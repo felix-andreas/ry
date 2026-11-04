@@ -911,8 +911,8 @@ fn operands(node: &SyntaxNode) -> Option<[SyntaxNode; 2]> {
 fn token_name(kind: SyntaxKind) -> Option<&'static str> {
     use SyntaxKind::*;
     Some(match kind {
-        INTEGER | DOUBLE | COMPLEX | TRUE_KW | FALSE_KW | INF_KW | NAN_KW | NA_KW
-        | NA_INTEGER_KW | NA_REAL_KW | NA_COMPLEX_KW | NA_CHARACTER_KW => "NUM_CONST",
+        INTEGER | DOUBLE | COMPLEX | SUFFIXED_NUMBER | TRUE_KW | FALSE_KW | INF_KW | NAN_KW
+        | NA_KW | NA_INTEGER_KW | NA_REAL_KW | NA_COMPLEX_KW | NA_CHARACTER_KW => "NUM_CONST",
         STRING | RAW_STRING => "STR_CONST",
         NULL_KW => "NULL_CONST",
         IDENT | DOTS | DOTDOTI => "SYMBOL",

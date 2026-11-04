@@ -23,7 +23,7 @@ Highlighting a stub file goes through LSP semantic tokens. One server
 implementation then colours both an inline `#:` annotation and a stub file, in
 every LSP client, reusing spans the server already computes.
 
-`docs/src/content/docs/contributing/authoring-stubs.md` is the contract for the
+`docs/src/content/docs/development/authoring-stubs.md` is the contract for the
 format, the overload rules, and the export manifests.
 
 # Decision record: the beta semantics
@@ -92,7 +92,7 @@ does not, it does not go in, however useful it looks. Expressiveness never buys 
 Three things are ruled out.
 
 - Type classes and traits are declined rather than deferred.
-  `contributing/design/open-questions.md` records the reasoning.
+  `development/design/open-questions.md` records the reasoning.
 - General subtyping is out, because subtype inference is a different and slower algorithm than
   unification. A declared coercion at a named boundary is Hindley-Milner, and that is the shape any
   variance work must take.
@@ -698,7 +698,7 @@ the deliberately `Unknown` self-recursive schemes.
 
 # Decision record: the shipping stack is a hand-written parser, a lossless tree, and salsa
 
-`docs/src/content/docs/contributing/architecture.md` describes the architecture as it stands. This
+`docs/src/content/docs/development/architecture.md` describes the architecture as it stands. This
 record holds the reasoning behind it and the risks that come with it, so that no session
 re-derives either.
 
@@ -797,12 +797,12 @@ chosen by the mandate in `AGENTS.md` (the next two records).
 The previous position was that a superset dialect "stays a product decision" (the entry above),
 with `declare()` as the valid-R route. The mandate in `AGENTS.md` makes that decision: the inline
 syntax is on by default and ry warns when it is turned off, which only makes sense for a syntax that
-GNU R cannot parse. So the inline form is the superset that `contributing/design/inline-type-syntax.md`
+GNU R cannot parse. So the inline form is the superset that `development/design/inline-type-syntax.md`
 costed (generic binder, parameter, return and binding positions), typed files keep the `.R`
 extension because ry executes them directly, and `declare(type(...))` stays a recognized spelling for
 code that must remain valid R. The cost is that other R tools fail on a typed file, so code that must
 run on GNU R goes through a strip step that moves inline types into `#:` comments. The reasoning is in
-`contributing/design/r-runtime.md`, section 8.
+`development/design/r-runtime.md`, section 8.
 
 ## How inline annotations are built
 
@@ -1777,7 +1777,7 @@ the texts, and `docs/src/content/docs/reference/licensing.md` is the user-facing
 
 # Decision record: the runtime's object model, collector and native boundary
 
-This settles step 2 of `contributing/design/r-runtime.md`. The code is `crates/heap` (object
+This settles step 2 of `development/design/r-runtime.md`. The code is `crates/heap` (object
 model and collector) and `crates/libr` (the C API, built as `libR.so`, with its C half in
 `src/native.c` and its headers in `include/`).
 
@@ -2085,7 +2085,7 @@ signature in two languages for no safety gain.
 
 # Decision record: packages and R versions in the runtime
 
-`contributing/design/packaging.md` holds the design and the measurements. Nothing existed before, so
+`development/design/packaging.md` holds the design and the measurements. Nothing existed before, so
 there was no previous source of truth; the choices that settle architecture are these.
 
 - **One installed package directory serves GNU R 4.6 and ry's runtime,** because ry's `libR` is
@@ -2118,7 +2118,7 @@ there was no previous source of truth; the choices that settle architecture are 
 
 # Decision record: the interpreter and base R
 
-This settles step 3 of `contributing/design/r-runtime.md`. The code is `crates/interp`; before it
+This settles step 3 of `development/design/r-runtime.md`. The code is `crates/interp`; before it
 there was no evaluator, so there was no previous source of truth.
 
 - **`interp` sits between `heap` and `libr`.** `libr` depends on `interp` and installs it on the
@@ -2236,7 +2236,7 @@ there was no evaluator, so there was no previous source of truth.
 
 # Decision record: the full C API surface and package installation
 
-This settles the part of step 4 of `contributing/design/r-runtime.md` that does not need the
+This settles the part of step 4 of `development/design/r-runtime.md` that does not need the
 interpreter. Before it, `libr` exported the top 150 measured names, `Rf_eval` evaluated nine
 primitives, and nothing built or installed packages.
 
@@ -2403,8 +2403,8 @@ primitives, and nothing built or installed packages.
 
 # Decision record: the package-development loader
 
-Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and the user page
-`guides/running.md` describe the result. These choices settle architecture.
+Nothing loaded packages before; `development/design/r-runtime.md` section 6 and the user page
+`tutorial/runtime.mdx` describe the result. These choices settle architecture.
 
 - **The index lives in `semantics`, the diff in `crates/loader`, and only a backend knows the
   runtime.** `semantics::load_index` derives per-file facts (`file_items`, `file_binds`), the
@@ -2493,7 +2493,7 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
 
 # Decision record: package tests through the oracle
 
-`oracle packages` (`crates/oracle/src/packages.rs`, `contributing/corpus-and-oracle.md`, "Package
+`oracle packages` (`crates/oracle/src/packages.rs`, `development/corpus-and-oracle.md`, "Package
 tests") runs each corpus package's own `tests/` under GNU R and under ry and reports pass or fail per
 package. It is the measure for "the corpus packages run on ry".
 
@@ -2970,7 +2970,7 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   mask, so same-typed values share a layout id whatever their contents.
 - **Impact:** plain R is untouched, because every new form is a syntax error in R. Field reads with
   a known type compile to a slot load after one layout-id comparison, and tag tests are integer
-  comparisons. The design draft is `docs/src/content/docs/contributing/design/records-and-tags.md`.
+  comparisons. The design draft is `docs/src/content/docs/development/design/records-and-tags.md`.
 - **Field read sites** (`bytecode::Op::Field`, `records::cached_field`). `x$name` with a symbol
   field compiles to a `Field` instruction that carries a per-site shape constant, the integer
   pair `[layout id, slot]` (`records::NO_LAYOUT` until a record is seen). Tier 0 compares the
@@ -3122,7 +3122,7 @@ first lines R had already read, leaving R mid-command.
 
 # Decision record: the JIT tier
 
-`crates/jit` compiles hot tier-0 bytecode with Cranelift. `contributing/design/r-runtime.md`
+`crates/jit` compiles hot tier-0 bytecode with Cranelift. `development/design/r-runtime.md`
 (section 5, "What tier 1 does today") is the contract for what it does; this records why.
 
 - **Compile thresholds are 3000 entries and 10,000 backward jumps** (`crates/jit/src/jit.rs`).
@@ -3326,7 +3326,7 @@ first lines R had already read, leaving R mid-command.
 - **Impact:** no change for plain R (no shipped name collides, and all names are new symbols). The
   checker, hover, completion and goto-definition read the stub file like any other, so incremental
   analysis gains nothing new to invalidate. The user contract is `reference/standard-library.mdx`;
-  the draft with open questions is `contributing/design/standard-library.md`.
+  the draft with open questions is `development/design/standard-library.md`.
 
 ## Standard library updates reuse a uniquely held value
 
@@ -3352,7 +3352,7 @@ first lines R had already read, leaving R mid-command.
 
 - Each module was compared with Roc's builtins (pre-`Try` API) and everything that is typed,
   `NA`-free and reports failure as a tag was taken; the full list and the renames are in
-  `contributing/design/standard-library.md`.
+  `development/design/standard-library.md`.
 - **Skipped, with the reason:**
   - `Box`, `Encode`, `Decode`, `Hash`, `Inspect`, and the `Eq` implementations (`Dict.is_eq`):
     they serve Roc's memory layout or abilities, which ry does not have; `Bool.is_eq` compares any
@@ -3810,7 +3810,7 @@ first lines R had already read, leaving R mid-command.
   the pitch calls R--. A two-circle Venn
   diagram shows this: R on the left, ry's types and features on the right, typed R (`#:` comments)
   in the overlap, the union is R++ and the right circle is strict mode. The diagram has one
-  source, `docs/src/components/Venn.astro`, used by the landing page and `why-ry.mdx`.
+  source, `docs/src/components/Venn.astro`, used by the landing page and `getting-started.mdx`.
 - **One tagline: "A type checker and a fast runtime for R, written in Rust."** It is the README's
   line, and the landing page's subhead and meta description, the Starlight site description,
   `getting-started.mdx`, `ry.mdx`, the Zed extension and the `ry-lang` crate repeat it word for
@@ -3834,10 +3834,10 @@ first lines R had already read, leaving R mid-command.
   them matters, which is why the migration is the last part of the sell and not the opening.
 - **The landing page carries almost no prose.** Each section is a headline, at most one sentence,
   and tabs of real code beside real output. No eyebrow labels, step labels, notes or hints, because
-  people skim a landing page and the snippets carry the argument; detail lives in `why-ry.mdx`.
+  people skim a landing page and the snippets carry the argument; detail lives in `getting-started.mdx`.
 - **Motion shows the story; it never decorates.** The migration section sets the Venn beside the
   step tabs, and each step moves a "your code" marker into its region and dims the others (the
-  `data-step` attribute on `Venn.astro`; without it the diagram stays static, as on `why-ry.mdx`).
+  `data-step` attribute on `Venn.astro`; without it the diagram stays static, as on `getting-started.mdx`).
   Runtime and migration snippets reveal code first and output after, once on first view and again
   on each tab switch, and one neutral pill slides between tabs (no colored outline or glow). Every
   switch (pill, panel fade, line reveal, Venn marker) shares one symmetric ease-in-out curve and
@@ -3875,20 +3875,17 @@ first lines R had already read, leaving R mid-command.
 - **The migration has four steps, each with a real snippet and real output:** check the code you
   have, add types as `#:` comments, switch to the ry runtime (inline types, which it also enforces
   at run time, and ry's own features), then go fully typed under strict mode. Each step is optional and reversible, which is what makes adopting
-  ry safe for an existing code base. `why-ry.mdx` tells it in full.
+  ry safe for an existing code base. `getting-started.mdx` tells it in full.
 - **GNU R stays a first-class target.** `#:` comments keep a file plain R, so a team that keeps
   GNU R loses only the runtime features. The pitch says so in one sentence and does not dwell.
 - **The benchmark is honest about typing.** Its three columns are GNU R, ry on the same untyped
   code, and ry on typed strict code. Typed code is not faster yet (`backlog.md`), and the pitch
   says so instead of implying that types buy speed. When typed runtime features do get faster, the
   third column shows it without a rewrite of the copy.
-- **The docs sidebar follows the four steps** (`docs/astro.config.ts`): "1. Check the code you
-  have" and "2. Type your code" hold what works on GNU R and on ry's runtime alike, and "3. Switch
-  to the ry runtime" (inline annotations, records and tags, Arrays) and "4. Go fully typed"
-  (nominal types, DataFrame, strict mode) hold what needs ry's runtime. Records come before nominal
-  types, because nominal types are taught as the named form of a record or union shape. The landing page, `why-ry.mdx` and the
-  sidebar use the same step names, so a pitch step leads straight to its docs. Pages were regrouped,
-  not moved, so every URL and cross-link keeps working.
+- **The Tutorial follows the four steps** (`docs/astro.config.ts`): one page per step, "1. Check
+  your code" and "2. Type your code" for what works on GNU R and ry's runtime alike, "3. Run on
+  ry's runtime" and "4. Go fully typed" for what needs ry's runtime. See "Docs information
+  architecture" for why it is one page per step.
 - **Rejected:** opening the landing page with the Venn diagram and the migration (it explains a
   path before the reader wants the destination), and leading with "a reimplementation of R" (true, but a reader cannot use the
   incomplete runtime for real work today, so it is the destination, not the pitch).
@@ -3902,7 +3899,7 @@ first lines R had already read, leaving R mid-command.
   `type Name = ...` (or `#: @type`) wraps it in a nominal type. That gives a 2x2 grid, structural or
   nominal for product and for sum types, with one mechanism instead of a separate "declared record"
   or "declared union" concept. The user guide teaches it in
-  `type-checking/custom-types.mdx` (a record pair and a union); the contract is the reference section "Nominal records,
+  `tutorial/fully-typed.mdx` (a record pair and a union); the contract is the reference section "Nominal records,
   tuples and tags".
 - **Construction:** `@Name(...)` is the only constructor, and its parentheses are the value's own,
   so `@Point(x = 1, y = 2)` is a record and `@UserId(id = 1L,)` a one-field record. A bare value of
@@ -3979,7 +3976,7 @@ first lines R had already read, leaving R mid-command.
   - Large vectors have their own young budget, `GcPolicy::young_large_limit`: 16 MB, or half the old generation if that is larger ("Peak memory comes from what the heap keeps alive" says why not GNU R's 64 MB).
   - The major-collection limit shrinks by a fifth at most per collection instead of falling to what survived ("Collections run on GNU R's schedule").
 - **Kernels.** `duplicated`/`unique` without incomparables hash a plain key per type, and for an all-ASCII character vector they hash the CHARSXP pointer, because interning makes equal ASCII text one object (`crates/interp/src/sort.rs`). `strsplit` with `fixed = TRUE` builds its `memchr::memmem` finder once per pattern and collects byte ranges instead of `String`s (`crates/interp/src/strings.rs`). `char_str` validates ASCII-flagged strings strictly, which runs a word at a time, but only as a hint: native code can set any gp bit through `SETLEVELS`, so the flag never licenses `from_utf8_unchecked`.
-- **Impact.** At 1e7 rows every helper in `ops.R` is as fast as on GNU R or faster (table in `contributing/design/r-runtime.md`, section 7). `tstrsplit` takes 3.71 s against 5.73 s, `fread` 2.36 s against 3.16 s, and `rbindlist` 0.71 s against 0.90 s. The first `dcast` of a session no longer warms up slowly: 0.028 s against 0.047 s at 1e6 rows. These timings were taken with a 64 MB large-vector budget; at 16 MB, `fread` of a 1e7-row, five-column CSV, `tstrsplit` and `rbindlist` measured the same as at 64 MB (fread 1.31 s against GNU R's 1.27 s on one thread). The cost is memory: up to the budget in dead large vectors, and a collection limit that shrinks over eight collections. `RY_GC_VERIFY=1` passes the oracle suite, and `crates/oracle/cases/vectors__duplicated_fast_paths.R` pins the typed `duplicated` keys and fixed `strsplit` against GNU R.
+- **Impact.** At 1e7 rows every helper in `ops.R` is as fast as on GNU R or faster (table in `development/design/r-runtime.md`, section 7). `tstrsplit` takes 3.71 s against 5.73 s, `fread` 2.36 s against 3.16 s, and `rbindlist` 0.71 s against 0.90 s. The first `dcast` of a session no longer warms up slowly: 0.028 s against 0.047 s at 1e6 rows. These timings were taken with a 64 MB large-vector budget; at 16 MB, `fread` of a 1e7-row, five-column CSV, `tstrsplit` and `rbindlist` measured the same as at 64 MB (fread 1.31 s against GNU R's 1.27 s on one thread). The cost is memory: up to the budget in dead large vectors, and a collection limit that shrinks over eight collections. `RY_GC_VERIFY=1` passes the oracle suite, and `crates/oracle/cases/vectors__duplicated_fast_paths.R` pins the typed `duplicated` keys and fixed `strsplit` against GNU R.
 
 ## What keeps a dropped object alive: registers, handles, caches and dying finalizers
 
@@ -4019,7 +4016,7 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 
 This is a user directive: robustness is the long-run priority, so the whole toolchain is designed to
 be fuzzed, simulated and driven by scenario tests. It widens the per-stage fuzzing record above from
-the analysis pipeline to every component. `docs/src/content/docs/contributing/robustness.md` is the
+the analysis pipeline to every component. `docs/src/content/docs/development/robustness.md` is the
 contract.
 
 - **Previous shape.** Each analysis stage had a seeded fuzz battery, but the language server could be
@@ -4067,7 +4064,7 @@ contract.
 ## An Array is a flagged R vector, written `[...]`
 
 - **Previous shape.** ry had no strict vector. Typed code used `c()`, whose result R coerces (`c(1, "a")` is character), recycles, and lets hold `NA`, so neither the checker nor a DataFrame column could promise one item type without missing values.
-- **Target shape.** `[a, b, c]` is ry syntax for `Array<T>`, the standard library's strict vector: one exact item type (a single `logical`, `integer`, `double` or `character`, or a ry value), no `NA`, no attributes, no recycling and no implicit conversion. The contract is `reference/type-system.mdx`, "Arrays"; the user page is `type-checking/arrays.mdx`.
+- **Target shape.** `[a, b, c]` is ry syntax for `Array<T>`, the standard library's strict vector: one exact item type (a single `logical`, `integer`, `double` or `character`, or a ry value), no `NA`, no attributes, no recycling and no implicit conversion. The contract is `reference/type-system.mdx`, "Arrays"; the tutorial mentions it in `tutorial/runtime.mdx`.
 - **Runtime representation.** An Array is an ordinary R vector carrying the heap flag `flag_bits::ARRAY` (`crates/heap/src/object.rs`): atomic storage for scalar items, a VECSXP for ry-value items. A separate object type was rejected because every C API accessor, `sum()`, and the JIT already read the unboxed storage, so converting to R is free (drop the flag) and nothing has to learn a new layout. Setting any attribute clears the flag, which keeps "no attributes" true without checks at every attribute write. `values::duplicate` and `shallow_duplicate` drop the flag on the copy (nested Arrays keep theirs), because a copier is about to write and a builtin or C code may write an `NA`; only `arrays::writable` re-flags a copy, after checking the write.
 - **One place enforces the rules.** `crates/interp/src/arrays.rs` validates construction, operators (`arith.rs` wraps each builtin in `strict`), indexing and replacement, then flags the result. The bytecode fast paths and the JIT's type guard refuse a flagged operand, so they can never skip a check; a dedicated Array feedback kind is backlog work.
 - **R code keeps working on Arrays.** Reads follow R's positions wherever R gives no `NA` (negative positions, zeros), and everything that would produce `NA` is an error. A replacement that is not an item of the item type (an `NA`, an R vector, another type) does not error: the result is the plain R vector R would build, so base functions such as `ifelse()` that assign into an argument keep working. An operator works the same way: an operand that is not an Array and not a single item of the item type makes R's operator run and return a plain vector (`arrays::check_operands`), because base `str()` computes `ob - signif(ob, digits)` and `signif()` returns a plain vector. Typed code cannot reach that path because the checker rejects the value; the rules the checker cannot see (bounds, no recycling) stay runtime errors, so a typed `Array<T>` never holds a plain vector.
@@ -5087,7 +5084,7 @@ check` releases its trees once, and memoized records are compact" below).
   each `SECREL32` thread-local offset, so a relocated `R.dll` (ASLR, or a base-address collision)
   computes a garbage address on every `thread_local` access. lld emits none. mingw's `gcc` is
   configured `--with-ld` and ignores `-fuse-ld=lld`, so `clang --target=x86_64-w64-mingw32
-  -fuse-ld=lld` is the linker driver (`contributing/design/r-runtime.md`, section 11, has the
+  -fuse-ld=lld` is the linker driver (`development/design/r-runtime.md`, section 11, has the
   command).
 - **A 64 MiB main-thread stack** for `ry.exe` (`crates/ry/build.rs`): the session evaluates on the
   main thread, and base R's startup overflows Windows' 1 MiB default. The UTF-8 code-page
@@ -5373,7 +5370,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **`zeroin2` reports a precision after hitting the iteration limit**: the bracket width `|c - b|`, not -1, so `uniroot`'s `estim.prec` matches GNU R on non-converged searches.
 - **JIT function speculation skips frame-bound symbols**: a call of a symbol the frame can bind (a formal or a local assignment) is never speculated from the enclosure, because a formal holding a function shadows a global of the same name (`uniroot(f, ...)` with a global `f`). Pinned by `formal_shadows_enclosing_function` in `crates/jit/tests/test_tiers.rs`.
 - **One implementation where two were written in parallel.** `sum` over doubles totals each argument in the long double model, rounds it to a double, and adds it to a long double total, which is what GNU R's observed results across arguments need; main's compensated sum was removed. Parse data comes from `crates/interp/src/parse_data.rs`, which replays GNU R's lexer contexts, instead of a second builder in `lower.rs`. A hashed frame's chains live in one place (`HashTable` in `crates/heap/src/env.rs`), which both `env.profile` and the listing order read. Graphics devices keep the graphics engine's implementations.
-- **Impact:** no effect on static analysis. Each behavior has one implementation in `crates/interp`, and the GNU test runner (`contributing/corpus-and-oracle.md`) is the regression check.
+- **Impact:** no effect on static analysis. Each behavior has one implementation in `crates/interp`, and the GNU test runner (`development/corpus-and-oracle.md`) is the regression check.
 
 ## A fix says whether it may be applied unseen
 
@@ -5697,7 +5694,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   headers declare *and* its `R.dll` exports (declared-only names vary by platform and are often
   macros), plus an internal section of non-header names packages link. The test fails when ry's
   headers miss one or `libR` does not export it. Regenerate against a new GNU R release with
-  `RY_GNU_R_INCLUDE`, `RY_GNU_R_EXPORTS` and `RY_UPDATE_API_NAMES=1` (`contributing/testing.md`).
+  `RY_GNU_R_INCLUDE`, `RY_GNU_R_EXPORTS` and `RY_UPDATE_API_NAMES=1` (`development/testing.md`).
   GNU R's front-end headers (`ga.h`, `graphapp.h`, `iconv.h`, `libintl.h`) are excluded: packages
   get gettext's header from Rtools, and the rest is RGui.
 - `R_varloc_t` is a struct holding one pointer, as in GNU R, so `R_findVarLoc` returns the binding
@@ -5792,7 +5789,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 - **Shape.** `[lint] data-table` (off by default, `data_table_lint` in `lints.rs`) flags
   `data.table()`, `fread()`, `as.data.table()` and `setDT()`, bare or `data.table::`, and names the
-  DataFrame equivalent with a link to `guides/from-data-table.md`. A bare call is dropped when the
+  DataFrame equivalent with a link to `reference/from-data-table.md`. A bare call is dropped when the
   file defines that name, exactly as `object-system` does.
 - **Why constructors.** Like the object-system lint, which flags definitions rather than every
   `new()`, every data.table operation needs a table first, so the constructors mark where
@@ -6514,7 +6511,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Column or variable.** With the frame's columns known, a bare name is a column exactly when it is one of them; data.table also looks columns up first, so a same-named variable loses there too. With unknown columns, a name is a column unless it resolves to a local binding (`item_naming().resolutions`), is a project global name (`project_global_names`), is a base constant (`T`, `F`, `pi`, `letters`, ...), or is one of data.table's own symbols. A guess cannot be wrong silently in the other direction: a name taken for a column that is not one makes the DataFrame query fail with a missing-column error at run time.
 - **Nothing approximate.** Every unsupported shape returns `None` and produces no rewrite. Updates in place (`:=`, `setorder`, `setDT`) are rewritten only as top-level statements outside any function, as `x <- x |> ...`, because inside a function the caller would stop seeing the change. `dt[i, col := v]` needs known columns: an existing column is rewritten only for a literal of its own type, as `Expr.if_else(test & !Expr.is_null(test), v, col("col"))`, since data.table leaves a row whose test is `NA` unchanged. A keyed join (`setkey` then `X[Y]`) is skipped because it needs statement order.
 - **A rewritten table never escapes to unrewritten code.** Every rewrite turns a data.table into a DataFrame. `[.DataFrame` still answers `x[i, j, by]` and `:=`, but data.table's own functions refuse one (`setorder(df, -x)` stops with "x must be a data.frame or data.table"), and so does any package code that checks `is.data.table`, so the whole-file migration (`DataTableRewrite.replacement`) keeps a form only where its table flows into other kept rewrites, into `$`, `[[` or a shape function (`nrow`, `names`, ...), or is discarded. A query that is its function's return value is wrapped in `data.table::as.data.table()`, so a function's interface keeps its classes (parameters already enter through `as.DataFrame()`). Every other form gets `replacement: None`; dropping one can expose another, so `data_table_rewrites` iterates to a fixpoint (`fate`, `uses_are_safe`). Uses are matched by name across the whole scope, which can only leave more forms alone. A single code action (`standalone`) is user-directed and stays offered. Found by `tools/bench/migrate/fuzz.py`: the previous engine rewrote the `data.table()` constructors in the benchmark templates while their callers stayed data.table code.
-- **Accepted differences.** DataFrame aggregations skip `NA` (so `na.rm = TRUE` is dropped and `sum(x)` without it no longer gives `NA`), `DataFrame.sort` puts `NA` last where `setorder` puts it first, and a join lists the left table's columns first. The guide's own mapping makes the same choices; `docs/.../guides/from-data-table.md` states them.
+- **Accepted differences.** DataFrame aggregations skip `NA` (so `na.rm = TRUE` is dropped and `sum(x)` without it no longer gives `NA`), `DataFrame.sort` puts `NA` last where `setorder` puts it first, and a join lists the left table's columns first. The guide's own mapping makes the same choices; `docs/.../reference/from-data-table.md` states them.
 
 ## Dates, windows, ranks, cross joins and pivots in the table engine
 
@@ -6590,16 +6587,17 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   - `rep`, `rep.int` and `rep_len` stream positions (`RepPlan` in `crates/interp/src/arith.rs`, `subset::select_positions`), and a plain vector's negative subscripts stream through a keep mask (`gather_kept` in `crates/interp/src/subset.rs`: `x[-(1:10)]` on 2e7 doubles, 305 MB peak, now 171 MB, GNU R 229 MB).
 - **Impact.** Peaks against GNU R 4.3.3: rep 242/239 MB, the subset loop 1386/1386 MB, data.table's `dt[v > 0.5]` loop 329/330 MB (`runtime_peak_memory_stays_near_gnu_r` in `crates/ry/tests/test_perf.rs`). The subset loop takes about 18 s against 17-19 s before and GNU R's 28.6 s. On the generated 60,000-line suites the collector's share grows from 0.44-0.58 s to 0.68-0.82 s of 20-28 s suites. `R_GC_MEM_GROW=0` costs far more on ry than on GNU R (finbench: 66 majors and 4.8 s in the collector against GNU R's 1.6 s), because GNU R's second old generation frees promoted temporaries without a full mark and ry has one old generation (`backlog.md`, "Open: collector throughput on the benchmark suites").
 
-## Large temporaries: deferred reference counting is the target, tracing stays for cycles
+## Large temporaries: freed from their reference counts, tracing stays for cycles
 
-- **Previous source of truth.** Only tracing frees memory. A temporary that a minor collection sees live is promoted and dies only in a major collection, so a loop's dead large vectors stay resident until the heap limit forces one. The copy-on-modify count in each header (`Sexp::refcount`) is kept but never frees anything.
-- **Target shape (settled, not built).** A per-type hybrid:
-  - Atomic vectors and strings cannot reference other objects, so they cannot be part of a cycle. When a decrement drops one to zero, it goes into a zero-count table, a flat `Vec<Sexp>` of candidates, using the copy-on-modify count rather than a second one. Lists and attribute pairlists are counted the same way.
-  - The table is reconciled only at allocation points, because C code may hold an unprotected `SEXP` until its next allocation, as GNU R allows. Reconciling marks the roots shallowly (protect stack, precious list, handles, handouts, `.Call` frames, interpreter frames, bytecode registers and JIT slots, which hold uncounted references) and frees every candidate that is still at zero and unmarked. That is the root scan a minor collection does already, without the tracing.
-  - Environments, closures, promises and external pointers stay with the tracing collector, which only has to handle that cyclic subset (the shape of CPython's cycle collector and Nim's ORC).
-  - Prerequisites: an object whose fields do not count (`DISABLE_REFCNT`, such as argument lists) must be a reconcile root or keep its referents out of the table, and every store into a counted field must go through the heap's counting setters. GC stress with verify is the soundness check, since a premature free is a use-after-free in package C code.
-- **Measured bound.** The best a prompt-freeing scheme can reach is the live-data peak, which tracing reaches today only with the smallest growth steps (`R_GC_MEM_GROW=0`, about 9x the collector time on the benchmark suites). Peaks in MiB, with the default schedule against `R_GC_MEM_GROW=0`: subset loop 1386 to 1100, data.table loop 329 to 262, rep 242 (already its live data). Deferred counting would bring those peaks without the extra full collections. Its CPU cost is one table push per count that reaches zero, plus a shallow root scan per reconcile, measured against a minor collection's root scan.
-- **Why not yet.** On the default schedule ry is already within 1% of GNU R on all three cases, and the counts carry a soundness risk that needs its own large change with GC-stress coverage. It is the top item under "Open: collector throughput" in `backlog.md`, ahead of a second old generation, which it would partly replace.
+- **Previous source of truth.** Only tracing freed memory. A temporary that a minor collection saw live was promoted and died only in a major collection, so a loop's dead large vectors stayed resident until the heap limit forced one. The copy-on-modify count in each header (`Sexp::refcount`) was kept but freed nothing.
+- **Shape.** A per-type hybrid in `crates/heap/src/heap.rs` (`note_zero`, `reconcile`, `shallow_roots`, `free_released`):
+  - Every counted store releases the old value through `release_reference`, which reports a count that fell from one to zero. Such an object goes into the zero-count table (`Heap::zero_count`, a flat `Vec<Sexp>` with the `ZERO_LISTED` header bit against duplicates) when it can be reclaimed: a non-ALTREP list, or a non-ALTREP large logical, integer, double, complex or raw vector. Strings and small vectors are left to tracing, since their pages are not returned one at a time.
+  - The table is reconciled only inside `maybe_collect`, at an allocation, because C code may hold an unprotected `SEXP` until its next allocation, as GNU R allows. A reconcile runs once the candidates add up to 4 MiB (`RECONCILE_BYTES`) or the table reaches 65,536 entries beyond those held. It sets `HELD` on the shallow roots: the protect stack, precious set, handles, handouts and globals, everything the root sources trace (interpreter frames, the bytecode register file, pending `.Call` arguments, condition handlers), one level deep, weak references, the fields of every object whose fields do not count (`untrack_references`, R's `DISABLE_REFCNT`), and the elements of every list that native code has seen (escaped lists, whose `SET_VECTOR_ELT` stores do not count). A candidate still at zero and not held is released: a list gives up its elements, which may cascade, and a large atomic vector's pages are freed at once.
+  - Environments, closures, promises and external pointers stay with the tracing collector, which handles the cyclic subset (the shape of CPython's cycle collector and Nim's ORC). Counts only ever overcount, because sweeping a dead object does not decrement its children, so a missed decrement keeps an object for tracing and never frees one early.
+  - A freed vector's bytes stay counted until the next collection recounts them, so the collection schedule matches tracing alone. Uncounting them put collections off, and the dead temporaries only a collection finds (forced promise values) piled up: `rep` peaked about a quarter higher.
+- **Soundness check.** `RY_GC_VERIFY=1` makes a reconcile free nothing; it runs a full collection instead and panics if anything it would have freed is reachable. The heap fuzzers (`fuzz_reconciles_free_only_unreachable_vectors`, `fuzz_temporaries_are_freed_and_live_vectors_kept`) run that cross-check, and the oracle cases pass under `RY_GC_STRESS=1 RY_GC_VERIFY=1` with the same results as the default run.
+- **Measured.** Peak RSS in MiB from `wait4`, ry against GNU R 4.3.3, for the scripts in `reference/cli.md` ("Memory"): subset loop 1097 against 1386 (tracing alone reached 1100 only with `R_GC_MEM_GROW=0`), data.table loop 277 against 340, `rep` 239 against 239 (its live data). Suite CPU is unchanged against tracing alone (finbench 18.4 s, dsbench 20.7 s against 21.6 s, biobench 25.3 s, collector time 0.57 to 0.74 s either way).
+- **Not done.** Freeing a closure's frame at return (GNU R's `R_CleanupEnvir`) would need counted enclosures; environments stay traced (`backlog.md`).
 
 ## Start-up memory: release relocation tables and preflight code pages
 
@@ -7355,11 +7353,26 @@ Each one trades a narrow class of missed errors for a class of false reports see
   / 0.008 s, checksums equal. `fuzz_typed_record_natives_agree_with_tier_zero` in
   `crates/jit/tests/test_tiers.rs` pins agreement across JIT modes.
 
+## Typed ry has its own numbers, `Bool`, `Str` and `List`
+
+- **Before:** typed ry borrowed R's `integer`, `double`, `logical` and `character`, which carry `NA` and recycle, and `Array<T>` was a strict R vector. Typed programs could not be written without R data types.
+- **Shape:** two number types, `I64` and `F64`, plus `Bool`, `Str` and `List<T>` (which replaces `Array<T>`), all `NA`-free. The design is `development/design/native-types.md`; the contract is the reference section "Numbers, `Bool` and `Str`".
+- **Number set cut to `I64` and `F64` (orchestrator decision).** The first version took all thirteen of Roc's number types (`I8`..`U128`, `F32`, `Dec`). Each width multiplied the checker's constraint cases, the interpreter's arithmetic and the JIT's register types, and no typed program used anything but `I64` and `F64`. Another width returns only when the benchmark hill climb shows a program that needs it. Any other literal suffix is a syntax error (`syntax` lexer). The internal literal constraints (`Constraint::Int`, `Constraint::Frac`) default to `I64` and `F64` and have no annotation spelling; `number` is the only written one. An R `integer` or `raw` value becomes `I64` at the boundary.
+- **Representation:** `F64`, `Bool` and `Str` reuse R's `double`, `logical` and `character` storage, so they cross into R for free. `I64` has its own vector type, `SexpType::I64` (code 28, `I64SXP`), with `REALSXP`'s layout: the 16-byte header, length and capacity, then 8 bytes per item at `VECTOR_DATA_OFFSET`. A scalar `I64` is a length-1 vector and a `List<I64>` is the same object at length n with the heap's Array flag (`numbers::alloc`, `numbers::list`). It carries no attributes and is never ALTREP.
+- **Why a dense `I64` vector (decision).** The previous shape was a boxed record per number (`Fields::Number`, one raw slot) and an R list of boxes for `List<I64>`, which gave two representations for one type, one GC-traced object per item, and an item-by-item arithmetic path (`arith::item_by_item`, `Items::RyValues`). A dense vector gives one representation for scalars and lists, a zero-copy handoff to the typed runtime (`crates/typed`), no per-item tracing (it is a leaf), vectorized same-length list arithmetic (`numbers::arithmetic`, no recycling, overflow an error) and storage compatible with bit64's `integer64`. A new type code beats a gp bit on `REALSXP`: R code and C code that test `TYPEOF` refuse it instead of reading the bits as doubles, and `is_atomic` is false for it, so every R builtin raises the `Num.to_r()` boundary error (`records::boundary_message`). Crossing to R stays explicit through `Num.to_r` and `List.to_r`.
+- **Literals:** a suffix names the type (`5i64`), and a `-` written directly before a literal is part of it. An unsuffixed literal keeps R's type unless an expected type, the other operand, or a later use decides it. At run time it stays the R value, and the operator (`numbers::operands`) or the annotated binding (`lower::with_annotated_literals`, which rewrites `n: I64 <- 5` and `List<N>` literal items) converts it. A literal branch adapts to the sibling branch's ry type (`adapt_literal_branch`), and a match arm or `if` arm in a function's tail adapts to the declared result.
+- **`/` decides `F64`** for undecided items and is a `type-mismatch` on `I64`, as Roc gives `/` a `Frac`.
+- **Lengths, counts and positions are `I64`** (`standard_library::whole_number`), as in Roc.
+- **List operators work item by item** and never recycle: on a `List<I64>` they run over the buffers (`numbers::arithmetic`), and on nested lists item by item (`arith::item_by_item`).
+- **`try f(x)`** is the `Ok` value or an early return of the `Err`; `try (expr)` keeps R's `try()`.
+- **No row variables.** An open tag union cannot pass its unlisted tags through with their types; this stays until a real program needs it (user direction to drop them from the design).
+- **Impact:** typed programs are written in ry types only (`tools/bench/why/typed/`). The cost is speed: the JIT has no register type for `I64`, so typed `I64` code runs in the interpreter (`backlog.md`).
+
 ## Typed values are native, immutable, acyclic and freed by reference counts
 
 - **Previous shape.** Typed natives (`crates/jit/src/native.rs`) build records as R heap objects
   traced by the mark-sweep collector and rooted through handle marks, and the first draft of
-  `contributing/design/typed-runtime.md` kept typed lists and strings as R vectors and `CHARSXP`s
+  `development/design/typed-runtime.md` kept typed lists and strings as R vectors and `CHARSXP`s
   with stack maps for roots.
 - **Chosen shape.** Typed ry's own values (numbers, `Str`, `List`, `Dict`, `Set`, records, tuples,
   tags, closures) are native values outside the R heap. They are immutable and acyclic (a closure
@@ -7385,7 +7398,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   bits of each index entry.
 - **Impact.** A `List<F64>` reaches C only through a copy, and an ALTREP wrapper is the deferred
   fix if the boundary copy shows up. The design and its test matrix are in
-  `contributing/design/typed-runtime.md`.
+  `development/design/typed-runtime.md`.
 
 ## Typed code compiles ahead of time, and `ry build --exe` writes an executable
 
@@ -7435,13 +7448,76 @@ Each one trades a narrow class of missed errors for a class of false reports see
   path completes, the R function's frame-local temporaries are not bound; only code that inspects
   that frame from outside (a debugger, `sys.frames()` from a validity method the fast path never
   calls) could see it.
+- **Versions.** `FAST_PATHS` lists the hashes each function may have, one per `methods` version the
+  fast path was checked against; the bundled GNU R 4.6.2 is the primary target. A miss on a
+  methods package whose version is the bundled one is an error at start-up, because it means the
+  base changed under the core; a miss on any other version keeps the R code. The R expressions the
+  native definitions fill in (coerce and replace methods) are R text in `METHODS_TEMPLATES` in
+  `methods_core.rs`, parsed once at install time.
+- **Definitions.** `setGeneric`, `setMethod` and `setClass` are native for the shapes a package
+  usually writes: local supers only, no `setClassUnion` member classes passed as a
+  classRepresentation, a `validity` that is `NULL` or a function of `object`. Anything else bails
+  to the R code before any effect. The native results are byte-identical to the R path (classes,
+  generics, method tables and `serialize()` output, compared on the generated S4 packages, the
+  Matrix sources and the methods package's own tests). Adding a direct subclass rebuilds the
+  superclass's whole subclass list as `completeSubclasses()` does, regenerating every indirect
+  extension (whose `by` and `to` carry the package attribute differently from the first time) and
+  repeating a class reached through two direct subclasses; appending would differ. One benign
+  exception to bailing before any effect: `setClass` evaluates `tryNew()` for slot prototypes
+  before its last checks, which fills the same `initialize` dispatch cache the R code fills.
+- **Switches.** `RY_METHODS_NATIVE=0` turns the definition fast paths off (the differential uses
+  it), `RY_TRACE_METHODS_BAILS=1` prints why each call bailed, and `RY_PRINT_METHODS_HASHES=1`
+  prints the hashes of the installed functions, for adding a version.
+- **The S4 cache is interim.** The end state has no S4 cache: the cold native path itself reaches
+  a first `new()` under 100 ms, and then the cache is deleted (AGENTS.md, "Caching is a sign of a
+  slow design"). Until then it stays, because restoring is about 10 times faster than running the
+  definitions natively (61 ms against about 850 ms), and incremental reload of it is not worth
+  building for a cache that is going away. It is saved uncompressed: the save fell from 344 to
+  about 190 ms and the cache grew from 1.5 to 9.4 MB, with the restore unchanged. Saving at process
+  exit instead of after the first run was rejected, because `.MTable` gathers inherited entries
+  during a session and the saved state would depend on what ran.
 - **Order.** Object creation and class queries came first because they are the run-time hot path
-  (`new()` 13.7 µs, `validObject` 3 µs, `is()` 2.3 µs against GNU R's 130, 73 and 11.8 µs). The
-  definition functions (`setMethod`, `setClass`, `cacheMetaData`) follow (`backlog.md`, "Open:
-  native methods core"). Whether the S4 metadata cache survives is decided once they are native.
-- **Impact.** Cold first `new()` on the bench package fell from 8.6 s to 6.3 s and the warm one from
-  94 to 103 ms to 78 to 88 ms. `crates/oracle/cases/s4__native_core_queries.R` pins the covered
-  functions, including their error messages and calls, against GNU R.
+  (`new()` 13.7 µs, `validObject` 3 µs, `is()` 2.3 µs against GNU R's 130, 73 and 11.8 µs). Then
+  the definition functions; `setClassUnion`, `cacheMetaData` and inherited dispatch remain
+  (`backlog.md`, "Open: native methods core").
+- **Impact.** Cold first `new()` on the bench package fell from 8.6 s to 6.3 s with the native
+  queries, and native definitions bring the generated `target/s4plain` package (2,892 definitions)
+  from about 2.2 s of S4 work to about 0.9 s. `crates/oracle/cases/s4__native_core_queries.R` and
+  `s4__native_definitions.R` pin the covered functions, including their error messages and calls,
+  against GNU R.
+
+## The typed core lowers R syntax at the first call and runs on 16-byte strings and view lists
+
+- **Previous shape.** Strict typed closures ran on the scalar natives in `crates/jit/src/native.rs`, which take R values in and out of every operation, so programs over strings, lists and local functions (`report`, `closures`, `bond_book`) gained nothing.
+- **Chosen shape.** `crates/typed` lowers a strict typed closure to a typed SSA IR at its first call for the argument types it sees, inserts Perceus reference counts (`ownership.rs`), and compiles it with Cranelift (`backend.rs`). `jit::native::call` is the one seam: it hands the argument values to `typed::call`, which returns `None` to fall back. A call that fails at run time (an `NA` where an integer cannot hold one, an overflow, an index out of range, an interrupt) returns status 1 and the interpreter reruns it, so the typed core never reports an error itself.
+- **Lowering from R syntax at run time, not from salsa.** The runtime cannot link the analysis, and the closure's body is the source of truth the interpreter also runs. The guards on resolved functions (`Speculation`, rechecked on every call) make the lowering sound against rebinding. The serialized per-function IR in `typed-runtime.md` remains the design for install-time code files.
+- **`Str` is 16 bytes, not 24.** Two words fit the two-register return of Cranelift's tail convention and halve list storage; strings up to 15 bytes are inline, flagged by bit 63 of the second word.
+- **One list header with a data pointer.** A `List` header points at its items, so an R vector argument is passed as a view (flag `VIEW`) over R's own data with no copy, and the same compiled code serves owned and borrowed lists. Writing to a view copies first.
+- **Base closures behind lazy-load promises.** Base binds its closures to lazy-load promises, so a function is base's own when its binding cell is base's, and `resolve_function` forces such a promise (it only reads the package database) instead of refusing.
+- **Counted loops check their ends once.** `for` over `seq_len`, `seq_along`, `a:b` or a vector tests `counter == end` at the latch and steps with `Op::Step`, which cannot overflow because the counter never passes the end.
+- **Impact.** On the why-bench, typed and strict: `closures` 0.348 s to 0.006 s, `report` 0.640 to 0.009, `bond_book` 0.739 to 0.049, `loop_sum` 0.021 to 0.010, `array_sum` 0.025 to 0.004, `array_map` 0.048 to 0.017.
+
+## Docs information architecture: Introduction, Tutorial, Reference, Development
+
+- **Previous shape.** The sidebar had Introduction, four numbered step sections of about three pages
+  each (`guides/`, `type-checking/`), Reference and Contributing. Installation and the editor setup
+  were long pages inside the first step, and the step pages repeated reference material in prose.
+  The owner judged the result walls of text with no clear concept.
+- **Target shape.** Introduction (`getting-started.mdx`, `installation.md`, `ry.mdx`,
+  `benchmarks.mdx`), a Tutorial of four pages under `tutorial/` (one per step, each a run of
+  snippets with real output), Reference (`reference/`, the contracts and the long material that
+  used to sit in the steps: DataFrames, data.table migration, arrays and known limits in
+  `type-system.mdx`), and Development (`development/`, renamed from `contributing/`, with design
+  drafts in `development/design/`). Editor setup is a table on the installation page.
+- **Redirects.** Every old URL redirects through the `redirects` map in `docs/astro.config.ts`,
+  to the tutorial section that absorbed it where one exists.
+- **Sidebar scroll.** starlight-theme-black scrolls `.sidebar-content` inside a pane with
+  `overflow: hidden`, while Starlight's `SidebarPersister` saves and restores the scroll of
+  `#starlight__sidebar`, which never scrolls. `docs/src/components/Sidebar.astro` wraps the theme's
+  sidebar and saves `.sidebar-content`'s `scrollTop` to sessionStorage on click and `pagehide`, and
+  restores it in an inline script right after the sidebar markup, so it applies before first paint.
+- **Impact.** The introduction and tutorial pages shrink from about 3,000 lines to about 1,300, a reader finds one page
+  per step, and the sidebar keeps its place across navigation.
 
 ## The start-up image is written in process and keyed by what start-up reads
 
@@ -7456,7 +7532,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Target shape.** The first eligible start (not interactive, no site or user profile, `RY_IMAGE`
   not `0`) writes the image itself after `.First.sys()`, and later starts load it in one
   two-pass bulk load (`crates/heap/src/image.rs`, `crates/interp/src/image.rs`,
-  `contributing/architecture.md`, "The start-up image"). The file name hashes the build, the flags,
+  `development/architecture.md`, "The start-up image"). The file name hashes the build, the flags,
   base R's files, the library directories that exist, and the steering variables (`R_*`, `LC_*`,
   `LANG`, `LANGUAGE`, `TZ`, `HOME`). Every other variable start-up reads is recorded through
   `interp::image::variable` and stored with its value in the image; a different value starts slow

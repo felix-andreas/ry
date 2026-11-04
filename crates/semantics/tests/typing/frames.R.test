@@ -9,21 +9,21 @@ labels <- DataFrame(count = 1L, label = "a")
 #++++
 labels: DataFrame{count: integer[], label: character[]}
 
-#---- an_array_column_types_as_its_item_vector
-prices <- DataFrame(id = [1L, 2L], price = [12.5, 9.99])
+#---- a_list_column_types_as_the_vector_sharing_its_items
+prices <- DataFrame(id = [1, 2], price = [12.5, 9.99], name = ["a", "b"])
 #++++
-prices: DataFrame{id: integer[], price: double[]}
+prices: DataFrame{id: List<I64>, price: double[], name: character[]}
 
-#---- an_array_column_reads_back_as_a_plain_vector
-prices <- DataFrame(id = [1L, 2L], price = [12.5, 9.99])
+#---- a_list_column_reads_back_as_a_plain_vector
+prices <- DataFrame(price = [12.5, 9.99])
 by_name <- prices$price
 by_string <- prices[["price"]]
-checked <- as.Array(prices$price)
+checked <- List.from_r(prices$price)
 #++++
-prices: DataFrame{id: integer[], price: double[]}
+prices: DataFrame{price: double[]}
 by_name: double[]
 by_string: double[]
-checked: Array<double>
+checked: List<F64>
 
 #---- an_unnamed_variable_keeps_its_name
 id <- 1:3

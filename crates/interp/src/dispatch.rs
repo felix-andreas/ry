@@ -74,9 +74,9 @@ pub unsafe fn implicit_class(object: Sexp) -> R<Sexp> {
         _ => 1,
     };
     let kind = object.kind();
-    // A call's class depends on its head (`if`, `for`, `=`, ...) and a record's on its kind,
-    // so only their type does not determine it.
-    let cacheable = !matches!(kind, SexpType::Language | SexpType::Record);
+    // A call's class depends on its head (`if`, `for`, `=`, ...), a record's on its kind and an
+    // `I64` vector's on whether it is a list, so only their type does not determine it.
+    let cacheable = !matches!(kind, SexpType::Language | SexpType::Record | SexpType::I64);
     if cacheable && let Some(&classes) = interp().globals.implicit_classes.get(&(shape, kind)) {
         return Ok(classes);
     }
@@ -175,6 +175,9 @@ unsafe fn basic_class(object: Sexp, for_dispatch: bool) -> &'static str {
             }
         }
         SexpType::Record => crate::records::native_kind(object).class_name(),
+        // A `List<I64>` keeps the class an R list of boxed numbers had.
+        SexpType::I64 if object.is_array() => "list",
+        SexpType::I64 => "ry_number",
         kind => kind.name(),
     }
 }

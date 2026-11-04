@@ -3,7 +3,7 @@
 Rust, one engine after the other so they never share the CPU, and prints a Markdown table of
 the faster of each question's two runs and of each engine's peak resident memory. With --write,
 the table replaces the one between the `bench-table:<rows>` markers in
-docs/src/content/docs/contributing/design/r-runtime.md.
+docs/src/content/docs/development/design/r-runtime.md.
 
 The data is generated on first use. data.table must be installed in the library named by
 RY_BENCH_RLIB (default ~/R/library). Build ry, libR and the Rust driver first (`just bench-table`
@@ -18,7 +18,7 @@ import argparse, json, math, os, pathlib, re, signal, subprocess, sys, tempfile
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent.parent
-page = root / "docs/src/content/docs/contributing/design/r-runtime.md"
+page = root / "docs/src/content/docs/development/design/r-runtime.md"
 
 LABELS = {
     "groupby q1": "groupby q1: `sum(v1)` by `id1`",

@@ -72,7 +72,7 @@ fn out(text: &str) {
 pub unsafe fn print_value_top(value: Sexp, env: Sexp) -> R<()> {
     // A ry value has an implicit class, so it prints through `print` and a user's
     // `print.ry_record` method, once base R has defined `print`.
-    let dispatches = value.kind() == SexpType::Record && {
+    let dispatches = crate::records::is_native(value) && !value.is_array() && {
         let print = values::install("print")?;
         eval::find_var(print, values::base_namespace())? != values::unbound()
     };
@@ -167,7 +167,7 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
                 return Ok(());
             }
         }
-        SexpType::Record => {
+        SexpType::Record | SexpType::I64 => {
             for line in deparse::deparse_lines(value, 60, deparse::options::SIMPLE) {
                 out(&format!("{line}\n"));
             }

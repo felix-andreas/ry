@@ -2499,6 +2499,7 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
                 && (0..length(x)).all(|index| chars_equal(x.element(index), y.element(index)))
         }
         SexpType::Raw => values::raws(x) == values::raws(y),
+        SexpType::I64 => x.slice::<i64>() == y.slice::<i64>(),
         SexpType::List | SexpType::Expression => {
             length(x) == length(y)
                 && (0..length(x)).all(|index| identical(x.element(index), y.element(index), flags))

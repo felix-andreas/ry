@@ -813,7 +813,7 @@ fn removing_a_cross_file_cycle_and_restoring_it_revalidates() {
         1,
         "",
     );
-    for reader in ["rev", "sort", "as.Array"] {
+    for reader in ["rev", "sort", "List.from_r"] {
         round_trip_edit(
             DocumentKind::Package,
             &[

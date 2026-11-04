@@ -14,6 +14,10 @@
 //! - a ry record, tuple or tag stores its interned layout id, its slot count, a mask of the
 //!   slots that hold raw numbers, and then its eight-byte slots.
 //!
+//! A ry `I64` is a vector of its own type ([`SexpType::I64`]) with `REALSXP`'s layout: eight bytes
+//! per item, inline after the length and capacity. A single `I64` is a length-one vector, and a
+//! `List<I64>` is the same object at any length with the Array flag set.
+//!
 //! The accessors are `unsafe` because a handle is only valid while its object is reachable from a
 //! root. Holding one across an allocation without rooting it is a bug, and the GC stress tests
 //! exist to catch it.
@@ -85,6 +89,10 @@ pub enum SexpType {
     /// A ry record, tuple or tag. GNU R leaves the code unused; the layout says which of the
     /// three a value is (see [`crate::records`]).
     Record = 27,
+    /// A ry `I64`: a dense vector of 64-bit signed integers with `REALSXP`'s layout. GNU R leaves
+    /// the code unused, so C code and R builtins that switch on the type refuse it instead of
+    /// reading its bits as doubles.
+    I64 = 28,
     /// A free heap slot. Seeing it through a handle means the handle outlived its object.
     Free = 31,
 }
@@ -117,6 +125,7 @@ impl SexpType {
             24 => SexpType::Raw,
             25 => SexpType::Object,
             27 => SexpType::Record,
+            28 => SexpType::I64,
             _ => return None,
         })
     }
@@ -154,6 +163,7 @@ impl SexpType {
             SexpType::Object => "S4",
             SexpType::Binding => "binding",
             SexpType::Record => "record",
+            SexpType::I64 => "I64",
             SexpType::Free => "FREESXP",
         }
     }
@@ -187,6 +197,7 @@ impl SexpType {
             SexpType::Object => "OBJSXP",
             SexpType::Binding => "BINDINGSXP",
             SexpType::Record => "RECORDSXP",
+            SexpType::I64 => "I64SXP",
             SexpType::Free => "FREESXP",
         }
     }
@@ -213,7 +224,7 @@ impl SexpType {
         Some(match self {
             SexpType::Char | SexpType::Raw => 1,
             SexpType::Logical | SexpType::Integer => 4,
-            SexpType::Real => 8,
+            SexpType::Real | SexpType::I64 => 8,
             SexpType::Complex => 16,
             SexpType::String | SexpType::List | SexpType::Expression => size_of::<Sexp>(),
             _ => return None,
@@ -356,6 +367,14 @@ pub(crate) mod gc_bits {
     /// A writable pointer to its elements was handed out (`STRING_PTR`, `DATAPTR` on a list),
     /// so stores into it bypass the write barrier and it is scanned at every minor collection.
     pub const ESCAPED: u8 = 1 << 3;
+    /// In the heap's zero-count table, so a count that drops to zero again adds no second entry.
+    pub const ZERO_LISTED: u8 = 1 << 4;
+    /// Held by a root while the zero-count table is reconciled; cleared before the reconcile
+    /// returns.
+    pub const HELD: u8 = 1 << 5;
+    /// Released by a reconcile: a dead list or pairlist whose fields were given up and cleared,
+    /// left for the collector to sweep.
+    pub const RELEASED: u8 = 1 << 6;
 }
 
 pub(crate) mod flag_bits {
@@ -367,7 +386,7 @@ pub(crate) mod flag_bits {
     /// The object's fields do not count as references (GNU R's `DISABLE_REFCNT`), as for the
     /// `*tmp*` value of a complex assignment, which must not make the target look shared.
     pub const UNTRACKED: u8 = 1 << 3;
-    /// A ry Array: an attribute-free, NA-free vector built by `[...]` or `as.Array`. The bit lives
+    /// A ry Array: an attribute-free, NA-free vector built by `[...]` or `List.from_r`. The bit lives
     /// here, not in the general-purpose bits, so C code reading `LEVELS` never sees it.
     pub const ARRAY: u8 = 1 << 4;
     /// A list of `(key, value)` pairs that keeps neither alive: a collection that finds either
@@ -493,7 +512,7 @@ impl Slot {
 
 /// How `value` is stored in slot `index`: raw when it is a length-one double, integer or logical
 /// without attributes, and a handle otherwise. A resizable vector stays a handle, because it is
-/// kept to grow in place.
+/// kept to grow in place, and so does a one-item ry list, whose list flag a raw slot would drop.
 pub unsafe fn slot_for(value: Sexp, index: usize) -> Slot {
     unsafe {
         if index >= UNBOXED_SLOTS
@@ -505,6 +524,7 @@ pub unsafe fn slot_for(value: Sexp, index: usize) -> Slot {
             )
             || value.length() != 1
             || value.flags() & flag_bits::RESIZABLE != 0
+            || value.is_array()
         {
             return Slot::Handle(value);
         }
@@ -705,6 +725,20 @@ impl Sexp {
             let count = &self.header().refcount;
             if count.get() != REFCOUNT_MAX {
                 count.set(count.get() + 1);
+            }
+        }
+    }
+
+    /// Drops one reference and says whether that was the last counted one.
+    pub(crate) unsafe fn release_reference(self) -> bool {
+        unsafe {
+            let count = &self.header().refcount;
+            match count.get() {
+                REFCOUNT_MAX | 0 => false,
+                current => {
+                    count.set(current - 1);
+                    current == 1
+                }
             }
         }
     }

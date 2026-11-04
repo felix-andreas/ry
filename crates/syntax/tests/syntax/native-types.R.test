@@ -1,0 +1,1144 @@
+#==== number_suffixes
+#---- integer_suffix
+5i64
+-9223372036854775808i64
+#++++
+SOURCE_FILE@0..28
+  LITERAL@0..4
+    SUFFIXED_NUMBER@0..4 "5i64"
+  NEWLINE@4..5 "\n"
+  UNARY_EXPR@5..28
+    MINUS@5..6 "-"
+    LITERAL@6..28
+      SUFFIXED_NUMBER@6..28 "9223372036854775808i64"
+
+#---- float_suffix
+1.5f64
+1e3f64
+.5f64
+#++++
+SOURCE_FILE@0..19
+  LITERAL@0..6
+    SUFFIXED_NUMBER@0..6 "1.5f64"
+  NEWLINE@6..7 "\n"
+  LITERAL@7..13
+    SUFFIXED_NUMBER@7..13 "1e3f64"
+  NEWLINE@13..14 "\n"
+  LITERAL@14..19
+    SUFFIXED_NUMBER@14..19 ".5f64"
+
+#---- hex_takes_the_integer_suffix
+0xFFi64
+#++++
+SOURCE_FILE@0..7
+  LITERAL@0..7
+    SUFFIXED_NUMBER@0..7 "0xFFi64"
+
+#---- hex_digits_are_not_suffixes
+0x1Ff64
+#++++
+SOURCE_FILE@0..7
+  LITERAL@0..7
+    DOUBLE@0..7 "0x1Ff64"
+
+#---- other_widths_are_errors
+5i32
+1.5f32
+1.5dec
+5u8
+#++++
+SOURCE_FILE@0..22
+  ERROR@0..4
+    ERROR_TOKEN@0..4 "5i32"
+  NEWLINE@4..5 "\n"
+  ERROR@5..11
+    ERROR_TOKEN@5..11 "1.5f32"
+  NEWLINE@11..12 "\n"
+  ERROR@12..18
+    ERROR_TOKEN@12..18 "1.5dec"
+  NEWLINE@18..19 "\n"
+  ERROR@19..22
+    ERROR_TOKEN@19..22 "5u8"
+err: 0..4: `i32` is not a number type suffix; use i64 or f64, the two number types ry has
+err: 5..11: `f32` is not a number type suffix; use i64 or f64, the two number types ry has
+err: 12..18: `dec` is not a number type suffix; use i64 or f64, the two number types ry has
+err: 19..22: `u8` is not a number type suffix; use i64 or f64, the two number types ry has
+
+#---- hex_takes_no_other_width
+0xFFi32
+#++++
+SOURCE_FILE@0..7
+  ERROR@0..7
+    ERROR_TOKEN@0..7 "0xFFi32"
+err: 0..7: `i32` is not a number type suffix; a hex literal takes only i64
+
+#---- r_literals_keep_their_lexing
+5i
+5L
+#++++
+SOURCE_FILE@0..5
+  LITERAL@0..2
+    COMPLEX@0..2 "5i"
+  NEWLINE@2..3 "\n"
+  LITERAL@3..5
+    INTEGER@3..5 "5L"
+
+#---- malformed_suffix
+5u7
+#++++
+SOURCE_FILE@0..3
+  ERROR@0..3
+    ERROR_TOKEN@0..3 "5u7"
+err: 0..3: `u7` is not a number type suffix; use i64 or f64, the two number types ry has
+
+#---- malformed_hex_suffix
+0xFFu7
+#++++
+SOURCE_FILE@0..6
+  ERROR@0..6
+    ERROR_TOKEN@0..6 "0xFFu7"
+err: 0..6: `u7` is not a number type suffix; a hex literal takes only i64
+
+#---- suffix_with_trailing_letters
+5i64x
+#++++
+SOURCE_FILE@0..5
+  ERROR@0..5
+    ERROR_TOKEN@0..5 "5i64x"
+err: 0..5: `i64x` is not a number type suffix; use i64 or f64, the two number types ry has
+
+#==== fstrings
+#---- fstring_with_interpolations
+f"Hello {name}, {n + 1}"
+#++++
+SOURCE_FILE@0..24
+  FSTRING@0..24
+    FSTRING_START@0..2 "f\""
+    FSTRING_TEXT@2..8 "Hello "
+    FSTRING_INTERPOLATION@8..14
+      L_BRACE@8..9 "{"
+      NAME@9..13
+        IDENT@9..13 "name"
+      R_BRACE@13..14 "}"
+    FSTRING_TEXT@14..16 ", "
+    FSTRING_INTERPOLATION@16..23
+      L_BRACE@16..17 "{"
+      BINARY_EXPR@17..22
+        NAME@17..18
+          IDENT@17..18 "n"
+        WHITESPACE@18..19 " "
+        PLUS@19..20 "+"
+        WHITESPACE@20..21 " "
+        LITERAL@21..22
+          DOUBLE@21..22 "1"
+      R_BRACE@22..23 "}"
+    FSTRING_END@23..24 "\""
+
+#---- fstring_single_quotes
+f'{x}'
+#++++
+SOURCE_FILE@0..6
+  FSTRING@0..6
+    FSTRING_START@0..2 "f'"
+    FSTRING_INTERPOLATION@2..5
+      L_BRACE@2..3 "{"
+      NAME@3..4
+        IDENT@3..4 "x"
+      R_BRACE@4..5 "}"
+    FSTRING_END@5..6 "'"
+
+#---- fstring_doubled_braces
+f"{{literal}} {x}"
+#++++
+SOURCE_FILE@0..18
+  FSTRING@0..18
+    FSTRING_START@0..2 "f\""
+    FSTRING_TEXT@2..14 "{{literal}} "
+    FSTRING_INTERPOLATION@14..17
+      L_BRACE@14..15 "{"
+      NAME@15..16
+        IDENT@15..16 "x"
+      R_BRACE@16..17 "}"
+    FSTRING_END@17..18 "\""
+
+#---- fstring_nested
+f"{f"{x}"}!"
+#++++
+SOURCE_FILE@0..12
+  FSTRING@0..12
+    FSTRING_START@0..2 "f\""
+    FSTRING_INTERPOLATION@2..10
+      L_BRACE@2..3 "{"
+      FSTRING@3..9
+        FSTRING_START@3..5 "f\""
+        FSTRING_INTERPOLATION@5..8
+          L_BRACE@5..6 "{"
+          NAME@6..7
+            IDENT@6..7 "x"
+          R_BRACE@7..8 "}"
+        FSTRING_END@8..9 "\""
+      R_BRACE@9..10 "}"
+    FSTRING_TEXT@10..11 "!"
+    FSTRING_END@11..12 "\""
+
+#---- fstring_braces_inside_interpolation
+f"{sapply(xs, function(x) { x + 1 })}"
+#++++
+SOURCE_FILE@0..38
+  FSTRING@0..38
+    FSTRING_START@0..2 "f\""
+    FSTRING_INTERPOLATION@2..37
+      L_BRACE@2..3 "{"
+      CALL_EXPR@3..36
+        NAME@3..9
+          IDENT@3..9 "sapply"
+        ARGUMENT_LIST@9..36
+          L_PAREN@9..10 "("
+          ARGUMENT@10..12
+            NAME@10..12
+              IDENT@10..12 "xs"
+          COMMA@12..13 ","
+          WHITESPACE@13..14 " "
+          ARGUMENT@14..35
+            FUNCTION_DEF@14..35
+              FUNCTION_KW@14..22 "function"
+              PARAMETER_LIST@22..25
+                L_PAREN@22..23 "("
+                PARAMETER@23..24
+                  IDENT@23..24 "x"
+                R_PAREN@24..25 ")"
+              WHITESPACE@25..26 " "
+              BRACE_EXPR@26..35
+                L_BRACE@26..27 "{"
+                WHITESPACE@27..28 " "
+                BINARY_EXPR@28..34
+                  NAME@28..29
+                    IDENT@28..29 "x"
+                  WHITESPACE@29..30 " "
+                  PLUS@30..31 "+"
+                  WHITESPACE@31..32 " "
+                  LITERAL@32..33
+                    DOUBLE@32..33 "1"
+                  WHITESPACE@33..34 " "
+                R_BRACE@34..35 "}"
+          R_PAREN@35..36 ")"
+      R_BRACE@36..37 "}"
+    FSTRING_END@37..38 "\""
+
+#---- fstring_without_interpolation
+f"plain"
+#++++
+SOURCE_FILE@0..8
+  FSTRING@0..8
+    FSTRING_START@0..2 "f\""
+    FSTRING_TEXT@2..7 "plain"
+    FSTRING_END@7..8 "\""
+
+#---- raw_string_unchanged
+r"(a {b})"
+#++++
+SOURCE_FILE@0..10
+  LITERAL@0..10
+    RAW_STRING@0..10 "r\"(a {b})\""
+
+#---- fstring_empty_interpolation
+f"{}"
+#++++
+SOURCE_FILE@0..5
+  FSTRING@0..5
+    FSTRING_START@0..2 "f\""
+    FSTRING_INTERPOLATION@2..4
+      L_BRACE@2..3 "{"
+      R_BRACE@3..4 "}"
+    FSTRING_END@4..5 "\""
+err: 2..4: this interpolation is empty; write `{{` for a literal brace
+
+#---- fstring_lone_closing_brace
+f"a } b"
+#++++
+SOURCE_FILE@0..8
+  FSTRING@0..8
+    FSTRING_START@0..2 "f\""
+    FSTRING_TEXT@2..7 "a } b"
+    FSTRING_END@7..8 "\""
+err: 4..5: a `}` in an f-string's text is written `}}`
+
+#---- fstring_unterminated
+f"abc
+#++++
+SOURCE_FILE@0..5
+  FSTRING@0..5
+    FSTRING_START@0..2 "f\""
+    FSTRING_TEXT@2..5 "abc"
+err: 0..5: unterminated f-string; expected a closing quote
+
+#---- fstring_unclosed_interpolation
+f"{x"
+#++++
+SOURCE_FILE@0..5
+  FSTRING@0..5
+    FSTRING_START@0..2 "f\""
+    FSTRING_INTERPOLATION@2..5
+      L_BRACE@2..3 "{"
+      NAME@3..4
+        IDENT@3..4 "x"
+      ERROR@4..5
+        STRING@4..5 "\""
+err: 0..5: unterminated f-string; expected a closing quote
+err: 2..3: unclosed `{` in this f-string; expected a matching `}`
+err: 4..5: unterminated string; expected a closing quote
+err: 4..5: expected `}` to close this interpolation, found string
+
+#---- fstring_two_expressions_in_one_interpolation
+f"{x y}"
+#++++
+SOURCE_FILE@0..8
+  FSTRING@0..8
+    FSTRING_START@0..2 "f\""
+    FSTRING_INTERPOLATION@2..7
+      L_BRACE@2..3 "{"
+      NAME@3..4
+        IDENT@3..4 "x"
+      WHITESPACE@4..5 " "
+      ERROR@5..6
+        IDENT@5..6 "y"
+      R_BRACE@6..7 "}"
+    FSTRING_END@7..8 "\""
+err: 5..6: expected `}` to close this interpolation, found identifier
+
+#==== try
+#---- try_call
+try Str.to_i64(x)
+#++++
+SOURCE_FILE@0..17
+  TRY_EXPR@0..17
+    IDENT@0..3 "try"
+    WHITESPACE@3..4 " "
+    CALL_EXPR@4..17
+      NAME@4..14
+        IDENT@4..14 "Str.to_i64"
+      ARGUMENT_LIST@14..17
+        L_PAREN@14..15 "("
+        ARGUMENT@15..16
+          NAME@15..16
+            IDENT@15..16 "x"
+        R_PAREN@16..17 ")"
+
+#---- try_name
+try result
+#++++
+SOURCE_FILE@0..10
+  TRY_EXPR@0..10
+    IDENT@0..3 "try"
+    WHITESPACE@3..4 " "
+    NAME@4..10
+      IDENT@4..10 "result"
+
+#---- try_binds_the_postfix_chain
+try f(x)$y + 1
+#++++
+SOURCE_FILE@0..14
+  BINARY_EXPR@0..14
+    TRY_EXPR@0..11
+      IDENT@0..3 "try"
+      WHITESPACE@3..4 " "
+      DOLLAR_EXPR@4..10
+        CALL_EXPR@4..8
+          NAME@4..5
+            IDENT@4..5 "f"
+          ARGUMENT_LIST@5..8
+            L_PAREN@5..6 "("
+            ARGUMENT@6..7
+              NAME@6..7
+                IDENT@6..7 "x"
+            R_PAREN@7..8 ")"
+        DOLLAR@8..9 "$"
+        NAME@9..10
+          IDENT@9..10 "y"
+      WHITESPACE@10..11 " "
+    PLUS@11..12 "+"
+    WHITESPACE@12..13 " "
+    LITERAL@13..14
+      DOUBLE@13..14 "1"
+
+#---- try_inside_record
+(x = try f(a), y = try g(b))
+#++++
+SOURCE_FILE@0..28
+  RECORD_EXPR@0..28
+    ARGUMENT_LIST@0..28
+      L_PAREN@0..1 "("
+      ARGUMENT@1..13
+        NAME@1..2
+          IDENT@1..2 "x"
+        WHITESPACE@2..3 " "
+        EQ@3..4 "="
+        WHITESPACE@4..5 " "
+        TRY_EXPR@5..13
+          IDENT@5..8 "try"
+          WHITESPACE@8..9 " "
+          CALL_EXPR@9..13
+            NAME@9..10
+              IDENT@9..10 "f"
+            ARGUMENT_LIST@10..13
+              L_PAREN@10..11 "("
+              ARGUMENT@11..12
+                NAME@11..12
+                  IDENT@11..12 "a"
+              R_PAREN@12..13 ")"
+      COMMA@13..14 ","
+      WHITESPACE@14..15 " "
+      ARGUMENT@15..27
+        NAME@15..16
+          IDENT@15..16 "y"
+        WHITESPACE@16..17 " "
+        EQ@17..18 "="
+        WHITESPACE@18..19 " "
+        TRY_EXPR@19..27
+          IDENT@19..22 "try"
+          WHITESPACE@22..23 " "
+          CALL_EXPR@23..27
+            NAME@23..24
+              IDENT@23..24 "g"
+            ARGUMENT_LIST@24..27
+              L_PAREN@24..25 "("
+              ARGUMENT@25..26
+                NAME@25..26
+                  IDENT@25..26 "b"
+              R_PAREN@26..27 ")"
+      R_PAREN@27..28 ")"
+
+#---- try_call_stays_r
+try(x)
+#++++
+SOURCE_FILE@0..6
+  CALL_EXPR@0..6
+    NAME@0..3
+      IDENT@0..3 "try"
+    ARGUMENT_LIST@3..6
+      L_PAREN@3..4 "("
+      ARGUMENT@4..5
+        NAME@4..5
+          IDENT@4..5 "x"
+      R_PAREN@5..6 ")"
+
+#---- try_parenthesized_stays_r
+try (f(x))
+#++++
+SOURCE_FILE@0..10
+  CALL_EXPR@0..10
+    NAME@0..3
+      IDENT@0..3 "try"
+    WHITESPACE@3..4 " "
+    ARGUMENT_LIST@4..10
+      L_PAREN@4..5 "("
+      ARGUMENT@5..9
+        CALL_EXPR@5..9
+          NAME@5..6
+            IDENT@5..6 "f"
+          ARGUMENT_LIST@6..9
+            L_PAREN@6..7 "("
+            ARGUMENT@7..8
+              NAME@7..8
+                IDENT@7..8 "x"
+            R_PAREN@8..9 ")"
+      R_PAREN@9..10 ")"
+
+#---- try_minus_stays_r
+try -x
+#++++
+SOURCE_FILE@0..6
+  BINARY_EXPR@0..6
+    NAME@0..3
+      IDENT@0..3 "try"
+    WHITESPACE@3..4 " "
+    MINUS@4..5 "-"
+    NAME@5..6
+      IDENT@5..6 "x"
+
+#---- try_bracket_stays_r
+try[x]
+#++++
+SOURCE_FILE@0..6
+  SUBSET_EXPR@0..6
+    NAME@0..3
+      IDENT@0..3 "try"
+    ARGUMENT_LIST@3..6
+      L_BRACKET@3..4 "["
+      ARGUMENT@4..5
+        NAME@4..5
+          IDENT@4..5 "x"
+      R_BRACKET@5..6 "]"
+
+#---- try_at_line_end_stays_r
+try
+x
+#++++
+SOURCE_FILE@0..5
+  NAME@0..3
+    IDENT@0..3 "try"
+  NEWLINE@3..4 "\n"
+  NAME@4..5
+    IDENT@4..5 "x"
+
+#==== record_update
+#---- spread_then_fields
+(..point, x = 3)
+#++++
+SOURCE_FILE@0..16
+  RECORD_EXPR@0..16
+    ARGUMENT_LIST@0..16
+      L_PAREN@0..1 "("
+      RECORD_SPREAD@1..8
+        IDENT@1..8 "..point"
+      COMMA@8..9 ","
+      WHITESPACE@9..10 " "
+      ARGUMENT@10..15
+        NAME@10..11
+          IDENT@10..11 "x"
+        WHITESPACE@11..12 " "
+        EQ@12..13 "="
+        WHITESPACE@13..14 " "
+        LITERAL@14..15
+          DOUBLE@14..15 "3"
+      R_PAREN@15..16 ")"
+
+#---- spread_alone
+(..point,)
+#++++
+SOURCE_FILE@0..10
+  RECORD_EXPR@0..10
+    ARGUMENT_LIST@0..10
+      L_PAREN@0..1 "("
+      RECORD_SPREAD@1..8
+        IDENT@1..8 "..point"
+      COMMA@8..9 ","
+      R_PAREN@9..10 ")"
+
+#---- spread_then_unnamed_item
+(..point, 3)
+#++++
+SOURCE_FILE@0..12
+  RECORD_EXPR@0..12
+    ARGUMENT_LIST@0..12
+      L_PAREN@0..1 "("
+      RECORD_SPREAD@1..8
+        IDENT@1..8 "..point"
+      COMMA@8..9 ","
+      WHITESPACE@9..10 " "
+      ARGUMENT@10..11
+        LITERAL@10..11
+          DOUBLE@10..11 "3"
+      R_PAREN@11..12 ")"
+err: 10..11: this item needs a name: every field of a record is named, so a literal cannot mix named and unnamed items
+
+#---- spread_not_first_stays_a_name
+(x = 1, ..point)
+#++++
+SOURCE_FILE@0..16
+  RECORD_EXPR@0..16
+    ARGUMENT_LIST@0..16
+      L_PAREN@0..1 "("
+      ARGUMENT@1..6
+        NAME@1..2
+          IDENT@1..2 "x"
+        WHITESPACE@2..3 " "
+        EQ@3..4 "="
+        WHITESPACE@4..5 " "
+        LITERAL@5..6
+          DOUBLE@5..6 "1"
+      COMMA@6..7 ","
+      WHITESPACE@7..8 " "
+      ARGUMENT@8..15
+        NAME@8..15
+          IDENT@8..15 "..point"
+      R_PAREN@15..16 ")"
+err: 8..15: this item needs a name: every field of a record is named, so a literal cannot mix named and unnamed items
+
+#---- spread_in_a_nested_record
+f((..p, y = 2))
+#++++
+SOURCE_FILE@0..15
+  CALL_EXPR@0..15
+    NAME@0..1
+      IDENT@0..1 "f"
+    ARGUMENT_LIST@1..15
+      L_PAREN@1..2 "("
+      ARGUMENT@2..14
+        RECORD_EXPR@2..14
+          ARGUMENT_LIST@2..14
+            L_PAREN@2..3 "("
+            RECORD_SPREAD@3..6
+              IDENT@3..6 "..p"
+            COMMA@6..7 ","
+            WHITESPACE@7..8 " "
+            ARGUMENT@8..13
+              NAME@8..9
+                IDENT@8..9 "y"
+              WHITESPACE@9..10 " "
+              EQ@10..11 "="
+              WHITESPACE@11..12 " "
+              LITERAL@12..13
+                DOUBLE@12..13 "2"
+            R_PAREN@13..14 ")"
+      R_PAREN@14..15 ")"
+
+#---- spread_not_in_tag_payload
+:Point(..p, x = 3)
+#++++
+SOURCE_FILE@0..18
+  TAG_EXPR@0..18
+    COLON@0..1 ":"
+    NAME@1..6
+      IDENT@1..6 "Point"
+    ARGUMENT_LIST@6..18
+      L_PAREN@6..7 "("
+      ARGUMENT@7..10
+        NAME@7..10
+          IDENT@7..10 "..p"
+      COMMA@10..11 ","
+      WHITESPACE@11..12 " "
+      ARGUMENT@12..17
+        NAME@12..13
+          IDENT@12..13 "x"
+        WHITESPACE@13..14 " "
+        EQ@14..15 "="
+        WHITESPACE@15..16 " "
+        LITERAL@16..17
+          DOUBLE@16..17 "3"
+      R_PAREN@17..18 ")"
+err: 12..13: this item cannot have a name: no item of a tuple is named, so a tag payload cannot mix named and unnamed items
+
+#==== patterns
+#---- list_patterns
+match (xs) {
+  [] => 0
+  [a] => 1
+  [a, b] => 2
+  [first, ..] => 3
+  [first, ..rest] => 4
+  [.., last] => 5
+  [first, .., last] => 6
+}
+#++++
+SOURCE_FILE@0..134
+  MATCH_EXPR@0..134
+    IDENT@0..5 "match"
+    WHITESPACE@5..6 " "
+    PAREN_EXPR@6..10
+      L_PAREN@6..7 "("
+      NAME@7..9
+        IDENT@7..9 "xs"
+      R_PAREN@9..10 ")"
+    WHITESPACE@10..11 " "
+    L_BRACE@11..12 "{"
+    NEWLINE@12..13 "\n"
+    WHITESPACE@13..15 "  "
+    MATCH_ARM@15..22
+      PATTERN_ARRAY@15..17
+        L_BRACKET@15..16 "["
+        R_BRACKET@16..17 "]"
+      WHITESPACE@17..18 " "
+      FAT_ARROW@18..20 "=>"
+      WHITESPACE@20..21 " "
+      LITERAL@21..22
+        DOUBLE@21..22 "0"
+    NEWLINE@22..23 "\n"
+    WHITESPACE@23..25 "  "
+    MATCH_ARM@25..33
+      PATTERN_ARRAY@25..28
+        L_BRACKET@25..26 "["
+        PATTERN_BIND@26..27
+          NAME@26..27
+            IDENT@26..27 "a"
+        R_BRACKET@27..28 "]"
+      WHITESPACE@28..29 " "
+      FAT_ARROW@29..31 "=>"
+      WHITESPACE@31..32 " "
+      LITERAL@32..33
+        DOUBLE@32..33 "1"
+    NEWLINE@33..34 "\n"
+    WHITESPACE@34..36 "  "
+    MATCH_ARM@36..47
+      PATTERN_ARRAY@36..42
+        L_BRACKET@36..37 "["
+        PATTERN_BIND@37..38
+          NAME@37..38
+            IDENT@37..38 "a"
+        COMMA@38..39 ","
+        WHITESPACE@39..40 " "
+        PATTERN_BIND@40..41
+          NAME@40..41
+            IDENT@40..41 "b"
+        R_BRACKET@41..42 "]"
+      WHITESPACE@42..43 " "
+      FAT_ARROW@43..45 "=>"
+      WHITESPACE@45..46 " "
+      LITERAL@46..47
+        DOUBLE@46..47 "2"
+    NEWLINE@47..48 "\n"
+    WHITESPACE@48..50 "  "
+    MATCH_ARM@50..66
+      PATTERN_ARRAY@50..61
+        L_BRACKET@50..51 "["
+        PATTERN_BIND@51..56
+          NAME@51..56
+            IDENT@51..56 "first"
+        COMMA@56..57 ","
+        WHITESPACE@57..58 " "
+        PATTERN_REST@58..60
+          IDENT@58..60 ".."
+        R_BRACKET@60..61 "]"
+      WHITESPACE@61..62 " "
+      FAT_ARROW@62..64 "=>"
+      WHITESPACE@64..65 " "
+      LITERAL@65..66
+        DOUBLE@65..66 "3"
+    NEWLINE@66..67 "\n"
+    WHITESPACE@67..69 "  "
+    MATCH_ARM@69..89
+      PATTERN_ARRAY@69..84
+        L_BRACKET@69..70 "["
+        PATTERN_BIND@70..75
+          NAME@70..75
+            IDENT@70..75 "first"
+        COMMA@75..76 ","
+        WHITESPACE@76..77 " "
+        PATTERN_REST@77..83
+          IDENT@77..83 "..rest"
+        R_BRACKET@83..84 "]"
+      WHITESPACE@84..85 " "
+      FAT_ARROW@85..87 "=>"
+      WHITESPACE@87..88 " "
+      LITERAL@88..89
+        DOUBLE@88..89 "4"
+    NEWLINE@89..90 "\n"
+    WHITESPACE@90..92 "  "
+    MATCH_ARM@92..107
+      PATTERN_ARRAY@92..102
+        L_BRACKET@92..93 "["
+        PATTERN_REST@93..95
+          IDENT@93..95 ".."
+        COMMA@95..96 ","
+        WHITESPACE@96..97 " "
+        PATTERN_BIND@97..101
+          NAME@97..101
+            IDENT@97..101 "last"
+        R_BRACKET@101..102 "]"
+      WHITESPACE@102..103 " "
+      FAT_ARROW@103..105 "=>"
+      WHITESPACE@105..106 " "
+      LITERAL@106..107
+        DOUBLE@106..107 "5"
+    NEWLINE@107..108 "\n"
+    WHITESPACE@108..110 "  "
+    MATCH_ARM@110..132
+      PATTERN_ARRAY@110..127
+        L_BRACKET@110..111 "["
+        PATTERN_BIND@111..116
+          NAME@111..116
+            IDENT@111..116 "first"
+        COMMA@116..117 ","
+        WHITESPACE@117..118 " "
+        PATTERN_REST@118..120
+          IDENT@118..120 ".."
+        COMMA@120..121 ","
+        WHITESPACE@121..122 " "
+        PATTERN_BIND@122..126
+          NAME@122..126
+            IDENT@122..126 "last"
+        R_BRACKET@126..127 "]"
+      WHITESPACE@127..128 " "
+      FAT_ARROW@128..130 "=>"
+      WHITESPACE@130..131 " "
+      LITERAL@131..132
+        DOUBLE@131..132 "6"
+    NEWLINE@132..133 "\n"
+    R_BRACE@133..134 "}"
+
+#---- nested_list_pattern
+match (xs) {
+  [[a], b] => a
+}
+#++++
+SOURCE_FILE@0..30
+  MATCH_EXPR@0..30
+    IDENT@0..5 "match"
+    WHITESPACE@5..6 " "
+    PAREN_EXPR@6..10
+      L_PAREN@6..7 "("
+      NAME@7..9
+        IDENT@7..9 "xs"
+      R_PAREN@9..10 ")"
+    WHITESPACE@10..11 " "
+    L_BRACE@11..12 "{"
+    NEWLINE@12..13 "\n"
+    WHITESPACE@13..15 "  "
+    MATCH_ARM@15..28
+      PATTERN_ARRAY@15..23
+        L_BRACKET@15..16 "["
+        PATTERN_ARRAY@16..19
+          L_BRACKET@16..17 "["
+          PATTERN_BIND@17..18
+            NAME@17..18
+              IDENT@17..18 "a"
+          R_BRACKET@18..19 "]"
+        COMMA@19..20 ","
+        WHITESPACE@20..21 " "
+        PATTERN_BIND@21..22
+          NAME@21..22
+            IDENT@21..22 "b"
+        R_BRACKET@22..23 "]"
+      WHITESPACE@23..24 " "
+      FAT_ARROW@24..26 "=>"
+      WHITESPACE@26..27 " "
+      NAME@27..28
+        IDENT@27..28 "a"
+    NEWLINE@28..29 "\n"
+    R_BRACE@29..30 "}"
+
+#---- list_pattern_two_rests
+match (xs) {
+  [.., x, ..] => x
+}
+#++++
+SOURCE_FILE@0..33
+  MATCH_EXPR@0..33
+    IDENT@0..5 "match"
+    WHITESPACE@5..6 " "
+    PAREN_EXPR@6..10
+      L_PAREN@6..7 "("
+      NAME@7..9
+        IDENT@7..9 "xs"
+      R_PAREN@9..10 ")"
+    WHITESPACE@10..11 " "
+    L_BRACE@11..12 "{"
+    NEWLINE@12..13 "\n"
+    WHITESPACE@13..15 "  "
+    MATCH_ARM@15..31
+      PATTERN_ARRAY@15..26
+        L_BRACKET@15..16 "["
+        PATTERN_REST@16..18
+          IDENT@16..18 ".."
+        COMMA@18..19 ","
+        WHITESPACE@19..20 " "
+        PATTERN_BIND@20..21
+          NAME@20..21
+            IDENT@20..21 "x"
+        COMMA@21..22 ","
+        WHITESPACE@22..23 " "
+        PATTERN_REST@23..25
+          IDENT@23..25 ".."
+        R_BRACKET@25..26 "]"
+      WHITESPACE@26..27 " "
+      FAT_ARROW@27..29 "=>"
+      WHITESPACE@29..30 " "
+      NAME@30..31
+        IDENT@30..31 "x"
+    NEWLINE@31..32 "\n"
+    R_BRACE@32..33 "}"
+err: 23..25: a list pattern takes at most one `..`
+
+#---- as_pattern
+match (s) {
+  :Circle(radius = r) as circle => circle
+  :A | :B as either => either
+}
+#++++
+SOURCE_FILE@0..85
+  MATCH_EXPR@0..85
+    IDENT@0..5 "match"
+    WHITESPACE@5..6 " "
+    PAREN_EXPR@6..9
+      L_PAREN@6..7 "("
+      NAME@7..8
+        IDENT@7..8 "s"
+      R_PAREN@8..9 ")"
+    WHITESPACE@9..10 " "
+    L_BRACE@10..11 "{"
+    NEWLINE@11..12 "\n"
+    WHITESPACE@12..14 "  "
+    MATCH_ARM@14..53
+      PATTERN_AS@14..43
+        PATTERN_TAG@14..33
+          COLON@14..15 ":"
+          NAME@15..21
+            IDENT@15..21 "Circle"
+          PATTERN_LIST@21..33
+            L_PAREN@21..22 "("
+            PATTERN_FIELD@22..32
+              NAME@22..28
+                IDENT@22..28 "radius"
+              WHITESPACE@28..29 " "
+              EQ@29..30 "="
+              WHITESPACE@30..31 " "
+              PATTERN_BIND@31..32
+                NAME@31..32
+                  IDENT@31..32 "r"
+            R_PAREN@32..33 ")"
+        WHITESPACE@33..34 " "
+        IDENT@34..36 "as"
+        WHITESPACE@36..37 " "
+        NAME@37..43
+          IDENT@37..43 "circle"
+      WHITESPACE@43..44 " "
+      FAT_ARROW@44..46 "=>"
+      WHITESPACE@46..47 " "
+      NAME@47..53
+        IDENT@47..53 "circle"
+    NEWLINE@53..54 "\n"
+    WHITESPACE@54..56 "  "
+    MATCH_ARM@56..83
+      PATTERN_AS@56..73
+        PATTERN_OR@56..63
+          PATTERN_TAG@56..58
+            COLON@56..57 ":"
+            NAME@57..58
+              IDENT@57..58 "A"
+          WHITESPACE@58..59 " "
+          PIPE@59..60 "|"
+          WHITESPACE@60..61 " "
+          PATTERN_TAG@61..63
+            COLON@61..62 ":"
+            NAME@62..63
+              IDENT@62..63 "B"
+        WHITESPACE@63..64 " "
+        IDENT@64..66 "as"
+        WHITESPACE@66..67 " "
+        NAME@67..73
+          IDENT@67..73 "either"
+      WHITESPACE@73..74 " "
+      FAT_ARROW@74..76 "=>"
+      WHITESPACE@76..77 " "
+      NAME@77..83
+        IDENT@77..83 "either"
+    NEWLINE@83..84 "\n"
+    R_BRACE@84..85 "}"
+
+#---- as_needs_a_name
+match (s) {
+  x as => x
+}
+#++++
+SOURCE_FILE@0..25
+  MATCH_EXPR@0..25
+    IDENT@0..5 "match"
+    WHITESPACE@5..6 " "
+    PAREN_EXPR@6..9
+      L_PAREN@6..7 "("
+      NAME@7..8
+        IDENT@7..8 "s"
+      R_PAREN@8..9 ")"
+    WHITESPACE@9..10 " "
+    L_BRACE@10..11 "{"
+    NEWLINE@11..12 "\n"
+    WHITESPACE@12..14 "  "
+    MATCH_ARM@14..23
+      PATTERN_AS@14..19
+        PATTERN_BIND@14..15
+          NAME@14..15
+            IDENT@14..15 "x"
+        WHITESPACE@15..16 " "
+        IDENT@16..18 "as"
+        WHITESPACE@18..19 " "
+      FAT_ARROW@19..21 "=>"
+      WHITESPACE@21..22 " "
+      NAME@22..23
+        IDENT@22..23 "x"
+    NEWLINE@23..24 "\n"
+    R_BRACE@24..25 "}"
+err: 19..21: expected a name after `as`, found `=>`
+
+#---- record_rest_binds
+match (p) {
+  (x = x, ..rest) => rest
+}
+#++++
+SOURCE_FILE@0..39
+  MATCH_EXPR@0..39
+    IDENT@0..5 "match"
+    WHITESPACE@5..6 " "
+    PAREN_EXPR@6..9
+      L_PAREN@6..7 "("
+      NAME@7..8
+        IDENT@7..8 "p"
+      R_PAREN@8..9 ")"
+    WHITESPACE@9..10 " "
+    L_BRACE@10..11 "{"
+    NEWLINE@11..12 "\n"
+    WHITESPACE@12..14 "  "
+    MATCH_ARM@14..37
+      PATTERN_LIST@14..29
+        L_PAREN@14..15 "("
+        PATTERN_FIELD@15..20
+          NAME@15..16
+            IDENT@15..16 "x"
+          WHITESPACE@16..17 " "
+          EQ@17..18 "="
+          WHITESPACE@18..19 " "
+          PATTERN_BIND@19..20
+            NAME@19..20
+              IDENT@19..20 "x"
+        COMMA@20..21 ","
+        WHITESPACE@21..22 " "
+        PATTERN_REST@22..28
+          IDENT@22..28 "..rest"
+        R_PAREN@28..29 ")"
+      WHITESPACE@29..30 " "
+      FAT_ARROW@30..32 "=>"
+      WHITESPACE@32..33 " "
+      NAME@33..37
+        IDENT@33..37 "rest"
+    NEWLINE@37..38 "\n"
+    R_BRACE@38..39 "}"
+
+#---- punned_fields
+match (p) {
+  (x =, y =) => x + y
+  (x =,) => x
+}
+#++++
+SOURCE_FILE@0..49
+  MATCH_EXPR@0..49
+    IDENT@0..5 "match"
+    WHITESPACE@5..6 " "
+    PAREN_EXPR@6..9
+      L_PAREN@6..7 "("
+      NAME@7..8
+        IDENT@7..8 "p"
+      R_PAREN@8..9 ")"
+    WHITESPACE@9..10 " "
+    L_BRACE@10..11 "{"
+    NEWLINE@11..12 "\n"
+    WHITESPACE@12..14 "  "
+    MATCH_ARM@14..33
+      PATTERN_LIST@14..24
+        L_PAREN@14..15 "("
+        PATTERN_FIELD@15..18
+          NAME@15..16
+            IDENT@15..16 "x"
+          WHITESPACE@16..17 " "
+          EQ@17..18 "="
+        COMMA@18..19 ","
+        WHITESPACE@19..20 " "
+        PATTERN_FIELD@20..23
+          NAME@20..21
+            IDENT@20..21 "y"
+          WHITESPACE@21..22 " "
+          EQ@22..23 "="
+        R_PAREN@23..24 ")"
+      WHITESPACE@24..25 " "
+      FAT_ARROW@25..27 "=>"
+      WHITESPACE@27..28 " "
+      BINARY_EXPR@28..33
+        NAME@28..29
+          IDENT@28..29 "x"
+        WHITESPACE@29..30 " "
+        PLUS@30..31 "+"
+        WHITESPACE@31..32 " "
+        NAME@32..33
+          IDENT@32..33 "y"
+    NEWLINE@33..34 "\n"
+    WHITESPACE@34..36 "  "
+    MATCH_ARM@36..47
+      PATTERN_LIST@36..42
+        L_PAREN@36..37 "("
+        PATTERN_FIELD@37..40
+          NAME@37..38
+            IDENT@37..38 "x"
+          WHITESPACE@38..39 " "
+          EQ@39..40 "="
+        COMMA@40..41 ","
+        R_PAREN@41..42 ")"
+      WHITESPACE@42..43 " "
+      FAT_ARROW@43..45 "=>"
+      WHITESPACE@45..46 " "
+      NAME@46..47
+        IDENT@46..47 "x"
+    NEWLINE@47..48 "\n"
+    R_BRACE@48..49 "}"
+
+#---- rest_binding_needs_named_fields
+match (p) {
+  (a, ..rest) => a
+}
+#++++
+SOURCE_FILE@0..32
+  MATCH_EXPR@0..32
+    IDENT@0..5 "match"
+    WHITESPACE@5..6 " "
+    PAREN_EXPR@6..9
+      L_PAREN@6..7 "("
+      NAME@7..8
+        IDENT@7..8 "p"
+      R_PAREN@8..9 ")"
+    WHITESPACE@9..10 " "
+    L_BRACE@10..11 "{"
+    NEWLINE@11..12 "\n"
+    WHITESPACE@12..14 "  "
+    MATCH_ARM@14..30
+      PATTERN_LIST@14..25
+        L_PAREN@14..15 "("
+        PATTERN_BIND@15..16
+          NAME@15..16
+            IDENT@15..16 "a"
+        COMMA@16..17 ","
+        WHITESPACE@17..18 " "
+        PATTERN_REST@18..24
+          IDENT@18..24 "..rest"
+        R_PAREN@24..25 ")"
+      WHITESPACE@25..26 " "
+      FAT_ARROW@26..28 "=>"
+      WHITESPACE@28..29 " "
+      NAME@29..30
+        IDENT@29..30 "a"
+    NEWLINE@30..31 "\n"
+    R_BRACE@31..32 "}"
+err: 14..25: `..` ignores the remaining fields of a record pattern, so it needs named fields before it
+
+#---- suffixed_literal_pattern
+match (n) {
+  0i64 => :Zero
+  -1i64 => :MinusOne
+}
+#++++
+SOURCE_FILE@0..50
+  MATCH_EXPR@0..50
+    IDENT@0..5 "match"
+    WHITESPACE@5..6 " "
+    PAREN_EXPR@6..9
+      L_PAREN@6..7 "("
+      NAME@7..8
+        IDENT@7..8 "n"
+      R_PAREN@8..9 ")"
+    WHITESPACE@9..10 " "
+    L_BRACE@10..11 "{"
+    NEWLINE@11..12 "\n"
+    WHITESPACE@12..14 "  "
+    MATCH_ARM@14..27
+      PATTERN_LITERAL@14..18
+        LITERAL@14..18
+          SUFFIXED_NUMBER@14..18 "0i64"
+      WHITESPACE@18..19 " "
+      FAT_ARROW@19..21 "=>"
+      WHITESPACE@21..22 " "
+      TAG_EXPR@22..27
+        COLON@22..23 ":"
+        NAME@23..27
+          IDENT@23..27 "Zero"
+    NEWLINE@27..28 "\n"
+    WHITESPACE@28..30 "  "
+    MATCH_ARM@30..48
+      PATTERN_LITERAL@30..35
+        MINUS@30..31 "-"
+        LITERAL@31..35
+          SUFFIXED_NUMBER@31..35 "1i64"
+      WHITESPACE@35..36 " "
+      FAT_ARROW@36..38 "=>"
+      WHITESPACE@38..39 " "
+      TAG_EXPR@39..48
+        COLON@39..40 ":"
+        NAME@40..48
+          IDENT@40..48 "MinusOne"
+    NEWLINE@48..49 "\n"
+    R_BRACE@49..50 "}"

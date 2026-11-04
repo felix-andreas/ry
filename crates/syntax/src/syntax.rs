@@ -16,7 +16,7 @@ mod tree;
 use std::{borrow::Cow, sync::Arc};
 pub use {
     kind::SyntaxKind,
-    lexer::{Token, is_syntactic_name, lex},
+    lexer::{NumberType, Token, is_syntactic_name, lex, split_number_suffix},
     parser::{infix_binding_power, parse},
     text_size::{TextLen, TextRange, TextSize},
     tree::{

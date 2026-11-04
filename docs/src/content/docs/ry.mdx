@@ -25,10 +25,9 @@ also served as Markdown at [`/ry.md`](/ry.md).
 | `ry server` | The language server, which your editor starts |
 | `ry debug-adapter` | A Debug Adapter Protocol debugger |
 
-Checking, formatting and the editor never run R, and ry's runtime brings its own base R 4.6.2, so
-only `ry R` needs GNU R installed. Install the
-[VS Code extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry) or a
-binary ([Installation](/installation)).
+Checking, formatting and the editor never run R. The other commands need base R: the 0.4.1-beta
+release reads it from a GNU R 4.3 or newer, and a build from source carries base R 4.6.2 inside
+`ry`. `ry R` always needs GNU R. [Installation](/installation) has the binaries and editor setup.
 
 ## Configuration
 
@@ -105,25 +104,25 @@ When a comment and an inline annotation disagree, ry uses the inline one and war
 
 | Type | Meaning |
 | --- | --- |
-| `integer`, `double`, `character`, `logical`, `complex` | Exactly one element; an `if` condition needs one |
+| `integer`, `double`, `character`, `logical`, `complex` | Exactly one element |
 | `integer[]`, `double[named]` | A vector of any length, optionally with names |
-| `list{integer, character}`, `list{name: character}` | A list with a fixed shape, positional or named; `$` on a missing field is an error |
+| `list{integer, character}`, `list{name: character}` | A list with a fixed shape, positional or named; `$` on a misspelled field is an error |
 | `list[integer]`, `list[named: integer]` | A list of any length, or looked up by key (`[[key]]` gives `integer \| NULL`) |
 | `character \| NULL` | A union; `is.null()` and the other `is.*` tests narrow it |
 | `fn(x: double, ...: character) -> double` | A function type; argument names are part of it |
 | `<T: numeric> fn(x: T) -> T` | A generic function, bounded to `integer` or `double` |
 | `Record{x: double}`, `Tuple{integer, character}` | ry's records and tuples |
 | `:Ok(integer) \| :Err(character) \| ..` | Tags; a trailing `..` leaves the union open |
-| `Array<double>` | ry's strict vector: one item type, no `NA`, no names, no recycling |
+| `I64`, `F64`, `Bool`, `Str` | ry's own numbers and strings, which never hold `NA` |
+| `List<F64>` | ry's typed sequence: one item type, no `NA`, no names, no recycling |
 | `DataFrame{region: character[], units: integer[]}` | ry's typed table |
 | `Result<T, E>`, `Dict<K, V>`, `Set<T>` | Standard library types |
 | `Any` | A deliberate opt-out; compatible with everything, and strict mode accepts it |
 | `Unknown` | What ry could not infer (data frame columns, S4 and R6 objects); compatible with everything, and strict mode reports it |
 
-A `double` accepts an `integer` or `logical`, but a number never passes for a `character`. Each of
-your functions has one signature, and there is no inheritance, so inference stays fast enough for
-every keystroke. [Type checking](/type-checking/overview) and the
-[type system reference](/reference/type-system) have the rules.
+A `double` accepts an `integer` or `logical`, but a number never passes for a `character`. Your own
+functions cannot be overloaded, and nominal types have no subtyping. The
+[tutorial](/tutorial/types) and the [type system reference](/reference/type-system) have the rules.
 
 ## Records, tags and `match`
 
@@ -134,7 +133,7 @@ point <- (x = 1, y = 2)          # Record{x: double, y: double}; point$x reads a
 pair <- (1L, "a")                # Tuple{integer, character}
 one <- (x = 1,)                  # a one-field record needs the trailing comma
 shape <- :Rect(width = 2, height = 3)   # a tag with a payload
-xs <- [1.5, 2, 3]                # Array<double>
+xs <- [1.5, 2, 3]                # List<F64>
 
 alias Shape =
   | :Circle(radius: double)
@@ -155,10 +154,12 @@ area(shape)
 
 A `match` that misses a case is a `non-exhaustive-match` error, and an arm the earlier ones already
 cover is an `unreachable-pattern` warning. Patterns are `_`, a name, a literal, a tag with payload
-patterns, `(p, q)`, `(x = p, ..)`, `p | q`, and a guard `p if (cond)`. Records have value
+patterns, `(p, q)`, `(x = p, ..)`, a list pattern `[first, ..rest]`, `p as name`, `p | q`, and a guard
+`p if (cond)`. `(..point, y = 3)` copies a record with a field replaced, and `try f(x)` returns an
+`:Err` from the enclosing function early. Records have value
 semantics, and passing one to an R function is an error until you convert it with `as.list()`.
-[Records and tags](/type-checking/records-and-tags) and [Arrays](/type-checking/arrays) have the
-details.
+[Records, tuples and tags](/reference/type-system#records-tuples-and-tags) and
+[lists](/reference/type-system#lists) have the rules.
 
 ## Standard library
 
@@ -187,7 +188,7 @@ sales |>
 Verbs: `select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`, `join`, `join_asof`,
 `head`, and lazy queries through `LazyFrame`. Existing data.table code runs unchanged, most of its
 queries on the same engine, and data.table's own test suite passes under ry.
-[DataFrames](/guides/dataframes) has the API.
+[DataFrames](/reference/dataframes) has the API.
 
 ## Strict mode
 
@@ -195,7 +196,7 @@ queries on the same engine, and data.table's own test suite passes under ry.
 run means every value has a known type. `ry run`, `ry R`, `ry load` and the console then refuse code
 with a strict-mode error. Combined with `object-systems = false`, it also rejects new S4, R6 and
 Reference Classes, which otherwise get an `object-system` warning recommending records and tags.
-[Strict mode](/type-checking/strict-mode) lists what it reports.
+[Strict mode](/reference/type-system#strict-mode) lists what it reports.
 
 ## Running and loading packages
 
@@ -203,7 +204,7 @@ Reference Classes, which otherwise get an `object-system` warning recommending r
 `load_all()` and no restart. In RStudio, `source(pipe("ry load --r-entry"))` in `~/.Rprofile` gives
 you a fast `load_all()`. On a 326,000-line package, a cold load takes 1.3 to 1.7 s against
 `devtools::load_all()`'s 9.6 s, and a reload after an edit 79 to 83 ms against 8.6 s.
-[Running and reloading](/guides/running) has the details.
+[Package loading](/reference/package-loading) has the details.
 
 ## Editor
 
@@ -212,7 +213,7 @@ go-to-definition, references, rename, call hierarchy, signature help, inlay hint
 refactorings (extract variable or function, inline, convert between `#:` and inline types), an
 outline, folding, semantic highlighting, formatting, and code lenses to run and debug tests. The VS
 Code extension adds a debugger, a console with live values, a data viewer and a plot panel. Any
-LSP editor can run `ry server`. [Editors](/guides/editors) lists everything.
+LSP editor can run `ry server`. [Installation](/installation#editors) sets each editor up.
 
 ## Performance
 
@@ -226,7 +227,7 @@ of data.table's time. [Benchmarks](/benchmarks) has the programs and the method.
 ## Status
 
 ry is in beta. The checker, language server, formatter and loader are ready for daily use, and
-diagnostic codes, `ry.toml` keys and the JSON output are stable. ry's own runtime is still
-incomplete: a script that needs something it lacks stops with an error that names it, and `ry R`
-runs plain and typed R on GNU R meanwhile. Records, tags, Arrays, `DataFrame` and the standard
-library run only on ry's runtime.
+diagnostic codes, `ry.toml` keys and the JSON output are stable. ry's runtime is incomplete: a
+script that needs something it lacks stops with an error that names it, and `ry R` runs plain and
+inline-annotated R on GNU R instead. Records, tags, lists, `DataFrame` and the standard library
+run only on ry's runtime.

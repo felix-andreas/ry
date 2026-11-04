@@ -413,10 +413,55 @@ const PRINTS: &[(&str, &str)] = &[
         "{ mk <- function() :Red; for (i in 1:4) a <- mk(); identical(a, :Red) }",
         "[1] TRUE\n",
     ),
+    // `try` unwraps an `:Ok` and returns an `:Err` from the function around it, interpreted and
+    // compiled alike.
+    (
+        "{ half <- function(n) if (n %% 2 == 0) :Ok(n / 2) else :Err(:Odd); quarter <- function(n) { h <- try half(n); q <- try half(h); :Ok(q) }; for (i in 1:4) r <- list(quarter(8), quarter(6)); r }",
+        "[[1]]\n:Ok(2)\n\n[[2]]\n:Err(:Odd)\n\n",
+    ),
+    (
+        "{ both <- :Ok(1, 2); f <- function() try both; f() }",
+        "(1, 2)\n",
+    ),
+    // A record update copies the record and replaces the named fields.
+    (
+        "{ q <- (..point, y = 5); list(q, point) }",
+        "[[1]]\n(x = 1, y = 5)\n\n[[2]]\n(x = 1, y = 2)\n\n",
+    ),
+    // List patterns match by length, and `..name` binds the items in between.
+    (
+        "{ f <- function(xs) match (xs) { [] => \"none\", [a] => a, [a, ..middle, b] => middle }; list(f([]), f([\"x\"]), f([\"x\", \"y\", \"z\", \"w\"]), f([\"x\", \"y\"])) }",
+        "[[1]]\n[1] \"none\"\n\n[[2]]\n[1] \"x\"\n\n[[3]]\n[\"y\", \"z\"]\n\n[[4]]\nList.from_r(character(0))\n\n",
+    ),
+    (
+        "match ((1, 2)) { [a] => a, _ => \"not a list\" }",
+        "[1] \"not a list\"\n",
+    ),
+    // `as` binds the whole value a pattern matched.
+    (
+        "match (circle) { :Circle(..) as shape => shape }",
+        ":Circle(radius = 2)\n",
+    ),
 ];
 
 /// Each case's code and the error message it raises.
 const ERRORS: &[(&str, &str)] = &[
+    (
+        "{ oops <- :Err(:Oops); try oops }",
+        "`try` returns an `:Err` early from the function around it, but it is not inside a function",
+    ),
+    (
+        "{ one <- 1; f <- function() try one; f() }",
+        "`try` needs `:Ok(value)` or `:Err(error)`, but got `1`",
+    ),
+    (
+        "(..pair, x = 1)",
+        "only a record can be updated with `..`, but got `(1L, \"a\")`",
+    ),
+    (
+        "(..point, z = 1)",
+        "the record has no field `z`; its fields are `x`, `y`",
+    ),
     (
         "point$z",
         "the record has no field `z`; its fields are `x`, `y`",

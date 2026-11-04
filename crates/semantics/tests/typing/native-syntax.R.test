@@ -1,0 +1,173 @@
+#==== number_suffixes
+#---- a_suffix_names_the_exact_type
+a <- 5i64
+b <- 0xFFi64
+c <- 1.5f64
+#++++
+a: I64
+b: I64
+c: F64
+
+#---- a_suffixed_number_must_fit_its_type
+a <- 9223372036854775808i64
+b <- 1.5i64
+#++++
+a: Unknown
+b: Unknown
+5..27 error[type-mismatch] this literal does not fit `I64`, which cannot hold its value exactly
+33..39 error[type-mismatch] this literal does not fit `I64`, which cannot hold its value exactly
+
+#---- suffixed_numbers_do_not_mix
+x <- 1i64 + 1.5f64
+#++++
+x: Unknown
+5..18 error[type-mismatch] `+` is not defined between `I64` and `F64`. Number types are never converted into each other: convert one side, as in `Num.to_i64(x)`
+
+#---- a_suffixed_number_decides_an_unsuffixed_one
+x <- 1i64 + 2
+#++++
+x: I64
+
+#==== format_strings
+#---- a_format_string_is_a_str
+name <- "Ada"
+greeting <- f"hello {name}, you are {36} years old"
+#++++
+name: character
+greeting: Str
+
+#---- interpolations_are_checked
+greeting <- f"hello {undefined_name}"
+#++++
+greeting: Str
+21..35 warning[unresolved] I could not resolve `undefined_name` in this package, its imports, or builtins.
+
+#==== try
+#---- try_unwraps_the_ok_value_and_returns_the_error
+parse_both <- function(a: Str, b: Str) {
+  x <- try Str.to_i64(a)
+  y <- try Str.to_i64(b)
+  :Ok(x + y)
+}
+#++++
+parse_both: fn(a: Str, b: Str) -> :Err(:InvalidNumStr) | :Ok(I64)
+
+#---- try_joins_errors_of_different_steps
+#: fn(text: Str) -> :Ok(I64) | :Err(:Negative)
+positive <- function(text) {
+  n <- Str.to_i64(text)
+  match (n) {
+    :Ok(value) => if (value < 0) :Err(:Negative) else :Ok(value),
+    :Err(_) => :Ok(0)
+  }
+}
+both <- function(text: Str) {
+  n <- try Str.to_i64(text)
+  p <- try positive(text)
+  :Ok(n + p)
+}
+#++++
+positive: fn(text: Str) -> :Ok(I64) | :Err(:Negative)
+both: fn(text: Str) -> :Err(:InvalidNumStr | :Negative) | :Ok(I64)
+
+#---- try_needs_a_result
+f <- function(x: I64) try x
+#++++
+f: fn(x: I64) -> Unknown
+26..27 error[type-mismatch] `try` needs a result such as `:Ok(value) | :Err(error)`, but this is `I64`
+
+#---- try_outside_a_function
+n <- try Str.to_i64("1")
+#++++
+n: Unknown
+5..24 error[type-mismatch] `try` returns an `:Err` early from the function around it, but this one is not inside a function. Use `match` to handle the error here
+
+#==== record_update
+#---- an_update_keeps_the_record_type
+p <- (x = 1.5, y = 2.5)
+q <- (..p, y = 3.5)
+#++++
+p: Record{x: double, y: double}
+q: Record{x: double, y: double}
+
+#---- an_update_cannot_add_a_field
+p <- (x = 1, y = 2)
+q <- (..p, z = 3)
+#++++
+p: Record{x: double, y: double}
+q: Unknown
+31..32 error[type-mismatch] field `z` does not exist in `Record{x: double, y: double}`
+
+#---- an_update_keeps_each_field_type
+p <- (name = "Ada", age = 36)
+q <- (..p, age = "old")
+#++++
+p: Record{age: double, name: character}
+q: Unknown
+47..52 error[type-mismatch] expected `double`, found `character`
+
+#---- only_a_record_updates
+n <- 1L
+q <- (..n, x = 2)
+#++++
+n: integer
+q: Unknown
+16..17 error[type-mismatch] only a record can be updated with `..`, but this is `integer`
+
+#==== list_patterns
+#---- list_items_bind_the_item_type
+describe <- function(xs: List<Str>) {
+  match (xs) {
+    [] => "empty",
+    [only] => only,
+    [first, ..rest] => Str.concat(first, Num.to_str(List.len(rest)))
+  }
+}
+#++++
+describe: fn(xs: List<Str>) -> Str
+
+#---- a_list_pattern_on_a_record_never_matches
+f <- function(p: Record{x: I64}) match (p) { [a] => a, _ => 0 }
+#++++
+f: fn(p: Record{x: I64}) -> Unknown
+45..48 error[type-mismatch] this pattern can never match: the value is `Record{x: I64}`
+
+#==== as_patterns
+#---- as_binds_the_whole_value
+area <- function(shape: :Circle(F64) | :Square(F64)) {
+  match (shape) {
+    :Circle(r) as whole => whole,
+    other => other
+  }
+}
+#++++
+area: fn(shape: :Circle(F64) | :Square(F64)) -> :Circle(F64) | :Square(F64)
+
+#==== native_list_operators
+#---- a_list_beside_a_scalar_applies_the_operator_to_each_item
+times <- [3i64, 1i64, 2i64]
+after <- times >= 2i64
+shifted <- times + 1
+#++++
+times: List<I64>
+after: List<Bool>
+shifted: List<I64>
+
+#---- a_list_and_a_scalar_of_another_number_type_do_not_mix
+xs <- [1.5, 2]
+ys <- xs * 2i64
+#++++
+xs: List<F64>
+ys: Unknown
+21..30 error[type-mismatch] `*` is not defined between `List<F64>` and `I64`. Both sides must have one item type, and number types are never converted into each other
+
+#==== declared_result_literals
+#---- match_arm_literals_take_the_declared_result_type
+rate <- function(region: :North | :South) -> F64 {
+  match (region) {
+    :North => 0.2
+    :South => 0.1
+  }
+}
+#++++
+rate: fn(region: :North | :South) -> F64

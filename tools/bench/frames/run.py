@@ -4,7 +4,7 @@
 on the same inputs. Engines run one after another so they never share the CPU. Prints a Markdown
 table of the faster of each step's runs and of each engine's peak resident memory, and refuses
 results whose checksums disagree. With --write, the table replaces the one between the
-`bench-frames` markers in docs/src/content/docs/contributing/design/r-runtime.md.
+`bench-frames` markers in docs/src/content/docs/development/design/r-runtime.md.
 
 The modules are the `tables`, `market_data` and `trials` templates, generated from one seed in
 both variants. data.table and lubridate must be installed in the library named by RY_BENCH_RLIB
@@ -16,7 +16,7 @@ import argparse, math, os, pathlib, random, re, subprocess, sys, tempfile
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent.parent
-page = root / "docs/src/content/docs/contributing/design/r-runtime.md"
+page = root / "docs/src/content/docs/development/design/r-runtime.md"
 
 MODULES = [
     ("datascience", "tables"),

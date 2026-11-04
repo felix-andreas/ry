@@ -5,100 +5,99 @@ ns <- [1L, 2L]
 bs <- [TRUE, FALSE]
 ss <- ["a", "b"]
 #++++
-xs: Array<double>
-ns: Array<integer>
-bs: Array<logical>
-ss: Array<character>
+xs: List<I64>
+ns: List<I64>
+bs: List<Bool>
+ss: List<Str>
 
 #---- empty_takes_its_type_from_the_annotation
-#: Array<character>
+#: List<Str>
 names <- []
 #++++
-names: Array<character>
+names: List<Str>
 
 #---- empty_takes_its_type_from_first_use
 xs <- []
 ys <- List.append(xs, 1L)
 #++++
-xs: Array<Unknown>
-ys: Array<integer>
+xs: List<Unknown>
+ys: List<I64>
 
 #---- items_never_convert
 xs <- [1L, 2.5]
 #++++
 xs: Unknown
-11..14 error[type-mismatch] this item is `double`, but the Array's first item is `integer`. An Array's items share one type and are never converted into each other
+11..14 error[type-mismatch] this item is `F64`, but the list's first item is `I64`. A `List`'s items share one type and are never converted into each other
 
 #---- tags_join_into_a_union
 ts <- [:Ok(1), :Err("no")]
 #++++
-ts: Array<:Ok(double) | :Err(character)>
+ts: List<:Ok(double) | :Err(character)>
 
 #---- records_box_into_a_list
 points <- [(x = 1, y = 2), (x = 3, y = 4)]
 first_x <- points[[1]]$x
 #++++
-points: Array<Record{x: double, y: double}>
+points: List<Record{x: double, y: double}>
 first_x: double
 
 #---- missing_value_is_an_error
 xs <- [1, NA]
 #++++
 xs: Unknown
-10..12 error[type-mismatch] an Array holds no missing values. Mark an item that may be missing with a tag instead, as in `[:Some(1), :None]`
+10..12 error[type-mismatch] a `List` holds no missing values. Mark an item that may be missing with a tag instead, as in `[:Some(1), :None]`
 
 #---- vector_item_is_an_error
 xs <- [c(1, 2)]
 #++++
 xs: Unknown
-7..14 error[type-mismatch] an Array cannot hold `double[]`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags
+7..14 error[type-mismatch] a `List` cannot hold `double[]`. Its items are ry values: numbers such as `I64` and `F64`, `Bool`, `Str`, records, tuples, tags and other collections
 
 #---- null_item_is_an_error
 xs <- [1, NULL]
 #++++
 xs: Unknown
-10..14 error[type-mismatch] an Array cannot hold `NULL`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags
+10..14 error[type-mismatch] a `List` cannot hold `NULL`. Its items are ry values: numbers such as `I64` and `F64`, `Bool`, `Str`, records, tuples, tags and other collections
 
 #---- complex_item_is_an_error
 xs <- [1i]
 #++++
 xs: Unknown
-7..9 error[type-mismatch] an Array cannot hold `complex`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags
+7..9 error[type-mismatch] a `List` cannot hold `complex`. Its items are ry values: numbers such as `I64` and `F64`, `Bool`, `Str`, records, tuples, tags and other collections
 
 #---- nested_arrays
 grid <- [[1, 2], [3, 4]]
 cell <- grid[[2]][[1]]
 #++++
-grid: Array<Array<double>>
-cell: double
+grid: List<List<I64>>
+cell: I64
 
 #==== annotations
 #---- vector_item_type_is_an_error
-#: Array<double[]>
+#: List<double[]>
 xs <- [1]
 #++++
-xs: Array<double>
-9..17 error[annotation] an Array cannot hold `double[]`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags
+xs: List<I64>
+8..16 error[annotation] a `List` cannot hold `double[]`. Its items are ry values: numbers such as `I64` and `F64`, `Bool`, `Str`, records, tuples, tags and collections
 
 #---- nullable_item_type_is_an_error
-#: Array<double | NULL>
+#: List<double | NULL>
 xs <- [1]
 #++++
-xs: Array<double>
-9..22 error[annotation] an Array cannot hold `double | NULL`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags
+xs: List<I64>
+8..21 error[annotation] a `List` cannot hold `double | NULL`. Its items are ry values: numbers such as `I64` and `F64`, `Bool`, `Str`, records, tuples, tags and collections
 
 #---- tag_union_item_type
-#: Array<:Some(double) | :None>
+#: List<:Some(double) | :None>
 xs <- [:Some(1), :None]
 #++++
-xs: Array<:Some(double) | :None>
+xs: List<:Some(double) | :None>
 
 #---- annotation_checks_the_items
-#: Array<integer>
+#: List<I64>
 xs <- [1, 2]
 #++++
-xs: Array<integer>
-24..30 error[type-mismatch] expected `Array<integer>`, found `Array<double>`
+xs: List<I64>
 
 #==== conversion
 #---- array_passes_to_r_code
@@ -112,30 +111,30 @@ t: double
 m: double
 
 #---- r_vector_is_not_an_array
-#: fn(x: Array<double>) -> double
+#: fn(x: List<F64>) -> double
 total <- function(x) sum(x)
 t <- total(c(1, 2))
 #++++
-total: fn(x: Array<double>) -> double
+total: fn(x: List<F64>) -> double
 t: Unknown
-73..80 error[type-mismatch] expected `Array<double>`, found `double[]`. Convert an R vector with `as.Array()`
+69..76 error[type-mismatch] expected `List<F64>`, found `double[]`. Convert an R vector with `List.from_r()`
 
 #---- as_array_converts
-a <- as.Array(c(1, 2))
-b <- as.Array(1:3)
-c1 <- as.Array(c("a", "b"))
-d <- as.Array(list((x = 1,), (x = 2,)))
+a <- List.from_r(c(1, 2))
+b <- List.from_r(1:3)
+c1 <- List.from_r(c("a", "b"))
+d <- List.from_r(list((x = 1,), (x = 2,)))
 #++++
-a: Array<double>
-b: Array<integer>
-c1: Array<character>
-d: Array<Record{x: double}>
+a: List<F64>
+b: List<I64>
+c1: List<Str>
+d: List<Record{x: double}>
 
 #---- array_of_records_passes_as_a_list
 xs <- [(x = 1,), (x = 2,)]
 n <- length(xs)
 #++++
-xs: Array<Record{x: double}>
+xs: List<Record{x: double}>
 n: integer
 
 #==== operators
@@ -149,14 +148,15 @@ d <- ns / 2L
 e <- -xs
 f <- xs ^ 2
 #++++
-xs: Array<double>
-ns: Array<integer>
-a: Array<double>
-b: Array<integer>
-c1: Array<integer>
-d: Array<double>
-e: Array<double>
-f: Array<double>
+xs: List<I64>
+ns: List<I64>
+a: List<I64>
+b: List<I64>
+c1: List<I64>
+d: Unknown
+e: List<I64>
+f: List<I64>
+75..82 error[type-mismatch] `/` is not defined on `I64`, because an integer type has no exact quotient. Use `%/%` for floored division, or convert to `F64` with `Num.to_f64()`
 
 #---- comparison_and_logic
 xs <- [1, 2]
@@ -164,38 +164,37 @@ big <- xs > 1
 both <- big & !big
 either <- big | big
 #++++
-xs: Array<double>
-big: Array<logical>
-both: Array<logical>
-either: Array<logical>
+xs: List<I64>
+big: List<Bool>
+both: List<Bool>
+either: List<Bool>
 
 #---- integer_and_double_never_mix
 ns <- [1L, 2L]
 a <- ns + 1
 #++++
-ns: Array<integer>
-a: Unknown
-20..26 error[type-mismatch] `+` is not defined between `Array<integer>` and `double`. Both sides must have one item type, and `integer` and `double` are never converted into each other
+ns: List<I64>
+a: List<I64>
 
 #---- r_vector_operand_is_an_error
 xs <- [1, 2]
 a <- xs + c(1, 2)
 #++++
-xs: Array<double>
+xs: List<I64>
 a: Unknown
-18..30 error[type-mismatch] `+` is not defined between `Array<double>` and `double[]`. Convert the R vector with `as.Array()` first
+18..30 error[type-mismatch] `+` is not defined between `List<I64>` and `double[]`. Convert the R vector with `List.from_r()` first
 
 #---- character_arithmetic_is_an_error
 a <- ["a"] + ["b"]
 #++++
 a: Unknown
-5..18 error[type-mismatch] `+` is not defined between `Array<character>` and `Array<character>`. On Arrays it takes `integer` or `double` items
+5..18 error[type-mismatch] `+` is not defined between `List<Str>` and `List<Str>`. On lists it takes number items
 
 #---- not_on_numbers_is_an_error
 a <- ![1, 2]
 #++++
 a: Unknown
-6..12 error[type-mismatch] expected a `logical` value, found `Array<double>`
+6..12 error[type-mismatch] expected a `logical` value, found `List<I64>`
 
 #==== indexing
 #---- extract_and_subset
@@ -207,37 +206,39 @@ positions <- [1L, 3L]
 by_array <- xs[positions]
 all <- xs[]
 #++++
-xs: Array<double>
-one: double
-some: Array<double>
-masked: Array<double>
-positions: Array<integer>
-by_array: Array<double>
-all: Array<double>
+xs: List<I64>
+one: I64
+some: List<I64>
+masked: List<I64>
+positions: List<I64>
+by_array: List<I64>
+all: List<I64>
 
 #---- name_index_is_an_error
 xs <- [10, 20]
 a <- xs["a"]
 #++++
-xs: Array<double>
+xs: List<I64>
 a: Unknown
-23..26 error[type-mismatch] `x[i]` on an Array takes one index: positions, or a `logical` mask, but this index is `character`. An Array has one dimension and no names
+23..26 error[type-mismatch] `x[i]` on a `List` takes one index: a `List<I64>` of positions, or a `List<Bool>` mask, but this index is `character`. A `List` has one dimension and no names
 
 #---- two_indexes_is_an_error
 xs <- [10, 20]
 a <- xs[[1, 2]]
 #++++
-xs: Array<double>
+xs: List<I64>
 a: Unknown
-20..30 error[type-mismatch] `x[[i]]` on an Array takes one position, an `integer` or `double`. An Array has one dimension and no names
+20..30 error[type-mismatch] `x[[i]]` on a `List` takes one position, an `I64`. A `List` has one dimension and no names
 
 #==== iteration
 #---- for_binds_the_item_type
-total <- 0
-for (x in [1, 2, 3]) total <- total + x
+f <- function() {
+  total <- 0
+  for (x in [1, 2, 3]) total <- total + x
+  total
+}
 #++++
-total: double
-NULL
+f: fn() -> I64
 
 #==== standard_library
 #---- list_functions_take_and_return_arrays
@@ -251,105 +252,112 @@ labels <- List.map(xs, function(x) Num.to_str(x))
 both <- List.concat(xs, [4])
 parts <- List.split_at(xs, 1L)
 #++++
-xs: Array<double>
-doubled: Array<double>
-big: Array<double>
-n: integer
-s: double
-first: :Ok(double) | :Err(:ListWasEmpty)
-labels: Array<character>
-both: Array<double>
-parts: Record{before: Array<double>, others: Array<double>}
+xs: List<I64>
+doubled: List<I64>
+big: List<I64>
+n: I64
+s: I64
+first: :Ok(I64) | :Err(:ListWasEmpty)
+labels: List<Str>
+both: List<I64>
+parts: Record{before: List<I64>, others: List<I64>}
 
-#---- list_functions_still_take_lists
+#---- list_functions_refuse_r_lists
 n <- List.len(list(1, 2))
 #++++
-n: integer
+n: Unknown
+14..24 error[type-mismatch] expected `List<T>`, found `list{double, double}`. Convert an R list with `List.from_r()`
 
 #---- mapping_to_a_non_item_is_an_error
-xs <- [1, 2]
+xs <- [1.5, 2.5]
 twice <- function(x: double) -> double[] c(x, x)
 pairs <- List.map(xs, twice)
 wrapped <- List.map(xs, function(x) list(x))
 #++++
-xs: Array<double>
+xs: List<F64>
 twice: fn(x: double) -> double[]
 pairs: Unknown
 wrapped: Unknown
-84..89 error[type-mismatch] this function must return an Array item (a single `logical`, `integer`, `double` or `character` value, or a ry value such as a record, tuple or tag), but it returns `double[]`
-115..134 error[type-mismatch] this function must return an Array item (a single `logical`, `integer`, `double` or `character` value, or a ry value such as a record, tuple or tag), but it returns `list{double}`
+88..93 error[type-mismatch] this function must return a `List` item (a ry value such as a number, `Bool`, `Str`, record, tuple or tag), but it returns `double[]`
+119..138 error[type-mismatch] this function must return a `List` item (a ry value such as a number, `Bool`, `Str`, record, tuple or tag), but it returns `list{F64}`
 
 #---- as_array_needs_items
-ys <- as.Array(list(c(1, 2)))
+ys <- List.from_r(list(c(1, 2)))
 #++++
 ys: Unknown
-6..29 error[type-mismatch] no overload of `as.Array` matches these arguments. I tried all 6 declared signatures; the first candidate fails with: expected `logical[]`, found `list{double[]}`
+6..32 error[type-mismatch] no overload of `List.from_r` matches these arguments. I tried all 6 declared signatures; the first candidate fails with: expected `logical[]`, found `list{double[]}`
 
 #==== contextual_lambdas
 #---- a_lambda_takes_the_item_type
-xs <- [1, 2]
+xs <- [1.5, 2.5]
 halves <- List.map(xs, \(x) x / 2)
 pairs <- List.map(xs, \(x) c(x, x))
 #++++
-xs: Array<double>
-halves: Array<double>
+xs: List<F64>
+halves: List<F64>
 pairs: Unknown
-70..82 error[type-mismatch] this function must return an Array item (a single `logical`, `integer`, `double` or `character` value, or a ry value such as a record, tuple or tag), but it returns `double[]`
-
-#---- a_list_types_the_lambda_too
-words <- list("a", "bb")
-sizes <- List.map(words, \(w) nchar(w))
-#++++
-words: list{character, character}
-sizes: list[integer]
+74..86 error[type-mismatch] this function must return a `List` item (a ry value such as a number, `Bool`, `Str`, record, tuple or tag), but it returns `double[]`
 
 #---- nested_lambdas_take_their_own_context
 grid <- List.map([1, 2], \(x) List.sum(List.map([10, 20], \(y) x * y)))
 #++++
-grid: Array<double>
+grid: List<I64>
 
 #---- an_annotated_parameter_keeps_its_annotation
 xs <- [1, 2]
 ys <- List.map(xs, function(x: integer) x)
 #++++
-xs: Array<double>
+xs: List<I64>
 ys: Unknown
-32..54 error[type-mismatch] this function is passed `double`, but its parameter `x` accepts `integer`
+32..54 error[type-mismatch] this function is passed `I64`, but its parameter `x` accepts `integer`
 
 #---- a_formal_with_a_default_is_left_to_inference
 xs <- [1, 2]
 scaled <- List.map(xs, function(x, scale = 2) x * scale)
 #++++
-xs: Array<double>
-scaled: Array<double>
+xs: List<I64>
+scaled: List<I64>
 
 #---- a_body_that_refuses_the_item_type_names_the_parameter
 words <- ["a", "b"]
 bad <- List.map(words, \(w) w * 2)
 #++++
-words: Array<character>
+words: List<Str>
 bad: Unknown
-48..49 error[type-mismatch] `w` is used as a numeric value (`integer` or `double`) here, but the call passes this function `character` for it
+48..53 error[type-mismatch] `*` is not defined on `Str`. It takes a number
 
 #---- a_formal_after_dots_takes_no_type
 words <- ["a", "b"]
 doubled <- List.map(words, function(..., w) w * 2)
 #++++
-words: Array<character>
+words: List<Str>
 doubled: Unknown
-47..69 error[type-mismatch] this function is passed `character`, but its parameter `w` is used as a numeric value (`integer` or `double`)
+47..69 error[type-mismatch] this function is passed `Str`, but its parameter `w` is used as a numeric value (`integer` or `double`)
 
 #---- a_fold_accumulator_is_left_to_inference
-bytes <- Str.walk_utf8_with_index("ab", list(), function(seen, byte, i) List.append(seen, byte * i))
-total <- List.walk([1L, 2L], list(), function(seen, item) List.append(seen, item))
+bytes <- Str.walk_utf8_with_index("ab", [], function(seen, byte, i) List.append(seen, byte))
+total <- List.walk([1L, 2L], [], function(seen, item) List.append(seen, item))
 #++++
-bytes: list{}
-total: list{}
+bytes: List<I64>
+total: List<I64>
 
 #---- an_update_callback_keeps_its_item_hint
 people <- [(name = "a", age = 1), (name = "b", age = 2)]
 renamed <- List.update(people, 1L, function(p) (name = p$nme, age = p$age))
 #++++
-people: Array<Record{age: double, name: character}>
+people: List<Record{age: double, name: character}>
 renamed: Unknown
 114..117 error[type-mismatch] field `nme` does not exist in `Record{age: double, name: character}`. Did you mean `name`?
+
+#---- undecided_items_take_their_type_from_use
+squares <- List.map([1, 2], \(x) x * x)
+halves <- List.map([1, 2], \(x) x / 2)
+grid <- List.map([1, 2], \(x) List.map([10, 20], \(y) x * y))
+total <- List.sum([1, 2])
+first <- [1, 2][[1]] + 1
+#++++
+squares: List<I64>
+halves: List<F64>
+grid: List<List<I64>>
+total: I64
+first: I64

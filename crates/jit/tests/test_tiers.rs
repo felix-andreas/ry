@@ -297,36 +297,38 @@ fn seeds_agree_across_tiers() {
         ),
         // Reading Array items, which a double position past the last item cannot do.
         (
-            "x <- as.Array(as.numeric(1:n) / n)\ns <- 0\nfor (i in 1:n) s <- s + x[[i]]\ns",
+            "x <- List.from_r(as.numeric(1:n) / n)\ns <- 0\nfor (i in 1:n) s <- s + x[[i]]\ns",
             "(n = 600L)",
             false,
         ),
         (
-            "x <- as.Array(c(1, 2, 3))\ns <- 0\nfor (i in 1:n) s <- s + x[[if (i > 300L) 3.5 else 2]]\ns",
+            "x <- List.from_r(c(1, 2, 3))\ns <- 0\nfor (i in 1:n) s <- s + x[[if (i > 300L) 3.5 else 2]]\ns",
             "(n = 600L)",
             true,
         ),
         // Storing items keeps an Array an Array, through the copy a shared one needs.
         (
-            "out <- as.Array(rep(0, n))\nfor (i in 1:n) out[[i]] <- i * 2\nlist(out[[n]], is.Array(out))",
+            "out <- List.from_r(rep(0, n))\nfor (i in 1:n) out[[i]] <- i * 2\nlist(out[[n]], .ry_is_list(out))",
             "(n = 600L)",
             false,
         ),
         (
-            "a <- as.Array(rep(0, n))\nb <- a\nfor (i in 1:n) b[[i]] <- 1\nlist(is.Array(b), sum(b), is.Array(a), sum(a))",
+            "a <- List.from_r(rep(0, n))\nb <- a\nfor (i in 1:n) b[[i]] <- 1\nlist(.ry_is_list(b), sum(b), .ry_is_list(a), sum(a))",
             "(n = 600L)",
             false,
         ),
         // A missing value cannot be an item, so storing one leaves the Array to tier 0.
         (
-            "out <- as.Array(rep(0, n))\nfor (i in 1:n) out[[i]] <- if (i == 400L) 0 / 0 else i * 2\nlist(is.Array(out), out[[400]], out[[n]])",
+            "out <- List.from_r(rep(0, n))\nfor (i in 1:n) out[[i]] <- if (i == 400L) 0 / 0 else i * 2\nlist(.ry_is_list(out), out[[400]], out[[n]])",
             "(n = 600L)",
             false,
         ),
+        // An R integer becomes `I64` in a list, and a `List<I64>` has no R vector to fall back
+        // to, so storing an R value in one is an error in every tier.
         (
-            "out <- as.Array(rep(0L, n))\nfor (i in 1:n) out[[i]] <- if (i == 400L) NA_integer_ else i\nlist(is.Array(out), out[[400]], out[[n]])",
+            "out <- List.from_r(rep(0L, n))\nfor (i in 1:n) out[[i]] <- if (i == 400L) NA_integer_ else i\nlist(.ry_is_list(out), out[[400]], out[[n]])",
             "(n = 600L)",
-            false,
+            true,
         ),
         // A loop compiled before the one after it has run: the second loop guesses an integer
         // sequence, and a double one deoptimizes.
@@ -637,11 +639,19 @@ fn traversals_agree_across_tiers() {
     // A library traversal whose callback inlines runs as a compiled loop. A list or an element
     // the loop does not expect, an `NA` answer or an integer overflow hands the call back to
     // tier 0, which must then give the same value or error.
-    let definitions = "xs <- List.from_vector(1:50 + 0)\nys <- List.from_vector(1:50)\nflip <- 0L\n\
-                       add <- function(acc, x) acc + x\nstep <- add\n\
-                       ds <- Dict.insert(Dict.insert(Dict.insert(Dict.empty(), 1L, 10), 2L, 20), 3L, 30)\n\
-                       sd <- Dict.insert(Dict.insert(Dict.empty(), \"a\", 1), \"b\", 2)\n\
-                       st <- Set.from_list(List.from_vector(1:20 + 0.5))";
+    // `List.from_r` turns R integers into boxed `I64`s, so the list of R integers the compiled
+    // integer loops read is written as a literal.
+    let integers = (1..=50)
+        .map(|item| format!("{item}L"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let definitions = format!(
+        "xs <- List.from_r(1:50 + 0)\nys <- [{integers}]\nflip <- 0L\n\
+         add <- function(acc, x) acc + x\nstep <- add\n\
+         ds <- Dict.insert(Dict.insert(Dict.insert(Dict.empty(), 1L, 10), 2L, 20), 3L, 30)\n\
+         sd <- Dict.insert(Dict.insert(Dict.empty(), \"a\", 1), \"b\", 2)\n\
+         st <- Set.from_list(List.from_r(1:20 + 0.5))"
+    );
     let cases = [
         ("List.walk(xs, 0, function(acc, x) acc + x * b)", false),
         ("List.walk(ys, 0L, function(acc, x) acc + x)", false),
@@ -761,7 +771,7 @@ fn traversals_agree_across_tiers() {
     ];
     with_interpreter(|| {
         // SAFETY: the interpreter is installed.
-        unsafe { run(definitions) };
+        unsafe { run(&definitions) };
         for (case, (body, fails)) in cases.iter().enumerate() {
             // SAFETY: the interpreter is installed.
             let (reference, compiled) = unsafe { outcomes(3_000_000 + case, body, "()") };
@@ -1217,6 +1227,7 @@ unsafe fn has_compiled_code(name: &str) -> bool {
         function.is_ok_and(|function| {
             function.kind() == heap::object::SexpType::Closure
                 && (jit::has_native(function)
+                    || typed::has_compiled(function)
                     || function.cdr().kind() == heap::object::SexpType::Bytecode
                         && function.cdr().cdr().element(interp::bytecode::TIER1) != values::nil())
         })
@@ -1584,6 +1595,9 @@ enum Model {
     Scalar(Scalar),
     List(Vec<Scalar>),
     Found(Option<Scalar>),
+    /// A count or a position, which the library gives as an `I64`.
+    Whole(i64),
+    FoundWhole(i64),
     Error,
 }
 
@@ -1593,7 +1607,7 @@ fn fuzz_stdlib_traversals_agree_with_model() {
     // every library traversal the JIT compiles into a loop, each checked against a model of the
     // library in Rust. Tier 0 and compiled code must both give the model's value, so a hand-off
     // from the loop (an `NA` answer, an overflow, an element of another type, a collection that
-    // is not one, an Array, which fails the loop's type guard as an ALTREP list does) must still
+    // is not one, a list, which fails the loop's type guard as an ALTREP list does) must still
     // end where the model says.
     with_interpreter(|| {
         let (mut runs, mut errors) = (0, 0);
@@ -1700,7 +1714,9 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
                 Ok(add(acc, arith(x, Scalar::Int(Some(i as i32 + 1)), '*')))
             });
             (
-                format!("List.walk_with_index({list}, {init}, function(acc, x, i) acc + x * i)"),
+                format!(
+                    "List.walk_with_index({list}, {init}, function(acc, x, i) acc + x * Num.to_r(i))"
+                ),
                 model,
             )
         }
@@ -1769,7 +1785,7 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
             });
             (
                 format!(
-                    "List.walk_with_index_until({list}, {init}, function(acc, x, i) {{ if (i > {limit}) :Break(acc) else :Continue(acc + x) }})"
+                    "List.walk_with_index_until({list}, {init}, function(acc, x, i) {{ if (Num.to_r(i) > {limit}) :Break(acc) else :Continue(acc + x) }})"
                 ),
                 model,
             )
@@ -1812,7 +1828,7 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
                 .map(|(i, &x)| arith(x, Scalar::Int(Some(i as i32 + 1)), '*'))
                 .collect();
             (
-                format!("List.map_with_index({list}, function(x, i) x * i)"),
+                format!("List.map_with_index({list}, function(x, i) x * Num.to_r(i))"),
                 Model::List(mapped),
             )
         }
@@ -1923,10 +1939,7 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
                             }
                         }
                     }
-                    (
-                        "count_if",
-                        model.unwrap_or(Model::Scalar(Scalar::Int(Some(count)))),
-                    )
+                    ("count_if", model.unwrap_or(Model::Whole(i64::from(count))))
                 }
                 choice => {
                     let last = choice >= 7;
@@ -1936,7 +1949,7 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
                         &answers(order),
                         true,
                         |at| match index {
-                            true => Model::Found(Some(Scalar::Int(Some(at as i32 + 1)))),
+                            true => Model::FoundWhole(at as i64 + 1),
                             false => Model::Found(Some(items[at])),
                         },
                         Model::Found(None),
@@ -1964,7 +1977,7 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
     }
 }
 
-/// The items as an Array literal, now and then, when they share one type and none is `NA`.
+/// The items as a list literal, now and then, when they share one type and none is `NA`.
 fn homogeneous_array(rng: &mut SplitMix64, items: &[Scalar]) -> Option<String> {
     // An Array holds no `NA`, so a list with one stays a list.
     let all_int = items
@@ -2152,6 +2165,8 @@ fn render(model: &Model) -> String {
         }
         Model::Found(Some(value)) => format!(":Ok({})", scalar(*value)),
         Model::Found(None) => ":Err(:NotFound)".to_owned(),
+        Model::Whole(value) => format!("{value}i64"),
+        Model::FoundWhole(value) => format!(":Ok({value}i64)"),
         Model::Error => "stop(\"the model fails\")".to_owned(),
     }
 }
@@ -2300,4 +2315,215 @@ total@ <- function(n: integer, x: double, k: integer) -> double {{
         right = scalar(rng),
         arms = arms.join("\n"),
     )
+}
+
+/// The bodies of typed closures over vectors: whole-vector arithmetic and comparisons, element
+/// reads and writes in and out of range, reductions of empty and `NA` vectors, and loops that
+/// build vectors by index. `v` is `double[]`, `w` is `integer[]` and `n` is `integer`.
+const VECTOR_BODIES: &[&str] = &[
+    "sum(v * 2 + 1)",
+    "sum(v + w)",
+    "length(v) + length(w)",
+    "max(v)",
+    "min(w)",
+    "sum(w)",
+    "sum(v) / length(v)",
+    "v[[n]]",
+    "w[[n]] + 1L",
+    "sum(v > 1)",
+    "{ out <- rep(0, n); for (i in seq_len(n)) out[[i]] <- i * 0.5; sum(out) }",
+    "{ out <- v; for (i in seq_along(out)) out[[i]] <- out[[i]] * 2; sum(out) + sum(v) }",
+    "{ total <- 0L; for (x in w) total <- total + x; total }",
+    "{ s <- 0; i <- 1L; while (i <= length(v)) { s <- s + v[[i]]; i <- i + 1L }; s }",
+    "{ x <- v * w; y <- x - v; sum(y) / length(y) }",
+    "{ k <- seq_len(n); sum(k * k) }",
+    "{ u <- v; u[[1L]] <- 100; u[[1L]] + v[[1L]] }",
+    "sqrt(sum(abs(v)))",
+    "{ z <- w %% 3L; sum(z == 0L) }",
+    "{ z <- w %/% 2L; sum(z) }",
+    "{ total <- 0; for (i in seq_len(n)) { if (i %% 2L == 0L) next; if (i > 7L) break; total <- total + v[[1L]] }; total }",
+];
+
+const VECTOR_ARGUMENTS: &[(&str, &str, &str)] = &[
+    ("c(1, 2.5, -3, 4)", "c(2L, 5L, 7L, 1L)", "3L"),
+    ("c(0.5, 2)", "1:2", "1L"),
+    ("c(1, NA, 3)", "c(1L, NA, 3L)", "2L"),
+    ("0[0L]", "1L[0L]", "0L"),
+    ("c(1e308, 1e308)", "c(2147483647L, 1L)", "2L"),
+    ("c(3, 4, 5)", "c(1L, 2L, 3L)", "5L"),
+    ("2", "4L", "1L"),
+    ("c(NaN, 1)", "c(-1L, -2L)", "-1L"),
+];
+
+/// Random typed closures over vectors give the same values and errors as tier 0, and leave no
+/// native value alive once they return.
+#[test]
+fn fuzz_typed_vector_closures_agree_with_tier_zero() {
+    with_interpreter(|| {
+        let (mut runs, mut compiled_runs) = (0, 0);
+        for_each_seed(300, |seed| {
+            let mut rng = SplitMix64(seed);
+            let body = VECTOR_BODIES[rng.below(VECTOR_BODIES.len())];
+            let returned = ["double", "integer", ""][rng.below(3)];
+            let arrow = if returned.is_empty() {
+                String::new()
+            } else {
+                format!(" -> {returned}")
+            };
+            let definition =
+                format!("function(v: double[], w: integer[], n: integer){arrow} {{ {body} }}");
+            let calls: Vec<String> = (0..4)
+                .map(|_| {
+                    let (v, w, n) = VECTOR_ARGUMENTS[rng.below(VECTOR_ARGUMENTS.len())];
+                    // The arguments are variables, since the typed core takes values it can read
+                    // without forcing a promise.
+                    format!("{{ v <- {v}; w <- {w}; n <- {n}; FUNCTION(v, w, n) }}")
+                })
+                .collect();
+            // SAFETY: the interpreter is installed.
+            let (reference, compiled, typed) = unsafe {
+                let run_all = |name: &str, mode: Mode| {
+                    jit::install_mode(mode);
+                    run(&format!("{name} <- {definition}"));
+                    let outcomes: Vec<String> = calls
+                        .iter()
+                        .map(|call| run(&call.replace("FUNCTION", name)))
+                        .collect();
+                    jit::install_mode(Mode::Off);
+                    outcomes
+                };
+                let reference = run_all(&format!("vector_reference_{seed}"), Mode::Off);
+                let name = format!("vector_compiled_{seed}");
+                let compiled = run_all(&name, Mode::On);
+                let function = lower::parse_text(&name, "<test>")
+                    .and_then(|parsed| eval::eval(parsed.element(0), values::global_env()));
+                let typed = function.is_ok_and(typed::has_compiled);
+                (reference, compiled, typed)
+            };
+            runs += 1;
+            compiled_runs += usize::from(typed);
+            for (index, (expected, outcome)) in reference.iter().zip(&compiled).enumerate() {
+                assert_eq!(
+                    expected,
+                    outcome,
+                    "seed {seed}, call {}: {} with\nFUNCTION <- {definition}",
+                    index + 1,
+                    calls[index]
+                );
+            }
+            // SAFETY: the typed core's counters are thread-local and only read.
+            let live = unsafe { typed::values::ry_live_objects() };
+            assert_eq!(
+                live, 0,
+                "seed {seed} leaked {live} native values with\nf <- {definition}"
+            );
+        });
+        eprintln!("{compiled_runs} of {runs} closures ran on the typed core");
+        assert!(
+            // A third of the closures declare a return type their body does not produce, and the
+            // typed core leaves those to the interpreter, which reports the failed check.
+            runs < 50 || compiled_runs * 2 > runs - runs / 3,
+            "only {compiled_runs} of {runs} closures ran on the typed core"
+        );
+    });
+}
+
+#[test]
+fn typed_core_keeps_tier_zero_semantics_at_scope_and_na_edges() {
+    // Each case defines `FUNCTION` and calls it with variables, which the typed core reads
+    // without forcing a promise.
+    let cases: &[(&str, &[&str])] = &[
+        // A name a loop body or a branch creates is unset on the path that skips it.
+        (
+            "function(n: integer) -> integer { for (i in seq_len(n)) { v <- rep(0, 2L) }; length(v) }",
+            &["{ x <- 2L; FUNCTION(x) }", "{ x <- 0L; FUNCTION(x) }"],
+        ),
+        (
+            "function(b: logical) -> integer { if (b) { v <- rep(0, 3L) }; length(v) }",
+            &["{ x <- TRUE; FUNCTION(x) }", "{ x <- FALSE; FUNCTION(x) }"],
+        ),
+        // Both branches set it, so it is set after the `if`.
+        (
+            "function(b: logical) -> integer { if (b) y <- 1L else y <- 2L; y }",
+            &["{ x <- TRUE; FUNCTION(x) }", "{ x <- FALSE; FUNCTION(x) }"],
+        ),
+        (
+            "function(n: integer) -> integer { k <- 0L; while (k < n) { s <- k; k <- k + 1L }; s }",
+            &["{ x <- 3L; FUNCTION(x) }", "{ x <- 0L; FUNCTION(x) }"],
+        ),
+        // The loop ends where it started even when the body reassigns the end's variable.
+        (
+            "function(m: integer) -> integer { n <- m; s <- 0L; for (i in seq_len(n)) { s <- s + 1L; n <- 2L }; s }",
+            &["{ x <- 5L; FUNCTION(x) }"],
+        ),
+        (
+            "function(m: integer) -> integer { n <- m; s <- 0L; for (n in 1:n) s <- s + 1L; s }",
+            &["{ x <- 3L; FUNCTION(x) }"],
+        ),
+        // An `if` whose branches differ in type, and an `if` without `else`.
+        (
+            "function(b: logical) -> integer { x <- if (b) 1L else 2.5; length(x) }",
+            &["{ x <- TRUE; FUNCTION(x) }"],
+        ),
+        (
+            "function(b: logical) -> integer | NULL if (b) 1L",
+            &["{ x <- FALSE; FUNCTION(x) }"],
+        ),
+        // A local function sees the names where it is defined, and the latest value of each.
+        (
+            "function(n: integer) -> integer { y <- 1L; g <- function(k: integer) -> integer k + y; \
+             h <- function(y: integer) -> integer g(0L); h(n) }",
+            &["{ x <- 100L; FUNCTION(x) }"],
+        ),
+        (
+            "function(x: integer) -> integer { h <- function(y: integer) -> integer y + x; x <- 100L; h(1L) }",
+            &["{ a <- 2L; FUNCTION(a) }"],
+        ),
+        (
+            "function(b: logical, x: integer) -> integer { g <- function(y: integer) -> integer y + 1L; \
+             if (b) g <- function(y: integer) -> integer y * 10L; g(x) }",
+            &[
+                "{ a <- FALSE; z <- 2L; FUNCTION(a, z) }",
+                "{ a <- TRUE; z <- 2L; FUNCTION(a, z) }",
+            ],
+        ),
+        // `seq_along(NULL)` is empty.
+        (
+            "function(n: integer) -> integer { x <- NULL; s <- n; for (i in seq_along(x)) s <- s + 1L; s }",
+            &["{ a <- 0L; FUNCTION(a) }"],
+        ),
+        // A double `%%` that loses all accuracy warns, and `NA` formats as R does.
+        (
+            "function(a: double, b: double) -> double a %% b",
+            &["{ x <- 1e20; y <- 3; FUNCTION(x, y) }"],
+        ),
+        (
+            "function(x: integer) -> character as.character(x)",
+            &["{ a <- NA_integer_; FUNCTION(a) }"],
+        ),
+    ];
+    with_interpreter(|| {
+        for (case, &(definition, calls)) in cases.iter().enumerate() {
+            // SAFETY: the interpreter is installed.
+            let (reference, compiled) = unsafe {
+                let run_all = |name: &str, mode: Mode| {
+                    jit::install_mode(mode);
+                    run(&format!("{name} <- {definition}"));
+                    let outcomes: Vec<String> = calls
+                        .iter()
+                        .map(|call| run(&call.replace("FUNCTION", name)))
+                        .collect();
+                    jit::install_mode(Mode::Off);
+                    outcomes
+                };
+                let reference = run_all(&format!("edge_reference_{case}"), Mode::Off);
+                let compiled = run_all(&format!("edge_compiled_{case}"), Mode::On);
+                (reference, compiled)
+            };
+            assert_eq!(reference, compiled, "case {case}: FUNCTION <- {definition}");
+            // SAFETY: the typed core's counters are thread-local and only read.
+            let live = unsafe { typed::values::ry_live_objects() };
+            assert_eq!(live, 0, "case {case} leaked {live} native values");
+        }
+    });
 }

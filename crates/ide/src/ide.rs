@@ -6493,9 +6493,11 @@ fn value_shapes<'db>(db: &'db dyn Db, ty: Ty<'db>, shapes: &mut Vec<ValueShape<'
         TyKind::List(_) | TyKind::NamedList(_) | TyKind::Tuple(_) | TyKind::Record(_) => {
             ValueShape::List
         }
-        TyKind::NativeTuple(_) | TyKind::NativeRecord(_) | TyKind::Tag(..) | TyKind::OtherTags => {
-            ValueShape::Native
-        }
+        TyKind::NativeTuple(_)
+        | TyKind::NativeRecord(_)
+        | TyKind::Tag(..)
+        | TyKind::OtherTags
+        | TyKind::Native(_) => ValueShape::Native,
         TyKind::Frame(..) => ValueShape::Frame,
         TyKind::Function(_) => ValueShape::Function,
         TyKind::Null => ValueShape::Null,
@@ -7148,7 +7150,9 @@ fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
     match ty.kind(db) {
         TyKind::Unknown => false,
         TyKind::Var(_) | TyKind::Rigid(_) => variables_allowed,
-        TyKind::Any | TyKind::Null | TyKind::Scalar(_) | TyKind::OtherTags => true,
+        TyKind::Any | TyKind::Null | TyKind::Scalar(_) | TyKind::OtherTags | TyKind::Native(_) => {
+            true
+        }
         TyKind::NativeTuple(items) => items
             .iter()
             .all(|&item| is_hintable(db, item, variables_allowed)),

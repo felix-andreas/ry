@@ -1,0 +1,183 @@
+---
+title: Go fully typed
+description: Nominal types, the typed DataFrame, the standard library, and strict mode, which rejects every value ry cannot type
+sidebar:
+  label: 4. Go fully typed
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+**Goal:** model data with types the checker knows completely, then turn on strict mode, which
+proves that every value has a known type.
+
+## Nominal types
+
+Records and tag unions are *structural*: any value with the right shape fits, and `alias` only names
+a shape. `type` declares a *nominal* type, which keeps values with the same shape apart. Only its
+constructor, `@Name(...)`, creates one:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+type Celsius = Record{degrees: double}
+type Fahrenheit = Record{degrees: double}
+
+boils <- function(water: Celsius) -> logical water$degrees >= 100
+
+oven <- @Fahrenheit(degrees = 350,)
+boils(oven)
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @type Celsius {Record{degrees: double}}
+
+#: @type Fahrenheit {Record{degrees: double}}
+
+#: fn(water: Celsius) -> logical
+boils <- function(water) water$degrees >= 100
+
+#: @new Fahrenheit
+oven <- (degrees = 350,)
+boils(oven)
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+type-mismatch
+
+  x expected `Celsius`, found `Fahrenheit`
+```
+
+With `alias` in place of `type`, both are the same record type and the call passes. `type` works
+over R values too: with `type UserId = character`, an `OrderId` string cannot pass for a `UserId`.
+When `@Email(...)` appears in one validating function only, every `Email` in the program has passed
+that validation. At run time, `@Name(x)` is just `x`.
+
+## DataFrame
+
+`DataFrame` is ry's typed table. Its queries use Polars' verbs and run on the Polars engine, and the
+checker follows every column through every step:
+
+```r
+sales <- DataFrame(region = ["eu", "us", "eu"], units = [3L, 5L, 2L], price = [1.5, 2, 3])
+sales |>
+  DataFrame.with_columns(revenue = col("units") * col("price")) |>
+  DataFrame.group_by("region") |>
+  GroupBy.agg(total = col("revenu") |> Expr.sum())
+```
+
+```text ry check typing
+type-mismatch
+
+  x this frame has no column `revenu`. Did you mean `revenue`?
+```
+
+Fix the typo and `ry run` prints the result:
+
+```text
+   region total
+   <char> <num>
+1:     eu  10.5
+2:     us  10.0
+```
+
+A `DataFrame.read_csv()` of a literal path in the project reads the file's header, so the checker
+knows its columns from the first step. data.table code keeps running unchanged.
+[DataFrames](/reference/dataframes) has the API, and
+[Moving from data.table](/reference/from-data-table) maps each data.table idiom.
+
+## The standard library
+
+Seven modules modeled on Roc's: `List`, `Str`, `Num`, `Bool`, `Dict`, `Set` and `Result`, called by
+qualified names. Where R would return `NA` or warn, a function returns a tag, which `match` handles:
+
+```r
+first_or_zero <- function(xs: List<I64>) -> I64 {
+  match (List.first(xs)) {
+    :Ok(x) => x
+    :Err(:ListWasEmpty) => 0i64
+  }
+}
+first_or_zero([])
+```
+
+```text ry run runtime=ry exact
+0i64
+```
+
+[Standard library](/reference/standard-library) lists every function.
+
+## Strict mode
+
+By default, ry checks what it can and lets `Unknown` values through, so a clean run does not say how
+much was checked. Strict mode makes every value ry cannot type, and every parameter nothing
+constrains, an error:
+
+```toml
+# ry.toml
+[check]
+strict = true
+```
+
+```r
+total <- function(df) sum(df$amount)
+```
+
+```text ry check typing strict
+strict
+
+  x strict mode: parameter `df` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `df: TYPE`
+
+strict
+
+  x strict mode: this expression has an undetermined type (`Unknown`)
+```
+
+Typing `df` as a `data.frame` clears the first error but not the second, because a `data.frame`'s
+columns are `Unknown`; a `DataFrame{amount: double[]}` clears both. A value declared `Any` is a
+deliberate opt-out and is not reported. Under strict mode, `ry run`, `ry R` and `ry load` refuse
+code with a strict-mode error, and a `# typing: strict` comment turns it on for one file.
+
+Most of what strict mode asks for is already known to inference. `ry check --annotate` writes the
+inferred type of each unannotated top-level function and binding into the file:
+
+```r
+area <- function(width, height = 1) width * height
+label <- function(shape) shape$name
+```
+
+becomes
+
+```r
+area <- function<T: numeric>(width: T, height: T = 1) -> T width * height
+label <- function(shape) shape$name
+```
+
+and reports what inference could not settle:
+
+```text
+strict
+
+  x strict mode: parameter `shape` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `shape: TYPE`
+
+strict
+
+  x strict mode: this expression has an undetermined type (`Unknown`)
+
+added 1 inferred annotation
+2 problems in 1 file
+```
+
+In strict mode, the top level of a file in `R/` may only define things (functions, types, classes,
+and constants computed without side effects), so loading a package has no side effects.
+`[check] object-systems = false` also rejects new S4, R6 and Reference Classes.
+[Type system](/reference/type-system#a-package-files-top-level) has the rules.
+
+**Next:** the [Reference](/reference/type-system), or [ry at a glance](/ry) for everything on one
+page.

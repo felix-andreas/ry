@@ -12,6 +12,7 @@ expressions.
 
 | Function | Summary |
 | --- | --- |
+| [`Str.from_r`](#strfrom_r) | Converts an R string into a `Str`, refusing `NA` and a length other than one. |
 | [`Str.is_empty`](#stris_empty) | Whether the string is `""`. |
 | [`Str.concat`](#strconcat) | `first` followed by `second`. |
 | [`Str.join_with`](#strjoin_with) | Joins a list of strings with `separator` between them. |
@@ -35,8 +36,8 @@ expressions.
 | [`Str.to_utf8`](#strto_utf8) | The bytes of the string's UTF-8 encoding. |
 | [`Str.from_utf8`](#strfrom_utf8) | The string a list of bytes encodes, or `:Err(:BadUtf8)`. |
 | [`Str.from_utf8_lossy`](#strfrom_utf8_lossy) | Decodes UTF-8 bytes, replacing each invalid sequence with U+FFFD. |
-| [`Str.to_integer`](#strto_integer) | Parses a whole number that fits an `integer`, or `:Err(:InvalidNumStr)`. |
-| [`Str.to_double`](#strto_double) | Parses a decimal number, or `:Err(:InvalidNumStr)`; `NA` and `NaN` are not numbers. |
+| [`Str.to_i64`](#strto_i64) | Parses a whole number that fits an `I64`, or `:Err(:InvalidNumStr)`. |
+| [`Str.to_f64`](#strto_f64) | Parses a decimal number, or `:Err(:InvalidNumStr)`; `NA` and `NaN` are not numbers. |
 | [`Str.with_ascii_lowercased`](#strwith_ascii_lowercased) | Lowercases the ASCII letters and leaves every other character alone. |
 | [`Str.with_ascii_uppercased`](#strwith_ascii_uppercased) | Uppercases the ASCII letters. |
 | [`Str.caseless_ascii_equals`](#strcaseless_ascii_equals) | Whether two strings are equal when ASCII case is ignored. |
@@ -49,20 +50,44 @@ expressions.
 | [`Str.from_utf32`](#strfrom_utf32) | Builds a string from Unicode code points, or `:Err(:BadUtf32)` for a number that is not one (a surrogate, a negative number, or one above 1114111) and for zero. |
 | [`Str.from_utf32_lossy`](#strfrom_utf32_lossy) | Builds a string from Unicode code points, replacing each number that is not one with U+FFFD. |
 
-## `Str.is_empty`
+## `Str.from_r`
 
 <Tabs syncKey="annotation-style">
 <TabItem label="Inline">
 
 ```r
-Str.is_empty <- function(string: character) -> logical
+Str.from_r <- function(value: character) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character) -> logical
+#: fn(value: character) -> Str
+Str.from_r <- function(value)
+```
+
+</TabItem>
+</Tabs>
+
+Converts an R string into a `Str`, refusing `NA` and a length other than one.
+
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L765)
+
+## `Str.is_empty`
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+Str.is_empty <- function(string: Str) -> Bool
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(string: Str) -> Bool
 Str.is_empty <- function(string)
 ```
 
@@ -76,7 +101,7 @@ Str.is_empty("")
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L829)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L773)
 
 ## `Str.concat`
 
@@ -84,14 +109,14 @@ Str.is_empty("")
 <TabItem label="Inline">
 
 ```r
-Str.concat <- function(first: character, second: character) -> character
+Str.concat <- function(first: Str, second: Str) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(first: character, second: character) -> character
+#: fn(first: Str, second: Str) -> Str
 Str.concat <- function(first, second)
 ```
 
@@ -105,7 +130,7 @@ Str.concat("snake", "_case")
 #> "snake_case"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L837)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L781)
 
 ## `Str.join_with`
 
@@ -113,14 +138,14 @@ Str.concat("snake", "_case")
 <TabItem label="Inline">
 
 ```r
-Str.join_with <- function(strings: list[character], separator: character) -> character
+Str.join_with <- function(strings: List<Str>, separator: Str) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(strings: list[character], separator: character) -> character
+#: fn(strings: List<Str>, separator: Str) -> Str
 Str.join_with <- function(strings, separator)
 ```
 
@@ -130,11 +155,11 @@ Str.join_with <- function(strings, separator)
 Joins a list of strings with `separator` between them.
 
 ```r ry run runtime=ry dput
-Str.join_with(list("a", "b", "c"), ", ")
+Str.join_with(["a", "b", "c"], ", ")
 #> "a, b, c"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L845)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L789)
 
 ## `Str.split_on`
 
@@ -142,14 +167,14 @@ Str.join_with(list("a", "b", "c"), ", ")
 <TabItem label="Inline">
 
 ```r
-Str.split_on <- function(string: character, separator: character) -> list[character]
+Str.split_on <- function(string: Str, separator: Str) -> List<Str>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character, separator: character) -> list[character]
+#: fn(string: Str, separator: Str) -> List<Str>
 Str.split_on <- function(string, separator)
 ```
 
@@ -160,10 +185,10 @@ Splits at every occurrence of `separator`.
 
 ```r ry run runtime=ry dput
 Str.split_on("a,b,,c", ",")
-#> list("a", "b", "", "c")
+#> ["a", "b", "", "c"]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L853)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L797)
 
 ## `Str.repeat`
 
@@ -171,14 +196,14 @@ Str.split_on("a,b,,c", ",")
 <TabItem label="Inline">
 
 ```r
-Str.repeat <- function(string: character, count: integer) -> character
+Str.repeat <- function(string: Str, count: I64) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character, count: integer) -> character
+#: fn(string: Str, count: I64) -> Str
 Str.repeat <- function(string, count)
 ```
 
@@ -188,11 +213,11 @@ Str.repeat <- function(string, count)
 `count` copies of the string.
 
 ```r ry run runtime=ry dput
-Str.repeat("ab", 3L)
+Str.repeat("ab", 3)
 #> "ababab"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L861)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L805)
 
 ## `Str.starts_with`
 
@@ -200,14 +225,14 @@ Str.repeat("ab", 3L)
 <TabItem label="Inline">
 
 ```r
-Str.starts_with <- function(string: character, prefix: character) -> logical
+Str.starts_with <- function(string: Str, prefix: Str) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character, prefix: character) -> logical
+#: fn(string: Str, prefix: Str) -> Bool
 Str.starts_with <- function(string, prefix)
 ```
 
@@ -221,7 +246,7 @@ Str.starts_with("report.csv", "report")
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L869)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L813)
 
 ## `Str.ends_with`
 
@@ -229,14 +254,14 @@ Str.starts_with("report.csv", "report")
 <TabItem label="Inline">
 
 ```r
-Str.ends_with <- function(string: character, suffix: character) -> logical
+Str.ends_with <- function(string: Str, suffix: Str) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character, suffix: character) -> logical
+#: fn(string: Str, suffix: Str) -> Bool
 Str.ends_with <- function(string, suffix)
 ```
 
@@ -250,7 +275,7 @@ Str.ends_with("report.csv", ".R")
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L877)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L821)
 
 ## `Str.contains`
 
@@ -258,14 +283,14 @@ Str.ends_with("report.csv", ".R")
 <TabItem label="Inline">
 
 ```r
-Str.contains <- function(string: character, part: character) -> logical
+Str.contains <- function(string: Str, part: Str) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character, part: character) -> logical
+#: fn(string: Str, part: Str) -> Bool
 Str.contains <- function(string, part)
 ```
 
@@ -279,7 +304,7 @@ Str.contains("a.b", ".")
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L885)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L829)
 
 ## `Str.trim`
 
@@ -287,14 +312,14 @@ Str.contains("a.b", ".")
 <TabItem label="Inline">
 
 ```r
-Str.trim <- function(string: character) -> character
+Str.trim <- function(string: Str) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character) -> character
+#: fn(string: Str) -> Str
 Str.trim <- function(string)
 ```
 
@@ -308,7 +333,7 @@ Str.trim("  hi  ")
 #> "hi"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L893)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L837)
 
 ## `Str.trim_start`
 
@@ -316,14 +341,14 @@ Str.trim("  hi  ")
 <TabItem label="Inline">
 
 ```r
-Str.trim_start <- function(string: character) -> character
+Str.trim_start <- function(string: Str) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character) -> character
+#: fn(string: Str) -> Str
 Str.trim_start <- function(string)
 ```
 
@@ -337,7 +362,7 @@ Str.trim_start("  hi  ")
 #> "hi  "
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L901)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L845)
 
 ## `Str.trim_end`
 
@@ -345,14 +370,14 @@ Str.trim_start("  hi  ")
 <TabItem label="Inline">
 
 ```r
-Str.trim_end <- function(string: character) -> character
+Str.trim_end <- function(string: Str) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character) -> character
+#: fn(string: Str) -> Str
 Str.trim_end <- function(string)
 ```
 
@@ -366,7 +391,7 @@ Str.trim_end("  hi  ")
 #> "  hi"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L909)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L853)
 
 ## `Str.drop_prefix`
 
@@ -374,14 +399,14 @@ Str.trim_end("  hi  ")
 <TabItem label="Inline">
 
 ```r
-Str.drop_prefix <- function(string: character, prefix: character) -> character
+Str.drop_prefix <- function(string: Str, prefix: Str) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character, prefix: character) -> character
+#: fn(string: Str, prefix: Str) -> Str
 Str.drop_prefix <- function(string, prefix)
 ```
 
@@ -395,7 +420,7 @@ Str.drop_prefix("v1.2", "v")
 #> "1.2"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L917)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L861)
 
 ## `Str.drop_suffix`
 
@@ -403,14 +428,14 @@ Str.drop_prefix("v1.2", "v")
 <TabItem label="Inline">
 
 ```r
-Str.drop_suffix <- function(string: character, suffix: character) -> character
+Str.drop_suffix <- function(string: Str, suffix: Str) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character, suffix: character) -> character
+#: fn(string: Str, suffix: Str) -> Str
 Str.drop_suffix <- function(string, suffix)
 ```
 
@@ -424,7 +449,7 @@ Str.drop_suffix("data.csv", ".csv")
 #> "data"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L925)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L869)
 
 ## `Str.with_prefix`
 
@@ -432,14 +457,14 @@ Str.drop_suffix("data.csv", ".csv")
 <TabItem label="Inline">
 
 ```r
-Str.with_prefix <- function(string: character, prefix: character) -> character
+Str.with_prefix <- function(string: Str, prefix: Str) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character, prefix: character) -> character
+#: fn(string: Str, prefix: Str) -> Str
 Str.with_prefix <- function(string, prefix)
 ```
 
@@ -453,7 +478,7 @@ Str.with_prefix("world", "hello ")
 #> "hello world"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L933)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L877)
 
 ## `Str.replace_each`
 
@@ -461,14 +486,14 @@ Str.with_prefix("world", "hello ")
 <TabItem label="Inline">
 
 ```r
-Str.replace_each <- function(string: character, pattern: character, replacement: character) -> character
+Str.replace_each <- function(string: Str, pattern: Str, replacement: Str) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character, pattern: character, replacement: character) -> character
+#: fn(string: Str, pattern: Str, replacement: Str) -> Str
 Str.replace_each <- function(string, pattern, replacement)
 ```
 
@@ -482,7 +507,7 @@ Str.replace_each("a.b.c", ".", "-")
 #> "a-b-c"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L941)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L885)
 
 ## `Str.replace_first`
 
@@ -490,14 +515,14 @@ Str.replace_each("a.b.c", ".", "-")
 <TabItem label="Inline">
 
 ```r
-Str.replace_first <- function(string: character, pattern: character, replacement: character) -> character
+Str.replace_first <- function(string: Str, pattern: Str, replacement: Str) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character, pattern: character, replacement: character) -> character
+#: fn(string: Str, pattern: Str, replacement: Str) -> Str
 Str.replace_first <- function(string, pattern, replacement)
 ```
 
@@ -511,7 +536,7 @@ Str.replace_first("a.b.c", ".", "-")
 #> "a-b.c"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L949)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L893)
 
 ## `Str.replace_last`
 
@@ -519,14 +544,14 @@ Str.replace_first("a.b.c", ".", "-")
 <TabItem label="Inline">
 
 ```r
-Str.replace_last <- function(string: character, pattern: character, replacement: character) -> character
+Str.replace_last <- function(string: Str, pattern: Str, replacement: Str) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character, pattern: character, replacement: character) -> character
+#: fn(string: Str, pattern: Str, replacement: Str) -> Str
 Str.replace_last <- function(string, pattern, replacement)
 ```
 
@@ -540,7 +565,7 @@ Str.replace_last("a.b.c", ".", "-")
 #> "a.b-c"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L957)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L901)
 
 ## `Str.split_first`
 
@@ -548,14 +573,14 @@ Str.replace_last("a.b.c", ".", "-")
 <TabItem label="Inline">
 
 ```r
-Str.split_first <- function(string: character, separator: character) -> Result<Record{before: character, after: character}, :NotFound>
+Str.split_first <- function(string: Str, separator: Str) -> Result<Record{before: Str, after: Str}, :NotFound>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character, separator: character) -> Result<Record{before: character, after: character}, :NotFound>
+#: fn(string: Str, separator: Str) -> Result<Record{before: Str, after: Str}, :NotFound>
 Str.split_first <- function(string, separator)
 ```
 
@@ -569,7 +594,7 @@ Str.split_first("key=value=more", "=")
 #> :Ok((after = "value=more", before = "key"))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L965)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L909)
 
 ## `Str.split_last`
 
@@ -577,14 +602,14 @@ Str.split_first("key=value=more", "=")
 <TabItem label="Inline">
 
 ```r
-Str.split_last <- function(string: character, separator: character) -> Result<Record{before: character, after: character}, :NotFound>
+Str.split_last <- function(string: Str, separator: Str) -> Result<Record{before: Str, after: Str}, :NotFound>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character, separator: character) -> Result<Record{before: character, after: character}, :NotFound>
+#: fn(string: Str, separator: Str) -> Result<Record{before: Str, after: Str}, :NotFound>
 Str.split_last <- function(string, separator)
 ```
 
@@ -598,7 +623,7 @@ Str.split_last("key=value=more", "=")
 #> :Ok((after = "more", before = "key=value"))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L973)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L917)
 
 ## `Str.count_utf8_bytes`
 
@@ -606,14 +631,14 @@ Str.split_last("key=value=more", "=")
 <TabItem label="Inline">
 
 ```r
-Str.count_utf8_bytes <- function(string: character) -> integer
+Str.count_utf8_bytes <- function(string: Str) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character) -> integer
+#: fn(string: Str) -> I64
 Str.count_utf8_bytes <- function(string)
 ```
 
@@ -624,10 +649,10 @@ The number of bytes in the string's UTF-8 encoding.
 
 ```r ry run runtime=ry dput
 Str.count_utf8_bytes("hé")
-#> 3L
+#> 3i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L981)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L925)
 
 ## `Str.to_utf8`
 
@@ -635,14 +660,14 @@ Str.count_utf8_bytes("hé")
 <TabItem label="Inline">
 
 ```r
-Str.to_utf8 <- function(string: character) -> list[integer]
+Str.to_utf8 <- function(string: Str) -> List<I64>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character) -> list[integer]
+#: fn(string: Str) -> List<I64>
 Str.to_utf8 <- function(string)
 ```
 
@@ -653,10 +678,10 @@ The bytes of the string's UTF-8 encoding.
 
 ```r ry run runtime=ry dput
 Str.to_utf8("hé")
-#> list(104L, 195L, 169L)
+#> [104i64, 195i64, 169i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L989)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L933)
 
 ## `Str.from_utf8`
 
@@ -664,14 +689,14 @@ Str.to_utf8("hé")
 <TabItem label="Inline">
 
 ```r
-Str.from_utf8 <- function(bytes: list[integer]) -> Result<character, :BadUtf8>
+Str.from_utf8 <- function(bytes: List<I64>) -> Result<Str, :BadUtf8>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(bytes: list[integer]) -> Result<character, :BadUtf8>
+#: fn(bytes: List<I64>) -> Result<Str, :BadUtf8>
 Str.from_utf8 <- function(bytes)
 ```
 
@@ -681,11 +706,11 @@ Str.from_utf8 <- function(bytes)
 The string a list of bytes encodes, or `:Err(:BadUtf8)`.
 
 ```r ry run runtime=ry dput
-Str.from_utf8(list(104L, 105L))
+Str.from_utf8([104, 105])
 #> :Ok("hi")
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L997)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L941)
 
 ## `Str.from_utf8_lossy`
 
@@ -693,14 +718,14 @@ Str.from_utf8(list(104L, 105L))
 <TabItem label="Inline">
 
 ```r
-Str.from_utf8_lossy <- function(bytes: list[integer]) -> character
+Str.from_utf8_lossy <- function(bytes: List<I64>) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(bytes: list[integer]) -> character
+#: fn(bytes: List<I64>) -> Str
 Str.from_utf8_lossy <- function(bytes)
 ```
 
@@ -710,56 +735,56 @@ Str.from_utf8_lossy <- function(bytes)
 Decodes UTF-8 bytes, replacing each invalid sequence with U+FFFD.
 
 ```r ry run runtime=ry dput
-Str.from_utf8_lossy(list(104L, 255L, 105L))
+Str.from_utf8_lossy([104, 255, 105])
 #> "h�i"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1005)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L949)
 
-## `Str.to_integer`
+## `Str.to_i64`
 
 <Tabs syncKey="annotation-style">
 <TabItem label="Inline">
 
 ```r
-Str.to_integer <- function(string: character) -> Result<integer, :InvalidNumStr>
+Str.to_i64 <- function(string: Str) -> Result<I64, :InvalidNumStr>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character) -> Result<integer, :InvalidNumStr>
-Str.to_integer <- function(string)
+#: fn(string: Str) -> Result<I64, :InvalidNumStr>
+Str.to_i64 <- function(string)
 ```
 
 </TabItem>
 </Tabs>
 
-Parses a whole number that fits an `integer`, or `:Err(:InvalidNumStr)`.
+Parses a whole number that fits an `I64`, or `:Err(:InvalidNumStr)`.
 
 ```r ry run runtime=ry dput
-Str.to_integer("4.2")
+Str.to_i64("4.2")
 #> :Err(:InvalidNumStr)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1013)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L957)
 
-## `Str.to_double`
+## `Str.to_f64`
 
 <Tabs syncKey="annotation-style">
 <TabItem label="Inline">
 
 ```r
-Str.to_double <- function(string: character) -> Result<double, :InvalidNumStr>
+Str.to_f64 <- function(string: Str) -> Result<F64, :InvalidNumStr>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character) -> Result<double, :InvalidNumStr>
-Str.to_double <- function(string)
+#: fn(string: Str) -> Result<F64, :InvalidNumStr>
+Str.to_f64 <- function(string)
 ```
 
 </TabItem>
@@ -768,11 +793,11 @@ Str.to_double <- function(string)
 Parses a decimal number, or `:Err(:InvalidNumStr)`; `NA` and `NaN` are not numbers.
 
 ```r ry run runtime=ry dput
-Str.to_double("4.5e1")
+Str.to_f64("4.5e1")
 #> :Ok(45)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1021)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L965)
 
 ## `Str.with_ascii_lowercased`
 
@@ -780,14 +805,14 @@ Str.to_double("4.5e1")
 <TabItem label="Inline">
 
 ```r
-Str.with_ascii_lowercased <- function(string: character) -> character
+Str.with_ascii_lowercased <- function(string: Str) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character) -> character
+#: fn(string: Str) -> Str
 Str.with_ascii_lowercased <- function(string)
 ```
 
@@ -801,7 +826,7 @@ Str.with_ascii_lowercased("Straße ABC")
 #> "straße abc"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1029)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L973)
 
 ## `Str.with_ascii_uppercased`
 
@@ -809,14 +834,14 @@ Str.with_ascii_lowercased("Straße ABC")
 <TabItem label="Inline">
 
 ```r
-Str.with_ascii_uppercased <- function(string: character) -> character
+Str.with_ascii_uppercased <- function(string: Str) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character) -> character
+#: fn(string: Str) -> Str
 Str.with_ascii_uppercased <- function(string)
 ```
 
@@ -830,7 +855,7 @@ Str.with_ascii_uppercased("straße abc")
 #> "STRAßE ABC"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1037)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L981)
 
 ## `Str.caseless_ascii_equals`
 
@@ -838,14 +863,14 @@ Str.with_ascii_uppercased("straße abc")
 <TabItem label="Inline">
 
 ```r
-Str.caseless_ascii_equals <- function(first: character, second: character) -> logical
+Str.caseless_ascii_equals <- function(first: Str, second: Str) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(first: character, second: character) -> logical
+#: fn(first: Str, second: Str) -> Bool
 Str.caseless_ascii_equals <- function(first, second)
 ```
 
@@ -859,7 +884,7 @@ Str.caseless_ascii_equals("Content-Type", "content-type")
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1045)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L989)
 
 ## `Str.walk_utf8`
 
@@ -867,14 +892,14 @@ Str.caseless_ascii_equals("Content-Type", "content-type")
 <TabItem label="Inline">
 
 ```r
-Str.walk_utf8 <- function<S>(string: character, state: S, f: fn(S, integer) -> S) -> S
+Str.walk_utf8 <- function<S>(string: Str, state: S, f: fn(S, I64) -> S) -> S
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <S> fn(string: character, state: S, f: fn(S, integer) -> S) -> S
+#: <S> fn(string: Str, state: S, f: fn(S, I64) -> S) -> S
 Str.walk_utf8 <- function(string, state, f)
 ```
 
@@ -884,11 +909,11 @@ Str.walk_utf8 <- function(string, state, f)
 Folds the string's UTF-8 bytes: `f(state, byte)` gives the next state.
 
 ```r ry run runtime=ry dput
-Str.walk_utf8("abc", 0L, function(total, byte) total + byte)
-#> 294L
+Str.walk_utf8("abc", 0, function(total, byte) total + Num.to_i64(byte))
+#> 294i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1053)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L997)
 
 ## `Str.walk_utf8_with_index`
 
@@ -896,14 +921,14 @@ Str.walk_utf8("abc", 0L, function(total, byte) total + byte)
 <TabItem label="Inline">
 
 ```r
-Str.walk_utf8_with_index <- function<S>(string: character, state: S, f: fn(S, integer, integer) -> S) -> S
+Str.walk_utf8_with_index <- function<S>(string: Str, state: S, f: fn(S, I64, I64) -> S) -> S
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <S> fn(string: character, state: S, f: fn(S, integer, integer) -> S) -> S
+#: <S> fn(string: Str, state: S, f: fn(S, I64, I64) -> S) -> S
 Str.walk_utf8_with_index <- function(string, state, f)
 ```
 
@@ -913,11 +938,11 @@ Str.walk_utf8_with_index <- function(string, state, f)
 Folds the string's UTF-8 bytes, passing `f` each byte's 1-based position too.
 
 ```r ry run runtime=ry dput
-Str.walk_utf8_with_index("ab", list(), function(seen, byte, i) List.append(seen, byte * i))
-#> list(97L, 196L)
+Str.walk_utf8_with_index("ab", [], function(seen, byte, i) List.append(seen, Num.to_i64(byte) * i))
+#> [97i64, 196i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1061)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1005)
 
 ## `Str.to_utf16`
 
@@ -925,14 +950,14 @@ Str.walk_utf8_with_index("ab", list(), function(seen, byte, i) List.append(seen,
 <TabItem label="Inline">
 
 ```r
-Str.to_utf16 <- function(string: character) -> list[integer]
+Str.to_utf16 <- function(string: Str) -> List<I64>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character) -> list[integer]
+#: fn(string: Str) -> List<I64>
 Str.to_utf16 <- function(string)
 ```
 
@@ -944,10 +969,10 @@ Multilingual Plane takes two units, a surrogate pair.
 
 ```r ry run runtime=ry dput
 Str.to_utf16("h\U0001F600")
-#> list(104L, 55357L, 56832L)
+#> [104i64, 55357i64, 56832i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1070)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1014)
 
 ## `Str.from_utf16`
 
@@ -955,14 +980,14 @@ Str.to_utf16("h\U0001F600")
 <TabItem label="Inline">
 
 ```r
-Str.from_utf16 <- function(units: list[integer]) -> Result<character, :BadUtf16>
+Str.from_utf16 <- function(units: List<I64>) -> Result<Str, :BadUtf16>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(units: list[integer]) -> Result<character, :BadUtf16>
+#: fn(units: List<I64>) -> Result<Str, :BadUtf16>
 Str.from_utf16 <- function(units)
 ```
 
@@ -973,11 +998,11 @@ Decodes UTF-16 code units, or `:Err(:BadUtf16)` for an unpaired surrogate or a z
 an R string cannot hold. A number outside 0 to 65535 is an error.
 
 ```r ry run runtime=ry dput
-Str.from_utf16(list(104L, 55357L))
+Str.from_utf16([104, 55357])
 #> :Err(:BadUtf16)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1079)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1023)
 
 ## `Str.from_utf16_lossy`
 
@@ -985,14 +1010,14 @@ Str.from_utf16(list(104L, 55357L))
 <TabItem label="Inline">
 
 ```r
-Str.from_utf16_lossy <- function(units: list[integer]) -> character
+Str.from_utf16_lossy <- function(units: List<I64>) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(units: list[integer]) -> character
+#: fn(units: List<I64>) -> Str
 Str.from_utf16_lossy <- function(units)
 ```
 
@@ -1002,11 +1027,11 @@ Str.from_utf16_lossy <- function(units)
 Decodes UTF-16 code units, replacing each unpaired surrogate and each zero unit with U+FFFD.
 
 ```r ry run runtime=ry dput
-Str.from_utf16_lossy(list(104L, 105L))
+Str.from_utf16_lossy([104, 105])
 #> "hi"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1087)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1031)
 
 ## `Str.to_utf32`
 
@@ -1014,14 +1039,14 @@ Str.from_utf16_lossy(list(104L, 105L))
 <TabItem label="Inline">
 
 ```r
-Str.to_utf32 <- function(string: character) -> list[integer]
+Str.to_utf32 <- function(string: Str) -> List<I64>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: character) -> list[integer]
+#: fn(string: Str) -> List<I64>
 Str.to_utf32 <- function(string)
 ```
 
@@ -1032,10 +1057,10 @@ The string's Unicode code points, one per character.
 
 ```r ry run runtime=ry dput
 Str.to_utf32("h\u00e9")
-#> list(104L, 233L)
+#> [104i64, 233i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1095)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1039)
 
 ## `Str.from_utf32`
 
@@ -1043,14 +1068,14 @@ Str.to_utf32("h\u00e9")
 <TabItem label="Inline">
 
 ```r
-Str.from_utf32 <- function(code_points: list[integer]) -> Result<character, :BadUtf32>
+Str.from_utf32 <- function(code_points: List<I64>) -> Result<Str, :BadUtf32>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(code_points: list[integer]) -> Result<character, :BadUtf32>
+#: fn(code_points: List<I64>) -> Result<Str, :BadUtf32>
 Str.from_utf32 <- function(code_points)
 ```
 
@@ -1061,11 +1086,11 @@ Builds a string from Unicode code points, or `:Err(:BadUtf32)` for a number that
 surrogate, a negative number, or one above 1114111) and for zero.
 
 ```r ry run runtime=ry dput
-Str.from_utf32(list(55296L))
+Str.from_utf32([55296])
 #> :Err(:BadUtf32)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1104)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1048)
 
 ## `Str.from_utf32_lossy`
 
@@ -1073,14 +1098,14 @@ Str.from_utf32(list(55296L))
 <TabItem label="Inline">
 
 ```r
-Str.from_utf32_lossy <- function(code_points: list[integer]) -> character
+Str.from_utf32_lossy <- function(code_points: List<I64>) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(code_points: list[integer]) -> character
+#: fn(code_points: List<I64>) -> Str
 Str.from_utf32_lossy <- function(code_points)
 ```
 
@@ -1090,8 +1115,8 @@ Str.from_utf32_lossy <- function(code_points)
 Builds a string from Unicode code points, replacing each number that is not one with U+FFFD.
 
 ```r ry run runtime=ry dput
-Str.from_utf32_lossy(list(82L, 121L))
+Str.from_utf32_lossy([82, 121])
 #> "Ry"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1112)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1056)

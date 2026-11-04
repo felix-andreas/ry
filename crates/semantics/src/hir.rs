@@ -14,8 +14,9 @@ use {
         sync::{LazyLock, Mutex},
     },
     syntax::{
-        ElementRef, NodeRef, SyntaxKind, SyntaxNode, TextRange, TextSize, TokenRef,
+        ElementRef, NodeRef, NumberType, SyntaxKind, SyntaxNode, TextRange, TextSize, TokenRef,
         ast::{is_expression_kind, name_text},
+        split_number_suffix,
     },
 };
 
@@ -989,6 +990,12 @@ impl Module {
             ExpressionKind::Record(fields) => {
                 self[fields].iter().map(|field| field.value).for_each(visit)
             }
+            ExpressionKind::RecordUpdate { base, fields } => {
+                visit(base);
+                self[fields].iter().map(|field| field.value).for_each(visit)
+            }
+            ExpressionKind::FormatString(pieces) => self[pieces].iter().copied().for_each(visit),
+            ExpressionKind::Try(operand) => visit(operand),
             ExpressionKind::Tag { payload, .. } => payload.into_iter().for_each(visit),
             ExpressionKind::Match { scrutinee, arms } => {
                 visit(scrutinee);
@@ -1015,7 +1022,7 @@ impl Module {
     /// Whether a tag payload pattern is a bare `..`, as in `:Tag(..)`, which matches the tag
     /// with any payload or none.
     pub fn is_any_payload(&self, payload: PatId) -> bool {
-        matches!(self.pattern(payload).kind, PatternKind::Record { fields, rest: true } if fields.is_empty())
+        matches!(self.pattern(payload).kind, PatternKind::Record { fields, rest: Some(Rest { binding: None }) } if fields.is_empty())
     }
 
     /// The names a pattern binds, as `NameRef` expressions, in source order.
@@ -1041,10 +1048,27 @@ fn pattern_bindings(arrays: &impl Arrays, pattern: PatId) -> Vec<ExprId> {
                     collect(arrays, item, bindings);
                 }
             }
-            PatternKind::Record { fields, .. } => {
+            PatternKind::Record { fields, rest } => {
                 for field in &arrays.pattern_field_array()[fields.range()] {
                     collect(arrays, field.pattern, bindings);
                 }
+                bindings.extend(rest.and_then(|rest| rest.binding));
+            }
+            PatternKind::List { items, rest } => {
+                let items = &arrays.pattern_list_array()[items.range()];
+                let position = rest.map_or(items.len(), |rest| rest.position as usize);
+                let (before, after) = items.split_at(position.min(items.len()));
+                for &item in before {
+                    collect(arrays, item, bindings);
+                }
+                bindings.extend(rest.and_then(|rest| rest.rest.binding));
+                for &item in after {
+                    collect(arrays, item, bindings);
+                }
+            }
+            PatternKind::As { pattern, binding } => {
+                collect(arrays, pattern, bindings);
+                bindings.push(binding);
             }
         }
     }
@@ -1139,6 +1163,12 @@ pub enum LiteralKind {
     Integer(Text),
     Double(Text),
     Complex(Text),
+    /// A ry number with a type suffix, as in `5i64`. The text is the number without its
+    /// suffix, so an `i128` or `u128` value stays exact.
+    Suffixed {
+        number: Text,
+        ty: NumberType,
+    },
     /// The value without its quotes; escapes are not decoded.
     String(Text),
     Logical(bool),
@@ -1250,6 +1280,11 @@ pub enum ExpressionKind {
     Tuple(Span<ExprId>),
     /// `(x = 1, y = 2)`: a native record, fields in source order.
     Record(Span<RecordField>),
+    /// `(..base, x = 3)`: a copy of the record `base` with the listed fields replaced.
+    RecordUpdate {
+        base: ExprId,
+        fields: Span<RecordField>,
+    },
     /// `[a, b]`: an Array literal.
     Array(Span<ExprId>),
     /// `:Name` or `:Name(...)`. The payload is a `Tuple` or `Record` expression spanning the
@@ -1262,6 +1297,11 @@ pub enum ExpressionKind {
         scrutinee: ExprId,
         arms: Span<MatchArm>,
     },
+    /// `f"..."`: its pieces in source order. A text run is a `String` literal holding the run
+    /// as written, so a doubled brace stays doubled; an interpolation is its expression.
+    FormatString(Span<ExprId>),
+    /// `try expr`: the operand's `Ok` value, or an early return of its `Err`.
+    Try(ExprId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1307,9 +1347,34 @@ pub enum PatternKind {
     /// Without `rest`, the pattern must list every field of the record it matches.
     Record {
         fields: Span<PatternField>,
-        rest: bool,
+        rest: Option<Rest>,
+    },
+    /// `[a, b]`, or with a rest, `[first, ..rest, last]`.
+    List {
+        items: Span<PatId>,
+        rest: Option<ListRest>,
+    },
+    /// `pattern as name`: binds the whole matched value as well as the pattern's names.
+    As {
+        pattern: PatId,
+        binding: ExprId,
     },
     Or(Span<PatId>),
+}
+
+/// The `..` of a pattern, which matches what the listed items leave over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rest {
+    /// The `NameRef` that `..rest` binds; a bare `..` binds nothing.
+    pub binding: Option<ExprId>,
+}
+
+/// The `..` of a list pattern: the items before `position` match the list's start, and the
+/// rest match its end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListRest {
+    pub position: u32,
+    pub rest: Rest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1612,6 +1677,44 @@ impl Lowering {
                     .map(|list| self.lower_items(list, list.range()));
                 self.allocate(ExpressionKind::Tag { name, payload }, range)
             }
+            SyntaxKind::FSTRING => {
+                let mark = self.expression_stack.len();
+                for child in node.children() {
+                    let piece = match child {
+                        ElementRef::Token(token) if token.kind() == SyntaxKind::FSTRING_TEXT => {
+                            let start = self.parts.text.len() as u32;
+                            self.parts.text.push_str(token.text());
+                            let text = Text {
+                                start,
+                                len: token.text().len() as u32,
+                            };
+                            self.allocate(
+                                ExpressionKind::Literal(LiteralKind::String(text)),
+                                token.range(),
+                            )
+                        }
+                        ElementRef::Node(interpolation)
+                            if interpolation.kind() == SyntaxKind::FSTRING_INTERPOLATION =>
+                        {
+                            let inner = expression_children(interpolation).next();
+                            self.lower_optional(inner, significant_range_of(interpolation))
+                        }
+                        _ => continue,
+                    };
+                    self.expression_stack.push(piece);
+                }
+                let pieces = seal(
+                    &mut self.expression_stack,
+                    mark,
+                    &mut self.parts.expression_lists,
+                );
+                self.allocate(ExpressionKind::FormatString(pieces), range)
+            }
+            SyntaxKind::TRY_EXPR => {
+                let operand = expression_children(node).next();
+                let operand = self.lower_optional(operand, range);
+                self.allocate(ExpressionKind::Try(operand), range)
+            }
             SyntaxKind::MATCH_EXPR => {
                 let scrutinee = expression_children(node).next();
                 let scrutinee = self.lower_optional(scrutinee, range);
@@ -1632,13 +1735,28 @@ impl Lowering {
 
     /// The items of a native tuple or record literal. The parser already rejects a list that
     /// mixes named and unnamed items, so the first item decides which one this is.
+    /// A leading `..base` makes the list a record update, whose other items the parser
+    /// requires to be named.
     fn lower_items(&mut self, list: NodeRef<'_>, range: TextRange) -> ExprId {
+        let base = child_of_kind(list, SyntaxKind::RECORD_SPREAD).map(|spread| {
+            let spread_range = significant_range_of(spread);
+            let name = spread
+                .first_token()
+                .map(|token| Symbol::new(token.text().trim_start_matches('.')))
+                .unwrap_or_default();
+            let name_range = TextRange::new(
+                (spread_range.start() + TextSize::from(2)).min(spread_range.end()),
+                spread_range.end(),
+            );
+            self.allocate(ExpressionKind::NameRef(name), name_range)
+        });
         let mark = self.argument_stack.len();
         self.lower_arguments_of(list, None);
-        let is_record = self
-            .argument_stack
-            .get(mark)
-            .is_some_and(|argument| argument.name.is_some());
+        let is_record = base.is_some()
+            || self
+                .argument_stack
+                .get(mark)
+                .is_some_and(|argument| argument.name.is_some());
         if is_record {
             let field_mark = self.field_stack.len();
             for index in mark..self.argument_stack.len() {
@@ -1666,7 +1784,11 @@ impl Lowering {
                 field_mark,
                 &mut self.parts.record_fields,
             );
-            return self.allocate(ExpressionKind::Record(fields), range);
+            let kind = match base {
+                Some(base) => ExpressionKind::RecordUpdate { base, fields },
+                None => ExpressionKind::Record(fields),
+            };
+            return self.allocate(kind, range);
         }
         let item_mark = self.expression_stack.len();
         for argument in self.argument_stack.drain(mark..) {
@@ -1759,7 +1881,8 @@ impl Lowering {
                     )
                 });
                 if is_record {
-                    let rest = child_of_kind(node, SyntaxKind::PATTERN_REST).is_some();
+                    let rest = child_of_kind(node, SyntaxKind::PATTERN_REST)
+                        .map(|rest| self.lower_rest(rest));
                     let mark = self.pattern_field_stack.len();
                     for field in node
                         .child_nodes()
@@ -1771,11 +1894,22 @@ impl Lowering {
                         let Some(name) = field_name_text(name_node) else {
                             continue;
                         };
+                        // A punned field, `(x =)`, binds the field's own name.
                         let pattern = match field
                             .child_nodes()
                             .find(|child| is_pattern_kind(child.kind()))
                         {
                             Some(pattern) => self.lower_pattern(pattern),
+                            None if field
+                                .child_tokens()
+                                .any(|token| token.kind() == SyntaxKind::EQ)
+                                && name_node.kind() == SyntaxKind::NAME =>
+                            {
+                                let name_range = name_node.range();
+                                let binding =
+                                    self.allocate(ExpressionKind::NameRef(name), name_range);
+                                self.allocate_pattern(PatternKind::Bind(binding), name_range)
+                            }
                             None => self.allocate_pattern(
                                 PatternKind::Missing,
                                 significant_range_of(field),
@@ -1797,6 +1931,46 @@ impl Lowering {
                     PatternKind::Tuple(self.lower_pattern_list(node))
                 }
             }
+            SyntaxKind::PATTERN_ARRAY => {
+                let mark = self.pattern_stack.len();
+                let mut rest = None;
+                for item in node.child_nodes() {
+                    if item.kind() == SyntaxKind::PATTERN_REST {
+                        // The parser reports a second `..`; the first one stands.
+                        if rest.is_none() {
+                            rest = Some(ListRest {
+                                position: (self.pattern_stack.len() - mark) as u32,
+                                rest: self.lower_rest(item),
+                            });
+                        }
+                    } else if is_pattern_kind(item.kind()) {
+                        let item = self.lower_pattern(item);
+                        self.pattern_stack.push(item);
+                    }
+                }
+                let items = seal(&mut self.pattern_stack, mark, &mut self.parts.pattern_lists);
+                PatternKind::List { items, rest }
+            }
+            SyntaxKind::PATTERN_AS => {
+                let pattern = match node
+                    .child_nodes()
+                    .find(|child| is_pattern_kind(child.kind()))
+                {
+                    Some(inner) => self.lower_pattern(inner),
+                    None => self.allocate_pattern(PatternKind::Missing, range),
+                };
+                match child_of_kind(node, SyntaxKind::NAME) {
+                    Some(name_node) => {
+                        let name = name_symbol(name_node).unwrap_or_default();
+                        let binding = self.allocate(
+                            ExpressionKind::NameRef(name),
+                            significant_range_of(name_node),
+                        );
+                        PatternKind::As { pattern, binding }
+                    }
+                    None => return pattern,
+                }
+            }
             SyntaxKind::PATTERN_OR => PatternKind::Or(self.lower_pattern_list(node)),
             SyntaxKind::PATTERN_PAREN => {
                 return match node
@@ -1810,6 +1984,22 @@ impl Lowering {
             _ => PatternKind::Missing,
         };
         self.allocate_pattern(kind, range)
+    }
+
+    fn lower_rest(&mut self, rest: NodeRef<'_>) -> Rest {
+        let range = significant_range_of(rest);
+        let binding = rest
+            .first_token()
+            .map(|token| token.text().trim_start_matches('.'))
+            .filter(|name| !name.is_empty())
+            .map(|name| {
+                let name_range = TextRange::new(
+                    (range.start() + TextSize::from(2)).min(range.end()),
+                    range.end(),
+                );
+                self.allocate(ExpressionKind::NameRef(Symbol::new(name)), name_range)
+            });
+        Rest { binding }
     }
 
     fn lower_pattern_list(&mut self, node: NodeRef<'_>) -> Span<PatId> {
@@ -2063,6 +2253,8 @@ fn is_pattern_kind(kind: SyntaxKind) -> bool {
             | SyntaxKind::PATTERN_LIST
             | SyntaxKind::PATTERN_OR
             | SyntaxKind::PATTERN_PAREN
+            | SyntaxKind::PATTERN_ARRAY
+            | SyntaxKind::PATTERN_AS
     )
 }
 
@@ -2133,6 +2325,13 @@ fn literal_kind(node: NodeRef<'_>, buffer: &mut String) -> LiteralKind {
         SyntaxKind::INTEGER => LiteralKind::Integer(text(token.text())),
         SyntaxKind::DOUBLE => LiteralKind::Double(text(token.text())),
         SyntaxKind::COMPLEX => LiteralKind::Complex(text(token.text())),
+        SyntaxKind::SUFFIXED_NUMBER => match split_number_suffix(token.text()) {
+            Some((number, ty)) => LiteralKind::Suffixed {
+                number: text(number),
+                ty,
+            },
+            None => LiteralKind::Double(text(token.text())),
+        },
         SyntaxKind::STRING | SyntaxKind::RAW_STRING => {
             LiteralKind::String(text(string_value(token.text())))
         }

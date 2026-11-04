@@ -43,6 +43,7 @@ pub fn parse(text: &str) -> Parse {
         annotation_unclosed_reported: false,
         statement_had_lexer_error: false,
         statement_left_group_open: false,
+        spread_allowed: false,
     };
     parser.source_file();
     let tree = parser.builder.finish(text);
@@ -88,6 +89,10 @@ struct Parser<'a> {
     /// The unclosed-opener error is the whole story and the ending newline was
     /// eaten as trivia, so the boundary check neither reports nor recovers.
     statement_left_group_open: bool,
+    /// Set by a parenthesized record or tuple literal for its own item list, the one place a
+    /// leading `..base` is a record update's spread. The list clears it before parsing any item,
+    /// so it never reaches a nested list.
+    spread_allowed: bool,
 }
 
 impl Parser<'_> {
@@ -1613,6 +1618,7 @@ impl Parser<'_> {
             IDENT if self.token_str(self.pos) == "match" && self.match_ahead() => {
                 self.match_expr();
             }
+            IDENT if self.token_str(self.pos) == "try" && self.try_ahead() => self.try_expr(),
             IDENT | DOTS | DOTDOTI | UNDERSCORE => self.wrap(NAME),
             COLON if self.next_token_is(IDENT) => self.tag_expr(),
             AT if self.pure_marker_ahead() => self.function_def(),
@@ -1637,7 +1643,10 @@ impl Parser<'_> {
                 self.statement_had_lexer_error = true;
                 self.wrap(ERROR);
             }
-            INTEGER | DOUBLE | COMPLEX | STRING | RAW_STRING => self.wrap(LITERAL),
+            INTEGER | DOUBLE | COMPLEX | SUFFIXED_NUMBER | STRING | RAW_STRING => {
+                self.wrap(LITERAL)
+            }
+            FSTRING_START => self.fstring(),
             MINUS | PLUS => self.unary(UNARY_SIGN_BP),
             BANG => self.unary(UNARY_NOT_BP),
             TILDE => self.unary(TILDE_BP + 1),
@@ -1693,6 +1702,91 @@ impl Parser<'_> {
             _ => return false,
         }
         true
+    }
+
+    /// `try NAME` or `try CALL`, with the name on the line of the `try`. R reads `try` followed by
+    /// a name as two operands in a row, a syntax error, while `try(x)`, `try (x)`, `try -x`,
+    /// `try[x]` and a `try` that ends its line keep their R meanings.
+    fn try_ahead(&self) -> bool {
+        let kind_at = |pos: usize| self.tokens.get(pos).map(|token| token.kind);
+        kind_at(self.pos + 1) == Some(WHITESPACE) && kind_at(self.pos + 2) == Some(IDENT)
+    }
+
+    /// The operand is the name with its postfix chain (calls, indexing, `$`, `@` and `::`), so
+    /// `try f(x)$y` propagates from `f(x)$y`, while `try f(x) + 1` adds to the unwrapped value.
+    fn try_expr(&mut self) {
+        self.start(TRY_EXPR);
+        self.bump();
+        self.eat_trivia(false);
+        let checkpoint = self.checkpoint();
+        if self.primary() {
+            self.operators(checkpoint, FIELD_BP);
+        }
+        self.finish();
+    }
+
+    fn fstring(&mut self) {
+        self.start(FSTRING);
+        self.bump();
+        loop {
+            match self.current() {
+                Some(FSTRING_TEXT) => self.bump(),
+                Some(L_BRACE) => self.interpolation(),
+                Some(FSTRING_END) => {
+                    self.bump();
+                    break;
+                }
+                // The lexer reports the missing quote.
+                _ => break,
+            }
+        }
+        self.finish();
+    }
+
+    fn interpolation(&mut self) {
+        self.start(FSTRING_INTERPOLATION);
+        let open_range = self.token_range(self.pos);
+        self.open_group();
+        self.bump();
+        self.eat_trivia(true);
+        if self.at(R_BRACE) {
+            let range = TextRange::new(open_range.start(), self.token_range(self.pos).end());
+            self.error_rule(
+                range,
+                "this interpolation is empty; write `{{` for a literal brace",
+            );
+        } else if !self.expression(0) {
+            self.error_expected("an expression inside the f-string's `{}`");
+        }
+        self.eat_trivia(true);
+        if !matches!(self.current(), None | Some(R_BRACE | FSTRING_END)) {
+            self.error_expected("`}` to close this interpolation");
+            self.start(ERROR);
+            // The lexer closes the interpolation at the first `}` its own braces leave
+            // unmatched, so skipping balanced braces finds it.
+            let mut depth = 0u32;
+            while let Some(kind) = self.current() {
+                match kind {
+                    L_BRACE => depth += 1,
+                    R_BRACE if depth == 0 => break,
+                    R_BRACE => depth -= 1,
+                    FSTRING_END if depth == 0 => break,
+                    _ => {}
+                }
+                self.bump();
+            }
+            self.finish();
+        }
+        self.end_group();
+        if self.at(R_BRACE) {
+            self.bump();
+        } else {
+            self.error_unclosed(
+                open_range,
+                "unclosed `{` in this f-string; expected a matching `}`",
+            );
+        }
+        self.finish();
     }
 
     fn unary(&mut self, right_bp: u8) {
@@ -1951,6 +2045,7 @@ impl Parser<'_> {
 
     /// `items`, when given, receives the shape of every argument, which ry's literals validate.
     fn argument_list_items(&mut self, open: SyntaxKind, mut items: Option<&mut Vec<Item>>) {
+        let spread_allowed = std::mem::take(&mut self.spread_allowed);
         self.start(ARGUMENT_LIST);
         let open_range = self.token_range(self.pos);
         self.open_group();
@@ -2001,7 +2096,19 @@ impl Parser<'_> {
                         self.recover_argument(closer);
                         continue;
                     }
-                    self.collected_argument(closer, items.as_deref_mut());
+                    match items.as_deref_mut() {
+                        Some(items)
+                            if spread_allowed && items.is_empty() && self.spread_ahead() =>
+                        {
+                            let range = self.token_range(self.pos);
+                            self.wrap(RECORD_SPREAD);
+                            items.push(Item {
+                                kind: ItemKind::Spread,
+                                range,
+                            });
+                        }
+                        items => self.collected_argument(closer, items),
+                    }
                     expect_argument = false;
                 }
             }
@@ -2220,9 +2327,24 @@ impl Parser<'_> {
         matches!(self.peek_significant(pos + 1, false), Some((L_BRACE, _)))
     }
 
+    /// `..name` alone as the first item of a record literal. `..name` is an ordinary R name, so
+    /// `(..point, x = 3)` would otherwise be a record holding the variable `..point`; ry reads
+    /// it as a copy of `point` with `x` replaced.
+    fn spread_ahead(&self) -> bool {
+        self.at(IDENT)
+            && self
+                .token_str(self.pos)
+                .strip_prefix("..")
+                .is_some_and(|name| name.starts_with(char::is_alphabetic))
+            && self
+                .peek_significant(self.pos + 1, true)
+                .is_none_or(|(kind, _)| matches!(kind, COMMA | R_PAREN))
+    }
+
     fn collection_literal(&mut self) {
         let checkpoint = self.checkpoint();
         let mut items = Vec::new();
+        self.spread_allowed = true;
         self.argument_list_items(L_PAREN, Some(&mut items));
         let named = self.validate_items(&items, "literal");
         self.start_at(checkpoint, if named { RECORD_EXPR } else { TUPLE_EXPR });
@@ -2245,7 +2367,7 @@ impl Parser<'_> {
                     item.range,
                     "an Array item has no name; use a record such as `(x = 1, y = 2)` for named fields",
                 ),
-                ItemKind::Positional => {}
+                ItemKind::Positional | ItemKind::Spread => {}
             }
         }
         self.finish();
@@ -2312,13 +2434,17 @@ impl Parser<'_> {
     /// Reports mixed, repeated, empty and spliced items, and returns whether the items are named
     /// fields rather than positional items.
     fn validate_items(&mut self, items: &[Item], what: &str) -> bool {
-        let named = matches!(
-            items.iter().find(|item| item.kind != ItemKind::Empty),
-            Some(Item {
-                kind: ItemKind::Named(_),
-                ..
-            })
-        );
+        let spread = items
+            .first()
+            .is_some_and(|item| item.kind == ItemKind::Spread);
+        let named = spread
+            || matches!(
+                items.iter().find(|item| item.kind != ItemKind::Empty),
+                Some(Item {
+                    kind: ItemKind::Named(_),
+                    ..
+                })
+            );
         let mut seen: Vec<&str> = Vec::new();
         for item in items {
             match &item.kind {
@@ -2343,7 +2469,7 @@ impl Parser<'_> {
                         seen.push(name);
                     }
                 }
-                ItemKind::Positional => {}
+                ItemKind::Positional | ItemKind::Spread => {}
             }
         }
         named
@@ -2502,9 +2628,36 @@ impl Parser<'_> {
             if alternatives > 1 {
                 self.finish();
             }
+            // `as` binds looser than `|`, so `:A | :B as x` names whichever alternative matched.
+            loop {
+                let across_newlines = !self.newlines_significant();
+                match self.peek_significant(self.pos, across_newlines) {
+                    Some((IDENT, at)) if self.token_str(at) == "as" => {}
+                    _ => break,
+                }
+                self.eat_trivia(false);
+                self.start_at(checkpoint, PATTERN_AS);
+                self.bump();
+                self.eat_trivia(false);
+                if self.at(IDENT) && !self.rest_ahead() {
+                    self.wrap(NAME);
+                } else {
+                    self.error_expected("a name after `as`");
+                }
+                self.finish();
+            }
         }
         self.depth -= 1;
         produced
+    }
+
+    /// `..` or `..name`: the rest of a list or record pattern, binding it to `name` when given.
+    fn rest_ahead(&self) -> bool {
+        self.at(IDENT)
+            && self
+                .token_str(self.pos)
+                .strip_prefix("..")
+                .is_some_and(|name| name.is_empty() || name.starts_with(char::is_alphabetic))
     }
 
     fn pattern_primary(&mut self) -> bool {
@@ -2514,8 +2667,10 @@ impl Parser<'_> {
         };
         match kind {
             UNDERSCORE => self.wrap(PATTERN_WILDCARD),
-            IDENT if self.token_str(self.pos) == ".." => {
-                self.error_here("`..` may only end a record pattern or stand for a tag's payload");
+            IDENT if self.rest_ahead() => {
+                self.error_here(
+                    "`..` may only stand in a list pattern, end a record pattern, or stand for a tag's payload",
+                );
                 self.wrap(PATTERN_REST);
             }
             IDENT => {
@@ -2534,7 +2689,7 @@ impl Parser<'_> {
                 self.wrap(NAME);
                 self.finish();
             }
-            INTEGER | DOUBLE | COMPLEX | STRING | RAW_STRING => {
+            INTEGER | DOUBLE | COMPLEX | SUFFIXED_NUMBER | STRING | RAW_STRING => {
                 self.start(PATTERN_LITERAL);
                 self.wrap(LITERAL);
                 self.finish();
@@ -2547,7 +2702,7 @@ impl Parser<'_> {
             MINUS
                 if matches!(
                     self.tokens.get(self.pos + 1).map(|token| token.kind),
-                    Some(INTEGER | DOUBLE | COMPLEX | INF_KW)
+                    Some(INTEGER | DOUBLE | COMPLEX | SUFFIXED_NUMBER | INF_KW)
                 ) =>
             {
                 self.start(PATTERN_LITERAL);
@@ -2573,6 +2728,7 @@ impl Parser<'_> {
                 }
                 self.finish();
             }
+            L_BRACKET | L_BRACKET2 => self.array_pattern(),
             L_PAREN => {
                 let checkpoint = self.checkpoint();
                 let shape = self.pattern_list(false);
@@ -2602,6 +2758,60 @@ impl Parser<'_> {
         true
     }
 
+    /// `[p1, .., last]`: a list of exactly these items, or of at least them with a `..`.
+    fn array_pattern(&mut self) {
+        if self.at(L_BRACKET2) {
+            self.split_double_bracket();
+        }
+        self.start(PATTERN_ARRAY);
+        let open_range = self.token_range(self.pos);
+        self.open_group();
+        self.bump();
+        let mut rest = false;
+        loop {
+            self.eat_trivia(true);
+            match self.current() {
+                None | Some(R_BRACKET) => break,
+                _ => {}
+            }
+            if self.rest_ahead() {
+                if rest {
+                    self.error_here("a list pattern takes at most one `..`");
+                }
+                rest = true;
+                self.wrap(PATTERN_REST);
+            } else if !self.pattern() {
+                self.recover_in_list(R_BRACKET);
+            }
+            self.eat_trivia(true);
+            match self.current() {
+                Some(COMMA) => self.bump(),
+                Some(R_BRACKET) | None => break,
+                Some(_) => {
+                    self.error_expected("`,` or `]` in this list pattern");
+                    let before = self.pos;
+                    self.recover_in_list(R_BRACKET);
+                    match self.current() {
+                        Some(COMMA) => self.bump(),
+                        Some(R_BRACKET) => {}
+                        _ if self.pos == before => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        self.end_group();
+        if self.at(R_BRACKET) {
+            self.bump();
+        } else {
+            self.error_unclosed(
+                open_range,
+                "unclosed `[` in this pattern; expected a matching `]`",
+            );
+        }
+        self.finish();
+    }
+
     /// The parenthesized items of a tuple, record or payload pattern, without the wrapping node.
     fn pattern_list(&mut self, payload: bool) -> PatternListShape {
         let open = self.pos;
@@ -2621,7 +2831,8 @@ impl Parser<'_> {
             if shape.rest {
                 self.error_here("`..` must be the last item of a pattern");
             }
-            if self.at(IDENT) && self.token_str(self.pos) == ".." {
+            if self.rest_ahead() {
+                shape.rest_binds = self.token_str(self.pos) != "..";
                 self.wrap(PATTERN_REST);
                 shape.rest = true;
             } else if self.at(IDENT)
@@ -2639,7 +2850,8 @@ impl Parser<'_> {
                 self.eat_trivia(true);
                 self.bump();
                 self.eat_trivia(true);
-                if !self.pattern() {
+                // `(x =, y =)` puns: each field binds a name of its own spelling.
+                if !matches!(self.current(), None | Some(COMMA | R_PAREN)) && !self.pattern() {
                     self.recover_in_list(R_PAREN);
                 }
                 self.finish();
@@ -2689,7 +2901,7 @@ impl Parser<'_> {
             );
         }
         shape.range = self.range_from(open);
-        if shape.rest && !shape.named && !(payload && shape.items == 0) {
+        if shape.rest && !shape.named && (shape.rest_binds || !(payload && shape.items == 0)) {
             self.error_rule(
                 shape.range,
                 "`..` ignores the remaining fields of a record pattern, so it needs named fields before it",
@@ -2765,8 +2977,10 @@ fn starts_expression(kind: SyntaxKind) -> bool {
                 | INTEGER
                 | DOUBLE
                 | COMPLEX
+                | SUFFIXED_NUMBER
                 | STRING
                 | RAW_STRING
+                | FSTRING_START
                 | MINUS
                 | PLUS
                 | BANG
@@ -2791,6 +3005,8 @@ enum ItemKind {
     Positional,
     Dots,
     Named(String),
+    /// `..base` opening a record update.
+    Spread,
 }
 
 #[derive(Default)]
@@ -2798,6 +3014,8 @@ struct PatternListShape {
     items: usize,
     named: bool,
     rest: bool,
+    /// The rest is `..name`, which binds the remaining fields.
+    rest_binds: bool,
     trailing_comma: bool,
     range: TextRange,
 }

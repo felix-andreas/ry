@@ -1273,7 +1273,13 @@ unsafe fn do_dev_capabilities(call: &NativeCall<'_>) -> R<Sexp> {
     };
     crate::heap().root(capabilities);
     let declared = |present: bool, value: c_int| if present { value } else { 1 };
-    let since = |version: c_int| if dev.device_version < version { 0 } else { NA_INTEGER };
+    let since = |version: c_int| {
+        if dev.device_version < version {
+            0
+        } else {
+            NA_INTEGER
+        }
+    };
     let group = since(graphics_engine::VERSION_GROUP);
     let codes: [&[i32]; MINIMUM + 1] = [
         &[dev.have_transparency],

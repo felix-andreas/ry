@@ -10,7 +10,7 @@ to giving a wrong answer: a construct it cannot describe becomes `Unknown`, whic
 everything, so a gap means a skipped check rather than a false error, and [strict mode](#strict-mode)
 shows where the gaps are. Second, every rule must be cheap enough to check on every keystroke, which
 is why inference is Hindley–Milner, why your own functions cannot be overloaded, and why there is no
-subtyping between nominal types. The [overview](/type-checking/overview) introduces the same ideas
+subtyping between nominal types. The [tutorial](/tutorial/types) introduces the same ideas
 through examples.
 
 `ry check` reports the type errors on this page only when typing is on, through `[check] typing = true`
@@ -343,7 +343,9 @@ these rules:
 - **The return value is checked when the function returns**, including through `return()`, and
   before `on.exit` code runs.
 - **Bindings are not checked.** `x: integer <- value` types `x` for the checker and is erased at
-  run time.
+  run time. The one exception is an unsuffixed number literal bound to a ry number type:
+  `n: I64 <- 5` binds `5i64`, and `xs: List<I64> <- [1, 2]` converts each item, because the
+  literal is R's `double` until something converts it (see [number literals](#number-literals)).
 - **Type definitions and `@Name(value)` do nothing at run time.** A definition is skipped, and
   `@Name(value)` runs as `(value)`.
 - **A check tests the value's storage type only.** `logical`, `integer`, `double`, `complex`,
@@ -370,7 +372,7 @@ new definition and is not checked.
 
 Before running anything, `ry run` and `ry R` check the script and their console checks each command, with the
 project's `ry.toml`. They print every `annotation-mismatch` and `inline-annotation` warning. In
-[strict mode](/type-checking/strict-mode) they also print every error and refuse to run code that
+[strict mode](/tutorial/fully-typed#strict-mode) they also print every error and refuse to run code that
 has one: a script exits with status 1, and the console drops the command. Other findings are left
 to `ry check`, so they never change whether R code runs.
 
@@ -549,8 +551,8 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
   or set element may have. `complex` and `raw` are left out.
 - `scalar numeric` admits a scalar `integer` or `double`, which is both bounds at once. It is what an
   endpoint of `:` infers, so `function(n) 1:n` is `<T: scalar numeric> fn(n: T) -> double[]`.
-- `item` admits what an [Array](#arrays) can hold: a scalar `logical`, `integer`, `double` or
-  `character`, or a ry value. `as.Array : <T: item> fn(x: list[T]) -> Array<T>` uses it.
+- `item` admits what a [`List`](#lists) can hold: a number, a `Bool`, a `Str`, or another ry value.
+  `List.from_r` uses it to type a `list[T]` argument.
 
 Any other constraint name is an annotation error, and the error lists the ones that exist. An
 argument whose type violates a constraint is a type error at the call. A union satisfies a
@@ -718,7 +720,7 @@ the nominal identity.
 
 An *opaque* nominal type has no representation to project. The standard-library stubs declare
 `factor`, `connection`, `Date`, and other types the grammar cannot describe structurally as a bare
-`@type NAME` (see [stubs](/type-checking/unknown#package-stubs)). For these types:
+`@type NAME` (see [stubs](/development/authoring-stubs)). For these types:
 
 - `$`, `[`, and `[[` are accepted and give `Unknown`, because the R objects behind these classes
   commonly support access that depends on values.
@@ -836,7 +838,7 @@ the value with the member type you intend.
 ## Records, tuples and tags
 
 Records, tuples and tags are ry's own values, not R lists. The user guide is
-[Records and tags](/type-checking/records-and-tags/); this section is their typing contract. They are
+[Records and tags](/tutorial/runtime#records-tags-and-match); this section is their typing contract. They are
 inline syntax, so with `[check] inline-annotations = false` each literal, tag or `match` is reported
 as a `ry-syntax` warning. Literals are still typed then, but a `match` gets no coverage check. Their types may be written in `#:` comments
 either way.
@@ -913,6 +915,24 @@ this section needs the value's shape, the nominal value projects to its represen
 - A nominal value whose representation is a record, tuple or tag is still a ry value when it
   [crosses into R](#crossing-into-r).
 
+### Record update
+
+`(..point, y = 3.5)` is a copy of the record `point` with the field `y` replaced. It has `point`'s
+type, so every replaced field must exist and keep its type:
+
+```r
+p <- (x = 1, y = 2)
+q <- (..p, z = 3)
+```
+
+```text ry check typing
+type-mismatch
+
+  x field `z` does not exist in `Record{x: double, y: double}`
+```
+
+Only a record can be updated this way, and `$<-` is the statement form of the same change.
+
 ### `match`
 
 `match (EXPR) { ARMS }` is a `match` expression only when the `{` is on the line of the closing `)`,
@@ -957,6 +977,44 @@ A guarded arm never counts toward coverage, because its guard can be false. A `m
 case is a `non-exhaustive-match` error naming up to three missing cases as patterns, and an arm that
 the arms above it already cover is an `unreachable-pattern` warning.
 
+### List and `as` patterns
+
+`match` takes two more pattern forms. A list pattern matches a `List` by its length and items:
+`[]` matches the empty list, `[a, b]` a list of exactly two items, and `[first, ..rest]` a list of at
+least one item, binding the remaining items to `rest` as a list. `[.., last]` matches from the end.
+`p as name` matches what `p` matches and binds the whole value to `name`:
+
+```r ry run runtime=ry strict
+describe <- function(xs: List<I64>) -> Str match (xs) {
+  [] => "empty",
+  [only] => f"just {only}",
+  [first, ..rest] as all => f"{List.len(all)} items, starting with {first}"
+}
+describe([])
+#> [1] "empty"
+describe([1i64, 2i64, 3i64])
+#> [1] "3 items, starting with 1"
+```
+
+### Propagating an error with `try`
+
+`try f(x)`, where `f(x)` returns a result such as `:Ok(value) | :Err(error)`, is the `value` of an
+`:Ok`. On an `:Err` the enclosing function returns that `:Err` at once, and the function's result
+type gains its error:
+
+```r
+parse_both <- function(a: Str, b: Str) {
+  x <- try Str.to_i64(a)
+  y <- try Str.to_i64(b)
+  :Ok(x + y)
+}
+```
+
+`parse_both` types as `fn(a: Str, b: Str) -> :Err(:InvalidNumStr) | :Ok(I64)`. `try` applies to a
+name or call written directly after it. `try (expr)` and `try` before anything else keep R's
+meaning, a call of R's `try()`, so no R code changes meaning. A `try` outside a function, or on a
+value that is not a result, is a `type-mismatch`.
+
 ### Crossing into R
 
 R functions and C code do not know these values. `as.list()` converts a record, tuple or tag to a
@@ -969,78 +1027,182 @@ exceptions are the functions the runtime lets them through: those that understan
 `lapply`, `do.call`). A value whose type only sometimes is a record, tuple or tag, such as
 `Record{x: double} | NULL`, is not reported, because it may be R data when the code runs.
 
-## Arrays
+## Numbers, `Bool` and `Str`
 
-An Array is ry's strict typed vector. The user guide is [Arrays](/type-checking/arrays/); this
-section is its typing contract. The `[...]` literal is inline syntax, so with
+ry has its own scalar types, none of which holds `NA`. They are the types typed ry is written in,
+and an R value reaches them only through an explicit conversion (see
+[Crossing between R and ry scalars](#crossing-between-r-and-ry-scalars)).
+
+### Number types
+
+| Type | Values |
+| --- | --- |
+| `I64` | a 64-bit signed integer, every bit pattern a value |
+| `F64` | an IEEE 754 double, including `NaN` and the infinities |
+
+An `F64` is stored as R's `double`, so an `F64` fits `double` and is passed to R code as is. An
+`I64` does not share R's `integer`, because R reads one 32-bit pattern as `NA` and overflows to `NA`
+with a warning: `-2147483648i64` is an ordinary `I64`, and overflow is an error.
+
+The constraint `number` admits both types.
+
+### Number literals
+
+A suffix names a literal's type exactly: `5i64` or `1.5f64`. A hex literal takes only the `i64`
+suffix (`0xFFi64`), because `f` is a hex digit. A `-` written directly before a literal is part of
+it, so `-9223372036854775808i64` is an `I64`. Any other suffix is a syntax error.
+
+An unsuffixed literal, such as `5`, `5L` or `1.5`, has R's type unless a ry number type asks for it.
+A ry type asks in three places:
+
+- **An expected type.** A typed parameter, an annotated variable, a function's declared result, a
+  list item or a record field whose type is known.
+- **The other operand.** In arithmetic or a comparison with an operand of a ry number type, the
+  literal takes that type, so `n + 1` with `n: I64` is an `I64`.
+- **A later use.** `total <- 0` gives `total` a literal type that its first use decides. In
+  `for (x in xs) total <- total + x` with `xs: List<F64>`, `total` is an `F64`. A variable that
+  nothing decides keeps R's type.
+
+A literal the type cannot hold exactly, such as `2.5` as an `I64`, is a
+`type-mismatch` at the literal:
+
+```r
+m <- 5i64
+m * 2.5
+```
+
+```text ry check typing
+type-mismatch
+
+  x this literal does not fit `I64`, which cannot hold its value exactly
+```
+
+When the code runs, an unsuffixed literal is the R value it always was, and the operator or
+binding that the checker typed converts it. An annotated binding such as `n: I64 <- 5` binds the
+`I64`, and `xs: List<I64> <- [1, 2]` converts each item. A conversion that cannot be exact is an
+error, never a rounded value.
+
+### Number arithmetic
+
+Both operands of an arithmetic operator or comparison have the same number type, and the two types
+are never converted into each other: `1i64 + 1.5f64` is a `type-mismatch` that tells you to convert
+one side.
+
+| Operator | `I64` | `F64` |
+| --- | --- | --- |
+| `+ - *`, unary `-` | the same type; overflow is an error | the same type |
+| `/` | a `type-mismatch` that suggests `%/%` or `Num.to_f64()` | the same type |
+| `%/%`, `%%` | floored division and modulo, as in R | as in R |
+| `^` | the same type | the same type |
+| `== != < > <= >=` | `Bool` | `Bool` |
+
+Integer division by zero is an error. `Num.div_trunc` and `Num.rem` give truncating division, and
+`Num.add_checked`, `Num.add_wrap` and `Num.add_saturated` (with their `sub` and `mul` siblings) give
+the other overflow behaviors. `Num.to_i64` and `Num.to_f64` convert between the two types.
+`Num.to_i64` is an error when the value is not whole or does not fit, and `Num.to_i64_checked`
+returns `:Err(:OutOfBounds)` instead.
+
+### `Bool` and `Str`
+
+`Bool` is `TRUE` or `FALSE`, never `NA`. A comparison of ry numbers or strings is a `Bool`, as is
+`!`, `&&`, `||`, `&` or `|` on `Bool` operands. `if` and `while` take a `Bool` or an R `logical`.
+
+`Str` is an immutable UTF-8 string, never `NA`. A string literal becomes a `Str` where one is
+expected, and the `Str` module holds the functions that work on strings. A `Bool` is stored as R's
+`logical` and a `Str` as R's `character`, so both pass to R code as they are.
+
+`f"..."` builds a `Str` from text and interpolated expressions, each written in braces:
+
+```r ry run runtime=ry strict
+name <- "ry"
+n <- 5i64
+f"hello {name}, {n + 1i64}"
+#> [1] "hello ry, 6"
+```
+
+Doubled braces, `{{` and `}}`, stand for literal braces. R reads `f"..."` as a syntax error, so no R
+code changes meaning.
+
+### Crossing between R and ry scalars
+
+`Num.from_r` turns an R `double` into an `F64` and an R `integer` into an `I64`, and `Str.from_r`
+turns a `character` into a `Str`. Each stops with an error on `NA`, on a length other than one, and
+on attributes. `Num.to_r` goes the other way: an `I64` becomes R's `integer` when it fits in 32
+bits and a `double` otherwise.
+
+Passing an `I64` to an R parameter typed as an R number is a `type-mismatch`, and when the code
+runs, an R function that receives one stops with an error that names `Num.to_r()`. The checker does
+not yet name `Num.to_r()` in its message, and it does not flag an `I64` passed to an untyped base
+function such as `sqrt()`.
+
+## Lists
+
+A `List` is ry's typed sequence, and this section
+is its typing contract. The `[...]` literal is inline syntax, so with
 `[check] inline-annotations = false` each literal is a `ry-syntax` warning, and it is still typed.
-The type `Array<T>` may be written in `#:` comments either way.
+The type `List<T>` may be written in `#:` comments either way.
 
-### Array literals
+### List literals
 
-`[a, b, c]` types as `Array<T>`, where `T` is the type of the first item. Every other item must have
-exactly that type: items are never converted into each other, so `[1L, 2.5]` is a `type-mismatch` at
-`2.5`. The one exception is tags, whose types join into a tag union, so `[:Ok(1), :Err("no")]` is an
-`Array<:Ok(double) | :Err(character)>`.
+`[a, b, c]` types as `List<T>`, where `T` is the type of the first item. Every other item must have
+exactly that type: items are never converted into each other, so `[1, "a"]` is a `type-mismatch` at
+`"a"`. An unsuffixed number literal is decided by the list it is in, as described under
+[number literals](#number-literals): `[1, 2]` is a `List<I64>`, `[1.5, 2]` is a `List<F64>`, and
+`[1i64, 2]` is a `List<I64>`. A literal the item type cannot hold exactly, such as `2.5` in
+`[1, 2.5]`, is a `type-mismatch`. Tags are the one exception to exact item types: their types join
+into a tag union, so `[:Ok(1), :Err("no")]` is a list of `:Ok(double) | :Err(character)`.
 
-An item is a scalar-like `logical`, `integer`, `double` or `character`, or a ry value: a record,
-tuple, tag, dictionary, set or another Array. Any other item type is a `type-mismatch`, and so is the
-literal `NA`. A type does not say whether a value is missing, so an item computed by R code may still
-be `NA`, and the constructor stops with an error on it when the code runs. It also checks that atomic
-items share one type; that ry values share one type is checked only by the checker. In an annotation, `Array<T>` with any other `T`,
-such as `Array<double[]>` or `Array<double | NULL>`, is an `annotation` error.
+An item is a number, a `Bool`, a `Str`, or another ry value: a record, tuple, tag, `Dict`, `Set` or
+list. Any other item type is a `type-mismatch`, and so is the literal `NA`. A type does not say
+whether a value is missing, so an item computed by R code may still be `NA`, and the constructor
+stops with an error on it when the code runs. In an annotation, `List<T>` with any other `T`, such
+as `List<double[]>`, is an `annotation` error.
 
-The empty literal `[]` takes its item type from an annotation, as in `#: Array<character>`, or else
-is `Array<Unknown>` until a use such as `List.append(xs, 1L)` gives it one.
+The empty literal `[]` takes its item type from an annotation, as in `#: List<Str>`, or from a use
+such as `List.append(xs, 1)`.
 
-### Arrays and R vectors
+### Lists and R vectors
 
-- `Array<T>` fits `T[]` when `T` is atomic, and `list[T]` when `T` is a ry value, so an Array passes
-  to any R function that takes a vector or a list.
-- A plain R vector never fits `Array<T>`. `as.Array(x)` converts one: a `T[]` gives `Array<T>`, and a
-  `list[T]` gives `Array<T>` when `T` is a ry value (the `item` constraint).
-- At run time `as.Array()` stops with an error on an `NA` or a classed object, and drops names.
-  Setting any attribute on an Array turns it into a plain R vector.
+- `List<F64>`, `List<Bool>` and `List<Str>` are stored as R `double`, `logical` and `character`
+  vectors, and they fit `double[]`, `logical[]` and `character[]`. A list of ry values fits
+  `list[T]`. Other lists, such as `List<I64>`, cross to R only through `List.to_r()`.
+- A plain R vector never fits `List<T>`. `List.from_r(x)` converts one: a `double[]` gives
+  `List<F64>`, a `character[]` gives `List<Str>`, and a `list[T]` gives `List<T>` when `T` is a ry
+  value (the `item` constraint).
+- At run time `List.from_r()` stops with an error on an `NA` or an attribute such as a class, and it
+  drops names. Setting an attribute on a list, or assigning `NA` into it from R code, turns it into a
+  plain R vector.
 
-### Array operators
+### List operators
 
-An elementwise operator takes two Arrays with the same item type, or an Array and a scalar-like value
-of the item type. `integer` and `double` never mix, and an R vector operand is a `type-mismatch`
-whose message suggests `as.Array()`.
+An elementwise operator takes two lists with the same item type, or a list and a single value of the
+item type. Number types never mix, and an R vector operand is a `type-mismatch` whose message
+suggests `List.from_r()`.
 
 | Operator | Items | Result |
 | --- | --- | --- |
-| `+ - * %% %/%`, unary `-` | `integer` or `double` | `Array<T>` |
-| `/ ^` | `integer` or `double` | `Array<double>` |
-| `== != < > <= >=` | atomic | `Array<logical>` |
-| `& \| !` | `logical` | `Array<logical>` |
+| `+ - * %% %/% ^`, unary `-` | numbers | `List<T>` |
+| `/` | `F64` | `List<T>` |
+| `== != < > <= >=` | numbers and `Str` for ordering, any item for equality | `List<Bool>` |
+| `& \| !` | `Bool` | `List<Bool>` |
 
-When the code runs, two Arrays of different lengths are an error rather than recycled, and a result
-that holds `NA` or `NaN`, such as an integer overflow, is an error. An operator on Arrays of ry
-values is an error, and so are two Arrays of different item types. An operand that is not an Array
-and not a single item of the item type, such as an R vector, `NA` or an `integer` beside an
-`Array<double>`, is a `type-mismatch` in checked code; when R code does it, as base `str()` does
-with `ob - signif(ob, digits)`, R's operator runs and the result is a plain R vector, as for a
-replacement below.
+`/` on `I64` items is a `type-mismatch`, as it is on a single `I64`, and it decides undecided
+literal items as `F64`, so `[1, 2] / 2` is a `List<F64>`. When the code runs, two lists of different
+lengths are an error rather than recycled.
 
-### Array indexing
+### List indexing
 
-- `xs[[i]]` takes one `integer` or `double` position and types as `T`.
-- `xs[i]` takes positions, a `logical` mask, or no index, and types as `Array<T>`.
-- A `character` index, or more than one index, is a `type-mismatch`, because an Array has one
+- `xs[[i]]` takes one position and types as `T`.
+- `xs[i]` takes positions, a `Bool` mask, or no index, and types as `List<T>`.
+- A `character` index, or more than one index, is a `type-mismatch`, because a list has one
   dimension and no names.
-- When the code runs, positions follow R where R gives no `NA`: a negative position leaves an item
-  out and a zero selects nothing. A position past the end, an `NA` position, or a mask of a different
-  length is an error, never `NA`.
-- A replacement through `[<-` or `[[<-` must be an item of the item type, or for `[<-` an Array of
-  them with one item per position, which is never recycled. When the code runs, a position past the
-  end or an Array of the wrong length is an error. A replacement that is not an item of the item
-  type, such as `NA` or an R vector, is a `type-mismatch` in checked code; when R code does it, as
-  base `ifelse()` does with its `test` argument, the result is the plain R vector R would build.
+- When the code runs, a negative position leaves an item out and a zero selects nothing, as in R. A
+  position past the end, an `NA` position, or a mask of a different length is an error, never `NA`.
+- A replacement through `[<-` or `[[<-` must be an item of the item type, or for `[<-` a list of
+  them with one item per position, which is never recycled.
 
-`for (x in xs)` binds `x` as `T`. Every `List` function of the
-[standard library](/reference/standard-library/) that takes a collection has an Array overload, so
-`List.map` on an `Array<T>` returns an Array and `List.len` returns its length.
+`for (x in xs)` binds `x` as `T`. The `List` module of the [standard library](/reference/std/list/)
+holds the functions that work on lists.
 
 ## Function types
 
@@ -1301,7 +1463,7 @@ parameters are already bound when the literal's body is inferred:
 ```r
 xs <- [1, 2]
 pairs <- List.map(xs, \(x) c(x, x))
-# error: this function must return an Array item (...), but it returns `double[]`
+# error: this function must return a list item (...), but it returns `double[]`
 ```
 
 `List.map` expects `fn(T) -> U` with `T` bound to `double` by `xs`, so `x` is `double` inside the
@@ -2179,7 +2341,7 @@ Arguments are checked for compatibility, not exact equality:
 - The promotion order from [vector coercions](#vector-coercions) applies, so `mean(1L)`,
   `sd(c(1L, 2L))`, and `sum(x > threshold)` are not errors.
 - A type parameter that several parameters share, directly as `T` or as the items of `list[T]` or
-  `Array<T>`, takes the join of what the arguments pass, whatever their order. Tags join to their
+  `List<T>`, takes the join of what the arguments pass, whatever their order. Tags join to their
   union, so with `light: :Red | :Green`, `Bool.is_eq(:Red, light)` checks just as
   `Bool.is_eq(light, :Red)` does, and `pick(:Red, :Green)` on `<T> fn(a: T, b: T) -> T` is
   `:Red | :Green`. Numbers join in R's promotion order, so `Num.add(1L, 2.5)` and
@@ -2258,7 +2420,7 @@ silent `Unknown`, and its reads are not reported.
 ### Overload sets
 
 A standard-library stub may declare several signatures for one name, forming an ordered overload
-set ([authoring stubs](/contributing/authoring-stubs#overloads-and-generics) describes how). A call
+set ([authoring stubs](/development/authoring-stubs#overloads-and-generics) describes how). A call
 to such a name is resolved separately at each call site:
 
 - Candidates are tried in declaration order, and the call commits to the first one whose parameters
@@ -2844,7 +3006,7 @@ scoping.
 
 - A namespace is *known* when stubs declare it. The shipped standard-library packages are known, and
   so is any namespace a project stub file declares: `stubs/dplyr.Rtypes` declares the namespace
-  `dplyr` (see [stubs](/type-checking/unknown#package-stubs)).
+  `dplyr` (see [stubs](/development/authoring-stubs)).
 - The project's own package is always known. Qualifying a name with the package you are editing, as
   `withr::defer()` does inside the package `withr`, reads the definition the checker already holds,
   and wins over a stub namespace of the same name. It reads the namespace only, so in a test file or
@@ -2886,7 +3048,7 @@ the whole package. Without them, analysis behaves as though both were empty.
   read in the package is tolerated instead of guessed at.
 - A `library(pkg)` or `require(pkg)` call anywhere in the project is the script-world equivalent of
   `import(pkg)`, and follows the same rule. Because R's search path is project-wide, so is the
-  tolerance. An [export manifest](/contributing/authoring-stubs#export-manifests) is enough to lift
+  tolerance. An [export manifest](/development/authoring-stubs#export-manifests) is enough to lift
   it; types are not required. The tidyverse, `knitr`, `rlang`, `glue`, `jsonlite`, `R6`, and the rest
   of the shipped manifests therefore keep unresolved-name detection on. A package nothing describes
   switches it off, and a two-line `stubs/<pkg>.Rtypes` of your own switches it back on.
@@ -2912,7 +3074,7 @@ the whole package. Without them, analysis behaves as though both were empty.
 
 The shipped stubs pair each namespace with a vendored *export manifest*: the complete list of names
 the namespace really exports, generated from a live R session (see
-[authoring stubs](/contributing/authoring-stubs#export-manifests)). Every manifest name is a known
+[authoring stubs](/development/authoring-stubs#export-manifests)). Every manifest name is a known
 global:
 
 - A bare or qualified read of a manifest name always resolves, with no unresolved or not-exported
@@ -3311,18 +3473,19 @@ sales <- DataFrame(team = ["a", "b"], amount = [1, 2])   # DataFrame{team: chara
 An unnamed computed argument, a repeated name, or `...` leaves the columns unknown, and so does a
 project's own function named `DataFrame`, which shadows the builtin.
 
-An `Array<T>` argument is a `T[]` column: the frame stores the column as a plain vector. Reading a
-column back, as `sales$amount` or `sales[["amount"]]`, gives that plain vector, typed `T[]`, even
-when no step could have put an `NA` into it. `as.Array(sales$amount)` is the checked way back to an
-`Array<T>`, and it stops with an error on an `NA`. A read never gives an Array, because an Array
-changes how R arithmetic on it behaves: two Arrays are never recycled and never mix `integer` with
-`double`, so `sales$units * sales$price` would stop with an error. Whether a column holds an `NA`
-depends on the data, such as a left join's unmatched rows, so a read that gave an Array only when
+A `List<T>` argument is a column of the R vector type `T` is stored as (`List<F64>` is a `double[]`
+column): the frame stores the column as a plain vector. Reading a column back, as `sales$amount` or
+`sales[["amount"]]`, gives that plain vector, even when no step could have put an `NA` into it.
+`List.from_r(sales$amount)` is the checked way back to a `List`, and it stops with an error on an
+`NA`. A read never gives a `List`, because a `List` changes how arithmetic on it behaves: two lists
+are never recycled and never mix item types, so `sales$units * sales$price` would stop with an
+error. Whether a column holds an `NA`
+depends on the data, such as a left join's unmatched rows, so a read that gave a `List` only when
 the column had none would make the same code fail or pass depending on its input.
 
 #### Verbs
 
-Each verb of the [DataFrame API](/guides/dataframes) types as a new column list, computed from the
+Each verb of the [DataFrame API](/reference/dataframes) types as a new column list, computed from the
 syntax of its arguments. A string argument names a column, and any other argument is an
 expression built from `col("x")`:
 
@@ -3858,7 +4021,7 @@ exception, because the fallback marks a call the declarations could not describe
 
 Strict mode also reports each read that the
 [attached-package tolerance](#package-imports-namespace-and-description) silenced, and points at the
-[stub](/type-checking/unknown#package-stubs) that would make it checkable. Without that, a clean run after
+[stub](/development/authoring-stubs) that would make it checkable. Without that, a clean run after
 `library(unknownpkg)` would look the same as a run that checked nothing.
 
 ### Unresolved references escalate to errors
@@ -4060,3 +4223,43 @@ not read.
 - A checked annotation on such a broken definition binds its declared type without checking it, so
   the definition keeps its contract for callers until the value parses again, and is then checked
   against the annotation as usual.
+
+## Limitations
+
+Most gaps are silent, because a value the checker cannot type is `Unknown` and its checks are
+skipped. [Strict mode](#strict-mode) reports most of the places they occur.
+
+Not checked:
+
+- **Base data frame columns.** Everything read out of a `data.frame` is `Unknown`, so `df$whatever`
+  passes even if the column does not exist. A [`DataFrame`](#dataframes) types its columns.
+- **Matrix dimensions.** Matrix arithmetic is checked, but a non-conformable product is not.
+  Indexing with several indices, as in `m[i, j]`, or with `drop = FALSE` gives `Unknown`.
+- **S4 and R6 objects** are `Unknown`, and calls to an S3 generic that dispatches through
+  `UseMethod()` return `Any`. Operator methods such as `+.Date` and methods called directly are
+  checked.
+- **Packages without a stub.** Their names are `Unknown`, and attaching one switches off
+  unresolved-name reports for the whole project.
+- **`$` on an atomic vector in a package that defines a `$` method**, because a classed vector may
+  carry that method.
+- **Some paths a test elsewhere in the body rules out.** A list member beside a number in
+  arithmetic, a list or `NULL` beside an operand of unknown type, the `NULL` of a computed list
+  field used as a `:` endpoint, and the logical member in the false branch of `isTRUE()` or
+  `isFALSE()` are not reported, because correct R usually guards them in ways the checker cannot
+  follow.
+- **A placeholder local**, a variable whose only visible value is `NULL` or a bare `NA`, filled
+  later by `assign()` or `<<-`, where it is passed as an argument or tested as a condition.
+- **A project's own `%op%` operators**, because one may quote its right operand, as magrittr's `%>%`
+  does.
+
+Known bugs, where correct code is reported:
+
+- **A bare `NA` under a declared return type.** A function declared `-> character` that returns
+  `NA` on one path is reported, because `NA` is `logical`. Return `NA_character_` instead.
+- **A trailing comma for rlang's dynamic dots.** dplyr's verbs accept `mutate(d, y = 1, )`, but the
+  trailing comma is reported as it is for `c(1, 2, )`.
+- **Package-qualified calls to a package ry does not know.** `pkg::fun()` reports an unknown
+  namespace when ry has no stub or export list for `pkg`, even if a file calls `library(pkg)`.
+- **A generic function passed inline as an argument.** `lapply(xs, function<T>(v: T) -> T v)` is
+  reported, because type parameters on a function that is not bound to a name are not
+  instantiated. Leave the function's types off, or bind it to a name first.

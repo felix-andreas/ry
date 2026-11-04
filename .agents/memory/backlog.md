@@ -22,6 +22,25 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
+## Open: JIT register type for native numbers
+
+- Top performance debt. The JIT's `Ty` has `Int(i32)`, `Dbl`, `Lgl`, `Num`, the R vectors, `List` and `Arr`, but no register type for ry's own numbers. `I64` (which `List.range`, `List.len` and loop counters produce) is a length-1 `I64SXP` vector (`crates/interp/src/numbers.rs`), so typed loops run through the interpreter and allocate per operation.
+- Effect: typed benchmarks rewritten in ry types run 10 to 100 times slower than the earlier typed versions that used R `integer` and `double` (`tools/bench/why/results.json`).
+- Fix: an unboxed `I64` register type in the JIT with overflow-checked arithmetic that reads `List<I64>` buffers directly, and `for` over `List.range` lowered to a counted loop.
+
+## Open: the typed core
+
+- **Records, tags, `Result` and `Dict` results.** `validate` and `orders` refuse at `.ry_record` and `Result.with_default`, so they run on the scalar natives in `crates/jit/src/native.rs`. The design's pools (`typed-runtime.md`, "Representations") are not built.
+- **Default arguments and named `c()`.** `drawdown` never reaches the typed core.
+- **Elementwise fusion.** `vector_arith` allocates one 8 MB buffer per vector operation that does not die in place; fusing a chain of `VectorArith` whose intermediates die at once into one loop is the fix.
+- **Arguments that are unforced promises.** `typed::call` takes only values readable without forcing (constants, variables, forced promises), so `f(c(1, 2))` from untyped code takes the native path. Hooking the call after the interpreter forces the arguments would cover it.
+- **Code files and `ry build --exe`.** Code is compiled in memory at the first call; the install-time code file, mapped shared code and executables in `typed-runtime.md` are not built.
+- **`ToDbl` of a loop counter keeps its `NA` select**, because the backend does not track which locals are known not to be `NA`.
+- **Call-time speculation checks walk every lookup chain.** `still_resolves` re-walks each speculation's environment chain on every call; a per-binding version stamp would make the check one compare.
+- **Compiled closures stay rooted for the session.** Up to `MAX_COMPILED` closures are kept alive by their code; dropping the code with the closure needs a finalizer hook in the heap.
+- **Mutual recursion caches a refusal.** A typed closure that calls one still being compiled refuses, and the refusal is remembered, so mutually recursive typed functions always take the native path.
+- **Names a branch creates.** A name set in only one branch, or with different types in the two, is out of scope after the `if`, so reading it refuses; a loop body's names are out of scope after the loop. Local functions defined or rebound in a branch or loop refuse.
+
 ## Open: two Renviron readers
 
 - ry has two Renviron readers, the interpreter's startup one in `crates/interp/src/session.rs` and `rcmd::command_environment`. The interpreter's lets an already-set variable win, which differs from GNU R's `process_Renviron` (a file line always overrides). Merge them into one reader with GNU R's semantics.
@@ -37,7 +56,7 @@ The quality bar is four things.
 - **Start-up image follow-ups.** An empty `ry run` takes about 47 ms from the image (`decisions.md`, "The start-up image is written in process"). Levers: profile the load (the 6 MB bulk load and checksum against the 27 to 31 ms floor of `R_DEFAULT_PACKAGES=NULL`); let interactive consoles and sessions with profiles load the image and run the profiles after it (they start slow today); let `ry_start_session` embedders and `ry load` use it.
 - **Windows linear algebra without GNU R.** No system LAPACK exists there, so `solve` and friends need `R_HOME` naming GNU R for its `Rblas.dll`/`Rlapack.dll`. Build R's reference BLAS and LAPACK (`src/extra/blas`, `src/modules/lapack` in the tarball) into the base tree on Windows; needs a Fortran compiler in the release workflow.
 - **The base build has run on Linux only.** `just package` runs `just base-r` on each release runner; macOS and Windows are unverified until the release workflow runs.
-- **CI must run GNU R 4.6.2.** The oracle's expectations are GNU R 4.6.2 output (`contributing/corpus-and-oracle.md`, "The reference GNU R"); `.github/pending/ci.yml` installs 4.6.2 and waits for `just accept`. Without GNU R, `oracle compare --engine ry` and `--engine ry-jit` pass 251 of 251 and skip the 12 cases whose packages ry's bundled library lacks (data.table, bit64, rlang, knitr, rmarkdown, ragg, lattice). Those 12 expectations print what the packages' CRAN releases printed when recorded, so a package release can change them.
+- **CI must run GNU R 4.6.2.** The oracle's expectations are GNU R 4.6.2 output (`development/corpus-and-oracle.md`, "The reference GNU R"); `.github/pending/ci.yml` installs 4.6.2 and waits for `just accept`. Without GNU R, `oracle compare --engine ry` and `--engine ry-jit` pass 251 of 251 and skip the 12 cases whose packages ry's bundled library lacks (data.table, bit64, rlang, knitr, rmarkdown, ragg, lattice). Those 12 expectations print what the packages' CRAN releases printed when recorded, so a package release can change them.
 - **Nix.** `flake.nix` fetches the tarball as a fixed-output derivation and builds the base in `postInstall`; `nix build` has not been run yet.
 - **Old base trees stay in the cache after an upgrade**, as runtimes do (see below).
 
@@ -54,29 +73,38 @@ The quality bar is four things.
 
 The methods package's core is moving into Rust behind hash-guarded prologues (`decisions.md`, "The
 methods package's core runs natively behind hash-guarded prologues"). `new()`, the default
-`initialize()`, `validObject()`, `is()` and `extends()` are native when nothing observable would
-differ. Remaining, in the order the cold first-`new()` profile of `target/s4heavy` ranks them:
+`initialize()`, `validObject()`, `is()`, `extends()`, `setGeneric()`, `setMethod()` and `setClass()`
+are native when nothing observable would differ. On `target/s4plain` (2,892 definitions, no
+imports beyond R6) a cold first `new()` costs about 0.85 s (running the definitions 530 ms,
+`cacheMetaData` 125 ms, the cache save 190 ms) and a warm one about 62 ms; the goal is under 100 ms
+cold without the S4 cache, which is deleted once that holds (`decisions.md`). Consider a native
+class table with dense ids and a bitset extends relation instead of porting function by function.
+A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
+4.5 µs per call. Remaining, largest first:
 
-- `setMethod`: `asMethodDefinition` and `new("MethodDefinition")`, `matchSignature`,
-  `isSealedMethod` (which calls `getMethod`), `.cacheMethodInTable`, `.addToMetaTable`, and
-  `.resetInheritedMethods`, which rescans the whole table on every call and so makes a package's
-  method definitions quadratic.
-- `setClass`, `setClassUnion`, `setIs` and `completeClassDefinition`; then `setGeneric`, `setAs`
-  and `setValidity`.
-- `cacheMetaData` and `.checkGroupSigLength` (the import cost, see "Start-up and imports are the
-  floor of a warm `ry load`" below).
+- `setClassUnion` (297 ms for 25 unions). `setIs` copies basic member classes into the methods
+  namespace (`.findOrCopyClass`, `.assignOverBinding`), `completeExtends` runs a nested `setIs` for
+  every subclass of a member, and `.recacheSubclasses` follows. Start with unions whose members
+  are all local classes.
+- The `setClass` shapes that still bail (`RY_TRACE_METHODS_BAILS=1`): a classRepresentation passed
+  in by `setClassUnion`, supers from another package, several `contains` with data parts, and
+  classes that are virtual for lack of slots.
+- `cacheMetaData` and `.checkGroupSigLength` (about 125 ms cold, 45 ms warm, and the import cost, see "Start-up and
+  imports are the floor of a warm `ry load`" below).
+- The S4 cache save (about 190 ms uncompressed, mostly `makeLazyLoadDB` serializing).
 - `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every
   data part, so `new("MethodDefinition", f)` costs about 50 µs (GNU R about 340 µs).
   `.mergeAttrs` decides the attribute order, so a native version must reproduce it exactly.
 - `as()` and the coerce methods it caches in `coerce`'s `.MTable`. Until it is native, the default
   `initialize` bails whenever a slot value's class differs from the slot class and extends it (a
-  union member, a subclass), which costs about 200 µs per `new()` (`new("Holder", value = "a",
-  point = q, n = 2L)` in the micro-benchmark below).
+  union member, a subclass), which costs about 200 µs per `new()`.
 - Inherited dispatch (`.findInheritedMethods`), `getMethod`, `selectMethod` and `existsMethod`.
-- The differential coverage: the methods package's own tests and the S4-heavy corpus (Matrix)
-  against GNU R for every function that turns native.
-- Then decide whether the S4 metadata cache survives native definitions. If it does, make it
-  incremental on reload (one changed definition today reruns the whole unit, about 6 to 10 s).
+- Two methods-package tests fail on both the native and the R path, and pass on GNU R:
+  `basicRefClass.R` (`environment(foo) <- a` with a reference object signals "replacement object
+  is not an environment") and `namesAndSlots.R` (`names(a) <- "A"` on an S4 object without a
+  `names` slot does not signal an error).
+- Matrix's `load_all` from source stops in `load()` with `readChar` on an empty file name, on both
+  paths, after its class definitions have run.
 
 Micro-benchmarks (release, per call): `new()` with three same-class slots 13.7 µs (GNU R 130 µs,
 ry before 179 µs), `validObject` 3.0 µs (GNU R 73 µs), `is(q, "Point")` 2.3 µs (GNU R 11.8 µs),
@@ -86,10 +114,10 @@ ry before 179 µs), `validObject` 3.0 µs (GNU R 73 µs), `is(q, "Point")` 2.3 �
 ## Open: collector throughput on the benchmark suites
 
 - **Measure first.** Generate the suites (`python3 tools/bench/generate.py --out .bench --lines 300000 --files 500`), install the corpus library (`just corpus`; the polars R package builds from source and takes the longest), then run `just bench-compare .bench/finbench .bench/dsbench .bench/biobench` with `RY_GC_LOG=<file>` set. The report's last block gives each runtime's `gc.time()` total and share of suite time; the log gives every pause (kind, nanoseconds, young small and large bytes, old bytes), from which pause p50 and p99 and collections per second follow. Fix the largest cost the numbers show, then check each object type's allocation path against `decisions.md`, "Data-oriented design and explicit allocators" (open audit items: "Open: data-oriented layouts and explicit allocators").
-- **Deferred reference counting for large temporaries.** The settled target for peaks below GNU R's: zero-count table, reconciled at allocation points by a shallow root scan, with tracing kept for environments, closures and promises (`decisions.md`, "Large temporaries: deferred reference counting"). Bound: subset loop 1386 to 1100 MiB, data.table loop 329 to 262 MiB.
+- **Free a closure's frame at return** (GNU R's `R_CleanupEnvir`): large vectors bound only in a returned call's frame wait for a collection, because environments are traced and enclosures are not counted. Counting enclosures would let a frame whose count is zero at return give up its bindings to the zero-count table (`decisions.md`, "Large temporaries: freed from their reference counts"). Measure first: subset, data.table and `rep` loops already peak below GNU R.
 - **A second old generation.** A minor collection promotes everything it marks, so a temporary live at one dies only in a full collection. GNU R has two old generations and collects the younger one first, which is why `R_GC_MEM_GROW=0` costs GNU R almost nothing on finbench (collector 1.56 s to 1.59 s) and ry 0.7 s to 4.8 s (66 full collections instead of 5). Aging objects through one minor collection before promotion, or an intermediate generation, is the fix to measure (`decisions.md`, "Collections run on GNU R's schedule").
 - **Builder peaks still above GNU R's by more than 10%** (fresh process per case, 2e7 doubles, peak over the inputs in MB, ry against GNU R 4.3.3): `x * 2 + 1` 305/153 (GNU R writes the result into an unshared temporary operand; ry cannot take a reference count of 0 as proof yet, because bytecode registers and JIT slots hold uncounted references, `eval::reuse_permitted`), `seq(1, n, by = 1)` 381/305, `vapply(l, function(v) v + 1, numeric(1))` over a 1e6 list 112/58, `unlist` 20/4. `resolve()` in `crates/interp/src/subset.rs` still builds a `Vec<usize>` per general subscript.
-- **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `contributing/robustness.md`).
+- **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `development/robustness.md`).
 - **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
 
 ## Open: base R kernels against GNU R
@@ -106,7 +134,7 @@ ry before 179 µs), `validObject` 3.0 µs (GNU R 73 µs), `is(q, "Point")` 2.3 �
 ## Open: the package loader
 
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
-`docs/.../guides/running.md`). Gaps, roughly in order of how often a real package hits them:
+`docs/.../tutorial/runtime.mdx`). Gaps, roughly in order of how often a real package hits them:
 
 - **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
   the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
@@ -152,7 +180,7 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 
 An adversarial review of every docs page ran each claim against the binary. The docs now state the
 behavior below truthfully, most of it under "Where correct code is reported" in
-the Limitations section of `type-checking/unknown.mdx`, so fixing an item means updating that page too.
+the Limitations section of `reference/type-system.mdx`, so fixing an item means updating that page too.
 
 False reports on correct R, worst first:
 
@@ -202,7 +230,7 @@ gives 39 errors: 25 true package bugs, 2 known limitations and 12 false reports 
 three generated benchmark packages (`tools/bench/generate.py`) report nothing. To reproduce, give
 each package a `ry.toml` with `[check]` `typing = true` (typing is off by default) and run
 `ry check --output json R` inside it. A fix also deletes its line here and, for a user-visible
-gap, in the Limitations section of `type-checking/unknown.mdx`.
+gap, in the Limitations section of `reference/type-system.mdx`.
 
 ### True bugs, left reported (25)
 
@@ -391,7 +419,7 @@ type-level function the annotation language does not have.
 ### Smaller open items
 
 - `@new` is unrestricted project-wide, so a nominal type's invariant holds only by convention. The
-  `type-checking/custom-types.md` says so conditionally ("put `@new` in one constructor"). An
+  `tutorial/fully-typed.mdx` says so conditionally ("put `@new` in one constructor"). An
   encapsulation modifier would make it a guarantee.
 - A narrowing failure on a field, or behind `&&`, produces a message byte-identical to the one for
   writing no guard at all. The docs know the fix, which is to lift the value into a local first. The
@@ -417,7 +445,7 @@ type-level function the annotation language does not have.
   typed (the `DataFrame` type is the typed alternative). A local whose
   type is a generic parameter (`total <- a + b` inside `<T> fn(a: T, ...)`) gets no inlay hint,
   because a bare `T` without its binder would mislead.
-- `contributing/design/r-runtime.md` section 8 keeps `declare(type(...))` as a third annotation
+- `development/design/r-runtime.md` section 8 keeps `declare(type(...))` as a third annotation
   spelling for code that must stay valid R, and a strip step (`ry build`) that moves inline types
   into `#:` comments. Neither exists yet; `syntax::erase_inline_annotations` is the starting point
   for the strip step.
@@ -1238,7 +1266,7 @@ which needs workflow scope, any scheduled fuzz job and its corpus cache, and an 
 
 - **Three `fuzz_iterations` harnesses ignore `FUZZ_SEED`.** `refactor_seed_mutations_keep_code_valid` (`crates/ide/tests/test_fuzz.rs`), `fuzz_the_intern_table_keeps_exactly_the_surviving_strings` (`crates/heap/tests/test_gc.rs`) and the reload fuzz (`crates/loader/tests/test_reload_fuzz.rs`) draw from one fixed generator, so `just fuzz-deep` reruns their same inputs each round. Convert each to `for_each_seed` with `SplitMix64(CONST ^ seed)`.
 
-Gaps in the simulation, fuzzing and scenario design that `contributing/robustness.md` specifies.
+Gaps in the simulation, fuzzing and scenario design that `development/robustness.md` specifies.
 
 - **Drive `oracle::fuzz::program` through `syntax::testing::Entropy`**, so a coverage-guided target can feed it bytes.
 - **The oracle's `run_command` timeout kills only the direct child** (`crates/oracle/src/oracle.rs`). A grandchild that inherited stdout or stderr keeps the drain threads blocked in `join`, so a hung subprocess tree still hangs the harness. Spawn the engine in its own process group and kill the group.
@@ -1686,7 +1714,7 @@ in which case the number is honest rather than a bug.
 A condition whose type is still undetermined is bound to `logical`, so `function(n) while (n) ...`
 infers `n: logical` and rejects a numeric caller. Fixing that properly needs a "coercible to a
 condition" constraint, which is a fourth constraint kind and therefore the documented tripwire for
-designing traits rather than accreting them. `contributing/design/open-questions.md` holds the
+designing traits rather than accreting them. `development/design/open-questions.md` holds the
 reasoning.
 
 ## Open: what the adoption reviews left
@@ -1772,7 +1800,7 @@ never required its operands to share a type, and a class that declares `+.Class`
 the tie forbids.
 
 This is the same third-constraint-kind question recorded above and in
-`contributing/design/open-questions.md`. The right fix is a "supports this operator" constraint in
+`development/design/open-questions.md`. The right fix is a "supports this operator" constraint in
 place of `Numeric`, replacing both the tie and the `declares_arithmetic` relaxation. The next stub
 corpus addition that returns a real nominal will trip it again.
 
@@ -1840,7 +1868,7 @@ correctly nullable. This is the same family as the data.frame row-type and matri
 
 Reporting that an annotation in a call's argument list is silent does not give the lambda parameter
 an annotatable position. That stays the one genuine expressiveness argument for inline type syntax,
-which `contributing/design/inline-type-syntax.md` records. The message says to lift the function to
+which `development/design/inline-type-syntax.md` records. The message says to lift the function to
 its own binding, rather than to move it up a line, which would annotate the wrong thing.
 
 ### `Unknown` is both the gradual top and the recursion fixpoint's seed
@@ -2149,7 +2177,7 @@ tagging fences `r` for Zed if that proves distant.
 
 ## Open: REPL
 
-The console ships behind `ry run` (ry's runtime) and `ry R` (GNU R), with `ry repl` kept as a hidden alias, and `contributing/design/repl.md` holds the architecture and the
+The console ships behind `ry run` (ry's runtime) and `ry R` (GNU R), with `ry repl` kept as a hidden alias, and `development/design/repl.md` holds the architecture and the
 two pty-harness requirements. R is loaded at runtime with no build-time link, so the workspace builds
 without R everywhere. The console is reedline inside the `ReadConsole` hook, with lexer
 highlighting, conservative completeness backed by R's continuation as the safety net, and SIGINT
@@ -2167,7 +2195,7 @@ pre-evaluation diagnostics on pending input; and hover on the input line. The gr
 is a fourth, and the design record describes the versioned mirror structs it needs.
 
 **Windows needs a real-machine smoke test.** The embedding is implemented and
-`contributing/design/repl.md` has the recipe, covering Rstart callbacks through `R_DefParamsEx`'s
+`development/design/repl.md` has the recipe, covering Rstart callbacks through `R_DefParamsEx`'s
 version handshake, sibling-DLL preloading, the RGui-to-LinkDLL switch, and the UserBreak plus
 deferred-interrupt pair. It is compile-verified against `x86_64-pc-windows-gnullvm`, and GNU R's `R.dll`
 now loads first by full path, because ry's own `R.dll` sits beside `ry.exe` and would otherwise
@@ -2257,7 +2285,7 @@ The end-to-end guard rests on the corpus suites.
     keep a column's codes narrow while its level count allows, and sum the checksum in
     `tools/bench/table/ry.R` per chunk rather than converting a whole column. Then run
     `report.py DIR --rows 1e8 --joins-only` and the 1e8 group-by, write the tables with
-    `--write`, and update `contributing/design/r-runtime.md` section 7, whose 1e8 join prose
+    `--write`, and update `development/design/r-runtime.md` section 7, whose 1e8 join prose
     says neither engine fits.
 - **`ry migrate data-table` checks a name's uses in the current file only** (`uses_are_safe` in
   `crates/ide/src/migrate.rs`). A top-level `sales <- fread(...)` in one file that another file
@@ -2315,7 +2343,7 @@ The end-to-end guard rests on the corpus suites.
   generic `expected ..., found ...` mismatch without naming the file or the differing column.
 - **Building a DataFrame copies every column** into the engine, where `data.table()` keeps R's
   vectors: at 1e7 rows this is most of the typed modules' gap in `make_events`, `fetch_prices`
-  and `enrol` (`contributing/design/r-runtime.md`, "Real code: the benchmark modules"). Numeric
+  and `enrol` (`development/design/r-runtime.md`, "Real code: the benchmark modules"). Numeric
   columns could share R's buffers once the collector can pin them for a Polars buffer's life.
 - **R precedence trap:** `col("a") * 2 |> Expr.alias("b")` pipes only the `2`. A lint that
   recognizes a pipe into an `Expr.` function whose left side is a literal would catch it.
@@ -2371,7 +2399,7 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: the runtime
 
-What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pressing first.
+What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pressing first.
 
 - **Inline annotation checks have known holes** (typing reference, "Inline annotations at run time").
   A promise that escapes its frame unforced (returned inside a closure, or stored) is never checked,
@@ -2387,7 +2415,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **R 4.4 and 4.5 are supported by reading GNU R's sources, not by running them.** Install both and
   run the oracle and the interp and ry suites under each (`ORACLE_R`, `R_HOME`). Under 4.6.1 seven
   oracle cases differ, mostly for build reasons (OpenBLAS digits, glibc `mktime` state, a NaN
-  payload), plus one that calls the removed `C_pKS2`; `contributing/corpus-and-oracle.md` lists them.
+  payload), plus one that calls the removed `C_pKS2`; `development/corpus-and-oracle.md` lists them.
 - **ry's console evaluates a chunk only once all of it parses** (`interp::session::run_console`): a
   `-f` script that ends inside an unfinished expression runs none of its complete expressions until
   the user finishes it, where GNU R runs each expression as soon as it is complete.
