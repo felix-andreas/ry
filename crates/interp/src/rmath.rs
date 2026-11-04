@@ -1166,6 +1166,42 @@ fn bd0(x: f64, np: f64) -> f64 {
     if !finite(x) || !finite(np) || np == 0.0 {
         return f64::NAN;
     }
+    // R 4.5.1 halves the series' terms and doubles the sum at the end, and splits the log of
+    // `x/np`, so that extreme arguments neither overflow nor underflow.
+    if crate::system::r_at_least_release(4, 5, 1) {
+        if (x - np).abs() < 0.1 * (x + np) {
+            let difference = x - np;
+            let mut v = difference / (x + np);
+            if difference != 0.0 && v == 0.0 {
+                let (x_quarter, np_quarter) = (x / 4.0, np / 4.0);
+                v = (x_quarter - np_quarter) / (x_quarter + np_quarter);
+            }
+            let mut s = difference / 2.0 * v;
+            if (s * 2.0).abs() < DBL_MIN {
+                return s * 2.0;
+            }
+            let mut ej = x * v;
+            v *= v;
+            for j in 1..1000 {
+                ej *= v;
+                let previous = s;
+                s += ej / ((j << 1) + 1) as f64;
+                if s == previous {
+                    return s * 2.0;
+                }
+            }
+        }
+        let log_ratio = if finite(x / np) {
+            (x / np).ln()
+        } else {
+            x.ln() - np.ln()
+        };
+        return if x > np {
+            x * (log_ratio - 1.0) + np
+        } else {
+            x * log_ratio + np - x
+        };
+    }
     if (x - np).abs() < 0.1 * (x + np) {
         let mut v = (x - np) / (x + np);
         let mut s = (x - np) * v;
@@ -1757,6 +1793,13 @@ pub fn pnorm_both(x: f64, tail: c_int, log: bool) -> (f64, f64) {
         0.00378239633202758244,
         7.29751555083966205e-5,
     ];
+    // From R 4.5 on, the tail formula runs on into the subnormal range, out to
+    // `qnorm(log(2^-1074), log.p = TRUE)`, before a probability is rounded to 0 or 1.
+    let denormal_edge = if crate::system::r_at_least(4, 5) {
+        38.4674
+    } else {
+        37.5193
+    };
     if x.is_nan() {
         return (x, x);
     }
@@ -1829,8 +1872,8 @@ pub fn pnorm_both(x: f64, tail: c_int, log: bool) -> (f64, f64) {
         tails_from(temp, y, &mut cumulative, &mut complementary);
         swap_tail(&mut cumulative, &mut complementary);
     } else if (log && y < 1e170)
-        || (lower && -37.5193 < x && x < 8.2924)
-        || (upper && -8.2924 < x && x < 37.5193)
+        || (lower && -denormal_edge < x && x < 8.2924)
+        || (upper && -8.2924 < x && x < denormal_edge)
     {
         let xsq = 1.0 / (x * x);
         let mut xnum = P[5] * xsq;
@@ -5262,9 +5305,19 @@ pub fn dbinom_raw(x: f64, n: f64, p: f64, q: f64, log: bool) -> f64 {
     if q == 0.0 {
         return if x == n { d1(log) } else { d0(log) };
     }
+    // From R 4.4 on, the end points are powers of the smaller of p and q, the more accurate.
+    let powers = crate::system::r_at_least(4, 4);
     if x == 0.0 {
         if n == 0.0 {
             return d1(log);
+        }
+        if powers {
+            return match (p > q, log) {
+                (true, true) => n * q.ln(),
+                (true, false) => q.powf(n),
+                (false, true) => n * (-p).ln_1p(),
+                (false, false) => pow1p(-p, n),
+            };
         }
         let lc = if p < 0.1 {
             -bd0(n, n * q) - n * p
@@ -5274,6 +5327,14 @@ pub fn dbinom_raw(x: f64, n: f64, p: f64, q: f64, log: bool) -> f64 {
         return d_exp(lc, log);
     }
     if x == n {
+        if powers {
+            return match (p > q, log) {
+                (true, true) => n * (-q).ln_1p(),
+                (true, false) => pow1p(-q, n),
+                (false, true) => n * p.ln(),
+                (false, false) => p.powf(n),
+            };
+        }
         let lc = if q < 0.1 {
             -bd0(n, n * p) - n * q
         } else {
@@ -5283,6 +5344,13 @@ pub fn dbinom_raw(x: f64, n: f64, p: f64, q: f64, log: bool) -> f64 {
     }
     if x < 0.0 || x > n {
         return d0(log);
+    }
+    let mut n = n;
+    if !finite(n) && crate::system::r_at_least_release(4, 5, 1) {
+        if finite(x) {
+            return d0(log);
+        }
+        n = f64::MAX;
     }
     let lc = stirlerr(n) - stirlerr(x) - stirlerr(n - x) - bd0(x, n * p) - bd0(n - x, n * q);
     let lf = M_LN_2PI + x.ln() + (-x / n).ln_1p();
@@ -7298,13 +7366,130 @@ fn wilcox_valid(m: f64, n: f64) -> Option<(usize, usize)> {
         return None;
     }
     let small = m.min(n);
-    if small * small * (m + n) > MAX_COUNT_CELLS {
+    let cells = if crate::system::r_at_least(4, 6) {
+        m * n / 2.0
+    } else {
+        small * small * (m + n)
+    };
+    if cells > MAX_COUNT_CELLS {
         warning(format!(
             "wilcox: samples of sizes {m} and {n} are too large"
         ));
         return None;
     }
     Some((m as usize, n as usize))
+}
+
+/// Where the Mann-Whitney counts come from: the whole table for R before 4.6, or GNU R
+/// 4.6's lazily filled half table, whose state outlives a call.
+enum WilcoxCounts {
+    Table(Rc<[f64]>),
+    Lazy(usize, usize),
+}
+
+fn wilcox_source(m: usize, n: usize) -> WilcoxCounts {
+    if crate::system::r_at_least(4, 6) {
+        WilcoxCounts::Lazy(m, n)
+    } else {
+        WilcoxCounts::Table(wilcox_counts(m, n))
+    }
+}
+
+fn wilcox_count(source: &WilcoxCounts, k: usize) -> f64 {
+    match source {
+        WilcoxCounts::Table(counts) => counts.get(k).copied().unwrap_or(0.0),
+        WilcoxCounts::Lazy(m, n) => cwilcox(k, *m, *n),
+    }
+}
+
+/// GNU R 4.6's `w`, `sigma`, `allocated_m`, `allocated_n` and `max_k` globals. The state
+/// is reused, without refilling, by any later call whose sizes fit inside the allocated
+/// ones, so a C caller that does not call `wilcox_free` between sizes reads counts left
+/// over from the earlier sizes. Results only match GNU R if that reuse is reproduced.
+struct WilcoxState {
+    w: Vec<f64>,
+    sigma: Vec<i64>,
+    allocated: (usize, usize),
+    filled: usize,
+}
+
+thread_local! {
+    static WILCOX_STATE: RefCell<WilcoxState> = const {
+        RefCell::new(WilcoxState {
+            w: Vec::new(),
+            sigma: Vec::new(),
+            allocated: (0, 0),
+            filled: 0,
+        })
+    };
+}
+
+/// Releases the lazily filled Mann-Whitney counts, as the GNU R wrappers do on exit.
+pub fn wilcox_free() {
+    WILCOX_STATE.with_borrow_mut(|state| {
+        state.w = Vec::new();
+        state.sigma = Vec::new();
+        state.allocated = (0, 0);
+        state.filled = 0;
+    });
+}
+
+/// The number of choices with Mann-Whitney statistic `k`, by Löffler's recursion
+/// `w[k] = sum(w[i] sigma[k - i]) / k`, where `sigma` sums the divisors of `k` up to `m`
+/// less those from `n + 1` to `m + n`. `filled` counts the entries of `w` computed so far.
+fn cwilcox(k: usize, m: usize, n: usize) -> f64 {
+    let total = m * n;
+    if k > total {
+        return 0.0;
+    }
+    let k = if k > total / 2 { total - k } else { k };
+    let (small, large) = (m.min(n), m.max(n));
+    if small == 0 || k == 0 {
+        return if k == 0 { 1.0 } else { 0.0 };
+    }
+    WILCOX_STATE.with_borrow_mut(|state| {
+        if state.w.is_empty() || state.allocated != (small, large) {
+            if !state.w.is_empty() && (small > state.allocated.0 || large > state.allocated.1) {
+                state.w = Vec::new();
+                state.sigma = Vec::new();
+            }
+            if state.w.is_empty() {
+                state.w = vec![0.0; small * large / 2 + 1];
+                state.sigma = vec![0; small * large / 2 + 1];
+                state.allocated = (small, large);
+                state.filled = 0;
+            }
+        }
+        let (small, large) = (small as i64, large as i64);
+        for index in state.filled..=k {
+            let index_signed = index as i64;
+            let mut sum = 0;
+            for divisor in 1..=small.min(index_signed) {
+                if index_signed % divisor == 0 {
+                    sum += divisor;
+                }
+            }
+            for divisor in large + 1..=(small + large).min(index_signed) {
+                if index_signed % divisor == 0 {
+                    sum -= divisor;
+                }
+            }
+            state.sigma[index] = sum;
+        }
+        for index in state.filled..=k {
+            state.w[index] = if index == 0 {
+                1.0
+            } else {
+                let mut sum = 0.0;
+                for i in 0..index {
+                    sum += state.w[i] * state.sigma[index - i] as f64;
+                }
+                sum / index as f64
+            };
+        }
+        state.filled = state.filled.max(k + 1);
+        state.w[k]
+    })
 }
 
 pub fn dwilcox(x: f64, m: f64, n: f64, log: bool) -> f64 {
@@ -7322,7 +7507,7 @@ pub fn dwilcox(x: f64, m: f64, n: f64, log: bool) -> f64 {
     if x < 0.0 || x > m * n {
         return d0(log);
     }
-    let count = wilcox_counts(mm, nn)[x as usize];
+    let count = wilcox_count(&wilcox_source(mm, nn), x as usize);
     if log {
         count.ln() - lchoose(m + n, n)
     } else {
@@ -7348,18 +7533,18 @@ pub fn pwilcox(q: f64, m: f64, n: f64, lower: bool, log: bool) -> f64 {
     if q >= m * n {
         return dt1(lower, log);
     }
-    let counts = wilcox_counts(mm, nn);
+    let counts = wilcox_source(mm, nn);
     let c = choose(m + n, n);
     let mut p = 0.0;
     let mut lower = lower;
     if q <= m * n / 2.0 {
-        for count in &counts[..=q as usize] {
-            p += count / c;
+        for i in 0..=q as usize {
+            p += wilcox_count(&counts, i) / c;
         }
     } else {
         let q = m * n - q;
-        for count in &counts[..q as usize] {
-            p += count / c;
+        for i in 0..q as usize {
+            p += wilcox_count(&counts, i) / c;
         }
         lower = !lower;
     }
@@ -7388,14 +7573,15 @@ pub fn qwilcox(x: f64, m: f64, n: f64, lower: bool, log: bool) -> f64 {
     } else {
         x
     };
-    let counts = wilcox_counts(mm, nn);
+    let counts = wilcox_source(mm, nn);
+    let total = mm * nn;
     let c = choose(m + n, n);
     let mut p = 0.0;
     let mut q = 0usize;
     if x <= 0.5 {
         x -= 10.0 * DBL_EPSILON;
-        while q + 1 < counts.len() {
-            p += counts[q] / c;
+        while q < total {
+            p += wilcox_count(&counts, q) / c;
             if p >= x {
                 break;
             }
@@ -7404,8 +7590,8 @@ pub fn qwilcox(x: f64, m: f64, n: f64, lower: bool, log: bool) -> f64 {
         q as f64
     } else {
         x = 1.0 - x + 10.0 * DBL_EPSILON;
-        while q + 1 < counts.len() {
-            p += counts[q] / c;
+        while q < total {
+            p += wilcox_count(&counts, q) / c;
             if p > x {
                 break;
             }
