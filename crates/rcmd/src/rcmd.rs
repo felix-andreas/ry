@@ -381,7 +381,7 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
         let installed = root.join("bin/x64/libR.dll.a");
         fs::copy(&import_library, &installed).map_err(io_error(&installed))?;
     }
-    let toolchain = link_system_linear_algebra(root, &sources.toolchain)?;
+    let toolchain = versioned_linear_algebra(&sources.toolchain);
     write(
         &root.join("etc/Makeconf"),
         &makeconf(home, &toolchain, Platform::HOST),
@@ -545,88 +545,23 @@ exec "$cmd" $extra "$@"
     )
 }
 
-/// The toolchain with the system's BLAS and LAPACK behind `lib/libRblas.so` and
-/// `lib/libRlapack.so`, linked as GNU R links its own (`-L"$(R_HOME)/lib" -lRblas`). The default
-/// `-lblas` and `-llapack` need the unversioned `libblas.so` that only a distribution's
-/// development package installs, while the runtime opens `libblas.so.3`, so a system without
-/// that package runs linear algebra but cannot link a package that uses it (Matrix, quadprog).
-/// Each library is the file the dynamic loader resolves the soname to, the one the runtime
-/// opens, and a package linked against it records that soname. A toolchain naming other
-/// libraries, or a system without them, is returned unchanged.
-fn link_system_linear_algebra(root: &Path, toolchain: &Toolchain) -> Result<Toolchain> {
-    let mut linked = toolchain.clone();
-    if !cfg!(target_os = "linux") {
-        return Ok(linked);
-    }
-    if toolchain.blas_libs == "-lblas"
-        && link_system_library(
-            root,
-            &["libblas.so.3", "libblas.so"],
-            "dgemm_",
-            "libRblas.so",
-        )?
-    {
-        linked.blas_libs = r#"-L"$(R_HOME)/lib" -lRblas"#.into();
-    }
-    if toolchain.lapack_libs == "-llapack"
-        && link_system_library(
-            root,
-            &["liblapack.so.3", "liblapack.so"],
-            "dgesv_",
-            "libRlapack.so",
-        )?
-    {
-        linked.lapack_libs = r#"-L"$(R_HOME)/lib" -lRlapack"#.into();
-    }
-    Ok(linked)
-}
-
-/// Links `lib/<own>` in the home at `root` to the first of `sonames` the dynamic loader opens,
-/// found as the file that defines `symbol`; `false` when none opens.
-fn link_system_library(root: &Path, sonames: &[&str], symbol: &str, own: &str) -> Result<bool> {
-    let Some(target) = sonames
-        .iter()
-        .find_map(|soname| system_library_file(soname, symbol))
-    else {
-        return Ok(false);
-    };
-    link(&target, &root.join("lib").join(own))?;
-    Ok(true)
-}
-
-/// The file the dynamic loader resolves `soname` to, found through the file that defines `symbol`.
-#[cfg(target_os = "linux")]
-fn system_library_file(soname: &str, symbol: &str) -> Option<PathBuf> {
-    use std::{
-        ffi::{CStr, CString, OsStr},
-        os::unix::ffi::OsStrExt,
-    };
-    let soname = CString::new(soname).ok()?;
-    let symbol = CString::new(symbol).ok()?;
-    // SAFETY: opening a shared library runs its initializers, and OpenBLAS's starts a thread pool;
-    // the handle is closed before returning, which joins it again. `dladdr` fills `info` with
-    // pointers into the loader's tables, and the path is copied out before `dlclose` frees them.
-    unsafe {
-        let handle = libc::dlopen(soname.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
-        if handle.is_null() {
-            return None;
+/// The toolchain with `-lblas` and `-llapack` spelled as the versioned files, `-l:libblas.so.3`
+/// and `-l:liblapack.so.3`. The bare names need the unversioned `libblas.so` that only a
+/// distribution's development package installs, while the runtime opens `libblas.so.3`, so a
+/// system without that package would run linear algebra but fail to link a package that uses it
+/// (Matrix, quadprog). The linker resolves the file when the package links, which keeps the
+/// home independent of what the system had installed when the home was built.
+fn versioned_linear_algebra(toolchain: &Toolchain) -> Toolchain {
+    let mut versioned = toolchain.clone();
+    if cfg!(target_os = "linux") {
+        if toolchain.blas_libs == "-lblas" {
+            versioned.blas_libs = "-l:libblas.so.3".into();
         }
-        let address = libc::dlsym(handle, symbol.as_ptr());
-        let mut info: libc::Dl_info = std::mem::zeroed();
-        let file = (!address.is_null()
-            && libc::dladdr(address, &mut info) != 0
-            && !info.dli_fname.is_null())
-        .then(|| PathBuf::from(OsStr::from_bytes(CStr::from_ptr(info.dli_fname).to_bytes())));
-        // A failed close leaves the library mapped in an install process that exits soon, and the
-        // path found is right either way, so the failure changes nothing worth reporting.
-        libc::dlclose(handle);
-        file.filter(|file| file.is_absolute())
+        if toolchain.lapack_libs == "-llapack" {
+            versioned.lapack_libs = "-l:liblapack.so.3".into();
+        }
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn system_library_file(_soname: &str, _symbol: &str) -> Option<PathBuf> {
-    None
+    versioned
 }
 
 /// ry's R home for the runtime library `libr`, assembled in the user's cache on first use
@@ -2502,6 +2437,30 @@ SHLIB_OPENMP_CFLAGS =
         assert_eq!(toolchain.cppflags, "-I/opt/R/arm64/include");
         assert_eq!(toolchain.ldflags, "-L/opt/R/arm64/lib");
         assert_eq!(toolchain.openmp, "", "Apple's clang has no OpenMP");
+    }
+
+    #[test]
+    fn bare_blas_and_lapack_link_the_versioned_files_on_linux() {
+        let bare = Toolchain {
+            blas_libs: "-lblas".into(),
+            lapack_libs: "-llapack".into(),
+            ..Toolchain::default()
+        };
+        let versioned = versioned_linear_algebra(&bare);
+        if cfg!(target_os = "linux") {
+            assert_eq!(versioned.blas_libs, "-l:libblas.so.3");
+            assert_eq!(versioned.lapack_libs, "-l:liblapack.so.3");
+        } else {
+            assert_eq!(versioned.blas_libs, "-lblas");
+        }
+        let located = Toolchain {
+            blas_libs: "-L/nix/store/def-blas-3/lib -lblas".into(),
+            ..bare
+        };
+        assert_eq!(
+            versioned_linear_algebra(&located).blas_libs,
+            "-L/nix/store/def-blas-3/lib -lblas"
+        );
     }
 
     #[test]
