@@ -1240,6 +1240,21 @@ pub extern "C" fn ry_runtime_id() -> *const c_char {
     concat!(env!("RY_RUNTIME_ID"), "\0").as_ptr().cast()
 }
 
+/// The text [`ry_run`] runs in place of reading its script, set by [`ry_set_script_source`].
+static SCRIPT_SOURCE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Makes the next [`ry_run`] run `source`, a NUL-terminated UTF-8 string, as the text of its
+/// script instead of reading the file, which still names the script. `ry run` passes the
+/// program the checker elaborated: each unsuffixed literal typed `I64` spelled with its suffix,
+/// because R would read it as a `double`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_set_script_source(source: *const c_char) {
+    let text = String::from_utf8_lossy(crate::strings::c_bytes(source)).into_owned();
+    *SCRIPT_SOURCE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text);
+}
+
 /// Runs R on ry's runtime the way `Rscript` does: starts the session (base R and the default
 /// packages from the GNU R installation), attaches the package loader as `tools:ry`, evaluates
 /// `input` and then the file at `path` (either may be null, and with both null it reads R code
@@ -1300,7 +1315,15 @@ pub unsafe extern "C" fn ry_run(
             true,
         );
     }
-    if let (interp::session::Outcome::Completed, Some(path)) = (&outcome, &path) {
+    let source = SCRIPT_SOURCE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let (interp::session::Outcome::Completed, Some(path), Some(source)) =
+        (&outcome, &path, &source)
+    {
+        outcome = interp::session::run_text(source, path);
+    } else if let (interp::session::Outcome::Completed, Some(path)) = (&outcome, &path) {
         outcome = match std::fs::read(path) {
             Ok(bytes) => {
                 interp::session::run_text(&interp::values::escape_invalid_bytes(&bytes), path)

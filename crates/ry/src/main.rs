@@ -395,9 +395,13 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
     let Some(mut preflight) = Preflight::discover(file, file.to_path_buf()) else {
         return ExitCode::from(2);
     };
-    if preflight.check(&String::from_utf8_lossy(&source)) == Verdict::Refuse {
+    let text = String::from_utf8_lossy(&source);
+    let Some(program) = preflight.check(&text) else {
         return ExitCode::from(1);
-    }
+    };
+    // Only a program the check elaborated replaces the file, so an unchanged Latin-1 script
+    // still reaches the runtime as its own bytes.
+    let program = (program != text).then_some(program);
     let flags = runtime_flags(preflight.config());
     drop(preflight);
     match runtime {
@@ -405,7 +409,15 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
             #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
             release_executable_code();
             runtime_exit(checking_loads().and_then(|()| {
-                repl::run_on_ry_runtime(Some(file), None, &arguments, flags, None, None)
+                repl::run_on_ry_runtime(
+                    Some(file),
+                    program.as_deref(),
+                    None,
+                    &arguments,
+                    flags,
+                    None,
+                    None,
+                )
             }))
         }
         Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
@@ -453,13 +465,13 @@ fn run_console(
     // filter does not check it a second time, and later commands see its definitions.
     let input = match script {
         Some(script) => {
-            if preflight.check(&script) == Verdict::Refuse {
+            let Some(program) = preflight.check(&script) else {
                 return ExitCode::from(1);
-            }
+            };
             preflight.rename(console);
             match runtime {
                 Runtime::GnuR => preflight::erase(&script),
-                Runtime::Ry => script,
+                Runtime::Ry => program,
             }
         }
         None => String::new(),
@@ -764,6 +776,7 @@ fn run_load(
             let status = checking_loads().and_then(|()| {
                 repl::run_on_ry_runtime(
                     file,
+                    None,
                     Some(&input),
                     &[],
                     runtime_flags(preflight.config()),

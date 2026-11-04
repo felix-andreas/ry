@@ -180,7 +180,7 @@ The smaller number.
 
 ```r ry run runtime=ry dput
 Num.min(2, 1)
-#> 1
+#> 1i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1088)
@@ -603,7 +603,7 @@ The absolute value.
 
 ```r ry run runtime=ry dput
 Num.abs(-3)
-#> 3
+#> 3i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1209)
@@ -632,7 +632,7 @@ The absolute difference of two numbers. An integer result that overflows is an e
 
 ```r ry run runtime=ry dput
 Num.abs_diff(3, 10)
-#> 7
+#> 7i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1217)
@@ -807,7 +807,7 @@ error.
 
 ```r ry run runtime=ry dput
 Num.pow(2, 10)
-#> 1024
+#> 1024i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1266)
@@ -982,7 +982,7 @@ The difference, or `:Err(:Overflow)`.
 
 ```r ry run runtime=ry dput
 Num.sub_checked(10, 3)
-#> :Ok(7)
+#> :Ok(7i64)
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1315)
@@ -1244,7 +1244,7 @@ The quotient rounded toward zero, or `:Err(:DivByZero)`; `Inf` divided by `Inf` 
 
 ```r ry run runtime=ry dput
 Num.div_trunc_checked(-7, 2)
-#> :Ok(-3)
+#> :Ok(-3i64)
 Num.div_trunc_checked(Inf, Inf)
 #> :Err(:Undefined)
 ```
@@ -1275,7 +1275,7 @@ Divides and rounds up, or `:Err(:DivByZero)`.
 
 ```r ry run runtime=ry dput
 Num.div_ceil_checked(7, 2)
-#> :Ok(4)
+#> :Ok(4i64)
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1398)
@@ -1304,7 +1304,7 @@ The remainder of the truncated division, with the sign of `first`, or `:Err(:Div
 
 ```r ry run runtime=ry dput
 Num.rem_checked(-7, 2)
-#> :Ok(-1)
+#> :Ok(-1i64)
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1406)
@@ -1546,7 +1546,7 @@ overflow is possible. Unlike `+`, it can be passed by name.
 
 ```r ry run runtime=ry dput
 List.walk([1, 2, 3], 0, Num.add)
-#> 6
+#> 6i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1477)
@@ -1576,7 +1576,7 @@ Num.sub <- function(first, second)
 
 ```r ry run runtime=ry dput
 Num.sub(10, 4)
-#> 6
+#> 6i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1486)
@@ -1605,7 +1605,7 @@ The product. An `integer` product that overflows is an error.
 
 ```r ry run runtime=ry dput
 Num.mul(6, 7)
-#> 42
+#> 42i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1494)
@@ -1664,7 +1664,7 @@ The quotient rounded toward zero. A zero divisor is an error.
 
 ```r ry run runtime=ry dput
 Num.div_trunc(-7, 2)
-#> -3
+#> -3i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1511)
@@ -1693,7 +1693,7 @@ The quotient rounded up. A zero divisor is an error.
 
 ```r ry run runtime=ry dput
 Num.div_ceil(7, 2)
-#> 4
+#> 4i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1519)
@@ -1722,7 +1722,7 @@ The remainder of the truncated division, with the sign of `first`. A zero diviso
 
 ```r ry run runtime=ry dput
 Num.rem(-7, 2)
-#> -1
+#> -1i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1527)
@@ -1752,7 +1752,7 @@ Num.pow_int <- function(base, exponent)
 
 ```r ry run runtime=ry dput
 Num.pow_int(3, 4)
-#> 81L
+#> 81i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1536)

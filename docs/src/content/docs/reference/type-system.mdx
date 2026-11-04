@@ -343,9 +343,8 @@ these rules:
 - **The return value is checked when the function returns**, including through `return()`, and
   before `on.exit` code runs.
 - **Bindings are not checked.** `x: integer <- value` types `x` for the checker and is erased at
-  run time. The one exception is an unsuffixed number literal bound to a ry number type:
-  `n: I64 <- 5` binds `5i64`, and `xs: List<I64> <- [1, 2]` converts each item, because the
-  literal is R's `double` until something converts it (see [number literals](#number-literals)).
+  run time. A literal in the bound value still runs as the number type the checker gave it (see
+  [number literals](#number-literals)).
 - **Type definitions and `@Name(value)` do nothing at run time.** A definition is skipped, and
   `@Name(value)` runs as `(value)`.
 - **A check tests the value's storage type only.** `logical`, `integer`, `double`, `complex`,
@@ -1077,10 +1076,13 @@ type-mismatch
   x this literal does not fit `I64`, which cannot hold its value exactly
 ```
 
-When the code runs, an unsuffixed literal is the R value it always was, and the operator or
-binding that the checker typed converts it. An annotated binding such as `n: I64 <- 5` binds the
-`I64`, and `xs: List<I64> <- [1, 2]` converts each item. A conversion that cannot be exact is an
-error, never a rounded value.
+A literal runs as the type the checker gave it. Before `ry run` or the console runs code on ry's
+runtime, every unsuffixed literal the checker typed as `I64` is spelled with its suffix, so the arm
+`:Err(_) => 0` in a function declared `-> I64` returns `0i64`, and `xs <- [1, 2]` is a `List<I64>`.
+A file with no ry syntax and no strict mode is not analyzed, and its literals keep R's types. Code
+that `ry load` or `source()` runs is not elaborated this way: there an operator converts a literal
+operand, and an annotated binding such as `n: I64 <- 5` converts its literal. A conversion that
+cannot be exact is an error, never a rounded value.
 
 ### Number arithmetic
 

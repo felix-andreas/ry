@@ -391,6 +391,10 @@ pub struct ItemCheck<'db> {
     /// Coverage of each `match`, kept apart from `errors` because a missing case does not
     /// make the item's exported type untrustworthy.
     pub match_findings: ThinVec<MatchFinding>,
+    /// The unsuffixed number literals this check typed as `I64`, in id order. R reads `5` as a
+    /// `double` whatever the checker decided, so the code ry's runtime runs spells each one with
+    /// its suffix (`preflight` in the `ry` crate); without it, `-> I64` could return a `double`.
+    pub i64_literals: ThinVec<ExprId>,
     /// What only editor features read, absent when the host asked for no editor facts, so a
     /// one-shot check keeps no per-item slots for them.
     pub editor: Option<Box<EditorFacts<'db>>>,
@@ -920,6 +924,20 @@ fn check_item_in<'db>(
     }
     context.default_literal_vars();
     let recorded = mem::take(&mut context.recorded.0);
+    let i64_literals = recorded
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| {
+            let id = ExprId::new(index);
+            let is_unsuffixed = matches!(
+                module.kind(id),
+                ExpressionKind::Literal(LiteralKind::Integer(_) | LiteralKind::Double(_))
+            );
+            let ty = context.table.resolve(db, (*slot)?);
+            (is_unsuffixed && matches!(ty.kind(db), TyKind::Native(NativeScalar::I64)))
+                .then_some(id)
+        })
+        .collect();
     let match_findings = match_findings(db, context.table.definitions, module, |scrutinee| {
         let ty = (*recorded.get(scrutinee.index())?)?;
         Some(context.table.resolve(db, ty))
@@ -1024,6 +1042,7 @@ fn check_item_in<'db>(
         .collect();
     ItemCheck {
         match_findings: ThinVec::from(match_findings),
+        i64_literals,
         errors: ThinVec::from(errors),
         strict_origins: ThinVec::from(context.strict_origins),
         scheme,

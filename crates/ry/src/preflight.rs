@@ -26,7 +26,10 @@ use {
         sync::{LazyLock, Mutex, PoisonError},
         thread,
     },
-    syntax::{SyntaxNode, erase_inline_annotations, input_is_unfinished, is_inline_annotation},
+    syntax::{
+        NodeOrToken, SyntaxKind, SyntaxNode, TextRange, erase_inline_annotations,
+        input_is_unfinished, is_inline_annotation,
+    },
 };
 
 /// Analysis state for one run or one console session. A console session is checked as one
@@ -95,9 +98,12 @@ impl Preflight {
         self.path = path;
     }
 
-    /// Checks `input` as the next part of the session. Accepted input joins the session;
-    /// refused input does not, so the next command is checked as if it was never typed.
-    pub fn check(&mut self, input: &str) -> Verdict {
+    /// Checks `input` as the next part of the session and returns the program ry's runtime runs
+    /// for it, or `None` when strict mode refused it. That program is `input` with each
+    /// unsuffixed literal the checker typed `I64` spelled with its suffix, because R reads `5` as
+    /// a `double` whatever type the checker gave it. Accepted input joins the session; refused
+    /// input does not, so the next command is checked as if it was never typed.
+    pub fn check(&mut self, input: &str) -> Option<String> {
         let start = self.session.len();
         let mut source = String::with_capacity(start + input.len() + 1);
         source.push_str(&self.session);
@@ -107,7 +113,7 @@ impl Preflight {
         // Inference recurses per nested expression, which can outgrow the main thread's stack.
         let db = self.db.clone();
         let (file, config, text) = (self.file, &self.config, source.as_str());
-        let (verdict, findings) = thread::scope(|scope| {
+        let (verdict, findings, literals) = thread::scope(|scope| {
             let worker = thread::Builder::new()
                 .stack_size(crate::ANALYSIS_STACK_SIZE)
                 .spawn_scoped(scope, move || findings(&db, file, config, text));
@@ -144,15 +150,21 @@ impl Preflight {
             &resolve_note,
         );
         match verdict {
-            Verdict::Run => self.session = source,
-            Verdict::Refuse => refuse(
-                reported
-                    .iter()
-                    .filter(|diagnostic| is_strict_error(diagnostic))
-                    .count(),
-            ),
+            Verdict::Run => {
+                let program = with_i64_suffixes(input, &literals, start);
+                self.session = source;
+                Some(program)
+            }
+            Verdict::Refuse => {
+                refuse(
+                    reported
+                        .iter()
+                        .filter(|diagnostic| is_strict_error(diagnostic))
+                        .count(),
+                );
+                None
+            }
         }
-        verdict
     }
 }
 
@@ -314,12 +326,14 @@ fn findings(
     file: SourceFile,
     config: &Config,
     source: &str,
-) -> (Verdict, Vec<Diagnostic>) {
+) -> (Verdict, Vec<Diagnostic>, Vec<TextRange>) {
     let strict = semantics::file_is_strict(db, file);
-    // Plain R without strict mode has nothing to report, so it skips analysis entirely.
-    if !strict && !has_inline_annotation(&semantics::parse(db, file).syntax_node()) {
-        return (Verdict::Run, Vec::new());
+    // Plain R without strict mode has nothing to report and no literal a ry type decides, so it
+    // skips analysis entirely.
+    if !strict && !has_ry_syntax(&semantics::parse(db, file).syntax_node(), source) {
+        return (Verdict::Run, Vec::new(), Vec::new());
     }
+    let literals = semantics::file_i64_literals(db, file);
     let diagnostics = apply_suppressions(document_diagnostics(db, file, config), source);
     let refuse = strict && diagnostics.iter().any(is_strict_error);
     let kept = diagnostics
@@ -336,7 +350,39 @@ fn findings(
             Verdict::Run
         },
         kept,
+        literals,
     )
+}
+
+/// `input`, which starts at `start` in the checked session, with each literal in `literals`
+/// (session ranges, in source order) spelled as the `I64` the checker typed it: `5` becomes
+/// `5i64`, `5L` becomes `5i64`, and a whole `1e3` or `2.0` becomes `1000i64` or `2i64`, because
+/// the `i64` suffix takes only an integer. Text after a literal on its line moves right.
+fn with_i64_suffixes(input: &str, literals: &[TextRange], start: usize) -> String {
+    let mut program = String::with_capacity(input.len() + 4 * literals.len());
+    let mut copied = 0;
+    for range in literals {
+        let Some(literal_start) = usize::from(range.start()).checked_sub(start) else {
+            continue;
+        };
+        let literal_end = usize::from(range.end()) - start;
+        let Some(text) = input.get(literal_start..literal_end) else {
+            continue;
+        };
+        program.push_str(&input[copied..literal_start]);
+        let digits = text.strip_suffix('L').unwrap_or(text);
+        let is_integer_text = digits.bytes().all(|byte| byte.is_ascii_digit())
+            || digits.starts_with("0x")
+            || digits.starts_with("0X");
+        match digits.parse::<f64>() {
+            Ok(value) if !is_integer_text => program.push_str(&format!("{value:.0}")),
+            _ => program.push_str(digits),
+        }
+        program.push_str("i64");
+        copied = literal_end;
+    }
+    program.push_str(&input[copied..]);
+    program
 }
 
 /// A syntax error is left to the runtime, which reports it in R's own words; in the console
@@ -347,6 +393,32 @@ fn is_strict_error(diagnostic: &Diagnostic) -> bool {
 
 fn has_inline_annotation(root: &SyntaxNode) -> bool {
     root.descendants().any(|node| is_inline_annotation(&node))
+}
+
+/// Whether `source` holds anything that can give a literal a ry type: an inline or comment
+/// annotation, a list literal, a suffixed number, or a standard library call such as
+/// `List.range(1, 10)`. Missing one of these leaves an `I64` literal an R double at run time, so
+/// the test errs toward analysis.
+fn has_ry_syntax(root: &SyntaxNode, source: &str) -> bool {
+    source.contains("#:")
+        || has_inline_annotation(root)
+        || root.descendants_with_tokens().any(|element| match element {
+            NodeOrToken::Node(node) => node.kind() == SyntaxKind::ARRAY_EXPR,
+            NodeOrToken::Token(token) => match token.kind() {
+                SyntaxKind::SUFFIXED_NUMBER => true,
+                SyntaxKind::IDENT => is_module_qualified(token.text()),
+                _ => false,
+            },
+        })
+}
+
+/// Whether `name` is spelled like a standard library function, `Module.function`.
+fn is_module_qualified(name: &str) -> bool {
+    name.split_once('.').is_some_and(|(module, function)| {
+        module.starts_with(|first: char| first.is_ascii_uppercase())
+            && module.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            && function.starts_with(|first: char| first.is_ascii_lowercase() || first == '_')
+    })
 }
 
 /// GNU R reads the plain program an annotated one means.
@@ -387,9 +459,9 @@ impl InputFilter for ConsoleFilter {
         }
         let command = std::mem::take(&mut self.held);
         match self.preflight.check(&command) {
-            Verdict::Refuse => Filtered::Refuse,
-            Verdict::Run if self.erase => Filtered::Run(erase(&command)),
-            Verdict::Run => Filtered::Run(command),
+            None => Filtered::Refuse,
+            Some(_) if self.erase => Filtered::Run(erase(&command)),
+            Some(program) => Filtered::Run(program),
         }
     }
 
