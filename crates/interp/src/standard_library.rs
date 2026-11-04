@@ -430,7 +430,7 @@ thread_local! {
 /// The environment the builtins of `package:ry` are bound in. S3 method lookup falls back to it,
 /// because lookup from the global environment skips the search path, and with base R loaded the
 /// environment is no longer on it.
-pub(crate) fn builtins_env() -> Option<Sexp> {
+pub fn builtins_env() -> Option<Sexp> {
     BUILTINS_ENV.with(std::cell::Cell::get)
 }
 

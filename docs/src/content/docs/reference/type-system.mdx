@@ -1088,7 +1088,8 @@ runtime, every unsuffixed literal the checker typed as `I64` is spelled with its
 `:Err(_) => 0` in a function declared `-> I64` returns `0i64`, and `xs <- [1, 2]` is a `List<I64>`.
 A file with no ry syntax and no strict mode is not analyzed, and its literals keep R's types. Code
 that `ry load` or `source()` runs is not elaborated this way: there an operator converts a literal
-operand, and an annotated binding such as `n: I64 <- 5` converts its literal. A conversion that
+operand, and an annotated binding such as `n: I64 <- 5` converts its literal. An `I64` parameter and an `-> I64` result
+convert the same way, so `f(3)` passes `3i64` to `f <- function(n: I64) ...`. A conversion that
 cannot be exact is an error, never a rounded value.
 
 ### Number arithmetic

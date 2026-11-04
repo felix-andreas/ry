@@ -26,6 +26,8 @@ pub enum Item {
     Dbl,
     Lgl,
     Str,
+    /// ry's 64-bit integer, which has no `NA` and whose arithmetic fails on overflow.
+    I64,
 }
 
 /// The type of a local.
@@ -41,6 +43,8 @@ pub enum Type {
     Bool,
     /// A string scalar, which is never `NA`.
     Str,
+    /// ry's `I64`: a 64-bit integer without `NA`.
+    I64,
     Null,
     /// An R atomic vector of these items. `array` marks an `Array<T>`, which has no `NA` and
     /// carries the Array bit when it crosses back to R.
@@ -80,6 +84,7 @@ impl Type {
             Item::Dbl => Type::Dbl,
             Item::Lgl => Type::Lgl,
             Item::Str => Type::Str,
+            Item::I64 => Type::I64,
         }
     }
 
@@ -90,6 +95,7 @@ impl Type {
             Type::Dbl => Some(Item::Dbl),
             Type::Lgl | Type::Bool => Some(Item::Lgl),
             Type::Str => Some(Item::Str),
+            Type::I64 => Some(Item::I64),
             _ => None,
         }
     }
@@ -193,6 +199,7 @@ pub enum Constant {
     Lgl(i32),
     /// A string constant, as the bytes of a static string the compiler built.
     Str(u64, u64),
+    I64(i64),
     Null,
 }
 
@@ -238,6 +245,8 @@ pub enum Math {
     Tan = 12,
     Round = 13,
     Sign = 14,
+    /// Rounding half away from zero, as `Num.round` does.
+    RoundAway = 15,
 }
 
 /// A reduction of a vector to a scalar.
@@ -275,8 +284,10 @@ pub enum Op {
     Math(Math, Item, Local),
     /// `round(x, digits)` of a scalar double.
     RoundDigits(Local, Local),
-    /// An integer or logical scalar as a double.
+    /// An integer, logical or `I64` scalar as a double.
     ToDbl(Local),
+    /// An integer or double scalar as an `I64`, failing unless it converts exactly.
+    ToI64(Local),
     /// A logical scalar as an integer.
     LglToInt(Local),
     /// A logical as a branch condition: fails on `NA`.
@@ -286,8 +297,10 @@ pub enum Op {
     /// A loop counter plus its step (1 or -1), for a counter that has not reached its end, so
     /// the sum neither overflows nor lands on `NA`.
     Step(Local, Local),
-    /// The length of a vector or list, as an integer.
+    /// The length of a vector or list, as an integer or an `I64` (the destination's type).
     Length(Local),
+    /// The `I64` list `from..=to`, empty when `to < from`.
+    RangeI64(Local, Local),
     /// Item `index` (1-based) of a vector or list. Fails out of range.
     Get(Local, Local),
     /// The vector or list with item `index` (1-based) replaced: `x[[i]] <- value`. Fails out of
@@ -333,6 +346,15 @@ pub enum Op {
     FormatFixed(Local, i32),
     /// `formatC(i, width = w, flag = "0")`, or with spaces when the flag is false.
     FormatPadded(Local, i32, bool),
+    /// Arithmetic over ry lists fused into one pass with borrowed inputs (lists of `item` and
+    /// scalars), as `values::ry_elementwise` encodes `program`. The result is a list of `item`,
+    /// or with `sum` the sum of its items.
+    Elementwise {
+        item: Item,
+        sum: bool,
+        program: SmallVec<[u32; 8]>,
+        inputs: SmallVec<[Local; 4]>,
+    },
     /// A call of a compiled typed function with borrowed arguments.
     CallTyped(usize, SmallVec<[Local; 4]>),
     /// Fails when an interrupt is pending.
@@ -351,6 +373,7 @@ impl Op {
             | Not(a)
             | Math(_, _, a)
             | ToDbl(a)
+            | ToI64(a)
             | LglToInt(a)
             | Truth(a)
             | Length(a)
@@ -375,6 +398,7 @@ impl Op {
             | RoundDigits(a, b)
             | Get(a, b)
             | Range(a, b)
+            | RangeI64(a, b)
             | Same(a, b)
             | Step(a, b)
             | Repeat(a, b)
@@ -391,7 +415,7 @@ impl Op {
                 operands.push(*separator);
                 operands
             }
-            CallTyped(_, arguments) => arguments.clone(),
+            CallTyped(_, arguments) | Elementwise { inputs: arguments, .. } => arguments.clone(),
         }
     }
 
@@ -420,7 +444,7 @@ impl Op {
             | Same(..) | Step(..) => false,
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function
             // warns about NaNs.
-            Arith(op, item, ..) => *item == Item::Int || *op == self::Arith::Mod,
+            Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,
             Math(..) => true,
             // `NA` formats differently in `as.character`, `paste` and `sprintf`, so the
             // interpreter formats it.
