@@ -119,8 +119,9 @@ Opt-in style lints, such as `single-quotes` and `redundant-return`, are listed i
 
 ## Fix and silence
 
-`ry check --fix` applies the safe fixes (`=` to `<-`, `T` to `TRUE`, the trailing comma) and
-reports what is left. A spelling suggestion is a guess, so it needs `--unsafe-fixes` as well:
+Add `print(totl)` to the lint example above, as `R/rates.R`. `ry check --fix` applies the safe
+fixes (`=` to `<-`, `T` to `TRUE`, the trailing comma) and reports what is left. A spelling
+suggestion is a guess, so it needs `--unsafe-fixes` as well:
 
 ```text
 $ ry check --fix
@@ -128,6 +129,7 @@ unresolved
 
   ! I could not resolve `totl` in this package, its imports, or builtins. Did you mean `total`?
    --[R/rates.R:4:7]
+ 3 | x <- c(1, 2)
  4 | print(totl)
    |       ^^^^
   help: Change to `total` (`ry check --fix --unsafe-fixes` applies it)

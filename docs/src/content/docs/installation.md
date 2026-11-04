@@ -6,7 +6,7 @@ description: Install the ry binary and set up your editor
 ## The binary
 
 The latest release is [0.4.1-beta](https://github.com/felix-andreas/ry/releases/tag/0.4.1-beta).
-Each archive holds the single `ry` binary, with ry's runtime built in:
+Each archive holds a single `ry` binary:
 
 | Platform | Archive |
 | --- | --- |

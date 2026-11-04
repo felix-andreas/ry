@@ -26,7 +26,7 @@ each command. There is no `load_all()` to call and no session to restart:
 
 ```text
 $ ry run
-Loaded tally: 1 definition bound lazily, 0 top-level statements run, in 5 ms.
+Loaded tally: 1 definition bound lazily, 0 top-level statements run, in 6 ms.
 ry console on ry's runtime. Type q() or Ctrl-D to quit.
 > count_words("the  quick fox")
 [1] 4
@@ -37,7 +37,7 @@ The double space made an empty word. Change `strsplit(text, " ")` in `R/count.R`
 
 ```text
 > count_words("the  quick fox")
-Reloaded tally: 1 definition rebound, in 3 ms.
+Reloaded tally: 1 definition rebound, in 13 ms.
 [1] 3
 ```
 
