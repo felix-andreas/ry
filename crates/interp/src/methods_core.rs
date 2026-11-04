@@ -26,21 +26,77 @@ use {
     rustc_hash::FxHashSet,
 };
 
-/// Returns `false` from a definition fast path so the R body runs. Setting
-/// `RY_TRACE_METHODS_BAILS` prints the source line of every bail, which shows why a definition
-/// takes the slow path.
+/// Returns `false` from a fast path so the R body runs, noting why for the fallback report of a
+/// definition (see `report_fallback`). `RY_TRACE_METHODS_BAILS` prints every bail, of the
+/// definition fast paths and the others, with its source line.
 macro_rules! bail {
-    ($skip:expr) => {{
-        if trace_bails() {
-            eprintln!("methods fast path bails at methods_core.rs:{}", line!());
-        }
+    ($skip:expr) => {
+        bail!($skip, "")
+    };
+    ($skip:expr, $reason:expr) => {{
+        note_bail(line!(), $reason);
         return Ok($skip);
     }};
+}
+
+thread_local! {
+    static LAST_BAIL: std::cell::Cell<(u32, &'static str)> = const { std::cell::Cell::new((0, "")) };
+}
+
+fn note_bail(line: u32, reason: &'static str) {
+    if trace_bails() {
+        eprintln!("methods fast path bails at methods_core.rs:{line} {reason}");
+    }
+    LAST_BAIL.with(|last| last.set((line, reason)));
 }
 
 fn trace_bails() -> bool {
     static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *TRACE.get_or_init(|| std::env::var_os("RY_TRACE_METHODS_BAILS").is_some())
+}
+
+/// Reports a definition that runs the methods package's R code instead of its fast path, which
+/// is many times slower, when load reports are on: `options(ry.load.verbose = TRUE)` or
+/// `RY_LOAD_VERBOSE=true`. The report names the definition, the reason, and the bail's source
+/// line for a contributor.
+unsafe fn report_fallback(
+    call: &Call<'_>,
+    function: &str,
+    argument: &str,
+    define: unsafe fn(&Call<'_>) -> R<Sexp>,
+) -> R<Sexp> {
+    // A fallback that records no reason must not print the one an earlier call left behind.
+    LAST_BAIL.with(|last| last.set((0, "")));
+    let value = define(call)?;
+    let frame = call.arg(0);
+    if !(value.kind() == SexpType::Logical && is_false(value)) || !load_verbose() {
+        return Ok(value);
+    }
+    let (line, reason) = LAST_BAIL.with(|last| last.get());
+    let name = match quiet_value(install(argument)?, frame)? {
+        Some(name) if name.kind() == SexpType::String && length(name) > 0 => {
+            format!("\"{}\"", String::from_utf8_lossy(name.element(0).bytes()))
+        }
+        _ => "...".to_string(),
+    };
+    if reason.is_empty() {
+        eprintln!(
+            "ry: {function}({name}) runs the methods package's R code: a case the fast path does not cover"
+        );
+    } else {
+        eprintln!(
+            "ry: {function}({name}) runs the methods package's R code: {reason} (methods_core.rs:{line})"
+        );
+    }
+    Ok(value)
+}
+
+unsafe fn load_verbose() -> bool {
+    let option = crate::envir::get_option("ry.load.verbose");
+    if option != nil() {
+        return option.kind() == SexpType::Logical && length(option) == 1 && is_true(option);
+    }
+    std::env::var("RY_LOAD_VERBOSE").is_ok_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -1325,21 +1381,31 @@ unsafe fn is_false(value: Sexp) -> bool {
 /// does what `.GenericAssign()` does: binds it in `where`, caches it in `.genericTable`, and
 /// binds an empty copy of its methods table as the `.__T__` metadata.
 unsafe fn do_set_generic(call: &Call<'_>) -> R<Sexp> {
+    report_fallback(call, "setGeneric", "name", set_generic)
+}
+
+unsafe fn set_generic(call: &Call<'_>) -> R<Sexp> {
     let frame = call.arg(0);
     let skip = values::scalar_bool(false)?;
     if !native_definitions() {
-        bail!(skip);
+        bail!(
+            skip,
+            "`RY_METHODS_NATIVE=0` turns the native definitions off"
+        );
     }
     let Some(name) = forced_arg(frame, "name")? else {
-        bail!(skip);
+        bail!(skip, "`name` is missing");
     };
     if !is_plain_name(name) {
-        bail!(skip);
+        bail!(skip, "`name` is not a single plain string");
     }
     let name_text = name.element(0);
     let methods = interp().globals.methods_namespace;
     if in_basic_funs(name_text.bytes())? {
-        bail!(skip);
+        bail!(
+            skip,
+            "the methods package keeps an implicit generic for this base function"
+        );
     }
     for argument in [
         "group",
@@ -1351,49 +1417,67 @@ unsafe fn do_set_generic(call: &Call<'_>) -> R<Sexp> {
         "simpleInheritanceOnly",
     ] {
         if !eval::is_missing(install(argument)?, frame)? {
-            bail!(skip);
+            bail!(
+                skip,
+                "a `group`, `valueClass`, `package`, `signature`, `useAsDefault`, `genericFunction` or `simpleInheritanceOnly` argument is given"
+            );
         }
     }
     if eval::is_missing(install("def")?, frame)? {
-        bail!(skip);
+        bail!(skip, "`def` is missing");
     }
     let Some(place) = forced_arg(frame, "where")? else {
-        bail!(skip);
+        bail!(skip, "`where` is missing");
     };
     if place.kind() != SexpType::Environment {
-        bail!(skip);
+        bail!(skip, "`where` is not an environment");
     }
     let name_symbol = install_text(name_text)?;
     if visible_function(name_symbol, place)? != Visible::None {
-        bail!(skip);
+        bail!(
+            skip,
+            "a function of this name is already visible from `where`"
+        );
     }
     if crate::envir::is_namespace(place) {
         if standard_packages_define(name_symbol)? != Some(false) {
-            bail!(skip);
+            bail!(
+                skip,
+                "a standard package defines a function of this name, or their namespaces are not loaded yet"
+            );
         }
     } else if visible_function(name_symbol, methods)? != Visible::None {
-        bail!(skip);
+        bail!(skip, "the methods package sees a function of this name");
     }
     let Some(def) = forced_arg(frame, "def")? else {
-        bail!(skip);
+        bail!(skip, "`def` is missing");
     };
     if def.kind() != SexpType::Closure
         || !is_standard_generic_call(crate::bytecode::closure_body(def), name_text.bytes())?
     {
-        bail!(skip);
+        bail!(
+            skip,
+            "`def` is not a function whose body is exactly `standardGeneric(\"name\")`"
+        );
     }
     let Some(package) = package_name(place)? else {
-        bail!(skip);
+        bail!(skip, "the package name of `where` needs a search");
     };
     let table_symbol = table_meta_symbol(name_text.bytes(), package.element(0).bytes())?;
     if !assignable(place, name_symbol) || !assignable(place, table_symbol) {
-        bail!(skip);
+        bail!(
+            skip,
+            "the generic or its methods table cannot be assigned in `where`"
+        );
     }
     let Some(generics) = methods_value(".genericTable")? else {
-        bail!(skip);
+        bail!(skip, "the methods package's generic table is missing");
     };
     if generics.kind() != SexpType::Environment {
-        bail!(skip);
+        bail!(
+            skip,
+            "the methods package's generic table is not an environment"
+        );
     }
     match quiet_value(name_symbol, generics)? {
         None => {}
@@ -1403,21 +1487,27 @@ unsafe fn do_set_generic(call: &Call<'_>) -> R<Sexp> {
                 && length(previous_package) == 1
                 && previous_package.element(0) == package.element(0))
             {
-                bail!(skip);
+                bail!(
+                    skip,
+                    "a generic of this name from another package is cached"
+                );
             }
         }
-        Some(_) => return Ok(skip),
+        Some(_) => bail!(
+            skip,
+            "a generic of this name is cached in an unexpected shape"
+        ),
     }
     let formal_names = formal_names(def.car());
     if formal_names.is_empty() {
-        bail!(skip);
+        bail!(skip, "`def` has no formal arguments");
     }
     let mut signature: Vec<Sexp> = formal_names.clone();
     if signature.len() > 1 {
         signature.retain(|&symbol| symbol != symbols().dots);
     }
     if signature == [symbols().dots] {
-        bail!(skip);
+        bail!(skip, "the only formal argument of `def` is `...`");
     }
 
     let generic = make_generic(name_text, def, package, &formal_names, &signature)?;
@@ -1493,7 +1583,11 @@ struct ImplicitGeneric {
 /// own version identical to it and keeps it. `setMethod()` reports making a generic only for a
 /// function that is not an S3 generic, so those take the R code. `None` where the R code would
 /// find a cached implicit generic, a saved implicit generic or group, or anything else to do.
-unsafe fn implicit_generic(name_symbol: Sexp, function: Sexp, place: Sexp) -> R<Option<ImplicitGeneric>> {
+unsafe fn implicit_generic(
+    name_symbol: Sexp,
+    function: Sexp,
+    place: Sexp,
+) -> R<Option<ImplicitGeneric>> {
     let base = values::base_namespace();
     let name = name_symbol.car().bytes();
     if function.kind() != SexpType::Closure
@@ -1523,15 +1617,20 @@ unsafe fn implicit_generic(name_symbol: Sexp, function: Sexp, place: Sexp) -> R<
     {
         return Ok(None);
     }
-    let (Some(generic_table), Some(implicit_table)) =
-        (methods_value(".genericTable")?, methods_value(".implicitTable")?)
-    else {
+    let (Some(generic_table), Some(implicit_table)) = (
+        methods_value(".genericTable")?,
+        methods_value(".implicitTable")?,
+    ) else {
         return Ok(None);
     };
     if generic_table.kind() != SexpType::Environment
         || implicit_table.kind() != SexpType::Environment
-        || crate::heap().frame_cell(generic_table, name_symbol).is_some()
-        || crate::heap().frame_cell(implicit_table, name_symbol).is_some()
+        || crate::heap()
+            .frame_cell(generic_table, name_symbol)
+            .is_some()
+        || crate::heap()
+            .frame_cell(implicit_table, name_symbol)
+            .is_some()
         || !assignable(place, name_symbol)
     {
         return Ok(None);
@@ -1556,7 +1655,13 @@ unsafe fn implicit_generic(name_symbol: Sexp, function: Sexp, place: Sexp) -> R<
     heap.root(body);
     let def = values::triple(SexpType::Closure, function.car(), body, base)?;
     heap.root(def);
-    let generic = make_generic(name_symbol.car(), def, base_package, &formal_names, &signature)?;
+    let generic = make_generic(
+        name_symbol.car(),
+        def,
+        base_package,
+        &formal_names,
+        &signature,
+    )?;
     heap.root(generic);
 
     // `.derivedDefaultMethod(function)`, whose target is `ANY` for the first formal.
@@ -1568,7 +1673,12 @@ unsafe fn implicit_generic(name_symbol: Sexp, function: Sexp, place: Sexp) -> R<
         heap.set_element(arguments, index, symbol.car());
     }
     heap.root(arguments);
-    let default = values::triple(SexpType::Closure, function.car(), function.cdr(), function.tag())?;
+    let default = values::triple(
+        SexpType::Closure,
+        function.car(),
+        function.cdr(),
+        function.tag(),
+    )?;
     heap.root(default);
     let target = signature_object(any, arguments)?;
     for (attribute, value) in [
@@ -1672,22 +1782,29 @@ unsafe fn generic_skeleton(generic_name: Sexp, formals: Sexp, formal_names: &[Se
 /// generic's tables and in `where`'s `.__T__` metadata, then resets the inherited methods
 /// (and marks a primitive's methods for reset), without the quadratic table rebuild.
 unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
+    report_fallback(call, "setMethod", "f", set_method)
+}
+
+unsafe fn set_method(call: &Call<'_>) -> R<Sexp> {
     let frame = call.arg(0);
     let skip = values::scalar_bool(false)?;
     if !native_definitions() {
-        bail!(skip);
+        bail!(
+            skip,
+            "`RY_METHODS_NATIVE=0` turns the native definitions off"
+        );
     }
     let Some(name) = forced_arg(frame, "f")? else {
-        bail!(skip);
+        bail!(skip, "`f` is missing");
     };
     if !is_plain_name(name) || name.element(0).bytes() == b"as.double" {
-        bail!(skip);
+        bail!(skip, "`f` is not a single plain string, or is `as.double`");
     }
     let Some(place) = forced_arg(frame, "where")? else {
-        bail!(skip);
+        bail!(skip, "`where` is missing");
     };
     if place.kind() != SexpType::Environment || place.has_gp(gp::FRAME_LOCKED) {
-        bail!(skip);
+        bail!(skip, "`where` is not an environment, or is locked");
     }
     let name_symbol = install_text(name.element(0))?;
     let mut generic = crate::methods::visible_generic(name_symbol, place)?;
@@ -1712,17 +1829,23 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
             && generic != basic_generic
             && !crate::sort::identical(generic, basic_generic, &Default::default())
         {
-            bail!(skip);
+            bail!(
+                skip,
+                "the generic visible for this primitive differs from the methods package's own"
+            );
         }
         let Some(table) = methods_value(".genericTable")? else {
-            bail!(skip);
+            bail!(skip, "the methods package's generic table is missing");
         };
         match quiet_value(name_symbol, table)? {
             None => generic_table = Some(table),
             Some(cached)
                 if cached == basic_generic
                     || crate::sort::identical(cached, basic_generic, &Default::default()) => {}
-            Some(_) => bail!(skip),
+            Some(_) => bail!(
+                skip,
+                "the generic cached for this primitive differs from the methods package's own"
+            ),
         }
         generic = basic_generic;
     }
@@ -1741,7 +1864,7 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
     // `setMethod()` stores a method for a generic whose body does more than dispatch, such as
     // `coerce` and `initialize`, exactly as for a standard one.
     if !is_standard_generic(generic, true)? {
-        bail!(skip);
+        bail!(skip, "no standard generic of this name is found");
     }
     match primitive {
         // The generic the methods package set up for a primitive has the primitive as its
@@ -1751,10 +1874,16 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
                 || crate::dispatch::primitive_methods(function)
                     .is_some_and(|(found, _)| found != generic)
             {
-                bail!(skip);
+                bail!(
+                    skip,
+                    "the primitive dispatches to a different generic than the methods package's own"
+                );
             }
         }
-        None if !has_closure_default(generic)? => bail!(skip),
+        None if !has_closure_default(generic)? => bail!(
+            skip,
+            "the generic's default method is a primitive or an internal function"
+        ),
         None => {}
     }
     // `getGeneric()` caches a generic it finds that is also the global binding.
@@ -1765,7 +1894,10 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
                 .transpose()?
                 .flatten();
             if global != generic || cached != Some(generic) {
-                bail!(skip);
+                bail!(
+                    skip,
+                    "a different function of this name is bound in the global environment, or the generic is not cached"
+                );
             }
         }
     }
@@ -1780,52 +1912,68 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
         Visible::Function(function) if function == generic => {
             match quiet_value(table_symbol, place)? {
                 Some(table) if table.kind() == SexpType::Environment => Some(table),
-                Some(_) => return Ok(skip),
+                Some(_) => bail!(
+                    skip,
+                    "the generic's method table is bound to something other than an environment"
+                ),
                 None => None,
             }
         }
-        _ => return Ok(skip),
+        _ => bail!(skip, "the visible function of this name is not the generic"),
     };
 
     let Some(signature) = forced_arg(frame, "signature")? else {
-        bail!(skip);
+        bail!(skip, "`signature` is missing");
     };
     let Some(signature) = match_signature(signature, generic)? else {
-        bail!(skip);
+        bail!(
+            skip,
+            "the signature names a class that is not defined yet, or names an argument the generic does not have"
+        );
     };
     crate::heap().root(signature);
     if primitive.is_some() && sealed_primitive_method(name.element(0).bytes(), signature)? {
-        bail!(skip);
+        bail!(
+            skip,
+            "the method is for a primitive and its signature names only basic classes, which seals it"
+        );
     }
     let Some(definition) = forced_arg(frame, "definition")? else {
-        bail!(skip);
+        bail!(skip, "`definition` is missing");
     };
     if definition.kind() != SexpType::Closure
         || definition.has_gp(gp::S4_OBJECT)
         || values::class_attr(definition) != nil()
     {
-        bail!(skip);
+        bail!(skip, "`definition` is not a plain R function");
     }
-    if !same_formals(definition.car(), generic.car()) {
-        bail!(skip);
-    }
+    let Some(definition) = conform_definition(definition, generic, signature)? else {
+        bail!(
+            skip,
+            "the method's formals differ from the generic's by a renamed or omitted argument, or a different order"
+        );
+    };
+    crate::heap().root(definition);
     let env = generic.tag();
     let (Some(methods_table), Some(all_table)) = (
         quiet_value(symbols().mtable, env)?,
         quiet_value(symbols().all_mtable, env)?,
     ) else {
-        bail!(skip);
+        bail!(skip, "the generic's environment has no methods tables");
     };
     if methods_table.kind() != SexpType::Environment || all_table.kind() != SexpType::Environment {
-        bail!(skip);
+        bail!(skip, "the generic's methods tables are not environments");
     }
     let Some(signature_length) = quiet_value(symbols().sig_length, env)?
         .and_then(|length| usize::try_from(values::as_integer_scalar(length)).ok())
     else {
-        bail!(skip);
+        bail!(skip, "the generic's signature length is not a number");
     };
     let Some(signature) = match_signature_length(signature, signature_length)? else {
-        bail!(skip);
+        bail!(
+            skip,
+            "the signature is longer than the arguments the generic dispatches on"
+        );
     };
     crate::heap().root(signature);
     let label = signature_label(signature)?;
@@ -1834,16 +1982,27 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
         && (existing.kind() == SexpType::Environment
             || values::inherits(existing, "SealedMethodDefinition"))
     {
-        bail!(skip);
+        bail!(skip, "a sealed method for this signature exists");
     }
     if !no_methods_lists()? || !cache_on_assign(place)? || duplicate_classes()? {
-        bail!(skip);
+        bail!(
+            skip,
+            "methods lists are on, `where` does not cache on assign, or two packages define a class of the same name"
+        );
     }
     let meta_table = match quiet_value(table_symbol, place)? {
-        _ if implicit.is_some() && !assignable(place, table_symbol) => return Ok(skip),
-        Some(_) if implicit.is_some() => return Ok(skip),
+        _ if implicit.is_some() && !assignable(place, table_symbol) => bail!(
+            skip,
+            "the implicit generic's method table cannot be assigned in this namespace"
+        ),
+        Some(_) if implicit.is_some() => {
+            bail!(skip, "an implicit generic already has a method table here")
+        }
         Some(table) if table.kind() == SexpType::Environment => Some(table),
-        Some(_) => return Ok(skip),
+        Some(_) => bail!(
+            skip,
+            "the generic's method table is bound to something other than an environment"
+        ),
         None => None,
     };
     // `.resetInheritedMethods()` turns a `MethodWithNext` it keeps back into a plain method
@@ -1858,7 +2017,10 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
         let source = if copy_all { methods_table } else { all_table };
         match quiet_value(symbol, source)? {
             Some(method) if !values::inherits(method, "MethodWithNext") => {}
-            _ => return Ok(skip),
+            _ => bail!(
+                skip,
+                "an inherited method has a `callNextMethod()` chain to reset"
+            ),
         }
     }
 
@@ -1894,6 +2056,173 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
         crate::dispatch::set_primitive_methods(primitive, "reset", generic, nil())?;
     }
     values::scalar_bool(true)
+}
+
+/// The closure `setMethod()` makes of a method definition, before `asMethodDefinition()`.
+/// Formals that match the generic's by name keep the method as it is, except that
+/// `matchDefaults()` gives an argument without a default the generic's default. Other formals go
+/// through `conformMethod()` and `rematchDefinition()`: the method becomes `.local` inside a
+/// closure on the generic's formals, which calls it with the arguments both share. `None` leaves
+/// the R code to warn about a renamed argument, expand the signature for an omitted one, or
+/// signal its error.
+unsafe fn conform_definition(definition: Sexp, generic: Sexp, signature: Sexp) -> R<Option<Sexp>> {
+    let method_formals = definition.car();
+    let generic_formals = generic.car();
+    let method_names = formal_names(method_formals);
+    let generic_names = formal_names(generic_formals);
+    let dots = symbols().dots;
+    if method_names == generic_names {
+        if same_formals(method_formals, generic_formals) {
+            return Ok(Some(definition));
+        }
+        // `formals<-` makes a plain closure, so the method's attributes go.
+        let mut formals = Vec::with_capacity(method_names.len());
+        let (mut method_cell, mut generic_cell) = (method_formals, generic_formals);
+        while method_cell.kind() == SexpType::Pairlist {
+            let default = if method_cell.car() == missing_arg() {
+                generic_cell.car()
+            } else {
+                method_cell.car()
+            };
+            formals.push((method_cell.tag(), default));
+            method_cell = method_cell.cdr();
+            generic_cell = generic_cell.cdr();
+        }
+        let formals = tagged_pairlist(&formals)?;
+        return values::triple(
+            SexpType::Closure,
+            formals,
+            definition.cdr(),
+            definition.tag(),
+        )
+        .map(Some);
+    }
+    if method_names.len() == 1 && generic_names.len() == 1 {
+        return Ok(None);
+    }
+    let keeps_dots = method_names.contains(&dots);
+    let position_in_method = |name: &Sexp| {
+        method_names
+            .iter()
+            .position(|method_name| method_name == name)
+    };
+
+    // `conformMethod()`: an omitted argument changes the signature, and an order the generic
+    // does not share is an error.
+    let mut last = None;
+    for name in &generic_names {
+        if *name == dots && !keeps_dots {
+            continue;
+        }
+        let Some(position) = position_in_method(name) else {
+            return Ok(None);
+        };
+        if last.is_some_and(|last| position < last) {
+            return Ok(None);
+        }
+        last = Some(position);
+    }
+
+    // `rematchDefinition()`.
+    let added = method_names
+        .iter()
+        .any(|name| !generic_names.contains(name));
+    if !added {
+        // Every generic argument is in the method in order, so the names would be equal.
+        return Ok(None);
+    }
+    let Some(dots_position) = generic_names.iter().position(|name| *name == dots) else {
+        return Ok(None);
+    };
+    let used: Vec<bool> = generic_names
+        .iter()
+        .map(|name| method_names.contains(name))
+        .collect();
+    let call_arguments: Vec<Sexp> = generic_names
+        .iter()
+        .zip(&used)
+        .filter(|&(name, &used)| used || *name == dots)
+        .map(|(&name, _)| name)
+        .collect();
+    let mut call_names: Option<Vec<Sexp>> = None;
+    let trailing = generic_names.len() - dots_position - 1;
+    if trailing > 0 {
+        let generic_tail = &generic_names[dots_position + 1..];
+        if method_names.len() < trailing
+            || method_names[method_names.len() - trailing..] != *generic_tail
+        {
+            return Ok(None);
+        }
+        let mut names = vec![nil(); call_arguments.len()];
+        let start = names.len() - trailing;
+        names[start..].copy_from_slice(generic_tail);
+        call_names = Some(names);
+    }
+    // An argument from the first `missing` signature element on, up to `...`, is passed by name.
+    // As in R, the signature position is compared with the position among the formals.
+    let missing =
+        (0..length(signature)).find(|&index| signature.element(index).bytes() == b"missing");
+    if let Some(missing) = missing {
+        let by_name: Vec<Sexp> = (0..generic_names.len())
+            .filter(|&index| used[index] && missing <= index && index < dots_position)
+            .map(|index| generic_names[index])
+            .collect();
+        if !by_name.is_empty() {
+            let names = call_names.get_or_insert_with(|| vec![nil(); call_arguments.len()]);
+            for name in by_name {
+                if let Some(index) = call_arguments.iter().position(|argument| *argument == name) {
+                    names[index] = name;
+                }
+            }
+        }
+    }
+    let arguments: Vec<(Sexp, Sexp)> = call_arguments
+        .iter()
+        .enumerate()
+        .map(|(index, &argument)| {
+            let tag = call_names.as_ref().map_or(nil(), |names| names[index]);
+            (tag, argument)
+        })
+        .collect();
+    let local = install(".local")?;
+    let call = lcons(local, tagged_pairlist(&arguments)?)?;
+    let assignment = lcons(symbols().assign, cons(local, cons(definition, nil())?)?)?;
+    let body = lcons(symbols().brace, cons(assignment, cons(call, nil())?)?)?;
+
+    // `.copyMethodDefaults()` and then `matchDefaults()`: a default the method gives wins unless
+    // it is a symbol or missing.
+    let mut formals = Vec::with_capacity(generic_names.len());
+    let mut cell = generic_formals;
+    while cell.kind() == SexpType::Pairlist {
+        let mut default = cell.car();
+        if let Some(position) = position_in_method(&cell.tag()) {
+            let method_default = pairlist_nth(method_formals, position);
+            if method_default.kind() != SexpType::Symbol {
+                default = method_default;
+            }
+        }
+        formals.push((cell.tag(), default));
+        cell = cell.cdr();
+    }
+    let formals = tagged_pairlist(&formals)?;
+    values::triple(SexpType::Closure, formals, body, definition.tag()).map(Some)
+}
+
+/// A pairlist of `(tag, value)` pairs, a nil tag leaving its cell untagged.
+unsafe fn tagged_pairlist(cells: &[(Sexp, Sexp)]) -> R<Sexp> {
+    let mut list = nil();
+    for &(tag, value) in cells.iter().rev() {
+        list = cons_tagged(value, list, tag)?;
+    }
+    Ok(list)
+}
+
+unsafe fn pairlist_nth(list: Sexp, index: usize) -> Sexp {
+    let mut cell = list;
+    for _ in 0..index {
+        cell = cell.cdr();
+    }
+    cell.car()
 }
 
 /// `.isSealedMethod()` for a primitive: a method on basic classes only is sealed, because the
@@ -2148,98 +2477,129 @@ unsafe fn match_signature_length(signature: Sexp, signature_length: usize) -> R<
 /// class is reached twice. Every class involved is defined by the package itself, so its
 /// definition is rebound where it lives.
 unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
+    report_fallback(call, "setClass", "Class", set_class)
+}
+
+unsafe fn set_class(call: &Call<'_>) -> R<Sexp> {
     let frame = call.arg(0);
     let skip = values::scalar_bool(false)?;
     if !native_definitions() {
-        bail!(skip);
+        bail!(
+            skip,
+            "`RY_METHODS_NATIVE=0` turns the native definitions off"
+        );
     }
     let names = symbols();
-    for name in [names.access, names.version, names.sealed, names.package, names.s3_methods] {
+    for name in [
+        names.access,
+        names.version,
+        names.sealed,
+        names.package,
+        names.s3_methods,
+    ] {
         if !eval::is_missing(name, frame)? {
-            bail!(skip);
+            bail!(
+                skip,
+                "an `access`, `version`, `sealed`, `package` or `S3methods` argument is given"
+            );
         }
     }
     let Some(class) = forced_arg(frame, "Class")? else {
-        bail!(skip);
+        bail!(skip, "`Class` is missing");
     };
     if !is_plain_name(class) {
-        bail!(skip);
+        bail!(skip, "`Class` is not a single plain string");
     }
     let Some(place) = forced_arg(frame, "where")? else {
-        bail!(skip);
+        bail!(skip, "`where` is missing");
     };
     if place.kind() != SexpType::Environment || place.has_gp(gp::FRAME_LOCKED) {
-        bail!(skip);
+        bail!(skip, "`where` is not an environment, or is locked");
     }
     let Some(package) = package_name(place)? else {
-        bail!(skip);
+        bail!(skip, "the package name of `where` needs a search");
     };
     // `.requirePackage(package)`, the environment of the coerce and replace methods.
     let registry = crate::heap().known().namespace_registry;
     if quiet_value(install_text(package.element(0))?, registry)? != Some(place) {
-        bail!(skip);
+        bail!(skip, "`where` is not the namespace of a loaded package");
     }
     if !cache_on_assign(place)? || duplicate_classes()? {
-        bail!(skip);
+        bail!(
+            skip,
+            "`where` does not cache on assign, or two packages define a class of the same name"
+        );
     }
     let Some(class_table) = methods_value(".classTable")? else {
-        bail!(skip);
+        bail!(skip, "the methods package's class table is missing");
     };
     if class_table.kind() != SexpType::Environment
         || crate::methods::cached_class_definition(class, class_table)? != nil()
     {
-        bail!(skip);
+        bail!(skip, "the class is already defined");
     }
     let name = class.element(0);
     let meta = class_meta_symbol(name.bytes())?;
     if bound_from(meta, place) || !assignable(place, meta) {
-        bail!(skip);
+        bail!(
+            skip,
+            "a definition of the class is already visible from `where`, or its binding there is locked"
+        );
     }
 
+    // `setClass()` takes the unnamed elements of a representation as superclasses ahead of
+    // `contains`, and the superclass `VIRTUAL` as the mark of a virtual class.
     let mut own: Vec<(Sexp, Sexp)> = Vec::new();
-    let mut virtual_class = false;
+    let mut super_names: Vec<Sexp> = Vec::new();
     if !eval::is_missing(symbols().slots, frame)? {
         if !eval::is_missing(symbols().representation, frame)? {
-            bail!(skip);
+            bail!(skip, "both `slots` and `representation` are given");
         }
         let Some(slots) = forced_arg(frame, "slots")? else {
-            bail!(skip);
+            bail!(skip, "`slots` is missing");
         };
         let Some(pairs) = named_classes(slots) else {
-            bail!(skip);
+            bail!(
+                skip,
+                "`slots` is not a named character vector of distinct slot names"
+            );
         };
         own = pairs;
     } else if !eval::is_missing(symbols().representation, frame)? {
         let Some(representation) = forced_arg(frame, "representation")? else {
-            bail!(skip);
+            bail!(skip, "`representation` is missing");
         };
-        if is_plain_name(representation) && representation.element(0).bytes() == b"VIRTUAL" {
-            virtual_class = true;
-        } else {
-            let Some(pairs) = named_classes(representation) else {
-                bail!(skip);
-            };
-            own = pairs;
-        }
+        let Some((pairs, listed)) = representation_parts(representation) else {
+            bail!(skip, "`representation` is not a list of single class names");
+        };
+        own = pairs;
+        super_names = listed;
     }
-    let contains = if eval::is_missing(symbols().contains, frame)? {
-        alloc_strings(0)?
-    } else {
-        match forced_arg(frame, "contains")? {
-            Some(contains) => contains,
-            None => bail!(skip),
+    if !eval::is_missing(symbols().contains, frame)? {
+        let Some(contains) = forced_arg(frame, "contains")? else {
+            bail!(skip, "`contains` is missing");
+        };
+        if contains.kind() != SexpType::String || contains.attrib() != nil() {
+            bail!(skip, "`contains` is not a plain character vector");
         }
-    };
-    if contains.kind() != SexpType::String || contains.attrib() != nil() {
-        bail!(skip);
+        super_names.extend((0..length(contains)).map(|index| contains.element(index)));
     }
+    let virtual_class = super_names.iter().any(|known| known.bytes() == b"VIRTUAL");
+    super_names.retain(|known| known.bytes() != b"VIRTUAL");
     let prototype = if eval::is_missing(symbols().prototype, frame)? {
         None
     } else {
         match forced_arg(frame, "prototype")? {
             Some(value) if value == nil() => None,
+            Some(value) if value.has_gp(gp::S4_OBJECT) => match prototype_def_list(value)? {
+                Some(list) => {
+                    crate::heap().root(list);
+                    Some(list)
+                }
+                None => bail!(skip, "a `prototype()` with a data part or unset slots"),
+            },
             Some(value) => Some(value),
-            None => bail!(skip),
+            None => bail!(skip, "`prototype` is missing"),
         }
     };
     // `.makeValidityMethod()` keeps a function whose one argument is `object` as it is.
@@ -2256,7 +2616,10 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
             {
                 value
             }
-            _ => bail!(skip),
+            _ => bail!(
+                skip,
+                "`validity` is not a function whose only argument is `object`"
+            ),
         }
     };
     let prototype_names = match prototype {
@@ -2268,41 +2631,50 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
                 || names.kind() != SexpType::String
                 || list.attrib().cdr() != nil()
             {
-                bail!(skip);
+                bail!(skip, "`prototype` is not a plain named list");
             }
             let names: Vec<Sexp> = (0..length(list))
                 .map(|index| names.element(index))
                 .collect();
             if !distinct_names(&names) {
-                bail!(skip);
+                bail!(skip, "`prototype` names a slot twice");
             }
             names
         }
     };
-    if virtual_class && (length(contains) > 0 || prototype.is_some()) {
-        bail!(skip);
+    if virtual_class && (!own.is_empty() || prototype.is_some()) {
+        bail!(skip, "a virtual class with slots or a prototype");
     }
-    if !virtual_class && own.is_empty() && length(contains) == 0 {
-        bail!(skip);
+    if !virtual_class && own.is_empty() && super_names.is_empty() {
+        bail!(
+            skip,
+            "a class without slots or superclasses, which R makes virtual"
+        );
     }
 
     let mut supers: Vec<Super> = Vec::new();
-    for index in 0..length(contains) {
-        let super_name = contains.element(index);
+    for (index, &super_name) in super_names.iter().enumerate() {
         if super_name == values::na_string()
             || supers
                 .iter()
                 .any(|known| known.name.bytes() == super_name.bytes())
             || super_name.bytes() == name.bytes()
         {
-            bail!(skip);
+            bail!(
+                skip,
+                "a superclass is `NA`, is listed twice, or is the class itself"
+            );
         }
-        let Some(definition) = local_class(super_name, package, place)? else {
-            bail!(skip);
+        let definition = match local_class(super_name, package, place)? {
+            Ok(definition) => definition,
+            Err(reason) => bail!(skip, reason),
         };
         let superclasses = slot(definition, symbols().contains)?;
         if index > 0 && length(superclasses) > 0 {
-            bail!(skip);
+            bail!(
+                skip,
+                "a superclass after the first has superclasses of its own"
+            );
         }
         supers.push(Super {
             name: super_name,
@@ -2320,13 +2692,20 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
                 .iter()
                 .any(|known| known.name.bytes() == ancestor_name.bytes())
             {
-                bail!(skip);
+                bail!(
+                    skip,
+                    "a listed superclass is also a superclass of the first one"
+                );
             }
-            let Some(definition) = local_class(ancestor_name, package, place)? else {
-                bail!(skip);
+            let definition = match local_class(ancestor_name, package, place)? {
+                Ok(definition) => definition,
+                Err(reason) => bail!(skip, reason),
             };
             if !plain_extension(extensions.element(index))? {
-                bail!(skip);
+                bail!(
+                    skip,
+                    "the first superclass extends one of its superclasses conditionally or through a data part"
+                );
             }
             ancestors.push(Super {
                 name: ancestor_name,
@@ -2338,7 +2717,7 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
     lineage.extend(ancestors.iter().map(|known| known.name));
     for known in supers.iter().chain(&ancestors) {
         if element(slot(known.definition, symbols().subclasses)?, name.bytes()).is_some() {
-            bail!(skip);
+            bail!(skip, "a superclass already lists this class as a subclass");
         }
     }
 
@@ -2348,13 +2727,19 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
             .iter()
             .any(|known| position_of(needed, known.bytes()).is_some())
         {
-            bail!(skip);
+            bail!(skip, "a superclass needs primitive methods set up");
         }
     } else {
-        bail!(skip);
+        bail!(
+            skip,
+            "the methods package's list of classes needing primitive methods is missing"
+        );
     }
     if !definition_caches(name.bytes(), &lineage, prototype.is_some())? {
-        bail!(skip);
+        bail!(
+            skip,
+            "the dispatch caches are not filled yet, or a coerce method that `setIs()` would replace exists"
+        );
     }
 
     // The slots: the class's own, then each superclass's, which include their superclasses'.
@@ -2363,7 +2748,7 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
     let mut slot_names: FxHashSet<&[u8]> = own.iter().map(|&(name, _)| name.bytes()).collect();
     for &(slot_name, slot_class) in &own {
         let Some(definition) = cached_class(values::scalar_string_charsxp(slot_class)?)? else {
-            bail!(skip);
+            bail!(skip, "a slot class is not defined yet");
         };
         let qualified = values::scalar_string_charsxp(slot_class)?;
         values::set_attr(
@@ -2381,7 +2766,10 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
             if matches!(slot_name.bytes(), b".Data" | b".S3Class")
                 || !slot_names.insert(slot_name.bytes())
             {
-                bail!(skip);
+                bail!(
+                    skip,
+                    "a superclass has a `.Data` or `.S3Class` slot, or two classes define the same slot"
+                );
             }
             slots.push((slot_name, super_slots.element(index)));
         }
@@ -2390,11 +2778,11 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
         .iter()
         .any(|&prototype_name| !slots.iter().any(|&(known, _)| known == prototype_name))
     {
-        bail!(skip);
+        bail!(skip, "`prototype` names a slot the class does not have");
     }
 
     let Some(default_prototype) = methods_value(".defaultPrototype")? else {
-        bail!(skip);
+        bail!(skip, "the methods package's default prototype is missing");
     };
     let prototype_object = values::duplicate(default_prototype)?;
     if let Some(list) = prototype {
@@ -2417,7 +2805,10 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
                     continue;
                 }
                 let Some(value) = try_new(slot_class, place)? else {
-                    bail!(skip);
+                    bail!(
+                        skip,
+                        "the default value of a slot needs an `initialize` method or other R code to make"
+                    );
                 };
                 let stored = if value == nil() { s4_null()? } else { value };
                 values::set_attr(prototype_object, symbol, stored)?;
@@ -2447,7 +2838,7 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
         let Some(class_definition) =
             cached_class(values::scalar_string_charsxp(slot_class.element(0))?)?
         else {
-            bail!(skip);
+            bail!(skip, "a slot class is not defined yet");
         };
         if is_true(slot(class_definition, symbols().virtual_)?) {
             continue;
@@ -2455,17 +2846,20 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
         let value_class = dispatch::class_of(value)?;
         let first = values::scalar_string_charsxp(value_class.element(0))?;
         if name_extends(first, cached_class(first)?, slot_class.element(0).bytes())? != Some(true) {
-            bail!(skip);
+            bail!(
+                skip,
+                "a prototype value does not belong to its slot's class"
+            );
         }
     }
     prototype_object.set_gp_bits(gp::S4_OBJECT, true);
 
     let Some(representation_class) = cached_class(values::scalar_string("classRepresentation")?)?
     else {
-        bail!(skip);
+        bail!(skip, "the class `classRepresentation` is not defined yet");
     };
     let Some(extension_class) = cached_class(values::scalar_string("SClassExtension")?)? else {
-        bail!(skip);
+        bail!(skip, "the class `SClassExtension` is not defined yet");
     };
     let class_name = values::scalar_string_charsxp(name)?;
     values::set_attr(class_name, package_symbol, package)?;
@@ -2506,7 +2900,10 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
                     first.definition,
                 )?,
             ) else {
-                bail!(skip);
+                bail!(
+                    skip,
+                    "an extension through the first superclass is conditional or into a data part"
+                );
             };
             through_contains.push(contained);
             through_subclasses.push(subclass);
@@ -2525,12 +2922,11 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
             .map(|(known, &extension)| (known.name, extension)),
     );
     sort_by_distance(&mut contains_entries)?;
-    let contains_list = if virtual_class {
-        named_list(&[])?
-    } else if contains_entries.is_empty() {
-        values::alloc(SexpType::List, 0)?
-    } else {
+    // `contains[["VIRTUAL"]] <- NULL` leaves the list's names behind.
+    let contains_list = if !contains_entries.is_empty() || virtual_class {
         named_list(&contains_entries)?
+    } else {
+        values::alloc(SexpType::List, 0)?
     };
     let slots_list = if slots.is_empty() {
         values::alloc(SexpType::List, 0)?
@@ -2566,7 +2962,10 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
     };
     for (known, &direct) in supers.iter().zip(&directs) {
         let Some(subclasses) = walked_subclasses(known.definition, name, direct, &lookup)? else {
-            bail!(skip);
+            bail!(
+                skip,
+                "a superclass has a subclass whose definition is unknown, or one it extends conditionally or through a data part"
+            );
         };
         rebuilt.push(subclasses);
     }
@@ -2574,7 +2973,18 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
         record_subclasses(known, subclasses, place, class_table)?;
     }
     for (known, &extension) in ancestors.iter().zip(&through_subclasses) {
-        let mut subclasses = list_entries(slot(known.definition, symbols().subclasses)?);
+        // `completeSubclasses()` adds the class to an ancestor only when `possibleExtends()`
+        // finds no relation yet, and for a class union that is any of the class and its direct
+        // superclasses among the union's subclasses.
+        let existing = slot(known.definition, symbols().subclasses)?;
+        if is_class_union(known.definition)? == Some(true)
+            && std::iter::once(name)
+                .chain(super_names.iter().copied())
+                .any(|class| element(existing, class.bytes()).is_some())
+        {
+            continue;
+        }
+        let mut subclasses = list_entries(existing);
         subclasses.push((name, extension));
         record_subclasses(known, &subclasses, place, class_table)?;
     }
@@ -2624,32 +3034,39 @@ unsafe fn class_generator(class_name: Sexp, package: Sexp, place: Sexp) -> R<Sex
 /// Each member's step reads the definitions the earlier steps changed, so the fast path keeps
 /// its changes in a [`Pending`] overlay and writes them only once every step has succeeded.
 unsafe fn do_set_class_union(call: &Call<'_>) -> R<Sexp> {
+    report_fallback(call, "setClassUnion", "name", set_class_union)
+}
+
+unsafe fn set_class_union(call: &Call<'_>) -> R<Sexp> {
     let frame = call.arg(0);
     let skip = values::scalar_bool(false)?;
     if !native_definitions() {
-        bail!(skip);
+        bail!(
+            skip,
+            "`RY_METHODS_NATIVE=0` turns the native definitions off"
+        );
     }
     // GNU R forces `members`, then `where`, then `name`, which shows when a promise has effects.
     for argument in ["members", "where"] {
         forced_arg(frame, argument)?;
     }
     let Some(class) = forced_arg(frame, "name")? else {
-        bail!(skip);
+        bail!(skip, "`name` is missing");
     };
     if !is_plain_name(class) {
-        bail!(skip);
+        bail!(skip, "`name` is not a single plain string");
     }
     let Some(members) = forced_arg(frame, "members")? else {
-        bail!(skip);
+        bail!(skip, "`members` is missing");
     };
     if members.kind() != SexpType::String || members.attrib() != nil() || length(members) == 0 {
-        bail!(skip);
+        bail!(skip, "`members` is not a plain, non-empty character vector");
     }
     let mut member_names: Vec<Sexp> = (0..length(members))
         .map(|index| members.element(index))
         .collect();
     if !distinct_names(&member_names) {
-        bail!(skip);
+        bail!(skip, "`members` lists a class twice");
     }
     if let Some(index) = member_names
         .iter()
@@ -2659,53 +3076,65 @@ unsafe fn do_set_class_union(call: &Call<'_>) -> R<Sexp> {
         member_names.insert(0, null);
     }
     let Some(place) = forced_arg(frame, "where")? else {
-        bail!(skip);
+        bail!(skip, "`where` is missing");
     };
     if place.kind() != SexpType::Environment
         || place.has_gp(gp::FRAME_LOCKED)
         || !crate::envir::is_namespace(place)
     {
-        bail!(skip);
+        bail!(skip, "`where` is not a package namespace, or is locked");
     }
     let Some(package) = package_name(place)? else {
-        bail!(skip);
+        bail!(skip, "the package name of `where` needs a search");
     };
     let registry = crate::heap().known().namespace_registry;
     if quiet_value(install_text(package.element(0))?, registry)? != Some(place) {
-        bail!(skip);
+        bail!(skip, "`where` is not the namespace of a loaded package");
     }
     if !cache_on_assign(place)? || duplicate_classes()? {
-        bail!(skip);
+        bail!(
+            skip,
+            "`where` does not cache on assign, or two packages define a class of the same name"
+        );
     }
     let Some(class_table) = methods_value(".classTable")? else {
-        bail!(skip);
+        bail!(skip, "the methods package's class table is missing");
     };
     if class_table.kind() != SexpType::Environment
         || crate::methods::cached_class_definition(class, class_table)? != nil()
     {
-        bail!(skip);
+        bail!(skip, "the class is already defined");
     }
     let name = class.element(0);
     let meta = class_meta_symbol(name.bytes())?;
     if bound_from(meta, place) || !assignable(place, meta) {
-        bail!(skip);
+        bail!(
+            skip,
+            "a definition of the class is already visible from `where`, or its binding there is locked"
+        );
     }
     if member_names
         .iter()
         .any(|member| member.bytes() == name.bytes())
     {
-        bail!(skip);
+        bail!(skip, "the union lists itself as a member");
     }
     if !definition_caches(name.bytes(), &member_names, false)?
         || !initialize_cached(b"ClassUnionRepresentation")?
     {
-        bail!(skip);
+        bail!(
+            skip,
+            "the dispatch caches are not filled yet, or a coerce method that `setIs()` would replace exists"
+        );
     }
     let (Some(union_class), Some(extension_class)) = (
         cached_class(values::scalar_string("ClassUnionRepresentation")?)?,
         cached_class(values::scalar_string("SClassExtension")?)?,
     ) else {
-        bail!(skip);
+        bail!(
+            skip,
+            "the class `ClassUnionRepresentation` or `SClassExtension` is not defined yet"
+        );
     };
     let package_symbol = symbols().package;
     let class_name = values::scalar_string_charsxp(name)?;
@@ -2738,7 +3167,8 @@ unsafe fn do_set_class_union(call: &Call<'_>) -> R<Sexp> {
 
     for &member in &member_names {
         if !add_union_member(&mut pending, member, name, package, place, extension_class)? {
-            bail!(skip);
+            // The helper recorded why.
+            return Ok(skip);
         }
     }
 
@@ -2836,10 +3266,10 @@ unsafe fn add_union_member(
     extension_class: Sexp,
 ) -> R<bool> {
     let Some(union_definition) = pending.class(union)? else {
-        bail!(false);
+        bail!(false, "the union is not defined yet");
     };
     let Some(member_definition) = pending.class(member)? else {
-        bail!(false);
+        bail!(false, "a member class is not defined yet");
     };
     let member_contains = slot(member_definition, symbols().contains)?;
     let union_subclasses = slot(union_definition, symbols().subclasses)?;
@@ -2852,7 +3282,10 @@ unsafe fn add_union_member(
             b"classRepresentation"
         )
     {
-        bail!(false);
+        bail!(
+            false,
+            "a member already extends the union, or is not a plain class"
+        );
     }
     let member_package = slot(member_definition, symbols().package)?;
     let member_class_name = values::scalar_string_charsxp(member)?;
@@ -2871,7 +3304,10 @@ unsafe fn add_union_member(
     )?;
     let lookup = |class: Sexp| pending.class(class);
     let Some(subclasses) = walked_subclasses(union_definition, member, extension, &lookup)? else {
-        bail!(false);
+        bail!(
+            false,
+            "a member has a subclass whose definition is unknown, or one it extends conditionally or through a data part"
+        );
     };
     let union_updated = values::shallow_duplicate(union_definition)?;
     crate::heap().root(union_updated);
@@ -2900,7 +3336,7 @@ unsafe fn add_union_member(
     pending.bind(place, class_meta_symbol(union.bytes())?, union_updated);
     for &(subclass, subclass_extension) in &subclasses {
         let Some(subclass_definition) = pending.class(subclass)? else {
-            bail!(false);
+            bail!(false, "a subclass of the union is not defined yet");
         };
         // GNU R tests whether the subclass's own name is among its superclasses, which it never
         // is, so every subclass gets the union's extension, replacing one it has.
@@ -2944,10 +3380,16 @@ unsafe fn add_union_member(
                 eval::force_promise(cell.cdr())?;
             }
             let Some(bound) = pending.bound(frame, member_meta)? else {
-                bail!(false);
+                bail!(
+                    false,
+                    "a member's definition is bound in several environments and one of them holds none"
+                );
             };
             if !bound.has_gp(gp::S4_OBJECT) {
-                bail!(false);
+                bail!(
+                    false,
+                    "a member's definition is bound in several environments and one of them holds no class definition"
+                );
             }
             if slot_text(bound, "package")? == member_package.element(0).bytes() {
                 found = Some(frame);
@@ -2957,16 +3399,22 @@ unsafe fn add_union_member(
         found
     };
     let Some(home) = home else {
-        bail!(false);
+        bail!(
+            false,
+            "no environment from `where` outward binds the member's definition from its own package"
+        );
     };
     if !cache_on_assign(home)? {
-        bail!(false);
+        bail!(
+            false,
+            "the environment that holds a member's definition does not cache on assign"
+        );
     }
 
     // `.newDirectSuperclass()` appends the union, which has no superclasses, and
     // `completeExtends()` walks the superclasses again.
     if get_attr(member_contains, install("conflicts")?) != nil() {
-        bail!(false);
+        bail!(false, "a member's superclasses have unresolved conflicts");
     }
     let mut directs: Vec<(Sexp, Sexp)> = Vec::new();
     for (superclass, superclass_extension) in list_entries(member_contains) {
@@ -2978,11 +3426,14 @@ unsafe fn add_union_member(
     let mut contains = directs.clone();
     for &(superclass, superclass_extension) in &directs {
         let Some(by_definition) = pending.class(superclass)? else {
-            bail!(false);
+            bail!(false, "a superclass of a member is not defined yet");
         };
         let ancestors = slot(by_definition, symbols().contains)?;
         if get_attr(ancestors, install("conflicts")?) != nil() {
-            bail!(false);
+            bail!(
+                false,
+                "a superclass of a member has unresolved conflicts among its own superclasses"
+            );
         }
         let plain = values::scalar_string_charsxp(superclass)?;
         for (ancestor, ancestor_extension) in list_entries(ancestors) {
@@ -3000,7 +3451,10 @@ unsafe fn add_union_member(
                 by_definition,
             )?
             else {
-                bail!(false);
+                bail!(
+                    false,
+                    "a member reaches a superclass conditionally or through a data part"
+                );
             };
             contains.push((ancestor, combined));
         }
@@ -3010,12 +3464,15 @@ unsafe fn add_union_member(
         .iter()
         .any(|entry| entry.0.bytes() == member.bytes())
     {
-        bail!(false);
+        bail!(false, "a member would become its own superclass");
     }
     let contains_names: Vec<Sexp> = contains.iter().map(|entry| entry.0).collect();
     if !distinct_names(&contains_names) {
         let Some(removed) = resolved_superclasses(pending, member, &directs, &contains)? else {
-            bail!(false);
+            bail!(
+                false,
+                "a member reaches a superclass twice, in orders that conflict"
+            );
         };
         let mut position = 0;
         contains.retain(|_| {
@@ -3034,7 +3491,7 @@ unsafe fn add_union_member(
                 continue;
             }
             let Some(superclass_definition) = pending.class(superclass)? else {
-                bail!(false);
+                bail!(false, "a superclass of a member is not defined yet");
             };
             if element(slot(superclass_definition, symbols().slots)?, b".S3Class").is_some() {
                 let s3_class = get_attr(
@@ -3045,7 +3502,10 @@ unsafe fn add_union_member(
                     && (0..length(s3_class))
                         .any(|index| s3_class.element(index).bytes() == superclass.bytes())
                 {
-                    bail!(false);
+                    bail!(
+                        false,
+                        "a member with slots extends a registered S3 class indirectly"
+                    );
                 }
             }
         }
@@ -3062,7 +3522,10 @@ unsafe fn add_union_member(
             .iter()
             .any(|entry| entry.0.bytes() == subclass.bytes())
         {
-            bail!(false);
+            bail!(
+                false,
+                "a subclass of a member does not extend the union yet"
+            );
         }
     }
 
@@ -3087,15 +3550,24 @@ unsafe fn add_union_member(
             }
             let subclass_meta = class_meta_symbol(subclass.bytes())?;
             if crate::heap().frame_cell(place, subclass_meta).is_none() {
-                bail!(false);
+                bail!(
+                    false,
+                    "a subclass of a member from the same package has no definition bound in `where`"
+                );
             }
             let Some(bound) = pending.bound(place, subclass_meta)? else {
-                bail!(false);
+                bail!(
+                    false,
+                    "a subclass of a member from the same package has no definition bound in `where`"
+                );
             };
             let Some(union_extension) =
                 element(slot(union_updated, symbols().subclasses)?, subclass.bytes())
             else {
-                bail!(false);
+                bail!(
+                    false,
+                    "a subclass of a member is missing from the union's subclasses"
+                );
             };
             let mut bound_contains = list_entries(slot(bound, symbols().contains)?);
             if bound_contains
@@ -3105,7 +3577,10 @@ unsafe fn add_union_member(
                 continue;
             }
             if !is_plain_representation(bound) || pending.class(subclass)?.is_none() {
-                bail!(false);
+                bail!(
+                    false,
+                    "a subclass of a member is not a plain class, or is not defined yet"
+                );
             }
             bound_contains.push((union, union_extension));
             let rebound = values::shallow_duplicate(bound)?;
@@ -3120,12 +3595,15 @@ unsafe fn add_union_member(
         // the result.
         for &(subclass, extension) in &list_entries(slot(member_updated, symbols().subclasses)?) {
             let Some(subclass_definition) = pending.class(subclass)? else {
-                bail!(false);
+                bail!(false, "a subclass of a member is not defined yet");
             };
             match recached(subclass_definition, member, extension)? {
                 Recache::Unchanged => {}
                 Recache::Changed(definition) => pending.cache(subclass, definition, true),
-                Recache::Unsupported => bail!(false),
+                Recache::Unsupported => bail!(
+                    false,
+                    "a subclass of a member needs its superclasses recomputed in a way the fast path does not cover"
+                ),
             }
         }
     }
@@ -3733,41 +4211,63 @@ struct Super {
     definition: Sexp,
 }
 
-/// The definition of the class `name` when `setIs()` may rebind it in `place`: a plain class
-/// of `package` that is bound there, unsealed, without a data part, a test or a coercion of
-/// its own toward its superclasses, and with a prototype for a virtual class to give its
-/// subclasses.
-unsafe fn local_class(name: Sexp, package: Sexp, place: Sexp) -> R<Option<Sexp>> {
+/// The definition of the class `name` when `setIs()` may rebind it in `place`: a plain class or
+/// a class union of `package` that is bound there, unsealed, without a data part, a test or a
+/// coercion of its own toward its superclasses, and with a prototype for a virtual class to give
+/// its subclasses unless it has `NULL` among them.
+unsafe fn local_class(name: Sexp, package: Sexp, place: Sexp) -> R<Result<Sexp, &'static str>> {
     let Some(definition) = cached_class(values::scalar_string_charsxp(name)?)? else {
-        return Ok(None);
+        return Ok(Err("a superclass is not in the class cache"));
     };
     let meta = class_meta_symbol(name.bytes())?;
-    if !is_plain_representation(definition)
-        || quiet_value(meta, place)? != Some(definition)
-        || !assignable(place, meta)
-        || slot_text(definition, "package")? != package.element(0).bytes()
-        || !is_false(slot(definition, symbols().sealed)?)
-        || element(slot(definition, symbols().slots)?, b".Data").is_some()
-        || element(slot(definition, symbols().slots)?, b".S3Class").is_some()
-    {
-        return Ok(None);
+    let class = values::class_attr(definition);
+    let union = length(class) == 1 && class.element(0).bytes() == b"ClassUnionRepresentation";
+    if !(is_plain_representation(definition) || union) {
+        return Ok(Err("a superclass has a special representation"));
+    }
+    // `getClassDef()` reads the class cache first, so the R code works on the cached definition
+    // and assigns it back over the binding. The two can differ: `setClassUnion()` orders a
+    // subclass's extensions differently in the cache than in the namespace, in GNU R too.
+    if slot_text(definition, "package")? != package.element(0).bytes() {
+        return Ok(Err(
+            "a superclass is a basic class or comes from another package",
+        ));
+    }
+    if quiet_value(meta, place)?.is_none() || !assignable(place, meta) {
+        return Ok(Err(
+            "a superclass is not defined in this package's namespace",
+        ));
+    }
+    if !is_false(slot(definition, symbols().sealed)?) {
+        return Ok(Err("a superclass is sealed"));
+    }
+    let slots = slot(definition, symbols().slots)?;
+    if element(slots, b".Data").is_some() || element(slots, b".S3Class").is_some() {
+        return Ok(Err("a superclass has a data part or is an S3 class"));
     }
     let contains = slot(definition, symbols().contains)?;
     for index in 0..length(contains) {
         if !plain_extension(contains.element(index))? {
-            return Ok(None);
+            return Ok(Err(
+                "a superclass extends a class through a test or a coercion",
+            ));
         }
     }
     let is_virtual = is_true(slot(definition, symbols().virtual_)?);
-    if is_virtual && slot(definition, symbols().prototype)? == nil() {
-        return Ok(None);
+    // `setIs()` gives a virtual class without a prototype the prototype of its first subclass,
+    // unless `NULL` is among its subclasses.
+    if is_virtual
+        && slot(definition, symbols().prototype)? == nil()
+        && element(slot(definition, symbols().subclasses)?, b"NULL").is_none()
+    {
+        return Ok(Err("a virtual superclass has no prototype yet"));
     }
     // A class without slots of its own is virtual unless it extends a class, so a
     // non-virtual one without slots has superclasses that are all virtual.
-    if !is_virtual && length(slot(definition, symbols().slots)?) == 0 && length(contains) == 0 {
-        return Ok(None);
+    if !is_virtual && length(slots) == 0 && length(contains) == 0 {
+        return Ok(Err("a superclass has neither slots nor superclasses"));
     }
-    Ok(Some(definition))
+    Ok(Ok(definition))
 }
 
 /// Whether an extension is a simple `SClassExtension` that is not to a data part.
@@ -3933,19 +4433,30 @@ unsafe fn try_new(class: Sexp, place: Sexp) -> R<Option<Sexp>> {
     let contained = values::names(slot(definition, symbols().contains)?);
     let mut labels = vec![class.bytes()];
     labels.extend((0..length(contained)).map(|index| contained.element(index).bytes()));
+    // The methods package's own `initialize` methods (for `environment`, `matrix`, `ts` and the
+    // like) never fail without arguments, so `new()` gives what `tryNew()`'s `tryCatch()` would.
+    // A package's method may fail, and then `tryNew()` falls back to the prototype.
+    let mut own_initialize = false;
     for label in labels {
-        if crate::heap()
-            .frame_cell(methods_table, values::install_bytes(label)?)
-            .is_some()
-        {
-            return Ok(None);
+        let symbol = values::install_bytes(label)?;
+        if crate::heap().frame_cell(methods_table, symbol).is_some() {
+            let Some(method) = quiet_value(symbol, methods_table)? else {
+                return Ok(None);
+            };
+            let namespace = interp().globals.methods_namespace;
+            if method.kind() != SexpType::Closure
+                || (method.tag() != namespace && method.tag().enclosure() != namespace)
+            {
+                return Ok(None);
+            }
+            own_initialize = true;
         }
     }
     // `new(definition)` makes the object and calls `initialize()` on it without arguments. When
     // dispatch selects the default method for the object's class, that call returns the object,
     // so the object and the method dispatch caches are the whole result. The value becomes a slot of the new class's
     // prototype, which `new()` copies deeply, so a shallow copy is enough here.
-    if !crate::methods::first_units_pending() {
+    if !own_initialize && !crate::methods::first_units_pending() {
         let value = crate::methods::new_object_copying(definition, false)?;
         crate::heap().root(value);
         let label = crate::methods::dispatch_class(value)?;
@@ -4373,6 +4884,64 @@ unsafe fn named_classes(value: Sexp) -> Option<Vec<(Sexp, Sexp)>> {
     Some(pairs)
 }
 
+/// The slots and superclasses of a `representation` argument: a single class name, which is a
+/// superclass, or a character vector or list of single class names, the named ones slots and
+/// the others superclasses. Slot names and superclass names are each distinct.
+unsafe fn representation_parts(value: Sexp) -> Option<(Vec<(Sexp, Sexp)>, Vec<Sexp>)> {
+    if is_plain_name(value) && values::names(value) == nil() {
+        return Some((Vec::new(), vec![value.element(0)]));
+    }
+    let names = values::names(value);
+    if value.attrib() != nil() && (names == nil() || value.attrib().cdr() != nil())
+        || value.has_gp(gp::S4_OBJECT)
+    {
+        return None;
+    }
+    let mut slots = Vec::new();
+    let mut supers: Vec<Sexp> = Vec::new();
+    for index in 0..length(value) {
+        let class = match value.kind() {
+            SexpType::String => value.element(index),
+            SexpType::List => {
+                let item = value.element(index);
+                if !is_plain_name(item) || values::names(item) != nil() {
+                    return None;
+                }
+                item.element(0)
+            }
+            _ => return None,
+        };
+        if class == values::na_string() || class.bytes().is_empty() {
+            return None;
+        }
+        let name = if names == nil() {
+            values::blank_string()
+        } else {
+            names.element(index)
+        };
+        if name == values::na_string() {
+            return None;
+        }
+        if name.bytes().is_empty() {
+            if supers.iter().any(|known| known.bytes() == class.bytes()) {
+                return None;
+            }
+            supers.push(class);
+        } else {
+            slots.push((name, class));
+        }
+    }
+    let slot_names: Vec<Sexp> = slots.iter().map(|&(slot_name, _)| slot_name).collect();
+    if !distinct_names(&slot_names)
+        || slot_names
+            .iter()
+            .any(|slot_name| matches!(slot_name.bytes(), b".Data" | b"class" | b".S3Class"))
+    {
+        return None;
+    }
+    Some((slots, supers))
+}
+
 /// Whether names are non-empty, not `NA` and distinct.
 unsafe fn distinct_names(names: &[Sexp]) -> bool {
     names.iter().enumerate().all(|(index, &name)| {
@@ -4412,6 +4981,43 @@ unsafe fn list_entries(list: Sexp) -> Vec<(Sexp, Sexp)> {
     (0..length(list))
         .map(|index| (names.element(index), list.element(index)))
         .collect()
+}
+
+/// The list `prototype(...)` was called with, from the `classPrototypeDef` it returns, when
+/// the call named only slots. `reconcilePropertiesAndPrototype()` turns a prototype list into
+/// that same object with `do.call("prototype", list)`, so the two forms define the same class.
+/// `None` for a data part, or for a slot whose value is `NULL` and so left no attribute.
+unsafe fn prototype_def_list(value: Sexp) -> R<Option<Sexp>> {
+    let class = values::get_attr(value, symbols().class);
+    if class.kind() != SexpType::String
+        || length(class) != 1
+        || class.element(0).bytes() != b"classPrototypeDef"
+    {
+        return Ok(None);
+    }
+    let object = slot(value, install("object")?)?;
+    let slot_names = slot(value, install("slots")?)?;
+    if !is_false(slot(value, install("dataPart")?)?)
+        || object.kind() != SexpType::Object
+        || slot_names.kind() != SexpType::String
+    {
+        return Ok(None);
+    }
+    let mut entries = Vec::new();
+    let mut attribute = object.attrib();
+    while attribute != nil() {
+        entries.push((attribute.tag().car(), attribute.car()));
+        attribute = attribute.cdr();
+    }
+    if entries.len() != length(slot_names)
+        || entries
+            .iter()
+            .enumerate()
+            .any(|(index, &(name, _))| name.bytes() != slot_names.element(index).bytes())
+    {
+        return Ok(None);
+    }
+    named_list(&entries).map(Some)
 }
 
 unsafe fn named_list(entries: &[(Sexp, Sexp)]) -> R<Sexp> {
