@@ -48,6 +48,8 @@ pub enum ImageError {
     Unsupported(String),
     /// The image does not match the heap it is loaded into, or is damaged.
     Invalid(String),
+    /// The image was written against other fixed objects; the heap is unchanged.
+    FixedObjects,
     Heap(HeapError),
 }
 
@@ -56,6 +58,9 @@ impl fmt::Display for ImageError {
         match self {
             ImageError::Unsupported(message) => write!(formatter, "{message}"),
             ImageError::Invalid(message) => write!(formatter, "the image is invalid: {message}"),
+            ImageError::FixedObjects => {
+                write!(formatter, "its fixed objects differ from this heap's")
+            }
             ImageError::Heap(error) => write!(formatter, "{error}"),
         }
     }
@@ -410,7 +415,7 @@ impl Heap {
         objects.extend(fixed.primitives.iter().copied());
         objects.extend(fixed.extra.iter().copied());
         if objects.len() != fixed_count || object_count < fixed_count {
-            return Err(invalid("its fixed objects differ from this heap's"));
+            return Err(ImageError::FixedObjects);
         }
         // Objects that existed before the load keep their reference counts at least as high as
         // the image's, and an old one that comes to point at a loaded object is remembered.

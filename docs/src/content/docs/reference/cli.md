@@ -217,7 +217,8 @@ An image belongs to one ry build, one base R tree, and the values of the environ
 start-up reads (`R_DEFAULT_PACKAGES`, `R_LIBS`, the locale and the others), so a change to any of
 them starts the slow way once and writes a new image. A session never uses an image when it is
 interactive or sources a site or user profile, which `ry run` never does and ry's `Rscript` does
-when one exists. A damaged image is reported on stderr and replaced:
+when one exists. A start that prints a warning, seeds the random number generator, or loads a
+package from a library outside R home writes no image either, so it runs the slow way every time. A damaged image is reported on stderr and replaced:
 
 ```
 ry: starting without the start-up image: /home/me/.cache/ry/image/cac0e68e60610b97.image is damaged

@@ -208,9 +208,20 @@ pub(crate) unsafe fn load(plan: &Plan) -> Result<bool, LoadError> {
         .load_image(heap_image, &fixed, &mut |token| {
             builtin_libraries::routine_address(token)
         })
-        .map_err(|error| LoadError::Partial(error.to_string()))?;
+        .map_err(|error| match error {
+            // The fixed objects are compared before the heap takes anything.
+            ImageError::FixedObjects => LoadError::Untouched(error.to_string()),
+            _ => LoadError::Partial(error.to_string()),
+        })?;
     restore_state(state, &roots).map_err(|error| LoadError::Partial(error.to_string()))?;
     READS.with(|reads| *reads.borrow_mut() = None);
+    // Pruning removes the image used least recently, so a load counts as a use. A file this
+    // process cannot touch only loses its place in that order.
+    if let Ok(file) = std::fs::File::options().append(true).open(&plan.path) {
+        match file.set_modified(std::time::SystemTime::now()) {
+            Ok(()) | Err(_) => {}
+        }
+    }
     Ok(true)
 }
 
@@ -235,8 +246,15 @@ fn checksum(bytes: &[u8]) -> u64 {
 /// Whether the environment holds the values an image recorded for the variables start-up read.
 fn same_reads(encoded: &[u8]) -> Result<bool, ImageError> {
     let mut input = Reader { bytes: encoded };
-    let mut same = true;
-    for _ in 0..input.u32()? {
+    let every = input.u8()? != 0;
+    let count = input.u32()?;
+    // When start-up listed the whole environment, a variable added since is a change too.
+    let mut same = !every
+        || std::env::vars_os()
+            .filter(|(name, _)| name.to_str().is_none_or(|name| !steers_start_up(name)))
+            .count()
+            == count as usize;
+    for _ in 0..count {
         let name = std::str::from_utf8(input.blob()?)
             .map_err(|_| ImageError::Invalid("a variable name is not UTF-8".to_owned()))?;
         let value = match input.u8()? {
@@ -271,6 +289,7 @@ fn save_reads(plan: &Plan) -> Vec<u8> {
     names.retain(|name| !steers_start_up(name));
     names.sort_unstable();
     let mut out = Writer::default();
+    out.u8(u8::from(reads.every));
     out.u32(names.len() as u32);
     for name in names {
         out.blob(name.as_bytes());
@@ -305,6 +324,9 @@ pub(crate) unsafe fn before() -> Before {
 /// Writes the plan's image of the session start-up just finished.
 pub(crate) unsafe fn write(plan: &Plan, before: &Before) -> Result<(), String> {
     let reads = save_reads(plan);
+    if !eligible()? {
+        return Ok(());
+    }
     check_empty(before)?;
     let host_objects = (plan.host.fixed_objects)()?;
     let primitives = primitives();
@@ -385,6 +407,32 @@ fn extra_objects(host: &[Sexp]) -> Vec<Sexp> {
     extra.extend_from_slice(host);
     extra
 }
+
+/// Whether this start's state can go into an image at all, like a start that sources no profile.
+/// Base R's profile seeds the generator when `_R_RNG_VERSION_` is set, and every process loading
+/// the image would draw the same numbers from that seed. The key covers only R home's packages,
+/// so a namespace loaded from another library would outlive a reinstall, with lazy-load promises
+/// into its old database.
+unsafe fn eligible() -> Result<bool, String> {
+    let seed = crate::values::install(".Random.seed").map_err(|error| format!("{error:?}"))?;
+    if heap()
+        .frame_cell(crate::values::global_env(), seed)
+        .is_some()
+    {
+        return Ok(false);
+    }
+    let outside = crate::session::eval_text(OUTSIDE_R_HOME, crate::values::global_env())
+        .map_err(|error| format!("cannot list the loaded namespaces: {error:?}"))?;
+    Ok(crate::values::as_logical_scalar(outside) == 0)
+}
+
+/// Whether a loaded namespace lives outside `R_HOME/library`, whose entries may be links into
+/// another library. The namespaces ry defines itself are not packages in any library.
+const OUTSIDE_R_HOME: &str = "{ home <- normalizePath(list.files(file.path(R.home(), \"library\"), \
+        full.names = TRUE)); \
+    paths <- vapply(setdiff(loadedNamespaces(), c(\"base\", \"ry\", \"std\")), \
+        function(name) getNamespaceInfo(name, \"path\"), \"\"); \
+    !all(normalizePath(paths) %in% home) }";
 
 /// Fails when start-up left state that an image does not carry.
 unsafe fn check_empty(before: &Before) -> Result<(), String> {
@@ -707,8 +755,12 @@ fn key(host: &ImageHost, home: &str, environment: &[(String, String)]) -> u64 {
     for variable in ["R_LIBS", "R_LIBS_USER", "R_LIBS_SITE"] {
         if let Ok(paths) = std::env::var(variable) {
             for path in std::env::split_paths(&paths) {
+                // The profile stores each directory as an absolute path, so a relative one
+                // depends on the working directory as well.
                 let path = crate::connections::expand_path(&path.to_string_lossy());
-                mix(&[u8::from(Path::new(&path).is_dir())]);
+                let absolute = std::path::absolute(&path).unwrap_or_else(|_| PathBuf::from(&path));
+                mix(absolute.as_os_str().as_encoded_bytes());
+                mix(&[u8::from(absolute.is_dir())]);
             }
         }
     }

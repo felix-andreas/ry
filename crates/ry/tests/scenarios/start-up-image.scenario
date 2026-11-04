@@ -46,3 +46,11 @@ run ry run report.R
 expect exit 0
 expect stdout "point 3"
 expect stderr lacks "start-up image"
+
+env R_DEFAULT_PACKAGES datasets,nosuchpkg
+run ry run report.R
+expect exit 0
+expect stderr "nosuchpkg"
+run ry run report.R
+expect exit 0
+expect stderr "nosuchpkg"

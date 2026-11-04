@@ -603,8 +603,14 @@ and writes the image at the end.
 - **Refuses what it cannot carry.** The writer fails, and the start keeps going without an image,
   when start-up left a frame, a pending warning, a C finalizer, an external pointer other than a
   builtin routine, a new record layout, an open graphics device, or a loaded shared library.
+- **Skips starts it cannot reproduce.** Some starts write no image and say nothing, like a start
+  that sources a profile. A start that warned is one, because loading would not print the warnings
+  again. So is a start that left `.Random.seed` in the global environment (base R's profile seeds
+  the generator when `_R_RNG_VERSION_` is set, and every load would draw the same numbers). So is
+  one that loaded a namespace from outside `R_HOME/library`, which the key does not cover.
 - **Keyed by its inputs.** The file name hashes the runtime build, the session flags, base R's
-  files (size and modification time), which library directories exist, and the variables that
+  files (size and modification time), the absolute library directories and which of them exist,
+  and the variables that
   steer every start (`R_*`, `LC_*`, `LANG`, `LANGUAGE`, `TZ`, `HOME`). Every other variable start-up
   reads goes through `interp::image::variable`, which records it, and the image stores those
   values; a load whose environment differs in one starts the slow way and replaces the image.
@@ -617,7 +623,7 @@ and writes the image at the end.
 Interpreter state outside the heap is saved beside it: methods' dispatch globals and primitive
 method tables, the S4 extends and implicit-class tables, the loaded builtin libraries, data.table's
 namespace, and the environment variables start-up set. Per-process state, such as the command
-line, the temporary directory, the RNG and the start time, is never in the image.
+line, the temporary directory, the RNG seed and the start time, is never in the image.
 
 ## Correctness and performance instruments
 

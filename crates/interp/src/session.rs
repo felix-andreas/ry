@@ -79,8 +79,10 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
         }
     }
     let before = plan.as_ref().map(|_| crate::image::before());
-    start_slowly(&home, site_profile, user_profile)?;
-    if let (Some(plan), Some(before)) = (&plan, &before)
+    let warned = start_slowly(&home, site_profile, user_profile)?;
+    // An image would not replay the warnings, which GNU R prints on every start.
+    if !warned
+        && let (Some(plan), Some(before)) = (&plan, &before)
         && let Err(message) = crate::image::write(plan, before)
     {
         write_console(
@@ -119,12 +121,13 @@ fn user_profile_path() -> Option<String> {
     user.filter(|path| std::path::Path::new(path).exists())
 }
 
-/// Start-up from the C-level options to the default packages, as GNU R runs it.
+/// Start-up from the C-level options to the default packages, as GNU R runs it. Returns whether
+/// start-up warned.
 unsafe fn start_slowly(
     home: &str,
     site_profile: Option<String>,
     user_profile: Option<String>,
-) -> R<()> {
+) -> R<bool> {
     crate::envir::install_default_options()?;
     let machine = crate::system::machine()?;
     eval::define(values::install(".Machine")?, machine, base_env())?;
@@ -170,8 +173,9 @@ unsafe fn start_slowly(
     }
     eval_text(".First.sys()", global_env())?;
     crate::frame::attach_package()?;
+    let warned = !interp().warnings.is_empty();
     conditions::print_warnings()?;
-    Ok(())
+    Ok(warned)
 }
 
 /// GNU R 4.3.3's `registerS3methods()`, as [`stable_hash`] of its formals and body. Setting

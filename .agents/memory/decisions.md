@@ -7467,6 +7467,13 @@ Each one trades a narrow class of missed errors for a class of false reports see
   which are safe to copy because the loader overwrites the fixed environment's frame, and it cost
   a full collection per slow start. Rust state that holds heap objects must be a fixed object, a
   heap root, or saved by `save_state`; the oracle and scenario suites run with images on.
+- **Starts that cannot be reproduced write no image, silently.** These are a start that warned
+  (a load would not print the warning again), a start that left `.Random.seed` (base R's profile
+  seeds from the clock under `_R_RNG_VERSION_`, and every load would share that seed), and a start
+  that loaded a namespace from outside `R_HOME/library`. The key covers only R home's packages, so
+  a reinstalled package elsewhere would keep lazy-load promises into its old database. Hashing
+  those packages' files instead would make the key depend on which packages start-up loads, which
+  is known only after the slow start. Relative library directories are keyed as absolute paths.
 - **Impact.** Empty `ry run`: 125 ms to 47 ms median (the writing run costs about 180 ms).
   `methods::getClass("numeric")` with `R_DEFAULT_PACKAGES=NULL`: 64 ms to 56 ms. The oracle shows
   the same results with and without images, and `start-up-image.scenario` pins the env-change and
