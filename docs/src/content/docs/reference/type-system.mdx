@@ -1061,13 +1061,29 @@ A ry type asks in three places:
 - **A later use.** `total <- 0` gives `total` a literal type that its first use in the same
   function decides: an operand beside a ry number, an argument to a typed parameter, or an annotated
   binding. In `for (x in xs) total <- total + x` with `xs: List<F64>`, `total` is an `F64`, and
-  `rate <- 2.0; half(rate)` with `half(x: F64)` makes `rate` an `F64`. Any other read, and a read
-  from another top-level statement, gives the variable R's type, as does a function that never
-  decides it.
+  `rate <- 2.0; half(rate)` with `half(x: F64)` makes `rate` an `F64`. Any other read gives the
+  variable R's type, as does a function that never decides it.
+- **A top-level binding in a typed file.** In a strict file, or a file written with ry syntax (an
+  inline annotation, a record, tuple, tag, `List` or `match`), a literal bound outside any function
+  is a ry value: `count <- 3` is an `I64`, `rate <- 2.0` an `F64`, `name <- "ry"` a `Str` and
+  `flag <- TRUE` a `Bool`. A literal written with a decimal point or an exponent is an `F64`, and
+  arithmetic on literals alone is one literal, so `step <- 1 / 4` is an `F64`. Each top-level
+  statement is checked on its own, so nothing later in the file decides the type. In any other file
+  a top-level literal has R's type.
 
-Arithmetic on literals alone (`+`, `-`, `*`, `%%` and `/`) is decided as one literal, so
-`2 * 3.14159 * r` with `r: F64` is an `F64`, and `/` asks for `F64`. A string or `TRUE`/`FALSE`
-bound to a variable is decided the same way, as `Str` or `character` and `Bool` or `logical`.
+A value written with literals alone is decided as one literal, wherever a lone literal would be:
+
+- Arithmetic (`+`, `-`, `*`, `%%` and `/`), so `2 * 3.14159 * r` with `r: F64` is an `F64`, and `/`
+  asks for `F64`.
+- Logic and comparisons (`!`, `&&`, `||`, and a comparison of number literals), so
+  `ok: Bool <- 1.5 < 2` holds, and a literal beside a `Bool` takes that type: `TRUE && done` with
+  `done: Bool` is a `Bool`.
+- An `if` whose branches are such values, and a `{}` holding one, so `x: F64 <- if (c) 0.1 else 3`
+  holds and `if (c) 1 else 2.5` at a top-level binding is an `F64`.
+
+A string or `TRUE`/`FALSE` bound to a variable is decided the same way, as `Str` or `character`
+and `Bool` or `logical`. A ry number that a call leaves open is decided by an annotation as well,
+so `total: F64 <- List.sum([3])` sums a `List<F64>`.
 
 A literal the type cannot hold exactly, such as `2.5` as an `I64`, is a
 `type-mismatch` at the literal:
@@ -1140,10 +1156,25 @@ turns a `character` into a `Str`. Each stops with an error on `NA`, on a length 
 on attributes. `Num.to_r` goes the other way: an `I64` becomes R's `integer` when it fits in 32
 bits and a `double` otherwise.
 
-Passing an `I64` to an R parameter typed as an R number is a `type-mismatch`, and when the code
-runs, an R function that receives one stops with an error that names `Num.to_r()`. The checker does
-not yet name `Num.to_r()` in its message, and it does not flag an `I64` passed to an untyped base
-function such as `sqrt()`.
+No R type represents an `I64`, or a `List` whose items are not `F64`, `Bool` or `Str`, so passing
+one to an R function is a `type-mismatch` that names the conversion. When such code runs anyway, the
+R function stops with the same advice:
+
+```r
+n <- 4
+inc <- function(x: I64) -> I64 x + 1
+sqrt(n)
+```
+
+```text ry check typing
+type-mismatch
+
+  x `sqrt` is an R function, and this value is a ry `I64`, not an R object. Convert it with `Num.to_r()` first
+```
+
+An `F64`, `Bool` or `Str`, and a `List` of one of them, shares the representation of R's `double`,
+`logical` or `character` (vector), so it passes to R code unconverted: `sqrt(2.0)` and
+`mean([1.5, 2.5])` need no conversion.
 
 ## Lists
 

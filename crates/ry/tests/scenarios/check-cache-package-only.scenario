@@ -9,10 +9,10 @@ file DESCRIPTION
 | Package: shapes
 | Version: 0.1.0
 file R/area.R
-| #: fn(width: double, height: double) -> double
+| #: fn(width: F64, height: F64) -> F64
 | area <- function(width, height) width * height
 file tests/testthat/helper-values.R
-| expected_area <- 6
+| expected_area <- 6.0
 file tests/testthat/test-area.R
 | stopifnot(area(2, 3) == expected_area)
 
@@ -40,7 +40,7 @@ expect stderr "expected_area"
 
 # The helper gets the name back while only package checks run, and the full check sees it.
 file tests/testthat/helper-values.R
-| expected_area <- 6
+| expected_area <- 6.0
 
 run ry check R
 expect exit 0

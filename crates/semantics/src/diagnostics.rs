@@ -3348,15 +3348,17 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             message
         }
         TypeErrorKind::NativeValueToR { function, kind } => {
-            let kind = match kind {
-                NativeValueKind::Record => "record",
-                NativeValueKind::Tuple => "tuple",
-                NativeValueKind::Tag => "tag",
-                NativeValueKind::Dict => "dict",
-                NativeValueKind::Set => "set",
+            let (kind, conversion) = match kind {
+                NativeValueKind::Record => ("record", "as.list"),
+                NativeValueKind::Tuple => ("tuple", "as.list"),
+                NativeValueKind::Tag => ("tag", "as.list"),
+                NativeValueKind::Dict => ("dict", "as.list"),
+                NativeValueKind::Set => ("set", "as.list"),
+                NativeValueKind::I64 => ("`I64`", "Num.to_r"),
+                NativeValueKind::List => ("`List`", "List.to_r"),
             };
             format!(
-                "`{function}` is an R function, and this value is a ry {kind}, not an R object. Convert it with `as.list()` first"
+                "`{function}` is an R function, and this value is a ry {kind}, not an R object. Convert it with `{conversion}()` first"
             )
         }
         TypeErrorKind::FieldCannotBeAdded { field, container } => format!(

@@ -1193,6 +1193,25 @@ pub fn file_is_strict(db: &dyn Db, file: SourceFile) -> bool {
     }
 }
 
+/// Whether a literal bound outside any function in `file` is a ry value: the file is strict,
+/// or written with ry syntax (an inline annotation, a record, tuple, tag, `List` or `match`).
+#[salsa::tracked]
+pub fn file_holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
+    // Unlike `file_is_strict`, a host with no settings does not count as strict here, because
+    // this changes types rather than only reporting origins.
+    let strict = match file_typing_mode(db, file) {
+        Some(mode) => *mode == TypingMode::Strict,
+        None => AnalysisSettings::try_get(db).is_some_and(|settings| *settings.strict(db)),
+    };
+    if strict {
+        return true;
+    }
+    let sites = file_syntax_sites(db, file);
+    sites.any(SiteRole::RySyntax)
+        || sites.any(SiteRole::InlineSite)
+        || sites.any(SiteRole::InlineAnnotation)
+}
+
 /// The file ranges of the unsuffixed number literals the checker typed as `I64`, in source
 /// order. ry's runtime reads each one as its suffixed form, because R would read `5` as a
 /// `double` whatever type the checker gave it.
@@ -2615,6 +2634,7 @@ fn check_item_against<'db>(
         &annotations.expressions,
         Some(globals),
         file_is_strict(db, *item.file(db)),
+        *file_holds_ry_values(db, *item.file(db)),
     ))
 }
 

@@ -363,6 +363,9 @@ pub struct NumberLiteral {
     pub decimal_places: Option<u32>,
     /// Written with R's `L` suffix, so its R type is `integer`.
     pub integer: bool,
+    /// Written with a decimal point or an exponent (`2.0`, `1e3`), which makes `F64` the ry
+    /// number type it takes when nothing decides one, as in Roc.
+    pub fractional_form: bool,
 }
 
 impl NumberLiteral {
@@ -396,12 +399,16 @@ impl NumberLiteral {
             };
             (whole, value, decimal_places)
         };
+        let fractional_form = !digits.starts_with("0x")
+            && !digits.starts_with("0X")
+            && digits.contains(['.', 'e', 'E']);
         Some(NumberLiteral {
             negative,
             whole,
             value: if negative { -value } else { value },
             decimal_places,
             integer,
+            fractional_form,
         })
     }
 
