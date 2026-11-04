@@ -1,12 +1,10 @@
 # ry's runtime package, `ry`: the DataFrame API, the data.table helpers that also take frames,
-# and Arrays.
+# and the conversions into ry's own values.
 #
 # The functions run only on ry's runtime, which binds them in the `ry` namespace and attaches it as
 # `package:ry`. `crates/interp/src/frame.rs` and `dataframe.rs` implement them, and a test keeps
 # this file's names and the runtime's equal. The standard library is its own namespace, declared
 # in `std.Rtypes`.
-
-@type Array<T>
 
 # Conversions from a list to ry's own values. They are base builtins on ry's runtime, not part
 # of `package:ry`, so the test that keeps this file and the runtime's table equal skips them.
@@ -14,16 +12,6 @@
 as.record : fn(x: list[Any]) -> Any
 as.tuple : fn(x: list[Any]) -> Any
 as.tag : fn(x: list[Any]) -> Any
-
-# Arrays. `as.Array` checks every item: it refuses `NA`, a classed object and a ragged list, and
-# drops names. An Array passes to R code as the plain vector it is, so the reverse needs no call.
-as.Array : <T> fn(x: Array<T>) -> Array<T>
-as.Array : fn(x: logical[]) -> Array<logical>
-as.Array : fn(x: integer[]) -> Array<integer>
-as.Array : fn(x: double[]) -> Array<double>
-as.Array : fn(x: character[]) -> Array<character>
-as.Array : <T: item> fn(x: list[T]) -> Array<T>
-is.Array : fn(x: Any) -> logical
 
 # DataFrame
 #

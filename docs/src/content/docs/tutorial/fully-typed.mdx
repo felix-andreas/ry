@@ -98,17 +98,17 @@ Seven modules modeled on Roc's: `List`, `Str`, `Num`, `Bool`, `Dict`, `Set` and 
 qualified names. Where R would return `NA` or warn, a function returns a tag, which `match` handles:
 
 ```r
-first_or_zero <- function(xs: Array<integer>) -> integer {
+first_or_zero <- function(xs: List<I64>) -> I64 {
   match (List.first(xs)) {
     :Ok(x) => x
-    :Err(:ListWasEmpty) => 0L
+    :Err(:ListWasEmpty) => 0i64
   }
 }
 first_or_zero([])
 ```
 
 ```text ry run runtime=ry exact
-[1] 0
+0i64
 ```
 
 [Standard library](/reference/standard-library) lists every function.

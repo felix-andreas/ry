@@ -228,8 +228,8 @@ builtins. The root holds the interpreter state (`Interp`, the frame stack, the h
   and the image files it writes.
 - **`annotations.rs`**: the run-time checks that [inline annotations](/reference/type-system#inline-annotations-at-run-time)
   become at a function's boundary.
-- **`records.rs`**: records, tuples, tags and `match` at run time. **`arrays.rs`**: `Array<T>`, an R
-  vector with the heap's Array bit set, and the strict rules that go with it.
+- **`records.rs`**: records, tuples, tags and `match` at run time. **`arrays.rs`**: `List<T>`, an R
+  vector with the heap's list bit set, and the strict rules that go with it; **`numbers.rs`**: the native number types.
 - **`dataframe.rs`**: the Polars-style `DataFrame` verbs and column expressions. **`frame.rs`**: the
   `DataFrame` value, its readers, writers and conversions. **`data_table.rs`**: data.table queries
   answered on ry's engine when the result is guaranteed identical, and declined to data.table

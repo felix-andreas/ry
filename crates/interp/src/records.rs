@@ -8,11 +8,12 @@
 
 use {
     crate::{
+        arrays,
         builtins::{Arg, BuiltinDef, Call, builtin, special},
-        deparse, eval, interp,
+        deparse, eval, interp, numbers,
         sort::IdenticalFlags,
         standard_library,
-        unwind::{R, Unwind, error, error_in},
+        unwind::{Jump, R, Unwind, error, error_in, jump},
         values::{self, char_str, length, missing_arg, nil, scalar_string, symbol_name, symbols},
     },
     heap::{
@@ -26,6 +27,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".ry_tuple", -1, do_tuple),
     builtin(".ry_tag", -1, do_tag),
     special(".ry_match", -1, do_match).keep_visibility(),
+    special(".ry_try", 1, do_try),
+    builtin(".ry_update", -1, do_update),
+    builtin(".ry_text", 1, do_text),
     builtin("as.record", 1, do_as_record),
     builtin("as.tuple", 1, do_as_tuple),
     builtin("as.tag", -1, do_as_tag),
@@ -44,6 +48,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("format.ry_set", -1, do_format),
     builtin("all.equal.ry_dict", -1, do_all_equal),
     builtin("all.equal.ry_set", -1, do_all_equal),
+    builtin("format.ry_number", -1, do_format),
+    builtin("all.equal.ry_number", -1, do_all_equal),
 ];
 
 /// The kind of a record object.
@@ -84,26 +90,33 @@ pub unsafe fn slot_value(object: Sexp, index: usize) -> R<Sexp> {
     }
 }
 
-/// The error a builtin that does not understand native values raises for one, naming the
+/// Whether `value` is a ry value R code cannot read: a record, tuple, tag, dictionary or set, or
+/// an `I64` or `List<I64>`.
+pub unsafe fn is_native(value: Sexp) -> bool {
+    matches!(value.kind(), SexpType::Record | SexpType::I64)
+}
+
+/// The error a builtin that does not understand native values raises for `value`, naming the
 /// argument (`point`) and the conversion that fixes it.
-pub fn boundary_message(subject: &str, kind: NativeKind) -> String {
-    format!(
-        "{subject} is a ry {}, not an R object; convert it with `as.list()`",
-        kind.type_name()
-    )
+pub unsafe fn boundary_message(subject: &str, value: Sexp) -> String {
+    let (name, conversion) = match value.kind() {
+        SexpType::I64 if value.is_array() => ("List<I64>", "List.to_r()"),
+        SexpType::I64 => ("I64", "Num.to_r()"),
+        _ => (native_kind(value).type_name(), "as.list()"),
+    };
+    format!("{subject} is a ry {name}, not an R object; convert it with `{conversion}`")
 }
 
 /// Refuses a native value among `args`, for a builtin that is not in [`ACCEPTS_NATIVE`]. Only
-/// the top-level arguments are scanned, so the check costs one type test per argument.
-pub unsafe fn check_native_args(call: Sexp, args: &[Arg]) -> R<()> {
+/// the top-level arguments are scanned, so the check costs one type test per argument. With
+/// `skip_numbers`, for the operators that compute on native numbers, those pass through.
+pub unsafe fn check_native_args(call: Sexp, args: &[Arg], skip_numbers: bool) -> R<()> {
     for (position, arg) in args.iter().enumerate() {
-        if arg.value.kind() == SexpType::Record {
+        let kind = arg.value.kind();
+        if kind == SexpType::Record || (kind == SexpType::I64 && !skip_numbers) {
             let subject = argument_text(call, position)
                 .unwrap_or_else(|| format!("argument {}", position + 1));
-            return Err(error_in(
-                call,
-                boundary_message(&subject, native_kind(arg.value)),
-            ));
+            return Err(error_in(call, boundary_message(&subject, arg.value)));
         }
     }
     Ok(())
@@ -113,7 +126,7 @@ pub unsafe fn check_native_args(call: Sexp, args: &[Arg]) -> R<()> {
 /// or an `if` condition; `expression` is the code that produced it.
 pub unsafe fn boundary_error(value: Sexp, expression: Sexp, call: Sexp) -> Unwind {
     let subject = short_code(expression).unwrap_or_else(|| "the value".to_owned());
-    error_in(call, boundary_message(&subject, native_kind(value)))
+    error_in(call, boundary_message(&subject, value))
 }
 
 /// The source of argument `position` of `call`, in backticks, unless a `...` before it makes the
@@ -171,6 +184,78 @@ unsafe fn do_tag(call: &Call<'_>) -> R<Sexp> {
     let tag = tag_id(name.value).map_err(|message| call.error(message))?;
     let items = arg_items(payload)?;
     make(Some(tag), &items).map_err(|message| call.error(message))
+}
+
+/// `try result`: the payload of an `:Ok`, or a `return` of the whole `:Err` from the function
+/// whose body evaluates it. A payload of several items comes back as a tuple of them.
+unsafe fn do_try(call: &Call<'_>) -> R<Sexp> {
+    let value = eval::eval(call.arg(0), call.env)?;
+    let tag = (value.kind() == SexpType::Record)
+        .then(|| layout(value))
+        .and_then(|layout| layout.tag.map(|tag| tag_name(tag)));
+    match tag.as_deref() {
+        Some("Ok") => match value.record_slot_count() {
+            1 => slot_value(value, 0),
+            count => {
+                let mut items = Vec::with_capacity(count);
+                for index in 0..count {
+                    items.push((None, slot_value(value, index)?));
+                }
+                make(None, &items).map_err(|message| call.error(message))
+            }
+        },
+        Some("Err") => {
+            if !interp().frames.iter().any(|frame| frame.env == call.env) {
+                return Err(call.error(
+                    "`try` returns an `:Err` early from the function around it, but it is not inside a function",
+                ));
+            }
+            Err(jump(Jump::Return {
+                env: call.env,
+                value,
+            }))
+        }
+        _ => Err(call.error(format!(
+            "`try` needs `:Ok(value)` or `:Err(error)`, but got `{}`",
+            describe(value)
+        ))),
+    }
+}
+
+/// One interpolation of an f-string as text: a native number without its suffix, a list or
+/// another ry value as its literal, and an R value as `as.character()` writes it.
+unsafe fn do_text(call: &Call<'_>) -> R<Sexp> {
+    let value = call.arg(0);
+    if let Some(number) = numbers::read(value) {
+        return scalar_string(&number.to_string());
+    }
+    if is_native(value) || value.is_array() {
+        return scalar_string(&deparse::deparse_one_line(value));
+    }
+    let as_character = values::install("as.character")?;
+    eval::eval(values::call(as_character, &[value])?, call.env)
+}
+
+/// `(..base, name = value, ...)`: a copy of the record `base` with the named fields replaced.
+unsafe fn do_update(call: &Call<'_>) -> R<Sexp> {
+    let Some((base, fields)) = call.args.split_first() else {
+        return Err(call.error("a record update needs a record after `..`"));
+    };
+    let mut result = base.value;
+    if result.kind() != SexpType::Record || !matches!(native_kind(result), NativeKind::Record) {
+        return Err(call.error(format!(
+            "only a record can be updated with `..`, but got `{}`",
+            describe(result)
+        )));
+    }
+    for (name, value) in arg_items(fields)? {
+        let Some(name) = name else {
+            return Err(call.error("every field of a record update needs a name"));
+        };
+        let index = field_index(result, symbol_name(name).as_bytes(), call.call)?;
+        result = with_slot(result, index, value)?;
+    }
+    Ok(result)
 }
 
 /// The items of a constructor call, each with its field name if it has one.
@@ -641,7 +726,7 @@ pub unsafe fn eval_bound_registers(
 /// Whether the value of the `match` guard `guard` holds, as `if` reads a condition, except that
 /// a record, tuple or tag gets the boundary error.
 pub unsafe fn guard_holds(condition: Sexp, guard: Sexp, call: Sexp) -> R<bool> {
-    if condition.kind() == SexpType::Record {
+    if is_native(condition) {
         return Err(boundary_error(condition, guard, call));
     }
     eval::as_condition(condition, call)
@@ -670,6 +755,12 @@ unsafe fn matches(
             let name = symbol_name(pattern);
             match name.as_ref() {
                 "_" => Ok(true),
+                _ if name.starts_with("..") && name.len() > 2 => Err(error_in(
+                    call,
+                    format!(
+                        "`{name}` binds the rest of a list, so it may only stand in a list pattern"
+                    ),
+                )),
                 ".." => Err(error_in(
                     call,
                     "`..` may only end a record pattern or stand for a tag's payload",
@@ -707,6 +798,14 @@ unsafe fn matches(
                     matches(arguments[1].1, value, bindings, call)
                 }
                 "(" if arguments.len() == 1 => matches(arguments[0].1, value, bindings, call),
+                ".ry_as" if arguments.len() == 2 => {
+                    if !matches(arguments[0].1, value, bindings, call)? {
+                        return Ok(false);
+                    }
+                    bindings.push((arguments[1].1, value));
+                    Ok(true)
+                }
+                ".ry_array" => array_matches(&arguments, value, bindings, call),
                 ".ry_tuple" | ".ry_record" => {
                     if value.kind() != SexpType::Record {
                         return Ok(false);
@@ -758,6 +857,65 @@ unsafe fn matches(
         | SexpType::Complex
         | SexpType::String => Ok(literal_matches(pattern, value)),
         _ => Err(error_in(call, "invalid pattern in `match`")),
+    }
+}
+
+/// Matches a list pattern: exactly its items, or with a `..` at least the items before and
+/// after it, binding the items in between as a list to `..name`.
+unsafe fn array_matches(
+    items: &[(Sexp, Sexp)],
+    value: Sexp,
+    bindings: &mut Vec<(Sexp, Sexp)>,
+    call: Sexp,
+) -> R<bool> {
+    if !value.is_array() {
+        return Ok(false);
+    }
+    let count = length(value);
+    let rest = items
+        .iter()
+        .position(|(_, item)| rest_name(*item).is_some());
+    let (before, after) = match rest {
+        Some(position) => (&items[..position], &items[position + 1..]),
+        None => (items, &items[items.len()..]),
+    };
+    let fixed = before.len() + after.len();
+    if count < fixed || (rest.is_none() && count != fixed) {
+        return Ok(false);
+    }
+    for (index, (_, item)) in before.iter().enumerate() {
+        if !matches(*item, arrays::item(value, index)?, bindings, call)? {
+            return Ok(false);
+        }
+    }
+    let tail = count - after.len();
+    for (offset, (_, item)) in after.iter().enumerate() {
+        if !matches(*item, arrays::item(value, tail + offset)?, bindings, call)? {
+            return Ok(false);
+        }
+    }
+    if let Some(position) = rest
+        && let Some(Some(name)) = items.get(position).and_then(|(_, item)| rest_name(*item))
+    {
+        let list = arrays::slice(value, before.len(), tail)?;
+        bindings.push((values::install(&name)?, list));
+    }
+    Ok(true)
+}
+
+/// For a rest pattern `..` or `..name`, the name it binds, if any.
+unsafe fn rest_name(pattern: Sexp) -> Option<Option<String>> {
+    if pattern.kind() != SexpType::Symbol {
+        return None;
+    }
+    let name = symbol_name(pattern);
+    let rest = name.strip_prefix("..")?;
+    if rest.is_empty() {
+        Some(None)
+    } else if rest.starts_with(char::is_alphabetic) {
+        Some(Some(rest.to_owned()))
+    } else {
+        None
     }
 }
 
@@ -824,6 +982,9 @@ unsafe fn payload_matches(
 pub unsafe fn literal_matches(pattern: Sexp, value: Sexp) -> bool {
     if pattern == nil() || value == nil() {
         return pattern == value;
+    }
+    if let Some(number) = numbers::read(value) {
+        return numbers::literal_matches(pattern, number);
     }
     if length(value) != 1 || value.is_object() || length(pattern) != 1 {
         return false;
@@ -1047,6 +1208,10 @@ unsafe fn compare(
     prefix: &str,
     messages: &mut Vec<String>,
 ) -> R<()> {
+    if target.kind() == SexpType::I64 || current.kind() == SexpType::I64 {
+        compare_numbers(target, current, prefix, messages);
+        return Ok(());
+    }
     if target.kind() != SexpType::Record || current.kind() != SexpType::Record {
         if target.kind() == SexpType::Record || current.kind() == SexpType::Record {
             messages.push(format!(
@@ -1166,8 +1331,54 @@ unsafe fn compare_r(
     Ok(())
 }
 
+/// `all.equal` where either side is an `I64` or a `List<I64>`: exact, because the numbers are
+/// integers.
+unsafe fn compare_numbers(target: Sexp, current: Sexp, prefix: &str, messages: &mut Vec<String>) {
+    let same_shape = target.kind() == current.kind() && target.is_array() == current.is_array();
+    if !same_shape {
+        messages.push(format!(
+            "{prefix}target is {}, current is {}",
+            kind_phrase(target),
+            kind_phrase(current)
+        ));
+        return;
+    }
+    let (left, right) = (target.slice::<i64>(), current.slice::<i64>());
+    if left.len() != right.len() {
+        messages.push(format!(
+            "{prefix}Lengths ({}, {}) differ",
+            left.len(),
+            right.len()
+        ));
+        return;
+    }
+    let differences = left.iter().zip(right).filter(|(a, b)| a != b).count();
+    match (
+        target.is_array(),
+        left.iter().zip(right).find(|(a, b)| a != b),
+    ) {
+        (_, None) => {}
+        (false, Some((&a, &b))) => messages.push(format!(
+            "{prefix}target is {}, current is {}",
+            numbers::literal(a),
+            numbers::literal(b)
+        )),
+        (true, Some(_)) => messages.push(format!(
+            "{prefix}{differences} of {} items differ",
+            left.len()
+        )),
+    }
+}
+
 unsafe fn kind_phrase(value: Sexp) -> String {
-    if value.kind() == SexpType::Record {
+    if value.kind() == SexpType::I64 {
+        if value.is_array() {
+            "a ry List<I64>"
+        } else {
+            "a ry I64"
+        }
+        .to_owned()
+    } else if value.kind() == SexpType::Record {
         format!("a ry {}", native_kind(value).type_name())
     } else {
         format!("of type {}", value.kind().name())

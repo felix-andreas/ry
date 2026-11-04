@@ -5,7 +5,7 @@
 use {
     semantics::{
         DocumentKind,
-        hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind},
+        hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind, Rest},
         item_hir, item_tree,
         testing::with_fixture_project,
     },
@@ -110,8 +110,17 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
                 .collect();
             format!("Record({})", names.join(", "))
         }
+        ExpressionKind::RecordUpdate { fields, .. } => {
+            let names: Vec<&str> = module[fields]
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect();
+            format!("RecordUpdate({})", names.join(", "))
+        }
         ExpressionKind::Tag { name, .. } => format!("Tag :{}", module.name(*name)),
         ExpressionKind::Match { .. } => "Match".to_owned(),
+        ExpressionKind::FormatString(_) => "FormatString".to_owned(),
+        ExpressionKind::Try(_) => "Try".to_owned(),
     };
     output.push_str(&format!("{}{label}\n", "  ".repeat(depth)));
     match kind {
@@ -184,12 +193,36 @@ fn render_pattern(output: &mut String, module: &Module, id: PatId, depth: usize)
         PatternKind::Record { fields, rest } => {
             output.push_str(&format!(
                 "{indent}pattern Record{}\n",
-                if *rest { " .." } else { "" }
+                rest.map(|rest| format!(" {}", rest_text(module, rest)))
+                    .unwrap_or_default()
             ));
             for field in &module[fields] {
                 output.push_str(&format!("{indent}  field {} =\n", field.name));
                 render_pattern(output, module, field.pattern, depth + 2);
             }
+        }
+        PatternKind::List { items, rest } => {
+            output.push_str(&format!("{indent}pattern list\n"));
+            let items = &module[items];
+            let position = rest.map_or(items.len(), |rest| rest.position as usize);
+            for (index, item) in items.iter().enumerate() {
+                if index == position
+                    && let Some(rest) = rest
+                {
+                    output.push_str(&format!("{indent}  {}\n", rest_text(module, rest.rest)));
+                }
+                render_pattern(output, module, *item, depth + 1);
+            }
+            if let Some(rest) = rest.filter(|rest| rest.position as usize >= items.len()) {
+                output.push_str(&format!("{indent}  {}\n", rest_text(module, rest.rest)));
+            }
+        }
+        PatternKind::As { pattern, binding } => {
+            let ExpressionKind::NameRef(name) = module.kind(*binding) else {
+                panic!("an `as` binding is a name");
+            };
+            output.push_str(&format!("{indent}pattern as {name}\n"));
+            render_pattern(output, module, *pattern, depth + 1);
         }
         PatternKind::Or(alternatives) => {
             output.push_str(&format!("{indent}pattern or\n"));
@@ -215,6 +248,13 @@ fn render_arguments(output: &mut String, module: &Module, arguments: &[Argument]
     }
 }
 
+fn rest_text(module: &Module, rest: Rest) -> String {
+    match rest.binding.map(|binding| module.kind(binding)) {
+        Some(ExpressionKind::NameRef(name)) => format!("..{name}"),
+        _ => "..".to_owned(),
+    }
+}
+
 /// Renders a literal with its text resolved, as `Integer("1L")`.
 fn literal_text(module: &Module, literal: &LiteralKind) -> String {
     match literal {
@@ -222,6 +262,7 @@ fn literal_text(module: &Module, literal: &LiteralKind) -> String {
         LiteralKind::Double(text) => format!("Double({:?})", &module[text]),
         LiteralKind::Complex(text) => format!("Complex({:?})", &module[text]),
         LiteralKind::String(text) => format!("String({:?})", &module[text]),
+        LiteralKind::Suffixed { number, ty } => format!("Suffixed({:?}, {ty:?})", &module[number]),
         other => format!("{other:?}"),
     }
 }

@@ -201,7 +201,7 @@ definition: installed Str. from base, stats, utils, methods, graphics, grDevices
 references: none
 rename: none
 signature: none
-completion (38): Str.caseless_ascii_equals, Str.concat, Str.contains, Str.count_utf8_bytes, Str.drop_prefix, Str.drop_suffix, Str.ends_with, Str.from_utf16
+completion (39): Str.caseless_ascii_equals, Str.concat, Str.contains, Str.count_utf8_bytes, Str.drop_prefix, Str.drop_suffix, Str.ends_with, Str.from_r
 
 #---- completion_ranks_locals_before_keywords
 f <- function(value) {
@@ -413,7 +413,7 @@ action: Add inferred type annotation for `outer`
   edit 19..19 -> " -> double"
 action: Add inferred type annotations for the whole file
   edit 19..19 -> " -> double"
-completion (72): by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot, barplot.default
+completion (73): by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot, barplot.default
 hint @19 -> double
 hint @43: T
 hint @47: T

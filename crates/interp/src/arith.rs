@@ -895,13 +895,25 @@ pub enum Op {
 unsafe fn strict(
     call: &Call<'_>,
     class: OperatorClass,
-    compute: impl FnOnce(&Call<'_>) -> R<Sexp>,
+    compute: impl Fn(&Call<'_>) -> R<Sexp>,
 ) -> R<Sexp> {
-    if !call.args.iter().any(|arg| arg.value.is_array()) {
+    // An `I64` operand, single or a list, has its own vectorized operators (see `numbers`).
+    if !call.args.iter().any(|arg| arg.value.is_array())
+        || call
+            .args
+            .iter()
+            .any(|arg| arg.value.kind() == SexpType::I64)
+    {
         return compute(call);
     }
     let operands: Vec<Sexp> = call.args.iter().map(|arg| arg.value).collect();
     let name = call.name();
+    if operands
+        .iter()
+        .any(|&value| value.is_array() && arrays::items(value) == arrays::Items::RyValues)
+    {
+        return item_by_item(call, &operands, compute);
+    }
     if arrays::check_operands(call.call, name, class, &operands)? {
         let result = compute(call)?;
         return arrays::finish_result(call.call, name, result);
@@ -917,7 +929,74 @@ unsafe fn strict(
     Ok(result)
 }
 
+/// An operator on a list of ry values, such as nested lists, applied to each pair of items in
+/// turn. R's operator knows nothing of ry values, so the scalar operator runs once per item and
+/// the results form a new list. Two lists must have one length, because a list is never recycled,
+/// and an operand that is not a list stands beside every item.
+unsafe fn item_by_item(
+    call: &Call<'_>,
+    operands: &[Sexp],
+    compute: impl Fn(&Call<'_>) -> R<Sexp>,
+) -> R<Sexp> {
+    let name = call.name();
+    let lengths: Vec<usize> = operands
+        .iter()
+        .filter(|value| value.is_array())
+        .map(|&value| length(value))
+        .collect();
+    let count = lengths.first().copied().unwrap_or(0);
+    if let [left, right] = lengths[..]
+        && left != right
+    {
+        return Err(call.error(format!(
+            "`{name}` needs lists of the same length, but they have {left} and {right} items; a list is never recycled"
+        )));
+    }
+    let mut results = Vec::with_capacity(count);
+    for position in 0..count {
+        let mut args = Vec::with_capacity(call.args.len());
+        for arg in call.args {
+            let value = if arg.value.is_array() {
+                let item = arrays::item(arg.value, position)?;
+                // No record, tuple, tag, dictionary or set defines an operator, so one gets the
+                // list's own message rather than the boundary error for one item.
+                if item.kind() == SexpType::Record {
+                    return Err(call.error(format!(
+                        "`{name}` is not defined for a list of ry value items"
+                    )));
+                }
+                crate::heap().root(item);
+                item
+            } else {
+                arg.value
+            };
+            args.push(Arg {
+                tag: arg.tag,
+                value,
+            });
+        }
+        let item_call = Call {
+            call: call.call,
+            op: call.op,
+            args: &args,
+            env: call.env,
+            reusable: None,
+        };
+        let result = compute(&item_call)?;
+        crate::heap().root(result);
+        results.push(result);
+    }
+    arrays::from_items(&results)?.map_err(|message| call.error(message))
+}
+
 unsafe fn arithmetic(call: &Call<'_>, op: Op) -> R<Sexp> {
+    if call
+        .args
+        .iter()
+        .any(|arg| matches!(arg.value.kind(), SexpType::Record | SexpType::I64))
+    {
+        return crate::numbers::arithmetic(call, op);
+    }
     match call.args {
         [single] => unary_arithmetic(call, op, single.value),
         [left, right] => binary_arithmetic(call.call, op, left.value, right.value),
@@ -1703,6 +1782,13 @@ unsafe fn comparable(value: Sexp) -> R<Sexp> {
 }
 
 unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
+    if call
+        .args
+        .iter()
+        .any(|arg| matches!(arg.value.kind(), SexpType::Record | SexpType::I64))
+    {
+        return crate::numbers::comparison(call, |ordering| comparison.holds(ordering));
+    }
     if call.len() != 2 {
         return Err(call.error("comparison is possible only for atomic and list types"));
     }

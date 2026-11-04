@@ -15,6 +15,11 @@ was declined.
 
 ## Drafts
 
+### [Typed ry's native value types](/development/design/native-types/)
+
+ry's own value types (`I64`, `F64`, `Bool`, `Str`, `List<T>`) and the record, tag and pattern
+additions, with the explicit R boundary and the runtime contract.
+
 ### [Open type-system questions](/development/design/open-questions/)
 
 Type-system questions with no settled answer: tagged unions, S3 dispatch, modeling data frames and

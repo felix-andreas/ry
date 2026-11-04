@@ -1,13 +1,13 @@
 #==== prelude_on
 #---- qualified_names_reach_the_library
-doubled <- std::List.map(list(1L, 2L), function(x) x * 2L)
+doubled <- std::List.map([1, 2], function(x) x * 2)
 n <- std::List.len(doubled)
 #++++
-doubled: list[integer]
-n: integer
+doubled: List<I64>
+n: I64
 
 #---- ry_package_does_not_export_the_library
-n <- ry::List.len(list(1L))
+n <- ry::List.len([1])
 #++++
 n: Unknown
 5..17 warning[unresolved] `List.len` is not exported by `ry`. It is in ry's standard library: write `std::List.len`.
@@ -15,18 +15,18 @@ n: Unknown
 #==== prelude_off
 #---- qualified_names_type_as_the_library
 # [check] prelude = false
-doubled <- std::List.map(list(1L, 2L), function(x) x * 2L)
+doubled <- std::List.map([1, 2], function(x) x * 2)
 n <- std::List.len(doubled)
 #++++
-doubled: list[integer]
-n: integer
+doubled: List<I64>
+n: I64
 
 #---- qualified_overloads_select_per_call
 # [check] prelude = false
 a <- std::List.map([1, 2], function(x) x * 2)
 d <- std::Dict.insert(std::Dict.empty(), "a", 1L)
 #++++
-a: Array<double>
+a: List<I64>
 d: Dict<character, integer>
 
 #---- library_types_stay_in_scope

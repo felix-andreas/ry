@@ -11,8 +11,16 @@ pub enum SyntaxKind {
     INTEGER,
     DOUBLE,
     COMPLEX,
+    /// A number with a ry type suffix, as in `5i64`, `0xFFu8` or `1.5f32`.
+    SUFFIXED_NUMBER,
     STRING,
     RAW_STRING,
+    /// `f"` or `f'`, which opens an f-string.
+    FSTRING_START,
+    /// Literal text between an f-string's interpolations, `{{` and `}}` included.
+    FSTRING_TEXT,
+    /// The quote that closes an f-string.
+    FSTRING_END,
 
     IDENT,
     DOTS,
@@ -121,6 +129,15 @@ pub enum SyntaxKind {
     TAG_EXPR,
     /// `match (value) { arms }`.
     MATCH_EXPR,
+    /// `f"text {expr} text"`: [`FSTRING_START`], text and [`FSTRING_INTERPOLATION`]s, then
+    /// [`FSTRING_END`].
+    FSTRING,
+    /// `{expr}` inside an [`FSTRING`].
+    FSTRING_INTERPOLATION,
+    /// `try f(x)`, which returns an `:Err` from the enclosing function and unwraps an `:Ok`.
+    TRY_EXPR,
+    /// `..base`, the first item of a record update `(..base, x = 3)`.
+    RECORD_SPREAD,
     /// `@Name(value)`, which introduces a nominal type: a [`NEW_TYPE`] then a [`PAREN_EXPR`].
     NEW_EXPR,
     MATCH_ARM,
@@ -138,6 +155,10 @@ pub enum SyntaxKind {
     PATTERN_REST,
     PATTERN_OR,
     PATTERN_PAREN,
+    /// `[p1, ..rest, last]`, a list pattern.
+    PATTERN_ARRAY,
+    /// `pattern as name`, which also binds the whole value to `name`.
+    PATTERN_AS,
 
     /// Consecutive `#:` lines stitched into one node.
     ANNOTATION,
@@ -243,8 +264,12 @@ impl SyntaxKind {
             INTEGER => "integer literal",
             DOUBLE => "number",
             COMPLEX => "complex literal",
+            SUFFIXED_NUMBER => "suffixed number",
             STRING => "string",
             RAW_STRING => "raw string",
+            FSTRING_START => "f-string",
+            FSTRING_TEXT => "f-string text",
+            FSTRING_END => "end of the f-string",
             IDENT => "identifier",
             DOTS => "`...`",
             DOTDOTI => "`..N`",
@@ -340,6 +365,10 @@ impl SyntaxKind {
             ARRAY_EXPR => "Array",
             TAG_EXPR => "tag",
             MATCH_EXPR => "`match` expression",
+            FSTRING => "f-string",
+            FSTRING_INTERPOLATION => "f-string interpolation",
+            TRY_EXPR => "`try` expression",
+            RECORD_SPREAD => "record spread",
             NEW_EXPR => "nominal constructor",
             MATCH_ARM => "`match` arm",
             MATCH_GUARD => "arm guard",
@@ -352,6 +381,8 @@ impl SyntaxKind {
             PATTERN_REST => "`..` pattern",
             PATTERN_OR => "alternative patterns",
             PATTERN_PAREN => "parenthesized pattern",
+            PATTERN_ARRAY => "list pattern",
+            PATTERN_AS => "`as` pattern",
             ANNOTATION => "type annotation",
             ANNOTATION_DIRECTIVE => "annotation directive",
             TYPE_REF => "type",

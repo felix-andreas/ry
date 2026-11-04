@@ -297,36 +297,38 @@ fn seeds_agree_across_tiers() {
         ),
         // Reading Array items, which a double position past the last item cannot do.
         (
-            "x <- as.Array(as.numeric(1:n) / n)\ns <- 0\nfor (i in 1:n) s <- s + x[[i]]\ns",
+            "x <- List.from_r(as.numeric(1:n) / n)\ns <- 0\nfor (i in 1:n) s <- s + x[[i]]\ns",
             "(n = 600L)",
             false,
         ),
         (
-            "x <- as.Array(c(1, 2, 3))\ns <- 0\nfor (i in 1:n) s <- s + x[[if (i > 300L) 3.5 else 2]]\ns",
+            "x <- List.from_r(c(1, 2, 3))\ns <- 0\nfor (i in 1:n) s <- s + x[[if (i > 300L) 3.5 else 2]]\ns",
             "(n = 600L)",
             true,
         ),
         // Storing items keeps an Array an Array, through the copy a shared one needs.
         (
-            "out <- as.Array(rep(0, n))\nfor (i in 1:n) out[[i]] <- i * 2\nlist(out[[n]], is.Array(out))",
+            "out <- List.from_r(rep(0, n))\nfor (i in 1:n) out[[i]] <- i * 2\nlist(out[[n]], .ry_is_list(out))",
             "(n = 600L)",
             false,
         ),
         (
-            "a <- as.Array(rep(0, n))\nb <- a\nfor (i in 1:n) b[[i]] <- 1\nlist(is.Array(b), sum(b), is.Array(a), sum(a))",
+            "a <- List.from_r(rep(0, n))\nb <- a\nfor (i in 1:n) b[[i]] <- 1\nlist(.ry_is_list(b), sum(b), .ry_is_list(a), sum(a))",
             "(n = 600L)",
             false,
         ),
         // A missing value cannot be an item, so storing one leaves the Array to tier 0.
         (
-            "out <- as.Array(rep(0, n))\nfor (i in 1:n) out[[i]] <- if (i == 400L) 0 / 0 else i * 2\nlist(is.Array(out), out[[400]], out[[n]])",
+            "out <- List.from_r(rep(0, n))\nfor (i in 1:n) out[[i]] <- if (i == 400L) 0 / 0 else i * 2\nlist(.ry_is_list(out), out[[400]], out[[n]])",
             "(n = 600L)",
             false,
         ),
+        // An R integer becomes `I64` in a list, and a `List<I64>` has no R vector to fall back
+        // to, so storing an R value in one is an error in every tier.
         (
-            "out <- as.Array(rep(0L, n))\nfor (i in 1:n) out[[i]] <- if (i == 400L) NA_integer_ else i\nlist(is.Array(out), out[[400]], out[[n]])",
+            "out <- List.from_r(rep(0L, n))\nfor (i in 1:n) out[[i]] <- if (i == 400L) NA_integer_ else i\nlist(.ry_is_list(out), out[[400]], out[[n]])",
             "(n = 600L)",
-            false,
+            true,
         ),
         // A loop compiled before the one after it has run: the second loop guesses an integer
         // sequence, and a double one deoptimizes.
@@ -637,11 +639,19 @@ fn traversals_agree_across_tiers() {
     // A library traversal whose callback inlines runs as a compiled loop. A list or an element
     // the loop does not expect, an `NA` answer or an integer overflow hands the call back to
     // tier 0, which must then give the same value or error.
-    let definitions = "xs <- List.from_vector(1:50 + 0)\nys <- List.from_vector(1:50)\nflip <- 0L\n\
-                       add <- function(acc, x) acc + x\nstep <- add\n\
-                       ds <- Dict.insert(Dict.insert(Dict.insert(Dict.empty(), 1L, 10), 2L, 20), 3L, 30)\n\
-                       sd <- Dict.insert(Dict.insert(Dict.empty(), \"a\", 1), \"b\", 2)\n\
-                       st <- Set.from_list(List.from_vector(1:20 + 0.5))";
+    // `List.from_r` turns R integers into boxed `I64`s, so the list of R integers the compiled
+    // integer loops read is written as a literal.
+    let integers = (1..=50)
+        .map(|item| format!("{item}L"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let definitions = format!(
+        "xs <- List.from_r(1:50 + 0)\nys <- [{integers}]\nflip <- 0L\n\
+         add <- function(acc, x) acc + x\nstep <- add\n\
+         ds <- Dict.insert(Dict.insert(Dict.insert(Dict.empty(), 1L, 10), 2L, 20), 3L, 30)\n\
+         sd <- Dict.insert(Dict.insert(Dict.empty(), \"a\", 1), \"b\", 2)\n\
+         st <- Set.from_list(List.from_r(1:20 + 0.5))"
+    );
     let cases = [
         ("List.walk(xs, 0, function(acc, x) acc + x * b)", false),
         ("List.walk(ys, 0L, function(acc, x) acc + x)", false),
@@ -761,7 +771,7 @@ fn traversals_agree_across_tiers() {
     ];
     with_interpreter(|| {
         // SAFETY: the interpreter is installed.
-        unsafe { run(definitions) };
+        unsafe { run(&definitions) };
         for (case, (body, fails)) in cases.iter().enumerate() {
             // SAFETY: the interpreter is installed.
             let (reference, compiled) = unsafe { outcomes(3_000_000 + case, body, "()") };
@@ -1585,6 +1595,9 @@ enum Model {
     Scalar(Scalar),
     List(Vec<Scalar>),
     Found(Option<Scalar>),
+    /// A count or a position, which the library gives as an `I64`.
+    Whole(i64),
+    FoundWhole(i64),
     Error,
 }
 
@@ -1594,7 +1607,7 @@ fn fuzz_stdlib_traversals_agree_with_model() {
     // every library traversal the JIT compiles into a loop, each checked against a model of the
     // library in Rust. Tier 0 and compiled code must both give the model's value, so a hand-off
     // from the loop (an `NA` answer, an overflow, an element of another type, a collection that
-    // is not one, an Array, which fails the loop's type guard as an ALTREP list does) must still
+    // is not one, a list, which fails the loop's type guard as an ALTREP list does) must still
     // end where the model says.
     with_interpreter(|| {
         let (mut runs, mut errors) = (0, 0);
@@ -1701,7 +1714,9 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
                 Ok(add(acc, arith(x, Scalar::Int(Some(i as i32 + 1)), '*')))
             });
             (
-                format!("List.walk_with_index({list}, {init}, function(acc, x, i) acc + x * i)"),
+                format!(
+                    "List.walk_with_index({list}, {init}, function(acc, x, i) acc + x * Num.to_r(i))"
+                ),
                 model,
             )
         }
@@ -1770,7 +1785,7 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
             });
             (
                 format!(
-                    "List.walk_with_index_until({list}, {init}, function(acc, x, i) {{ if (i > {limit}) :Break(acc) else :Continue(acc + x) }})"
+                    "List.walk_with_index_until({list}, {init}, function(acc, x, i) {{ if (Num.to_r(i) > {limit}) :Break(acc) else :Continue(acc + x) }})"
                 ),
                 model,
             )
@@ -1813,7 +1828,7 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
                 .map(|(i, &x)| arith(x, Scalar::Int(Some(i as i32 + 1)), '*'))
                 .collect();
             (
-                format!("List.map_with_index({list}, function(x, i) x * i)"),
+                format!("List.map_with_index({list}, function(x, i) x * Num.to_r(i))"),
                 Model::List(mapped),
             )
         }
@@ -1924,10 +1939,7 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
                             }
                         }
                     }
-                    (
-                        "count_if",
-                        model.unwrap_or(Model::Scalar(Scalar::Int(Some(count)))),
-                    )
+                    ("count_if", model.unwrap_or(Model::Whole(i64::from(count))))
                 }
                 choice => {
                     let last = choice >= 7;
@@ -1937,7 +1949,7 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
                         &answers(order),
                         true,
                         |at| match index {
-                            true => Model::Found(Some(Scalar::Int(Some(at as i32 + 1)))),
+                            true => Model::FoundWhole(at as i64 + 1),
                             false => Model::Found(Some(items[at])),
                         },
                         Model::Found(None),
@@ -1965,7 +1977,7 @@ fn stdlib_case(rng: &mut SplitMix64) -> (String, Model) {
     }
 }
 
-/// The items as an Array literal, now and then, when they share one type and none is `NA`.
+/// The items as a list literal, now and then, when they share one type and none is `NA`.
 fn homogeneous_array(rng: &mut SplitMix64, items: &[Scalar]) -> Option<String> {
     // An Array holds no `NA`, so a list with one stays a list.
     let all_int = items
@@ -2153,6 +2165,8 @@ fn render(model: &Model) -> String {
         }
         Model::Found(Some(value)) => format!(":Ok({})", scalar(*value)),
         Model::Found(None) => ":Err(:NotFound)".to_owned(),
+        Model::Whole(value) => format!("{value}i64"),
+        Model::FoundWhole(value) => format!(":Ok({value}i64)"),
         Model::Error => "stop(\"the model fails\")".to_owned(),
     }
 }

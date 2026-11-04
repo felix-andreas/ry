@@ -745,6 +745,7 @@ impl Heap {
             SexpType::Logical
                 | SexpType::Integer
                 | SexpType::Real
+                | SexpType::I64
                 | SexpType::Complex
                 | SexpType::Raw
         ) {
@@ -2961,6 +2962,7 @@ unsafe fn is_leaf(object: Sexp, nil: Sexp) -> bool {
             | SexpType::Logical
             | SexpType::Integer
             | SexpType::Real
+            | SexpType::I64
             | SexpType::Complex
             | SexpType::Raw
     ) && !object.is_altrep()
@@ -3137,10 +3139,11 @@ unsafe fn reclaimable(object: Sexp) -> bool {
 }
 
 /// Every type code a vector can have, for generators and tests.
-pub const VECTOR_TYPES: [SexpType; 8] = [
+pub const VECTOR_TYPES: [SexpType; 9] = [
     SexpType::Logical,
     SexpType::Integer,
     SexpType::Real,
+    SexpType::I64,
     SexpType::Complex,
     SexpType::String,
     SexpType::List,

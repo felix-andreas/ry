@@ -128,5 +128,5 @@ references: none
 rename: none
 signature: fn(x: double, [by]: double) -> double
 parameters: x: double | [[by]: double]
-completion (73): by = , by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot
+completion (74): by = , by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot
 hint @69by =

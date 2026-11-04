@@ -1305,7 +1305,6 @@ impl<'p, 'b> Translator<'p, 'b> {
             accumulator,
             expected,
             items,
-            index,
             parts,
             prelude,
             steps,
@@ -1507,11 +1506,6 @@ impl<'p, 'b> Translator<'p, 'b> {
                 }
             }
         }
-        if let Some(register) = index {
-            let at = self.builder.ins().ireduce(I32, at);
-            let index = self.builder.ins().iadd_imm_s(at, 1);
-            self.def_register(register, Ty::Int, index);
-        }
         for &(step, state) in steps {
             self.action(position, self.plan.state(state), step)?;
         }
@@ -1637,8 +1631,16 @@ impl<'p, 'b> Translator<'p, 'b> {
             }
             Fold::CountIf => {
                 let counted = self.builder.use_var(count);
-                let counted = self.builder.ins().ireduce(I32, counted);
-                self.def_register(dst, Ty::Int, counted);
+                let done = self
+                    .call(
+                        runtime::jit_count as *const () as usize,
+                        &[I64, I64, I64],
+                        Some(I32),
+                        &[self.activation, destination, counted],
+                    )
+                    .ok_or(Refusal("the count helper returned nothing"))?;
+                let done = self.builder.ins().icmp_imm_s(IntCC::NotEqual, done, 0);
+                self.hand_off_unless(position, before, done);
             }
             Fold::Find { index } => {
                 let list = iconst(&mut self.builder, collection);

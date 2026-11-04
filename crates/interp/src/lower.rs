@@ -19,7 +19,10 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
         strings::Encoding,
     },
-    syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, Unexpected},
+    syntax::{
+        NumberType, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize,
+        Unexpected, split_number_suffix,
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -432,6 +435,7 @@ fn unexpected_token(root: &SyntaxNode, text: &str, unexpected: &std::ops::Range<
 fn token_description(token: &SyntaxToken, text: &str) -> String {
     let name = match token.kind() {
         SyntaxKind::INTEGER
+        | SyntaxKind::SUFFIXED_NUMBER
         | SyntaxKind::DOUBLE
         | SyntaxKind::COMPLEX
         | SyntaxKind::TRUE_KW
@@ -1067,6 +1071,15 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
                 .into_iter()
                 .next()
                 .ok_or_else(|| error("missing operand"))?;
+            // `-` written before a suffixed literal is part of it, so `-128i8` is the `I8` it
+            // denotes rather than `128i8`, which does not fit, negated.
+            if operator.text() == "-"
+                && operand.kind() == SyntaxKind::LITERAL
+                && let Some(token) = significant_tokens(&operand).into_iter().next()
+                && token.kind() == SyntaxKind::SUFFIXED_NUMBER
+            {
+                return suffixed_number_value(token.text(), true);
+            }
             let operand = lower(&operand, source)?;
             let symbol = install(operator.text())?;
             values::call(symbol, &[operand])
@@ -1171,7 +1184,28 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
             }
             values::pairlist(&items, SexpType::Language)
         }
+        SyntaxKind::FSTRING => format_string(node, source),
+        SyntaxKind::TRY_EXPR => match expression_children(node).first() {
+            Some(operand) => values::call(install(".ry_try")?, &[lower(operand, source)?]),
+            None => Err(error("expected an expression after `try`")),
+        },
         SyntaxKind::RECORD_EXPR | SyntaxKind::TUPLE_EXPR => {
+            if let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST)
+                && let Some(spread) = child_of_kind(&arguments, SyntaxKind::RECORD_SPREAD)
+            {
+                let text = spread.text().to_string();
+                let base = text
+                    .trim()
+                    .strip_prefix("..")
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| error("a record update needs a record after `..`"))?;
+                let mut items = vec![
+                    (nil(), install(".ry_update")?),
+                    (nil(), install(&identifier(base))?),
+                ];
+                items.extend(literal_items(&arguments, source)?);
+                return values::pairlist(&items, SexpType::Language);
+            }
             let head = if node.kind() == SyntaxKind::RECORD_EXPR {
                 ".ry_record"
             } else {
@@ -1256,7 +1290,14 @@ unsafe fn binary(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
         let symbol = install(operator.text())?;
         return values::call(symbol, &[left_value]);
     };
-    let right_value = lower(right, source)?;
+    let mut right_value = lower(right, source)?;
+    if matches!(
+        operator.kind(),
+        SyntaxKind::LESS_MINUS | SyntaxKind::LESS2_MINUS | SyntaxKind::EQ
+    ) && let Some(ascription) = child_of_kind(node, SyntaxKind::TYPE_ASCRIPTION)
+    {
+        right_value = with_annotated_literals(&ascription, right, right_value)?;
+    }
     match operator.kind() {
         SyntaxKind::MINUS_GREATER => values::call(symbols().assign, &[right_value, left_value]),
         SyntaxKind::MINUS_GREATER2 => values::call(symbols().assign2, &[right_value, left_value]),
@@ -1267,6 +1308,89 @@ unsafe fn binary(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
             let symbol = install(operator.text())?;
             values::call(symbol, &[left_value, right_value])
         }
+    }
+}
+
+/// An unsuffixed number literal bound to a name annotated `I64`, as in `n: I64 <- 5`, is an
+/// `I64`, because the checker types the binding so and the literal has no operand to convert it
+/// later; so are the items of a list literal bound to a `List<I64>`, as in
+/// `xs: List<I64> <- [1, 2]`. Any other value runs unchanged, as bindings are not checked.
+unsafe fn with_annotated_literals(
+    ascription: &SyntaxNode,
+    node: &SyntaxNode,
+    value: Sexp,
+) -> R<Sexp> {
+    let Some(annotation) = ascription.children().next() else {
+        return Ok(value);
+    };
+    match annotation.kind() {
+        SyntaxKind::TYPE_REF => match (names_i64(&annotation), number_literal_text(node)) {
+            (true, Some(text)) => crate::numbers::from_text(&text),
+            _ => Ok(value),
+        },
+        SyntaxKind::TYPE_APPLY if node.kind() == SyntaxKind::ARRAY_EXPR => {
+            let is_list = child_of_kind(&annotation, SyntaxKind::NAME)
+                .is_some_and(|name| name.text() == "List");
+            let item = child_of_kind(&annotation, SyntaxKind::TYPE_ARG_LIST)
+                .and_then(|arguments| child_of_kind(&arguments, SyntaxKind::TYPE_REF))
+                .is_some_and(|item| names_i64(&item));
+            if !(is_list && item) {
+                return Ok(value);
+            };
+            let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) else {
+                return Ok(value);
+            };
+            // The lowered call holds one cell per argument, after its head.
+            let mut cell = value.cdr();
+            for argument in arguments
+                .children()
+                .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
+            {
+                if cell == nil() {
+                    break;
+                }
+                let text = match expression_children(&argument).as_slice() {
+                    [item] => number_literal_text(item),
+                    _ => None,
+                };
+                if let Some(text) = text {
+                    crate::heap().set_car(cell, crate::numbers::from_text(&text)?);
+                }
+                cell = cell.cdr();
+            }
+            Ok(value)
+        }
+        _ => Ok(value),
+    }
+}
+
+/// Whether a type reference names `I64`, the one ry number that is not R's `double` at run time.
+fn names_i64(annotation: &SyntaxNode) -> bool {
+    annotation.text().to_string().trim() == "I64"
+}
+
+/// The text of an unsuffixed integer or double literal, with its sign when a `-` is written
+/// directly before it, and without an `L` suffix.
+fn number_literal_text(node: &SyntaxNode) -> Option<String> {
+    match node.kind() {
+        SyntaxKind::LITERAL => {
+            let token = significant_tokens(node).into_iter().next()?;
+            match token.kind() {
+                SyntaxKind::INTEGER => Some(token.text().trim_end_matches('L').to_owned()),
+                SyntaxKind::DOUBLE => Some(token.text().to_owned()),
+                _ => None,
+            }
+        }
+        SyntaxKind::UNARY_EXPR => {
+            let operator = significant_tokens(node).into_iter().next()?;
+            match (operator.kind(), expression_children(node).as_slice()) {
+                (SyntaxKind::MINUS, [operand]) => {
+                    number_literal_text(operand).map(|text| format!("-{text}"))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -1397,6 +1521,45 @@ unsafe fn literal_items(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Vec<
         .collect()
 }
 
+/// `f"a{x}b"` runs as `paste0("a", .ry_text(x), "b")`. A text run has its escapes decoded
+/// and its doubled braces halved.
+unsafe fn format_string(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
+    let text = install(".ry_text")?;
+    let mut items = vec![(nil(), install("paste0")?)];
+    for child in node.children_with_tokens() {
+        match child {
+            SyntaxElement::Token(token) if token.kind() == SyntaxKind::FSTRING_TEXT => {
+                let text = token.text().replace("{{", "{").replace("}}", "}");
+                let (bytes, high_byte) =
+                    unescape_bytes(&text).map_err(|failure| error(failure.message))?;
+                let encoding = if high_byte {
+                    Encoding::Native
+                } else {
+                    Encoding::Utf8
+                };
+                let piece = alloc(SexpType::String, 1)?;
+                values::set_elt(piece, 0, values::mkchar_bytes(&bytes, encoding)?);
+                items.push((nil(), piece));
+            }
+            SyntaxElement::Node(interpolation)
+                if interpolation.kind() == SyntaxKind::FSTRING_INTERPOLATION =>
+            {
+                let inner = expression_children(&interpolation);
+                let inner = inner
+                    .first()
+                    .ok_or_else(|| error("this interpolation is empty"))?;
+                let value = lower(inner, source)?;
+                items.push((nil(), values::call(text, &[value])?));
+            }
+            _ => {}
+        }
+    }
+    if items.len() == 1 {
+        items.push((nil(), values::scalar_string("")?));
+    }
+    values::pairlist(&items, SexpType::Language)
+}
+
 /// A tag's name as the string `.ry_tag` takes first.
 unsafe fn tag_name(name: &SyntaxNode) -> R<Sexp> {
     let token = significant_tokens(name)
@@ -1464,7 +1627,7 @@ unsafe fn match_expression(node: &SyntaxNode, source: Option<&SourceMap>) -> R<S
 unsafe fn pattern(node: &SyntaxNode) -> R<Sexp> {
     match node.kind() {
         SyntaxKind::PATTERN_WILDCARD => install("_"),
-        SyntaxKind::PATTERN_REST => install(".."),
+        SyntaxKind::PATTERN_REST if node.text() == ".." => install(".."),
         SyntaxKind::PATTERN_BIND => {
             let name = child_of_kind(node, SyntaxKind::NAME)
                 .ok_or_else(|| error("empty binding pattern"))?;
@@ -1510,6 +1673,29 @@ unsafe fn pattern(node: &SyntaxNode) -> R<Sexp> {
                 result = values::call(pipe, &[result, alternative?])?;
             }
             Ok(result)
+        }
+        SyntaxKind::PATTERN_REST => {
+            let text = node.text().to_string();
+            install(&identifier(text.trim()))
+        }
+        SyntaxKind::PATTERN_ARRAY => {
+            let mut items = vec![(nil(), install(".ry_array")?)];
+            for child in node.children() {
+                items.push((nil(), pattern(&child)?));
+            }
+            values::pairlist(&items, SexpType::Language)
+        }
+        SyntaxKind::PATTERN_AS => {
+            let inner = node
+                .children()
+                .find(|child| child.kind() != SyntaxKind::NAME)
+                .ok_or_else(|| error("`as` needs a pattern before it"))?;
+            let name = node
+                .children()
+                .filter(|child| child.kind() == SyntaxKind::NAME)
+                .last()
+                .ok_or_else(|| error("`as` needs a name after it"))?;
+            values::call(install(".ry_as")?, &[pattern(&inner)?, name_symbol(&name)?])
         }
         SyntaxKind::PATTERN_PAREN => {
             let inner = node
@@ -1738,6 +1924,7 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
     let known = crate::heap().known();
     match token.kind() {
         SyntaxKind::DOUBLE => values::scalar_real(parse_number(text)),
+        SyntaxKind::SUFFIXED_NUMBER => suffixed_number_value(text, false),
         SyntaxKind::INTEGER => {
             let body = &text[..text.len() - 1];
             let value = parse_number(body);
@@ -1805,6 +1992,18 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
 }
 
 /// A numeric literal: decimal, hexadecimal, or hexadecimal with a binary exponent.
+/// The value a suffixed number runs as: `1.5f64` is an R double and `5i64` a native `I64`.
+unsafe fn suffixed_number_value(text: &str, negative: bool) -> R<Sexp> {
+    let (number, suffix) =
+        split_number_suffix(text).ok_or_else(|| error(format!("malformed number `{text}`")))?;
+    match (suffix, negative) {
+        (NumberType::F64, true) => values::scalar_real(-parse_number(number)),
+        (NumberType::F64, false) => values::scalar_real(parse_number(number)),
+        (NumberType::I64, true) => crate::numbers::from_text(&format!("-{number}")),
+        (NumberType::I64, false) => crate::numbers::from_text(number),
+    }
+}
+
 pub fn parse_number(text: &str) -> f64 {
     let lower = text.to_ascii_lowercase();
     if let Some(hex) = lower.strip_prefix("0x") {

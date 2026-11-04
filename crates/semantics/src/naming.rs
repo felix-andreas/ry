@@ -959,6 +959,18 @@ impl Context<'_> {
                     self.resolve(field.value);
                 }
             }
+            ExpressionKind::RecordUpdate { base, fields } => {
+                self.resolve(*base);
+                for field in &module[fields] {
+                    self.resolve(field.value);
+                }
+            }
+            ExpressionKind::FormatString(pieces) => {
+                for &piece in &module[pieces] {
+                    self.resolve(piece);
+                }
+            }
+            ExpressionKind::Try(operand) => self.resolve(*operand),
             ExpressionKind::Tag { payload, .. } => {
                 if let Some(payload) = payload {
                     self.resolve(*payload);
@@ -1028,6 +1040,12 @@ impl Context<'_> {
                     self.check_or_patterns(field.pattern);
                 }
             }
+            PatternKind::List { items, .. } => {
+                for &item in &module[items] {
+                    self.check_or_patterns(item);
+                }
+            }
+            PatternKind::As { pattern, .. } => self.check_or_patterns(*pattern),
             PatternKind::Or(alternatives) => {
                 let names_of = |alternative: PatId| -> BTreeSet<Symbol> {
                     module

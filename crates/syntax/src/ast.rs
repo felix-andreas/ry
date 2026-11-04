@@ -91,6 +91,8 @@ pub fn is_expression_kind(kind: SyntaxKind) -> bool {
             | TAG_EXPR
             | MATCH_EXPR
             | NEW_EXPR
+            | FSTRING
+            | TRY_EXPR
     )
 }
 

@@ -631,7 +631,7 @@ unsafe fn singleton(layout: u32) -> Result<Sexp, Refusal> {
 
 /// The slot of `layout` that holds the field `name`.
 /// Whether a layout `$` and `[[` may read is positional (a tuple) or named (a record). A tag's
-/// payload is read only by `match`, and a dict or set has no fields, so the interpreter raises
+/// payload is read only by `match`, and a dict or a set has no fields, so the interpreter raises
 /// an error for both and native code leaves them to it.
 unsafe fn plain_fields(layout: u32) -> Result<bool, Refusal> {
     let refused = Refusal("`$` or `[[` of a tag, a dict or a set");

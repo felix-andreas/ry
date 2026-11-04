@@ -1,4 +1,5 @@
 # A table pipeline: filter a million sales rows, add a revenue column, and total it per region.
+# The table type is ry's own; its columns are R vectors, so the total crosses back with `Num.from_r()`.
 pipeline <- function(sales: DataFrame{region: character[], units: integer[], price: double[]}) -> double {
   totals <- sales |>
     DataFrame.filter(col("units") > 3L) |>
@@ -10,4 +11,4 @@ pipeline <- function(sales: DataFrame{region: character[], units: integer[], pri
 }
 i <- seq_len(1000000L)
 sales <- DataFrame(region = c("north", "south", "east", "west")[i %% 4L + 1L], units = i %% 17L, price = 1 + i %% 100L)
-measure("sales", function() pipeline(sales))
+measure("sales", function() Num.from_r(pipeline(sales)))
