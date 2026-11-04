@@ -1811,9 +1811,6 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
             slots.push((slot_name, super_slots.element(index)));
         }
     }
-    if !virtual_class && slots.is_empty() {
-        bail!(skip);
-    }
     if prototype_names
         .iter()
         .any(|&prototype_name| !slots.iter().any(|&(known, _)| known == prototype_name))
@@ -2063,7 +2060,9 @@ unsafe fn local_class(name: Sexp, package: Sexp, place: Sexp) -> R<Option<Sexp>>
     if is_virtual && slot(definition, "prototype")? == nil() {
         return Ok(None);
     }
-    if !is_virtual && length(slot(definition, "slots")?) == 0 {
+    // A class without slots of its own is virtual unless it extends a class, so a
+    // non-virtual one without slots has superclasses that are all virtual.
+    if !is_virtual && length(slot(definition, "slots")?) == 0 && length(contains) == 0 {
         return Ok(None);
     }
     Ok(Some(definition))
@@ -2272,6 +2271,8 @@ unsafe fn direct_extension(
                 .all(|slot_name| position_of(super_slots, slot_name.bytes()).is_some());
         let coerce_body = if same_slots {
             template(Template::CoerceSame, &[("CLASS", super_name)])?
+        } else if length(super_slots) == 0 {
+            template(Template::CoerceStrip, &[("CLASS", super_name)])?
         } else {
             template(
                 Template::CoerceNew,
@@ -2281,7 +2282,13 @@ unsafe fn direct_extension(
                 ],
             )?
         };
-        let replace_body = template(Template::ReplaceSlots, &[("TOSLOTS", super_slots)])?;
+        // A class without slots has superclasses without slots, which `makeExtends()` takes
+        // as the same representation, so replacing relabels the value.
+        let replace_body = if slot_names.is_empty() {
+            template(Template::ReplaceClass, &[("FROM", class_name)])?
+        } else {
+            template(Template::ReplaceSlots, &[("TOSLOTS", super_slots)])?
+        };
         (
             values::triple(SexpType::Closure, simple_coerce.car(), coerce_body, place)?,
             values::triple(SexpType::Closure, simple_replace.car(), replace_body, place)?,
@@ -2531,6 +2538,8 @@ enum Template {
     CombineCoerce,
     CombineReplaceVirtual,
     CombineReplace,
+    CoerceStrip,
+    ReplaceClass,
 }
 
 /// The expressions of `.simpleCoerceExpr()`, `.simpleReplaceExpr()`, `makeExtends()` and
@@ -2559,7 +2568,9 @@ const METHODS_TEMPLATES: &str = r#"list(
         methods::as(.value, TO) <- value
         value <- .value
         BYEXPR
-    })
+    }),
+    quote({ attributes(from) <- NULL; class(from) <- CLASS; from}),
+    quote({class(value) <- FROM; value})
 )"#;
 
 /// The template `which` with its placeholders replaced, as `substitute()` replaces them: every
