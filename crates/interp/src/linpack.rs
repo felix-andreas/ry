@@ -21,7 +21,7 @@ use std::ffi::c_int;
 
 /// A column-major matrix with leading dimension `ld`, addressed 1-based.
 #[derive(Clone, Copy)]
-pub(crate) struct Matrix {
+pub struct Matrix {
     base: *mut f64,
     ld: isize,
 }
@@ -55,30 +55,57 @@ unsafe fn element(vector: *mut f64, index: isize) -> *mut f64 {
 
 // The level-1 BLAS operations LINPACK is written in, on contiguous vectors.
 
-/// The Euclidean norm, scaled so it neither overflows nor underflows.
-pub(crate) unsafe fn dnrm2(count: isize, x: *const f64) -> f64 {
-    let mut scale = 0.0f64;
-    let mut sum = 1.0f64;
-    for index in 0..count.max(0) {
-        let value = *x.offset(index);
-        if value != 0.0 {
-            let magnitude = value.abs();
-            if scale < magnitude {
-                sum = 1.0 + sum * (scale / magnitude) * (scale / magnitude);
-                scale = magnitude;
-            } else {
-                sum += (magnitude / scale) * (magnitude / scale);
+/// The Euclidean norm after Blue's algorithm as the reference BLAS 3.10 and later (and so GNU R
+/// 4.6) compute it: values in the middle range are summed as plain squares, and only values
+/// near the overflow or underflow limits are scaled.
+pub unsafe fn dnrm2(count: isize, x: *const f64) -> f64 {
+    let tsml = f64::from_bits(((1023 - 511) as u64) << 52);
+    let tbig = f64::from_bits(((1023 + 486) as u64) << 52);
+    let ssml = f64::from_bits(((1023 + 537) as u64) << 52);
+    let sbig = f64::from_bits(((1023 - 538) as u64) << 52);
+    if count <= 0 {
+        return 0.0;
+    }
+    let mut not_big = true;
+    let (mut big, mut medium, mut small) = (0.0f64, 0.0f64, 0.0f64);
+    for index in 0..count {
+        let magnitude = (*x.offset(index)).abs();
+        if magnitude > tbig {
+            big += (magnitude * sbig) * (magnitude * sbig);
+            not_big = false;
+        } else if magnitude < tsml {
+            if not_big {
+                small += (magnitude * ssml) * (magnitude * ssml);
             }
+        } else {
+            medium += magnitude * magnitude;
         }
     }
-    if scale == 0.0 {
-        0.0
+    let (scale, sum_of_squares) = if big > 0.0 {
+        if medium > 0.0 || medium > f64::MAX || medium.is_nan() {
+            big += (medium * sbig) * sbig;
+        }
+        (1.0 / sbig, big)
+    } else if small > 0.0 {
+        if medium > 0.0 || medium > f64::MAX || medium.is_nan() {
+            let medium_root = medium.sqrt();
+            let small_root = small.sqrt() / ssml;
+            let (low, high) = if small_root > medium_root {
+                (medium_root, small_root)
+            } else {
+                (small_root, medium_root)
+            };
+            (1.0, (high * high) * (1.0 + (low / high) * (low / high)))
+        } else {
+            (1.0 / ssml, small)
+        }
     } else {
-        scale * sum.sqrt()
-    }
+        (1.0, medium)
+    };
+    scale * sum_of_squares.sqrt()
 }
 
-pub(crate) unsafe fn ddot(count: isize, x: *const f64, y: *const f64) -> f64 {
+pub unsafe fn ddot(count: isize, x: *const f64, y: *const f64) -> f64 {
     let mut sum = 0.0;
     for index in 0..count.max(0) {
         sum += *x.offset(index) * *y.offset(index);
@@ -86,7 +113,7 @@ pub(crate) unsafe fn ddot(count: isize, x: *const f64, y: *const f64) -> f64 {
     sum
 }
 
-pub(crate) unsafe fn daxpy(count: isize, factor: f64, x: *const f64, y: *mut f64) {
+pub unsafe fn daxpy(count: isize, factor: f64, x: *const f64, y: *mut f64) {
     if factor == 0.0 {
         return;
     }
@@ -95,7 +122,7 @@ pub(crate) unsafe fn daxpy(count: isize, factor: f64, x: *const f64, y: *mut f64
     }
 }
 
-pub(crate) unsafe fn dscal(count: isize, factor: f64, x: *mut f64) {
+pub unsafe fn dscal(count: isize, factor: f64, x: *mut f64) {
     for index in 0..count.max(0) {
         *x.offset(index) *= factor;
     }
@@ -132,27 +159,38 @@ unsafe fn drot(count: isize, x: *mut f64, y: *mut f64, c: f64, s: f64) {
     }
 }
 
-/// Constructs the Givens rotation that zeroes `b` against `a`: on return `a` holds `r`, and
-/// the rotation is `(c, s)`. The reconstruction value BLAS also stores in `b` is not needed.
+/// Constructs the Givens rotation that zeroes `b` against `a`, as the reference BLAS 3.10 and
+/// later (and so GNU R 4.6) do: on return `a` holds `r`, and the rotation is `(c, s)`. The
+/// reconstruction value BLAS also stores in `b` is not needed.
 fn drotg(a: &mut f64, b: &mut f64) -> (f64, f64) {
-    let roe = if a.abs() > b.abs() { *a } else { *b };
-    let scale = a.abs() + b.abs();
-    if scale == 0.0 {
-        *a = 0.0;
+    let safe_minimum = f64::MIN_POSITIVE;
+    let safe_maximum = f64::from_bits(2046u64 << 52);
+    let (a_norm, b_norm) = (a.abs(), b.abs());
+    if b_norm == 0.0 {
         *b = 0.0;
         return (1.0, 0.0);
     }
-    let mut r = scale * ((*a / scale).powi(2) + (*b / scale).powi(2)).sqrt();
-    r *= 1.0f64.copysign(roe);
+    if a_norm == 0.0 {
+        *a = *b;
+        *b = 1.0;
+        return (0.0, 1.0);
+    }
+    let scale = safe_maximum.min(safe_minimum.max(a_norm).max(b_norm));
+    let sigma = if a_norm > b_norm {
+        1.0f64.copysign(*a)
+    } else {
+        1.0f64.copysign(*b)
+    };
+    let r = sigma * (scale * ((*a / scale) * (*a / scale) + (*b / scale) * (*b / scale)).sqrt());
     let c = *a / r;
     let s = *b / r;
-    let mut z = 1.0;
-    if a.abs() > b.abs() {
-        z = s;
-    }
-    if b.abs() >= a.abs() && c != 0.0 {
-        z = 1.0 / c;
-    }
+    let z = if a_norm > b_norm {
+        s
+    } else if c != 0.0 {
+        1.0 / c
+    } else {
+        1.0
+    };
     *a = r;
     *b = z;
     (c, s)
@@ -690,7 +728,7 @@ pub unsafe extern "C" fn dtrsl_(
     triangular_solve(Matrix::new(t, *ldt), *n as isize, b, *job, info);
 }
 
-pub(crate) unsafe fn triangular_solve(
+pub unsafe fn triangular_solve(
     t: Matrix,
     n: isize,
     b: *mut f64,
@@ -1375,7 +1413,11 @@ pub unsafe extern "C" fn dsvdc_(
         let mut l = m - 1;
         while l > 0 {
             let test = (*s_at(l)).abs() + (*s_at(l + 1)).abs();
-            if test + (*e_at(l)).abs() == test {
+            let ztest = test + (*e_at(l)).abs();
+            // R's dsvdc tests the relative change instead of exact equality, which declares
+            // elements negligible that LINPACK's own test would keep.
+            let acc = (test - ztest).abs() / (1.0e-100 + test);
+            if !(acc > 1.0e-15) {
                 *e_at(l) = 0.0;
                 break;
             }
@@ -1394,7 +1436,9 @@ pub unsafe extern "C" fn dsvdc_(
                 if ls != l + 1 {
                     test += (*e_at(ls - 1)).abs();
                 }
-                if test + (*s_at(ls)).abs() == test {
+                let ztest = test + (*s_at(ls)).abs();
+                let acc = (test - ztest).abs() / (1.0e-100 + test);
+                if !(acc > 1.0e-15) {
                     *s_at(ls) = 0.0;
                     break;
                 }

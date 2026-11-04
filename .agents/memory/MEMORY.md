@@ -149,6 +149,11 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 
 ### Semantics traps
 
+- **Numeric ports must match GNU R's last bit, so port the routine, not the formula.** nmath (pgamma, qgamma, qbeta, toms708, dpois, discrete quantile searches), smooth.spline, lowess and loess follow the 4.6.2 C and Fortran evaluation order (`x**3` is `(x*x)*x`, sums are left-associative, ddot is sequential). Find a difference with a grid sweep against GNU R before reading code. A residual few-ulp gap usually sits in a shared routine: R 4.6.2's internal BLAS has the LAPACK 3.10 `dnrm2` (Blue's algorithm) and `drotg`, and its `dsvdc` uses a relative-change negligibility test. All three live in `crates/interp/src/linpack.rs`.
+- **loess is a port of `loessc.c` and `loessf.f`** (`stats_loess.rs`, 1-based arrays with slot 0 unused to keep the Fortran indexing). The kd-tree, vertex blending and the exact/approximate statistics follow the original; only 1 to 4 predictors are allowed, as in R.
+- **`options(ry.blas="host")` (or `RY_BLAS=host`) opts into the host BLAS.** The default is the reference-order kernels, which are bit-identical to GNU R's internal BLAS.
+- **A full disk shows up as a test-build failure** (ENOSPC, or a Bus error at link). Delete stale `target` artifacts before suspecting the code.
+
 - **`GlobalEnv` has no default method bodies, on purpose.** The SCC fixpoint's view is a second implementor, and a defaulted method silently gives it a wrong answer (this once collapsed every recursive function using `Date + 1` to `Unknown`). Test such facts with a recursive and non-recursive fixture pair.
 - **Dispatch and the numeric constraint must read the same class scope** (stubs plus project), so a package's own `+.Money` makes `Money` arithmetic.
 - **A read recorded by name instead of by expression id is invisible to the slot model**, which is why `%op%` reads go through `mark_slot_read`.

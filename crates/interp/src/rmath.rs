@@ -39,7 +39,7 @@
 //     Copyright (C) 2003-2022 The R Foundation
 //     Copyright (C) 1998 Ross Ihaka
 //
-// GNU R: src/nmath/qbeta.c (qbeta_start)
+// GNU R: src/nmath/qbeta.c (qbeta_raw)
 //     Copyright (C) 1998--2022 The R Core Team
 //     Copyright (C) 1995, 1996 Robert Gentleman and Ross Ihaka
 //     based on code (C) 1979 and later Royal Statistical Society
@@ -56,10 +56,32 @@
 //     Copyright (C) 2000-2020 The R Core Team
 //     Copyright (C) 1998 Ross Ihaka
 //
-// GNU R: src/nmath/pgamma.c (log1pmx, logspace_sub)
+// GNU R: src/nmath/pgamma.c (pgamma_raw and its helpers, logcf, log1pmx, lgamma1p, logspace_sub)
 //     Copyright (C) 2006-2019 The R Core Team
 //     Copyright (C) 2005-6 Morten Welinder <terra@gnome.org>
 //     Copyright (C) 2005-10 The R Foundation
+//
+// GNU R: src/nmath/bd0.c (ebd0 and its scale table)
+//     Copyright (C) 2000-2025 The R Core Team
+//     Copyright (C) 2014 Morten Welinder
+//     Copyright (C) 2000 Catherine Loader
+//
+// GNU R: src/nmath/qgamma.c (qgamma, qchisq_appr)
+//     Copyright (C) 2000--2015 The R Core Team
+//     Copyright (C) 1998 Ross Ihaka
+//     Copyright (C) 2004--2015 The R Foundation
+//
+// GNU R: src/nmath/qDiscrete_search.h (q_DISCRETE_BODY, do_search), qpois.c, qbinom.c, qnbinom.c
+//     Copyright (C) 2000-2024 The R Core Team
+//     Copyright (C) 2005-2021 The R Foundation
+//
+// GNU R: src/nmath/stirlerr.c (stirlerr)
+//     Copyright (C) 2000-2025 The R Core Team
+//     Copyright (C) 2000 Catherine Loader
+//
+// GNU R: src/nmath/dpois.c (dpois_raw)
+//     Copyright (C) 2000-2021 The R Core Team
+//     Copyright (C) 2000 Catherine Loader
 //
 // GNU R: src/nmath/cospi.c (cospi_, sinpi_, tanpi_)
 //     Copyright (C) 2013-2022 The R Core Team
@@ -795,25 +817,47 @@ pub fn logspace_sum(logx: &[f64]) -> f64 {
     }
 }
 
-/// `sum_{k >= 0} x^k / (first + k step)` for `|x| < 1`, the series behind `log1pmx`, `bd0` and
-/// `lgamma1p`. Each term is at most `|x|^k` times the first, so the sum stops once that falls
-/// below a quarter of an ulp, and it runs from the smallest term up (Horner's rule in `x`) so
-/// the largest terms are rounded last.
-fn progression_series(x: f64, first: f64, step: f64) -> f64 {
-    // Callers pass |x| below one half; the cap only bounds the loop for anything else.
-    const MAXIMUM_TERMS: u32 = 2000;
-    let magnitude = x.abs();
-    let mut terms = 0;
-    let mut power = 1.0;
-    while power > f64::EPSILON / 4.0 && terms < MAXIMUM_TERMS {
-        power *= magnitude;
-        terms += 1;
+/// `sum_{k >= 0} x^k / (i + k d)`, by the continued fraction of GNU R's `logcf`, with a relative
+/// tolerance `eps`. It is the series behind `log1pmx` and `lgamma1p`.
+fn logcf(x: f64, i: f64, d: f64, eps: f64) -> f64 {
+    let scale_factor = scale_factor();
+    let mut c1 = 2.0 * d;
+    let mut c2 = i + d;
+    let mut c4 = c2 + d;
+    let mut a1 = c2;
+    let mut b1 = i * (c2 - i * x);
+    let mut b2 = d * d * x;
+    let mut a2 = c4 * c2 - b2;
+    b2 = c4 * b1 - i * b2;
+    while (a2 * b1 - a1 * b2).abs() > (eps * b1 * b2).abs() {
+        let mut c3 = c2 * c2 * x;
+        c2 += d;
+        c4 += d;
+        a1 = c4 * a2 - c3 * a1;
+        b1 = c4 * b2 - c3 * b1;
+        c3 = c1 * c1 * x;
+        c1 += d;
+        c4 += d;
+        a2 = c4 * a1 - c3 * a2;
+        b2 = c4 * b1 - c3 * b2;
+        if b2.abs() > scale_factor {
+            a1 /= scale_factor;
+            b1 /= scale_factor;
+            a2 /= scale_factor;
+            b2 /= scale_factor;
+        } else if b2.abs() < 1.0 / scale_factor {
+            a1 *= scale_factor;
+            b1 *= scale_factor;
+            a2 *= scale_factor;
+            b2 *= scale_factor;
+        }
     }
-    let mut sum = 0.0;
-    for k in (0..=terms).rev() {
-        sum = sum * x + 1.0 / (first + f64::from(k) * step);
-    }
-    sum
+    a2 / b2
+}
+
+/// `(2^32)^8 = 2^256`, the rescaling factor of the continued fractions.
+fn scale_factor() -> f64 {
+    f64::from_bits((1023 + 256) << 52)
 }
 
 /// `log(1 + x) - x`, accurate near zero.
@@ -827,7 +871,7 @@ pub fn log1pmx(x: f64) -> f64 {
     if x.abs() < 1e-2 {
         r * ((((2.0 / 9.0 * y + 2.0 / 7.0) * y + 2.0 / 5.0) * y + 2.0 / 3.0) * y - x)
     } else {
-        r * (2.0 * y * progression_series(y, 3.0, 2.0) - x)
+        r * (2.0 * y * logcf(y, 3.0, 2.0, 1e-14) - x)
     }
 }
 
@@ -885,7 +929,7 @@ pub fn lgamma1p(a: f64) -> f64 {
         return lgammafn(a + 1.0);
     }
     let count = LGAMMA1P_COEFFICIENTS.len();
-    let mut lgam = TAIL * progression_series(-a / 2.0, (count + 2) as f64, 1.0);
+    let mut lgam = TAIL * logcf(-a / 2.0, (count + 2) as f64, 1.0, 1e-14);
     for coefficient in LGAMMA1P_COEFFICIENTS.iter().rev() {
         lgam = coefficient - a * lgam;
     }
@@ -1121,11 +1165,106 @@ const STIRLERR_HALVES: [f64; 31] = [
     0.005554733551962801,
 ];
 
+unsafe extern "C" {
+    /// The C library's `lgamma`, which GNU R's `stirlerr` calls on `(1, 5.25]`.
+    fn lgamma(x: f64) -> f64;
+}
+
+/// `stirlerr(n) = ln(n!) - ln(sqrt(2 pi n) (n / e)^n)`, with GNU R's pieces: the table at half
+/// integers up to 15, a direct form below 5.25, and Stirling's series with as many terms as each
+/// range needs. R before 4.4 used one cutoff set and the direct form up to 15.
+#[allow(clippy::excessive_precision)]
+fn stirlerr(n: f64) -> f64 {
+    if !crate::system::r_at_least_release(4, 4, 0) {
+        return stirlerr_before_4_4(n);
+    }
+    // The series coefficients B_2k / (2k (2k - 1)), as GNU R spells them.
+    const S: [f64; 17] = [
+        0.083333333333333333333,
+        0.00277777777777777777778,
+        0.00079365079365079365079365,
+        0.000595238095238095238095238,
+        0.0008417508417508417508417508,
+        0.0019175269175269175269175262,
+        0.0064102564102564102564102561,
+        0.029550653594771241830065352,
+        0.17964437236883057316493850,
+        1.3924322169059011164274315,
+        13.402864044168391994478957,
+        156.84828462600201730636509,
+        2193.1033333333333333333333,
+        36108.771253724989357173269,
+        691472.26885131306710839498,
+        15238221.539407416192283370,
+        382900751.39141414141414141,
+    ];
+    // Horner form with the last coefficient index `last`: (S0-(S1-(...-S_last/nn)/nn)/nn)/n.
+    let series = |last: usize, nn: f64| {
+        let mut tail = S[last];
+        for index in (0..last).rev() {
+            tail = S[index] - tail / nn;
+        }
+        tail / n
+    };
+    if n <= 23.5 {
+        let doubled = n + n;
+        if n <= 15.0
+            && doubled >= 0.0
+            && doubled == doubled.trunc()
+            && let Some(value) = STIRLERR_HALVES.get(doubled as usize)
+        {
+            return *value;
+        }
+        if n <= 5.25 {
+            return if n >= 1.0 {
+                let log_n = n.ln();
+                // SAFETY: `lgamma` is a pure C library function of a double.
+                let log_gamma = unsafe { lgamma(n) };
+                log_gamma + n * (1.0 - log_n) + (log_n - M_LN_2PI) / 2.0
+            } else {
+                lgamma1p(n) - (n + 0.5) * n.ln() + n - M_LN_SQRT_2PI
+            };
+        }
+        let nn = n * n;
+        let last = if n > 12.8 {
+            6
+        } else if n > 12.3 {
+            7
+        } else if n > 8.9 {
+            8
+        } else if n > 7.3 {
+            10
+        } else if n > 6.6 {
+            12
+        } else if n > 6.1 {
+            14
+        } else {
+            16
+        };
+        return series(last, nn);
+    }
+    let nn = n * n;
+    let last = if n > 15.7e6 {
+        0
+    } else if n > 6180.0 {
+        1
+    } else if n > 205.0 {
+        2
+    } else if n > 86.0 {
+        3
+    } else if n > 27.0 {
+        4
+    } else {
+        5
+    };
+    series(last, nn)
+}
+
 /// The error of Stirling's approximation to `ln(n!)`, `ln Gamma(n + 1) - (n + 1/2) ln n + n -
 /// ln sqrt(2 pi)` (Loader 2000). Up to 15 it is read from the table at half integers or computed
 /// from that definition; above 15 it is Stirling's series `sum_k B_2k / (2k (2k - 1) n^(2k - 1))`
 /// with as many terms as Loader's cutoffs (35, 80 and 500) need for full precision.
-fn stirlerr(n: f64) -> f64 {
+fn stirlerr_before_4_4(n: f64) -> f64 {
     // |B_2k| / (2k (2k - 1)) for k = 1..5; the series alternates in sign.
     const STIRLING_SERIES: [f64; 5] = [
         1.0 / 12.0,
@@ -1222,82 +1361,232 @@ fn bd0(x: f64, np: f64) -> f64 {
     x * (x / np).ln() + np - x
 }
 
-/// `bd0` as an unevaluated sum `high + low`. A plain double holds the deviance only to an
-/// absolute precision of an ulp of itself or, away from `x == np`, of `x`, which `exp(-bd0)`
-/// turns into a relative error of the density; the Poisson density needs it to the last digit.
-fn bd0_extended(x: f64, np: f64) -> (f64, f64) {
-    let ratio = x / np;
-    let plain = bd0(x, np);
-    // Past about 1e300 the product below overflows, and a deviance anywhere near that size
-    // leaves no density for the extra digits to refine.
-    if !(ratio.is_finite() && ratio > 0.0) || !(plain < 1e300) {
-        return (plain, 0.0);
+/// `x ln(x/m) + m - x` as an unevaluated sum `(high, low)` (Welinder's `ebd0`). A plain double
+/// holds the deviance only to an absolute precision of an ulp of its largest term, which
+/// `exp(-bd0)` turns into a relative error of the Poisson density; the two parts keep it.
+fn ebd0(x: f64, m: f64) -> (f64, f64) {
+    const SCALE_BITS: i32 = 10;
+    const TABLE_STEPS: i32 = 128;
+    let mut high = 0.0;
+    let mut low = 0.0;
+    if x == m {
+        return (0.0, 0.0);
     }
-    let ratio_low = (-ratio).mul_add(np, x) / np;
-    let log_ratio = ln_double_double((ratio, ratio_low));
-    let product = double_double_mul_f64(log_ratio, x);
-    let difference = two_sum(np, -x);
-    double_double_add(product, difference)
-}
-
-/// The natural logarithm of a double-double, by `2 atanh((m - 1)/(m + 1))` on the mantissa
-/// reduced to [1/sqrt(2), sqrt(2)], where the series loses nothing to cancellation.
-fn ln_double_double(value: (f64, f64)) -> (f64, f64) {
-    const LN_2: (f64, f64) = (std::f64::consts::LN_2, 2.319_046_813_846_299_6e-17);
-    let mut exponent = value.0.log2().floor();
-    let mut scale = 2f64.powf(-exponent);
-    if value.0 * scale > std::f64::consts::SQRT_2 {
-        exponent += 1.0;
-        scale *= 0.5;
+    if x == 0.0 {
+        return (m, 0.0);
     }
-    let mantissa = (value.0 * scale, value.1 * scale);
-    let numerator = two_sum(mantissa.0 - 1.0, mantissa.1);
-    let denominator = double_double_add(two_sum(mantissa.0, 1.0), (mantissa.1, 0.0));
-    let s = double_double_div(numerator, denominator);
-    let s_squared = double_double_mul(s, s);
-    let mut power = s;
-    let mut sum = s;
-    for k in 1..200 {
-        power = double_double_mul(power, s_squared);
-        let term = double_double_div(power, ((2 * k + 1) as f64, 0.0));
-        sum = double_double_add(sum, term);
-        if term.0.abs() <= 1e-34 * sum.0.abs() {
-            break;
+    if m == 0.0 {
+        return (f64::INFINITY, 0.0);
+    }
+    if m / x == f64::INFINITY {
+        return (m, 0.0);
+    }
+    let (r, e) = frexp(m / x);
+    if M_LN2 * f64::from(-e) > 1.0 + f64::MAX / x {
+        return (f64::INFINITY, 0.0);
+    }
+    let i = ((r - 0.5) * f64::from(2 * TABLE_STEPS) + 0.5).floor() as usize;
+    let f = (f64::from(1u32 << SCALE_BITS) / (0.5 + i as f64 / f64::from(2 * TABLE_STEPS)) + 0.5)
+        .floor();
+    let fg = ldexp(f, -(e + SCALE_BITS));
+    if fg == f64::INFINITY {
+        return (fg, 0.0);
+    }
+    // Splits each term into its nearest integer and the remainder, so that nice arguments add
+    // without rounding.
+    fn add(high: &mut f64, low: &mut f64, term: f64) {
+        let rounded = (term + 0.5).floor();
+        *high += rounded;
+        *low += term - rounded;
+    }
+    add(&mut high, &mut low, -x * log1pmx((m * fg - x) / x));
+    if fg == 1.0 {
+        return (high, low);
+    }
+    for j in 0..4 {
+        add(&mut high, &mut low, x * BD0_SCALE[i][j]);
+        add(&mut high, &mut low, -x * BD0_SCALE[0][j] * f64::from(e));
+        if !finite(high) {
+            return (f64::INFINITY, 0.0);
         }
     }
-    let twice = (2.0 * sum.0, 2.0 * sum.1);
-    double_double_add(twice, double_double_mul_f64(LN_2, exponent))
+    add(&mut high, &mut low, m);
+    add(&mut high, &mut low, -m * fg);
+    (high, low)
 }
 
-fn two_sum(a: f64, b: f64) -> (f64, f64) {
-    let sum = a + b;
-    let b_virtual = sum - a;
-    let error = (a - (sum - b_virtual)) + (b - b_virtual);
-    (sum, error)
+/// `frexp`: `x = fraction * 2^exponent` with the fraction in `[0.5, 1)`, for finite nonzero `x`.
+fn frexp(x: f64) -> (f64, i32) {
+    if x == 0.0 || !x.is_finite() {
+        return (x, 0);
+    }
+    // Subnormals are lifted into the normal range first.
+    let (scaled, lift) = if x.abs() < f64::MIN_POSITIVE {
+        (x * f64::from_bits((1023 + 54) << 52), 54)
+    } else {
+        (x, 0)
+    };
+    let bits = scaled.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32 - 1022;
+    let fraction = f64::from_bits((bits & !(0x7ff << 52)) | (1022 << 52));
+    (fraction, exponent - lift)
 }
 
-fn double_double_add(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
-    let (sum, error) = two_sum(a.0, b.0);
-    let error = error + a.1 + b.1;
-    two_sum(sum, error)
+/// `ldexp`: `x * 2^n` with a single rounding, also into the subnormal range.
+fn ldexp(mut x: f64, mut n: i32) -> f64 {
+    let two_1023 = f64::from_bits(0x7fe0_0000_0000_0000);
+    let two_m969 = f64::from_bits(0x0010_0000_0000_0000) * f64::from_bits((1023 + 53) << 52);
+    if n > 1023 {
+        x *= two_1023;
+        n -= 1023;
+        if n > 1023 {
+            x *= two_1023;
+            n -= 1023;
+            n = n.min(1023);
+        }
+    } else if n < -1022 {
+        x *= two_m969;
+        n += 1022 - 53;
+        if n < -1022 {
+            x *= two_m969;
+            n += 1022 - 53;
+            n = n.max(-1022);
+        }
+    }
+    x * f64::from_bits(((1023 + n) as u64) << 52)
 }
 
-fn double_double_mul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
-    let product = a.0 * b.0;
-    let error = a.0.mul_add(b.0, -product) + (a.0 * b.1 + a.1 * b.0);
-    two_sum(product, error)
-}
-
-fn double_double_mul_f64(a: (f64, f64), b: f64) -> (f64, f64) {
-    double_double_mul(a, (b, 0.0))
-}
-
-fn double_double_div(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
-    let quotient = a.0 / b.0;
-    let remainder = double_double_add(a, double_double_mul((-quotient, 0.0), b));
-    let correction = remainder.0 / b.0;
-    two_sum(quotient, correction)
-}
+const BD0_SCALE: [[f64; 4]; 129] = [
+    [0.6931471824645996, -1.9046542121259336e-09, -8.78318373858934e-17, 3.061840738529369e-24],
+    [0.6853040456771851, -4.2578264469739224e-08, -1.1723105396588968e-15, 6.20339263720161e-23],
+    [0.6773988008499146, 2.274189014883632e-08, 1.4411920431605914e-15, 7.046384546650164e-23],
+    [0.6699305772781372, -4.8293856025338755e-08, -8.664795531738382e-16, 7.049557660755325e-24],
+    [0.6624060869216919, -4.791602492559832e-08, -2.161508226230938e-15, 7.092968360825275e-23],
+    [0.6548244953155518, 6.237715233226027e-09, 1.1806699607549086e-16, 6.660323533535123e-25],
+    [0.6471850872039795, -4.220866856030625e-08, -1.3817589176253094e-15, -1.1159932395766606e-23],
+    [0.6400018930435181, -4.979170142860312e-08, 4.887013763907625e-16, 1.6847465694533583e-23],
+    [0.6327667236328125, -5.406177194799966e-08, -2.7224545250006775e-15, -2.9070780223955397e-23],
+    [0.6249561309814453, 3.285935434860221e-08, 1.201672936775467e-16, -8.668233185091897e-24],
+    [0.6181373596191406, -6.406189467789147e-11, 3.550580962335878e-18, -3.623679406748965e-25],
+    [0.6107416152954102, 4.229853800552519e-08, 1.548143293520366e-15, -5.446353118719766e-23],
+    [0.6032907962799072, 5.515817491641428e-08, 2.1193636784238266e-15, 1.247109826410663e-22],
+    [0.5963221788406372, 3.28135385530004e-09, -1.4033469816541837e-16, 5.544061982643074e-24],
+    [0.5893045663833618, 4.307998580088679e-08, -3.2446651600595306e-15, -2.569782398567476e-23],
+    [0.5822374820709229, -3.983067387025585e-08, 2.9387905513776885e-15, 1.6124430498687833e-22],
+    [0.5751199722290039, 2.242384056216906e-09, -2.204516403537114e-17, 4.078543753751354e-25],
+    [0.5685046911239624, 4.422870603093543e-08, 2.7879957109977287e-16, -9.741708794029408e-24],
+    [0.5618454217910767, 2.147161382026752e-08, 1.3374919170106156e-15, -2.326922260336506e-23],
+    [0.554580807685852, 4.57783499996367e-09, 2.633145912141026e-16, 2.070995903387998e-23],
+    [0.5478278398513794, -7.667999568639061e-09, 6.199095327775322e-16, 6.341979011056023e-24],
+    [0.5410289764404297, -3.7302321231891256e-08, -3.3801781496424835e-15, 1.4469198371142414e-22],
+    [0.5347557067871094, 4.382891916066001e-08, -8.601820749692393e-16, -8.775950563978016e-24],
+    [0.5278670787811279, 1.0839714903454478e-08, -4.480281248130319e-16, 3.8840996084516777e-23],
+    [0.5215104818344116, 4.2031594205127476e-08, 1.211009992711288e-15, -2.3206744819671555e-23],
+    [0.5145297050476074, -1.2322940889930578e-08, 2.820084495413274e-16, 1.880026562185923e-23],
+    [0.5080875158309937, -1.2297126872340414e-08, -4.295835588700959e-16, -1.8036626177499945e-23],
+    [0.5016034841537476, 5.9145378372704727e-08, 1.2728561033550608e-15, -5.824094430019416e-23],
+    [0.4950772523880005, 1.4409851090135817e-08, -6.381910184083422e-17, -3.500509376717118e-25],
+    [0.48910707235336304, 2.745798610703787e-08, -1.4470418644525664e-15, 4.211866896949939e-23],
+    [0.4824984669685364, 1.762245460668055e-08, 4.128675224747099e-16, 2.6082691866392177e-23],
+    [0.4764525294303894, -1.2470243504481004e-08, -9.162193924794196e-17, 3.765782542240376e-24],
+    [0.469759464263916, -5.450353945946063e-09, -4.304846960468561e-16, 2.074710343707083e-25],
+    [0.46363574266433716, -1.7013046527125653e-09, 7.601622738878589e-18, -2.0415879231895994e-25],
+    [0.4574742913246155, 6.943684516258486e-10, -2.5461310777374286e-17, 5.5412533419976475e-25],
+    [0.4512746334075928, 1.0731865174307131e-08, 6.374000219845047e-16, 3.901547318408994e-23],
+    [0.44503629207611084, 2.8650656958006948e-08, -9.155352545558342e-16, -4.7365878254772817e-23],
+    [0.43938833475112915, 2.6186132373595683e-08, 1.3619601577579505e-15, -5.2672794844240613e-23],
+    [0.4330751895904541, 1.9065733880552216e-08, 1.014319201479946e-15, 1.0145670737413337e-22],
+    [0.42735910415649414, -1.141359362577532e-08, 1.3242044582274781e-16, -1.0240055893684678e-23],
+    [0.42096930742263794, -1.2778508917676845e-08, 6.143525731270704e-16, 1.419242178938019e-23],
+    [0.4151833653450012, -7.767916088141646e-09, 5.955443124124071e-16, 2.732668133771502e-23],
+    [0.4093637466430664, 1.8807551072086426e-09, 1.9153331349462894e-16, -5.6208063158075e-24],
+    [0.40351009368896484, -2.0416603518924603e-08, -2.93405013148838e-16, 1.894346911970581e-24],
+    [0.39762192964553833, 1.0016001361634608e-09, 2.2863242352463633e-17, 9.458133611770764e-25],
+    [0.3916988968849182, 1.545909711353488e-08, 1.0962823446210085e-15, 3.108302239821126e-23],
+    [0.3864043951034546, -2.076412375373593e-09, 1.5073464810114547e-16, 7.412449454375094e-24],
+    [0.38041436672210693, -8.244395388601333e-09, 1.4866224964678982e-16, -3.927292740683968e-24],
+    [0.3743882179260254, 9.158529934438775e-09, 5.656919067358501e-16, 3.4213474905617904e-23],
+    [0.36900103092193604, -2.2253590969967263e-08, 6.231405399548338e-16, -2.1564751355837555e-23],
+    [0.36358463764190674, -2.6778728567933285e-08, -9.943908455716573e-16, -4.704929732945495e-24],
+    [0.35745590925216675, -2.033036139437172e-08, -1.5794492077344114e-15, 6.318678032068057e-23],
+    [0.3519763946533203, 2.850385882879891e-08, -9.566434575519799e-16, -6.409595040255684e-24],
+    [0.3464667797088623, -1.236265312343221e-08, -6.003368248279719e-16, -2.860901497105794e-24],
+    [0.3409265875816345, -6.110413286464222e-10, 1.7467136243918857e-17, 1.9962587429804357e-25],
+    [0.3353555202484131, 2.167272583619706e-08, -1.0918773497788125e-15, -3.047574780704126e-23],
+    [0.33045530319213867, -1.608884048209802e-08, -3.833435008838916e-16, -7.683741875124221e-24],
+    [0.3248254060745239, 2.801670362373443e-08, -2.0725720961098414e-16, 1.3160777896524739e-23],
+    [0.3191636800765991, 2.6222629401218e-08, -1.3995222573204161e-15, 8.599883909680833e-23],
+    [0.31418323516845703, 2.6826626253750874e-08, -9.792556373536439e-16, 2.2954960929108544e-23],
+    [0.3084607720375061, 1.368350943664609e-08, 5.591995050742643e-16, -1.1938701403427125e-23],
+    [0.3034266233444214, -8.629042369534545e-09, -5.222554219259392e-16, 3.228770766379237e-23],
+    [0.2983669638633728, 8.688424202318856e-09, 2.764116793423446e-16, -1.0171858868428321e-23],
+    [0.29255300760269165, -4.91631446664087e-09, 2.562284723960507e-16, -2.6341575505102177e-23],
+    [0.28743791580200195, -1.3782395669181824e-08, 7.29039351877645e-16, -4.431977943282236e-24],
+    [0.28229647874832153, 2.3770866164340987e-08, 6.449228392264254e-16, 3.417536976845211e-23],
+    [0.27712851762771606, 1.4733029018998423e-08, 6.793364114448283e-16, 3.593898034032222e-24],
+    [0.27193373441696167, -1.8933320689029642e-08, 7.77939410955583e-16, 2.591972424742619e-23],
+    [0.2667117714881897, 1.4300387263244119e-11, -7.458876800955772e-19, 4.247418782257993e-26],
+    [0.2622140049934387, 7.802219315067305e-09, 5.022431038767539e-16, -2.4063174816868367e-23],
+    [0.25694090127944946, 2.9618050234603288e-08, 7.279528203645545e-16, 2.638556081145549e-23],
+    [0.2516399025917053, -6.44787778725231e-09, 4.122028133693521e-16, 7.427559296153698e-24],
+    [0.2470736801624298, -1.9981829524340355e-09, -1.0909757890855787e-16, 6.236552089808213e-24],
+    [0.24171993136405945, 5.523085988556886e-09, -2.686547633696265e-16, -2.764495989170092e-24],
+    [0.23710808157920837, 1.0085374313462125e-08, -4.775626813761317e-16, 2.330620598032363e-23],
+    [0.231700599193573, -1.3946383603524737e-08, 1.0970921279709183e-17, 3.229909378627549e-25],
+    [0.22704219818115234, -6.451284839670279e-09, -4.2529947798112047e-16, -1.0260254677162862e-23],
+    [0.2223619818687439, 1.4110645096820917e-08, 6.025568981827254e-16, 1.9385180739531644e-23],
+    [0.21765980124473572, -8.286782815503102e-09, 5.232363919579781e-16, 5.078443538654066e-23],
+    [0.21214580535888672, -8.254218641923217e-09, 3.255553133321774e-16, 1.571430013634162e-23],
+    [0.20739519596099854, -1.6149279691290985e-09, 2.1131592679643073e-17, 1.4275617427027514e-24],
+    [0.20262190699577332, 8.597639933327628e-09, -3.3804619056798137e-16, 2.5623235609364303e-24],
+    [0.19782572984695435, 1.348296585490516e-08, -3.2024568730231384e-16, -2.5712252251631252e-23],
+    [0.1930064558982849, 9.956859781112826e-10, 9.001674563844606e-17, -3.754797654135173e-24],
+    [0.1889725625514984, 4.2415360113068346e-09, 3.8086815297465933e-16, -2.1147402916208568e-23],
+    [0.18411031365394592, 6.931054841174955e-09, -3.4784858522920016e-16, 2.4665943434547742e-23],
+    [0.17922431230545044, 5.0739235035734964e-09, 3.2221329189922637e-16, -1.0379009008973928e-23],
+    [0.17431432008743286, 3.794385250444066e-09, 3.190066898587176e-16, 2.0292714723890484e-23],
+    [0.17020416259765625, 3.4223344158590407e-09, -1.8846416901959178e-16, 1.1415315069779235e-23],
+    [0.16524958610534668, -1.3210039284672348e-08, -2.3213954359040806e-16, 3.043054213286757e-24],
+    [0.1602703034877777, 6.007922159767531e-09, -7.521047737154288e-17, -1.2649106048711768e-25],
+    [0.15610191226005554, -1.2301535790015805e-08, 3.0175617567361414e-16, -8.633806506327147e-24],
+    [0.15191605687141418, -1.4845571882915465e-08, -3.265830289949929e-16, -1.5268151962784823e-23],
+    [0.14686977863311768, -4.6748995785605985e-09, -4.294291341758996e-16, 1.328295982896899e-23],
+    [0.142645001411438, 9.186472027522541e-09, -8.049373155998929e-16, 1.437998766909278e-23],
+    [0.1384023129940033, 9.86511672351753e-09, -8.837306496940929e-16, 7.295324909194215e-24],
+    [0.1332872211933136, 9.990350768873668e-10, 3.316946610734358e-17, 2.7351440526086287e-24],
+    [0.129004567861557, -7.46120853989396e-09, -6.212113165383437e-16, 1.855187264989731e-24],
+    [0.12470348179340363, -3.2924463155836747e-09, -7.404120132741752e-17, 1.3246955625609024e-24],
+    [0.12038381397724152, 3.3791991427278845e-09, 1.6214981996371606e-16, -6.00070673940474e-24],
+    [0.11604541540145874, 3.5638392237302696e-10, -7.354219635108878e-18, 7.794312440645008e-26],
+    [0.11168810725212097, 3.136765958089427e-09, -8.994406293238225e-19, -7.920937558182207e-26],
+    [0.10731174051761627, -4.728527791542092e-09, -4.2976339455270984e-16, 5.351143287258107e-24],
+    [0.10291612148284912, 2.8332007850906393e-09, 4.925742757234052e-17, 2.794436810397303e-24],
+    [0.09850110113620758, 4.970725164810119e-09, 4.130512756847049e-16, 6.313449560595865e-25],
+    [0.09406651556491852, -6.525850970717784e-09, -1.3492816627243298e-16, -9.079650179574527e-24],
+    [0.08961215615272522, 2.5369617517867482e-09, 1.6110664594961319e-16, -5.189504504486964e-24],
+    [0.08603434264659882, -5.304795713811927e-09, 5.127575488441481e-17, 1.463615545692133e-24],
+    [0.08154398202896118, 2.0112156384755053e-09, 8.065769331577608e-17, -3.0150319017810437e-24],
+    [0.07703337073326111, 5.7495661565099e-09, -2.503851097302985e-16, -1.846143093040508e-23],
+    [0.07250232994556427, 1.177662634077592e-09, -3.525476857925506e-17, 1.3164077898906505e-24],
+    [0.0688626617193222, -7.043545302565235e-09, 2.49712406751501e-16, 1.0686882487619963e-23],
+    [0.06429435312747955, -2.422082090447475e-09, -2.0555896149129847e-16, 8.602907613530545e-24],
+    [0.0606246218085289, 7.905943261166115e-12, -8.270443345471096e-19, -2.3533820836754142e-26],
+    [0.056018441915512085, -5.139745296034448e-10, -3.811651571366802e-17, 1.9072195442219776e-24],
+    [0.052318163216114044, -3.5574325707443677e-09, 9.191155834145393e-17, -5.321463973420977e-24],
+    [0.04767347127199173, -1.8026349302147082e-09, 1.0329634289704177e-16, -2.2283569301283993e-24],
+    [0.04394212365150452, -1.795005699634089e-09, -5.3817402974104447e-17, -1.3996196977941442e-24],
+    [0.040196798741817474, 3.8451930528538014e-10, -2.4485452721520977e-17, -7.386769024377949e-26],
+    [0.0354953333735466, -3.5901653872016936e-10, -2.073207767866976e-17, -2.412097216555168e-26],
+    [0.0317181795835495, 6.87235046648027e-10, -6.430478093749473e-18, 1.3508692031871337e-25],
+    [0.02792670577764511, 7.568773385813188e-10, -4.22031585165944e-17, 2.534760563692782e-24],
+    [0.02412080392241478, -1.1255707477175747e-09, 4.89700584100947e-17, 1.4172214525647275e-24],
+    [0.01934296265244484, 1.9068610579431322e-10, -1.0635946218849709e-17, -5.300489542457734e-25],
+    [0.015504186972975731, -4.3701048335620385e-10, 6.61106154763715e-18, 2.5398086818405174e-25],
+    [0.01165061630308628, 9.168890091615367e-10, -1.5848697818454755e-17, -1.350491609984469e-24],
+    [0.007782140746712685, -3.046577434773212e-10, 7.793435996762285e-18, 4.660100148208369e-25],
+    [0.0038986406289041042, -2.1324678134426733e-10, 1.2541658163801307e-19, 8.745035431740123e-27],
+    [0.0, 0.0, 0.0, 0.0],
+];
 
 pub fn lbeta(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
@@ -2105,6 +2394,8 @@ pub fn qunif(p: f64, a: f64, b: f64, lower: bool, log: bool) -> f64 {
 // The Poisson density, the gamma distribution and its special cases.
 
 pub fn dpois_raw(x: f64, lambda: f64, log: bool) -> f64 {
+    // 2^1023 / pi: from here 2 pi x overflows.
+    const X_LARGE: f64 = 2.861_117_485_757_028_2e+307;
     if lambda == 0.0 {
         return if x == 0.0 { d1(log) } else { d0(log) };
     }
@@ -2120,18 +2411,18 @@ pub fn dpois_raw(x: f64, lambda: f64, log: bool) -> f64 {
         }
         return d_exp(-lambda + x * lambda.ln() - lgammafn(x + 1.0), log);
     }
-    let (high, low) = bd0_extended(x, lambda);
-    let low = low + stirlerr(x);
-    // 2 pi x overflows for x near DBL_MAX, where sqrt(2 pi) sqrt(x) does not.
-    let root = M_SQRT_2PI * x.sqrt();
-    if log {
-        -low - high - root.ln()
-    } else if low.abs() > 1.0 {
-        // The low part stays below an ulp of the high part, which here is beyond the range
-        // where the density is representable.
-        (-(high + low)).exp() / root
+    let (high, deviance_low) = ebd0(x, lambda);
+    let low = deviance_low + stirlerr(x);
+    let large = x >= X_LARGE;
+    let root = if large {
+        M_SQRT_2PI * x.sqrt()
     } else {
-        (-low).exp() * (-high).exp() / root
+        M_2PI * x
+    };
+    if log {
+        -low - high - if large { root.ln() } else { 0.5 * root.ln() }
+    } else {
+        (-low).exp() * (-high).exp() / if large { root } else { root.sqrt() }
     }
 }
 
@@ -2214,518 +2505,305 @@ pub fn pgamma(x: f64, shape: f64, scale: f64, lower: bool, log: bool) -> f64 {
             dt0(lower, log)
         };
     }
-    regularized_gamma(x, shape, lower, log)
+    pgamma_raw(x, shape, lower, log)
 }
 
-/// `P(shape, x)` when `lower`, else `Q(shape, x) = 1 - P(shape, x)`, for `shape > 0`.
-///
-/// Each method computes one tail directly, and the other comes from its complement only
-/// where the direct tail is at most about 0.9, so neither tail loses relative accuracy. The
-/// methods are those of DiDonato and Morris (1986) and Gautschi (1979): the power series of
-/// the lower tail below the mode, Legendre's continued fraction for the upper tail above it,
-/// a series for `Q` itself when the shape is below one and `x` is small (where `Q` can be
-/// tiny while `P` is near one), and Temme's (1979) uniform asymptotic expansion near the
-/// mode of a large shape, where the series and the fraction would need `O(sqrt(shape))`
-/// terms.
-fn regularized_gamma(x: f64, shape: f64, lower: bool, log: bool) -> f64 {
+/// `P(alph, x)` when `lower_tail`, else `Q(alph, x)`, for `alph > 0` (Welinder's `pgamma_raw`).
+/// It picks among the series of Abramowitz and Stegun 6.5.29 for small `x`, a scaled series or
+/// continued fraction for `x` far from `alph`, and Temme-style Poisson asymptotics near it.
+fn pgamma_raw(x: f64, alph: f64, lower_tail: bool, log_p: bool) -> f64 {
     if x <= 0.0 {
-        return dt0(lower, log);
+        return dt0(lower_tail, log_p);
     }
-    if x == f64::INFINITY {
-        return dt1(lower, log);
+    if x >= f64::INFINITY {
+        return dt1(lower_tail, log_p);
     }
-    let ratio = x / shape;
-    let (value, is_upper) = if shape < 1.0 && x < 1.5 {
-        if gamma_lower_series(x, shape, false) < 0.5 {
-            (gamma_lower_series(x, shape, log), false)
+    let res = if x < 1.0 {
+        pgamma_smallx(x, alph, lower_tail, log_p)
+    } else if x <= alph - 1.0 && x < 0.8 * (alph + 50.0) {
+        let sum = pd_upper_series(x, alph, log_p);
+        let d = dpois_wrap(alph, x, log_p);
+        if !lower_tail {
+            if log_p {
+                log1_exp(d + sum)
+            } else {
+                1.0 - d * sum
+            }
+        } else if log_p {
+            sum + d
         } else {
-            (gamma_upper_small_shape(x, shape, log), true)
+            sum * d
         }
-    } else if shape >= 20.0 && (0.3..=2.4).contains(&ratio) {
-        gamma_uniform_expansion(x, shape, log)
-    } else if x < shape + 1.0 {
-        (gamma_lower_series(x, shape, log), false)
+    } else if alph - 1.0 < x && alph < 0.8 * (x + 50.0) {
+        let d = dpois_wrap(alph, x, log_p);
+        let sum = if alph < 1.0 {
+            if x * DBL_EPSILON > 1.0 - alph {
+                d1(log_p)
+            } else {
+                let f = pd_lower_cf(alph, x - (alph - 1.0)) * x / alph;
+                if log_p { f.ln() } else { f }
+            }
+        } else {
+            let sum = pd_lower_series(x, alph - 1.0);
+            if log_p { sum.ln_1p() } else { 1.0 + sum }
+        };
+        if !lower_tail {
+            if log_p { sum + d } else { sum * d }
+        } else if log_p {
+            log1_exp(d + sum)
+        } else {
+            1.0 - d * sum
+        }
     } else {
-        (gamma_upper_fraction(x, shape, log), true)
+        ppois_asymp(alph - 1.0, x, !lower_tail, log_p)
     };
-    if is_upper != lower {
-        value
-    } else if log {
-        log1_exp(value)
+    // Near the smallest normal number the result loses accuracy to underflow, so it is redone on
+    // the log scale.
+    if !log_p && res < DBL_MIN / DBL_EPSILON {
+        pgamma_raw(x, alph, lower_tail, true).exp()
     } else {
-        0.5 - value + 0.5
+        res
     }
 }
 
-/// `P(shape, x) = x^shape e^-x / Gamma(shape + 1) * sum_n x^n / ((shape + 1) ... (shape +
-/// n))`, the series of Abramowitz and Stegun 6.5.29, for `x` below about `shape + 1`.
-fn gamma_lower_series(x: f64, shape: f64, log: bool) -> f64 {
-    let mut term = 1.0;
-    let mut sum = 1.0;
-    let mut index = 1.0;
-    while index < 1e6 {
-        term *= x / (shape + index);
-        sum += term;
-        if term <= sum * DBL_EPSILON * 0.5 {
-            break;
-        }
-        index += 1.0;
+/// `dpois(x_plus_1 - 1, lambda)`, also for `x_plus_1` below one.
+fn dpois_wrap(x_plus_1: f64, lambda: f64, log: bool) -> f64 {
+    // If |x| > |k| * M_CUTOFF then log(exp(-x) * k^x) is about -x.
+    const M_CUTOFF: f64 = M_LN2 * 1024.0 / DBL_EPSILON;
+    if !finite(lambda) {
+        return d0(log);
     }
-    if log {
-        gamma_density_factor(x, shape, true) + sum.ln()
+    if x_plus_1 > 1.0 {
+        return dpois_raw(x_plus_1 - 1.0, lambda, log);
+    }
+    if lambda > (x_plus_1 - 1.0).abs() * M_CUTOFF {
+        d_exp(-lambda - lgammafn(x_plus_1), log)
     } else {
-        gamma_density_factor(x, shape, false) * sum
+        let d = dpois_raw(x_plus_1, lambda, log);
+        if log {
+            d + (x_plus_1 / lambda).ln()
+        } else {
+            d * (x_plus_1 / lambda)
+        }
     }
 }
 
-/// `Q(shape, x)` from Legendre's continued fraction (Abramowitz and Stegun 6.5.31),
-///
-/// `Gamma(shape, x) = e^-x x^shape / (x + 1 - shape - 1 (1 - shape) / (x + 3 - shape - 2 (2
-/// - shape) / (x + 5 - shape - ...)))`,
-///
-/// for `x` above about `shape + 1`. Lentz's method (Thompson and Barnett 1986) finds how many
-/// terms converge, and the fraction is then evaluated again from that depth upward, which
-/// damps rounding errors where Lentz's forward products accumulate one per term.
-fn gamma_upper_fraction(x: f64, shape: f64, log: bool) -> f64 {
-    const TINY: f64 = 1e-300;
-    let nonzero = |value: f64| if value.abs() < TINY { TINY } else { value };
-    let mut denominator = nonzero(x + 1.0 - shape);
-    let mut numerator_ratio = denominator;
-    let mut inverse_ratio = 0.0;
-    let mut index = 1.0;
-    while index < 1e6 {
-        let partial_numerator = -index * (index - shape);
-        let partial_denominator = x + 2.0 * index + 1.0 - shape;
-        inverse_ratio = 1.0 / nonzero(partial_denominator + partial_numerator * inverse_ratio);
-        numerator_ratio = nonzero(partial_denominator + partial_numerator / numerator_ratio);
-        let step = numerator_ratio * inverse_ratio;
-        denominator *= step;
-        if (step - 1.0).abs() <= DBL_EPSILON {
-            break;
-        }
-        index += 1.0;
-    }
-    if denominator.is_finite() && denominator != 0.0 {
-        let mut tail = 0.0;
-        let mut depth = index + 4.0;
-        while depth >= 1.0 {
-            let partial_numerator = -depth * (depth - shape);
-            let partial_denominator = x + 2.0 * depth + 1.0 - shape;
-            tail = partial_numerator / nonzero(partial_denominator + tail);
-            depth -= 1.0;
-        }
-        denominator = x + 1.0 - shape + tail;
-    }
-    if log {
-        shape.ln() + gamma_density_factor(x, shape, true) - denominator.ln()
-    } else {
-        shape * gamma_density_factor(x, shape, false) / denominator
-    }
-}
-
-/// `Q(shape, x)` for `shape < 1` and small `x`, from the expansion of the lower incomplete
-/// gamma function `gamma(shape, x) = x^shape sum_n (-x)^n / (n! (shape + n))` with its
-/// first term split off (Gautschi 1979, section 4.1):
-///
-/// `Q = 1 - x^shape / Gamma(shape + 1) - x^shape / Gamma(shape + 1) * shape * sum_{n >= 1}
-/// (-x)^n / (n! (shape + n))`.
-///
-/// The first difference is `-expm1(shape ln x - ln Gamma(shape + 1))`, which stays accurate
-/// as `shape` goes to zero, where `Q` is about `shape E1(x)`.
-fn gamma_upper_small_shape(x: f64, shape: f64, log: bool) -> f64 {
-    let log_power = shape * x.ln() - lgamma1p(shape);
-    let mut factor = 1.0;
+/// The lower or upper tail for `x < 1` by Abramowitz and Stegun 6.5.29.
+fn pgamma_smallx(x: f64, alph: f64, lower_tail: bool, log_p: bool) -> f64 {
     let mut sum = 0.0;
-    let mut index = 1.0;
-    while index < 1000.0 {
-        factor *= -x / index;
-        let term = factor / (shape + index);
+    let mut c = alph;
+    let mut n = 0.0;
+    loop {
+        n += 1.0;
+        c *= -x / n;
+        let term = c / (alph + n);
         sum += term;
-        if term.abs() <= sum.abs() * DBL_EPSILON * 0.5 {
+        if term.abs() <= DBL_EPSILON * sum.abs() {
             break;
         }
-        index += 1.0;
     }
-    let upper = -log_power.exp_m1() - log_power.exp() * shape * sum;
-    if log { upper.ln() } else { upper }
-}
-
-/// The smaller tail of the gamma distribution near the mode of a large shape, by Temme's
-/// (1979) uniform asymptotic expansion (DLMF 8.12.3, 8.12.7-8.12.11):
-///
-/// `Q(a, x) = erfc(eta sqrt(a / 2)) / 2 + e^(-a eta^2 / 2) / sqrt(2 pi a) sum_k c_k(eta) a^-k`
-///
-/// with `eta^2 / 2 = lambda - 1 - ln lambda`, `lambda = x / a`, and `eta` of the sign of
-/// `lambda - 1`. Factoring out the normal density turns the error function into Mills'
-/// ratio, so a tail far below the double range keeps its logarithm. Returns the tail on the
-/// requested scale and whether it is the upper one.
-fn gamma_uniform_expansion(x: f64, shape: f64, log: bool) -> (f64, bool) {
-    let exponent = gamma_deviance(x, shape);
-    let is_upper = x > shape;
-    let magnitude = (2.0 * exponent / shape).sqrt();
-    let eta = if is_upper { magnitude } else { -magnitude };
-    let mut correction = 0.0;
-    for row in TEMME_COEFFICIENTS.iter().rev() {
-        let coefficient = row.iter().rev().fold(0.0, |sum, &value| sum * eta + value);
-        correction = correction / shape + coefficient;
-    }
-    let root_shape = shape.sqrt();
-    let mills = mills_ratio(magnitude * root_shape) * root_shape;
-    let bracket = if is_upper {
-        mills + correction
+    if lower_tail {
+        let f1 = if log_p { sum.ln_1p() } else { 1.0 + sum };
+        let f2 = if alph > 1.0 {
+            let f2 = dpois_raw(alph, x, log_p);
+            if log_p { f2 + x } else { f2 * x.exp() }
+        } else if log_p {
+            alph * x.ln() - lgamma1p(alph)
+        } else {
+            x.powf(alph) / lgamma1p(alph).exp()
+        };
+        if log_p { f1 + f2 } else { f1 * f2 }
     } else {
-        mills - correction
-    };
-    let value = if log {
-        -exponent - 0.5 * (M_2PI * shape).ln() + bracket.ln()
+        let lf2 = alph * x.ln() - lgamma1p(alph);
+        if log_p {
+            log1_exp(sum.ln_1p() + lf2)
+        } else {
+            let f1m1 = sum;
+            let f2m1 = lf2.exp_m1();
+            -(f1m1 + f2m1 + f1m1 * f2m1)
+        }
+    }
+}
+
+/// `sum_{n >= 1} x^n / (y (y + 1) ... (y + n - 1))`, about `x / y` for large `y`.
+fn pd_upper_series(x: f64, mut y: f64, log_p: bool) -> f64 {
+    let mut term = x / y;
+    let mut sum = term;
+    loop {
+        y += 1.0;
+        term *= x / y;
+        sum += term;
+        if term <= sum * DBL_EPSILON {
+            break;
+        }
+    }
+    if log_p { sum.ln() } else { sum }
+}
+
+/// The continued fraction for the scaled upper-tail `F_gamma`, about `(y / d) (1 + (1 - y) / d)`.
+fn pd_lower_cf(y: f64, d: f64) -> f64 {
+    const MAX_IT: u32 = 200_000;
+    let scale_factor = scale_factor();
+    if y == 0.0 {
+        return 0.0;
+    }
+    let mut f0 = y / d;
+    if (y - 1.0).abs() < d.abs() * DBL_EPSILON {
+        return f0;
+    }
+    if f0 > 1.0 {
+        f0 = 1.0;
+    }
+    let mut c2 = y;
+    let mut c4 = d;
+    let mut a1 = 0.0;
+    let mut b1 = 1.0;
+    let mut a2 = y;
+    let mut b2 = d;
+    while b2 > scale_factor {
+        a1 /= scale_factor;
+        b1 /= scale_factor;
+        a2 /= scale_factor;
+        b2 /= scale_factor;
+    }
+    let mut i = 0.0;
+    let mut old = -1.0;
+    let mut f = 0.0;
+    while i < f64::from(MAX_IT) {
+        i += 1.0;
+        c2 -= 1.0;
+        let mut c3 = i * c2;
+        c4 += 2.0;
+        a1 = c4 * a2 + c3 * a1;
+        b1 = c4 * b2 + c3 * b1;
+        i += 1.0;
+        c2 -= 1.0;
+        c3 = i * c2;
+        c4 += 2.0;
+        a2 = c4 * a1 + c3 * a2;
+        b2 = c4 * b1 + c3 * b2;
+        if b2 > scale_factor {
+            a1 /= scale_factor;
+            b1 /= scale_factor;
+            a2 /= scale_factor;
+            b2 /= scale_factor;
+        }
+        if b2 != 0.0 {
+            f = a2 / b2;
+            if (f - old).abs() <= DBL_EPSILON * fmax2(f0, f.abs()) {
+                return f;
+            }
+            old = f;
+        }
+    }
+    f
+}
+
+/// `sum_{n >= 0} y (y - 1) ... (y - n) / lambda^(n + 1)`, about `y / lambda`.
+fn pd_lower_series(lambda: f64, mut y: f64) -> f64 {
+    let mut term = 1.0;
+    let mut sum = 0.0;
+    while y >= 1.0 && term > sum * DBL_EPSILON {
+        term *= y / lambda;
+        sum += term;
+        y -= 1.0;
+    }
+    if y != y.floor() {
+        // The series does not converge for y below -lambda, so one more term comes from the
+        // continued fraction.
+        let f = pd_lower_cf(y, lambda + 1.0 - y);
+        sum += term * f;
+    }
+    sum
+}
+
+/// `dnorm(x) / pnorm(x, lower_tail)` with more accuracy than the quotient, given `lp =
+/// pnorm(x, lower_tail, log = TRUE)` (Abramowitz and Stegun 26.2.12).
+fn dpnorm(mut x: f64, mut lower_tail: bool, lp: f64) -> f64 {
+    if x < 0.0 {
+        x = -x;
+        lower_tail = !lower_tail;
+    }
+    if x > 10.0 && !lower_tail {
+        let mut term = 1.0 / x;
+        let mut sum = term;
+        let x2 = x * x;
+        let mut i = 1.0;
+        loop {
+            term *= -i / x2;
+            sum += term;
+            i += 2.0;
+            if term.abs() <= DBL_EPSILON * sum {
+                break;
+            }
+        }
+        1.0 / sum
     } else {
-        (-exponent).exp() * bracket / (M_2PI * shape).sqrt()
-    };
-    (value, is_upper)
+        dnorm(x, 0.0, 1.0, false) / lp.exp()
+    }
 }
 
-/// `x^shape e^-x / Gamma(shape + 1)` on the requested scale, as `exp(-stirlerr(shape) -
-/// deviance) / sqrt(2 pi shape)` (Loader 2000), which keeps the large exponents of the two
-/// factors from cancelling.
-///
-/// For a small shape and moderate `x` the factors cannot overflow, and the direct product is
-/// more accurate: `exp` of an exponent `E` carries a relative error of about `|E|` rounding
-/// errors, while `x^shape`, `e^-x` and `Gamma(shape + 1)` each round once.
-fn gamma_density_factor(x: f64, shape: f64, log: bool) -> f64 {
-    // `gammafn` is a product of a few accurate factors up to 10 and an exponential above.
-    if !log && shape < 9.0 && x < 600.0 {
-        return x.powf(shape) * (-x).exp() / gammafn(shape + 1.0);
+/// The probability that a Poisson variate is at most `x`, by an asymptotic expansion in the
+/// normal distribution (Smith's, at members.aol.com/iandjmsmith/PoissonApprox.htm).
+fn ppois_asymp(x: f64, lambda: f64, lower_tail: bool, log_p: bool) -> f64 {
+    const COEFS_A: [f64; 8] = [
+        -1e99,
+        2.0 / 3.0,
+        -4.0 / 135.0,
+        8.0 / 2835.0,
+        16.0 / 8505.0,
+        -8992.0 / 12629925.0,
+        -334144.0 / 492567075.0,
+        698752.0 / 1477701225.0,
+    ];
+    const COEFS_B: [f64; 8] = [
+        -1e99,
+        1.0 / 12.0,
+        1.0 / 288.0,
+        -139.0 / 51840.0,
+        -571.0 / 2488320.0,
+        163879.0 / 209018880.0,
+        5246819.0 / 75246796800.0,
+        -534703531.0 / 902961561600.0,
+    ];
+    let dfm = lambda - x;
+    let pt = -log1pmx(dfm / x);
+    let mut s2pt = (2.0 * x * pt).sqrt();
+    if dfm < 0.0 {
+        s2pt = -s2pt;
     }
-    let exponent = -stirlerr(shape) - gamma_deviance(x, shape);
-    if log {
-        exponent - 0.5 * (M_2PI * shape).ln()
+    let mut res12 = 0.0;
+    let mut res1_term = x.sqrt();
+    let mut res1_ig = res1_term;
+    let mut res2_term = s2pt;
+    let mut res2_ig = res2_term;
+    for i in 1..8 {
+        res12 += res1_ig * COEFS_A[i];
+        res12 += res2_ig * COEFS_B[i];
+        res1_term *= pt / i as f64;
+        res2_term *= 2.0 * pt / (2 * i + 1) as f64;
+        res1_ig = res1_ig / x + res1_term;
+        res2_ig = res2_ig / x + res2_term;
+    }
+    let mut elfb = x;
+    let mut elfb_term = 1.0;
+    for coefficient in &COEFS_B[1..8] {
+        elfb += elfb_term * coefficient;
+        elfb_term /= x;
+    }
+    if !lower_tail {
+        elfb = -elfb;
+    }
+    let f = res12 / elfb;
+    let np = pnorm(s2pt, 0.0, 1.0, !lower_tail, log_p);
+    if log_p {
+        let n_d_over_p = dpnorm(s2pt, !lower_tail, np);
+        np + (f * n_d_over_p).ln_1p()
     } else {
-        exponent.exp() / (M_2PI * shape).sqrt()
+        let nd = dnorm(s2pt, 0.0, 1.0, log_p);
+        np + f * nd
     }
 }
-
-/// The deviance `shape ln(shape / x) + x - shape = shape (lambda - 1 - ln lambda)`, with
-/// `lambda = x / shape`. Near `lambda = 1` the direct form cancels almost completely; there
-/// `-shape log1pmx(lambda - 1)` is accurate to a few rounding errors relative. Far below,
-/// `lambda - 1` would round away `lambda` itself, but the logarithm dominates the direct form.
-fn gamma_deviance(x: f64, shape: f64) -> f64 {
-    let relative = (x - shape) / shape;
-    // A tiny shape against a huge `x` overflows `lambda - 1`; that far from 1 the direct form
-    // has nothing to cancel.
-    if x >= 0.25 * shape && relative.is_finite() {
-        -shape * log1pmx(relative)
-    } else {
-        shape * (shape.ln() - x.ln()) + x - shape
-    }
-}
-
-/// Mills' ratio `(1 - Phi(t)) / phi(t)` for `t >= 0`. Below 30 the normal tail does not
-/// underflow and the quotient is exact to rounding; above, Laplace's continued fraction
-/// `1 / (t + 1 / (t + 2 / (t + 3 / (t + ...))))` converges in a few terms.
-fn mills_ratio(t: f64) -> f64 {
-    if t < 30.0 {
-        return pnorm(t, 0.0, 1.0, false, false) / dnorm(t, 0.0, 1.0, false);
-    }
-    let mut tail = t;
-    for index in (1..=40).rev() {
-        tail = t + index as f64 / tail;
-    }
-    1.0 / tail
-}
-
-/// The Taylor coefficients in `eta` of Temme's `c_k(eta)`, one row per `k`, derived from
-/// `c_0 = 1 / (lambda - 1) - 1 / eta` and `c_k = c_{k-1}'(eta) / eta + (-1)^k g_k /
-/// (lambda - 1)` (DLMF 8.12.10-8.12.11), with `g_k` the coefficients of Stirling's series
-/// for the gamma function, by exact rational series reversion of `eta^2 / 2 = lambda - 1 -
-/// ln lambda`. Rows stop where their terms fall below 1e-19 for `|eta| <= 1.05` and shapes
-/// of at least 20.
-const TEMME_COEFFICIENTS: [&[f64]; 11] = [
-    &[
-        -0.3333333333333333,
-        0.08333333333333333,
-        -0.014814814814814815,
-        0.0011574074074074073,
-        0.0003527336860670194,
-        -0.0001787551440329218,
-        3.919263178522438e-05,
-        -2.185448510679992e-06,
-        -1.85406221071516e-06,
-        8.296711340953087e-07,
-        -1.7665952736826078e-07,
-        6.707853543401498e-09,
-        1.0261809784240309e-08,
-        -4.382036018453353e-09,
-        9.14769958223679e-10,
-        -2.5514193994946248e-11,
-        -5.830772132550426e-11,
-        2.4361948020667415e-11,
-        -5.0276692801141755e-12,
-        1.1004392031956135e-13,
-        3.371763262400985e-13,
-        -1.392388722418162e-13,
-        2.8534893807047445e-14,
-        -5.139111834242572e-16,
-        -1.9752288294349442e-15,
-        8.099521156704561e-16,
-        -1.6522531216398162e-16,
-        2.5305430097478883e-18,
-        1.1686939738559576e-17,
-        -4.770037049820485e-18,
-    ],
-    &[
-        -0.001851851851851852,
-        -0.003472222222222222,
-        0.0026455026455026454,
-        -0.0009902263374485596,
-        0.00020576131687242798,
-        -4.018775720164609e-07,
-        -1.8098550334489977e-05,
-        7.64916091608111e-06,
-        -1.6120900894563446e-06,
-        4.647127802807434e-09,
-        1.378633446915721e-07,
-        -5.752545603517705e-08,
-        1.1951628599778148e-08,
-        -1.7543241719747647e-11,
-        -1.0091543710600413e-09,
-        4.162792991842583e-10,
-        -8.56390702649298e-11,
-        6.067215101604758e-14,
-        7.1624989648114856e-12,
-        -2.933186643771437e-12,
-        5.996696365683689e-13,
-        -2.1671786527323313e-16,
-        -4.978339972369262e-14,
-        2.0291628823713425e-14,
-        -4.13125571381061e-15,
-        8.286516239883097e-19,
-        3.4100308869333327e-16,
-        -1.3854195302893971e-16,
-        2.812346653228875e-17,
-    ],
-    &[
-        0.004133597883597883,
-        -0.0026813271604938273,
-        0.0007716049382716049,
-        2.0093878600823047e-06,
-        -0.0001073665322636516,
-        5.2923448829120125e-05,
-        -1.2760635188618728e-05,
-        3.423578734096138e-08,
-        1.3721957309062934e-06,
-        -6.298992138380055e-07,
-        1.4280614206064242e-07,
-        -2.0477098421990866e-10,
-        -1.409252991086752e-08,
-        6.228974084922022e-09,
-        -1.3670488396617114e-09,
-        9.428356159014678e-13,
-        1.2872252400089318e-10,
-        -5.5645956134363323e-11,
-        1.197593554636698e-11,
-        -4.1689782251838634e-15,
-        -1.0940640427884595e-12,
-        4.662239946390136e-13,
-        -9.905105763906907e-14,
-        1.8931876768373515e-17,
-        8.859221872591127e-15,
-        -3.737820398046405e-15,
-        7.868833639035156e-16,
-        -9.000027395741211e-20,
-        -6.928881229347671e-17,
-        2.9020384270164786e-17,
-    ],
-    &[
-        0.0006494341563786008,
-        0.00022947209362139917,
-        -0.0004691894943952557,
-        0.00026772063206283885,
-        -7.561801671883977e-05,
-        -2.396505113867297e-07,
-        1.1082654115347302e-05,
-        -5.6749528269915965e-06,
-        1.4230900732435883e-06,
-        -2.7861080291528143e-11,
-        -1.6958404091930278e-07,
-        8.099464905388083e-08,
-        -1.9111168485973655e-08,
-        2.3928620439808118e-12,
-        2.0620131815488797e-09,
-        -9.460496661855133e-10,
-        2.1541049775774907e-10,
-        -1.388823336813903e-14,
-        -2.1894761681963938e-11,
-        9.790998951171684e-12,
-        -2.178219188018096e-12,
-        6.208819573407901e-17,
-        2.126978363279737e-13,
-        -9.344688791517433e-14,
-        2.045367122678285e-14,
-        -2.58260790403495e-19,
-        -1.9405297673344544e-15,
-        8.415979290484816e-16,
-    ],
-    &[
-        -0.0008618882909167117,
-        0.0007840392217200666,
-        -0.0002990724803031902,
-        -1.4638452578843418e-06,
-        6.641498215465122e-05,
-        -3.968365047179435e-05,
-        1.1375726970678419e-05,
-        2.507497226237533e-10,
-        -1.6954149536558305e-06,
-        8.907507532205309e-07,
-        -2.292934834000805e-07,
-        2.956794137544049e-11,
-        2.8865829742708783e-08,
-        -1.4189739437803219e-08,
-        3.4463580499464896e-09,
-        -2.3024517174528067e-13,
-        -3.9409233028046403e-10,
-        1.86023389685045e-10,
-        -4.356323005056618e-11,
-        1.278600101629623e-15,
-        4.67927502665792e-12,
-        -2.149246470613483e-12,
-        4.908815614809652e-13,
-        -6.33859148489156e-18,
-        -5.045332069080094e-14,
-        2.2722958222901286e-14,
-        -5.096082608472402e-15,
-    ],
-    &[
-        -0.00033679855336635813,
-        -6.972813758365857e-05,
-        0.0002772753244959392,
-        -0.00019932570516188847,
-        6.797780477937208e-05,
-        1.419062920643967e-07,
-        -1.3594048189768693e-05,
-        8.018470256334202e-06,
-        -2.291481176508095e-06,
-        -3.252473551298454e-10,
-        3.4652846491085265e-07,
-        -1.8447187191171344e-07,
-        4.8240967037894184e-08,
-        -1.7989466721743514e-14,
-        -6.306194500013523e-09,
-        3.162417628774568e-09,
-        -7.840924253697429e-10,
-        5.192679165254041e-15,
-        9.358944242306784e-11,
-        -4.513426216163278e-11,
-        1.0799129993116828e-11,
-        -3.661886712685252e-17,
-        -1.210902069055155e-12,
-        5.680743584990564e-13,
-        -1.3249659916340829e-13,
-    ],
-    &[
-        0.0005313079364639922,
-        -0.0005921664373536939,
-        0.0002708782096718045,
-        7.902353232660328e-07,
-        -8.153969367561969e-05,
-        5.61168275310625e-05,
-        -1.8329116582843375e-05,
-        -3.0796134506033047e-09,
-        3.465155368803609e-06,
-        -2.0291327396058603e-06,
-        5.788792863149004e-07,
-        2.338630673826657e-13,
-        -8.828600746330484e-08,
-        4.7435958880408125e-08,
-        -1.2545415020710383e-08,
-        8.649648858010293e-14,
-        1.6846058979264062e-09,
-        -8.575492823577594e-10,
-        2.1598224929232125e-10,
-        -7.613230520476153e-16,
-        -2.6639822008536144e-11,
-        1.3065700536611057e-11,
-        -3.1799163902367977e-12,
-    ],
-    &[
-        0.00034436760689237765,
-        5.171790908260592e-05,
-        -0.00033493161081142234,
-        0.0002812695154763237,
-        -0.00010976582244684731,
-        -1.2741009095484485e-07,
-        2.7744451511563645e-05,
-        -1.8263488805711332e-05,
-        5.7876949497350525e-06,
-        4.93875893393627e-10,
-        -1.0595367014026043e-06,
-        6.166714376110408e-07,
-        -1.7562973359060463e-07,
-        -1.297447328701544e-12,
-        2.695423606288966e-08,
-        -1.4578352908731272e-08,
-        3.887645959386175e-09,
-        -3.881002251019412e-17,
-        -5.327994173877286e-10,
-        2.7437977643314844e-10,
-        -6.995796092070568e-11,
-    ],
-    &[
-        -0.0006526239185953094,
-        0.0008394987206720873,
-        -0.000438297098541721,
-        -6.969091458420552e-07,
-        0.00016644846642067547,
-        -0.00012783517679769218,
-        4.629953263691304e-05,
-        4.557909867922708e-09,
-        -1.0595271125805195e-05,
-        6.783342904865167e-06,
-        -2.1075476666258803e-06,
-        -1.7213731432817144e-11,
-        3.773587741611098e-07,
-        -2.1867506700122867e-07,
-        6.220228804018927e-08,
-        6.597703826733e-16,
-        -9.590386497425686e-09,
-        5.213214492280807e-09,
-        -1.3991589583935709e-09,
-    ],
-    &[
-        -0.0005967612901927463,
-        -7.204895416020011e-05,
-        0.0006782308837667328,
-        -0.0006401475260262758,
-        0.00027750107634328704,
-        1.819700838046515e-07,
-        -8.479507117068503e-05,
-        6.105192082501531e-05,
-        -2.1073920183404862e-05,
-        -8.858589014125599e-10,
-        4.5284535953805374e-06,
-        -2.8427815022504407e-06,
-        8.708234177864641e-07,
-        3.6886101871706966e-12,
-        -1.534469519070206e-07,
-        8.862466778790695e-08,
-        -2.5184812301826817e-08,
-    ],
-    &[
-        0.0013324454494800656,
-        -0.0019144384985654776,
-        0.0011089369134596636,
-        9.9324041226423e-07,
-        -0.0005087450129309319,
-        0.00042735056665392886,
-        -0.00016858853767910798,
-        -8.1301893922785e-09,
-        4.5284402370562144e-05,
-        -3.127053674781734e-05,
-        1.044986828530338e-05,
-        4.8435226265680926e-11,
-        -2.148256587345626e-06,
-        1.329369701097492e-06,
-    ],
-];
 
 /// The starting value of `qgamma`: AS 91's chi-squared approximations.
 pub fn qchisq_appr(p: f64, nu: f64, g: f64, lower: bool, log: bool, tol: f64) -> f64 {
@@ -2774,19 +2852,19 @@ pub fn qchisq_appr(p: f64, nu: f64, g: f64, lower: bool, log: bool, tol: f64) ->
     }
 }
 
-/// The gamma quantile, the root `x` of `pgamma(x) = p`. On the standard scale `y = x / scale`
-/// it solves `ln P(y) = ln p` for `u = ln y`, where `P` is the tail whose probability is at most
-/// one half, so the target keeps all its digits. In `u` the lower tail is nearly linear
-/// (`ln P ~ shape u`) and nothing underflows before the quantile does. Halley's method runs
-/// from the best of three approximations: Wilson and Hilferty's cube of a normal deviate, the
-/// leading term `y^shape / Gamma(shape + 1)` of the lower tail's series, and the leading term
-/// `y^(shape - 1) e^-y / Gamma(shape)` of the upper tail's asymptotic expansion (Abramowitz and
-/// Stegun 26.4.17, 6.5.29 and 6.5.32). A bracket of the root guards every step. The scaled
-/// result takes Newton steps on `x` and then moves to the neighbouring double whose probability
-/// is closest to `p`.
+/// The gamma quantile: AS 91's chi-squared approximation, then up to 1000 steps of a seven-term
+/// Taylor series on `pgamma`, then a Newton iteration on the log scale for the last digits (GNU
+/// R's `qgamma`).
 pub fn qgamma(p: f64, alpha: f64, scale: f64, lower: bool, log: bool) -> f64 {
-    const MAXIMUM_ITERATIONS: usize = 60;
-    const MAXIMUM_POLISH: usize = 64;
+    const EPS1: f64 = 1e-2;
+    const EPS2: f64 = 5e-7;
+    const EPS_N: f64 = 1e-15;
+    const MAX_IT: u32 = 1000;
+    const P_MIN: f64 = 1e-100;
+    const P_MAX: f64 = 1.0 - 1e-14;
+    const I420: f64 = 1.0 / 420.0;
+    const I2520: f64 = 1.0 / 2520.0;
+    const I5040: f64 = 1.0 / 5040.0;
     if p.is_nan() || alpha.is_nan() || scale.is_nan() {
         return p + alpha + scale;
     }
@@ -2799,173 +2877,101 @@ pub fn qgamma(p: f64, alpha: f64, scale: f64, lower: bool, log: bool) -> f64 {
     if alpha == 0.0 {
         return 0.0;
     }
-    if alpha == f64::INFINITY {
-        return f64::INFINITY;
+    let mut max_it_newton = 1;
+    if alpha < 1e-10 {
+        max_it_newton = 7;
     }
-    let log_lower = dt_log(p, lower, log);
-    let use_lower = log_lower <= -M_LN2;
-    let target = if use_lower {
-        log_lower
-    } else {
-        dt_clog(p, lower, log)
-    };
-    let log_tail_at = |u: f64| pgamma(u.exp(), alpha, 1.0, use_lower, true);
-    // Below this `u` the scaled quantile rounds to zero.
-    let smallest = f64::from_bits(1);
-    let underflow = smallest.ln() - scale.ln();
-
-    // Near zero `P(y) = y^shape / Gamma(shape + 1) (1 + O(y))`, so when this start lies below
-    // the smallest positive double, so does the quantile.
-    let small = (log_lower + lgamma1p(alpha)) / alpha;
-    if small < underflow - 1.0 {
-        return 0.0;
-    }
-    let mut candidates = [small, f64::NAN, f64::NAN];
-    let ninth = 1.0 / (9.0 * alpha);
-    let cube_root = 1.0 - ninth + qnorm(p, 0.0, 1.0, lower, log) * ninth.sqrt();
-    if cube_root > 0.0 {
-        candidates[1] = alpha.ln() + 3.0 * cube_root.ln();
-    }
-    if !use_lower {
-        let lgamma_shape = lgammafn(alpha);
-        let mut y = -target;
-        for _ in 0..4 {
-            y = -target + (alpha - 1.0) * y.ln() - lgamma_shape;
-            if !(y > 0.0 && y.is_finite()) {
-                break;
+    let mut p_lower = dt_qiv(p, lower, log);
+    let g = lgammafn(alpha);
+    let mut ch = qchisq_appr(p, 2.0 * alpha, g, lower, log, EPS1);
+    'phases: {
+        if !finite(ch) {
+            max_it_newton = 0;
+            break 'phases;
+        }
+        if ch < EPS2 {
+            max_it_newton = 20;
+            break 'phases;
+        }
+        if p_lower > P_MAX || p_lower < P_MIN {
+            max_it_newton = 20;
+            break 'phases;
+        }
+        let c = alpha - 1.0;
+        let s6 = (120.0 + c * (346.0 + 127.0 * c)) * I5040;
+        let ch0 = ch;
+        for _ in 1..=MAX_IT {
+            let q = ch;
+            let p1 = 0.5 * ch;
+            let p2 = p_lower - pgamma_raw(p1, alpha, true, false);
+            if !finite(p2) || ch <= 0.0 {
+                ch = ch0;
+                max_it_newton = 27;
+                break 'phases;
+            }
+            let t = p2 * (alpha * M_LN2 + g + p1 - c * ch.ln()).exp();
+            let b = t / ch;
+            let a = 0.5 * t - b * c;
+            let s1 = (210.0 + a * (140.0 + a * (105.0 + a * (84.0 + a * (70.0 + 60.0 * a))))) * I420;
+            let s2 = (420.0 + a * (735.0 + a * (966.0 + a * (1141.0 + 1278.0 * a)))) * I2520;
+            let s3 = (210.0 + a * (462.0 + a * (707.0 + 932.0 * a))) * I2520;
+            let s4 = (252.0 + a * (672.0 + 1182.0 * a) + c * (294.0 + a * (889.0 + 1740.0 * a)))
+                * I5040;
+            let s5 = (84.0 + 2264.0 * a + c * (1175.0 + 606.0 * a)) * I2520;
+            ch += t
+                * (1.0 + 0.5 * t * s1
+                    - b * c * (s1 - b * (s2 - b * (s3 - b * (s4 - b * (s5 - b * s6))))));
+            if (q - ch).abs() < EPS2 * ch {
+                break 'phases;
+            }
+            if (q - ch).abs() > 0.1 * ch {
+                ch = if ch < q { 0.9 * q } else { 1.1 * q };
             }
         }
-        if y > 0.0 && y.is_finite() {
-            candidates[2] = y.ln();
-        }
     }
-    let mut u = alpha.ln();
-    let mut residual = f64::INFINITY;
-    for candidate in candidates {
-        if !candidate.is_finite() {
-            continue;
+    let mut x = 0.5 * scale * ch;
+    if max_it_newton > 0 {
+        let mut p = p;
+        let mut log_p = log;
+        if !log_p {
+            p = p.ln();
+            log_p = true;
         }
-        let candidate_residual = log_tail_at(candidate) - target;
-        if candidate_residual.abs() < residual.abs() {
-            u = candidate;
-            residual = candidate_residual;
-        }
-    }
-
-    // `ln P` rises with `u` for the lower tail and falls for the upper one. Writing `s` for its
-    // derivative in `u`, `y` times the density over the tail, the second derivative is
-    // `s (shape - y - s)`.
-    let rising = use_lower;
-    let (mut below, mut above) = (f64::NEG_INFINITY, f64::INFINITY);
-    let mut best = (u, f64::INFINITY);
-    for _ in 0..MAXIMUM_ITERATIONS {
-        let log_tail = log_tail_at(u);
-        residual = log_tail - target;
-        if residual.abs() < best.1 {
-            best = (u, residual.abs());
-        } else if residual.abs() > best.1 && below.is_finite() && above.is_finite() {
-            // Rounding in the distribution function now outweighs the step.
-            break;
-        }
-        if residual == 0.0 {
-            break;
-        }
-        if (residual < 0.0) == rising {
-            below = u;
+        if x == 0.0 {
+            const ONE_PLUS: f64 = 1.0 + 1e-7;
+            const ONE_MINUS: f64 = 1.0 - 1e-7;
+            x = DBL_MIN;
+            p_lower = pgamma(x, alpha, scale, lower, log_p);
+            if (lower && p_lower > p * ONE_PLUS) || (!lower && p_lower < p * ONE_MINUS) {
+                return 0.0;
+            }
         } else {
-            above = u;
+            p_lower = pgamma(x, alpha, scale, lower, log_p);
         }
-        if above < underflow {
+        if p_lower == f64::NEG_INFINITY {
             return 0.0;
         }
-        let y = u.exp();
-        let magnitude = (dgamma(y, alpha, 1.0, true) - log_tail).exp() * y;
-        let slope = if rising { magnitude } else { -magnitude };
-        let newton = residual / slope;
-        let correction = 1.0 - 0.5 * newton * (alpha - y - slope);
-        let step = if correction > 0.5 {
-            newton / correction
-        } else {
-            newton
-        };
-        let mut next = u - step;
-        if !(next > below && next < above) {
-            next = match (below.is_finite(), above.is_finite()) {
-                (true, true) => 0.5 * (below + above),
-                (true, false) => below + 1.0 + below.abs(),
-                _ => above - 1.0 - above.abs(),
-            };
-        }
-        if next == u || (next - u).abs() <= 2.0 * f64::EPSILON {
-            best.0 = next;
-            break;
-        }
-        u = next;
-    }
-
-    let mut x = best.0.exp() * scale;
-    if !(x > 0.0) {
-        return 0.0;
-    }
-    if x == f64::INFINITY {
-        return x;
-    }
-    // Far from 1 a double `u` resolves `y` only to hundreds of ulps, so Newton steps on `x`
-    // itself finish the root before the walk to the closest neighbour.
-    let residual_at = |x: f64| pgamma(x, alpha, scale, use_lower, true) - target;
-    let mut x_residual = residual_at(x);
-    for _ in 0..4 {
-        let log_tail = x_residual + target;
-        let magnitude = (dgamma(x, alpha, scale, true) - log_tail).exp();
-        let slope = if rising { magnitude } else { -magnitude };
-        let next = x - x_residual / slope;
-        if !(next > 0.0 && next.is_finite()) || next == x {
-            break;
-        }
-        let next_residual = residual_at(next);
-        if !(next_residual.abs() < x_residual.abs()) {
-            break;
-        }
-        x = next;
-        x_residual = next_residual;
-    }
-    let mut closest = x_residual.abs();
-    for upward in [true, false] {
-        for _ in 0..MAXIMUM_POLISH {
-            let neighbour = if upward { x.next_up() } else { x.next_down() };
-            let neighbour_distance = residual_at(neighbour).abs();
-            if !(neighbour_distance < closest) {
+        for i in 1..=max_it_newton {
+            let p1 = p_lower - p;
+            if p1.abs() < (EPS_N * p).abs() {
                 break;
             }
-            x = neighbour;
-            closest = neighbour_distance;
-        }
-    }
-    // Where the distribution function is flat to its last bit, a run of doubles share the
-    // closest probability and the root lies somewhere among them; the middle of the run is the
-    // best guess.
-    let mut run = [0usize; 2];
-    for (side, upward) in [true, false].into_iter().enumerate() {
-        let mut edge = x;
-        for _ in 0..MAXIMUM_POLISH {
-            edge = if upward {
-                edge.next_up()
+            let density = dgamma(x, alpha, scale, log_p);
+            if density == d0(log_p) {
+                break;
+            }
+            let mut t = if log_p {
+                p1 * (p_lower - density).exp()
             } else {
-                edge.next_down()
+                p1 / density
             };
-            if residual_at(edge).abs() != closest {
+            t = if lower { x - t } else { x + t };
+            p_lower = pgamma(t, alpha, scale, lower, log_p);
+            if (p_lower - p).abs() > p1.abs() || (i > 1 && (p_lower - p).abs() == p1.abs()) {
                 break;
             }
-            run[side] += 1;
+            x = t;
         }
-    }
-    let (up, down) = (run[0], run[1]);
-    for _ in 0..up.abs_diff(down) / 2 {
-        x = if up > down {
-            x.next_up()
-        } else {
-            x.next_down()
-        };
     }
     x
 }
@@ -3390,6 +3396,15 @@ pub fn pbeta(x: f64, a: f64, b: f64, lower: bool, log: bool) -> f64 {
     pbeta_raw(x, a, b, lower, log)
 }
 
+/// `R_Log1_Exp` as TOMS 708 defines it, with its own `rexpm1` instead of the C library's `expm1`.
+fn log1_exp_toms(x: f64) -> f64 {
+    if x > -M_LN2 {
+        (-rexpm1(x)).ln()
+    } else {
+        (-x.exp()).ln_1p()
+    }
+}
+
 /// The incomplete beta ratio `I_x(a, b)` and its complement `1 - I_x(a, b)`, with `y = 1 - x`
 /// passed separately for accuracy near one, and TOMS 708's error code.
 fn bratio(a: f64, b: f64, x: f64, y: f64, log: bool) -> (f64, f64, i32) {
@@ -3476,7 +3491,7 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log: bool) -> (f64, f64, i32) {
         let path;
         if b0 < eps.min(eps * a0) {
             w = fpser(a0, b0, x0, eps, log);
-            w1 = if log { log1_exp(w) } else { 0.5 - w + 0.5 };
+            w1 = if log { log1_exp_toms(w) } else { 0.5 - w + 0.5 };
             return finish(w, w1, do_swap, ierr);
         }
         if a0 < eps.min(eps * b0) && b0 * x0 <= 1.0 {
@@ -3519,12 +3534,12 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log: bool) -> (f64, f64, i32) {
         match path {
             Path::WBpser => {
                 w = bpser(a0, b0, x0, eps, log);
-                w1 = if log { log1_exp(w) } else { 0.5 - w + 0.5 };
+                w1 = if log { log1_exp_toms(w) } else { 0.5 - w + 0.5 };
                 done = Done::Both;
             }
             Path::W1Bpser => {
                 w1 = bpser(b0, a0, y0, eps, log);
-                w = if log { log1_exp(w1) } else { 0.5 - w1 + 0.5 };
+                w = if log { log1_exp_toms(w1) } else { 0.5 - w1 + 0.5 };
                 done = Done::Both;
             }
             Path::Bgrat {
@@ -3604,17 +3619,17 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log: bool) -> (f64, f64, i32) {
         match path {
             Path::WBpser => {
                 w = bpser(a0, b0, x0, eps, log);
-                w1 = if log { log1_exp(w) } else { 0.5 - w + 0.5 };
+                w1 = if log { log1_exp_toms(w) } else { 0.5 - w + 0.5 };
                 done = Done::Both;
             }
             Path::Bfrac => {
                 w = bfrac(a0, b0, x0, y0, lambda, eps * 15.0, log);
-                w1 = if log { log1_exp(w) } else { 0.5 - w + 0.5 };
+                w1 = if log { log1_exp_toms(w) } else { 0.5 - w + 0.5 };
                 done = Done::Both;
             }
             Path::Basym => {
                 w = basym(a0, b0, lambda, eps * 100.0, log);
-                w1 = if log { log1_exp(w) } else { 0.5 - w + 0.5 };
+                w1 = if log { log1_exp_toms(w) } else { 0.5 - w + 0.5 };
                 done = Done::Both;
             }
             Path::Bup => {
@@ -3628,7 +3643,7 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log: bool) -> (f64, f64, i32) {
                 if w < DBL_MIN && log {
                     b0 += n as f64;
                     w = bpser(a0, b0, x0, eps, log);
-                    w1 = log1_exp(w);
+                    w1 = log1_exp_toms(w);
                     done = Done::Both;
                 } else if x0 <= 0.7 {
                     w += bpser(a0, b0, x0, eps, false);
@@ -3663,7 +3678,7 @@ fn bratio(a: f64, b: f64, x: f64, y: f64, log: bool) -> (f64, f64, i32) {
         Done::FromW1 => return end_from_w1(w1, log, do_swap, ierr),
         Done::FromW1Log => {
             if log {
-                w = log1_exp(w1);
+                w = log1_exp_toms(w1);
             } else {
                 w = -w1.exp_m1();
                 w1 = w1.exp();
@@ -3954,14 +3969,34 @@ fn bfrac(a: f64, b: f64, x: f64, y: f64, lambda: f64, eps: f64, log: bool) -> f6
     let mut bnp1 = c / c1;
     let mut r = c1 / c;
     let mut r0;
+    // R 4.5.1 caps the iterations at 1000 instead of 10000, orders the product `n x (b - n)`
+    // differently, and rescales the terms when `n x (b - n)` overflows for a huge `b`.
+    let current = crate::system::r_at_least_release(4, 5, 1);
+    let maximum = if current { 1000.0 } else { 10000.0 };
     loop {
         n += 1.0;
+        let mut rescale = false;
+        let w = if current {
+            let w = n * x * (b - n);
+            if finite(w) {
+                w
+            } else {
+                rescale = true;
+                n * x * ldexp(b - n, -20)
+            }
+        } else {
+            n * (b - n) * x
+        };
         let mut t = n / a;
-        let w = n * (b - n) * x;
         let mut e = a / s;
         let alpha = p * (p + c0) * e * e * (w * x);
         e = (t + 1.0) / (c1 + t + t);
-        let beta = n + w / s + e * (c + n * yp1);
+        let beta = if current {
+            let tail = n + e * (c + n * yp1);
+            w / s + if rescale { ldexp(tail, -20) } else { tail }
+        } else {
+            n + w / s + e * (c + n * yp1)
+        };
         p = t + 1.0;
         s += 2.0;
         t = alpha * an + beta * anp1;
@@ -3979,13 +4014,13 @@ fn bfrac(a: f64, b: f64, x: f64, y: f64, lambda: f64, eps: f64, log: bool) -> f6
         bn /= bnp1;
         anp1 = r;
         bnp1 = 1.0;
-        if n >= 10000.0 {
+        if n >= maximum {
             break;
         }
     }
-    if n >= 10000.0 && (r - r0).abs() > eps * r {
+    if n >= maximum && (r - r0).abs() > eps * r {
         warning(format!(
-            " bfrac(a={a}, b={b}, x={x}, y={y}, lambda={lambda}) did *not* converge (in 10000 steps)"
+            " bfrac(a={a}, b={b}, x={x}, y={y}, lambda={lambda}) did *not* converge (in {maximum} steps)"
         ));
     }
     if log { brc + r.ln() } else { brc * r }
@@ -5062,238 +5097,447 @@ fn gamln(a: f64) -> f64 {
     }
 }
 
-/// The beta quantile. AS 109's starting value, then Newton steps on `log x` against the
-/// smaller tail's log probability, safeguarded by bisection, so the answer is the root of
-/// `pbeta` to the last bits wherever `pbeta` itself is accurate.
+/// The beta quantile (AS 109 with Remark AS R83, and R's refinements): a starting value from
+/// Hastings's and Carter's normal approximations, then safeguarded Newton steps on `x` or on
+/// `log x`.
 pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
-    // The search probes pbeta far from the quantile, where its series may fail to converge
-    // without that touching the answer, so those warnings are not the caller's.
-    let raised = WARNINGS.with(|warnings| warnings.borrow().len());
-    let quantile = qbeta_search(alpha, p, q, lower, log);
-    WARNINGS.with(|warnings| warnings.borrow_mut().truncate(raised));
-    quantile
-}
-
-fn qbeta_search(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
-    if alpha.is_nan() || p.is_nan() || q.is_nan() {
-        return alpha + p + q;
+    if p.is_nan() || q.is_nan() || alpha.is_nan() {
+        return p + q + alpha;
     }
     if p < 0.0 || q < 0.0 {
         return f64::NAN;
     }
-    if let Some(boundary) = q_p01_boundaries(alpha, lower, log, 0.0, 1.0) {
-        return boundary;
-    }
-    if p == 0.0 || q == 0.0 || !finite(p) || !finite(q) {
-        if p == 0.0 && q == 0.0 {
-            return if alpha < d_val(0.5, log) {
-                if lower { 0.0 } else { 1.0 }
-            } else if alpha > d_val(0.5, log) {
-                if lower { 1.0 } else { 0.0 }
-            } else {
-                0.5
-            };
-        }
-        // A vanishing first shape (relative to the second) puts all the mass at 0, and a
-        // vanishing second shape puts it at 1.
-        if p == 0.0 || q / p == f64::INFINITY {
-            return 0.0;
-        }
-        if q == 0.0 || p / q == f64::INFINITY {
-            return 1.0;
-        }
-        return 0.5;
-    }
-    // The log probability of each tail, and which end of [0, 1] the quantile lies nearer:
-    // solving for the distance to that end keeps its relative precision.
-    let log_lower = if log {
-        if lower { alpha } else { log1_exp(alpha) }
-    } else if lower {
-        alpha.ln()
-    } else {
-        (-alpha).ln_1p()
-    };
-    let log_upper = if log {
-        if lower { log1_exp(alpha) } else { alpha }
-    } else if lower {
-        (-alpha).ln_1p()
-    } else {
-        alpha.ln()
-    };
-    // Solve for t, the distance from the quantile to the nearer end of [0, 1], so that a
-    // quantile near either end keeps its relative precision. When the quantile lies above
-    // 1/2, t = 1 - x follows Beta(q, p). The equation is on the log scale of whichever tail
-    // probability is smaller, the one the arguments represent accurately.
-    let log_half = pbeta(0.5, p, q, true, true);
-    if log_lower == log_half {
-        return 0.5;
-    }
-    let near_zero = log_lower < log_half;
-    let (a, b) = if near_zero { (p, q) } else { (q, p) };
-    let use_lower = log_lower <= log_upper;
-    let (target, t_lower) = match (near_zero, use_lower) {
-        (true, true) => (log_lower, true),
-        (true, false) => (log_upper, false),
-        (false, true) => (log_lower, false),
-        (false, false) => (log_upper, true),
-    };
-    let t_lower_log = if near_zero { log_lower } else { log_upper };
-    // h(t) increases with t: the lower tail's log probability, or minus the upper tail's.
-    let direction = if t_lower { 1.0 } else { -1.0 };
-    // Newton's method on log(t), stepping as t * exp(du) so tiny quantiles keep their relative
-    // precision, inside a bracket that falls back to bisection when a step leaves it.
-    let mut t = qbeta_start(t_lower_log, a, b);
-    if !(t > 0.0 && t < 0.5) {
-        t = 0.25;
-    }
-    let lbeta_ab = lbeta(a, b);
-    if !lbeta_ab.is_finite() || !(a + b).is_finite() {
-        // The parameters are beyond what the density can be evaluated at, as in GNU R.
-        return f64::NAN;
-    }
-    let mut lo = 0.0_f64;
-    let mut hi = 0.5_f64;
-    for _ in 0..1000 {
-        let value = pbeta(t, a, b, t_lower, true);
-        if value.is_nan() {
-            // pbeta's asymptotic expansion fails for an extreme second shape far from the
-            // quantile; the quantile lies nearer 0, where it converges.
-            hi = t;
-            t = if lo == 0.0 {
-                hi * 1e-3
-            } else {
-                (lo * hi).sqrt()
-            };
-            continue;
-        }
-        let difference = direction * (value - target);
-        if difference == 0.0 {
-            break;
-        }
-        if difference > 0.0 {
-            hi = t;
-        } else {
-            lo = t;
-        }
-        // d/du log P(e^u) = t f(t) / P(t), and the same with Q for the upper tail.
-        let log_density = (a - 1.0) * t.ln() + (b - 1.0) * (-t).ln_1p() - lbeta_ab;
-        let step = -difference / (t.ln() + log_density - value).exp();
-        let mut next = t * step.exp();
-        if !(next > lo && next < hi) {
-            next = if lo == 0.0 {
-                hi * 1e-3
-            } else if hi / lo > 4.0 {
-                (lo * hi).sqrt()
-            } else {
-                0.5 * (lo + hi)
-            };
-        } else if step.abs() < 1e-15 {
-            t = next;
-            break;
-        }
-        if next == t {
-            break;
-        }
-        t = next;
-    }
-    let quantile = if near_zero { t } else { 0.5 - t + 0.5 };
-    // Newton's method converges in t, and turning a t near 1/2 into 1 - t rounds, so the
-    // quantile can land a few doubles from the one whose probability is nearest the target.
-    // A short walk over neighbouring doubles settles it. pbeta rounds to the same value over
-    // runs of adjacent doubles, so the walk looks a few doubles past a flat stretch.
-    const LOOKAHEAD: usize = 8;
-    let miss = |x: f64| (pbeta(x, p, q, lower, log) - alpha).abs();
-    let mut best = quantile;
-    let mut best_miss = miss(best);
-    // The log-scale solve resolves a probability only to |log p| ulps, which near 1e-60 is
-    // about a hundred ulps of p itself, so a few Newton steps on the caller's own scale
-    // recover the digits a small probability represents exactly.
-    for _ in 0..8 {
-        if best_miss == 0.0 || !(best > 0.0 && best < 1.0) {
-            break;
-        }
-        let value = pbeta(best, p, q, lower, log);
-        let density = dbeta(best, p, q, false);
-        let slope = if lower { density } else { -density };
-        let slope = if log { slope / value.exp() } else { slope };
-        if !(slope.is_finite() && slope != 0.0) {
-            break;
-        }
-        let next = best - (value - alpha) / slope;
-        if !(next > 0.0 && next < 1.0) {
-            break;
-        }
-        let next_miss = miss(next);
-        if next_miss >= best_miss {
-            break;
-        }
-        best = next;
-        best_miss = next_miss;
-    }
-    // A quantile of exactly 0 or 1 is a tail probability below the double range, which no
-    // interior double improves on.
-    let directions: &[fn(f64) -> f64] = if quantile > 0.0 && quantile < 1.0 {
-        &[f64::next_up, f64::next_down]
-    } else {
-        &[]
-    };
-    for step in directions {
-        'walk: loop {
-            let mut candidate = best;
-            for _ in 0..LOOKAHEAD {
-                candidate = step(candidate);
-                if !(candidate > 0.0 && candidate < 1.0) {
-                    break 'walk;
-                }
-                let candidate_miss = miss(candidate);
-                if candidate_miss < best_miss {
-                    best = candidate;
-                    best_miss = candidate_miss;
-                    continue 'walk;
-                }
-            }
-            break;
-        }
-    }
-    // GNU R never returns a subnormal beta quantile: it gives 0 or 2^-1024, whichever has
-    // the probability nearer the target, and its own tests rely on that.
-    if best < f64::MIN_POSITIVE {
-        let floor = f64::MIN_POSITIVE / 4.0;
-        best = if miss(floor) < miss(0.0) { floor } else { 0.0 };
-    }
-    best
+    qbeta_raw(alpha, p, q, lower, log, USE_LOG_X_CUTOFF, N_NEWTON_FREE)[0]
 }
 
-/// AS 109's approximation of the lower-tail beta quantile at log probability `log_p`.
-fn qbeta_start(log_p: f64, a: f64, b: f64) -> f64 {
-    let p_ = log_p.exp();
-    let logbeta = lbeta(a, b);
-    // Hastings's approximation of the normal quantile of the upper tail 1 - p.
-    let r = (-2.0 * log_p).sqrt();
-    let y = r - (2.30753 + 0.27061 * r) / (1.0 + (0.99229 + 0.04481 * r) * r);
-    if a > 1.0 && b > 1.0 {
-        let r = (y * y - 3.0) / 6.0;
-        let s = 1.0 / (a + a - 1.0);
-        let t = 1.0 / (b + b - 1.0);
-        let h = 2.0 / (s + t);
-        let w = y * (h + r).sqrt() / h - (t - s) * (r + 5.0 / 6.0 - 2.0 / (3.0 * h));
-        a / (a + b * (w + w).exp())
-    } else {
-        let r = b + b;
-        let mut t = 1.0 / (9.0 * b);
-        t = r * (1.0 - t + y * t.sqrt()).powi(3);
-        if t <= 0.0 {
-            1.0 - ((-p_).ln_1p() + b.ln() + logbeta).exp() / b
+const USE_LOG_X_CUTOFF: f64 = -5.0;
+const N_NEWTON_FREE: i32 = 4;
+
+/// Returns `[qbeta, 1 - qbeta]`, the second useful when the quantile is close to one. With
+/// `log_q_cut` infinite the results are on the log scale.
+#[allow(clippy::too_many_lines, unused_assignments)]
+fn qbeta_raw(
+    alpha: f64,
+    p: f64,
+    q: f64,
+    lower_tail: bool,
+    log_p: bool,
+    log_q_cut: f64,
+    n_newton: i32,
+) -> [f64; 2] {
+    // Assumes subnormal numbers, so there is no underflow at DBL_MIN.
+    const DBL_VERY_MIN: f64 = DBL_MIN / 4.0;
+    const DBL_LOG_V_MIN: f64 = M_LN2 * (-1021.0 - 2.0);
+    const FPU: f64 = 3e-308;
+    const ACU_MIN: f64 = 1e-300;
+    const P_LO: f64 = FPU;
+    const P_HI: f64 = 1.0 - 2.22e-16;
+    const CONST1: f64 = 2.30753;
+    const CONST2: f64 = 0.27061;
+    const CONST3: f64 = 0.99229;
+    const CONST4: f64 = 0.04481;
+    // log(DBL_EPSILON)
+    const LOG_EPS_C: f64 = M_LN2 * (1.0 - 53.0);
+    let dbl_1_minus_eps = f64::from_bits(0x3fef_ffff_ffff_ffff);
+
+    let give_log_q = log_q_cut == f64::INFINITY;
+    let mut use_log_x = give_log_q;
+    let mut warned = false;
+    let mut add_n_step = true;
+    let mut swap_tail;
+    let (mut a, mut la, mut pp, mut qq) = (0.0, 0.0, 0.0, 0.0);
+    let (mut g, mut h, mut r, mut s, mut t, mut w);
+    (r, t, w) = (0.0, 0.0, 0.0);
+    let mut y = -1.0;
+    let mut u = 0.0;
+    let mut xinbta = 0.0;
+    let mut tx = 0.0;
+    let mut u_n = 1.0;
+
+    let q_zero = || {
+        if give_log_q {
+            [f64::NEG_INFINITY, 0.0]
         } else {
-            t = (4.0 * a + r - 2.0) / t;
-            if t <= 1.0 {
-                ((log_p + a.ln() + logbeta) / a).exp()
+            [0.0, 1.0]
+        }
+    };
+    let q_one = || {
+        if give_log_q {
+            [0.0, f64::NEG_INFINITY]
+        } else {
+            [1.0, 0.0]
+        }
+    };
+    let q_half = || {
+        if give_log_q {
+            [-M_LN2, -M_LN2]
+        } else {
+            [0.5, 0.5]
+        }
+    };
+
+    if alpha == dt0(lower_tail, log_p) {
+        return q_zero();
+    }
+    if alpha == dt1(lower_tail, log_p) {
+        return q_one();
+    }
+    // Checked before the transformation, which may lose all accuracy.
+    if (log_p && alpha > 0.0) || (!log_p && !(0.0..=1.0).contains(&alpha)) {
+        return [f64::NAN, f64::NAN];
+    }
+    // p == 0, q == 0, p = Inf and q = Inf are one- or two-point masses.
+    if p == 0.0 || q == 0.0 || !finite(p) || !finite(q) {
+        if p == 0.0 && q == 0.0 {
+            let half = if log_p { -M_LN2 } else { 0.5 };
+            if alpha < half {
+                return q_zero();
+            }
+            if alpha > half {
+                return q_one();
+            }
+            return q_half();
+        } else if p == 0.0 || p / q == 0.0 {
+            return q_zero();
+        } else if q == 0.0 || q / p == 0.0 {
+            return q_one();
+        }
+        return q_half();
+    }
+
+    let p_lower = dt_qiv(alpha, lower_tail, log_p);
+    let logbeta = lbeta(p, q);
+    swap_tail = p_lower > 0.5;
+    let mut n_maybe_swaps = 0;
+    let (mut acu, mut rp);
+
+    enum Exit {
+        Converged,
+        NotConverged,
+        Return,
+    }
+    let exit = 'search: loop {
+        if swap_tail {
+            a = dt_civ(alpha, lower_tail, log_p);
+            la = dt_clog(alpha, lower_tail, log_p);
+            pp = q;
+            qq = p;
+        } else {
+            a = p_lower;
+            la = dt_log(alpha, lower_tail, log_p);
+            pp = p;
+            qq = q;
+        }
+        n_maybe_swaps += 1;
+        acu = ACU_MIN.max(10f64.powf(-13.0 - 2.5 / (pp * pp) - 0.5 / (a * a)));
+        let u0 = (la + pp.ln() + logbeta) / pp;
+        rp = pp * (1.0 - qq) / (pp + 1.0);
+        t = 0.2;
+        let u0_maybe = M_LN2 * -1021.0 < u0 && u0 < -0.01;
+        u_n = 1.0;
+        let mut jump_to_newton = false;
+        if u0_maybe
+            && u0
+                < (t * LOG_EPS_C
+                    - (pp * (1.0 - qq) * (2.0 - qq) / (2.0 * (pp + 2.0))).abs().ln())
+                    / 2.0
+        {
+            // One cheap correction step, instead of a Newton step.
+            rp *= u0.exp();
+            if rp > -1.0 {
+                u = u0 - rp.ln_1p() / pp;
             } else {
-                1.0 - 2.0 / (t + 1.0)
+                u = u0;
+            }
+            xinbta = u.exp();
+            tx = xinbta;
+            use_log_x = true;
+            jump_to_newton = true;
+        }
+        if !jump_to_newton {
+            // y_alpha of AS 64: Hastings's approximation of qnorm(1 - a).
+            r = (-2.0 * la).sqrt();
+            y = r - (CONST1 + CONST2 * r) / (1.0 + (CONST3 + CONST4 * r) * r);
+            if pp > 1.0 && qq > 1.0 {
+                // Carter (1947), AS 109 remark 5.
+                r = (y * y - 3.0) / 6.0;
+                s = 1.0 / (pp + pp - 1.0);
+                t = 1.0 / (qq + qq - 1.0);
+                h = 2.0 / (s + t);
+                w = y * (h + r).sqrt() / h - (t - s) * (r + 5.0 / 6.0 - 2.0 / (3.0 * h));
+                if w > 300.0 {
+                    t = w + w + qq.ln() - pp.ln();
+                    u = if t <= 18.0 {
+                        -t.exp().ln_1p()
+                    } else {
+                        -t - (-t).exp()
+                    };
+                    xinbta = u.exp();
+                } else {
+                    xinbta = pp / (pp + qq * (w + w).exp());
+                    u = -(qq / pp * (w + w).exp()).ln_1p();
+                }
+            } else {
+                // AS 64, Scheffe-Tukey and Wilson-Hilferty.
+                r = qq + qq;
+                t = 1.0 / (3.0 * qq.sqrt());
+                t = r * r_pow_di(1.0 + t * (-t + y), 3);
+                s = 4.0 * pp + r - 2.0;
+                if t == 0.0 || (t < 0.0 && s >= t) {
+                    let l1ma = if swap_tail {
+                        dt_log(alpha, lower_tail, log_p)
+                    } else {
+                        dt_clog(alpha, lower_tail, log_p)
+                    };
+                    let xx = (l1ma + qq.ln() + logbeta) / qq;
+                    if xx <= 0.0 {
+                        xinbta = -xx.exp_m1();
+                        u = log1_exp(xx);
+                    } else {
+                        let r_ = rp * u0.exp();
+                        if r_ > -1.0 {
+                            u = u0 - r_.ln_1p() / pp;
+                        } else {
+                            u = u0;
+                        }
+                        xinbta = u.exp();
+                    }
+                } else {
+                    t = s / t;
+                    if t <= 1.0 {
+                        u = u0;
+                        xinbta = u.exp();
+                    } else {
+                        xinbta = 1.0 - 2.0 / (t + 1.0);
+                        u = (-2.0 / (t + 1.0)).ln_1p();
+                    }
+                }
+            }
+            // If the initial u is completely wrong this decision is wrong too.
+            if (swap_tail && u >= -log_q_cut.exp())
+                || (!swap_tail && u >= -(4.0 * log_q_cut).exp() && pp / qq < 1000.0)
+            {
+                swap_tail = !swap_tail;
+                if swap_tail {
+                    a = dt_civ(alpha, lower_tail, log_p);
+                    la = dt_clog(alpha, lower_tail, log_p);
+                    pp = q;
+                    qq = p;
+                } else {
+                    a = p_lower;
+                    la = dt_log(alpha, lower_tail, log_p);
+                    pp = p;
+                    qq = q;
+                }
+                u = log1_exp(u);
+                xinbta = u.exp();
+            }
+            if !use_log_x {
+                use_log_x = u < log_q_cut;
+            }
+            let bad_u = !finite(u);
+            let bad_init = bad_u || xinbta > P_HI;
+            tx = xinbta;
+            if bad_u || u < log_q_cut {
+                // Try the left border quickly, at the smallest positive number.
+                w = pbeta_raw(DBL_VERY_MIN, pp, qq, true, log_p);
+                if w > (if log_p { la } else { a }) {
+                    if log_p || (w - a).abs() < (0.0 - a).abs() {
+                        tx = DBL_VERY_MIN;
+                        u_n = DBL_LOG_V_MIN;
+                    } else {
+                        tx = 0.0;
+                        u_n = f64::NEG_INFINITY;
+                    }
+                    use_log_x = log_p;
+                    add_n_step = false;
+                    break 'search Exit::Return;
+                } else if u < DBL_LOG_V_MIN {
+                    u = DBL_LOG_V_MIN;
+                    xinbta = DBL_VERY_MIN;
+                }
+            }
+            // The approximation is sometimes negative, and zero is not acceptable either.
+            if bad_init && !(use_log_x && tx > 0.0) {
+                if u == f64::NEG_INFINITY {
+                    u = M_LN2 * -1021.0;
+                    xinbta = DBL_MIN;
+                } else {
+                    xinbta = if xinbta > 1.1 {
+                        0.5
+                    } else if xinbta < P_LO {
+                        u.exp()
+                    } else {
+                        P_HI
+                    };
+                    if bad_u {
+                        u = xinbta.ln();
+                    }
+                }
             }
         }
+
+        // Newton-Raphson with pbeta_raw.
+        r = 1.0 - pp;
+        t = 1.0 - qq;
+        let mut wprev = 0.0;
+        let mut prev: f64 = 1.0;
+        let mut adj: f64 = 1.0;
+        if use_log_x {
+            for i_pb in 0..1000 {
+                y = pbeta_raw(xinbta, pp, qq, true, true);
+                w = if y == f64::NEG_INFINITY {
+                    0.0
+                } else {
+                    (y - la) * (y - u + logbeta + r * u + t * log1_exp(u)).exp()
+                };
+                if !finite(w) {
+                    if n_maybe_swaps <= 1 {
+                        continue 'search;
+                    }
+                    return [f64::NAN, f64::NAN];
+                }
+                if i_pb >= n_newton && w * wprev <= 0.0 {
+                    prev = adj.abs().max(FPU);
+                }
+                g = 1.0;
+                for _ in 0..1000 {
+                    adj = g * w;
+                    if adj.abs() < prev {
+                        u_n = u - adj;
+                        if u_n <= 0.0 {
+                            if prev <= acu || w.abs() <= acu {
+                                break 'search Exit::Converged;
+                            }
+                            break;
+                        }
+                    }
+                    g /= 3.0;
+                }
+                let d = adj.abs().min((u_n - u).abs());
+                if d <= 4e-16 * (u_n + u).abs() {
+                    break 'search Exit::Converged;
+                }
+                u = u_n;
+                xinbta = u.exp();
+                wprev = w;
+            }
+        } else {
+            for i_pb in 0..1000 {
+                y = pbeta_raw(xinbta, pp, qq, true, log_p);
+                w = if log_p {
+                    (y - la) * (y + logbeta + r * xinbta.ln() + t * (-xinbta).ln_1p()).exp()
+                } else {
+                    (y - a) * (logbeta + r * xinbta.ln() + t * (-xinbta).ln_1p()).exp()
+                };
+                if !finite(w) {
+                    if n_maybe_swaps <= 2 {
+                        if !log_p && n_maybe_swaps == 2 {
+                            use_log_x = true;
+                        }
+                        if !log_p || n_maybe_swaps <= 1 {
+                            continue 'search;
+                        }
+                    }
+                    return [f64::NAN, f64::NAN];
+                }
+                if i_pb >= n_newton && w * wprev <= 0.0 {
+                    prev = adj.abs().max(FPU);
+                }
+                g = 1.0;
+                for _ in 0..1000 {
+                    adj = g * w;
+                    // Full Newton steps at the beginning, then the safeguard.
+                    if i_pb < n_newton || adj.abs() < prev {
+                        tx = xinbta - adj;
+                        if (0.0..=1.0).contains(&tx) {
+                            if prev <= acu || w.abs() <= acu {
+                                break 'search Exit::Converged;
+                            }
+                            if tx != 0.0 && tx != 1.0 {
+                                break;
+                            }
+                        }
+                    }
+                    g /= 3.0;
+                }
+                if (tx - xinbta).abs() <= 4e-16 * (tx + xinbta) {
+                    break 'search Exit::Converged;
+                }
+                xinbta = tx;
+                if tx == 0.0 {
+                    break;
+                }
+                wprev = w;
+            }
+        }
+        break 'search Exit::NotConverged;
+    };
+
+    if let Exit::NotConverged = exit {
+        warned = true;
+        precision_warning("qbeta");
+    }
+    if !matches!(exit, Exit::Return) {
+        let log_ = log_p || use_log_x;
+        if (log_ && y == f64::NEG_INFINITY) || (!log_ && y == 0.0) {
+            // Stuck at the left: the smallest positive number may be better.
+            w = pbeta_raw(DBL_VERY_MIN, pp, qq, true, log_);
+            if log_ || (w - a).abs() <= (y - a).abs() {
+                tx = DBL_VERY_MIN;
+                u_n = DBL_LOG_V_MIN;
+            }
+            add_n_step = false;
+        } else if !warned
+            && (if log_ {
+                (y - la).abs() > 3.0
+            } else {
+                (y - a).abs() > 1e-4
+            })
+            && !(log_
+                && y == f64::NEG_INFINITY
+                && pbeta_raw(dbl_1_minus_eps, pp, qq, true, true) > la + 2.0)
+        {
+            warning(format!(
+                "qbeta(a, *) =: x0 with |pbeta(x0,*{}) - alpha| = {} is not accurate",
+                if log_ { ", log_" } else { "" },
+                crate::format::c_format((y - if log_ { la } else { a }).abs(), "g", 5, "", false)
+            ));
+        }
+    }
+
+    if give_log_q {
+        let r = log1_exp(u_n);
+        return if swap_tail { [r, u_n] } else { [u_n, r] };
+    }
+    if use_log_x {
+        if add_n_step {
+            // One last Newton step on the original scale.
+            if u_n != 1.0 {
+                xinbta = u_n.exp();
+            }
+            y = pbeta_raw(xinbta, pp, qq, true, log_p);
+            w = if log_p {
+                (y - la) * (y + logbeta + r * xinbta.ln() + t * (-xinbta).ln_1p()).exp()
+            } else {
+                (y - a) * (logbeta + r * xinbta.ln() + t * (-xinbta).ln_1p()).exp()
+            };
+            tx = if finite(w) { xinbta - w } else { xinbta };
+        } else {
+            return if swap_tail {
+                [-u_n.exp_m1(), u_n.exp()]
+            } else {
+                [u_n.exp(), -u_n.exp_m1()]
+            };
+        }
+    }
+    if swap_tail {
+        [1.0 - tx, tx]
+    } else {
+        [tx, 1.0 - tx]
     }
 }
+
 
 // The binomial, negative binomial, geometric and hypergeometric distributions.
 
@@ -5395,92 +5639,103 @@ pub fn pbinom(x: f64, n: f64, p: f64, lower: bool, log: bool) -> f64 {
     pbeta(p, x + 1.0, n - x, !lower, log)
 }
 
-/// The quantile of a distribution on the integers `0..=maximum`: the smallest `y` whose lower
-/// tail `distribution(y, true, log)` reaches `p`, or for the upper tail the smallest `y` whose
-/// upper tail `distribution(y, false, log)` has fallen to `p`.
+/// The quantile of a distribution on the integers `0..=maximum`, GNU R's `q_DISCRETE_BODY`.
 ///
 /// The search starts from the Cornish-Fisher expansion `mu + sigma (z + gamma (z^2 - 1) / 6)`
 /// about the normal quantile `z`, where `gamma` is the skewness (Cornish and Fisher (1937);
-/// Johnson, Kemp and Kotz (2005), section 1.8). From there it doubles its step until it
-/// passes the quantile, then halves the bracket. A probability given as the distribution
-/// function at an integer may have been rounded on the way in, so `p` is relaxed by a few
-/// units in the last place: that integer, not its successor, is the answer.
+/// Johnson, Kemp and Kotz (2005), section 1.8). `p` is first nudged by a few units in the last
+/// place so that a probability that was rounded on the way in still finds its own integer, and a
+/// start past 4096 walks in shrinking strides.
 #[allow(clippy::too_many_arguments)]
 fn discrete_quantile(
-    p: f64,
+    mut p: f64,
     mu: f64,
     sigma: f64,
     gamma: f64,
     lower: bool,
     log: bool,
-    maximum: f64,
+    maximum: Option<f64>,
     distribution: &dyn Fn(f64, bool, bool) -> f64,
 ) -> f64 {
-    // The search accepts a value within 64 epsilon of the target probability, relative to
-    // the nearer end of [0, 1]: near 1, adjacent CDF values differ by a few ulps of 1, and a
-    // slack relative to p itself would return the quantile below. On the log scale the
-    // slack is 16 epsilon of the log probability.
-    let slack = if log {
-        16.0 * DBL_EPSILON * p.abs()
-    } else {
-        64.0 * DBL_EPSILON * p.abs().min(1.0 - p)
-    };
-    let reached = |y: f64| {
-        let value = distribution(y, lower, log);
-        value.is_nan()
-            || if lower {
-                value >= p - slack
-            } else {
-                value < p + slack
-            }
-    };
+    const FUZZ_PLAIN: f64 = 8.0;
+    const FUZZ_LOG: f64 = 2.0;
+    const LARGE: f64 = 4096.0;
+    const INCREMENT_FRACTION: f64 = 1.0 / 64.0;
+    const SHRINK: f64 = 8.0;
+    const RELATIVE_TOLERANCE: f64 = 1e-15;
+    const EXTRA_FACTOR: f64 = 4.0;
     let normal = qnorm(p, 0.0, 1.0, lower, log);
-    let start = (mu + sigma * (normal + gamma * (normal * normal - 1.0) / 6.0)).round();
-    let start = if start.is_nan() { mu.round() } else { start };
-    let start = start.clamp(0.0, maximum);
-
-    // Gallop away from the start until the quantile lies in (below, above].
-    let (mut below, mut above);
-    let mut step = 1.0;
-    if reached(start) {
-        above = start;
-        loop {
-            if above == 0.0 {
-                return 0.0;
-            }
-            let candidate = (above - step).max(0.0);
-            if reached(candidate) {
-                above = candidate;
-                step *= 2.0;
-            } else {
-                below = candidate;
-                break;
-            }
+    let mut y = forceint(mu + sigma * (normal + gamma * (normal * normal - 1.0) / 6.0));
+    match maximum {
+        Some(limit) if y > limit => y = limit,
+        _ if y < 0.0 => y = 0.0,
+        _ => {}
+    }
+    let mut z = distribution(y, lower, log);
+    if log {
+        let e = FUZZ_LOG * DBL_EPSILON;
+        if lower && p > -f64::MAX {
+            p *= 1.0 + e;
+        } else {
+            p *= 1.0 - e;
         }
     } else {
-        below = start;
-        loop {
-            if below >= maximum {
-                return maximum;
-            }
-            let candidate = (below + step).min(maximum);
-            if reached(candidate) {
-                above = candidate;
-                break;
-            }
-            below = candidate;
-            step *= 2.0;
+        let e = FUZZ_PLAIN * DBL_EPSILON;
+        if lower {
+            p *= 1.0 - e;
+        } else if 1.0 - p > EXTRA_FACTOR * e {
+            p *= 1.0 + e;
         }
     }
-    loop {
-        let middle = (below + (above - below) / 2.0).floor();
-        if middle <= below || middle >= above {
-            return above;
+    let search = |mut y: f64, z: &mut f64, increment: f64| -> f64 {
+        let left = if lower { *z >= p } else { *z < p };
+        if left {
+            loop {
+                let mut next = -1.0;
+                if y > 0.0 {
+                    next = distribution(y - increment, lower, log);
+                } else if y < 0.0 {
+                    y = 0.0;
+                }
+                if y == 0.0 || next.is_nan() || (if lower { next < p } else { next >= p }) {
+                    return y;
+                }
+                let lowered = y - increment;
+                y = if 0.0 < lowered { lowered } else { 0.0 };
+                *z = next;
+            }
         }
-        if reached(middle) {
-            above = middle;
-        } else {
-            below = middle;
+        loop {
+            let previous = y;
+            let mut next = -1.0;
+            y += increment;
+            match maximum {
+                Some(limit) if y < limit => next = distribution(y, lower, log),
+                Some(limit) if y > limit => y = limit,
+                Some(_) => {}
+                None => next = distribution(y, lower, log),
+            }
+            if maximum == Some(y) || next.is_nan() || (if lower { next >= p } else { next < p }) {
+                if increment <= 1.0 {
+                    *z = next;
+                    return y;
+                }
+                return previous;
+            }
+            *z = next;
+        }
+    };
+    if y < LARGE {
+        return search(y, &mut z, 1.0);
+    }
+    let mut increment = (y * INCREMENT_FRACTION).floor();
+    loop {
+        let previous = increment;
+        y = search(y, &mut z, increment);
+        let shrunk = (increment / SHRINK).floor();
+        increment = if 1.0 < shrunk { shrunk } else { 1.0 };
+        if !(previous > 1.0 && increment > y * RELATIVE_TOLERANCE) {
+            return y;
         }
     }
 }
@@ -5508,7 +5763,7 @@ pub fn qbinom(p: f64, n: f64, pr: f64, lower: bool, log: bool) -> f64 {
     let mu = n * pr;
     let sigma = (n * pr * q).sqrt();
     let gamma = (q - pr) / sigma;
-    discrete_quantile(p, mu, sigma, gamma, lower, log, n, &|y, lower, log| {
+    discrete_quantile(p, mu, sigma, gamma, lower, log, Some(n), &|y, lower, log| {
         pbinom(y, n, pr, lower, log)
     })
 }
@@ -5522,6 +5777,42 @@ pub fn dnbinom(x: f64, size: f64, prob: f64, log: bool) -> f64 {
     }
     if nonint_warning(x) || x < 0.0 || !finite(x) {
         return d0(log);
+    }
+    if crate::system::r_at_least_release(4, 4, 0) {
+        let x = forceint(x);
+        if x == 0.0 {
+            // The limit as size goes to zero is a point mass at zero.
+            if size == 0.0 {
+                return d1(log);
+            }
+            return if log {
+                size * prob.ln()
+            } else {
+                prob.powf(size)
+            };
+        }
+        let size = if finite(size) { size } else { DBL_MAX };
+        if x < 1e-10 * size {
+            // Two terms of Abramowitz and Stegun 6.1.47 in place of dbinom_raw.
+            let xx2s = x_choose_two_over(x, size);
+            return d_exp(
+                size * prob.ln() + x * (size.ln() + (-prob).ln_1p()) - lgamma1p(x)
+                    + xx2s.ln_1p(),
+                log,
+            );
+        }
+        // log(size / (size + x)) is much less accurate than log1p(-x / (size + x)) for x < size.
+        let p = if log {
+            if x < size {
+                (-x / (size + x)).ln_1p()
+            } else {
+                (size / (size + x)).ln()
+            }
+        } else {
+            size / (size + x)
+        };
+        let ans = dbinom_raw(size, x + size, prob, 1.0 - prob, log);
+        return if log { p + ans } else { p * ans };
     }
     if x == 0.0 && size == 0.0 {
         return d1(log);
@@ -5540,6 +5831,15 @@ pub fn dnbinom(x: f64, size: f64, prob: f64, log: bool) -> f64 {
     let ans = dbinom_raw(size, x + size, prob, 1.0 - prob, log);
     let p = size / (size + x);
     if log { p.ln() + ans } else { p * ans }
+}
+
+/// `x (x - 1) / (2 size)` without overflow for huge `x`.
+fn x_choose_two_over(x: f64, size: f64) -> f64 {
+    if x < f64::MAX.sqrt() {
+        ldexp(x * (x - 1.0), -1) / size
+    } else {
+        x * (ldexp(x, -1) / size)
+    }
 }
 
 pub fn dnbinom_mu(x: f64, size: f64, mu: f64, log: bool) -> f64 {
@@ -5575,13 +5875,31 @@ pub fn dnbinom_mu(x: f64, size: f64, mu: f64, log: bool) -> f64 {
         } else {
             (mu / (1.0 + mu / size)).ln()
         };
+        if crate::system::r_at_least_release(4, 4, 0) {
+            return d_exp(
+                x * p - mu - lgamma1p(x) + x_choose_two_over(x, size).ln_1p(),
+                log,
+            );
+        }
         return d_exp(
             x * p - mu - lgammafn(x + 1.0) + (x * (x - 1.0) / (2.0 * size)).ln_1p(),
             log,
         );
     }
-    let p = size / (size + x);
     let ans = dbinom_raw(size, x + size, size / (size + mu), mu / (size + mu), log);
+    if crate::system::r_at_least_release(4, 4, 0) {
+        let p = if log {
+            if x < size {
+                (-x / (size + x)).ln_1p()
+            } else {
+                (size / (size + x)).ln()
+            }
+        } else {
+            size / (size + x)
+        };
+        return if log { p + ans } else { p * ans };
+    }
+    let p = size / (size + x);
     if log { p.ln() + ans } else { p * ans }
 }
 
@@ -5668,12 +5986,15 @@ pub fn qnbinom(p: f64, size: f64, prob: f64, lower: bool, log: bool) -> f64 {
         gamma,
         lower,
         log,
-        f64::INFINITY,
+        None,
         &|y, lower, log| pnbinom(y, size, prob, lower, log),
     )
 }
 
 pub fn qnbinom_mu(p: f64, size: f64, mu: f64, lower: bool, log: bool) -> f64 {
+    if size == f64::INFINITY {
+        return qpois(p, mu, lower, log);
+    }
     if p.is_nan() || size.is_nan() || mu.is_nan() {
         return p + size + mu;
     }
@@ -5686,9 +6007,6 @@ pub fn qnbinom_mu(p: f64, size: f64, mu: f64, lower: bool, log: bool) -> f64 {
     if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
         return boundary;
     }
-    if !finite(size) {
-        return qpois(p, mu, lower, log);
-    }
     let q = 1.0 + mu / size;
     let pp = mu / size;
     let sigma = (size * pp * q).sqrt();
@@ -5700,7 +6018,7 @@ pub fn qnbinom_mu(p: f64, size: f64, mu: f64, lower: bool, log: bool) -> f64 {
         gamma,
         lower,
         log,
-        f64::INFINITY,
+        None,
         &|y, lower, log| pnbinom_mu(y, size, mu, lower, log),
     )
 }
@@ -5937,7 +6255,7 @@ pub fn qpois(p: f64, lambda: f64, lower: bool, log: bool) -> f64 {
         gamma,
         lower,
         log,
-        f64::INFINITY,
+        None,
         &|y, lower, log| ppois(y, lambda, lower, log),
     )
 }

@@ -16,7 +16,9 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal},
         coerce::coerce_vector,
         conditions,
+        envir::get_option,
         format::format_g,
+        long_double::{self, LongDouble},
         makeconf::{expand_make, make_assignments},
         platform,
         unwind::{R, error},
@@ -166,9 +168,11 @@ enum Product {
     TransposedCross,
 }
 
-/// `%*%`, `crossprod` and `tcrossprod`, as GNU R's default `matprod` computes them on its
-/// reference BLAS. They run in ry's own kernels rather than the installed BLAS, so they need no
-/// library and give the same bits on every machine.
+/// `%*%`, `crossprod` and `tcrossprod`, as GNU R computes them for `options(matprod=)`. The
+/// modes `"default"`, `"blas"` and `"default.simd"` all give what GNU R's reference BLAS gives
+/// (its NaN screen only chooses between loops that sum in the same order), and `"internal"`
+/// accumulates in long double. They run in ry's own kernels rather than the installed BLAS, so
+/// they need no library and give the same bits on every machine.
 unsafe fn matrix_product(call: &Call<'_>, product: Product) -> R<Sexp> {
     let internal = crate::interp()
         .builtin(call.op.primitive_index())
@@ -220,8 +224,8 @@ unsafe fn matrix_product(call: &Call<'_>, product: Product) -> R<Sexp> {
                 Product::Matrix if x_cols == 1 => (1, y_length),
                 Product::Cross if y_length == x_rows => (x_rows, 1),
                 Product::Cross if x_rows == 1 => (1, y_length),
-                Product::TransposedCross if y_length == x_cols => (1, x_cols),
-                Product::TransposedCross if x_cols == 1 => (y_length, 1),
+                Product::TransposedCross if x_rows == 1 => (1, y_length),
+                Product::TransposedCross => (y_length, 1),
                 _ => (0, 0),
             };
             ((x_rows, x_cols), y_shape)
@@ -258,9 +262,51 @@ unsafe fn matrix_product(call: &Call<'_>, product: Product) -> R<Sexp> {
         Product::TransposedCross => (x_rows, y_rows),
     };
     let result = alloc_matrix(mode, result_rows, result_cols)?;
+    let matprod = values::first_string(get_option("matprod")).unwrap_or_default();
+    let internal = matprod == "internal";
+    if !internal && host_blas_requested() {
+        let screen = match &*matprod {
+            "blas" => Screen::None,
+            "default.simd" => Screen::Sum,
+            _ => Screen::Pairs,
+        };
+        let done = if mode == SexpType::Complex {
+            host_complex_product(
+                product,
+                screen,
+                &shape,
+                complexes(x_values),
+                complexes(y_values),
+                complexes_mut(result),
+            )?
+        } else {
+            host_real_product(
+                product,
+                screen,
+                symmetric,
+                &shape,
+                reals(x_values),
+                reals(y_values),
+                reals_mut(result),
+            )?
+        };
+        if done {
+            product_dimnames(
+                product,
+                x,
+                y,
+                x_dims.is_some(),
+                y_dims.is_some(),
+                &shape,
+                result,
+            )?;
+            return Ok(result);
+        }
+    }
     if mode == SexpType::Complex {
         complex_product(
             product,
+            internal,
             &shape,
             complexes(x_values),
             complexes(y_values),
@@ -269,6 +315,7 @@ unsafe fn matrix_product(call: &Call<'_>, product: Product) -> R<Sexp> {
     } else {
         real_product(
             product,
+            internal,
             symmetric,
             &shape,
             reals(x_values),
@@ -304,6 +351,7 @@ struct Shape {
 /// survives, and that keeps `NA` apart from `NaN`.
 fn real_product(
     product: Product,
+    extended: bool,
     symmetric: bool,
     shape: &Shape,
     x: &[f64],
@@ -318,6 +366,10 @@ fn real_product(
     } = *shape;
     if x_rows == 0 || x_cols == 0 || y_rows == 0 || y_cols == 0 {
         z.fill(0.0);
+        return;
+    }
+    if extended {
+        long_double_product(product, shape, x, y, z);
         return;
     }
     match product {
@@ -374,6 +426,238 @@ fn real_product(
     }
 }
 
+/// GNU R's `internal` loops: every entry is a long double total of the double products of its
+/// terms, in index order, rounded once to double. Each product is rounded to double first, as
+/// the SSE multiplication GNU R compiles to does.
+fn long_double_product(product: Product, shape: &Shape, x: &[f64], y: &[f64], z: &mut [f64]) {
+    let Shape {
+        x_rows,
+        x_cols,
+        y_rows,
+        y_cols,
+    } = *shape;
+    // For entry (row, col): the terms are x[x_start + t * x_step] * y[y_start + t * y_step].
+    let (rows, cols, terms) = match product {
+        Product::Matrix => (x_rows, y_cols, x_cols),
+        Product::Cross => (x_cols, y_cols, x_rows),
+        Product::TransposedCross => (x_rows, y_rows, x_cols),
+    };
+    let mut products = vec![0.0; terms];
+    for col in 0..cols {
+        for row in 0..rows {
+            let (x_start, x_step, y_start, y_step) = match product {
+                Product::Matrix => (row, x_rows, col * y_rows, 1),
+                Product::Cross => (row * x_rows, 1, col * y_rows, 1),
+                Product::TransposedCross => (row, x_rows, col, y_rows),
+            };
+            for (term, slot) in products.iter_mut().enumerate() {
+                *slot = x[x_start + term * x_step] * y[y_start + term * y_step];
+            }
+            z[row + col * rows] = long_double::add_all(LongDouble::ZERO, &products).to_f64();
+        }
+    }
+}
+
+/// The host BLAS, opted into with `options(ry.blas = "host")` or `RY_BLAS=host`: the products
+/// then call the installed `dgemm`, `dgemv`, `dsyrk` and `zgemm` exactly as GNU R's `matprod`,
+/// `crossprod` and `tcrossprod` do, so the bits are those of whatever BLAS GNU R links on this
+/// machine (OpenBLAS differs from the reference BLAS in the last bit). The option wins over the
+/// variable.
+fn host_blas_requested() -> bool {
+    static FROM_ENVIRONMENT: OnceLock<bool> = OnceLock::new();
+    // SAFETY: `get_option` returns a live value or nil.
+    match unsafe { values::first_string(get_option("ry.blas")) } {
+        Some(choice) => choice == "host",
+        None => *FROM_ENVIRONMENT
+            .get_or_init(|| std::env::var("RY_BLAS").is_ok_and(|choice| choice == "host")),
+    }
+}
+
+/// How GNU R decides, per `options(matprod =)`, whether an operand may hold a NaN or an infinity
+/// and so must not reach the BLAS (PR#4582): `default` tests pairs of entries, `default.simd`
+/// tests their sum, and `blas` does not test.
+#[derive(Clone, Copy)]
+enum Screen {
+    None,
+    Pairs,
+    Sum,
+}
+
+/// `mayHaveNaNOrInf` and `mayHaveNaNOrInf_simd`, including the false alarm when two finite
+/// entries sum to infinity.
+fn may_have_non_finite(screen: Screen, values: &[f64]) -> bool {
+    match screen {
+        Screen::None => false,
+        Screen::Pairs => {
+            let (head, pairs) = values.split_at(values.len() & 1);
+            head.iter().any(|value| !value.is_finite())
+                || pairs
+                    .chunks_exact(2)
+                    .any(|pair| !(pair[0] + pair[1]).is_finite())
+        }
+        Screen::Sum => !values.iter().sum::<f64>().is_finite(),
+    }
+}
+
+/// `cmayHaveNaNOrInf` and `cmayHaveNaNOrInf_simd`.
+fn may_have_non_finite_complex(screen: Screen, values: &[Rcomplex]) -> bool {
+    match screen {
+        Screen::None => false,
+        Screen::Pairs => {
+            let (head, pairs) = values.split_at(values.len() & 1);
+            head.iter()
+                .any(|value| !value.r.is_finite() || !value.i.is_finite())
+                || pairs.chunks_exact(2).any(|pair| {
+                    !(pair[0].r + pair[0].i + pair[1].r + pair[1].i).is_finite()
+                })
+        }
+        Screen::Sum => {
+            let mut sum = 0.0;
+            for value in values {
+                sum += value.r;
+                sum += value.i;
+            }
+            !sum.is_finite()
+        }
+    }
+}
+
+/// The real products through the host BLAS, with GNU R's choice of routine. Returns `false`
+/// when the operands fail the NaN screen, which GNU R answers with its plain loops, and those
+/// are the reference kernels.
+fn host_real_product(
+    product: Product,
+    screen: Screen,
+    symmetric: bool,
+    shape: &Shape,
+    x: &[f64],
+    y: &[f64],
+    z: &mut [f64],
+) -> R<bool> {
+    let Shape {
+        x_rows,
+        x_cols,
+        y_rows,
+        y_cols,
+    } = *shape;
+    if x_rows == 0 || x_cols == 0 || y_rows == 0 || y_cols == 0 {
+        z.fill(0.0);
+        return Ok(true);
+    }
+    if may_have_non_finite(screen, x) || (!symmetric && may_have_non_finite(screen, y)) {
+        return Ok(false);
+    }
+    let blas = blas()?;
+    let (one, zero, unit) = (1.0, 0.0, 1);
+    let (x_rows, x_cols, y_rows, y_cols) =
+        (x_rows as i32, x_cols as i32, y_rows as i32, y_cols as i32);
+    let (none, transposed, upper) = (c"N".as_ptr(), c"T".as_ptr(), c"U".as_ptr());
+    let (x, y, z_pointer) = (x.as_ptr(), y.as_ptr(), z.as_mut_ptr());
+    // SAFETY: every call reads the operands and writes the result within the extents GNU R
+    // passes for the same product, and the result has that many entries.
+    unsafe {
+        match product {
+            Product::Matrix if y_cols == 1 => (blas.dgemv)(
+                none, &x_rows, &x_cols, &one, x, &x_rows, y, &unit, &zero, z_pointer, &unit, 1,
+            ),
+            Product::Matrix if x_rows == 1 => (blas.dgemv)(
+                transposed, &y_rows, &y_cols, &one, y, &y_rows, x, &unit, &zero, z_pointer,
+                &unit, 1,
+            ),
+            Product::Matrix => (blas.dgemm)(
+                none, none, &x_rows, &y_cols, &x_cols, &one, x, &x_rows, y, &y_rows, &zero,
+                z_pointer, &x_rows, 1, 1,
+            ),
+            Product::Cross if symmetric => (blas.dsyrk)(
+                upper, transposed, &x_cols, &x_rows, &one, x, &x_rows, &zero, z_pointer,
+                &x_cols, 1, 1,
+            ),
+            Product::Cross if y_cols == 1 => (blas.dgemv)(
+                transposed, &x_rows, &x_cols, &one, x, &x_rows, y, &unit, &zero, z_pointer,
+                &unit, 1,
+            ),
+            Product::Cross if x_cols == 1 => (blas.dgemv)(
+                transposed, &y_rows, &y_cols, &one, y, &y_rows, x, &unit, &zero, z_pointer,
+                &unit, 1,
+            ),
+            Product::Cross => (blas.dgemm)(
+                transposed, none, &x_cols, &y_cols, &x_rows, &one, x, &x_rows, y, &y_rows,
+                &zero, z_pointer, &x_cols, 1, 1,
+            ),
+            Product::TransposedCross if symmetric => (blas.dsyrk)(
+                upper, none, &x_rows, &x_cols, &one, x, &x_rows, &zero, z_pointer, &x_rows, 1, 1,
+            ),
+            Product::TransposedCross if y_rows == 1 => (blas.dgemv)(
+                none, &x_rows, &x_cols, &one, x, &x_rows, y, &unit, &zero, z_pointer, &unit, 1,
+            ),
+            Product::TransposedCross if x_rows == 1 => (blas.dgemv)(
+                none, &y_rows, &y_cols, &one, y, &y_rows, x, &unit, &zero, z_pointer, &unit, 1,
+            ),
+            Product::TransposedCross => (blas.dgemm)(
+                none, transposed, &x_rows, &y_rows, &x_cols, &one, x, &x_rows, y, &y_rows,
+                &zero, z_pointer, &x_rows, 1, 1,
+            ),
+        }
+    }
+    if symmetric {
+        match product {
+            Product::Cross => mirror_upper(z, x_cols as usize),
+            Product::TransposedCross => mirror_upper(z, x_rows as usize),
+            Product::Matrix => {}
+        }
+    }
+    Ok(true)
+}
+
+/// The complex products through the host `zgemm`, as `host_real_product`.
+fn host_complex_product(
+    product: Product,
+    screen: Screen,
+    shape: &Shape,
+    x: &[Rcomplex],
+    y: &[Rcomplex],
+    z: &mut [Rcomplex],
+) -> R<bool> {
+    let Shape {
+        x_rows,
+        x_cols,
+        y_rows,
+        y_cols,
+    } = *shape;
+    if x_rows == 0 || x_cols == 0 || y_rows == 0 || y_cols == 0 {
+        z.fill(Rcomplex { r: 0.0, i: 0.0 });
+        return Ok(true);
+    }
+    if may_have_non_finite_complex(screen, x) || may_have_non_finite_complex(screen, y) {
+        return Ok(false);
+    }
+    let blas = blas()?;
+    let one = Rcomplex { r: 1.0, i: 0.0 };
+    let zero = Rcomplex { r: 0.0, i: 0.0 };
+    let (x_rows, x_cols, y_rows, y_cols) =
+        (x_rows as i32, x_cols as i32, y_rows as i32, y_cols as i32);
+    let (none, transposed) = (c"N".as_ptr(), c"T".as_ptr());
+    let (x, y, z) = (x.as_ptr(), y.as_ptr(), z.as_mut_ptr());
+    // SAFETY: as for `host_real_product`.
+    unsafe {
+        match product {
+            Product::Matrix => (blas.zgemm)(
+                none, none, &x_rows, &y_cols, &x_cols, &one, x, &x_rows, y, &y_rows, &zero, z,
+                &x_rows, 1, 1,
+            ),
+            Product::Cross => (blas.zgemm)(
+                transposed, none, &x_cols, &y_cols, &x_rows, &one, x, &x_rows, y, &y_rows,
+                &zero, z, &x_cols, 1, 1,
+            ),
+            Product::TransposedCross => (blas.zgemm)(
+                none, transposed, &x_rows, &y_rows, &x_cols, &one, x, &x_rows, y, &y_rows,
+                &zero, z, &x_rows, 1, 1,
+            ),
+        }
+    }
+    Ok(true)
+}
+
 /// The complex products, in reference `zgemm`'s order for the same reasons as `real_product`.
 /// GNU R calls `zgemm` unless an operand holds a NaN or an infinity, and `zgemm` multiplies with
 /// Fortran's plain formula, which overflows to NaN where C99's product, the one GNU R's fallback
@@ -381,6 +665,7 @@ fn real_product(
 /// because the sums start at positive zero and so never hold a negative zero.
 fn complex_product(
     product: Product,
+    extended: bool,
     shape: &Shape,
     x: &[Rcomplex],
     y: &[Rcomplex],
@@ -395,6 +680,10 @@ fn complex_product(
     let zero = Rcomplex { r: 0.0, i: 0.0 };
     if x_rows == 0 || x_cols == 0 || y_rows == 0 || y_cols == 0 {
         z.fill(zero);
+        return;
+    }
+    if extended {
+        long_double_complex_product(product, shape, x, y, z);
         return;
     }
     let finite = |values: &[Rcomplex]| {
@@ -446,6 +735,49 @@ fn complex_product(
                     }
                 }
             }
+        }
+    }
+}
+
+/// GNU R's `internal` complex loops: the real and imaginary totals are long doubles over the
+/// C99 products of the terms.
+fn long_double_complex_product(
+    product: Product,
+    shape: &Shape,
+    x: &[Rcomplex],
+    y: &[Rcomplex],
+    z: &mut [Rcomplex],
+) {
+    let Shape {
+        x_rows,
+        x_cols,
+        y_rows,
+        y_cols,
+    } = *shape;
+    let (rows, cols, terms) = match product {
+        Product::Matrix => (x_rows, y_cols, x_cols),
+        Product::Cross => (x_cols, y_cols, x_rows),
+        Product::TransposedCross => (x_rows, y_rows, x_cols),
+    };
+    let mut reals = vec![0.0; terms];
+    let mut imaginaries = vec![0.0; terms];
+    for col in 0..cols {
+        for row in 0..rows {
+            let (x_start, x_step, y_start, y_step) = match product {
+                Product::Matrix => (row, x_rows, col * y_rows, 1),
+                Product::Cross => (row * x_rows, 1, col * y_rows, 1),
+                Product::TransposedCross => (row, x_rows, col, y_rows),
+            };
+            for term in 0..terms {
+                let term_product =
+                    c99_multiply(x[x_start + term * x_step], y[y_start + term * y_step]);
+                reals[term] = term_product.r;
+                imaginaries[term] = term_product.i;
+            }
+            z[row + col * rows] = Rcomplex {
+                r: long_double::add_all(LongDouble::ZERO, &reals).to_f64(),
+                i: long_double::add_all(LongDouble::ZERO, &imaginaries).to_f64(),
+            };
         }
     }
 }
@@ -2898,6 +3230,10 @@ const LAPACK_SEARCH: LibrarySearch = LibrarySearch {
 
 fortran_library!(Blas, BLAS_SEARCH, {
     dtrsm: fn(Text, Text, Text, Text, Integer, Integer, Double, Double, Integer, DoubleOut, Integer, TextLength, TextLength, TextLength, TextLength);
+    dgemm: fn(Text, Text, Integer, Integer, Integer, Double, Double, Integer, Double, Integer, Double, DoubleOut, Integer, TextLength, TextLength);
+    dgemv: fn(Text, Integer, Integer, Double, Double, Integer, Double, Integer, Double, DoubleOut, Integer, TextLength);
+    dsyrk: fn(Text, Text, Integer, Integer, Double, Double, Integer, Double, DoubleOut, Integer, TextLength, TextLength);
+    zgemm: fn(Text, Text, Integer, Integer, Integer, Complex, Complex, Integer, Complex, Integer, Complex, ComplexOut, Integer, TextLength, TextLength);
     dnrm2: fn(Integer, Double, Integer) -> f64;
     ddot: fn(Integer, Double, Integer, Double, Integer) -> f64;
     dasum: fn(Integer, Double, Integer) -> f64;

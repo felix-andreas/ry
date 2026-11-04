@@ -86,7 +86,7 @@ pub mod graphics;
 pub mod hashtab;
 pub mod inspect;
 pub mod legacy;
-pub mod linpack;
+pub use interp::linpack;
 pub mod lists;
 pub mod macho;
 pub mod memory;

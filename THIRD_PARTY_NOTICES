@@ -41,6 +41,11 @@ crates/interp/src/distributions.rs
         Copyright (C) 2005-2020 The R Foundation
         Copyright (C) 1998 Ross Ihaka
 
+crates/interp/src/fft.rs
+    GNU R src/library/stats/src/fft.c (fft_factor, fft_work and their helpers)
+        Copyright (C) 1998--2025 The R Core Team
+        Copyright (C) 1995, 1996, 1997 Robert Gentleman and Ross Ihaka
+
 crates/interp/src/graphics.rs
     GNU R src/library/graphics/src/plot3d.c (contour label placement, persp)
         Copyright (C) 1998--2018 The R Core Team
@@ -82,7 +87,7 @@ crates/interp/src/random.rs
 
 crates/interp/src/register_s3_methods.R
     GNU R src/library/base/R/namespace.R (registerS3methods)
-        Copyright (C) 1995-2023 The R Core Team
+        Copyright (C) 1995-2025 The R Core Team
 
 crates/interp/src/rmath.rs
     GNU R src/nmath/toms708.c (bratio and its helpers, grat_r)
@@ -113,7 +118,7 @@ crates/interp/src/rmath.rs
         Copyright (C) 2000-2022 The R Core Team
         Copyright (C) 2003-2022 The R Foundation
         Copyright (C) 1998 Ross Ihaka
-    GNU R src/nmath/qbeta.c (qbeta_start)
+    GNU R src/nmath/qbeta.c (qbeta_raw)
         Copyright (C) 1998--2022 The R Core Team
         Copyright (C) 1995, 1996 Robert Gentleman and Ross Ihaka
         based on code (C) 1979 and later Royal Statistical Society
@@ -126,10 +131,24 @@ crates/interp/src/rmath.rs
     GNU R src/nmath/lgamma.c (lgammafn_sign)
         Copyright (C) 2000-2020 The R Core Team
         Copyright (C) 1998 Ross Ihaka
-    GNU R src/nmath/pgamma.c (log1pmx, logspace_sub)
+    GNU R src/nmath/pgamma.c (pgamma_raw and its helpers, logcf, log1pmx, lgamma1p, logspace_sub)
         Copyright (C) 2006-2019 The R Core Team
         Copyright (C) 2005-6 Morten Welinder <terra@gnome.org>
         Copyright (C) 2005-10 The R Foundation
+    GNU R src/nmath/bd0.c (ebd0 and its scale table)
+        Copyright (C) 2000-2025 The R Core Team
+        Copyright (C) 2014 Morten Welinder
+        Copyright (C) 2000 Catherine Loader
+    GNU R src/nmath/qgamma.c (qgamma, qchisq_appr)
+        Copyright (C) 2000--2015 The R Core Team
+        Copyright (C) 1998 Ross Ihaka
+        Copyright (C) 2004--2015 The R Foundation
+    GNU R src/nmath/stirlerr.c (stirlerr)
+        Copyright (C) 2000-2025 The R Core Team
+        Copyright (C) 2000 Catherine Loader
+    GNU R src/nmath/dpois.c (dpois_raw)
+        Copyright (C) 2000-2021 The R Core Team
+        Copyright (C) 2000 Catherine Loader
     GNU R src/nmath/cospi.c (cospi_, sinpi_, tanpi_)
         Copyright (C) 2013-2022 The R Core Team
     GNU R src/nmath/stirlerr.c (stirlerr)
@@ -148,6 +167,24 @@ crates/interp/src/rmath.rs
         partly based on Catherine Loader's work,
         (C) 1999-2000 Lucent Technologies, Bell Laboratories
 
+crates/interp/src/stats.rs
+    GNU R src/library/stats/src/lowess.c (clowess, lowest)
+        Copyright (C) 1996 Robert Gentleman and Ross Ihaka
+        Copyright (C) 1999-2025 The R Core Team
+
+crates/interp/src/stats_loess.rs
+    GNU R src/library/stats/src/loessf.f (the ehg and lowes routines)
+        The authors of this software are Cleveland, Grosse, and Shyu.
+        Copyright (c) 1989, 1992 by AT&T.
+        Permission to use, copy, modify, and distribute this software for any purpose without fee
+        is hereby granted, provided that this entire notice is included in all copies of any
+        software which is or includes a copy or modification of this software and in all copies
+        of the supporting documentation for such software. THIS SOFTWARE IS BEING PROVIDED "AS
+        IS", WITHOUT ANY EXPRESS OR IMPLIED WARRANTY. IN PARTICULAR, NEITHER THE AUTHORS NOR AT&T
+        MAKE ANY REPRESENTATION OR WARRANTY OF ANY KIND CONCERNING THE MERCHANTABILITY OF THIS
+        SOFTWARE OR ITS FITNESS FOR ANY PARTICULAR PURPOSE.
+        Copyright (C) 1998-2020 The R Core Team
+
 crates/interp/src/stats_nlm.rs
     GNU R src/appl/uncmin.c (the line search, trust region and secant updates)
         Copyright (C) 1999-2017 The R Core Team
@@ -161,6 +198,15 @@ crates/interp/src/stats_optimize.rs
         Copyright (C) 1995, 1996 Robert Gentleman and Ross Ihaka
         Copyright (C) 2003-2004 The R Foundation
         Copyright (C) 1998--2014 The R Core Team
+
+crates/interp/src/stats_spline.rs
+    GNU R src/library/stats/src/sbart.c (sbart)
+        Derived from the GAMFIT sources, which derive from code by Finbarr O'Sullivan; the file
+        carries no copyright line of its own
+    GNU R src/library/stats/src/qsbart.f (rbart)
+        Copyright (C) 1998-2016 The R Core Team
+    GNU R src/appl/interv.c (findInterval)
+        Copyright (C) 2002--2025 The R Core Team
 
 crates/interp/src/stats_tests.rs
     GNU R src/library/stats/src/swilk.c (swilk)
@@ -275,13 +321,13 @@ jpeg-encoder crate, whose IJG terms are listed with it below).
 3. Rust crates and the C libraries they bundle
 ==============================================
 
-483 crates from crates.io are built into ry. Each crate is listed under
+482 crates from crates.io are built into ry. Each crate is listed under
 the licence it is used under (for a choice such as `MIT OR Apache-2.0`, the first
 permissive licence of the choice), with the copyright lines from its licence files.
 The licence texts follow each list; a crate that ships no text of its own is covered
 by the text shown for its licence.
 
-MIT (408 crates)
+MIT (407 crates)
 ----------------
 
 - addr2line 0.25.1 <https://github.com/gimli-rs/addr2line>
@@ -688,8 +734,6 @@ MIT (408 crates)
     Copyright (c) 2016 The Rust Project Developers
 - parking_lot_core 0.9.12 <https://github.com/Amanieu/parking_lot>
     Copyright (c) 2016 The Rust Project Developers
-- pcre2 0.2.11 <https://github.com/BurntSushi/rust-pcre2>
-    Copyright (c) 2017 Andrew Gallant
 - pcre2-sys 0.2.10 <https://github.com/BurntSushi/rust-pcre2>
     Copyright (c) 2017 Andrew Gallant
 - percent-encoding 2.3.2 <https://github.com/servo/rust-url/>
@@ -1136,7 +1180,7 @@ Text 1 of 18 for MIT, used by 270 crates:
     IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
     DEALINGS IN THE SOFTWARE.
 
-Text 2 of 18 for MIT, used by 39 crates:
+Text 2 of 18 for MIT, used by 38 crates:
 
     The MIT License (MIT)
 

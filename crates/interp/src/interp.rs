@@ -42,6 +42,7 @@ pub mod distributions;
 pub mod envir;
 pub mod eval;
 #[cfg(unix)]
+mod fft;
 pub mod fork;
 pub mod format;
 pub mod frame;
@@ -76,6 +77,7 @@ pub mod rmath;
 pub mod serialize;
 pub mod session;
 pub mod sort;
+pub mod linpack;
 pub mod standard_library;
 pub mod stats;
 pub mod stats_arima;

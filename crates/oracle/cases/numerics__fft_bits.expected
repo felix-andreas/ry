@@ -1,0 +1,105 @@
+[stdout]
+| [1] "0x1.4p+5"              "-0x1p+2"               "-0x1.0000000000001p+2"
+| [4] "-0x1.0000000000001p+2" "-0x1p+2"               "-0x1p+2"              
+| [7] "-0x1.ffffffffffffep+1" "-0x1.ffffffffffffdp+1"
+| [1] "0x0p+0"                "0x1.3504f333f9de6p+3"  "0x1p+2"               
+| [4] "0x1.a827999fcef34p+0"  "0x0p+0"                "-0x1.a827999fcef34p+0"
+| [7] "-0x1p+2"               "-0x1.3504f333f9de6p+3"
+| [1] -4+4i
+| [1] FALSE
+| n=2      fft 73864 inverse 73864 roundtrip 78272
+| n=3      fft 136820 inverse 136180 roundtrip 157527
+| n=4      fft 280091 inverse 287051 roundtrip 289864
+| n=5      fft 466433 inverse 456985 roundtrip 447392
+| n=6      fft 621413 inverse 588653 roundtrip 718356
+| n=7      fft 786018 inverse 781050 roundtrip 863290
+| n=8      fft 1108137 inverse 1112629 roundtrip 1192458
+| n=9      fft 1231508 inverse 1214928 roundtrip 1569603
+| n=10     fft 1651582 inverse 1672333 roundtrip 1768662
+| n=11     fft 1971270 inverse 1895654 roundtrip 2015997
+| n=12     fft 2500070 inverse 2613934 roundtrip 2490690
+| n=13     fft 2740655 inverse 2707047 roundtrip 3077055
+| n=14     fft 2890786 inverse 2849870 roundtrip 3819973
+| n=15     fft 3718692 inverse 3627410 roundtrip 3823547
+| n=16     fft 3981245 inverse 4082845 roundtrip 4210365
+| n=17     fft 3925248 inverse 3732825 roundtrip 4240988
+| n=18     fft 4304198 inverse 4126645 roundtrip 4334174
+| n=19     fft 3738911 inverse 3664257 roundtrip 4452260
+| n=20     fft 4430783 inverse 4403857 roundtrip 4472749
+| n=21     fft 3905317 inverse 4309005 roundtrip 5376786
+| n=22     fft 4450307 inverse 4509352 roundtrip 4972719
+| n=23     fft 4493290 inverse 4558983 roundtrip 5148592
+| n=24     fft 4974521 inverse 5127961 roundtrip 5421086
+| n=25     fft 4830178 inverse 4997134 roundtrip 5915422
+| n=26     fft 5418677 inverse 5515990 roundtrip 6603672
+| n=27     fft 5650099 inverse 5947219 roundtrip 6939476
+| n=28     fft 6281002 inverse 6390564 roundtrip 7047174
+| n=29     fft 6746949 inverse 6667459 roundtrip 7178665
+| n=30     fft 7076543 inverse 7245260 roundtrip 7904550
+| n=31     fft 7621131 inverse 7423547 roundtrip 8890157
+| n=32     fft 7803400 inverse 7830714 roundtrip 8653290
+| n=33     fft 7439027 inverse 7323694 roundtrip 8373455
+| n=34     fft 7909304 inverse 7815338 roundtrip 8385235
+| n=35     fft 7742681 inverse 8037750 roundtrip 9044007
+| n=36     fft 7937507 inverse 7827630 roundtrip 8888303
+| n=37     fft 7822195 inverse 7766027 roundtrip 9197230
+| n=38     fft 8646096 inverse 8601986 roundtrip 9536499
+| n=39     fft 8719657 inverse 8856985 roundtrip 9257486
+| n=40     fft 9146579 inverse 8923307 roundtrip 10287838
+| n=48     fft 11133458 inverse 11312381 roundtrip 12859226
+| n=49     fft 11429667 inverse 11651353 roundtrip 13258990
+| n=50     fft 11496629 inverse 11285506 roundtrip 13175017
+| n=60     fft 13391835 inverse 13660694 roundtrip 16282722
+| n=64     fft 14777197 inverse 15081365 roundtrip 17273206
+| n=72     fft 16927902 inverse 17183369 roundtrip 19610221
+| n=77     fft 17756393 inverse 18072636 roundtrip 20880123
+| n=81     fft 19127020 inverse 19286753 roundtrip 21411208
+| n=97     fft 22490346 inverse 22983844 roundtrip 25719632
+| n=100    fft 23605995 inverse 23438262 roundtrip 26931115
+| n=101    fft 23444476 inverse 23307934 roundtrip 27647569
+| n=120    fft 27871789 inverse 27779997 roundtrip 31609409
+| n=121    fft 28168154 inverse 27239187 roundtrip 32042461
+| n=125    fft 29655533 inverse 29612403 roundtrip 35130448
+| n=128    fft 30722293 inverse 30633268 roundtrip 34826505
+| n=143    fft 32977934 inverse 33101569 roundtrip 38817551
+| n=169    fft 40233800 inverse 39737420 roundtrip 46785856
+| n=210    fft 49979892 inverse 49426185 roundtrip 56818681
+| n=243    fft 56824318 inverse 56823773 roundtrip 66834150
+| n=256    fft 61043802 inverse 61186706 roundtrip 70449076
+| n=360    fft 84343066 inverse 84222202 roundtrip 99457819
+| n=500    fft 119739136 inverse 119711594 roundtrip 138193759
+| n=512    fft 121760605 inverse 121141015 roundtrip 140793166
+| n=625    fft 149540490 inverse 149674065 roundtrip 172308935
+| n=1000   fft 238062769 inverse 238364883 roundtrip 274876190
+| n=1009   fft 240485333 inverse 240643052 roundtrip 280618038
+| n=1024   fft 244825580 inverse 245682980 roundtrip 281128270
+| n=1260   fft 303397355 inverse 303879768 roundtrip 351268289
+| n=2310   fft 554272059 inverse 553496635 roundtrip 641355110
+| n=4096   fft 994094455 inverse 992929445 roundtrip 1133560893
+| n=5000   fft 1216229317 inverse 1214367972 roundtrip 1392936061
+| n=7919   fft 1926882913 inverse 1925484200 roundtrip 2199760155
+| n=10000  fft 2445849000 inverse 2444669245 roundtrip 2774728972
+| [1] "0x1.fp+4"             "0x1.09438b31ecafcp+3" "0x1.cd82b446159f4p+1"
+| [4] "0x1.662d6e19f472bp+3" "0x1.8p+1"             "0x1.662d6e19f472bp+3"
+| [7] "0x1.cd82b446159f3p+1" "0x1.09438b31ecafbp+3"
+| [1] NA NA NA
+| [1] 5+0i
+| complex(0)
+| [1]  3+0i -1+0i
+| array 28141077 28148245 
+| array with a unit dimension 18785853 
+| matrix 42259403 
+| mvfft 43137814 42992406 
+| mvfft one row 41925 
+| vector-valued (multivariate) series required 
+| [1] 1024
+| [1]  3  8 14 20 26 14  5
+| [1] "0x1.079b26efee463p+12" "0x1.5726e900e9206p+14" "0x1.7f2c56875e5d2p+11"
+| [4] "0x1.34622537e7fc3p+13" "0x1.ccd3b6e410e7bp+14"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("0x1.079b26efee463p+12", "0x1.5726e900e9206p+14", "0x1.7f2c56875e5d2p+11", 
+| "0x1.34622537e7fc3p+13", "0x1.ccd3b6e410e7bp+14")

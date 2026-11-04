@@ -413,6 +413,17 @@ place it searched. On Windows, linear algebra needs `R_HOME`, for GNU R's `Rblas
 `-l:liblapack.so.3`), so a package that uses them (Matrix, quadprog) builds without the
 distribution's BLAS and LAPACK development packages.
 
+The matrix products (`%*%`, `crossprod`, `tcrossprod`) do not use that BLAS by default. ry computes
+them in its own kernels, which add each entry's terms in the order of the reference BLAS that GNU R
+bundles, so the bits are the same on every machine. A GNU R linked to an optimized BLAS such as
+OpenBLAS differs from that in the last bit. To get that GNU R's results, set `options(ry.blas =
+"host")` or start ry with `RY_BLAS=host`: the products then call the BLAS found above (`dgemm`,
+`dgemv`, `dsyrk`, `zgemm`) with the arguments GNU R passes, and `options(matprod =)` keeps its
+meaning, including the NaN and infinity screen of `"default"` and `"default.simd"`. The option wins
+over the variable, and `"reference"` (the default) selects ry's kernels. `options(matprod =
+"internal")` is GNU R's long double loop and ignores the setting. `solve`, `qr`, `chol`, `svd` and
+the other LAPACK-backed functions always call the host libraries.
+
 Packages you installed with GNU R are on ry's `.libPaths()` without any setup. When `R_LIBS_USER`
 is unset, it holds GNU R's user library for ry's R version (`~/R/<platform>-library/4.6` on
 Linux, `~/Library/R/<arch>/4.6/library` on macOS, with `arm64` for Apple silicon) and then the existing ones of older 4.x versions,

@@ -1,0 +1,37 @@
+[stdout]
+| internal crossprod equals a plain double loop: FALSE 
+| gemm          7x5 3787379
+| gemv          7x1 212478
+| vecmat        1x40 4355002
+| dot           1x1 3271
+| outer         7x40 31405244
+| cross_matrix  7x7 5122606
+| cross_sym     6x6 3805041
+| cross_vec     1x1 3271
+| cross_two     6x3 1256264
+| tcross_sym    7x7 5122606
+| tcross_two    7x3 1717551
+| tcross_vec    7x7 4898432
+| complex       7x5 7672551
+| [1] "0x1.95da5137781ap+42"  "0x1.33cad83713f0cp+42" "0x1.5f81503e8a292p+42"
+| [4] "0x1.33cad83713f0cp+42" "0x1.646bb08f4688p+42"  "0x1.59b7b6f2fe2c8p+42"
+| default 3538697 3510144 3739440 192896751 4439230 
+| [1] NaN NaN
+| [1] NA NA
+| [1]  Inf -Inf
+| default.simd 3538697 3510144 3739440 192896751 4439230 
+| [1] NaN NaN
+| [1] NA NA
+| [1]  Inf -Inf
+| internal 3529818 3498875 3730407 192876901 4440092 
+| [1] NaN NaN
+| [1] NA NA
+| [1]  Inf -Inf
+| invalid value for 'matprod' 
+| [1] "default"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "default"
