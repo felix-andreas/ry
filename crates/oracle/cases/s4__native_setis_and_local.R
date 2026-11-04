@@ -1,0 +1,118 @@
+# Class hierarchies and methods whose formals differ from the generic, defined inside a package
+# namespace: the subclass bookkeeping `setIs()` does and the `.local` wrapper
+# `rematchDefinition()` builds, which ry's methods core does natively.
+info <- new.env(hash = TRUE, parent = baseenv())
+imports <- new.env(hash = TRUE, parent = .BaseNamespaceEnv)
+attr(imports, "name") <- "imports:s4setis"
+ns <- new.env(hash = TRUE, parent = imports)
+assign(".__NAMESPACE__.", info, envir = ns)
+info$spec <- c(name = "s4setis", version = "1.0")
+info$exports <- new.env(hash = TRUE, parent = baseenv())
+info$imports <- list(base = TRUE)
+info$path <- tempdir()
+info$dynlibs <- character()
+info$S3methods <- matrix(NA_character_, 0L, 4L)
+assign(".packageName", "s4setis", envir = ns)
+invisible(.Internal(registerNamespace("s4setis", ns)))
+
+setClass("P0", slots = c(p = "numeric"), where = ns)
+setClassUnion("PU", "P0", where = ns)
+setClass("P1", contains = "P0", where = ns)
+setClass("P2", contains = "P1", where = ns)
+setClass("P3", contains = "P2", slots = c(p3 = "character"), where = ns)
+setClass("Q0", representation("VIRTUAL"), where = ns)
+setClass("Q1", contains = "Q0", slots = c(q = "numeric"), where = ns)
+setClass("Q2", contains = "Q1", where = ns)
+setClassUnion("QU", c("Q1", "P1"), where = ns)
+setClass("Q3", contains = "Q2", where = ns)
+setClass("PQ", contains = c("P2", "Q0"), where = ns)
+setClass("R0", representation("VIRTUAL", "Q0"), where = ns)
+setClass("R1", representation(r = "list"), contains = "R0", where = ns)
+setClass("R2", contains = "R1", prototype = list(r = list(1)), where = ns)
+setClassUnion("PUU", c("PU", "QU"), where = ns)
+setClass("S1", contains = "P3", where = ns)
+setClass("WP", slots = c(a = "numeric", b = "list"), prototype = prototype(b = list(1), a = 3),
+  where = ns)
+setClass("WP2", contains = "WP", prototype = prototype(a = 9), where = ns)
+setClass("Slots", slots = c(f = "function", e = "environment", l = "list"), where = ns)
+
+classes <- c("P0", "P1", "P2", "P3", "Q1", "Q2", "Q3", "PQ", "R0", "R1", "R2", "S1", "WP", "WP2",
+  "PU", "QU", "PUU")
+for (cl in classes) {
+  def <- getClass(cl, where = ns)
+  cat(cl, if (def@virtual) "(virtual)", "\n")
+  cat("  contains:", names(def@contains), "\n")
+  cat("  by:", vapply(def@contains, function(e) if (length(e@by)) e@by else "-", ""), "\n")
+  cat("  distance:", vapply(def@contains, function(e) e@distance, 1), "\n")
+  cat("  subclasses:", names(def@subclasses), "\n")
+  cat("  slots:", paste(names(def@slots), def@slots, sep = "="), "\n")
+}
+str(attributes(getClass("WP2", where = ns)@prototype))
+str(new("R2")@r)
+s <- new("Slots")
+cat(class(s@f), class(s@e), length(s@l), identical(s@e, new("Slots")@e), "\n")
+extends("S1", "PUU")
+extends("P1", "PU")
+is(new("P3"), "QU")
+is(new("Q3"), "PUU")
+existsMethod("initialize", "P3")
+
+setGeneric("g1", function(x, ...) standardGeneric("g1"), where = ns)
+setMethod("g1", "P0", function(x, n = 2, ...) x@p * n, where = ns)
+setMethod("g1", "Q1", function(x, ..., scale) x@q * scale, where = ns)
+setGeneric("g2", function(x, y, ...) standardGeneric("g2"), where = ns)
+setMethod("g2", c("P0", "missing"), function(x, y, k = 1, ...) x@p + k, where = ns)
+setMethod("g2", c("P0", "numeric"), function(x, y, k = y, ...) x@p + y + k, where = ns)
+setGeneric("g3", function(object, verbose = FALSE, ...) standardGeneric("g3"), where = ns)
+setMethod("g3", "P0", function(object, verbose = TRUE, ...) verbose, where = ns)
+setMethod("g3", "Q1", function(object, verbose = FALSE, digits = 3, ...) c(verbose, digits),
+  where = ns)
+
+g1 <- get("g1", ns)
+g2 <- get("g2", ns)
+g3 <- get("g3", ns)
+g1(new("P1", p = 2))
+g1(new("P1", p = 2), n = 5)
+g1(new("Q1", q = 2), scale = 10)
+g2(new("P0", p = 1))
+g2(new("P0", p = 1), k = 4)
+g2(new("P0", p = 1), 2)
+g3(new("P0"))
+g3(new("Q1"), digits = 7)
+for (spec in list(list("g1", "P0"), list("g1", "Q1"), list("g2", c("P0", "missing")),
+                  list("g2", c("P0", "numeric")), list("g3", "P0"), list("g3", "Q1"))) {
+  method <- getMethod(spec[[1]], spec[[2]], where = ns)
+  cat(spec[[1]], spec[[2]], ":", class(method), "\n")
+  print(formals(method))
+  print(body(method))
+}
+showMethods("g2", where = ns)
+showMethods("g3", where = ns, includeDefs = TRUE)
+
+# A class whose ancestors include a union makes `setIs()` recache the union's other members,
+# which changes how their methods dispatch.
+setClass("M", slots = c(m = "numeric"), where = ns)
+setClassUnion("U", "M", where = ns)
+setClass("S", contains = "M", where = ns)
+setClass("C", contains = "S", where = ns)
+setClass("D", contains = "C", slots = c(d = "list"), where = ns)
+setClassUnion("U3", "C", where = ns)
+setClass("E", contains = "D", where = ns)
+setClass("F", contains = "E", where = ns)
+is(new("D"))
+setGeneric("h", function(x) standardGeneric("h"), where = ns)
+setMethod("h", "M", function(x) "M", where = ns)
+setMethod("h", "U3", function(x) "U3", where = ns)
+get("h", ns)(new("D"))
+
+# `tryNew()` falls back to the prototype when a slot class's `initialize` fails.
+gen <- suppressMessages(setRefClass("RC", fields = list(a = "numeric"),
+  methods = list(initialize = function(...) stop("boom")), where = ns))
+setClass("Holder", slots = c(r = "RC", n = "numeric"), where = ns)
+class(attr(getClass("Holder", where = ns)@prototype, "r"))
+
+# A character `representation` other than a single class name is an error.
+r <- try(setClass("Z", representation = c(x = "numeric"), where = ns), silent = TRUE)
+isClass("Z", where = ns)
+r <- try(setClass("Z2", representation = c(y = "numeric", "P0"), where = ns), silent = TRUE)
+isClass("Z2", where = ns)
