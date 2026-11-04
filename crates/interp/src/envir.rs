@@ -374,10 +374,19 @@ unsafe fn do_set_environment(call: &Call<'_>) -> R<Sexp> {
     let mut env = call.arg(1);
     // GNU R's `simple_as_environment`: an S4 object extending `environment`, such as a
     // reference class object, stands for the environment in its data part.
+    // Any other S4 object counts as `NULL` for a closure and is refused for anything else.
     if env.kind() == SexpType::Object {
-        env = crate::subset::s4_data_part(env);
+        let data_part = crate::subset::s4_data_part(env);
+        if data_part.kind() == SexpType::Environment {
+            env = data_part;
+        } else if object.kind() == SexpType::Closure {
+            env = nil();
+        }
     }
     if object.kind() == SexpType::Closure {
+        if env == nil() {
+            return Err(call.error("use of NULL environment is defunct"));
+        }
         if env.kind() != SexpType::Environment {
             return Err(call.error("replacement object is not an environment"));
         }

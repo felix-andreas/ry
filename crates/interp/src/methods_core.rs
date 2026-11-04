@@ -2058,6 +2058,10 @@ unsafe fn do_set_class_union(call: &Call<'_>) -> R<Sexp> {
     if !native_definitions() {
         bail!(skip);
     }
+    // GNU R forces `members`, then `where`, then `name`, which shows when a promise has effects.
+    for argument in ["members", "where"] {
+        forced_arg(frame, argument)?;
+    }
     let Some(class) = forced_arg(frame, "name")? else {
         bail!(skip);
     };
@@ -2535,13 +2539,13 @@ unsafe fn add_union_member(
             pending.cache(subclass, rebound, true);
         }
     } else {
-        // `.recacheSubclasses(member)` puts the member among its subclasses' superclasses, where
-        // it already is.
-        for &(subclass, _) in &member_subclasses {
+        // `.recacheSubclasses(member)` overwrites the member's entry in each subclass's
+        // superclasses with the member's extension for it, which must change nothing.
+        for &(subclass, extension) in &list_entries(slot(member_updated, "subclasses")?) {
             let Some(subclass_definition) = pending.class(subclass)? else {
                 bail!(false);
             };
-            if element(slot(subclass_definition, "contains")?, member.bytes()).is_none() {
+            if !recache_unchanged(subclass_definition, member.bytes(), extension)? {
                 bail!(false);
             }
         }
@@ -2829,22 +2833,32 @@ unsafe fn class_cached(symbol: Sexp, name: &[u8], place: Sexp, class_table: Sexp
             else {
                 bail!(false);
             };
-            let contains = list_entries(slot(member_definition, "contains")?);
-            if !contains
-                .iter()
-                .any(|entry| entry.0.bytes() == name && entry.1 == extension)
-            {
+            if !recache_unchanged(member_definition, name, extension)? {
                 bail!(false);
             }
-            let mut previous = f64::NEG_INFINITY;
-            for &(_, superclass_extension) in &contains {
-                let distance = values::as_real_scalar(slot(superclass_extension, "distance")?);
-                if !(distance >= previous) {
-                    bail!(false);
-                }
-                previous = distance;
-            }
         }
+    }
+    Ok(true)
+}
+
+/// Whether `.recacheSubclasses()` leaves the class `definition` as it is: it overwrites the
+/// entry for `superclass` in the class's `contains` with `extension` and re-sorts by distance,
+/// which changes nothing when the entry is that very extension and the order is already sorted.
+unsafe fn recache_unchanged(definition: Sexp, superclass: &[u8], extension: Sexp) -> R<bool> {
+    let contains = list_entries(slot(definition, "contains")?);
+    if !contains
+        .iter()
+        .any(|entry| entry.0.bytes() == superclass && entry.1 == extension)
+    {
+        return Ok(false);
+    }
+    let mut previous = f64::NEG_INFINITY;
+    for &(_, superclass_extension) in &contains {
+        let distance = values::as_real_scalar(slot(superclass_extension, "distance")?);
+        if !(distance >= previous) {
+            return Ok(false);
+        }
+        previous = distance;
     }
     Ok(true)
 }

@@ -85,7 +85,7 @@ costs from `RY_TRACE_METHODS_BAILS=1` with a timer around each definition):
   1.8 ms each, 33 ms for 19 calls.
 - Native `setMethod`: about 23 µs per call, 42 ms for 1,867 methods.
 - The first union of a basic class (`setClassUnion("Basic00OrNull", ...)`, about 9 ms), which
-  copies the basic member classes into the methods namespace on the R path. Later unions are
+  rebinds the basic member classes in `package:methods` on the R path. Later unions are
   native (about 190 µs each).
 - `cacheMetaData` delegates a class to `.cacheClass` when its cached definition differs from the
   bound one (77 classes on `s4plain`, real work) and a union whose members' cached extensions are

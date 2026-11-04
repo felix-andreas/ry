@@ -64,6 +64,13 @@ f <- function() value
 environment(f) <- as.environment(h)
 f()
 
-# A class definition holds an external pointer, which format() and str() show.
-format(getClass("Base", where = ns)@versionKey)
-str(list(key = getClass("Base", where = ns)@versionKey))
+# A class definition holds an external pointer, which format() shows by its address.
+key <- getClass("Base", where = ns)@versionKey
+typeof(key)
+startsWith(format(key), "<pointer: ")
+
+# An S4 value that is not an environment is refused as one.
+g <- function() 1
+tryCatch(environment(g) <- new("Base"), error = function(e) cat("error:", conditionMessage(e), "\n"))
+y <- 1
+tryCatch(environment(y) <- new("Base"), error = function(e) cat("error:", conditionMessage(e), "\n"))

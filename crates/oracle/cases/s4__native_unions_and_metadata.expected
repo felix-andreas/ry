@@ -32,9 +32,10 @@
 | [1] TRUE
 | [1] FALSE
 | [1] 1
-| [1] "<pointer: 0x7f786c616a80>"
-| List of 1
-|  $ key:<externalptr> 
+| [1] "externalptr"
+| [1] TRUE
+| error: use of NULL environment is defunct 
+| error: replacement object is not an environment 
 [messages]
 [warnings]
 [errors]

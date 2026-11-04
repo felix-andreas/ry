@@ -12,8 +12,8 @@ description: Release announcements and project news
   `setClassUnion()` and `methods::cacheMetaData()` run in Rust for the shapes packages usually
   write, with results identical to the methods package's R code. On a generated package with 2,892
   S4 definitions, the first `new()` after an uncached load takes about 0.5 s instead of about 6 s.
-- **`format()` and `str()` show external pointers** as GNU R does (`<pointer: 0x…>`), instead of
-  failing with "Found no format() method".
+- **`format()` shows external pointers** as GNU R does (`<pointer: 0x…>`), so `str()` of a value
+  that holds one, such as an S4 class definition, no longer fails with "Found no format() method".
 
 ### Known limitations
 
