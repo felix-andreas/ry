@@ -7686,7 +7686,9 @@ Each one trades a narrow class of missed errors for a class of false reports see
   assembled home links `lib/libRblas.so` and `lib/libRlapack.so` to the files the dynamic loader
   resolves `libblas.so.3` and `liblapack.so.3` to (`dlopen`, then `dladdr` on `dgemm_` or `dgesv_`),
   and its Makeconf names them as GNU R's does (`-L"$(R_HOME)/lib" -lRblas`); a package linked so
-  records the system soname. `install` makes the library path absolute.
+  records the soname of the file the link resolves to (which may be the file that defines the
+  routine, such as `libopenblas.so.0`, rather than `libblas.so.3`). The lookup closes its handle,
+  so an install process does not keep OpenBLAS's thread pool. `install` makes the library path absolute.
 - **What is not the bottleneck.** Installs never byte-compile (ry compiles closures when they
   run), and writing the lazy-load database is fast: 0.06 s for MASS against GNU R's 0.10 s on the
   same driver. The R half spends its time in Rd processing and help indices (MASS: 0.55 s and

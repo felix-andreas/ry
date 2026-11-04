@@ -594,8 +594,7 @@ fn link_system_library(root: &Path, sonames: &[&str], symbol: &str, own: &str) -
     Ok(true)
 }
 
-/// The file the dynamic loader resolves `soname` to. The library stays loaded: the runtime
-/// opens the same one for linear algebra, so unloading it would only repeat the work.
+/// The file the dynamic loader resolves `soname` to, found through the file that defines `symbol`.
 #[cfg(target_os = "linux")]
 fn system_library_file(soname: &str, symbol: &str) -> Option<PathBuf> {
     use std::{
@@ -604,24 +603,24 @@ fn system_library_file(soname: &str, symbol: &str) -> Option<PathBuf> {
     };
     let soname = CString::new(soname).ok()?;
     let symbol = CString::new(symbol).ok()?;
-    // SAFETY: opening a shared library runs its initializers; BLAS and LAPACK builds have none
-    // that touch the process beyond their own state. `dladdr` fills `info` with pointers into
-    // the loader's own tables, which stay valid while the library is loaded.
+    // SAFETY: opening a shared library runs its initializers, and OpenBLAS's starts a thread pool;
+    // the handle is closed before returning, which joins it again. `dladdr` fills `info` with
+    // pointers into the loader's tables, and the path is copied out before `dlclose` frees them.
     unsafe {
         let handle = libc::dlopen(soname.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
         if handle.is_null() {
             return None;
         }
         let address = libc::dlsym(handle, symbol.as_ptr());
-        if address.is_null() {
-            return None;
-        }
         let mut info: libc::Dl_info = std::mem::zeroed();
-        if libc::dladdr(address, &mut info) == 0 || info.dli_fname.is_null() {
-            return None;
-        }
-        let file = PathBuf::from(OsStr::from_bytes(CStr::from_ptr(info.dli_fname).to_bytes()));
-        file.is_absolute().then_some(file)
+        let file = (!address.is_null()
+            && libc::dladdr(address, &mut info) != 0
+            && !info.dli_fname.is_null())
+        .then(|| PathBuf::from(OsStr::from_bytes(CStr::from_ptr(info.dli_fname).to_bytes())));
+        // A failed close leaves the library mapped in an install process that exits soon, and the
+        // path found is right either way, so the failure changes nothing worth reporting.
+        libc::dlclose(handle);
+        file.filter(|file| file.is_absolute())
     }
 }
 

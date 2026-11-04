@@ -312,7 +312,8 @@ Both run R's own `build` and `INSTALL` scripts on ry's runtime, from ry's R home
 built against ry's libR, as `ry run` loads it. `--runtime gnu-r` (or `RY_RUNTIME=gnu-r`) uses GNU R
 instead.
 
-ry's `R CMD INSTALL` runs `make` with one job per processor unless `MAKEFLAGS` is set. A package
+ry's `R CMD INSTALL` and `R CMD SHLIB` run `make` with one job per processor unless `MAKEFLAGS`
+is set to a value. A package
 whose `Makevars` builds correctly only with one job fails in parallel, so a failed parallel build
 runs again with one job, reusing the objects already built. Installed R code is not byte-compiled,
 because ry compiles closures when they run.
