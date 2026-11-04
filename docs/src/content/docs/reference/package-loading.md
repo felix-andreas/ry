@@ -224,6 +224,17 @@ the top-level statements, the S4 caches and so on. `RY_LOAD_VERBOSE=true` in the
 the option's default, which reaches the load `ry load` makes before any of your code runs. The first
 load of a process also prints `process start`, the time the process took to reach the load.
 
+On ry's runtime, `setClass()`, `setClassUnion()`, `setGeneric()` and `setMethod()` run natively
+when the result is identical to what the methods package's R code builds, and that R code runs
+otherwise. With the option on, each definition that takes the R code says which one and why:
+
+```
+ry: setClass("Num") runs the methods package's R code: a superclass is a basic class or comes from another package (methods_core.rs:2520)
+```
+
+The R code gives the same classes and methods, only more slowly (a few milliseconds per
+definition against tens of microseconds), so the report is a guide to load time, not a warning.
+
 On ry's runtime, process start and the imports run GNU R's own R code: base, `methods` and the
 default packages at start, then each imported namespace. A warm load spends most of its time
 there. The runtime registers each namespace's S3 methods natively, in place of the loops in GNU R

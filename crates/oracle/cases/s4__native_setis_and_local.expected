@@ -1,0 +1,234 @@
+[stdout]
+| P0 
+|   contains: PU PUU 
+|   by: - PU 
+|   distance: 1 2 
+|   subclasses: P1 P2 P3 PQ S1 
+|   slots: p=numeric 
+| P1 
+|   contains: P0 QU PU PUU 
+|   by: - - P0 QU 
+|   distance: 1 1 2 2 
+|   subclasses: P2 P3 PQ S1 
+|   slots: p=numeric 
+| P2 
+|   contains: P1 P0 QU PU PUU 
+|   by: - P1 P1 P1 PU 
+|   distance: 1 2 2 3 4 
+|   subclasses: P3 PQ S1 
+|   slots: p=numeric 
+| P3 
+|   contains: P2 P1 P0 PU QU PUU 
+|   by: - P2 P2 P2 P1 QU 
+|   distance: 1 2 3 4 3 4 
+|   subclasses: S1 
+|   slots: p3=character p=numeric 
+| Q1 
+|   contains: Q0 QU PUU 
+|   by: - - QU 
+|   distance: 1 1 2 
+|   subclasses: Q2 Q3 
+|   slots: q=numeric 
+| Q2 
+|   contains: Q1 Q0 QU PUU 
+|   by: - Q1 Q1 QU 
+|   distance: 1 2 2 3 
+|   subclasses: Q3 
+|   slots: q=numeric 
+| Q3 
+|   contains: Q2 Q1 Q0 QU 
+|   by: - Q2 Q2 Q2 
+|   distance: 1 2 3 3 
+|   subclasses: 
+|   slots: q=numeric 
+| PQ 
+|   contains: P2 Q0 P1 P0 QU PU 
+|   by: - - P2 P2 P2 P2 
+|   distance: 1 1 2 3 3 4 
+|   subclasses: 
+|   slots: p=numeric 
+| R0 (virtual) 
+|   contains: Q0 
+|   by: - 
+|   distance: 1 
+|   subclasses: R1 R2 
+|   slots:  
+| R1 
+|   contains: R0 Q0 
+|   by: - R0 
+|   distance: 1 2 
+|   subclasses: R2 
+|   slots: r=list 
+| R2 
+|   contains: R1 R0 Q0 
+|   by: - R1 R1 
+|   distance: 1 2 3 
+|   subclasses: 
+|   slots: r=list 
+| S1 
+|   contains: P3 P2 P1 P0 QU PU PUU 
+|   by: - P3 P3 P3 P3 P3 P3 
+|   distance: 1 2 3 4 4 5 5 
+|   subclasses: 
+|   slots: p3=character p=numeric 
+| WP 
+|   contains: 
+|   by:  
+|   distance:  
+|   subclasses: WP2 
+|   slots: a=numeric b=list 
+| WP2 
+|   contains: WP 
+|   by: - 
+|   distance: 1 
+|   subclasses: 
+|   slots: a=numeric b=list 
+| PU (virtual) 
+|   contains: PUU 
+|   by: - 
+|   distance: 1 
+|   subclasses: P0 P2 S1 
+|   slots:  
+| QU (virtual) 
+|   contains: PUU 
+|   by: - 
+|   distance: 1 
+|   subclasses: Q1 P1 Q2 P2 P3 
+|   slots:  
+| PUU (virtual) 
+|   contains: 
+|   by:  
+|   distance:  
+|   subclasses: PU QU P0 Q1 P1 Q2 P2 P2 P3 
+|   slots:  
+| List of 2
+|  $ a: num 9
+|  $ b:List of 1
+|   ..$ : num 1
+| List of 1
+|  $ : num 1
+| function environment 0 TRUE 
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] "g1"
+| [1] "g2"
+| [1] "g3"
+| [1] 4
+| [1] 10
+| [1] 20
+| [1] 2
+| [1] 5
+| [1] 5
+| [1] TRUE
+| [1] 0 7
+| g1 P0 : MethodDefinition 
+| $x
+| 
+| 
+| $...
+| 
+| 
+| {
+|     .local <- function (x, n = 2, ...) 
+|     x@p * n
+|     .local(x, ...)
+| }
+| g1 Q1 : MethodDefinition 
+| $x
+| 
+| 
+| $...
+| 
+| 
+| {
+|     .local <- function (x, ..., scale) 
+|     x@q * scale
+|     .local(x, ...)
+| }
+| g2 P0 missing : MethodDefinition 
+| $x
+| 
+| 
+| $y
+| 
+| 
+| $...
+| 
+| 
+| {
+|     .local <- function (x, y, k = 1, ...) 
+|     x@p + k
+|     .local(x, y = y, ...)
+| }
+| g2 P0 numeric : MethodDefinition 
+| $x
+| 
+| 
+| $y
+| 
+| 
+| $...
+| 
+| 
+| {
+|     .local <- function (x, y, k = y, ...) 
+|     x@p + y + k
+|     .local(x, y, ...)
+| }
+| g3 P0 : MethodDefinition 
+| $object
+| 
+| 
+| $verbose
+| [1] TRUE
+| 
+| $...
+| 
+| 
+| verbose
+| g3 Q1 : MethodDefinition 
+| $object
+| 
+| 
+| $verbose
+| [1] FALSE
+| 
+| $...
+| 
+| 
+| {
+|     .local <- function (object, verbose = FALSE, digits = 3, 
+|         ...) 
+|     c(verbose, digits)
+|     .local(object, verbose, ...)
+| }
+| Function: g2 (package s4setis)
+| x="P0", y="missing"
+| x="P0", y="numeric"
+| 
+| Function: g3 (package s4setis)
+| object="P0"
+| function (object, verbose = TRUE, ...) 
+| verbose
+| 
+| 
+| object="Q1"
+| function (object, verbose = FALSE, ...) 
+| {
+|     .local <- function (object, verbose = FALSE, digits = 3, 
+|         ...) 
+|     c(verbose, digits)
+|     .local(object, verbose, ...)
+| }
+| 
+| 
+| 
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| structure(1L, class = c("terminal", "connection"))

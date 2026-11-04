@@ -36,8 +36,45 @@ load <- if (exists("load_all", mode = "function") && Sys.getenv("LOADER") != "pk
     options(ry.load.lazy_s4 = FALSE)
     load_all(root, quiet = TRUE)
   }
-} else {
+} else if (requireNamespace("pkgload", quietly = TRUE)) {
   function() pkgload::load_all(root, quiet = TRUE)
+} else {
+  # Without pkgload, a bare namespace that imports everything its imports export and sources
+  # the files in collation order, which is what load_all does for this package.
+  function() {
+    description <- read.dcf(file.path(root, "DESCRIPTION"))
+    name <- description[1L, "Package"]
+    files <- if ("Collate" %in% colnames(description)) {
+      scan(text = description[1L, "Collate"], what = "", quiet = TRUE)
+    } else {
+      sort(basename(list.files(file.path(root, "R"), pattern = "[.][Rr]$")))
+    }
+    imports <- if ("Imports" %in% colnames(description)) {
+      sub("[ (].*", "", trimws(strsplit(description[1L, "Imports"], ",")[[1L]]))
+    } else {
+      character()
+    }
+    info <- new.env(hash = TRUE, parent = baseenv())
+    parent <- new.env(hash = TRUE, parent = .BaseNamespaceEnv)
+    attr(parent, "name") <- paste0("imports:", name)
+    for (package in imports) {
+      exports <- asNamespace(package)
+      for (export in getNamespaceExports(package)) {
+        assign(export, get(export, envir = exports), envir = parent)
+      }
+    }
+    namespace <- new.env(hash = TRUE, parent = parent)
+    assign(".__NAMESPACE__.", info, envir = namespace)
+    info$spec <- c(name = name, version = description[1L, "Version"])
+    info$exports <- new.env(hash = TRUE, parent = baseenv())
+    info$imports <- list(base = TRUE)
+    info$path <- root
+    info$dynlibs <- character()
+    info$S3methods <- matrix(NA_character_, 0L, 4L)
+    assign(".packageName", name, envir = namespace)
+    .Internal(registerNamespace(name, namespace))
+    for (file in files) sys.source(file.path(root, "R", file), envir = namespace, keep.source = TRUE)
+  }
 }
 total <- system.time(suppressMessages(load()))[["elapsed"]]
 s4 <- 0

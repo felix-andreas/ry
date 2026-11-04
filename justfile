@@ -527,12 +527,22 @@ corpus-ry-install *args: ry-home
 oracle *args:
     cargo run -q -p oracle -- {{ args }}
 
-# Generates the seeded S4-heavy package (600 classes, 1,900 methods) into `dir` and times its first load on ry's runtime, split by S4 call, e.g. `just bench-s4-load .bench/s4heavy`.
+# Generates the seeded S4-heavy package (600 classes, 1,900 methods) into `dir` and times its first load on ry's runtime and on GNU R, split by S4 call, e.g. `just bench-s4-load .bench/s4heavy`.
 bench-s4-load dir="target/s4heavy" seed="20261102":
     cargo build --release -p ry-lang -p libr
     python3 -I tools/loader-bench/s4_package.py {{ dir }} --seed {{ seed }}
     cd {{ dir }} && echo 'q()' | {{ justfile_directory() }}/target/release/ry run
     cd {{ justfile_directory() }}/target && PKG={{ absolute_path(dir) }} ./release/ry run {{ justfile_directory() }}/tools/loader-bench/s4_profile.R
+    @echo "== GNU R"
+    cd {{ justfile_directory() }}/target && PKG={{ absolute_path(dir) }} Rscript {{ justfile_directory() }}/tools/loader-bench/s4_profile.R
+
+# Times single S4 definitions in the global environment on GNU R and ry, e.g. `just bench-s4-micro 100`.
+bench-s4-micro n="200":
+    cargo build --release -p ry-lang -p libr
+    @echo "== GNU R"
+    S4_MICRO_N={{ n }} Rscript tools/loader-bench/s4_micro.R
+    @echo "== ry"
+    cd target && S4_MICRO_N={{ n }} ./release/ry run {{ justfile_directory() }}/tools/loader-bench/s4_micro.R
 
 # Times each phase of `ry load` on the S4-heavy package and its first S4 use, once with an empty cache and twice warm, e.g. `just bench-s4-first-use target/s4heavy lubridate,data.table,xts`.
 bench-s4-first-use dir="target/s4heavy" imports="" seed="20261102":

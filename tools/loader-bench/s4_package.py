@@ -18,11 +18,19 @@ package's classes and basic ones, which are the two shapes that used to keep eve
 eager. `--imports` adds real packages to `Imports` and `import()`s them, so the load's import
 phase does real work, as `--imports lubridate,data.table,xts` does.
 
+A third of the methods on package generics (`--local-share`) add a `verbose = FALSE` argument
+before the generic's `...`, so `setMethod()` wraps them in a `.local` function as the methods
+package does for any method whose formals differ from its generic's.
+
 `R/zz_probe.R` defines `s4_probe()`, which exercises dispatch, `is()`, `validObject`,
 `callNextMethod`, `show`, `initialize`, unions and the base generics' methods, and returns the
 results as a list, so `s4_check.R` can compare a load on one runtime against another.
 
-Usage: python3 s4_package.py ROOT [--seed N] [--imports PKG,PKG]
+`--local-share 0.33` gives that share of the package-generic methods an extra formal
+(`function(object, verbose = FALSE, ...)`), which `setMethod()` rematches through `.local`, as
+about a third of the reported package's methods do.
+
+Usage: python3 s4_package.py ROOT [--seed N] [--imports PKG,PKG] [--local-share F]
 """
 import argparse
 import os
@@ -45,9 +53,14 @@ def main():
     parser.add_argument("--seed", type=int, default=20261102)
     parser.add_argument("--name", default="s4heavy")
     parser.add_argument("--imports", default="")
+    parser.add_argument("--local-share", type=float, default=0.33,
+                        help="share of package-generic methods whose formals add an argument")
     args = parser.parse_args()
     rng = random.Random(args.seed)
     package = Package(rng)
+    # A separate stream, so the share leaves every other choice of a given seed as it was.
+    package.local_rng = random.Random(args.seed + 1)
+    package.local_share = args.local_share
     package.write(args.root, args.name, [name for name in args.imports.split(",") if name])
 
 
@@ -365,6 +378,9 @@ def method_text(rng, generic, signature, argument, package, counters):
     if argument is None:
         formals = "x, y, ..." if generic in package.pair_generics else "object, ..."
         receiver = "x" if generic in package.pair_generics else "object"
+        # A formal the generic lacks makes `setMethod()` wrap the body in `.local`.
+        if package.local_rng.random() < package.local_share:
+            formals = formals.replace("...", "verbose = FALSE, ...")
     elif generic == "initialize":
         return (f'setMethod("initialize", {signature_text}, function(.Object, ...) {{\n'
                 "  .Object <- callNextMethod(.Object, ...)\n"
