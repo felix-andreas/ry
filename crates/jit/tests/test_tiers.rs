@@ -323,10 +323,12 @@ fn seeds_agree_across_tiers() {
             "(n = 600L)",
             false,
         ),
+        // An R integer becomes `I64` in a list, and a `List<I64>` has no R vector to fall back
+        // to, so storing an R value in one is an error in every tier.
         (
             "out <- List.from_r(rep(0L, n))\nfor (i in 1:n) out[[i]] <- if (i == 400L) NA_integer_ else i\nlist(.ry_is_list(out), out[[400]], out[[n]])",
             "(n = 600L)",
-            false,
+            true,
         ),
         // A loop compiled before the one after it has run: the second loop guesses an integer
         // sequence, and a double one deoptimizes.
