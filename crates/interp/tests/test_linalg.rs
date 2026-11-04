@@ -78,6 +78,30 @@ r <- .Internal(La_chol(s, FALSE, -1))
 lq <- .Internal(La_qr(x))
 "#;
 
+/// The orders of summation that decide the last bit. Reference `dsyrk` and GNU R's NaN fallback
+/// loops add the products in index order in double, which is what `default` and `blas` do here;
+/// `internal` accumulates in x87 long double and so differs from that loop; and `cumprod`
+/// rounds a long double running product, so it differs from a double recurrence. A machine whose
+/// GNU R links OpenBLAS gets other bits from its `default` and `blas` products, by design.
+const SUMMATION_ORDERS: &str = r#"
+order_m <- (sin(1:120 * 1.3) + 1.5) * 1e6
+dim(order_m) <- c(20L, 6L)
+loop <- rep(0, 36)
+dim(loop) <- c(6L, 6L)
+for (i in 1:6) for (j in 1:6) { acc <- 0; for (k in 1:20) acc <- acc + order_m[k, i] * order_m[k, j]; loop[i, j] <- acc }
+.Internal(options(list(matprod = "default")))
+by_default <- all(.Internal(crossprod(order_m, NULL)) == loop)
+.Internal(options(list(matprod = "blas")))
+by_blas <- all(.Internal(crossprod(order_m, NULL)) == loop)
+.Internal(options(list(matprod = "internal")))
+by_internal <- all(.Internal(crossprod(order_m, NULL)) == loop)
+.Internal(options(list(matprod = "default")))
+series <- 1 + (sin(1:100000 * 1.7) + 1) / 200
+running <- series
+for (k in 2:100000) running[k] <- running[k - 1] * series[k]
+as.numeric(c(by_default, by_blas, by_internal, all(cumprod(series) == running)))
+"#;
+
 /// The matrix products: each case's name, expression, and the bits of GNU R's result.
 const PRODUCTS: &[(&str, &str, &[u64])] = &[
     (
@@ -631,6 +655,11 @@ fn linear_algebra_matches_gnu_r() {
                 "{name}: `{expression}`"
             );
         }
+        assert_eq!(
+            result_bits("summation orders", SUMMATION_ORDERS),
+            [1.0f64, 1.0, 0.0, 0.0].map(f64::to_bits),
+            "default and blas sum in index order, internal and cumprod in long double"
+        );
         if !system_lapack_present() {
             eprintln!(
                 "skipping the library cases: the system BLAS and LAPACK (libblas.so.3, \
