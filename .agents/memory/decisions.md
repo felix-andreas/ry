@@ -7526,7 +7526,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Library constants are speculated by identity.** `Num.pi` and its siblings are read as constants when the value the name resolves to is the very object `standard_library::builtins_env()` holds, so a user binding of the same name, or a rebinding, fails the guard (`lower::resolve_value`, `typed::still_resolves`).
 - **`List<T>` annotations are checked at run time.** The mask reader knew only the old `Array<T>` spelling, so a closure annotated with nothing but lists counted as untyped and never reached the typed core. `List<T>` requires the Array bit and the item's storage (an R list for records, tags, functions and nested lists), and any empty list passes, because an empty list is stored as `logical`.
 - **A constant scalar default is passed as the argument** (`jit::native::call`), so a missing argument with a default such as `k: F64 = 3` no longer refuses the call.
-- **Impact.** On the why-bench, typed and strict: `array_dot` 3.171 s to 0.008 s, `loop_sum` 2.341 to 0.007, `bond_book` 4.075 to 0.072, `drawdown` 1.663 to 0.007, `vector_arith` 0.266 to 0.063, `log_rank` 3.286 to 1.853 (its `Record` parameter still refuses).
+- **Impact.** On the why-bench, typed and strict: `array_dot` 3.171 s to 0.004 s, `loop_sum` 2.341 to 0.007, `bond_book` 4.075 to 0.075, `drawdown` 1.663 to 0.007, `closures` 0.756 to 0.004, `vector_arith` 0.266 to 0.062, `log_rank` 3.286 to 1.653 (its `Record` parameter still refuses).
 
 ## Docs information architecture: Introduction, Tutorial, Reference, Development
 
