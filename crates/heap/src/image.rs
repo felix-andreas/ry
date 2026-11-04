@@ -856,6 +856,7 @@ fn kind_of(code: u8) -> Result<SexpType, ImageError> {
     SexpType::from_code(u32::from(code)).ok_or_else(|| invalid("an object has an unknown type"))
 }
 
+#[inline]
 fn lookup(objects: &[Sexp], position: u32) -> Result<Sexp, ImageError> {
     objects
         .get(position as usize)
@@ -863,6 +864,7 @@ fn lookup(objects: &[Sexp], position: u32) -> Result<Sexp, ImageError> {
         .ok_or_else(|| invalid("a reference points past the objects loaded so far"))
 }
 
+#[cold]
 fn invalid(message: &str) -> ImageError {
     ImageError::Invalid(message.to_owned())
 }
@@ -909,6 +911,7 @@ pub struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
+    #[inline]
     pub fn take(&mut self, count: usize) -> Result<&'a [u8], ImageError> {
         if self.bytes.len() < count {
             return Err(invalid("it ends early"));
@@ -918,28 +921,34 @@ impl<'a> Reader<'a> {
         Ok(taken)
     }
 
+    #[inline]
     fn array<const N: usize>(&mut self) -> Result<[u8; N], ImageError> {
         let mut array = [0; N];
         array.copy_from_slice(self.take(N)?);
         Ok(array)
     }
 
+    #[inline]
     pub fn u8(&mut self) -> Result<u8, ImageError> {
         Ok(self.array::<1>()?[0])
     }
 
+    #[inline]
     pub fn u16(&mut self) -> Result<u16, ImageError> {
         Ok(u16::from_le_bytes(self.array()?))
     }
 
+    #[inline]
     pub fn u32(&mut self) -> Result<u32, ImageError> {
         Ok(u32::from_le_bytes(self.array()?))
     }
 
+    #[inline]
     pub fn u64(&mut self) -> Result<u64, ImageError> {
         Ok(u64::from_le_bytes(self.array()?))
     }
 
+    #[inline]
     pub fn blob(&mut self) -> Result<&'a [u8], ImageError> {
         let length = self.u64()?;
         let length = usize::try_from(length).map_err(|_| invalid("a length is too large"))?;
@@ -951,6 +960,11 @@ impl<'a> Reader<'a> {
         if self.bytes.len() < count * 4 {
             return Err(invalid("it ends early"));
         }
-        (0..count).map(|_| self.u32()).collect()
+        let (words, rest) = self.bytes.split_at(count * 4);
+        self.bytes = rest;
+        Ok(words
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect())
     }
 }
