@@ -24,7 +24,7 @@ f: fn(x: Celsius) -> double
 #---- nominal_constructor_warns_and_types_as_its_value
 x <- @UserId(5L)
 #++++
-x: integer
+x: I64
 5..12 warning[inline-annotation] inline type annotations are turned off (`[check] inline-annotations = false`), so this one is not checked. R itself cannot run this code: delete the annotation, or turn inline annotations back on
 
 #---- inline_coercion_warns

@@ -329,6 +329,37 @@ package version target="":
     esac
     echo "$dir/ry-$target.$(case "$target" in *windows*) echo zip ;; *) echo tar.gz ;; esac)"
 
+# Print the name of a nightly build of COMMIT: `nightly.<UTC date>.<HHMM>.<six hex digits of the hash>`.
+nightly-name commit="HEAD":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    stamp=$(TZ=UTC0 git log -1 --format='%cd' --date=format-local:'%Y%m%d.%H%M' {{ quote(commit) }})
+    hash=$(git rev-parse {{ quote(commit) }})
+    echo "nightly.$stamp.${hash:0:6}"
+
+# Publish release/NAME as a nightly GitHub release, then delete all but the newest five nightlies.
+# It is a normal release with `--latest=false`, never a pre-release: the Zed extension installs the
+# newest pre-release, and GitHub's "latest" must keep pointing at a real release.
+# Needs `gh` signed in (GH_TOKEN in CI).
+nightly-publish name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    name={{ quote(name) }}
+    sha="${GITHUB_SHA:-$(git rev-parse HEAD)}"
+    asset="release/$name/ry-x86_64-unknown-linux-gnu.tar.gz"
+    repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+    url="https://github.com/$repo/releases/download/$name/ry-x86_64-unknown-linux-gnu.tar.gz"
+    notes="An untested snapshot of [${sha:0:7}](https://github.com/$repo/commit/$sha), not a release. Install on Linux x86_64 with: \`curl -fsSL $url | tar xz\`"
+    if gh release view "$name" >/dev/null 2>&1; then
+    	gh release upload "$name" --clobber "$asset"
+    else
+    	gh release create "$name" --latest=false --target "$sha" --title "ry $name" --notes "$notes" "$asset"
+    fi
+    # The names start with a date, so the newest sort last.
+    gh release list --limit 200 --json tagName --jq '.[].tagName | select(startswith("nightly."))' |
+    	sort -r | tail -n +6 |
+    	while read -r tag; do gh release delete "$tag" --cleanup-tag --yes; done
+
 # Package this machine's release archive, then install it into a scratch directory and smoke-test it.
 release-dry-run version="0.0.0-dry-run":
     #!/usr/bin/env bash

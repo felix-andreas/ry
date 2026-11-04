@@ -1878,6 +1878,13 @@ impl Lowering<'_> {
                     .builder
                     .emit(Type::of_item(item), Op::Get(vector, index)))
             }
+            // A typed list carries its item type, so the runtime's empty-list storage fix is moot.
+            ".ry_items" => {
+                let [list, _] = arguments.exactly(2)?[..] else {
+                    return Err(Refusal("a malformed `.ry_items`"));
+                };
+                self.value(list)
+            }
             "lapply" | "vapply" | "List.map" => self.map(name, &arguments),
             "unlist" => {
                 let [a] = arguments.exactly(1)?[..] else {

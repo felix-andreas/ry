@@ -60,18 +60,18 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderCompile", 2, do_compile).invisible(),
 ];
 
-/// Evaluates the loader's R side into a fresh environment and attaches it as `tools:ry`, which
-/// gives the session `load_all()`.
+/// Attaches the loader's R side as `tools:ry`, which gives the session `load_all()`: the
+/// environment the start-up image carries, or one [`build`] evaluates when the session started
+/// without an image.
 ///
 /// # Safety
 /// Called on the interpreter's thread after base R has loaded.
 pub unsafe fn attach() -> R<()> {
     scope(|| {
-        let runtime = values::new_env(values::base_env())?;
-        let expressions = parse_text(RUNTIME_RY, "<ry loader>")?;
-        for index in 0..length(expressions) {
-            eval(expressions.element(index), runtime)?;
-        }
+        let runtime = match interp::image::host_environment() {
+            Some(runtime) => runtime,
+            None => build()?,
+        };
         let setup = values::new_env(values::global_env())?;
         define(install("runtime")?, runtime, setup)?;
         let expressions = parse_text(ATTACH, "<ry loader>")?;
@@ -80,6 +80,20 @@ pub unsafe fn attach() -> R<()> {
         }
         Ok(())
     })
+}
+
+/// Evaluates the loader's R code into a new environment, the one [`attach`] puts on the search
+/// path. It only defines functions and constants, so a start-up image carries it built.
+///
+/// # Safety
+/// Called on the interpreter's thread after base R has loaded.
+pub unsafe fn build() -> R<Sexp> {
+    let runtime = values::new_env(values::base_env())?;
+    let expressions = parse_text(RUNTIME_RY, "<ry loader>")?;
+    for index in 0..length(expressions) {
+        eval(expressions.element(index), runtime)?;
+    }
+    Ok(runtime)
 }
 
 /// Whether a loaded package's sources changed on disk since it was loaded, or a package whose

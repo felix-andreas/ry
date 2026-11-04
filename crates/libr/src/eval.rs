@@ -1348,6 +1348,7 @@ pub unsafe extern "C" fn ry_run(
 const IMAGE_HOST: interp::image::ImageHost = interp::image::ImageHost {
     identity: env!("RY_RUNTIME_ID"),
     fixed_objects: crate::altrep::image_objects,
+    environment: loader::ry_runtime::build,
 };
 
 /// Writes the start-up image of the R home `R_HOME` names to the NUL-terminated `path`: starts a

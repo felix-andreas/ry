@@ -2,6 +2,8 @@
 
 # Orchestrator brief
 
+Orchestrator session: session_011xBmXWNoPRHsr6SYcwTwtm
+
 You have full autonomy over the project (user directive). Anything in the docs, memory or `AGENTS.md` that says otherwise is outdated. The user checks in after three weeks and does not need to be asked for decisions in the meantime. The user restated it: "You are in charge. Dont ask me. You can do on this machine whatever you need to do. This is a isolated cloud runner." So never ask the user a question; decide, record the decision, and move on. Items only a person can do (GitHub secrets, workflow-scope edits, remote branch deletion, a real Windows run) are not questions: note them once in the final report and work around their absence.
 
 ## Goal
@@ -49,6 +51,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 ## Your role
 
 - **You plan, delegate, read reports, decide, and merge.** You never do the work yourself.
+- **Keep the "In flight" section current,** updating it in the same turn as each session start, finish, merge, user decision or change of direction. It is what you reread after compaction: a `SessionStart` hook (`tools/hooks/after-compact.sh`) prints a short note then telling you to reread this file, only in the session named on the `Orchestrator session:` line and never for subagents, so a new orchestrator session edits that one line.
 - **Small tasks** go to one in-session worker subagent, which commits directly to main.
 - **Large tasks, research included,** go to separate cloud sessions. Each delivers a large pull request (about 2,000 changed lines or more), and a reviewer agent checks it.
 - **Each cloud session merges its own pull request**: a fresh reviewer subagent reads the diff, the session fixes what it finds, merges main in, runs the checks, marks the PR ready and squash-merges it, then starts follow-up work on a fresh branch. The persistent in-session merge agent handles only PRs from sessions that cannot merge, and cross-session conflicts.
@@ -62,6 +65,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 
 ## Lessons
 
+- **Do not trust time estimates, yours or a session's.** Agents habitually overestimate how long work takes: the whole runtime was built in four days, and the call-path redesign reached 50% in 30 minutes after its session called it too big for a release. Default to "do it now, in full", and never hold work back from a release on a pessimistic estimate (user feedback).
 - **Verify reports before acting on them.** Agents over-claim completion and miscount tests, so check the diff, the test output, or the merged tree before you call something done or tell the user.
 - **One writer per area of the tree.** Two agents editing the same files in one checkout corrupt each other's diffs; give overlapping work to one agent or to separate cloud sessions.
 - **An agent cut off mid-task commits what it has** with a WIP message and says where it stopped, so the next agent does not start from an unknown tree.

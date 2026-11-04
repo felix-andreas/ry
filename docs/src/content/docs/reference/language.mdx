@@ -257,7 +257,10 @@ print(List.to_r(cheap))
 [1] 10.50  9.75
 ```
 
-An R function given an `I64` stops with an error that names `Num.to_r()`.
+Passing an `I64`, or a `List` of anything but `F64`, `Bool` or `Str`, to an R function is a
+`type-mismatch` that names `Num.to_r()` or `List.to_r()`. In a typed file this covers top-level
+bindings too, because a literal bound there is a ry value: `n <- 4` is an `I64`, so `sqrt(n)` asks
+for `sqrt(Num.to_r(n))`. An `F64`, `Bool` or `Str` shares R's representation and passes unconverted.
 [Crossing between R and ry scalars](/reference/type-system#crossing-between-r-and-ry-scalars) has
 the rules.
 

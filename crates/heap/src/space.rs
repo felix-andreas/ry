@@ -60,7 +60,8 @@ type Bitmap = [u64; BITMAP_WORDS];
 const RESERVED_BYTES: usize = 64 << 30;
 const MINIMUM_RESERVED_BYTES: usize = 1 << 30;
 /// Pages committed per system call.
-const COMMIT_PAGES: usize = 16;
+const COMMIT_PAGES: usize = HUGE_PAGE_SIZE / PAGE_SIZE;
+const HUGE_PAGE_SIZE: usize = 2 << 20;
 const NO_PAGE: u32 = u32::MAX;
 /// The class of a page that holds no objects and can be given to any class.
 const EMPTY_PAGE: u8 = u8::MAX;
@@ -161,9 +162,9 @@ impl Space {
             }
             reserved_bytes /= 2;
         };
-        // A reservation is aligned to the system page (4 KiB on Unix), but pages here are
-        // 64 KiB, so the first partial one is skipped.
-        let aligned = (base_mapping as usize).next_multiple_of(PAGE_SIZE);
+        // A reservation is aligned to the system page (4 KiB on Unix). The heap starts at the
+        // next 2 MiB boundary, so each commit covers whole transparent huge pages.
+        let aligned = (base_mapping as usize).next_multiple_of(HUGE_PAGE_SIZE);
         let base = NonNull::new(aligned as *mut u8)
             .unwrap_or_else(|| panic!("mmap returned a null reservation"));
         Space {
@@ -254,8 +255,8 @@ impl Space {
 
     fn new_page(&mut self) -> Option<u32> {
         if self.page_count == self.committed_pages {
-            let commit =
-                COMMIT_PAGES.min(self.reserved_bytes / PAGE_SIZE - 1 - self.committed_pages);
+            let commit = COMMIT_PAGES
+                .min((self.reserved_bytes - HUGE_PAGE_SIZE) / PAGE_SIZE - self.committed_pages);
             if commit == 0 {
                 return None;
             }
@@ -785,7 +786,16 @@ mod virtual_memory {
                 0,
             )
         };
-        (mapping != libc::MAP_FAILED).then_some(mapping.cast())
+        if mapping == libc::MAP_FAILED {
+            return None;
+        }
+        // SAFETY: the range is the mapping just made. The advice is a hint, so a kernel without
+        // transparent huge pages refusing it changes nothing.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::madvise(mapping, bytes, libc::MADV_HUGEPAGE);
+        }
+        Some(mapping.cast())
     }
 
     /// Makes `bytes` at `start`, inside a reservation, readable and writable.

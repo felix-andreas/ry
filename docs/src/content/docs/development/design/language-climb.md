@@ -49,13 +49,14 @@ one batch rather than being decided inside the climb.
 | --- | --- | --- | --- | --- |
 | baseline | 8/16 | 0 | not measured | The harness, the corpus, and the first friendliness gaps the generator found |
 | 1 | 13/17 | 0/10 | 10/20 | `&&` and `\|\|` on two `Bool`s give `Bool`. Arithmetic on number literals alone (`2 * 3.14159 * r`) adapts like a lone literal. Within one function, a variable written with a string, `TRUE`/`FALSE` or number literal is decided by the parameter it is passed to or the annotated binding it flows into |
+| 2 | 20/21 | 0/12 | 5/20 | In a strict file or a file with ry syntax, a top-level literal binding is a ry value (`rate <- 2.0` is an `F64`), and passing an `I64` or a `List<I64>` to an R function names `Num.to_r()` or `List.to_r()` |
+| 3 | 20/21 | 8/240 | 0/240 | A value of literals alone (logic, comparisons, an `if` of literals, a one-statement `{}`) adapts like a lone literal; a literal beside a `Bool` in `&&` takes `Bool`; an annotation decides a ry number a call left open. The generator now writes empty ranges, which exposed the empty-list gap below; an empty list that carries the `I64` kind (from `List.range`) sums to the `I64` 0 |
+| 4 | 20/21 | 0/240 | 0/240 | An empty list keeps the item type the checker gave it: the preflight passes `[]` and each callback-built library list (`List.map`) through `.ry_items` with that type |
 
 ## Open questions
 
-- **Top-level literal bindings.** Each top-level statement is its own analysis item, so `rate <- 2.0`
-  at the top of a script takes R's `double` when its item is checked, and a later
-  `half(rate)` with `half(x: F64)` is a type error (`top-level-literal-binding.R`). Every rejected
-  soundness program fails this way. Deciding the type from later items would break the per-item
-  firewall. The options are to keep R's type and say so in the error, to generalize the binding the
-  way Roc types a top-level `x = 5` (each read instantiates it, and the runtime converts the value
-  at each typed read), or to make a top-level literal binding in strict mode a ry value by default.
+- **Empty lists in code that is not elaborated.** `ry run` and the console pass `[]` and every
+  library call whose result items come from a callback (`List.map`) through `.ry_items` with the
+  item type the checker gave them, so an empty result keeps its type. `ry load` and `source()` run
+  unelaborated text, where such an empty list is still a `logical` vector of length zero unless a
+  `List<I64>` parameter or result converts it.

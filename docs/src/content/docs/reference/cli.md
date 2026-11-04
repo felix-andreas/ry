@@ -312,6 +312,12 @@ Both run R's own `build` and `INSTALL` scripts on ry's runtime, from ry's R home
 built against ry's libR, as `ry run` loads it. `--runtime gnu-r` (or `RY_RUNTIME=gnu-r`) uses GNU R
 instead.
 
+ry's `R CMD INSTALL` and `R CMD SHLIB` run `make` with one job per processor unless `MAKEFLAGS`
+is set to a value. A package
+whose `Makevars` builds correctly only with one job fails in parallel, so a failed parallel build
+runs again with one job, reusing the objects already built. Installed R code is not byte-compiled,
+because ry compiles closures when they run.
+
 ## debug-adapter
 
 `ry debug-adapter` serves one debug session over the
@@ -378,7 +384,27 @@ first use: `libblas.so.3` and `liblapack.so.3` on Linux, Accelerate on macOS. Wi
 also looks in the directories GNU R's `etc/Makeconf` records (which is how it finds them on NixOS),
 then for GNU R's own `lib/libRblas.so` and `lib/libRlapack.so`. If none loads, the error lists every
 place it searched. On Windows, linear algebra needs `R_HOME`, for GNU R's `Rblas.dll` and
-`Rlapack.dll`. Compiled package code links the same libraries.
+`Rlapack.dll`. Compiled package code links the same libraries: on Linux, where the toolchain would link
+`-lblas -llapack`, ry's `Makeconf` names the versioned files instead (`-l:libblas.so.3` and
+`-l:liblapack.so.3`), so a package that uses them (Matrix, quadprog) builds without the
+distribution's BLAS and LAPACK development packages.
+
+Packages you installed with GNU R are on ry's `.libPaths()` without any setup. When `R_LIBS_USER`
+is unset, it holds GNU R's user library for ry's R version (`~/R/<platform>-library/4.6` on
+Linux, `~/Library/R/<arch>/4.6/library` on macOS, with `arm64` for Apple silicon) and then the existing ones of older 4.x versions,
+newest first. When `R_LIBS_SITE` is unset, it holds ry's own site library, then the `site-library`
+of the GNU R on `PATH` (read from its `R` script's `R_HOME_DIR`) and `/usr/local/lib/R/site-library`,
+`/usr/lib/R/site-library` and `/usr/local/lib/R/library`, skipping any that holds `base`. Only
+directories that exist are kept, in this order and ahead of ry's own library:
+
+```text
+[1] "/home/me/R/x86_64-pc-linux-gnu-library/4.6"
+[2] "/home/me/R/x86_64-pc-linux-gnu-library/4.5"
+[3] "/opt/R/4.5.1/lib/R/site-library"
+[4] "/home/me/.cache/ry/home/18e0bd65b5dace8c/library"
+```
+
+A variable you set replaces its default, as in GNU R; `R_LIBS_SITE=NULL` drops the site libraries.
 
 On macOS, `ry run` loads packages installed by CRAN's or Homebrew's GNU R unchanged: it loads a copy
 of each package library, cached under `~/Library/Caches/ry/rebound/`, that names ry's runtime

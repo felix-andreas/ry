@@ -19,7 +19,7 @@ use {
             stub_library, stub_source_problems,
         },
         test_document_kind,
-        testing::with_fixture_project,
+        testing::{with_fixture_project, with_strict_fixture_project},
         top_level::{TopLevel, item_declared_pure, item_top_level},
     },
     std::{collections::BTreeMap, path::Path},
@@ -32,6 +32,15 @@ use {
 fn render_case(
     source: &str,
     kind: DocumentKind,
+    render: &dyn Fn(&RootDatabase, SourceFile) -> String,
+) -> String {
+    render_case_in(source, kind, false, render)
+}
+
+fn render_case_in(
+    source: &str,
+    kind: DocumentKind,
+    strict: bool,
     render: &dyn Fn(&RootDatabase, SourceFile) -> String,
 ) -> String {
     let files: Vec<(Option<String>, String, DocumentKind)> = match split_files(source) {
@@ -48,7 +57,7 @@ fn render_case(
         .iter()
         .map(|(_, text, kind)| (text.clone(), *kind))
         .collect();
-    with_fixture_project(inputs, |db, sources| {
+    let render_all = |db: &RootDatabase, sources: &[SourceFile]| {
         let mut output = String::new();
         for ((path, _, _), file) in files.iter().zip(sources) {
             if let Some(path) = path {
@@ -57,7 +66,12 @@ fn render_case(
             output.push_str(&render(db, *file));
         }
         output
-    })
+    };
+    if strict {
+        with_strict_fixture_project(inputs, render_all)
+    } else {
+        with_fixture_project(inputs, render_all)
+    }
 }
 
 /// Classified by path as the hosts classify a project's files.
@@ -187,7 +201,7 @@ fn typing_script_fixtures() {
 /// metadata is a singleton input the shared fixture database must not keep.
 fn render_with_strict(source: &str) -> String {
     if !has_metadata(source) {
-        return render_case(source, DocumentKind::Package, &render_strict_file);
+        return render_case_in(source, DocumentKind::Package, true, &render_strict_file);
     }
     let files =
         split_files(source).unwrap_or_else(|| vec![("R/main.R".to_owned(), source.to_owned())]);

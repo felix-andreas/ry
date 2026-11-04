@@ -20,7 +20,7 @@ run ry check --annotate
 expect exit 1
 expect stdout "added 2 inferred annotations"
 expect file R/area.R "area <- function<T: numeric>(width: T, height: T = 1) -> T width * height"
-expect file R/area.R "unit: integer <- 1L"
+expect file R/area.R "unit: I64 <- 1L"
 expect stderr "parameter `shape` has no type"
 
 # Annotating again finds nothing new to write.

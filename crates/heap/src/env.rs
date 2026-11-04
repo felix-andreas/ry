@@ -344,7 +344,7 @@ impl Frame {
             filter |= filter_bit(binding.symbol);
         }
         let index = (bindings.len() > INDEX_THRESHOLD).then(|| {
-            let mut index = FxHashMap::default();
+            let mut index = FxHashMap::with_capacity_and_hasher(bindings.len(), Default::default());
             for (position, binding) in bindings.iter().enumerate() {
                 if binding.symbol != REMOVED {
                     index.entry(binding.symbol).or_insert(position as u32);

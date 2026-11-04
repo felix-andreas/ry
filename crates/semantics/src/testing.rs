@@ -161,7 +161,15 @@ pub fn with_fixture_project<R>(
     files: Vec<(String, DocumentKind)>,
     render: impl FnOnce(&RootDatabase, &[SourceFile]) -> R,
 ) -> R {
-    with_fixture_data_project(files, Vec::new(), render)
+    with_fixture_settings(files, Vec::new(), false, render)
+}
+
+/// [`with_fixture_project`] in a project with `[check] strict = true`.
+pub fn with_strict_fixture_project<R>(
+    files: Vec<(String, DocumentKind)>,
+    render: impl FnOnce(&RootDatabase, &[SourceFile]) -> R,
+) -> R {
+    with_fixture_settings(files, Vec::new(), true, render)
 }
 
 /// [`with_fixture_project`] with the project's data files, each a path and its text, sniffed as
@@ -169,6 +177,15 @@ pub fn with_fixture_project<R>(
 pub fn with_fixture_data_project<R>(
     files: Vec<(String, DocumentKind)>,
     data_files: Vec<(String, String)>,
+    render: impl FnOnce(&RootDatabase, &[SourceFile]) -> R,
+) -> R {
+    with_fixture_settings(files, data_files, false, render)
+}
+
+fn with_fixture_settings<R>(
+    files: Vec<(String, DocumentKind)>,
+    data_files: Vec<(String, String)>,
+    strict: bool,
     render: impl FnOnce(&RootDatabase, &[SourceFile]) -> R,
 ) -> R {
     let layouts: BTreeMap<String, sniff::Layout> = data_files
@@ -179,7 +196,7 @@ pub fn with_fixture_data_project<R>(
         let db = slot.get_or_insert_with(|| {
             let db = RootDatabase::default();
             install_shipped_stubs(&db);
-            AnalysisSettings::new(&db, true, true, true);
+            AnalysisSettings::new(&db, true, strict, true);
             db
         });
         let prelude = files
@@ -188,6 +205,9 @@ pub fn with_fixture_data_project<R>(
         let settings = AnalysisSettings::get(db);
         if *settings.prelude(db) != prelude {
             settings.set_prelude(db).to(prelude);
+        }
+        if *settings.strict(db) != strict {
+            settings.set_strict(db).to(strict);
         }
         let sources: Vec<SourceFile> = files
             .into_iter()

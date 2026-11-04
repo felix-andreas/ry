@@ -1,0 +1,66 @@
+# A nightly build runs only when someone starts it from the Actions tab. It builds the chosen ref
+# for Linux x86_64, smoke-tests the archive and publishes it as a GitHub release named
+# `nightly.<date>.<HHMM>.<sha6>` (`just nightly-name`). See "Nightly builds" in
+# docs/src/content/docs/development/releasing.md.
+name: Nightly
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    outputs:
+      name: ${{ steps.name.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - id: name
+        run: echo "name=$(just nightly-name "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: r-lib/actions/setup-r@v2
+      - name: link libraries
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libbz2-dev liblzma-dev
+      - name: package
+        env:
+          NAME: ${{ steps.name.outputs.name }}
+        run: |
+          export RY_BUILD="$NAME"
+          just package "$NAME" x86_64-unknown-linux-gnu
+      - name: smoke test
+        env:
+          NAME: ${{ steps.name.outputs.name }}
+          RY_SMOKE_PACKAGES: "1"
+        run: tools/smoke-test.sh "release/$NAME/ry-x86_64-unknown-linux-gnu".*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ry-x86_64-unknown-linux-gnu
+          path: release/${{ steps.name.outputs.name }}/ry-x86_64-unknown-linux-gnu.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      NAME: ${{ needs.build.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - uses: actions/download-artifact@v4
+        with:
+          path: release/${{ env.NAME }}
+          merge-multiple: true
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: just nightly-publish "$NAME"
