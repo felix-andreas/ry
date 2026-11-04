@@ -167,6 +167,11 @@ crates/interp/src/rmath.rs
         partly based on Catherine Loader's work,
         (C) 1999-2000 Lucent Technologies, Bell Laboratories
 
+crates/interp/src/stats.rs
+    GNU R src/library/stats/src/lowess.c (clowess, lowest)
+        Copyright (C) 1996 Robert Gentleman and Ross Ihaka
+        Copyright (C) 1999-2025 The R Core Team
+
 crates/interp/src/stats_nlm.rs
     GNU R src/appl/uncmin.c (the line search, trust region and secant updates)
         Copyright (C) 1999-2017 The R Core Team
@@ -180,6 +185,15 @@ crates/interp/src/stats_optimize.rs
         Copyright (C) 1995, 1996 Robert Gentleman and Ross Ihaka
         Copyright (C) 2003-2004 The R Foundation
         Copyright (C) 1998--2014 The R Core Team
+
+crates/interp/src/stats_spline.rs
+    GNU R src/library/stats/src/sbart.c (sbart)
+        Derived from the GAMFIT sources, which derive from code by Finbarr O'Sullivan; the file
+        carries no copyright line of its own
+    GNU R src/library/stats/src/qsbart.f (rbart)
+        Copyright (C) 1998-2016 The R Core Team
+    GNU R src/appl/interv.c (findInterval)
+        Copyright (C) 2002--2025 The R Core Team
 
 crates/interp/src/stats_tests.rs
     GNU R src/library/stats/src/swilk.c (swilk)

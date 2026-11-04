@@ -1,3 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Parts of this file are modified translations into Rust of GNU R's C sources, and keep their
+// copyright notices:
+//
+// GNU R: src/library/stats/src/lowess.c (clowess, lowest)
+//     Copyright (C) 1996 Robert Gentleman and Ross Ihaka
+//     Copyright (C) 1999-2025 The R Core Team
+//
+// Modifications Copyright (C) 2025-2026 Felix Andreas. This file is free software: you can
+// redistribute it and/or modify it under the terms of the GNU General Public License as
+// published by the Free Software Foundation, either version 2 of the License, or (at your
+// option) any later version. It is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See the GNU General Public License in LICENSE at the repository root.
+
 //! The stats package's native routines, other than the distribution functions: least squares,
 //! the GLM link helpers, correlation and distance, and the numerical building blocks behind
 //! `fft`, `filter`, `approx`, `spline`, `lowess` and friends. Model formulas are in
@@ -1636,7 +1652,7 @@ fn local_fit(
         let mean: f64 = (left..end).map(|k| weights[k] * x[k]).sum();
         let mut slope = xs - mean;
         let spread: f64 = (left..end)
-            .map(|k| weights[k] * (x[k] - mean) * (x[k] - mean))
+            .map(|k| weights[k] * ((x[k] - mean) * (x[k] - mean)))
             .sum();
         if spread.sqrt() > 0.001 * range {
             slope /= spread;
