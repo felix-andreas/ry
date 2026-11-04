@@ -1,0 +1,65 @@
+# Class, generic and method definitions made inside a package namespace, the shape the native
+# definitions in ry's methods core take.
+info <- new.env(hash = TRUE, parent = baseenv())
+imports <- new.env(hash = TRUE, parent = .BaseNamespaceEnv)
+attr(imports, "name") <- "imports:s4union"
+ns <- new.env(hash = TRUE, parent = imports)
+assign(".__NAMESPACE__.", info, envir = ns)
+info$spec <- c(name = "s4union", version = "1.0")
+info$exports <- new.env(hash = TRUE, parent = baseenv())
+info$imports <- list(base = TRUE)
+info$path <- tempdir()
+info$dynlibs <- character()
+info$S3methods <- matrix(NA_character_, 0L, 4L)
+assign(".packageName", "s4union", envir = ns)
+invisible(.Internal(registerNamespace("s4union", ns)))
+
+setClass("Base", slots = c(id = "integer"), where = ns)
+setClass("Leaf", contains = "Base", where = ns)
+setClass("Twig", contains = "Leaf", where = ns)
+setClass("Frame", contains = "data.frame", slots = c(tag = "character"), where = ns)
+setClassUnion("NumOrBase", c("numeric", "Base", "integer"), where = ns)
+setClassUnion("MaybeFrame", c("Frame", "NULL"), where = ns)
+setClassUnion("Anything", c("NumOrBase", "character"), where = ns)
+
+for (cl in c("Base", "Leaf", "Twig", "integer", "numeric", "Frame")) {
+  def <- getClass(cl, where = ns)
+  cat(cl, ":", names(def@contains), "\n")
+  cat("  distances:", vapply(def@contains, function(e) e@distance, 1), "\n")
+}
+cat(names(getClass("NumOrBase", where = ns)@subclasses), "\n")
+cat(names(getClass("Anything", where = ns)@subclasses), "\n")
+is(new("Twig", id = 1L), "NumOrBase")
+is(new("Twig", id = 1L), "Anything")
+is(1L, "Anything")
+is("a", "NumOrBase")
+extends("Leaf", "Anything")
+extends("Frame", "MaybeFrame")
+
+setGeneric("describe", function(x, ...) standardGeneric("describe"), where = ns)
+setMethod("describe", "NumOrBase", function(x, ...) "num-or-base", where = ns)
+setMethod("describe", "character", function(x, ...) "character", where = ns)
+setMethod("describe", "MaybeFrame", function(x, ...) "maybe-frame", where = ns)
+setMethod("length", "Base", function(x) 42L, where = ns)
+
+cacheMetaData(ns, TRUE, searchWhere = ns)
+describe <- get("describe", envir = ns)
+describe(new("Twig", id = 2L))
+describe(3)
+describe(4L)
+describe("s")
+describe(NULL)
+length(new("Leaf"))
+exists(".__T__describe:s4union", envir = ns)
+sort(names(get(".__T__describe:s4union", envir = ns)))
+
+leaf <- new("Leaf", id = 5L)
+tryCatch(names(leaf) <- "x", error = function(e) cat("error:", conditionMessage(e), "\n"))
+isVirtualClass("NumOrBase")
+isVirtualClass("Leaf")
+
+Holder <- setRefClass("Holder", fields = list(value = "numeric"), where = ns)
+h <- Holder$new(value = 1)
+f <- function() value
+environment(f) <- as.environment(h)
+f()
