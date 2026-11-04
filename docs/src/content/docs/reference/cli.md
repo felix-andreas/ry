@@ -391,7 +391,7 @@ distribution's BLAS and LAPACK development packages.
 
 Packages you installed with GNU R are on ry's `.libPaths()` without any setup. When `R_LIBS_USER`
 is unset, it holds GNU R's user library for ry's R version (`~/R/<platform>-library/4.6` on
-Linux, `~/Library/R/<arch>/4.6/library` on macOS) and then the existing ones of older 4.x versions,
+Linux, `~/Library/R/<arch>/4.6/library` on macOS, with `arm64` for Apple silicon) and then the existing ones of older 4.x versions,
 newest first. When `R_LIBS_SITE` is unset, it holds ry's own site library, then the `site-library`
 of the GNU R on `PATH` (read from its `R` script's `R_HOME_DIR`) and `/usr/local/lib/R/site-library`,
 `/usr/lib/R/site-library` and `/usr/local/lib/R/library`, skipping any that holds `base`. Only

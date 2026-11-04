@@ -419,7 +419,9 @@ fn read_renviron() {
 
 /// GNU R's user libraries for this major version and an older minor one, newest first:
 /// `~/R/<platform>-library/<x.y>` on Linux, `~/Library/R/<arch>/<x.y>/library` on macOS. The
-/// current version's is `R_LIBS_USER`'s `%U` already.
+/// current version's is `R_LIBS_USER`'s `%U` already. GNU R's platform vendor differs by
+/// architecture (`x86_64-pc-linux-gnu`, `aarch64-unknown-linux-gnu`), so any vendor matches,
+/// and macOS names Apple silicon `arm64`.
 #[cfg(unix)]
 fn gnu_r_user_libraries() -> Vec<String> {
     let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
@@ -427,21 +429,40 @@ fn gnu_r_user_libraries() -> Vec<String> {
     };
     let version = crate::system::r_version();
     let arch = std::env::consts::ARCH;
-    (0..version.minor)
-        .rev()
-        .map(|minor| {
-            let x_y = format!("{}.{minor}", version.major);
-            if cfg!(target_os = "macos") {
-                home.join("Library/R").join(arch).join(x_y).join("library")
+    let platforms: Vec<std::path::PathBuf> = if cfg!(target_os = "macos") {
+        let arch = if arch == "aarch64" { "arm64" } else { arch };
+        vec![home.join("Library/R").join(arch)]
+    } else {
+        let mut platforms: Vec<std::path::PathBuf> = std::fs::read_dir(home.join("R"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name.starts_with(&format!("{arch}-")) && name.ends_with("-linux-gnu-library")
+                })
+            })
+            .collect();
+        platforms.sort();
+        platforms
+    };
+    let mut libraries = Vec::new();
+    for minor in (0..version.minor).rev() {
+        let x_y = format!("{}.{minor}", version.major);
+        for platform in &platforms {
+            let library = if cfg!(target_os = "macos") {
+                platform.join(&x_y).join("library")
             } else {
-                home.join("R")
-                    .join(format!("{arch}-pc-linux-gnu-library"))
-                    .join(x_y)
+                platform.join(&x_y)
+            };
+            if library.is_dir() {
+                libraries.push(library.to_string_lossy().into_owned());
             }
-        })
-        .filter(|path| path.is_dir())
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect()
+        }
+    }
+    libraries
 }
 
 /// The site libraries of GNU R: the `site-library` of the `R` on `PATH`, and the ones Debian,
