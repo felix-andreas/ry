@@ -523,6 +523,9 @@ pub enum Numeric {
 pub enum Intrinsic {
     /// `x[i]` or `x[[i]]` on a plain vector with a scalar index.
     Element,
+    /// `x[i, j]` on an ordinary matrix with scalar subscripts, whose element type comes from
+    /// what the site has read so far; compiled code checks the matrix's shape and type.
+    MatrixElement,
     Length,
     Negate(Numeric),
     Not,
@@ -859,6 +862,11 @@ pub enum Action<'a> {
     BranchIfObject {
         src: usize,
     },
+    /// Discards the code unless `src` is not an object, for a [`Op::BranchIfObject`] whose
+    /// target has never run.
+    GuardNotObject {
+        src: usize,
+    },
     /// Branches unless `src` is a plain record, tuple or tag of `layout`.
     BranchUnlessShape {
         src: usize,
@@ -932,6 +940,15 @@ pub enum Action<'a> {
         dst: usize,
         slot: usize,
         index: usize,
+        value: usize,
+    },
+    /// `x[i, j] <- value` in place on an ordinary matrix, with a generic path that copies or
+    /// hands the assignment to tier 0.
+    SubAssignMatrix {
+        dst: usize,
+        slot: usize,
+        row: usize,
+        column: usize,
         value: usize,
     },
 }
@@ -1143,6 +1160,7 @@ fn native(action: &Action<'_>) -> bool {
             | Action::Comparison { .. }
             | Action::Intrinsic { .. }
             | Action::SubAssign { .. }
+            | Action::SubAssignMatrix { .. }
             | Action::LogicLeft { .. }
             | Action::LogicRight { .. }
     )
@@ -1450,7 +1468,7 @@ impl<'a> Builder<'a> {
                 Op::GetVar => Some(inst.operand(1)),
                 Op::SetVar => Some(inst.operand(0)),
                 Op::ForStep => Some(inst.operand(2)),
-                Op::SubAssign => Some(inst.operand(1)),
+                Op::SubAssign | Op::SubAssignMatrix => Some(inst.operand(1)),
                 _ => None,
             };
             if let Some(operand) = symbol_operand {
@@ -1919,6 +1937,11 @@ impl<'a> Builder<'a> {
             Op::BranchIfObject => {
                 if state.registers[operand(0)].is_plain() {
                     Action::FallThrough
+                } else if self.never_ran(operand(1)) {
+                    // The dispatching path has never run, so compiled code speculates the
+                    // subject is not an object. Its result would otherwise join the plain
+                    // path's at type Boxed and make everything that reads it run in tier 0.
+                    Action::GuardNotObject { src: operand(0) }
                 } else {
                     self.push_edge(operand(1), state);
                     Action::BranchIfObject { src: operand(0) }
@@ -2118,13 +2141,47 @@ impl<'a> Builder<'a> {
                 Effect::Opaque,
             ),
             Op::SubAssignMatrix => {
-                let value = match state.registers[operand(4)] {
-                    Ty::Bottom => Ty::Boxed,
-                    ty => ty,
-                };
-                let action = self.opaque_step(state, Some((operand(0), value)), &[], Effect::Opaque);
-                state.visible = Some(false);
-                action
+                let slot = self.slot(self.constant(operand(1)));
+                let (row, column, value) = (
+                    state.registers[operand(2)],
+                    state.registers[operand(3)],
+                    state.registers[operand(4)],
+                );
+                // The matrix's shape is not part of its type, so compiled code checks it on
+                // every store, and anything but an ordinary matrix goes to tier 0.
+                if matches!(value, Ty::Dbl | Ty::Int | Ty::Lgl)
+                    && matches!(row, Ty::Int | Ty::Dbl)
+                    && matches!(column, Ty::Int | Ty::Dbl)
+                    && matches!(state.slots[slot].ty, Ty::Boxed | Ty::Bottom)
+                    && state.slots[slot].may_be(status::LOADED)
+                    && !(self.defaulted.contains_key(&self.slots[slot])
+                        && state.slots[slot].may_be(status::NOT_LOADED))
+                {
+                    let mut forgotten = state.slots[slot];
+                    forgotten.status = status::NOT_LOADED;
+                    let mut fast = state.slots[slot];
+                    fast.status |= status::DIRTY;
+                    fast.status &= !status::NOT_LOADED;
+                    state.slots[slot] = fast.join(forgotten);
+                    state.registers[operand(0)] = value;
+                    state.visible = Some(false);
+                    Action::SubAssignMatrix {
+                        dst: operand(0),
+                        slot,
+                        row: operand(2),
+                        column: operand(3),
+                        value: operand(4),
+                    }
+                } else {
+                    let value = match value {
+                        Ty::Bottom => Ty::Boxed,
+                        ty => ty,
+                    };
+                    let action =
+                        self.opaque_step(state, Some((operand(0), value)), &[], Effect::Opaque);
+                    state.visible = Some(false);
+                    action
+                }
             }
             Op::Guard => {
                 let symbol = self.constant(operand(0));
@@ -3305,6 +3362,24 @@ impl<'a> Builder<'a> {
             && let Some(action) = self.traverse(state, traversal, call, args, dst)
         {
             return Ok(action);
+        }
+        // A matrix's shape is not part of its type, so the read is chosen from the site's
+        // feedback, and compiled code checks the shape on every read.
+        if untagged
+            && name == "["
+            && let [Ty::Boxed, Ty::Int | Ty::Dbl, Ty::Int | Ty::Dbl] = types[..]
+        {
+            let feedback = self.feedback_at(inst.pc);
+            if matches!(feedback, Ty::Dbl | Ty::Int | Ty::Lgl) {
+                state.registers[dst] = feedback;
+                state.visible = Some(true);
+                return Ok(Action::Intrinsic {
+                    intrinsic: Intrinsic::MatrixElement,
+                    dst,
+                    args,
+                    result: feedback,
+                });
+            }
         }
         if untagged && let Some((intrinsic, mut result)) = intrinsic_for(name, &types) {
             // A list element is boxed, so its type comes from what the site has read so far,

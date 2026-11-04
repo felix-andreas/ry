@@ -24,6 +24,13 @@ The quality bar is four things.
 
 ## Open: broken on main
 
+- `test_tiers` `fuzz_typed_record_natives_agree_with_tier_zero` fails in the full suite (an old
+  object "lost its mark" in `Heap::write_barrier_slow`, seed 104 or 121 depending on the build)
+  but passes alone, so it depends on heap state earlier seeds leave behind. It fails on main
+  without the untyped-tier changes too; the frame release (`Heap::release_frame`) is the
+  suspect.
+- ry's own base R has no recommended packages, so `zoo` cannot load (`there is no package called
+  'lattice'`) and the `timeseries` workload of `just bench-real` fails.
 - `crates/jit/tests/test_tiers.rs` `run_time_binding_shadows_cached_global_function` fails for `gen`: a `g` bound in a generic's frame before `UseMethod` is not seen by `gen.default`, which calls the global `g`. The cause is outside the typed core: the test fails without it.
 
 ## Open: the typed core
@@ -827,8 +834,14 @@ calls of `function(x, y = 2) x + y`, `RY_JIT=off`) and on `timeseries`. Fixed:
   tier 0's `assign_element_in_place` appends), and computed subscripts (`i + 1`, a formal) and
   `m[i, j] <- v` (`Op::SubAssignMatrix`) compile to in-place stores. rcp list-for and list-while
   went from a timeout to 1.26 s and 0.79 s (GNU R 1.40 s and 1.32 s), convolution from 16.9 s to
-  0.20 s (GNU R 0.91 s). matrix-for runs 1.6 s with the JIT against 1.2 s without: the JIT treats
-  `SubAssignMatrix` as an opaque step that flushes its registers.
+  0.20 s (GNU R 0.91 s).
+- **Matrix elements in compiled code.** `m[i, j] <- v` (`Action::SubAssignMatrix`) and `m[i, j]`
+  (`Intrinsic::MatrixElement`, typed from the site's feedback) run natively on an ordinary
+  matrix, which `runtime::jit_matrix_rows` recognizes on each access because the shape is not
+  part of the JIT type. A `BranchIfObject` whose dispatch path never ran compiles to a guard
+  (`Action::GuardNotObject`), or its `Boxed` result would widen every read of `m[i, j]`. rcp
+  matrix-for 2.09 s to 0.28 s (GNU R 0.74 s); a read-modify-write loop 0.51 s to 0.031 s (GNU R
+  0.063 s).
 - **`perl = TRUE` matching was quadratic.** The `pcre2` crate revalidates the UTF-8 subject on
   every call, so a global `gsub` on 1 MB took minutes; `crates/interp/src/pcre.rs` binds PCRE2
   directly with `PCRE2_NO_UTF_CHECK`. regexdna 0.35 s against GNU R's 1.0 s.
