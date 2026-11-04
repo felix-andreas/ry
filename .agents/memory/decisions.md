@@ -7466,6 +7466,12 @@ Each one trades a narrow class of missed errors for a class of false reports see
   units plus the native definitions bring a cold first `new()` on `target/s4heavy` to 80 to 87 ms
   (one run in five about 103 ms from machine noise), against 0.36 to 0.40 s with a cache miss
   before.
+- **A promise stays a root while it is forced** (`force_promise` in `interp/src/eval.rs`).
+  Before, only the bindings that held a promise kept it alive. A loader S4 placeholder removes
+  its own binding while it runs, so a collection mid-force freed the promise and its environment
+  (debug smallvec precondition panics, "object not found"). The promise is pushed on the handle
+  stack for the duration of the force, as GNU R's `R_PendingPromises` keeps it, which costs one
+  handle push per force and makes self-replacing promises safe for any caller.
 - **`setMethod` creates the implicit generic of a base S3 generic natively** (`implicit_generic`
   in `methods_core.rs`). `setMethod("as.list", ...)` in a package namespace on a base closure
   whose body calls `UseMethod` runs `setGeneric(f, where)`, which builds the generic with
