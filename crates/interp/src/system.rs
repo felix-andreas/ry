@@ -206,6 +206,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         })
     }),
     internal("Sys.which", 1, do_sys_which),
+    internal("ryOsVersion", 0, do_os_version),
     internal("Sys.chmod", 3, do_sys_chmod).invisible(),
     internal("Sys.umask", 1, do_sys_umask).keep_visibility(),
     internal("Sys.getpid", 0, |_| unsafe {
@@ -525,6 +526,40 @@ unsafe fn do_sys_which(call: &Call<'_>) -> R<Sexp> {
         values::set_attr(result, symbols().names, names)?;
     }
     Ok(result)
+}
+
+/// `utils:::.osVersion()` on Linux, read from `/etc/os-release` without the two shells the R
+/// code starts (`Sys.which("uname")` and `uname -a`, of whose output it reads only the kernel
+/// name). NULL where the R code has to run: another system, no `uname` on `PATH`, or an
+/// `os-release` that is missing, not UTF-8, or names the system only in an unusual way.
+unsafe fn do_os_version(_call: &Call<'_>) -> R<Sexp> {
+    if !cfg!(target_os = "linux") || find_program("uname").is_none() {
+        return Ok(nil());
+    }
+    let Ok(text) = std::fs::read_to_string("/etc/os-release") else {
+        return Ok(nil());
+    };
+    let named = |prefix: &str| text.lines().find_map(|line| line.strip_prefix(prefix));
+    let name = if let Some(name) = named("PRETTY_NAME=") {
+        name
+    } else if text.lines().any(|line| line.starts_with("NAME")) {
+        let Some(name) = named("NAME=") else {
+            return Ok(nil());
+        };
+        name
+    } else {
+        "Linux (unknown distro)"
+    };
+    // `sub("\"(.*)\"", "\\1", name)`: the text between the first and the last quote.
+    match (name.find('"'), name.rfind('"')) {
+        (Some(first), Some(last)) if first < last => scalar_string(&format!(
+            "{}{}{}",
+            &name[..first],
+            &name[first + 1..last],
+            &name[last + 1..]
+        )),
+        _ => scalar_string(name),
+    }
 }
 
 fn find_program(name: &str) -> Option<PathBuf> {

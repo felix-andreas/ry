@@ -803,7 +803,7 @@ pub(crate) unsafe fn force_deferred(name: &[u8], lookup: Lookup<'_>) -> R<bool> 
 /// The first generic function bound to `symbol` from `env` outward (from `package`, unless
 /// that is empty): a closure with a `generic` attribute, or the generic the methods package
 /// set up for a primitive.
-unsafe fn find_generic(symbol: Sexp, env: Sexp, package: &str) -> R<Sexp> {
+pub(crate) unsafe fn find_generic(symbol: Sexp, env: Sexp, package: &str) -> R<Sexp> {
     let heap = crate::heap();
     let generic_symbol = values::install("generic")?;
     let package_symbol = values::install("package")?;

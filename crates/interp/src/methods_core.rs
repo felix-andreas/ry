@@ -51,12 +51,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryS4SetGeneric", 1, do_set_generic),
     internal("ryS4SetMethod", 1, do_set_method),
     internal("ryS4SetClass", 1, do_set_class),
+    internal("ryS4CheckGroupSigLength", 1, do_check_group_sig_length),
 ];
 
 /// The methods package's functions that get a fast path, with the [`stable_hash`] of the formals
 /// and body each was made from, one per supported version of the package (ry's bundled base R
 /// and the GNU R versions `R_HOME` may name). `initialize` is the default method of the
-/// `initialize` generic. Setting `RY_PRINT_METHODS_HASHES` prints the hashes of the loaded ones,
+/// `initialize` generic. Setting `RY_PRINT_FAST_PATH_HASHES` prints the hashes of the loaded ones,
 /// for updating this together with `methods_core.R` and the fast paths.
 const FAST_PATHS: &[(&str, &[u64])] = &[
     ("new", &[0xed04_11d7_4c52_3b14]),
@@ -67,12 +68,13 @@ const FAST_PATHS: &[(&str, &[u64])] = &[
     ("setGeneric", &[0xe3ac_b876_a896_9c54]),
     ("setMethod", &[0x7cc6_fd5c_68e7_5d79]),
     ("setClass", &[0x3a03_d885_5064_d505]),
+    (".checkGroupSigLength", &[0x5f8d_dfdc_b708_b922]),
 ];
 
 /// The version of GNU R that ry's bundled base R is built from. Its methods package is the one
 /// every fast path must match, so a fast path that does not install there is an error rather
 /// than a silent loss of speed.
-const BUNDLED_VERSION: &str = include_str!("../../../tools/base-r/VERSION");
+pub(crate) const BUNDLED_VERSION: &str = include_str!("../../../tools/base-r/VERSION");
 
 /// Puts the fast paths of `methods_core.R` in front of the functions of the methods namespace
 /// `namespace` they were made for, changing each closure in place so that every reference to it
@@ -85,7 +87,7 @@ pub unsafe fn install_fast_paths(namespace: Sexp) -> R<()> {
     let bundled =
         values::first_string(version).is_some_and(|version| version == BUNDLED_VERSION.trim());
     let names = values::names(prologues);
-    let print = std::env::var_os("RY_PRINT_METHODS_HASHES").is_some();
+    let print = std::env::var_os("RY_PRINT_FAST_PATH_HASHES").is_some();
     let mut missed = Vec::new();
     for index in 0..length(prologues) {
         let Some(name) = values::string_at(names, index) else {
@@ -146,7 +148,7 @@ pub unsafe fn install_fast_paths(namespace: Sexp) -> R<()> {
     if bundled && !missed.is_empty() {
         return Err(crate::unwind::error(format!(
             "the native fast paths for {} do not match ry's bundled methods package; update \
-             FAST_PATHS in methods_core.rs (RY_PRINT_METHODS_HASHES=1 prints the hashes)",
+             FAST_PATHS in methods_core.rs (RY_PRINT_FAST_PATH_HASHES=1 prints the hashes)",
             missed.join(", ")
         )));
     }
@@ -959,6 +961,279 @@ unsafe fn quiet_binding(cell: Sexp, depth: u32) -> R<Option<Sexp>> {
         return Ok(None);
     }
     eval::force_promise(value).map(Some)
+}
+
+/// `.checkGroupSigLength(gnames, generics)` when every generic it reaches is in the generic
+/// table and their signature lengths already agree, which holds for every call once the group
+/// generics are set up. Every namespace whose classes involve a group generic (`setOldClass()`
+/// asks for `Ops`) runs `.updateMethodsInTable()` on each member of the group, which calls this
+/// once per member, and in R each call walks the whole group again: about ten milliseconds a
+/// namespace. Binds the body's `funs` to the value the body returns, or bails where the body
+/// would warn, set up a methods table, reset a signature length or look a generic up past the
+/// generic table.
+unsafe fn do_check_group_sig_length(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.arg(0);
+    let skip = values::scalar_bool(false)?;
+    let (Some(names), Some(generics)) = (
+        quiet_value(install("gnames")?, frame)?,
+        quiet_value(install("generics")?, frame)?,
+    ) else {
+        bail!(skip)
+    };
+    let (Some(mut names), Some(mut generics)) = (plain_list(names), plain_list(generics)) else {
+        bail!(skip)
+    };
+    let group_class = values::scalar_string("groupGenericFunction")?;
+    let generic_class = values::scalar_string("genericFunction")?;
+    let group_symbol = install("group")?;
+    let mut rounds = 0;
+    let funs = loop {
+        if names.len() != generics.len()
+            || !names
+                .iter()
+                .all(|&name| name.kind() == SexpType::String && length(name) == 1)
+        {
+            bail!(skip)
+        }
+        let mut funs = names.clone();
+        let (mut next_names, mut next_generics) = (Vec::new(), Vec::new());
+        let mut recall = false;
+        for (&name, &generic) in names.iter().zip(&generics) {
+            if is_instance(generic, group_class)? != Some(true) {
+                bail!(skip)
+            }
+            let Some(group) = plain_list(get_attr(generic, group_symbol)) else {
+                bail!(skip)
+            };
+            if !group.is_empty() {
+                // `gnames[[i]] <- fdef@group` and `generics[[i]] <- lapply(fdef@group,
+                // getGeneric)`, which the recursive call's `unlist(, FALSE)` splices in.
+                for member in group {
+                    let Some(cached) = cached_generic(member)? else {
+                        bail!(skip)
+                    };
+                    next_names.push(member);
+                    next_generics.push(cached);
+                }
+                recall = true;
+                continue;
+            }
+            // `unlist(, FALSE)` keeps a plain string as a new string without attributes.
+            next_names.push(values::scalar_string_charsxp(name.element(0))?);
+            next_generics.push(generic);
+            let Some(members) = group_members(generic, group_class, generic_class)? else {
+                bail!(skip)
+            };
+            funs.extend(members);
+        }
+        if !recall {
+            break funs;
+        }
+        rounds += 1;
+        if rounds > 8 {
+            bail!(skip)
+        }
+        names = next_names;
+        generics = next_generics;
+    };
+    let mut distinct: Vec<Sexp> = Vec::with_capacity(funs.len());
+    let flags = crate::sort::IdenticalFlags::default();
+    for fun in funs {
+        if !distinct
+            .iter()
+            .any(|&seen| crate::sort::identical(seen, fun, &flags))
+        {
+            distinct.push(fun);
+        }
+    }
+    let signature_length = install(".SigLength")?;
+    let mut lengths = Vec::with_capacity(distinct.len());
+    for &fun in &distinct {
+        let generic = if fun.kind() == SexpType::String && length(fun) == 1 {
+            let Some(generic) = cached_generic(fun)? else {
+                bail!(skip)
+            };
+            generic
+        } else {
+            fun
+        };
+        if generic == nil() {
+            lengths.push(0.0);
+            continue;
+        }
+        if is_instance(generic, generic_class)? != Some(true) {
+            bail!(skip)
+        }
+        let Some(value) = quiet_value(signature_length, generic.tag())? else {
+            bail!(skip)
+        };
+        if !matches!(value.kind(), SexpType::Integer | SexpType::Real) || length(value) != 1 {
+            bail!(skip)
+        }
+        lengths.push(crate::subset::numeric_element(value, 0));
+    }
+    let longest = lengths.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if lengths
+        .iter()
+        .any(|&length| length < longest && length > 0.0)
+    {
+        bail!(skip)
+    }
+    let value = values::list_vector(&distinct)?;
+    crate::heap().define(frame, install("funs")?, value)?;
+    values::scalar_bool(true)
+}
+
+/// `getGroupMembers(generic, recursive = TRUE, character = FALSE)` for a group generic of base,
+/// whose members the methods namespace defines. `None` where that needs R code.
+unsafe fn group_members(
+    generic: Sexp,
+    group_class: Sexp,
+    generic_class: Sexp,
+) -> R<Option<Vec<Sexp>>> {
+    if is_instance(generic, generic_class)? != Some(true) {
+        return Ok(None);
+    }
+    if is_instance(generic, group_class)? != Some(true) {
+        return Ok(Some(Vec::new()));
+    }
+    let package = get_attr(generic, install("package")?);
+    if package.kind() != SexpType::String
+        || length(package) != 1
+        || package.element(0).bytes() != b"base"
+    {
+        return Ok(None);
+    }
+    let Some(members) = plain_list(get_attr(generic, install("groupMembers")?)) else {
+        return Ok(None);
+    };
+    recursive_members(&members, group_class, 0)
+}
+
+/// `.recMembers(members, .methodsNamespace)` inside `getGroupMembers()`: each member that has a
+/// generic, or `NULL` in its place, followed by the members of each member that is a group.
+unsafe fn recursive_members(
+    members: &[Sexp],
+    group_class: Sexp,
+    depth: u32,
+) -> R<Option<Vec<Sexp>>> {
+    if depth > 8 {
+        return Ok(None);
+    }
+    let mut all = vec![nil(); members.len()];
+    for (index, &member) in members.iter().enumerate() {
+        if member.kind() != SexpType::String || length(member) != 1 {
+            return Ok(None);
+        }
+        let Some(generic) = methods_generic(member)? else {
+            return Ok(None);
+        };
+        if generic == nil() {
+            continue;
+        }
+        all[index] = member;
+        if is_instance(generic, group_class)? == Some(true) {
+            let Some(inner) = plain_list(get_attr(generic, install("groupMembers")?)) else {
+                return Ok(None);
+            };
+            let Some(inner) = recursive_members(&inner, group_class, depth + 1)? else {
+                return Ok(None);
+            };
+            all.extend(inner);
+        }
+    }
+    Ok(Some(all))
+}
+
+/// `getGeneric(name)`: the generic the generic table holds for `name`, when it holds a single
+/// one. `None` where `getGeneric()` would look further.
+unsafe fn cached_generic(name: Sexp) -> R<Option<Sexp>> {
+    if name.kind() != SexpType::String
+        || length(name) != 1
+        || name.element(0) == values::na_string()
+    {
+        return Ok(None);
+    }
+    let Some(table) = methods_value(".genericTable")? else {
+        return Ok(None);
+    };
+    if table.kind() != SexpType::Environment {
+        return Ok(None);
+    }
+    match quiet_value(values::install_charsxp(name.element(0))?, table)? {
+        Some(generic) if generic.kind() == SexpType::Closure => Ok(Some(generic)),
+        _ => Ok(None),
+    }
+}
+
+/// `getGeneric(name, FALSE, .methodsNamespace)`: the generic visible from the methods namespace,
+/// or the methods package's generic for a base primitive, or `NULL` for neither. `None` where
+/// the lookup would run deferred definitions or change the generic table.
+unsafe fn methods_generic(name: Sexp) -> R<Option<Sexp>> {
+    let text = name.element(0).bytes();
+    if text.is_empty() || text == b"as.double" || name.element(0) == values::na_string() {
+        return Ok(None);
+    }
+    if interp()
+        .globals
+        .deferred_definitions
+        .iter()
+        .any(|definitions| definitions.generics.contains(text))
+    {
+        return Ok(None);
+    }
+    let symbol = values::install_charsxp(name.element(0))?;
+    let found = crate::methods::find_generic(symbol, interp().globals.methods_namespace, "")?;
+    if found != nil() {
+        // `.getGeneric()` caches a generic the global environment also binds.
+        return Ok(
+            match crate::heap().frame_cell(values::global_env(), symbol) {
+                Some(_) => None,
+                None => Some(found),
+            },
+        );
+    }
+    let Some(base) = quiet_value(symbol, values::base_env())? else {
+        return Ok(Some(nil()));
+    };
+    if !matches!(
+        base.kind(),
+        SexpType::Closure | SexpType::Builtin | SexpType::Special
+    ) {
+        return Ok(Some(nil()));
+    }
+    let Some(basic) = methods_value(".BasicFunsList")? else {
+        return Ok(None);
+    };
+    let Some(generic) = element(basic, text) else {
+        return Ok(Some(nil()));
+    };
+    if generic.kind() != SexpType::Closure {
+        return Ok(Some(nil()));
+    }
+    if is_instance(generic, values::scalar_string("genericFunction")?)? != Some(true) {
+        return Ok(None);
+    }
+    // `.cacheGeneric()` leaves the table alone only when it already holds this generic.
+    let Some(cached) = cached_generic(name)? else {
+        return Ok(None);
+    };
+    if !crate::sort::identical(cached, generic, &crate::sort::IdenticalFlags::default()) {
+        return Ok(None);
+    }
+    Ok(Some(generic))
+}
+
+/// The elements of a list without names, which `unlist(, FALSE)` and `c()` splice as they are.
+unsafe fn plain_list(value: Sexp) -> Option<Vec<Sexp>> {
+    if value.kind() != SexpType::List || values::names(value) != nil() {
+        return None;
+    }
+    Some(
+        (0..length(value))
+            .map(|index| value.element(index))
+            .collect(),
+    )
 }
 
 // Helpers.

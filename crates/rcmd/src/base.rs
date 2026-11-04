@@ -359,7 +359,14 @@ fn run_image_writer(front_end: &Path, root: &Path, work: &Path) -> Result<()> {
         .env("HOME", work)
         .env("R_LIBS_USER", "NULL")
         .env("R_LIBS_SITE", "NULL");
-    for name in ["PATH", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT"] {
+    for name in [
+        "PATH",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "SYSTEMROOT",
+        "RY_PRINT_FAST_PATH_HASHES",
+    ] {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
         }

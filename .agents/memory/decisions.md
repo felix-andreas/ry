@@ -7305,7 +7305,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   whichever release it finds (licensing record above). The copy follows R 4.3.3, so the runtime
   replaces the installed function only when an FNV-1a hash of its formals and body (symbols and
   strings by their text, attributes ignored) equals the 4.3.3 one; any other release keeps its own
-  function at its own speed. `RY_PRINT_REGISTER_HASH` prints the installed function's hash for
+  function at its own speed. `RY_PRINT_FAST_PATH_HASHES` prints the installed function's hash for
   updating the constant with the copy.
 - **Pinned by** `namespaces_register_s3_methods_as_gnu_r_does` in `crates/libr/tests/test_install.rs`,
   which installs two packages under ry and under GNU R and compares one script's output (every
@@ -7466,7 +7466,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   exception to bailing before any effect: `setClass` evaluates `tryNew()` for slot prototypes
   before its last checks, which fills the same `initialize` dispatch cache the R code fills.
 - **Switches.** `RY_METHODS_NATIVE=0` turns the definition fast paths off (the differential uses
-  it), `RY_TRACE_METHODS_BAILS=1` prints why each call bailed, and `RY_PRINT_METHODS_HASHES=1`
+  it), `RY_TRACE_METHODS_BAILS=1` prints why each call bailed, and `RY_PRINT_FAST_PATH_HASHES=1`
   prints the hashes of the installed functions, for adding a version.
 - **The S4 cache is interim.** The end state has no S4 cache: the cold native path itself reaches
   a first `new()` under 100 ms, and then the cache is deleted (AGENTS.md, "Caching is a sign of a

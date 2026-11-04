@@ -365,6 +365,25 @@ impl Space {
         }
     }
 
+    /// Marks every object allocated since the last collection, as a minor collection in which
+    /// all of them survive would, without tracing any of them.
+    pub unsafe fn mark_young(&mut self) {
+        // The unused tail of a cursor's run counts as allocated until it is released.
+        self.release_cursors();
+        for index in 0..self.touched.len() {
+            let page = self.touched[index] as usize;
+            let slot_size = SLOT_SIZES[self.page_class[page] as usize];
+            for word in 0..BITMAP_WORDS {
+                let young = self.allocated[page][word] & !self.marks[page][word];
+                for bit in set_bits(young) {
+                    let offset = page * PAGE_SIZE + (word * 64 + bit) * slot_size;
+                    // SAFETY: an allocated slot of a committed page holds an object.
+                    unsafe { self.mark(Sexp::from_non_null(self.base.add(offset).cast())) };
+                }
+            }
+        }
+    }
+
     /// Clears every mark, as a major collection starts.
     pub fn clear_marks(&mut self) {
         self.marks.fill([0; BITMAP_WORDS]);

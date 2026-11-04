@@ -2758,6 +2758,34 @@ impl Heap {
         }
     }
 
+    /// Makes every young object old without tracing, which is what a minor collection in which
+    /// all of them survive would leave. Loading a start-up image allocates megabytes that live
+    /// as long as the session, and the first minor collection after it would trace all of them
+    /// only to keep them; marking them in allocation order reads no object's children.
+    pub unsafe fn promote_young(&mut self) {
+        if self.inhibit > 0 {
+            return;
+        }
+        self.inhibit += 1;
+        self.space.marked_vector_cells = 0;
+        self.space.mark_young();
+        for index in 0..self.young_large.len() {
+            let object = self.young_large[index];
+            self.space.mark(object);
+        }
+        // Every young string is marked, so this only resets the young bookkeeping.
+        self.strings.remove_dead_young(&self.space);
+        self.sweep_young();
+        for parent in self.remembered.drain(..) {
+            parent.set_gc_bit(gc_bits::REMEMBERED, false);
+        }
+        self.young_bytes = 0;
+        self.young_large_bytes = 0;
+        self.refresh_small_trigger();
+        self.stats.live_vector_cells += self.space.marked_vector_cells;
+        self.inhibit -= 1;
+    }
+
     unsafe fn sweep_young(&mut self) {
         let mut swept = Swept::default();
         let change = self.space.sweep_young(&mut swept);

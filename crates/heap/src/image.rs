@@ -431,6 +431,9 @@ impl Heap {
         self.inhibit_collection();
         let result = self.load_image_inhibited(image, fixed, relocation, address);
         self.allow_collection();
+        if result.is_ok() {
+            self.promote_young();
+        }
         result
     }
 
