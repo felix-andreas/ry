@@ -7765,3 +7765,19 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Impact.** One source of truth for length and capacity (the heap object), no shadow buffers,
   and appends that never copy unless R code holds a second reference. GC sizes an object by
   capacity, so headroom is visible to collection limits. Analysis is unaffected.
+
+## ry's base R ships the recommended packages
+
+- **Shape.** `tools/base-r/build.sh` installs GNU R's recommended packages from the source
+  release's `src/library/Recommended/*.tar.gz` into the base R tree it builds, with that tree's own
+  `R CMD INSTALL`, so `library(lattice)` and the rest work without GNU R installed, as in GNU R.
+  On Linux that is all fifteen. On macOS and Windows nlme, KernSmooth and mgcv (which imports nlme)
+  are left out, because their Fortran code would link a Fortran runtime the archive does not carry
+  (Homebrew's or Rtools' `libgfortran`); there they come from GNU R's own libraries.
+- **Why not GNU R's system library on `.libPaths()`.** Debian's `/etc/R/Renviron` puts
+  `/usr/lib/R/library` in `R_LIBS_SITE`, but site libraries come before `.Library`, so GNU R's
+  `stats`, `utils` and the other base packages there would shadow ry's own. `gnu_r_site_libraries`
+  in `crates/interp/src/session.rs` leaves out every library that holds `base` for that reason.
+- **Cost.** On Linux the fifteen packages add about 85 s to the build and 34 MB to the base R tree (63 MB in all).
+- **Windows.** The unversioned `Recommended/*.tgz` names are symlinks, which tar cannot create on
+  Windows, so the build extracts only the versioned tarballs.
