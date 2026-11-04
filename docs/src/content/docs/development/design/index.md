@@ -20,6 +20,11 @@ was declined.
 ry's own value types (`I64`, `F64`, `Bool`, `Str`, `List<T>`) and the record, tag and pattern
 additions, with the explicit R boundary and the runtime contract.
 
+### [Typed ry's hill climb](/development/design/language-climb/)
+
+How typed ry grows: a fitness function over speed against Rust, friendliness cases and soundness
+fuzzing, run by `just climb`, and the log of each step.
+
 ### [Open type-system questions](/development/design/open-questions/)
 
 Type-system questions with no settled answer: tagged unions, S3 dispatch, modeling data frames and
