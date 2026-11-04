@@ -71,6 +71,10 @@
 //     Copyright (C) 1998 Ross Ihaka
 //     Copyright (C) 2004--2015 The R Foundation
 //
+// GNU R: src/nmath/qDiscrete_search.h (q_DISCRETE_BODY, do_search), qpois.c, qbinom.c, qnbinom.c
+//     Copyright (C) 2000-2024 The R Core Team
+//     Copyright (C) 2005-2021 The R Foundation
+//
 // GNU R: src/nmath/stirlerr.c (stirlerr)
 //     Copyright (C) 2000-2025 The R Core Team
 //     Copyright (C) 2000 Catherine Loader
@@ -5426,92 +5430,103 @@ pub fn pbinom(x: f64, n: f64, p: f64, lower: bool, log: bool) -> f64 {
     pbeta(p, x + 1.0, n - x, !lower, log)
 }
 
-/// The quantile of a distribution on the integers `0..=maximum`: the smallest `y` whose lower
-/// tail `distribution(y, true, log)` reaches `p`, or for the upper tail the smallest `y` whose
-/// upper tail `distribution(y, false, log)` has fallen to `p`.
+/// The quantile of a distribution on the integers `0..=maximum`, GNU R's `q_DISCRETE_BODY`.
 ///
 /// The search starts from the Cornish-Fisher expansion `mu + sigma (z + gamma (z^2 - 1) / 6)`
 /// about the normal quantile `z`, where `gamma` is the skewness (Cornish and Fisher (1937);
-/// Johnson, Kemp and Kotz (2005), section 1.8). From there it doubles its step until it
-/// passes the quantile, then halves the bracket. A probability given as the distribution
-/// function at an integer may have been rounded on the way in, so `p` is relaxed by a few
-/// units in the last place: that integer, not its successor, is the answer.
+/// Johnson, Kemp and Kotz (2005), section 1.8). `p` is first nudged by a few units in the last
+/// place so that a probability that was rounded on the way in still finds its own integer, and a
+/// start past 4096 walks in shrinking strides.
 #[allow(clippy::too_many_arguments)]
 fn discrete_quantile(
-    p: f64,
+    mut p: f64,
     mu: f64,
     sigma: f64,
     gamma: f64,
     lower: bool,
     log: bool,
-    maximum: f64,
+    maximum: Option<f64>,
     distribution: &dyn Fn(f64, bool, bool) -> f64,
 ) -> f64 {
-    // The search accepts a value within 64 epsilon of the target probability, relative to
-    // the nearer end of [0, 1]: near 1, adjacent CDF values differ by a few ulps of 1, and a
-    // slack relative to p itself would return the quantile below. On the log scale the
-    // slack is 16 epsilon of the log probability.
-    let slack = if log {
-        16.0 * DBL_EPSILON * p.abs()
-    } else {
-        64.0 * DBL_EPSILON * p.abs().min(1.0 - p)
-    };
-    let reached = |y: f64| {
-        let value = distribution(y, lower, log);
-        value.is_nan()
-            || if lower {
-                value >= p - slack
-            } else {
-                value < p + slack
-            }
-    };
+    const FUZZ_PLAIN: f64 = 8.0;
+    const FUZZ_LOG: f64 = 2.0;
+    const LARGE: f64 = 4096.0;
+    const INCREMENT_FRACTION: f64 = 1.0 / 64.0;
+    const SHRINK: f64 = 8.0;
+    const RELATIVE_TOLERANCE: f64 = 1e-15;
+    const EXTRA_FACTOR: f64 = 4.0;
     let normal = qnorm(p, 0.0, 1.0, lower, log);
-    let start = (mu + sigma * (normal + gamma * (normal * normal - 1.0) / 6.0)).round();
-    let start = if start.is_nan() { mu.round() } else { start };
-    let start = start.clamp(0.0, maximum);
-
-    // Gallop away from the start until the quantile lies in (below, above].
-    let (mut below, mut above);
-    let mut step = 1.0;
-    if reached(start) {
-        above = start;
-        loop {
-            if above == 0.0 {
-                return 0.0;
-            }
-            let candidate = (above - step).max(0.0);
-            if reached(candidate) {
-                above = candidate;
-                step *= 2.0;
-            } else {
-                below = candidate;
-                break;
-            }
+    let mut y = forceint(mu + sigma * (normal + gamma * (normal * normal - 1.0) / 6.0));
+    match maximum {
+        Some(limit) if y > limit => y = limit,
+        _ if y < 0.0 => y = 0.0,
+        _ => {}
+    }
+    let mut z = distribution(y, lower, log);
+    if log {
+        let e = FUZZ_LOG * DBL_EPSILON;
+        if lower && p > -f64::MAX {
+            p *= 1.0 + e;
+        } else {
+            p *= 1.0 - e;
         }
     } else {
-        below = start;
-        loop {
-            if below >= maximum {
-                return maximum;
-            }
-            let candidate = (below + step).min(maximum);
-            if reached(candidate) {
-                above = candidate;
-                break;
-            }
-            below = candidate;
-            step *= 2.0;
+        let e = FUZZ_PLAIN * DBL_EPSILON;
+        if lower {
+            p *= 1.0 - e;
+        } else if 1.0 - p > EXTRA_FACTOR * e {
+            p *= 1.0 + e;
         }
     }
-    loop {
-        let middle = (below + (above - below) / 2.0).floor();
-        if middle <= below || middle >= above {
-            return above;
+    let search = |mut y: f64, z: &mut f64, increment: f64| -> f64 {
+        let left = if lower { *z >= p } else { *z < p };
+        if left {
+            loop {
+                let mut next = -1.0;
+                if y > 0.0 {
+                    next = distribution(y - increment, lower, log);
+                } else if y < 0.0 {
+                    y = 0.0;
+                }
+                if y == 0.0 || next.is_nan() || (if lower { next < p } else { next >= p }) {
+                    return y;
+                }
+                let lowered = y - increment;
+                y = if 0.0 < lowered { lowered } else { 0.0 };
+                *z = next;
+            }
         }
-        if reached(middle) {
-            above = middle;
-        } else {
-            below = middle;
+        loop {
+            let previous = y;
+            let mut next = -1.0;
+            y += increment;
+            match maximum {
+                Some(limit) if y < limit => next = distribution(y, lower, log),
+                Some(limit) if y > limit => y = limit,
+                Some(_) => {}
+                None => next = distribution(y, lower, log),
+            }
+            if maximum == Some(y) || next.is_nan() || (if lower { next >= p } else { next < p }) {
+                if increment <= 1.0 {
+                    *z = next;
+                    return y;
+                }
+                return previous;
+            }
+            *z = next;
+        }
+    };
+    if y < LARGE {
+        return search(y, &mut z, 1.0);
+    }
+    let mut increment = (y * INCREMENT_FRACTION).floor();
+    loop {
+        let previous = increment;
+        y = search(y, &mut z, increment);
+        let shrunk = (increment / SHRINK).floor();
+        increment = if 1.0 < shrunk { shrunk } else { 1.0 };
+        if !(previous > 1.0 && increment > y * RELATIVE_TOLERANCE) {
+            return y;
         }
     }
 }
@@ -5539,7 +5554,7 @@ pub fn qbinom(p: f64, n: f64, pr: f64, lower: bool, log: bool) -> f64 {
     let mu = n * pr;
     let sigma = (n * pr * q).sqrt();
     let gamma = (q - pr) / sigma;
-    discrete_quantile(p, mu, sigma, gamma, lower, log, n, &|y, lower, log| {
+    discrete_quantile(p, mu, sigma, gamma, lower, log, Some(n), &|y, lower, log| {
         pbinom(y, n, pr, lower, log)
     })
 }
@@ -5699,12 +5714,15 @@ pub fn qnbinom(p: f64, size: f64, prob: f64, lower: bool, log: bool) -> f64 {
         gamma,
         lower,
         log,
-        f64::INFINITY,
+        None,
         &|y, lower, log| pnbinom(y, size, prob, lower, log),
     )
 }
 
 pub fn qnbinom_mu(p: f64, size: f64, mu: f64, lower: bool, log: bool) -> f64 {
+    if size == f64::INFINITY {
+        return qpois(p, mu, lower, log);
+    }
     if p.is_nan() || size.is_nan() || mu.is_nan() {
         return p + size + mu;
     }
@@ -5717,9 +5735,6 @@ pub fn qnbinom_mu(p: f64, size: f64, mu: f64, lower: bool, log: bool) -> f64 {
     if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
         return boundary;
     }
-    if !finite(size) {
-        return qpois(p, mu, lower, log);
-    }
     let q = 1.0 + mu / size;
     let pp = mu / size;
     let sigma = (size * pp * q).sqrt();
@@ -5731,7 +5746,7 @@ pub fn qnbinom_mu(p: f64, size: f64, mu: f64, lower: bool, log: bool) -> f64 {
         gamma,
         lower,
         log,
-        f64::INFINITY,
+        None,
         &|y, lower, log| pnbinom_mu(y, size, mu, lower, log),
     )
 }
@@ -5968,7 +5983,7 @@ pub fn qpois(p: f64, lambda: f64, lower: bool, log: bool) -> f64 {
         gamma,
         lower,
         log,
-        f64::INFINITY,
+        None,
         &|y, lower, log| ppois(y, lambda, lower, log),
     )
 }
