@@ -21,6 +21,8 @@
 
 pub mod arena;
 pub mod env;
+pub mod image;
+pub use image::{Fixed, ImageError};
 pub mod large;
 pub mod object;
 pub mod records;
@@ -323,7 +325,8 @@ impl HeapGrowth {
             }
             _ => {}
         }
-        if let Some(fraction) = number("R_GC_GROWFRAC").filter(|value| (0.35..=0.75).contains(value))
+        if let Some(fraction) =
+            number("R_GC_GROWFRAC").filter(|value| (0.35..=0.75).contains(value))
         {
             growth.grow_fraction = fraction;
         }
@@ -1271,6 +1274,12 @@ impl Heap {
         Ok(symbol)
     }
 
+    /// The interned symbol named `name`, if one exists, without installing it.
+    pub unsafe fn find_symbol(&self, name: &[u8]) -> Option<Sexp> {
+        let name = self.find_interned(name, 0)?;
+        self.symbols.get(&name).copied()
+    }
+
     pub fn symbol_count(&self) -> usize {
         self.symbols.len()
     }
@@ -2115,11 +2124,10 @@ impl Heap {
                 // below the next one's peak and buy a full collection in the middle of it.
                 let needed = self.old_bytes() + request;
                 let policy = &mut self.policy;
-                policy.heap_limit = policy.growth.next_limit(
-                    policy.heap_limit,
-                    needed,
-                    policy.min_heap_limit,
-                );
+                policy.heap_limit =
+                    policy
+                        .growth
+                        .next_limit(policy.heap_limit, needed, policy.min_heap_limit);
                 self.mapped.limit = pool_limit(policy.heap_limit);
                 self.mapped.trim();
             }

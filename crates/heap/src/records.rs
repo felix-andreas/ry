@@ -151,6 +151,11 @@ impl Layouts {
         id
     }
 
+    /// How many layouts and tags are interned, which only ever grows.
+    pub fn counts(&self) -> (usize, usize) {
+        (self.layouts.len(), self.tags.len())
+    }
+
     pub fn get(&self, id: u32) -> Option<&Layout> {
         self.layouts.get(id as usize)
     }

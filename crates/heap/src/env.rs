@@ -288,6 +288,88 @@ impl Frame {
     }
 }
 
+/// A frame's exact contents, as a heap image stores them: every slot in order (a removed one
+/// as `None`), the formal count and removal count, and the hash table's chains. The symbol
+/// filter and the lookup index derive from the slots, so an image leaves them out.
+pub(crate) struct FrameImage {
+    pub slots: Vec<Option<(Sexp, Sexp)>>,
+    pub formals: u32,
+    pub removed: u32,
+    pub table: Option<TableImage>,
+}
+
+pub(crate) struct TableImage {
+    pub heads: Vec<u32>,
+    pub next: Vec<u32>,
+    pub hashes: Vec<u32>,
+    pub count: u32,
+}
+
+impl Frame {
+    pub(crate) fn image(&self) -> FrameImage {
+        FrameImage {
+            slots: self
+                .bindings
+                .iter()
+                .map(|binding| {
+                    (binding.symbol != REMOVED).then_some((binding.symbol, binding.cell))
+                })
+                .collect(),
+            formals: self.formals,
+            removed: self.removed,
+            table: self.table.as_ref().map(|table| TableImage {
+                heads: table.heads.clone(),
+                next: table.next.clone(),
+                hashes: table.hashes.clone(),
+                count: table.count,
+            }),
+        }
+    }
+
+    /// The frame an image stored, with a removed slot's cell set to `nil`.
+    pub(crate) fn from_image(image: FrameImage, nil: Sexp) -> Frame {
+        let bindings: SmallVec<[Binding; INLINE_BINDINGS]> = image
+            .slots
+            .iter()
+            .map(|slot| match *slot {
+                Some((symbol, cell)) => Binding { symbol, cell },
+                None => Binding {
+                    symbol: REMOVED,
+                    cell: nil,
+                },
+            })
+            .collect();
+        let mut filter = 0;
+        for binding in bindings.iter().filter(|binding| binding.symbol != REMOVED) {
+            filter |= filter_bit(binding.symbol);
+        }
+        let index = (bindings.len() > INDEX_THRESHOLD).then(|| {
+            let mut index = FxHashMap::default();
+            for (position, binding) in bindings.iter().enumerate() {
+                if binding.symbol != REMOVED {
+                    index.entry(binding.symbol).or_insert(position as u32);
+                }
+            }
+            Box::new(index)
+        });
+        Frame {
+            bindings,
+            index,
+            table: image.table.map(|table| {
+                Box::new(HashTable {
+                    heads: table.heads,
+                    next: table.next,
+                    hashes: table.hashes,
+                    count: table.count,
+                })
+            }),
+            formals: image.formals,
+            removed: image.removed,
+            filter,
+        }
+    }
+}
+
 /// GNU R's chained hash table for a hashed frame, kept in step with the frame's inserts and
 /// removals because the order GNU R lists the frame in depends on that whole history: a removal
 /// leaves the table at the size it grew to, and its chain counter falls only when a bucket
