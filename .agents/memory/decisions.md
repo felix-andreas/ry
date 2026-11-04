@@ -7332,7 +7332,13 @@ Each one trades a narrow class of missed errors for a class of false reports see
   strings by their text, attributes ignored) equals the 4.6.2 one. Another release keeps its own
   function at its own speed, and a mismatch on the bundled 4.6.2 is an error, because it means the
   copy and the bundled tree drifted apart. `RY_PRINT_FAST_PATH_HASHES` prints the installed function's hash for
-  updating the constant with the copy.
+  updating the constant with the copy. The hash skips a nested `function` call's fourth element
+  (its srcref), because a parse from source fills it and GNU R's saved namespace leaves it out:
+  hashing it made the pristine function hash one way in `build-base` and another in a built home,
+  and pinning the second broke every clean build. ry's own built base namespace saves the
+  replacement, which the guard recognises by the replacement's own hash and leaves in place.
+  `stable_hash_ignores_nested_function_srcrefs` in `session.rs` pins the srcref rule, and CI's
+  `just base-r dev` is the end-to-end check because it builds base R from the source tarball.
 - **Pinned by** `namespaces_register_s3_methods_as_gnu_r_does` in `crates/libr/tests/test_install.rs`,
   which installs two packages under ry and under GNU R and compares one script's output (every
   branch: known generics, another package's generic, an overwrite and its message, local plain and

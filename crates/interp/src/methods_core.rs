@@ -64,13 +64,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
 const FAST_PATHS: &[(&str, &[u64])] = &[
     ("new", &[0xed04_11d7_4c52_3b14]),
     ("initialize", &[0x0cbc_a8bc_242d_4840]),
-    ("validObject", &[0xcfec_1557_eba8_fe90]),
+    ("validObject", &[0x8f82_3d83_2f02_0ff0]),
     ("is", &[0xa975_8041_9461_37c4, 0x4826_09db_60cf_b7e5]),
-    ("extends", &[0x2df8_66a4_f3b4_1f5e]),
-    ("setGeneric", &[0xe3ac_b876_a896_9c54]),
+    ("extends", &[0x244f_7420_923b_771e]),
+    ("setGeneric", &[0xbaa0_ee27_203e_a2f4]),
     ("setMethod", &[0x7cc6_fd5c_68e7_5d79]),
     ("setClass", &[0x3a03_d885_5064_d505]),
-    (".checkGroupSigLength", &[0x5f8d_dfdc_b708_b922]),
+    (".checkGroupSigLength", &[0x83f1_310d_2df4_2522]),
     ("setClassUnion", &[0x432d_d49c_dabe_37aa]),
     ("cacheMetaData", &[0xacce_736a_7865_842c]),
 ];
@@ -840,7 +840,11 @@ unsafe fn name_extends(class1: Sexp, definition1: Option<Sexp>, class2: &[u8]) -
 
 /// `extends(definition, class2)` for a class definition.
 unsafe fn class_extends(definition: Sexp, class2: &[u8]) -> R<Option<bool>> {
-    name_extends(slot(definition, symbols().class_name)?, Some(definition), class2)
+    name_extends(
+        slot(definition, symbols().class_name)?,
+        Some(definition),
+        class2,
+    )
 }
 
 /// `isClassUnion(definition)`: whether the class of the definition extends
@@ -2169,7 +2173,11 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
             bail!(skip);
         };
         let qualified = values::scalar_string_charsxp(slot_class)?;
-        values::set_attr(qualified, package_symbol, slot(definition, symbols().package)?)?;
+        values::set_attr(
+            qualified,
+            package_symbol,
+            slot(definition, symbols().package)?,
+        )?;
         slots.push((slot_name, qualified));
     }
     for known in &supers {
@@ -2876,8 +2884,10 @@ unsafe fn add_union_member(
             if subclass.bytes() == union.bytes() {
                 continue;
             }
-            let subclass_package =
-                get_attr(slot(subclass_extension, symbols().sub_class)?, symbols().package);
+            let subclass_package = get_attr(
+                slot(subclass_extension, symbols().sub_class)?,
+                symbols().package,
+            );
             if subclass_package.kind() != SexpType::String
                 || length(subclass_package) != 1
                 || subclass_package.element(0).bytes() != member_package.element(0).bytes()
@@ -2909,11 +2919,7 @@ unsafe fn add_union_member(
             bound_contains.push((union, union_extension));
             let rebound = values::shallow_duplicate(bound)?;
             crate::heap().root(rebound);
-            crate::subset::assign_slot(
-                rebound,
-                symbols().contains,
-                named_list(&bound_contains)?,
-            )?;
+            crate::subset::assign_slot(rebound, symbols().contains, named_list(&bound_contains)?)?;
             pending.bind(place, subclass_meta, rebound);
             pending.cache(subclass, rebound, true);
         }
@@ -2984,7 +2990,9 @@ unsafe fn resolved_superclasses(
         let ordering = match pending.class(direct)? {
             Some(definition) => {
                 let mut names = Vec::new();
-                for (name, superclass_extension) in list_entries(slot(definition, symbols().contains)?) {
+                for (name, superclass_extension) in
+                    list_entries(slot(definition, symbols().contains)?)
+                {
                     if is_simple(superclass_extension) {
                         names.push(name);
                     }
@@ -3780,7 +3788,10 @@ pub(crate) unsafe fn inherited_method(
         } else {
             simple(extension)?
                 || (!simple_only
-                    && is_true(crate::bytecode::closure_body(slot(extension, symbols().test)?)))
+                    && is_true(crate::bytecode::closure_body(slot(
+                        extension,
+                        symbols().test,
+                    )?)))
         };
         if !eligible || seen.contains(&label.bytes()) {
             continue;
@@ -4002,7 +4013,10 @@ unsafe fn combine_extensions(
     let by_replace_body = crate::bytecode::closure_body(by_replace);
     let replace = if is_true(slot(by_definition, symbols().virtual_)?) {
         // The replace method goes through the extension from `by` to `to`, when `by` has one.
-        match element(slot(by_definition, symbols().contains)?, to.element(0).bytes()) {
+        match element(
+            slot(by_definition, symbols().contains)?,
+            to.element(0).bytes(),
+        ) {
             Some(skip) => {
                 let body = template(
                     Template::CombineReplaceVirtual,
@@ -4571,11 +4585,7 @@ unsafe fn s4_null() -> R<Sexp> {
 /// A class attribute for a class of the methods package.
 unsafe fn methods_class(class: &str) -> R<Sexp> {
     let value = values::scalar_string(class)?;
-    values::set_attr(
-        value,
-        symbols().package,
-        values::scalar_string("methods")?,
-    )?;
+    values::set_attr(value, symbols().package, values::scalar_string("methods")?)?;
     Ok(value)
 }
 
@@ -4625,8 +4635,10 @@ unsafe fn is_standard_generic(generic: Sexp, nonstandard: bool) -> R<bool> {
 /// `.Internal` function of an internal generic, which dispatch from C code.
 unsafe fn has_closure_default(generic: Sexp) -> R<bool> {
     let default = get_attr(generic, symbols().default);
-    Ok(!matches!(default.kind(), SexpType::Builtin | SexpType::Special)
-        && !values::inherits(default, "internalDispatchMethod"))
+    Ok(
+        !matches!(default.kind(), SexpType::Builtin | SexpType::Special)
+            && !values::inherits(default, "internalDispatchMethod"),
+    )
 }
 
 /// The text of a slot that holds a single string.
