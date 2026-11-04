@@ -474,7 +474,7 @@ unsafe fn try_eval(expression: Sexp, env: Sexp, failed: *mut c_int, silent: bool
         state.handlers = handlers;
         state.restarts = restarts;
         state.show_error_messages = show;
-        state.frames.truncate(frames);
+        interp::truncate_frames(state, frames);
         if !failed.is_null() {
             *failed = result.is_err() as c_int;
         }

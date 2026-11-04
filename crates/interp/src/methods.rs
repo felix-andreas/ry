@@ -267,13 +267,14 @@ pub unsafe fn signature_arguments(args: &[Arg], generic: Sexp) -> R<Option<Sexp>
 /// The frame also gets the dispatch variables, and takes over the generic's call, caller and
 /// arguments, which is what `sys.call()`, `parent.frame()` and `match.call()` see.
 pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
-    let (call, sys_parent, promargs) = interp()
+    let state = interp();
+    let position = state
         .frames
         .iter()
-        .rev()
-        .find(|frame| frame.env == generic_env)
-        .map(|frame| (frame.call, frame.sys_parent, frame.promargs))
+        .rposition(|frame| frame.env == generic_env)
         .ok_or_else(|| error("could not find the generic function's frame"))?;
+    let (call, sys_parent) = (state.frames[position].call, state.frames[position].sys_parent);
+    let promargs: eval::Args = crate::frame_args(state, position).into();
     let heap = crate::heap();
     let method_env = values::new_env(method.tag())?;
     let mut formal = method.car();
@@ -318,7 +319,7 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
         method,
         method_env,
         sys_parent,
-        promargs,
+        &promargs,
         Entry::Unchecked,
     )
 }

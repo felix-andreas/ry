@@ -991,8 +991,7 @@ pub unsafe fn apply_closure(
         return value;
     }
     let env = bind_arguments(call, function, args, supplied)?;
-    let promargs = args_pairlist(args)?;
-    run_closure(call, function, env, sys_parent, promargs, Entry::Unchecked)
+    run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
 }
 
 /// A fresh environment for a call of the closure `function`, with `args` matched to its formals
@@ -1077,11 +1076,7 @@ pub unsafe fn apply_closure_moved(
     let heap = crate::heap();
     heap.define_formals_uncollected(env, &bindings)?;
     heap.mark_frame_formals(env);
-    let promargs = args_pairlist(args)?;
-    heap.untrack_references(promargs);
-    // Untracking a cell stops its tail from counting too, which the rest of the list needs.
-    promargs.cdr().increment_refcount();
-    run_closure(call, function, env, sys_parent, promargs, Entry::Unchecked)
+    run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
 }
 
 /// Whether every argument is untagged and the formals, which have no `...`, take them all.
@@ -1126,8 +1121,8 @@ unsafe fn formal_binding(env: Sexp, formal: Sexp, actual: Sexp) -> R<Formal> {
     })
 }
 
-/// The arguments as a rooted pairlist of their values or promises, which a frame records. The
-/// caller keeps the values alive, so one collection check covers every cell.
+/// The arguments as a rooted pairlist of their values or promises. The caller keeps the values
+/// alive, so one collection check covers every cell.
 pub unsafe fn args_pairlist(args: &[Arg]) -> R<Sexp> {
     let heap = crate::heap();
     heap.reserve(TRIPLE_BYTES * args.len(), &[]);
@@ -1145,7 +1140,7 @@ pub unsafe fn run_closure(
     function: Sexp,
     env: Sexp,
     sys_parent: Sexp,
-    promargs: Sexp,
+    args: &[Arg],
     entry: Entry,
 ) -> R<Sexp> {
     let _activity = activity::enter(Activity::CallSetup, 0);
@@ -1163,12 +1158,14 @@ pub unsafe fn run_closure(
         refuse_object_system(call, function, sys_parent)?;
     }
     let restarts = state.restarts.clone();
+    let start = state.frame_args.len() as u32;
+    state.frame_args.extend_from_slice(args);
     state.frames.push(Frame {
         call,
         function,
         env,
         sys_parent,
-        promargs,
+        args: start,
         on_exit: Vec::new(),
         handlers: state.handlers.clone(),
         restarts: restarts.clone(),
@@ -1215,7 +1212,7 @@ pub unsafe fn run_closure(
     let state = interp();
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = state.frames[depth - 1].handlers.clone();
-    state.frames.truncate(depth - 1);
+    crate::truncate_frames(state, depth - 1);
     state.restarts = restarts;
     state.srcref = caller_srcref;
     result
@@ -2489,13 +2486,13 @@ unsafe fn do_invisible(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_nargs(call: &Call<'_>) -> R<Sexp> {
     let env = call.env;
-    let count = interp()
+    let state = interp();
+    let count = state
         .frames
         .iter()
-        .rev()
-        .find(|frame| frame.env == env)
-        .map_or(NA_INTEGER, |frame| {
-            values::pairlist_length(frame.promargs) as i32
+        .rposition(|frame| frame.env == env)
+        .map_or(NA_INTEGER, |index| {
+            crate::frame_args(state, index).len() as i32
         });
     // Outside any closure, such as at top level, GNU R finds no call to count and answers NA.
     values::scalar_integer(count)
@@ -2665,8 +2662,7 @@ pub unsafe fn force_and_call_with(
         _ => Entry::Unchecked,
     };
     let frame = bind_arguments(call, function, &args, None)?;
-    let promargs = args_pairlist(&args)?;
-    run_closure(call, function, frame, env, promargs, entry)
+    run_closure(call, function, frame, env, &args, entry)
 }
 
 unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
@@ -2710,7 +2706,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         function: call.op,
         env,
         sys_parent: call.env,
-        promargs: nil(),
+        args: state.frame_args.len() as u32,
         on_exit: Vec::new(),
         handlers: handlers.clone(),
         restarts: restarts.clone(),
@@ -2728,7 +2724,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     let state = interp();
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = state.frames[depth - 1].handlers.clone();
-    state.frames.truncate(depth - 1);
+    crate::truncate_frames(state, depth - 1);
     state.restarts = restarts;
     result
 }

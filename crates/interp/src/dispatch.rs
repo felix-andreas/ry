@@ -514,10 +514,11 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("'generic' argument must be a character string"));
     }
     let generic_symbol = values::install_charsxp(generic.element(0))?;
-    let (frame_call, function, promargs, sys_parent) = {
+    let (frame_call, function, sys_parent) = {
         let frame: &Frame = &interp().frames[position];
-        (frame.call, frame.function, frame.promargs, frame.sys_parent)
+        (frame.call, frame.function, frame.sys_parent)
     };
+    let promargs: eval::Args = crate::frame_args(interp(), position).into();
     let object = if call.len() >= 2 {
         eval::eval(call.arg(1), env)?
     } else {
@@ -525,7 +526,7 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
             // GNU R's `GetObject` falls back to the first supplied argument when the first
             // formal was not supplied, so `f(y = obj)` dispatches on `obj`.
             object if object == nil() && first_formal_missing(function, env)? => {
-                first_supplied(promargs)?
+                first_supplied(&promargs)?
             }
             object => object,
         }
@@ -572,7 +573,7 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
             }
         }
     }
-    let args = eval::unevaluated_args(promargs);
+    let args = promargs;
     let new_call = renamed_call(frame_call, found.method_name)?;
     drop(dispatching);
     let result = apply_method(new_call, found.method, &args, sys_parent, &vars)?;
@@ -645,13 +646,13 @@ unsafe fn first_formal_missing(function: Sexp, env: Sexp) -> R<bool> {
     Ok(value == missing_arg() || value == unbound())
 }
 
-/// The value of the first supplied argument among a call's matched arguments.
-unsafe fn first_supplied(promargs: Sexp) -> R<Sexp> {
-    if promargs.kind() != SexpType::Pairlist {
+/// The value of the first supplied argument among a call's arguments.
+unsafe fn first_supplied(args: &[Arg]) -> R<Sexp> {
+    let Some(first) = args.first() else {
         return Ok(nil());
-    }
+    };
     // GNU R's GetObject takes the first argument even when it was left empty.
-    match promargs.car() {
+    match first.value {
         value if value.kind() == SexpType::Dots => value_of(value.car()),
         value if value == missing_arg() => Ok(nil()),
         value => value_of(value),
@@ -707,10 +708,11 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     else {
         return Err(error("'NextMethod' called from outside a function"));
     };
-    let (frame_call, function, promargs, sys_parent) = {
+    let (frame_call, function, sys_parent) = {
         let frame = &interp().frames[position];
-        (frame.call, frame.function, frame.promargs, frame.sys_parent)
+        (frame.call, frame.function, frame.sys_parent)
     };
+    let promargs: eval::Args = crate::frame_args(interp(), position).into();
     if frame_call.car().kind() != SexpType::Symbol {
         return Err(error("'NextMethod' called from an anonymous function"));
     }
@@ -839,7 +841,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     };
     // The arguments: the method's own, with each formal replaced by a promise of its current
     // value in the method's frame, so changes the method made are seen.
-    let mut args = eval::unevaluated_args(promargs);
+    let mut args = promargs;
     if function.kind() == SexpType::Closure {
         let matched = eval::match_args(function.car(), &args, frame_call)?;
         let formals: Vec<Sexp> = values::pairlist_items(function.car())
@@ -1290,13 +1292,14 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
     let state = interp();
     let handlers = state.handlers.clone();
     let restarts = state.restarts.clone();
-    let promargs = eval::args_pairlist(promised)?;
+    let start = state.frame_args.len() as u32;
+    state.frame_args.extend_from_slice(promised);
     state.frames.push(Frame {
         call,
         function: found.method,
         env: context_env,
         sys_parent: env,
-        promargs,
+        args: start,
         on_exit: Vec::new(),
         handlers: handlers.clone(),
         restarts: restarts.clone(),
@@ -1307,7 +1310,7 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
     let state = interp();
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = state.frames[depth - 1].handlers.clone();
-    state.frames.truncate(depth - 1);
+    crate::truncate_frames(state, depth - 1);
     state.restarts = restarts;
     result
 }

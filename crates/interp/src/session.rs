@@ -124,6 +124,7 @@ unsafe fn start_from_image(home: &str) -> R<()> {
         base_env(),
     )?;
     remove_library_site()?;
+    crate::profile_summary::mark_ready();
     conditions::print_warnings()
 }
 
@@ -764,7 +765,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
             false
         }
     };
-    interp().frames.clear();
+    crate::truncate_frames(interp(), 0);
     interp().foreign_calls.clear();
     interp().handlers = interp().global_handlers.clone();
     interp().restarts = None;
@@ -777,7 +778,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     if let Err(unwind) = (interp().hooks.run_task_callbacks)(expression, value, succeeded, visible)
     {
         report_toplevel(unwind);
-        interp().frames.clear();
+        crate::truncate_frames(interp(), 0);
         interp().foreign_calls.clear();
         interp().handlers = interp().global_handlers.clone();
         interp().restarts = None;

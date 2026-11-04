@@ -102,7 +102,7 @@ pub mod viewer;
 pub use crate::unwind::{Jump, RError};
 use {
     crate::{
-        builtins::{BuiltinDef, Kind},
+        builtins::{Arg, BuiltinDef, Kind},
         conditions::{HandlerStack, RestartStack},
         unwind::{R, Unwind},
     },
@@ -123,8 +123,10 @@ pub struct Frame {
     pub env: Sexp,
     /// The environment the call was evaluated in, which `parent.frame` returns.
     pub sys_parent: Sexp,
-    /// The matched arguments as a pairlist of promises, tagged with the formal names.
-    pub promargs: Sexp,
+    /// Where the call's arguments (values or promises, with the tags the call gave them) start
+    /// in [`Interp::frame_args`]; they run up to the next frame's start. `sys.function`'s
+    /// pairlist of them is built only when dispatch asks for it, so a call allocates none.
+    pub args: u32,
     /// `on.exit` expressions, in the order they run.
     pub on_exit: Vec<Sexp>,
     pub handlers: HandlerStack,
@@ -132,6 +134,26 @@ pub struct Frame {
     /// The srcref current when the call was made (`R_Srcref`), which `sys.call` and `traceback`
     /// attach to the call, and which is current again once the call returns.
     pub srcref: Sexp,
+}
+
+/// The arguments of the frame at `index` (zero-based), as the call passed them.
+pub fn frame_args(state: &Interp, index: usize) -> &[Arg] {
+    let Some(frame) = state.frames.get(index) else {
+        return &[];
+    };
+    let end = state
+        .frames
+        .get(index + 1)
+        .map_or(state.frame_args.len(), |next| next.args as usize);
+    state.frame_args.get(frame.args as usize..end).unwrap_or(&[])
+}
+
+/// Keeps the first `depth` frames and drops the rest with their arguments.
+pub fn truncate_frames(state: &mut Interp, depth: usize) {
+    if let Some(frame) = state.frames.get(depth) {
+        state.frame_args.truncate(frame.args as usize);
+    }
+    state.frames.truncate(depth);
 }
 
 /// Services the heap's owner provides because they need native code or process-wide state the
@@ -198,6 +220,8 @@ pub enum TaskCallbackRoutine {
 
 pub struct Interp {
     pub frames: Vec<Frame>,
+    /// The arguments of every frame, back to back in frame order (see [`Frame::args`]).
+    pub frame_args: Vec<Arg>,
     /// The foreign calls (`.Call`, `.External`, `.C`, `.Fortran`) in progress, each with the
     /// number of frames below it. GNU R gives them a builtin context, which tracebacks list and
     /// `sys.calls()` does not, so they live beside the frames rather than among them.
@@ -366,6 +390,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     let connection_table = connections::Table::new(hooks.connection_vfprintf);
     state.interp = Some(Interp {
         frames: Vec::new(),
+        frame_args: Vec::new(),
         foreign_calls: Vec::new(),
         handlers: None,
         restarts: None,
@@ -516,7 +541,6 @@ impl RootSource for InterpRoots {
                     frame.function,
                     frame.env,
                     frame.sys_parent,
-                    frame.promargs,
                     frame.srcref,
                 ] {
                     marker.mark(object);
@@ -526,6 +550,10 @@ impl RootSource for InterpRoots {
                 }
                 conditions::trace_handlers(&frame.handlers, marker);
                 conditions::trace_restarts(&frame.restarts, marker);
+            }
+            for arg in &interp.frame_args {
+                marker.mark(arg.tag);
+                marker.mark(arg.value);
             }
             for &(call, _) in &interp.foreign_calls {
                 marker.mark(call);
