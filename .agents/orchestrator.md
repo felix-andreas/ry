@@ -81,7 +81,7 @@ Release 0.4.2-beta: focus is untyped R (runtime speed, peak memory, S4 start-up)
 | session_0111kWqDtXuaHtaQUjXKTBbT (bundle base R) | registerS3methods release blocker: a stable_hash that ignores srcrefs, plus accepting ry's own saved replacement | opening a PR with tests, self-merges, then reports |
 | session_0111kWqBiUsHhdvToMM3XK3p (untyped speed, #304 perf/untyped-tiers) | flat argument arena, then four hotspots in one push: in-place `[[<-`/`[<-` growth, matrix index fast paths, cost of the `<-`/rep/`[[<-` builtins, regex. Call setup measured at under 10%, so value args and slot frames are on hold | self-merges when the oracle and guards are green |
 | session_0111kWqCm79QaDnkV4xwNbYT (native methods package) | S4 load under 100 ms; 33/33 package-load tests pass | finishing, self-merges |
-| session_0111kWqBEE1AsUXHyHMAPyN2 (peak memory) | frame release at return merged as #332 (sales 2.17x GNU R, memory-peak guards green); checking whether it caused vector_arith to drop from 1.2x to 0.93x | then stops |
+| session_0111kWqBEE1AsUXHyHMAPyN2 (peak memory) | frame release at return merged as #332 (sales 2.17x GNU R, memory-peak guards green); the vector_arith swing is GNU R and machine noise | done, idle |
 | session_0111kWqCfpecU8o5DgWeVLCK (typed fast path) | #327 merged, stale tier test fixed | done, stopped |
 | session_0111kWqBqyKbio71yRiq3xcG (typed language) | WIP on feat/climb-speed-baseline | paused until after the release |
 | session_0111kWqCm1CEW7RN3igU6Tzk (top CRAN, draft #312) | top-100 run; future and ggplot2 loess gaps in backlog.md | done, unmerged |
