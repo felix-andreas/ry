@@ -73,25 +73,37 @@ The quality bar is four things.
 
 The methods package's core is moving into Rust behind hash-guarded prologues (`decisions.md`, "The
 methods package's core runs natively behind hash-guarded prologues"). `new()`, the default
-`initialize()`, `validObject()`, `is()`, `extends()`, `setGeneric()`, `setMethod()` and `setClass()`
-are native when nothing observable would differ. On `target/s4plain` (2,892 definitions, no
-imports beyond R6) a cold first `new()` costs about 0.85 s (running the definitions 530 ms,
-`cacheMetaData` 125 ms, the cache save 190 ms) and a warm one about 62 ms; the goal is under 100 ms
-cold without the S4 cache, which is deleted once that holds (`decisions.md`). Consider a native
-class table with dense ids and a bitset extends relation instead of porting function by function.
-A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
-4.5 µs per call. Remaining, largest first:
+`initialize()`, `validObject()`, `is()`, `extends()`, `setGeneric()`, `setMethod()`, `setClass()`,
+`setClassUnion()` and `cacheMetaData()` are native when nothing observable would differ. On
+the S4-heavy bench package (2,892 definitions, `just bench-s4-first-use target/s4heavy
+lubridate,data.table,xts`) a cold first `new()` costs about 0.47 s (running the definitions about
+245 ms, `cacheMetaData` 16 ms, the cache save about 200 ms) and a warm one about 77 ms; the goal is under 100 ms cold without the S4 cache, which is deleted once
+that holds (`decisions.md`). Consider a native class table with dense ids and a bitset extends
+relation instead of porting function by function. A reload after editing a method or a class
+takes 0.2 to 0.45 s, and dispatch costs 2.3 to 4.5 µs per call. Remaining, largest first (per-call
+costs from `RY_TRACE_METHODS_BAILS=1` with a timer around each definition):
 
-- `setClassUnion` (297 ms for 25 unions). `setIs` copies basic member classes into the methods
-  namespace (`.findOrCopyClass`, `.assignOverBinding`), `completeExtends` runs a nested `setIs` for
-  every subclass of a member, and `.recacheSubclasses` follows. Start with unions whose members
-  are all local classes.
-- The `setClass` shapes that still bail (`RY_TRACE_METHODS_BAILS=1`): a classRepresentation passed
-  in by `setClassUnion`, supers from another package, several `contains` with data parts, and
-  classes that are virtual for lack of slots.
-- `cacheMetaData` and `.checkGroupSigLength` (about 125 ms cold, 45 ms warm, and the import cost, see "Start-up and
-  imports are the floor of a warm `ry load`" below).
-- The S4 cache save (about 190 ms uncompressed, mostly `makeLazyLoadDB` serializing).
+- Native `setClass` itself: about 100 µs per call, 60 ms for 579 classes (callgrind with
+  `--toggle-collect='*do_set_class'` on a build with `CARGO_PROFILE_RELEASE_STRIP=false`). A slot
+  default runs R's `new()` only the first time a class is used, to fill `initialize`'s dispatch
+  cache (about a quarter of the cost, `.InheritForDispatch` in R); then come the templates each
+  direct extension instantiates (`substitute_symbols`) and symbol interning.
+- The S4 cache save (about 190 ms uncompressed, mostly `makeLazyLoadDB` serializing), which goes
+  away with the cache.
+- `setMethod` on a generic that is not yet a standard generic: primitives (`length`, `c`), base
+  functions that get an implicit generic (`as.list`, `print`, `toString`) and `initialize`. About
+  1.8 ms each, 33 ms for 19 calls.
+- Native `setMethod`: about 23 µs per call, 42 ms for 1,867 methods.
+- The first union of a basic class (`setClassUnion("Basic00OrNull", ...)`, about 9 ms), which
+  rebinds the basic member classes in `package:methods` on the R path. Later unions are
+  native (about 190 µs each).
+- `cacheMetaData` delegates a class to `.cacheClass` when its cached definition differs from the
+  bound one (77 classes on `s4plain`, real work) and a union whose members' cached extensions are
+  out of date, and delegates generics of other packages, group generics and primitives.
+- The `setClass` shapes that still bail: supers from another package, several `contains` with
+  data parts, and classes that are virtual for lack of slots.
+- `.checkGroupSigLength` and the imports' `cacheMetaData` (see "Start-up and imports are the
+  floor of a warm `ry load`" below).
 - `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every
   data part, so `new("MethodDefinition", f)` costs about 50 µs (GNU R about 340 µs).
   `.mergeAttrs` decides the attribute order, so a native version must reproduce it exactly.

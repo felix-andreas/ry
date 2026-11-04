@@ -1,0 +1,44 @@
+[stdout]
+| Base : NumOrBase Anything 
+|   distances: 1 2 
+| Leaf : Base NumOrBase Anything 
+|   distances: 1 2 3 
+| Twig : Leaf Base NumOrBase Anything 
+|   distances: 1 2 3 4 
+| integer : double numeric vector data.frameRowLabels NumOrBase Anything 
+|   distances: 1 1 1 1 1 2 
+| numeric : vector NumOrBase Anything 
+|   distances: 1 1 2 
+| Frame : data.frame MaybeFrame list oldClass vector 
+|   distances: 1 1 2 2 3 
+| numeric Base integer double Leaf factor factor Twig ordered ordered 
+| NumOrBase character numeric Base integer signature className ObjectsWithPackage double Leaf factor factor Twig ordered ordered 
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] "describe"
+| [1] "num-or-base"
+| [1] "num-or-base"
+| [1] "num-or-base"
+| [1] "character"
+| [1] "maybe-frame"
+| [1] 42
+| [1] TRUE
+| [1] "character"  "MaybeFrame" "NumOrBase" 
+| error: invalid to use names()<- on an S4 object of class 'Leaf' 
+| [1] TRUE
+| [1] FALSE
+| [1] 1
+| [1] "externalptr"
+| [1] TRUE
+| error: use of NULL environment is defunct 
+| error: replacement object is not an environment 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

@@ -10,5 +10,7 @@ list(
     extends = quote(switch(.Internal(ryS4Extends(environment())), return(FALSE), return(TRUE))),
     setGeneric = quote(if (.Internal(ryS4SetGeneric(environment()))) return(name)),
     setMethod = quote(if (.Internal(ryS4SetMethod(environment()))) return(invisible(f))),
-    setClass = quote(if (is.function(value <- .Internal(ryS4SetClass(environment())))) return(invisible(value)))
+    setClass = quote(if (is.function(value <- .Internal(ryS4SetClass(environment())))) return(invisible(value))),
+    setClassUnion = quote(if (is.function(value <- .Internal(ryS4SetClassUnion(environment())))) return(invisible(value))),
+    cacheMetaData = quote(if (.Internal(ryS4CacheMetaData(environment()))) return(invisible(NULL)))
 )
