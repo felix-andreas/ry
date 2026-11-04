@@ -80,7 +80,7 @@ Release 0.4.2-beta: focus is untyped R (runtime speed, peak memory, S4 start-up)
 | --- | --- | --- |
 | session_0111kWqDtXuaHtaQUjXKTBbT (bundle base R) | #331 merged; dry run: Linux passes, macOS fails building grid (`libintl.h`), Windows fails extracting the R tarball (symlinks) | fixing both in one PR, self-merges, then the dry run is rerun |
 | session_0111kWqBiUsHhdvToMM3XK3p (untyped speed) | #304 merged: argument arena, in-place `[[<-`/`[<-` growth, matrix subassign bytecode, a direct PCRE2 binding, in-place textConnection output | bench-real before/after pending; next the `<-`/rep/`[[<-` builtin costs and the JIT matrix store, then re-profile the call-heavy workloads (objects, validation, functional) |
-| session_0111kWqCm79QaDnkV4xwNbYT (native methods package) | S4 load under 100 ms; 33/33 package-load tests pass | finishing, self-merges |
+| session_0111kWqCm79QaDnkV4xwNbYT (native methods package) | merged as #333: first new() on an S4-heavy package 80-87 ms cold, S4 cache deleted, fixes the S4 forcing that #332 broke | done |
 | session_0111kWqBEE1AsUXHyHMAPyN2 (peak memory) | frame release at return merged as #332 (sales 2.17x GNU R, memory-peak guards green); the vector_arith swing is GNU R and machine noise | done, idle |
 | session_0111kWqCfpecU8o5DgWeVLCK (typed fast path) | #327 merged, stale tier test fixed | done, stopped |
 | session_0111kWqBqyKbio71yRiq3xcG (typed language) | WIP on feat/climb-speed-baseline | paused until after the release |
