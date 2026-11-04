@@ -48,7 +48,7 @@
 | 	Exact two-sample Kolmogorov-Smirnov test
 | 
 | data:  x and y
-| D^- = 0.04, p-value = 0.9532
+| D^- = 0.04, p-value = 0.9546
 | alternative hypothesis: the CDF of x lies below that of y
 | 
 | 

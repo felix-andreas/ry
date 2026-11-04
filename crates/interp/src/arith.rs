@@ -1386,6 +1386,22 @@ pub fn real_op(op: Op, a: f64, b: f64) -> f64 {
     }
 }
 
+/// R 4.6's `R_pow` multiplies out a cube or a fourth power of a base in [-11, 11] instead of
+/// calling C's `pow`, which can differ in the last bit.
+pub fn small_power_product(base: f64, exponent: f64) -> Option<f64> {
+    if !(exponent == 3.0 || exponent == 4.0)
+        || !(-11.0..=11.0).contains(&base)
+        || !crate::system::r_at_least(4, 6)
+    {
+        return None;
+    }
+    Some(if exponent == 4.0 {
+        base * base * base * base
+    } else {
+        base * base * base
+    })
+}
+
 /// `^` with R's special cases, which C's `pow` leaves to the platform: `1^y` and `x^0` are 1
 /// even for `NA`, and an infinite operand gives a defined limit or `NaN` (`(-Inf)^0.5`).
 pub fn power(base: f64, exponent: f64) -> f64 {
@@ -1404,6 +1420,8 @@ pub fn power(base: f64, exponent: f64) -> f64 {
     if base.is_finite() && exponent.is_finite() {
         return if exponent == 2.0 {
             base * base
+        } else if let Some(product) = small_power_product(base, exponent) {
+            product
         } else {
             base.powf(exponent)
         };
@@ -2546,9 +2564,11 @@ fn signif_complex(z: Rcomplex, digits: f64) -> Rcomplex {
 }
 
 unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
-    // GNU R counts the arguments before matching them, and blames the calling closure for a
-    // wrong count or a lone argument that is not `x`.
-    if call.is_empty() || call.len() > 2 {
+    // Through R 4.3, GNU R counts the arguments before matching them, and blames the calling
+    // closure for a wrong count or a lone argument that is not `x`. From R 4.4 on, matching
+    // against `x` and `digits` alone reports what does not fit as an unused argument.
+    let counts_first = !crate::system::r_at_least(4, 4);
+    if counts_first && (call.is_empty() || call.len() > 2) {
         let name = if significant { "signif" } else { "round" };
         return Err(error(format!(
             "{} arguments passed to '{name}' which requires 1 or 2 arguments",
@@ -2556,7 +2576,8 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
         )));
     }
     let missing_operand = "argument \"x\" is missing, with no default";
-    if let [only] = call.args
+    if counts_first
+        && let [only] = call.args
         && only.tag != nil()
         && values::symbol_name(only.tag) != "x"
     {
@@ -3532,7 +3553,7 @@ unsafe fn do_colon(call: &Call<'_>) -> R<Sexp> {
         if length(operand) > 1 {
             // GNU R reads the variable on every such call, so a script can switch the check on
             // and off; reading it only here keeps the common scalar call free of the lookup.
-            let strict = std::env::var("_R_CHECK_LENGTH_COLON_")
+            let strict = crate::image::variable("_R_CHECK_LENGTH_COLON_")
                 .is_ok_and(|value| matches!(value.as_str(), "TRUE" | "true" | "True" | "T"));
             if strict {
                 return Err(call.error("numerical expression has length > 1"));

@@ -331,9 +331,10 @@ pub unsafe extern "C" fn Rf_rmultinom(
     })
 }
 
-/// GNU R frees the tables `dwilcox` and friends cache; ry's tables are rebuilt per call.
 #[unsafe(no_mangle)]
-pub extern "C" fn wilcox_free() {}
+pub extern "C" fn wilcox_free() {
+    interp::rmath::wilcox_free();
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn signrank_free() {}

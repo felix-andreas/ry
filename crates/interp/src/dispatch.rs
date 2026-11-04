@@ -516,8 +516,9 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
         )));
     };
     let mut vars = found.vars;
-    // Local variables the generic defined before dispatching are visible to the method.
-    if function.kind() == SexpType::Closure {
+    // Through R 4.3, local variables the generic defined before dispatching are visible to the
+    // method; R 4.4 stopped forwarding them.
+    if function.kind() == SexpType::Closure && !crate::system::r_at_least(4, 4) {
         let formals: Vec<Sexp> = values::pairlist_items(function.car())
             .into_iter()
             .map(|(tag, _)| tag)

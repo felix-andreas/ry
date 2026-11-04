@@ -4,7 +4,7 @@
 | list(id = c("a", "b", "c"), n = c(1L, NA, 3L), v = c(0.5, 1000, 
 | -2.25), flag = c(TRUE, FALSE, NA), s = c("x", "", NA), empty = c(NA, 
 | NA, NA))
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
 | NULL
 |        id     n       v   flag      s  empty
@@ -16,7 +16,7 @@
 | "character" "integer64"   "integer" 
 | list(g = c("k", "l"), big = structure(c(1.48219693752374e-314, 
 | 4.94065645841247e-324), class = "integer64"), small = 1:2)
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
 | NULL
 |         g        big small
@@ -27,7 +27,7 @@
 | "IDate/Date"    "integer" 
 | list(day = structure(19724:19725, class = c("IDate", "Date")), 
 |     v = 1:2)
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
 | NULL
 |           day     v
@@ -38,7 +38,7 @@
 | "POSIXct/POSIXt"        "integer" 
 | list(when = structure(c(1704189600, 1704279600), class = c("POSIXct", 
 | "POSIXt"), tzone = "UTC"), v = 1:2)
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
 | NULL
 |                   when     v
@@ -48,7 +48,7 @@
 |        name           v 
 | "character"   "integer" 
 | list(name = c("quoted, comma", "plain"), v = 1:2)
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
 | NULL
 |             name     v
@@ -58,7 +58,7 @@
 |        name           v 
 | "character"   "integer" 
 | list(name = c("padded", "plain"), v = 1:2)
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
 | NULL
 |      name     v
@@ -68,7 +68,7 @@
 |      code         v 
 | "integer" "integer" 
 | list(code = c(7L, 10L), v = 1:2)
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
 | NULL
 |     code     v
@@ -78,7 +78,7 @@
 |           x           y 
 | "character"   "integer" 
 | list(x = c("T", "F"), y = 1:2)
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
 | NULL
 |         x     y
@@ -88,7 +88,7 @@
 |         x         y 
 | "logical" "integer" 
 | list(x = c(TRUE, FALSE), y = 1:2)
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
 | NULL
 |         x     y
@@ -98,7 +98,7 @@
 |         x         y 
 | "numeric" "numeric" 
 | list(x = c(Inf, -Inf), y = c(1, NaN))
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
 | NULL
 |        x     y
@@ -108,7 +108,7 @@
 |           x           y 
 |   "numeric" "character" 
 | list(x = c(1, 2.5, 3), y = c("a", "b", "c"))
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
 | NULL
 |        x      y
@@ -119,7 +119,7 @@
 |           x           y 
 | "character" "character" 
 | list(x = c("1-2", "3-4"), y = c("a", "b"))
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
 | NULL
 |         x      y
@@ -129,7 +129,7 @@
 |      only 
 | "integer" 
 | list(only = 1:2)
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
 | NULL
 |     only
@@ -139,7 +139,7 @@
 |         x         x 
 | "integer" "integer" 
 | list(x = 1L, x = 2L)
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
 | NULL
 |        x     x
@@ -148,7 +148,7 @@
 |         x        V2 
 | "integer" "integer" 
 | list(x = 1L, V2 = 2L)
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref"
 | NULL
 |        x    V2
@@ -158,6 +158,8 @@
 |    <int>
 | 1:     1
 [messages]
+- \nAttaching package: ‘data.table’\n
+- The following object is masked from ‘package:base’:\n\n    %notin%\n
 [warnings]
 [errors]
 [value]

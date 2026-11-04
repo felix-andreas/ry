@@ -827,6 +827,10 @@ pub struct Tags {
 }
 
 impl Tags {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.layouts.is_empty() && self.errors.is_empty()
+    }
+
     pub fn trace(&self, marker: &mut heap::Marker<'_>) {
         for &(_, error) in &self.errors {
             // SAFETY: the collector runs on the interpreter's thread, and the cache keeps each

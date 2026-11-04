@@ -67,7 +67,7 @@ export default defineConfig({
 		'/contributing/authoring-stubs': '/development/authoring-stubs',
 		'/contributing/releasing': '/development/releasing',
 		'/contributing/design': '/development/design',
-		'/contributing/design/base-image': '/development/design/base-image',
+		'/contributing/design/base-image': '/development/architecture/#the-start-up-image',
 		'/contributing/design/data-masking': '/development/design/data-masking',
 		'/contributing/design/inline-type-syntax': '/development/design/inline-type-syntax',
 		'/contributing/design/open-questions': '/development/design/open-questions',

@@ -66,8 +66,10 @@ pub unsafe fn do_fmin(call: &NativeCall<'_>) -> R<Sexp> {
         return Err(call.error("invalid 'tol' value"));
     }
     let mut objective = |x: f64| -> R<f64> {
-        let value = scalar_objective(call, function, x, "optimize")?;
-        clamp_infinite(call, value)
+        match scalar_objective(call, function, x, "optimize")? {
+            Some(value) => replace_non_finite(call, value, false),
+            None => replace_integer_na(call),
+        }
     };
     let minimum = brent_fmin(lower, upper, tolerance, &mut objective)?;
     values::scalar_real(minimum)
@@ -108,19 +110,9 @@ pub unsafe fn zeroin2(call: &NativeCall<'_>) -> R<Sexp> {
         return Err(call.error("'maxiter' must be positive"));
     }
     let mut objective = |x: f64| -> R<f64> {
-        let value = scalar_objective(call, function, x, "zeroin")?;
-        if value.is_finite() {
-            return Ok(value);
-        }
-        if value == f64::NEG_INFINITY {
-            call.warning("-Inf replaced by maximally negative value")?;
-            Ok(-f64::MAX)
-        } else if value == f64::INFINITY {
-            call.warning("Inf replaced by maximum positive value")?;
-            Ok(f64::MAX)
-        } else {
-            call.warning("NA replaced by maximum positive value")?;
-            Ok(f64::MAX)
+        match scalar_objective(call, function, x, "zeroin")? {
+            Some(value) => replace_non_finite(call, value, true),
+            None => replace_integer_na(call),
         }
     };
     let (root, iterations, precision) = brent_zeroin(
@@ -135,8 +127,14 @@ pub unsafe fn zeroin2(call: &NativeCall<'_>) -> R<Sexp> {
     values::real_vector(&[root, iterations as f64, precision])
 }
 
-/// Calls the R function `function` at the scalar `x` and returns its numeric value.
-unsafe fn scalar_objective(call: &NativeCall<'_>, function: Sexp, x: f64, what: &str) -> R<f64> {
+/// Calls the R function `function` at the scalar `x` and returns its numeric value, or `None`
+/// for an integer `NA`.
+unsafe fn scalar_objective(
+    call: &NativeCall<'_>,
+    function: Sexp,
+    x: f64,
+    what: &str,
+) -> R<Option<f64>> {
     crate::scope(|| {
         let argument = values::scalar_real(x)?;
         let expression = values::call(function, &[argument])?;
@@ -144,30 +142,42 @@ unsafe fn scalar_objective(call: &NativeCall<'_>, function: Sexp, x: f64, what: 
         match value.kind() {
             SexpType::Integer | SexpType::Logical if length(value) == 1 => {
                 let entry = values::ints(value)[0];
-                Ok(if entry == NA_INTEGER {
-                    f64::NAN
-                } else {
-                    entry as f64
-                })
+                Ok((entry != NA_INTEGER).then_some(entry as f64))
             }
-            SexpType::Real if length(value) == 1 => Ok(values::reals(value)[0]),
+            SexpType::Real if length(value) == 1 => Ok(Some(values::reals(value)[0])),
             _ => Err(call.error(format!("invalid function value in '{what}'"))),
         }
     })
 }
 
-/// `optimize`'s treatment of a non-finite value: the largest finite value of the same sign.
-unsafe fn clamp_infinite(call: &NativeCall<'_>, value: f64) -> R<f64> {
+unsafe fn replace_integer_na(call: &NativeCall<'_>) -> R<f64> {
+    call.warning("NA replaced by maximum positive value")?;
+    Ok(f64::MAX)
+}
+
+/// The finite stand-in GNU R's optimizers use for a non-finite objective value. `-Inf` keeps
+/// its sign for root finding, and from R 4.5 on for every optimizer, which also name the kind
+/// of value they replaced.
+pub(crate) unsafe fn replace_non_finite(
+    call: &NativeCall<'_>,
+    value: f64,
+    keeps_sign: bool,
+) -> R<f64> {
     if value.is_finite() {
         return Ok(value);
     }
-    if value == f64::NEG_INFINITY {
+    let current = crate::system::r_at_least(4, 5);
+    if value == f64::NEG_INFINITY && (keeps_sign || current) {
         call.warning("-Inf replaced by maximally negative value")?;
-        Ok(-f64::MAX)
-    } else {
-        call.warning("NA/Inf replaced by maximum positive value")?;
-        Ok(f64::MAX)
+        return Ok(-f64::MAX);
     }
+    let kind = match (current, value.is_nan()) {
+        (false, _) => "NA/Inf",
+        (true, true) => "NA/NaN",
+        (true, false) => "Inf",
+    };
+    call.warning(format!("{kind} replaced by maximum positive value"))?;
+    Ok(f64::MAX)
 }
 
 /// Brent's minimizer: golden section search accelerated by successive parabolic

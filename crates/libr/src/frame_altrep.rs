@@ -311,6 +311,11 @@ unsafe impl Sync for Classes {}
 
 static CLASSES: OnceLock<Classes> = OnceLock::new();
 
+/// Registers the classes now if no frame column has needed them yet.
+pub(crate) fn register() {
+    classes();
+}
+
 fn classes() -> Classes {
     *CLASSES.get_or_init(|| unsafe { register_classes() })
 }

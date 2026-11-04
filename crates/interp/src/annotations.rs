@@ -60,6 +60,11 @@ impl Default for State {
 }
 
 impl State {
+    /// Whether no signature is registered and no check is pending.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.signatures.is_empty() && self.pending.is_empty()
+    }
+
     pub unsafe fn trace(&self, marker: &mut Marker<'_>) {
         for &weak in self.signatures.values() {
             marker.mark(weak);

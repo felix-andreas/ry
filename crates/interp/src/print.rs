@@ -376,11 +376,29 @@ pub unsafe fn print_vector(vector: Sexp, options: &PrintOptions) -> R<()> {
     }
     if shown < count {
         out(&format!(
-            " [ reached getOption(\"max.print\") -- omitted {} entries ]\n",
+            "{} {} entries ]\n",
+            max_reached_prefix(),
             count - shown
         ));
     }
     Ok(())
+}
+
+/// The start of the note that `max.print` cut a printout short. R 4.5 also names the `max`
+/// argument of `print()`, which sets the same limit.
+fn max_reached_prefix() -> &'static str {
+    match crate::system::r_at_least(4, 5) {
+        true => " [ reached 'max' / getOption(\"max.print\") -- omitted",
+        false => " [ reached getOption(\"max.print\") -- omitted",
+    }
+}
+
+/// `count` and its noun, singular for one: GNU R's `ngettext(" %d row", " %d rows", count)`.
+fn counted(count: usize, singular: &str, plural: &str) -> String {
+    match count {
+        1 => format!(" 1 {singular}"),
+        _ => format!(" {count} {plural}"),
+    }
 }
 
 unsafe fn print_named_vector(
@@ -531,18 +549,43 @@ pub unsafe fn print_matrix(
     options: &PrintOptions,
     top: bool,
 ) -> R<()> {
-    // GNU R prints whole rows only, as many as fit within `max` entries.
-    let shown = if top && cols > 0 && options.max / cols < rows {
+    if !top {
+        return print_matrix_rows(matrix, rows, cols, rows, options);
+    }
+    // GNU R prints whole rows only, as many as fit within `max` entries. R 4.5 also stops at
+    // `max` columns, and then prints at least one row.
+    let truncates_columns = crate::system::r_at_least(4, 5);
+    let shown_cols = match truncates_columns {
+        true => cols.min(options.max),
+        false => cols,
+    };
+    let mut shown = if cols > 0 && options.max / cols < rows {
         options.max / cols
     } else {
         rows
     };
-    print_matrix_rows(matrix, rows, cols, shown, options)?;
-    if shown < rows {
+    if cols > shown_cols && shown < 1 && rows > 0 {
+        shown = 1;
+    }
+    print_matrix_rows(matrix, rows, shown_cols, shown, options)?;
+    if truncates_columns && (shown < rows || shown_cols < cols) {
+        let mut note = max_reached_prefix().to_owned();
+        if shown < rows {
+            note.push_str(&counted(rows - shown, "row", "rows"));
+        }
+        if shown_cols < cols {
+            if shown < rows {
+                note.push_str(" and");
+            }
+            note.push_str(&counted(cols - shown_cols, "column", "columns"));
+        }
+        note.push_str(" ]\n");
+        out(&note);
+    } else if shown < rows {
         out(&format!(
-            " [ reached getOption(\"max.print\") -- omitted {} {} ]\n",
-            rows - shown,
-            if rows - shown == 1 { "row" } else { "rows" }
+            "{}{} ]\n",
+            max_reached_prefix(),
+            counted(rows - shown, "row", "rows")
         ));
     }
     Ok(())
@@ -692,10 +735,13 @@ unsafe fn print_matrix_rows(
             text.push('\n');
         }
         text.push_str(&pad(&row_title, row_label_width, false));
+        // Column labels, named or `[,j]`, align like the column's entries, except that before
+        // R 4.6 a right-aligned character matrix left-aligns its `[,j]` labels.
+        let labels_right =
+            right && (col_names != nil() || !is_string || crate::system::r_at_least(4, 6));
         for col in start..end {
             text.push_str(&" ".repeat(options.gap));
-            // Column labels, named or `[,j]`, align like the column's entries.
-            text.push_str(&pad(&col_labels[col], widths[col], right));
+            text.push_str(&pad(&col_labels[col], widths[col], labels_right));
         }
         text.push('\n');
         for row in 0..shown {
@@ -724,17 +770,28 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
     } else {
         nil()
     };
-    // GNU R prints whole slices up to `max` entries, then the whole rows of a last slice that fit.
-    let (shown_slices, last_rows) = if slice > 0 && cols > 0 && options.max < slice * slices {
+    // GNU R prints whole slices up to `max` entries, then the whole rows of a last slice that
+    // fit. R 4.5 fills that last slice up to `max` entries: one partial row when fewer than a
+    // row's entries remain.
+    let truncates_columns = crate::system::r_at_least(4, 5);
+    let max_reached = slice > 0 && options.max < slice * slices;
+    let (shown_slices, last_rows, last_cols) = if max_reached && truncates_columns {
+        let shown = options.max.div_ceil(slice);
+        let remaining = options.max - slice * (shown - 1);
+        match remaining < cols {
+            true => (shown, 1, remaining),
+            false => (shown, remaining / cols, cols),
+        }
+    } else if max_reached && cols > 0 {
         let shown = options.max.div_ceil(slice);
         let last_rows = (options.max - slice * (shown - 1)) / cols;
         if last_rows == 0 {
-            (shown - 1, rows)
+            (shown - 1, rows, cols)
         } else {
-            (shown, last_rows)
+            (shown, last_rows, cols)
         }
     } else {
-        (slices, rows)
+        (slices, rows, cols)
     };
     for index in 0..shown_slices {
         let mut label = String::from(", , ");
@@ -781,22 +838,37 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
             }
             values::set_attr(matrix, symbols().dimnames, sub)?;
         }
-        let shown = if index + 1 == shown_slices {
-            last_rows
+        let (shown, shown_cols) = if index + 1 == shown_slices {
+            (last_rows, last_cols)
         } else {
-            rows
+            (rows, cols)
         };
-        print_matrix_rows(matrix, rows, cols, shown, options)?;
+        print_matrix_rows(matrix, rows, shown_cols, shown, options)?;
         out("\n");
     }
-    if shown_slices < slices {
+    if max_reached && truncates_columns {
+        let mut note = max_reached_prefix().to_owned();
+        if shown_slices < slices {
+            note.push_str(&counted(slices - shown_slices, "slice", "slices"));
+        } else {
+            if rows > last_rows {
+                note.push_str(&counted(rows - last_rows, "row", "rows"));
+            }
+            if cols > last_cols {
+                note.push_str(&counted(cols - last_cols, "column", "columns"));
+            }
+        }
+        note.push_str(" ] \n");
+        out(&note);
+    } else if shown_slices < slices {
         let omitted_rows = if last_rows < rows {
             format!(" {} row(s) and", rows - last_rows)
         } else {
             String::new()
         };
         out(&format!(
-            " [ reached getOption(\"max.print\") -- omitted{omitted_rows} {} matrix slice(s) ]\n",
+            "{}{omitted_rows} {} matrix slice(s) ]\n",
+            max_reached_prefix(),
             slices - shown_slices
         ));
     }
@@ -893,7 +965,8 @@ unsafe fn print_list(list: Sexp, options: &PrintOptions, tag: &mut String) -> R<
     }
     if shown < count {
         out(&format!(
-            " [ reached getOption(\"max.print\") -- omitted {} entries ]\n",
+            "{} {} entries ]\n",
+            max_reached_prefix(),
             count - shown
         ));
     }

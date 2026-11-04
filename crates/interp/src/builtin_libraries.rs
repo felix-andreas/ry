@@ -137,6 +137,7 @@ pub unsafe fn registered_routines(info: Sexp) -> R<Option<Sexp>> {
         (RoutineKind::External, "ExternalRoutine"),
     ] {
         let routines: Vec<&(&str, RoutineKind, &str, i32)> = routines()
+            .filter(|routine| registered_in_release(routine))
             .filter(|routine| routine.0 == package && routine.1 == kind)
             .collect();
         let mut entries = Vec::with_capacity(routines.len());
@@ -213,7 +214,9 @@ pub unsafe fn try_call(foreign: &Call<'_>) -> R<Option<Sexp>> {
                     .any(|(name, _)| *name == routine.0)
             };
             match routines().filter(loaded).find(|routine| {
-                routine.2 == &*name && package.is_none_or(|package| package == routine.0)
+                routine.2 == &*name
+                    && package.is_none_or(|package| package == routine.0)
+                    && registered_in_release(routine)
             }) {
                 Some(routine) => routine,
                 None => return Ok(None),
@@ -345,8 +348,24 @@ fn find(
     name: &str,
     package: Option<&str>,
 ) -> Option<&'static (&'static str, RoutineKind, &'static str, i32)> {
-    routines()
-        .find(|routine| routine.2 == name && package.is_none_or(|package| package == routine.0))
+    routines().find(|routine| {
+        routine.2 == name
+            && package.is_none_or(|package| package == routine.0)
+            && registered_in_release(routine)
+    })
+}
+
+/// Whether the GNU R release in `R_HOME` registers `routine`. R 4.4 replaced the Kolmogorov
+/// distribution's `pKolmogorov2x` and `pKS2` with `pkolmogorov_two_exact` and
+/// `pkolmogorov_two_limit`, so each release binds only its own names as `C_` symbols.
+fn registered_in_release(routine: &Routine) -> bool {
+    match (routine.0, routine.2) {
+        ("stats", "pKolmogorov2x" | "pKS2") => !crate::system::r_at_least(4, 4),
+        ("stats", "pkolmogorov_two_exact" | "pkolmogorov_two_limit") => {
+            crate::system::r_at_least(4, 4)
+        }
+        _ => true,
+    }
 }
 
 /// The package of a builtin library's `DLLInfo` or `info` pointer.
@@ -388,6 +407,31 @@ unsafe fn routine_of(
     let package = values::string_at(identity, 0)?;
     let name = values::string_at(identity, 1)?;
     find(&name, Some(&package))
+}
+
+/// A start-up image's token for an external pointer to a builtin routine's table entry: its
+/// position in [`routines`], plus one so that no token is zero.
+pub(crate) unsafe fn routine_token(pointer: Sexp) -> Option<u64> {
+    if !is_marker(pointer.external_tag(), ROUTINE_MARKER) {
+        return None;
+    }
+    let index = routine_index(pointer.external_address() as *const Routine)?;
+    Some(index as u64 + 1)
+}
+
+/// The table entry a [`routine_token`] names.
+pub(crate) fn routine_address(token: u64) -> Option<*mut std::ffi::c_void> {
+    let index = usize::try_from(token.checked_sub(1)?).ok()?;
+    let routine = routines().nth(index)?;
+    Some(routine as *const Routine as *mut std::ffi::c_void)
+}
+
+/// The package of a builtin library [`load`] names, as the `'static` name the table keeps.
+pub(crate) fn package_name(package: &str) -> Option<&'static str> {
+    PACKAGES
+        .iter()
+        .find(|candidate| **candidate == package)
+        .copied()
 }
 
 unsafe fn is_marker(tag: Sexp, marker: &str) -> bool {

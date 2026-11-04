@@ -592,6 +592,50 @@ and all the documents, and the database handle deliberately never leaves it.
   `.Rtypes` buffer gets loader-problem diagnostics, semantic tokens, and goto-definition for type
   names, and a `NAMESPACE` file gets import validation.
 
+## The start-up image
+
+A runtime session that is not interactive and sources no profile starts from an image of the
+session as it stands after `.First.sys()`, which [the CLI reference](/reference/cli#start-up-image)
+describes for users. `crates/heap/src/image.rs` writes and loads the heap part, and
+`crates/interp/src/image.rs` keys the file, saves the interpreter state outside the heap, and
+decides when an image applies. `crates/interp/src/session.rs` runs one of two paths: it loads the
+image in place of everything from the C-level options to `.First.sys()`, or it starts the slow way
+and writes the image at the end.
+
+- **Written in process, on the first start.** A start that finds no image runs the slow way and
+  then writes one, so an image always matches the base R tree and the build that use it, and
+  nothing at build time has to produce it.
+- **Loaded in one bulk pass, not mapped.** The heap image lists every reachable object with
+  references as dense positions, and the loader allocates them all and then fills them in a second
+  pass. Fixed objects (the heap's well-known objects, the primitives by index, `package:ry` and
+  libR's ALTREP classes) are referred to by position, because both processes create them before
+  start-up. Strings, symbols and base bindings are interned again, weak references load empty,
+  and compiled closure bodies are stored as their source, since the bytecode tier recompiles them.
+- **Refuses what it cannot carry.** The writer fails, and the start keeps going without an image,
+  when start-up left a frame, a pending warning, a C finalizer, an external pointer other than a
+  builtin routine, a new record layout, an open graphics device, or a loaded shared library.
+- **Skips starts it cannot reproduce.** Some starts write no image and say nothing, like a start
+  that sources a profile. A start that warned is one, because loading would not print the warnings
+  again. So is a start that left `.Random.seed` in the global environment (base R's profile seeds
+  the generator when `_R_RNG_VERSION_` is set, and every load would draw the same numbers). So is
+  one that loaded a namespace from outside `R_HOME/library`, which the key does not cover.
+- **Keyed by its inputs.** The file name hashes the runtime build, the session flags, base R's
+  files (size and modification time), the absolute library directories and which of them exist,
+  and the variables that
+  steer every start (`R_*`, `LC_*`, `LANG`, `LANGUAGE`, `TZ`, `HOME`). Every other variable start-up
+  reads goes through `interp::image::variable`, which records it, and the image stores those
+  values; a load whose environment differs in one starts the slow way and replaces the image.
+  An interpreter environment read that bypasses `image::variable` during start-up is a bug, because
+  an image made without that value would load anyway.
+- **Damage falls back, never half-loads.** A checksum over the whole file is verified before the
+  heap takes any of it. A failure past that point (`LoadError::Partial`) would leave the heap
+  half-built, so the start fails and the image is removed.
+
+Interpreter state outside the heap is saved beside it: methods' dispatch globals and primitive
+method tables, the S4 extends and implicit-class tables, the loaded builtin libraries, data.table's
+namespace, and the environment variables start-up set. Per-process state, such as the command
+line, the temporary directory, the RNG seed and the start time, is never in the image.
+
 ## Correctness and performance instruments
 
 The fixture suites are the correctness contract. `crates/semantics/tests/test_incremental.rs` pins

@@ -62,7 +62,7 @@ stopped it, and the deparsed last value. A warning or error carries its call, as
 environments, S3 and S4, conditions, vectors, recycling, attributes, NA handling, numerics,
 control flow, printing, delimited data I/O (`read.table`, `write.table`, `scan`, `type.convert`),
 colours, contour lines and axis ticks, graphics devices and parameters (`par`, layouts, the
-device list, text metrics), grid and the graphics engine (the `grid__*` cases, which need ragg and lattice installed and compare drawings with GNU R by pixel checksums of a ragg capture), object sizes, hash tables, and data.table queries (the `datatable__*` cases, which need data.table installed and check that the queries ry answers itself print and behave exactly as under data.table). `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.3.3 output, so another R version can differ in printing details and needs `RY_BLESS=1` to re-record.
+device list, text metrics), grid and the graphics engine (the `grid__*` cases, which need ragg and lattice installed and compare drawings with GNU R by pixel checksums of a ragg capture), object sizes, hash tables, and data.table queries (the `datatable__*` cases, which need data.table installed and check that the queries ry answers itself print and behave exactly as under data.table). `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.6.2 output, the release ry bundles as its base R (see [The reference GNU R](#the-reference-gnu-r)).
 
 The driver differs from `Rscript` in four ways that the cases avoid: it parses the whole file first, so a syntax error hides the output of the lines before it; its own frames show in `sys.nframe()` and `sys.calls()` (so data.table prints the table after a top-level `:=`, which it skips at a real prompt); `commandArgs(TRUE)` holds the two paths; and `quit()` ends the run without a report.
 
@@ -176,6 +176,9 @@ ORACLE_R=/opt/R/4.6.2/bin/R just oracle verify            # the single-file case
 ORACLE_RSCRIPT=/opt/R/4.6.2/bin/Rscript just oracle packages   # the package corpus
 ```
 
+Installing rig puts its `R` ahead of the system one on `PATH`; remove the `R` and `Rscript` links
+in `/usr/local/bin` to keep the system R as the default.
+
 `ORACLE_R` covers `verify`, `record` and `compare`. `ORACLE_RSCRIPT` covers `packages` and `bench`.
 When `ORACLE_R` is set, the `ry` engine of `compare` also runs with `R_HOME` set to that R's home,
 so ry's runtime loads the same base library and emulates the same version as the GNU R it is
@@ -185,25 +188,40 @@ compared with. That makes `compare` the check for a new R release:
 ORACLE_R=/opt/R/4.6.1/bin/R just oracle compare --engine ry
 ```
 
-Under GNU R 4.6.2, the 19 cases that differ from their 4.3.3 recordings on ry's bundled base
-(leaving out those that need corpus packages) split as follows. 11 match GNU R 4.6.2 exactly, so
-their differences are R's own changes. One calls `C_pKS2`, a routine R 4.6 removed: GNU R 4.6 fails
-it, while ry keeps every version's routines and runs it. One depends on how that GNU R was built
-(`png()` without X11 or cairo). The rest are R 4.4 to 4.6 changes that ry does not emulate yet, listed
-in `backlog.md` ("Open: R 4.6 behavior ry does not emulate yet"). How GNU R is built also matters:
-OpenBLAS changes the last digits of `lm` and `arima` results, glibc's `mktime` resolves a repeated
-wall-clock time differently after it has seen a time in a spring-forward gap, and the sign of
-`NA^NaN` depends on the compiler.
+ry follows the version of the base R it loads. Each behavior GNU R changed between 4.3 and 4.6 is
+gated on that version in `crates/interp` (`system::r_at_least`), so ry with `R_HOME` set to GNU R
+4.3.3 behaves as 4.3.3 does, and ry on its bundled base behaves as 4.6.2 does.
 
 Without any GNU R, `compare` checks the engine against each case's recorded outcome instead and says
-so on stderr. ry then runs on its bundled base R 4.6.2 while the recordings are 4.3.3 output, so
-the report mixes version differences with ry bugs; set `R_HOME` to a GNU R 4.3.3 home to compare
-like with like.
+so on stderr. The engine then runs on ry's bundled base R 4.6.2, the release the recordings come
+from. A case that needs a package the engine cannot load is reported as `skip ... needs <package>`.
 
-The recorded `.expected` files come from R 4.3.3, so a newer R legitimately differs under
-`verify`. Record into a separate checkout, or keep the 4.3.3 output as the contract. Installing
-rig puts its `R` ahead of the system one on `PATH`; remove the `R` and `Rscript` links in
-`/usr/local/bin` to keep the system R as the default.
+## The reference GNU R
+
+The `.expected` files are recorded with GNU R 4.6.2 built from source with
+
+```sh
+./configure --enable-memory-profiling --with-x --without-recommended-packages --disable-java
+```
+
+with the pango development headers installed (`libpango1.0-dev`), and with `data.table`, `bit64`,
+`rlang`, `knitr`, `rmarkdown`, `ragg` and `lattice` installed from CRAN into its library. Some
+cases depend on that build:
+
+- `utils__rprofmem` needs memory profiling.
+- The graphics cases need `png()` to draw through cairo, which R uses only when pango is present.
+  Without it the bitmap type falls back to Xlib, which needs an X11 display.
+- Collation and a few string cases follow ICU, which R uses when its headers are installed.
+- The `datatable__*`, `grid__*` and knitr cases print what those packages' current CRAN releases
+  print, and each declares the packages it needs in an `# oracle: requires` line.
+
+Other builds differ in the last digits too: OpenBLAS changes `lm` and `arima` results, and the sign
+of `NA^NaN` depends on the compiler. glibc's `mktime` starts its search from the offset its last call
+found, so a repeated wall-clock time with unknown daylight saving depends on what ran before; the
+cases that print one convert a summer time first.
+
+Record with `ORACLE_R=<that R> oracle record crates/oracle/cases` and review every changed
+`.expected` file.
 
 ## The benchmark generator
 

@@ -1,0 +1,56 @@
+# A user runs scripts repeatedly. The first run writes the start-up image and later runs load it;
+# a run whose environment differs in a variable start-up reads gets its own start, and a damaged
+# image falls back to the slow start and is replaced, without failing the script.
+
+requires ry-runtime
+
+file report.R
+| cat("editor", getOption("editor"), "\n")
+| cat("attached", "package:stats" %in% search(), "\n")
+| methods::setClass("Point", methods::representation(x = "numeric"))
+| cat("point", methods::new("Point", x = 3)@x, "\n")
+
+env EDITOR vi
+run ry run report.R
+expect exit 0
+expect stdout "editor vi"
+expect stdout "attached TRUE"
+expect stdout "point 3"
+expect stderr lacks "start-up image"
+
+run ry run report.R
+expect exit 0
+expect stdout "editor vi"
+expect stdout "point 3"
+expect stderr lacks "start-up image"
+
+env EDITOR nano
+run ry run report.R
+expect exit 0
+expect stdout "editor nano"
+
+env R_DEFAULT_PACKAGES NULL
+run ry run report.R
+expect exit 0
+expect stdout "attached FALSE"
+expect stdout "point 3"
+
+damage .cache/ry/image
+run ry run report.R
+expect exit 0
+expect stderr "is damaged"
+expect stdout "attached FALSE"
+expect stdout "point 3"
+
+run ry run report.R
+expect exit 0
+expect stdout "point 3"
+expect stderr lacks "start-up image"
+
+env R_DEFAULT_PACKAGES datasets,nosuchpkg
+run ry run report.R
+expect exit 0
+expect stderr "nosuchpkg"
+run ry run report.R
+expect exit 0
+expect stderr "nosuchpkg"

@@ -8,7 +8,8 @@
 use {
     oracle::{
         Engine, EngineError, ProcessEngine, diff, engine_from_environment, expected_path,
-        find_cases, gnu_r_available, parse, render, runnable_cases, ry_runtime_available,
+        find_cases, gnu_r_available, installed_packages, parse, render, runnable_cases,
+        ry_runtime_available,
     },
     std::{
         path::PathBuf,
@@ -20,7 +21,7 @@ use {
 
 fn cases() -> Vec<PathBuf> {
     let found = find_cases(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cases"));
-    runnable_cases(found).0
+    runnable_cases(found, installed_packages).0
 }
 
 #[test]

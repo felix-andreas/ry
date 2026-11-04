@@ -12,7 +12,7 @@
 | [1]  3.98998332048084281 -0.99498600346244503  1.00000422781422560
 | [4] -0.00325996820649266  2.00151614623652696
 | 2 7 
-| [1]  1.84334762302418e+00  1.16487706844987e+00 -6.67157194768876e-09
+| [1]  1.84334762302418e+00  1.16487706844107e+00 -6.67157194773920e-09
 | 1 11 
 | [1] "invalid parameter length"
 | iteration = 0
@@ -43,55 +43,55 @@
 | Function Value
 | [1] 0.299928154329838
 | Gradient:
-| [1] -0.279963749294510  0.123679259448741
+| [1] -0.279963749238998  0.123679259421818
 | 
 | iteration = 3
 | Step:
-| [1]  0.1024733116489961 -0.0597110911178595
+| [1]  0.1024733116301009 -0.0597110911085994
 | Parameter:
-| [1] 0.644320010307234 2.002127507675925
+| [1] 0.644320010288339 2.002127507685185
 | Function Value
-| [1] 0.298860872158756
+| [1] 0.29886087215202
 | Gradient:
-| [1] 0.35859687663730710 0.00425701747526897
+| [1] 0.35859687641526250 0.00425701747524928
 | 
 | iteration = 4
 | Step:
-| [1] -0.05841677160744252 -0.00678459800720499
+| [1] -0.05841677158547276 -0.00678459800241882
 | Parameter:
-| [1] 0.585903238699791 1.995342909668720
+| [1] 0.585903238702866 1.995342909682766
 | Function Value
-| [1] 0.289340763186897
+| [1] 0.289340763186694
 | Gradient:
-| [1] -0.02366890239358099 -0.00931218529553805
+| [1] -0.02366890239358099 -0.00931218529547249
 | 
 | iteration = 5
 | Step:
-| [1] 0.00359834858568886 0.00518193846596149
+| [1] 0.00359834858631769 0.00518193846552073
 | Parameter:
-| [1] 0.58950158728548 2.00052484813468
+| [1] 0.589501587289184 2.000524848148287
 | Function Value
-| [1] 0.289273896835043
+| [1] 0.289273896835052
 | Gradient:
-| [1] -0.00155795171208339  0.00105169679610785
+| [1] -0.00155795165657224  0.00105169682384899
 | 
 | iteration = 6
 | Step:
-| [1]  0.000267830671718539 -0.000556332604414678
+| [1]  0.000267830662786239 -0.000556332618312005
 | Parameter:
-| [1] 0.589769417957199 1.999968515530266
+| [1] 0.58976941795197 1.99996851552997
 | Function Value
 | [1] 0.289273425614892
 | Gradient:
-| [1]  9.51119183412175e-05 -6.09689682074100e-05
+| [1]  9.51119183412175e-05 -6.09689682074189e-05
 | 
 | iteration = 7
 | Parameter:
-| [1] 0.589754006736335 1.999998998345705
+| [1] 0.589754006731102 1.999998998345415
 | Function Value
 | [1] 0.28927342393957
 | Gradient:
-| [1] -3.43614026121486e-08 -3.30291515244941e-09
+| [1] -3.43614026121486e-08 -3.27515956293351e-09
 | 
 | Relative gradient close to zero.
 | Current iterate is probably solution.
@@ -110,18 +110,18 @@
 | calls 18 [1] 0 1 1 0 0
 | 1 2 
 | calls 2 [1] "invalid function value in 'nlm' optimizer"
-| warning: NA/Inf replaced by maximum positive value 
+| warning: NA/NaN replaced by maximum positive value 
 | calls 4 [1] "probable coding error in analytic gradient"
-| warning: NA/Inf replaced by maximum positive value 
+| warning: Inf replaced by maximum positive value 
 | calls 4 [1] "probable coding error in analytic gradient"
 | calls 4 [1] "probable coding error in analytic gradient"
 | warning: NAs introduced by coercion 
 | calls 4 [1]  2  0  0 NA NA
 | 1 0 
 | calls 3 [1] "invalid function value in 'nlm' optimizer"
-| warning: NA/Inf replaced by maximum positive value 
+| warning: NA/NaN replaced by maximum positive value 
 | calls 4 [1] "probable coding error in analytic gradient"
-| warning: NA/Inf replaced by maximum positive value 
+| warning: Inf replaced by maximum positive value 
 | calls 4 [1] "probable coding error in analytic gradient"
 | calls 6 [1] 0 1 1 0 0
 | 1 1 
