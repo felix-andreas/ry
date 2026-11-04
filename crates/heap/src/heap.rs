@@ -1722,7 +1722,10 @@ impl Heap {
         {
             return;
         }
-        if count as usize == self.frame_cycles(env, result) {
+        // Only a reconcile flags the roots, and a closure the frame made may be held by one that
+        // counts nothing, such as native state that keeps an R callback, so at return only
+        // promises count as the frame's own cycles.
+        if count as usize == self.frame_cycles(env, result, false) {
             if !self.roots.precious.contains_key(&env) {
                 self.clear_frame(env);
             }
@@ -1746,16 +1749,18 @@ impl Heap {
         });
     }
 
-    /// The counted references to `env` that its own bindings make: a closure or promise bound
-    /// only there whose environment is `env`. A reconcile also requires that no root holds it.
-    unsafe fn frame_cycles(&self, env: Sexp, result: Sexp) -> usize {
+    /// The counted references to `env` that its own bindings make: a promise, or with
+    /// `closures` a closure, bound only there whose environment is `env` and that no root
+    /// flagged by a reconcile holds.
+    unsafe fn frame_cycles(&self, env: Sexp, result: Sexp, closures: bool) -> usize {
         self.local_cells(env)
             .filter(|cell| {
                 let value = cell.cdr();
                 cell.tracks_references()
                     && value != result
                     && value.refcount() == 1
-                    && matches!(value.kind(), SexpType::Closure | SexpType::Promise)
+                    && (value.kind() == SexpType::Promise
+                        || (closures && value.kind() == SexpType::Closure))
                     && value.tag() == env
                     && value.gc_bits() & gc_bits::HELD == 0
             })
@@ -1815,7 +1820,8 @@ impl Heap {
                         && closure.gc_bits() & gc_bits::HELD == 0
                 })
                 .count();
-            if count as usize == self.frame_cycles(env, unbound) + dead + entry.swept as usize {
+            if count as usize == self.frame_cycles(env, unbound, true) + dead + entry.swept as usize
+            {
                 self.clear_frame(env);
             }
         }
