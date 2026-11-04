@@ -16,6 +16,9 @@
 //! The loader overwrites the contents of the mutable ones among these (an environment's frame, a
 //! symbol's base binding), so the loaded heap holds what the image's heap held.
 //!
+//! A string that names a path under a directory the writer saw elsewhere can be moved under the
+//! loader's directory with a [`Relocation`], so an image built in one place loads in another.
+//!
 //! The image has two passes' worth of records. The allocation table describes every object that
 //! is not fixed, in index order, with what allocating it needs: a vector's length and its plain
 //! elements, a string's text, a symbol's name. The contents then give every object's header and
@@ -29,7 +32,7 @@ use {
         strings,
     },
     rustc_hash::{FxHashMap, FxHashSet},
-    std::{ffi::c_void, fmt},
+    std::{borrow::Cow, ffi::c_void, fmt},
 };
 
 const MAGIC: &[u8; 8] = b"RYIMAGE\x01";
@@ -40,6 +43,37 @@ pub struct Fixed<'a> {
     pub primitives: &'a [Sexp],
     /// Further objects that exist before the image loads, in an order both heaps agree on.
     pub extra: &'a [Sexp],
+}
+
+/// Path prefixes an image's strings move between: a string equal to a `from` prefix, or one that
+/// continues it with `/`, loads with that prefix replaced by its `to`.
+#[derive(Default)]
+pub struct Relocation {
+    pub prefixes: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl Relocation {
+    /// `text` with its prefix moved, and the encoding marks the result needs given the marks
+    /// `bits` the image recorded.
+    pub fn apply<'t>(&self, text: &'t [u8], bits: u16) -> (Cow<'t, [u8]>, u16) {
+        for (from, to) in &self.prefixes {
+            let Some(rest) = text.strip_prefix(from.as_slice()) else {
+                continue;
+            };
+            if !(rest.is_empty() || rest.first() == Some(&b'/')) || from == to {
+                continue;
+            }
+            let moved = [to.as_slice(), rest].concat();
+            // A path keeps its marks unless the new prefix is not ASCII, which makes it UTF-8.
+            let bits = if to.is_ascii() {
+                bits
+            } else {
+                (bits & !(gp::ASCII | gp::ENCODING | gp::CACHED)) | gp::UTF8
+            };
+            return (Cow::Owned(moved), bits);
+        }
+        (Cow::Borrowed(text), bits)
+    }
 }
 
 #[derive(Debug)]
@@ -383,17 +417,19 @@ impl Heap {
     }
 
     /// Loads an image [`Heap::write_image`] wrote in a process of the same build, and returns the
-    /// objects its roots map to. `address` decodes an external pointer's token. The heap must
+    /// objects its roots map to. `address` decodes an external pointer's token, and `relocation`
+    /// moves the paths in its strings. The heap must
     /// hold no state the image replaces other than what a fresh start leaves: the image's
     /// environments, symbols and bindings overwrite the loading heap's.
     pub unsafe fn load_image(
         &mut self,
         image: &[u8],
         fixed: &Fixed<'_>,
+        relocation: &Relocation,
         address: &mut dyn FnMut(u64) -> Option<*mut c_void>,
     ) -> Result<Vec<Sexp>, ImageError> {
         self.inhibit_collection();
-        let result = self.load_image_inhibited(image, fixed, address);
+        let result = self.load_image_inhibited(image, fixed, relocation, address);
         self.allow_collection();
         result
     }
@@ -402,6 +438,7 @@ impl Heap {
         &mut self,
         image: &[u8],
         fixed: &Fixed<'_>,
+        relocation: &Relocation,
         address: &mut dyn FnMut(u64) -> Option<*mut c_void>,
     ) -> Result<Vec<Sexp>, ImageError> {
         let mut input = Reader { bytes: image };
@@ -427,11 +464,11 @@ impl Heap {
             let (object, existed) = match origin {
                 ORIGIN_STRING => {
                     let bits = input.u16()?;
-                    let text = input.blob()?;
-                    let existed = self.find_interned(text, bits);
+                    let (text, bits) = relocation.apply(input.blob()?, bits);
+                    let existed = self.find_interned(&text, bits);
                     match existed {
                         Some(found) => (found, true),
-                        None => (self.intern_with_bits(text, bits)?, false),
+                        None => (self.intern_with_bits(&text, bits)?, false),
                     }
                 }
                 ORIGIN_SYMBOL => {
@@ -458,7 +495,7 @@ impl Heap {
                     let size = object_size(SexpType::Pairlist, 0).unwrap_or(40);
                     (self.allocate_uncollected(kind, size, size)?, false)
                 }
-                ORIGIN_FRESH => (self.allocate_from_image(&mut input)?, false),
+                ORIGIN_FRESH => (self.allocate_from_image(&mut input, relocation)?, false),
                 _ => return Err(invalid("an object has an unknown origin")),
             };
             objects.push(object);
@@ -637,7 +674,11 @@ impl Heap {
 
     /// Allocates an object of the allocation table's [`ORIGIN_FRESH`] kind, with its plain
     /// elements.
-    unsafe fn allocate_from_image(&mut self, input: &mut Reader<'_>) -> Result<Sexp, ImageError> {
+    unsafe fn allocate_from_image(
+        &mut self,
+        input: &mut Reader<'_>,
+        relocation: &Relocation,
+    ) -> Result<Sexp, ImageError> {
         let kind = kind_of(input.u8()?)?;
         let nil = self.known.nil;
         Ok(match kind.shape() {
@@ -649,7 +690,8 @@ impl Heap {
                     if text.len() != length {
                         return Err(invalid("a string's length differs from its text"));
                     }
-                    let object = self.new_char(text, 0)?;
+                    let (text, bits) = relocation.apply(text, bits);
+                    let object = self.new_char(&text, 0)?;
                     object.set_gp(bits);
                     return Ok(object);
                 }

@@ -524,7 +524,7 @@ pub fn file_for_page(name: &str, page: usize) -> String {
         }
     }
     if let Some(rest) = result.strip_prefix("~/")
-        && let Ok(home) = crate::image::variable("HOME")
+        && let Ok(home) = std::env::var("HOME")
     {
         return format!("{home}/{rest}");
     }

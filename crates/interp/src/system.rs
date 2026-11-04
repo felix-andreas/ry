@@ -300,7 +300,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     // GNU R session, which `R CMD check` and testthat turn into an error.
     special("browser", -1, |call| unsafe {
         crate::debugger::browser()?;
-        let checked = crate::image::variable("_R_CHECK_BROWSER_NONINTERACTIVE_")
+        let checked = std::env::var("_R_CHECK_BROWSER_NONINTERACTIVE_")
             .is_ok_and(|value| matches!(value.as_str(), "true" | "TRUE" | "True" | "T"));
         if !crate::interp().interactive && checked {
             return Err(call.error("non-interactive browser() -- left over from debugging?"));
@@ -467,7 +467,7 @@ static SESSION_TEMP: std::sync::OnceLock<Result<SessionTemp, String>> = std::syn
 fn create_session_temp_dir() -> Result<SessionTemp, String> {
     let root = ["R_TMPDIR", "TMPDIR", "TMP", "TEMP"]
         .iter()
-        .filter_map(|name| crate::image::variable(name).ok())
+        .filter_map(|name| std::env::var(name).ok())
         .find(|candidate| {
             !candidate.is_empty() && crate::platform::writable_directory(candidate.as_ref())
         })
@@ -535,7 +535,7 @@ fn find_program(name: &str) -> Option<PathBuf> {
     let extensions: Vec<String> = if candidate.extension().is_some() || !cfg!(windows) {
         vec![String::new()]
     } else {
-        crate::image::variable("PATHEXT")
+        std::env::var("PATHEXT")
             .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned())
             .split(';')
             .filter(|extension| !extension.is_empty())
@@ -546,7 +546,7 @@ fn find_program(name: &str) -> Option<PathBuf> {
     let directories: Vec<PathBuf> = if candidate.components().count() > 1 {
         vec![PathBuf::new()]
     } else {
-        crate::image::variable_os("PATH")
+        std::env::var_os("PATH")
             .map(|path| std::env::split_paths(&path).collect())
             .unwrap_or_default()
     };
@@ -739,7 +739,7 @@ unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
     let names = call.arg(0);
     let unset = values::first_string(call.arg(1)).map(|text| text.into_owned());
     if length(names) == 0 {
-        let mut entries: Vec<String> = crate::image::variables()
+        let mut entries: Vec<String> = std::env::vars()
             .map(|(name, value)| format!("{name}={value}"))
             .collect();
         entries.sort();
@@ -751,7 +751,7 @@ unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
         let name = values::string_at(names, index)
             .map(|text| text.into_owned())
             .unwrap_or_default();
-        let charsxp = match crate::image::variable(&name) {
+        let charsxp = match std::env::var(&name) {
             Ok(value) => values::mkchar(&value)?,
             Err(_) => match &unset {
                 Some(unset) => values::mkchar(unset)?,
@@ -1000,7 +1000,7 @@ fn resolve_zone(tz: &str) -> Zone {
 /// The session's zone name as GNU R reports it: the value of `TZ`, or the empty name when
 /// `TZ` is unset and the system's zone applies.
 fn session_zone_name() -> String {
-    crate::image::variable("TZ").unwrap_or_default()
+    std::env::var("TZ").unwrap_or_default()
 }
 
 /// The instant `seconds` names, moved by whole 400-year cycles into the range jiff covers.
@@ -3088,7 +3088,7 @@ pub fn read_r_version(home: &str) -> RVersion {
         .unwrap_or(0);
     // Debian keeps the headers outside R_HOME and names them in the `R_INCLUDE_DIR` that
     // `bin/R` exports.
-    let shared_include = crate::image::variable_os("R_INCLUDE_DIR").map(PathBuf::from);
+    let shared_include = std::env::var_os("R_INCLUDE_DIR").map(PathBuf::from);
     // ry's base R tree records the nickname as the source release does, in `VERSION-NICK`.
     let nickname = std::fs::read_to_string(gnu_home.join("VERSION-NICK"))
         .ok()
@@ -3701,7 +3701,7 @@ fn windows_command(line: &str) -> Result<std::process::Command, String> {
             .into_iter()
             .chain([PathBuf::from(".")])
             .chain(
-                crate::image::variable_os("PATH")
+                std::env::var_os("PATH")
                     .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
                     .unwrap_or_default(),
             )

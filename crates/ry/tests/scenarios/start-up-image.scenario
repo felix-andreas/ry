@@ -1,27 +1,30 @@
-# A user runs scripts repeatedly. The first run writes the start-up image and later runs load it;
-# a run whose environment differs in a variable start-up reads gets its own start, and a damaged
-# image falls back to the slow start and is replaced, without failing the script.
+# A user runs scripts with the start-up image that ships in ry's base R tree. Each start reads
+# the environment afresh, so a variable base R's profile or a default package's `.onLoad` reads
+# takes effect on every run; a variable that changes which packages load starts the slow way;
+# and turning the image off gives the same session.
 
 requires ry-runtime
 
 file report.R
 | cat("editor", getOption("editor"), "\n")
 | cat("attached", "package:stats" %in% search(), "\n")
+| cat("search", search(), "\n")
+| cat("seeded", exists(".Random.seed", globalenv()), "\n")
+| cat("leaked", exists("namespace", baseenv(), inherits = FALSE), "\n")
 | methods::setClass("Point", methods::representation(x = "numeric"))
 | cat("point", methods::new("Point", x = 3)@x, "\n")
+| cat("stats", basename(getNamespaceInfo("stats", "path")), file.exists(getNamespaceInfo("stats", "path")), "\n")
 
 env EDITOR vi
 run ry run report.R
 expect exit 0
 expect stdout "editor vi"
 expect stdout "attached TRUE"
+expect stdout "search .GlobalEnv tools:ry package:std package:ry package:stats package:graphics package:grDevices package:utils package:datasets package:methods Autoloads package:base"
+expect stdout "seeded FALSE"
+expect stdout "leaked FALSE"
 expect stdout "point 3"
-expect stderr lacks "start-up image"
-
-run ry run report.R
-expect exit 0
-expect stdout "editor vi"
-expect stdout "point 3"
+expect stdout "stats stats TRUE"
 expect stderr lacks "start-up image"
 
 env EDITOR nano
@@ -29,28 +32,21 @@ run ry run report.R
 expect exit 0
 expect stdout "editor nano"
 
+env RY_IMAGE 0
+run ry run report.R
+expect exit 0
+expect stdout "editor nano"
+expect stdout "search .GlobalEnv tools:ry package:std package:ry package:stats package:graphics package:grDevices package:utils package:datasets package:methods Autoloads package:base"
+expect stdout "point 3"
+
+env RY_IMAGE 1
 env R_DEFAULT_PACKAGES NULL
 run ry run report.R
 expect exit 0
 expect stdout "attached FALSE"
 expect stdout "point 3"
 
-damage .cache/ry/image
-run ry run report.R
-expect exit 0
-expect stderr "is damaged"
-expect stdout "attached FALSE"
-expect stdout "point 3"
-
-run ry run report.R
-expect exit 0
-expect stdout "point 3"
-expect stderr lacks "start-up image"
-
 env R_DEFAULT_PACKAGES datasets,nosuchpkg
-run ry run report.R
-expect exit 0
-expect stderr "nosuchpkg"
 run ry run report.R
 expect exit 0
 expect stderr "nosuchpkg"

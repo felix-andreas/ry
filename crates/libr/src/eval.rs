@@ -1326,6 +1326,32 @@ const IMAGE_HOST: interp::image::ImageHost = interp::image::ImageHost {
     fixed_objects: crate::altrep::image_objects,
 };
 
+/// Writes the start-up image of the R home `R_HOME` names to the NUL-terminated `path`: starts a
+/// session the slow way in this process's environment and saves it. Returns 0 once written, and
+/// 1 after reporting why it was not. The base tree's build calls this through
+/// `ry-rcmd write-start-image`; nothing else writes an image.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_write_start_image(path: *const c_char) -> c_int {
+    runtime();
+    if report_missing_r_home() {
+        return 1;
+    }
+    let path = std::path::PathBuf::from(
+        std::ffi::CStr::from_ptr(path)
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let written = interp::session::write_start_image(IMAGE_HOST, &path);
+    interp::system::remove_session_temp_dir();
+    match written {
+        Ok(()) => 0,
+        Err(unwind) => {
+            interp::session::report_toplevel(unwind);
+            1
+        }
+    }
+}
+
 /// Starts the session a script runs in: base R and the default packages, then the package
 /// loader as `tools:ry`. Reports why and returns false when either does not load.
 unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool {

@@ -493,29 +493,6 @@ impl Journey {
                     .insert((*name).to_owned(), (*value).to_owned());
                 Ok(())
             }
-            ["damage", directory] => {
-                // Flips one byte in the middle of every file, as a torn write or a bad disk would.
-                let directory = self.root.join(directory);
-                let entries = std::fs::read_dir(&directory)
-                    .map_err(|error| format!("reading {}: {error}", directory.display()))?;
-                let mut damaged = 0;
-                for entry in entries {
-                    let path = entry.map_err(|error| error.to_string())?.path();
-                    let mut bytes = std::fs::read(&path)
-                        .map_err(|error| format!("reading {}: {error}", path.display()))?;
-                    let middle = bytes.len() / 2;
-                    if let Some(byte) = bytes.get_mut(middle) {
-                        *byte ^= 0x5a;
-                        damaged += 1;
-                    }
-                    std::fs::write(&path, bytes)
-                        .map_err(|error| format!("writing {}: {error}", path.display()))?;
-                }
-                if damaged == 0 {
-                    return Err(format!("{} holds no file to damage", directory.display()));
-                }
-                Ok(())
-            }
             ["remove", path] => {
                 fs::remove_file(self.root.join(path)).map_err(|error| error.to_string())?;
                 self.watched(path, lsp_types::FileChangeType::DELETED);
@@ -979,7 +956,6 @@ impl Journey {
                     .env("XDG_CACHE_HOME", self.root.join(".cache"))
                     .env_remove("RY_LIBR")
                     .env_remove("RY_IMAGE")
-                    .env_remove("RY_IMAGE_DIR")
                     .envs(&self.environment);
                 if *program == "single-ry" {
                     // A release finds nothing beside it, so neither may the copy that stands in.

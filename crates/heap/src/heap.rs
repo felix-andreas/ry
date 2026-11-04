@@ -22,7 +22,7 @@
 pub mod arena;
 pub mod env;
 pub mod image;
-pub use image::{Fixed, ImageError};
+pub use image::{Fixed, ImageError, Relocation};
 pub mod large;
 pub mod object;
 pub mod records;
@@ -2105,9 +2105,7 @@ impl Heap {
         (0..(object.length() as usize).min(64))
             .map(|index| object.stored_element(index))
             .filter(|&element| {
-                element.refcount() == 1
-                    && element.kind() != SexpType::List
-                    && reclaimable(element)
+                element.refcount() == 1 && element.kind() != SexpType::List && reclaimable(element)
             })
             .map(|element| self.size_of(element))
             .sum()

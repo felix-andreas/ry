@@ -31,8 +31,8 @@ pub struct StartOptions {
     /// `interactive()`, which also makes `keep.source` default to `TRUE` (base R's system
     /// profile sets it from `interactive()`).
     pub interactive: bool,
-    /// Lets a non-interactive start without profiles load a start-up image, or write one (see
-    /// [`crate::image`]); `None` always starts the slow way.
+    /// Lets a start that [`crate::image::applies`] to load the start-up image of its R home;
+    /// `None` always starts the slow way.
     pub image: Option<crate::image::ImageHost>,
 }
 
@@ -40,28 +40,18 @@ pub struct StartOptions {
 pub unsafe fn start(options: StartOptions) -> R<()> {
     interp().command_args = options.command_args;
     interp().interactive = options.interactive;
-    // The runtime reports a UTF-8 locale (`l10n_info`), so the C library's character
-    // functions must agree: iconv's `//TRANSLIT` and packages calling `mbrtowc` read
-    // LC_CTYPE, which stays "C" (ASCII) until something sets it. Numeric formatting keeps
-    // the C locale, so only LC_CTYPE changes. A system without C.UTF-8 keeps ASCII.
-    libc::setlocale(libc::LC_CTYPE, c"C.UTF-8".as_ptr());
-    read_renviron();
-    crate::system::init_locale();
+    prepare_process();
     let home = crate::system::r_home();
     let site_profile = options.site_profile.then(site_profile_path).flatten();
     let user_profile = options.user_profile.then(user_profile_path).flatten();
-    let plan = crate::image::plan(
-        options.image,
-        options.interactive,
-        site_profile.is_some() || user_profile.is_some(),
-        &home,
-    );
-    if let Some(plan) = &plan {
-        match crate::image::load(plan) {
-            Ok(true) => {
-                crate::graphics::define_device_variables()?;
-                return Ok(());
-            }
+    if let Some(host) = &options.image
+        && crate::image::applies(
+            options.interactive,
+            site_profile.is_some() || user_profile.is_some(),
+        )
+    {
+        match crate::image::load(host, &home) {
+            Ok(true) => return start_from_image(&home),
             Ok(false) => {}
             Err(crate::image::LoadError::Untouched(message)) => {
                 write_console(
@@ -70,26 +60,90 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
                 );
             }
             Err(crate::image::LoadError::Partial(message)) => {
-                crate::image::discard(plan);
                 return Err(error(format!(
-                    "the start-up image did not load: {message}; it is removed, so the next \
-                     start runs without it"
+                    "the start-up image did not load: {message}; set RY_IMAGE=0 to start \
+                     without it"
                 )));
             }
         }
     }
-    let before = plan.as_ref().map(|_| crate::image::before());
-    let warned = start_slowly(&home, site_profile, user_profile)?;
-    // An image would not replay the warnings, which GNU R prints on every start.
-    if !warned
-        && let (Some(plan), Some(before)) = (&plan, &before)
-        && let Err(message) = crate::image::write(plan, before)
-    {
-        write_console(
-            format!("ry: cannot write the start-up image: {message}\n").as_bytes(),
-            true,
-        );
+    start_slowly(&home, site_profile, user_profile)?;
+    Ok(())
+}
+
+/// Starts a session the slow way in the process's environment and writes its start-up image to
+/// `path`, as the base tree's build does. Fails when start-up warned, since a start from the
+/// image would not print the warning.
+pub unsafe fn write_start_image(host: crate::image::ImageHost, path: &std::path::Path) -> R<()> {
+    interp().interactive = false;
+    prepare_process();
+    let home = crate::system::r_home();
+    let before = crate::image::before();
+    if start_slowly(&home, None, None)? {
+        return Err(error("start-up warned, so it cannot be imaged"));
     }
+    crate::image::write(&host, &home, path, &before).map_err(error)
+}
+
+/// The process state every start sets before R code runs: the C library's locale, the system
+/// `Renviron`, and the interpreter's locale.
+unsafe fn prepare_process() {
+    // The runtime reports a UTF-8 locale (`l10n_info`), so the C library's character
+    // functions must agree: iconv's `//TRANSLIT` and packages calling `mbrtowc` read
+    // LC_CTYPE, which stays "C" (ASCII) until something sets it. Numeric formatting keeps
+    // the C locale, so only LC_CTYPE changes. A system without C.UTF-8 keeps ASCII.
+    libc::setlocale(libc::LC_CTYPE, c"C.UTF-8".as_ptr());
+    read_renviron();
+    crate::system::init_locale();
+}
+
+/// The start-up steps that read the process environment, run after the image loads: the
+/// C-level options and the variables that describe this machine, base R's profile, and the
+/// `.onLoad` hooks of the default packages that set options from the environment. Every option
+/// is removed first, so that the hooks, which set only options not yet set, see the order GNU
+/// R's start-up gives them.
+unsafe fn start_from_image(home: &str) -> R<()> {
+    crate::envir::clear_options()?;
+    define_process_variables()?;
+    source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
+    // The profile attaches a new `Autoloads` at position 2, in front of the default packages;
+    // the image's own sits behind them, where the slow start put it.
+    eval_text(
+        "detach(pos = 2L); .AutoloadEnv <- as.environment(\"Autoloads\")",
+        base_env(),
+    )?;
+    // utils' hook also assigns `osVersion`, this machine's, into its sealed namespace.
+    eval_text(
+        "local(for (name in c(\"utils\", \"grDevices\", \"stats\")) { \
+         namespace <- asNamespace(name); \
+         if (name == \"utils\") unlockBinding(\"osVersion\", namespace); \
+         namespace$.onLoad(dirname(getNamespaceInfo(name, \"path\")), name); \
+         if (name == \"utils\") lockBinding(\"osVersion\", namespace) })",
+        base_env(),
+    )?;
+    remove_library_site()?;
+    conditions::print_warnings()
+}
+
+/// The options and base variables that depend on this process: the C-level options,
+/// `.Machine`, `.Platform` and the graphics device variables.
+unsafe fn define_process_variables() -> R<()> {
+    crate::envir::install_default_options()?;
+    let machine = crate::system::machine()?;
+    eval::define(values::install(".Machine")?, machine, base_env())?;
+    let platform = crate::system::platform()?;
+    eval::define(values::install(".Platform")?, platform, base_env())?;
+    crate::graphics::define_device_variables()
+}
+
+/// The base profile binds `.Library.site` in the global environment too, so that a site profile
+/// can assign it directly; GNU R's global environment no longer holds it afterwards.
+unsafe fn remove_library_site() -> R<()> {
+    eval_text(
+        "if (exists(\".Library.site\", envir = globalenv(), inherits = FALSE)) \
+         rm(\".Library.site\", envir = globalenv())",
+        global_env(),
+    )?;
     Ok(())
 }
 
@@ -128,12 +182,7 @@ unsafe fn start_slowly(
     site_profile: Option<String>,
     user_profile: Option<String>,
 ) -> R<bool> {
-    crate::envir::install_default_options()?;
-    let machine = crate::system::machine()?;
-    eval::define(values::install(".Machine")?, machine, base_env())?;
-    let platform = crate::system::platform()?;
-    eval::define(values::install(".Platform")?, platform, base_env())?;
-    crate::graphics::define_device_variables()?;
+    define_process_variables()?;
     eval::define(
         values::install(".BaseNamespaceEnv")?,
         base_namespace(),
@@ -161,13 +210,7 @@ unsafe fn start_slowly(
     if let Some(site) = site_profile {
         source_file(&site, base_env())?;
     }
-    // The base profile binds `.Library.site` in the global environment too, so that a site
-    // profile can assign it directly; GNU R's global environment no longer holds it afterwards.
-    eval_text(
-        "if (exists(\".Library.site\", envir = globalenv(), inherits = FALSE)) \
-         rm(\".Library.site\", envir = globalenv())",
-        global_env(),
-    )?;
+    remove_library_site()?;
     if let Some(user) = user_profile {
         source_file(&user, global_env())?;
     }

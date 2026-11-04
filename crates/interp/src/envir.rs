@@ -1043,6 +1043,11 @@ pub unsafe fn options() -> Sexp {
     }
 }
 
+/// Removes every option, for a start that sets them again from the C-level defaults.
+pub(crate) unsafe fn clear_options() -> R<()> {
+    set_options(nil())
+}
+
 unsafe fn set_options(list: Sexp) -> R<()> {
     crate::heap().define(base_env(), symbols().dot_options, list)?;
     Ok(())
@@ -1341,9 +1346,7 @@ pub unsafe fn install_default_options() -> R<()> {
         ("keep.source", scalar_bool(false)?),
         (
             "keep.source.pkgs",
-            scalar_bool(
-                crate::image::variable("R_KEEP_PKG_SOURCE").is_ok_and(|value| value == "yes"),
-            )?,
+            scalar_bool(std::env::var("R_KEEP_PKG_SOURCE").is_ok_and(|value| value == "yes"))?,
         ),
         ("keep.parse.data", scalar_bool(true)?),
         ("keep.parse.data.pkgs", scalar_bool(false)?),

@@ -7519,39 +7519,38 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Impact.** The introduction and tutorial pages shrink from about 3,000 lines to about 1,300, a reader finds one page
   per step, and the sidebar keeps its place across navigation.
 
-## The start-up image is written in process and keyed by what start-up reads
+## The start-up image is build output of the base tree, and every start re-reads the environment
 
-- **Previous source of truth.** Every start re-derived the same session from base R's files: it
-  sourced the baseloader, lazy-loaded base, and attached the six default packages, which included
-  methods rebuilding its S4 tables. An empty `ry run` took about 125 ms (median, Linux, bench
-  profile), and `R_DEFAULT_PACKAGES=NULL` took about 30 ms.
-- **What was structurally weak.** The design draft planned one `base.image` per platform, written
-  by `just base-r` and mapped in place with copy-on-write. That duplicated a fact, the session
-  after start-up, in a build artifact that could drift from the runtime and base tree actually in
-  use. It also needed a copy-on-write path through every heap write.
-- **Target shape.** The first eligible start (not interactive, no site or user profile, `RY_IMAGE`
-  not `0`) writes the image itself after `.First.sys()`, and later starts load it in one
-  two-pass bulk load (`crates/heap/src/image.rs`, `crates/interp/src/image.rs`,
-  `development/architecture.md`, "The start-up image"). The file name hashes the build, the flags,
-  base R's files, the library directories that exist, and the steering variables (`R_*`, `LC_*`,
-  `LANG`, `LANGUAGE`, `TZ`, `HOME`). Every other variable start-up reads is recorded through
-  `interp::image::variable` and stored with its value in the image; a different value starts slow
-  and replaces the image. Hashing the whole environment was tried first and rejected: a wrapper
-  that sets a per-process variable (a trace id) would defeat every image.
-- **No "existing objects" check.** The writer once refused to copy any object that was live
-  before start-up, to catch Rust-held handles. It flagged only `package:ry`'s frame and constants,
-  which are safe to copy because the loader overwrites the fixed environment's frame, and it cost
-  a full collection per slow start. Rust state that holds heap objects must be a fixed object, a
-  heap root, or saved by `save_state`; the oracle and scenario suites run with images on.
-- **Starts that cannot be reproduced write no image, silently.** These are a start that warned
-  (a load would not print the warning again), a start that left `.Random.seed` (base R's profile
-  seeds from the clock under `_R_RNG_VERSION_`, and every load would share that seed), and a start
-  that loaded a namespace from outside `R_HOME/library`. The key covers only R home's packages, so
-  a reinstalled package elsewhere would keep lazy-load promises into its old database. Hashing
-  those packages' files instead would make the key depend on which packages start-up loads, which
-  is known only after the slow start. Relative library directories are keyed as absolute paths.
-- **Impact.** Empty `ry run`: 125 ms to 47 ms median (the writing run costs about 180 ms).
-  `methods::getClass("numeric")` with `R_DEFAULT_PACKAGES=NULL`: 64 ms to 56 ms. The oracle shows
-  the same results with and without images, and `start-up-image.scenario` pins the env-change and
-  damaged-image fallbacks. Analysis is unaffected: the image is runtime-only.
-
+- **Previous source of truth.** Without an image, every start re-derived the same session from
+  base R's files (baseloader, lazy-loaded base, the six default packages, methods rebuilding its
+  S4 tables): an empty `ry run` took about 125 ms (median, Linux, bench profile). A first design
+  wrote the image at run time on the first eligible start, into `~/.cache/ry/image`, keyed by the
+  build, the session flags, base R's files, the library paths and the steering variables, with
+  every other environment read recorded through an `image::variable` wrapper and compared on load.
+- **What was structurally weak.** That image was a cache of derived state, and it had a cache's
+  failures: a key that missed an input (a shared `.Random.seed`, a stale lazy-load database of a
+  package outside R home, relative `R_LIBS`, start-up warnings shown only on the writing run), and
+  a wrapper every interpreter environment read had to remember to use.
+- **Target shape.** The image is build output. `ry-rcmd build-base` writes it as its last step
+  into the base tree (`library/base/R/ry-start.image`) in an emptied environment, a release embeds
+  it with the tree, and nothing writes it at run time. The header carries `RY_RUNTIME_ID`; an
+  image of another build is skipped silently (`just start-image` refreshes it in a development
+  checkout). After the load, each start clears the options and re-runs the environment-reading
+  steps: the C-level options, `.Machine`, `.Platform`, base R's profile, and the `.onLoad` hooks
+  of utils, grDevices and stats (`interp::session::start_from_image`). The image holds only what
+  those steps leave alone, the namespaces and their attachment, which depend on nothing in the
+  environment but `image::LOADING_VARIABLES`; a start that sets one runs the slow way. Strings
+  under the writer's R home are relocated to the tree the image file lives in
+  (`heap::image::Relocation`). The writer fails, failing the build, when start-up warned or left
+  `.Random.seed`. User packages get the same treatment as install-time output of `ry install`
+  (`backlog.md`).
+- **No "existing objects" check.** Rust state that holds heap objects across start-up must be a
+  fixed object, a heap root, or saved by `image::save_state`; a check that refused every object
+  live before start-up flagged only `package:ry`'s frame, which the loader overwrites safely.
+- **Impact.** Empty `ry run`: about 120 ms to 60 ms median. Re-running the environment steps
+  costs about 12 ms against loading a run-time image (47 ms). `methods::getClass("numeric")` with
+  `R_DEFAULT_PACKAGES=NULL` starts the slow way (63 ms; the run-time image keyed that variable and
+  took 56 ms). The four cache bugs cannot occur: no image depends on
+  the run-time environment. Options, the search path and namespace paths match a slow start
+  (`start-up-image.scenario`). Development builds start slowly after a runtime edit until the
+  image is rewritten. Analysis is unaffected: the image is runtime-only.

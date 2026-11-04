@@ -666,7 +666,7 @@ pub unsafe fn description(file: Sexp) -> Option<String> {
 pub fn expand_path(path: &str) -> String {
     if let Some(rest) = path.strip_prefix('~')
         && (rest.is_empty() || rest.starts_with('/'))
-        && let Ok(home) = crate::image::variable("HOME")
+        && let Ok(home) = std::env::var("HOME")
     {
         return format!("{home}{rest}");
     }
