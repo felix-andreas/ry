@@ -485,6 +485,7 @@ unsafe fn save_state(plan: &Plan, roots: &mut Vec<Sexp>) -> Vec<u8> {
     };
     let globals = &interp().globals;
     out.u32(root(globals.methods_namespace));
+    out.u32(root(globals.methods_templates));
     out.u8(u8::from(globals.methods_dispatch));
     out.u8(u8::from(globals.allow_primitive_methods));
 
@@ -586,6 +587,7 @@ unsafe fn restore_state(state: &[u8], roots: &[Sexp]) -> Result<(), ImageError> 
 
     let globals = &mut interp().globals;
     globals.methods_namespace = root(&mut input)?;
+    globals.methods_templates = root(&mut input)?;
     globals.methods_dispatch = input.u8()? != 0;
     globals.allow_primitive_methods = input.u8()? != 0;
 
