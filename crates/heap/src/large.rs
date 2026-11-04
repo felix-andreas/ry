@@ -23,8 +23,14 @@ pub(crate) const MAPPED_BYTES: usize = 1 << 20;
 pub(crate) struct MappedPool {
     mappings: Vec<Mapping>,
     bytes: usize,
-    /// The most bytes kept, which [`crate::Heap`] sets from its limit after each major
-    /// collection, so the memory the pool holds stays a small share of the heap.
+    /// The most bytes kept, which [`crate::Heap`] keeps at its vector limit. The pool maps
+    /// nothing while it holds a mapping, so what it keeps never lifts the peak above the most
+    /// bytes the large vectors took at once; its limit only bounds the memory left idle after
+    /// such a peak. A smaller limit costs time without lowering the peak: at half the vector
+    /// limit, with a minimum of 32 MB, the 40 MB `1:n` a `for` loop over ten million elements
+    /// expands was unmapped after every call and faulted in again by the next, and a loop of
+    /// 8 MB vector arithmetic, which frees four temporaries between allocations, kept only two
+    /// at a quarter.
     pub limit: usize,
 }
 
@@ -34,11 +40,11 @@ struct Mapping {
 }
 
 impl MappedPool {
-    pub fn new() -> MappedPool {
+    pub fn new(limit: usize) -> MappedPool {
         MappedPool {
             mappings: Vec::new(),
             bytes: 0,
-            limit: MIN_POOL_BYTES,
+            limit,
         }
     }
 
@@ -102,7 +108,12 @@ impl MappedPool {
     /// idle while pages are added would raise the peak above what returning every dead vector
     /// gives. Between those moments the pool's idle mappings, at most its limit, stay resident.
     unsafe fn reuse(&mut self, length: usize) -> Option<NonNull<u8>> {
-        let lengths = || self.mappings.iter().map(|mapping| mapping.length).enumerate();
+        let lengths = || {
+            self.mappings
+                .iter()
+                .map(|mapping| mapping.length)
+                .enumerate()
+        };
         if let Some((chosen, _)) = lengths()
             .filter(|&(_, kept)| kept >= length)
             .min_by_key(|&(_, kept)| kept)
@@ -176,7 +187,11 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Mapped<A> {
         let Ok(new_layout) = Layout::from_size_align(new_size, layout.align()) else {
             return std::ptr::null_mut();
         };
-        match (is_mapped(layout), is_mapped(new_layout), NonNull::new(address)) {
+        match (
+            is_mapped(layout),
+            is_mapped(new_layout),
+            NonNull::new(address),
+        ) {
             (false, false, _) => self.0.realloc(address, layout, new_size),
             (true, true, Some(block)) => {
                 match (page_rounded(layout.size()), page_rounded(new_size)) {
@@ -212,18 +227,6 @@ unsafe fn unmap_block(address: NonNull<u8>, length: usize) {
         std::process::abort();
     }
 }
-
-/// The pool's limit for a heap whose collection limit is `heap_limit`: half of it, and at
-/// least [`MIN_POOL_BYTES`]. The pool maps nothing while it holds a mapping, so what it keeps
-/// never lifts the peak above the most bytes the large vectors took at once; its limit only
-/// bounds the memory left idle after such a peak. A loop of 8 MB vector arithmetic frees four
-/// temporaries between allocations, and a quarter of the limit kept two: the other two faulted
-/// in fresh pages every iteration, which took more time than the arithmetic.
-pub(crate) fn pool_limit(heap_limit: usize) -> usize {
-    (heap_limit / 2).max(MIN_POOL_BYTES)
-}
-
-const MIN_POOL_BYTES: usize = 32 << 20;
 
 fn page_rounded(size: usize) -> Option<usize> {
     size.checked_next_multiple_of(page_size())

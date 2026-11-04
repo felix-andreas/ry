@@ -6,9 +6,10 @@
 //! operations on those bitmaps, so neither marking an already-marked object nor freeing a dead
 //! one touches the object's own memory. Marking an object for the first time also sets its
 //! header's `OLD` bit, which the write barrier reads; the collector scans that object next, so
-//! the header is about to be in cache anyway. An intermediate or major collection also sets its
-//! `TENURED` bit, and a per-page tenured bitmap records the same slots so that an intermediate
-//! collection can unmark the younger old generation with word operations.
+//! the header is about to be in cache anyway. An object ages one generation per collection that
+//! marks it, as in GNU R: an intermediate or major collection sets the `TENURED` bit of a survivor
+//! that was already old, and a per-page tenured bitmap records the same slots so that an
+//! intermediate collection can unmark the younger old generation with word operations.
 //!
 //! Allocation bumps a pointer. The cursor of a size class claims a run of consecutive free slots
 //! in the allocated bitmap, which on a fresh or emptied page is the whole page, and then hands
@@ -92,9 +93,9 @@ pub(crate) struct Space {
     /// walk every page.
     total_live_slots: usize,
     marks: Vec<Bitmap>,
-    /// The slots marked when the last intermediate or major collection finished: the oldest
-    /// generation, whose objects carry `TENURED` in their headers. Only those collections free
-    /// a marked slot, so these bits are always a subset of the marks.
+    /// The oldest generation, whose objects carry `TENURED` in their headers. Only intermediate
+    /// and major collections free a marked slot, and they drop the dead slots from these bits,
+    /// so they are always a subset of the marks.
     tenured: Vec<Bitmap>,
     allocated: Vec<Bitmap>,
     /// Slots whose object owns memory outside the heap: environments, whose frames spill.
@@ -113,8 +114,11 @@ pub(crate) struct Space {
     /// The vector data, in 8-byte cells, of the objects marked since the heap last reset it,
     /// counted as marking reaches each object because its header is in cache then.
     pub marked_vector_cells: u64,
-    /// The header bits a newly marked object gets: `OLD` in a minor collection, and `OLD` and
-    /// `TENURED` in an intermediate or major one.
+    /// The part of `marked_vector_cells` whose objects are tenured, counted the same way.
+    pub tenured_vector_cells: u64,
+    /// The header bits a newly marked object that was already old gets: `OLD` in a minor
+    /// collection, and `OLD` and `TENURED` in an intermediate or major one. A young object
+    /// becomes `OLD` only.
     pub promote_bits: u8,
 }
 
@@ -181,6 +185,7 @@ impl Space {
             empty_pages: Vec::new(),
             touched: Vec::new(),
             marked_vector_cells: 0,
+            tenured_vector_cells: 0,
             promote_bits: gc_bits::OLD,
         }
     }
@@ -297,11 +302,12 @@ impl Space {
         }
     }
 
-    /// Marks `object` and says whether it was unmarked. A newly marked object gets
-    /// [`Space::promote_bits`].
+    /// Marks `object` and says whether it was unmarked. A newly marked object ages: it gets
+    /// [`Space::promote_bits`] if it was already old, and `OLD` if it was young.
     #[inline]
     pub unsafe fn mark(&mut self, object: Sexp) -> bool {
-        let unmarked = match self.locate(object) {
+        let location = self.locate(object);
+        let unmarked = match location {
             Some((page, word, bit)) => {
                 let marks = &mut self.marks[page][word];
                 let unmarked = *marks & bit == 0;
@@ -314,16 +320,37 @@ impl Space {
                 unmarked
             },
         };
-        // A major collection marks every live object again, so the test keeps it from storing
-        // into the header of each one that is already promoted.
         if unmarked {
-            let promote = self.promote_bits;
-            if unsafe { object.gc_bits() } & promote != promote {
+            let bits = unsafe { object.gc_bits() };
+            let promote = if bits & gc_bits::OLD == 0 {
+                gc_bits::OLD
+            } else {
+                self.promote_bits
+            };
+            // A major collection marks every live object again, so the test keeps it from
+            // storing into the header of each one that is already promoted.
+            if bits & promote != promote {
                 unsafe { object.set_gc_bit(promote, true) };
             }
-            self.marked_vector_cells += unsafe { vector_cells(object) };
+            let cells = unsafe { vector_cells(object) };
+            self.marked_vector_cells += cells;
+            if promote & gc_bits::TENURED != 0 {
+                self.tenured_vector_cells += cells;
+                if let Some((page, word, bit)) = location {
+                    self.tenured[page][word] |= bit;
+                }
+            }
         }
         unmarked
+    }
+
+    /// Whether `object`, which this collection has marked, is tenured.
+    #[inline]
+    pub unsafe fn is_tenured(&self, object: Sexp) -> bool {
+        match self.locate(object) {
+            Some((page, word, bit)) => self.tenured[page][word] & bit != 0,
+            None => unsafe { object.gc_bits() & gc_bits::TENURED != 0 },
+        }
     }
 
     /// Records that `object`, an environment in this space, owns a frame to drop when it dies.
@@ -392,9 +419,14 @@ impl Space {
         }
     }
 
-    /// Makes every marked object tenured, after an intermediate or major collection swept.
-    pub fn tenure_marked(&mut self) {
-        self.tenured.copy_from_slice(&self.marks);
+    /// Drops the dead slots from the tenured bits, after an intermediate or major collection
+    /// swept.
+    pub fn forget_dead_tenured(&mut self) {
+        for (tenured, marks) in self.tenured.iter_mut().zip(&self.marks) {
+            for (tenured, mark) in tenured.iter_mut().zip(marks) {
+                *tenured &= mark;
+            }
+        }
     }
 
     /// Whether `object`, a small object, is in the tenured bitmap; `None` for a large object.

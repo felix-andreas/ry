@@ -738,6 +738,8 @@ fn an_intermediate_collection_frees_promoted_garbage_but_not_tenured_garbage() {
         heap.root(holder);
         let tenured = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
         heap.set_element(holder, 0, tenured);
+        // Each collection ages a survivor by one generation, so tenuring takes two.
+        heap.collect(Collection::Major);
         heap.collect(Collection::Major);
         let promoted = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
         heap.set_element(holder, 1, promoted);
@@ -753,6 +755,35 @@ fn an_intermediate_collection_frees_promoted_garbage_but_not_tenured_garbage() {
         assert_eq!(tenured.kind(), SexpType::Integer);
         heap.collect(Collection::Major);
         assert_eq!(heap.stats().objects_freed, before + 2);
+    }
+}
+
+#[test]
+fn a_major_collection_ages_a_young_survivor_only_to_the_younger_old_generation() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        let parent = heap.alloc_vector(SexpType::List, 2).expect("alloc");
+        heap.root(parent);
+        heap.collect(Collection::Major);
+        heap.collect(Collection::Major);
+        // Temporaries still in use when a major collection runs, held by a tenured parent.
+        for index in 0..2 {
+            let temporary = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            *temporary
+                .slice_mut::<i32>()
+                .first_mut()
+                .expect("one element") = index as i32;
+            heap.set_element(parent, index, temporary);
+        }
+        heap.collect(Collection::Major);
+        // One dies, and an intermediate collection frees it without waiting for a major one.
+        // The other must survive, so the major collection left the parent remembered.
+        heap.set_element(parent, 0, heap.nil());
+        let before = heap.stats().objects_freed;
+        heap.collect(Collection::Intermediate);
+        assert_eq!(heap.stats().objects_freed, before + 1);
+        assert_eq!(parent.element(1).slice::<i32>(), &[1]);
     }
 }
 
@@ -1453,28 +1484,41 @@ fn heap_growth_follows_gnu_r_variables() {
     const MEGABYTE: usize = 1 << 20;
     let minimum = 64 * MEGABYTE;
     let default = HeapGrowth::DEFAULT;
-    // A need past the limit raises it to the need, then by a fifth plus GNU R's smallest step.
-    let grown = default.next_limit(minimum, 100 * MEGABYTE, minimum);
-    assert_eq!(grown, 120 * MEGABYTE + 640_000);
+    // The need counts the fifth of the minimum a minor collection keeps free. A need past the
+    // limit raises it to the need, then by a fifth plus GNU R's smallest step.
+    let need = 100 * MEGABYTE + minimum / 5;
+    let grown = default.next_limit(minimum, 100 * MEGABYTE, minimum, false);
+    assert_eq!(grown, (need as f64 * 1.2) as usize + 640_000);
+    // A live set of 44 MiB fills 69% of 64 MiB, but with the free fifth it fills 89%, so the
+    // limit grows instead of leaving every later minor collection to escalate.
+    assert_eq!(
+        default.next_limit(minimum, 44 * MEGABYTE, minimum, false),
+        minimum + minimum / 5 + 640_000
+    );
+    // A major collection that a full heap forced before a limit's worth of vectors was
+    // allocated since the last one grows the limit however little survived.
+    assert_eq!(
+        default.next_limit(80 * MEGABYTE, 37 * MEGABYTE, minimum, true),
+        96 * MEGABYTE + 640_000
+    );
     // Between 30% and 70% full, the limit holds.
     assert_eq!(
-        default.next_limit(200 * MEGABYTE, 100 * MEGABYTE, minimum),
+        default.next_limit(200 * MEGABYTE, 100 * MEGABYTE, minimum, false),
         200 * MEGABYTE
     );
     // Below 30% it shrinks by a fifth, never below the minimum.
     assert_eq!(
-        default.next_limit(500 * MEGABYTE, 100 * MEGABYTE, minimum),
+        default.next_limit(500 * MEGABYTE, 100 * MEGABYTE, minimum, false),
         400 * MEGABYTE
     );
     assert_eq!(
-        default.next_limit(70 * MEGABYTE, MEGABYTE, minimum),
+        default.next_limit(70 * MEGABYTE, MEGABYTE, minimum, false),
         minimum
     );
-    // Without growth, the limit stays a fifth of the minimum above the need, the headroom below
-    // which a minor collection escalates to a major one.
+    // Without growth, the limit rises only to the need plus GNU R's smallest step.
     let tight = growth(&[("R_GC_MEM_GROW", "0")]);
     assert_eq!(
-        tight.next_limit(minimum, 100 * MEGABYTE, minimum),
-        100 * MEGABYTE + minimum / 5
+        tight.next_limit(minimum, 100 * MEGABYTE, minimum, false),
+        need + 640_000
     );
 }

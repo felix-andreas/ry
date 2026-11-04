@@ -30,7 +30,7 @@ pub mod strings;
 use {
     crate::{
         env::Frame,
-        large::{MAPPED_BYTES, MappedPool, pool_limit},
+        large::{MAPPED_BYTES, MappedPool},
         object::{
             EnvironmentObject, NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject,
             TripleObject, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, object_size, slot_for,
@@ -73,9 +73,17 @@ pub struct Heap {
     mapped: MappedPool,
     /// Large objects allocated since the last collection, which a minor collection sweeps.
     young_large: Vec<Sexp>,
+    /// Whether the collections running are the deeper ones of an escalation.
+    escalating: bool,
+    /// Bytes of large vectors allocated since the last major collection.
+    large_allocated_since_major: usize,
     remembered: Vec<Sexp>,
+    /// While a deeper collection traces a tenured object: whether one of its children seen so
+    /// far is younger, which puts the object in the remembered set.
+    tracing_tenured: bool,
+    younger_child: bool,
     /// The vector cells of the tenured objects, as of the last intermediate or major collection,
-    /// to which an intermediate one adds what it marks.
+    /// to which an intermediate one adds what it tenures.
     tenured_vector_cells: u64,
     escaped: Vec<Sexp>,
     /// The elements each escaped list held when it escaped. Native stores through the pointer
@@ -360,7 +368,8 @@ impl HeapGrowth {
             }
             _ => {}
         }
-        if let Some(fraction) = number("R_GC_GROWFRAC").filter(|value| (0.35..=0.75).contains(value))
+        if let Some(fraction) =
+            number("R_GC_GROWFRAC").filter(|value| (0.35..=0.75).contains(value))
         {
             growth.grow_fraction = fraction;
         }
@@ -372,21 +381,30 @@ impl HeapGrowth {
         growth
     }
 
-    /// The limit after a major collection that left `needed` bytes to hold.
-    pub fn next_limit(&self, limit: usize, needed: usize, minimum: usize) -> usize {
+    /// The limit after a major collection that left `needed` bytes to hold. A `thrashing`
+    /// heap grows as if the need filled more than the grow fraction.
+    pub fn next_limit(
+        &self,
+        limit: usize,
+        needed: usize,
+        minimum: usize,
+        thrashing: bool,
+    ) -> usize {
+        // A minor collection escalates to a major one when less than a fifth of the smallest
+        // limit is left (`Heap::escalate_if_full`), so that fifth is part of the need, as in GNU
+        // R's `AdjustHeapSize`. Leaving it out lets a live set just under the grow fraction
+        // keep the limit where every later minor collection escalates.
+        let needed = needed + minimum / 5;
         let mut limit = limit.max(needed) as f64;
         let occupancy = needed as f64 / limit;
-        if occupancy > self.grow_fraction {
+        if thrashing || occupancy > self.grow_fraction {
             // GNU R's smallest step, 80,000 cells of 8 bytes, keeps a zero increment from
             // collecting on every allocation once the need reaches the limit.
             limit += GROW_STEP_MIN + self.grow_increment * limit;
         } else if occupancy < self.shrink_fraction {
             limit -= self.shrink_increment * limit;
         }
-        // A minor collection escalates to a major one when less than a fifth of the smallest
-        // limit is left (`Heap::maybe_collect`), so a limit closer to the need than that would
-        // turn every following minor collection into a major one.
-        (limit as usize).max(needed + minimum / 5).max(minimum)
+        (limit as usize).max(needed).max(minimum)
     }
 }
 
@@ -572,9 +590,13 @@ impl Heap {
             allocation_ceiling: memory_ceiling(),
             space: Space::new(),
             large: FxHashSet::default(),
-            mapped: MappedPool::new(),
+            mapped: MappedPool::new(policy.heap_limit),
             young_large: Vec::new(),
+            escalating: false,
+            large_allocated_since_major: 0,
             remembered: Vec::new(),
+            tracing_tenured: false,
+            younger_child: false,
             tenured_vector_cells: 0,
             escaped: Vec::new(),
             escaped_lists: Vec::new(),
@@ -2038,6 +2060,7 @@ impl Heap {
         self.large.insert(object);
         self.young_large.push(object);
         self.young_large_bytes += size;
+        self.large_allocated_since_major += size;
         Ok(object)
     }
 
@@ -2096,12 +2119,14 @@ impl Heap {
                 self.old_large_bytes + request + policy.min_heap_limit / 5 > policy.heap_limit;
             let nodes_full = self.old_small_bytes + policy.min_node_limit / 5 > policy.node_limit;
             if !vectors_full && !nodes_full {
-                return;
+                break;
             }
             if kind == Collection::Major {
                 self.stress_counter = 0;
             }
+            self.escalating = true;
             self.collect_keeping(kind, keep, request);
+            self.escalating = false;
         }
     }
 
@@ -2132,9 +2157,7 @@ impl Heap {
         (0..(object.length() as usize).min(64))
             .map(|index| object.stored_element(index))
             .filter(|&element| {
-                element.refcount() == 1
-                    && element.kind() != SexpType::List
-                    && reclaimable(element)
+                element.refcount() == 1 && element.kind() != SexpType::List && reclaimable(element)
             })
             .map(|element| self.size_of(element))
             .sum()
@@ -2371,6 +2394,7 @@ impl Heap {
             .is_some()
             .then(|| (Instant::now(), self.young_bytes, self.young_large_bytes));
         self.space.marked_vector_cells = 0;
+        self.space.tenured_vector_cells = 0;
         if kind != Collection::Major && self.policy.verify {
             self.verify_barrier();
         }
@@ -2393,12 +2417,15 @@ impl Heap {
             // A tenured object stays marked, so tracing stops at it; the ones that may point at
             // younger objects are exactly the remembered and escaped ones, so tracing starts
             // from them too. The others are unmarked now, and traced if anything reaches them.
+            // Tracing remembers again each tenured parent still left pointing at a younger child.
             for index in 0..self.remembered.len() {
                 let parent = self.remembered[index];
+                parent.set_gc_bit(gc_bits::REMEMBERED, false);
                 if parent.gc_bits() & gc_bits::TENURED != 0 {
                     self.mark_stack.push(parent);
                 }
             }
+            self.remembered.clear();
             for index in 0..self.escaped.len() {
                 let parent = self.escaped[index];
                 if parent.gc_bits() & gc_bits::TENURED != 0 {
@@ -2471,29 +2498,40 @@ impl Heap {
             Collection::Intermediate => {
                 self.strings.remove_dead(&self.space);
                 self.sweep_all();
-                self.space.tenure_marked();
+                self.space.forget_dead_tenured();
                 self.stats.intermediate_collections += 1;
             }
             Collection::Major => {
                 self.strings.remove_dead(&self.space);
                 self.sweep_all();
-                self.space.tenure_marked();
+                self.space.forget_dead_tenured();
                 self.stats.major_collections += 1;
                 // The limit shrinks by a fifth at most per major collection rather than to what
                 // survived, so an explicit `gc()` between two large operations does not drop it
                 // below the next one's peak and buy a full collection in the middle of it.
                 let policy = &mut self.policy;
+                // A full heap that forces a major collection before the program allocated a
+                // limit's worth of vectors since the last one means the limit is too close to
+                // what the program keeps in flight between collections: each such major
+                // collection tenures that working set, which only the next major collection
+                // can free. The survivors alone cannot show it, so the limit grows as if they
+                // filled it.
+                let thrashing =
+                    self.escalating && self.large_allocated_since_major < policy.heap_limit;
+                self.large_allocated_since_major = 0;
                 policy.heap_limit = policy.growth.next_limit(
                     policy.heap_limit,
                     self.old_large_bytes + request,
                     policy.min_heap_limit,
+                    thrashing,
                 );
                 policy.node_limit = policy.growth.next_limit(
                     policy.node_limit,
                     self.old_small_bytes,
                     policy.min_node_limit,
+                    false,
                 );
-                self.mapped.limit = pool_limit(policy.heap_limit);
+                self.mapped.limit = policy.heap_limit;
                 self.mapped.trim();
             }
         }
@@ -2508,11 +2546,9 @@ impl Heap {
                 }
                 tenured
             }),
-            Collection::Intermediate | Collection::Major => {
-                for parent in self.remembered.drain(..) {
-                    parent.set_gc_bit(gc_bits::REMEMBERED, false);
-                }
-            }
+            // A deeper collection emptied the set before it marked, and tracing put back the
+            // tenured parents of the survivors it aged only to the younger old generation.
+            Collection::Intermediate | Collection::Major => {}
         }
         self.young_bytes = 0;
         self.young_large_bytes = 0;
@@ -2523,8 +2559,12 @@ impl Heap {
             Collection::Intermediate => self.tenured_vector_cells + self.space.marked_vector_cells,
             Collection::Major => self.space.marked_vector_cells,
         };
-        if kind != Collection::Minor {
-            self.tenured_vector_cells = stats.live_vector_cells;
+        match kind {
+            Collection::Minor => {}
+            Collection::Intermediate => {
+                self.tenured_vector_cells += self.space.tenured_vector_cells
+            }
+            Collection::Major => self.tenured_vector_cells = self.space.tenured_vector_cells,
         }
         stats.max_live_objects = stats.max_live_objects.max(stats.live_objects);
         stats.max_vector_cells = stats.max_vector_cells.max(stats.live_vector_cells);
@@ -2560,6 +2600,9 @@ impl Heap {
     unsafe fn mark(&mut self, object: Sexp) {
         if self.space.mark(object) && !is_leaf(object, self.known.nil) {
             self.mark_stack.push(object);
+        }
+        if self.tracing_tenured && !self.younger_child && !self.space.is_tenured(object) {
+            self.younger_child = true;
         }
     }
 
@@ -2634,6 +2677,21 @@ impl Heap {
     }
 
     unsafe fn trace(&mut self, object: Sexp) {
+        // Collection ages each survivor by one generation, so a deeper collection can leave a
+        // tenured object pointing at a child it aged only to the younger old generation; the
+        // write barrier never saw that pointer, so tracing remembers the parent instead.
+        self.tracing_tenured = self.space.promote_bits & gc_bits::TENURED != 0
+            && object.gc_bits() & gc_bits::TENURED != 0;
+        self.younger_child = false;
+        self.trace_children(object);
+        if self.younger_child && object.gc_bits() & gc_bits::REMEMBERED == 0 {
+            object.set_gc_bit(gc_bits::REMEMBERED, true);
+            self.remembered.push(object);
+        }
+        self.tracing_tenured = false;
+    }
+
+    unsafe fn trace_children(&mut self, object: Sexp) {
         self.mark(object.attrib());
         if object.is_altrep() {
             self.mark(object.car());
@@ -2835,7 +2893,11 @@ impl Heap {
                         } else {
                             0
                         },
-                        if self.space.is_marked(child) { "untenured" } else { "young" },
+                        if self.space.is_marked(child) {
+                            "untenured"
+                        } else {
+                            "young"
+                        },
                         child.kind(),
                     );
                 }
