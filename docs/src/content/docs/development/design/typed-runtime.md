@@ -466,6 +466,24 @@ benchmark programs, because those give the largest measured wins: the typed prog
 nothing from the native path today (`bond_book`, `report`, `closures`) are the ones that need
 lists, strings and captures.
 
+## What exists
+
+`crates/typed` builds the first slice. It compiles a strict typed closure at its first call for
+the argument types it sees, which covers scalars, vectors and Arrays of numbers, logicals and
+strings, lists of scalars, local functions (inlined), `lapply` and `vapply` over a local function,
+and the string builtins of the benchmark programs. It differs from this draft in four ways:
+
+- The IR is lowered at run time from the closure's R syntax, not from a serialized summary the
+  analysis computes, and its global calls are guarded by the bindings they resolved to.
+- A `Str` is two words with up to 15 bytes inline, not three, so it returns in two registers.
+- A `List` header points at its items, so an R vector crosses into compiled code as a view with no
+  copy, and writing to a view copies it first.
+- Code lives in memory for the process. Code files, `ry install` compilation, `ry build --exe`,
+  value tracking, records, tags, pools and the background workers are not built.
+
+A call whose arguments are unforced promises, a default argument or a construct the lowering does
+not know runs on the native path in `crates/jit/src/native.rs` instead.
+
 ## Open questions
 
 - **Dropping the profile-driven native path.** Once the typed core compiles ahead of time, the

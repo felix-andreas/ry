@@ -346,10 +346,14 @@ unsafe fn tail_invisible(expression: Sexp) -> bool {
     match &*values::symbol_name(expression.car()) {
         "<-" | "=" | "invisible" => true,
         "{" => args.last().is_some_and(|&(_, last)| tail_invisible(last)),
-        "if" => args
-            .iter()
-            .skip(1)
-            .any(|&(_, branch)| tail_invisible(branch)),
+        // An `if` without `else` whose condition is false gives an invisible `NULL`.
+        "if" => {
+            args.len() < 3
+                || args
+                    .iter()
+                    .skip(1)
+                    .any(|&(_, branch)| tail_invisible(branch))
+        }
         ".ry_match" => args.iter().skip(1).any(|&(_, arm)| {
             arm.kind() == SexpType::Language
                 && values::pairlist_items(arm.cdr())
@@ -2890,8 +2894,7 @@ pub unsafe fn call(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<S
     }
     let formals = function.car();
     let mut formal = formals;
-    let mut types: SmallVec<[Ty; 4]> = SmallVec::new();
-    let mut words: SmallVec<[u64; 4]> = SmallVec::new();
+    let mut arguments: SmallVec<[Sexp; 4]> = SmallVec::new();
     let mut read: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
     for arg in args {
         if formal.kind() != SexpType::Pairlist
@@ -2904,13 +2907,26 @@ pub unsafe fn call(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<S
         if arg.value.kind() == SexpType::Promise && arg.value.car() == values::unbound() {
             read.push((arg.value, value));
         }
-        let (ty, word) = argument_word(value)?;
-        types.push(ty);
-        words.push(word);
+        arguments.push(value);
         formal = formal.cdr();
     }
     if formal.kind() == SexpType::Pairlist {
         return None;
+    }
+    // A strict typed closure runs on the typed core's native values when it compiles there,
+    // and on the scalar natives below when it does not.
+    if let Some(value) = typed::call(function, &arguments) {
+        if value.is_ok() {
+            force_read(&read);
+        }
+        return Some(value);
+    }
+    let mut types: SmallVec<[Ty; 4]> = SmallVec::new();
+    let mut words: SmallVec<[u64; 4]> = SmallVec::new();
+    for &value in &arguments {
+        let (ty, word) = argument_word(value)?;
+        types.push(ty);
+        words.push(word);
     }
     let native = native_for(function, &types)?;
     let trampoline = trampoline(&native.params, native.result)?;
@@ -2935,14 +2951,19 @@ pub unsafe fn call(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<S
             .ok_or_else(|| interp::unwind::error("a native function returned no record")),
     };
     heap.release_handles(mark);
-    // The call read each unforced argument promise, so it is forced now: a promise shared
-    // through `...` must keep the value this call saw, as if tier 0 had forced it.
-    for (promise, value) in read {
+    force_read(&read);
+    interp::interp().visible = true;
+    Some(value)
+}
+
+/// Forces each argument promise a compiled call read without forcing: a promise shared through
+/// `...` must keep the value this call saw, as if tier 0 had forced it.
+unsafe fn force_read(read: &[(Sexp, Sexp)]) {
+    let heap = interp::heap();
+    for &(promise, value) in read {
         heap.set_car(promise, value);
         heap.set_tag(promise, values::nil());
     }
-    interp::interp().visible = true;
-    Some(value)
 }
 
 type R<T> = Result<T, interp::unwind::Unwind>;

@@ -1,6 +1,6 @@
 ---
 title: Structure
-description: What each source file holds in the syntax, semantics, ide, format, loader, oracle, ry, repl, heap, interp, jit, libr, sniff, table, and rcmd crates
+description: What each source file holds in the syntax, semantics, ide, format, loader, oracle, ry, repl, heap, interp, jit, typed, libr, sniff, table, and rcmd crates
 ---
 
 This page lists what each source file in ry's crates is responsible for. How the crates depend on
@@ -249,6 +249,20 @@ machine code with Cranelift, and hands the activation back to tier 0 when a spec
 - **`codegen.rs`**: machine code for a plan.
 - **`runtime.rs`**: the activation record compiled code runs on, and the helpers it calls for
   everything that allocates, runs R code or can fail.
+
+## `typed`
+
+The crate root is `src/typed.rs`: the entry point from `jit`'s `native::call`, the table of
+compiled code per closure and argument types, and the conversion of R values to native values and
+back.
+
+- **`lower.rs`**: a closure's body as typed IR, with local functions inlined at their calls and
+  every global function guarded by the binding it resolved to.
+- **`ir.rs`**: the typed IR: types, instructions, blocks and the builder.
+- **`ownership.rs`**: reference counts from liveness, in the style of Perceus.
+- **`backend.rs`**: Cranelift code for the IR, and the trampoline the entry point calls.
+- **`values.rs`**: the native values (`Str`, `List`, `Dict`) and the runtime functions compiled
+  code calls.
 
 ## `libr`
 

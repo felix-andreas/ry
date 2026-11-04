@@ -14,6 +14,7 @@ The crates live in `crates/`:
 - `loader`: the package-development loader behind `ry load`.
 - `repl`: the R console behind `ry repl` and `ry run`. It loads R at runtime, which is why the rest of the workspace can build without R.
 - `heap`: the R runtime's object model and garbage collector.
+- `typed`: the typed core, which compiles strict typed closures to run on native values.
 - `libr`: R's C API, built as an ABI-compatible `libR` shared library.
 - `rcmd`: ry's R home and the `R CMD` commands that install packages against it.
 - `oracle`: the differential test harness that compares an engine against GNU R.

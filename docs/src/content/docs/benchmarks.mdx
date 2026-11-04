@@ -13,10 +13,11 @@ Each program runs as plain R on GNU R, as the same plain R on ry, and typed in
 <BenchmarkTable />
 
 Recursion and loops gain the most, while vectorized builtins already run in C on GNU R. Types add
-a second gain where typed functions work on numbers, records and `match`: such a function runs as
-native code from its first call, so `orders` and `expr_tree` run 13 and 83 times faster typed than
-on GNU R. Typed code that builds vectors or strings (`bond_book`, `report`) runs as fast as untyped
-code, and ry usually peaks higher in memory than GNU R.
+a second gain: a typed function in strict mode compiles to native code before its first call and
+works on native numbers, strings and lists, so `closures`, `report` and `expr_tree` run between 60
+and 120 times faster typed than on GNU R. Whole-vector arithmetic (`vector_arith`) gains little,
+because each operation still writes a new vector, and the typed functions over `Result` and
+dictionaries (`validate`) run about twice as fast as untyped code.
 
 ## The programs
 
