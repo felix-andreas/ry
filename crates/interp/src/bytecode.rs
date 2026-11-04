@@ -48,6 +48,7 @@ use {
     },
     heap::{
         Marker,
+        activity::{self, Activity, Counter},
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -485,9 +486,9 @@ pub enum Op {
     LogicRight,
     /// `dst formals body srcref`
     Closure,
-    /// `dst variable index value call double`: `variable[index] <- value` (or `[[` when
-    /// `double` is 1), where `index` is a register that already holds the index's value and the
-    /// assignment runs as `<-` would run it.
+    /// `dst variable index value call kind`: `variable[index] <- value`, `[[` or `$` as the
+    /// [`ElementKind`] operand says, where `index` is a register that already holds the index's
+    /// value (the name as a string for `$`) and the assignment runs as `<-` would run it.
     SubAssign,
     /// `srcref statement`: makes the srcref constant current, for a statement of a `{` with
     /// source references; `statement` is 1 when a statement starts there, which an attached
@@ -552,9 +553,25 @@ pub enum Op {
     /// the integer scalar `table` holds for it, or the scalar 0 when no arm runs (see
     /// [`switch_table`]). The arms follow as a chain of [`Op::MatchLiteral`] tests.
     SwitchArm,
+    /// `dst variable row column value call`: `variable[row, column] <- value` or
+    /// `variable[[row, column]] <- value`, as `call` says, with the subscripts' values in
+    /// registers `row` and `column`, run as `<-` would run it.
+    SubAssignMatrix,
 }
 
-pub const OPS: [Op; 41] = [
+/// Which replacement an [`Op::SubAssign`] does, stored as its last operand.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+enum ElementKind {
+    /// `x[i] <- value`
+    Single = 0,
+    /// `x[[i]] <- value`
+    Double = 1,
+    /// `x$name <- value`
+    Dollar = 2,
+}
+
+pub const OPS: [Op; 42] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -596,6 +613,7 @@ pub const OPS: [Op; 41] = [
     Op::BoundEval,
     Op::MatchCondition,
     Op::SwitchArm,
+    Op::SubAssignMatrix,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1626,14 +1644,16 @@ impl Compiler {
             if matches!(name.as_str(), "<-" | "=")
                 && args.len() == 2
                 && args.iter().all(|(tag, _)| *tag == nil())
-                && let Some((double, replacement)) = self.element_assignment_target(args[0].1)?
+                && let Some((kind, replacement, subscripts)) =
+                    self.element_assignment_target(args[0].1)?
             {
                 return self.element_assignment(
                     call,
                     head,
                     primitive,
                     replacement,
-                    double,
+                    kind,
+                    &subscripts,
                     dst,
                     &args,
                 );
@@ -1658,49 +1678,108 @@ impl Compiler {
         self.general_call(call, head, dst)
     }
 
-    /// For `x[i]` or `x[[i]]` as an assignment target, whether it is `[[` and the base
-    /// replacement function, when `x` is a variable and `i` is a constant or a variable that is
-    /// never a promise (so evaluating it early is unobservable).
-    unsafe fn element_assignment_target(&mut self, target: Sexp) -> R<Option<(bool, Sexp)>> {
+    /// For `x[i]`, `x[[i]]` or `x$name` as an assignment target: its [`ElementKind`], the base
+    /// replacement function, and the index expression (`"name"` for `x$name`), when `x` is a
+    /// variable and `i` is a constant or a variable that is never a promise (so evaluating it
+    /// early is unobservable).
+    unsafe fn element_assignment_target(
+        &mut self,
+        target: Sexp,
+    ) -> R<Option<(ElementKind, Sexp, SmallVec<[Sexp; 2]>)>> {
         if target.kind() != SexpType::Language || target.car().kind() != SexpType::Symbol {
             return Ok(None);
         }
-        let double = match &*symbol_name(target.car()) {
-            "[" => false,
-            "[[" => true,
+        let kind = match &*symbol_name(target.car()) {
+            "[" => ElementKind::Single,
+            "[[" => ElementKind::Double,
+            "$" => ElementKind::Dollar,
             _ => return Ok(None),
         };
         let parts = values::pairlist_items(target.cdr());
-        let [(variable_tag, variable), (index_tag, index)] = parts.as_slice() else {
+        let Some(((variable_tag, variable), subscripts)) = parts.split_first() else {
             return Ok(None);
         };
-        if *variable_tag != nil() || *index_tag != nil() || variable.kind() != SexpType::Symbol {
+        if *variable_tag != nil()
+            || variable.kind() != SexpType::Symbol
+            || !(1..=2).contains(&subscripts.len())
+            || subscripts.iter().any(|(tag, _)| *tag != nil())
+            || (kind == ElementKind::Dollar && subscripts.len() != 1)
+        {
             return Ok(None);
         }
-        let simple_index = match index.kind() {
+        let index = &subscripts[0].1;
+        if kind == ElementKind::Dollar {
+            // `x$name` quotes its index; a one-string index is the same name.
+            let name = match index.kind() {
+                SexpType::Symbol if *index != symbols().dots && *index != missing_arg() => {
+                    index.car()
+                }
+                SexpType::String
+                    if length(*index) == 1
+                        && !values::has_attributes(*index)
+                        && index.element(0) != values::na_string() =>
+                {
+                    index.element(0)
+                }
+                _ => return Ok(None),
+            };
+            let index = values::scalar_string_charsxp(name)?;
+            return Ok(self
+                .base_primitive(values::install("$<-")?, "$<-")?
+                .map(|primitive| (kind, primitive, smallvec![index])));
+        }
+        if !subscripts
+            .iter()
+            .all(|(_, index)| self.side_effect_free_index(*index, 0))
+        {
+            return Ok(None);
+        }
+        let name = if kind == ElementKind::Double {
+            "[[<-"
+        } else {
+            "[<-"
+        };
+        let replacement = values::install(name)?;
+        Ok(self.base_primitive(replacement, name)?.map(|primitive| {
+            (
+                kind,
+                primitive,
+                subscripts.iter().map(|(_, index)| *index).collect(),
+            )
+        }))
+    }
+
+    /// Whether evaluating the subscript `index` cannot change a variable of the frame, so the
+    /// compiled assignment may evaluate it before reading the target: a variable of the frame (a
+    /// formal's promise runs in the caller's frame), a numeric constant, or base arithmetic on
+    /// those.
+    unsafe fn side_effect_free_index(&self, index: Sexp, depth: u32) -> bool {
+        match index.kind() {
             SexpType::Symbol => {
-                *index != symbols().dots
-                    && *index != missing_arg()
-                    && eval::dot_dot_index(*index).is_none()
-                    && !self.formals.contains(index)
-                    && self
-                        .local_symbols
-                        .as_ref()
-                        .is_some_and(|found| found.contains(index))
+                index != symbols().dots
+                    && index != missing_arg()
+                    && eval::dot_dot_index(index).is_none()
+                    && (self.formals.contains(&index)
+                        || self
+                            .local_symbols
+                            .as_ref()
+                            .is_some_and(|found| found.contains(&index)))
             }
             SexpType::Integer | SexpType::Real => {
-                length(*index) == 1 && !values::has_attributes(*index)
+                length(index) == 1 && !values::has_attributes(index)
+            }
+            SexpType::Language if depth < 8 && index.car().kind() == SexpType::Symbol => {
+                let operator = symbol_name(index.car());
+                let arguments = values::pairlist_items(index.cdr());
+                ARITHS[..5].iter().any(|(_, name)| *name == &*operator)
+                    && (1..=2).contains(&arguments.len())
+                    && !self.frame_may_bind(index.car())
+                    && arguments.iter().all(|(tag, argument)| {
+                        *tag == nil() && self.side_effect_free_index(*argument, depth + 1)
+                    })
             }
             _ => false,
-        };
-        if !simple_index {
-            return Ok(None);
         }
-        let name = if double { "[[<-" } else { "[<-" };
-        let replacement = values::install(name)?;
-        Ok(self
-            .base_primitive(replacement, name)?
-            .map(|primitive| (double, primitive)))
     }
 
     /// `x[i] <- value`, guarded by both `<-` and the replacement function.
@@ -1711,12 +1790,17 @@ impl Compiler {
         head: Sexp,
         primitive: Sexp,
         replacement: Sexp,
-        double: bool,
+        kind: ElementKind,
+        subscripts: &[Sexp],
         dst: u32,
         args: &[(Sexp, Sexp)],
     ) -> R<()> {
         let target = args[0].1;
-        let replacement_symbol = values::install(if double { "[[<-" } else { "[<-" })?;
+        let replacement_symbol = values::install(match kind {
+            ElementKind::Single => "[<-",
+            ElementKind::Double => "[[<-",
+            ElementKind::Dollar => "$<-",
+        })?;
         let mut guards = Vec::new();
         for (symbol, expected) in [(head, primitive), (replacement_symbol, replacement)] {
             let probe = self.frame_may_bind(symbol) as u32;
@@ -1727,16 +1811,33 @@ impl Compiler {
         }
         let mark = self.next_register;
         let value = self.allocate();
-        let index = self.allocate();
         self.expression(args[1].1, value)?;
-        let index_expression = target.cdr().cdr().car();
-        self.expression(index_expression, index)?;
+        let mut registers: SmallVec<[u32; 2]> = SmallVec::new();
+        for &subscript in subscripts {
+            let register = self.allocate();
+            if self.formals.contains(&subscript) {
+                // A missing argument selects everything, which only the general assignment
+                // does, so the instruction looks the formal up itself (see `subscript_value`).
+                let symbol = self.constant(subscript);
+                self.emit(Op::Constant, &[register, symbol]);
+            } else {
+                self.expression(subscript, register)?;
+            }
+            registers.push(register);
+        }
         let variable = self.constant(target.cdr().car());
         let call_constant = self.constant(call);
-        self.emit(
-            Op::SubAssign,
-            &[dst, variable, index, value, call_constant, double as u32],
-        );
+        match registers[..] {
+            [row, column] => self.emit(
+                Op::SubAssignMatrix,
+                &[dst, variable, row, column, value, call_constant],
+            ),
+            [index, ..] => self.emit(
+                Op::SubAssign,
+                &[dst, variable, index, value, call_constant, kind as u32],
+            ),
+            [] => self.evaluate(dst, call_constant),
+        }
         self.release_to(mark);
         let done = self.emit_patchable(Op::Jump, &[0]);
         for guard in guards {
@@ -1769,6 +1870,7 @@ impl Compiler {
                 | "[["
                 | "[<-"
                 | "[[<-"
+                | "$<-"
                 | ".Internal"
                 | "local"
                 | "$"
@@ -2612,7 +2714,7 @@ const BREAK_MARKER: u32 = 1 << 30;
 const NEXT_MARKER: u32 = 1 << 29;
 const MARKER_MASK: u32 = BREAK_MARKER | NEXT_MARKER;
 
-pub fn operand_count(op: Op) -> usize {
+pub const fn operand_count(op: Op) -> usize {
     match op {
         Op::Constant => 2,
         Op::GetVar => 3,
@@ -2643,6 +2745,7 @@ pub fn operand_count(op: Op) -> usize {
         Op::LogicRight => 5,
         Op::Closure => 4,
         Op::SubAssign => 6,
+        Op::SubAssignMatrix => 6,
         Op::SetSrcref => 2,
         Op::EndStatement => 3,
         Op::BranchUnlessPrimitive => 3,
@@ -2650,6 +2753,18 @@ pub fn operand_count(op: Op) -> usize {
         Op::DispatchSubject => 4,
     }
 }
+
+/// [`operand_count`] by opcode word, so dispatch reads the width with one load beside the
+/// opcode instead of branching on the decoded op.
+const OPERAND_COUNTS: [u8; OPS.len()] = {
+    let mut counts = [0; OPS.len()];
+    let mut index = 0;
+    while index < OPS.len() {
+        counts[index] = operand_count(OPS[index]) as u8;
+        index += 1;
+    }
+    counts
+};
 
 // The interpreter.
 
@@ -2794,6 +2909,7 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
 }
 
 unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
+    let _activity = activity::enter(Activity::Interpreter, 0);
     let decoded = Decoded::of(machine);
     loop {
         let at = pc;
@@ -2972,8 +3088,9 @@ unsafe fn step(
     let register = |index: usize| *registers.add(index);
     let set = |index: usize, value: Sexp| *registers.add(index) = value;
     debug_assert!(at < code.len() && (code[at] as usize) < OPS.len());
-    let op = *OPS.get_unchecked(*code.get_unchecked(at) as usize);
-    let next = at + 1 + operand_count(op);
+    let word = *code.get_unchecked(at) as usize;
+    let op = *OPS.get_unchecked(word);
+    let next = at + 1 + *OPERAND_COUNTS.get_unchecked(word) as usize;
     match op {
         Op::Constant => {
             set(operand(0), decoded.constants.element(operand(1)));
@@ -3368,8 +3485,35 @@ unsafe fn step(
             let call = decoded.constants.element(operand(4));
             let value = register(operand(3));
             let variable = decoded.constants.element(operand(1));
-            let double = operand(5) != 0;
-            if !assign_element_in_place(env, variable, register(operand(2)), value, double)? {
+            let kind = match operand(5) {
+                0 => ElementKind::Single,
+                1 => ElementKind::Double,
+                _ => ElementKind::Dollar,
+            };
+            let done = match subscript_value(env, register(operand(2)))? {
+                Some(index) => assign_element_in_place(env, variable, index, value, kind)?,
+                None => false,
+            };
+            if !done {
+                eval::complex_assign(call, call.cdr().car(), value, env, false)?;
+            }
+            set(operand(0), value);
+            interp().visible = false;
+        }
+        Op::SubAssignMatrix => {
+            let call = decoded.constants.element(operand(5));
+            let value = register(operand(4));
+            let variable = decoded.constants.element(operand(1));
+            let done = match (
+                subscript_value(env, register(operand(2)))?,
+                subscript_value(env, register(operand(3)))?,
+            ) {
+                (Some(row), Some(column)) => {
+                    assign_matrix_element_in_place(env, variable, row, column, value)?
+                }
+                _ => false,
+            };
+            if !done {
                 eval::complex_assign(call, call.cdr().car(), value, env, false)?;
             }
             set(operand(0), value);
@@ -3399,17 +3543,18 @@ pub fn logic_result(is_and: bool, left: i32, right: i32) -> i32 {
     }
 }
 
-/// `x[[i]] <- value` or `x[i] <- value` done in place, without `complex_assign`'s replacement
-/// calls, when the result is certain to equal what `[[<-` or `[<-` would return: `x` is a local,
-/// unshared, classless vector, `i` a scalar position inside it, and `value` either any non-`NULL`
-/// element of a list under `[[`, or an attribute-free scalar of `x`'s own atomic type. Returns
-/// whether it did the assignment; otherwise the variable is unchanged.
+/// `x[[i]] <- value`, `x[i] <- value` or `x$name <- value` done in place, without
+/// `complex_assign`'s replacement calls, when the result is certain to equal what the replacement
+/// function would return: `x` is a local, unshared, classless vector, `i` a scalar position inside
+/// it (or a name `x` has, for `$`), and `value` either any non-`NULL` element of a list under
+/// `[[` or `$`, or an attribute-free scalar of `x`'s own atomic type. Returns whether it did the
+/// assignment; otherwise the variable is unchanged.
 unsafe fn assign_element_in_place(
     env: Sexp,
     variable: Sexp,
     index: Sexp,
     value: Sexp,
-    double: bool,
+    kind: ElementKind,
 ) -> R<bool> {
     let heap = crate::heap();
     let Some(cell) = heap.frame_cell(env, variable) else {
@@ -3428,9 +3573,10 @@ unsafe fn assign_element_in_place(
         return Ok(false);
     }
     let fits = match target.kind() {
-        SexpType::List => double && value != nil(),
+        SexpType::List => kind != ElementKind::Single && value != nil(),
         SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::String => {
-            value.kind() == target.kind()
+            kind != ElementKind::Dollar
+                && value.kind() == target.kind()
                 && length(value) == 1
                 && !value.is_altrep()
                 && !values::has_attributes(value)
@@ -3441,14 +3587,39 @@ unsafe fn assign_element_in_place(
         return Ok(false);
     }
     let position = match index.kind() {
+        // `$<-` on a list replaces the first element whose name matches exactly; a name `x`
+        // lacks appends an element, which `complex_assign` does.
+        SexpType::String => {
+            let wanted = index.element(0);
+            let names = values::get_attr(target, symbols().names);
+            if wanted == values::na_string() || names.kind() != SexpType::String {
+                return Ok(false);
+            }
+            let wanted_bytes = wanted.bytes();
+            let found = (0..length(names)).find(|&at| {
+                let name = names.element(at);
+                name == wanted || (name != values::na_string() && name.bytes() == wanted_bytes)
+            });
+            match found {
+                Some(at) => at as f64 + 1.0,
+                None => return Ok(false),
+            }
+        }
         SexpType::Integer if index.slice::<i32>()[0] != NA_INTEGER => {
             f64::from(index.slice::<i32>()[0])
         }
         SexpType::Real => index.slice::<f64>()[0],
         _ => return Ok(false),
     };
+    let count = length(target);
+    // Assigning one past the end appends, which a vector without attributes that a previous
+    // growth left room in (see `subset::grow`) does in place.
+    let appends = position == count as f64 + 1.0
+        && heap.is_resizable(target)
+        && target.capacity() > count as isize
+        && target.attrib() == nil();
     // NaN fails both comparisons, and `x[[2.7]]` truncates to the second element.
-    if !(position >= 1.0 && position < length(target) as f64 + 1.0) {
+    if !appends && !(position >= 1.0 && position < count as f64 + 1.0) {
         return Ok(false);
     }
     let position = position as usize - 1;
@@ -3456,6 +3627,9 @@ unsafe fn assign_element_in_place(
     moves::modifying(target)?;
     if values::maybe_shared(target) || !eval::reuse_permitted(env, target) {
         return Ok(false);
+    }
+    if appends {
+        heap.resize_vector(target, count as isize + 1)?;
     }
     match target.kind() {
         SexpType::Real => values::reals_mut(target)[position] = value.slice::<f64>()[0],
@@ -3467,6 +3641,99 @@ unsafe fn assign_element_in_place(
     }
     cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
     Ok(true)
+}
+
+/// The value of a compiled assignment's subscript register. A register holding a symbol holds a
+/// formal the compiler left for this lookup, and `None` means the formal is missing.
+unsafe fn subscript_value(env: Sexp, index: Sexp) -> R<Option<Sexp>> {
+    if index.kind() != SexpType::Symbol {
+        return Ok(Some(index));
+    }
+    if eval::argument_is_missing(index, env)? {
+        return Ok(None);
+    }
+    let value = eval::eval_symbol(index, env)?;
+    crate::heap().root(value);
+    Ok(Some(value))
+}
+
+/// `variable[row, column] <- value` on an atomic matrix, done in place when the matrix is the
+/// frame's own unshared value, `value` is one element of its type and both subscripts are in
+/// bounds. Returns false, having changed nothing, when the general assignment must run.
+unsafe fn assign_matrix_element_in_place(
+    env: Sexp,
+    variable: Sexp,
+    row: Sexp,
+    column: Sexp,
+    value: Sexp,
+) -> R<bool> {
+    let heap = crate::heap();
+    let Some(cell) = heap.frame_cell(env, variable) else {
+        return Ok(false);
+    };
+    let target = cell.cdr();
+    if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED)
+        || target == value
+        || target.is_object()
+        || target.is_altrep()
+        || !matches!(
+            target.kind(),
+            SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::String
+        )
+        || value.kind() != target.kind()
+        || length(value) != 1
+        || value.is_altrep()
+        || values::has_attributes(value)
+    {
+        return Ok(false);
+    }
+    let dim = values::get_attr(target, symbols().dim);
+    if dim.kind() != SexpType::Integer || length(dim) != 2 {
+        return Ok(false);
+    }
+    let rows = dim.slice::<i32>()[0];
+    let columns = dim.slice::<i32>()[1];
+    let Some(row) = matrix_subscript(row, rows) else {
+        return Ok(false);
+    };
+    let Some(column) = matrix_subscript(column, columns) else {
+        return Ok(false);
+    };
+    let position = row + column * rows as usize;
+    // The conditions under which `complex_assign` updates the variable's value in place.
+    moves::modifying(target)?;
+    if values::maybe_shared(target) || !eval::reuse_permitted(env, target) {
+        return Ok(false);
+    }
+    match target.kind() {
+        SexpType::Real => values::reals_mut(target)[position] = value.slice::<f64>()[0],
+        SexpType::Integer | SexpType::Logical => {
+            values::ints_mut(target)[position] = value.slice::<i32>()[0]
+        }
+        _ => heap.set_element(target, position, value.element(0)),
+    }
+    cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
+    Ok(true)
+}
+
+/// The zero-based position a one-element numeric matrix subscript selects in a dimension of
+/// `extent`, or `None` when it is out of bounds, NA, or anything but a plain number.
+unsafe fn matrix_subscript(index: Sexp, extent: i32) -> Option<usize> {
+    if index.is_altrep() || values::has_attributes(index) || length(index) != 1 {
+        return None;
+    }
+    let position = match index.kind() {
+        SexpType::Integer if index.slice::<i32>()[0] != NA_INTEGER => {
+            f64::from(index.slice::<i32>()[0])
+        }
+        SexpType::Real => index.slice::<f64>()[0],
+        _ => return None,
+    };
+    // NaN fails both comparisons, and `x[2.7, 1]` truncates to the second row.
+    if !(position >= 1.0 && position < f64::from(extent) + 1.0) {
+        return None;
+    }
+    Some(position as usize - 1)
 }
 
 unsafe fn call_builtin(
@@ -3607,6 +3874,8 @@ unsafe fn lookup_variable(
             return Ok(value);
         }
     }
+    activity::count(Counter::LookupMisses);
+    let _activity = activity::enter(Activity::Lookup, 0);
     if let Some(cell) = resolve(symbol, enclosure, false)? {
         fill_cache(symbol, enclosure, cell, cache, slot);
     }
@@ -3618,11 +3887,11 @@ unsafe fn lookup_variable(
 /// references, so they count as referenced while that code runs: in `x + y` where forcing `y`
 /// runs `x[] <- 1`, the assignment must copy `x` rather than change the left operand.
 unsafe fn holding(held: Range<usize>, run: impl FnOnce() -> R<Sexp>) -> R<Sexp> {
-    let values: Vec<Sexp> = interp()
+    let values: SmallVec<[Sexp; 8]> = interp()
         .bytecode
         .registers
         .get(held)
-        .map(<[Sexp]>::to_vec)
+        .map(SmallVec::from_slice)
         .unwrap_or_default();
     for value in &values {
         value.increment_refcount();
@@ -3658,6 +3927,7 @@ unsafe fn lookup_function(
             return Ok(value);
         }
     }
+    activity::count(Counter::LookupMisses);
     if let Some(cell) = resolve(symbol, enclosure, true)? {
         fill_cache(symbol, enclosure, cell, cache, slot);
     }

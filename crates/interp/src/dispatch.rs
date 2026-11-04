@@ -15,7 +15,10 @@ use {
             symbol_name, symbols, unbound,
         },
     },
-    heap::object::{Sexp, SexpType, gp},
+    heap::{
+        activity::{self, Activity, Counter},
+        object::{Sexp, SexpType, gp},
+    },
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
 };
@@ -214,13 +217,29 @@ unsafe fn is_top_env(env: Sexp) -> bool {
 /// An entry holds the binding cell, not its value, because assigning a new value to an existing
 /// binding outside a function frame does not move [`heap::Heap::binding_epoch`]: a hit reads the
 /// cell afresh, and falls back to the walk when the value is no longer a function. An entry is
-/// valid while the binding epoch and the collection count are unchanged. The epoch moves when a
-/// binding outside a function frame appears or disappears or an enclosure changes, and a
-/// collection may free an environment whose address a later key then reuses.
+/// valid while the binding epoch is unchanged, which moves when a binding outside a function
+/// frame appears or disappears or an enclosure changes. The cache is a root
+/// ([`trace_method_cache`]), so no environment or cell it names is freed and its address reused
+/// by a different object while the entry exists; a collection therefore leaves the cache valid.
 #[derive(Default)]
 pub struct MethodCache {
-    stamp: (u64, u64),
+    stamp: u64,
     entries: FxHashMap<(Sexp, Sexp, Sexp, bool), Option<Sexp>>,
+    /// The method name symbol `prefix.class` by the symbols of `prefix` and `class`. Building
+    /// and interning the name was a third of a dispatch; symbols are never freed, so the table
+    /// needs neither invalidation nor tracing.
+    names: FxHashMap<(Sexp, Sexp), Sexp>,
+}
+
+pub unsafe fn trace_method_cache(cache: &MethodCache, marker: &mut heap::Marker<'_>) {
+    for (&(name, top, table, _), &cell) in &cache.entries {
+        marker.mark(name);
+        marker.mark(top);
+        marker.mark(table);
+        if let Some(cell) = cell {
+            marker.mark(cell);
+        }
+    }
 }
 
 /// Looks up the S3 method `name`: from the calling environment to its top environment, then in
@@ -250,9 +269,7 @@ pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Opti
     } else {
         None
     };
-    let heap = crate::heap();
-    let stats = heap.stats();
-    let stamp = (heap.binding_epoch(), stats.collections());
+    let stamp = crate::heap().binding_epoch();
     let key = (name, top, table.unwrap_or(values::empty_env()), search_top);
     let cache = &mut interp().method_cache;
     if cache.stamp != stamp {
@@ -352,6 +369,24 @@ unsafe fn function_in_frame(name: Sexp, env: Sexp) -> R<Option<Sexp>> {
     Ok(values::is_function(value).then_some(value))
 }
 
+/// The symbol `prefix.class`, for the symbol `prefix` and the class name `class` (a `CHARSXP`).
+unsafe fn method_name(prefix: Sexp, class: Sexp) -> R<Sexp> {
+    if class == values::na_string() || class.length() == 0 {
+        return method_symbol(&symbol_name(prefix), &char_str(class));
+    }
+    let key = (prefix, values::install_charsxp(class)?);
+    if let Some(&name) = interp().method_cache.names.get(&key) {
+        return Ok(name);
+    }
+    let mut name: SmallVec<[u8; 64]> = SmallVec::new();
+    name.extend_from_slice(prefix.car().bytes());
+    name.push(b'.');
+    name.extend_from_slice(class.bytes());
+    let name = values::install_bytes(&name)?;
+    interp().method_cache.names.insert(key, name);
+    Ok(name)
+}
+
 unsafe fn method_symbol(generic: &str, class: &str) -> R<Sexp> {
     // Dispatch builds two or three of these names per call, and formatting them was most of the
     // cost of `UseMethod`.
@@ -362,25 +397,25 @@ unsafe fn method_symbol(generic: &str, class: &str) -> R<Sexp> {
     values::install_bytes(&name)
 }
 
-/// The dispatch variables a method frame gets.
+/// The dispatch variables a method frame gets. `generic` and `group` are `CHARSXP`s.
 unsafe fn dispatch_vars(
-    generic: &str,
+    generic: Sexp,
     classes: Sexp,
     method: Sexp,
     call_env: Sexp,
     def_env: Sexp,
-    group: Option<&str>,
+    group: Option<Sexp>,
 ) -> R<Vec<(Sexp, Sexp)>> {
     let symbols = symbols();
     let mut vars = vec![
-        (symbols.dot_generic, scalar_string(generic)?),
+        (symbols.dot_generic, values::scalar_string_charsxp(generic)?),
         (symbols.dot_class, classes),
         (symbols.dot_method, method),
         (symbols.dot_generic_call_env, call_env),
         (symbols.dot_generic_def_env, def_env),
     ];
     if let Some(group) = group {
-        vars.push((symbols.dot_group, scalar_string(group)?));
+        vars.push((symbols.dot_group, values::scalar_string_charsxp(group)?));
     }
     Ok(vars)
 }
@@ -402,36 +437,35 @@ struct Found {
     vars: Vec<(Sexp, Sexp)>,
 }
 
+/// The S3 method of the generic named by the symbol `generic` for `object`'s classes.
 unsafe fn find_s3_method(
-    generic: &str,
+    generic: Sexp,
     object: Sexp,
     call_env: Sexp,
     def_env: Sexp,
-    group: Option<&str>,
 ) -> R<Option<Found>> {
+    let _activity = activity::enter(Activity::S3Dispatch, 0);
     let classes = implicit_class(object)?;
     let classes_count = length(classes);
     for index in 0..classes_count {
-        let class = char_str(classes.element(index));
-        let name = method_symbol(generic, &class)?;
-        let mut found = lookup_method(name, call_env, def_env)?;
-        let mut method_name = name;
-        if found.is_none()
-            && let Some(group) = group
-        {
-            method_name = method_symbol(group, &class)?;
-            found = lookup_method(method_name, call_env, def_env)?;
-        }
+        let method_name = method_name(generic, classes.element(index))?;
         // base's `sort.list` is a function, not the `sort` method for class "list", and
         // GNU R's dispatch passes over it.
-        if let Some(method) = found
-            && !(symbol_name(method_name) == "sort.list"
+        if let Some(method) = lookup_method(method_name, call_env, def_env)?
+            && !(method_name.car().bytes() == b"sort.list"
                 && method.kind() == SexpType::Closure
                 && method.tag() == values::base_namespace())
         {
             let suffix = class_suffix(classes, index)?;
             let method_string = values::scalar_string_charsxp(method_name.car())?;
-            let vars = dispatch_vars(generic, suffix, method_string, call_env, def_env, group)?;
+            let vars = dispatch_vars(
+                generic.car(),
+                suffix,
+                method_string,
+                call_env,
+                def_env,
+                None,
+            )?;
             return Ok(Some(Found {
                 method,
                 method_name,
@@ -439,11 +473,11 @@ unsafe fn find_s3_method(
             }));
         }
     }
-    let default = method_symbol(generic, "default")?;
+    let default = method_name(generic, symbols().default.car())?;
     if let Some(method) = lookup_method(default, call_env, def_env)? {
         let method_string = values::scalar_string_charsxp(default.car())?;
         let empty = values::alloc(SexpType::String, 0)?;
-        let vars = dispatch_vars(generic, empty, method_string, call_env, def_env, group)?;
+        let vars = dispatch_vars(generic.car(), empty, method_string, call_env, def_env, None)?;
         return Ok(Some(Found {
             method,
             method_name: default,
@@ -465,6 +499,8 @@ unsafe fn renamed_call(call: Sexp, name: Sexp) -> R<Sexp> {
 // UseMethod.
 
 unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
+    activity::count(Counter::S3Dispatches);
+    let dispatching = activity::enter(Activity::S3Dispatch, 0);
     let env = call.env;
     let state = interp();
     let Some(position) = state.frames.iter().rposition(|frame| frame.env == env) else {
@@ -477,11 +513,12 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     if generic.kind() != SexpType::String || length(generic) != 1 {
         return Err(call.error("'generic' argument must be a character string"));
     }
-    let generic_name = char_str(generic.element(0)).into_owned();
-    let (frame_call, function, promargs, sys_parent) = {
+    let generic_symbol = values::install_charsxp(generic.element(0))?;
+    let (frame_call, function, sys_parent) = {
         let frame: &Frame = &interp().frames[position];
-        (frame.call, frame.function, frame.promargs, frame.sys_parent)
+        (frame.call, frame.function, frame.sys_parent)
     };
+    let promargs: eval::Args = crate::frame_args(interp(), position).into();
     let object = if call.len() >= 2 {
         eval::eval(call.arg(1), env)?
     } else {
@@ -489,16 +526,17 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
             // GNU R's `GetObject` falls back to the first supplied argument when the first
             // formal was not supplied, so `f(y = obj)` dispatches on `obj`.
             object if object == nil() && first_formal_missing(function, env)? => {
-                first_supplied(promargs)?
+                first_supplied(&promargs)?
             }
             object => object,
         }
     };
-    let def_env = match lookup_generic_definition(&generic_name, env, sys_parent)? {
+    let def_env = match lookup_generic_definition(generic_symbol, env, sys_parent)? {
         Some(definition) if definition.kind() == SexpType::Closure => definition.tag(),
         _ => values::base_namespace(),
     };
-    let Some(found) = find_s3_method(&generic_name, object, sys_parent, def_env, None)? else {
+    let Some(found) = find_s3_method(generic_symbol, object, sys_parent, def_env)? else {
+        let generic_name = char_str(generic.element(0));
         let class = implicit_class(object)?;
         let classes: Vec<String> = (0..length(class))
             .map(|index| char_str(class.element(index)).into_owned())
@@ -516,12 +554,18 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     // Through R 4.3, local variables the generic defined before dispatching are visible to the
     // method; R 4.4 stopped forwarding them.
     if function.kind() == SexpType::Closure && !crate::system::r_at_least(4, 4) {
-        let formals: Vec<Sexp> = values::pairlist_items(function.car())
-            .into_iter()
-            .map(|(tag, _)| tag)
-            .collect();
+        let is_formal = |symbol: Sexp| {
+            let mut formal = function.car();
+            while formal.kind() == SexpType::Pairlist {
+                if formal.tag() == symbol {
+                    return true;
+                }
+                formal = formal.cdr();
+            }
+            false
+        };
         for symbol in crate::heap().frame_symbols(env) {
-            if !formals.contains(&symbol)
+            if !is_formal(symbol)
                 && !vars.iter().any(|(var, _)| *var == symbol)
                 && let Some(cell) = crate::heap().frame_cell(env, symbol)
             {
@@ -529,8 +573,9 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
             }
         }
     }
-    let args = eval::unevaluated_args(promargs);
+    let args = promargs;
     let new_call = renamed_call(frame_call, found.method_name)?;
+    drop(dispatching);
     let result = apply_method(new_call, found.method, &args, sys_parent, &vars, false)?;
     Err(crate::unwind::jump(crate::Jump::Return {
         env,
@@ -539,8 +584,7 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// The generic function named `name` as seen from the generic's frame.
-unsafe fn lookup_generic_definition(name: &str, env: Sexp, caller: Sexp) -> R<Option<Sexp>> {
-    let symbol = values::install(name)?;
+unsafe fn lookup_generic_definition(symbol: Sexp, env: Sexp, caller: Sexp) -> R<Option<Sexp>> {
     for start in [env.enclosure(), caller] {
         let mut frame = start;
         while frame != values::empty_env() {
@@ -602,13 +646,13 @@ unsafe fn first_formal_missing(function: Sexp, env: Sexp) -> R<bool> {
     Ok(value == missing_arg() || value == unbound())
 }
 
-/// The value of the first supplied argument among a call's matched arguments.
-unsafe fn first_supplied(promargs: Sexp) -> R<Sexp> {
-    if promargs.kind() != SexpType::Pairlist {
+/// The value of the first supplied argument among a call's arguments.
+unsafe fn first_supplied(args: &[Arg]) -> R<Sexp> {
+    let Some(first) = args.first() else {
         return Ok(nil());
-    }
+    };
     // GNU R's GetObject takes the first argument even when it was left empty.
-    match promargs.car() {
+    match first.value {
         value if value.kind() == SexpType::Dots => value_of(value.car()),
         value if value == missing_arg() => Ok(nil()),
         value => value_of(value),
@@ -653,6 +697,8 @@ unsafe fn apply_method(
 // NextMethod.
 
 unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
+    activity::count(Counter::S3Dispatches);
+    let dispatching = activity::enter(Activity::S3Dispatch, 0);
     let env = call.env;
     let state = interp();
     // The NextMethod closure's frame is `env`; the method frame is the one it was called from.
@@ -668,10 +714,11 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     else {
         return Err(error("'NextMethod' called from outside a function"));
     };
-    let (frame_call, function, promargs, sys_parent) = {
+    let (frame_call, function, sys_parent) = {
         let frame = &interp().frames[position];
-        (frame.call, frame.function, frame.promargs, frame.sys_parent)
+        (frame.call, frame.function, frame.sys_parent)
     };
+    let promargs: eval::Args = crate::frame_args(interp(), position).into();
     if frame_call.car().kind() != SexpType::Symbol {
         return Err(error("'NextMethod' called from an anonymous function"));
     }
@@ -800,7 +847,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     };
     // The arguments: the method's own, with each formal replaced by a promise of its current
     // value in the method's frame, so changes the method made are seen.
-    let mut args = eval::unevaluated_args(promargs);
+    let mut args = promargs;
     if function.kind() == SexpType::Closure {
         let matched = eval::match_args(function.car(), &args, frame_call)?;
         let formals: Vec<Sexp> = values::pairlist_items(function.car())
@@ -849,15 +896,20 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     } else {
         values::scalar_string_charsxp(method_name.car())?
     };
+    let group_charsxp = match &group_name {
+        Some(group) => Some(values::mkchar(group)?),
+        None => None,
+    };
     let vars = dispatch_vars(
-        &generic_name,
+        values::mkchar(&generic_name)?,
         next_classes,
         method_string,
         call_env,
         def_env,
-        group_name.as_deref(),
+        group_charsxp,
     )?;
     let new_call = renamed_call(frame_call, method_name)?;
+    drop(dispatching);
     match method.kind() {
         SexpType::Closure => apply_closure(new_call, method, &args, method_env, Some(&vars)),
         _ => {
@@ -1180,9 +1232,12 @@ unsafe fn dispatch_promised(
             && let Some(value) = s4_dispatch(op, call, promised, env)?
         {
             Some(value)
-        } else if let Some(found) =
-            find_s3_method(definition.name, object, env, values::base_namespace(), None)?
-        {
+        } else if let Some(found) = find_s3_method(
+            values::install(definition.name)?,
+            object,
+            env,
+            values::base_namespace(),
+        )? {
             Some(apply_internal_method(call, found, promised, env)?)
         } else {
             None
@@ -1222,9 +1277,11 @@ unsafe fn promise_of_missing(value: Sexp) -> R<bool> {
 
 unsafe fn internal_dispatch(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
     let object = args[0].value;
-    let Some(found) = find_s3_method(name, object, env, values::base_namespace(), None)? else {
+    let generic = values::install(name)?;
+    let Some(found) = find_s3_method(generic, object, env, values::base_namespace())? else {
         return Ok(None);
     };
+    activity::count(Counter::S3Dispatches);
     let promised = promised_args(call, args)?;
     apply_internal_method(call, found, &promised, env).map(Some)
 }
@@ -1241,13 +1298,14 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
     let state = interp();
     let handlers = state.handlers.clone();
     let restarts = state.restarts.clone();
-    let promargs = eval::args_pairlist(promised)?;
+    let start = state.frame_args.len() as u32;
+    state.frame_args.extend_from_slice(promised);
     state.frames.push(Frame {
         call,
         function: found.method,
         env: context_env,
         sys_parent: env,
-        promargs,
+        args: start,
         on_exit: Vec::new(),
         handlers: handlers.clone(),
         restarts: restarts.clone(),
@@ -1260,11 +1318,11 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = state.frames[depth - 1].handlers.clone();
     state.frame_closures.truncate(state.frames[depth - 1].closures);
-    state.frames.truncate(depth - 1);
+    crate::truncate_frames(state, depth - 1);
     state.restarts = restarts;
     if let Ok(value) = result {
         let heap = crate::heap();
-        heap.release_arguments(promargs);
+        heap.release_argument_promises(promised.iter().map(|arg| arg.value));
         heap.release_enclosure(context_env, value);
     }
     result
@@ -1401,17 +1459,26 @@ unsafe fn find_group_method(
     object: Sexp,
     env: Sexp,
 ) -> R<Option<Found>> {
+    let _activity = activity::enter(Activity::S3Dispatch, 0);
     let classes = implicit_class(object)?;
     let def_env = values::base_namespace();
+    let prefixes = [values::install(generic)?, values::install(group)?];
     for index in 0..length(classes) {
-        let class = char_str(classes.element(index)).into_owned();
-        for prefix in [generic, group] {
-            let name = method_symbol(prefix, &class)?;
+        let class = classes.element(index);
+        for prefix in prefixes {
+            let name = method_name(prefix, class)?;
             if let Some(method) = lookup_method(name, env, def_env)? {
                 let suffix = class_suffix(classes, index)?;
                 let method_string = values::scalar_string_charsxp(name.car())?;
-                let vars =
-                    dispatch_vars(generic, suffix, method_string, env, def_env, Some(group))?;
+                let [generic, group] = prefixes;
+                let vars = dispatch_vars(
+                    generic.car(),
+                    suffix,
+                    method_string,
+                    env,
+                    def_env,
+                    Some(group.car()),
+                )?;
                 return Ok(Some(Found {
                     method,
                     method_name: name,

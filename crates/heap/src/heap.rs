@@ -19,6 +19,7 @@
 // takes must point at a live object of the kind the function expects.
 #![allow(clippy::missing_safety_doc)]
 
+pub mod activity;
 pub mod arena;
 pub mod env;
 pub mod image;
@@ -1158,7 +1159,7 @@ impl Heap {
     ) -> HeapResult<Sexp> {
         // Every field is written below, so zeroing the slot first would store it twice.
         let object = self.allocate_uncollected(SexpType::Environment, ENVIRONMENT_BYTES, 0)?;
-        std::ptr::write(object.frame_ptr(), Frame::with_capacity(bindings));
+        Frame::write_empty(object.frame_ptr(), bindings);
         self.space.set_finalizable(object);
         object.set_enclosure_unbarriered(enclosure);
         enclosure.increment_refcount();
@@ -1861,6 +1862,16 @@ impl Heap {
             self.store(cell, value, nil);
             cell.set_car_unbarriered(nil);
             cell = cell.cdr();
+        }
+    }
+
+    /// [`Heap::release_arguments`] for arguments held in an uncounted slice, where a
+    /// promise whose reference count is zero is held only by that slice.
+    pub unsafe fn release_argument_promises(&mut self, values: impl Iterator<Item = Sexp>) {
+        for value in values {
+            if value.kind() == SexpType::Promise && value.refcount() == 0 {
+                self.release_promise(value);
+            }
         }
     }
 
@@ -2659,6 +2670,7 @@ impl Heap {
             return;
         }
         self.inhibit += 1;
+        let _activity = activity::enter(activity::Activity::Collector, 0);
         let started = self
             .policy
             .timing

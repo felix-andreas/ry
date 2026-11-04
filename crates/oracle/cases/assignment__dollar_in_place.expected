@@ -1,0 +1,36 @@
+[stdout]
+| List of 3
+|  $ a: num 10
+|  $ b: chr "keep"
+|  $ a: num -1
+| List of 6
+|  $ x      :List of 2
+|   ..$ a: chr "text"
+|   ..$ c: num 3
+|  $ y      :List of 2
+|   ..$ a: num 1
+|   ..$ b: num 2
+|  $ z      :List of 2
+|   ..$ a: num 5
+|   ..$ b: num 2
+|  $ e      :List of 2
+|   ..$ alpha: num 1
+|   ..$ al   : num 2
+|  $ unnamed:List of 3
+|   ..$  : num 1
+|   ..$  : num 2
+|   ..$ a: num 3
+|  $ na     :List of 2
+|   ..$ NA: num 1
+|   ..$ NA: num 2
+|   a b
+| 1 5 x
+| 2 6 y
+[messages]
+[warnings]
+- Coercing LHS to a list (in z$a <- 5)
+[errors]
+[value]
+list
+| structure(list(a = 5:6, b = c("x", "y")), row.names = c(NA, -2L
+| ), class = "data.frame")

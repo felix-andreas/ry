@@ -1903,9 +1903,14 @@ registered-methods table (resolved first, since replacing an existing binding's 
 move the epoch) and whether the top environment's own frame is searched (it is not when the
 calling frames end at the empty environment). An entry holds the binding cell rather than its value, since reassigning an existing
 binding does not move `Heap::binding_epoch`, so a hit rereads the cell and walks again when the
-value is no longer a function. The whole cache is dropped when the binding epoch or the collection
-count changes: the epoch covers bindings appearing or disappearing and enclosures changing, and a
-collection may free an environment whose address a later key reuses. A walk that passed a function
+value is no longer a function. The whole cache is dropped when the binding epoch changes, which
+covers bindings appearing or disappearing and enclosures changing. The cache is a GC root
+(`dispatch::trace_method_cache`), so no key's environment is freed and its address reused while the
+entry exists; dropping it on every collection instead made a dispatch-heavy loop that collects
+often (xts, zoo) repeat the full walk after each minor collection. The method name `generic.class`
+is cached beside it by the pair of symbols (`MethodCache::names`), because building and interning
+the name was about a third of a `UseMethod` on the `timeseries` workload; symbols are never freed,
+so that table needs no invalidation. A walk that passed a function
 frame, an active binding, or a non-function binding of the name is not cached, because a later
 change there would not move the epoch. xts `period.apply` with 33,335 periods went from about 262k
 to 250k instructions per period (GNU R 204k) and from 1.51 s to about 1.3 s (GNU R 0.89 s; oracle
@@ -7724,3 +7729,39 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
   Matrix's compile takes about 134 s serially and about 33 s with four jobs, so for packages with
   compiled code the C and C++ compiler is the floor. Analysis is unaffected.
+
+## Bytecode is build output, not a cache
+
+- **Previous shape.** `r-runtime.md` planned to cache bytecode and runtime summaries on disk under
+  content hashes; no code implemented it. Installs do not byte-compile today: every closure
+  compiles at its first call.
+- **What was weak.** A cache is a second copy of each package's code that needs invalidation and a
+  key computation on every load, and the performance principles in `AGENTS.md` treat a cache as a
+  sign of a slow design.
+- **Target shape.** `ry install` / `R CMD INSTALL` write bytecode beside the lazy-load database,
+  stamped with the ry build; a different build ignores the stamp and compiles at first call. Base R
+  is compiled into a section of the base image keyed by the runtime hash (`base-image.md`). `ry
+  load` and scripts compile at first call, so that tier must be cheap. `r-runtime.md`, "Where
+  bytecode comes from", is the spec. Not implemented yet: the bytecode format changes with the
+  call-path redesign (`development/design/call-path.md`), so its on-disk form waits for that.
+- **Impact.** One source of truth (the package's R code plus the install output derived from it),
+  no invalidation logic, and no hashing at load.
+
+## Vectors grow in place into spare capacity
+
+- **Previous shape.** `x[[length(x) + 1]] <- v` allocated a vector of the new length and copied
+  every element, so a loop that appends n elements was quadratic; rcp's list-for timed out.
+  Subscripts other than a local symbol or a constant fell back to `complex_assign`, and a text
+  output connection rebuilt its character vector from bytes for every line.
+- **Target shape.** Growth uses the heap's resizable vectors (`alloc_resizable_vector`,
+  `resize_vector`), the same flag `SETLENGTH` and `IS_GROWABLE` expose to packages. `subset::grow`
+  extends an unshared, unclassed vector without dims in place when capacity allows, and otherwise
+  copies into a vector with 5% headroom, which keeps a sequence of appends linear at a memory cost
+  of one twentieth. Names grow alongside. Tier 0 compiles side-effect-free subscripts (locals,
+  formals, numeric constants, and `+ - * / ^` of those) and two-subscript matrix stores
+  (`Op::SubAssignMatrix`) to in-place stores, and a formal is read at run time so a missing one
+  still assigns every element. A text connection's lines are the R vector itself, grown with
+  doubling.
+- **Impact.** One source of truth for length and capacity (the heap object), no shadow buffers,
+  and appends that never copy unless R code holds a second reference. GC sizes an object by
+  capacity, so headroom is visible to collection limits. Analysis is unaffected.

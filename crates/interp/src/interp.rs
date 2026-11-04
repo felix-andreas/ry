@@ -64,9 +64,11 @@ pub mod native;
 pub mod numbers;
 pub mod parallel;
 pub mod parse_data;
+mod pcre;
 pub mod platform;
 pub mod plotmath;
 pub mod print;
+pub mod profile_summary;
 pub mod random;
 pub mod rd;
 pub mod records;
@@ -101,7 +103,7 @@ pub mod viewer;
 pub use crate::unwind::{Jump, RError};
 use {
     crate::{
-        builtins::{BuiltinDef, Kind},
+        builtins::{Arg, BuiltinDef, Kind},
         conditions::{HandlerStack, RestartStack},
         unwind::{R, Unwind},
     },
@@ -122,8 +124,10 @@ pub struct Frame {
     pub env: Sexp,
     /// The environment the call was evaluated in, which `parent.frame` returns.
     pub sys_parent: Sexp,
-    /// The matched arguments as a pairlist of promises, tagged with the formal names.
-    pub promargs: Sexp,
+    /// Where the call's arguments (values or promises, with the tags the call gave them) start
+    /// in [`Interp::frame_args`]; they run up to the next frame's start. `sys.function`'s
+    /// pairlist of them is built only when dispatch asks for it, so a call allocates none.
+    pub args: u32,
     /// `on.exit` expressions, in the order they run.
     pub on_exit: Vec<Sexp>,
     pub handlers: HandlerStack,
@@ -133,6 +137,26 @@ pub struct Frame {
     pub srcref: Sexp,
     /// Where this call's entries in [`Interp::frame_closures`] start.
     pub closures: usize,
+}
+
+/// The arguments of the frame at `index` (zero-based), as the call passed them.
+pub fn frame_args(state: &Interp, index: usize) -> &[Arg] {
+    let Some(frame) = state.frames.get(index) else {
+        return &[];
+    };
+    let end = state
+        .frames
+        .get(index + 1)
+        .map_or(state.frame_args.len(), |next| next.args as usize);
+    state.frame_args.get(frame.args as usize..end).unwrap_or(&[])
+}
+
+/// Keeps the first `depth` frames and drops the rest with their arguments.
+pub fn truncate_frames(state: &mut Interp, depth: usize) {
+    if let Some(frame) = state.frames.get(depth) {
+        state.frame_args.truncate(frame.args as usize);
+    }
+    state.frames.truncate(depth);
 }
 
 /// A call that creates more closures than this, such as a loop of `lapply(x, function(i) ...)`,
@@ -203,6 +227,8 @@ pub enum TaskCallbackRoutine {
 
 pub struct Interp {
     pub frames: Vec<Frame>,
+    /// The arguments of every frame, back to back in frame order (see [`Frame::args`]).
+    pub frame_args: Vec<Arg>,
     /// The closures each running call created in its own frame, at most
     /// [`FRAME_CLOSURES`] each, which the heap needs to release the frame when the call returns
     /// (`Heap::release_frame`).
@@ -282,6 +308,9 @@ pub struct Interp {
     /// Values moved out of a caller's variable into a closure's parameter.
     pub moves: moves::State,
     pub method_cache: dispatch::MethodCache,
+    /// The replacement function's symbol for each getter symbol (`names<-` for `names`), so a
+    /// complex assignment installs no name. Symbols are never freed, so entries need no tracing.
+    pub replacement_symbols: FxHashMap<Sexp, Sexp>,
     pub library_tags: standard_library::Tags,
     /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
     /// off when the project sets `[check] object-systems = false`.
@@ -372,6 +401,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     let connection_table = connections::Table::new(hooks.connection_vfprintf);
     state.interp = Some(Interp {
         frames: Vec::new(),
+        frame_args: Vec::new(),
         frame_closures: Vec::new(),
         foreign_calls: Vec::new(),
         handlers: None,
@@ -408,6 +438,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         annotations: annotations::State::default(),
         moves: moves::State::default(),
         method_cache: dispatch::MethodCache::default(),
+        replacement_symbols: FxHashMap::default(),
         library_tags: standard_library::Tags::default(),
         object_systems: true,
         prelude: true,
@@ -522,7 +553,6 @@ impl RootSource for InterpRoots {
                     frame.function,
                     frame.env,
                     frame.sys_parent,
-                    frame.promargs,
                     frame.srcref,
                 ] {
                     marker.mark(object);
@@ -532,6 +562,10 @@ impl RootSource for InterpRoots {
                 }
                 conditions::trace_handlers(&frame.handlers, marker);
                 conditions::trace_restarts(&frame.restarts, marker);
+            }
+            for arg in &interp.frame_args {
+                marker.mark(arg.tag);
+                marker.mark(arg.value);
             }
             for &closure in &interp.frame_closures {
                 marker.mark(closure);
@@ -547,6 +581,7 @@ impl RootSource for InterpRoots {
                 conditions::trace_restarts(restarts, marker);
             }
             marker.mark(interp.srcref);
+            dispatch::trace_method_cache(&interp.method_cache, marker);
             graphics_engine::trace(marker);
             if let Some(unwind) = &interp.parked_unwind {
                 crate::unwind::trace_unwind(unwind, marker);

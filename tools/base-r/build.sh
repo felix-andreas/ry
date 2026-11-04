@@ -33,7 +33,9 @@ if [ "$actual" != "$checksum" ]; then
 fi
 source_root=$(mktemp -d "$cache/source.XXXXXX")
 trap 'rm -rf "$source_root"' EXIT
-tar -xzf "$tarball" -C "$source_root"
+# The recommended packages and the test suite are the release's only symlinks, which tar cannot
+# create on Windows, and the build needs neither.
+tar -xzf "$tarball" -C "$source_root" --exclude "R-$version/src/library/Recommended" --exclude "R-$version/tests"
 source="$source_root/R-$version"
 for patch in "$here"/patches/*.patch; do
 	[ -e "$patch" ] || continue

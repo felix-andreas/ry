@@ -38,6 +38,7 @@ pub struct StartOptions {
 
 /// Starts the session. Errors here are fatal: base R did not load.
 pub unsafe fn start(options: StartOptions) -> R<()> {
+    crate::profile_summary::start_from_environment();
     interp().command_args = options.command_args;
     interp().interactive = options.interactive;
     prepare_process();
@@ -123,6 +124,7 @@ unsafe fn start_from_image(home: &str) -> R<()> {
         base_env(),
     )?;
     remove_library_site()?;
+    crate::profile_summary::mark_ready();
     conditions::print_warnings()
 }
 
@@ -220,6 +222,7 @@ unsafe fn start_slowly(
     crate::frame::attach_package()?;
     let warned = !interp().warnings.is_empty();
     conditions::print_warnings()?;
+    crate::profile_summary::mark_ready();
     Ok(warned)
 }
 
@@ -845,6 +848,9 @@ pub unsafe fn finish() {
     if let Err(unwind) = crate::utils::stop_memory_profiler() {
         report_toplevel(unwind);
     }
+    if let Err(unwind) = crate::profile_summary::finish() {
+        report_toplevel(unwind);
+    }
     (interp().hooks.run_exit_finalizers)();
     crate::system::remove_session_temp_dir();
 }
@@ -880,7 +886,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
             false
         }
     };
-    interp().frames.clear();
+    crate::truncate_frames(interp(), 0);
     interp().foreign_calls.clear();
     interp().handlers = interp().global_handlers.clone();
     interp().restarts = None;
@@ -893,7 +899,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     if let Err(unwind) = (interp().hooks.run_task_callbacks)(expression, value, succeeded, visible)
     {
         report_toplevel(unwind);
-        interp().frames.clear();
+        crate::truncate_frames(interp(), 0);
         interp().foreign_calls.clear();
         interp().handlers = interp().global_handlers.clone();
         interp().restarts = None;

@@ -1,0 +1,115 @@
+{
+  "machine": "Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores",
+  "r": "Rscript (R) version 4.3.3 (2024-02-29)",
+  "repeat": 3,
+  "workloads": [
+    {
+      "workload": "conditions",
+      "kind": "workload",
+      "gnu_r": 0.731,
+      "ry_jit": 0.774,
+      "ry_nojit": 0.846,
+      "cold": {
+        "gnu_r": 0.714,
+        "ry_jit": 0.937,
+        "ry_nojit": 0.74
+      }
+    },
+    {
+      "workload": "functional",
+      "kind": "workload",
+      "gnu_r": 0.71,
+      "ry_jit": 0.903,
+      "ry_nojit": 0.903,
+      "cold": {
+        "gnu_r": 0.894,
+        "ry_jit": 0.927,
+        "ry_nojit": 0.832
+      }
+    },
+    {
+      "workload": "objects",
+      "kind": "workload",
+      "gnu_r": 0.947,
+      "ry_jit": 1.2,
+      "ry_nojit": 1.149,
+      "cold": {
+        "gnu_r": 0.966,
+        "ry_jit": 0.955,
+        "ry_nojit": 1.01
+      }
+    },
+    {
+      "workload": "records",
+      "kind": "workload",
+      "gnu_r": 0.628,
+      "ry_jit": 0.67,
+      "ry_nojit": 0.629,
+      "cold": {
+        "gnu_r": 0.579,
+        "ry_jit": 0.521,
+        "ry_nojit": 0.523
+      }
+    },
+    {
+      "workload": "simulation",
+      "kind": "workload",
+      "gnu_r": 0.527,
+      "ry_jit": 0.318,
+      "ry_nojit": 0.321,
+      "cold": {
+        "gnu_r": 0.501,
+        "ry_jit": 0.369,
+        "ry_nojit": 0.345
+      }
+    },
+    {
+      "workload": "strings",
+      "kind": "workload",
+      "gnu_r": 0.916,
+      "ry_jit": 0.809,
+      "ry_nojit": 0.849,
+      "cold": {
+        "gnu_r": 1.444,
+        "ry_jit": 1.028,
+        "ry_nojit": 1.046
+      }
+    },
+    {
+      "workload": "tables",
+      "kind": "workload",
+      "gnu_r": 0.337,
+      "ry_jit": 0.394,
+      "ry_nojit": 0.385,
+      "cold": {
+        "gnu_r": 0.345,
+        "ry_jit": 0.394,
+        "ry_nojit": 0.351
+      }
+    },
+    {
+      "workload": "timeseries",
+      "kind": "workload",
+      "gnu_r": 1.33,
+      "ry_jit": 1.323,
+      "ry_nojit": 1.385,
+      "cold": {
+        "gnu_r": 1.46,
+        "ry_jit": 1.524,
+        "ry_nojit": 1.458
+      }
+    },
+    {
+      "workload": "validation",
+      "kind": "workload",
+      "gnu_r": 0.825,
+      "ry_jit": 1.052,
+      "ry_nojit": 1.082,
+      "cold": {
+        "gnu_r": 0.935,
+        "ry_jit": 1.083,
+        "ry_nojit": 0.915
+      }
+    }
+  ]
+}

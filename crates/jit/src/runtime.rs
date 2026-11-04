@@ -548,10 +548,8 @@ pub unsafe extern "C" fn jit_call(
                     Some(signature) if signature == values::nil() => Entry::Checked(None),
                     Some(signature) => Entry::Checked(Some(signature)),
                 };
-                // The frame records no argument list: only `nargs`, method dispatch and
-                // `standardGeneric` read it, and a frame-safe callee calls none of them.
                 let env = eval::bind_arguments(call, function, &args, None)?;
-                eval::run_closure(call, function, env, machine.env, values::nil(), entry)
+                eval::run_closure(call, function, env, machine.env, &args, entry)
             });
             match result {
                 Err(unwind) => {

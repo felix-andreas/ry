@@ -13,7 +13,12 @@
 #define IEEE_754 1
 #define SUPPORT_UTF8 1
 #define SUPPORT_MBCS 1
+/* ry does not translate messages, so ENABLE_NLS only decides whether a package's `_()` calls
+   dgettext, which returns the message id. A macOS build environment has no libintl.h, so there
+   `_()` is the message id directly. */
+#ifndef __APPLE__
 #define ENABLE_NLS 1
+#endif
 /* Fortran CHARACTER arguments carry a hidden length (FCLEN and FCONE in R_ext/BLAS.h), as in
    GNU R 4.3 and later; a package can define DONT_USE_FC_LEN_T to drop it. */
 #ifndef DONT_USE_FC_LEN_T
