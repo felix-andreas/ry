@@ -41,6 +41,11 @@ crates/interp/src/distributions.rs
         Copyright (C) 2005-2020 The R Foundation
         Copyright (C) 1998 Ross Ihaka
 
+crates/interp/src/fft.rs
+    GNU R src/library/stats/src/fft.c (fft_factor, fft_work and their helpers)
+        Copyright (C) 1998--2025 The R Core Team
+        Copyright (C) 1995, 1996, 1997 Robert Gentleman and Ross Ihaka
+
 crates/interp/src/graphics.rs
     GNU R src/library/graphics/src/plot3d.c (contour label placement, persp)
         Copyright (C) 1998--2018 The R Core Team
@@ -82,7 +87,7 @@ crates/interp/src/random.rs
 
 crates/interp/src/register_s3_methods.R
     GNU R src/library/base/R/namespace.R (registerS3methods)
-        Copyright (C) 1995-2023 The R Core Team
+        Copyright (C) 1995-2025 The R Core Team
 
 crates/interp/src/rmath.rs
     GNU R src/nmath/toms708.c (bratio and its helpers, grat_r)
@@ -275,13 +280,13 @@ jpeg-encoder crate, whose IJG terms are listed with it below).
 3. Rust crates and the C libraries they bundle
 ==============================================
 
-483 crates from crates.io are built into ry. Each crate is listed under
+482 crates from crates.io are built into ry. Each crate is listed under
 the licence it is used under (for a choice such as `MIT OR Apache-2.0`, the first
 permissive licence of the choice), with the copyright lines from its licence files.
 The licence texts follow each list; a crate that ships no text of its own is covered
 by the text shown for its licence.
 
-MIT (408 crates)
+MIT (407 crates)
 ----------------
 
 - addr2line 0.25.1 <https://github.com/gimli-rs/addr2line>
@@ -688,8 +693,6 @@ MIT (408 crates)
     Copyright (c) 2016 The Rust Project Developers
 - parking_lot_core 0.9.12 <https://github.com/Amanieu/parking_lot>
     Copyright (c) 2016 The Rust Project Developers
-- pcre2 0.2.11 <https://github.com/BurntSushi/rust-pcre2>
-    Copyright (c) 2017 Andrew Gallant
 - pcre2-sys 0.2.10 <https://github.com/BurntSushi/rust-pcre2>
     Copyright (c) 2017 Andrew Gallant
 - percent-encoding 2.3.2 <https://github.com/servo/rust-url/>
@@ -1136,7 +1139,7 @@ Text 1 of 18 for MIT, used by 270 crates:
     IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
     DEALINGS IN THE SOFTWARE.
 
-Text 2 of 18 for MIT, used by 39 crates:
+Text 2 of 18 for MIT, used by 38 crates:
 
     The MIT License (MIT)
 

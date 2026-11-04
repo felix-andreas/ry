@@ -1,3 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// This file is a modified translation into Rust of GNU R's C source, and keeps its copyright
+// notices:
+//
+// GNU R: src/library/stats/src/fft.c (fft_factor, fft_work and their helpers)
+//     Copyright (C) 1998--2025 The R Core Team
+//     Copyright (C) 1995, 1996, 1997 Robert Gentleman and Ross Ihaka
+
 //! The fast Fourier transform behind `fft` and `mvfft`, which must give GNU R's bits: the
 //! butterflies, the twiddle recurrences and the permutation order decide every rounding error.
 //!
@@ -5,9 +14,6 @@
 //! is Richard Singleton's mixed-radix algorithm ("Programs for Digital Signal Processing", IEEE
 //! Press) as translated to C by Ross Ihaka. The Fortran-style `goto` structure is kept as a
 //! state machine over the original labels, so the arithmetic can be compared line by line.
-//!
-//!     Copyright (C) 1998--2025 The R Core Team
-//!     Copyright (C) 1995, 1996, 1997 Robert Gentleman and Ross Ihaka
 
 use std::f64::consts::FRAC_PI_4;
 
