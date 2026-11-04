@@ -2346,10 +2346,26 @@ unsafe fn logical_stretch(index: Sexp) -> usize {
     }
 }
 
-/// `vector` extended to `length`, padded with NA, keeping its attributes but not its dims.
+/// `vector` extended to `new_length`, padded with NA, keeping its attributes but not its dims.
+///
+/// A copy reserves room past `new_length`, by GNU R's factor of 1.05, and an unshared vector with
+/// room grows in place, so a loop that appends one element at a time runs in linear time.
 unsafe fn grow(vector: Sexp, new_length: usize) -> R<Sexp> {
     let count = length(vector);
-    let result = alloc(vector.kind(), new_length)?;
+    if grows_in_place(vector, new_length) {
+        let names = values::names(vector);
+        if names == nil() || grows_in_place(names, new_length) {
+            crate::heap().resize_vector(vector, new_length as isize)?;
+            for position in count..new_length {
+                set_na(vector, position);
+            }
+            if names != nil() {
+                crate::heap().resize_vector(names, new_length as isize)?;
+            }
+            return Ok(vector);
+        }
+    }
+    let result = alloc_with_room(vector.kind(), new_length)?;
     for position in 0..new_length {
         if position < count {
             copy_element(vector, position, result, position)?;
@@ -2367,13 +2383,34 @@ unsafe fn grow(vector: Sexp, new_length: usize) -> R<Sexp> {
     }
     let names = values::names(vector);
     if names != nil() {
-        let grown = alloc(SexpType::String, new_length)?;
+        let grown = alloc_with_room(SexpType::String, new_length)?;
         for position in 0..count {
             values::set_elt(grown, position, names.element(position));
         }
         values::set_attr(result, symbols().names, grown)?;
     }
     Ok(result)
+}
+
+/// Whether `vector` can take `new_length` elements without a copy: it is a resizable vector
+/// with that much room that nothing else references, and it has no dims for growth to drop.
+unsafe fn grows_in_place(vector: Sexp, new_length: usize) -> bool {
+    crate::heap().is_resizable(vector)
+        && !vector.is_altrep()
+        && new_length as isize <= vector.capacity()
+        && !values::maybe_shared(vector)
+        && values::get_attr(vector, symbols().dim) == nil()
+        && values::get_attr(vector, symbols().dimnames) == nil()
+}
+
+/// A resizable vector of `length` elements with room to grow by GNU R's factor of 1.05.
+unsafe fn alloc_with_room(kind: SexpType, length: usize) -> R<Sexp> {
+    let capacity = length + length / 20;
+    let heap = crate::heap();
+    let vector = heap.alloc_resizable_vector(kind, capacity as isize)?;
+    heap.root(vector);
+    heap.resize_vector(vector, length as isize)?;
+    Ok(vector)
 }
 
 /// `target[offsets] <- value`, recycling `value`, which is not empty.

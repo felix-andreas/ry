@@ -931,6 +931,15 @@ impl Journey {
                     Err(format!("the buffer lacks `{needle}`:\n{buffer}"))
                 }
             }
+            ["expect", "file", path, "lacks", needle] => {
+                let text =
+                    fs::read_to_string(self.root.join(path)).map_err(|error| error.to_string())?;
+                if text.contains(needle) {
+                    Err(format!("{path} contains `{needle}`:\n{text}"))
+                } else {
+                    Ok(())
+                }
+            }
             ["expect", "file", path, needle] => {
                 let text =
                     fs::read_to_string(self.root.join(path)).map_err(|error| error.to_string())?;

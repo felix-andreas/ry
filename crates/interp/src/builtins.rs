@@ -13,6 +13,7 @@ use {
         values::{self, nil},
     },
     heap::object::{Sexp, SexpType},
+    smallvec::{SmallVec, smallvec},
     syntax::native_values::ACCEPTS_NATIVE,
 };
 
@@ -397,18 +398,41 @@ impl Call<'_> {
     /// Matches the arguments to `formals` the way a closure would (exact, partial, then
     /// positional), for the primitives that take named arguments. A `...` formal collects the
     /// rest, which are returned separately.
-    pub unsafe fn match_args(&self, formals: &[&str]) -> R<(Vec<Option<Sexp>>, Vec<Arg>)> {
+    pub unsafe fn match_args(&self, formals: &[&str]) -> R<(Matched, Vec<Arg>)> {
         match_builtin_args(self.call, self.args, formals)
     }
 }
+
+/// The values a builtin's arguments matched, one per formal, `None` where none did.
+pub type Matched = SmallVec<[Option<Sexp>; 8]>;
 
 /// Argument matching for builtins: the same three passes as closures, over `Arg`s.
 pub unsafe fn match_builtin_args(
     call: Sexp,
     args: &[Arg],
     formals: &[&str],
-) -> R<(Vec<Option<Sexp>>, Vec<Arg>)> {
-    let mut matched: Vec<Option<Sexp>> = vec![None; formals.len()];
+) -> R<(Matched, Vec<Arg>)> {
+    let mut matched: Matched = smallvec![None; formals.len()];
+    // Without names only the positional pass matches: the arguments fill the formals before
+    // `...` in order, and the rest go to `...`.
+    let named =
+        |arg: &Arg| arg.tag.kind() == SexpType::Symbol && !values::symbol_name(arg.tag).is_empty();
+    if !args.iter().any(named) {
+        let positional = formals
+            .iter()
+            .take_while(|formal| **formal != "...")
+            .count();
+        if positional < formals.len() || args.len() <= positional {
+            let mut rest = Vec::new();
+            for (position, arg) in args.iter().enumerate() {
+                match matched.get_mut(position) {
+                    Some(slot) if position < positional => *slot = Some(arg.value),
+                    _ => rest.push(*arg),
+                }
+            }
+            return Ok((matched, rest));
+        }
+    }
     let mut used = vec![false; args.len()];
     let dots = formals.iter().position(|formal| *formal == "...");
     let names: Vec<Option<String>> = args

@@ -29,7 +29,7 @@ use {
     bzip2::{read::MultiBzDecoder, write::BzEncoder},
     flate2::{Compression, read::MultiGzDecoder, write::GzEncoder},
     heap::{
-        object::{NA_INTEGER, NA_LOGICAL, Rcomplex, Sexp, SexpType},
+        object::{NA_INTEGER, NA_LOGICAL, Rcomplex, Sexp, SexpType, gp},
         strings::Encoding,
     },
     lzma_rust2::{CheckType, XzOptions, XzReader, XzWriter},
@@ -323,12 +323,12 @@ impl Table {
             while builtin {
                 let device = (*con).private as *const Device;
                 match device.as_ref() {
-                    Some(Device::TextOutput(TextOutput {
-                        target: Some(target),
-                        ..
-                    })) => {
-                        marker.mark(target.symbol);
-                        marker.mark(target.env);
+                    Some(Device::TextOutput(output)) => {
+                        marker.mark(output.lines);
+                        if let Some(target) = output.target {
+                            marker.mark(target.symbol);
+                            marker.mark(target.env);
+                        }
                         break;
                     }
                     Some(Device::Gzcon(gzcon)) => {
@@ -1396,15 +1396,14 @@ unsafe fn do_text_connection(call: &Call<'_>) -> R<Sexp> {
                     env,
                 })
             };
-            let mut lines = Vec::new();
+            let mut lines = values::alloc(SexpType::String, 0)?;
             if let Some(target) = target
                 && open != "w"
             {
                 let existing = crate::eval::find_var(target.symbol, target.env)?;
                 if existing.kind() == SexpType::String {
-                    for line in values::strings(existing) {
-                        lines.push(line.unwrap_or_else(|| "NA".into()).into_bytes());
-                    }
+                    let count = values::length(existing);
+                    lines = text_lines_with_room(existing, count, count)?;
                 } else {
                     crate::conditions::warning(
                         "text connection: appending to a non-existent char vector",
@@ -2015,7 +2014,8 @@ unsafe fn text_connection_value(con: Sexp) -> R<Sexp> {
     let builtin = entry(slot).is_some_and(|entry| entry.builtin);
     match device(con) {
         Ok(Device::TextOutput(output)) if builtin => {
-            strings_vector(&output.lines, Encoding::Native)
+            let count = values::length(output.lines);
+            text_lines_with_room(output.lines, count, count)
         }
         Ok(Device::TextInput(_)) if builtin => Err(error("'con' is not an output textConnection")),
         _ => Err(error("'con' is not a textConnection")),
@@ -3600,7 +3600,10 @@ struct TextInput {
 }
 
 struct TextOutput {
-    lines: Vec<Vec<u8>>,
+    /// The completed lines as the character vector the target variable holds, with spare
+    /// capacity so a line appends in place. Rebuilding it from bytes for every line made
+    /// `capture.output` of n lines cost n squared string allocations.
+    lines: Sexp,
     partial: Vec<u8>,
     /// The variable each completed line updates, which [`Table::trace`] keeps alive.
     target: Option<TextTarget>,
@@ -4121,8 +4124,11 @@ unsafe fn device_close(con: Rconnection) -> R<()> {
         Device::TextOutput(output) => {
             if !output.partial.is_empty() {
                 let line = std::mem::take(&mut output.partial);
-                output.lines.push(line);
+                push_text_line(output, &line)?;
                 update_text_target(output)?;
+            }
+            if let Some(target) = output.target {
+                set_text_target_lock(target, false);
             }
             Ok(())
         }
@@ -4365,7 +4371,7 @@ unsafe fn device_write(con: Rconnection, bytes: &[u8], printing: bool) -> R<usiz
             for &byte in bytes {
                 if byte == b'\n' {
                     let line = std::mem::take(&mut output.partial);
-                    output.lines.push(line);
+                    push_text_line(output, &line)?;
                     completed = true;
                 } else {
                     output.partial.push(byte);
@@ -4406,8 +4412,48 @@ unsafe fn update_text_target(output: &TextOutput) -> R<()> {
     let Some(target) = output.target else {
         return Ok(());
     };
-    let value = strings_vector(&output.lines, Encoding::Native)?;
-    crate::eval::define(target.symbol, value, target.env)
+    set_text_target_lock(target, false);
+    crate::eval::define(target.symbol, output.lines, target.env)?;
+    // GNU R locks the variable while the connection is open, which also keeps R code from
+    // changing the vector this connection appends to in place.
+    set_text_target_lock(target, true);
+    Ok(())
+}
+
+unsafe fn set_text_target_lock(target: TextTarget, locked: bool) {
+    if let Some(cell) = crate::heap().frame_cell(target.env, target.symbol) {
+        cell.set_gp_bits(gp::BINDING_LOCKED, locked);
+    }
+}
+
+/// Appends one completed line. The vector grows in place unless it is full or something besides
+/// the target variable also holds it, since R code may have kept the value it read earlier.
+unsafe fn push_text_line(output: &mut TextOutput, line: &[u8]) -> R<()> {
+    let heap = crate::heap();
+    let charsxp = values::mkchar_bytes(line, Encoding::Native)?;
+    heap.root(charsxp);
+    let count = values::length(output.lines);
+    if !heap.is_resizable(output.lines)
+        || output.lines.capacity() <= count as isize
+        || values::maybe_shared(output.lines)
+    {
+        output.lines = text_lines_with_room(output.lines, count, (count * 2).max(16))?;
+    }
+    heap.resize_vector(output.lines, count as isize + 1)?;
+    heap.set_element(output.lines, count, charsxp);
+    Ok(())
+}
+
+/// A resizable copy of the first `count` lines of `lines`, with room for `capacity`.
+unsafe fn text_lines_with_room(lines: Sexp, count: usize, capacity: usize) -> R<Sexp> {
+    let heap = crate::heap();
+    let copy = heap.alloc_resizable_vector(SexpType::String, capacity.max(count) as isize)?;
+    heap.root(copy);
+    heap.resize_vector(copy, count as isize)?;
+    for index in 0..count {
+        heap.set_element(copy, index, values::string_elt(lines, index));
+    }
+    Ok(copy)
 }
 
 unsafe fn device_seek(

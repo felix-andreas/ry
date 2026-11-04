@@ -501,6 +501,5 @@ not know runs on the native path in `crates/jit/src/native.rs` instead.
 - **First-call compile time.** A function compiled at its first call costs about a millisecond on
   that call unless a worker compiled it first. Whether a 300,000-line code base under development
   needs the copy-and-patch baseline for its first calls is to be measured.
-- **The bytecode cache.** `r-runtime.md` caches untyped bytecode on disk under content hashes.
-  Under the performance principles that cache is to be replaced the same way, by bytecode written
-  at install as build output and a first tier fast enough to compile the rest at load.
+- **Untyped bytecode** is install-time build output and part of the base image, not a cache
+  (`r-runtime.md`, "Where bytecode comes from").

@@ -21,7 +21,10 @@ mod runtime;
 use {
     analysis::Refusal,
     bumpalo::Bump,
-    heap::object::{Header, Sexp, SexpType, gp},
+    heap::{
+        activity::{self, Activity, Counter},
+        object::{Header, Sexp, SexpType, gp},
+    },
     interp::{
         annotations,
         bytecode::{self, Machine, Op, PROFILE, TIER1, Tier, TierExit, profile},
@@ -313,6 +316,8 @@ unsafe fn compile<'a>(
     patient: bool,
     trigger: Trigger,
 ) -> Result<&'a Compiled, Refusal> {
+    activity::count(Counter::JitCompiles);
+    let _activity = activity::enter(Activity::JitCompile, 0);
     ARENA.with(|arena| match arena.try_borrow_mut() {
         Ok(mut arena) => {
             let compiled = compile_in(&arena, machine, patient, trigger);
@@ -555,13 +560,17 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             panic: None,
             resume_pc: 0,
         };
+        activity::count(Counter::JitEntries);
+        let running = activity::enter(Activity::Compiled, 0);
         let result: *mut Header = (compiled.entry)(&mut activation);
+        drop(running);
         if let Some(payload) = activation.panic.take() {
             resume_unwind(payload);
         }
         match result as usize {
             runtime::DECLINED => return None,
             runtime::DEOPTIMIZED => {
+                activity::count(Counter::JitDeoptimizations);
                 return Some(TierExit::Resume {
                     pc: activation.resume_pc,
                     pending: activation.pending.take(),

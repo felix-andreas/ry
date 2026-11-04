@@ -17,7 +17,10 @@ use {
         unwind::{Jump, R, Unwind, error, error_in},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
-    heap::object::{Sexp, SexpType, gp},
+    heap::{
+        activity::{self, Activity, Counter},
+        object::{Sexp, SexpType, gp},
+    },
     rustc_hash::FxHashSet,
     std::rc::Rc,
 };
@@ -83,6 +86,8 @@ pub fn drop_deferred_definitions(key: &str) {
 /// `R_dispatchGeneric`: selects and runs the method of generic `generic` named `name` for the
 /// arguments in the generic's frame `env`.
 pub unsafe fn dispatch_generic(name: Sexp, env: Sexp, generic: Sexp) -> R<Sexp> {
+    activity::count(Counter::S4Dispatches);
+    let selecting = activity::enter(Activity::S4Dispatch, 0);
     let generic_name = values::first_string(name).unwrap_or_default().into_owned();
     if generic.kind() != SexpType::Closure {
         let class = dispatch::class_of(generic)?;
@@ -123,6 +128,7 @@ pub unsafe fn dispatch_generic(name: Sexp, env: Sexp, generic: Sexp) -> R<Sexp> 
     if method.is_object() {
         method = load_method(method, name, env)?;
     }
+    drop(selecting);
     match method.kind() {
         SexpType::Closure => {
             if values::inherits(method, "internalDispatchMethod") {
@@ -261,13 +267,14 @@ pub unsafe fn signature_arguments(args: &[Arg], generic: Sexp) -> R<Option<Sexp>
 /// The frame also gets the dispatch variables, and takes over the generic's call, caller and
 /// arguments, which is what `sys.call()`, `parent.frame()` and `match.call()` see.
 pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
-    let (call, sys_parent, promargs) = interp()
+    let state = interp();
+    let position = state
         .frames
         .iter()
-        .rev()
-        .find(|frame| frame.env == generic_env)
-        .map(|frame| (frame.call, frame.sys_parent, frame.promargs))
+        .rposition(|frame| frame.env == generic_env)
         .ok_or_else(|| error("could not find the generic function's frame"))?;
+    let (call, sys_parent) = (state.frames[position].call, state.frames[position].sys_parent);
+    let promargs: eval::Args = crate::frame_args(state, position).into();
     let heap = crate::heap();
     let method_env = values::new_env(method.tag())?;
     let mut formal = method.car();
@@ -312,7 +319,7 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
         method,
         method_env,
         sys_parent,
-        promargs,
+        &promargs,
         Entry::Unchecked,
     )
 }

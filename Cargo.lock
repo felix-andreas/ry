@@ -1820,7 +1820,7 @@ dependencies = [
  "libmimalloc-sys",
  "lzma-rust2",
  "memchr",
- "pcre2",
+ "pcre2-sys",
  "rcmd",
  "regex",
  "regex-automata",
@@ -2554,17 +2554,6 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link",
-]
-
-[[package]]
-name = "pcre2"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e970b0fcce0c7ee6ef662744ff711f21ccd6f11b7cf03cd187a80e89797fc67"
-dependencies = [
- "libc",
- "log",
- "pcre2-sys",
 ]
 
 [[package]]

@@ -20,6 +20,7 @@ use {
     },
     heap::{
         ENVIRONMENT_BYTES, Formal, TRIPLE_BYTES,
+        activity::{self, Activity, Counter},
         object::{NA_INTEGER, Sexp, SexpType, gp},
     },
     smallvec::{SmallVec, smallvec},
@@ -54,6 +55,7 @@ unsafe fn eval_unsignalled(expression: Sexp, env: Sexp) -> R<Sexp> {
         }
         SexpType::Language => {
             interp().visible = true;
+            let _activity = activity::enter(Activity::Evaluator, 0);
             eval_call(expression, env)
         }
         SexpType::Promise => force_promise(expression),
@@ -185,6 +187,7 @@ unsafe fn lexical_call(env: Sexp) -> Sexp {
 /// `findVar`: the value bound to `symbol` from `env` outward, or `R_UnboundValue`. Promises are
 /// returned unforced.
 pub unsafe fn find_var(symbol: Sexp, env: Sexp) -> R<Sexp> {
+    let _activity = activity::enter(Activity::Lookup, 0);
     match find_cell(symbol, env) {
         Some(cell) => cell_value(cell),
         None if symbol == symbols().tmp => Ok(tmp_value(env)),
@@ -224,6 +227,7 @@ pub unsafe fn find_fun(symbol: Sexp, env: Sexp) -> R<Sexp> {
 /// `findFun3`: [`find_fun`] for the head of `call`, which a missing function's error names, as
 /// in GNU R.
 pub unsafe fn find_called_fun(symbol: Sexp, mut env: Sexp, call: Sexp) -> R<Sexp> {
+    let _activity = activity::enter(Activity::Lookup, 0);
     let heap = crate::heap();
     let known = heap.known();
     while env != known.empty_env {
@@ -315,6 +319,7 @@ pub unsafe fn set_var(symbol: Sexp, value: Sexp, env: Sexp) -> R<()> {
 
 /// A promise to evaluate `code` in `env`.
 pub unsafe fn make_promise(code: Sexp, env: Sexp) -> R<Sexp> {
+    activity::count(Counter::PromisesCreated);
     triple(SexpType::Promise, unbound(), code, env)
 }
 
@@ -322,6 +327,7 @@ pub unsafe fn make_promise(code: Sexp, env: Sexp) -> R<Sexp> {
 /// Its expression is the code's source, as for any other promise; the code itself sits in the
 /// attribute slot, which a promise otherwise never uses (see `force_promise`).
 pub unsafe fn compiled_promise(code: Sexp, env: Sexp) -> R<Sexp> {
+    activity::count(Counter::PromisesCreated);
     let heap = crate::heap();
     let promise = heap.alloc_compiled_promise(unbound(), bytecode::source_of(code), env, code)?;
     heap.root(promise);
@@ -343,6 +349,7 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
         ));
     }
     moves::forcing(promise)?;
+    activity::count(Counter::PromisesForced);
     promise.set_gp_bits(PROMISE_SEEN, true);
     let code = promise.attrib();
     let result = if code.kind() == SexpType::Bytecode {
@@ -448,6 +455,13 @@ pub unsafe fn unevaluated_args(mut list: Sexp) -> Args {
     args
 }
 
+/// `definition`'s position in the builtin table, which [`interp::Interp::builtin`] reads by.
+pub fn builtin_index(definition: &BuiltinDef) -> usize {
+    let table = &interp().builtins;
+    (definition as *const BuiltinDef as usize).wrapping_sub(table.as_ptr() as usize)
+        / size_of::<BuiltinDef>()
+}
+
 pub unsafe fn builtin_def(function: Sexp) -> R<&'static BuiltinDef> {
     interp()
         .builtin(function.primitive_index())
@@ -474,6 +488,14 @@ unsafe fn call_builtin_reusing(
     env: Sexp,
     reusable: Option<Sexp>,
 ) -> R<Sexp> {
+    let _activity = if activity::enabled() {
+        let index = builtin_index(definition);
+        activity::count(Counter::BuiltinCalls);
+        activity::count_builtin(index);
+        activity::enter(Activity::Builtin, index as u32)
+    } else {
+        activity::enter(Activity::Builtin, 0)
+    };
     if definition.arity >= 0
         && matches!(
             definition.kind,
@@ -746,6 +768,7 @@ unsafe fn collect_evaluated_args(
     while arguments.kind() == SexpType::Pairlist {
         let expression = arguments.car();
         if expression == dots {
+            activity::count(Counter::DotsCalls);
             let value = find_var(dots, env)?;
             if value.kind() == SexpType::Dots {
                 let mut cell = value;
@@ -839,6 +862,7 @@ unsafe fn closure_args_into(
     while arguments.kind() == SexpType::Pairlist {
         let expression = arguments.car();
         if expression == dots {
+            activity::count(Counter::DotsCalls);
             let value = find_var(dots, env)?;
             if value.kind() == SexpType::Dots {
                 let mut cell = value;
@@ -967,8 +991,7 @@ pub unsafe fn apply_closure(
         return value;
     }
     let env = bind_arguments(call, function, args, supplied)?;
-    let promargs = args_pairlist(args)?;
-    run_closure(call, function, env, sys_parent, promargs, Entry::Unchecked)
+    run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
 }
 
 /// [`apply_closure`] for promises the caller built for this call alone and never reads again,
@@ -990,9 +1013,8 @@ pub unsafe fn apply_closure_owning(
         return value;
     }
     let env = bind_arguments(call, function, args, supplied)?;
-    let promargs = args_pairlist(args)?;
-    let result = run_closure(call, function, env, sys_parent, promargs, Entry::Unchecked)?;
-    crate::heap().release_arguments(promargs);
+    let result = run_closure(call, function, env, sys_parent, args, Entry::Unchecked)?;
+    crate::heap().release_argument_promises(args.iter().map(|arg| arg.value));
     Ok(result)
 }
 
@@ -1004,6 +1026,7 @@ pub unsafe fn bind_arguments(
     args: &[Arg],
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
+    let _activity = activity::enter(Activity::CallSetup, 0);
     let formals = function.car();
     // Most calls pass every argument by position to a function without `...`, which needs no
     // matching table: argument `i` binds formal `i`, and the formals past the last argument are
@@ -1011,6 +1034,7 @@ pub unsafe fn bind_arguments(
     let actuals = if supplied.is_none() && positional(formals, args) {
         None
     } else {
+        activity::count(Counter::FormalsMatchedByName);
         Some(match_args(formals, args, call)?)
     };
     let env = frame_environment(function, formals)?;
@@ -1076,11 +1100,7 @@ pub unsafe fn apply_closure_moved(
     let heap = crate::heap();
     heap.define_formals_uncollected(env, &bindings)?;
     heap.mark_frame_formals(env);
-    let promargs = args_pairlist(args)?;
-    heap.untrack_references(promargs);
-    // Untracking a cell stops its tail from counting too, which the rest of the list needs.
-    promargs.cdr().increment_refcount();
-    run_closure(call, function, env, sys_parent, promargs, Entry::Unchecked)
+    run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
 }
 
 /// Whether every argument is untagged and the formals, which have no `...`, take them all.
@@ -1125,8 +1145,8 @@ unsafe fn formal_binding(env: Sexp, formal: Sexp, actual: Sexp) -> R<Formal> {
     })
 }
 
-/// The arguments as a rooted pairlist of their values or promises, which a frame records. The
-/// caller keeps the values alive, so one collection check covers every cell.
+/// The arguments as a rooted pairlist of their values or promises. The caller keeps the values
+/// alive, so one collection check covers every cell.
 pub unsafe fn args_pairlist(args: &[Arg]) -> R<Sexp> {
     let heap = crate::heap();
     heap.reserve(TRIPLE_BYTES * args.len(), &[]);
@@ -1144,9 +1164,12 @@ pub unsafe fn run_closure(
     function: Sexp,
     env: Sexp,
     sys_parent: Sexp,
-    promargs: Sexp,
+    args: &[Arg],
     entry: Entry,
 ) -> R<Sexp> {
+    let _activity = activity::enter(Activity::CallSetup, 0);
+    activity::count(Counter::ClosureCalls);
+    let _frame = crate::profile_summary::enter_closure(call, function);
     moves::entering_closure(function, env)?;
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
@@ -1158,16 +1181,17 @@ pub unsafe fn run_closure(
     if !state.object_systems {
         refuse_object_system(call, function, sys_parent)?;
     }
-    let handlers = state.handlers.clone();
     let restarts = state.restarts.clone();
+    let start = state.frame_args.len() as u32;
+    state.frame_args.extend_from_slice(args);
     state.frames.push(Frame {
         call,
         function,
         env,
         sys_parent,
-        promargs,
+        args: start,
         on_exit: Vec::new(),
-        handlers: handlers.clone(),
+        handlers: state.handlers.clone(),
         restarts: restarts.clone(),
         srcref: state.srcref,
         closures: state.frame_closures.len(),
@@ -1214,7 +1238,7 @@ pub unsafe fn run_closure(
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = state.frames[depth - 1].handlers.clone();
     let closures = state.frames[depth - 1].closures;
-    state.frames.truncate(depth - 1);
+    crate::truncate_frames(state, depth - 1);
     state.restarts = restarts;
     state.srcref = caller_srcref;
     if let Ok(value) = result {
@@ -2500,13 +2524,13 @@ unsafe fn do_invisible(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_nargs(call: &Call<'_>) -> R<Sexp> {
     let env = call.env;
-    let count = interp()
+    let state = interp();
+    let count = state
         .frames
         .iter()
-        .rev()
-        .find(|frame| frame.env == env)
-        .map_or(NA_INTEGER, |frame| {
-            values::pairlist_length(frame.promargs) as i32
+        .rposition(|frame| frame.env == env)
+        .map_or(NA_INTEGER, |index| {
+            crate::frame_args(state, index).len() as i32
         });
     // Outside any closure, such as at top level, GNU R finds no call to count and answers NA.
     values::scalar_integer(count)
@@ -2676,8 +2700,7 @@ pub unsafe fn force_and_call_with(
         _ => Entry::Unchecked,
     };
     let frame = bind_arguments(call, function, &args, None)?;
-    let promargs = args_pairlist(&args)?;
-    run_closure(call, function, frame, env, promargs, entry)
+    run_closure(call, function, frame, env, &args, entry)
 }
 
 unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
@@ -2721,7 +2744,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         function: call.op,
         env,
         sys_parent: call.env,
-        promargs: nil(),
+        args: state.frame_args.len() as u32,
         on_exit: Vec::new(),
         handlers: handlers.clone(),
         restarts: restarts.clone(),
@@ -2741,7 +2764,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = state.frames[depth - 1].handlers.clone();
     state.frame_closures.truncate(state.frames[depth - 1].closures);
-    state.frames.truncate(depth - 1);
+    crate::truncate_frames(state, depth - 1);
     state.restarts = restarts;
     result
 }
@@ -3241,7 +3264,7 @@ pub unsafe fn complex_assign(
     superassign: bool,
 ) -> R<()> {
     let symbols = symbols();
-    let mut getters = Vec::new();
+    let mut getters: SmallVec<[Sexp; 4]> = SmallVec::new();
     let mut inner = target;
     while inner.kind() == SexpType::Language {
         getters.push(inner);
@@ -3276,9 +3299,9 @@ pub unsafe fn complex_assign(
     // replacement still holds the old value, which therefore must be a copy. The `*tmp*`
     // promise deliberately counts no reference, so the inner assignment cannot see the share.
     let index_assigns = getters.iter().any(|getter| {
-        values::pairlist_items(getter.cdr().cdr())
-            .into_iter()
-            .any(|(_, argument)| contains_assignment(argument, symbols))
+        any_item(getter.cdr().cdr(), |argument| {
+            contains_assignment(argument, symbols)
+        })
     });
     let mut binding_env = lookup_env;
     while binding_env != heap.known().empty_env && heap.frame_cell(binding_env, inner).is_none() {
@@ -3306,7 +3329,7 @@ pub unsafe fn complex_assign(
     interp().tmp_values.push((env, base));
     let replaced: R<Sexp> = (|| unsafe {
         // Values of each level, innermost first: the variable, then each getter applied to it.
-        let mut levels = vec![base];
+        let mut levels: SmallVec<[Sexp; 4]> = smallvec![base];
         let tmp_symbol = symbols.tmp;
         let mut shared = false;
         for getter in getters.iter().skip(1).rev() {
@@ -3356,11 +3379,15 @@ pub unsafe fn complex_assign(
             // in place stays uniquely referenced for the next update.
             let value_promise = forced_promise(value_code, replacement)?;
             crate::heap().untrack_references(value_promise);
-            let mut call_items = vec![(nil(), setter), (nil(), tmp_symbol)];
-            let mut argument_items = vec![(nil(), object_promise)];
-            for (tag, argument) in values::pairlist_items(getter.cdr().cdr()) {
-                call_items.push((tag, argument));
-                argument_items.push((tag, argument));
+            let mut call_items: SmallVec<[(Sexp, Sexp); 6]> =
+                smallvec![(nil(), setter), (nil(), tmp_symbol)];
+            let mut argument_items: SmallVec<[(Sexp, Sexp); 6]> =
+                smallvec![(nil(), object_promise)];
+            let mut rest = getter.cdr().cdr();
+            while matches!(rest.kind(), SexpType::Pairlist | SexpType::Language) {
+                call_items.push((rest.tag(), rest.car()));
+                argument_items.push((rest.tag(), rest.car()));
+                rest = rest.cdr();
             }
             call_items.push((symbols.value, value_promise));
             argument_items.push((symbols.value, value_promise));
@@ -3405,9 +3432,18 @@ unsafe fn contains_assignment(expression: Sexp, symbols: &values::Symbols) -> bo
     head == symbols.assign
         || head == symbols.assign2
         || head == symbols.assign_eq
-        || values::pairlist_items(expression)
-            .into_iter()
-            .any(|(_, part)| contains_assignment(part, symbols))
+        || any_item(expression, |part| contains_assignment(part, symbols))
+}
+
+/// Whether `test` holds for any value of the pairlist or call `list`.
+unsafe fn any_item(mut list: Sexp, mut test: impl FnMut(Sexp) -> bool) -> bool {
+    while matches!(list.kind(), SexpType::Pairlist | SexpType::Language) {
+        if test(list.car()) {
+            return true;
+        }
+        list = list.cdr();
+    }
+    false
 }
 
 /// The function a call's head names: a symbol is looked up as a function, anything else (such
@@ -3426,9 +3462,14 @@ unsafe fn call_head_function(head: Sexp, env: Sexp) -> R<Sexp> {
 unsafe fn replacement_function(getter: Sexp, whole: Sexp) -> R<Sexp> {
     match getter.kind() {
         SexpType::Symbol => {
-            let mut name = getter.car().bytes().to_vec();
+            if let Some(&symbol) = interp().replacement_symbols.get(&getter) {
+                return Ok(symbol);
+            }
+            let mut name: SmallVec<[u8; 32]> = SmallVec::from_slice(getter.car().bytes());
             name.extend_from_slice(b"<-");
-            values::install_bytes(&name)
+            let symbol = values::install_bytes(&name)?;
+            interp().replacement_symbols.insert(getter, symbol);
+            Ok(symbol)
         }
         SexpType::Language
             if (getter.car() == symbols().double_colon

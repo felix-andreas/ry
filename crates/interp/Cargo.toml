@@ -21,7 +21,7 @@ serde_json.workspace = true
 regex.workspace = true
 regex-automata = "0.4"
 fancy-regex = { version = "0.20", features = ["leftmost_longest"] }
-pcre2 = "0.2.11"
+pcre2-sys = "0.2.10"
 regex-syntax = "0.8"
 flate2 = "1"
 libc = "0.2"

@@ -16,9 +16,11 @@
 use {
     crate::{Global, Runtime, runtime},
     heap::{
+        activity::{self, Activity, Counter},
         arena::{Arena, Watermark},
         object::{Sexp, SexpType},
     },
+    rustc_hash::FxHashMap,
     interp::unwind::INTERRUPTS_SUSPENDED,
     std::{
         any::Any,
@@ -276,6 +278,7 @@ unsafe fn close_native_scope(runtime: &mut Runtime, scope: NativeScope) -> usize
 
 /// Runs a `.Call` or `.External` routine inside a C context and its own handle scope.
 pub unsafe fn call_native(function: DlFunc, args: &[Sexp], what: &str) -> ApiResult<Sexp> {
+    let _activity = native_activity(function);
     let (scope, entry_depth) = {
         let runtime = runtime();
         let entry_depth = runtime.heap.roots.protect.depth();
@@ -328,6 +331,7 @@ pub unsafe fn call_native_pointers(
     pointers: &[*mut c_void],
     what: &str,
 ) -> ApiResult<()> {
+    let _activity = native_activity(function);
     let mut ignored = std::ptr::null_mut();
     let entry_depth = runtime().heap.roots.protect.depth();
     let result = with_native_scope(|| {
@@ -347,6 +351,39 @@ pub unsafe fn call_native_pointers(
     result?;
     run_pending_finalizers();
     Ok(())
+}
+
+/// Publishes native code as the current activity for the profile summary, labelled with the
+/// package whose shared library holds `function`.
+unsafe fn native_activity(function: DlFunc) -> activity::Scope {
+    if !activity::enabled() {
+        return activity::enter(Activity::Native, 0);
+    }
+    activity::count(Counter::NativeCalls);
+    static LIBRARIES: std::sync::Mutex<Option<FxHashMap<usize, u32>>> = std::sync::Mutex::new(None);
+    let address = function as usize;
+    let mut libraries = match LIBRARIES.lock() {
+        Ok(libraries) => libraries,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let label = *libraries
+        .get_or_insert_with(FxHashMap::default)
+        .entry(address)
+        .or_insert_with(|| activity::label(&library_package(function)));
+    activity::enter(Activity::Native, label)
+}
+
+/// The package a native routine belongs to, read from its shared library's file name
+/// (`.../data.table/libs/data.table.so` is `data.table`).
+unsafe fn library_package(function: DlFunc) -> String {
+    let mut info: libc::Dl_info = std::mem::zeroed();
+    if libc::dladdr(function as *const c_void, &mut info) == 0 || info.dli_fname.is_null() {
+        return "unknown".to_owned();
+    }
+    let path = CStr::from_ptr(info.dli_fname).to_string_lossy();
+    let file = path.rsplit('/').next().unwrap_or(&path);
+    let stem = file.split(".so").next().unwrap_or(file);
+    stem.to_owned()
 }
 
 /// Runs `function(data)` inside a C context, for callbacks that return nothing.

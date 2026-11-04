@@ -95,6 +95,10 @@ pub enum Command {
         /// Do not load the package the working directory belongs to into the console
         #[arg(long, conflicts_with = "script")]
         no_load: bool,
+        /// Write a summary of where the run spent its time to FILE when it ends. The summary
+        /// holds no source code, identifiers or data, so it is safe to share
+        #[arg(long, value_name = "FILE")]
+        profile_summary: Option<PathBuf>,
     },
     /// Run an R script on GNU R, or open a GNU R console without one
     ///
@@ -350,6 +354,7 @@ impl Command {
                 session,
                 runtime,
                 no_load,
+                ..
             } => Session {
                 runtime: resolve_runtime(*runtime, runtime_variable, Runtime::Ry),
                 mode: session_mode(session, !no_load),
