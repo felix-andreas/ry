@@ -596,7 +596,11 @@ pub unsafe extern "C" fn ry_elementwise(
         _ => return 1,
     };
     let sum = sum != 0;
-    let result = if sum { null_mut() } else { list_alloc(kind, length, length) };
+    let result = if sum {
+        null_mut()
+    } else {
+        list_alloc(kind, length, length)
+    };
     let status = if kind == DBL {
         elementwise_dbl(program, inputs, lists, length, result, out)
     } else {
@@ -658,8 +662,24 @@ unsafe fn elementwise_dbl(
         for (step, &encoded) in program.iter().enumerate() {
             let (done, rest) = buffers.split_at_mut(step);
             let target = &mut rest[0][..chunk];
-            let left = operand(encoded as usize >> 8 & 0xFF, inputs, lists, &scalars, done, start, chunk);
-            let right = operand(encoded as usize >> 16 & 0xFF, inputs, lists, &scalars, done, start, chunk);
+            let left = operand(
+                encoded as usize >> 8 & 0xFF,
+                inputs,
+                lists,
+                &scalars,
+                done,
+                start,
+                chunk,
+            );
+            let right = operand(
+                encoded as usize >> 16 & 0xFF,
+                inputs,
+                lists,
+                &scalars,
+                done,
+                start,
+                chunk,
+            );
             let pairs = target.iter_mut().zip(left.iter().zip(right));
             let mut lost = false;
             match encoded & 0xFF {
@@ -676,7 +696,9 @@ unsafe fn elementwise_dbl(
                 IDIV => pairs.for_each(|(slot, (&x, &y))| *slot = real_integer_divide(x, y)),
                 _ => return 1,
             }
-            let undefined = target.iter().fold(false, |found, &value| found | value.is_nan());
+            let undefined = target
+                .iter()
+                .fold(false, |found, &value| found | value.is_nan());
             if lost || undefined {
                 return 1;
             }
@@ -685,7 +707,11 @@ unsafe fn elementwise_dbl(
         if result.is_null() {
             total = add_all(total, items);
         } else {
-            ptr::copy_nonoverlapping(items.as_ptr(), ((*result).data as *mut f64).add(start), chunk);
+            ptr::copy_nonoverlapping(
+                items.as_ptr(),
+                ((*result).data as *mut f64).add(start),
+                chunk,
+            );
         }
         start += chunk;
     }
@@ -718,8 +744,24 @@ unsafe fn elementwise_i64(
         for (step, &encoded) in program.iter().enumerate() {
             let (done, rest) = buffers.split_at_mut(step);
             let target = &mut rest[0][..chunk];
-            let left = operand(encoded as usize >> 8 & 0xFF, inputs, lists, &scalars, done, start, chunk);
-            let right = operand(encoded as usize >> 16 & 0xFF, inputs, lists, &scalars, done, start, chunk);
+            let left = operand(
+                encoded as usize >> 8 & 0xFF,
+                inputs,
+                lists,
+                &scalars,
+                done,
+                start,
+                chunk,
+            );
+            let right = operand(
+                encoded as usize >> 16 & 0xFF,
+                inputs,
+                lists,
+                &scalars,
+                done,
+                start,
+                chunk,
+            );
             let pairs = target.iter_mut().zip(left.iter().zip(right));
             let mut overflow = false;
             let apply = |combine: fn(i64, i64) -> (i64, bool)| {
@@ -748,7 +790,11 @@ unsafe fn elementwise_i64(
                 total = next;
             }
         } else {
-            ptr::copy_nonoverlapping(items.as_ptr(), ((*result).data as *mut i64).add(start), chunk);
+            ptr::copy_nonoverlapping(
+                items.as_ptr(),
+                ((*result).data as *mut i64).add(start),
+                chunk,
+            );
         }
         start += chunk;
     }
@@ -2060,7 +2106,8 @@ unsafe fn refill(class: usize) -> *mut FreeBlock {
 /// The class of a block above 64 KiB: its size rounded up to a power of two, counted from
 /// 128 KiB.
 fn large_class(size: usize) -> usize {
-    let class = (size.next_power_of_two().trailing_zeros() - MAX_BLOCK.trailing_zeros() - 1) as usize;
+    let class =
+        (size.next_power_of_two().trailing_zeros() - MAX_BLOCK.trailing_zeros() - 1) as usize;
     if class >= LARGE_CLASS_COUNT {
         panic!("typed value allocation of {size} bytes");
     }
@@ -2470,7 +2517,11 @@ unsafe fn arith(op: u32, kind: u32, a: Side, b: Side) -> *mut List {
     }
     if kind == DBL && lists {
         let result = arith(op, u32::from(DBL), a, b);
-        if !result.is_null() && raw_slice((*result).data as *const f64, length).iter().any(|x| x.is_nan()) {
+        if !result.is_null()
+            && raw_slice((*result).data as *const f64, length)
+                .iter()
+                .any(|x| x.is_nan())
+        {
             ry_list_drop(result);
             return null_mut();
         }

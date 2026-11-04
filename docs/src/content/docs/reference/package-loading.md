@@ -109,6 +109,13 @@ or generics by name, as `new()`, `is()`, `getClass()` and method dispatch do. Wh
 one during the load itself, the held-back definitions placed before that statement run then, and the
 rest run in their own places.
 
+After the load, the definitions run in units. The first unit holds the classes, unions, validity
+methods, coercions and methods for other packages' generics, and runs as a whole. Each of the
+package's own generics whose methods name only classes defined before them, and whose names no other
+definition reads, is a unit of its own: its `setGeneric()` and all its methods run the first time the
+generic is called or looked up, after the first unit. A session that creates objects of the package's
+classes but calls only a few of its generics registers only those generics' methods.
+
 A load holds them back only when all of these hold, and otherwise runs every one of them in place:
 
 - Every S4 registration in the package is `setClass()` (alone or as `Gen <- setClass(...)`),
@@ -145,29 +152,6 @@ A load holds them back only when all of these hold, and otherwise runs every one
 back, as in `Loaded shapes: 1 definition bound lazily, 1 top-level statement run, 6 S4 definitions held
 back until first use, in 5 ms.` A reload that changes one of them, or a name they bind, runs them all
 first.
-
-When the held-back definitions run after the load, ry saves what they bound (the classes, generics
-and method tables) to `$XDG_CACHE_HOME/ry/s4` (`~/.cache/ry/s4` by default), and a later process
-restores them instead of running them, much as GNU R restores an installed package's S4 metadata.
-The saved definitions form a lazy-load database, like an installed package's R code, so a process
-reads only the classes and generics it uses. The `methods` package's class and generic tables get
-the package's own classes and generics as lazy entries too, and only what involves other packages
-(a union with `NULL` as a member, a `show` or `initialize` method) is cached when the definitions
-are restored. The database is stored uncompressed, which makes the save faster at the cost of disk
-space. On a generated package with 2,892 S4 definitions, the first `new()` takes about 0.85 s when
-the definitions run (the save included) and about 60 ms when they are restored. A saved entry is
-used only when all of these match the process that saved it:
-
-- the text of every held-back definition, the package's name and version, and the build of ry;
-- the R version, and the version of every package the namespace imports.
-
-The definitions are saved only when they read nothing but the names they bind themselves and the
-`methods` and base functions that build S4 objects, such as `setClass()`, `representation()`, `c()`
-and `function`, so no other code in the package can change what they produce. A definition that
-reads a package constant, as in `prototype(side = ZERO)`, still runs in every process. Nothing is
-saved when running them signalled a message or a warning, so a later process shows it again, nor
-when the package registers load actions (`setLoadAction()`) or sets `.requireCachedGenerics`. The
-directory is safe to delete.
 
 ### Source references
 

@@ -482,7 +482,9 @@ fn held_back_s4_definitions_behave_as_if_run_eagerly() {
                  area(Sq(side = 3)), perimeter(new('Sq', side = 2)), \
                  tryCatch(validObject(Sq(side = -1)), error = function(e) 'invalid'), \
                  is(Sq(side = 1), 'Sq'), if (exists('ORIGIN')) ORIGIN@side, \
-                 sort(getGenerics(asNamespace('shapes'))), '\\n')";
+                 sort(getGenerics(asNamespace('shapes'))), \
+                 capture.output(showMethods('area')), names(getClass('Sq')@slots), \
+                 names(getClass('Sq')@contains), '\\n')";
     // Without `ORIGIN`, every S4 definition stays held back after the load; with it, the load
     // itself needs the class and runs the definitions placed before `ORIGIN` at that point.
     let origin = "ORIGIN <- new(\"Sq\", side = 0)\n";
@@ -507,7 +509,7 @@ fn held_back_s4_definitions_behave_as_if_run_eagerly() {
             files[3].1.to_owned()
         };
         files[3].1 = &second;
-        // The first lazy run saves the definitions' metadata and the second restores it.
+        // The second lazy run starts from the package caches the first one wrote.
         let root = package(&files);
         let cache = tempfile::tempdir().expect("temp dir");
         let mut printed = Vec::new();
@@ -537,12 +539,12 @@ fn held_back_s4_definitions_behave_as_if_run_eagerly() {
                 .to_owned();
             printed.push((text, line, summary));
         }
-        let (lazy, restored, eager) = (&printed[0], &printed[1], &printed[2]);
+        let (lazy, warm, eager) = (&printed[0], &printed[1], &printed[2]);
         assert_eq!(lazy.1, eager.1, "lazy:\n{}\neager:\n{}", lazy.0, eager.0);
         assert_eq!(
-            restored.1, eager.1,
-            "restored:\n{}\neager:\n{}",
-            restored.0, eager.0
+            warm.1, eager.1,
+            "warm:\n{}\neager:\n{}",
+            warm.0, eager.0
         );
         assert!(lazy.1.contains(expected), "{}", lazy.0);
         assert!(lazy.2.contains(lazy_summary), "{}", lazy.0);
@@ -635,13 +637,54 @@ fn a_held_back_method_for_another_packages_generic_is_there_when_that_generic_ne
     }
 }
 
+/// A held-back definition that fails when a lazy generic's first use runs it leaves that
+/// generic reporting the failure on every later use, not missing.
+#[test]
+fn a_lazy_generic_whose_held_back_definitions_fail_reports_the_failure_on_every_use() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: failing\nVersion: 1.0\n"),
+        ("NAMESPACE", "exportPattern(\".\")\n"),
+        (
+            "R/a.R",
+            "setClass(\"A\", representation(x = \"numeric\"))\n\
+             setGeneric(\"foo\", function(x) standardGeneric(\"foo\"))\n\
+             setMethod(\"foo\", \"A\", function(x) x@x)\n\
+             setClass(\"B\", contains = \"Missing\")\n",
+        ),
+    ]);
+    let reload = format!(
+        "options(ry.load.lazy_s4 = TRUE); load_all({:?}, full = TRUE)",
+        root.path().display().to_string()
+    );
+    let probe = "first <- tryCatch(foo(1), error = conditionMessage); \
+                 later <- tryCatch(foo(1), error = conditionMessage); \
+                 cat('probe:', grepl('Missing', first), later, '\\n')";
+    let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+        .arg("load")
+        .arg(root.path())
+        .args(["-e", &reload, "-e", probe])
+        .env("XDG_CACHE_HOME", root.path().join("cache"))
+        .output()
+        .expect("run ry load");
+    let text = text(&output);
+    assert!(
+        text.contains(
+            "probe: TRUE `foo` is unavailable because loading the S4 definitions of failing \
+             failed; fix the error above and run `load_all()` again"
+        ),
+        "{text}"
+    );
+}
+
 /// Unions that name basic classes, with or without one of the package's classes, and coercions
 /// with `setAs()`, are held back with the classes they name, and each first use, in a process of
 /// its own, sees what an eager load shows: union membership of the basic classes, everything a
 /// basic class extends once a union was named, in the order the unions were defined, coercions
 /// in both directions and their replacement form, method lookups, validity, and dispatch on an
-/// object read back from disk.
-/// The second round restores the definitions from the S4 metadata cache.
+/// object read back from disk. `worth` waits for its own first use, after the classes.
 #[test]
 fn unions_with_basic_classes_and_coercions_are_held_back_and_behave_as_if_run_eagerly() {
     if !r_available() {
@@ -706,24 +749,14 @@ fn unions_with_basic_classes_and_coercions_are_held_back_and_behave_as_if_run_ea
         "cat('probe:', capture.output(showMethods('worth')), '\\n')".to_owned(),
         format!("x <- readRDS({saved:?}); cat('probe:', as(x, 'character'), worth(x), '\\n')"),
     ];
-    // The second round finds the S4 metadata cache the first round's forces saved.
-    for round in ["miss", "hit"] {
-        let cached = std::fs::read_dir(root.path().join("cache/ry/s4"))
-            .is_ok_and(|mut entries| entries.next().is_some());
-        assert_eq!(cached, round == "hit", "{round}");
-        for probe in &probes {
-            let lazy = load("TRUE", probe);
-            let eager = load("FALSE", probe);
-            assert!(
-                lazy.contains("11 S4 definitions held back until first use"),
-                "{round}: {lazy}"
-            );
-            assert_eq!(
-                line(&lazy),
-                line(&eager),
-                "{round}: lazy:\n{lazy}\neager:\n{eager}"
-            );
-        }
+    for probe in &probes {
+        let lazy = load("TRUE", probe);
+        let eager = load("FALSE", probe);
+        assert!(
+            lazy.contains("11 S4 definitions held back until first use"),
+            "{lazy}"
+        );
+        assert_eq!(line(&lazy), line(&eager), "lazy:\n{lazy}\neager:\n{eager}");
     }
 }
 

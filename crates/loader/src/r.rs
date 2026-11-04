@@ -211,11 +211,28 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
                         ),
                     ),
                     (
-                        "cache_key".into(),
-                        deferred
-                            .cache_key
-                            .as_ref()
-                            .map_or(RValue::Null, |key| RValue::Character(vec![key.clone()])),
+                        "units".into(),
+                        RValue::Integer(deferred.units.iter().map(|&unit| unit as i32).collect()),
+                    ),
+                    (
+                        "lazy_generics".into(),
+                        RValue::Character(
+                            deferred
+                                .lazy_generics
+                                .iter()
+                                .map(|lazy| lazy.generic.clone())
+                                .collect(),
+                        ),
+                    ),
+                    (
+                        "lazy_names".into(),
+                        RValue::Vector(
+                            deferred
+                                .lazy_generics
+                                .iter()
+                                .map(|lazy| strings(&lazy.names))
+                                .collect(),
+                        ),
                     ),
                     ("names".into(), strings(&deferred.names)),
                 ])

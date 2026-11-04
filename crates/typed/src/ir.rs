@@ -418,7 +418,10 @@ impl Op {
                 operands.push(*separator);
                 operands
             }
-            CallTyped(_, arguments) | Elementwise { inputs: arguments, .. } => arguments.clone(),
+            CallTyped(_, arguments)
+            | Elementwise {
+                inputs: arguments, ..
+            } => arguments.clone(),
         }
     }
 

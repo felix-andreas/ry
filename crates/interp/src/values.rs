@@ -129,6 +129,12 @@ pub struct Symbols {
     pub dot_device: Sexp,
     pub dot_internal: Sexp,
     pub dot_primitive: Sexp,
+    pub from: Sexp,
+    pub ry_s4_initialize: Sexp,
+    pub access: Sexp,
+    pub version: Sexp,
+    pub s3_methods: Sexp,
+    pub representation: Sexp,
 }
 
 macro_rules! symbol_table {
@@ -257,6 +263,12 @@ symbol_table! {
     dot_device = ".Device",
     dot_internal = ".Internal",
     dot_primitive = ".Primitive",
+    from = "from",
+    ry_s4_initialize = "ryS4Initialize",
+    access = "access",
+    version = "version",
+    s3_methods = "S3methods",
+    representation = "representation",
 }
 
 /// Session-wide objects the builtins keep. Each is rooted for the life of the session.

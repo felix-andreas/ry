@@ -987,7 +987,9 @@ impl Emitter<'_, '_> {
                     } else {
                         self.item_words(input)?.0
                     };
-                    self.builder.ins().stack_store(I64, word, words, 8 * index as i32);
+                    self.builder
+                        .ins()
+                        .stack_store(I64, word, words, 8 * index as i32);
                 }
                 let steps = self.builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
@@ -996,7 +998,9 @@ impl Emitter<'_, '_> {
                 ));
                 for (index, &step) in program.iter().enumerate() {
                     let step = self.builder.ins().iconst(I32, i64::from(step));
-                    self.builder.ins().stack_store(I64, step, steps, 4 * index as i32);
+                    self.builder
+                        .ins()
+                        .stack_store(I64, step, steps, 4 * index as i32);
                 }
                 let out = self.builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,

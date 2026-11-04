@@ -54,17 +54,22 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("new_object", new_object_routine),
 ];
 
-/// S4 definitions a package loader holds back until first use. Looking up one of `classes` or
-/// `generics` by name calls `force` first, which runs them and defines what was looked up.
+/// S4 definitions a package loader holds back until first use, in units. The first unit holds
+/// the classes and every definition not split off: looking up one of `classes` or `generics`
+/// by name, or a primitive in `primitives` dispatching on an object of one of `classes`, runs
+/// it. Each of `lazy` is a generic of its own unit, which a lookup of that generic runs, after
+/// the first unit if that has not run yet. `force` runs units: it is a closure of one argument,
+/// `NULL` for the first unit or a generic's name for that generic's unit.
 pub struct DeferredDefinitions {
-    /// Identifies the definitions to [`drop_deferred_definitions`]: one loaded package each.
+    /// Identifies the definitions to [`drop_deferred_definitions`] and [`force_deferred_unit`]:
+    /// one loaded package each.
     pub key: String,
     pub classes: FxHashSet<Box<[u8]>>,
     pub generics: FxHashSet<Box<[u8]>>,
-    /// Primitives the definitions add methods to, which dispatch on an object of one of
-    /// `classes` only once they have run.
     pub primitives: FxHashSet<Box<[u8]>>,
-    /// A closure of no arguments.
+    pub lazy: FxHashSet<Box<[u8]>>,
+    /// Whether the first unit has yet to run.
+    pub first_pending: bool,
     pub force: Sexp,
 }
 
@@ -81,6 +86,31 @@ pub fn drop_deferred_definitions(key: &str) {
         .globals
         .deferred_definitions
         .retain(|existing| existing.key != key);
+}
+
+/// Whether some loader holds back definitions that may define classes or add methods to
+/// other packages' generics, which every class lookup and dispatch must then account for.
+pub fn first_units_pending() -> bool {
+    interp()
+        .globals
+        .deferred_definitions
+        .iter()
+        .any(|definitions| definitions.first_pending)
+}
+
+/// Runs the unit of the definitions registered under `key` that `generic` names, or the
+/// first unit for `None`, unless it ran already: what a placeholder the loader bound in a
+/// unit's place does when code reaches it.
+pub unsafe fn force_deferred_unit(key: &str, generic: Option<&[u8]>) -> R<()> {
+    let deferred = &mut interp().globals.deferred_definitions;
+    let Some(position) = deferred
+        .iter()
+        .position(|definitions| definitions.key == key)
+    else {
+        return Ok(());
+    };
+    let lazy = generic.filter(|generic| deferred[position].lazy.contains(*generic));
+    run_unit(position, lazy)
 }
 
 /// `R_dispatchGeneric`: selects and runs the method of generic `generic` named `name` for the
@@ -338,21 +368,21 @@ pub unsafe fn new_object_copying(class_def: Sexp, deep: bool) -> R<Sexp> {
             "C level NEW macro called with null class definition pointer",
         ));
     }
-    let virtual_flag = slot_value(class_def, "virtual")?;
-    let class_name = slot_value(class_def, "className")?;
+    let virtual_flag = crate::subset::get_slot(class_def, symbols().virtual_, nil())?;
+    let class_name = crate::subset::get_slot(class_def, symbols().class_name, nil())?;
     if values::as_logical_scalar(virtual_flag) != 0 {
         return Err(error(format!(
             "trying to generate an object from a virtual class (\"{}\")",
             values::first_string(class_name).unwrap_or_default()
         )));
     }
-    let prototype = slot_value(class_def, "prototype")?;
+    let prototype = crate::subset::get_slot(class_def, symbols().prototype, nil())?;
     let value = if deep {
         values::duplicate(prototype)?
     } else {
         values::shallow_duplicate(prototype)?
     };
-    let package = values::get_attr(class_name, values::install("package")?);
+    let package = values::get_attr(class_name, symbols().package);
     if value.kind() == SexpType::Object || package != nil() {
         values::set_attr(value, symbols().class, class_name)?;
         value.set_gp_bits(gp::S4_OBJECT, true);
@@ -736,7 +766,7 @@ pub(crate) unsafe fn cached_class_definition(class: Sexp, table: Sexp) -> R<Sexp
     if value == unbound() {
         return Ok(nil());
     }
-    let package_symbol = values::install("package")?;
+    let package_symbol = symbols().package;
     let package = values::get_attr(class, package_symbol);
     if package.kind() == SexpType::String && length(package) > 0 {
         let defined_package = values::get_attr(value, package_symbol);
@@ -794,30 +824,60 @@ pub(crate) enum Lookup<'a> {
     Primitive(&'a [&'a [u8]]),
 }
 
-/// Runs the deferred definitions that the lookup of `name` needs, if any, and reports whether
-/// it ran some. They are unregistered first, so a lookup they make themselves finds nothing
-/// deferred.
+/// Runs the deferred unit that the lookup of `name` needs, if any, and reports whether it ran
+/// one. The unit is marked as run first, so a lookup it makes itself finds nothing deferred.
 pub(crate) unsafe fn force_deferred(name: &[u8], lookup: Lookup<'_>) -> R<bool> {
-    let deferred = &mut interp().globals.deferred_definitions;
-    let Some(position) = deferred.iter().position(|definitions| match lookup {
-        Lookup::Class => definitions.classes.contains(name),
-        Lookup::Generic => definitions.generics.contains(name),
-        Lookup::Primitive(classes) => {
-            definitions.primitives.contains(name)
-                && classes
-                    .iter()
-                    .any(|class| definitions.classes.contains(*class))
+    let deferred = &interp().globals.deferred_definitions;
+    for (position, definitions) in deferred.iter().enumerate() {
+        let first = definitions.first_pending
+            && match lookup {
+                Lookup::Class => definitions.classes.contains(name),
+                Lookup::Generic => definitions.generics.contains(name),
+                Lookup::Primitive(classes) => {
+                    definitions.primitives.contains(name)
+                        && classes
+                            .iter()
+                            .any(|class| definitions.classes.contains(*class))
+                }
+            };
+        let lazy = matches!(lookup, Lookup::Generic) && definitions.lazy.contains(name);
+        if first || lazy {
+            run_unit(position, lazy.then_some(name))?;
+            return Ok(true);
         }
-    }) else {
-        return Ok(false);
+    }
+    Ok(false)
+}
+
+/// Marks the unit of the definitions at `position` as run, and the first unit with it, then
+/// calls their `force` for it unless both ran already. Definitions with no unit left are
+/// unregistered.
+unsafe fn run_unit(position: usize, lazy: Option<&[u8]>) -> R<()> {
+    let deferred = &mut interp().globals.deferred_definitions;
+    let Some(definitions) = deferred.get_mut(position) else {
+        return Ok(());
     };
-    let definitions = deferred.remove(position);
+    let first = std::mem::replace(&mut definitions.first_pending, false);
+    let lazy = lazy.filter(|generic| definitions.lazy.remove(*generic));
+    if !first && lazy.is_none() {
+        return Ok(());
+    }
+    let force = definitions.force;
+    if definitions.lazy.is_empty() {
+        deferred.remove(position);
+    }
+    let argument = match lazy {
+        Some(generic) => values::scalar_string(&String::from_utf8_lossy(generic))?,
+        None => nil(),
+    };
     let heap = crate::heap();
-    heap.preserve(definitions.force);
-    let result = values::call(definitions.force, &[])
-        .and_then(|call| eval::eval(call, values::global_env()));
-    heap.release(definitions.force);
-    result.map(|_| true)
+    heap.preserve(force);
+    heap.preserve(argument);
+    let result =
+        values::call(force, &[argument]).and_then(|call| eval::eval(call, values::global_env()));
+    heap.release(argument);
+    heap.release(force);
+    result.map(|_| ())
 }
 
 /// The first generic function bound to `symbol` from `env` outward (from `package`, unless
@@ -826,7 +886,7 @@ pub(crate) unsafe fn force_deferred(name: &[u8], lookup: Lookup<'_>) -> R<bool> 
 pub(crate) unsafe fn find_generic(symbol: Sexp, env: Sexp, package: &str) -> R<Sexp> {
     let heap = crate::heap();
     let generic_symbol = values::install("generic")?;
-    let package_symbol = values::install("package")?;
+    let package_symbol = symbols().package;
     let mut frame = env;
     while frame != values::empty_env() {
         if let Some(cell) = heap.frame_cell(frame, symbol) {

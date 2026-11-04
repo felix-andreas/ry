@@ -322,7 +322,9 @@ impl Lowering<'_> {
             return Err(Refusal("a constant that is not a plain scalar"));
         }
         if let Some(number) = interp::numbers::read(value) {
-            return Ok(self.builder.emit(Type::I64, Op::Const(Constant::I64(number))));
+            return Ok(self
+                .builder
+                .emit(Type::I64, Op::Const(Constant::I64(number))));
         }
         let (ty, constant) = match value.kind() {
             SexpType::Integer => (Type::Int, Constant::Int(rvalues::ints(value)[0])),
@@ -1214,7 +1216,9 @@ impl Lowering<'_> {
                     .collect();
                 let result_kind = plain_storage(self.builder.ty(value));
                 if !interp::annotations::admits_inline(definition, body, &kinds, result_kind) {
-                    return Err(Refusal("a local function whose annotations reject its types"));
+                    return Err(Refusal(
+                        "a local function whose annotations reject its types",
+                    ));
                 }
                 let result = self.builder.local(self.builder.ty(value));
                 self.builder.push(Some(result), Op::Copy(value));
@@ -1442,7 +1446,9 @@ impl Lowering<'_> {
                     .builder
                     .emit(Type::Lgl, Op::Compare(Compare::Lt, Item::Dbl, a, zero));
                 self.fail_if(negative);
-                Ok(self.builder.emit(Type::Dbl, Op::Math(Math::Sqrt, Item::Dbl, a)))
+                Ok(self
+                    .builder
+                    .emit(Type::Dbl, Op::Math(Math::Sqrt, Item::Dbl, a)))
             }
             "Num.pow" => {
                 let [base, exponent] = arguments.exactly(2)?[..] else {
@@ -1458,9 +1464,10 @@ impl Lowering<'_> {
                     };
                 }
                 let [base, exponent] = doubles;
-                let power = self
-                    .builder
-                    .emit(Type::Dbl, Op::Arith(Arith::NumPow, Item::Dbl, base, exponent));
+                let power = self.builder.emit(
+                    Type::Dbl,
+                    Op::Arith(Arith::NumPow, Item::Dbl, base, exponent),
+                );
                 self.fail_if_nan(power);
                 Ok(power)
             }
@@ -1619,7 +1626,9 @@ impl Lowering<'_> {
                         self.fail_if_nan(total);
                         Ok(total)
                     }
-                    _ => Err(Refusal("a `List.sum` of something other than a number list")),
+                    _ => Err(Refusal(
+                        "a `List.sum` of something other than a number list",
+                    )),
                 }
             }
             "sum" | "prod" | "mean" => {
@@ -1972,7 +1981,9 @@ impl Lowering<'_> {
             Type::vector(result_item)
         } else if to_array {
             if !matches!(result_item, Item::Dbl | Item::I64) {
-                return Err(Refusal("a `List.map` to a list of something other than numbers"));
+                return Err(Refusal(
+                    "a `List.map` to a list of something other than numbers",
+                ));
             }
             Type::Vector {
                 item: result_item,
@@ -2010,11 +2021,12 @@ impl Lowering<'_> {
     /// state each item's step leaves, in a loop over the items with the function inlined.
     unsafe fn walk(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let counting = name == "List.count_if";
-        let (list, state, function) = match (counting, &arguments.exactly(arguments.items.len())?[..]) {
-            (true, &[list, predicate]) => (list, None, predicate),
-            (false, &[list, state, f]) => (list, Some(state), f),
-            _ => return Err(Refusal("a walk of an unsupported form")),
-        };
+        let (list, state, function) =
+            match (counting, &arguments.exactly(arguments.items.len())?[..]) {
+                (true, &[list, predicate]) => (list, None, predicate),
+                (false, &[list, state, f]) => (list, Some(state), f),
+                _ => return Err(Refusal("a walk of an unsupported form")),
+            };
         let list = self.value(list)?;
         let ty = self.builder.ty(list);
         let item = match ty {
@@ -2360,7 +2372,13 @@ impl Lowering<'_> {
         if let Some(item) = array_item(ta).or(array_item(tb)) {
             let side = |lower: &mut Self, value: Local| -> Result<Local, Refusal> {
                 match (lower.builder.ty(value), item) {
-                    (Type::Vector { item: other, array: true }, _) if other == item => Ok(value),
+                    (
+                        Type::Vector {
+                            item: other,
+                            array: true,
+                        },
+                        _,
+                    ) if other == item => Ok(value),
                     (Type::Dbl, Item::Dbl) | (Type::I64, Item::I64) => Ok(value),
                     (Type::Dbl | Type::Int, Item::I64) => lower.to_i64(value),
                     _ => Err(Refusal("list arithmetic between different item types")),
@@ -2443,17 +2461,23 @@ impl Lowering<'_> {
             }
             None => Node::Leaf(self.value(expression)?),
         };
-        let index = u8::try_from(nodes.len()).map_err(|_| Refusal("an arithmetic expression too large"))?;
+        let index =
+            u8::try_from(nodes.len()).map_err(|_| Refusal("an arithmetic expression too large"))?;
         nodes.push(node);
         Ok(index)
     }
 
     /// The operator and operands of a binary call of base R's arithmetic, looking through
     /// parentheses.
-    unsafe fn arith_call(&mut self, expression: Sexp) -> Result<Option<(Arith, Sexp, Sexp)>, Refusal> {
+    unsafe fn arith_call(
+        &mut self,
+        expression: Sexp,
+    ) -> Result<Option<(Arith, Sexp, Sexp)>, Refusal> {
         let mut expression = expression;
         loop {
-            if expression.kind() != SexpType::Language || expression.car().kind() != SexpType::Symbol {
+            if expression.kind() != SexpType::Language
+                || expression.car().kind() != SexpType::Symbol
+            {
                 return Ok(None);
             }
             let head = expression.car();
@@ -2488,11 +2512,7 @@ impl Lowering<'_> {
     /// Emits an arithmetic tree. A tree of two or more list operations runs as one fused pass,
     /// which with `sum` also sums the items and then returns `true`; anything else emits
     /// operation by operation.
-    unsafe fn arith_nodes(
-        &mut self,
-        nodes: &[Node],
-        sum: bool,
-    ) -> Result<(Local, bool), Refusal> {
+    unsafe fn arith_nodes(&mut self, nodes: &[Node], sum: bool) -> Result<(Local, bool), Refusal> {
         let array_item = |ty: Type| match ty {
             Type::Vector { item, array: true } => Some(item),
             _ => None,
@@ -2522,7 +2542,11 @@ impl Lowering<'_> {
             }
         }
         let root = nodes.len() - 1;
-        let operations = lists.iter().zip(nodes).filter(|&(&list, node)| list && matches!(node, Node::Arith(..))).count();
+        let operations = lists
+            .iter()
+            .zip(nodes)
+            .filter(|&(&list, node)| list && matches!(node, Node::Arith(..)))
+            .count();
         if let Some(item) = item
             && (operations >= 2 || sum && operations >= 1)
             && let Some(fused) = self.fused(nodes, &values, &lists, item, sum)?
@@ -2537,7 +2561,9 @@ impl Lowering<'_> {
                 values[index] = Some(self.arith(op, a, b)?);
             }
         }
-        values[root].map(|value| (value, false)).ok_or(Refusal("an empty arithmetic tree"))
+        values[root]
+            .map(|value| (value, false))
+            .ok_or(Refusal("an empty arithmetic tree"))
     }
 
     /// The fused pass over the list operations of an arithmetic tree whose scalar subtrees are
@@ -2585,15 +2611,24 @@ impl Lowering<'_> {
                     return Ok(None);
                 };
                 let value = match (self.builder.ty(value), item) {
-                    (Type::Vector { item: other, array: true }, _) if other == item => value,
+                    (
+                        Type::Vector {
+                            item: other,
+                            array: true,
+                        },
+                        _,
+                    ) if other == item => value,
                     (Type::Dbl, Item::Dbl) | (Type::I64, Item::I64) => value,
                     (Type::Dbl | Type::Int, Item::I64) => self.to_i64(value)?,
                     _ => return Ok(None),
                 };
-                let position = inputs.iter().position(|&input| input == value).unwrap_or_else(|| {
-                    inputs.push(value);
-                    inputs.len() - 1
-                });
+                let position = inputs
+                    .iter()
+                    .position(|&input| input == value)
+                    .unwrap_or_else(|| {
+                        inputs.push(value);
+                        inputs.len() - 1
+                    });
                 *slot = Operand::Input(position as u32);
             }
             stepped[index] = Some(steps.len() as u32);
@@ -2616,7 +2651,15 @@ impl Lowering<'_> {
             (true, _) => Type::I64,
             (false, _) => Type::Vector { item, array: true },
         };
-        Ok(Some(self.builder.emit(ty, Op::Elementwise { item, sum, program, inputs })))
+        Ok(Some(self.builder.emit(
+            ty,
+            Op::Elementwise {
+                item,
+                sum,
+                program,
+                inputs,
+            },
+        )))
     }
 
     /// A numeric operand converted to `item`, as a scalar or a vector as it was.
@@ -2653,7 +2696,9 @@ impl Lowering<'_> {
         if ta == Type::I64 || tb == Type::I64 {
             let a = self.to_i64(a)?;
             let b = self.to_i64(b)?;
-            return Ok(self.builder.emit(Type::Bool, Op::Compare(op, Item::I64, a, b)));
+            return Ok(self
+                .builder
+                .emit(Type::Bool, Op::Compare(op, Item::I64, a, b)));
         }
         let vectors = ta.items().is_some() || tb.items().is_some();
         let item_of = |ty: Type| ty.item().or_else(|| ty.items());

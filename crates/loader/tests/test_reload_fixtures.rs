@@ -168,8 +168,13 @@ fn render_plan(plan: &Plan, texts: &[(String, Option<String>)]) -> String {
                 foreign.join(" ")
             ));
         }
-        if deferred.cache_key.is_none() {
-            output.push_str("metadata not cached: a definition reads other code\n");
+        let lazy: Vec<&str> = deferred
+            .lazy_generics
+            .iter()
+            .map(|lazy| lazy.generic.as_str())
+            .collect();
+        if !lazy.is_empty() {
+            output.push_str(&format!("generics run on first use {}\n", lazy.join(" ")));
         }
     }
     if plan.sysdata != SysdataChange::Keep {
