@@ -3912,7 +3912,7 @@ unsafe fn key_in(value: Sexp) -> Option<(Key, KeyKind)> {
             let text = value.element(0);
             (text != values::na_string()).then_some((Key::Text(text), KeyKind::Text))
         }
-        SexpType::Record => {
+        SexpType::I64 => {
             native_key_bits(value)?;
             Some((Key::Native(value), KeyKind::Native))
         }

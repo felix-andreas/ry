@@ -534,7 +534,8 @@ unsafe fn call_builtin_reusing(
         && let Err(refused) = crate::records::check_native_args(
             call,
             args,
-            crate::numbers::takes_numbers(definition.name),
+            crate::numbers::takes_numbers(definition.name)
+                || crate::arrays::indexes_by_numbers(definition.name, args),
         ) {
         Err(refused)
     } else {

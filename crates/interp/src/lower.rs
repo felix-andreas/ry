@@ -21,8 +21,7 @@ use {
     },
     syntax::{
         NumberType, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize,
-        Unexpected,
-        split_number_suffix,
+        Unexpected, split_number_suffix,
     },
 };
 
@@ -1325,8 +1324,7 @@ unsafe fn with_annotated_literals(
         return Ok(value);
     };
     match annotation.kind() {
-        SyntaxKind::TYPE_REF => match (names_i64(&annotation), number_literal_text(node))
-        {
+        SyntaxKind::TYPE_REF => match (names_i64(&annotation), number_literal_text(node)) {
             (true, Some(text)) => crate::numbers::from_text(&text),
             _ => Ok(value),
         },

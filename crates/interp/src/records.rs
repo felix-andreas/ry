@@ -116,10 +116,7 @@ pub unsafe fn check_native_args(call: Sexp, args: &[Arg], skip_numbers: bool) ->
         if kind == SexpType::Record || (kind == SexpType::I64 && !skip_numbers) {
             let subject = argument_text(call, position)
                 .unwrap_or_else(|| format!("argument {}", position + 1));
-            return Err(error_in(
-                call,
-                boundary_message(&subject, arg.value),
-            ));
+            return Err(error_in(call, boundary_message(&subject, arg.value)));
         }
     }
     Ok(())
@@ -1356,7 +1353,10 @@ unsafe fn compare_numbers(target: Sexp, current: Sexp, prefix: &str, messages: &
         return;
     }
     let differences = left.iter().zip(right).filter(|(a, b)| a != b).count();
-    match (target.is_array(), left.iter().zip(right).find(|(a, b)| a != b)) {
+    match (
+        target.is_array(),
+        left.iter().zip(right).find(|(a, b)| a != b),
+    ) {
         (_, None) => {}
         (false, Some((&a, &b))) => messages.push(format!(
             "{prefix}target is {}, current is {}",
@@ -1372,7 +1372,12 @@ unsafe fn compare_numbers(target: Sexp, current: Sexp, prefix: &str, messages: &
 
 unsafe fn kind_phrase(value: Sexp) -> String {
     if value.kind() == SexpType::I64 {
-        if value.is_array() { "a ry List<I64>" } else { "a ry I64" }.to_owned()
+        if value.is_array() {
+            "a ry List<I64>"
+        } else {
+            "a ry I64"
+        }
+        .to_owned()
     } else if value.kind() == SexpType::Record {
         format!("a ry {}", native_kind(value).type_name())
     } else {

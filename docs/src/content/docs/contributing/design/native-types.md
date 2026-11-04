@@ -377,8 +377,9 @@ provides them.
     evaluates to, so a literal needs no conversion;
   - `Bool`: a length-one R `logical` holding `TRUE` or `FALSE`;
   - `Str`: a length-one R `character` holding a UTF-8 `CHARSXP` that is not `NA_STRING`;
-  - `I64`: one native number object holding the 64-bit value, with no attributes, distinguishable
-    from every R type by its type code.
+  - `I64`: a length-1 vector of ry's own type code (`I64SXP`, 28) with `REALSXP`'s layout,
+    holding the 64-bit value, with no attributes and never ALTREP, distinguishable from every R
+    type by its type code.
 - Integer arithmetic traps on overflow, integer division by zero is an error, and float arithmetic
   is IEEE 754. No typed operation checks for `NA`, because no ry value holds one.
 
@@ -387,7 +388,8 @@ provides them.
 - A `List<T>` is contiguous, with items stored unboxed at their natural width when `T` is a number
   (8 bytes for `F64` and `I64`), as R's 4-byte
   `logical` for `Bool`, and as handles otherwise. `List<F64>`, `List<Bool>` and `List<Str>` use R's `double`, `logical` and `character`
-  vector layouts, so they pass to R code and C code without a copy, as `Array<T>` does today.
+  vector layouts, so they pass to R code and C code without a copy. `List<I64>` is the `I64SXP`
+  vector at length n, so a scalar and a list share one representation.
 - An update through `xs[[i]] <- v`, `List.set`, `List.append` and the like reuses the storage when
   the list is uniquely held (`decisions.md`, "Standard library updates reuse a uniquely held
   value"), so a loop that appends is amortized constant time per item.

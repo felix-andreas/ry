@@ -899,7 +899,10 @@ unsafe fn strict(
 ) -> R<Sexp> {
     // An `I64` operand, single or a list, has its own vectorized operators (see `numbers`).
     if !call.args.iter().any(|arg| arg.value.is_array())
-        || call.args.iter().any(|arg| arg.value.kind() == SexpType::I64)
+        || call
+            .args
+            .iter()
+            .any(|arg| arg.value.kind() == SexpType::I64)
     {
         return compute(call);
     }

@@ -8,13 +8,7 @@
 
 use {
     heap::{Heap, object::Sexp},
-    interp::{
-        eval, lower,
-        numbers,
-        print,
-        unwind::Unwind,
-        values,
-    },
+    interp::{eval, lower, numbers, print, unwind::Unwind, values},
     std::cell::RefCell,
 };
 
@@ -82,13 +76,22 @@ const PRINTS: &[(&str, &str)] = &[
     ("Num.to_i64_checked(5)", ":Ok(5i64)\n"),
     ("Num.to_i64_checked(-1.5)", ":Err(:OutOfBounds)\n"),
     ("Num.to_i64_checked(1e19)", ":Err(:OutOfBounds)\n"),
-    ("Num.to_i64(-9223372036854775808)", "-9223372036854775808i64\n"),
+    (
+        "Num.to_i64(-9223372036854775808)",
+        "-9223372036854775808i64\n",
+    ),
     ("Num.to_f64(n)", "[1] 5\n"),
     // Overflow behaviors.
     ("Num.add_wrap(Num.max_i64, 1)", "-9223372036854775808i64\n"),
     ("Num.mul_wrap(4294967296i64, 4294967296i64)", "0i64\n"),
-    ("Num.add_saturated(Num.max_i64, 10)", "9223372036854775807i64\n"),
-    ("Num.sub_saturated(Num.min_i64, 10)", "-9223372036854775808i64\n"),
+    (
+        "Num.add_saturated(Num.max_i64, 10)",
+        "9223372036854775807i64\n",
+    ),
+    (
+        "Num.sub_saturated(Num.min_i64, 10)",
+        "-9223372036854775808i64\n",
+    ),
     ("Num.add_checked(Num.max_i64, 1)", ":Err(:Overflow)\n"),
     ("Num.add_checked(n, 1)", ":Ok(6i64)\n"),
     ("Num.abs(Num.to_i64(-3))", "3i64\n"),

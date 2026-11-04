@@ -873,12 +873,11 @@ impl Deparser {
         // `[]` rebuilds as an empty logical Array, so an empty one of another type converts.
         if count == 0 {
             match object.kind() {
-                SexpType::Integer | SexpType::I64 => {
-                    return self.print("List.from_r(integer(0))");
-                }
+                SexpType::Integer => return self.print("List.from_r(integer(0))"),
                 SexpType::Real => return self.print("List.from_r(numeric(0))"),
                 SexpType::String => return self.print("List.from_r(character(0))"),
-                SexpType::List => return self.print("[]"),
+                // An empty `List<I64>` is what `[]` gives once a later use types it.
+                SexpType::List | SexpType::I64 => return self.print("[]"),
                 _ => {}
             }
         }
@@ -937,7 +936,11 @@ impl Deparser {
                 .iter()
                 .all(|(key, _)| crate::arrays::is_ry_value(*key) || values::length(*key) == 1);
         self.print(module);
-        self.print(if literal { ".from_list([" } else { ".from_list(list(" });
+        self.print(if literal {
+            ".from_list(["
+        } else {
+            ".from_list(list("
+        });
         self.in_list += 1;
         let mut broken = false;
         let count = entries.len();

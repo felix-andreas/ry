@@ -26,7 +26,10 @@ pub fn sexp_type(code: SEXPTYPE) -> ApiResult<SexpType> {
 /// raises the conversion error instead.
 pub unsafe fn refuse_native(object: Sexp) -> ApiResult<()> {
     if interp::records::is_native(object) {
-        return Err(error(interp::records::boundary_message("the value", object)));
+        return Err(error(interp::records::boundary_message(
+            "the value",
+            object,
+        )));
     }
     Ok(())
 }

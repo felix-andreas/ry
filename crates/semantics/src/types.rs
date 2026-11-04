@@ -629,7 +629,6 @@ impl Constraint {
             _ => None,
         }
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]

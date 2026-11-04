@@ -2566,7 +2566,7 @@ impl<'a> Builder<'a> {
             };
             lowering.scope.push((parameters[at].0, register));
         }
-        // A position is an `I64`, a boxed native number no register type holds, so the
+        // A position is an `I64`, a length-1 I64 vector no register type holds, so the
         // position binds to no register and a body that reads it is not compiled.
         if traversal.indexed {
             lowering.scope.push((parameters[arity - 1].0, UNUSED));

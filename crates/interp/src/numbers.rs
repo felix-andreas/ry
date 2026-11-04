@@ -238,8 +238,7 @@ unsafe fn r_operand(call: &Call<'_>, value: Sexp) -> R<i64> {
             call.name()
         ))
     })?;
-    convert(source)
-        .ok_or_else(|| call.error(format!("{} does not fit I64", source_text(source))))
+    convert(source).ok_or_else(|| call.error(format!("{} does not fit I64", source_text(source))))
 }
 
 /// The boundary error for the operand that is a ry value but not a number.
@@ -344,10 +343,10 @@ pub fn convert(source: Source) -> Option<i64> {
     const LIMIT: f64 = 9_223_372_036_854_775_808.0;
     match source {
         Source::Int(value) => Some(value),
-        Source::F64(value) => (value.is_finite()
-            && value.fract() == 0.0
-            && (-LIMIT..LIMIT).contains(&value))
-        .then(|| value as i64),
+        Source::F64(value) => {
+            (value.is_finite() && value.fract() == 0.0 && (-LIMIT..LIMIT).contains(&value))
+                .then(|| value as i64)
+        }
     }
 }
 
@@ -449,8 +448,8 @@ unsafe fn two_numbers(call: &Call<'_>) -> R<(i64, i64)> {
 }
 
 unsafe fn library_operand(call: &Call<'_>, parameter: &str, value: Sexp) -> R<i64> {
-    let source = r_source(value)
-        .map_err(|_| wrong(call, parameter, "an I64 or a plain R number", value))?;
+    let source =
+        r_source(value).map_err(|_| wrong(call, parameter, "an I64 or a plain R number", value))?;
     convert(source).ok_or_else(|| {
         call.error(format!(
             "`{parameter}` is {}, which does not fit I64",
@@ -724,7 +723,10 @@ pub(crate) unsafe fn list_from_r(call: &Call<'_>) -> R<Sexp> {
             }
             numbers.iter().map(|&number| i64::from(number)).collect()
         } else {
-            values::raws(vector).iter().map(|&byte| i64::from(byte)).collect()
+            values::raws(vector)
+                .iter()
+                .map(|&byte| i64::from(byte))
+                .collect()
         };
         return list(&widened);
     }
