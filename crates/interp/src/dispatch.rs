@@ -534,7 +534,7 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     }
     let args = eval::unevaluated_args(promargs);
     let new_call = renamed_call(frame_call, found.method_name)?;
-    let result = apply_method(new_call, found.method, &args, sys_parent, &vars)?;
+    let result = apply_method(new_call, found.method, &args, sys_parent, &vars, false)?;
     Err(crate::unwind::jump(crate::Jump::Return {
         env,
         value: result,
@@ -618,14 +618,20 @@ unsafe fn first_supplied(promargs: Sexp) -> R<Sexp> {
     }
 }
 
+/// `owned` says the promises in `args` were made for this call alone and are not read again,
+/// so the call releases them once it returns ([`eval::apply_closure_owning`]).
 unsafe fn apply_method(
     call: Sexp,
     method: Sexp,
     args: &[Arg],
     sys_parent: Sexp,
     vars: &[(Sexp, Sexp)],
+    owned: bool,
 ) -> R<Sexp> {
     match method.kind() {
+        SexpType::Closure if owned => {
+            eval::apply_closure_owning(call, method, args, sys_parent, Some(vars))
+        }
         SexpType::Closure => apply_closure(call, method, args, sys_parent, Some(vars)),
         SexpType::Builtin => {
             let definition = eval::builtin_def(method)?;
@@ -1249,14 +1255,21 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
         handlers: handlers.clone(),
         restarts: restarts.clone(),
         srcref: state.srcref,
+        closures: state.frame_closures.len(),
     });
     let depth = state.frames.len();
-    let result = apply_method(new_call, found.method, promised, env, &found.vars);
+    let result = apply_method(new_call, found.method, promised, env, &found.vars, true);
     let state = interp();
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = state.frames[depth - 1].handlers.clone();
+    state.frame_closures.truncate(state.frames[depth - 1].closures);
     state.frames.truncate(depth - 1);
     state.restarts = restarts;
+    if let Ok(value) = result {
+        let heap = crate::heap();
+        heap.release_arguments(promargs);
+        heap.release_enclosure(context_env, value);
+    }
     result
 }
 
@@ -1348,7 +1361,7 @@ unsafe fn group_dispatch(
     }
     let promised = promised_args(call, args)?;
     let new_call = renamed_call(call, found_method.method_name)?;
-    apply_method(new_call, found_method.method, &promised, env, &vars).map(Some)
+    apply_method(new_call, found_method.method, &promised, env, &vars, true).map(Some)
 }
 
 /// Asks `chooseOpsMethod(x, y, mx, my, cl, reverse)` whether `chosen`, the method found for

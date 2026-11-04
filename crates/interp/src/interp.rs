@@ -131,7 +131,13 @@ pub struct Frame {
     /// The srcref current when the call was made (`R_Srcref`), which `sys.call` and `traceback`
     /// attach to the call, and which is current again once the call returns.
     pub srcref: Sexp,
+    /// Where this call's entries in [`Interp::frame_closures`] start.
+    pub closures: usize,
 }
+
+/// A call that creates more closures than this, such as a loop of `lapply(x, function(i) ...)`,
+/// keeps its frame for a collection to free, which bounds what the list roots.
+pub const FRAME_CLOSURES: usize = 16;
 
 /// Services the heap's owner provides because they need native code or process-wide state the
 /// interpreter does not own. Each has a working default, so a test harness needs none.
@@ -197,6 +203,10 @@ pub enum TaskCallbackRoutine {
 
 pub struct Interp {
     pub frames: Vec<Frame>,
+    /// The closures each running call created in its own frame, at most
+    /// [`FRAME_CLOSURES`] each, which the heap needs to release the frame when the call returns
+    /// (`Heap::release_frame`).
+    pub frame_closures: Vec<Sexp>,
     /// The foreign calls (`.Call`, `.External`, `.C`, `.Fortran`) in progress, each with the
     /// number of frames below it. GNU R gives them a builtin context, which tracebacks list and
     /// `sys.calls()` does not, so they live beside the frames rather than among them.
@@ -362,6 +372,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     let connection_table = connections::Table::new(hooks.connection_vfprintf);
     state.interp = Some(Interp {
         frames: Vec::new(),
+        frame_closures: Vec::new(),
         foreign_calls: Vec::new(),
         handlers: None,
         restarts: None,
@@ -521,6 +532,9 @@ impl RootSource for InterpRoots {
                 }
                 conditions::trace_handlers(&frame.handlers, marker);
                 conditions::trace_restarts(&frame.restarts, marker);
+            }
+            for &closure in &interp.frame_closures {
+                marker.mark(closure);
             }
             for &(call, _) in &interp.foreign_calls {
                 marker.mark(call);
