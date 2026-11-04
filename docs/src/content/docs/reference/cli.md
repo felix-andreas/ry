@@ -221,7 +221,7 @@ like `ry run`. `ry load --r-entry` prints the R code that gives a plain R sessio
 and consoles of `ry run` and `ry R`.
 
 `ry server --debug` (or `RY_DEBUG=1`) adds internal analysis facts to hover, for working on ry itself.
-No feature is experimental right now, so `--experimental-features` ignores every name with a warning
+No feature is experimental, so `--experimental-features` ignores every name with a warning
 (`range_formatting` is always on).
 
 ## test

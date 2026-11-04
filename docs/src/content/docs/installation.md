@@ -49,13 +49,15 @@ runtime.
 
 | Editor | Setup |
 | --- | --- |
-| VS Code | Install the [ry extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry). It bundles ry 0.3.2-beta, which has no runtime, for Linux x86_64, macOS on Apple silicon and Windows x86_64. Set `ry.path` to a 0.4.1-beta binary to use `ry run`, the debugger and the console. |
-| Positron, VSCodium | Install the `.vsix` for your platform from the [0.3.2-beta release](https://github.com/felix-andreas/ry/releases/tag/0.3.2-beta) with **Extensions: Install from VSIX...**; ry is not on Open VSX. |
-| Zed | Install the [R extension](https://zed.dev/extensions/r). Then clone this repository and run **zed: install dev extension** on `editors/zed`. It uses `ry` on your `PATH`, or downloads the latest release. |
+| VS Code | Install the [ry extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry). |
+| Positron, VSCodium | Install the `.vsix` for your platform from the [0.3.2-beta release](https://github.com/felix-andreas/ry/releases/tag/0.3.2-beta) with **Extensions: Install from VSIX...** (ry is not on Open VSX). |
+| Zed | Install the [R extension](https://zed.dev/extensions/r), then clone this repository and run **zed: install dev extension** on `editors/zed`. It uses the `ry` on your `PATH`, or downloads the latest release. |
 | RStudio | Formatting only: under **Tools → Global Options → Code → Formatting**, set **Code formatter** to **External** and the command to `ry fmt`. |
 | Any LSP client | Run `ry server` as the language server for R files. |
 
-The language server reads the project's `ry.toml`, so the editor and `ry check` report the same
-findings. [Editor settings](/reference/configuration#editor-settings) lists the extension's options.
+The extension in VS Code, Positron and VSCodium bundles ry 0.3.2-beta, which has no runtime. Set its
+`ry.path` setting to a 0.4.1-beta binary to use `ry run`, the debugger and the console. The language
+server reads the project's `ry.toml`, so the editor and `ry check` report the same findings.
+[Editor settings](/reference/configuration#editor-settings) lists the extension's options.
 
 **Next:** [check your code](/tutorial/check).

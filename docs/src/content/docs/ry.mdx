@@ -25,10 +25,9 @@ also served as Markdown at [`/ry.md`](/ry.md).
 | `ry server` | The language server, which your editor starts |
 | `ry debug-adapter` | A Debug Adapter Protocol debugger |
 
-Checking, formatting and the editor never run R, and ry's runtime brings its own base R 4.6.2, so
-only `ry R` needs GNU R installed. Install the
-[VS Code extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry) or a
-binary ([Installation](/installation)).
+Checking, formatting and the editor never run R. The other commands need base R: the 0.4.1-beta
+release reads it from a GNU R 4.3 or newer, and a build from source carries base R 4.6.2 inside
+`ry`. `ry R` always needs GNU R. [Installation](/installation) has the binaries and editor setup.
 
 ## Configuration
 
@@ -105,9 +104,9 @@ When a comment and an inline annotation disagree, ry uses the inline one and war
 
 | Type | Meaning |
 | --- | --- |
-| `integer`, `double`, `character`, `logical`, `complex` | Exactly one element; an `if` condition needs one |
+| `integer`, `double`, `character`, `logical`, `complex` | Exactly one element |
 | `integer[]`, `double[named]` | A vector of any length, optionally with names |
-| `list{integer, character}`, `list{name: character}` | A list with a fixed shape, positional or named; `$` on a missing field is an error |
+| `list{integer, character}`, `list{name: character}` | A list with a fixed shape, positional or named; `$` on a misspelled field is an error |
 | `list[integer]`, `list[named: integer]` | A list of any length, or looked up by key (`[[key]]` gives `integer \| NULL`) |
 | `character \| NULL` | A union; `is.null()` and the other `is.*` tests narrow it |
 | `fn(x: double, ...: character) -> double` | A function type; argument names are part of it |
@@ -120,10 +119,9 @@ When a comment and an inline annotation disagree, ry uses the inline one and war
 | `Any` | A deliberate opt-out; compatible with everything, and strict mode accepts it |
 | `Unknown` | What ry could not infer (data frame columns, S4 and R6 objects); compatible with everything, and strict mode reports it |
 
-A `double` accepts an `integer` or `logical`, but a number never passes for a `character`. Each of
-your functions has one signature, and there is no inheritance, so inference stays fast enough for
-every keystroke. The [tutorial](/tutorial/types) and the
-[type system reference](/reference/type-system) have the rules.
+A `double` accepts an `integer` or `logical`, but a number never passes for a `character`. Your own
+functions cannot be overloaded, and nominal types have no subtyping. The
+[tutorial](/tutorial/types) and the [type system reference](/reference/type-system) have the rules.
 
 ## Records, tags and `match`
 
@@ -226,7 +224,7 @@ of data.table's time. [Benchmarks](/benchmarks) has the programs and the method.
 ## Status
 
 ry is in beta. The checker, language server, formatter and loader are ready for daily use, and
-diagnostic codes, `ry.toml` keys and the JSON output are stable. ry's own runtime is still
-incomplete: a script that needs something it lacks stops with an error that names it, and `ry R`
-runs plain and typed R on GNU R meanwhile. Records, tags, Arrays, `DataFrame` and the standard
-library run only on ry's runtime.
+diagnostic codes, `ry.toml` keys and the JSON output are stable. ry's runtime is incomplete: a
+script that needs something it lacks stops with an error that names it, and `ry R` runs plain and
+inline-annotated R on GNU R instead. Records, tags, Arrays, `DataFrame` and the standard library
+run only on ry's runtime.

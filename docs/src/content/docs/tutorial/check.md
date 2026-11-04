@@ -19,7 +19,8 @@ apply_discount <- function(price, rate) {
 }
 ```
 
-Run `ry check` anywhere in the project:
+Run `ry check` anywhere in the project. It works the same in a folder of scripts with no
+`DESCRIPTION`:
 
 ```text ry check
 $ ry check
@@ -31,12 +32,14 @@ unresolved
  2 |   price * ratee
    |           ^^^^^
  3 | }
+  help: Change to `rate` (`ry check --fix --unsafe-fixes` applies it)
 
 1 problem in 1 file
+1 fixable with `ry check --fix --unsafe-fixes`
 ```
 
 A finding starts with its code (`unresolved`), then `!` for a warning or `x` for an error. The exit
-status is 1 when anything is found.
+status is 1 when anything is found. [Fix and silence](#fix-and-silence) covers the `help:` line.
 
 ry resolves every name by R's scoping rules, so it knows what each file can see:
 
@@ -79,12 +82,13 @@ syntax-error
 
 ## Lints
 
-Eleven lints are on by default. Three of them flag style that hides bugs:
+Eleven lints are on by default. Three of them flag style that hides bugs, here in `R/rates.R`:
 
 ```r
 total = 2L
 flag <- T
 x <- c(1, 2, )
+print(totl)
 ```
 
 ```text ry check
@@ -119,9 +123,9 @@ Opt-in style lints, such as `single-quotes` and `redundant-return`, are listed i
 
 ## Fix and silence
 
-Add `print(totl)` to the lint example above, as `R/rates.R`. `ry check --fix` applies the safe
-fixes (`=` to `<-`, `T` to `TRUE`, the trailing comma) and reports what is left. A spelling
-suggestion is a guess, so it needs `--unsafe-fixes` as well:
+On `R/rates.R` above, `ry check --fix` applies the safe fixes (`=` to `<-`, `T` to `TRUE`, the
+trailing comma) and reports what is left. A spelling suggestion is a guess, so it needs
+`--unsafe-fixes` as well:
 
 ```text
 $ ry check --fix
@@ -186,5 +190,4 @@ The language server shows the same findings as you type, with hover, completion,
 references, rename and quick fixes for the same fixes. [Installation](/installation#editors) sets it
 up.
 
-**You can now** check and format an R project, apply fixes, and gate CI on both.
 **Next:** [type your code](/tutorial/types).

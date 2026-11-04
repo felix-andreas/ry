@@ -7,9 +7,8 @@ sidebar:
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-**Goal:** model data with types the checker knows completely, and make ry prove that every value
-has a known type. That proof is strict mode, which comes last, after the tools that make it
-reachable.
+**Goal:** model data with types the checker knows completely, then turn on strict mode, which
+proves that every value has a known type.
 
 ## Nominal types
 
@@ -175,12 +174,10 @@ added 1 inferred annotation
 2 problems in 1 file
 ```
 
-In strict mode, a file in `R/` may only define things at its top level (functions, types, constants
-built by `@pure` functions), so loading a package has no side effects.
+In strict mode, the top level of a file in `R/` may only define things (functions, types, classes,
+and constants computed without side effects), so loading a package has no side effects.
 `[check] object-systems = false` also rejects new S4, R6 and Reference Classes.
 [Type system](/reference/type-system#a-package-files-top-level) has the rules.
 
-**You can now** keep same-shaped values apart, query typed tables, handle failure with tags instead
-of `NA`, and prove with strict mode that every value has a known type.
 **Next:** the [Reference](/reference/type-system), or [ry at a glance](/ry) for everything on one
 page.

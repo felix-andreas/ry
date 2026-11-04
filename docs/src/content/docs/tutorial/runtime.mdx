@@ -21,8 +21,13 @@ annotations that are also checked at run time, and records, tagged unions and `m
 | `ry document` | roxygen2, writing the same `man/*.Rd` and `NAMESPACE` byte for byte |
 | `ry load -e EXPR` | loads the package, evaluates `EXPR`, exits |
 
-Inside a package, the console loads it, then reloads exactly the definitions you changed before
-each command. There is no `load_all()` to call and no session to restart:
+Inside a package, `ry run` opens a console that loads the package, then reloads exactly the
+definitions you changed before each command. There is no `load_all()` to call and no session to
+restart. Take a package `tally` whose `R/count.R` has a bug:
+
+```r
+count_words <- function(text) length(strsplit(text, " ")[[1]])
+```
 
 ```text
 $ ry run
@@ -32,8 +37,8 @@ ry console on ry's runtime. Type q() or Ctrl-D to quit.
 [1] 4
 ```
 
-The double space made an empty word. Change `strsplit(text, " ")` in `R/count.R` to split on
-`"[[:space:]]+"`, save, and run the same command:
+The double space makes an empty word. Change `" "` to `"[[:space:]]+"`, save, and run the same
+command:
 
 ```text
 > count_words("the  quick fox")
@@ -47,63 +52,8 @@ something it lacks stops with an error that names it, and `ry R` runs the same c
 
 ## Inline annotations
 
-A `#:` comment repeats every parameter name of the function below it. An inline annotation puts
-each type next to its name instead, and means the same to the checker:
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Untyped">
-
-```r
-apply_discount <- function(price, rate = 0.2) {
-  price * (1 - rate)
-}
-apply_discount("100")
-```
-
-```text ry check typing
-type-mismatch
-
-  x expected a numeric value (`integer` or `double`), found `character`
-```
-
-</TabItem>
-<TabItem label="Inline">
-
-```r
-apply_discount <- function(price: double, rate: double = 0.2) -> double {
-  price * (1 - rate)
-}
-apply_discount("100")
-```
-
-```text ry check typing
-type-mismatch
-
-  x expected `double`, found `character`
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: fn(price: double, [rate]: double) -> double
-apply_discount <- function(price, rate = 0.2) {
-  price * (1 - rate)
-}
-apply_discount("100")
-```
-
-```text ry check typing
-type-mismatch
-
-  x expected `double`, found `character`
-```
-
-</TabItem>
-</Tabs>
-
-On ry's runtime, an inline annotation is also checked when the code runs, which catches values
-whose type shows only then:
+An inline annotation, the **Inline** tab of [step 2](/tutorial/types#annotate), means the same to
+the checker as its `#:` comment. On ry's runtime it is also checked when the code runs:
 
 ```r
 scale <- function(values: double, by: double) -> double values * by
@@ -126,8 +76,8 @@ When a statement has both spellings and they disagree, ry uses the inline one an
 
 ## Records, tags and match
 
-R models data with lists, S4 or R6 classes, which a checker can follow only so far. ry has its own
-data types, which run only on ry's runtime:
+ry has its own data types, which a checker can follow completely where R's lists, S4 and R6 classes
+defeat it. They run only on ry's runtime:
 
 ```r
 point <- (x = 1, y = 2)       # Record{x: double, y: double}
@@ -211,6 +161,4 @@ type-mismatch
 `[1, 2, 3]` is an *Array*, ry's strict vector: one item type, no `NA`, no names and no recycling.
 [Type system](/reference/type-system#arrays) has its rules.
 
-**You can now** run scripts and a reloading console on ry's runtime, write inline annotations that
-are checked when the code runs, and model data with records, tags and `match`.
 **Next:** [go fully typed](/tutorial/fully-typed).
