@@ -545,6 +545,9 @@ unsafe fn try_eval(expression: Sexp, env: Sexp) -> R<Result<Sexp, String>> {
 /// `.InheritForDispatch(classes, fdef, mtable)`: selects an inherited method and caches it in
 /// the table. The call names the function by value, as GNU R's does, which shows in its errors.
 unsafe fn inherited_method(classes: &[Sexp], generic: Sexp, table: Sexp) -> R<Sexp> {
+    if let Some(method) = crate::methods_core::inherited_method(classes, generic, table)? {
+        return Ok(method);
+    }
     let function = methods_function(".InheritForDispatch")?;
     let classes = values::list_vector(classes)?;
     let call = values::call(function, &[classes, generic, table])?;

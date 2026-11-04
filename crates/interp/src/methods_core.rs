@@ -2831,12 +2831,7 @@ fn trace_delegate(line: u32) {
 /// class bound to `symbol` in `place`, with its effects written directly. `false`, before any
 /// effect, when the definition is not a plain class, union or reference class representation,
 /// or when the class table holds a definition of the name from another package.
-unsafe fn cache_class_item(
-    symbol: Sexp,
-    name: &[u8],
-    place: Sexp,
-    class_table: Sexp,
-) -> R<bool> {
+unsafe fn cache_class_item(symbol: Sexp, name: &[u8], place: Sexp, class_table: Sexp) -> R<bool> {
     let Some(definition) = quiet_value(symbol, place)? else {
         bail!(false);
     };
@@ -3344,16 +3339,22 @@ unsafe fn try_new(class: Sexp, place: Sexp) -> R<Option<Sexp>> {
             return Ok(None);
         }
     }
-    // `new(definition)` makes the object and calls `initialize()` on it without arguments. Once
-    // dispatch has cached the default method for the object's class, that call returns the
-    // object and changes nothing, so the object is the whole result. Before that, the R call
-    // runs to fill the dispatch cache as GNU R does. The value becomes a slot of the new class's
+    // `new(definition)` makes the object and calls `initialize()` on it without arguments. When
+    // dispatch selects the default method for the object's class, that call returns the object,
+    // so the object and the method dispatch caches are the whole result. The value becomes a slot of the new class's
     // prototype, which `new()` copies deeply, so a shallow copy is enough here.
     if interp().globals.deferred_definitions.is_empty() {
         let value = crate::methods::new_object_copying(definition, false)?;
         crate::heap().root(value);
         let label = crate::methods::dispatch_class(value)?;
-        if let Some(method) = quiet_value(install_text(label.element(0))?, all_table)?
+        let method = match quiet_value(install_text(label.element(0))?, all_table)? {
+            Some(method) => Some(method),
+            None => match methods_value("initialize")? {
+                Some(generic) => inherited_method(&[label], generic, all_table)?,
+                None => None,
+            },
+        };
+        if let Some(method) = method
             && is_default_initialize(method)?
         {
             return Ok(Some(value));
@@ -3363,6 +3364,120 @@ unsafe fn try_new(class: Sexp, place: Sexp) -> R<Option<Sexp>> {
         return Ok(None);
     };
     eval::eval(values::call(new, &[definition])?, place).map(Some)
+}
+
+/// `.InheritForDispatch(classes, generic, table)` for a generic of one signature argument
+/// outside any group, when one method is eligible: the closest of the class's superclasses
+/// that has a method, or the default for `ANY`. Like the R code, it caches the method in
+/// `table` under the class's label, as a copy whose `target` names the class. `None` when the
+/// R code has to choose among methods, coerce the argument, or report that none applies.
+pub(crate) unsafe fn inherited_method(
+    classes: &[Sexp],
+    generic: Sexp,
+    table: Sexp,
+) -> R<Option<Sexp>> {
+    if !native_definitions() {
+        return Ok(None);
+    }
+    let &[class] = classes else {
+        return Ok(None);
+    };
+    if class.kind() != SexpType::String || length(class) != 1 || generic.kind() != SexpType::Closure
+    {
+        return Ok(None);
+    }
+    let group = slot(generic, "group")?;
+    if length(group) != 0 || duplicate_classes()? {
+        return Ok(None);
+    }
+    let Some(methods_table) = quiet_value(install(".MTable")?, generic.tag())? else {
+        return Ok(None);
+    };
+    if methods_table.kind() != SexpType::Environment {
+        return Ok(None);
+    }
+    let arguments = slot(generic, "signature")?;
+    if arguments.kind() != SexpType::String || length(arguments) == 0 {
+        return Ok(None);
+    }
+    let simple_only = is_true(get_attr(arguments, install("simpleOnly")?));
+    let Some(definition) = cached_class(class)? else {
+        return Ok(None);
+    };
+    // The labels `.findInheritedMethods()` looks up after the exact one: the superclasses
+    // whose inheritance holds without a test, nearest first, then `ANY`.
+    let mut found: Vec<(Sexp, Sexp, Sexp)> = Vec::new();
+    let mut seen: Vec<&[u8]> = vec![class.element(0).bytes()];
+    let mut candidates = list_entries(slot(definition, "contains")?);
+    candidates.push((values::mkchar("ANY")?, values::scalar_bool(true)?));
+    for (label, extension) in candidates {
+        let eligible = if extension.kind() == SexpType::Logical {
+            is_true(extension)
+        } else {
+            simple(extension)?
+                || (!simple_only
+                    && is_true(crate::bytecode::closure_body(slot(extension, "test")?)))
+        };
+        if !eligible || seen.contains(&label.bytes()) {
+            continue;
+        }
+        seen.push(label.bytes());
+        if let Some(cell) = crate::heap().frame_cell(methods_table, install_text(label)?) {
+            let Some(method) = quiet_binding(cell, 0)? else {
+                return Ok(None);
+            };
+            found.push((label, extension, method));
+        }
+    }
+    if found.len() > 1 {
+        found.retain(|(label, _, _)| label.bytes() != b"ANY");
+    }
+    let [(label, extension, method)] = found[..] else {
+        return Ok(None);
+    };
+    let method = if is_method_definition(method) {
+        // `.inheritedArgsExpression()` adds a coercion of the argument to the class the method
+        // is defined for unless the class extends it simply.
+        let defined = get_attr(method, install("defined")?);
+        if defined.kind() != SexpType::String
+            || length(defined) != 1
+            || defined.element(0).bytes() != label.bytes()
+            || (label.bytes() != b"ANY"
+                && extension.kind() != SexpType::Logical
+                && !simple(extension)?)
+        {
+            return Ok(None);
+        }
+        let package = match get_attr(class, install("package")?) {
+            package if package.kind() == SexpType::String && length(package) == 1 => {
+                package.element(0)
+            }
+            _ => values::mkchar("methods")?,
+        };
+        let target = values::scalar_string_charsxp(class.element(0))?;
+        crate::heap().root(target);
+        values::set_attr(target, symbols().class, methods_class("signature")?)?;
+        values::set_attr(
+            target,
+            symbols().names,
+            values::scalar_string_charsxp(arguments.element(0))?,
+        )?;
+        values::set_attr(
+            target,
+            install("package")?,
+            values::scalar_string_charsxp(package)?,
+        )?;
+        target.set_gp_bits(gp::S4_OBJECT, true);
+        let copy = values::shallow_duplicate(method)?;
+        values::set_attr(copy, install("target")?, target)?;
+        copy
+    } else if matches!(method.kind(), SexpType::Builtin | SexpType::Special) {
+        method
+    } else {
+        return Ok(None);
+    };
+    eval::define(install_text(class.element(0))?, method, table)?;
+    Ok(Some(method))
 }
 
 /// Whether `method` is the default `initialize` method or a copy of it that inherited dispatch
@@ -3882,7 +3997,9 @@ unsafe fn default_where(frame: Sexp, promise: Sexp) -> R<Option<Sexp>> {
     for name in ["topenv", "parent.frame"] {
         let symbol = install(name)?;
         if crate::heap().frame_cell(frame, symbol).is_some()
-            || crate::heap().frame_cell(frame.enclosure(), symbol).is_some()
+            || crate::heap()
+                .frame_cell(frame.enclosure(), symbol)
+                .is_some()
         {
             return Ok(None);
         }
