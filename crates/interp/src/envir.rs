@@ -1341,7 +1341,9 @@ pub unsafe fn install_default_options() -> R<()> {
         ("keep.source", scalar_bool(false)?),
         (
             "keep.source.pkgs",
-            scalar_bool(std::env::var("R_KEEP_PKG_SOURCE").is_ok_and(|value| value == "yes"))?,
+            scalar_bool(
+                crate::image::variable("R_KEEP_PKG_SOURCE").is_ok_and(|value| value == "yes"),
+            )?,
         ),
         ("keep.parse.data", scalar_bool(true)?),
         ("keep.parse.data.pkgs", scalar_bool(false)?),

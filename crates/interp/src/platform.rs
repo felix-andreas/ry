@@ -818,7 +818,7 @@ mod imp {
     }
 
     pub fn system_name() -> SystemName {
-        let user = std::env::var("USERNAME").unwrap_or_else(|_| "unknown".into());
+        let user = crate::image::variable("USERNAME").unwrap_or_else(|_| "unknown".into());
         let machine = match std::env::consts::ARCH {
             "x86_64" => "x86-64",
             other => other,
@@ -827,7 +827,7 @@ mod imp {
             sysname: "Windows".into(),
             release: "10 x64".into(),
             version: String::new(),
-            nodename: std::env::var("COMPUTERNAME").unwrap_or_default(),
+            nodename: crate::image::variable("COMPUTERNAME").unwrap_or_default(),
             machine: machine.into(),
             login: user.clone(),
             effective_user: user.clone(),
@@ -864,7 +864,7 @@ mod imp {
     pub fn home_directory(user: Option<&[u8]>) -> Option<Vec<u8>> {
         match user {
             Some(_) => None,
-            None => std::env::var("USERPROFILE")
+            None => crate::image::variable("USERPROFILE")
                 .ok()
                 .map(|home| home.replace('\\', "/").into_bytes()),
         }

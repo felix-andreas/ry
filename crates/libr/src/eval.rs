@@ -1222,6 +1222,7 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
         site_profile: false,
         user_profile: false,
         interactive: false,
+        image: None,
     };
     match interp::session::start(options) {
         Ok(()) => 0,
@@ -1320,6 +1321,11 @@ pub unsafe extern "C" fn ry_run(
     }
 }
 
+const IMAGE_HOST: interp::image::ImageHost = interp::image::ImageHost {
+    identity: env!("RY_RUNTIME_ID"),
+    fixed_objects: crate::altrep::image_objects,
+};
+
 /// Starts the session a script runs in: base R and the default packages, then the package
 /// loader as `tools:ry`. Reports why and returns false when either does not load.
 unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool {
@@ -1332,6 +1338,7 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
         site_profile: flags & RUN_FLAG_SITE_PROFILE != 0,
         user_profile: flags & RUN_FLAG_USER_PROFILE != 0,
         interactive: false,
+        image: Some(IMAGE_HOST),
     };
     if let Err(unwind) = interp::session::start(options) {
         interp::session::report_toplevel(unwind);
@@ -1549,6 +1556,7 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         site_profile: true,
         user_profile: true,
         interactive: true,
+        image: Some(IMAGE_HOST),
     };
     if let Err(unwind) = interp::session::start(options) {
         interp::session::report_toplevel(unwind);

@@ -409,6 +409,31 @@ unsafe fn routine_of(
     find(&name, Some(&package))
 }
 
+/// A start-up image's token for an external pointer to a builtin routine's table entry: its
+/// position in [`routines`], plus one so that no token is zero.
+pub(crate) unsafe fn routine_token(pointer: Sexp) -> Option<u64> {
+    if !is_marker(pointer.external_tag(), ROUTINE_MARKER) {
+        return None;
+    }
+    let index = routine_index(pointer.external_address() as *const Routine)?;
+    Some(index as u64 + 1)
+}
+
+/// The table entry a [`routine_token`] names.
+pub(crate) fn routine_address(token: u64) -> Option<*mut std::ffi::c_void> {
+    let index = usize::try_from(token.checked_sub(1)?).ok()?;
+    let routine = routines().nth(index)?;
+    Some(routine as *const Routine as *mut std::ffi::c_void)
+}
+
+/// The package of a builtin library [`load`] names, as the `'static` name the table keeps.
+pub(crate) fn package_name(package: &str) -> Option<&'static str> {
+    PACKAGES
+        .iter()
+        .find(|candidate| **candidate == package)
+        .copied()
+}
+
 unsafe fn is_marker(tag: Sexp, marker: &str) -> bool {
     tag.kind() == SexpType::Symbol && values::symbol_name(tag) == marker
 }

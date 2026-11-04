@@ -433,6 +433,10 @@ thread_local! {
     static OUTPUT_DECIMAL: RefCell<String> = RefCell::new(".".to_owned());
 }
 
+pub(crate) fn output_decimal() -> String {
+    OUTPUT_DECIMAL.with(|decimal| decimal.borrow().clone())
+}
+
 pub fn set_output_decimal(mark: &str) {
     OUTPUT_DECIMAL.with(|decimal| *decimal.borrow_mut() = mark.to_owned());
 }

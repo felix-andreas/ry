@@ -206,6 +206,28 @@ time where many objects outlive a collection: on a generated package's 1,907 tes
 runs 66 full collections instead of 5, and collecting takes 4.8 s of the 25 s instead of 0.7 s.
 A value outside a variable's range is ignored, as on GNU R.
 
+### Start-up image
+
+The first `ry run` of a script saves the session as it stands once base R and the default packages
+have loaded, and later runs load that image instead of running base R's start-up code. On Linux an
+empty script takes about 47 ms from an image and about 125 ms without one; the run that writes the
+image takes about 180 ms.
+
+An image belongs to one ry build, one base R tree, and the values of the environment variables
+start-up reads (`R_DEFAULT_PACKAGES`, `R_LIBS`, the locale and the others), so a change to any of
+them starts the slow way once and writes a new image. A session never uses an image when it is
+interactive or sources a site or user profile, which `ry run` never does and ry's `Rscript` does
+when one exists. A damaged image is reported on stderr and replaced:
+
+```
+ry: starting without the start-up image: /home/me/.cache/ry/image/cac0e68e60610b97.image is damaged
+```
+
+| Variable | Effect |
+| --- | --- |
+| `RY_IMAGE` | `0` turns images off: every start runs the slow way and writes nothing. |
+| `RY_IMAGE_DIR` | The directory images go in, instead of `$XDG_CACHE_HOME/ry/image` (or `~/.cache/ry/image`). It keeps the four most recent images. |
+
 ## load and server
 
 `ry load` [loads the package](/guides/running) at `PATH` (default: the one containing the

@@ -5175,9 +5175,9 @@ check` releases its trees once, and memoized records are compact" below).
 - **Version emulation is kept for the opt-in:** `R_HOME` naming GNU R 4.3 or later makes ry
   behave like that release ("The runtime emulates the GNU R version it loads base R from" below).
   The oracle's expectations are GNU R 4.6.2 output, so CI sets `R_HOME` to 4.6.2.
-- **Impact.** One source of truth for the R version a user gets; start-up is unchanged (about
-  140 ms for an empty script, the same tree shape as GNU R's). The preloaded heap image that
-  would cut start-up further is a design draft (`docs/.../contributing/design/base-image.md`).
+- **Impact.** One source of truth for the R version a user gets, with the same tree shape as
+  GNU R's. Start-up from that tree is cut by the start-up image ("The start-up image is written
+  in process and keyed by what start-up reads" below).
 
 ## The runtime emulates the GNU R version it loads base R from
 
@@ -7442,3 +7442,33 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Impact.** Cold first `new()` on the bench package fell from 8.6 s to 6.3 s and the warm one from
   94 to 103 ms to 78 to 88 ms. `crates/oracle/cases/s4__native_core_queries.R` pins the covered
   functions, including their error messages and calls, against GNU R.
+
+## The start-up image is written in process and keyed by what start-up reads
+
+- **Previous source of truth.** Every start re-derived the same session from base R's files: it
+  sourced the baseloader, lazy-loaded base, and attached the six default packages, which included
+  methods rebuilding its S4 tables. An empty `ry run` took about 125 ms (median, Linux, bench
+  profile), and `R_DEFAULT_PACKAGES=NULL` took about 30 ms.
+- **What was structurally weak.** The design draft planned one `base.image` per platform, written
+  by `just base-r` and mapped in place with copy-on-write. That duplicated a fact, the session
+  after start-up, in a build artifact that could drift from the runtime and base tree actually in
+  use. It also needed a copy-on-write path through every heap write.
+- **Target shape.** The first eligible start (not interactive, no site or user profile, `RY_IMAGE`
+  not `0`) writes the image itself after `.First.sys()`, and later starts load it in one
+  two-pass bulk load (`crates/heap/src/image.rs`, `crates/interp/src/image.rs`,
+  `contributing/architecture.md`, "The start-up image"). The file name hashes the build, the flags,
+  base R's files, the library directories that exist, and the steering variables (`R_*`, `LC_*`,
+  `LANG`, `LANGUAGE`, `TZ`, `HOME`). Every other variable start-up reads is recorded through
+  `interp::image::variable` and stored with its value in the image; a different value starts slow
+  and replaces the image. Hashing the whole environment was tried first and rejected: a wrapper
+  that sets a per-process variable (a trace id) would defeat every image.
+- **No "existing objects" check.** The writer once refused to copy any object that was live
+  before start-up, to catch Rust-held handles. It flagged only `package:ry`'s frame and constants,
+  which are safe to copy because the loader overwrites the fixed environment's frame, and it cost
+  a full collection per slow start. Rust state that holds heap objects must be a fixed object, a
+  heap root, or saved by `save_state`; the oracle and scenario suites run with images on.
+- **Impact.** Empty `ry run`: 125 ms to 47 ms median (the writing run costs about 180 ms).
+  `methods::getClass("numeric")` with `R_DEFAULT_PACKAGES=NULL`: 64 ms to 56 ms. The oracle shows
+  the same results with and without images, and `start-up-image.scenario` pins the env-change and
+  damaged-image fallbacks. Analysis is unaffected: the image is runtime-only.
+

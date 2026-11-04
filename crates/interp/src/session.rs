@@ -31,6 +31,9 @@ pub struct StartOptions {
     /// `interactive()`, which also makes `keep.source` default to `TRUE` (base R's system
     /// profile sets it from `interactive()`).
     pub interactive: bool,
+    /// Lets a non-interactive start without profiles load a start-up image, or write one (see
+    /// [`crate::image`]); `None` always starts the slow way.
+    pub image: Option<crate::image::ImageHost>,
 }
 
 /// Starts the session. Errors here are fatal: base R did not load.
@@ -44,6 +47,84 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     libc::setlocale(libc::LC_CTYPE, c"C.UTF-8".as_ptr());
     read_renviron();
     crate::system::init_locale();
+    let home = crate::system::r_home();
+    let site_profile = options.site_profile.then(site_profile_path).flatten();
+    let user_profile = options.user_profile.then(user_profile_path).flatten();
+    let plan = crate::image::plan(
+        options.image,
+        options.interactive,
+        site_profile.is_some() || user_profile.is_some(),
+        &home,
+    );
+    if let Some(plan) = &plan {
+        match crate::image::load(plan) {
+            Ok(true) => {
+                crate::graphics::define_device_variables()?;
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(crate::image::LoadError::Untouched(message)) => {
+                write_console(
+                    format!("ry: starting without the start-up image: {message}\n").as_bytes(),
+                    true,
+                );
+            }
+            Err(crate::image::LoadError::Partial(message)) => {
+                crate::image::discard(plan);
+                return Err(error(format!(
+                    "the start-up image did not load: {message}; it is removed, so the next \
+                     start runs without it"
+                )));
+            }
+        }
+    }
+    let before = plan.as_ref().map(|_| crate::image::before());
+    start_slowly(&home, site_profile, user_profile)?;
+    if let (Some(plan), Some(before)) = (&plan, &before)
+        && let Err(message) = crate::image::write(plan, before)
+    {
+        write_console(
+            format!("ry: cannot write the start-up image: {message}\n").as_bytes(),
+            true,
+        );
+    }
+    Ok(())
+}
+
+/// The site profile to source: `R_PROFILE`, else `R_HOME/etc/Rprofile.site`, if it exists.
+fn site_profile_path() -> Option<String> {
+    let site = std::env::var("R_PROFILE")
+        .ok()
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| format!("{}/etc/Rprofile.site", crate::system::r_home()));
+    std::path::Path::new(&site).exists().then_some(site)
+}
+
+/// The user profile to source: `R_PROFILE_USER`, else `./.Rprofile`, else `~/.Rprofile`, if it
+/// exists. A set `R_PROFILE_USER` is the only candidate, even when the file is missing (callr
+/// points it at its own profile).
+fn user_profile_path() -> Option<String> {
+    let user = match std::env::var("R_PROFILE_USER")
+        .ok()
+        .filter(|path| !path.is_empty())
+    {
+        Some(path) => Some(crate::connections::expand_path(&path)),
+        None => [
+            ".Rprofile".to_owned(),
+            crate::connections::expand_path("~/.Rprofile"),
+        ]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).exists()),
+    };
+    user.filter(|path| std::path::Path::new(path).exists())
+}
+
+/// Start-up from the C-level options to the default packages, as GNU R runs it.
+unsafe fn start_slowly(
+    home: &str,
+    site_profile: Option<String>,
+    user_profile: Option<String>,
+) -> R<()> {
     crate::envir::install_default_options()?;
     let machine = crate::system::machine()?;
     eval::define(values::install(".Machine")?, machine, base_env())?;
@@ -60,7 +141,6 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
         base_namespace(),
         crate::heap().known().namespace_registry,
     )?;
-    let home = crate::system::r_home();
     let version = crate::system::r_version();
     let (major, minor) = crate::system::OLDEST_SUPPORTED_R;
     if (version.major, version.minor) < (major, minor) {
@@ -75,14 +155,8 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
     eval_text(".OptRequireMethods()", global_env())?;
     // GNU R's order: the site profile, then the user profile, both after `methods` loads.
-    if options.site_profile {
-        let site = std::env::var("R_PROFILE")
-            .ok()
-            .filter(|path| !path.is_empty())
-            .unwrap_or_else(|| format!("{home}/etc/Rprofile.site"));
-        if std::path::Path::new(&site).exists() {
-            source_file(&site, base_env())?;
-        }
+    if let Some(site) = site_profile {
+        source_file(&site, base_env())?;
     }
     // The base profile binds `.Library.site` in the global environment too, so that a site
     // profile can assign it directly; GNU R's global environment no longer holds it afterwards.
@@ -91,24 +165,8 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
          rm(\".Library.site\", envir = globalenv())",
         global_env(),
     )?;
-    if options.user_profile {
-        // A set `R_PROFILE_USER` is the only candidate, even when the file is missing (callr
-        // points it at its own profile).
-        let user = match std::env::var("R_PROFILE_USER")
-            .ok()
-            .filter(|path| !path.is_empty())
-        {
-            Some(path) => Some(crate::connections::expand_path(&path)),
-            None => [
-                ".Rprofile".to_owned(),
-                crate::connections::expand_path("~/.Rprofile"),
-            ]
-            .into_iter()
-            .find(|path| std::path::Path::new(path).exists()),
-        };
-        if let Some(user) = user.filter(|path| std::path::Path::new(path).exists()) {
-            source_file(&user, global_env())?;
-        }
+    if let Some(user) = user_profile {
+        source_file(&user, global_env())?;
     }
     eval_text(".First.sys()", global_env())?;
     crate::frame::attach_package()?;

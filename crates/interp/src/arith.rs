@@ -3467,7 +3467,7 @@ unsafe fn do_colon(call: &Call<'_>) -> R<Sexp> {
         if length(operand) > 1 {
             // GNU R reads the variable on every such call, so a script can switch the check on
             // and off; reading it only here keeps the common scalar call free of the lookup.
-            let strict = std::env::var("_R_CHECK_LENGTH_COLON_")
+            let strict = crate::image::variable("_R_CHECK_LENGTH_COLON_")
                 .is_ok_and(|value| matches!(value.as_str(), "TRUE" | "true" | "True" | "T"));
             if strict {
                 return Err(call.error("numerical expression has length > 1"));
@@ -4073,7 +4073,9 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
     {
         return keep_factor(object, result);
     }
-    let plan = RepPlan::Cycle { total: out as usize };
+    let plan = RepPlan::Cycle {
+        total: out as usize,
+    };
     keep_factor(object, select_repeated(object, &plan, count, 1)?)
 }
 
