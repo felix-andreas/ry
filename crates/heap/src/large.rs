@@ -213,13 +213,17 @@ unsafe fn unmap_block(address: NonNull<u8>, length: usize) {
     }
 }
 
-/// The pool's limit for a heap whose collection limit is `heap_limit`: a quarter of it, and
-/// at least [`MIN_POOL_BYTES`].
+/// The pool's limit for a heap whose collection limit is `heap_limit`: half of it, and at
+/// least [`MIN_POOL_BYTES`]. The pool maps nothing while it holds a mapping, so what it keeps
+/// never lifts the peak above the most bytes the large vectors took at once; its limit only
+/// bounds the memory left idle after such a peak. A loop of 8 MB vector arithmetic frees four
+/// temporaries between allocations, and a quarter of the limit kept two: the other two faulted
+/// in fresh pages every iteration, which took more time than the arithmetic.
 pub(crate) fn pool_limit(heap_limit: usize) -> usize {
-    (heap_limit / 4).max(MIN_POOL_BYTES)
+    (heap_limit / 2).max(MIN_POOL_BYTES)
 }
 
-const MIN_POOL_BYTES: usize = 16 << 20;
+const MIN_POOL_BYTES: usize = 32 << 20;
 
 fn page_rounded(size: usize) -> Option<usize> {
     size.checked_next_multiple_of(page_size())

@@ -294,12 +294,19 @@ pub struct GcPolicy {
     /// Bytes of young large vectors that trigger a minor collection, which also grows to half
     /// the old generation.
     pub young_large_limit: usize,
-    /// GNU R's `R_VSize` in bytes: a large vector that would take the whole heap past it runs a
-    /// collection, and a major one when the old generation alone would still pass it. It is
-    /// adjusted after each major collection by [`HeapGrowth`], and never drops below
-    /// `min_heap_limit`.
+    /// GNU R's `R_VSize` in bytes, over large vectors only: a large vector that would take them
+    /// past it runs a collection, and a deeper one when the old large vectors alone would still
+    /// pass it. It is adjusted after each major collection by [`HeapGrowth`], and never drops
+    /// below `min_heap_limit`.
     pub heap_limit: usize,
     pub min_heap_limit: usize,
+    /// GNU R's `R_NSize` in bytes, over the small-object pages: a minor collection that leaves
+    /// the old small objects too close to it runs a deeper one. It moves like `heap_limit`.
+    /// Small objects get a limit of their own because base R's alone take about 30 MB, which
+    /// under one limit for both left large temporaries a few megabytes before every minor
+    /// collection escalated to a major one.
+    pub node_limit: usize,
+    pub min_node_limit: usize,
     pub growth: HeapGrowth,
     pub stress: GcStress,
     /// Checks the write barrier's invariant before every minor collection, and replaces each
@@ -635,7 +642,7 @@ impl Heap {
     }
 
     /// The bytes of every object allocated and not yet freed, garbage included: what the heap
-    /// occupies now, which the collection limit bounds.
+    /// occupies now, which the two collection limits bound together.
     pub fn allocated_bytes(&self) -> usize {
         self.old_bytes() + self.young_bytes + self.young_large_bytes
     }
@@ -650,7 +657,8 @@ impl Heap {
         let stats = &self.stats;
         let vector_bytes = stats.live_vector_cells * 8;
         let object_bytes = stats.live_bytes.saturating_sub(vector_bytes);
-        let scale = self.policy.heap_limit as f64 / (stats.live_bytes.max(1) as f64);
+        let limit = self.policy.heap_limit + self.policy.node_limit;
+        let scale = limit as f64 / (stats.live_bytes.max(1) as f64);
         let scale = scale.max(1.0);
         let megabytes = |bytes: f64| (bytes / MEGABYTE * 10.0).ceil() / 10.0;
         // Each object's share of the bytes beside its vector data, for the peak's megabytes.
@@ -2082,9 +2090,12 @@ impl Heap {
     /// every large vector allocated just below the limit would run a collection that frees
     /// nothing, and only a major one moves the limit.
     unsafe fn escalate_if_full(&mut self, keep: &[Sexp], request: usize) {
-        let margin = request + self.policy.min_heap_limit / 5;
         for kind in [Collection::Intermediate, Collection::Major] {
-            if self.old_bytes() + margin <= self.policy.heap_limit {
+            let policy = &self.policy;
+            let vectors_full =
+                self.old_large_bytes + request + policy.min_heap_limit / 5 > policy.heap_limit;
+            let nodes_full = self.old_small_bytes + policy.min_node_limit / 5 > policy.node_limit;
+            if !vectors_full && !nodes_full {
                 return;
             }
             if kind == Collection::Major {
@@ -2292,17 +2303,20 @@ impl Heap {
         roots
     }
 
-    /// Frees a large atomic vector a reconcile found dead. Its bytes stay counted until a collection
-    /// recounts them (a minor one for a young vector, a major one for an old one), so a reconcile
-    /// returns pages early without moving the collections. Uncounting them would put the next
-    /// collection off, and the dead temporaries only a collection finds, such as a forced
-    /// promise's value, would pile up meanwhile: a loop of `y <- rep(runif(1e6), 10)` then peaked
-    /// a quarter higher.
+    /// Frees a large atomic vector a reconcile found dead. A young vector's bytes stay counted
+    /// until the next minor collection, so a reconcile returns pages early without putting that
+    /// collection off: the dead temporaries only a collection finds, such as a forced promise's
+    /// value, would pile up meanwhile, and a loop of `y <- rep(runif(1e6), 10)` then peaked a
+    /// quarter higher. An old vector's bytes are uncounted at once, because only the deeper
+    /// collections recount the old generation, and the stale bytes made every minor collection
+    /// of a vector loop escalate to a full one that found nothing more to free.
     unsafe fn free_released(&mut self, object: Sexp) {
-        if object.gc_bits() & gc_bits::MARK == 0
-            && let Some(position) = self.young_large.iter().rposition(|&young| young == object)
-        {
-            self.young_large.swap_remove(position);
+        if object.gc_bits() & gc_bits::MARK == 0 {
+            if let Some(position) = self.young_large.iter().rposition(|&young| young == object) {
+                self.young_large.swap_remove(position);
+            }
+        } else {
+            self.old_large_bytes = self.old_large_bytes.saturating_sub(self.size_of(object));
         }
         self.free_large(object);
         self.stats.vectors_released += 1;
@@ -2325,7 +2339,7 @@ impl Heap {
         if large {
             let old_bytes = self.old_bytes();
             self.young_large_bytes + request > self.policy.young_large_limit.max(old_bytes / 2)
-                || self.allocated_bytes() + request > self.policy.heap_limit
+                || self.old_large_bytes + self.young_large_bytes + request > self.policy.heap_limit
         } else {
             self.young_bytes + request > self.small_trigger
         }
@@ -2468,12 +2482,16 @@ impl Heap {
                 // The limit shrinks by a fifth at most per major collection rather than to what
                 // survived, so an explicit `gc()` between two large operations does not drop it
                 // below the next one's peak and buy a full collection in the middle of it.
-                let needed = self.old_bytes() + request;
                 let policy = &mut self.policy;
                 policy.heap_limit = policy.growth.next_limit(
                     policy.heap_limit,
-                    needed,
+                    self.old_large_bytes + request,
                     policy.min_heap_limit,
+                );
+                policy.node_limit = policy.growth.next_limit(
+                    policy.node_limit,
+                    self.old_small_bytes,
+                    policy.min_node_limit,
                 );
                 self.mapped.limit = pool_limit(policy.heap_limit);
                 self.mapped.trim();
@@ -3090,6 +3108,11 @@ impl Default for GcPolicy {
             // GNU R's default `R_VSIZE`.
             heap_limit: 64 * 1024 * 1024,
             min_heap_limit: 64 * 1024 * 1024,
+            // About twice GNU R's default `R_NSIZE` (350,000 cells of 56 bytes), because ry's
+            // base packages take more small-object bytes than GNU R's cons cells and a smaller
+            // limit only buys full collections while they load.
+            node_limit: 32 * 1024 * 1024,
+            min_node_limit: 32 * 1024 * 1024,
             growth: HeapGrowth::from_environment(|name| std::env::var(name).ok()),
             stress: match gc_stress_requested() {
                 Some(GcStressStart::Startup) => GcStress::EveryAllocation,
