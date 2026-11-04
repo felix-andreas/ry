@@ -541,7 +541,12 @@ unsafe fn emit_warnings(call: &NativeCall<'_>, workspace: &mut Workspace) -> R<(
 }
 
 unsafe fn emit(call: &NativeCall<'_>, warnings: Vec<String>) -> R<()> {
-    for message in warnings {
+    // C's `warning()` drops one trailing newline from its message, and these messages carry the
+    // newline of the Fortran formats they come from.
+    for mut message in warnings {
+        if message.ends_with('\n') {
+            message.pop();
+        }
         call.warning(message)?;
     }
     Ok(())

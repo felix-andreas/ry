@@ -319,7 +319,11 @@ fn nothing_panics_and_na_stays_na() {
         ("ppois", |x, a, _| ppois(x, a, false, false)),
         ("qpois", |x, a, _| qpois(x, a, true, true)),
         ("phyper", |x, a, b| phyper(x, a, b, 7.0, true, false)),
-        ("qnbinom", |x, a, b| qnbinom(x, a, b, true, false)),
+        // GNU R's search for the quantile walks from the mean, so a probability near zero with
+        // a large size takes effectively forever there too.
+        ("qnbinom", |x, a, b| {
+            qnbinom(x, a.min(1e6), if b.is_nan() { b } else { b.clamp(1e-3, 1.0) }, true, false)
+        }),
         ("pnchisq", |x, a, b| {
             pnchisq(x, a, b.abs().min(500.0), true, false)
         }),

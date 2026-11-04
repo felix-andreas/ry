@@ -1,0 +1,24 @@
+[stdout]
+| pairwise cov 208440356 
+| pairwise cor 207486249 
+| complete cor 208248477 
+| na.or.complete 209580243 
+| many NA pairwise cov 212097942 
+| many NA pairwise cor 208229551 
+| pairwise spearman 7808796 
+| pairwise kendall 3212237 
+| cov 208829505 
+| cor 206342857 
+| cor spearman 2427457 
+| cor kendall 1034480 
+| x with y 961370 
+| x with y pairwise 1075141 
+| vectors 68159 
+| extremes 5999 
+| constant 3408 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

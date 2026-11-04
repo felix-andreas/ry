@@ -1,0 +1,178 @@
+[stdout]
+| one predictor, interpolate
+| 24787891 
+| 104156 
+| one predictor, direct
+| 25792986 
+| 105654 
+| symmetric, degree 1
+| 25322551 
+| 100424 
+| direct degree 0 
+| 25699326 
+| 106608 
+| direct degree 1 
+| 25385962 
+| 96966 
+| direct degree 2 
+| 25792986 
+| 105654 
+| irregular x, degree 0 
+| 7671522 
+| 100000 
+| irregular x, degree 1 
+| 8039362 
+| 96154 
+| irregular x, degree 2 
+| 8166945 
+| 86223 
+| two predictors
+| 15574110 
+| 115315 
+| 430418 
+| 67851 
+| degree 1
+| 15836198 
+| 101356 
+| 381556 
+| 55643 
+| degree 0
+| 15796475 
+| 117831 
+| 440178 
+| 77273 
+| three predictors
+| 15336842 
+| 95578 
+| 398669 
+| 74605 
+| symmetric
+| 14991639 
+| 112708 
+| 403098 
+| 73603 
+| exact statistics
+| 15574110 
+| 105151 
+| 401795 
+| 67851 
+| approximate statistics
+| 15574110 
+| 114161 
+| 395160 
+| 67851 
+| direct
+| 16126298 
+| 99735 
+| 410054 
+| 71705 
+| direct symmetric
+| 15935757 
+| 117693 
+| 413604 
+| 67287 
+| drop.square
+| 15705833 
+| 99476 
+| 410979 
+| 68608 
+| parametric
+| 15394035 
+| 79863 
+| 362438 
+| 72919 
+| parametric and drop.square
+| 15559434 
+| 111800 
+| 443814 
+| 80837 
+| no normalize
+| 15138800 
+| 98455 
+| 450691 
+| 63798 
+| span above 1
+| 15815940 
+| 86661 
+| 371986 
+| 69566 
+| fine cells
+| 15299247 
+| 92859 
+| 403752 
+| 62547 
+| weights
+| 15231710 
+| 105760 
+| 392313 
+| 79921 
+| one predictor, data frame
+| 15357770 
+| 113548 
+| 288085 
+| 48489 
+| symmetric exact
+| 15761335 
+| 110410 
+| 279343 
+| 43988 
+| loess.smooth and lowess
+| 21201214 
+| loess.smooth robust
+| 1624759 
+| ties
+| 14721138 
+| 95391 
+| 264835 
+| 41770 
+| small span
+| [1] "k-d tree limited by memory. ncmax= 200"
+| singular
+| warning: at  0.95 
+| warning: radius  0.0025 
+| warning: all data on boundary of neighborhood. make span bigger 
+| warning: pseudoinverse used at 0.95 
+| warning: neighborhood radius 0.05 
+| warning: reciprocal condition number  1 
+| warning: zero-width neighborhood. make span bigger 
+| 1836167 
+[messages]
+[warnings]
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+- degree must be at least 1 for vertex influence matrix (in predLoess(object$y, object$x, newx = if (is.null(newdata)) object$x else if (is.data.frame(newdata)) as.matrix(model.frame(delete.response(terms(object)), )
+[errors]
+[value]
+NULL
+| NULL
