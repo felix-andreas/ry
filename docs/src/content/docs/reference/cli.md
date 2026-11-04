@@ -214,26 +214,22 @@ A value outside a variable's range is ignored, as on GNU R.
 
 ### Start-up image
 
-The first `ry run` of a script saves the session as it stands once base R and the default packages
-have loaded, and later runs load that image instead of running base R's start-up code. On Linux an
-empty script takes about 47 ms from an image and about 125 ms without one; the run that writes the
-image takes about 180 ms.
+ry's base R tree ships an image of the session as it stands once base R and the default packages
+have loaded (`library/base/R/ry-start.image`), and a start loads it instead of running base R's
+start-up code. On Linux an empty `ry run` script takes about 50 ms from the image and about 110 ms
+without it. The image is written when ry is built and never at run time.
 
-An image belongs to one ry build, one base R tree, and the values of the environment variables
-start-up reads (`R_DEFAULT_PACKAGES`, `R_LIBS`, the locale and the others), so a change to any of
-them starts the slow way once and writes a new image. A session never uses an image when it is
-interactive or sources a site or user profile, which `ry run` never does and ry's `Rscript` does
-when one exists. A start that prints a warning, seeds the random number generator, or loads a
-package from a library outside R home writes no image either, so it runs the slow way every time. A damaged image is reported on stderr and replaced:
-
-```
-ry: starting without the start-up image: /home/me/.cache/ry/image/cac0e68e60610b97.image is damaged
-```
+Each start still runs the steps that read the environment: the C-level options, base R's profile,
+and the `.onLoad` hooks of utils, grDevices and stats. So `EDITOR`, `R_LIBS`, `_R_RNG_VERSION_`
+and the other variables they read take effect on every run, as they do on GNU R. A start runs the
+slow way, with the same result, when it is interactive, sources a site or user profile (which
+`ry run` never does and ry's `Rscript` does when one exists), or sets a variable that changes which
+packages load or how: `R_DEFAULT_PACKAGES`, `R_TESTS`, `R_KEEP_PKG_SOURCE=yes`,
+`_R_TRACE_LOADNAMESPACE_`, `_R_NO_REPORT_MISSING_NAMESPACES_` or `_R_METHODS_DONT_CHECKSUBCLASSES`.
 
 | Variable | Effect |
 | --- | --- |
-| `RY_IMAGE` | `0` turns images off: every start runs the slow way and writes nothing. |
-| `RY_IMAGE_DIR` | The directory images go in, instead of `$XDG_CACHE_HOME/ry/image` (or `~/.cache/ry/image`). It keeps the four most recent images. |
+| `RY_IMAGE` | `0` turns the image off: every start runs the slow way. |
 
 ## load and server
 

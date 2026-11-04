@@ -596,45 +596,48 @@ and all the documents, and the database handle deliberately never leaves it.
 
 A runtime session that is not interactive and sources no profile starts from an image of the
 session as it stands after `.First.sys()`, which [the CLI reference](/reference/cli#start-up-image)
-describes for users. `crates/heap/src/image.rs` writes and loads the heap part, and
-`crates/interp/src/image.rs` keys the file, saves the interpreter state outside the heap, and
-decides when an image applies. `crates/interp/src/session.rs` runs one of two paths: it loads the
-image in place of everything from the C-level options to `.First.sys()`, or it starts the slow way
-and writes the image at the end.
+describes for users. `crates/heap/src/image.rs` writes and loads the heap part,
+`crates/interp/src/image.rs` saves the interpreter state outside the heap and decides when an
+image applies, and `crates/interp/src/session.rs` either loads the image or starts the slow way.
 
-- **Written in process, on the first start.** A start that finds no image runs the slow way and
-  then writes one, so an image always matches the base R tree and the build that use it, and
-  nothing at build time has to produce it.
+- **Build output, read-only.** `ry-rcmd build-base` writes the image as its last step, into the
+  base tree at `library/base/R/ry-start.image`, by running `ry-rcmd write-start-image` with an
+  emptied environment. A release embeds the tree, image included. Nothing writes an image at run
+  time, and nothing keys it on the run-time environment. `ry-rcmd start-image BASE --libr FILE`
+  (`just start-image`) writes it again over a built tree.
+- **One build.** The header carries the runtime's identity (`RY_RUNTIME_ID`, a hash of the
+  runtime's sources), and an image of another build is skipped silently, so a development
+  checkout starts the slow way after a runtime edit until `just start-image` runs.
+- **The environment is read again on every start.** After the load, the start clears the options
+  and runs the steps that read the process environment: the C-level options, `.Machine`,
+  `.Platform` and the device variables, base R's profile, and the `.onLoad` hooks of utils,
+  grDevices and stats, which set options from the environment only when they are unset. The
+  profile's second `Autoloads` is detached, and utils' `osVersion` binding is unlocked around its
+  hook, which assigns it. What the image holds is what those steps do not touch: base's
+  namespace, the six default namespaces and their attachment, which read no variable outside
+  `image::LOADING_VARIABLES`. A start that sets one of those runs the slow way.
+- **Relocated paths.** The image records the R home it was written in (the base tree's staging
+  directory) and its canonical form. The loader moves every string under either prefix to the
+  directory the image file really lives in, which is where a slow start's resolved namespace paths
+  and lazy-load databases point.
 - **Loaded in one bulk pass, not mapped.** The heap image lists every reachable object with
   references as dense positions, and the loader allocates them all and then fills them in a second
   pass. Fixed objects (the heap's well-known objects, the primitives by index, `package:ry` and
   libR's ALTREP classes) are referred to by position, because both processes create them before
   start-up. Strings, symbols and base bindings are interned again, weak references load empty,
   and compiled closure bodies are stored as their source, since the bytecode tier recompiles them.
-- **Refuses what it cannot carry.** The writer fails, and the start keeps going without an image,
-  when start-up left a frame, a pending warning, a C finalizer, an external pointer other than a
-  builtin routine, a new record layout, an open graphics device, or a loaded shared library.
-- **Skips starts it cannot reproduce.** Some starts write no image and say nothing, like a start
-  that sources a profile. A start that warned is one, because loading would not print the warnings
-  again. So is a start that left `.Random.seed` in the global environment (base R's profile seeds
-  the generator when `_R_RNG_VERSION_` is set, and every load would draw the same numbers). So is
-  one that loaded a namespace from outside `R_HOME/library`, which the key does not cover.
-- **Keyed by its inputs.** The file name hashes the runtime build, the session flags, base R's
-  files (size and modification time), the absolute library directories and which of them exist,
-  and the variables that
-  steer every start (`R_*`, `LC_*`, `LANG`, `LANGUAGE`, `TZ`, `HOME`). Every other variable start-up
-  reads goes through `interp::image::variable`, which records it, and the image stores those
-  values; a load whose environment differs in one starts the slow way and replaces the image.
-  An interpreter environment read that bypasses `image::variable` during start-up is a bug, because
-  an image made without that value would load anyway.
-- **Damage falls back, never half-loads.** A checksum over the whole file is verified before the
-  heap takes any of it. A failure past that point (`LoadError::Partial`) would leave the heap
-  half-built, so the start fails and the image is removed.
+- **The writer refuses what it cannot carry.** Writing fails, and so does the base tree's build,
+  when start-up warned (a load would not print the warning), left `.Random.seed` in the global
+  environment, a frame, a C finalizer, an external pointer other than a builtin routine, a new
+  record layout, an open graphics device, or a loaded shared library.
+- **Damage fails before the heap changes.** A checksum over the whole file is verified before the
+  heap takes any of it, and a damaged image starts the slow way with a line on stderr. A failure
+  past that point (`LoadError::Partial`) would leave the heap half-built, so the start fails.
 
-Interpreter state outside the heap is saved beside it: methods' dispatch globals and primitive
-method tables, the S4 extends and implicit-class tables, the loaded builtin libraries, data.table's
-namespace, and the environment variables start-up set. Per-process state, such as the command
-line, the temporary directory, the RNG seed and the start time, is never in the image.
+Interpreter state outside the heap is saved beside it: methods' dispatch globals, templates and
+primitive method tables, the S4 extends and implicit-class tables, the loaded builtin libraries
+and data.table's namespace. Per-process state, such as the command line, the temporary directory,
+the RNG seed and the start time, is never in the image.
 
 ## Correctness and performance instruments
 

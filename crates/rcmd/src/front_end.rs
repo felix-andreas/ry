@@ -3,10 +3,11 @@
 //! taking GNU R's command lines, and so do the `R CMD` commands that are R functions of the
 //! tools and utils packages, such as `R CMD build`. The R home is the directory `R_HOME` names.
 //!
-//! Two commands prepare homes rather than run one. `assemble ROOT --include DIR --libr FILE
+//! Three commands prepare homes rather than run one. `assemble ROOT --include DIR --libr FILE
 //! --base DIR` creates an R home over a base R tree, and `build-base SOURCE OUTPUT --include DIR
 //! --libr FILE --sha256 SUM` builds ry's base R tree from GNU R's unpacked source release
-//! ([`crate::base`]).
+//! ([`crate::base`]). `start-image BASE --libr FILE` writes a built tree's start-up image again,
+//! for a runtime of another build.
 //!
 //! The `ry-rcmd` binary is this front end alone, and `ry` is it too when started under one of
 //! the names [`invoked_as_front_end`] recognizes, so a release can ship `ry` as its only file.
@@ -32,11 +33,11 @@ pub fn invoked_as_front_end() -> bool {
 /// Runs the front end with `arguments`, the command line after the program name.
 pub fn main(arguments: Vec<String>) -> ExitCode {
     let command = arguments.first().map(String::as_str);
-    if let Some(command @ ("assemble" | "build-base")) = command {
-        let result = if command == "assemble" {
-            assemble(&arguments[1..])
-        } else {
-            build_base(&arguments[1..])
+    if let Some(command @ ("assemble" | "build-base" | "start-image")) = command {
+        let result = match command {
+            "assemble" => assemble(&arguments[1..]),
+            "build-base" => build_base(&arguments[1..]),
+            _ => start_image(&arguments[1..]),
         };
         return match result {
             Ok(root) => {
@@ -71,7 +72,7 @@ pub fn main(arguments: Vec<String>) -> ExitCode {
     }
     let arguments = match front_end.as_ref().map(|(name, _)| name.as_str()) {
         Some("R") => match arguments.first().map(String::as_str) {
-            Some("CMD" | "RHOME") => arguments,
+            Some("CMD" | "RHOME" | "write-start-image") => arguments,
             _ => [vec!["R".to_owned()], arguments].concat(),
         },
         Some("Rterm") => [vec!["R".to_owned()], arguments].concat(),
@@ -103,6 +104,9 @@ pub fn main(arguments: Vec<String>) -> ExitCode {
         (_, Some(session)) => run_r(&home, &session),
         (Some((front, rest)), None) if front == "R" => {
             crate::r_command_line(rest).and_then(|session| run_r(&home, &session))
+        }
+        (Some((front, [path])), None) if front == "write-start-image" => {
+            write_start_image(&home, path)
         }
         (Some((front, rest)), None) if front == "Rscript" => {
             crate::rscript_command_line(rest).and_then(|session| run_r(&home, &session))
@@ -232,6 +236,20 @@ fn assemble(arguments: &[String]) -> crate::Result<PathBuf> {
     Ok(root)
 }
 
+fn start_image(arguments: &[String]) -> crate::Result<PathBuf> {
+    let (positional, options) = parse_options(arguments, &["--libr"]);
+    let (&[base], Some(libr)) = (positional.as_slice(), options.get("--libr")) else {
+        return Err(crate::Error::Usage(
+            "usage: ry-rcmd start-image BASE --libr FILE".into(),
+        ));
+    };
+    let rcmd = std::env::current_exe()
+        .map_err(|error| crate::Error::Io(PathBuf::from("ry-rcmd"), error))?;
+    let base = absolute(base)?;
+    crate::base::write_start_image(&base, &rcmd, &absolute(libr)?)?;
+    Ok(base.join("library/base/R/ry-start.image"))
+}
+
 fn build_base(arguments: &[String]) -> crate::Result<PathBuf> {
     let (positional, options) = parse_options(arguments, &["--include", "--libr", "--sha256"]);
     let (&[source, output], Some(include), Some(libr), Some(checksum)) = (
@@ -241,8 +259,7 @@ fn build_base(arguments: &[String]) -> crate::Result<PathBuf> {
         options.get("--sha256"),
     ) else {
         return Err(crate::Error::Usage(
-            "usage: ry-rcmd build-base SOURCE OUTPUT --include DIR --libr FILE --sha256 SUM"
-                .into(),
+            "usage: ry-rcmd build-base SOURCE OUTPUT --include DIR --libr FILE --sha256 SUM".into(),
         ));
     };
     let rcmd = std::env::current_exe()
@@ -296,25 +313,7 @@ fn run_r(home: &Path, session: &crate::Session) -> crate::Result<i32> {
     // With neither a file nor `-e`, `ry_run` reads stdin as a console, one expression at a time.
     let input = expressions.clone();
     let library_path = crate::libr_path(home);
-    // Loading ry's libR globally is what lets compiled packages resolve R's API from it: by
-    // soname on Linux, by flat lookup on macOS. On Windows a package DLL imports from "R.dll"
-    // by name, which finds the module already loaded.
-    #[cfg(unix)]
-    let library = unsafe {
-        libloading::os::unix::Library::open(
-            Some(&library_path),
-            libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_GLOBAL,
-        )
-    }
-    .map(libloading::Library::from);
-    #[cfg(windows)]
-    let library = unsafe { libloading::Library::new(&library_path) };
-    let library = library.map_err(|error| {
-        crate::Error::Usage(format!(
-            "cannot load ry's runtime {}: {error}",
-            library_path.display()
-        ))
-    })?;
+    let library = load_runtime(&library_path)?;
     type Run = unsafe extern "C" fn(
         *const c_char,
         *const c_char,
@@ -362,4 +361,48 @@ fn run_r(home: &Path, session: &crate::Session) -> crate::Result<i32> {
     // The runtime keeps global state and threads that must not be torn down by unloading it.
     std::mem::forget(library);
     Ok(status)
+}
+
+/// Writes the start-up image of the R home's base R tree to `path`, through libR's
+/// `ry_write_start_image`. The base R build runs it as its last step.
+fn write_start_image(home: &Path, path: &str) -> crate::Result<i32> {
+    let library_path = crate::libr_path(home);
+    let library = load_runtime(&library_path)?;
+    type Write = unsafe extern "C" fn(*const c_char) -> c_int;
+    let write = unsafe { library.get::<Write>(b"ry_write_start_image\0") }
+        .map(|symbol| *symbol)
+        .map_err(|error| {
+            crate::Error::Usage(format!(
+                "{} is not ry's runtime: {error}",
+                library_path.display()
+            ))
+        })?;
+    let path = CString::new(path)
+        .map_err(|_| crate::Error::Usage("the image path contains a NUL byte".into()))?;
+    let status = unsafe { write(path.as_ptr()) };
+    std::mem::forget(library);
+    Ok(status)
+}
+
+/// Loads ry's runtime, the libR at `library_path`.
+fn load_runtime(library_path: &Path) -> crate::Result<libloading::Library> {
+    // Loading ry's libR globally is what lets compiled packages resolve R's API from it: by
+    // soname on Linux, by flat lookup on macOS. On Windows a package DLL imports from "R.dll"
+    // by name, which finds the module already loaded.
+    #[cfg(unix)]
+    let library = unsafe {
+        libloading::os::unix::Library::open(
+            Some(library_path),
+            libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_GLOBAL,
+        )
+    }
+    .map(libloading::Library::from);
+    #[cfg(windows)]
+    let library = unsafe { libloading::Library::new(&library_path) };
+    library.map_err(|error| {
+        crate::Error::Usage(format!(
+            "cannot load ry's runtime {}: {error}",
+            library_path.display()
+        ))
+    })
 }

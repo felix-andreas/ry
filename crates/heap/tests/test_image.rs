@@ -5,7 +5,7 @@
 
 use {
     heap::{
-        Collection, Fixed, Heap, ImageError,
+        Collection, Fixed, Heap, ImageError, Relocation,
         object::{Sexp, SexpType, Shape},
         records::{Fields, Layout},
         strings::Encoding,
@@ -30,7 +30,12 @@ fn damaged_images_are_rejected() {
         let image = write(&source, &roots);
         for cut in [0, 7, 8, 12, image.len() / 2, image.len() - 1] {
             let mut target = fresh_heap();
-            let result = target.load_image(&image[..cut], &fixed(&[]), &mut decode);
+            let result = target.load_image(
+                &image[..cut],
+                &fixed(&[]),
+                &Relocation::default(),
+                &mut decode,
+            );
             assert!(
                 matches!(result, Err(ImageError::Invalid(_))),
                 "an image cut at {cut} of {} bytes loads",
@@ -41,9 +46,53 @@ fn damaged_images_are_rejected() {
         longer.push(0);
         let mut target = fresh_heap();
         assert!(matches!(
-            target.load_image(&longer, &fixed(&[]), &mut decode),
+            target.load_image(&longer, &fixed(&[]), &Relocation::default(), &mut decode),
             Err(ImageError::Invalid(_))
         ));
+    }
+}
+
+#[test]
+fn relocation_moves_paths_under_a_prefix() {
+    unsafe {
+        let mut source = Heap::new();
+        let texts = [
+            "/build/home",
+            "/build/home/library/base",
+            "/build/homes",
+            "elsewhere",
+        ];
+        let vector = source
+            .alloc_vector(SexpType::String, texts.len() as isize)
+            .expect("alloc");
+        for (index, text) in texts.iter().enumerate() {
+            let string = source
+                .mk_char(text.as_bytes(), Encoding::Native)
+                .expect("mk_char");
+            source.set_element(vector, index, string);
+        }
+        source.root(vector);
+        let image = write(&source, &[vector]);
+        let mut target = fresh_heap();
+        let relocation = Relocation {
+            prefixes: vec![(b"/build/home".to_vec(), "/run/hôme".as_bytes().to_vec())],
+        };
+        let loaded = target
+            .load_image(&image, &fixed(&[]), &relocation, &mut decode)
+            .unwrap_or_else(|error| panic!("the image does not load: {error}"));
+        let texts: Vec<Vec<u8>> = (0..texts.len())
+            .map(|index| {
+                let string = loaded[0].element(index);
+                std::slice::from_raw_parts(string.data(), string.length() as usize).to_vec()
+            })
+            .collect();
+        let expected: [&[u8]; 4] = [
+            "/run/hôme".as_bytes(),
+            "/run/hôme/library/base".as_bytes(),
+            b"/build/homes",
+            b"elsewhere",
+        ];
+        assert_eq!(texts, expected);
     }
 }
 
@@ -60,7 +109,7 @@ unsafe fn round_trip(seed: u64) {
         // bindings land on.
         let preinstalled = target.install(b"name0").expect("install");
         let loaded = target
-            .load_image(&image, &fixed(&[]), &mut decode)
+            .load_image(&image, &fixed(&[]), &Relocation::default(), &mut decode)
             .unwrap_or_else(|error| panic!("seed {seed}: the image does not load: {error}"));
         assert_eq!(loaded.len(), roots.len(), "seed {seed}");
         assert_eq!(target.install(b"name0").expect("install"), preinstalled);
