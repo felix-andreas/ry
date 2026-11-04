@@ -1244,13 +1244,14 @@ pub extern "C" fn ry_runtime_id() -> *const c_char {
 /// The text [`ry_run`] runs in place of reading its script, set by [`ry_set_script_source`].
 static SCRIPT_SOURCE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// Makes the next [`ry_run`] run `source`, a NUL-terminated UTF-8 string, as the text of its
-/// script instead of reading the file, which still names the script. `ry run` passes the
+/// Makes the next [`ry_run`] run `source`, NUL-terminated bytes in the script's encoding, as its
+/// script instead of reading the file, which still names the script. Invalid UTF-8 is read as
+/// the file would be, each byte kept as itself. `ry run` passes the
 /// program the checker elaborated: each unsuffixed literal typed `I64` spelled with its suffix,
 /// because R would read it as a `double`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_set_script_source(source: *const c_char) {
-    let text = String::from_utf8_lossy(crate::strings::c_bytes(source)).into_owned();
+    let text = interp::values::escape_invalid_bytes(crate::strings::c_bytes(source)).into_owned();
     *SCRIPT_SOURCE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text);

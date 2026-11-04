@@ -1058,9 +1058,16 @@ A ry type asks in three places:
   list item or a record field whose type is known.
 - **The other operand.** In arithmetic or a comparison with an operand of a ry number type, the
   literal takes that type, so `n + 1` with `n: I64` is an `I64`.
-- **A later use.** `total <- 0` gives `total` a literal type that its first use decides. In
-  `for (x in xs) total <- total + x` with `xs: List<F64>`, `total` is an `F64`. A variable that
-  nothing decides keeps R's type.
+- **A later use.** `total <- 0` gives `total` a literal type that its first use in the same
+  function decides: an operand beside a ry number, an argument to a typed parameter, or an annotated
+  binding. In `for (x in xs) total <- total + x` with `xs: List<F64>`, `total` is an `F64`, and
+  `rate <- 2.0; half(rate)` with `half(x: F64)` makes `rate` an `F64`. Any other read, and a read
+  from another top-level statement, gives the variable R's type, as does a function that never
+  decides it.
+
+Arithmetic on literals alone (`+`, `-`, `*`, `%%` and `/`) is decided as one literal, so
+`2 * 3.14159 * r` with `r: F64` is an `F64`, and `/` asks for `F64`. A string or `TRUE`/`FALSE`
+bound to a variable is decided the same way, as `Str` or `character` and `Bool` or `logical`.
 
 A literal the type cannot hold exactly, such as `2.5` as an `I64`, is a
 `type-mismatch` at the literal:

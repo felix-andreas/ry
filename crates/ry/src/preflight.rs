@@ -27,7 +27,7 @@ use {
         thread,
     },
     syntax::{
-        NodeOrToken, SyntaxKind, SyntaxNode, TextRange, erase_inline_annotations,
+        NodeOrToken, SyntaxKind, SyntaxNode, TextRange, TextSize, erase_inline_annotations,
         input_is_unfinished, is_inline_annotation,
     },
 };
@@ -104,6 +104,16 @@ impl Preflight {
     /// a `double` whatever type the checker gave it. Accepted input joins the session; refused
     /// input does not, so the next command is checked as if it was never typed.
     pub fn check(&mut self, input: &str) -> Option<String> {
+        let literals = self.check_literals(input)?;
+        let program = with_i64_suffixes(input.as_bytes(), &literals);
+        // Only ASCII is inserted, and only between tokens, so the text stays UTF-8.
+        Some(String::from_utf8_lossy(&program).into_owned())
+    }
+
+    /// Like [`Preflight::check`], but returns the ranges in `input` of the literals the checker
+    /// typed `I64`, for a caller that rewrites bytes `input` only stands for, such as a Latin-1
+    /// script whose invalid bytes `input` spells as `?`.
+    pub fn check_literals(&mut self, input: &str) -> Option<Vec<TextRange>> {
         let start = self.session.len();
         let mut source = String::with_capacity(start + input.len() + 1);
         source.push_str(&self.session);
@@ -151,9 +161,13 @@ impl Preflight {
         );
         match verdict {
             Verdict::Run => {
-                let program = with_i64_suffixes(input, &literals, start);
                 self.session = source;
-                Some(program)
+                Some(
+                    literals
+                        .into_iter()
+                        .filter_map(|range| range.checked_sub(TextSize::try_from(start).ok()?))
+                        .collect(),
+                )
             }
             Verdict::Refuse => {
                 refuse(
@@ -354,35 +368,74 @@ fn findings(
     )
 }
 
-/// `input`, which starts at `start` in the checked session, with each literal in `literals`
-/// (session ranges, in source order) spelled as the `I64` the checker typed it: `5` becomes
-/// `5i64`, `5L` becomes `5i64`, and a whole `1e3` or `2.0` becomes `1000i64` or `2i64`, because
-/// the `i64` suffix takes only an integer. Text after a literal on its line moves right.
-fn with_i64_suffixes(input: &str, literals: &[TextRange], start: usize) -> String {
-    let mut program = String::with_capacity(input.len() + 4 * literals.len());
+/// `input` with each literal in `literals` (sorted, disjoint ranges into `input`) spelled as
+/// the `I64` the checker typed it: `5` and `5L` become `5i64`, and a whole `1e3` or `2.0`
+/// becomes `1000i64` or `2i64`, because the `i64` suffix takes only an integer. The conversion
+/// is exact, digit by digit, because an `f64` rounds past 2^53. Text after a literal on its line
+/// moves right.
+pub fn with_i64_suffixes(input: &[u8], literals: &[TextRange]) -> Vec<u8> {
+    let mut program = Vec::with_capacity(input.len() + 4 * literals.len());
     let mut copied = 0;
     for range in literals {
-        let Some(literal_start) = usize::from(range.start()).checked_sub(start) else {
+        let (literal_start, literal_end) = (usize::from(range.start()), usize::from(range.end()));
+        let Some(text) = input
+            .get(literal_start..literal_end)
+            .and_then(|text| std::str::from_utf8(text).ok())
+            .filter(|_| literal_start >= copied)
+        else {
             continue;
         };
-        let literal_end = usize::from(range.end()) - start;
-        let Some(text) = input.get(literal_start..literal_end) else {
-            continue;
-        };
-        program.push_str(&input[copied..literal_start]);
+        program.extend_from_slice(&input[copied..literal_start]);
         let digits = text.strip_suffix('L').unwrap_or(text);
-        let is_integer_text = digits.bytes().all(|byte| byte.is_ascii_digit())
-            || digits.starts_with("0x")
-            || digits.starts_with("0X");
-        match digits.parse::<f64>() {
-            Ok(value) if !is_integer_text => program.push_str(&format!("{value:.0}")),
-            _ => program.push_str(digits),
+        match whole_decimal(digits) {
+            Some(whole) => program.extend_from_slice(whole.as_bytes()),
+            None => program.extend_from_slice(digits.as_bytes()),
         }
-        program.push_str("i64");
+        program.extend_from_slice(b"i64");
         copied = literal_end;
     }
-    program.push_str(&input[copied..]);
+    program.extend_from_slice(&input[copied..]);
     program
+}
+
+/// The plain decimal digits of a whole number written with a fraction or an exponent (`2.0`,
+/// `1e3`, `.5e1`), or `None` for a spelling R reads the same way with an `i64` suffix (plain
+/// digits, hexadecimal) or one that is not whole.
+fn whole_decimal(text: &str) -> Option<String> {
+    if text.starts_with("0x") || text.starts_with("0X") {
+        return None;
+    }
+    let (mantissa, exponent) = match text.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
+        None => (text, 0),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if fraction.is_empty() && exponent == 0 {
+        return None;
+    }
+    let mut digits: String = whole.chars().chain(fraction.chars()).collect();
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let shift = exponent.checked_sub(i64::try_from(fraction.len()).ok()?)?;
+    if shift >= 0 {
+        // Past 19 digits the literal cannot fit an `I64` anyway; the runtime reports it.
+        let zeros = usize::try_from(shift).ok()?.min(40);
+        digits.extend(std::iter::repeat_n('0', zeros));
+    } else {
+        let dropped = usize::try_from(-shift).ok()?;
+        let kept = digits.len().checked_sub(dropped)?;
+        if !digits[kept..].bytes().all(|byte| byte == b'0') {
+            return None;
+        }
+        digits.truncate(kept);
+    }
+    let trimmed = digits.trim_start_matches('0');
+    Some(if trimmed.is_empty() {
+        "0".to_owned()
+    } else {
+        trimmed.to_owned()
+    })
 }
 
 /// A syntax error is left to the runtime, which reports it in R's own words; in the console

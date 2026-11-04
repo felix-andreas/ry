@@ -1155,7 +1155,10 @@ fn erase_residual_vars_at<'db>(
     if !closer.abstracted.contains(&table.find(var)) {
         return match constraint {
             Constraint::Numeric | Constraint::ScalarNumeric => scalar(db, Atomic::Double),
-            Constraint::WholeLiteral { .. } | Constraint::FracLiteral => constraint
+            Constraint::WholeLiteral { .. }
+            | Constraint::FracLiteral
+            | Constraint::StrLiteral
+            | Constraint::BoolLiteral => constraint
                 .literal_default()
                 .map_or(unknown(db), |atomic| scalar(db, atomic)),
             Constraint::AtomicElement
@@ -1405,7 +1408,7 @@ struct Checker<'db, 'a> {
     call_first_var: u32,
     /// Per enclosing function, each early `return` value with its range, so a
     /// declared-return mismatch blames the offending `return`.
-    return_frames: Vec<Vec<(Ty<'db>, TextRange)>>,
+    return_frames: Vec<Vec<EarlyReturn<'db>>>,
     /// The ranges of `return(NA)` values, whose `logical` type stands for a missing value of
     /// whatever atomic type the function's other returns have.
     bare_na_returns: FxHashSet<TextRange>,
@@ -2482,8 +2485,39 @@ fn number_literal(module: &Module, id: ExprId) -> Option<NumberLiteral> {
     }
 }
 
+/// Whether `id` is arithmetic on number literals alone, such as `2 * 3.14159` or `(1 + 2) / 4`,
+/// which adapts to a ry number type as a lone literal does.
+fn is_literal_arithmetic(module: &Module, id: ExprId) -> bool {
+    match module.kind(id) {
+        ExpressionKind::Paren(inner) => is_literal_arithmetic(module, *inner),
+        ExpressionKind::Binary {
+            operator:
+                BinaryOperator::Add
+                | BinaryOperator::Subtract
+                | BinaryOperator::Multiply
+                | BinaryOperator::Divide
+                | BinaryOperator::Modulo,
+            lhs,
+            rhs,
+            ..
+        } => [*lhs, *rhs].into_iter().all(|operand| {
+            number_literal(module, operand).is_some() || is_literal_arithmetic(module, operand)
+        }),
+        _ => false,
+    }
+}
+
 fn comparable_atomic(atomic: Atomic) -> bool {
     !matches!(atomic, Atomic::Complex | Atomic::Raw)
+}
+
+/// A `return(value)` or a `try` that leaves its function early, with the range a mismatch
+/// blames. `value` is the returned expression, absent for a `try`.
+#[derive(Clone, Copy)]
+struct EarlyReturn<'db> {
+    ty: Ty<'db>,
+    range: TextRange,
+    value: Option<ExprId>,
 }
 
 impl<'db> Checker<'db, '_> {
@@ -2560,12 +2594,16 @@ impl<'db> Checker<'db, '_> {
             (true, Constraint::Number | Constraint::Int | Constraint::WholeLiteral { .. }) => {
                 native_scalar(self.db, NativeScalar::I64)
             }
-            (false, Constraint::WholeLiteral { .. } | Constraint::FracLiteral) => {
-                match constraint.literal_default() {
-                    Some(atomic) => scalar(self.db, atomic),
-                    None => return,
-                }
-            }
+            (
+                false,
+                Constraint::WholeLiteral { .. }
+                | Constraint::FracLiteral
+                | Constraint::StrLiteral
+                | Constraint::BoolLiteral,
+            ) => match constraint.literal_default() {
+                Some(atomic) => scalar(self.db, atomic),
+                None => return,
+            },
             _ => return,
         };
         // The constraint admits its default, so this cannot fail.
@@ -2593,7 +2631,10 @@ impl<'db> Checker<'db, '_> {
         if !matches!(
             self.table.entry(representative),
             Entry::Unbound {
-                constraint: Constraint::WholeLiteral { .. } | Constraint::FracLiteral,
+                constraint: Constraint::WholeLiteral { .. }
+                    | Constraint::FracLiteral
+                    | Constraint::StrLiteral
+                    | Constraint::BoolLiteral,
                 ..
             }
         ) {
@@ -2983,7 +3024,33 @@ impl<'db> Checker<'db, '_> {
                                 self.record_literal(value, ty);
                                 ty
                             }
-                            None => self.infer(value),
+                            None => match self.module.kind(value) {
+                                ExpressionKind::Literal(
+                                    kind @ (LiteralKind::String(_) | LiteralKind::Logical(_)),
+                                ) if binds_name
+                                    && !self.expression_annotations.contains_key(&id) =>
+                                {
+                                    let constraint = match kind {
+                                        LiteralKind::String(_) => Constraint::StrLiteral,
+                                        _ => Constraint::BoolLiteral,
+                                    };
+                                    let ty = self.fresh_literal(constraint, false);
+                                    self.record(value, ty)
+                                }
+                                // An annotated binding of a variable may decide the variable's
+                                // literal, so its read stays undecided until the annotation.
+                                ExpressionKind::NameRef(_)
+                                    if self.expression_annotations.contains_key(&id) =>
+                                {
+                                    let fresh = self.literal_reads.insert(value);
+                                    let ty = self.infer(value);
+                                    if fresh {
+                                        self.literal_reads.remove(&value);
+                                    }
+                                    ty
+                                }
+                                _ => self.infer(value),
+                            },
                         };
                         if binds_name {
                             self.table.level -= 1;
@@ -3050,7 +3117,28 @@ impl<'db> Checker<'db, '_> {
                     return any(self.db);
                 }
                 let first_call_error = self.errors.len();
+                // A variable written with a literal is decided by the parameter it is passed
+                // to, so `rate <- 2.0; half(rate)` makes `rate` the `F64` that `half` takes.
+                // An argument the call leaves undecided takes R's type afterwards.
+                let arena = self.arena;
+                let literal_arguments = BumpVec::from_iter_in(
+                    module[arguments]
+                        .iter()
+                        .filter_map(|argument| argument.value)
+                        .filter(|&value| {
+                            matches!(module.kind(value), ExpressionKind::NameRef(_))
+                                && self.literal_reads.insert(value)
+                        }),
+                    arena,
+                );
                 let ty = self.infer_call_expression(id, range, callee, &module[arguments]);
+                for &value in &literal_arguments {
+                    self.literal_reads.remove(&value);
+                    let argument = self.recorded_type(value);
+                    if self.open_literal_var(argument) {
+                        self.default_literal_var(argument, false);
+                    }
+                }
                 self.check_native_arguments(range, callee, &module[arguments], first_call_error);
                 if let Some(&slot) = self.naming.extras().run_time_writes.get(&id) {
                     let written = unknown(self.db);
@@ -3540,6 +3628,13 @@ impl<'db> Checker<'db, '_> {
         }
         self.record_expectation(value, declared.body);
         if self.adapt_literal(value, declared.body) != LiteralFit::NotLiteral {
+            return declared.body;
+        }
+        // `greeting <- "hi"; message: Str <- greeting`: the annotation is the use that decides a
+        // variable written with a literal.
+        if self.open_literal_var(value_ty)
+            && self.table.unify(self.db, value_ty, declared.body).is_ok()
+        {
             return declared.body;
         }
         let resolved_value = self.table.resolve(self.db, value_ty);
@@ -5479,7 +5574,11 @@ impl<'db> Checker<'db, '_> {
         match self.return_frames.last_mut() {
             Some(frame) => {
                 if !errs.is_empty() {
-                    frame.push((union_of(self.db, errs), operand_range));
+                    frame.push(EarlyReturn {
+                        ty: union_of(self.db, errs),
+                        range: operand_range,
+                        value: None,
+                    });
                 }
             }
             None => self.errors.push(TypeError {
@@ -6304,8 +6403,13 @@ impl<'db> Checker<'db, '_> {
         {
             self.bare_na_returns.insert(blamed);
         }
+        let value = arguments.first().and_then(|argument| argument.value);
         if let Some(frame) = self.return_frames.last_mut() {
-            frame.push((resolved, blamed));
+            frame.push(EarlyReturn {
+                ty: resolved,
+                range: blamed,
+                value,
+            });
         }
         null(self.db)
     }
@@ -7260,6 +7364,25 @@ impl<'db> Checker<'db, '_> {
                 if let Some(result) = self.infer_native_operator(operator, lhs, rhs, left, right) {
                     return result;
                 }
+                // Arithmetic on two undecided literals is itself an undecided literal, so
+                // `2 * 3.14159 * r` adapts to `r` as a lone literal would. `/` makes it a
+                // fraction; `^` and `%/%` are left out because R gives `double` and `integer` for
+                // them whatever the operand types.
+                if matches!(operator, Add | Subtract | Multiply | Modulo | Divide)
+                    && self.open_literal_var(left)
+                    && self.open_literal_var(right)
+                {
+                    let result = if operator == Divide {
+                        self.fresh_literal(Constraint::FracLiteral, false)
+                    } else {
+                        left
+                    };
+                    if self.table.unify(self.db, left, right).is_ok()
+                        && self.table.unify(self.db, left, result).is_ok()
+                    {
+                        return result;
+                    }
+                }
                 for operand in [left, right] {
                     if self.open_literal_var(operand) {
                         self.default_literal_var(operand, false);
@@ -7316,7 +7439,18 @@ impl<'db> Checker<'db, '_> {
                     .collect();
                 self.environment.rollback(mark);
                 self.join_writes(&writes, JoinEdge::Branch);
-                scalar(self.db, Atomic::Logical)
+                // Two `Bool` operands give a `Bool`, so typed code keeps its own type; any R
+                // logical operand gives R's `logical`, as R's operator does.
+                let boolean = native_scalar(self.db, NativeScalar::Bool);
+                let both_bool = [lhs, rhs].into_iter().all(|operand| {
+                    let ty = self.recorded_type(operand);
+                    self.structural(ty) == boolean
+                });
+                if both_bool {
+                    boolean
+                } else {
+                    scalar(self.db, Atomic::Logical)
+                }
             }
             // Opaque constructs: operands still infer for the IDE, but their diagnostics are
             // discarded because nothing inside the construct is judged. Elementwise `&` and `|`
@@ -7531,6 +7665,24 @@ impl<'db> Checker<'db, '_> {
             TyKind::Native(native) => Some(*native),
             _ => None,
         };
+        // `2 * 3.14159 * r`: each literal adapts, and `/` needs a fraction type, as it does
+        // between ry numbers.
+        if let Some(native) = target.filter(|native| native.is_number())
+            && let ExpressionKind::Binary {
+                operator, lhs, rhs, ..
+            } = *module.kind(value)
+            && is_literal_arithmetic(module, value)
+            && (operator != BinaryOperator::Divide || native.is_fraction())
+        {
+            for operand in [lhs, rhs] {
+                match self.adapt_literal(operand, expected) {
+                    LiteralFit::Fits => {}
+                    fit => return fit,
+                }
+            }
+            self.record(value, expected);
+            return LiteralFit::Fits;
+        }
         // A literal for an undecided `List` item is a ry value, as it is when written in the
         // list itself, and so is a number literal for a type parameter bounded by `number`,
         // `int` or `frac`.
@@ -9096,7 +9248,19 @@ impl<'db> Checker<'db, '_> {
             self.record_untyped_parameters(function_id, &untyped_candidates, declared.ret);
             // Each `return` is checked at its own site, not as one union blamed on the tail.
             let mut early_return_failed = false;
-            for &(returned, return_range) in &early_returns {
+            for &EarlyReturn {
+                ty: returned,
+                range: return_range,
+                value,
+            } in &early_returns
+            {
+                // `return(4)` in a function declared `-> I64` is the literal `4i64`, as a tail
+                // `4` is.
+                if value.is_some_and(|value| {
+                    self.adapt_literal(value, declared.ret) != LiteralFit::NotLiteral
+                }) {
+                    continue;
+                }
                 if !matches!(returned.kind(self.db), TyKind::Unknown)
                     && !self.table.compatible(self.db, returned, declared.ret)
                 {
@@ -9410,7 +9574,7 @@ impl<'db> Checker<'db, '_> {
         &self,
         parameters: &[Formal],
         body: ExprId,
-        early_returns: &[(Ty<'db>, TextRange)],
+        early_returns: &[EarlyReturn<'db>],
         trailing: Ty<'db>,
     ) -> Option<NullUnless<'db>> {
         let module = self.module;
@@ -9498,8 +9662,8 @@ impl<'db> Checker<'db, '_> {
             let exit_range = module.range(exit);
             let others_null = early_returns
                 .iter()
-                .filter(|(_, range)| !exit_range.contains_range(*range))
-                .any(|(ty, _)| has_null(*ty))
+                .filter(|early| !exit_range.contains_range(early.range))
+                .any(|early| has_null(early.ty))
                 || (!self.diverges(body) && has_null(trailing));
             (!others_null).then(|| NullUnless {
                 predicate: Name::new(self.db, predicate),
@@ -9737,7 +9901,7 @@ impl<'db> Checker<'db, '_> {
     /// trailing value: `function() return(TRUE)` returns `logical`, not `logical | NULL`.
     fn join_early_returns(
         &self,
-        early_returns: &[(Ty<'db>, TextRange)],
+        early_returns: &[EarlyReturn<'db>],
         trailing: Ty<'db>,
         body: ExprId,
     ) -> Ty<'db> {
@@ -9746,8 +9910,8 @@ impl<'db> Checker<'db, '_> {
         }
         let mut members: Vec<Ty<'db>> = early_returns
             .iter()
-            .filter(|(_, range)| !self.bare_na_returns.contains(range))
-            .map(|(ty, _)| *ty)
+            .filter(|early| !self.bare_na_returns.contains(&early.range))
+            .map(|early| early.ty)
             .collect();
         if !self.diverges(body) {
             members.push(self.table.resolve(self.db, trailing));
@@ -9774,8 +9938,8 @@ impl<'db> Checker<'db, '_> {
             members.extend(
                 early_returns
                     .iter()
-                    .filter(|(_, range)| self.bare_na_returns.contains(range))
-                    .map(|(ty, _)| *ty),
+                    .filter(|early| self.bare_na_returns.contains(&early.range))
+                    .map(|early| early.ty),
             );
         }
         union_of(self.db, members)

@@ -383,8 +383,9 @@ fn release_executable_code() {
 /// Runs `file` and exits with its status: 1 for a top-level error or a script strict mode
 /// refuses, 2 when the script cannot be read or the runtime cannot start.
 fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode {
-    // R reads a script in the session's encoding, so a Latin-1 script is valid R; the runtime
-    // reads the bytes itself, and the check sees them with invalid UTF-8 replaced.
+    // R reads a script in the session's encoding, so a Latin-1 script is valid R. The check
+    // sees each invalid byte as `?`, which keeps every offset, and the elaborated program is
+    // the file's own bytes with the literals respelled.
     let source = match fs::read(file) {
         Ok(source) => source,
         Err(error) => {
@@ -395,13 +396,15 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
     let Some(mut preflight) = Preflight::discover(file, file.to_path_buf()) else {
         return ExitCode::from(2);
     };
-    let text = String::from_utf8_lossy(&source);
-    let Some(program) = preflight.check(&text) else {
+    let mut text = String::with_capacity(source.len());
+    for chunk in source.utf8_chunks() {
+        text.push_str(chunk.valid());
+        text.extend(std::iter::repeat_n('?', chunk.invalid().len()));
+    }
+    let Some(literals) = preflight.check_literals(&text) else {
         return ExitCode::from(1);
     };
-    // Only a program the check elaborated replaces the file, so an unchanged Latin-1 script
-    // still reaches the runtime as its own bytes.
-    let program = (program != text).then_some(program);
+    let program = (!literals.is_empty()).then(|| preflight::with_i64_suffixes(&source, &literals));
     let flags = runtime_flags(preflight.config());
     drop(preflight);
     match runtime {

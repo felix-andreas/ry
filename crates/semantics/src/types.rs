@@ -557,6 +557,11 @@ pub enum Constraint {
     },
     /// Like `WholeLiteral`, for a literal with a fraction (`1.5`): a ry fraction type or `double`.
     FracLiteral,
+    /// The type of a variable written with a string literal (`name <- "ry"`): `Str` or R's
+    /// `character`, decided by its first use like `WholeLiteral`.
+    StrLiteral,
+    /// The type of a variable written with `TRUE` or `FALSE`: `Bool` or R's `logical`.
+    BoolLiteral,
 }
 
 impl Constraint {
@@ -605,6 +610,14 @@ impl Constraint {
             (WholeLiteral { .. } | FracLiteral | ArrayItem | Key, Number)
             | (Number, WholeLiteral { .. } | FracLiteral | ArrayItem | Key) => Number,
             (FracLiteral, Int) | (Int, FracLiteral) | (Int, Frac) | (Frac, Int) => return None,
+            // Both members of a literal constraint are keys; any other R constraint makes it an
+            // R value. A text or logical literal is never a number, and the two never meet.
+            (StrLiteral, Key) | (Key, StrLiteral) => StrLiteral,
+            (BoolLiteral, Key) | (Key, BoolLiteral) => BoolLiteral,
+            (StrLiteral, AtomicElement) | (AtomicElement, StrLiteral) => AtomicElement,
+            (BoolLiteral, c @ (AtomicElement | Numeric | ScalarNumeric))
+            | (c @ (AtomicElement | Numeric | ScalarNumeric), BoolLiteral) => c,
+            (StrLiteral | BoolLiteral, _) | (_, StrLiteral | BoolLiteral) => return None,
             // A literal used where R's number constraints apply is an R number.
             (WholeLiteral { .. } | FracLiteral, c) | (c, WholeLiteral { .. } | FracLiteral) => c,
             (Number | Int | Frac, _) | (_, Number | Int | Frac) => return None,
@@ -626,6 +639,8 @@ impl Constraint {
             Constraint::WholeLiteral { integer: false } | Constraint::FracLiteral => {
                 Some(Atomic::Double)
             }
+            Constraint::StrLiteral => Some(Atomic::Character),
+            Constraint::BoolLiteral => Some(Atomic::Logical),
             _ => None,
         }
     }

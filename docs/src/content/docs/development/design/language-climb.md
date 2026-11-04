@@ -42,3 +42,20 @@ before anything else. Among the other scores, speed and friendliness weigh equal
 `tools/climb/log.tsv` holds one line per measured step: the date, the commit, every score, and a
 note. A taste question a step raises (a new syntax, a changed default) goes to the orchestrator in
 one batch rather than being decided inside the climb.
+
+### Step log
+
+| Step | friendly | unsound | rejected | Change |
+| --- | --- | --- | --- | --- |
+| baseline | 8/16 | 0 | not measured | The harness, the corpus, and the first friendliness gaps the generator found |
+| 1 | 13/17 | 0/10 | 10/20 | `&&` and `\|\|` on two `Bool`s give `Bool`. Arithmetic on number literals alone (`2 * 3.14159 * r`) adapts like a lone literal. Within one function, a variable written with a string, `TRUE`/`FALSE` or number literal is decided by the parameter it is passed to or the annotated binding it flows into |
+
+## Open questions
+
+- **Top-level literal bindings.** Each top-level statement is its own analysis item, so `rate <- 2.0`
+  at the top of a script takes R's `double` when its item is checked, and a later
+  `half(rate)` with `half(x: F64)` is a type error (`top-level-literal-binding.R`). Every rejected
+  soundness program fails this way. Deciding the type from later items would break the per-item
+  firewall. The options are to keep R's type and say so in the error, to generalize the binding the
+  way Roc types a top-level `x = 5` (each read instantiates it, and the runtime converts the value
+  at each typed read), or to make a top-level literal binding in strict mode a ry value by default.

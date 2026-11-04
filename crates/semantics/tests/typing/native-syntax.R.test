@@ -171,3 +171,59 @@ rate <- function(region: :North | :South) -> F64 {
 }
 #++++
 rate: fn(region: :North | :South) -> F64
+
+#---- a_returned_literal_takes_the_declared_result_type
+pick <- function(b: Bool) -> I64 {
+  if (b) return(4)
+  5
+}
+#++++
+pick: fn(b: Bool) -> I64
+
+#==== literal_uses
+#---- logical_operators_on_bools_give_a_bool
+both <- (1.5f64 > 1) && (2i64 < 3)
+either <- TRUE || (1i64 == 2)
+#++++
+both: Bool
+either: logical
+
+#---- arithmetic_on_literals_adapts_as_one_literal
+circumference <- function(r: F64) -> F64 2 * 3.14159 * r
+scaled <- function(n: I64) -> I64 n * (2 + 3)
+#++++
+circumference: fn(r: F64) -> F64
+scaled: fn(n: I64) -> I64
+
+#---- a_call_decides_a_literal_variable
+half <- function(x: F64) -> F64 x / 2
+f <- function() {
+  rate <- 2.0
+  half(rate)
+}
+#++++
+half: fn(x: F64) -> F64
+f: fn() -> F64
+
+#---- an_annotated_binding_decides_a_string_or_logical_variable
+f <- function() -> Str {
+  greeting <- "hi"
+  message: Str <- greeting
+  message
+}
+g <- function() -> Bool {
+  flag <- TRUE
+  checked: Bool <- flag
+  checked
+}
+#++++
+f: fn() -> Str
+g: fn() -> Bool
+
+#---- a_plain_read_keeps_r_types
+f <- function() {
+  name <- "ry"
+  paste(name, "!")
+}
+#++++
+f: fn() -> character

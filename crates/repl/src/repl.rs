@@ -99,13 +99,13 @@ pub fn run(options: RunOptions) -> Result<(), ReplError> {
 }
 
 /// Runs R code on ry's own runtime instead of GNU R: loads ry's `libR` (from `RY_LIBR`, or
-/// beside the executable), evaluates `input`, then the script `file`, whose text is `source` when
-/// given (the program `ry run` checked) and the file's contents otherwise. Both are optional, and
+/// beside the executable), evaluates `input`, then the script `file`, whose bytes are `source`
+/// when given (the program `ry run` checked) and the file's contents otherwise. Both are optional, and
 /// `load_all()` is attached before either runs. With a `verdict`, the loader calls it before the
 /// package's first effect and exits with its status unless that is 0. Returns the exit status.
 pub fn run_on_ry_runtime(
     file: Option<&std::path::Path>,
-    source: Option<&str>,
+    source: Option<&[u8]>,
     input: Option<&str>,
     arguments: &[String],
     flags: RuntimeFlags,
