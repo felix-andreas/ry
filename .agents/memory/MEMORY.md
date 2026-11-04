@@ -66,6 +66,7 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 
 ## Long-term
 
+- **Nightly releases are normal releases with `--latest=false`, never pre-releases.** The Zed extension (`editors/zed/src/lib.rs`) installs the newest pre-release, so a pre-release nightly would be served to Zed users, while a non-pre-release with `--latest=false` is invisible to it and leaves GitHub's "latest" alone. Contract: `development/releasing.md`, "Nightly builds".
 - ry is its own R home, so GNU R's defaults for `R_LIBS_USER`/`R_LIBS_SITE` would hide packages installed for GNU R. `read_renviron` in `crates/interp/src/session.rs` appends GNU R's older-minor user libraries and site libraries to each of those variables the user left unset, skipping any library that holds `base` (a GNU R `.Library` would shadow ry's base packages). Contract: `reference/cli.md`, "How ry finds R".
 
 - **A top-level loop variable stays a `ForVariable` binding.** Its item exports it through `Naming::loop_bound_slots` (`naming.rs`), not by becoming `BindingKind::TopLevel`, because the unused check and the IDE treat `TopLevel` as a global item: the kind change produced "assigned but never used" in scripts and broke goto-definition and rename on the loop variable.

@@ -27,7 +27,7 @@ without one it publishes with `--oidc`, which works only inside GitHub Actions.
 
 ## The workflows
 
-`.github/workflows/` holds three workflows: `release.yml`, `docs.yml` (the docs deploy below) and
+`.github/workflows/` holds four workflows: `release.yml`, `nightly.yml` (below), `docs.yml` (the docs deploy below) and
 `ci.yml`. CI runs only when started by hand (from the Actions tab, on any ref), not on pushes or pull
 requests. The orchestrating agent starts it on main at its hourly check when main has new commits.
 
@@ -38,6 +38,23 @@ pushes with one command:
 ```bash
 git pull && just accept
 ```
+
+## Nightly builds
+
+A nightly is a Linux x86_64 build of any ref, started by hand: open **Actions**, then **Nightly**,
+then **Run workflow**, and pick the branch. It builds and smoke-tests the archive, then publishes it as
+a GitHub release named `nightly.<date>.<HHMM>.<sha6>`, from the commit's UTC committer date and time
+and the first six hex digits of its hash (`just nightly-name` prints it, for example
+`nightly.20261104.0712.999094`). `ry --version` prints the name after the version, because the
+workflow sets `RY_BUILD`. The workflow does not run `release-check`, builds no editor extension, and
+publishes nothing to the Marketplace.
+
+A nightly is a normal release created with `--latest=false`, not a pre-release. The Zed extension
+installs the newest release whose pre-release flag is set, so a pre-release nightly would reach Zed
+users; a non-pre-release with `--latest=false` is invisible to it and leaves GitHub's "latest"
+alone. The tag pattern of `release.yml` does not match `nightly.*` tags. `just nightly-publish NAME`
+publishes `release/NAME` and then deletes all but the newest five `nightly.` releases and their
+tags, so the releases page stays readable. It runs locally too, with `gh` signed in.
 
 ## Deploying the docs site
 

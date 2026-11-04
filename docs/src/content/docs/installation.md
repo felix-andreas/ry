@@ -31,6 +31,10 @@ nix profile install github:felix-andreas/ry                               # Nix 
 ry builds on nightly Rust, and `cargo install` does not read the toolchain the repository pins, so
 name `+nightly` yourself.
 
+Nightly snapshots for Linux x86_64 are on the [releases page](https://github.com/felix-andreas/ry/releases)
+under tags named `nightly.<date>.<time>.<hash>`; only the newest five are kept. They are untested
+snapshots for early feedback, so use a numbered release for anything else.
+
 ## R
 
 `ry check`, `ry fmt` and the language server never run R. The commands that do (`ry run`, `ry load`,
