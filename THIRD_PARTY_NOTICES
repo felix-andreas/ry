@@ -139,6 +139,10 @@ crates/interp/src/rmath.rs
         Copyright (C) 2000-2025 The R Core Team
         Copyright (C) 2014 Morten Welinder
         Copyright (C) 2000 Catherine Loader
+    GNU R src/nmath/qgamma.c (qgamma, qchisq_appr)
+        Copyright (C) 2000--2015 The R Core Team
+        Copyright (C) 1998 Ross Ihaka
+        Copyright (C) 2004--2015 The R Foundation
     GNU R src/nmath/stirlerr.c (stirlerr)
         Copyright (C) 2000-2025 The R Core Team
         Copyright (C) 2000 Catherine Loader

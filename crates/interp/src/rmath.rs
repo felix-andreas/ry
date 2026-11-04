@@ -66,6 +66,11 @@
 //     Copyright (C) 2014 Morten Welinder
 //     Copyright (C) 2000 Catherine Loader
 //
+// GNU R: src/nmath/qgamma.c (qgamma, qchisq_appr)
+//     Copyright (C) 2000--2015 The R Core Team
+//     Copyright (C) 1998 Ross Ihaka
+//     Copyright (C) 2004--2015 The R Foundation
+//
 // GNU R: src/nmath/stirlerr.c (stirlerr)
 //     Copyright (C) 2000-2025 The R Core Team
 //     Copyright (C) 2000 Catherine Loader
@@ -2843,19 +2848,19 @@ pub fn qchisq_appr(p: f64, nu: f64, g: f64, lower: bool, log: bool, tol: f64) ->
     }
 }
 
-/// The gamma quantile, the root `x` of `pgamma(x) = p`. On the standard scale `y = x / scale`
-/// it solves `ln P(y) = ln p` for `u = ln y`, where `P` is the tail whose probability is at most
-/// one half, so the target keeps all its digits. In `u` the lower tail is nearly linear
-/// (`ln P ~ shape u`) and nothing underflows before the quantile does. Halley's method runs
-/// from the best of three approximations: Wilson and Hilferty's cube of a normal deviate, the
-/// leading term `y^shape / Gamma(shape + 1)` of the lower tail's series, and the leading term
-/// `y^(shape - 1) e^-y / Gamma(shape)` of the upper tail's asymptotic expansion (Abramowitz and
-/// Stegun 26.4.17, 6.5.29 and 6.5.32). A bracket of the root guards every step. The scaled
-/// result takes Newton steps on `x` and then moves to the neighbouring double whose probability
-/// is closest to `p`.
+/// The gamma quantile: AS 91's chi-squared approximation, then up to 1000 steps of a seven-term
+/// Taylor series on `pgamma`, then a Newton iteration on the log scale for the last digits (GNU
+/// R's `qgamma`).
 pub fn qgamma(p: f64, alpha: f64, scale: f64, lower: bool, log: bool) -> f64 {
-    const MAXIMUM_ITERATIONS: usize = 60;
-    const MAXIMUM_POLISH: usize = 64;
+    const EPS1: f64 = 1e-2;
+    const EPS2: f64 = 5e-7;
+    const EPS_N: f64 = 1e-15;
+    const MAX_IT: u32 = 1000;
+    const P_MIN: f64 = 1e-100;
+    const P_MAX: f64 = 1.0 - 1e-14;
+    const I420: f64 = 1.0 / 420.0;
+    const I2520: f64 = 1.0 / 2520.0;
+    const I5040: f64 = 1.0 / 5040.0;
     if p.is_nan() || alpha.is_nan() || scale.is_nan() {
         return p + alpha + scale;
     }
@@ -2868,173 +2873,101 @@ pub fn qgamma(p: f64, alpha: f64, scale: f64, lower: bool, log: bool) -> f64 {
     if alpha == 0.0 {
         return 0.0;
     }
-    if alpha == f64::INFINITY {
-        return f64::INFINITY;
+    let mut max_it_newton = 1;
+    if alpha < 1e-10 {
+        max_it_newton = 7;
     }
-    let log_lower = dt_log(p, lower, log);
-    let use_lower = log_lower <= -M_LN2;
-    let target = if use_lower {
-        log_lower
-    } else {
-        dt_clog(p, lower, log)
-    };
-    let log_tail_at = |u: f64| pgamma(u.exp(), alpha, 1.0, use_lower, true);
-    // Below this `u` the scaled quantile rounds to zero.
-    let smallest = f64::from_bits(1);
-    let underflow = smallest.ln() - scale.ln();
-
-    // Near zero `P(y) = y^shape / Gamma(shape + 1) (1 + O(y))`, so when this start lies below
-    // the smallest positive double, so does the quantile.
-    let small = (log_lower + lgamma1p(alpha)) / alpha;
-    if small < underflow - 1.0 {
-        return 0.0;
-    }
-    let mut candidates = [small, f64::NAN, f64::NAN];
-    let ninth = 1.0 / (9.0 * alpha);
-    let cube_root = 1.0 - ninth + qnorm(p, 0.0, 1.0, lower, log) * ninth.sqrt();
-    if cube_root > 0.0 {
-        candidates[1] = alpha.ln() + 3.0 * cube_root.ln();
-    }
-    if !use_lower {
-        let lgamma_shape = lgammafn(alpha);
-        let mut y = -target;
-        for _ in 0..4 {
-            y = -target + (alpha - 1.0) * y.ln() - lgamma_shape;
-            if !(y > 0.0 && y.is_finite()) {
-                break;
+    let mut p_lower = dt_qiv(p, lower, log);
+    let g = lgammafn(alpha);
+    let mut ch = qchisq_appr(p, 2.0 * alpha, g, lower, log, EPS1);
+    'phases: {
+        if !finite(ch) {
+            max_it_newton = 0;
+            break 'phases;
+        }
+        if ch < EPS2 {
+            max_it_newton = 20;
+            break 'phases;
+        }
+        if p_lower > P_MAX || p_lower < P_MIN {
+            max_it_newton = 20;
+            break 'phases;
+        }
+        let c = alpha - 1.0;
+        let s6 = (120.0 + c * (346.0 + 127.0 * c)) * I5040;
+        let ch0 = ch;
+        for _ in 1..=MAX_IT {
+            let q = ch;
+            let p1 = 0.5 * ch;
+            let p2 = p_lower - pgamma_raw(p1, alpha, true, false);
+            if !finite(p2) || ch <= 0.0 {
+                ch = ch0;
+                max_it_newton = 27;
+                break 'phases;
+            }
+            let t = p2 * (alpha * M_LN2 + g + p1 - c * ch.ln()).exp();
+            let b = t / ch;
+            let a = 0.5 * t - b * c;
+            let s1 = (210.0 + a * (140.0 + a * (105.0 + a * (84.0 + a * (70.0 + 60.0 * a))))) * I420;
+            let s2 = (420.0 + a * (735.0 + a * (966.0 + a * (1141.0 + 1278.0 * a)))) * I2520;
+            let s3 = (210.0 + a * (462.0 + a * (707.0 + 932.0 * a))) * I2520;
+            let s4 = (252.0 + a * (672.0 + 1182.0 * a) + c * (294.0 + a * (889.0 + 1740.0 * a)))
+                * I5040;
+            let s5 = (84.0 + 2264.0 * a + c * (1175.0 + 606.0 * a)) * I2520;
+            ch += t
+                * (1.0 + 0.5 * t * s1
+                    - b * c * (s1 - b * (s2 - b * (s3 - b * (s4 - b * (s5 - b * s6))))));
+            if (q - ch).abs() < EPS2 * ch {
+                break 'phases;
+            }
+            if (q - ch).abs() > 0.1 * ch {
+                ch = if ch < q { 0.9 * q } else { 1.1 * q };
             }
         }
-        if y > 0.0 && y.is_finite() {
-            candidates[2] = y.ln();
-        }
     }
-    let mut u = alpha.ln();
-    let mut residual = f64::INFINITY;
-    for candidate in candidates {
-        if !candidate.is_finite() {
-            continue;
+    let mut x = 0.5 * scale * ch;
+    if max_it_newton > 0 {
+        let mut p = p;
+        let mut log_p = log;
+        if !log_p {
+            p = p.ln();
+            log_p = true;
         }
-        let candidate_residual = log_tail_at(candidate) - target;
-        if candidate_residual.abs() < residual.abs() {
-            u = candidate;
-            residual = candidate_residual;
-        }
-    }
-
-    // `ln P` rises with `u` for the lower tail and falls for the upper one. Writing `s` for its
-    // derivative in `u`, `y` times the density over the tail, the second derivative is
-    // `s (shape - y - s)`.
-    let rising = use_lower;
-    let (mut below, mut above) = (f64::NEG_INFINITY, f64::INFINITY);
-    let mut best = (u, f64::INFINITY);
-    for _ in 0..MAXIMUM_ITERATIONS {
-        let log_tail = log_tail_at(u);
-        residual = log_tail - target;
-        if residual.abs() < best.1 {
-            best = (u, residual.abs());
-        } else if residual.abs() > best.1 && below.is_finite() && above.is_finite() {
-            // Rounding in the distribution function now outweighs the step.
-            break;
-        }
-        if residual == 0.0 {
-            break;
-        }
-        if (residual < 0.0) == rising {
-            below = u;
+        if x == 0.0 {
+            const ONE_PLUS: f64 = 1.0 + 1e-7;
+            const ONE_MINUS: f64 = 1.0 - 1e-7;
+            x = DBL_MIN;
+            p_lower = pgamma(x, alpha, scale, lower, log_p);
+            if (lower && p_lower > p * ONE_PLUS) || (!lower && p_lower < p * ONE_MINUS) {
+                return 0.0;
+            }
         } else {
-            above = u;
+            p_lower = pgamma(x, alpha, scale, lower, log_p);
         }
-        if above < underflow {
+        if p_lower == f64::NEG_INFINITY {
             return 0.0;
         }
-        let y = u.exp();
-        let magnitude = (dgamma(y, alpha, 1.0, true) - log_tail).exp() * y;
-        let slope = if rising { magnitude } else { -magnitude };
-        let newton = residual / slope;
-        let correction = 1.0 - 0.5 * newton * (alpha - y - slope);
-        let step = if correction > 0.5 {
-            newton / correction
-        } else {
-            newton
-        };
-        let mut next = u - step;
-        if !(next > below && next < above) {
-            next = match (below.is_finite(), above.is_finite()) {
-                (true, true) => 0.5 * (below + above),
-                (true, false) => below + 1.0 + below.abs(),
-                _ => above - 1.0 - above.abs(),
-            };
-        }
-        if next == u || (next - u).abs() <= 2.0 * f64::EPSILON {
-            best.0 = next;
-            break;
-        }
-        u = next;
-    }
-
-    let mut x = best.0.exp() * scale;
-    if !(x > 0.0) {
-        return 0.0;
-    }
-    if x == f64::INFINITY {
-        return x;
-    }
-    // Far from 1 a double `u` resolves `y` only to hundreds of ulps, so Newton steps on `x`
-    // itself finish the root before the walk to the closest neighbour.
-    let residual_at = |x: f64| pgamma(x, alpha, scale, use_lower, true) - target;
-    let mut x_residual = residual_at(x);
-    for _ in 0..4 {
-        let log_tail = x_residual + target;
-        let magnitude = (dgamma(x, alpha, scale, true) - log_tail).exp();
-        let slope = if rising { magnitude } else { -magnitude };
-        let next = x - x_residual / slope;
-        if !(next > 0.0 && next.is_finite()) || next == x {
-            break;
-        }
-        let next_residual = residual_at(next);
-        if !(next_residual.abs() < x_residual.abs()) {
-            break;
-        }
-        x = next;
-        x_residual = next_residual;
-    }
-    let mut closest = x_residual.abs();
-    for upward in [true, false] {
-        for _ in 0..MAXIMUM_POLISH {
-            let neighbour = if upward { x.next_up() } else { x.next_down() };
-            let neighbour_distance = residual_at(neighbour).abs();
-            if !(neighbour_distance < closest) {
+        for i in 1..=max_it_newton {
+            let p1 = p_lower - p;
+            if p1.abs() < (EPS_N * p).abs() {
                 break;
             }
-            x = neighbour;
-            closest = neighbour_distance;
-        }
-    }
-    // Where the distribution function is flat to its last bit, a run of doubles share the
-    // closest probability and the root lies somewhere among them; the middle of the run is the
-    // best guess.
-    let mut run = [0usize; 2];
-    for (side, upward) in [true, false].into_iter().enumerate() {
-        let mut edge = x;
-        for _ in 0..MAXIMUM_POLISH {
-            edge = if upward {
-                edge.next_up()
+            let density = dgamma(x, alpha, scale, log_p);
+            if density == d0(log_p) {
+                break;
+            }
+            let mut t = if log_p {
+                p1 * (p_lower - density).exp()
             } else {
-                edge.next_down()
+                p1 / density
             };
-            if residual_at(edge).abs() != closest {
+            t = if lower { x - t } else { x + t };
+            p_lower = pgamma(t, alpha, scale, lower, log_p);
+            if (p_lower - p).abs() > p1.abs() || (i > 1 && (p_lower - p).abs() == p1.abs()) {
                 break;
             }
-            run[side] += 1;
+            x = t;
         }
-    }
-    let (up, down) = (run[0], run[1]);
-    for _ in 0..up.abs_diff(down) / 2 {
-        x = if up > down {
-            x.next_up()
-        } else {
-            x.next_down()
-        };
     }
     x
 }
