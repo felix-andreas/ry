@@ -433,7 +433,7 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
         SexpType::Closure => {
             let mut args = Args::new();
             promise_args_into(arguments, env, &mut args)?;
-            apply_closure(call, function, &args, env, None)
+            apply_closure_owning(call, function, &args, env, None)
         }
         _ => Err(error_in(call, "attempt to apply non-function")),
     }
@@ -994,6 +994,30 @@ pub unsafe fn apply_closure(
     run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
 }
 
+/// [`apply_closure`] for promises the caller built for this call alone and never reads again,
+/// which the call releases once it returns, as GNU R's `unpromiseArgs` does: a promise only the
+/// argument list still holds gives up its value, so an argument's large value can be freed
+/// before a collection finds it.
+pub unsafe fn apply_closure_owning(
+    call: Sexp,
+    function: Sexp,
+    args: &[Arg],
+    sys_parent: Sexp,
+    supplied: Option<&[(Sexp, Sexp)]>,
+) -> R<Sexp> {
+    if supplied.is_none()
+        && crate::annotations::is_typed(function)
+        && let Some(tier) = bytecode::tier()
+        && let Some(value) = (tier.call)(function, args)
+    {
+        return value;
+    }
+    let env = bind_arguments(call, function, args, supplied)?;
+    let result = run_closure(call, function, env, sys_parent, args, Entry::Unchecked)?;
+    crate::heap().release_argument_promises(args.iter().map(|arg| arg.value));
+    Ok(result)
+}
+
 /// A fresh environment for a call of the closure `function`, with `args` matched to its formals
 /// and bound, and rooted.
 pub unsafe fn bind_arguments(
@@ -1170,6 +1194,7 @@ pub unsafe fn run_closure(
         handlers: state.handlers.clone(),
         restarts: restarts.clone(),
         srcref: state.srcref,
+        closures: state.frame_closures.len(),
     });
     if PROFILE_TICK.load(Ordering::Relaxed) {
         record_profile_sample(None)?;
@@ -1212,9 +1237,15 @@ pub unsafe fn run_closure(
     let state = interp();
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = state.frames[depth - 1].handlers.clone();
+    let closures = state.frames[depth - 1].closures;
     crate::truncate_frames(state, depth - 1);
     state.restarts = restarts;
     state.srcref = caller_srcref;
+    if let Ok(value) = result {
+        let created = state.frame_closures.get(closures..).unwrap_or(&[]);
+        crate::heap().release_frame(env, value, created);
+    }
+    state.frame_closures.truncate(closures);
     result
 }
 
@@ -2197,6 +2228,13 @@ pub unsafe fn make_closure(formals: Sexp, body: Sexp, srcref: Sexp, env: Sexp) -
         values::set_attr(closure, symbols().srcref, srcref)?;
     }
     moves::created_closure(closure)?;
+    let state = interp();
+    if let Some(frame) = state.frames.last()
+        && frame.env == env
+        && state.frame_closures.len() - frame.closures < crate::FRAME_CLOSURES
+    {
+        state.frame_closures.push(closure);
+    }
     Ok(closure)
 }
 
@@ -2711,6 +2749,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         handlers: handlers.clone(),
         restarts: restarts.clone(),
         srcref: state.srcref,
+        closures: state.frame_closures.len(),
     });
     let depth = state.frames.len();
     let result = scope(|| match expression.kind() {
@@ -2724,6 +2763,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     let state = interp();
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = state.frames[depth - 1].handlers.clone();
+    state.frame_closures.truncate(state.frames[depth - 1].closures);
     crate::truncate_frames(state, depth - 1);
     state.restarts = restarts;
     result

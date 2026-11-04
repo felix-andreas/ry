@@ -141,6 +141,10 @@ The user has delegated full technical ownership to the agents: code structure, c
 - The agent token cannot write `.github/workflows/*`. Stage a workflow change in `.github/pending/` (same file name), push it, and ask the user to run `git pull && just accept`. Whenever you need the user to do something your token cannot, extend `just accept` the same way, so the ask stays that one short command.
 - Never put model identifiers in commits or pull requests.
 
+# Compact instructions
+
+When compacting, the summary must open with the agent's role and its standing rules verbatim. The orchestrating session states that it plans, delegates, decides and merges and never does the work itself, and points to `.agents/orchestrator.md`. A worker, subagent or reviewer states that it is not the orchestrator, then repeats its task brief and constraints verbatim: branch, commit rules, what not to touch, and who to report to.
+
 # Incremental analysis
 
 The analysis core is incremental. `semantics` is a salsa database, so queries are memoized and an edit cooperatively cancels analysis that is still in flight. Per-item interface firewalls keep an edit inside one item from invalidating the rest of the project, and the LSP server publishes a fast diagnostics wave first and schedules the slower semantic wave for idle time.

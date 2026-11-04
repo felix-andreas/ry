@@ -16,7 +16,7 @@ use {
     rustc_hash::FxHashMap,
     salsa::Setter,
     semantics::{
-        DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        DocumentKind, Elaboration, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{Diagnostic, RelatedLocation, Severity},
         stubs::install_shipped_stubs,
     },
@@ -27,7 +27,7 @@ use {
         thread,
     },
     syntax::{
-        NodeOrToken, SyntaxKind, SyntaxNode, TextRange, TextSize, erase_inline_annotations,
+        NodeOrToken, SyntaxKind, SyntaxNode, TextSize, erase_inline_annotations,
         input_is_unfinished, is_inline_annotation,
     },
 };
@@ -99,21 +99,20 @@ impl Preflight {
     }
 
     /// Checks `input` as the next part of the session and returns the program ry's runtime runs
-    /// for it, or `None` when strict mode refused it. That program is `input` with each
-    /// unsuffixed literal the checker typed `I64` spelled with its suffix, because R reads `5` as
-    /// a `double` whatever type the checker gave it. Accepted input joins the session; refused
-    /// input does not, so the next command is checked as if it was never typed.
+    /// for it, or `None` when strict mode refused it. That program is `input` elaborated with the
+    /// checker's types (see [`elaborate`]). Accepted input joins the session; refused input does
+    /// not, so the next command is checked as if it was never typed.
     pub fn check(&mut self, input: &str) -> Option<String> {
-        let literals = self.check_literals(input)?;
-        let program = with_i64_suffixes(input.as_bytes(), &literals);
+        let elaborations = self.check_elaborations(input)?;
+        let program = elaborate(input.as_bytes(), &elaborations);
         // Only ASCII is inserted, and only between tokens, so the text stays UTF-8.
         Some(String::from_utf8_lossy(&program).into_owned())
     }
 
-    /// Like [`Preflight::check`], but returns the ranges in `input` of the literals the checker
-    /// typed `I64`, for a caller that rewrites bytes `input` only stands for, such as a Latin-1
-    /// script whose invalid bytes `input` spells as `?`.
-    pub fn check_literals(&mut self, input: &str) -> Option<Vec<TextRange>> {
+    /// Like [`Preflight::check`], but returns the rewrites in `input`, for a caller that
+    /// rewrites bytes `input` only stands for, such as a Latin-1 script whose invalid bytes
+    /// `input` spells as `?`.
+    pub fn check_elaborations(&mut self, input: &str) -> Option<Vec<Elaboration>> {
         let start = self.session.len();
         let mut source = String::with_capacity(start + input.len() + 1);
         source.push_str(&self.session);
@@ -123,7 +122,7 @@ impl Preflight {
         // Inference recurses per nested expression, which can outgrow the main thread's stack.
         let db = self.db.clone();
         let (file, config, text) = (self.file, &self.config, source.as_str());
-        let (verdict, findings, literals) = thread::scope(|scope| {
+        let (verdict, findings, elaborations) = thread::scope(|scope| {
             let worker = thread::Builder::new()
                 .stack_size(crate::ANALYSIS_STACK_SIZE)
                 .spawn_scoped(scope, move || findings(&db, file, config, text));
@@ -163,9 +162,14 @@ impl Preflight {
             Verdict::Run => {
                 self.session = source;
                 Some(
-                    literals
+                    elaborations
                         .into_iter()
-                        .filter_map(|range| range.checked_sub(TextSize::try_from(start).ok()?))
+                        .filter_map(|elaboration| {
+                            let range = elaboration
+                                .range()
+                                .checked_sub(TextSize::try_from(start).ok()?)?;
+                            Some(elaboration.at(range))
+                        })
                         .collect(),
                 )
             }
@@ -340,14 +344,14 @@ fn findings(
     file: SourceFile,
     config: &Config,
     source: &str,
-) -> (Verdict, Vec<Diagnostic>, Vec<TextRange>) {
+) -> (Verdict, Vec<Diagnostic>, Vec<Elaboration>) {
     let strict = semantics::file_is_strict(db, file);
     // Plain R without strict mode has nothing to report and no literal a ry type decides, so it
     // skips analysis entirely.
     if !strict && !has_ry_syntax(&semantics::parse(db, file).syntax_node(), source) {
         return (Verdict::Run, Vec::new(), Vec::new());
     }
-    let literals = semantics::file_i64_literals(db, file);
+    let elaborations = semantics::file_elaborations(db, file);
     let diagnostics = apply_suppressions(document_diagnostics(db, file, config), source);
     let refuse = strict && diagnostics.iter().any(is_strict_error);
     let kept = diagnostics
@@ -364,36 +368,68 @@ fn findings(
             Verdict::Run
         },
         kept,
-        literals,
+        elaborations,
     )
 }
 
-/// `input` with each literal in `literals` (sorted, disjoint ranges into `input`) spelled as
-/// the `I64` the checker typed it: `5` and `5L` become `5i64`, and a whole `1e3` or `2.0`
-/// becomes `1000i64` or `2i64`, because the `i64` suffix takes only an integer. The conversion
-/// is exact, digit by digit, because an `f64` rounds past 2^53. Text after a literal on its line
-/// moves right.
-pub fn with_i64_suffixes(input: &[u8], literals: &[TextRange]) -> Vec<u8> {
-    let mut program = Vec::with_capacity(input.len() + 4 * literals.len());
+/// `input` rewritten for ry's runtime with the types the checker gave it. `elaborations` are
+/// sorted by start, outermost first, and either nest or are disjoint.
+///
+/// - A literal the checker typed `I64` is spelled as that `I64`: `5` and `5L` become `5i64`, and a
+///   whole `1e3` or `2.0` becomes `1000i64` or `2i64`, because the `i64` suffix takes only an
+///   integer. The conversion is exact, digit by digit, because an `f64` rounds past 2^53.
+/// - A list the runtime may build empty is passed through `.ry_items` with its item type, so
+///   `List.map(xs, f)` runs as `.ry_items(List.map(xs, f), "I64")`.
+///
+/// Text after a rewrite on its line moves right.
+pub fn elaborate(input: &[u8], elaborations: &[Elaboration]) -> Vec<u8> {
+    let mut program = Vec::with_capacity(input.len() + 16 * elaborations.len());
     let mut copied = 0;
-    for range in literals {
-        let (literal_start, literal_end) = (usize::from(range.start()), usize::from(range.end()));
-        let Some(text) = input
-            .get(literal_start..literal_end)
-            .and_then(|text| std::str::from_utf8(text).ok())
-            .filter(|_| literal_start >= copied)
-        else {
-            continue;
-        };
-        program.extend_from_slice(&input[copied..literal_start]);
-        let digits = text.strip_suffix('L').unwrap_or(text);
-        match whole_decimal(digits) {
-            Some(whole) => program.extend_from_slice(whole.as_bytes()),
-            None => program.extend_from_slice(digits.as_bytes()),
+    // The ends of the open `.ry_items` calls, innermost last, with the text that closes each.
+    let mut open: Vec<(usize, &'static str)> = Vec::new();
+    let close_through = |program: &mut Vec<u8>,
+                         copied: &mut usize,
+                         open: &mut Vec<(usize, &'static str)>,
+                         offset: usize| {
+        while let Some(&(end, items)) = open.last().filter(|(end, _)| *end <= offset) {
+            program.extend_from_slice(&input[*copied..end]);
+            program.extend_from_slice(b", \"");
+            program.extend_from_slice(items.as_bytes());
+            program.extend_from_slice(b"\")");
+            *copied = end;
+            open.pop();
         }
-        program.extend_from_slice(b"i64");
-        copied = literal_end;
+    };
+    for elaboration in elaborations {
+        let range = elaboration.range();
+        let (start, end) = (usize::from(range.start()), usize::from(range.end()));
+        if start < copied || end > input.len() {
+            continue;
+        }
+        close_through(&mut program, &mut copied, &mut open, start);
+        match *elaboration {
+            Elaboration::I64Literal(_) => {
+                let Some(text) = std::str::from_utf8(&input[start..end]).ok() else {
+                    continue;
+                };
+                program.extend_from_slice(&input[copied..start]);
+                let digits = text.strip_suffix('L').unwrap_or(text);
+                match whole_decimal(digits) {
+                    Some(whole) => program.extend_from_slice(whole.as_bytes()),
+                    None => program.extend_from_slice(digits.as_bytes()),
+                }
+                program.extend_from_slice(b"i64");
+                copied = end;
+            }
+            Elaboration::TypedList(_, items) => {
+                program.extend_from_slice(&input[copied..start]);
+                program.extend_from_slice(b".ry_items(");
+                copied = start;
+                open.push((end, items.name()));
+            }
+        }
     }
+    close_through(&mut program, &mut copied, &mut open, usize::MAX);
     program.extend_from_slice(&input[copied..]);
     program
 }

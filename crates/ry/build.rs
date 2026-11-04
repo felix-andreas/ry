@@ -24,6 +24,13 @@ const MANIFEST: &str = include_str!("ry.exe.manifest");
 const WINDRES_CANDIDATES: [&str; 3] = ["llvm-windres", "windres", "x86_64-w64-mingw32-windres"];
 
 fn main() {
+    // `RY_BUILD` names a nightly build (`just nightly-name`) and is appended to `ry --version`.
+    println!("cargo:rerun-if-env-changed=RY_BUILD");
+    let version = env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
+    match env::var("RY_BUILD") {
+        Ok(build) if !build.is_empty() => println!("cargo:rustc-env=RY_VERSION={version} ({build})"),
+        _ => println!("cargo:rustc-env=RY_VERSION={version}"),
+    }
     println!("cargo:rerun-if-env-changed=WINDRES");
     let target = env::var("TARGET").unwrap_or_default();
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("cargo sets OUT_DIR"));

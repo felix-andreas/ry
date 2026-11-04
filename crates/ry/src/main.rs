@@ -396,7 +396,7 @@ fn release_executable_code() {
 fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode {
     // R reads a script in the session's encoding, so a Latin-1 script is valid R. The check
     // sees each invalid byte as `?`, which keeps every offset, and the elaborated program is
-    // the file's own bytes with the literals respelled.
+    // the file's own bytes with the checker's rewrites.
     let source = match fs::read(file) {
         Ok(source) => source,
         Err(error) => {
@@ -412,10 +412,10 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
         text.push_str(chunk.valid());
         text.extend(std::iter::repeat_n('?', chunk.invalid().len()));
     }
-    let Some(literals) = preflight.check_literals(&text) else {
+    let Some(elaborations) = preflight.check_elaborations(&text) else {
         return ExitCode::from(1);
     };
-    let program = (!literals.is_empty()).then(|| preflight::with_i64_suffixes(&source, &literals));
+    let program = (!elaborations.is_empty()).then(|| preflight::elaborate(&source, &elaborations));
     let flags = runtime_flags(preflight.config());
     drop(preflight);
     match runtime {

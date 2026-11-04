@@ -227,9 +227,9 @@ unsafe fn start_slowly(
 }
 
 /// GNU R 4.6.2's `registerS3methods()`, as [`stable_hash`] of its formals and body. Setting
-/// `RY_PRINT_FAST_PATH_HASHES` prints the hash of the installed one, for updating this together with
-/// `register_s3_methods.R`.
-const GNU_REGISTER_S3_METHODS: u64 = 0x0c89_27a0_c611_ff8c;
+/// `RY_PRINT_FAST_PATH_HASHES` prints the hash of the one base R defines, for updating this
+/// together with `register_s3_methods.R`.
+const GNU_REGISTER_S3_METHODS: u64 = 0x54a3_acc7_9c94_1f6c;
 
 /// Replaces base R's `registerS3methods()` with `register_s3_methods.R`, which runs its two
 /// per-method loops natively: they cost every namespace load about a millisecond per hundred S3
@@ -250,17 +250,16 @@ unsafe fn install_register_s3_methods() -> R<()> {
     if std::env::var_os("RY_PRINT_FAST_PATH_HASHES").is_some() {
         eprintln!("registerS3methods {hash:#018x}");
     }
-    let replacement = || eval_text(include_str!("register_s3_methods.R"), base_namespace());
+    let replacement = eval_text(include_str!("register_s3_methods.R"), base_namespace())?;
+    // ry builds its bundled base R itself, so the base namespace it saved holds the replacement
+    // already, while a build from the source release defines GNU R's own function.
+    let mut replacement_hash = FNV_OFFSET;
+    stable_hash(replacement.car(), &mut replacement_hash);
+    stable_hash(crate::bytecode::closure_body(replacement), &mut replacement_hash);
+    if hash == replacement_hash {
+        return Ok(());
+    }
     if hash != GNU_REGISTER_S3_METHODS {
-        // Base R's lazy-load database is written by a session that already runs the
-        // replacement, so a base R tree built by ry holds the replacement itself.
-        let installed = replacement()?;
-        let mut installed_hash = FNV_OFFSET;
-        stable_hash(installed.car(), &mut installed_hash);
-        stable_hash(crate::bytecode::closure_body(installed), &mut installed_hash);
-        if hash == installed_hash {
-            return Ok(());
-        }
         if crate::system::r_version().number() == crate::methods_core::BUNDLED_VERSION.trim() {
             return Err(crate::unwind::error(format!(
                 "base R's registerS3methods() hashes to {hash:#018x}, not the GNU R {} \
@@ -270,7 +269,7 @@ unsafe fn install_register_s3_methods() -> R<()> {
         }
         return Ok(());
     }
-    eval::define(symbol, replacement()?, base_namespace())
+    eval::define(symbol, replacement, base_namespace())
 }
 
 /// GNU R 4.6.2's `utils:::.osVersion()`, as [`stable_hash`] of its formals and body. Setting
@@ -362,11 +361,25 @@ pub(crate) unsafe fn stable_hash(object: Sexp, hash: &mut u64) {
             }
         }
         SexpType::Pairlist | SexpType::Language => {
+            // A `function` call's fourth element is its srcref, which a parse with source
+            // references fills with line numbers and a saved namespace may not hold at all.
+            let elements = if object.kind() == SexpType::Language
+                && object.car().kind() == SexpType::Symbol
+                && object.car().car().bytes() == b"function"
+            {
+                3
+            } else {
+                usize::MAX
+            };
             let mut cell = object;
-            while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
+            let mut position = 0;
+            while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language)
+                && position < elements
+            {
                 stable_hash(cell.tag(), hash);
                 stable_hash(cell.car(), hash);
                 cell = cell.cdr();
+                position += 1;
             }
         }
         _ => {}
@@ -402,6 +415,114 @@ fn read_renviron() {
     // SAFETY: the session starts before any other thread exists.
     unsafe { std::env::set_var("R_HOME", &home) };
     export_wrapper_directories(&home);
+    let user_set = std::env::var_os("R_LIBS_USER").is_some();
+    let site_set = std::env::var_os("R_LIBS_SITE").is_some();
+    read_renviron_file(&home);
+    // ry is its own R home, so the defaults would hide every package installed for GNU R.
+    // Its libraries go after ry's own, which keeps a package installed for ry in front.
+    #[cfg(unix)]
+    for (name, set, extra) in [
+        ("R_LIBS_USER", user_set, gnu_r_user_libraries()),
+        ("R_LIBS_SITE", site_set, gnu_r_site_libraries()),
+    ] {
+        if set || extra.is_empty() {
+            continue;
+        }
+        let mut value = std::env::var(name).unwrap_or_default();
+        for path in extra {
+            if !value.split(':').any(|entry| entry == path) {
+                if !value.is_empty() {
+                    value.push(':');
+                }
+                value.push_str(&path);
+            }
+        }
+        // SAFETY: the session starts before any other thread exists.
+        unsafe { std::env::set_var(name, value) };
+    }
+}
+
+/// GNU R's user libraries for this major version and an older minor one, newest first:
+/// `~/R/<platform>-library/<x.y>` on Linux, `~/Library/R/<arch>/<x.y>/library` on macOS. The
+/// current version's is `R_LIBS_USER`'s `%U` already. GNU R's platform vendor differs by
+/// architecture (`x86_64-pc-linux-gnu`, `aarch64-unknown-linux-gnu`), so any vendor matches,
+/// and macOS names Apple silicon `arm64`.
+#[cfg(unix)]
+fn gnu_r_user_libraries() -> Vec<String> {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return Vec::new();
+    };
+    let version = crate::system::r_version();
+    let arch = std::env::consts::ARCH;
+    let platforms: Vec<std::path::PathBuf> = if cfg!(target_os = "macos") {
+        let arch = if arch == "aarch64" { "arm64" } else { arch };
+        vec![home.join("Library/R").join(arch)]
+    } else {
+        let mut platforms: Vec<std::path::PathBuf> = std::fs::read_dir(home.join("R"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name.starts_with(&format!("{arch}-")) && name.ends_with("-linux-gnu-library")
+                })
+            })
+            .collect();
+        platforms.sort();
+        platforms
+    };
+    let mut libraries = Vec::new();
+    for minor in (0..version.minor).rev() {
+        let x_y = format!("{}.{minor}", version.major);
+        for platform in &platforms {
+            let library = if cfg!(target_os = "macos") {
+                platform.join(&x_y).join("library")
+            } else {
+                platform.join(&x_y)
+            };
+            if library.is_dir() {
+                libraries.push(library.to_string_lossy().into_owned());
+            }
+        }
+    }
+    libraries
+}
+
+/// The site libraries of GNU R: the `site-library` of the `R` on `PATH`, and the ones Debian,
+/// Ubuntu and Fedora install packages into. A directory holding `base` is a GNU R's own
+/// library, whose base packages must not shadow ry's, so it is left out.
+#[cfg(unix)]
+fn gnu_r_site_libraries() -> Vec<String> {
+    let path_home = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path).find_map(|directory| {
+            let wrapper = std::fs::read_to_string(directory.join("R")).ok()?;
+            wrapper.lines().find_map(|line| {
+                let value = line.trim().strip_prefix("R_HOME_DIR=")?;
+                let value = value.trim_matches(|c| c == '\'' || c == '"');
+                (!value.is_empty() && !value.contains('$'))
+                    .then(|| std::path::Path::new(value).join("site-library"))
+            })
+        })
+    });
+    path_home
+        .into_iter()
+        .chain(
+            [
+                "/usr/local/lib/R/site-library",
+                "/usr/lib/R/site-library",
+                "/usr/local/lib/R/library",
+            ]
+            .map(std::path::PathBuf::from),
+        )
+        .filter(|path| path.is_dir() && !path.join("base").is_dir())
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Sets the variables of the first system `Renviron` that exists.
+fn read_renviron_file(home: &str) {
     for path in [format!("{home}/etc/Renviron"), "/etc/R/Renviron".to_owned()] {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
@@ -826,4 +947,31 @@ unsafe fn do_mk_unbound(call: &Call<'_>) -> R<Sexp> {
     }
     crate::heap().remove_binding(base_env(), symbol)?;
     Ok(nil())
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, crate::testing::with_interpreter};
+
+    /// A function parsed from source holds srcrefs in its nested `function` calls, while the copy
+    /// a namespace saves may not, and the guards on base R's functions must hash both alike.
+    #[test]
+    fn stable_hash_ignores_nested_function_srcrefs() {
+        let text = "function(x) {\n  inner <- function(y) y + 1\n  inner(x)\n}";
+        with_interpreter(|| {
+            // SAFETY: the interpreter is installed.
+            unsafe {
+                let hash_of = |srcfile: Sexp| -> R<u64> {
+                    let parsed = crate::lower::parse_with_srcfile(text, "<test>", srcfile)?;
+                    let mut hash = FNV_OFFSET;
+                    stable_hash(parsed.element(0), &mut hash);
+                    Ok(hash)
+                };
+                let with_source = hash_of(values::new_env(base_env()).expect("environment"))
+                    .expect("parse with source");
+                let without_source = hash_of(nil()).expect("parse without source");
+                assert_eq!(with_source, without_source);
+            }
+        });
+    }
 }

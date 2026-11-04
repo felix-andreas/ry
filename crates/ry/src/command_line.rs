@@ -10,7 +10,7 @@ use {
 
 #[derive(Debug, Parser)]
 // Clap defaults to the package name, `ry-lang`; the command is `ry`.
-#[command(name = "ry", version, after_help = EXPERIMENTAL_FEATURES_HELP)]
+#[command(name = "ry", version = env!("RY_VERSION"), after_help = EXPERIMENTAL_FEATURES_HELP)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,

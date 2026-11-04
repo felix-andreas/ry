@@ -620,6 +620,17 @@ unsafe fn sequence(call: &Call<'_>, like: Sexp, items: &[Sexp]) -> R<Sexp> {
     })
 }
 
+/// A collection whose items are drawn from `like`'s own items, as `List.keep_if` and
+/// `List.sublist` build. An empty result keeps `like`'s storage, so an `I64` list filtered down
+/// to nothing is an empty `I64` list rather than `logical(0)`: the items it would hold come from
+/// `like`, so their type is known without a guess.
+unsafe fn subset(call: &Call<'_>, like: Sexp, items: &[Sexp]) -> R<Sexp> {
+    if items.is_empty() && like.is_array() {
+        return arrays::empty_like(like);
+    }
+    sequence(call, like, items)
+}
+
 /// A list the library builds from scratch: a ry list when its items can form one, and an R list
 /// when they cannot, as when a dictionary holds R vectors.
 unsafe fn new_list(items: &[Sexp]) -> R<Sexp> {
@@ -1129,7 +1140,7 @@ unsafe fn list_update(call: &Call<'_>) -> R<Sexp> {
     let index = whole(call, "index", index)?;
     let f = function(call, "f", f)?;
     let Some(at) = position(index, count) else {
-        return sequence(call, list, &list_slice(list, 0, count)?);
+        return subset(call, list, &list_slice(list, 0, count)?);
     };
     // The call holds a reference while the callback runs, the way an R closure's argument does,
     // so a callback that assigns into the list with `<<-` copies it instead of changing the
@@ -1217,7 +1228,7 @@ unsafe fn list_reverse(call: &Call<'_>) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
     let mut items = list_elements(call, "list", list)?;
     items.reverse();
-    sequence(call, list, &items)
+    subset(call, list, &items)
 }
 
 unsafe fn list_join(call: &Call<'_>) -> R<Sexp> {
@@ -1327,7 +1338,7 @@ unsafe fn filter(call: &Call<'_>, keep: bool) -> R<Sexp> {
             kept.push(item);
         }
     }
-    sequence(call, list, &kept)
+    subset(call, list, &kept)
 }
 
 unsafe fn list_keep_if(call: &Call<'_>) -> R<Sexp> {
@@ -1355,7 +1366,7 @@ unsafe fn list_keep_if_try(call: &Call<'_>) -> R<Sexp> {
             (false, _) => return Ok(result),
         }
     }
-    ok(sequence(call, list, &kept)?)
+    ok(subset(call, list, &kept)?)
 }
 
 /// The payloads of the results `f` returns that are `:Ok` (when `oks`) or `:Err`.
@@ -1741,22 +1752,22 @@ unsafe fn list_and_count(call: &Call<'_>) -> R<(Sexp, usize, usize)> {
 
 unsafe fn list_take_first(call: &Call<'_>) -> R<Sexp> {
     let (list, _, taken) = list_and_count(call)?;
-    sequence(call, list, &list_slice(list, 0, taken)?)
+    subset(call, list, &list_slice(list, 0, taken)?)
 }
 
 unsafe fn list_take_last(call: &Call<'_>) -> R<Sexp> {
     let (list, total, taken) = list_and_count(call)?;
-    sequence(call, list, &list_slice(list, total - taken, total)?)
+    subset(call, list, &list_slice(list, total - taken, total)?)
 }
 
 unsafe fn list_drop_first(call: &Call<'_>) -> R<Sexp> {
     let (list, total, dropped) = list_and_count(call)?;
-    sequence(call, list, &list_slice(list, dropped, total)?)
+    subset(call, list, &list_slice(list, dropped, total)?)
 }
 
 unsafe fn list_drop_last(call: &Call<'_>) -> R<Sexp> {
     let (list, total, dropped) = list_and_count(call)?;
-    sequence(call, list, &list_slice(list, 0, total - dropped)?)
+    subset(call, list, &list_slice(list, 0, total - dropped)?)
 }
 
 unsafe fn list_drop_at(call: &Call<'_>) -> R<Sexp> {
@@ -1766,7 +1777,7 @@ unsafe fn list_drop_at(call: &Call<'_>) -> R<Sexp> {
     if let Some(at) = position(index, items.len()) {
         items.remove(at);
     }
-    sequence(call, list, &items)
+    subset(call, list, &items)
 }
 
 /// A 1-based start position as a 0-based index, which may lie past the end.
@@ -1784,14 +1795,14 @@ unsafe fn list_sublist(call: &Call<'_>) -> R<Sexp> {
     let taken = count(call, "count", taken)?;
     let from = start.min(total);
     let to = from.saturating_add(taken).min(total);
-    sequence(call, list, &list_slice(list, from, to)?)
+    subset(call, list, &list_slice(list, from, to)?)
 }
 
 unsafe fn list_split_at(call: &Call<'_>) -> R<Sexp> {
     let (list, total, before) = list_and_count(call)?;
     let items = list_slice(list, 0, total)?;
-    let first = sequence(call, list, &items[..before])?;
-    let others = sequence(call, list, &items[before..])?;
+    let first = subset(call, list, &items[..before])?;
+    let others = subset(call, list, &items[before..])?;
     record(&[("before", first), ("others", others)])
 }
 
@@ -1854,7 +1865,7 @@ unsafe fn list_sort_with(call: &Call<'_>) -> R<Sexp> {
         let answer = scope(|| invoke(call, compare, &[left, right]))?;
         ordering(call, "compare()", answer)
     })?;
-    sequence(call, list, &items)
+    subset(call, list, &items)
 }
 
 /// A stable merge sort of `items`, with `buffer` as scratch space of the same length.
@@ -2151,7 +2162,7 @@ unsafe fn sort_numbers(call: &Call<'_>, descending: bool) -> R<Sexp> {
     for number in numbers {
         items.push(number_value(number)?);
     }
-    sequence(call, list, &items)
+    subset(call, list, &items)
 }
 
 unsafe fn list_sort_asc(call: &Call<'_>) -> R<Sexp> {
@@ -2211,8 +2222,8 @@ unsafe fn split_around(call: &Call<'_>, last: bool) -> R<Sexp> {
     };
     match found {
         Some(at) => {
-            let before = sequence(call, list, &items[..at])?;
-            let after = sequence(call, list, &items[at + 1..])?;
+            let before = subset(call, list, &items[..at])?;
+            let after = subset(call, list, &items[at + 1..])?;
             ok(record(&[("before", before), ("after", after)])?)
         }
         None => err("NotFound"),
@@ -2239,14 +2250,14 @@ unsafe fn split_pieces(call: &Call<'_>, like: Sexp, items: &[Sexp], delimiter: &
             .zip(delimiter)
             .all(|(&left, &right)| identical(left, right, &flags))
         {
-            pieces.push(sequence(call, like, &items[start..at])?);
+            pieces.push(subset(call, like, &items[start..at])?);
             at += delimiter.len();
             start = at;
         } else {
             at += 1;
         }
     }
-    pieces.push(sequence(call, like, &items[start..])?);
+    pieces.push(subset(call, like, &items[start..])?);
     sequence(call, like, &pieces)
 }
 

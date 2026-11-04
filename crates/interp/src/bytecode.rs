@@ -3165,7 +3165,7 @@ unsafe fn step(
                 };
                 let mut args = eval::Args::new();
                 eval::compiled_args_into(arguments, env, &mut args)?;
-                eval::apply_closure(call, function, &args, env, None)?
+                eval::apply_closure_owning(call, function, &args, env, None)?
             } else {
                 // A special reads its arguments as expressions, so they stay uncompiled.
                 eval::apply_call(call, function, call.cdr(), env)?

@@ -95,6 +95,9 @@ pub struct Heap {
     /// Objects a store left without a counted reference, which the next reconcile frees if no
     /// root holds them either (`Heap::reconcile`).
     zero_count: Vec<Sexp>,
+    /// Frames of returned calls that the next reconcile may release ([`Heap::release_frame`]).
+    /// They are not roots: a collection drops the ones it frees.
+    returned: Vec<Returned>,
     /// The table size that runs the next reconcile. Entries a root holds stay in the table, so
     /// the trigger counts the entries added since the last one.
     reconcile_at: usize,
@@ -161,6 +164,15 @@ pub struct Heap {
     /// young and the old generation's bytes after it. Measuring pause distributions over a whole test suite needs every pause, which
     /// `gc.time()`'s totals cannot give.
     pause_log: Option<std::fs::File>,
+}
+
+/// A returned call's frame that waits for a reconcile to be released ([`Heap::release_frame`]).
+struct Returned {
+    env: Sexp,
+    /// The closures the call created in `env`, other than its result.
+    closures: SmallVec<[Sexp; 2]>,
+    /// How many of those a collection freed, whose references to `env` stay counted.
+    swept: u32,
 }
 
 /// A formal bound by [`Heap::define_formals`]. `missing` marks a formal the call did not supply,
@@ -604,6 +616,7 @@ impl Heap {
             escaped: Vec::new(),
             escaped_lists: Vec::new(),
             zero_count: Vec::new(),
+            returned: Vec::new(),
             reconcile_at: RECONCILE_ENTRIES,
             zero_bytes: 0,
             untracked: Vec::new(),
@@ -1149,6 +1162,7 @@ impl Heap {
         Frame::write_empty(object.frame_ptr(), bindings);
         self.space.set_finalizable(object);
         object.set_enclosure_unbarriered(enclosure);
+        enclosure.increment_refcount();
         Ok(object)
     }
 
@@ -1185,6 +1199,11 @@ impl Heap {
         payload.finalizer.set(finalizer);
         payload.c_finalizer.set(c_finalizer);
         payload.finalize_on_exit.set(finalize_on_exit);
+        // The fields are traced specially but count like any other, so a frame that is a
+        // finalizer's key is not released when its call returns (`release_frame`).
+        key.increment_refcount();
+        value.increment_refcount();
+        finalizer.increment_refcount();
         self.weak_refs.push(object);
         Ok(object)
     }
@@ -1491,7 +1510,7 @@ impl Heap {
     pub unsafe fn set_enclosure(&mut self, env: Sexp, value: Sexp) {
         self.binding_epoch += 1;
         self.enclosure_epoch += 1;
-        self.write_barrier(env, value);
+        self.store(env, env.enclosure(), value);
         env.set_enclosure_unbarriered(value);
     }
 
@@ -1676,6 +1695,192 @@ impl Heap {
         self.store(cell, cell.cdr(), value);
         cell.set_cdr_unbarriered(value);
         Ok(())
+    }
+
+    /// GNU R's `R_CleanupEnvir`: when a closure call returns `result`, the call's frame `env`
+    /// gives up its bindings if nothing counts a reference to it but its own closures and
+    /// promises (the cycles that a helper defined in the body or a default argument make).
+    /// Counted stores release what the bindings held, so a large vector bound only there is
+    /// freed at the next reconcile instead of waiting for a collection, which by then may have
+    /// tenured it. The bindings give up `result` too, when it is a binding's value: the call's
+    /// handle scope roots it for the caller, and a reconcile frees nothing a handle holds.
+    ///
+    /// Every reference to an environment from another object counts: bindings, list elements,
+    /// attributes, a closure's or promise's environment, an enclosure and a weak reference's
+    /// fields. Interpreter frames and handles do not, but none outlives the returned call.
+    ///
+    /// `closures` are the closures the call created in `env`. One that nothing counts may still
+    /// be held by a root the counts do not see, such as a handle or a native call's protect
+    /// stack, so a frame whose release needs it dead waits for the next reconcile, which checks
+    /// the roots (`Heap::release_returned`). So does a frame the frames of calls it made still
+    /// held through their promises when it returned, because those wait too.
+    pub unsafe fn release_frame(&mut self, env: Sexp, result: Sexp, closures: &[Sexp]) {
+        let count = env.refcount();
+        if env == result
+            || count == REFCOUNT_MAX
+            || !env.has_gp(gp::FUNCTION_FRAME)
+            || self.is_symbol_frame(env)
+        {
+            return;
+        }
+        if count as usize == self.frame_cycles(env, result) {
+            if !self.roots.precious.contains_key(&env) {
+                self.clear_frame(env);
+            }
+            return;
+        }
+        let closures: SmallVec<[Sexp; 2]> = closures
+            .iter()
+            .copied()
+            .filter(|&closure| closure != result && closure.tag() == env)
+            .collect();
+        self.zero_bytes += self
+            .local_cells(env)
+            .map(|cell| cell.cdr())
+            .filter(|&value| value.refcount() == 1 && reclaimable(value))
+            .map(|value| self.reclaimable_bytes(value))
+            .sum::<usize>();
+        self.returned.push(Returned {
+            env,
+            closures,
+            swept: 0,
+        });
+    }
+
+    /// The counted references to `env` that its own bindings make: a closure or promise bound
+    /// only there whose environment is `env`. A reconcile also requires that no root holds it.
+    unsafe fn frame_cycles(&self, env: Sexp, result: Sexp) -> usize {
+        self.local_cells(env)
+            .filter(|cell| {
+                let value = cell.cdr();
+                cell.tracks_references()
+                    && value != result
+                    && value.refcount() == 1
+                    && matches!(value.kind(), SexpType::Closure | SexpType::Promise)
+                    && value.tag() == env
+                    && value.gc_bits() & gc_bits::HELD == 0
+            })
+            .count()
+    }
+
+    /// Releases the bindings of a frame nothing else references, and its enclosure.
+    unsafe fn clear_frame(&mut self, env: Sexp) {
+        let cells: SmallVec<[Sexp; 16]> = self.local_cells(env).collect();
+        let nil = self.known.nil;
+        for &cell in &cells {
+            if cell.has_gp(gp::BINDING_LOCKED | gp::ACTIVE_BINDING) || !cell.tracks_references() {
+                continue;
+            }
+            let value = cell.cdr();
+            match value.kind() {
+                SexpType::Promise if value.refcount() == 1 => self.release_promise(value),
+                SexpType::Dots if value.refcount() == 1 => {
+                    let mut dots = value;
+                    while matches!(dots.kind(), SexpType::Dots | SexpType::Pairlist) {
+                        let promise = dots.car();
+                        if promise.kind() == SexpType::Promise && promise.refcount() == 1 {
+                            self.release_promise(promise);
+                        }
+                        dots = dots.cdr();
+                    }
+                }
+                _ => {}
+            }
+            self.store(cell, value, nil);
+            cell.set_cdr_unbarriered(nil);
+        }
+        // The enclosure counts a reference to the frame of the function that defined the callee,
+        // which can be released in turn when that function returns.
+        self.drop_enclosure(env);
+    }
+
+    /// Releases the frames that waited for a reconcile ([`Heap::release_frame`]), in the order
+    /// their calls returned, so a callee's frame gives up its promises before its caller's frame
+    /// is counted. The roots are flagged [`gc_bits::HELD`]; `frames_held` are the frames a root
+    /// other than a handle holds, because the caller's handle scope roots every frame it made.
+    unsafe fn release_returned(&mut self, frames_held: &[bool]) {
+        let returned = std::mem::take(&mut self.returned);
+        let unbound = self.known.unbound;
+        for (entry, &held) in returned.iter().zip(frames_held) {
+            let env = entry.env;
+            let count = env.refcount();
+            if held || count == REFCOUNT_MAX {
+                continue;
+            }
+            let dead = entry
+                .closures
+                .iter()
+                .filter(|&&closure| {
+                    closure.refcount() == 0
+                        && closure.tag() == env
+                        && closure.gc_bits() & gc_bits::HELD == 0
+                })
+                .count();
+            if count as usize == self.frame_cycles(env, unbound) + dead + entry.swept as usize {
+                self.clear_frame(env);
+            }
+        }
+    }
+
+    /// Drops `env`'s reference to its enclosure once nothing counts a reference to `env` and it
+    /// is not `result`: an environment a call made for itself, such as a dispatch context, is
+    /// garbage then, and its enclosure may be a frame that can be released.
+    pub unsafe fn release_enclosure(&mut self, env: Sexp, result: Sexp) {
+        if env != result && env.refcount() == 0 && !self.roots.precious.contains_key(&env) {
+            self.drop_enclosure(env);
+        }
+    }
+
+    /// Lookups cache nothing about a garbage environment, so the enclosure epochs stay.
+    unsafe fn drop_enclosure(&mut self, env: Sexp) {
+        let empty = self.known.empty_env;
+        self.store(env, env.enclosure(), empty);
+        env.set_enclosure_unbarriered(empty);
+    }
+
+    /// GNU R's `unpromiseArgs`: once a closure call returns, the argument list `arguments` that
+    /// the caller built for it gives up its promises, and each promise that only the list held
+    /// gives up its value and environment. The caller must not read the list or its promises
+    /// again.
+    pub unsafe fn release_arguments(&mut self, arguments: Sexp) {
+        if !arguments.tracks_references() {
+            return;
+        }
+        let nil = self.known.nil;
+        let mut cell = arguments;
+        while cell.kind() == SexpType::Pairlist {
+            let value = cell.car();
+            if value.kind() == SexpType::Promise && value.refcount() == 1 {
+                self.release_promise(value);
+            }
+            self.store(cell, value, nil);
+            cell.set_car_unbarriered(nil);
+            cell = cell.cdr();
+        }
+    }
+
+    /// [`Heap::release_arguments`] for arguments held in an uncounted slice, where a
+    /// promise whose reference count is zero is held only by that slice.
+    pub unsafe fn release_argument_promises(&mut self, values: impl Iterator<Item = Sexp>) {
+        for value in values {
+            if value.kind() == SexpType::Promise && value.refcount() == 0 {
+                self.release_promise(value);
+            }
+        }
+    }
+
+    /// Clears a promise that only a released frame or argument list held.
+    unsafe fn release_promise(&mut self, promise: Sexp) {
+        let value = promise.car();
+        if value != self.known.unbound {
+            self.store(promise, value, self.known.unbound);
+            promise.set_car_unbarriered(self.known.unbound);
+        }
+        let env = promise.tag();
+        if env != self.known.nil {
+            self.store(promise, env, self.known.nil);
+            promise.set_tag_unbarriered(self.known.nil);
+        }
     }
 
     /// Removes `symbol` from `env`'s own frame and reports whether it was bound.
@@ -2081,7 +2286,9 @@ impl Heap {
         // A reconcile scans every root, so it runs once the table could free enough to pay for
         // that, or has grown enough to need bounding. Running one at every large allocation
         // made package test suites a sixth slower, because entries a root holds stay listed.
-        if self.zero_bytes >= RECONCILE_BYTES || self.zero_count.len() >= self.reconcile_at {
+        if self.zero_bytes >= RECONCILE_BYTES
+            || self.zero_count.len() + self.returned.len() >= self.reconcile_at
+        {
             self.reconcile(keep);
         }
         match self.policy.stress {
@@ -2188,10 +2395,29 @@ impl Heap {
     /// stays for the sweep with its fields cleared; a dead large atomic vector is freed at once,
     /// which is what returns a temporary's pages before the next collection would.
     unsafe fn reconcile(&mut self, keep: &[Sexp]) {
-        if self.inhibit > 0 || self.zero_count.is_empty() {
+        if self.inhibit > 0 || (self.zero_count.is_empty() && self.returned.is_empty()) {
             return;
         }
         self.zero_bytes = 0;
+        // Releasing a returned frame lists what its bindings held, so the frames go first, with
+        // the roots flagged.
+        let mut roots = Vec::new();
+        if !self.returned.is_empty() {
+            let handles_from;
+            (roots, handles_from) = self.shallow_roots(keep);
+            for &root in &roots[..handles_from] {
+                root.set_gc_bit(gc_bits::HELD, true);
+            }
+            let frames_held: Vec<bool> = self
+                .returned
+                .iter()
+                .map(|entry| entry.env.gc_bits() & gc_bits::HELD != 0)
+                .collect();
+            for &root in &roots[handles_from..] {
+                root.set_gc_bit(gc_bits::HELD, true);
+            }
+            self.release_returned(&frames_held);
+        }
         let entries = std::mem::take(&mut self.zero_count);
         let mut work: Vec<Sexp> = Vec::new();
         for &object in &entries {
@@ -2202,12 +2428,17 @@ impl Heap {
             }
         }
         if work.is_empty() {
+            for root in roots.drain(..) {
+                root.set_gc_bit(gc_bits::HELD, false);
+            }
             self.reconcile_at = RECONCILE_ENTRIES;
             return;
         }
-        let mut roots = self.shallow_roots(keep);
-        for &root in &roots {
-            root.set_gc_bit(gc_bits::HELD, true);
+        if roots.is_empty() {
+            roots = self.shallow_roots(keep).0;
+            for &root in &roots {
+                root.set_gc_bit(gc_bits::HELD, true);
+            }
         }
         // Held entries stay in the table: the root that holds one can drop it without a store,
         // and the next reconcile looks again.
@@ -2290,19 +2521,55 @@ impl Heap {
         }
     }
 
-    /// Every object a reference the counts do not see points at, for [`Heap::reconcile`]. A
-    /// root's own fields are counted, so its children need no visit.
-    unsafe fn shallow_roots(&mut self, keep: &[Sexp]) -> Vec<Sexp> {
+    /// Drops the zero-count entries a collection is about to sweep, and gives up what the dead
+    /// lists among them held, with the lists those hold in turn. Sweeping decrements nothing,
+    /// so without this a list a frame released, which a collection found before a reconcile
+    /// did, would leave its columns counted forever, and no reconcile could free them once a
+    /// later copy of the data frame died.
+    unsafe fn release_swept_lists(&mut self) {
+        let entries = std::mem::take(&mut self.zero_count);
+        let mut dying: Vec<Sexp> = Vec::new();
+        for object in entries {
+            if self.space.is_marked(object) {
+                self.zero_count.push(object);
+            } else if object.kind() == SexpType::List && !object.is_altrep() {
+                dying.push(object);
+            }
+        }
+        let nil = self.known.nil;
+        while let Some(object) = dying.pop() {
+            let attributes = object.attrib();
+            object.set_attrib_unbarriered(nil);
+            let mut children: SmallVec<[Sexp; 16]> = SmallVec::new();
+            children.push(attributes);
+            for index in 0..object.length() as usize {
+                children.push(object.stored_element(index));
+                object.set_element_unbarriered(index, nil);
+            }
+            for child in children {
+                if !child.release_reference() {
+                    continue;
+                }
+                if !self.space.is_marked(child) {
+                    if child.kind() == SexpType::List && !child.is_altrep() {
+                        dying.push(child);
+                    }
+                } else {
+                    self.note_zero(child);
+                }
+            }
+        }
+    }
+
+    /// Every object a reference the counts do not see points at, for [`Heap::reconcile`], with
+    /// the handles last and where they start. A root's own fields are counted, so its children
+    /// need no visit.
+    unsafe fn shallow_roots(&mut self, keep: &[Sexp]) -> (Vec<Sexp>, usize) {
         let mut roots = Vec::with_capacity(4096);
         roots.extend(self.known.all());
         roots.extend_from_slice(keep);
         let stacks = &self.roots;
-        for stack in [
-            &stacks.globals,
-            &stacks.protect.stack,
-            &stacks.handles,
-            &stacks.handouts,
-        ] {
+        for stack in [&stacks.globals, &stacks.protect.stack, &stacks.handouts] {
             roots.extend_from_slice(&stack.entries);
         }
         roots.extend(stacks.precious.keys().copied());
@@ -2333,7 +2600,9 @@ impl Heap {
                 );
             }
         }
-        roots
+        let handles_from = roots.len();
+        roots.extend_from_slice(&self.roots.handles.entries);
+        (roots, handles_from)
     }
 
     /// Frees a large atomic vector a reconcile found dead. A young vector's bytes stay counted
@@ -2480,12 +2749,32 @@ impl Heap {
         self.drain();
         self.process_weak_refs();
         self.clear_dead_weak_pairs();
-        // Before the sweep, while a mark still means "survives".
+        // Before the sweep, while a mark still means "survives". A returned frame the sweep frees
+        // gives up its bindings first: sweeping decrements nothing, and those bindings may be the
+        // only counted references left to its caller's frame, which also waits to be released.
+        let returned = std::mem::take(&mut self.returned);
+        for entry in returned {
+            if self.space.is_marked(entry.env) {
+                self.returned.push(entry);
+            } else {
+                self.clear_frame(entry.env);
+            }
+        }
+        self.release_swept_lists();
         let space = &self.space;
         self.escaped.retain(|&object| space.is_marked(object));
         self.escaped_lists
             .retain(|(object, _)| space.is_marked(*object));
-        self.zero_count.retain(|&object| space.is_marked(object));
+        for entry in &mut self.returned {
+            let env = entry.env;
+            entry.closures.retain(|&mut closure| {
+                let swept = !space.is_marked(closure);
+                if swept && closure.tag() == env {
+                    entry.swept += 1;
+                }
+                !swept
+            });
+        }
         self.untracked.retain(|&object| space.is_marked(object));
         if !self.expect_dead.is_empty() {
             let expect_dead = std::mem::take(&mut self.expect_dead);
