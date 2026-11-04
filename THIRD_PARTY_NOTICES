@@ -118,7 +118,7 @@ crates/interp/src/rmath.rs
         Copyright (C) 2000-2022 The R Core Team
         Copyright (C) 2003-2022 The R Foundation
         Copyright (C) 1998 Ross Ihaka
-    GNU R src/nmath/qbeta.c (qbeta_start)
+    GNU R src/nmath/qbeta.c (qbeta_raw)
         Copyright (C) 1998--2022 The R Core Team
         Copyright (C) 1995, 1996 Robert Gentleman and Ross Ihaka
         based on code (C) 1979 and later Royal Statistical Society

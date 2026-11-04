@@ -39,7 +39,7 @@
 //     Copyright (C) 2003-2022 The R Foundation
 //     Copyright (C) 1998 Ross Ihaka
 //
-// GNU R: src/nmath/qbeta.c (qbeta_start)
+// GNU R: src/nmath/qbeta.c (qbeta_raw)
 //     Copyright (C) 1998--2022 The R Core Team
 //     Copyright (C) 1995, 1996 Robert Gentleman and Ross Ihaka
 //     based on code (C) 1979 and later Royal Statistical Society
@@ -5097,238 +5097,447 @@ fn gamln(a: f64) -> f64 {
     }
 }
 
-/// The beta quantile. AS 109's starting value, then Newton steps on `log x` against the
-/// smaller tail's log probability, safeguarded by bisection, so the answer is the root of
-/// `pbeta` to the last bits wherever `pbeta` itself is accurate.
+/// The beta quantile (AS 109 with Remark AS R83, and R's refinements): a starting value from
+/// Hastings's and Carter's normal approximations, then safeguarded Newton steps on `x` or on
+/// `log x`.
 pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
-    // The search probes pbeta far from the quantile, where its series may fail to converge
-    // without that touching the answer, so those warnings are not the caller's.
-    let raised = WARNINGS.with(|warnings| warnings.borrow().len());
-    let quantile = qbeta_search(alpha, p, q, lower, log);
-    WARNINGS.with(|warnings| warnings.borrow_mut().truncate(raised));
-    quantile
-}
-
-fn qbeta_search(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
-    if alpha.is_nan() || p.is_nan() || q.is_nan() {
-        return alpha + p + q;
+    if p.is_nan() || q.is_nan() || alpha.is_nan() {
+        return p + q + alpha;
     }
     if p < 0.0 || q < 0.0 {
         return f64::NAN;
     }
-    if let Some(boundary) = q_p01_boundaries(alpha, lower, log, 0.0, 1.0) {
-        return boundary;
-    }
-    if p == 0.0 || q == 0.0 || !finite(p) || !finite(q) {
-        if p == 0.0 && q == 0.0 {
-            return if alpha < d_val(0.5, log) {
-                if lower { 0.0 } else { 1.0 }
-            } else if alpha > d_val(0.5, log) {
-                if lower { 1.0 } else { 0.0 }
-            } else {
-                0.5
-            };
-        }
-        // A vanishing first shape (relative to the second) puts all the mass at 0, and a
-        // vanishing second shape puts it at 1.
-        if p == 0.0 || q / p == f64::INFINITY {
-            return 0.0;
-        }
-        if q == 0.0 || p / q == f64::INFINITY {
-            return 1.0;
-        }
-        return 0.5;
-    }
-    // The log probability of each tail, and which end of [0, 1] the quantile lies nearer:
-    // solving for the distance to that end keeps its relative precision.
-    let log_lower = if log {
-        if lower { alpha } else { log1_exp(alpha) }
-    } else if lower {
-        alpha.ln()
-    } else {
-        (-alpha).ln_1p()
-    };
-    let log_upper = if log {
-        if lower { log1_exp(alpha) } else { alpha }
-    } else if lower {
-        (-alpha).ln_1p()
-    } else {
-        alpha.ln()
-    };
-    // Solve for t, the distance from the quantile to the nearer end of [0, 1], so that a
-    // quantile near either end keeps its relative precision. When the quantile lies above
-    // 1/2, t = 1 - x follows Beta(q, p). The equation is on the log scale of whichever tail
-    // probability is smaller, the one the arguments represent accurately.
-    let log_half = pbeta(0.5, p, q, true, true);
-    if log_lower == log_half {
-        return 0.5;
-    }
-    let near_zero = log_lower < log_half;
-    let (a, b) = if near_zero { (p, q) } else { (q, p) };
-    let use_lower = log_lower <= log_upper;
-    let (target, t_lower) = match (near_zero, use_lower) {
-        (true, true) => (log_lower, true),
-        (true, false) => (log_upper, false),
-        (false, true) => (log_lower, false),
-        (false, false) => (log_upper, true),
-    };
-    let t_lower_log = if near_zero { log_lower } else { log_upper };
-    // h(t) increases with t: the lower tail's log probability, or minus the upper tail's.
-    let direction = if t_lower { 1.0 } else { -1.0 };
-    // Newton's method on log(t), stepping as t * exp(du) so tiny quantiles keep their relative
-    // precision, inside a bracket that falls back to bisection when a step leaves it.
-    let mut t = qbeta_start(t_lower_log, a, b);
-    if !(t > 0.0 && t < 0.5) {
-        t = 0.25;
-    }
-    let lbeta_ab = lbeta(a, b);
-    if !lbeta_ab.is_finite() || !(a + b).is_finite() {
-        // The parameters are beyond what the density can be evaluated at, as in GNU R.
-        return f64::NAN;
-    }
-    let mut lo = 0.0_f64;
-    let mut hi = 0.5_f64;
-    for _ in 0..1000 {
-        let value = pbeta(t, a, b, t_lower, true);
-        if value.is_nan() {
-            // pbeta's asymptotic expansion fails for an extreme second shape far from the
-            // quantile; the quantile lies nearer 0, where it converges.
-            hi = t;
-            t = if lo == 0.0 {
-                hi * 1e-3
-            } else {
-                (lo * hi).sqrt()
-            };
-            continue;
-        }
-        let difference = direction * (value - target);
-        if difference == 0.0 {
-            break;
-        }
-        if difference > 0.0 {
-            hi = t;
-        } else {
-            lo = t;
-        }
-        // d/du log P(e^u) = t f(t) / P(t), and the same with Q for the upper tail.
-        let log_density = (a - 1.0) * t.ln() + (b - 1.0) * (-t).ln_1p() - lbeta_ab;
-        let step = -difference / (t.ln() + log_density - value).exp();
-        let mut next = t * step.exp();
-        if !(next > lo && next < hi) {
-            next = if lo == 0.0 {
-                hi * 1e-3
-            } else if hi / lo > 4.0 {
-                (lo * hi).sqrt()
-            } else {
-                0.5 * (lo + hi)
-            };
-        } else if step.abs() < 1e-15 {
-            t = next;
-            break;
-        }
-        if next == t {
-            break;
-        }
-        t = next;
-    }
-    let quantile = if near_zero { t } else { 0.5 - t + 0.5 };
-    // Newton's method converges in t, and turning a t near 1/2 into 1 - t rounds, so the
-    // quantile can land a few doubles from the one whose probability is nearest the target.
-    // A short walk over neighbouring doubles settles it. pbeta rounds to the same value over
-    // runs of adjacent doubles, so the walk looks a few doubles past a flat stretch.
-    const LOOKAHEAD: usize = 8;
-    let miss = |x: f64| (pbeta(x, p, q, lower, log) - alpha).abs();
-    let mut best = quantile;
-    let mut best_miss = miss(best);
-    // The log-scale solve resolves a probability only to |log p| ulps, which near 1e-60 is
-    // about a hundred ulps of p itself, so a few Newton steps on the caller's own scale
-    // recover the digits a small probability represents exactly.
-    for _ in 0..8 {
-        if best_miss == 0.0 || !(best > 0.0 && best < 1.0) {
-            break;
-        }
-        let value = pbeta(best, p, q, lower, log);
-        let density = dbeta(best, p, q, false);
-        let slope = if lower { density } else { -density };
-        let slope = if log { slope / value.exp() } else { slope };
-        if !(slope.is_finite() && slope != 0.0) {
-            break;
-        }
-        let next = best - (value - alpha) / slope;
-        if !(next > 0.0 && next < 1.0) {
-            break;
-        }
-        let next_miss = miss(next);
-        if next_miss >= best_miss {
-            break;
-        }
-        best = next;
-        best_miss = next_miss;
-    }
-    // A quantile of exactly 0 or 1 is a tail probability below the double range, which no
-    // interior double improves on.
-    let directions: &[fn(f64) -> f64] = if quantile > 0.0 && quantile < 1.0 {
-        &[f64::next_up, f64::next_down]
-    } else {
-        &[]
-    };
-    for step in directions {
-        'walk: loop {
-            let mut candidate = best;
-            for _ in 0..LOOKAHEAD {
-                candidate = step(candidate);
-                if !(candidate > 0.0 && candidate < 1.0) {
-                    break 'walk;
-                }
-                let candidate_miss = miss(candidate);
-                if candidate_miss < best_miss {
-                    best = candidate;
-                    best_miss = candidate_miss;
-                    continue 'walk;
-                }
-            }
-            break;
-        }
-    }
-    // GNU R never returns a subnormal beta quantile: it gives 0 or 2^-1024, whichever has
-    // the probability nearer the target, and its own tests rely on that.
-    if best < f64::MIN_POSITIVE {
-        let floor = f64::MIN_POSITIVE / 4.0;
-        best = if miss(floor) < miss(0.0) { floor } else { 0.0 };
-    }
-    best
+    qbeta_raw(alpha, p, q, lower, log, USE_LOG_X_CUTOFF, N_NEWTON_FREE)[0]
 }
 
-/// AS 109's approximation of the lower-tail beta quantile at log probability `log_p`.
-fn qbeta_start(log_p: f64, a: f64, b: f64) -> f64 {
-    let p_ = log_p.exp();
-    let logbeta = lbeta(a, b);
-    // Hastings's approximation of the normal quantile of the upper tail 1 - p.
-    let r = (-2.0 * log_p).sqrt();
-    let y = r - (2.30753 + 0.27061 * r) / (1.0 + (0.99229 + 0.04481 * r) * r);
-    if a > 1.0 && b > 1.0 {
-        let r = (y * y - 3.0) / 6.0;
-        let s = 1.0 / (a + a - 1.0);
-        let t = 1.0 / (b + b - 1.0);
-        let h = 2.0 / (s + t);
-        let w = y * (h + r).sqrt() / h - (t - s) * (r + 5.0 / 6.0 - 2.0 / (3.0 * h));
-        a / (a + b * (w + w).exp())
-    } else {
-        let r = b + b;
-        let mut t = 1.0 / (9.0 * b);
-        t = r * (1.0 - t + y * t.sqrt()).powi(3);
-        if t <= 0.0 {
-            1.0 - ((-p_).ln_1p() + b.ln() + logbeta).exp() / b
+const USE_LOG_X_CUTOFF: f64 = -5.0;
+const N_NEWTON_FREE: i32 = 4;
+
+/// Returns `[qbeta, 1 - qbeta]`, the second useful when the quantile is close to one. With
+/// `log_q_cut` infinite the results are on the log scale.
+#[allow(clippy::too_many_lines, unused_assignments)]
+fn qbeta_raw(
+    alpha: f64,
+    p: f64,
+    q: f64,
+    lower_tail: bool,
+    log_p: bool,
+    log_q_cut: f64,
+    n_newton: i32,
+) -> [f64; 2] {
+    // Assumes subnormal numbers, so there is no underflow at DBL_MIN.
+    const DBL_VERY_MIN: f64 = DBL_MIN / 4.0;
+    const DBL_LOG_V_MIN: f64 = M_LN2 * (-1021.0 - 2.0);
+    const FPU: f64 = 3e-308;
+    const ACU_MIN: f64 = 1e-300;
+    const P_LO: f64 = FPU;
+    const P_HI: f64 = 1.0 - 2.22e-16;
+    const CONST1: f64 = 2.30753;
+    const CONST2: f64 = 0.27061;
+    const CONST3: f64 = 0.99229;
+    const CONST4: f64 = 0.04481;
+    // log(DBL_EPSILON)
+    const LOG_EPS_C: f64 = M_LN2 * (1.0 - 53.0);
+    let dbl_1_minus_eps = f64::from_bits(0x3fef_ffff_ffff_ffff);
+
+    let give_log_q = log_q_cut == f64::INFINITY;
+    let mut use_log_x = give_log_q;
+    let mut warned = false;
+    let mut add_n_step = true;
+    let mut swap_tail;
+    let (mut a, mut la, mut pp, mut qq) = (0.0, 0.0, 0.0, 0.0);
+    let (mut g, mut h, mut r, mut s, mut t, mut w);
+    (r, t, w) = (0.0, 0.0, 0.0);
+    let mut y = -1.0;
+    let mut u = 0.0;
+    let mut xinbta = 0.0;
+    let mut tx = 0.0;
+    let mut u_n = 1.0;
+
+    let q_zero = || {
+        if give_log_q {
+            [f64::NEG_INFINITY, 0.0]
         } else {
-            t = (4.0 * a + r - 2.0) / t;
-            if t <= 1.0 {
-                ((log_p + a.ln() + logbeta) / a).exp()
+            [0.0, 1.0]
+        }
+    };
+    let q_one = || {
+        if give_log_q {
+            [0.0, f64::NEG_INFINITY]
+        } else {
+            [1.0, 0.0]
+        }
+    };
+    let q_half = || {
+        if give_log_q {
+            [-M_LN2, -M_LN2]
+        } else {
+            [0.5, 0.5]
+        }
+    };
+
+    if alpha == dt0(lower_tail, log_p) {
+        return q_zero();
+    }
+    if alpha == dt1(lower_tail, log_p) {
+        return q_one();
+    }
+    // Checked before the transformation, which may lose all accuracy.
+    if (log_p && alpha > 0.0) || (!log_p && !(0.0..=1.0).contains(&alpha)) {
+        return [f64::NAN, f64::NAN];
+    }
+    // p == 0, q == 0, p = Inf and q = Inf are one- or two-point masses.
+    if p == 0.0 || q == 0.0 || !finite(p) || !finite(q) {
+        if p == 0.0 && q == 0.0 {
+            let half = if log_p { -M_LN2 } else { 0.5 };
+            if alpha < half {
+                return q_zero();
+            }
+            if alpha > half {
+                return q_one();
+            }
+            return q_half();
+        } else if p == 0.0 || p / q == 0.0 {
+            return q_zero();
+        } else if q == 0.0 || q / p == 0.0 {
+            return q_one();
+        }
+        return q_half();
+    }
+
+    let p_lower = dt_qiv(alpha, lower_tail, log_p);
+    let logbeta = lbeta(p, q);
+    swap_tail = p_lower > 0.5;
+    let mut n_maybe_swaps = 0;
+    let (mut acu, mut rp);
+
+    enum Exit {
+        Converged,
+        NotConverged,
+        Return,
+    }
+    let exit = 'search: loop {
+        if swap_tail {
+            a = dt_civ(alpha, lower_tail, log_p);
+            la = dt_clog(alpha, lower_tail, log_p);
+            pp = q;
+            qq = p;
+        } else {
+            a = p_lower;
+            la = dt_log(alpha, lower_tail, log_p);
+            pp = p;
+            qq = q;
+        }
+        n_maybe_swaps += 1;
+        acu = ACU_MIN.max(10f64.powf(-13.0 - 2.5 / (pp * pp) - 0.5 / (a * a)));
+        let u0 = (la + pp.ln() + logbeta) / pp;
+        rp = pp * (1.0 - qq) / (pp + 1.0);
+        t = 0.2;
+        let u0_maybe = M_LN2 * -1021.0 < u0 && u0 < -0.01;
+        u_n = 1.0;
+        let mut jump_to_newton = false;
+        if u0_maybe
+            && u0
+                < (t * LOG_EPS_C
+                    - (pp * (1.0 - qq) * (2.0 - qq) / (2.0 * (pp + 2.0))).abs().ln())
+                    / 2.0
+        {
+            // One cheap correction step, instead of a Newton step.
+            rp *= u0.exp();
+            if rp > -1.0 {
+                u = u0 - rp.ln_1p() / pp;
             } else {
-                1.0 - 2.0 / (t + 1.0)
+                u = u0;
+            }
+            xinbta = u.exp();
+            tx = xinbta;
+            use_log_x = true;
+            jump_to_newton = true;
+        }
+        if !jump_to_newton {
+            // y_alpha of AS 64: Hastings's approximation of qnorm(1 - a).
+            r = (-2.0 * la).sqrt();
+            y = r - (CONST1 + CONST2 * r) / (1.0 + (CONST3 + CONST4 * r) * r);
+            if pp > 1.0 && qq > 1.0 {
+                // Carter (1947), AS 109 remark 5.
+                r = (y * y - 3.0) / 6.0;
+                s = 1.0 / (pp + pp - 1.0);
+                t = 1.0 / (qq + qq - 1.0);
+                h = 2.0 / (s + t);
+                w = y * (h + r).sqrt() / h - (t - s) * (r + 5.0 / 6.0 - 2.0 / (3.0 * h));
+                if w > 300.0 {
+                    t = w + w + qq.ln() - pp.ln();
+                    u = if t <= 18.0 {
+                        -t.exp().ln_1p()
+                    } else {
+                        -t - (-t).exp()
+                    };
+                    xinbta = u.exp();
+                } else {
+                    xinbta = pp / (pp + qq * (w + w).exp());
+                    u = -(qq / pp * (w + w).exp()).ln_1p();
+                }
+            } else {
+                // AS 64, Scheffe-Tukey and Wilson-Hilferty.
+                r = qq + qq;
+                t = 1.0 / (3.0 * qq.sqrt());
+                t = r * r_pow_di(1.0 + t * (-t + y), 3);
+                s = 4.0 * pp + r - 2.0;
+                if t == 0.0 || (t < 0.0 && s >= t) {
+                    let l1ma = if swap_tail {
+                        dt_log(alpha, lower_tail, log_p)
+                    } else {
+                        dt_clog(alpha, lower_tail, log_p)
+                    };
+                    let xx = (l1ma + qq.ln() + logbeta) / qq;
+                    if xx <= 0.0 {
+                        xinbta = -xx.exp_m1();
+                        u = log1_exp(xx);
+                    } else {
+                        let r_ = rp * u0.exp();
+                        if r_ > -1.0 {
+                            u = u0 - r_.ln_1p() / pp;
+                        } else {
+                            u = u0;
+                        }
+                        xinbta = u.exp();
+                    }
+                } else {
+                    t = s / t;
+                    if t <= 1.0 {
+                        u = u0;
+                        xinbta = u.exp();
+                    } else {
+                        xinbta = 1.0 - 2.0 / (t + 1.0);
+                        u = (-2.0 / (t + 1.0)).ln_1p();
+                    }
+                }
+            }
+            // If the initial u is completely wrong this decision is wrong too.
+            if (swap_tail && u >= -log_q_cut.exp())
+                || (!swap_tail && u >= -(4.0 * log_q_cut).exp() && pp / qq < 1000.0)
+            {
+                swap_tail = !swap_tail;
+                if swap_tail {
+                    a = dt_civ(alpha, lower_tail, log_p);
+                    la = dt_clog(alpha, lower_tail, log_p);
+                    pp = q;
+                    qq = p;
+                } else {
+                    a = p_lower;
+                    la = dt_log(alpha, lower_tail, log_p);
+                    pp = p;
+                    qq = q;
+                }
+                u = log1_exp(u);
+                xinbta = u.exp();
+            }
+            if !use_log_x {
+                use_log_x = u < log_q_cut;
+            }
+            let bad_u = !finite(u);
+            let bad_init = bad_u || xinbta > P_HI;
+            tx = xinbta;
+            if bad_u || u < log_q_cut {
+                // Try the left border quickly, at the smallest positive number.
+                w = pbeta_raw(DBL_VERY_MIN, pp, qq, true, log_p);
+                if w > (if log_p { la } else { a }) {
+                    if log_p || (w - a).abs() < (0.0 - a).abs() {
+                        tx = DBL_VERY_MIN;
+                        u_n = DBL_LOG_V_MIN;
+                    } else {
+                        tx = 0.0;
+                        u_n = f64::NEG_INFINITY;
+                    }
+                    use_log_x = log_p;
+                    add_n_step = false;
+                    break 'search Exit::Return;
+                } else if u < DBL_LOG_V_MIN {
+                    u = DBL_LOG_V_MIN;
+                    xinbta = DBL_VERY_MIN;
+                }
+            }
+            // The approximation is sometimes negative, and zero is not acceptable either.
+            if bad_init && !(use_log_x && tx > 0.0) {
+                if u == f64::NEG_INFINITY {
+                    u = M_LN2 * -1021.0;
+                    xinbta = DBL_MIN;
+                } else {
+                    xinbta = if xinbta > 1.1 {
+                        0.5
+                    } else if xinbta < P_LO {
+                        u.exp()
+                    } else {
+                        P_HI
+                    };
+                    if bad_u {
+                        u = xinbta.ln();
+                    }
+                }
             }
         }
+
+        // Newton-Raphson with pbeta_raw.
+        r = 1.0 - pp;
+        t = 1.0 - qq;
+        let mut wprev = 0.0;
+        let mut prev: f64 = 1.0;
+        let mut adj: f64 = 1.0;
+        if use_log_x {
+            for i_pb in 0..1000 {
+                y = pbeta_raw(xinbta, pp, qq, true, true);
+                w = if y == f64::NEG_INFINITY {
+                    0.0
+                } else {
+                    (y - la) * (y - u + logbeta + r * u + t * log1_exp(u)).exp()
+                };
+                if !finite(w) {
+                    if n_maybe_swaps <= 1 {
+                        continue 'search;
+                    }
+                    return [f64::NAN, f64::NAN];
+                }
+                if i_pb >= n_newton && w * wprev <= 0.0 {
+                    prev = adj.abs().max(FPU);
+                }
+                g = 1.0;
+                for _ in 0..1000 {
+                    adj = g * w;
+                    if adj.abs() < prev {
+                        u_n = u - adj;
+                        if u_n <= 0.0 {
+                            if prev <= acu || w.abs() <= acu {
+                                break 'search Exit::Converged;
+                            }
+                            break;
+                        }
+                    }
+                    g /= 3.0;
+                }
+                let d = adj.abs().min((u_n - u).abs());
+                if d <= 4e-16 * (u_n + u).abs() {
+                    break 'search Exit::Converged;
+                }
+                u = u_n;
+                xinbta = u.exp();
+                wprev = w;
+            }
+        } else {
+            for i_pb in 0..1000 {
+                y = pbeta_raw(xinbta, pp, qq, true, log_p);
+                w = if log_p {
+                    (y - la) * (y + logbeta + r * xinbta.ln() + t * (-xinbta).ln_1p()).exp()
+                } else {
+                    (y - a) * (logbeta + r * xinbta.ln() + t * (-xinbta).ln_1p()).exp()
+                };
+                if !finite(w) {
+                    if n_maybe_swaps <= 2 {
+                        if !log_p && n_maybe_swaps == 2 {
+                            use_log_x = true;
+                        }
+                        if !log_p || n_maybe_swaps <= 1 {
+                            continue 'search;
+                        }
+                    }
+                    return [f64::NAN, f64::NAN];
+                }
+                if i_pb >= n_newton && w * wprev <= 0.0 {
+                    prev = adj.abs().max(FPU);
+                }
+                g = 1.0;
+                for _ in 0..1000 {
+                    adj = g * w;
+                    // Full Newton steps at the beginning, then the safeguard.
+                    if i_pb < n_newton || adj.abs() < prev {
+                        tx = xinbta - adj;
+                        if (0.0..=1.0).contains(&tx) {
+                            if prev <= acu || w.abs() <= acu {
+                                break 'search Exit::Converged;
+                            }
+                            if tx != 0.0 && tx != 1.0 {
+                                break;
+                            }
+                        }
+                    }
+                    g /= 3.0;
+                }
+                if (tx - xinbta).abs() <= 4e-16 * (tx + xinbta) {
+                    break 'search Exit::Converged;
+                }
+                xinbta = tx;
+                if tx == 0.0 {
+                    break;
+                }
+                wprev = w;
+            }
+        }
+        break 'search Exit::NotConverged;
+    };
+
+    if let Exit::NotConverged = exit {
+        warned = true;
+        precision_warning("qbeta");
+    }
+    if !matches!(exit, Exit::Return) {
+        let log_ = log_p || use_log_x;
+        if (log_ && y == f64::NEG_INFINITY) || (!log_ && y == 0.0) {
+            // Stuck at the left: the smallest positive number may be better.
+            w = pbeta_raw(DBL_VERY_MIN, pp, qq, true, log_);
+            if log_ || (w - a).abs() <= (y - a).abs() {
+                tx = DBL_VERY_MIN;
+                u_n = DBL_LOG_V_MIN;
+            }
+            add_n_step = false;
+        } else if !warned
+            && (if log_ {
+                (y - la).abs() > 3.0
+            } else {
+                (y - a).abs() > 1e-4
+            })
+            && !(log_
+                && y == f64::NEG_INFINITY
+                && pbeta_raw(dbl_1_minus_eps, pp, qq, true, true) > la + 2.0)
+        {
+            warning(format!(
+                "qbeta(a, *) =: x0 with |pbeta(x0,*{}) - alpha| = {} is not accurate",
+                if log_ { ", log_" } else { "" },
+                crate::format::c_format((y - if log_ { la } else { a }).abs(), "g", 5, "", false)
+            ));
+        }
+    }
+
+    if give_log_q {
+        let r = log1_exp(u_n);
+        return if swap_tail { [r, u_n] } else { [u_n, r] };
+    }
+    if use_log_x {
+        if add_n_step {
+            // One last Newton step on the original scale.
+            if u_n != 1.0 {
+                xinbta = u_n.exp();
+            }
+            y = pbeta_raw(xinbta, pp, qq, true, log_p);
+            w = if log_p {
+                (y - la) * (y + logbeta + r * xinbta.ln() + t * (-xinbta).ln_1p()).exp()
+            } else {
+                (y - a) * (logbeta + r * xinbta.ln() + t * (-xinbta).ln_1p()).exp()
+            };
+            tx = if finite(w) { xinbta - w } else { xinbta };
+        } else {
+            return if swap_tail {
+                [-u_n.exp_m1(), u_n.exp()]
+            } else {
+                [u_n.exp(), -u_n.exp_m1()]
+            };
+        }
+    }
+    if swap_tail {
+        [1.0 - tx, tx]
+    } else {
+        [tx, 1.0 - tx]
     }
 }
+
 
 // The binomial, negative binomial, geometric and hypergeometric distributions.
 
@@ -5569,6 +5778,42 @@ pub fn dnbinom(x: f64, size: f64, prob: f64, log: bool) -> f64 {
     if nonint_warning(x) || x < 0.0 || !finite(x) {
         return d0(log);
     }
+    if crate::system::r_at_least_release(4, 4, 0) {
+        let x = forceint(x);
+        if x == 0.0 {
+            // The limit as size goes to zero is a point mass at zero.
+            if size == 0.0 {
+                return d1(log);
+            }
+            return if log {
+                size * prob.ln()
+            } else {
+                prob.powf(size)
+            };
+        }
+        let size = if finite(size) { size } else { DBL_MAX };
+        if x < 1e-10 * size {
+            // Two terms of Abramowitz and Stegun 6.1.47 in place of dbinom_raw.
+            let xx2s = x_choose_two_over(x, size);
+            return d_exp(
+                size * prob.ln() + x * (size.ln() + (-prob).ln_1p()) - lgamma1p(x)
+                    + xx2s.ln_1p(),
+                log,
+            );
+        }
+        // log(size / (size + x)) is much less accurate than log1p(-x / (size + x)) for x < size.
+        let p = if log {
+            if x < size {
+                (-x / (size + x)).ln_1p()
+            } else {
+                (size / (size + x)).ln()
+            }
+        } else {
+            size / (size + x)
+        };
+        let ans = dbinom_raw(size, x + size, prob, 1.0 - prob, log);
+        return if log { p + ans } else { p * ans };
+    }
     if x == 0.0 && size == 0.0 {
         return d1(log);
     }
@@ -5586,6 +5831,15 @@ pub fn dnbinom(x: f64, size: f64, prob: f64, log: bool) -> f64 {
     let ans = dbinom_raw(size, x + size, prob, 1.0 - prob, log);
     let p = size / (size + x);
     if log { p.ln() + ans } else { p * ans }
+}
+
+/// `x (x - 1) / (2 size)` without overflow for huge `x`.
+fn x_choose_two_over(x: f64, size: f64) -> f64 {
+    if x < f64::MAX.sqrt() {
+        ldexp(x * (x - 1.0), -1) / size
+    } else {
+        x * (ldexp(x, -1) / size)
+    }
 }
 
 pub fn dnbinom_mu(x: f64, size: f64, mu: f64, log: bool) -> f64 {
@@ -5621,13 +5875,31 @@ pub fn dnbinom_mu(x: f64, size: f64, mu: f64, log: bool) -> f64 {
         } else {
             (mu / (1.0 + mu / size)).ln()
         };
+        if crate::system::r_at_least_release(4, 4, 0) {
+            return d_exp(
+                x * p - mu - lgamma1p(x) + x_choose_two_over(x, size).ln_1p(),
+                log,
+            );
+        }
         return d_exp(
             x * p - mu - lgammafn(x + 1.0) + (x * (x - 1.0) / (2.0 * size)).ln_1p(),
             log,
         );
     }
-    let p = size / (size + x);
     let ans = dbinom_raw(size, x + size, size / (size + mu), mu / (size + mu), log);
+    if crate::system::r_at_least_release(4, 4, 0) {
+        let p = if log {
+            if x < size {
+                (-x / (size + x)).ln_1p()
+            } else {
+                (size / (size + x)).ln()
+            }
+        } else {
+            size / (size + x)
+        };
+        return if log { p + ans } else { p * ans };
+    }
+    let p = size / (size + x);
     if log { p.ln() + ans } else { p * ans }
 }
 
