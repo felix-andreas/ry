@@ -817,8 +817,20 @@ fn run_time_binding_shadows_cached_global_function() {
             outcomes.push((name, run(&call("TRUE"))));
         }
         jit::install_mode(Mode::Off);
+        // R 4.4 stopped forwarding the generic's locals to the method, so from then on the
+        // method's `g` is the global one.
+        let forwarded = if interp::system::r_at_least(4, 4) {
+            "\"global\""
+        } else {
+            "\"local\""
+        };
         for (name, outcome) in outcomes {
-            assert_eq!(outcome, "\"local\"", "{name}");
+            let expected = if name == "gen" {
+                forwarded
+            } else {
+                "\"local\""
+            };
+            assert_eq!(outcome, expected, "{name}");
         }
     });
 }
@@ -2595,7 +2607,10 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
         // A missing argument takes its constant default.
         (
             "function(x: F64, k: F64 = 3) -> F64 x * k",
-            &["{ a <- 2; FUNCTION(a) }", "{ a <- 2; b <- 5; FUNCTION(a, b) }"],
+            &[
+                "{ a <- 2; FUNCTION(a) }",
+                "{ a <- 2; b <- 5; FUNCTION(a, b) }",
+            ],
         ),
         // `Num.round` rounds half away from zero, and `Num.pow` fails on NaN.
         (
@@ -2613,7 +2628,10 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
         // converts item by item.
         (
             "function(xs: List<I64>) -> I64 List.sum(xs)",
-            &["{ v <- [1, 2, 3]; FUNCTION(v) }", "{ v <- List.range(1, 4); FUNCTION(v) }"],
+            &[
+                "{ v <- [1, 2, 3]; FUNCTION(v) }",
+                "{ v <- List.range(1, 4); FUNCTION(v) }",
+            ],
         ),
         // A counted loop over `List.range` keeps the list length limit.
         (
@@ -2628,7 +2646,10 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
         // `Num.pow` is the platform's `pow`, which differs from `^` in the last bit.
         (
             "function(x: F64, y: F64) -> F64 Num.pow(x, y) - x ^ y",
-            &["{ a <- 1.3; b <- 3; FUNCTION(a, b) }", "{ a <- 1.1; b <- 4; FUNCTION(a, b) }"],
+            &[
+                "{ a <- 1.3; b <- 3; FUNCTION(a, b) }",
+                "{ a <- 1.1; b <- 4; FUNCTION(a, b) }",
+            ],
         ),
         // `List.count_if` counts TRUE answers and fails on NA, and `List.walk` folds.
         (
@@ -2637,7 +2658,10 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
         ),
         (
             "function(x: List<F64>) -> F64 List.walk(x, 0, function(s: F64, v: F64) -> F64 s + v * v)",
-            &["{ a <- [1, 2, 3]; FUNCTION(a) }", "{ a <- List.from_r(0[0L]); FUNCTION(a) }"],
+            &[
+                "{ a <- [1, 2, 3]; FUNCTION(a) }",
+                "{ a <- List.from_r(0[0L]); FUNCTION(a) }",
+            ],
         ),
         // `.ry_items`, which the preflight wraps around a typed empty list, lowers as its list.
         (
@@ -2667,7 +2691,10 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
                 (reference, compiled, function.is_ok_and(typed::has_compiled))
             };
             assert_eq!(reference, compiled, "case {case}: FUNCTION <- {definition}");
-            assert!(typed, "case {case} did not run on the typed core: {definition}");
+            assert!(
+                typed,
+                "case {case} did not run on the typed core: {definition}"
+            );
             // SAFETY: the typed core's counters are thread-local and only read.
             let live = unsafe { typed::values::ry_live_objects() };
             assert_eq!(live, 0, "case {case} leaked {live} native values");
@@ -2676,16 +2703,26 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
         // interpreter because its branches differ in storage.
         // SAFETY: the interpreter is installed.
         unsafe {
-            run("literal_result <- function(n: I64) -> List<I64> if (n > 0i64) List.range(1, n) else [1, 2]");
-            assert_eq!(run("{ a <- 0i64; literal_result(a) }"), run("List.range(1, 2)"));
+            run(
+                "literal_result <- function(n: I64) -> List<I64> if (n > 0i64) List.range(1, n) else [1, 2]",
+            );
+            assert_eq!(
+                run("{ a <- 0i64; literal_result(a) }"),
+                run("List.range(1, 2)")
+            );
         }
         // An empty list built at run time is stored as `logical`, so a `List<I64>` parameter or
         // result supplies its item type.
         // SAFETY: the interpreter is installed.
         unsafe {
             run("empty_items <- function(xs: List<I64>) .Internal(typeof(xs))");
-            run("empty_result <- function() -> List<I64> List.map(List.range(7L, 6), \\(v) v * 4i64)");
-            assert_eq!(run("empty_items(List.map(List.range(7L, 6), \\(v) v * 4i64))"), run("\"I64\""));
+            run(
+                "empty_result <- function() -> List<I64> List.map(List.range(7L, 6), \\(v) v * 4i64)",
+            );
+            assert_eq!(
+                run("empty_items(List.map(List.range(7L, 6), \\(v) v * 4i64))"),
+                run("\"I64\"")
+            );
             assert_eq!(run(".Internal(typeof(empty_result()))"), run("\"I64\""));
         }
         // A library constant the body assigns later is read as the local on the next iteration.
@@ -2694,14 +2731,21 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
             let definition = "function(n: I64) -> F64 { total <- 0; \
                 for (i in List.range(1, n)) { total <- total + Num.pi; Num.pi <- 1 }; total }";
             let mut outcomes = Vec::new();
-            for (name, mode) in [("assigned_reference", Mode::Off), ("assigned_compiled", Mode::On)] {
+            for (name, mode) in [
+                ("assigned_reference", Mode::Off),
+                ("assigned_compiled", Mode::On),
+            ] {
                 jit::install_mode(mode);
                 run(&format!("{name} <- {definition}"));
                 outcomes.push(run(&format!("{{ k <- 3i64; {name}(k) }}")));
                 outcomes.push(run(&format!("{{ k <- 3i64; {name}(k) }}")));
                 jit::install_mode(Mode::Off);
             }
-            assert_eq!(outcomes[..2], outcomes[2..], "an assigned Num.pi was read as the constant");
+            assert_eq!(
+                outcomes[..2],
+                outcomes[2..],
+                "an assigned Num.pi was read as the constant"
+            );
         }
         // A user binding that shadows a library constant must be read instead of the constant.
         // SAFETY: the interpreter is installed.
