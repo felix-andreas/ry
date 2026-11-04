@@ -3,8 +3,8 @@ use {
     oracle::{
         Engine, EngineError, ProcessEngine,
         bench::{self, Summary},
-        diff, engine_from_environment, expected_path, find_cases, gallery, gnu_r_available,
-        install, packages, parse, render, runnable_cases,
+        diff, engine_from_environment, engine_packages, expected_path, find_cases, gallery,
+        gnu_r_available, install, installed_packages, packages, parse, render, runnable_cases,
     },
     packages::{PackageOutcome, Runtime, Settings},
     std::{
@@ -175,7 +175,8 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         };
         eprintln!("GNU R was not found, so the engine is compared with the recorded outcomes");
-        return compare(None, second.as_ref(), &cases(paths.clone()));
+        let runnable = cases(paths.clone(), || engine_packages(second.as_ref()));
+        return compare(None, second.as_ref(), &runnable);
     }
     if !gnu_r_available() {
         eprintln!("GNU R was not found; install R or set ORACLE_R to its path");
@@ -183,13 +184,17 @@ fn main() -> ExitCode {
     }
     let gnu_r = ProcessEngine::gnu_r();
     match cli.command {
-        Command::Verify { paths } => verify(&gnu_r, &cases(paths)),
-        Command::Record { paths } => record(&gnu_r, &cases(paths)),
+        Command::Verify { paths } => verify(&gnu_r, &cases(paths, installed_packages)),
+        Command::Record { paths } => record(&gnu_r, &cases(paths, installed_packages)),
         Command::Compare { engine, paths } => {
             let Some(second) = second_engine(engine.as_deref()) else {
                 return ExitCode::from(2);
             };
-            compare(Some(&gnu_r), second.as_ref(), &cases(paths))
+            compare(
+                Some(&gnu_r),
+                second.as_ref(),
+                &cases(paths, installed_packages),
+            )
         }
         Command::Bench {
             ry,
@@ -302,7 +307,9 @@ fn run_gallery(options: gallery::Options) -> ExitCode {
     }
 }
 
-fn cases(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+/// The cases under `paths` that can run, given the packages `installed` lists; each case that
+/// needs a missing package is reported as skipped.
+fn cases(paths: Vec<PathBuf>, installed: impl FnOnce() -> Option<Vec<String>>) -> Vec<PathBuf> {
     let paths = if paths.is_empty() {
         vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cases")]
     } else {
@@ -317,7 +324,7 @@ fn cases(paths: Vec<PathBuf>) -> Vec<PathBuf> {
         }
         found.extend(cases);
     }
-    let (runnable, missing) = runnable_cases(found);
+    let (runnable, missing) = runnable_cases(found, installed);
     for (case, packages) in &missing {
         println!("skip    {}: needs {}", case.display(), packages.join(", "));
     }

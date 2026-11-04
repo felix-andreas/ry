@@ -97,8 +97,8 @@ first <- Bool.is_eq(light, :Red)
 second <- Bool.is_eq(:Red, light)
 #++++
 light: :Red | :Green
-first: logical
-second: logical
+first: Bool
+second: Bool
 
 #---- a_shared_parameter_returns_the_joined_tags
 #: <T> fn(a: T, b: T) -> T
@@ -114,28 +114,28 @@ result: :Ok(integer) | :Err(:Missing)
 add <- function(a, b) a + b
 a <- add(1L, 1.5)
 b <- add(1.5, 1L)
-c <- Num.add(TRUE, 2L)
-d <- Num.max(1L, 2.5)
+c <- Num.add(1, 2)
+d <- Num.max(1, 2.5)
 #++++
 add: <T: numeric> fn(a: T, b: T) -> T
 a: double
 b: double
-c: integer
-d: double
+c: I64
+d: F64
 
 #---- a_shared_item_parameter_promotes_numbers
-both <- List.concat(list(1L), list(2.5))
+both <- List.concat([1], [2.5])
 #++++
-both: list[double]
+both: List<F64>
 
 #---- a_shared_parameter_still_rejects_unrelated_types
 same <- Bool.is_eq(1L, "one")
-mixed <- List.concat(list(1L), list("a"))
+mixed <- List.concat([1], ["a"])
 #++++
 same: Unknown
 mixed: Unknown
 23..28 error[type-mismatch] expected `integer`, found `character`
-61..70 error[type-mismatch] expected `list[integer]`, found `list{character}`
+56..61 error[type-mismatch] expected `List<I64>`, found `List<Str>`
 
 #---- a_joined_parameter_checks_a_callback_against_the_join
 #: <T> fn(f: fn(T) -> logical, a: T, b: T) -> logical

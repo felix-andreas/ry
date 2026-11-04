@@ -212,6 +212,26 @@ time where many objects outlive a collection: on a generated package's 1,907 tes
 runs 66 full collections instead of 5, and collecting takes 4.8 s of the 25 s instead of 0.7 s.
 A value outside a variable's range is ignored, as on GNU R.
 
+### Start-up image
+
+ry's base R tree ships an image of the session as it stands once base R and the default packages
+have loaded (`library/base/R/ry-start.image`), and a start loads it instead of running base R's
+start-up code. On Linux an empty `ry run` script takes about 60 ms from the image and about 120 ms
+without it. The image is written when ry is built and never at run time.
+
+Each start still runs the steps that read the environment: the C-level options, base R's profile,
+and the `.onLoad` hooks of utils, grDevices and stats. So `EDITOR`, `R_LIBS`, `_R_RNG_VERSION_`
+and the other variables they read take effect on every run, as they do on GNU R. A start runs the
+slow way, with the same result, when it is interactive, sources a site or user profile (which
+`ry run` never does and ry's `Rscript` does when one exists), or sets a variable that changes which
+packages load or how: `R_DEFAULT_PACKAGES`, `R_TESTS`, `R_KEEP_PKG_SOURCE=yes`,
+`_R_TRACE_LOADNAMESPACE_`, `_R_NO_REPORT_MISSING_NAMESPACES_`, `_R_METHODS_DONT_CHECKSUBCLASSES`
+or `RY_METHODS_NATIVE`.
+
+| Variable | Effect |
+| --- | --- |
+| `RY_IMAGE` | `0` turns the image off: every start runs the slow way. |
+
 ## load and server
 
 `ry load` [loads the package](/reference/package-loading) at `PATH` (default: the one containing the
@@ -221,7 +241,7 @@ like `ry run`. `ry load --r-entry` prints the R code that gives a plain R sessio
 and consoles of `ry run` and `ry R`.
 
 `ry server --debug` (or `RY_DEBUG=1`) adds internal analysis facts to hover, for working on ry itself.
-No feature is experimental right now, so `--experimental-features` ignores every name with a warning
+No feature is experimental, so `--experimental-features` ignores every name with a warning
 (`range_formatting` is always on).
 
 ## test

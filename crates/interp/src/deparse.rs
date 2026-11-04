@@ -420,6 +420,10 @@ impl Deparser {
             },
             SexpType::Object => self.print("<S4 object of class structure>"),
             SexpType::Record => self.native(object),
+            SexpType::I64 => match crate::numbers::read(object) {
+                Some(number) => self.print(&crate::numbers::literal(number)),
+                None => self.print("<I64 vector>"),
+            },
             kind if kind.is_atomic() => self.vector(object),
             _ => self.print("<unknown>"),
         }
@@ -879,10 +883,11 @@ impl Deparser {
         // `[]` rebuilds as an empty logical Array, so an empty one of another type converts.
         if count == 0 {
             match object.kind() {
-                SexpType::Integer => return self.print("as.Array(integer(0))"),
-                SexpType::Real => return self.print("as.Array(numeric(0))"),
-                SexpType::String => return self.print("as.Array(character(0))"),
-                SexpType::List => return self.print("as.Array(list())"),
+                SexpType::Integer => return self.print("List.from_r(integer(0))"),
+                SexpType::Real => return self.print("List.from_r(numeric(0))"),
+                SexpType::String => return self.print("List.from_r(character(0))"),
+                // An empty `List<I64>` is what `[]` gives once a later use types it.
+                SexpType::List | SexpType::I64 => return self.print("[]"),
                 _ => {}
             }
         }
@@ -894,6 +899,7 @@ impl Deparser {
                 SexpType::Logical => values::scalar_logical(values::ints(object)[index]),
                 SexpType::Integer => values::scalar_integer(values::ints(object)[index]),
                 SexpType::Real => values::scalar_real(values::reals(object)[index]),
+                SexpType::I64 => crate::numbers::alloc(object.slice::<i64>()[index]),
                 SexpType::String => {
                     values::scalar_string_charsxp(values::string_elt(object, index))
                 }
@@ -918,7 +924,7 @@ impl Deparser {
         self.print("]");
     }
 
-    /// A dictionary or set, as the call that rebuilds it: `Dict.from_list(list(("a", 1)))` or
+    /// A dictionary or set, as the call that rebuilds it: `Dict.from_list([("a", 1)])` or
     /// `Set.empty()`.
     unsafe fn collection(&mut self, object: Sexp, dict: bool) {
         let module = if dict { "Dict" } else { "Set" };
@@ -933,8 +939,18 @@ impl Deparser {
             self.print(".empty()");
             return;
         }
+        // A dictionary's entries are tuples, which a ry list holds; a set's elements need to be
+        // single values or ry values for the `[...]` literal to rebuild them.
+        let literal = dict
+            || entries
+                .iter()
+                .all(|(key, _)| crate::arrays::is_ry_value(*key) || values::length(*key) == 1);
         self.print(module);
-        self.print(".from_list(list(");
+        self.print(if literal {
+            ".from_list(["
+        } else {
+            ".from_list(list("
+        });
         self.in_list += 1;
         let mut broken = false;
         let count = entries.len();
@@ -958,7 +974,7 @@ impl Deparser {
             self.indent -= 1;
         }
         self.in_list -= 1;
-        self.print("))");
+        self.print(if literal { "])" } else { "))" });
     }
 
     /// The calls ry's own syntax lowers to, printed back in that syntax.

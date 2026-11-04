@@ -45,7 +45,7 @@
 | 1:      a     1     1     1     1
 | 2:      b     1     2     1     2
 | 3:      c     1     0     1     0
-| [1] "names"             "row.names"         "class"            
+| [1] "row.names"         "class"             "names"            
 | [4] ".internal.selfref" "sorted"           
 |         g     y
 |    <char> <num>
@@ -118,6 +118,8 @@
 | 4:      b   TRUE     2
 | 5:      c     NA     1
 [messages]
+- \nAttaching package: ‘data.table’\n
+- The following object is masked from ‘package:base’:\n\n    %notin%\n
 [warnings]
 - The sum of an integer column for a group was more than type 'integer' can hold so the result has been coerced to 'numeric' automatically for convenience. (in gsum(v))
 - The sum of an integer column for a group was more than type 'integer' can hold so the result has been coerced to 'numeric' automatically for convenience. (in gsum(v))

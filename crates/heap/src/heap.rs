@@ -21,6 +21,8 @@
 
 pub mod arena;
 pub mod env;
+pub mod image;
+pub use image::{Fixed, ImageError, Relocation};
 pub mod large;
 pub mod object;
 pub mod records;
@@ -345,7 +347,8 @@ impl HeapGrowth {
             }
             _ => {}
         }
-        if let Some(fraction) = number("R_GC_GROWFRAC").filter(|value| (0.35..=0.75).contains(value))
+        if let Some(fraction) =
+            number("R_GC_GROWFRAC").filter(|value| (0.35..=0.75).contains(value))
         {
             growth.grow_fraction = fraction;
         }
@@ -745,6 +748,7 @@ impl Heap {
             SexpType::Logical
                 | SexpType::Integer
                 | SexpType::Real
+                | SexpType::I64
                 | SexpType::Complex
                 | SexpType::Raw
         ) {
@@ -1301,6 +1305,12 @@ impl Heap {
         self.symbols.insert(name, symbol);
         self.new_roots.push(symbol);
         Ok(symbol)
+    }
+
+    /// The interned symbol named `name`, if one exists, without installing it.
+    pub unsafe fn find_symbol(&self, name: &[u8]) -> Option<Sexp> {
+        let name = self.find_interned(name, 0)?;
+        self.symbols.get(&name).copied()
     }
 
     pub fn symbol_count(&self) -> usize {
@@ -2095,9 +2105,7 @@ impl Heap {
         (0..(object.length() as usize).min(64))
             .map(|index| object.stored_element(index))
             .filter(|&element| {
-                element.refcount() == 1
-                    && element.kind() != SexpType::List
-                    && reclaimable(element)
+                element.refcount() == 1 && element.kind() != SexpType::List && reclaimable(element)
             })
             .map(|element| self.size_of(element))
             .sum()
@@ -2411,11 +2419,10 @@ impl Heap {
                 // below the next one's peak and buy a full collection in the middle of it.
                 let needed = self.old_bytes() + request;
                 let policy = &mut self.policy;
-                policy.heap_limit = policy.growth.next_limit(
-                    policy.heap_limit,
-                    needed,
-                    policy.min_heap_limit,
-                );
+                policy.heap_limit =
+                    policy
+                        .growth
+                        .next_limit(policy.heap_limit, needed, policy.min_heap_limit);
                 self.mapped.limit = pool_limit(policy.heap_limit);
                 self.mapped.trim();
             }
@@ -2961,6 +2968,7 @@ unsafe fn is_leaf(object: Sexp, nil: Sexp) -> bool {
             | SexpType::Logical
             | SexpType::Integer
             | SexpType::Real
+            | SexpType::I64
             | SexpType::Complex
             | SexpType::Raw
     ) && !object.is_altrep()
@@ -3137,10 +3145,11 @@ unsafe fn reclaimable(object: Sexp) -> bool {
 }
 
 /// Every type code a vector can have, for generators and tests.
-pub const VECTOR_TYPES: [SexpType; 8] = [
+pub const VECTOR_TYPES: [SexpType; 9] = [
     SexpType::Logical,
     SexpType::Integer,
     SexpType::Real,
+    SexpType::I64,
     SexpType::Complex,
     SexpType::String,
     SexpType::List,

@@ -5,6 +5,9 @@ y <- as.POSIXct("2024-01-15 08:30:00", tz = "America/New_York"); print(y); print
 print(format(y, tz = "Asia/Tokyo", usetz = TRUE))
 print(as.POSIXlt(y, tz = "UTC"))
 print(as.POSIXct("2024-03-10 02:30:00", tz = "America/New_York"))
+# glibc's mktime reads a repeated time from the offset its previous call found, so a summer
+# time first pins the reading to daylight time.
+invisible(as.POSIXct("2024-07-01 12:00:00", tz = "America/New_York"))
 print(as.POSIXct("2024-11-03 01:30:00", tz = "America/New_York"))
 print(seq(as.POSIXct("2024-03-09 12:00", tz = "America/New_York"), by = "day", length.out = 3))
 print(as.POSIXct("2024-06-01", tz = "Australia/Melbourne"))

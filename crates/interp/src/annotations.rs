@@ -60,6 +60,11 @@ impl Default for State {
 }
 
 impl State {
+    /// Whether no signature is registered and no check is pending.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.signatures.is_empty() && self.pending.is_empty()
+    }
+
     pub unsafe fn trace(&self, marker: &mut Marker<'_>) {
         for &weak in self.signatures.values() {
             marker.mark(weak);
@@ -375,6 +380,15 @@ pub unsafe fn declared_return_type(function: Sexp) -> Option<Declared> {
     declared(mask_at(signature.element(MASKS), RETURN_SLOT))
 }
 
+/// Whether the formal at `position` of a typed closure declares a vector, such as `double[]`,
+/// rather than a scalar, so that a compiler gives a value of length one a vector's type there.
+pub unsafe fn declares_vector(function: Sexp, position: usize) -> bool {
+    signature_of(function).is_some_and(|signature| {
+        let mask = mask_at(signature.element(MASKS), FIRST_FORMAL_SLOT + position);
+        mask != 0 && mask & (SCALAR | ARRAY) == 0
+    })
+}
+
 /// The declared type of each formal of the definition `formals`/`body`, by position, and
 /// whether every formal carries a checked annotation. An untyped definition declares nothing.
 pub unsafe fn declared_formals(formals: Sexp, body: Sexp) -> (Vec<Option<Declared>>, bool) {
@@ -438,6 +452,48 @@ pub unsafe fn return_admits(function: Sexp, kind: SexpType) -> bool {
     };
     let mask = mask_at(signature.element(MASKS), RETURN_SLOT);
     mask == 0 || plain_admits(mask, kind)
+}
+
+/// Whether a closure's annotations admit a call binding values of these storage types to its
+/// formals, one each in order, and returning a value of storage type `result`. `true` beside a
+/// type marks an `Array`, and `None` is a type with no R storage, which only an unchecked
+/// annotation admits. A compiler that knows every type before the call runs decides the checks
+/// here once, exactly as the checks would decide them for the values.
+pub unsafe fn admits_storage(
+    function: Sexp,
+    arguments: &[Option<(SexpType, bool)>],
+    result: Option<(SexpType, bool)>,
+) -> bool {
+    let Some(signature) = signature_of(function) else {
+        return true;
+    };
+    let masks = signature.element(MASKS);
+    let admitted = |mask: Mask, storage: Option<(SexpType, bool)>| {
+        mask == 0 || storage.is_some_and(|(kind, array)| storage_admits(mask, kind, array))
+    };
+    let mut formal = function.car();
+    let mut slot = FIRST_FORMAL_SLOT;
+    while formal.kind() == SexpType::Pairlist {
+        let mask = mask_at(masks, slot);
+        if mask != 0 {
+            match arguments.get(slot - FIRST_FORMAL_SLOT) {
+                Some(&storage) if formal.tag() != values::symbols().dots && admitted(mask, storage) => {}
+                _ => return false,
+            }
+        }
+        formal = formal.cdr();
+        slot += 1;
+    }
+    admitted(mask_at(masks, RETURN_SLOT), result)
+}
+
+/// [`admits`] for a value known only by its storage type and whether it is an `Array`.
+fn storage_admits(mask: Mask, kind: SexpType, array: bool) -> bool {
+    if mask & ARRAY != 0 {
+        let items = mask & !ARRAY;
+        return array && (items == 0 || items & bit(kind) != 0);
+    }
+    mask & bit(kind) != 0
 }
 
 /// Whether a check admits a value of storage type `kind` that is not an `Array`.

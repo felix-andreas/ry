@@ -87,6 +87,17 @@ thread_local! {
     static NAMESPACE: Cell<Option<Sexp>> = const { Cell::new(None) };
 }
 
+/// The `ry` namespace the helpers are defined in, once [`attach`] has run.
+pub(crate) fn namespace() -> Option<Sexp> {
+    NAMESPACE.with(Cell::get)
+}
+
+/// Points the engine at helpers already defined in `namespace`, as a start-up image restores
+/// them.
+pub(crate) fn set_namespace(namespace: Sexp) {
+    NAMESPACE.with(|cell| cell.set(Some(namespace)));
+}
+
 /// Defines the helpers in `namespace`, the `ry` namespace, which is never collected.
 pub unsafe fn attach(namespace: Sexp) -> R<()> {
     crate::session::eval_text(HELPERS, namespace)?;

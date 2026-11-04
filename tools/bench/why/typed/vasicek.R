@@ -1,12 +1,14 @@
-# A simulation kernel from the finance code base: Vasicek interest-rate paths, one matrix row per step.
-vasicek_paths <- function(paths: integer = 200L, steps: integer = 2000L, r0: double = 0.03, kappa: double = 0.5, theta: double = 0.04, sigma: double = 0.01, dt: double = 1 / 12, seed: integer = 9L) -> matrix {
-  set.seed(seed)
-  rates <- matrix(r0, nrow = steps + 1L, ncol = paths)
-  for (t in seq_len(steps)) {
-    shock <- stats::rnorm(paths)
-    previous: double[] <- rates[t, ]
-    rates[t + 1L, ] <- previous + kappa * (theta - previous) * dt + sigma * sqrt(dt) * shock
+# A simulation kernel from the finance code base: Vasicek interest-rate paths, every path stepped
+# at once as a list of rates, summing the rates of every step. The shocks come from R's generator.
+vasicek <- function(paths: I64 = 200, steps: I64 = 2000, r0: F64 = 0.03, kappa: F64 = 0.5, theta: F64 = 0.04, sigma: F64 = 0.01, dt: F64 = 1f64 / 12f64, seed: I64 = 9) -> F64 {
+  set.seed(Num.to_r(seed))
+  rates <- List.repeat(r0, paths)
+  total <- List.sum(rates)
+  for (t in List.range(1, steps)) {
+    shock <- List.from_r(stats::rnorm(Num.to_r(paths)))
+    rates <- rates + kappa * (theta - rates) * dt + sigma * Num.sqrt(dt) * shock
+    total <- total + List.sum(rates)
   }
-  rates
+  total
 }
-measure("vasicek", function() sum(vasicek_paths()))
+measure("vasicek", function() vasicek())

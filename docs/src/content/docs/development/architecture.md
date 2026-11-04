@@ -64,7 +64,7 @@ illegal dependency unrepresentable.
   dispatch, and base R's primitives and internals in Rust, plus the check of
   [inline annotations](/tutorial/runtime#inline-annotations) at function boundaries. It depends on
   `heap`, `syntax` and `table`, and `libr` installs it through the `Evaluator` hook, so it knows
-  nothing about C. The values that are ry's own live here too: records and tags, `Array`,
+  nothing about C. The values that are ry's own live here too: records and tags, `List`,
   `DataFrame` and the standard library.
 - **`jit`** is the runtime's optimizing tier: it compiles hot tier-0 bytecode to machine code with
   Cranelift. Tier 0 calls it through the `Tier` hooks in `interp`'s `bytecode.rs` when a body has
@@ -73,6 +73,13 @@ illegal dependency unrepresentable.
   It depends on `heap` and `interp`, and `libr` installs it after the interpreter. `RY_JIT` picks
   the mode: `on` (the default), `off`, or `force`, which the tier tests and the `ry-jit` oracle
   engine use.
+- **`typed`** is the typed core. A strict typed closure called with values whose types it accepts
+  is lowered from its body to a typed IR at its first call, given reference counts, and compiled
+  with Cranelift to run on native values: scalars in registers, 16-byte strings, and lists that
+  view an R vector's data or own their items. `jit`'s `native::call` is the only caller, and a
+  call that does not compile, or fails while it runs, goes back to the interpreter unchanged. It
+  depends on `heap` and `interp`. `RY_TYPED_LOG=1` prints each compilation and refusal, and
+  `RY_TYPED_DUMP=1` prints the Cranelift IR.
 - **`table`** is ry's built-in typed table: an engine over Polars with a query IR that lowers
   `tbl[i, j, by]` and the `DataFrame` verbs to a lazy plan, plus the readers, writers and
   data.table helpers around it. `interp` owns the `DataFrame` value and calls the engine, and `libr`
@@ -587,6 +594,53 @@ and all the documents, and the database handle deliberately never leaves it.
 - **Stub buffers and `NAMESPACE` files are served standalone** and never enter the database. An
   `.Rtypes` buffer gets loader-problem diagnostics, semantic tokens, and goto-definition for type
   names, and a `NAMESPACE` file gets import validation.
+
+## The start-up image
+
+A runtime session that is not interactive and sources no profile starts from an image of the
+session as it stands after `.First.sys()`, which [the CLI reference](/reference/cli#start-up-image)
+describes for users. `crates/heap/src/image.rs` writes and loads the heap part,
+`crates/interp/src/image.rs` saves the interpreter state outside the heap and decides when an
+image applies, and `crates/interp/src/session.rs` either loads the image or starts the slow way.
+
+- **Build output, read-only.** `ry-rcmd build-base` writes the image as its last step, into the
+  base tree at `library/base/R/ry-start.image`, by running `ry-rcmd write-start-image` with an
+  emptied environment. A release embeds the tree, image included. Nothing writes an image at run
+  time, and nothing keys it on the run-time environment. `ry-rcmd start-image BASE --libr FILE`
+  (`just start-image`) writes it again over a built tree.
+- **One build.** The header carries the runtime's identity (`RY_RUNTIME_ID`, a hash of the
+  runtime's sources), and an image of another build is skipped silently, so a development
+  checkout starts the slow way after a runtime edit until `just start-image` runs.
+- **The environment is read again on every start.** After the load, the start clears the options
+  and runs the steps that read the process environment: the C-level options, `.Machine`,
+  `.Platform` and the device variables, base R's profile, and the `.onLoad` hooks of utils,
+  grDevices and stats, which set options from the environment only when they are unset. The
+  profile's second `Autoloads` is detached, and utils' `osVersion` binding is unlocked around its
+  hook, which assigns it. What the image holds is what those steps do not touch: base's
+  namespace, the six default namespaces and their attachment, which read no variable outside
+  `image::LOADING_VARIABLES`. A start that sets one of those runs the slow way.
+- **Relocated paths.** The image records the R home it was written in (the base tree's staging
+  directory) and its canonical form. The loader moves every string under either prefix to the
+  directory the image file really lives in, which is where a slow start's resolved namespace paths
+  and lazy-load databases point.
+- **Loaded in one bulk pass, not mapped.** The heap image lists every reachable object with
+  references as dense positions, and the loader allocates them all and then fills them in a second
+  pass. Fixed objects (the heap's well-known objects, the primitives by index, `package:ry` and
+  libR's ALTREP classes) are referred to by position, because both processes create them before
+  start-up. Strings, symbols and base bindings are interned again, weak references load empty,
+  and compiled closure bodies are stored as their source, since the bytecode tier recompiles them.
+- **The writer refuses what it cannot carry.** Writing fails, and so does the base tree's build,
+  when start-up warned (a load would not print the warning), left `.Random.seed` in the global
+  environment, a frame, a C finalizer, an external pointer other than a builtin routine, a new
+  record layout, an open graphics device, or a loaded shared library.
+- **Damage fails before the heap changes.** A checksum over the whole file is verified before the
+  heap takes any of it, and a damaged image starts the slow way with a line on stderr. A failure
+  past that point (`LoadError::Partial`) would leave the heap half-built, so the start fails.
+
+Interpreter state outside the heap is saved beside it: methods' dispatch globals, templates and
+primitive method tables, the S4 extends and implicit-class tables, the loaded builtin libraries
+and data.table's namespace. Per-process state, such as the command line, the temporary directory,
+the RNG seed and the start time, is never in the image.
 
 ## Correctness and performance instruments
 

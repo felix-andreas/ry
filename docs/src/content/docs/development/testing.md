@@ -370,8 +370,8 @@ cells are not traced, and a minor collection that keeps dead strings in the tabl
 
 Tests that load base R take it from the GNU R installation `R_HOME` names, and the runtime then
 behaves as that version; without `R_HOME` they use ry's own base R (`just base-r`), and the
-scenarios skip when it is not built. The oracle's expectations are GNU R 4.3.3 output, so CI sets
-`R_HOME` to 4.3.3.
+scenarios skip when it is not built. The oracle's expectations are GNU R 4.6.2 output, so CI sets
+`R_HOME` to 4.6.2.
 Run them once per supported version, for example `R_HOME=/opt/R/4.6.1/lib/R cargo test -p
 interp`, and the oracle the same way with `ORACLE_R` ([Corpus and oracle](/development/corpus-and-oracle)).
 
@@ -426,7 +426,7 @@ the ratio ry / GNU R. The cases live in `tools/bench/stdlib`: `ry.R` holds ry's 
 the R alternatives in base R, purrr, stringr and stringi under the same case names, and the
 fastest alternative sets the bar. A callback function is compared with R's callback idioms
 (`vapply`, `Filter`, `Reduce`, a `for` loop, purrr), and a function on one string with R's
-vectorized string functions. Where ry's input is a vector, the case also runs it on an Array,
+vectorized string functions. Where ry's input is a vector, the case also runs it on a `List`,
 ry's unboxed vector, and the faster of the two counts. Each case runs in its own process, so a case slower than
 `--timeout` shows as `timeout` without stopping the rest, and a `check` column compares
 checksums of both results. Packages load from `R_LIBS_USER`, and an alternative whose package is

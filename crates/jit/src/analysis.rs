@@ -781,8 +781,6 @@ pub enum Action<'a> {
         /// types: the element, or a dictionary entry's key and value. `None` for an argument
         /// the callback never reads.
         items: [Option<(usize, Ty)>; 2],
-        /// For [`Traversal::indexed`], the temporary holding the element's position.
-        index: Option<usize>,
         /// For a dictionary or set, the temporaries the loop keeps its keys and values in.
         parts: Option<(usize, usize)>,
         prelude: &'a [(Action<'a>, StateId)],
@@ -2568,15 +2566,11 @@ impl<'a> Builder<'a> {
             };
             lowering.scope.push((parameters[at].0, register));
         }
-        let index = match traversal.indexed {
-            true => {
-                let register = lowering.temporary()?;
-                lowering.state.registers[register] = Ty::Int;
-                lowering.scope.push((parameters[arity - 1].0, register));
-                Some(register)
-            }
-            false => None,
-        };
+        // A position is an `I64`, a length-1 I64 vector no register type holds, so the
+        // position binds to no register and a body that reads it is not compiled.
+        if traversal.indexed {
+            lowering.scope.push((parameters[arity - 1].0, UNUSED));
+        }
         let parts = match traversal.source {
             Source::List => None,
             Source::Dict | Source::Set => {
@@ -2641,8 +2635,7 @@ impl<'a> Builder<'a> {
             Fold::Walk { .. } => result_ty,
             Fold::Map | Fold::Filter(_) => Ty::List,
             Fold::Any | Fold::All => Ty::Lgl,
-            Fold::CountIf => Ty::Int,
-            Fold::Find { .. } => Ty::Boxed,
+            Fold::CountIf | Fold::Find { .. } => Ty::Boxed,
         };
         after.visible = Some(true);
         *state = after;
@@ -2656,7 +2649,6 @@ impl<'a> Builder<'a> {
             accumulator,
             expected,
             items,
-            index,
             parts,
             prelude: prelude.leak(),
             steps: steps.leak(),

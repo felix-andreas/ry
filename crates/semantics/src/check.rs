@@ -10,8 +10,9 @@ use {
         exhaustiveness::{MatchFinding, match_findings},
         hir::{
             Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind,
-            MatchArm, Module, NaAtom, NameSite, Parameter as Formal, PatId, PatternKind, Symbol,
-            UnaryOperator, destructure_leaves, integer_literal_position, is_whole_number_double,
+            MatchArm, Module, NaAtom, NameSite, Parameter as Formal, PatId, PatternKind,
+            RecordField as HirRecordField, Rest, Symbol, UnaryOperator, destructure_leaves,
+            integer_literal_position, is_whole_number_double,
         },
         infer::{
             Entry, FunctionMismatch, InferenceTable, RecordMismatch, UNCHECKED_WITNESS, UnifyError,
@@ -27,11 +28,11 @@ use {
         top_level::super_assigned_names,
         types::{
             Atomic, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType, InferenceVar,
-            Name, NativeField, NullUnless, Parameter, RecordField, ReduceForward, RestParameter,
-            TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any, array, array_element, column_type,
-            conflicting_tags, contains_inference_var, erase_vars, for_each_child_type,
-            is_ry_value_type, is_tag_type, map_child_types, native_record, null, scalar,
-            substitute_rigid, type_size, union_of, unknown,
+            Name, NativeField, NativeScalar, NullUnless, NumberLiteral, Parameter, RecordField,
+            ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any, array,
+            array_element, column_type, conflicting_tags, contains_inference_var, erase_vars,
+            for_each_child_type, is_ry_value_type, is_tag_type, map_child_types, native_record,
+            native_scalar, null, scalar, substitute_rigid, type_size, union_of, unknown,
         },
     },
     bumpalo::{Bump, collections::Vec as BumpVec},
@@ -50,7 +51,7 @@ use {
             atomic::{AtomicUsize, Ordering},
         },
     },
-    syntax::{TextRange, TextSize, native_values::accepts_native},
+    syntax::{NumberType, TextRange, TextSize, native_values::accepts_native},
     thin_vec::ThinVec,
 };
 
@@ -267,6 +268,16 @@ pub enum TypeErrorKind<'db> {
     NotIterable {
         found: Ty<'db>,
     },
+    /// `try x` where `x` is not a `:Ok(T) | :Err(E)` result.
+    TryNotResult {
+        found: Ty<'db>,
+    },
+    /// `try` outside a function, where there is nothing to return the error from.
+    TryOutsideFunction,
+    /// `(..base, x = 1)` where `base` is not a ry record.
+    RecordUpdateBase {
+        found: Ty<'db>,
+    },
     InfiniteType {
         variable: Ty<'db>,
         container: Ty<'db>,
@@ -309,6 +320,22 @@ pub enum TypeErrorKind<'db> {
         operator: &'static str,
         left: Ty<'db>,
         right: Ty<'db>,
+    },
+    /// An operator on ry scalars whose operands differ in type, or whose type it does not take
+    /// (`"a" + "b"` on `Str`, `-x` on a `Bool`). `right` is `None` for a unary operator.
+    NumberOperands {
+        operator: &'static str,
+        left: Ty<'db>,
+        right: Option<Ty<'db>>,
+    },
+    /// `/` on a ry integer type, which has no exact quotient.
+    IntegerDivision {
+        ty: Ty<'db>,
+    },
+    /// A number literal that the ry number type it is asked to take cannot hold (`1.5` or `2^63`
+    /// as an `I64`).
+    LiteralOutOfRange {
+        expected: Ty<'db>,
     },
     /// `point$z <- value` on a record without a field `z`: a record's fields are fixed.
     FieldCannotBeAdded {
@@ -721,6 +748,8 @@ fn check_item_in<'db>(
         },
         environment: Environment::default(),
         scheme_arena: Vec::new(),
+        literal_vars: Vec::new(),
+        literal_reads: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
         recorded: RecordedTypes(vec![None; module.expression_count()]),
         recorded_patterns: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
         recorded_expectations: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
@@ -736,6 +765,7 @@ fn check_item_in<'db>(
         record_strict_origins,
         strict_origins: Vec::new(),
         overload_probe_depth: 0,
+        ry_callee: false,
         operator_method_depth: 0,
         call_first_var: 0,
         return_frames: Vec::new(),
@@ -828,6 +858,7 @@ fn check_item_in<'db>(
                 } else {
                     match annotation.and_then(|a| a.declared.clone()) {
                         Some(declared) if annotation.is_some_and(|a| a.if_unknown) => {
+                            context.default_literal_vars();
                             let resolved_value = context.table.resolve(db, value_ty);
                             if matches!(resolved_value.kind(db), TyKind::Unknown) {
                                 Some(declared)
@@ -854,8 +885,15 @@ fn check_item_in<'db>(
                             {
                                 let expected = declared.body;
                                 let range = module.range(*value);
+                                let adapted = context.adapt_literal(*value, expected)
+                                    != LiteralFit::NotLiteral;
+                                // A literal the declaration does not adapt takes its default
+                                // type first, as R's `1L` is an `integer` an `integer[]` admits.
+                                context.default_literal_vars();
                                 let resolved_value = context.table.resolve(db, value_ty);
-                                if !context.table.compatible(db, resolved_value, expected) {
+                                if !adapted
+                                    && !context.table.compatible(db, resolved_value, expected)
+                                {
                                     let error = context.type_mismatch(
                                         range,
                                         expected,
@@ -880,6 +918,7 @@ fn check_item_in<'db>(
             }
         }
     }
+    context.default_literal_vars();
     let recorded = mem::take(&mut context.recorded.0);
     let match_findings = match_findings(db, context.table.definitions, module, |scrutinee| {
         let ty = (*recorded.get(scrutinee.index())?)?;
@@ -1087,12 +1126,26 @@ fn erase_residual_vars_at<'db>(
     if constraint == Constraint::Unconstrained {
         return unknown(db);
     }
+    // `Int` and `Frac` each admit one type, so a literal they describe is that type rather than
+    // a type parameter.
+    match constraint {
+        Constraint::Int => return native_scalar(db, NativeScalar::I64),
+        Constraint::Frac => return native_scalar(db, NativeScalar::F64),
+        _ => {}
+    }
     if !closer.abstracted.contains(&table.find(var)) {
         return match constraint {
             Constraint::Numeric | Constraint::ScalarNumeric => scalar(db, Atomic::Double),
+            Constraint::WholeLiteral { .. } | Constraint::FracLiteral => constraint
+                .literal_default()
+                .map_or(unknown(db), |atomic| scalar(db, atomic)),
             Constraint::AtomicElement
             | Constraint::Key
             | Constraint::ArrayItem
+            | Constraint::Number
+            | Constraint::Int
+            | Constraint::Frac
+            | Constraint::Eq
             | Constraint::Unconstrained => unknown(db),
         };
     }
@@ -1290,6 +1343,14 @@ struct Checker<'db, 'a> {
     expression_annotations: ArenaMap<'a, ExprId, Annotation<'db>>,
     environment: Environment<'db>,
     scheme_arena: Vec<TypeScheme<'db>>,
+    /// The inference variables that type a literal whose type its use decides: a `List`
+    /// item (`true`, defaulting to a ry number) or a variable written with a literal
+    /// (`false`, defaulting to R's type). Nothing quantifies them: a function generalizes
+    /// over its parameters, never over a literal it wrote.
+    literal_vars: Vec<(Ty<'db>, bool)>,
+    /// The reads that may keep a literal variable open, because they are an operand whose
+    /// other operand may decide it. Every other read decides it as R's type.
+    literal_reads: ArenaSet<'a, ExprId>,
     recorded: RecordedTypes<'db>,
     recorded_patterns: ArenaMap<'a, PatId, Ty<'db>>,
     recorded_expectations: ArenaMap<'a, ExprId, Ty<'db>>,
@@ -1313,6 +1374,10 @@ struct Checker<'db, 'a> {
     /// Non-zero while probing an overload candidate: the literal-as-integer courtesy is
     /// off so it cannot decide the winner (exact matches outrank conversions).
     overload_probe_depth: u32,
+    /// The arguments being matched belong to a function that takes a ry value, so a number
+    /// literal passed to one of its unbounded type parameters (a fold's initial state) is a
+    /// literal its use decides, as `List.walk([1, 2], 0, Num.add)` decides `0` is an `I64`.
+    ry_callee: bool,
     /// Non-zero while matching an operator method's candidates. An open operand's arithmetic
     /// must not fit `-.Date`'s `Date` parameter there, or `day - 2 * x` would be a `difftime`.
     operator_method_depth: u32,
@@ -2321,11 +2386,95 @@ fn comparison_operand_shape<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Operand
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RyClass {
+    Scalar(NativeScalar),
+    /// A variable or type parameter bounded by `number`, `int` or `frac`.
+    Open(Constraint),
+}
+
+impl RyClass {
+    fn is_number(self) -> bool {
+        match self {
+            RyClass::Scalar(native) => native.is_number(),
+            RyClass::Open(_) => true,
+        }
+    }
+}
+
+/// Whether a literal took the ry type it was checked against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiteralFit {
+    Fits,
+    /// A number literal the type cannot hold; the error is already reported.
+    OutOfRange,
+    /// Not a literal the type adapts, so the value's inferred type decides.
+    NotLiteral,
+}
+
+/// The number an unsuffixed number literal writes, with a `-` written directly before it
+/// folded in, as in `-128`.
+/// Whether a number literal can take a type bounded by `constraint`: an `int` bound refuses a
+/// fraction and a `frac` bound an `L` literal, whose R type says it is whole.
+/// Whether `ty` is or holds one of ry's own scalars or collections, as opposed to a tag or
+/// record that only carries R values.
+fn holds_ry_scalar(db: &dyn Db, ty: Ty<'_>) -> bool {
+    match ty.kind(db) {
+        TyKind::Native(_) => true,
+        TyKind::Named(..) => is_ry_value_type(db, ty),
+        TyKind::Tag(_, Some(payload)) => holds_ry_scalar(db, *payload),
+        TyKind::NativeTuple(items) | TyKind::Union(items) => {
+            items.iter().any(|&item| holds_ry_scalar(db, item))
+        }
+        TyKind::NativeRecord(fields) => fields.iter().any(|field| holds_ry_scalar(db, field.ty)),
+        _ => false,
+    }
+}
+
+/// The ry scalar a number suffix such as `i64` names.
+fn suffix_scalar(ty: NumberType) -> NativeScalar {
+    match ty {
+        NumberType::I64 => NativeScalar::I64,
+        NumberType::F64 => NativeScalar::F64,
+    }
+}
+
+fn literal_meets(literal: &NumberLiteral, constraint: Constraint) -> bool {
+    match constraint {
+        Constraint::Int => !literal.is_fraction(),
+        Constraint::Frac => !literal.integer,
+        _ => true,
+    }
+}
+
+fn number_literal(module: &Module, id: ExprId) -> Option<NumberLiteral> {
+    let (id, negative) = match module.kind(id) {
+        ExpressionKind::Unary {
+            operator: UnaryOperator::Minus,
+            operand,
+        } => (*operand, true),
+        _ => (id, false),
+    };
+    match module.kind(id) {
+        ExpressionKind::Literal(LiteralKind::Integer(text) | LiteralKind::Double(text)) => {
+            NumberLiteral::parse(&module[text], negative)
+        }
+        _ => None,
+    }
+}
+
 fn comparable_atomic(atomic: Atomic) -> bool {
     !matches!(atomic, Atomic::Complex | Atomic::Raw)
 }
 
 impl<'db> Checker<'db, '_> {
+    fn recorded_type(&self, id: ExprId) -> Ty<'db> {
+        self.recorded
+            .get(&id)
+            .copied()
+            .unwrap_or_else(|| unknown(self.db))
+    }
+
     fn record(&mut self, id: ExprId, ty: Ty<'db>) -> Ty<'db> {
         // A self-referential value can grow its type exponentially; past the ceiling the
         // expression takes `Unknown`. Only composites are measured so scalars pay nothing.
@@ -2362,10 +2511,102 @@ impl<'db> Checker<'db, '_> {
         self.table.fresh_ty(self.db, constraint)
     }
 
+    fn fresh_literal(&mut self, constraint: Constraint, native: bool) -> Ty<'db> {
+        let ty = self.fresh(constraint);
+        self.literal_vars.push((ty, native));
+        ty
+    }
+
+    /// Binds every literal variable nothing decided to its default: a ry number for a `List`
+    /// item, R's type for a variable written with a literal.
+    fn default_literal_vars(&mut self) {
+        for index in 0..self.literal_vars.len() {
+            let (ty, native) = self.literal_vars[index];
+            self.default_literal_var(ty, native);
+        }
+    }
+
+    fn default_literal_var(&mut self, ty: Ty<'db>, native: bool) {
+        let resolved = self.table.shallow_resolve(self.db, ty);
+        let TyKind::Var(var) = *resolved.kind(self.db) else {
+            return;
+        };
+        let Entry::Unbound { constraint, .. } = *self.table.entry(self.table.find(var)) else {
+            return;
+        };
+        let default = match (native, constraint) {
+            (_, Constraint::Frac | Constraint::FracLiteral) if native => {
+                native_scalar(self.db, NativeScalar::F64)
+            }
+            (true, Constraint::Number | Constraint::Int | Constraint::WholeLiteral { .. }) => {
+                native_scalar(self.db, NativeScalar::I64)
+            }
+            (false, Constraint::WholeLiteral { .. } | Constraint::FracLiteral) => {
+                match constraint.literal_default() {
+                    Some(atomic) => scalar(self.db, atomic),
+                    None => return,
+                }
+            }
+            _ => return,
+        };
+        // The constraint admits its default, so this cannot fail.
+        if self.table.unify(self.db, resolved, default).is_err() {
+            unreachable!("a literal variable admits its default type");
+        }
+    }
+
+    /// A join is not a use that decides a literal variable, so both sides take R's type.
+    fn default_join_literals(&mut self, left: Ty<'db>, right: Ty<'db>) {
+        for ty in [left, right] {
+            if self.open_literal_var(ty) {
+                self.default_literal_var(ty, false);
+            }
+        }
+    }
+
+    /// Whether `ty` is a literal variable that a use may still decide.
+    fn open_literal_var(&mut self, ty: Ty<'db>) -> bool {
+        let resolved = self.table.shallow_resolve(self.db, ty);
+        let TyKind::Var(var) = *resolved.kind(self.db) else {
+            return false;
+        };
+        let representative = self.table.find(var);
+        if !matches!(
+            self.table.entry(representative),
+            Entry::Unbound {
+                constraint: Constraint::WholeLiteral { .. } | Constraint::FracLiteral,
+                ..
+            }
+        ) {
+            return false;
+        }
+        let literal_vars = &self.literal_vars;
+        literal_vars.iter().any(|&(literal, native)| {
+            !native && matches!(literal.kind(self.db), TyKind::Var(other) if self.table.find(*other) == representative)
+        })
+    }
+
     fn unify_or_report(&mut self, range: TextRange, expected: Ty<'db>, found: Ty<'db>) {
         if let Err(error) = self.table.unify(self.db, expected, found) {
             self.report_unify(range, error);
         }
+    }
+
+    /// `ty` with every undecided literal in it given its default, for a message that should
+    /// name `I64` rather than a type variable, or a use that fixes the type, as a frame column
+    /// does. It decides the literals, so only such a use calls it.
+    fn settle_literals(&mut self, ty: Ty<'db>) -> Ty<'db> {
+        let mut open = FxHashSet::default();
+        self.table.collect_unbound_vars(self.db, ty, &mut open);
+        for var in open {
+            let representative = self.table.find(var);
+            if let Some(&(literal, native)) = self.literal_vars.iter().find(|(literal, _)| {
+                matches!(literal.kind(self.db), TyKind::Var(other) if self.table.find(*other) == representative)
+            }) {
+                self.default_literal_var(literal, native);
+            }
+        }
+        self.table.resolve(self.db, ty)
     }
 
     /// Every two-type report goes through here so record mismatches narrow to the field
@@ -2377,8 +2618,8 @@ impl<'db> Checker<'db, '_> {
         found: Ty<'db>,
         value: Option<ExprId>,
     ) -> TypeError<'db> {
-        let expected = self.table.resolve(self.db, expected);
-        let found = self.table.resolve(self.db, found);
+        let expected = self.settle_literals(expected);
+        let found = self.settle_literals(found);
         if let Some(field) = value.and_then(|value| self.assignment_for_record(value, expected)) {
             return TypeError {
                 range,
@@ -2661,7 +2902,19 @@ impl<'db> Checker<'db, '_> {
         let range = module.range(expression);
         let ty = match module.kind(expression) {
             ExpressionKind::Missing => unknown(self.db),
-            ExpressionKind::Literal(literal) => self.literal_ty(literal),
+            ExpressionKind::Literal(literal) => {
+                if let LiteralKind::Suffixed { number, ty } = literal
+                    && let Some(value) = NumberLiteral::parse(&module[number], false)
+                    && !suffix_scalar(*ty).holds(&value)
+                {
+                    let expected = native_scalar(self.db, suffix_scalar(*ty));
+                    self.errors.push(TypeError {
+                        range,
+                        kind: TypeErrorKind::LiteralOutOfRange { expected },
+                    });
+                }
+                self.literal_ty(literal)
+            }
             ExpressionKind::NameRef(_) => self.infer_read(id),
             ExpressionKind::Assign {
                 spelling,
@@ -2695,7 +2948,24 @@ impl<'db> Checker<'db, '_> {
                         if binds_name {
                             self.table.level += 1;
                         }
-                        let value_ty = self.infer(value);
+                        let literal = number_literal(self.module, value).filter(|_| {
+                            binds_name && !self.expression_annotations.contains_key(&id)
+                        });
+                        let value_ty = match literal {
+                            Some(literal) => {
+                                let constraint = if literal.is_fraction() {
+                                    Constraint::FracLiteral
+                                } else {
+                                    Constraint::WholeLiteral {
+                                        integer: literal.integer,
+                                    }
+                                };
+                                let ty = self.fresh_literal(constraint, false);
+                                self.record_literal(value, ty);
+                                ty
+                            }
+                            None => self.infer(value),
+                        };
                         if binds_name {
                             self.table.level -= 1;
                         }
@@ -2836,15 +3106,20 @@ impl<'db> Checker<'db, '_> {
                     return self.record(id, signature);
                 }
                 let parameters = *parameters;
-                // Hints apply only when they type every formal without a default: a partly
+                // R hints apply only when they type every formal without a default: a partly
                 // typed lambda (`Reduce(function(a, b) a + b, xs)` fixes `b` but not the
                 // accumulator `a`) infers better with all formals open, where `a + b` ties
-                // the two together.
+                // the two together. A ry hint applies alone, because a ry operator passes its
+                // type to an open operand: in `List.walk(xs, 0, \(acc, x) acc + x)`, `x` is the
+                // item type and `acc + x` makes the accumulator that type too.
                 let hints: Vec<Option<Ty<'db>>> = self
                     .parameter_hints
                     .remove(&id)
                     .filter(|hints| {
-                        module[parameters]
+                        hints.iter().flatten().any(|&hint| {
+                            let hint = self.table.resolve(self.db, hint);
+                            is_ry_value_type(self.db, hint) || self.ry_number_class(hint).is_some()
+                        }) || module[parameters]
                             .iter()
                             .filter(|parameter| parameter.name != "...")
                             .enumerate()
@@ -3075,6 +3350,21 @@ impl<'db> Checker<'db, '_> {
                 let (scrutinee, arms) = (*scrutinee, *arms);
                 self.infer_match(range, scrutinee, &module[arms])
             }
+            ExpressionKind::RecordUpdate { base, fields } => {
+                let (base, fields) = (*base, *fields);
+                self.infer_record_update(base, &module[fields])
+            }
+            ExpressionKind::FormatString(pieces) => {
+                let pieces = *pieces;
+                for &piece in module[pieces].iter() {
+                    self.infer(piece);
+                }
+                native_scalar(self.db, NativeScalar::Str)
+            }
+            ExpressionKind::Try(operand) => {
+                let operand = *operand;
+                self.infer_try(range, operand)
+            }
         };
         // Assignments applied their annotation before the slot write above.
         let ty = if matches!(module.kind(expression), ExpressionKind::Assign { .. }) {
@@ -3230,6 +3520,9 @@ impl<'db> Checker<'db, '_> {
             self.table.rigid_constraints.insert(*name, *constraint);
         }
         self.record_expectation(value, declared.body);
+        if self.adapt_literal(value, declared.body) != LiteralFit::NotLiteral {
+            return declared.body;
+        }
         let resolved_value = self.table.resolve(self.db, value_ty);
         if !self
             .table
@@ -3342,6 +3635,7 @@ impl<'db> Checker<'db, '_> {
             LiteralKind::Integer(_) => scalar(self.db, Atomic::Integer),
             LiteralKind::Double(_) => scalar(self.db, Atomic::Double),
             LiteralKind::Complex(_) => scalar(self.db, Atomic::Complex),
+            LiteralKind::Suffixed { ty, .. } => native_scalar(self.db, suffix_scalar(*ty)),
             LiteralKind::String(_) => scalar(self.db, Atomic::Character),
             LiteralKind::Logical(_) => scalar(self.db, Atomic::Logical),
             LiteralKind::Null => null(self.db),
@@ -3369,6 +3663,11 @@ impl<'db> Checker<'db, '_> {
             return self.read_non_local(id);
         };
         let ty = self.read_slot(id, slot);
+        // Only an operand whose other operand is a ry number may still decide a variable
+        // written with a literal; every other read makes it R's type.
+        if !self.literal_reads.contains(&id) && self.open_literal_var(ty) {
+            self.default_literal_var(ty, false);
+        }
         if self.unseen_frames > 0
             && matches!(self.table.resolve(self.db, ty).kind(self.db), TyKind::Null)
         {
@@ -3856,6 +4155,7 @@ impl<'db> Checker<'db, '_> {
     /// anything. A side that is still an unconstrained variable therefore joins as a union
     /// member instead of being bound to the other side.
     fn join_closure_write(&mut self, existing: Ty<'db>, written: Ty<'db>) -> Ty<'db> {
+        self.default_join_literals(existing, written);
         let open_variable = |checker: &Self, ty: Ty<'db>| {
             let resolved = checker.table.resolve(checker.db, ty);
             guard_members(checker.db, resolved)
@@ -4389,6 +4689,13 @@ impl<'db> Checker<'db, '_> {
         // `if (exists("emptyenv")) emptyenv() else NULL` probes for a function the library
         // ships, so the else branch is a fallback for older R that never runs here.
         let else_diverges = else_diverges || self.probes_a_shipped_function(condition);
+        let (then_ty, else_ty) = match else_branch {
+            Some(else_branch) if !then_diverges && !else_diverges && !discarded => (
+                self.adapt_literal_branch(then_branch, then_ty, else_ty),
+                self.adapt_literal_branch(else_branch, else_ty, then_ty),
+            ),
+            _ => (then_ty, else_ty),
+        };
         match (then_diverges, else_diverges) {
             (true, false) => else_ty,
             (false, true) => {
@@ -4505,9 +4812,9 @@ impl<'db> Checker<'db, '_> {
                 self.expect_scalar_logical(guard, ConditionSite::Operand);
             }
             let value = self.infer(arm.body);
-            all_values.push(value);
+            all_values.push((arm.body, value));
             if !self.diverges(arm.body) {
-                values.push(value);
+                values.push((arm.body, value));
                 arm_writes.push(self.environment.writes_since(mark));
             }
             self.environment.rollback(mark);
@@ -4546,12 +4853,28 @@ impl<'db> Checker<'db, '_> {
                 self.join_writes(&complete, JoinEdge::Branch);
             }
         }
-        let joined_values = if values.is_empty() {
+        let mut joined_values = if values.is_empty() {
             all_values
         } else {
             values
         };
-        let mut joined_values = joined_values.into_iter();
+        for index in 0..joined_values.len() {
+            let (body, value) = joined_values[index];
+            let others: Vec<Ty<'db>> = joined_values
+                .iter()
+                .enumerate()
+                .filter(|&(other, _)| other != index)
+                .map(|(_, &(_, other))| other)
+                .collect();
+            for other in others {
+                let adapted = self.adapt_literal_branch(body, value, other);
+                if adapted != value {
+                    joined_values[index].1 = adapted;
+                    break;
+                }
+            }
+        }
+        let mut joined_values = joined_values.into_iter().map(|(_, value)| value);
         let Some(first) = joined_values.next() else {
             return unknown(self.db);
         };
@@ -4629,10 +4952,7 @@ impl<'db> Checker<'db, '_> {
                     .collect();
                 Some(Ty::new(self.db, TyKind::NativeTuple(items)))
             }
-            PatternKind::Record {
-                fields,
-                rest: false,
-            } => {
+            PatternKind::Record { fields, rest: None } => {
                 let fields = self.module[fields]
                     .iter()
                     .map(|field| NativeField {
@@ -4801,15 +5121,24 @@ impl<'db> Checker<'db, '_> {
         self.recorded_patterns.insert(pattern, subject);
         match &node.kind {
             PatternKind::Missing | PatternKind::Wildcard | PatternKind::Literal { .. } => {}
-            PatternKind::Bind(leaf) => {
-                let leaf = *leaf;
-                self.recorded.insert(leaf, subject);
-                if let Some(&slot) = self.naming.resolutions.get(&leaf) {
-                    match bindings.iter_mut().find(|(bound, _)| *bound == slot) {
-                        Some((_, ty)) => *ty = union_of(self.db, [*ty, subject]),
-                        None => bindings.push((slot, subject)),
-                    }
+            PatternKind::Bind(leaf) => self.bind_leaf(*leaf, subject, bindings),
+            PatternKind::List { items, rest } => {
+                let (items, rest) = (*items, *rest);
+                let element = self.component_union(subject, array_element);
+                for &item in module[items].iter() {
+                    self.check_pattern(item, element, bindings);
                 }
+                if let Some(binding) = rest.and_then(|rest| rest.rest.binding) {
+                    self.bind_leaf(binding, array(self.db, element), bindings);
+                }
+            }
+            PatternKind::As {
+                pattern: inner,
+                binding,
+            } => {
+                let (inner, binding) = (*inner, *binding);
+                self.check_pattern(inner, subject, bindings);
+                self.bind_leaf(binding, subject, bindings);
             }
             PatternKind::Or(alternatives) => {
                 for &alternative in module[alternatives].iter() {
@@ -4838,6 +5167,12 @@ impl<'db> Checker<'db, '_> {
                     self.check_pattern(item, item_ty, bindings);
                 }
             }
+            PatternKind::Record {
+                rest: Some(Rest {
+                    binding: Some(_), ..
+                }),
+                ..
+            } => self.bind_unknown(pattern, bindings),
             PatternKind::Record { fields, .. } => {
                 for field in module[fields].iter() {
                     let name = field.name;
@@ -4926,7 +5261,7 @@ impl<'db> Checker<'db, '_> {
             }
             PatternKind::Record { fields, rest } => match subject.kind(self.db) {
                 TyKind::NativeRecord(native) => {
-                    (*rest || native.len() == fields.len())
+                    (rest.is_some() || native.len() == fields.len())
                         && module[fields].iter().all(|field| {
                             native
                                 .iter()
@@ -4935,6 +5270,22 @@ impl<'db> Checker<'db, '_> {
                 }
                 _ => false,
             },
+            PatternKind::List { .. } => array_element(self.db, subject).is_some(),
+            PatternKind::As { pattern: inner, .. } => {
+                let inner = *inner;
+                self.pattern_admits(inner, subject)
+            }
+        }
+    }
+
+    /// Binds the name a pattern writes, joining the types when an or-pattern binds it twice.
+    fn bind_leaf(&mut self, leaf: ExprId, ty: Ty<'db>, bindings: &mut Vec<(BindingId, Ty<'db>)>) {
+        self.recorded.insert(leaf, ty);
+        if let Some(&slot) = self.naming.resolutions.get(&leaf) {
+            match bindings.iter_mut().find(|(bound, _)| *bound == slot) {
+                Some((_, bound)) => *bound = union_of(self.db, [*bound, ty]),
+                None => bindings.push((slot, ty)),
+            }
         }
     }
 
@@ -4956,7 +5307,10 @@ impl<'db> Checker<'db, '_> {
     fn infer_array_literal(&mut self, items: &[ExprId]) -> Ty<'db> {
         let mut element: Option<Ty<'db>> = None;
         for &item in items {
-            let found = self.infer(item);
+            let found = match self.list_item_literal(item) {
+                Some(literal) => literal,
+                None => self.infer(item),
+            };
             let range = self.blame_range(item);
             if matches!(
                 self.module.kind(item),
@@ -4985,8 +5339,8 @@ impl<'db> Checker<'db, '_> {
                 continue;
             }
             self.table.rollback(snapshot);
-            let first = self.table.resolve(self.db, first);
-            let found = self.table.resolve(self.db, found);
+            let first = self.settle_literals(first);
+            let found = self.settle_literals(found);
             if is_tag_type(self.db, first) && is_tag_type(self.db, found) {
                 let joined = union_of(self.db, [first, found]);
                 element = Some(self.report_conflicting_tags(range, joined));
@@ -4999,24 +5353,52 @@ impl<'db> Checker<'db, '_> {
         }
         let element = match element {
             Some(element) => element,
-            None => self.fresh(Constraint::Unconstrained),
+            None => self.fresh(Constraint::ArrayItem),
         };
         array(self.db, element)
     }
 
-    /// An Array holds single `logical`, `integer`, `double` or `character` values unboxed, or
-    /// ry values boxed. An R vector or list item would make the Array ragged, and `complex` and
-    /// `raw` have no unboxed storage that the JIT reads.
+    /// A literal written as a `List` item is a ry value: a number literal is a ry number its use
+    /// decides (`I64` or `F64` when nothing does), a string `Str` and `TRUE` or `FALSE` `Bool`.
+    fn list_item_literal(&mut self, item: ExprId) -> Option<Ty<'db>> {
+        let module = self.module;
+        let mut inner = item;
+        while let ExpressionKind::Paren(paren) = module.kind(inner) {
+            inner = *paren;
+        }
+        let ty = if let Some(literal) = number_literal(module, inner) {
+            let constraint = if literal.integer {
+                Constraint::Int
+            } else if literal.is_fraction() {
+                Constraint::Frac
+            } else {
+                Constraint::Number
+            };
+            self.fresh_literal(constraint, true)
+        } else {
+            match module.kind(inner) {
+                ExpressionKind::Literal(LiteralKind::String(_)) => {
+                    native_scalar(self.db, NativeScalar::Str)
+                }
+                ExpressionKind::Literal(LiteralKind::Logical(_)) => {
+                    native_scalar(self.db, NativeScalar::Bool)
+                }
+                _ => return None,
+            }
+        };
+        self.record_literal(inner, ty);
+        if inner != item {
+            self.record(item, ty);
+        }
+        Some(ty)
+    }
+
+    /// A `List` holds ry values only. An R value would bring `NA`, attributes and recycling
+    /// into a type that has none, so it crosses into a `List` through `List.from_r`.
     fn array_item_allowed(&mut self, ty: Ty<'db>) -> bool {
         let structural = self.structural(ty);
         match structural.kind(self.db) {
-            TyKind::Scalar(
-                Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Character,
-            )
-            | TyKind::Var(_)
-            | TyKind::Rigid(_)
-            | TyKind::Any
-            | TyKind::Unknown => true,
+            TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown => true,
             _ => is_ry_value_type(self.db, structural),
         }
     }
@@ -5035,6 +5417,117 @@ impl<'db> Checker<'db, '_> {
             }
             None => joined,
         }
+    }
+
+    /// `try x`: the payload of `x`'s `:Ok` members is the value, and its `:Err` members join the
+    /// enclosing function's return type, as `return(:Err(e))` would.
+    fn infer_try(&mut self, range: TextRange, operand: ExprId) -> Ty<'db> {
+        let operand_range = self.blame_range(operand);
+        let inferred = self.infer(operand);
+        let resolved = self.settle_literals(inferred);
+        let members = match resolved.kind(self.db) {
+            TyKind::Union(members) => members.clone(),
+            TyKind::Unknown | TyKind::Any => return resolved,
+            _ => vec![resolved],
+        };
+        let mut oks = Vec::new();
+        let mut errs = Vec::new();
+        for member in members {
+            match member.kind(self.db) {
+                TyKind::Tag(name, Some(payload)) if name.text(self.db) == "Ok" => {
+                    match payload.kind(self.db) {
+                        TyKind::NativeTuple(items) if items.len() == 1 => oks.push(items[0]),
+                        _ => oks.push(*payload),
+                    }
+                }
+                TyKind::Tag(name, Some(_)) if name.text(self.db) == "Err" => errs.push(member),
+                _ => {
+                    self.errors.push(TypeError {
+                        range: operand_range,
+                        kind: TypeErrorKind::TryNotResult { found: resolved },
+                    });
+                    return unknown(self.db);
+                }
+            }
+        }
+        if oks.is_empty() {
+            self.errors.push(TypeError {
+                range: operand_range,
+                kind: TypeErrorKind::TryNotResult { found: resolved },
+            });
+            return unknown(self.db);
+        }
+        match self.return_frames.last_mut() {
+            Some(frame) => {
+                if !errs.is_empty() {
+                    frame.push((union_of(self.db, errs), operand_range));
+                }
+            }
+            None => self.errors.push(TypeError {
+                range,
+                kind: TypeErrorKind::TryOutsideFunction,
+            }),
+        }
+        union_of(self.db, oks)
+    }
+
+    /// `(..base, x = v)`: a copy of the record `base` with the listed fields replaced. Each field
+    /// must exist and keep its type, so the copy has `base`'s type.
+    fn infer_record_update(&mut self, base: ExprId, fields: &[HirRecordField]) -> Ty<'db> {
+        let base_range = self.blame_range(base);
+        let inferred = self.infer(base);
+        let resolved = self.table.resolve(self.db, inferred);
+        let native = match resolved.kind(self.db) {
+            TyKind::NativeRecord(native) => Some(native.clone()),
+            TyKind::Unknown | TyKind::Any | TyKind::Var(_) => None,
+            _ => {
+                for field in fields {
+                    self.infer(field.value);
+                }
+                self.errors.push(TypeError {
+                    range: base_range,
+                    kind: TypeErrorKind::RecordUpdateBase { found: resolved },
+                });
+                return unknown(self.db);
+            }
+        };
+        for field in fields {
+            let value_range = self.blame_range(field.value);
+            let value = self.infer(field.value);
+            let Some(native) = &native else { continue };
+            let name = field.name.as_str();
+            match native
+                .iter()
+                .find(|native| native.name.text(self.db) == name)
+            {
+                Some(existing) => {
+                    let fits = match self.adapt_literal(field.value, existing.ty) {
+                        LiteralFit::Fits | LiteralFit::OutOfRange => true,
+                        LiteralFit::NotLiteral => {
+                            matches!(value.kind(self.db), TyKind::Unknown)
+                                || self.table.compatible(self.db, value, existing.ty)
+                        }
+                    };
+                    if !fits {
+                        let error =
+                            self.type_mismatch(value_range, existing.ty, value, Some(field.value));
+                        self.errors.push(error);
+                    }
+                }
+                None => self.errors.push(TypeError {
+                    range: field.name_range,
+                    kind: TypeErrorKind::FieldDoesNotExist {
+                        suggestion: nearest_name(
+                            name,
+                            native.iter().map(|native| native.name.text(self.db)),
+                        ),
+                        field: name.to_owned(),
+                        container: resolved,
+                    },
+                }),
+            }
+        }
+        resolved
     }
 
     fn infer_for(
@@ -6450,8 +6943,41 @@ impl<'db> Checker<'db, '_> {
 
     fn infer_unary_minus(&mut self, operand: ExprId) -> Ty<'db> {
         let operand_range = self.blame_range(operand);
-        let inferred = self.infer(operand);
+        // `-` written before a suffixed literal is part of it, as in Roc, so
+        // `-9223372036854775808i64` is checked as the `I64` it denotes rather than as an
+        // out-of-range literal negated.
+        let inferred = match self.module.kind(operand) {
+            ExpressionKind::Literal(literal @ LiteralKind::Suffixed { number, ty }) => {
+                let scalar = suffix_scalar(*ty);
+                if NumberLiteral::parse(&self.module[number], true)
+                    .is_some_and(|value| !scalar.holds(&value))
+                {
+                    let expected = native_scalar(self.db, scalar);
+                    self.errors.push(TypeError {
+                        range: operand_range,
+                        kind: TypeErrorKind::LiteralOutOfRange { expected },
+                    });
+                }
+                let literal_ty = self.literal_ty(literal);
+                self.record(operand, literal_ty)
+            }
+            _ => self.infer(operand),
+        };
         let resolved = self.structural(inferred);
+        if let TyKind::Native(native) = resolved.kind(self.db) {
+            if !native.is_number() {
+                self.errors.push(TypeError {
+                    range: operand_range,
+                    kind: TypeErrorKind::NumberOperands {
+                        operator: "-",
+                        left: resolved,
+                        right: None,
+                    },
+                });
+                return unknown(self.db);
+            }
+            return resolved;
+        }
         // A DataFrame expression negates into a bigger expression, as `Ops.Expr` does at run time.
         if is_expr_type(self.db, resolved) {
             return resolved;
@@ -6580,6 +7106,13 @@ impl<'db> Checker<'db, '_> {
             );
         }
         match resolved.kind(self.db) {
+            TyKind::Native(NativeScalar::Bool) => return resolved,
+            TyKind::Native(_) => {
+                let expected = native_scalar(self.db, NativeScalar::Bool);
+                let error = self.type_mismatch(operand_range, expected, resolved, Some(operand));
+                self.errors.push(error);
+                return expected;
+            }
             TyKind::Any | TyKind::Unknown => return unknown(self.db),
             TyKind::Var(_) | TyKind::Rigid(_) => {
                 if !self.condition_coerces(resolved)
@@ -6654,14 +7187,17 @@ impl<'db> Checker<'db, '_> {
     ) -> Ty<'db> {
         let element = self.table.resolve(self.db, element);
         let fits = match element.kind(self.db) {
-            TyKind::Scalar(Atomic::Integer | Atomic::Double) => {
-                expected == OperandExpectation::Numeric
-            }
-            TyKind::Scalar(Atomic::Logical) => expected == OperandExpectation::Logical,
-            TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown => true,
+            TyKind::Native(NativeScalar::Bool) => expected == OperandExpectation::Logical,
+            TyKind::Native(native) => native.is_number() && expected == OperandExpectation::Numeric,
+            TyKind::Var(_) | TyKind::Rigid(_) => match self.ry_number_class(element) {
+                Some(_) => expected == OperandExpectation::Numeric,
+                None => true,
+            },
+            TyKind::Any | TyKind::Unknown => true,
             _ => false,
         };
         if !fits {
+            let array = self.settle_literals(array);
             self.errors.push(TypeError {
                 range: operand_range,
                 kind: TypeErrorKind::InvalidOperand {
@@ -6696,9 +7232,23 @@ impl<'db> Checker<'db, '_> {
                 // Both operands infer exactly once, before any candidate probe: a probe snapshot
                 // does not reverse environment writes, and re-inferring makes nested chains
                 // exponential.
+                self.literal_reads.insert(lhs);
+                self.literal_reads.insert(rhs);
                 let left = self.infer(lhs);
                 let right = self.infer(rhs);
-                if let Some(result) = self.infer_array_operator(range, operator, left, right) {
+                self.literal_reads.remove(&lhs);
+                self.literal_reads.remove(&rhs);
+                if let Some(result) = self.infer_native_operator(operator, lhs, rhs, left, right) {
+                    return result;
+                }
+                for operand in [left, right] {
+                    if self.open_literal_var(operand) {
+                        self.default_literal_var(operand, false);
+                    }
+                }
+                if let Some(result) =
+                    self.infer_array_operator(range, operator, (lhs, rhs), left, right)
+                {
                     return result;
                 }
                 self.operator_method_depth += 1;
@@ -6760,7 +7310,14 @@ impl<'db> Checker<'db, '_> {
                 let left = self.infer(lhs);
                 let right = self.infer(rhs);
                 if matches!(operator, And | Or) {
-                    if let Some(result) = self.infer_array_operator(range, operator, left, right) {
+                    if let Some(result) =
+                        self.infer_native_operator(operator, lhs, rhs, left, right)
+                    {
+                        return result;
+                    }
+                    if let Some(result) =
+                        self.infer_array_operator(range, operator, (lhs, rhs), left, right)
+                    {
                         return result;
                     }
                     // An operand whose type is still a variable is not constrained: it may be a
@@ -6797,13 +7354,360 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// Elementwise operators on Arrays. Both operands share one item type, with no promotion
-    /// between `integer` and `double`, and a single value of that type may stand on either side.
-    /// `None` when neither operand is an Array, so R's own rules apply.
+    /// An operator with a ry scalar operand: both operands have one ry type, with no conversion
+    /// between number types, and a literal on the other side takes that type. `None` when
+    /// neither operand is a ry scalar, so R's own rules apply.
+    fn infer_native_operator(
+        &mut self,
+        operator: BinaryOperator,
+        lhs: ExprId,
+        rhs: ExprId,
+        left: Ty<'db>,
+        right: Ty<'db>,
+    ) -> Option<Ty<'db>> {
+        use BinaryOperator::*;
+        let left = self.structural(left);
+        let right = self.structural(right);
+        let (known, known_side, other, other_ty) =
+            match (self.ry_number_class(left), self.ry_number_class(right)) {
+                (Some(class), _) => (class, left, rhs, right),
+                (None, Some(class)) => (class, right, lhs, left),
+                (None, None) => return None,
+            };
+        // A `List` beside a scalar applies the operator to each item, a list operator's rule.
+        if array_element(self.db, other_ty).is_some() {
+            return None;
+        }
+        let spelling = match operator {
+            And => "&",
+            Or => "|",
+            _ => operator_spelling(operator)?,
+        };
+        let range = self.module.range(lhs).cover(self.module.range(rhs));
+        let arithmetic = matches!(
+            operator,
+            Add | Subtract | Multiply | Divide | Modulo | IntegerDivide | Power
+        );
+        if arithmetic && !known.is_number() {
+            self.errors.push(TypeError {
+                range,
+                kind: TypeErrorKind::NumberOperands {
+                    operator: spelling,
+                    left: known_side,
+                    right: None,
+                },
+            });
+            return Some(unknown(self.db));
+        }
+        // The other operand takes the known type when it is a literal or an open variable.
+        let fits = match other_ty.kind(self.db) {
+            TyKind::Native(_) | TyKind::Rigid(_) => {
+                self.table.unify(self.db, other_ty, known_side).is_ok()
+            }
+            TyKind::Any | TyKind::Unknown => true,
+            TyKind::Var(_) => self.table.unify(self.db, other_ty, known_side).is_ok(),
+            _ => match known {
+                RyClass::Scalar(_) => match self.adapt_literal(other, known_side) {
+                    LiteralFit::Fits => true,
+                    LiteralFit::OutOfRange => return Some(unknown(self.db)),
+                    LiteralFit::NotLiteral => false,
+                },
+                // An undecided number meets a literal by deciding it together.
+                RyClass::Open(_) => match self.list_item_literal(other) {
+                    Some(literal) => self.table.unify(self.db, literal, known_side).is_ok(),
+                    None => false,
+                },
+            },
+        };
+        if !fits {
+            self.errors.push(TypeError {
+                range,
+                kind: TypeErrorKind::NumberOperands {
+                    operator: spelling,
+                    left,
+                    right: Some(right),
+                },
+            });
+            return Some(unknown(self.db));
+        }
+        let boolean = native_scalar(self.db, NativeScalar::Bool);
+        match (operator, known) {
+            (Add | Subtract | Multiply | Modulo | IntegerDivide | Power, _) => Some(known_side),
+            (Divide, RyClass::Scalar(native)) if native.is_integer() => {
+                self.errors.push(TypeError {
+                    range,
+                    kind: TypeErrorKind::IntegerDivision { ty: known_side },
+                });
+                Some(unknown(self.db))
+            }
+            (Divide, RyClass::Scalar(_) | RyClass::Open(Constraint::Frac)) => Some(known_side),
+            // `/` decides an undecided number as a fraction.
+            (Divide, RyClass::Open(_)) => match known_side.kind(self.db) {
+                TyKind::Var(var)
+                    if self
+                        .table
+                        .constrain(self.db, *var, Constraint::Frac)
+                        .is_ok() =>
+                {
+                    Some(known_side)
+                }
+                _ => {
+                    self.errors.push(TypeError {
+                        range,
+                        kind: TypeErrorKind::IntegerDivision { ty: known_side },
+                    });
+                    Some(unknown(self.db))
+                }
+            },
+            (Less | Greater | LessEq | GreaterEq, _)
+                if known.is_number() || known == RyClass::Scalar(NativeScalar::Str) =>
+            {
+                Some(boolean)
+            }
+            (Equal | NotEqual, _) => Some(boolean),
+            (And | Or, RyClass::Scalar(NativeScalar::Bool)) => Some(boolean),
+            _ => {
+                self.errors.push(TypeError {
+                    range,
+                    kind: TypeErrorKind::NumberOperands {
+                        operator: spelling,
+                        left,
+                        right: Some(right),
+                    },
+                });
+                Some(unknown(self.db))
+            }
+        }
+    }
+
+    /// What decides a ry operator: a ry scalar, or a number variable that only a ry number type
+    /// can fill (an undecided `List` item, or a type parameter bounded by `number`, `int` or
+    /// `frac`).
+    fn ry_number_class(&self, ty: Ty<'db>) -> Option<RyClass> {
+        let constraint = match ty.kind(self.db) {
+            TyKind::Native(native) => return Some(RyClass::Scalar(*native)),
+            TyKind::Var(_) => self.table.open_constraint(self.db, ty)?,
+            TyKind::Rigid(name) => *self.table.rigid_constraints.get(name)?,
+            _ => return None,
+        };
+        matches!(
+            constraint,
+            Constraint::Number | Constraint::Int | Constraint::Frac
+        )
+        .then_some(RyClass::Open(constraint))
+    }
+
+    /// Gives a literal value the ry type it is checked against: a number literal takes a ry
+    /// number type that holds it, a string literal `Str`, `TRUE` and `FALSE` `Bool`. A `List`,
+    /// record or tuple literal passes the expectation to its items. The adapted type is
+    /// recorded for the literal, so the editor shows the type the literal took.
+    fn adapt_literal(&mut self, value: ExprId, expected: Ty<'db>) -> LiteralFit {
+        let module = self.module;
+        let mut value = value;
+        while let ExpressionKind::Paren(inner) = module.kind(value) {
+            value = *inner;
+        }
+        let expected = self.structural(expected);
+        let target = match expected.kind(self.db) {
+            TyKind::Native(native) => Some(*native),
+            _ => None,
+        };
+        // A literal for an undecided `List` item is a ry value, as it is when written in the
+        // list itself, and so is a number literal for a type parameter bounded by `number`,
+        // `int` or `frac`.
+        let open = match target {
+            None => self.table.open_constraint(self.db, expected),
+            Some(_) => None,
+        };
+        let adapts = match open {
+            Some(Constraint::ArrayItem) => true,
+            Some(constraint @ (Constraint::Number | Constraint::Int | Constraint::Frac)) => {
+                number_literal(module, value)
+                    .is_some_and(|literal| literal_meets(&literal, constraint))
+            }
+            _ => false,
+        };
+        if adapts
+            && let Some(literal) = self.list_item_literal(value)
+            && self.table.unify(self.db, literal, expected).is_ok()
+        {
+            return LiteralFit::Fits;
+        }
+        if self.ry_callee
+            && open == Some(Constraint::Unconstrained)
+            && let Some(literal) = number_literal(module, value)
+        {
+            let constraint = if literal.is_fraction() {
+                Constraint::FracLiteral
+            } else {
+                Constraint::WholeLiteral {
+                    integer: literal.integer,
+                }
+            };
+            let ty = self.fresh_literal(constraint, false);
+            self.record_literal(value, ty);
+            if self.table.unify(self.db, ty, expected).is_ok() {
+                return LiteralFit::Fits;
+            }
+        }
+        if let Some(target) = target {
+            if let Some(literal) = number_literal(module, value) {
+                if !target.is_number() {
+                    return LiteralFit::NotLiteral;
+                }
+                let previous = self.recorded_type(value);
+                let open = matches!(
+                    self.table.shallow_resolve(self.db, previous).kind(self.db),
+                    TyKind::Var(_)
+                );
+                // An open item variable shared with a fraction item (`[1, 2.5]`) refuses an
+                // integer type, which is the fraction's mismatch, not this literal's.
+                if !target.holds(&literal)
+                    || (open && self.table.unify(self.db, previous, expected).is_err())
+                {
+                    self.errors.push(TypeError {
+                        range: self.blame_range(value),
+                        kind: TypeErrorKind::LiteralOutOfRange { expected },
+                    });
+                    return LiteralFit::OutOfRange;
+                }
+                self.record_literal(value, expected);
+                return LiteralFit::Fits;
+            }
+            let fits = match module.kind(value) {
+                ExpressionKind::Literal(LiteralKind::String(_)) => target == NativeScalar::Str,
+                ExpressionKind::Literal(LiteralKind::Logical(_)) => target == NativeScalar::Bool,
+                _ => false,
+            };
+            if fits {
+                self.record(value, expected);
+                return LiteralFit::Fits;
+            }
+            return LiteralFit::NotLiteral;
+        }
+        match module.kind(value) {
+            ExpressionKind::Array(items) => {
+                let Some(element) = array_element(self.db, expected) else {
+                    return LiteralFit::NotLiteral;
+                };
+                let items = module[items].to_vec();
+                self.adapt_components(&items, |_| Some(element), expected, value)
+            }
+            ExpressionKind::Tuple(items) => {
+                let TyKind::NativeTuple(expected_items) = expected.kind(self.db).clone() else {
+                    return LiteralFit::NotLiteral;
+                };
+                let items = module[items].to_vec();
+                if items.len() != expected_items.len() {
+                    return LiteralFit::NotLiteral;
+                }
+                self.adapt_components(
+                    &items,
+                    |index| expected_items.get(index).copied(),
+                    expected,
+                    value,
+                )
+            }
+            ExpressionKind::Tag {
+                name,
+                payload: Some(payload),
+            } => {
+                let (name, payload) = (*name, *payload);
+                let name = module.name(name);
+                let members = match expected.kind(self.db) {
+                    TyKind::Union(members) => members.clone(),
+                    _ => vec![expected],
+                };
+                let Some(member) = members.into_iter().find(|member| {
+                    matches!(member.kind(self.db), TyKind::Tag(tag, Some(_)) if tag.text(self.db) == name.as_str())
+                }) else {
+                    return LiteralFit::NotLiteral;
+                };
+                let TyKind::Tag(_, Some(member_payload)) = member.kind(self.db) else {
+                    return LiteralFit::NotLiteral;
+                };
+                let fit = self.adapt_literal(payload, *member_payload);
+                if fit == LiteralFit::Fits {
+                    self.record(value, member);
+                }
+                fit
+            }
+            ExpressionKind::Record(fields) => {
+                let TyKind::NativeRecord(expected_fields) = expected.kind(self.db).clone() else {
+                    return LiteralFit::NotLiteral;
+                };
+                let fields = module[fields].to_vec();
+                if fields.len() != expected_fields.len() {
+                    return LiteralFit::NotLiteral;
+                }
+                let items: Vec<ExprId> = fields.iter().map(|field| field.value).collect();
+                let db = self.db;
+                self.adapt_components(
+                    &items,
+                    |index| {
+                        let name = fields.get(index)?.name.as_str();
+                        expected_fields
+                            .iter()
+                            .find(|field| field.name.text(db) == name)
+                            .map(|field| field.ty)
+                    },
+                    expected,
+                    value,
+                )
+            }
+            _ => LiteralFit::NotLiteral,
+        }
+    }
+
+    /// Adapts each component of a collection literal to its expected type. The literal fits
+    /// when every component fits, adapted or as inferred.
+    fn adapt_components(
+        &mut self,
+        components: &[ExprId],
+        expected_component: impl Fn(usize) -> Option<Ty<'db>>,
+        expected: Ty<'db>,
+        value: ExprId,
+    ) -> LiteralFit {
+        let mut adapted = false;
+        for (index, &component) in components.iter().enumerate() {
+            let Some(component_expected) = expected_component(index) else {
+                return LiteralFit::NotLiteral;
+            };
+            match self.adapt_literal(component, component_expected) {
+                LiteralFit::Fits => adapted = true,
+                LiteralFit::OutOfRange => return LiteralFit::OutOfRange,
+                LiteralFit::NotLiteral => {
+                    let found = self.recorded_type(component);
+                    if !self.table.compatible(self.db, found, component_expected) {
+                        return LiteralFit::NotLiteral;
+                    }
+                }
+            }
+        }
+        if !adapted {
+            return LiteralFit::NotLiteral;
+        }
+        self.record(value, expected);
+        LiteralFit::Fits
+    }
+
+    /// Records a number literal's adapted type on the literal and on the `-` folded into it.
+    fn record_literal(&mut self, value: ExprId, ty: Ty<'db>) {
+        self.record(value, ty);
+        if let ExpressionKind::Unary { operand, .. } = self.module.kind(value) {
+            self.record(*operand, ty);
+        }
+    }
+
+    /// Elementwise operators on lists, as R's on vectors. Both operands share one item type, with
+    /// no conversion between number types, and a single value of that type may stand on either
+    /// side, a literal taking the item type. `None` when neither operand is a `List`, so R's own
+    /// rules apply.
     fn infer_array_operator(
         &mut self,
         range: TextRange,
         operator: BinaryOperator,
+        (lhs, rhs): (ExprId, ExprId),
         left: Ty<'db>,
         right: Ty<'db>,
     ) -> Option<Ty<'db>> {
@@ -6819,6 +7723,8 @@ impl<'db> Checker<'db, '_> {
             _ => operator_spelling(operator)?,
         };
         let reject = |checker: &mut Self| {
+            let left = checker.settle_literals(left);
+            let right = checker.settle_literals(right);
             checker.errors.push(TypeError {
                 range,
                 kind: TypeErrorKind::ArrayOperands {
@@ -6829,19 +7735,23 @@ impl<'db> Checker<'db, '_> {
             });
             Some(unknown(checker.db))
         };
-        let operand_element = |checker: &mut Self, operand: Ty<'db>, element: Option<Ty<'db>>| {
-            if let Some(element) = element {
-                return Some(element);
-            }
-            match operand.kind(checker.db) {
-                TyKind::Scalar(_) | TyKind::Var(_) | TyKind::Rigid(_) => Some(operand),
-                TyKind::Any | TyKind::Unknown => Some(known),
-                _ => None,
-            }
-        };
+        let operand_element =
+            |checker: &mut Self, value: ExprId, operand: Ty<'db>, element: Option<Ty<'db>>| {
+                if let Some(element) = element {
+                    return Some(element);
+                }
+                match operand.kind(checker.db) {
+                    TyKind::Native(_) | TyKind::Var(_) | TyKind::Rigid(_) => Some(operand),
+                    TyKind::Any | TyKind::Unknown => Some(known),
+                    _ => match checker.adapt_literal(value, known) {
+                        LiteralFit::Fits | LiteralFit::OutOfRange => Some(known),
+                        LiteralFit::NotLiteral => None,
+                    },
+                }
+            };
         let (Some(left_item), Some(right_item)) = (
-            operand_element(self, left, left_element),
-            operand_element(self, right, right_element),
+            operand_element(self, lhs, left, left_element),
+            operand_element(self, rhs, right, right_element),
         ) else {
             return reject(self);
         };
@@ -6850,32 +7760,52 @@ impl<'db> Checker<'db, '_> {
             self.table.rollback(snapshot);
             return reject(self);
         }
-        let item = self.table.resolve(self.db, left_item);
+        let mut item = self.table.resolve(self.db, left_item);
+        // `/` has an exact quotient only on fractional numbers, so it decides undecided items,
+        // such as the literals of `[1, 2] / 2`, as `F64`, the way Roc gives `/` a `Frac`.
+        if operator == Divide && matches!(item.kind(self.db), TyKind::Var(_)) {
+            let fraction = native_scalar(self.db, NativeScalar::F64);
+            let snapshot = self.table.snapshot();
+            if self.table.unify(self.db, item, fraction).is_ok() {
+                item = fraction;
+            } else {
+                self.table.rollback(snapshot);
+            }
+        }
         let item_kind = match item.kind(self.db) {
-            TyKind::Scalar(atomic) => Some(*atomic),
+            TyKind::Native(native) => Some(*native),
             TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown => None,
             _ => return reject(self),
         };
-        let logical = scalar(self.db, Atomic::Logical);
+        let boolean = native_scalar(self.db, NativeScalar::Bool);
         let result = match operator {
-            Add | Subtract | Multiply | Modulo | IntegerDivide | Divide | Power => {
+            Add | Subtract | Multiply | Modulo | IntegerDivide | Power | Divide => {
+                if item_kind.is_some_and(|native| !native.is_number()) {
+                    return reject(self);
+                }
+                if operator == Divide && item_kind.is_some_and(NativeScalar::is_integer) {
+                    self.errors.push(TypeError {
+                        range,
+                        kind: TypeErrorKind::IntegerDivision { ty: item },
+                    });
+                    return Some(unknown(self.db));
+                }
+                item
+            }
+            Less | Greater | LessEq | GreaterEq => {
                 if item_kind
-                    .is_some_and(|atomic| !matches!(atomic, Atomic::Integer | Atomic::Double))
+                    .is_some_and(|native| !native.is_number() && native != NativeScalar::Str)
                 {
                     return reject(self);
                 }
-                if matches!(operator, Divide | Power) {
-                    scalar(self.db, Atomic::Double)
-                } else {
-                    item
-                }
+                boolean
             }
-            Less | Greater | LessEq | GreaterEq | Equal | NotEqual => logical,
+            Equal | NotEqual => boolean,
             And | Or => {
-                if item_kind.is_some_and(|atomic| atomic != Atomic::Logical) {
+                if item_kind.is_some_and(|native| native != NativeScalar::Bool) {
                     return reject(self);
                 }
-                logical
+                boolean
             }
             _ => return None,
         };
@@ -7048,7 +7978,13 @@ impl<'db> Checker<'db, '_> {
                     Some(result) => results.push(result),
                     None if has_class && !matches!(member.kind(self.db), TyKind::Named(..)) => {
                         let result = self
-                            .infer_array_operator(range, operator, member_left, member_right)
+                            .infer_array_operator(
+                                range,
+                                operator,
+                                (lhs, rhs),
+                                member_left,
+                                member_right,
+                            )
                             .unwrap_or_else(|| {
                                 self.ordinary_operator_result(
                                     range,
@@ -7358,7 +8294,8 @@ impl<'db> Checker<'db, '_> {
     /// to unification, which binds it to `logical`.
     fn condition_coerces(&self, ty: Ty<'db>) -> bool {
         match ty.kind(self.db) {
-            TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double) => true,
+            TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double)
+            | TyKind::Native(NativeScalar::Bool) => true,
             // A vector type carries no length, and the vectors code tests (`if (x >= 1)` on a
             // `double[]`) are length one at run time far more often than not.
             TyKind::Vector(element) => self.condition_coerces(*element),
@@ -8164,7 +9101,19 @@ impl<'db> Checker<'db, '_> {
             let body_range = self.blame_range(blamed);
             // The trailing value alone: early returns already reported themselves.
             let resolved_body = self.table.resolve(self.db, trailing_ty);
+            let tail_adapts = !leaves.is_empty()
+                && leaves.iter().fold(true, |all, &leaf| {
+                    let fits = match self.adapt_literal(leaf, declared.ret) {
+                        LiteralFit::Fits | LiteralFit::OutOfRange => true,
+                        LiteralFit::NotLiteral => {
+                            let found = self.recorded_type(leaf);
+                            self.table.compatible(self.db, found, declared.ret)
+                        }
+                    };
+                    all && fits
+                });
             if !early_return_failed
+                && !tail_adapts
                 && !self.diverges(*body)
                 && !matches!(resolved_body.kind(self.db), TyKind::Unknown)
                 && !self.table.compatible(self.db, resolved_body, declared.ret)
@@ -8669,6 +9618,11 @@ impl<'db> Checker<'db, '_> {
                 let (then_branch, else_branch) = (*then_branch, *else_branch);
                 self.collect_tail_expressions(then_branch, into);
                 self.collect_tail_expressions(else_branch, into);
+            }
+            ExpressionKind::Match { arms, .. } if !self.module[arms].is_empty() => {
+                for arm in &self.module[arms] {
+                    self.collect_tail_expressions(arm.body, into);
+                }
             }
             _ => into.push(id),
         }
@@ -9435,7 +10389,7 @@ impl<'db> Checker<'db, '_> {
             TyKind::Function(_) | TyKind::Any | TyKind::Unknown => Callable::Yes,
             // A nominal left after projection is opaque (`matrix`, `Date`, `data.frame`): an R
             // object with a class, never a closure, so R's function lookup skips it.
-            TyKind::Named(..) => Callable::No,
+            TyKind::Named(..) | TyKind::Native(_) => Callable::No,
             TyKind::Rigid(_) => Callable::Untyped,
             TyKind::Var(_) => match self.table.open_constraint(self.db, resolved) {
                 Some(Constraint::Unconstrained) => Callable::Untyped,
@@ -12175,6 +13129,70 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
+    /// Whether `value` is a literal that checking will adapt to `expected`, a ry scalar or an
+    /// undecided `List` item, so a probe that only asks about compatibility does not refuse it.
+    fn literal_may_adapt(&self, value: ExprId, expected: Ty<'db>) -> bool {
+        let mut value = value;
+        while let ExpressionKind::Paren(inner) = self.module.kind(value) {
+            value = *inner;
+        }
+        let expected = self.table.resolve(self.db, expected);
+        let target = match expected.kind(self.db) {
+            TyKind::Native(native) => Some(*native),
+            TyKind::Var(_) => match self.table.open_constraint(self.db, expected) {
+                Some(Constraint::ArrayItem) => None,
+                Some(constraint @ (Constraint::Number | Constraint::Int | Constraint::Frac)) => {
+                    return number_literal(self.module, value)
+                        .is_some_and(|literal| literal_meets(&literal, constraint));
+                }
+                _ => return false,
+            },
+            _ => return false,
+        };
+        if let Some(literal) = number_literal(self.module, value) {
+            return target.is_none_or(|target| target.holds(&literal));
+        }
+        match self.module.kind(value) {
+            ExpressionKind::Literal(LiteralKind::String(_)) => {
+                target.is_none_or(|target| target == NativeScalar::Str)
+            }
+            ExpressionKind::Literal(LiteralKind::Logical(_)) => {
+                target.is_none_or(|target| target == NativeScalar::Bool)
+            }
+            _ => false,
+        }
+    }
+
+    /// The hint for a formal, if one survives the probe's rollback: a type with no open
+    /// variable, or an undecided ry number that an argument brought (the items of `[1, 2]`),
+    /// named by the argument's own variable, which the lambda body may still decide, as
+    /// `\(x) x / 2` decides `x` is a fraction.
+    fn settled_hint(
+        &self,
+        formal: Ty<'db>,
+        argument_vars: &FxHashSet<InferenceVar>,
+    ) -> Option<Ty<'db>> {
+        let TyKind::Var(var) = *formal.kind(self.db) else {
+            return (!self.table.contains_unbound_var(self.db, formal)).then_some(formal);
+        };
+        let representative = self.table.find(var);
+        if !matches!(
+            self.table.entry(representative),
+            Entry::Unbound {
+                constraint: Constraint::Number | Constraint::Int | Constraint::Frac,
+                ..
+            }
+        ) {
+            return None;
+        }
+        argument_vars
+            .iter()
+            .copied()
+            .filter(|&candidate| self.table.find(candidate) == representative)
+            .min_by_key(|candidate| candidate.0)
+            .map(|candidate| Ty::new(self.db, TyKind::Var(candidate)))
+    }
+
     /// A function literal with a formal that has neither a type annotation nor a default. A
     /// formal after `...` is left out, because R binds positional arguments to `...` first.
     fn needs_parameter_hints(&self, value: ExprId) -> bool {
@@ -12274,6 +13292,13 @@ impl<'db> Checker<'db, '_> {
                         .collect()
                 })
                 .collect();
+            let mut argument_vars = FxHashSet::default();
+            for (argument, &deferred) in arguments.iter().zip(deferred) {
+                if let (Some(ty), false) = (argument.ty, deferred) {
+                    self.table
+                        .collect_unbound_vars(self.db, ty, &mut argument_vars);
+                }
+            }
             let snapshot = self.table.snapshot();
             let accepts = arguments.iter().zip(targets.iter()).zip(deferred).all(
                 |((argument, target), &deferred)| {
@@ -12282,7 +13307,10 @@ impl<'db> Checker<'db, '_> {
                     }
                     match (argument.ty, target_ty(target)) {
                         (Some(actual), Some(expected)) => {
-                            self.table.compatible(self.db, actual, expected)
+                            argument
+                                .value
+                                .is_some_and(|value| self.literal_may_adapt(value, expected))
+                                || self.table.compatible(self.db, actual, expected)
                         }
                         // An argument the candidate has no parameter for rules the candidate out.
                         (Some(_), None) => false,
@@ -12338,14 +13366,16 @@ impl<'db> Checker<'db, '_> {
                             .enumerate()
                             .map(|(index, formal)| {
                                 let formal = self.table.resolve(self.db, formal);
-                                (!accumulators.get(index).copied().unwrap_or(false)
-                                    && !self.table.contains_unbound_var(self.db, formal)
-                                    && (index >= declared_count
-                                        || !matches!(
+                                if accumulators.get(index).copied().unwrap_or(false)
+                                    || (index < declared_count
+                                        && matches!(
                                             formal.kind(self.db),
                                             TyKind::Any | TyKind::Unknown
-                                        )))
-                                .then_some(formal)
+                                        ))
+                                {
+                                    return None;
+                                }
+                                self.settled_hint(formal, &argument_vars)
                             })
                             .collect(),
                     )
@@ -13031,6 +14061,26 @@ impl<'db> Checker<'db, '_> {
         function: &FunctionType<'db>,
         arguments: &[CallArgument<'db>],
     ) -> Vec<TypeError<'db>> {
+        let ry_callee = function
+            .positional
+            .iter()
+            .chain(function.named.iter().map(|parameter| &parameter.ty))
+            .any(|&parameter| {
+                let parameter = self.table.resolve(self.db, parameter);
+                is_ry_value_type(self.db, parameter)
+            });
+        let outer_ry_callee = std::mem::replace(&mut self.ry_callee, ry_callee);
+        let findings = self.match_argument_targets(callee_range, function, arguments);
+        self.ry_callee = outer_ry_callee;
+        findings
+    }
+
+    fn match_argument_targets(
+        &mut self,
+        callee_range: TextRange,
+        function: &FunctionType<'db>,
+        arguments: &[CallArgument<'db>],
+    ) -> Vec<TypeError<'db>> {
         let variadic_element = function.variadic.as_ref().map(|rest| rest.element);
         let arena = self.arena;
         let targets =
@@ -13267,7 +14317,7 @@ impl<'db> Checker<'db, '_> {
                 };
                 (self.item_variable(*item)?, found)
             }
-            TyKind::Named(name, items) if name.text(db) == "Array" => {
+            TyKind::Named(name, items) if name.text(db) == "List" => {
                 let (TyKind::Named(found_name, found_items), [item]) =
                     (found.kind(db), items.as_slice())
                 else {
@@ -13718,6 +14768,12 @@ impl<'db> Checker<'db, '_> {
         {
             return Ok(());
         }
+        // A literal that does not fit reported itself.
+        if let Some(value) = value
+            && self.adapt_literal(value, expected) != LiteralFit::NotLiteral
+        {
+            return Ok(());
+        }
         if self.table.compatible(self.db, resolved_found, expected) {
             return Ok(());
         }
@@ -14118,9 +15174,12 @@ impl<'db> Checker<'db, '_> {
             ([argument], [index]) if argument.name.is_none() => Some(self.structural(*index)),
             _ => None,
         };
+        // An R number stays a valid position, so a literal position (`xs[[1]]`) needs no
+        // conversion.
         let position = |db, ty: Ty<'db>, logical: bool| match ty.kind(db) {
             TyKind::Scalar(Atomic::Integer | Atomic::Double) => true,
-            TyKind::Scalar(Atomic::Logical) => logical,
+            TyKind::Native(NativeScalar::Bool) | TyKind::Scalar(Atomic::Logical) => logical,
+            TyKind::Native(native) => native.is_integer(),
             TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown => true,
             _ => false,
         };
@@ -15581,7 +16640,7 @@ impl<'db> Checker<'db, '_> {
     }
 
     fn column_field(&mut self, name: &str, ty: Ty<'db>) -> RecordField<'db> {
-        let resolved = self.table.resolve(self.db, ty);
+        let resolved = self.settle_literals(ty);
         RecordField {
             name: Name::new(self.db, name),
             ty: column_type(self.db, resolved),
@@ -15878,7 +16937,9 @@ impl<'db> Checker<'db, '_> {
                 Ok(VectorIndexShape::ScalarLike)
             }
             TyKind::Scalar(Atomic::Logical) => Ok(VectorIndexShape::VectorLike),
-            TyKind::Scalar(Atomic::Complex | Atomic::Raw) => Err(TypeError {
+            TyKind::Native(native) if native.is_integer() => Ok(VectorIndexShape::ScalarLike),
+            TyKind::Native(NativeScalar::Bool) => Ok(VectorIndexShape::VectorLike),
+            TyKind::Native(_) | TyKind::Scalar(Atomic::Complex | Atomic::Raw) => Err(TypeError {
                 range,
                 kind: TypeErrorKind::BadVectorIndex { index },
             }),
@@ -16163,10 +17224,31 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
+    /// A branch whose value is a literal takes the ry type another branch has, as it would
+    /// against an annotation, so `if (c) 0 else n` with `n: I64` is an `I64` and
+    /// `:Err(_) => :Ok(0)` beside an `:Ok(I64)` arm is `:Ok(I64)`. Any other branch keeps its type.
+    fn adapt_literal_branch(
+        &mut self,
+        branch: ExprId,
+        branch_ty: Ty<'db>,
+        other: Ty<'db>,
+    ) -> Ty<'db> {
+        let other = self.table.resolve(self.db, other);
+        let resolved = self.table.resolve(self.db, branch_ty);
+        if !holds_ry_scalar(self.db, other) || holds_ry_scalar(self.db, resolved) {
+            return branch_ty;
+        }
+        match self.adapt_literal(branch, other) {
+            LiteralFit::Fits => other,
+            LiteralFit::OutOfRange | LiteralFit::NotLiteral => branch_ty,
+        }
+    }
+
     /// Differing openness joins by union, never unification: the concrete branch would
     /// pin the other (`function(flag, x) if (flag) x else "s"` would demand
     /// `x: character`). Two open branches do tie, which types the coalesce idiom.
     fn join_branch_values(&mut self, left: Ty<'db>, right: Ty<'db>) -> Ty<'db> {
+        self.default_join_literals(left, right);
         let left_resolved = self.table.resolve(self.db, left);
         let right_resolved = self.table.resolve(self.db, right);
         // `Any` unifies with everything, so unifying would type the `if` as the other branch
@@ -16222,6 +17304,7 @@ impl<'db> Checker<'db, '_> {
     /// a union keep that variable, since a later use of the rebound value (`repo + 1`)
     /// would then constrain the parameter, so the joined value is unchecked.
     fn join_written_values(&mut self, left: Ty<'db>, right: Ty<'db>) -> Ty<'db> {
+        self.default_join_literals(left, right);
         let left_resolved = self.table.resolve(self.db, left);
         let right_resolved = self.table.resolve(self.db, right);
         // A rigid is the same open parameter written back as an annotation, so it joins the
@@ -16313,6 +17396,7 @@ impl<'db> Checker<'db, '_> {
             }
             let joined = match (current, branch_entry) {
                 (Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b))) if a != b => {
+                    self.default_join_literals(a, b);
                     let unknown_side = [a, b].into_iter().any(|ty| {
                         matches!(
                             self.table.resolve(self.db, ty).kind(self.db),
@@ -16389,6 +17473,13 @@ impl<'db> Checker<'db, '_> {
         if level <= self.table.level {
             // Escaped below the binding level: stays monomorphic.
             return ty;
+        }
+        let literal = self.literal_vars.iter().find(|(literal, _)| {
+            matches!(literal.kind(self.db), TyKind::Var(other) if self.table.find(*other) == representative)
+        });
+        if let Some(&(literal, native)) = literal {
+            self.default_literal_var(literal, native);
+            return self.table.resolve(self.db, ty);
         }
         let letter = (b'T' + (binders.len() as u8 % 7)) as char;
         let suffix = binders.len() / 7;
@@ -16472,6 +17563,8 @@ fn single<T>(items: Vec<T>) -> Option<T> {
 fn combine_operand_atomic<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Atomic> {
     match ty.kind(db) {
         TyKind::Scalar(atomic) => Some(*atomic),
+        // `F64`, `Bool` and `Str` are R's `double`, `logical` and `character` at run time.
+        TyKind::Native(native) => native.shared_atomic(),
         TyKind::Vector(element) | TyKind::NamedVector(element) => match element.kind(db) {
             TyKind::Scalar(atomic) => Some(*atomic),
             _ => None,
@@ -16987,6 +18080,7 @@ fn is_row_index<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
         TyKind::Scalar(atomic) => {
             matches!(atomic, Atomic::Logical | Atomic::Integer | Atomic::Double)
         }
+        TyKind::Native(native) => native.is_integer() || *native == NativeScalar::Bool,
         TyKind::Vector(element) | TyKind::NamedVector(element) => is_row_index(db, *element),
         TyKind::Union(members) => members.iter().all(|&member| is_row_index(db, member)),
         TyKind::Null

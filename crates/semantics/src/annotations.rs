@@ -8,9 +8,10 @@ use {
         Db,
         diagnostics::TypeRenderer,
         types::{
-            Atomic, Constraint, FrameKind, FunctionType, Name, NativeField, Parameter, RecordField,
-            RestParameter, Ty, TyKind, TypeScheme, any, column_type, conflicting_tags,
-            native_record, null, scalar, substitute_rigid, union_of, unknown,
+            Atomic, Constraint, FrameKind, FunctionType, Name, NativeField, NativeScalar,
+            Parameter, RecordField, RestParameter, Ty, TyKind, TypeScheme, any, column_type,
+            conflicting_tags, is_ry_value_type, native_record, null, scalar, substitute_rigid,
+            union_of, unknown,
         },
     },
     rustc_hash::FxHashSet,
@@ -155,7 +156,7 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                 let body = lowering.lower_type(&child);
                 lowering.definition_type = false;
                 annotation.declared = Some(TypeScheme {
-                    binders: ThinVec::from(take(&mut forall)),
+                    binders: lowering.scheme_binders(take(&mut forall)),
                     body,
                 });
             }
@@ -194,7 +195,7 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
             from_calls: false,
         };
         annotation.declared = Some(TypeScheme {
-            binders: ThinVec::from(forall),
+            binders: lowering.scheme_binders(forall),
             body: Ty::new(db, TyKind::Function(function)),
         });
     }
@@ -327,7 +328,7 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
         .map(|parameter: &Parameter<'db>| parameter.name.text(db).to_owned())
         .collect();
     annotation.declared = Some(TypeScheme {
-        binders: ThinVec::from(forall),
+        binders: lowering.scheme_binders(forall),
         body: Ty::new(
             db,
             TyKind::Function(FunctionType {
@@ -1058,6 +1059,8 @@ const PARSE_DEPTH_LIMIT: usize = 160;
 struct Lowering<'db> {
     db: &'db dyn Db,
     binders: Vec<Name<'db>>,
+    /// Type parameters written as a `List`'s item (`List<T>`), which only a ry value can fill.
+    list_item_binders: Vec<Name<'db>>,
     nominal_references: Vec<(String, TextRange)>,
     applied_references: Vec<(String, usize, TextRange)>,
     errors: Vec<(String, TextRange)>,
@@ -1075,6 +1078,7 @@ impl<'db> Lowering<'db> {
         Lowering {
             db,
             binders: Vec::new(),
+            list_item_binders: Vec::new(),
             nominal_references: Vec::new(),
             applied_references: Vec::new(),
             errors: Vec::new(),
@@ -1122,6 +1126,27 @@ impl<'db> Lowering<'db> {
     }
 
     /// `bound` spans every binder list of the block, so a duplicate across lists is caught too.
+    /// A parameter that fills a `List`'s item is a ry value even when it is written `<T>`, so
+    /// that a literal passed for it becomes a ry value rather than R's `double`.
+    fn scheme_binders(
+        &self,
+        forall: Vec<(Name<'db>, Constraint)>,
+    ) -> ThinVec<(Name<'db>, Constraint)> {
+        forall
+            .into_iter()
+            .map(|(name, constraint)| {
+                let constraint = if constraint == Constraint::Unconstrained
+                    && self.list_item_binders.contains(&name)
+                {
+                    Constraint::ArrayItem
+                } else {
+                    constraint
+                };
+                (name, constraint)
+            })
+            .collect()
+    }
+
     fn lower_binders(
         &mut self,
         list: &SyntaxNode,
@@ -1511,9 +1536,15 @@ impl<'db> Lowering<'db> {
                             .collect()
                     })
                     .unwrap_or_default();
-                // An Array is one-dimensional and NA-free, so a vector, list, `NULL` or function
-                // item would make it ragged or missing.
-                if text == "Array"
+                // A `List` holds ry values only, so an R vector, R scalar, `NULL` or function item
+                // has no place in it.
+                if text == "List"
+                    && let [item] = arguments.as_slice()
+                    && let TyKind::Rigid(binder) = item.kind(self.db)
+                {
+                    self.list_item_binders.push(*binder);
+                }
+                if text == "List"
                     && let [item] = arguments.as_slice()
                     && !array_item_annotation(self.db, *item)
                     && let Some(argument) = node
@@ -1523,7 +1554,7 @@ impl<'db> Lowering<'db> {
                 {
                     self.errors.push((
                         format!(
-                            "an Array cannot hold `{}`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags",
+                            "a `List` cannot hold `{}`. Its items are ry values: numbers such as `I64` and `F64`, `Bool`, `Str`, records, tuples, tags and collections",
                             node_text(&argument).trim()
                         ),
                         argument.text_range(),
@@ -1591,6 +1622,9 @@ impl<'db> Lowering<'db> {
             "complex" => return scalar(self.db, Atomic::Complex),
             "character" => return scalar(self.db, Atomic::Character),
             "raw" => return scalar(self.db, Atomic::Raw),
+            _ if let Some(native) = NativeScalar::from_name(text) => {
+                return Ty::new(self.db, TyKind::Native(native));
+            }
             "DataFrame" => return Ty::new(self.db, TyKind::Frame(FrameKind::DataFrame, None)),
             "LazyFrame" => return Ty::new(self.db, TyKind::Frame(FrameKind::LazyFrame, None)),
             "GroupBy" => {
@@ -1705,23 +1739,18 @@ impl<'db> Lowering<'db> {
     }
 }
 
-/// Whether an annotation may name `item` as an Array's item type. A type name, a type parameter or
+/// Whether an annotation may name `item` as a List's item type. A type name, a type parameter or
 /// a union of tags may; an R vector, list, `NULL`, function, `complex` or `raw` may not.
 fn array_item_annotation(db: &dyn Db, item: Ty<'_>) -> bool {
     match item.kind(db) {
-        TyKind::Scalar(atomic) => !matches!(atomic, Atomic::Complex | Atomic::Raw),
-        TyKind::Union(members) => members.iter().all(|&member| {
-            !matches!(member.kind(db), TyKind::Null) && array_item_annotation(db, member)
-        }),
-        TyKind::Vector(_)
-        | TyKind::NamedVector(_)
-        | TyKind::List(_)
-        | TyKind::NamedList(_)
-        | TyKind::Tuple(_)
-        | TyKind::Record(_)
-        | TyKind::Frame(..)
-        | TyKind::Function(_)
-        | TyKind::Null => false,
-        _ => true,
+        TyKind::Union(members) => members
+            .iter()
+            .all(|&member| array_item_annotation(db, member)),
+        TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown => true,
+        // A collection, an alias or a project's own nominal type is checked where it is used.
+        // Asking the stub library which `List` this is would make lowering a stub depend on the
+        // library it builds.
+        TyKind::Named(..) => true,
+        _ => is_ry_value_type(db, item),
     }
 }

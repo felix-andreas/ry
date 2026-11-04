@@ -798,9 +798,15 @@ impl Layout {
         let sub1 = self.tex(Parameter::Sub1)?;
         self.set_sub_style(style);
         let sub_bbox = self.element(sub, false)?;
-        // GNU R subtracts 0.8 times the ordinal of its `sigma5` parameter, which is 1, not
-        // 0.8 x-heights, so this term only wins for a subscript taller than 0.8 inches.
-        shift = shift.max(sub1).max(sub_bbox.height - 0.8);
+        // Through R 4.5.2, GNU R subtracts 0.8 times the ordinal of its `sigma5` parameter,
+        // which is 1, not 0.8 x-heights, so the term only wins for a subscript taller than
+        // 0.8 inches. R 4.5.3 subtracts 0.8 x-heights of the subscript style.
+        let lift = if crate::system::r_at_least_release(4, 5, 3) {
+            0.8 * self.tex(Parameter::XHeight)?
+        } else {
+            0.8
+        };
+        shift = shift.max(sub1).max(sub_bbox.height - lift);
         let sub_bbox = self.offset_element(sub, 0.0, -shift, draw)?;
         let body_bbox = body_bbox.combine(sub_bbox);
         self.set_style(style);

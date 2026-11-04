@@ -1,8 +1,7 @@
-# Exports of ry's runtime package, `package:ry`: the DataFrame API and Arrays.
+# Exports of ry's runtime package, `package:ry`: the DataFrame API.
 # `test_standard_library.rs` keeps this list equal to what the runtime binds, except for the `as.*`
-# conversions and `is.Array`: those are base builtins on ry's runtime, listed here only because `ry.Rtypes` declares
+# conversions: those are base builtins on ry's runtime, listed here only because `ry.Rtypes` declares
 # them for the checker and the stub tests require every declaration to appear in its manifest.
-as.Array
 as.DataFrame
 as.record
 as.tag
@@ -48,7 +47,6 @@ Expr.std
 Expr.sum
 Expr.var
 GroupBy.agg
-is.Array
 is.DataFrame
 key
 LazyFrame.collect

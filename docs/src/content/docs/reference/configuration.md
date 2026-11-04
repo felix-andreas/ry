@@ -172,7 +172,7 @@ unresolved
   help: Change to `std::List.map` (`ry check --fix --unsafe-fixes` applies it)
 ```
 
-The types `Result`, `Dict`, `Set` and `Array` stay in scope either way. `ry run` and its console
+The types `Result`, `Dict`, `Set` and `List` stay in scope either way. `ry run` and its console
 follow the setting too: with the prelude off, ry's runtime does not attach `package:std`, so a bare
 `List.map` fails there as well, while `std::List.map` works. GNU R (`ry R`) has no standard library
 at all.

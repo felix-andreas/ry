@@ -895,13 +895,25 @@ pub enum Op {
 unsafe fn strict(
     call: &Call<'_>,
     class: OperatorClass,
-    compute: impl FnOnce(&Call<'_>) -> R<Sexp>,
+    compute: impl Fn(&Call<'_>) -> R<Sexp>,
 ) -> R<Sexp> {
-    if !call.args.iter().any(|arg| arg.value.is_array()) {
+    // An `I64` operand, single or a list, has its own vectorized operators (see `numbers`).
+    if !call.args.iter().any(|arg| arg.value.is_array())
+        || call
+            .args
+            .iter()
+            .any(|arg| arg.value.kind() == SexpType::I64)
+    {
         return compute(call);
     }
     let operands: Vec<Sexp> = call.args.iter().map(|arg| arg.value).collect();
     let name = call.name();
+    if operands
+        .iter()
+        .any(|&value| value.is_array() && arrays::items(value) == arrays::Items::RyValues)
+    {
+        return item_by_item(call, &operands, compute);
+    }
     if arrays::check_operands(call.call, name, class, &operands)? {
         let result = compute(call)?;
         return arrays::finish_result(call.call, name, result);
@@ -917,7 +929,74 @@ unsafe fn strict(
     Ok(result)
 }
 
+/// An operator on a list of ry values, such as nested lists, applied to each pair of items in
+/// turn. R's operator knows nothing of ry values, so the scalar operator runs once per item and
+/// the results form a new list. Two lists must have one length, because a list is never recycled,
+/// and an operand that is not a list stands beside every item.
+unsafe fn item_by_item(
+    call: &Call<'_>,
+    operands: &[Sexp],
+    compute: impl Fn(&Call<'_>) -> R<Sexp>,
+) -> R<Sexp> {
+    let name = call.name();
+    let lengths: Vec<usize> = operands
+        .iter()
+        .filter(|value| value.is_array())
+        .map(|&value| length(value))
+        .collect();
+    let count = lengths.first().copied().unwrap_or(0);
+    if let [left, right] = lengths[..]
+        && left != right
+    {
+        return Err(call.error(format!(
+            "`{name}` needs lists of the same length, but they have {left} and {right} items; a list is never recycled"
+        )));
+    }
+    let mut results = Vec::with_capacity(count);
+    for position in 0..count {
+        let mut args = Vec::with_capacity(call.args.len());
+        for arg in call.args {
+            let value = if arg.value.is_array() {
+                let item = arrays::item(arg.value, position)?;
+                // No record, tuple, tag, dictionary or set defines an operator, so one gets the
+                // list's own message rather than the boundary error for one item.
+                if item.kind() == SexpType::Record {
+                    return Err(call.error(format!(
+                        "`{name}` is not defined for a list of ry value items"
+                    )));
+                }
+                crate::heap().root(item);
+                item
+            } else {
+                arg.value
+            };
+            args.push(Arg {
+                tag: arg.tag,
+                value,
+            });
+        }
+        let item_call = Call {
+            call: call.call,
+            op: call.op,
+            args: &args,
+            env: call.env,
+            reusable: None,
+        };
+        let result = compute(&item_call)?;
+        crate::heap().root(result);
+        results.push(result);
+    }
+    arrays::from_items(&results)?.map_err(|message| call.error(message))
+}
+
 unsafe fn arithmetic(call: &Call<'_>, op: Op) -> R<Sexp> {
+    if call
+        .args
+        .iter()
+        .any(|arg| matches!(arg.value.kind(), SexpType::Record | SexpType::I64))
+    {
+        return crate::numbers::arithmetic(call, op);
+    }
     match call.args {
         [single] => unary_arithmetic(call, op, single.value),
         [left, right] => binary_arithmetic(call.call, op, left.value, right.value),
@@ -1307,6 +1386,22 @@ pub fn real_op(op: Op, a: f64, b: f64) -> f64 {
     }
 }
 
+/// R 4.6's `R_pow` multiplies out a cube or a fourth power of a base in [-11, 11] instead of
+/// calling C's `pow`, which can differ in the last bit.
+pub fn small_power_product(base: f64, exponent: f64) -> Option<f64> {
+    if !(exponent == 3.0 || exponent == 4.0)
+        || !(-11.0..=11.0).contains(&base)
+        || !crate::system::r_at_least(4, 6)
+    {
+        return None;
+    }
+    Some(if exponent == 4.0 {
+        base * base * base * base
+    } else {
+        base * base * base
+    })
+}
+
 /// `^` with R's special cases, which C's `pow` leaves to the platform: `1^y` and `x^0` are 1
 /// even for `NA`, and an infinite operand gives a defined limit or `NaN` (`(-Inf)^0.5`).
 pub fn power(base: f64, exponent: f64) -> f64 {
@@ -1325,6 +1420,8 @@ pub fn power(base: f64, exponent: f64) -> f64 {
     if base.is_finite() && exponent.is_finite() {
         return if exponent == 2.0 {
             base * base
+        } else if let Some(product) = small_power_product(base, exponent) {
+            product
         } else {
             base.powf(exponent)
         };
@@ -1703,6 +1800,13 @@ unsafe fn comparable(value: Sexp) -> R<Sexp> {
 }
 
 unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
+    if call
+        .args
+        .iter()
+        .any(|arg| matches!(arg.value.kind(), SexpType::Record | SexpType::I64))
+    {
+        return crate::numbers::comparison(call, |ordering| comparison.holds(ordering));
+    }
     if call.len() != 2 {
         return Err(call.error("comparison is possible only for atomic and list types"));
     }
@@ -2460,9 +2564,11 @@ fn signif_complex(z: Rcomplex, digits: f64) -> Rcomplex {
 }
 
 unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
-    // GNU R counts the arguments before matching them, and blames the calling closure for a
-    // wrong count or a lone argument that is not `x`.
-    if call.is_empty() || call.len() > 2 {
+    // Through R 4.3, GNU R counts the arguments before matching them, and blames the calling
+    // closure for a wrong count or a lone argument that is not `x`. From R 4.4 on, matching
+    // against `x` and `digits` alone reports what does not fit as an unused argument.
+    let counts_first = !crate::system::r_at_least(4, 4);
+    if counts_first && (call.is_empty() || call.len() > 2) {
         let name = if significant { "signif" } else { "round" };
         return Err(error(format!(
             "{} arguments passed to '{name}' which requires 1 or 2 arguments",
@@ -2470,7 +2576,8 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
         )));
     }
     let missing_operand = "argument \"x\" is missing, with no default";
-    if let [only] = call.args
+    if counts_first
+        && let [only] = call.args
         && only.tag != nil()
         && values::symbol_name(only.tag) != "x"
     {

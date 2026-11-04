@@ -1,6 +1,6 @@
 ---
 title: Package loading
-description: What ry binds, runs and rebinds when it loads a package from source, and what it does not do yet
+description: What ry binds, runs and rebinds when it loads a package from source, and its limits
 ---
 
 `ry load`, `ry test`, `ry document`, the `ry run` and `ry R` consoles and `load_all()` all load a
