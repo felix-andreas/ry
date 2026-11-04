@@ -929,7 +929,7 @@ View <- function(x, title) {
     unlink(temporary, recursive = TRUE)
     dir.create(temporary, recursive = TRUE, showWarnings = FALSE)
     tools:::makeLazyLoadDB(values, file.path(temporary, "s4"),
-      variables = c(".ry_s4_meta", names))
+      variables = c(".ry_s4_meta", names), compress = FALSE)
     unlink(cache$path, recursive = TRUE)
     if (!file.rename(temporary, cache$path)) {
       stop("cannot move the database into place")

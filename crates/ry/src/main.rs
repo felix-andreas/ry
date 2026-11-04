@@ -220,6 +220,16 @@ fn main() -> ExitCode {
         return run_debug_adapter();
     }
 
+    // Rust ignores SIGPIPE, so a write to a closed pipe returns an error and `println!` panics on
+    // it: `ry check | head` would end in a panic message. The commands below only write a report,
+    // so they take the default disposition back and end silently, as `cat` and `grep` do. The
+    // language server keeps the error, because it shuts down through its own transport.
+    #[cfg(unix)]
+    if !matches!(cli.command, Command::Server { .. }) {
+        // SAFETY: no other thread exists yet, and SIG_DFL is a valid disposition for SIGPIPE.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
+
     // Recursive tree walks can exceed a constrained `ulimit -s` main stack.
     let command = move || match cli.command {
         Command::Check {

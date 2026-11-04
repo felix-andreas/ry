@@ -133,7 +133,7 @@ loads `ry.toml`:
 ## `object-systems`
 
 S4, R6 and Reference Classes keep working, but ry recommends
-[records and tagged unions](/type-checking/records-and-tags), which it checks statically, so each
+[records and tagged unions](/tutorial/runtime#records-tags-and-match), which it checks statically, so each
 class or method definition gets an `object-system` warning. Set `[lint] object-system = "off"` to
 silence it. A project that wants none of these classes sets `object-systems = false`, and every
 definition becomes an error, whatever the lint level says. Only definitions are reported, so a call

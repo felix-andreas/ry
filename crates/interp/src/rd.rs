@@ -256,10 +256,11 @@ fn builtin_shape(name: &str) -> Option<Shape> {
     Some(match name {
         "cr" | "dots" | "ldots" | "R" | "tab" => Shape::Zero,
         "acronym" | "abbr" | "bold" | "cite" | "command" | "dfn" | "dQuote" | "email" | "emph"
-        | "file" | "pkg" | "sQuote" | "strong" | "var" | "linkS4class" | "itemize"
-        | "enumerate" | "describe" => Shape::One(Latex),
-        "link" => Shape::OptionThenOne(Latex),
-        "code" | "donttest" | "dontshow" | "testonly" | "special" => Shape::One(RCode),
+        | "file" | "pkg" | "sQuote" | "strong" | "var" | "itemize" | "enumerate" | "describe" => {
+            Shape::One(Latex)
+        }
+        "link" | "linkS4class" | "linkS4methods" => Shape::OptionThenOne(Latex),
+        "code" | "donttest" | "dontdiff" | "dontshow" | "testonly" | "special" => Shape::One(RCode),
         "Sexpr" => Shape::OptionThenOne(RCode),
         "env" | "kbd" | "option" | "preformatted" | "samp" | "url" | "verb" | "dontrun" | "out" => {
             Shape::One(Verbatim)
@@ -397,6 +398,9 @@ struct Parser {
 const MAX_EXPANSIONS: usize = 100_000;
 
 impl Parser {
+    /// Reports a syntax error or an unknown macro, which GNU R follows the parser's recovery
+    /// from. Both go through GNU R's `yyerror`, which repeats the warning about the first
+    /// multi-line string seen anywhere in the file.
     fn warn(&mut self, message: impl std::fmt::Display) {
         self.warn_newline_in_string();
         let line = self.input.next_position.line;
@@ -456,7 +460,7 @@ impl Parser {
             if self.input.at_line_start && !verbatim {
                 if self.input.starts_with("#ifdef") || self.input.starts_with("#ifndef") {
                     self.flush(&mut run, mode, &mut nodes);
-                    let conditional = self.conditional(mode)?;
+                    let conditional = self.conditional(mode, top)?;
                     nodes.push(conditional);
                     continue;
                 }
@@ -673,7 +677,8 @@ impl Parser {
 
     /// A `#ifdef` or `#ifndef` block: the rest of its line as the condition, then the body up to
     /// `#endif`.
-    unsafe fn conditional(&mut self, mode: Mode) -> R<Node> {
+    /// A `#ifdef` block, which at the top level of a file may hold whole sections.
+    unsafe fn conditional(&mut self, mode: Mode, top: bool) -> R<Node> {
         let first = self.input.next_position;
         let tag = if self.input.starts_with("#ifdef") {
             "#ifdef"
@@ -702,7 +707,7 @@ impl Parser {
         }
         self.flush(&mut run, Mode::Latex, &mut condition);
         self.ifdef_depth += 1;
-        let body = self.content(mode, Close::EndIf, false)?;
+        let body = self.content(mode, Close::EndIf, top)?;
         self.ifdef_depth -= 1;
         if self.input.starts_with("#endif") {
             for _ in 0.."#endif".len() {
@@ -731,9 +736,21 @@ impl Parser {
         let first = self.input.next_position;
         self.input.next();
         let mut name = String::new();
-        while let Some(character) = self.input.peek(0).filter(char::is_ascii_alphanumeric) {
-            self.input.next();
+        while let Some(character) = self
+            .input
+            .peek(name.len())
+            .filter(char::is_ascii_alphanumeric)
+        {
             name.push(character);
+        }
+        // GNU R reads an unknown name again without its trailing digits, so `0\dots6` is
+        // `\dots` followed by the text `6`.
+        let letters = name.trim_end_matches(|character: char| character.is_ascii_digit());
+        if letters.len() < name.len() && !letters.is_empty() && !self.is_macro(&name)? {
+            name.truncate(letters.len());
+        }
+        for _ in 0..name.len() {
+            self.input.next();
         }
         let tag = format!("\\{name}");
         if let Some((arguments, definition)) = self.user_macro(&tag)? {
@@ -879,6 +896,16 @@ impl Parser {
 
     /// The definition and argument count of the user macro `tag`, from this file's definitions
     /// or the macro environment it was given.
+    /// Whether `name` is a macro GNU R's lexer knows, built in or user defined.
+    unsafe fn is_macro(&mut self, name: &str) -> R<bool> {
+        Ok(
+            matches!(name, "newcommand" | "renewcommand" | "RdOpts" | "item")
+                || section_shape(name).is_some()
+                || builtin_shape(name).is_some()
+                || self.user_macro(&format!("\\{name}"))?.is_some(),
+        )
+    }
+
     unsafe fn user_macro(&mut self, tag: &str) -> R<Option<(usize, String)>> {
         if let Some(found) = self.macros.get(tag) {
             return Ok(Some(found.clone()));

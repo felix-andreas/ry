@@ -1,0 +1,518 @@
+---
+title: DataFrames
+description: ry's built-in typed table, queried with a Polars-style API, run on the Polars engine, and checked column by column
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+A `DataFrame` is ry's built-in table, for code where data.table is too slow or too hard to read.
+Each query runs inside the [Polars](https://pola.rs) engine instead of as R code, which on
+db-benchmark's questions at ten million rows takes about a quarter of the time data.table does
+([Speed](#speed)), and the type checker knows every column's type at every step, so a misspelled
+column is reported before the query runs ([Types](#types)). Code you already wrote for data.table
+keeps working, and most of its queries run on the same engine
+([Existing data.table code](#existing-datatable-code)).
+
+You query it with Polars' verbs (`select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
+`join`, `join_asof` and `head`) and column expressions written as `col("x")`. DataFrames need ry's own runtime,
+so run scripts that use them with `ry run script.R`:
+
+```r
+sales <- DataFrame(
+  region = ["eu", "us", "eu", "asia", "us"],
+  units = [3L, 5L, 2L, 7L, 1L],
+  price = [1.5, 2, 3, 0.5, 4]
+)
+sales |>
+  DataFrame.filter(col("units") > 1L) |>
+  DataFrame.with_columns(revenue = col("units") * col("price")) |>
+  DataFrame.group_by("region") |>
+  GroupBy.agg(
+    col("revenue") |> Expr.sum(),
+    orders = Expr.len()
+  ) |>
+  DataFrame.sort("revenue", descending = TRUE)
+```
+
+```text ry run runtime=ry exact
+$ ry run sales.R
+   region revenue orders
+   <char>   <num>  <int>
+1:     eu    10.5      2
+2:     us    10.0      1
+3:   asia     3.5      1
+```
+
+Every function has a qualified name, such as `DataFrame.filter` or `Expr.sum`, and takes the value
+it works on as its first argument, so a query reads top to bottom with R's pipe `|>`. There is no
+method dispatch: `DataFrame.filter` always means the same function.
+
+Write columns as [lists](/reference/type-system#lists) (`[1.5, 2]`), so the checker holds each one to a
+single type with no missing values. A plain R vector such as `c(1.5, 2)` works too. A column read
+back with `sales$price` is a plain R vector, because later steps such as a left join can put `NA`
+into a column; `List.from_r(sales$price)` turns it back into a `List` and fails if it holds an `NA`.
+
+## Existing data.table code
+
+Code written for data.table runs unchanged under `ry run`, and most queries on a `data.table` run
+on the same engine as DataFrames. ry answers a query only when it can produce exactly what
+data.table would, meaning the same values, attributes, printing and warnings, and otherwise
+data.table answers it. data.table's own test suite, `test.data.table()`, passes in full under ry.
+[Moving from data.table](/reference/from-data-table#existing-datatable-code) lists which queries go
+where, and maps each data.table idiom to its DataFrame equivalent.
+
+## Building a DataFrame
+
+- `DataFrame(name = value, ...)` builds one from vectors. A length-one value is recycled.
+- `as.DataFrame(x)` converts a list, a `data.frame` or a `data.table`, and `is.DataFrame(x)` tests
+  for one.
+- `DataFrame.read_csv(path)` and `DataFrame.read_parquet(path)` read a file.
+  `strings_as_factors = TRUE` reads text columns as factors, and a whole-number column becomes
+  `integer` when every value fits, as `fread` does. When the path is a literal naming a `.csv`
+  file in the project, the checker reads the file's header and knows its columns
+  ([Columns from files](#columns-from-files)).
+- `DataFrame.write_csv(df, path)` and `DataFrame.write_parquet(df, path)` write one.
+- `DataFrame.schema(df)`, `DataFrame.columns(df)`, `DataFrame.height(df)` and
+  `DataFrame.width(df)` describe it:
+
+```r
+DataFrame.schema(sales)
+```
+
+```text ry run runtime=ry exact continue
+       region         units         price
+"character[]"   "integer[]"    "double[]"
+```
+
+### Columns from files
+
+`DataFrame.read_csv("data/sales.csv")` types with the columns the file has, sniffed from its first
+rows with the same rules as the reader, so the checker follows a query on a file from its first
+step. The path is relative to the project root, and with `strings_as_factors = TRUE` the text
+columns are factors. With a `data/sales.csv` of `region,units,price` rows, a typo is reported
+before the script runs:
+
+```r
+sales <- DataFrame.read_csv("data/sales.csv")
+by_region <- sales |>
+  DataFrame.filter(col("units") > 1L) |>
+  DataFrame.group_by("region") |>
+  GroupBy.agg(total = col("prcie") |> Expr.sum())
+```
+
+```text
+type-mismatch
+
+  x this frame has no column `prcie`. Did you mean `price`?
+   --[report.R:5:27]
+ 4 |   DataFrame.group_by("region") |>
+ 5 |   GroupBy.agg(total = col("prcie") |> Expr.sum())
+   |                           ^^^^^^^
+```
+
+The editor completes `col("...")` and every column string of a verb with the columns at that step,
+and hovering one shows its type. A path computed at run time, or a file the project does not have,
+gives a `DataFrame` whose columns are unknown, so nothing about them is checked. Annotate the
+variable to give it its columns, as in
+`sales: DataFrame{region: character, units: integer, price: double} <- DataFrame.read_csv(path)`.
+In [strict mode](/tutorial/fully-typed#strict-mode), a query that names a column of a frame whose columns
+are unknown is an error.
+
+## Expressions
+
+`col("units")` refers to a column. Arithmetic (`+`, `-`, `*`, `/`, `^`, `%/%`, `%%`), comparisons,
+`&`, `|` and `!` combine columns and plain R values into a new expression, so
+`col("units") * col("price")` and `col("price") > 2` are both expressions. `lit(value)` makes a
+constant column.
+
+Aggregations reduce a column to one value: `Expr.sum`, `Expr.mean`, `Expr.median`, `Expr.min`,
+`Expr.max`, `Expr.first`, `Expr.last`, `Expr.std`, `Expr.var` and `Expr.count`. `Expr.len()`
+counts rows, `Expr.cor(a, b)` correlates two columns, `Expr.is_null` tests for missing values, and
+`Expr.if_else(test, yes, no)` picks per row.
+
+An expression's output column takes the name of the first column it reads. Rename it with
+`Expr.alias`, or by passing it as a named argument to a verb, as `revenue = ...` does above. Mind
+R's precedence when you pipe into `Expr.alias`: `|>` binds tighter than `*`, so wrap an arithmetic
+expression in parentheses first.
+
+```r
+(col("price") * 2) |> Expr.alias("double")
+```
+
+```text ry run runtime=ry exact continue
+(col("price") * 2.0).alias("double")
+```
+
+## Verbs
+
+| Verb | What it does |
+| --- | --- |
+| `DataFrame.select(df, ...)` | keeps only the columns or expressions given |
+| `DataFrame.with_columns(df, ...)` | adds or replaces columns, keeping the rest |
+| `DataFrame.filter(df, ...)` | keeps the rows where every condition is `TRUE` |
+| `DataFrame.group_by(df, ...)` then `GroupBy.agg(groups, ...)` | one row per group, with one aggregation per column |
+| `DataFrame.sort(df, ..., descending = FALSE)` | orders the rows |
+| `DataFrame.head(df, n = 5)` and `DataFrame.tail(df, n = 5)` | the first or last rows |
+| `DataFrame.join(df, other, on, how = "inner")` | joins two DataFrames |
+| `DataFrame.join_asof(df, other, on, by = NULL)` | joins each row to the nearest row of `other` |
+
+A string names a column wherever a verb takes an expression, so `DataFrame.select(df, "region")`
+is short for `DataFrame.select(df, col("region"))`. Inside `GroupBy.agg`, each expression must
+give one value per group. `col("units")` alone gives one value per row, so the checker and the
+runtime both reject it until you aggregate it.
+
+```r
+sales |> DataFrame.select("region", cost = col("price") * 1.2, col("units") >= 3L)
+```
+
+```text ry run runtime=ry exact continue
+   region  cost  units
+   <char> <num> <lgcl>
+1:     eu   1.8   TRUE
+2:     us   2.4   TRUE
+3:     eu   3.6  FALSE
+4:   asia   0.6   TRUE
+5:     us   4.8  FALSE
+```
+
+Inside `GroupBy.agg`, the one exception to one value per group is `Expr.head(n)`, which keeps up
+to `n` values per group. Polars would give a list per group here, but ry has no list columns, so
+the values become rows. After a descending sort, this gives each group's largest values:
+
+```r
+sales |>
+  DataFrame.lazy() |>
+  LazyFrame.sort("units", descending = TRUE) |>
+  LazyFrame.group_by("region") |>
+  LazyGroupBy.agg(top_units = col("units") |> Expr.head(2L)) |>
+  LazyFrame.collect()
+```
+
+```text
+   region top_units
+   <char>     <int>
+1:   asia         7
+2:     us         5
+3:     us         1
+4:     eu         3
+5:     eu         2
+```
+
+The groups come in the order of their first row in the sorted data. Written lazily, with one
+sort column and `Expr.head(n)` as the only item for an `n` of at most 8, the sort and the grouping
+run as one step that keeps only each group's best rows, instead of sorting the whole table first.
+
+### Joins
+
+`DataFrame.join` takes the key columns as `on`, or as `left_on` and `right_on` when the names
+differ. `how` is `"inner"`, `"left"`, `"full"`, `"semi"`, `"anti"` or `"cross"`, which pairs every
+left row with every right row and takes no keys. The result has the left
+columns, then the right's non-key columns, and a right column whose name is already taken gets the
+`suffix` (`"_right"` by default), as in Polars.
+
+```r
+regions <- DataFrame(region = ["eu", "us"], manager = ["Ana", "Bo"])
+DataFrame.join(sales, regions, on = "region", how = "left")
+```
+
+```text ry run runtime=ry exact continue
+   region units price manager
+   <char> <int> <num>  <char>
+1:     eu     3   1.5     Ana
+2:     us     5   2.0      Bo
+3:     eu     2   3.0     Ana
+4:   asia     7   0.5    <NA>
+5:     us     1   4.0      Bo
+```
+
+`DataFrame.join_asof` matches each left row to one right row: the `by` columns must be equal, and
+the `on` column takes the nearest value. With the default `strategy = "backward"` that is the last
+right row at or before the left row's value. `"forward"` takes the first one at or after it, and
+`"nearest"` the closest. A left row with no match gets `NA`, and the columns are laid out as for a
+left join.
+
+```r
+trades <- DataFrame(ticker = ["a", "b", "a"], time = [5L, 3L, 1L], size = [10, 20, 30])
+quotes <- DataFrame(ticker = ["a", "a", "b"], time = [2L, 4L, 1L], bid = [1.5, 1.6, 7])
+DataFrame.join_asof(trades, quotes, on = "time", by = "ticker")
+```
+
+```text
+   ticker  time  size   bid
+   <char> <int> <num> <num>
+1:      a     5    10   1.6
+2:      b     3    20   7.0
+3:      a     1    30    NA
+```
+
+### Windows and ranks
+
+`Expr.over(expr, "key")` computes `expr` within each group of the key columns and gives every row
+its group's value, so the frame keeps all of its rows. `Expr.rank` numbers the values from 1 in
+order, breaking ties by row order and ranking `NA` last; wrap it in `Expr.over` to rank within
+groups:
+
+```r
+sales |> DataFrame.with_columns(
+  region_units = Expr.over(Expr.sum(col("units")), "region"),
+  place = Expr.over(Expr.rank(col("units"), descending = TRUE), "region")
+)
+```
+
+```text ry run runtime=ry exact continue
+   region units price region_units place
+   <char> <int> <num>        <int> <int>
+1:     eu     3   1.5            5     1
+2:     us     5   2.0            6     1
+3:     eu     2   3.0            5     2
+4:   asia     7   0.5            7     1
+5:     us     1   4.0            6     2
+```
+
+### Reshaping
+
+`DataFrame.pivot(df, on, index, values, agg = NULL)` turns the values of the `on` column into
+columns, with one row per value of `index`, like data.table's `dcast`. Rows and new columns come
+out sorted. With several values for one cell, `agg` combines them: `"sum"`, `"mean"`, `"min"`,
+`"max"`, `"first"`, `"last"` or `"count"`. Because the new columns depend on the data, the
+checker types the result as a `DataFrame` without known columns.
+
+```r
+sales |> DataFrame.pivot(on = "region", index = "units", values = "price")
+```
+
+```text ry run runtime=ry exact continue
+   units  asia    eu    us
+   <int> <num> <num> <num>
+1:     1    NA    NA     4
+2:     2    NA   3.0    NA
+3:     3    NA   1.5    NA
+4:     5    NA    NA     2
+5:     7   0.5    NA    NA
+```
+
+### Dates
+
+A column of R `Date` values stays a date column. Adding or subtracting a number of days gives a
+date, subtracting one date column from another gives the whole days between them as an integer,
+and a date compares with another date, such as one from `as.Date`. The checker reports any other
+operator on a date, such as `col("placed") * 2`.
+
+```r
+orders <- DataFrame(id = [1L, 2L], placed = as.Date(c("2024-01-30", "2024-02-03")))
+shipped <- orders |> DataFrame.with_columns(due = col("placed") + 14L)
+shipped |> DataFrame.filter(col("due") >= as.Date("2024-02-15"))
+```
+
+```text ry run runtime=ry exact
+      id     placed        due
+   <int>     <Date>     <Date>
+1:     2 2024-02-03 2024-02-17
+```
+
+## Lazy queries
+
+`DataFrame.lazy(df)` turns a DataFrame into a `LazyFrame`, and `LazyFrame.scan_csv(path)` or
+`LazyFrame.scan_parquet(path)` starts one from a file without reading it. A `LazyFrame` has the
+same verbs under the `LazyFrame.` prefix, but each verb only records a step.
+`LazyFrame.collect` optimizes the whole plan and runs it, and `LazyFrame.explain` shows the plan
+it would run:
+
+```r
+plan <- sales |>
+  DataFrame.lazy() |>
+  LazyFrame.with_columns(revenue = col("units") * col("price")) |>
+  LazyFrame.filter(col("region") == "eu") |>
+  LazyFrame.select("region", "revenue")
+LazyFrame.explain(plan)
+LazyFrame.collect(plan)
+```
+
+```text ry run runtime=ry exact continue
+SELECT [col("region"), col("revenue")]
+  WITH_COLUMNS [(col("units") * col("price")).alias("revenue")]
+    FILTER col("region") == "eu"
+      DATAFRAME 5 rows, 3 columns
+   region revenue
+   <char>   <num>
+1:     eu     4.5
+2:     eu     6.0
+```
+
+The plan reads bottom up. The optimizer moved the filter below `with_columns`, so `revenue` is only
+computed for the rows that survive. It also pushes filters and the columns a query needs into a
+file scan, and a `head` into the scan's row limit, so a lazy query over a large file reads only
+what it uses.
+
+## Converting to R's tables
+
+`as.data.frame(df)` gives a plain `data.frame`, and `as.data.table(df)` gives a `data.table` once
+`library(data.table)` is attached. Both conversions keep every column's type, factor levels and
+missing values. A DataFrame is not a `data.frame`, so the conversion is always explicit:
+`is.data.frame(df)` is `FALSE`, and passing a DataFrame where the checker expects a `data.frame`
+is a type error.
+
+```r
+as.data.frame(sales)
+```
+
+```text ry run runtime=ry exact continue
+  region units price
+1     eu     3   1.5
+2     us     5   2.0
+3     eu     2   3.0
+4   asia     7   0.5
+5     us     1   4.0
+```
+
+## Types
+
+The checker knows every column of a DataFrame. Each verb produces a new column list, so the types
+follow the data through a whole query, and a misspelled column, a join on a column that does not
+exist, or a column that `agg` forgets to aggregate is reported before the query runs.
+
+```r
+sales <- DataFrame(region = ["eu", "us"], units = [3L, 5L], price = [1.5, 2])
+summary <- sales |>
+  DataFrame.filter(col("units") > 1L) |>
+  DataFrame.with_columns(revenue = col("units") * col("price")) |>
+  DataFrame.group_by("region") |>
+  GroupBy.agg(total = col("revenue") |> Expr.sum(), orders = Expr.len())
+```
+
+Hover on each name to see its type:
+
+```text
+sales:   DataFrame{region: character[], units: integer[], price: double[]}
+summary: DataFrame{region: character[], total: double[], orders: integer[]}
+```
+
+The steps in between have types too. After `DataFrame.group_by("region")` the value is a
+`GroupBy{region: character[]; units: integer[], price: double[], revenue: double[]}`, whose key
+columns come before the semicolon. A `LazyFrame` carries its columns the same way, so a lazy query
+is checked as closely as an eager one.
+
+In the editor, completion inside `col("...")` or any column string of a verb offers the columns of
+the DataFrame at that step, and hovering such a string shows the column's type.
+
+A query can start from a file too. `DataFrame.read_csv("data/sales.csv")` and
+`LazyFrame.scan_csv(...)` with a literal path to a `.csv` file in the project have that file's
+columns, sniffed from its first rows (see [Columns from files](#columns-from-files)). A path
+computed at run time gives a `DataFrame` whose columns are unknown, so annotate the variable with
+its columns instead, as for any other value.
+
+### Mistakes in a query
+
+A column that does not exist is reported on the string that names it, with the nearest column:
+
+```r
+bad <- sales |> DataFrame.select(col("prcie"))
+```
+
+```text ry check typing continue
+type-mismatch
+
+  x the frame `sales` has no column `prcie`. Did you mean `price`?
+```
+
+The same check covers the keys of a join. Inside `GroupBy.agg`, every expression must reduce each
+group to one value:
+
+```r
+per_region <- sales |> DataFrame.group_by("region") |> GroupBy.agg(col("units"))
+```
+
+```text ry check typing continue
+type-mismatch
+
+  x `units` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`
+```
+
+Columns have types, so arithmetic follows R's rules: `col("units") * col("price")` is a `double`
+column, a comparison is `logical`, and `Expr.sum` of an `integer` column stays `integer`. An
+operation on a column whose type cannot take it is reported on that column, such as arithmetic or
+`Expr.sum` on text, and so is a comparison of text with a number:
+
+```r
+doubled <- sales |> DataFrame.with_columns(twice = col("region") * 2)
+big <- sales |> DataFrame.filter(col("region") > 1L)
+```
+
+```text ry check typing continue
+type-mismatch
+
+  x `*` needs numbers, but the column `region` is `character[]`
+
+type-mismatch
+
+  x `>` compares `character[]` with `integer`, text with a number, which almost always means the wrong column
+```
+
+### Annotating a parameter
+
+A DataFrame type lists its columns, like a record. A column type is always a vector, so
+`DataFrame{units: integer}` means the same as `DataFrame{units: integer[]}`:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+total_units <- function(sales: DataFrame{region: character, units: integer}) -> integer {
+  sum(sales$units)
+}
+total_units(DataFrame(region = c("eu"), unit = c(1L)))
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(sales: DataFrame{region: character, units: integer}) -> integer
+total_units <- function(sales) {
+  sum(sales$units)
+}
+total_units(DataFrame(region = c("eu"), unit = c(1L)))
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+type-mismatch
+
+  x expected `DataFrame{region: character[], units: integer[]}`, found `DataFrame{region: character[], unit: integer[]}`
+```
+
+The columns must match exactly, as a record's fields do, so a DataFrame with an extra column is not
+accepted either: an unexpected column is usually a misspelled one. A bare
+`DataFrame` accepts any DataFrame and leaves its columns unknown, and so do `LazyFrame`,
+`GroupBy` and `LazyGroupBy`. A DataFrame is not a `data.frame`, so a `data.frame` parameter
+rejects it: convert with `as.data.frame()` first.
+
+The [typing reference](/reference/type-system/#dataframes) lists how each verb types, and what
+the checker understands of the data.table bracket syntax that DataFrames also accept.
+
+## data.table syntax
+
+A DataFrame also answers data.table's `df[i, j, by]` queries, including `:=`, joins with `on =`,
+`.N` and `.SD`, so code written for data.table keeps working. This syntax is there for
+compatibility, and the editor completes its query symbols (`.N`, `.SD`, `.I`, `.GRP`, `.NGRP` and
+`.BY`) inside the brackets. New code should use the verbs above, which the checker and the editor understand
+better and which read in the order they run. The
+[typing reference](/reference/type-system/#datatable-queries) lists what the checker understands
+of the bracket syntax.
+
+Unlike data.table, a DataFrame follows R's copy-on-modify rule, so `df[, y := value]` leaves a copy
+you took earlier unchanged. When nothing else refers to the DataFrame, the update happens in place
+and costs only the new column.
+
+## Speed
+
+db-benchmark's ten group-by and five join questions, three `:=` update loops and a keyed rolling
+join, at ten million rows (db-benchmark's 0.5 GB size) on 4 cores, take 6.3 s on DataFrames and
+25.9 s on data.table using every thread, best of two runs each, with the same checksums, and
+DataFrames are faster on every question. At fifty million rows the ten group-by questions take
+11.8 s against 29.8 s. data.table's own functions (`fread`, `setkey`, `rbindlist`,
+`melt` and the rest) run data.table's C code, and at ten million rows each is as fast as under
+GNU R or faster (`tstrsplit` 3.7 s against 5.7 s, `fread` 2.4 s against 3.2 s). The
+[design notes](/development/design/r-runtime/#7-the-table-type) describe the benchmark.

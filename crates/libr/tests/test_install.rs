@@ -46,7 +46,7 @@ fn home() -> &'static PathBuf {
                 include: &Path::new(env!("CARGO_MANIFEST_DIR")).join("include"),
                 libr: &libr,
                 rcmd: &rcmd,
-                gnu_r_home: &gnu_r_home(),
+                base: &gnu_r_home(),
                 toolchain: rcmd::Toolchain::default(),
             },
         )

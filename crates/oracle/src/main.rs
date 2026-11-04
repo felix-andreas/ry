@@ -166,6 +166,17 @@ fn main() -> ExitCode {
         print!("{}", oracle::fuzz::program(seed));
         return ExitCode::SUCCESS;
     }
+    // Without GNU R, `compare` checks the second engine against the recorded outcomes, which is
+    // how ry's runtime is tested on a machine that has only ry.
+    if let Command::Compare { engine, paths } = &cli.command
+        && !gnu_r_available()
+    {
+        let Some(second) = second_engine(engine.as_deref()) else {
+            return ExitCode::from(2);
+        };
+        eprintln!("GNU R was not found, so the engine is compared with the recorded outcomes");
+        return compare(None, second.as_ref(), &cases(paths.clone()));
+    }
     if !gnu_r_available() {
         eprintln!("GNU R was not found; install R or set ORACLE_R to its path");
         return ExitCode::from(2);
@@ -175,17 +186,10 @@ fn main() -> ExitCode {
         Command::Verify { paths } => verify(&gnu_r, &cases(paths)),
         Command::Record { paths } => record(&gnu_r, &cases(paths)),
         Command::Compare { engine, paths } => {
-            let second: Box<dyn Engine> = match engine.as_deref() {
-                Some(name) => match ProcessEngine::named(name) {
-                    Some(engine) => Box::new(engine),
-                    None => {
-                        eprintln!("--engine needs a command");
-                        return ExitCode::from(2);
-                    }
-                },
-                None => engine_from_environment(),
+            let Some(second) = second_engine(engine.as_deref()) else {
+                return ExitCode::from(2);
             };
-            compare(&gnu_r, second.as_ref(), &cases(paths))
+            compare(Some(&gnu_r), second.as_ref(), &cases(paths))
         }
         Command::Bench {
             ry,
@@ -368,11 +372,33 @@ fn record(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {
     summarize(cases.len(), failures)
 }
 
-fn compare(gnu_r: &ProcessEngine, second: &dyn Engine, cases: &[PathBuf]) -> ExitCode {
+/// The engine `--engine` names, else the one `ORACLE_ENGINE` names.
+fn second_engine(name: Option<&str>) -> Option<Box<dyn Engine>> {
+    match name {
+        Some(name) => match ProcessEngine::named(name) {
+            Some(engine) => Some(Box::new(engine)),
+            None => {
+                eprintln!("--engine needs a command");
+                None
+            }
+        },
+        None => Some(engine_from_environment()),
+    }
+}
+
+/// Compares `second` with GNU R, or with each case's recorded outcome when `gnu_r` is `None`.
+fn compare(gnu_r: Option<&ProcessEngine>, second: &dyn Engine, cases: &[PathBuf]) -> ExitCode {
     let mut failures = 0;
     let mut skipped = 0;
     for case in cases {
-        let expected = match gnu_r.run(case) {
+        let expected = match gnu_r {
+            Some(gnu_r) => gnu_r.run(case).map_err(|error| error.to_string()),
+            None => std::fs::read_to_string(expected_path(case))
+                .ok()
+                .and_then(|text| parse(&text))
+                .ok_or_else(|| "no recorded outcome".to_string()),
+        };
+        let expected = match expected {
             Ok(outcome) => outcome,
             Err(error) => {
                 println!("ERROR   {}: {error}", case.display());

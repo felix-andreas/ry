@@ -367,6 +367,14 @@ pub(crate) mod gc_bits {
     /// A writable pointer to its elements was handed out (`STRING_PTR`, `DATAPTR` on a list),
     /// so stores into it bypass the write barrier and it is scanned at every minor collection.
     pub const ESCAPED: u8 = 1 << 3;
+    /// In the heap's zero-count table, so a count that drops to zero again adds no second entry.
+    pub const ZERO_LISTED: u8 = 1 << 4;
+    /// Held by a root while the zero-count table is reconciled; cleared before the reconcile
+    /// returns.
+    pub const HELD: u8 = 1 << 5;
+    /// Released by a reconcile: a dead list or pairlist whose fields were given up and cleared,
+    /// left for the collector to sweep.
+    pub const RELEASED: u8 = 1 << 6;
 }
 
 pub(crate) mod flag_bits {
@@ -717,6 +725,20 @@ impl Sexp {
             let count = &self.header().refcount;
             if count.get() != REFCOUNT_MAX {
                 count.set(count.get() + 1);
+            }
+        }
+    }
+
+    /// Drops one reference and says whether that was the last counted one.
+    pub(crate) unsafe fn release_reference(self) -> bool {
+        unsafe {
+            let count = &self.header().refcount;
+            match count.get() {
+                REFCOUNT_MAX | 0 => false,
+                current => {
+                    count.set(current - 1);
+                    current == 1
+                }
             }
         }
     }

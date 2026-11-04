@@ -10,7 +10,7 @@ to giving a wrong answer: a construct it cannot describe becomes `Unknown`, whic
 everything, so a gap means a skipped check rather than a false error, and [strict mode](#strict-mode)
 shows where the gaps are. Second, every rule must be cheap enough to check on every keystroke, which
 is why inference is Hindley–Milner, why your own functions cannot be overloaded, and why there is no
-subtyping between nominal types. The [overview](/type-checking/overview) introduces the same ideas
+subtyping between nominal types. The [tutorial](/tutorial/types) introduces the same ideas
 through examples.
 
 `ry check` reports the type errors on this page only when typing is on, through `[check] typing = true`
@@ -372,7 +372,7 @@ new definition and is not checked.
 
 Before running anything, `ry run` and `ry R` check the script and their console checks each command, with the
 project's `ry.toml`. They print every `annotation-mismatch` and `inline-annotation` warning. In
-[strict mode](/type-checking/strict-mode) they also print every error and refuse to run code that
+[strict mode](/tutorial/fully-typed#strict-mode) they also print every error and refuse to run code that
 has one: a script exits with status 1, and the console drops the command. Other findings are left
 to `ry check`, so they never change whether R code runs.
 
@@ -720,7 +720,7 @@ the nominal identity.
 
 An *opaque* nominal type has no representation to project. The standard-library stubs declare
 `factor`, `connection`, `Date`, and other types the grammar cannot describe structurally as a bare
-`@type NAME` (see [stubs](/type-checking/unknown#package-stubs)). For these types:
+`@type NAME` (see [stubs](/development/authoring-stubs)). For these types:
 
 - `$`, `[`, and `[[` are accepted and give `Unknown`, because the R objects behind these classes
   commonly support access that depends on values.
@@ -838,7 +838,7 @@ the value with the member type you intend.
 ## Records, tuples and tags
 
 Records, tuples and tags are ry's own values, not R lists. The user guide is
-[Records and tags](/type-checking/records-and-tags/); this section is their typing contract. They are
+[Records and tags](/tutorial/runtime#records-tags-and-match); this section is their typing contract. They are
 inline syntax, so with `[check] inline-annotations = false` each literal, tag or `match` is reported
 as a `ry-syntax` warning. Literals are still typed then, but a `match` gets no coverage check. Their types may be written in `#:` comments
 either way.
@@ -1137,7 +1137,7 @@ function such as `sqrt()`.
 
 ## Lists
 
-A `List` is ry's typed sequence. The user guide is [Typed lists](/type-checking/lists/); this section
+A `List` is ry's typed sequence, and this section
 is its typing contract. The `[...]` literal is inline syntax, so with
 `[check] inline-annotations = false` each literal is a `ry-syntax` warning, and it is still typed.
 The type `List<T>` may be written in `#:` comments either way.
@@ -2420,7 +2420,7 @@ silent `Unknown`, and its reads are not reported.
 ### Overload sets
 
 A standard-library stub may declare several signatures for one name, forming an ordered overload
-set ([authoring stubs](/contributing/authoring-stubs#overloads-and-generics) describes how). A call
+set ([authoring stubs](/development/authoring-stubs#overloads-and-generics) describes how). A call
 to such a name is resolved separately at each call site:
 
 - Candidates are tried in declaration order, and the call commits to the first one whose parameters
@@ -3006,7 +3006,7 @@ scoping.
 
 - A namespace is *known* when stubs declare it. The shipped standard-library packages are known, and
   so is any namespace a project stub file declares: `stubs/dplyr.Rtypes` declares the namespace
-  `dplyr` (see [stubs](/type-checking/unknown#package-stubs)).
+  `dplyr` (see [stubs](/development/authoring-stubs)).
 - The project's own package is always known. Qualifying a name with the package you are editing, as
   `withr::defer()` does inside the package `withr`, reads the definition the checker already holds,
   and wins over a stub namespace of the same name. It reads the namespace only, so in a test file or
@@ -3048,7 +3048,7 @@ the whole package. Without them, analysis behaves as though both were empty.
   read in the package is tolerated instead of guessed at.
 - A `library(pkg)` or `require(pkg)` call anywhere in the project is the script-world equivalent of
   `import(pkg)`, and follows the same rule. Because R's search path is project-wide, so is the
-  tolerance. An [export manifest](/contributing/authoring-stubs#export-manifests) is enough to lift
+  tolerance. An [export manifest](/development/authoring-stubs#export-manifests) is enough to lift
   it; types are not required. The tidyverse, `knitr`, `rlang`, `glue`, `jsonlite`, `R6`, and the rest
   of the shipped manifests therefore keep unresolved-name detection on. A package nothing describes
   switches it off, and a two-line `stubs/<pkg>.Rtypes` of your own switches it back on.
@@ -3074,7 +3074,7 @@ the whole package. Without them, analysis behaves as though both were empty.
 
 The shipped stubs pair each namespace with a vendored *export manifest*: the complete list of names
 the namespace really exports, generated from a live R session (see
-[authoring stubs](/contributing/authoring-stubs#export-manifests)). Every manifest name is a known
+[authoring stubs](/development/authoring-stubs#export-manifests)). Every manifest name is a known
 global:
 
 - A bare or qualified read of a manifest name always resolves, with no unresolved or not-exported
@@ -3485,7 +3485,7 @@ the column had none would make the same code fail or pass depending on its input
 
 #### Verbs
 
-Each verb of the [DataFrame API](/guides/dataframes) types as a new column list, computed from the
+Each verb of the [DataFrame API](/reference/dataframes) types as a new column list, computed from the
 syntax of its arguments. A string argument names a column, and any other argument is an
 expression built from `col("x")`:
 
@@ -4021,7 +4021,7 @@ exception, because the fallback marks a call the declarations could not describe
 
 Strict mode also reports each read that the
 [attached-package tolerance](#package-imports-namespace-and-description) silenced, and points at the
-[stub](/type-checking/unknown#package-stubs) that would make it checkable. Without that, a clean run after
+[stub](/development/authoring-stubs) that would make it checkable. Without that, a clean run after
 `library(unknownpkg)` would look the same as a run that checked nothing.
 
 ### Unresolved references escalate to errors
@@ -4223,3 +4223,43 @@ not read.
 - A checked annotation on such a broken definition binds its declared type without checking it, so
   the definition keeps its contract for callers until the value parses again, and is then checked
   against the annotation as usual.
+
+## Limitations
+
+Most gaps are silent, because a value the checker cannot type is `Unknown` and its checks are
+skipped. [Strict mode](#strict-mode) reports most of the places they occur.
+
+Not checked:
+
+- **Base data frame columns.** Everything read out of a `data.frame` is `Unknown`, so `df$whatever`
+  passes even if the column does not exist. A [`DataFrame`](#dataframes) types its columns.
+- **Matrix dimensions.** Matrix arithmetic is checked, but a non-conformable product is not.
+  Indexing with several indices, as in `m[i, j]`, or with `drop = FALSE` gives `Unknown`.
+- **S4 and R6 objects** are `Unknown`, and calls to an S3 generic that dispatches through
+  `UseMethod()` return `Any`. Operator methods such as `+.Date` and methods called directly are
+  checked.
+- **Packages without a stub.** Their names are `Unknown`, and attaching one switches off
+  unresolved-name reports for the whole project.
+- **`$` on an atomic vector in a package that defines a `$` method**, because a classed vector may
+  carry that method.
+- **Some paths a test elsewhere in the body rules out.** A list member beside a number in
+  arithmetic, a list or `NULL` beside an operand of unknown type, the `NULL` of a computed list
+  field used as a `:` endpoint, and the logical member in the false branch of `isTRUE()` or
+  `isFALSE()` are not reported, because correct R usually guards them in ways the checker cannot
+  follow.
+- **A placeholder local**, a variable whose only visible value is `NULL` or a bare `NA`, filled
+  later by `assign()` or `<<-`, where it is passed as an argument or tested as a condition.
+- **A project's own `%op%` operators**, because one may quote its right operand, as magrittr's `%>%`
+  does.
+
+Known bugs, where correct code is reported:
+
+- **A bare `NA` under a declared return type.** A function declared `-> character` that returns
+  `NA` on one path is reported, because `NA` is `logical`. Return `NA_character_` instead.
+- **A trailing comma for rlang's dynamic dots.** dplyr's verbs accept `mutate(d, y = 1, )`, but the
+  trailing comma is reported as it is for `c(1, 2, )`.
+- **Package-qualified calls to a package ry does not know.** `pkg::fun()` reports an unknown
+  namespace when ry has no stub or export list for `pkg`, even if a file calls `library(pkg)`.
+- **A generic function passed inline as an argument.** `lapply(xs, function<T>(v: T) -> T v)` is
+  reported, because type parameters on a function that is not bound to a name are not
+  instantiated. Leave the function's types off, or bind it to a name first.

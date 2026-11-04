@@ -1,6 +1,6 @@
 //! ry's standard library: the `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` and `Set` modules,
 //! modeled on Roc's builtins. `types/std.Rtypes` declares their types and documents them, and the
-//! design and user contract live in the docs (`contributing/design/standard-library.md`,
+//! design and user contract live in the docs (`development/design/standard-library.md`,
 //! `reference/standard-library.mdx`, and the generated `reference/std/` pages).
 //!
 //! The functions are bound in a `package:ry` environment just above `package:base`, so any

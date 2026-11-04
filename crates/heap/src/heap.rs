@@ -21,6 +21,7 @@
 
 pub mod arena;
 pub mod env;
+pub mod large;
 pub mod object;
 pub mod records;
 mod space;
@@ -29,6 +30,7 @@ pub mod strings;
 use {
     crate::{
         env::Frame,
+        large::{MAPPED_BYTES, MappedPool, pool_limit},
         object::{
             EnvironmentObject, NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject,
             TripleObject, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, object_size, slot_for,
@@ -67,10 +69,30 @@ pub struct Heap {
     /// The largest single allocation the heap attempts (`memory_ceiling`).
     allocation_ceiling: usize,
     large: FxHashSet<Sexp>,
+    /// Freed mappings of large vectors kept for the next one.
+    mapped: MappedPool,
     /// Large objects allocated since the last collection, which a minor collection sweeps.
     young_large: Vec<Sexp>,
     remembered: Vec<Sexp>,
     escaped: Vec<Sexp>,
+    /// The elements each escaped list held when it escaped. Native stores through the pointer
+    /// bypass the counts, so retiring the escape recounts the list from this snapshot.
+    escaped_lists: Vec<(Sexp, Vec<Sexp>)>,
+    /// Objects a store left without a counted reference, which the next reconcile frees if no
+    /// root holds them either (`Heap::reconcile`).
+    zero_count: Vec<Sexp>,
+    /// The table size that runs the next reconcile. Entries a root holds stay in the table, so
+    /// the trigger counts the entries added since the last one.
+    reconcile_at: usize,
+    /// The large-vector bytes the entries added since the last reconcile would free, as
+    /// [`Heap::note_zero`] estimates them.
+    zero_bytes: usize,
+    /// Live objects whose fields do not count (`flag_bits::UNTRACKED`): their fields are roots
+    /// for a reconcile.
+    untracked: Vec<Sexp>,
+    /// Under [`GcPolicy::verify`], what a reconcile would have freed, checked against the full
+    /// collection that runs instead.
+    expect_dead: Vec<Sexp>,
     weak_refs: Vec<Sexp>,
     /// Weak references whose keys died, kept alive with their keys until their finalizers run.
     ready_to_finalize: Vec<Sexp>,
@@ -92,7 +114,7 @@ pub struct Heap {
     /// Bytes of small objects allocated since the last collection.
     young_bytes: usize,
     /// The `young_bytes` past which a small allocation takes the slow path, which runs a minor
-    /// collection when one is due. It is derived from the policy and `old_bytes`, and stored
+    /// collection when one is due. It is derived from the policy and `old_small_bytes`, and stored
     /// because the allocation fast path then needs one compare against it; it is zero under
     /// collection stress, so every allocation takes the slow path. It changes only where its
     /// inputs do: a collection and [`Heap::update_policy`].
@@ -100,7 +122,10 @@ pub struct Heap {
     /// Bytes of large vectors allocated since the last collection, kept apart from
     /// `young_bytes` because they have their own budget.
     young_large_bytes: usize,
-    old_bytes: usize,
+    /// Bytes of old small objects and of old large vectors, apart because the nursery's budget
+    /// scales with the first alone.
+    old_small_bytes: usize,
+    old_large_bytes: usize,
     stats: GcStats,
     inhibit: u32,
     stress_counter: u64,
@@ -198,7 +223,9 @@ pub trait RootSource {
 
 pub struct Marker<'a> {
     stack: &'a mut Vec<Sexp>,
-    space: &'a mut Space,
+    /// `None` while the zero-count table is reconciled: every object a source names is then
+    /// collected into `stack` as a root, without marking or tracing.
+    space: Option<&'a mut Space>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -259,11 +286,17 @@ pub struct GcPolicy {
     /// Bytes of young large vectors that trigger a minor collection, which also grows to half
     /// the old generation.
     pub young_large_limit: usize,
-    /// Old-generation bytes that trigger a major collection after a minor one.
-    pub old_limit: usize,
-    pub min_old_limit: usize,
+    /// GNU R's `R_VSize` in bytes: a large vector that would take the whole heap past it runs a
+    /// collection, and a major one when the old generation alone would still pass it. It is
+    /// adjusted after each major collection by [`HeapGrowth`], and never drops below
+    /// `min_heap_limit`.
+    pub heap_limit: usize,
+    pub min_heap_limit: usize,
+    pub growth: HeapGrowth,
     pub stress: GcStress,
-    /// Checks the write barrier's invariant before every minor collection (`RY_GC_VERIFY`).
+    /// Checks the write barrier's invariant before every minor collection, and replaces each
+    /// reconcile's frees with a full collection that panics if it reaches one of them
+    /// (`RY_GC_VERIFY`).
     pub verify: bool,
     /// Adds each collection's processor and elapsed time to the statistics, which `gc.time()`
     /// turns on.
@@ -274,11 +307,83 @@ pub struct GcPolicy {
     pub reporter: Option<unsafe fn(&str)>,
 }
 
+/// How [`GcPolicy::heap_limit`] follows the live data, with GNU R's fractions for its vector
+/// heap. After a major collection the limit rises to what is needed (the survivors plus the
+/// allocation that ran the collection); when that need fills more than `grow_fraction` of it,
+/// it grows by `grow_increment` of itself, and when it fills less than `shrink_fraction`, it
+/// shrinks by `shrink_increment` of itself.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeapGrowth {
+    pub grow_fraction: f64,
+    pub grow_increment: f64,
+    pub shrink_fraction: f64,
+    pub shrink_increment: f64,
+}
+
+impl HeapGrowth {
+    pub const DEFAULT: HeapGrowth = HeapGrowth {
+        grow_fraction: 0.70,
+        grow_increment: 0.20,
+        shrink_fraction: 0.30,
+        shrink_increment: 0.20,
+    };
+
+    /// GNU R's settings from its environment variables: `R_GC_MEM_GROW` picks a preset (0
+    /// never grows by more than the need, 1 is the default, 2 grows by 30%, 3 by 40% from half
+    /// full), then `R_GC_GROWFRAC` (0.35 to 0.75), `R_GC_GROWINCRFRAC` and
+    /// `R_GC_VGROWINCRFRAC` (0.05 to 0.80) override single fractions. A value outside its
+    /// range is ignored, as in GNU R.
+    pub fn from_environment(variable: impl Fn(&str) -> Option<String>) -> HeapGrowth {
+        let number = |name: &str| variable(name).and_then(|value| value.trim().parse::<f64>().ok());
+        let mut growth = HeapGrowth::DEFAULT;
+        match number("R_GC_MEM_GROW").map(|level| level.trunc() as i64) {
+            Some(0) => growth.grow_increment = 0.0,
+            Some(2) => growth.grow_increment = 0.3,
+            Some(3) => {
+                growth.grow_increment = 0.4;
+                growth.grow_fraction = 0.5;
+            }
+            _ => {}
+        }
+        if let Some(fraction) = number("R_GC_GROWFRAC").filter(|value| (0.35..=0.75).contains(value))
+        {
+            growth.grow_fraction = fraction;
+        }
+        for name in ["R_GC_GROWINCRFRAC", "R_GC_VGROWINCRFRAC"] {
+            if let Some(fraction) = number(name).filter(|value| (0.05..=0.80).contains(value)) {
+                growth.grow_increment = fraction;
+            }
+        }
+        growth
+    }
+
+    /// The limit after a major collection that left `needed` bytes to hold.
+    pub fn next_limit(&self, limit: usize, needed: usize, minimum: usize) -> usize {
+        let mut limit = limit.max(needed) as f64;
+        let occupancy = needed as f64 / limit;
+        if occupancy > self.grow_fraction {
+            // GNU R's smallest step, 80,000 cells of 8 bytes, keeps a zero increment from
+            // collecting on every allocation once the need reaches the limit.
+            limit += GROW_STEP_MIN + self.grow_increment * limit;
+        } else if occupancy < self.shrink_fraction {
+            limit -= self.shrink_increment * limit;
+        }
+        // A minor collection escalates to a major one when less than a fifth of the smallest
+        // limit is left (`Heap::maybe_collect`), so a limit closer to the need than that would
+        // turn every following minor collection into a major one.
+        (limit as usize).max(needed + minimum / 5).max(minimum)
+    }
+}
+
+const GROW_STEP_MIN: f64 = 80_000.0 * 8.0;
+
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct GcStats {
     pub minor_collections: u64,
     pub major_collections: u64,
     pub objects_freed: u64,
+    /// Large vectors freed by reconciling the zero-count table, apart from a collection.
+    pub vectors_released: u64,
     pub live_objects: u64,
     pub live_bytes: u64,
     pub pages: u64,
@@ -444,9 +549,16 @@ impl Heap {
             allocation_ceiling: memory_ceiling(),
             space: Space::new(),
             large: FxHashSet::default(),
+            mapped: MappedPool::new(),
             young_large: Vec::new(),
             remembered: Vec::new(),
             escaped: Vec::new(),
+            escaped_lists: Vec::new(),
+            zero_count: Vec::new(),
+            reconcile_at: RECONCILE_ENTRIES,
+            zero_bytes: 0,
+            untracked: Vec::new(),
+            expect_dead: Vec::new(),
             weak_refs: Vec::new(),
             ready_to_finalize: Vec::new(),
             weak_pairs: Vec::new(),
@@ -476,7 +588,8 @@ impl Heap {
             young_bytes: 0,
             small_trigger: 0,
             young_large_bytes: 0,
-            old_bytes: 0,
+            old_small_bytes: 0,
+            old_large_bytes: 0,
             stats: GcStats::default(),
             inhibit: 1,
             stress_counter: 0,
@@ -504,13 +617,23 @@ impl Heap {
         self.stats
     }
 
+    /// The bytes of every object allocated and not yet freed, garbage included: what the heap
+    /// occupies now, which the collection limit bounds.
+    pub fn allocated_bytes(&self) -> usize {
+        self.old_bytes() + self.young_bytes + self.young_large_bytes
+    }
+
+    fn old_bytes(&self) -> usize {
+        self.old_small_bytes + self.old_large_bytes
+    }
+
     /// The live objects as of the last collection, in `gc()`'s units.
     pub fn usage(&self) -> Usage {
         const MEGABYTE: f64 = 1024.0 * 1024.0;
         let stats = &self.stats;
         let vector_bytes = stats.live_vector_cells * 8;
         let object_bytes = stats.live_bytes.saturating_sub(vector_bytes);
-        let scale = self.policy.old_limit as f64 / (stats.live_bytes.max(1) as f64);
+        let scale = self.policy.heap_limit as f64 / (stats.live_bytes.max(1) as f64);
         let scale = scale.max(1.0);
         let megabytes = |bytes: f64| (bytes / MEGABYTE * 10.0).ceil() / 10.0;
         // Each object's share of the bytes beside its vector data, for the peak's megabytes.
@@ -581,11 +704,14 @@ impl Heap {
 
     /// Recomputes [`Heap::small_trigger`] from the policy and the old generation's size.
     fn refresh_small_trigger(&mut self) {
-        // Like GNU R's trigger, the budget grows with the heap: a fixed one would collect on
-        // every large vector a big session allocates, rescanning the young ones each time.
+        // Like GNU R's trigger for cons cells, the budget grows with the old small objects: a
+        // fixed one would collect every few allocations in a session that loaded many packages,
+        // rescanning the young objects each time. Old large vectors do not count, as GNU R's
+        // cell trigger ignores vector memory, because a session holding a few big vectors would
+        // otherwise let as many bytes of small garbage pile up.
         self.small_trigger = match self.policy.stress {
             GcStress::EveryAllocation => 0,
-            GcStress::Off => self.policy.young_limit.max(self.old_bytes / 2),
+            GcStress::Off => self.policy.young_limit.max(self.old_small_bytes / 2),
         };
     }
 
@@ -768,8 +894,10 @@ impl Heap {
         ) {
             for index in length..old {
                 let dropped = vector.element(index as usize);
-                dropped.decrement_refcount();
                 vector.set_element_unbarriered(index as usize, self.known.nil);
+                if dropped.release_reference() {
+                    self.note_zero(dropped);
+                }
             }
         }
         vector.set_length(length);
@@ -1210,7 +1338,9 @@ impl Heap {
     unsafe fn store(&mut self, parent: Sexp, old: Sexp, new: Sexp) {
         if parent.flags() & flag_bits::UNTRACKED == 0 {
             new.increment_refcount();
-            old.decrement_refcount();
+            if old.release_reference() {
+                self.note_zero(old);
+            }
         }
         self.write_barrier(parent, new);
     }
@@ -1224,6 +1354,7 @@ impl Heap {
         object.cdr().decrement_refcount();
         object.tag().decrement_refcount();
         object.set_flag(flag_bits::UNTRACKED, true);
+        self.untracked.push(object);
     }
 
     pub unsafe fn set_car(&mut self, cell: Sexp, value: Sexp) {
@@ -1262,7 +1393,10 @@ impl Heap {
             let value = from.stored_element(from_start + offset);
             if tracked {
                 value.increment_refcount();
-                to.stored_element(to_start + offset).decrement_refcount();
+                let old = to.stored_element(to_start + offset);
+                if old.release_reference() {
+                    self.note_zero(old);
+                }
             }
             to.set_element_unbarriered(to_start + offset, value);
         }
@@ -1321,6 +1455,14 @@ impl Heap {
         if vector.gc_bits() & gc_bits::ESCAPED == 0 {
             vector.set_gc_bit(gc_bits::ESCAPED, true);
             self.escaped.push(vector);
+            if matches!(vector.kind(), SexpType::List | SexpType::Expression)
+                && vector.tracks_references()
+            {
+                let elements = (0..vector.length() as usize)
+                    .map(|index| vector.stored_element(index))
+                    .collect();
+                self.escaped_lists.push((vector, elements));
+            }
         }
     }
 
@@ -1332,6 +1474,18 @@ impl Heap {
     /// package touched once would be rescanned by every minor collection for the rest of the
     /// session.
     pub unsafe fn retire_escaped(&mut self) {
+        // Native code may have replaced elements without counting either side, so the counts
+        // move from what the list held when it escaped to what it holds now.
+        for (vector, before) in std::mem::take(&mut self.escaped_lists) {
+            for index in 0..vector.length() as usize {
+                vector.stored_element(index).increment_refcount();
+            }
+            for old in before {
+                if old.release_reference() {
+                    self.note_zero(old);
+                }
+            }
+        }
         let mut escaped = std::mem::take(&mut self.escaped);
         for vector in escaped.drain(..) {
             vector.set_gc_bit(gc_bits::ESCAPED, false);
@@ -1845,7 +1999,9 @@ impl Heap {
         }
         let layout = Layout::from_size_align(size, 16)
             .map_err(|_| HeapError::CannotAllocate { bytes: size })?;
-        let memory = if zeroed >= size {
+        let memory = if size >= MAPPED_BYTES {
+            self.mapped.allocate(size, zeroed)
+        } else if zeroed >= size {
             NonNull::new(std::alloc::alloc_zeroed(layout))
         } else {
             NonNull::new(std::alloc::alloc(layout)).inspect(|memory| {
@@ -1865,6 +2021,12 @@ impl Heap {
         if self.inhibit > 0 {
             return;
         }
+        // A reconcile scans every root, so it runs once the table could free enough to pay for
+        // that, or has grown enough to need bounding. Running one at every large allocation
+        // made package test suites a sixth slower, because entries a root holds stay listed.
+        if self.zero_bytes >= RECONCILE_BYTES || self.zero_count.len() >= self.reconcile_at {
+            self.reconcile(keep);
+        }
         match self.policy.stress {
             GcStress::EveryAllocation => {
                 // A major collection marks the whole heap, so running one every few allocations
@@ -1872,25 +2034,254 @@ impl Heap {
                 // debug build. Spacing majors by a sixteenth of the live objects bounds their
                 // marking at about sixteen objects per allocation while still running them often
                 // enough to free an old object whose last reference was dropped.
+                // The spacing counts objects, so a loop of a few huge vectors would promote
+                // them for thousands of allocations; the byte escalation below bounds that the
+                // same way it bounds the ordinary schedule.
                 self.stress_counter += 1;
                 let spacing = (self.stats.live_objects / 16).max(8);
-                let kind = if self.stress_counter >= spacing {
+                if self.stress_counter >= spacing {
                     self.stress_counter = 0;
-                    Collection::Major
+                    self.collect_keeping(Collection::Major, keep, request);
                 } else {
-                    Collection::Minor
-                };
-                self.collect_keeping(kind, keep);
+                    self.collect_keeping(Collection::Minor, keep, request);
+                    self.escalate_if_full(keep, request);
+                }
             }
             GcStress::Off => {
                 if self.collection_due(request, large) {
-                    self.collect_keeping(Collection::Minor, keep);
-                    if self.old_bytes > self.policy.old_limit {
-                        self.collect_keeping(Collection::Major, keep);
-                    }
+                    self.collect_keeping(Collection::Minor, keep, request);
+                    self.escalate_if_full(keep, request);
                 }
             }
         }
+    }
+
+    /// A minor collection keeps every old object, so the temporaries it found live and promoted
+    /// stay until a major one. Escalate, as GNU R does, when what is left would not hold the
+    /// request and a fifth of the smallest limit; without that margin, every large vector
+    /// allocated just below the limit would run a minor collection that frees nothing, and only
+    /// a major one moves the limit.
+    unsafe fn escalate_if_full(&mut self, keep: &[Sexp], request: usize) {
+        let margin = request + self.policy.min_heap_limit / 5;
+        if self.old_bytes() + margin > self.policy.heap_limit {
+            self.stress_counter = 0;
+            self.collect_keeping(Collection::Major, keep, request);
+        }
+    }
+
+    /// Remembers that the last counted reference to `object` went away, when a reconcile could
+    /// reclaim it: a list, whose release gives up its elements, or a large atomic vector, whose
+    /// memory a reconcile frees.
+    #[inline]
+    unsafe fn note_zero(&mut self, object: Sexp) {
+        if !reclaimable(object) {
+            return;
+        }
+        // An entry a root held at the last reconcile is still listed, but losing a counted
+        // reference again is news about it all the same.
+        if object.gc_bits() & gc_bits::ZERO_LISTED == 0 {
+            object.set_gc_bit(gc_bits::ZERO_LISTED, true);
+            self.zero_count.push(object);
+        }
+        self.zero_bytes += self.reclaimable_bytes(object);
+    }
+
+    /// The bytes freeing `object` would return: its own if it is a large atomic vector, and for
+    /// a list, those of the large atomic vectors among its first elements that it alone holds,
+    /// which is where a data frame's or a `list(...)` of results' columns are.
+    unsafe fn reclaimable_bytes(&self, object: Sexp) -> usize {
+        if object.kind() != SexpType::List {
+            return self.size_of(object);
+        }
+        (0..(object.length() as usize).min(64))
+            .map(|index| object.stored_element(index))
+            .filter(|&element| {
+                element.refcount() == 1
+                    && element.kind() != SexpType::List
+                    && reclaimable(element)
+            })
+            .map(|element| self.size_of(element))
+            .sum()
+    }
+
+    /// Frees what the zero-count table proves dead without waiting for a collection, the way
+    /// GNU R's reference counts would if it freed on them, which it does not.
+    ///
+    /// An entry with no counted reference can still be held through a reference the counts do
+    /// not see: a root (the protect stack, the precious set, a native call's handouts, an
+    /// interpreter frame), the fields of an untracked object, an escaped list's elements, a weak
+    /// reference, or the allocation's own `keep`. Those references are gathered shallowly and
+    /// flagged, which costs one pass over the roots rather than a trace of the heap. Every other
+    /// reference to a heap object is a counted field, so an entry at count zero that no root
+    /// names is unreachable.
+    ///
+    /// A dead list gives up its elements, which may cascade to their own last references, and
+    /// stays for the sweep with its fields cleared; a dead large atomic vector is freed at once,
+    /// which is what returns a temporary's pages before the next collection would.
+    unsafe fn reconcile(&mut self, keep: &[Sexp]) {
+        if self.inhibit > 0 || self.zero_count.is_empty() {
+            return;
+        }
+        self.zero_bytes = 0;
+        let entries = std::mem::take(&mut self.zero_count);
+        let mut work: Vec<Sexp> = Vec::new();
+        for &object in &entries {
+            if object.refcount() == 0 {
+                work.push(object);
+            } else {
+                object.set_gc_bit(gc_bits::ZERO_LISTED, false);
+            }
+        }
+        if work.is_empty() {
+            self.reconcile_at = RECONCILE_ENTRIES;
+            return;
+        }
+        let mut roots = self.shallow_roots(keep);
+        for &root in &roots {
+            root.set_gc_bit(gc_bits::HELD, true);
+        }
+        // Held entries stay in the table: the root that holds one can drop it without a store,
+        // and the next reconcile looks again.
+        let mut held = Vec::new();
+        work.retain(|&object| {
+            if object.gc_bits() & (gc_bits::HELD | gc_bits::ESCAPED) != 0 {
+                held.push(object);
+                false
+            } else {
+                object.set_gc_bit(gc_bits::ZERO_LISTED, false);
+                true
+            }
+        });
+        let verify = self.policy.verify;
+        let nil = self.known.nil;
+        let mut freed = false;
+        while let Some(object) = work.pop() {
+            if object.gc_bits() & gc_bits::RELEASED != 0 {
+                continue;
+            }
+            object.set_gc_bit(gc_bits::RELEASED, true);
+            let give_up = |child: Sexp, work: &mut Vec<Sexp>, held: &mut Vec<Sexp>| {
+                if !child.release_reference()
+                    || child.gc_bits() & gc_bits::RELEASED != 0
+                    || !(reclaimable(child) || child.kind() == SexpType::Pairlist)
+                {
+                    return;
+                }
+                if child.gc_bits() & (gc_bits::HELD | gc_bits::ESCAPED) == 0 {
+                    child.set_gc_bit(gc_bits::ZERO_LISTED, false);
+                    work.push(child);
+                } else if reclaimable(child) && child.gc_bits() & gc_bits::ZERO_LISTED == 0 {
+                    child.set_gc_bit(gc_bits::ZERO_LISTED, true);
+                    held.push(child);
+                }
+            };
+            give_up(object.attrib(), &mut work, &mut held);
+            object.set_attrib_unbarriered(nil);
+            match object.kind() {
+                SexpType::List => {
+                    for index in 0..object.length() as usize {
+                        give_up(object.stored_element(index), &mut work, &mut held);
+                        object.set_element_unbarriered(index, nil);
+                    }
+                }
+                SexpType::Pairlist => {
+                    give_up(object.car(), &mut work, &mut held);
+                    give_up(object.cdr(), &mut work, &mut held);
+                    give_up(object.tag(), &mut work, &mut held);
+                    object.set_car_unbarriered(nil);
+                    object.set_cdr_unbarriered(nil);
+                    object.set_tag_unbarriered(nil);
+                }
+                _ => {
+                    if verify {
+                        self.expect_dead.push(object);
+                    } else if object.gc_bits() & gc_bits::REMEMBERED == 0 {
+                        self.free_released(object);
+                        freed = true;
+                    }
+                    continue;
+                }
+            }
+            if verify {
+                self.expect_dead.push(object);
+            }
+        }
+        for root in roots.drain(..) {
+            root.set_gc_bit(gc_bits::HELD, false);
+        }
+        self.zero_count = held;
+        self.reconcile_at = self.zero_count.len() + RECONCILE_ENTRIES;
+        if freed {
+            self.refresh_live_stats();
+        }
+        if verify && !self.expect_dead.is_empty() {
+            // Nothing was freed, so the full collection that checks the released objects are
+            // unreachable is also the one that reclaims them.
+            self.collect_keeping(Collection::Major, keep, 0);
+        }
+    }
+
+    /// Every object a reference the counts do not see points at, for [`Heap::reconcile`]. A
+    /// root's own fields are counted, so its children need no visit.
+    unsafe fn shallow_roots(&mut self, keep: &[Sexp]) -> Vec<Sexp> {
+        let mut roots = Vec::with_capacity(4096);
+        roots.extend(self.known.all());
+        roots.extend_from_slice(keep);
+        let stacks = &self.roots;
+        for stack in [
+            &stacks.globals,
+            &stacks.protect.stack,
+            &stacks.handles,
+            &stacks.handouts,
+        ] {
+            roots.extend_from_slice(&stack.entries);
+        }
+        roots.extend(stacks.precious.keys().copied());
+        let sources = std::mem::take(&mut self.sources);
+        for (_, source) in &sources {
+            source.trace(&mut Marker {
+                stack: &mut roots,
+                space: None,
+            });
+        }
+        self.sources = sources;
+        for &weak in self.weak_refs.iter().chain(&self.ready_to_finalize) {
+            roots.extend([
+                weak,
+                weak.weak_key(),
+                weak.weak_value(),
+                weak.weak_finalizer(),
+            ]);
+        }
+        for &object in &self.untracked {
+            roots.extend([object.car(), object.cdr(), object.tag(), object.attrib()]);
+        }
+        for &vector in &self.escaped {
+            if !vector.is_altrep() && matches!(vector.kind(), SexpType::List | SexpType::Expression)
+            {
+                roots.extend(
+                    (0..vector.length() as usize).map(|index| vector.stored_element(index)),
+                );
+            }
+        }
+        roots
+    }
+
+    /// Frees a large atomic vector a reconcile found dead. Its bytes stay counted until a collection
+    /// recounts them (a minor one for a young vector, a major one for an old one), so a reconcile
+    /// returns pages early without moving the collections. Uncounting them would put the next
+    /// collection off, and the dead temporaries only a collection finds, such as a forced
+    /// promise's value, would pile up meanwhile: a loop of `y <- rep(runif(1e6), 10)` then peaked
+    /// a quarter higher.
+    unsafe fn free_released(&mut self, object: Sexp) {
+        if object.gc_bits() & gc_bits::MARK == 0
+            && let Some(position) = self.young_large.iter().rposition(|&young| young == object)
+        {
+            self.young_large.swap_remove(position);
+        }
+        self.free_large(object);
+        self.stats.vectors_released += 1;
+        self.stats.objects_freed += 1;
     }
 
     /// Whether allocating `request` more bytes, as one large vector or as small objects, runs a
@@ -1907,18 +2298,27 @@ impl Heap {
         // them to the nursery would buy a collection per column that rescans the columns
         // already allocated.
         if large {
-            self.young_large_bytes + request > self.policy.young_large_limit.max(self.old_bytes / 2)
+            let old_bytes = self.old_bytes();
+            self.young_large_bytes + request > self.policy.young_large_limit.max(old_bytes / 2)
+                || self.allocated_bytes() + request > self.policy.heap_limit
         } else {
             self.young_bytes + request > self.small_trigger
         }
     }
 
     /// Runs a collection now. Every live object must be reachable from a root.
+    /// A major collection asked for this way also returns the freed large vectors' kept memory
+    /// to the kernel, as GNU R's `gc()` returns free memory.
     pub unsafe fn collect(&mut self, kind: Collection) {
-        self.collect_keeping(kind, &[]);
+        self.collect_keeping(kind, &[], 0);
+        if kind == Collection::Major && self.inhibit == 0 {
+            self.mapped.flush();
+        }
     }
 
-    unsafe fn collect_keeping(&mut self, kind: Collection, keep: &[Sexp]) {
+    /// Runs a collection for an allocation of `request` bytes, which a major collection counts
+    /// as needed when it adjusts the heap limit.
+    unsafe fn collect_keeping(&mut self, kind: Collection, keep: &[Sexp], request: usize) {
         if self.inhibit > 0 {
             return;
         }
@@ -1980,6 +2380,23 @@ impl Heap {
         // Before the sweep, while a mark still means "survives".
         let space = &self.space;
         self.escaped.retain(|&object| space.is_marked(object));
+        self.escaped_lists
+            .retain(|(object, _)| space.is_marked(*object));
+        self.zero_count.retain(|&object| space.is_marked(object));
+        self.untracked.retain(|&object| space.is_marked(object));
+        if !self.expect_dead.is_empty() {
+            let expect_dead = std::mem::take(&mut self.expect_dead);
+            for &object in &expect_dead {
+                if self.space.is_marked(object) {
+                    panic!(
+                        "a reconcile would have freed a live {:?} of length {} (refcount {})",
+                        object.kind(),
+                        object.length(),
+                        object.refcount()
+                    );
+                }
+            }
+        }
         match kind {
             Collection::Minor => {
                 self.strings.remove_dead_young(&self.space);
@@ -1990,13 +2407,18 @@ impl Heap {
                 self.strings.remove_dead(&self.space);
                 self.sweep_all();
                 self.stats.major_collections += 1;
-                // The limit falls back towards twice what survived by an eighth per major
-                // collection rather than at once, as GNU R shrinks its trigger. Otherwise every
-                // explicit `gc()` between two large operations would drop the limit below the
-                // next one's peak and buy a full collection in the middle of it.
-                self.policy.old_limit = (self.old_bytes * 2)
-                    .max(self.policy.old_limit / 8 * 7)
-                    .max(self.policy.min_old_limit);
+                // The limit shrinks by a fifth at most per major collection rather than to what
+                // survived, so an explicit `gc()` between two large operations does not drop it
+                // below the next one's peak and buy a full collection in the middle of it.
+                let needed = self.old_bytes() + request;
+                let policy = &mut self.policy;
+                policy.heap_limit = policy.growth.next_limit(
+                    policy.heap_limit,
+                    needed,
+                    policy.min_heap_limit,
+                );
+                self.mapped.limit = pool_limit(policy.heap_limit);
+                self.mapped.trim();
             }
         }
         for parent in self.remembered.drain(..) {
@@ -2018,6 +2440,7 @@ impl Heap {
             stats.system_time += system_now.saturating_sub(system);
             stats.elapsed_time += elapsed.elapsed();
         }
+        let old_bytes = self.old_bytes();
         if let (Some((started, young, young_large)), Some(log)) = (logged, &mut self.pause_log) {
             let kind = match kind {
                 Collection::Minor => "minor",
@@ -2026,7 +2449,7 @@ impl Heap {
             let line = format!(
                 "{kind} {} {young} {young_large} {}\n",
                 started.elapsed().as_nanos(),
-                self.old_bytes
+                old_bytes
             );
             if let Err(error) = log.write_all(line.as_bytes()) {
                 panic!("cannot write the collection log RY_GC_LOG names: {error}");
@@ -2091,7 +2514,7 @@ impl Heap {
         for (_, source) in &sources {
             let mut marker = Marker {
                 stack: &mut self.mark_stack,
-                space: &mut self.space,
+                space: Some(&mut self.space),
             };
             source.trace(&mut marker);
         }
@@ -2332,11 +2755,11 @@ impl Heap {
     unsafe fn sweep_young(&mut self) {
         let mut swept = Swept::default();
         let change = self.space.sweep_young(&mut swept);
-        self.old_bytes = self.old_bytes.saturating_add_signed(change);
+        self.old_small_bytes = self.old_small_bytes.saturating_add_signed(change);
         let young_large = std::mem::take(&mut self.young_large);
         for &object in &young_large {
             if object.gc_bits() & gc_bits::MARK != 0 {
-                self.old_bytes += self.size_of(object);
+                self.old_large_bytes += self.size_of(object);
             } else {
                 self.free_large(object);
                 swept.freed += 1;
@@ -2350,25 +2773,26 @@ impl Heap {
 
     unsafe fn sweep_all(&mut self) {
         let mut swept = Swept::default();
-        let mut old_bytes = self.space.sweep_all(&mut swept);
+        self.old_small_bytes = self.space.sweep_all(&mut swept);
+        let mut old_large_bytes = 0;
         let large: Vec<Sexp> = self.large.iter().copied().collect();
         for object in large {
             if object.gc_bits() & gc_bits::MARK != 0 {
-                old_bytes += self.size_of(object);
+                old_large_bytes += self.size_of(object);
             } else {
                 self.free_large(object);
                 swept.freed += 1;
             }
         }
         self.young_large.clear();
-        self.old_bytes = old_bytes;
+        self.old_large_bytes = old_large_bytes;
         self.stats.objects_freed += swept.freed;
         self.refresh_live_stats();
     }
 
     fn refresh_live_stats(&mut self) {
         self.stats.live_objects = (self.space.live_slots() + self.large.len()) as u64;
-        self.stats.live_bytes = self.old_bytes as u64;
+        self.stats.live_bytes = self.old_bytes() as u64;
         self.stats.large_objects = self.large.len() as u64;
         self.stats.pages = self.space.page_count() as u64;
     }
@@ -2389,10 +2813,12 @@ impl Heap {
     unsafe fn free_large(&mut self, object: Sexp) {
         let size = self.size_of(object);
         self.large.remove(&object);
-        std::alloc::dealloc(
-            object.as_ptr().cast(),
-            Layout::from_size_align_unchecked(size, 16),
-        );
+        let memory = object.as_ptr().cast::<u8>();
+        if size >= MAPPED_BYTES {
+            self.mapped.release(NonNull::new_unchecked(memory), size);
+        } else {
+            std::alloc::dealloc(memory, Layout::from_size_align_unchecked(size, 16));
+        }
     }
 
     unsafe fn create_well_known(&mut self) {
@@ -2476,11 +2902,7 @@ impl Drop for Heap {
         unsafe {
             let large: Vec<Sexp> = self.large.iter().copied().collect();
             for object in large {
-                let size = self.size_of(object);
-                std::alloc::dealloc(
-                    object.as_ptr().cast(),
-                    Layout::from_size_align_unchecked(size, 16),
-                );
+                self.free_large(object);
             }
         }
     }
@@ -2557,8 +2979,10 @@ impl Default for GcPolicy {
             // 64 MB `R_VSIZE`, which also counts live data. A 64 MB budget let dead temporaries
             // of vectorized kernels pile up to about 50 MB above GNU R's peak at a million rows.
             young_large_limit: 16 * 1024 * 1024,
-            old_limit: 64 * 1024 * 1024,
-            min_old_limit: 64 * 1024 * 1024,
+            // GNU R's default `R_VSIZE`.
+            heap_limit: 64 * 1024 * 1024,
+            min_heap_limit: 64 * 1024 * 1024,
+            growth: HeapGrowth::from_environment(|name| std::env::var(name).ok()),
             stress: match gc_stress_requested() {
                 Some(GcStressStart::Startup) => GcStress::EveryAllocation,
                 _ => GcStress::Off,
@@ -2672,8 +3096,13 @@ impl RootStack {
 
 impl Marker<'_> {
     pub unsafe fn mark(&mut self, object: Sexp) {
-        if self.space.mark(object) {
-            self.stack.push(object);
+        match &mut self.space {
+            Some(space) => {
+                if space.mark(object) {
+                    self.stack.push(object);
+                }
+            }
+            None => self.stack.push(object),
         }
     }
 }
@@ -2683,6 +3112,30 @@ impl Sexp {
         self.set_length(length);
         self.set_capacity(capacity);
     }
+}
+
+/// Entries the zero-count table gathers before a reconcile bounds it, however little they would
+/// free.
+const RECONCILE_ENTRIES: usize = 1 << 16;
+
+/// Large-vector bytes the zero-count table must stand to free before a reconcile runs for them.
+/// A package's test session has about 20,000 roots, which take about 100 µs to scan, so a
+/// reconcile pays for itself only when it frees megabytes.
+const RECONCILE_BYTES: usize = 4 << 20;
+
+/// Whether a reconcile can reclaim `object` once nothing holds it: a list, by giving up its
+/// elements, or a large atomic vector, by freeing it. ALTREP objects keep their own data.
+unsafe fn reclaimable(object: Sexp) -> bool {
+    !object.is_altrep()
+        && match object.kind() {
+            SexpType::List => true,
+            SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::Raw => object.size_class() == LARGE_CLASS,
+            _ => false,
+        }
 }
 
 /// Every type code a vector can have, for generators and tests.

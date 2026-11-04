@@ -1,0 +1,11 @@
+[stdout]
+|        a b
+| first  1 2
+| second 3 4
+| [1] "a" "b"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

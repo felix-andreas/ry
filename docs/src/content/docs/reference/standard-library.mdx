@@ -7,7 +7,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 ry ships a small standard library modeled on Roc's builtins: `Result`, `List`, `Str`, `Num`,
 `Bool`, `Dict` and `Set`. Every function is fully typed, never meets `NA`, and reports failure as a tag instead of
-an error or a warning, so the pieces compose with [`match`](/type-checking/records-and-tags/) and
+an error or a warning, so the pieces compose with [`match`](/tutorial/runtime#records-tags-and-match) and
 the checker follows every step:
 
 <Tabs syncKey="annotation-style">
@@ -261,7 +261,7 @@ annotation forms, its documentation and a runnable example. It is generated from
 | Module | Covers |
 | --- | --- |
 | [`Result`](/reference/std/result/) | `:Ok` and `:Err` values |
-| [`List`](/reference/std/list/) | R lists and Arrays |
+| [`List`](/reference/std/list/) | `List<T>` and R lists |
 | [`Str`](/reference/std/str/) | single strings |
 | [`Num`](/reference/std/num/) | single numbers and numeric constants |
 | [`Bool`](/reference/std/bool/) | `TRUE` and `FALSE` |

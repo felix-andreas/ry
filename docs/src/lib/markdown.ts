@@ -48,7 +48,7 @@ export function sections(pages: DocsPage[]): { label: string; pages: DocsPage[] 
 }
 
 export function siteSummary(pages: DocsPage[]): string {
-  return pages.find((page) => page.id === 'why-ry')?.data.description ?? SUMMARY_FALLBACK;
+  return pages.find((page) => page.id === 'getting-started')?.data.description ?? SUMMARY_FALLBACK;
 }
 
 // Turns an MDX page body into Markdown that needs no components: the import lines and layout tags

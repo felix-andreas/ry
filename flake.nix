@@ -75,7 +75,17 @@
               ./crates
               ./types
               ./editors/code/package.json
+              ./tools/base-r
             ];
+          };
+
+          # GNU R's source release that ry's base R is built from, pinned by tools/base-r.
+          baseRVersion = pkgs.lib.trim (builtins.readFile ./tools/base-r/VERSION);
+          baseRSource = pkgs.fetchurl {
+            url = "https://cran.r-project.org/src/base/R-${pkgs.lib.versions.major baseRVersion}/R-${baseRVersion}.tar.gz";
+            sha256 = builtins.head (
+              pkgs.lib.splitString " " (builtins.readFile ./tools/base-r/SHA256SUMS)
+            );
           };
 
           commonArgs = {
@@ -124,21 +134,24 @@
               '';
               # `ry run` finds ry's runtime at ../lib/ry/libR.so relative to the executable, and the
               # name must stay libR.so, the soname compiled packages record. `ry load` looks for
-              # ry-rcmd beside the runtime to compile a package's src/.
+              # ry-rcmd beside the runtime to compile a package's src/. Base R is built with them
+              # into ../lib/ry/base-r, where `ry` looks for it.
               postInstall = ''
                 mkdir -p "$out/lib/ry"
                 mv "$out"/lib/libR${pkgs.stdenv.hostPlatform.extensions.sharedLibrary} "$out/lib/ry/"
                 mv "$out"/bin/ry-rcmd "$out/lib/ry/"
                 rm -f "$out"/lib/libR.a "$out"/lib/*.rlib
+                R_SOURCE_TARBALL=${baseRSource} R_SOURCE_CACHE="$TMPDIR/base-r-source" \
+                  bash tools/base-r/build.sh "$out/lib/ry/base-r" "$out/lib/ry/ry-rcmd" \
+                  "$out/lib/ry/libR${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"
               '';
               meta.mainProgram = "ry";
             }
           );
 
-          # `ry R` loads GNU R's libR, and ry's runtime reads base R from it. A Nix-built binary
-          # cannot load a libR built against another distribution's libraries, so R_HOME defaults
-          # to nixpkgs' R (shared) even where another R comes first on PATH; setting R_HOME still
-          # overrides it.
+          # `ry R` runs GNU R, and a Nix-built binary cannot load a libR built against another
+          # distribution's libraries, so nixpkgs' R comes first on PATH. ry's runtime uses its own
+          # base R unless the user sets R_HOME.
           packageNative =
             pkgs.runCommand "ry-${packageUnwrapped.version}"
               {
@@ -149,7 +162,7 @@
                 mkdir -p "$out/bin" "$out/lib"
                 ln -s ${packageUnwrapped}/lib/ry "$out/lib/ry"
                 makeWrapper ${packageUnwrapped}/bin/ry "$out/bin/ry" \
-                  --set-default R_HOME ${pkgs.R}/lib/R --prefix PATH : ${pkgs.R}/bin
+                  --prefix PATH : ${pkgs.R}/bin
               '';
 
           # Release binaries are cross-linked by zig and cannot run in the sandbox, so they skip

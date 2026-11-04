@@ -185,18 +185,30 @@ unsafe fn set_na(to: Sexp, to_index: usize) {
 
 /// A vector of the elements at `indices` (`usize::MAX` gives NA).
 pub unsafe fn select_elements(vector: Sexp, indices: &[usize]) -> R<Sexp> {
+    select_positions(vector, indices.iter().copied(), indices.len())
+}
+
+/// A vector of the `count` elements at `positions` (`usize::MAX` gives NA). Taking an iterator
+/// lets a caller whose positions follow a rule, such as `rep`, gather without first writing
+/// eight bytes per result element into a position list.
+pub unsafe fn select_positions(
+    vector: Sexp,
+    positions: impl Iterator<Item = usize>,
+    count: usize,
+) -> R<Sexp> {
+    let positions = positions.take(count);
     // An ALTREP string or list reads only the selected elements through its class's `Elt`
     // method, so `as.character(x)[1:5]` converts five numbers, not all of `x`.
     if vector.is_altrep() && matches!(vector.kind(), SexpType::String | SexpType::List) {
-        let count = length(vector);
-        let result = alloc(vector.kind(), indices.len())?;
+        let extent = length(vector);
+        let result = alloc(vector.kind(), count)?;
         crate::heap().root(result);
-        for (position, &index) in indices.iter().enumerate() {
-            if index < count {
-                values::set_elt(result, position, vector.element(index));
+        for (slot, index) in positions.enumerate() {
+            if index < extent {
+                values::set_elt(result, slot, vector.element(index));
                 crate::unwind::raise_parked()?;
             } else {
-                set_na(result, position);
+                set_na(result, slot);
             }
         }
         return Ok(result);
@@ -210,35 +222,46 @@ pub unsafe fn select_elements(vector: Sexp, indices: &[usize]) -> R<Sexp> {
     if kind == SexpType::Nil {
         return Ok(nil());
     }
-    if matches!(kind, SexpType::Pairlist | SexpType::Language) {
-        let list = values::pairlist_to_list(vector)?;
-        return select_elements(list, indices);
-    }
-    let count = length(vector);
+    let (vector, kind) = if matches!(kind, SexpType::Pairlist | SexpType::Language) {
+        (values::pairlist_to_list(vector)?, SexpType::List)
+    } else {
+        (vector, kind)
+    };
+    let extent = length(vector);
     match kind {
         SexpType::Logical | SexpType::Integer => {
-            return gather(kind, values::ints(vector), indices, NA_INTEGER, |result| {
-                values::ints_mut(result)
-            });
+            return gather(
+                kind,
+                values::ints(vector),
+                positions,
+                count,
+                NA_INTEGER,
+                |result| values::ints_mut(result),
+            );
         }
         SexpType::Real => {
-            return gather(kind, values::reals(vector), indices, NA_REAL, |result| {
-                values::reals_mut(result)
-            });
+            return gather(
+                kind,
+                values::reals(vector),
+                positions,
+                count,
+                NA_REAL,
+                |result| values::reals_mut(result),
+            );
         }
         SexpType::Raw => {
-            return gather(kind, values::raws(vector), indices, 0, |result| {
+            return gather(kind, values::raws(vector), positions, count, 0, |result| {
                 values::raws_mut(result)
             });
         }
         _ => {}
     }
-    let result = alloc(kind, indices.len())?;
-    for (position, &index) in indices.iter().enumerate() {
-        if index < count {
-            copy_element(vector, index, result, position)?;
+    let result = alloc(kind, count)?;
+    for (slot, index) in positions.enumerate() {
+        if index < extent {
+            copy_element(vector, index, result, slot)?;
         } else {
-            set_na(result, position);
+            set_na(result, slot);
         }
     }
     Ok(result)
@@ -264,6 +287,16 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
     match index.kind() {
         SexpType::Integer => {
             let positions = values::ints(index);
+            if positions
+                .iter()
+                .all(|&position| position <= 0 && position != NA_INTEGER)
+                && let Some(keep) = excluded(
+                    length(object),
+                    positions.iter().map(|&position| -f64::from(position)),
+                )
+            {
+                return Ok(Some(gather_kept(object, &keep)?));
+            }
             // Every subscript must be NA or positive; anything else needs the general rules.
             if positions
                 .iter()
@@ -280,6 +313,12 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
         }
         SexpType::Real => {
             let positions = values::reals(index);
+            if positions.iter().all(|&position| position < 1.0)
+                && let Some(keep) =
+                    excluded(length(object), positions.iter().map(|&position| -position))
+            {
+                return Ok(Some(gather_kept(object, &keep)?));
+            }
             if positions.iter().any(|&position| position < 1.0) {
                 return Ok(None);
             }
@@ -314,6 +353,53 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
         }
         _ => Ok(None),
     }
+}
+
+/// The elements negative subscripts keep, as a bitset with one bit per element (set when kept):
+/// `excluded` is each subscript negated. `None` unless every subscript is negative or zero and at
+/// least one is negative, the only case the mask covers; NA, a positive subscript or all zeros
+/// take the general rules.
+fn excluded(extent: usize, excluded: impl Iterator<Item = f64>) -> Option<Vec<u64>> {
+    let mut keep = vec![u64::MAX; extent.div_ceil(64)];
+    if let Some(last) = keep.last_mut()
+        && extent % 64 != 0
+    {
+        *last = (1 << (extent % 64)) - 1;
+    }
+    let mut any_negative = false;
+    for value in excluded {
+        // A subscript between -1 and 1 truncates to zero, which selects nothing.
+        if value.is_nan() || value <= -1.0 {
+            return None;
+        }
+        let position = value.trunc();
+        if position >= 1.0 {
+            any_negative = true;
+            if position <= extent as f64 {
+                let index = position as usize - 1;
+                if let Some(word) = keep.get_mut(index / 64) {
+                    *word &= !(1 << (index % 64));
+                }
+            }
+        }
+    }
+    any_negative.then_some(keep)
+}
+
+/// The elements of `object` whose bit in `keep` is set, streamed without a position list.
+unsafe fn gather_kept(object: Sexp, keep: &[u64]) -> R<Sexp> {
+    let kept = keep.iter().map(|word| word.count_ones() as usize).sum();
+    let positions = keep.iter().enumerate().flat_map(|(index, &word)| {
+        let mut remaining = word;
+        std::iter::from_fn(move || {
+            (remaining != 0).then(|| {
+                let bit = remaining.trailing_zeros() as usize;
+                remaining &= remaining - 1;
+                index * 64 + bit
+            })
+        })
+    });
+    gather_kind(object, positions, kept)
 }
 
 /// `object[positions]` for a logical, integer, double, character or list vector that is not
@@ -357,16 +443,17 @@ unsafe fn gather_kind(
     Ok(result)
 }
 
-/// `source[indices]` for an atomic vector of plain elements, with NA past the end.
+/// `source[positions]` for an atomic vector of plain elements, with NA past the end.
 unsafe fn gather<T: Copy + 'static>(
     kind: SexpType,
     source: &[T],
-    indices: &[usize],
+    positions: impl Iterator<Item = usize>,
+    count: usize,
     missing: T,
     output: impl Fn(Sexp) -> &'static mut [T],
 ) -> R<Sexp> {
-    let result = values::alloc_uninit(kind, indices.len())?;
-    for (slot, &index) in output(result).iter_mut().zip(indices) {
+    let result = values::alloc_uninit(kind, count)?;
+    for (slot, index) in output(result).iter_mut().zip(positions) {
         *slot = source.get(index).copied().unwrap_or(missing);
     }
     Ok(result)
@@ -4380,6 +4467,14 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     let mut other_names = nil();
     for (position, &(value, count, is_matrix)) in pieces.iter().enumerate() {
         let source_length = length(value);
+        // A matrix names the other dimension even when it adds no line, as a zero-row matrix
+        // of column names does in `rbind(template, ...)`.
+        if is_matrix && other_names == nil() {
+            let dimnames = get_attr(value, symbols().dimnames);
+            if dimnames != nil() {
+                other_names = dimnames.element(if by_row { 1 } else { 0 });
+            }
+        }
         for line in 0..count {
             for along in 0..extent {
                 let target = if by_row {
@@ -4418,9 +4513,6 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                 } else {
                     String::new()
                 });
-                if other_names == nil() && dimnames != nil() {
-                    other_names = dimnames.element(if by_row { 1 } else { 0 });
-                }
             } else {
                 // Positions count from 1 over the call's arguments, which `expressions` mirrors.
                 let expression = expressions[positions[position] - 1];

@@ -341,21 +341,23 @@ pub const BUILTINS: &[BuiltinDef] = &[
 /// GNU R 4.3 load unchanged.
 const INTERNALS_ID: &str = "2fdf6c18-697a-4ba7-b8ef-11c0d92f1327";
 
-/// The R installation whose base and recommended packages the session loads. When none was
-/// found this is GNU R's usual home, so `R.home()` still answers; [`missing_r_home`] says why.
+/// The R home whose base packages the session loads: the one `R_HOME` names, else ry's own base
+/// R tree (`rcmd::base::installed`). A host that carries the tree inside its executable
+/// extracts it and sets `R_HOME` before the session starts. When neither exists this is GNU
+/// R's usual home, so `R.home()` still answers; [`missing_r_home`] says why.
 pub fn r_home() -> String {
     located_r_home()
         .clone()
         .unwrap_or_else(|_| FALLBACK_R_HOME.to_owned())
 }
 
-/// The message a host prints, before starting a session, when no GNU R installation was found:
-/// what ry looked for, where, and how to fix it.
+/// The message a host prints, before starting a session, when no base R was found: what ry
+/// looked for and how to fix it.
 pub fn missing_r_home() -> Option<String> {
     located_r_home().as_ref().err().cloned()
 }
 
-/// GNU R's usual home on the platform, which `R.home()` reports when no installation was found.
+/// GNU R's usual home on the platform, which `R.home()` reports when no base R was found.
 #[cfg(target_os = "macos")]
 const FALLBACK_R_HOME: &str = "/Library/Frameworks/R.framework/Resources";
 #[cfg(not(target_os = "macos"))]
@@ -367,45 +369,36 @@ fn located_r_home() -> &'static Result<String, String> {
 }
 
 /// An R home is usable when it holds base R's R code, which the session sources first. A set
-/// `R_HOME` is authoritative, as it is for GNU R, so an unusable one is not searched past.
+/// `R_HOME` is authoritative, as it is for GNU R, so an unusable one is not searched past. A
+/// GNU R installation is used only when `R_HOME` names it, which is how a session emulates an
+/// older R.
 fn find_r_home() -> Result<String, String> {
-    let usable = |home: &str| Path::new(home).join("library/base/R/base").exists();
-    let fix = "install GNU R, or set R_HOME to the directory `R RHOME` prints; \
-               see https://ry-lang.org/installation/";
+    let usable = |home: &Path| rcmd::base::holds_base_r(home);
     // An exported but empty R_HOME, as some env files leave it, names no directory.
     if let Some(home) = std::env::var("R_HOME").ok().filter(|home| !home.is_empty()) {
-        if usable(&home) {
+        if usable(Path::new(&home)) {
             return Ok(home);
         }
         return Err(format!(
-            "ry: ry's runtime loads base R from a GNU R installation, but R_HOME is {home}, \
-             which holds none (no library/base/R/base)\n  fix: {fix}\n"
+            "ry: R_HOME is {home}, which holds no base R (no library/base/R/base)\n  \
+             fix: unset R_HOME to use ry's own base R, or set it to the directory a GNU R's \
+             `R RHOME` prints\n"
         ));
     }
-    let mut searched = vec!["R_HOME (not set)".to_owned()];
-    for candidate in crate::gnu_r_home::candidate_r_homes() {
-        let candidate = candidate.to_string_lossy().into_owned();
-        if usable(&candidate) {
-            return Ok(candidate);
-        }
-        searched.push(candidate);
+    match rcmd::base::installed() {
+        Some(base) if usable(&base) => Ok(base.to_string_lossy().into_owned()),
+        Some(base) => Err(format!(
+            "ry: ry's base R at {} is incomplete (no library/base/R/base)\n  fix: rebuild it \
+             with `just base-r`\n",
+            base.display()
+        )),
+        None => Err(
+            "ry: ry's base R was not found: R_HOME and RY_BASE_R are not set, and no \
+             base-r directory is beside the executable\n  fix: build it with `just base-r`, \
+             or set R_HOME to a GNU R installation\n"
+                .to_owned(),
+        ),
     }
-    match std::process::Command::new("R").arg("RHOME").output() {
-        Ok(output) if output.status.success() => {
-            let home = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if usable(&home) {
-                return Ok(home);
-            }
-            searched.push(format!("`R RHOME` ({home}, which holds no base R)"));
-        }
-        Ok(_) => searched.push("`R RHOME` (it failed)".to_owned()),
-        Err(_) => searched.push("`R RHOME` (no `R` on PATH)".to_owned()),
-    }
-    Err(format!(
-        "ry: ry's runtime loads base R from a GNU R installation, and none was found\n  \
-         searched: {}\n  fix: {fix}\n",
-        searched.join(", ")
-    ))
 }
 
 /// The session's temporary directory, which `tempdir()` returns and native code reads as
@@ -3003,9 +2996,9 @@ pub fn r_version() -> &'static RVersion {
 }
 
 /// Reads the version from the installation itself: the base package's `DESCRIPTION` holds
-/// the version that `library()`'s checks compare against, and `SVN-REVISION` in the GNU R home
-/// that base really lives in holds the revision and release date. ry's own R home links
-/// `library/base` from a GNU R home, so the link is resolved first. The session cannot start
+/// the version that `library()`'s checks compare against, and `SVN-REVISION` in the base R tree
+/// that base really lives in (ry's own or a GNU R home) holds the revision and release date.
+/// ry's assembled R home links `library/base` from that tree, so the link is resolved first. The session cannot start
 /// without a base package ([`missing_r_home`]), so a missing one is a broken installation.
 pub fn read_r_version(home: &str) -> RVersion {
     let base = Path::new(home).join("library/base");
@@ -3046,15 +3039,22 @@ pub fn read_r_version(home: &str) -> RVersion {
     // Debian keeps the headers outside R_HOME and names them in the `R_INCLUDE_DIR` that
     // `bin/R` exports.
     let shared_include = std::env::var_os("R_INCLUDE_DIR").map(PathBuf::from);
-    let nickname = [gnu_home.join("include"), Path::new(home).join("include")]
-        .into_iter()
-        .chain(shared_include)
-        .find_map(|include| {
-            let header = std::fs::read_to_string(include.join("Rversion.h")).ok()?;
-            header.lines().find_map(|line| {
-                let rest = line.trim().strip_prefix("#define R_NICK")?;
-                Some(rest.trim().trim_matches('"').to_owned())
-            })
+    // ry's base R tree records the nickname as the source release does, in `VERSION-NICK`.
+    let nickname = std::fs::read_to_string(gnu_home.join("VERSION-NICK"))
+        .ok()
+        .map(|nickname| nickname.trim().to_owned())
+        .filter(|nickname| !nickname.is_empty())
+        .or_else(|| {
+            [gnu_home.join("include"), Path::new(home).join("include")]
+                .into_iter()
+                .chain(shared_include)
+                .find_map(|include| {
+                    let header = std::fs::read_to_string(include.join("Rversion.h")).ok()?;
+                    header.lines().find_map(|line| {
+                        let rest = line.trim().strip_prefix("#define R_NICK")?;
+                        Some(rest.trim().trim_matches('"').to_owned())
+                    })
+                })
         })
         .unwrap_or_default();
     RVersion {

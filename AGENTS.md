@@ -14,6 +14,7 @@ The crates live in `crates/`:
 - `loader`: the package-development loader behind `ry load`.
 - `repl`: the R console behind `ry repl` and `ry run`. It loads R at runtime, which is why the rest of the workspace can build without R.
 - `heap`: the R runtime's object model and garbage collector.
+- `typed`: the typed core, which compiles strict typed closures to run on native values.
 - `libr`: R's C API, built as an ABI-compatible `libR` shared library.
 - `rcmd`: ry's R home and the `R CMD` commands that install packages against it.
 - `oracle`: the differential test harness that compares an engine against GNU R.
@@ -75,7 +76,7 @@ These rules apply to everything an agent writes.
 - **Start where the reader is.** Decide who is reading (a new user, someone looking up a rule, a contributor about to change the code) and open with what they need most: the answer, the rule, or what changed. Background comes after.
 - **Teach in order.** Introduce a concept before you use it, and finish one idea before starting the next. When a small example is easier to grasp than the general rule, show the example first.
 - **Write connected prose.** A sentence should carry one step of reasoning, not five, so split a sentence that chains several steps together. But do not overcorrect into a row of short, same-shaped sentences: that reads like a telegram and hides how the ideas relate. The small words that carry logic (because, so, but, unless, which means) are what make an explanation an explanation. Vary sentence length, and read the paragraph aloud. If three sentences in a row start with "It", rewrite them.
-- **Be concrete.** A real snippet and its real output beat a description of them. Get the output by running the tool (see "Run the tool before you claim what it does" below).
+- **Be concrete, and dense.** Aim for extremely high information density: a snippet with its real output beats a paragraph about it, and a table beats a list of similar sentences. Get the output by running the tool (see "Run the tool before you claim what it does" below).
 - **Pick a natural subject, in the active voice.** In a specification, the construct is the subject: write "the pipe types as that call", not "ry types the pipe as that call". Name ry where the statement really is about the tool, such as a diagnostic, a default, or a deliberate limit. In pages written for users, talk to the reader as "you".
 - **Say it literally first.** A metaphor must never stand in for the mechanism. Once the mechanism is stated plainly, a comparison may help it stick.
 - **Use one name for one thing.** Do not coin private terms: a name like "the literal courtesy" means nothing to a reader who has not seen the code that named it. Define a term of art before you rely on it, and use the same word for the same thing every time.
@@ -144,7 +145,7 @@ The user has delegated full technical ownership to the agents: code structure, c
 
 The analysis core is incremental. `semantics` is a salsa database, so queries are memoized and an edit cooperatively cancels analysis that is still in flight. Per-item interface firewalls keep an edit inside one item from invalidating the rest of the project, and the LSP server publishes a fast diagnostics wave first and schedules the slower semantic wave for idle time.
 
-The architecture page at `docs/src/content/docs/contributing/architecture.md` is the contract. Read it before you touch the analysis core or the server's scheduling, and keep it accurate. Deferred performance work lives in `.agents/memory/backlog.md`.
+The architecture page at `docs/src/content/docs/development/architecture.md` is the contract. Read it before you touch the analysis core or the server's scheduling, and keep it accurate. Deferred performance work lives in `.agents/memory/backlog.md`.
 
 A check must never read a project-wide map directly, because then every edit anywhere would invalidate it. Go through a per-name or per-item tracked projection instead, and pin the property in `crates/semantics/tests/test_incremental.rs`.
 
@@ -162,7 +163,7 @@ The agent knowledge base lives in the repository. Its index is `MEMORY.md`, whic
 
 `MEMORY.md` also names every other knowledge document. Keep a separate document only for material of genuinely larger scope, and link it from `MEMORY.md`. There are three today: `backlog.md` is the prioritized punch-list of open work, `decisions.md` is the log of settled architecture decisions, and `test-user-reports.md` collects the closed findings from simulated-user testing (a finding moves there from the backlog once it is fixed). Never start a new knowledge file for something small; fold it into the right horizon instead.
 
-A design document is not a memory file. Unsettled design work (proposals, open questions, sketchpads) belongs in the docs site under `docs/src/content/docs/contributing/design/`. List each one on that folder's index page, and keep it out of the sidebar.
+A design document is not a memory file. Unsettled design work (proposals, open questions, sketchpads) belongs in the docs site under `docs/src/content/docs/development/design/`. List each one on that folder's index page, and keep it out of the sidebar.
 
 `worklog.md` is a deliberate exception to both the timeless rule and the no-new-files rule. It is a chronological record, one line per cycle, that a scheduled routine appends to, so do not prune it as a rules violation. Durable facts still belong in the files above.
 
@@ -174,13 +175,12 @@ Memory lives in git on purpose. It travels with every `git clone` to any machine
 
 The docs site holds the specs for users and contributors. They are contracts, so keeping them accurate is mandatory.
 
-- (user directive) The docs are written for humans, so they get straight to the point in plain, concise language and cut everything irrelevant. Each page puts the most important information first (the motivation, what makes ry worth using) and gives details after. This matters most for the introduction and the type-checking section, which stay short: anything longer belongs in the reference section, or in contributing if it only matters for development. Agents own the docs and radically cut outdated or irrelevant material instead of preserving it.
-- The introduction (`getting-started.mdx`, `why-ry.mdx`, `benchmarks.mdx`, `ry.mdx`, `installation.md`), `guides/`, and `type-checking/` are for users. Keep them short and move detail into `reference/`. Each of the four sidebar steps holds about three pages (`docs/astro.config.ts` has the list), each page covers one idea with real output, and pages with annotation tabs are `.mdx` (see `contributing/development.md`). `getting-started.mdx` presents the three standout features, and `ry.mdx` is the one-page summary of everything, which the site also serves as `/ry.md`; keep it current when a feature changes.
-- Every typed example offers synced tabs for untyped plain R, `#:` comment annotations and inline syntax, type definitions included; the untyped tab is left out where the example has no plain-R form. The standard library has its own reference page.
-- Near the top, `why-ry.mdx` shows a measured benchmark of the same programs run untyped on GNU R, untyped on ry, and typed with strict mode on ry, and `benchmarks.mdx` adds each program's code and the method. `just bench-why --write` regenerates `tools/bench/why/results.json`, which every benchmark table on the site renders.
-- `reference/` holds the contracts: `type-system.mdx` is the semantics contract, and `cli.md`, `configuration.md`, `package-loading.md`, `diagnostic-codes.md`, and `formatting-rules.md` document the tool, and `licensing.md` says which licence covers each part.
-- The contributing pages are `contributing/architecture.md`, `contributing/structure.md`, `contributing/testing.md`, `contributing/corpus-and-oracle.md`, `contributing/development.md`, and `contributing/authoring-stubs.md`.
-- `contributing/design/` holds unsettled drafts. They are explicitly not contracts, which makes them the one place in the docs allowed to describe behavior that does not exist. Keep them out of the sidebar; the folder's index page lists them.
+- (user directive) The docs are written for humans, so they get straight to the point in plain, concise language and cut everything irrelevant. Each page puts the most important information first and gives details after. Agents own the docs and radically cut outdated or irrelevant material instead of preserving it.
+- The sidebar has four sections (`docs/astro.config.ts`). **Introduction** is `getting-started.mdx` (the landing page of the docs: what ry is, the benchmark table, one example per step), `installation.md` (binary, R, editors), `ry.mdx` (the one-page summary of everything, also served as `/ry.md`; keep it current when a feature changes) and `benchmarks.mdx`. **Tutorial** is `tutorial/check.md`, `tutorial/types.mdx`, `tutorial/runtime.mdx` and `tutorial/fully-typed.mdx`, one page per adoption step, each a sequence of snippets with real output. **Reference** (`reference/`) holds the contracts: `type-system.mdx` is the semantics contract, the other pages document the tool. **Development** (`development/`) is for contributors. Detail belongs in Reference or Development, never in the introduction or the tutorial.
+- Pages with annotation tabs are `.mdx` (see `development/index.md`). A typed example offers synced tabs for untyped plain R, `#:` comment annotations and inline syntax where the forms differ; use one tab group per idea, not per snippet, so the tabs do not bloat the page.
+- `getting-started.mdx` shows a measured benchmark of the same programs run untyped on GNU R, untyped on ry, and typed with strict mode on ry, and `benchmarks.mdx` adds each program's code and the method. `just bench-why --write` regenerates `tools/bench/why/results.json`, which every benchmark table on the site renders.
+- A moved or deleted page gets an entry in the `redirects` map in `docs/astro.config.ts`.
+- `development/design/` holds unsettled drafts. They are explicitly not contracts, which makes them the one place in the docs allowed to describe behavior that does not exist. Keep them out of the sidebar; the folder's index page lists them.
 - Treat the docs as a first-class deliverable. When behavior, design, or the fixture contract changes, update the relevant page in the same session, and leave it clear, accurate, and free of stale status. Never rewrite a spec to paper over a temporary gap in the implementation; note the gap instead.
 
 **Run the tool before you claim what it does.** Every statement about actual behavior, whether in a docs page, a memory document, or a commit message, must be confirmed by running the tool, not recalled or inferred from the code. Build a throwaway project (a `ry.toml` and one `.R` file) and read the real output.
@@ -217,10 +217,21 @@ If the user says:
 - Do not optimize for the smallest safe fix. Bring the area you touch to its intended shape: remove dead paths and temporary seams, and pay down the nearby debt the code needs to stay coherent. You are responsible for code quality, not only for delivering the feature.
 - Avoid helper-function indirection for logic that is used once and gains no testability or readability from the extraction. Inline a small one-off solution unless that would duplicate a lot of code.
 
+# Performance principles (user directive)
+
+Apply these when writing or optimizing code in the analysis core, the runtime, the GC and the JIT.
+
+- **Redesign before you tune.** Ask how to rewrite the code to use data-oriented design, not how to make the current shape a little faster.
+- **Use flat arrays, not hash tables, wherever the keys can be numbered densely.** Make references indices into those arrays, not pointers, and pack the most often read data (a kind, a tag, a small length) into the spare upper bits of the index.
+- **Caching is a sign of a slow design.** Do not add a cache: redesign the code so the fast path needs none, and delete an existing cache once a redesign makes it unnecessary. Two mechanisms are not caches in this sense, because they are the design: salsa memoization, which is how incremental analysis works, and the JIT's inline caches and type feedback, which drive speculation.
+- **Prefer a struct of arrays to an array of structs** when hot loops read only a few fields of each item.
+- **Keep small lists on the stack.** A list that is usually short gets inline capacity on the stack (a `SmallVec`-style type) instead of a heap allocation.
+- **Use a bitset, not an array of bools.**
+
 # Design bar
 
 - Aim for world-class implementation quality, not merely passing behavior.
-- (user directive) For compiler, runtime and JIT design, the quality bar is the state-of-the-art implementations Bend, vx-lang, goose and Roc. Measure design choices against them and adopt their best ideas where they fit R's C API constraints; the comparison lives in `docs/src/content/docs/contributing/design/prior-art.md`.
+- (user directive) For compiler, runtime and JIT design, the quality bar is the state-of-the-art implementations Bend, vx-lang, goose and Roc. Measure design choices against them and adopt their best ideas where they fit R's C API constraints; the comparison lives in `docs/src/content/docs/development/design/prior-art.md`.
 - Use the simplest correct data model and implementation that can express the required semantics.
 - Do not introduce a complicated abstraction unless it removes real complexity.
 - Make illegal states unrepresentable whenever practical.
@@ -253,14 +264,14 @@ The recorded decision must state the previous source of truth, what was duplicat
 # Testing strategy
 
 - Prefer fixtures. They are the primary way to validate analysis behavior, they read well in a diff, and they make it cheap to write many tests quickly.
-- Robustness is the long-run priority, so everything must be fuzzable and simulatable (user directive). Every component (each analysis stage, the language server, the loader, the runtime, the GC, the C API, the JIT, the table engine, package install, the CLI) gets fuzz, simulation or scenario coverage the day it exists, never as a later add-on, with a bounded pass in the default test suite. `docs/src/content/docs/contributing/robustness.md` is the contract.
+- Robustness is the long-run priority, so everything must be fuzzable and simulatable (user directive). Every component (each analysis stage, the language server, the loader, the runtime, the GC, the C API, the JIT, the table engine, package install, the CLI) gets fuzz, simulation or scenario coverage the day it exists, never as a later add-on, with a bounded pass in the default test suite. `docs/src/content/docs/development/robustness.md` is the contract.
 - Never let nondeterminism escape a seam: no wall clock, OS randomness, unordered iteration that reaches output, or unsteppable threads in a component's logic. Harnesses draw all randomness from one seed and print a replay command on failure. A new incremental shortcut gets a from-scratch cross-check behind `syntax::testing::enable_invariants()`.
 - A bug a harness finds lands with a pinned regression input (a regression battery entry, fixture, or scenario). A user journey a feature enables gets a `crates/ry/tests/scenarios/*.scenario` file.
 - Add or tighten a fixture before writing a parser-local or crate-local unit test, unless the behavior is genuinely awkward to express as a fixture.
 - Favor fixture renderers that expose semantic facts over ones that expose implementation detail.
 - When adding a new phase or module, add or extend a fixture suite for it before relying on ad hoc unit tests.
 - Use the lightest fixture change that captures the failing shape.
-- Read the testing page (`docs/src/content/docs/contributing/testing.md`) before you change the fixture harness or add a fixture suite.
+- Read the testing page (`docs/src/content/docs/development/testing.md`) before you change the fixture harness or add a fixture suite.
 - Run a single fixture case with `just fixture group__case [test-binary] [package]`, which defaults to `test_typing_fixtures` in `semantics`. The testing page lists every suite's test target.
 - While iterating, prefer focused crate tests such as `cargo test -p semantics`. `just gate` runs the full check, which shows the whole picture but does not block landing during this phase.
 - A fixture's `group__case` name is its test identity, so keep it stable, and reject a duplicate name across the suite instead of letting one case silently shadow another.

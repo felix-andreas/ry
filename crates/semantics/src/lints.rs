@@ -907,7 +907,7 @@ fn data_table_lint(
         "data-table",
         name.text_range(),
         format!(
-            "`{function}` creates a data.table. Its typed equivalent is {equivalent}, see https://ry-lang.org/guides/from-data-table/"
+            "`{function}` creates a data.table. Its typed equivalent is {equivalent}, see https://ry-lang.org/reference/from-data-table/"
         ),
         None,
     );
