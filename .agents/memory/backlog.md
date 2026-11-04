@@ -549,7 +549,8 @@ protects construction but nothing after it.
 - C code can write `NA` into an Array through `REAL()` or `INTEGER()`; nothing re-checks it.
 - The JIT and the bytecode fast paths treat an Array as an unknown value. A dedicated feedback kind
   would let compiled loops run strict arithmetic without the generic call.
-- The empty `[]` is a flagged `logical(0)` at run time, so its item type is known only statically.
+- An empty `[]` or `List.map` result is a flagged `logical(0)` under `ry load` and `source()`, which
+  run unelaborated text; elaborated code passes it through `.ry_items` (`preflight::elaborate`).
 - An integer overflow in an Array operator prints R's "NAs produced by integer overflow" warning
   as well as the Array error, because the check runs after R's operator. Muffle the warning when the
   result is rejected.

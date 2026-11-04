@@ -23,6 +23,7 @@ use {
 pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".ry_array", -1, do_array),
     builtin(".ry_is_list", 1, do_is_list),
+    builtin(".ry_items", 2, do_items).accepting_native(),
 ];
 
 /// What an Array holds, which is also what an operator or an assignment must match.
@@ -198,6 +199,30 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
         items.push(arg.value);
     }
     from_items(&items)?.map_err(|message| call.error(message))
+}
+
+/// `.ry_items(list, "I64")`: `list` itself, or an empty list of the named item type when `list` is
+/// empty. An empty list built at run time from no items, such as `List.map` over an empty list, is
+/// stored as `logical`, so the preflight wraps each list expression whose item type only the
+/// checker knows (`preflight::elaborate`). The names are `"I64"`, `"F64"`, `"Str"` and
+/// `"list"`, the storage of records, tuples, tags and nested lists.
+unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
+    let list = call.arg(0);
+    if !list.is_array() || length(list) != 0 {
+        return Ok(list);
+    }
+    let storage = match values::as_string_scalar(call.arg(1))?.as_deref() {
+        Some("I64") => Items::I64,
+        Some("F64") => Items::Double,
+        Some("Str") => Items::Character,
+        Some("list") => Items::RyValues,
+        _ => return Err(call.error("the item type must be \"I64\", \"F64\", \"Str\" or \"list\"")),
+    }
+    .storage();
+    if list.kind() == storage {
+        return Ok(list);
+    }
+    Ok(finish(alloc(storage, 0)?))
 }
 
 /// An Array of `items`, each a single non-NA value or a ry value, all of one kind; or why they

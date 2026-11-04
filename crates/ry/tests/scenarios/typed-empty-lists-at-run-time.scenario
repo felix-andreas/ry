@@ -1,0 +1,23 @@
+# A user maps over a list that turns out empty: the result keeps the item type the checker gave
+# it, so `List.sum` of it is that type's zero and a typed binding holds what it declares.
+
+requires ry-runtime
+
+file empty.R
+| v0: List<I64> <- List.map(List.range(6i64, 3), \(v) v * 0L)
+| v1: List<I64> <- List.map(List.range(8L, 5), \(v) v * 6)
+| print(c(typeof(v0), typeof(v1), typeof(List.sum(v1))))
+| empty: List<F64> <- []
+| halves <- List.range(7L, 6) |> List.map(\(v) 0.5f64)
+| nested <- List.map(List.map(List.range(3L, 1), \(v) v + 1), \(v) v * 2)
+| print(c(typeof(empty), typeof(halves), typeof(List.sum(halves)), typeof(nested)))
+| points <- List.map(List.range(3L, 1), \(v) :Point(v))
+| print(typeof(points))
+| print(List.map([1, 2], \(v) v * 2))
+
+run ry run --runtime ry empty.R
+expect exit 0
+expect stdout "[1] \"I64\" \"I64\" \"I64\""
+expect stdout "[1] \"double\" \"double\" \"double\" \"I64\""
+expect stdout "[1] \"list\""
+expect stdout "[2i64, 4i64]"
