@@ -22,6 +22,15 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
+## Open: the typed core
+
+- **Records, tags, `Result` and `Dict` results.** `validate` and `orders` refuse at `.ry_record` and `Result.with_default`, so they run on the scalar natives in `crates/jit/src/native.rs`. The design's pools (`typed-runtime.md`, "Representations") are not built.
+- **Default arguments and named `c()`.** `drawdown` never reaches the typed core.
+- **Elementwise fusion.** `vector_arith` allocates one 8 MB buffer per vector operation that does not die in place; fusing a chain of `VectorArith` whose intermediates die at once into one loop is the fix.
+- **Arguments that are unforced promises.** `typed::call` takes only values readable without forcing (constants, variables, forced promises), so `f(c(1, 2))` from untyped code takes the native path. Hooking the call after the interpreter forces the arguments would cover it.
+- **Code files and `ry build --exe`.** Code is compiled in memory at the first call; the install-time code file, mapped shared code and executables in `typed-runtime.md` are not built.
+- **`ToDbl` of a loop counter keeps its `NA` select**, because the backend does not track which locals are known not to be `NA`.
+
 ## Open: two Renviron readers
 
 - ry has two Renviron readers, the interpreter's startup one in `crates/interp/src/session.rs` and `rcmd::command_environment`. The interpreter's lets an already-set variable win, which differs from GNU R's `process_Renviron` (a file line always overrides). Merge them into one reader with GNU R's semantics.

@@ -7439,3 +7439,14 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Impact.** Cold first `new()` on the bench package fell from 8.6 s to 6.3 s and the warm one from
   94 to 103 ms to 78 to 88 ms. `crates/oracle/cases/s4__native_core_queries.R` pins the covered
   functions, including their error messages and calls, against GNU R.
+
+## The typed core lowers R syntax at the first call and runs on 16-byte strings and view lists
+
+- **Previous shape.** Strict typed closures ran on the scalar natives in `crates/jit/src/native.rs`, which take R values in and out of every operation, so programs over strings, lists and local functions (`report`, `closures`, `bond_book`) gained nothing.
+- **Chosen shape.** `crates/typed` lowers a strict typed closure to a typed SSA IR at its first call for the argument types it sees, inserts Perceus reference counts (`ownership.rs`), and compiles it with Cranelift (`backend.rs`). `jit::native::call` is the one seam: it hands the argument values to `typed::call`, which returns `None` to fall back. A call that fails at run time (an `NA` where an integer cannot hold one, an overflow, an index out of range, an interrupt) returns status 1 and the interpreter reruns it, so the typed core never reports an error itself.
+- **Lowering from R syntax at run time, not from salsa.** The runtime cannot link the analysis, and the closure's body is the source of truth the interpreter also runs. The guards on resolved functions (`Speculation`, rechecked on every call) make the lowering sound against rebinding. The serialized per-function IR in `typed-runtime.md` remains the design for install-time code files.
+- **`Str` is 16 bytes, not 24.** Two words fit the two-register return of Cranelift's tail convention and halve list storage; strings up to 15 bytes are inline, flagged by bit 63 of the second word.
+- **One list header with a data pointer.** A `List` header points at its items, so an R vector argument is passed as a view (flag `VIEW`) over R's own data with no copy, and the same compiled code serves owned and borrowed lists. Writing to a view copies first.
+- **Base closures behind lazy-load promises.** Base binds its closures to lazy-load promises, so a function is base's own when its binding cell is base's, and `resolve_function` forces such a promise (it only reads the package database) instead of refusing.
+- **Counted loops check their ends once.** `for` over `seq_len`, `seq_along`, `a:b` or a vector tests `counter == end` at the latch and steps with `Op::Step`, which cannot overflow because the counter never passes the end.
+- **Impact.** On the why-bench, typed and strict: `closures` 0.348 s to 0.006 s, `report` 0.640 to 0.009, `bond_book` 0.739 to 0.049, `loop_sum` 0.021 to 0.010, `array_sum` 0.025 to 0.004, `array_map` 0.048 to 0.017.
