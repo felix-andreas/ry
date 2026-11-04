@@ -1,15 +1,14 @@
 #==== native_types
 #---- suffixed_literals_keep_the_number_without_its_suffix
-c(5i64, 1.5f32, 0xFFu8, 2dec, 170141183460469231731687303715884105727i128)
+c(5i64, 1.5f64, 0xFFi64, 9223372036854775807i64)
 #++++
 # <statement>
   Call
     NameRef c
     Literal Suffixed("5", I64)
-    Literal Suffixed("1.5", F32)
-    Literal Suffixed("0xFF", U8)
-    Literal Suffixed("2", Dec)
-    Literal Suffixed("170141183460469231731687303715884105727", I128)
+    Literal Suffixed("1.5", F64)
+    Literal Suffixed("0xFF", I64)
+    Literal Suffixed("9223372036854775807", I64)
 
 #---- fstring_pieces_in_source_order
 f"Hello {name}, {{n}} is {n + 1}"
@@ -93,7 +92,7 @@ match (s) {
   :Circle(radius = r) as circle => circle
   (x = a, ..rest) => rest
   (x =, y =) => x
-  5i32 => 0
+  5i64 => 0
 }
 #++++
 # <statement>
@@ -120,5 +119,5 @@ match (s) {
           pattern bind y
       NameRef x
     arm
-      pattern literal Suffixed("5", I32)
+      pattern literal Suffixed("5", I64)
       Literal Double("0")

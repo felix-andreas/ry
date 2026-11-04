@@ -313,28 +313,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Num.div_ceil_checked", num_div_ceil_checked),
     library("Num.truncate", num_truncate),
     library("Num.to_f64", numbers::num_to_f64),
-    library("Num.to_i8", numbers::num_to_i8),
-    library("Num.to_i16", numbers::num_to_i16),
-    library("Num.to_i32", numbers::num_to_i32),
     library("Num.to_i64", numbers::num_to_i64),
-    library("Num.to_i128", numbers::num_to_i128),
-    library("Num.to_u8", numbers::num_to_u8),
-    library("Num.to_u16", numbers::num_to_u16),
-    library("Num.to_u32", numbers::num_to_u32),
-    library("Num.to_u64", numbers::num_to_u64),
-    library("Num.to_u128", numbers::num_to_u128),
-    library("Num.to_f32", numbers::num_to_f32),
-    library("Num.to_dec", numbers::num_to_dec),
-    library("Num.to_i8_checked", numbers::num_to_i8_checked),
-    library("Num.to_i16_checked", numbers::num_to_i16_checked),
-    library("Num.to_i32_checked", numbers::num_to_i32_checked),
     library("Num.to_i64_checked", numbers::num_to_i64_checked),
-    library("Num.to_i128_checked", numbers::num_to_i128_checked),
-    library("Num.to_u8_checked", numbers::num_to_u8_checked),
-    library("Num.to_u16_checked", numbers::num_to_u16_checked),
-    library("Num.to_u32_checked", numbers::num_to_u32_checked),
-    library("Num.to_u64_checked", numbers::num_to_u64_checked),
-    library("Num.to_u128_checked", numbers::num_to_u128_checked),
     library("Num.add_wrap", numbers::num_add_wrap),
     library("Num.sub_wrap", numbers::num_sub_wrap),
     library("Num.mul_wrap", numbers::num_mul_wrap),
@@ -479,10 +459,7 @@ pub(crate) unsafe fn attach() -> Sexp {
             let value = match constant {
                 Constant::Logical(flag) => scalar_bool(flag)?,
                 Constant::Double(number) => scalar_real(number)?,
-                Constant::I64(number) => numbers::alloc(numbers::Number {
-                    ty: numbers::NumberType::I64,
-                    bits: number as i128 as u128,
-                })?,
+                Constant::I64(number) => numbers::alloc(number)?,
             };
             eval::define(symbol, value, env)?;
             Ok(nil())
@@ -554,6 +531,8 @@ unsafe fn describe(value: Sexp) -> String {
     match value.kind() {
         SexpType::Nil => "NULL".to_owned(),
         SexpType::Record => format!("a ry {}", records::native_kind(value).type_name()),
+        SexpType::I64 if value.is_array() => "a ry List<I64>".to_owned(),
+        SexpType::I64 => "a ry I64".to_owned(),
         SexpType::Logical => vector_phrase(value, "logical"),
         SexpType::Integer => vector_phrase(value, "integer"),
         SexpType::Real => vector_phrase(value, "double"),
@@ -651,30 +630,15 @@ unsafe fn new_list(items: &[Sexp]) -> R<Sexp> {
     }
 }
 
-/// `values` as a ry list of native numbers of the unsigned type `ty`, which holds each of them.
-unsafe fn unsigned_list(values: impl Iterator<Item = u32>, ty: numbers::NumberType) -> R<Sexp> {
-    let mut items = Vec::new();
-    for value in values {
-        items.push(unsigned(value, ty)?);
-    }
-    Ok(arrays::finish(list_vector(&items)?))
+/// `values` as a ry list of `I64`s.
+unsafe fn number_list(values: impl Iterator<Item = i64>) -> R<Sexp> {
+    numbers::list(&values.collect::<Vec<_>>())
 }
 
-/// `value` as a native number of the unsigned type `ty`.
 /// A length, count or 1-based position as the `I64` its signature promises.
 pub unsafe fn whole_number(value: usize) -> R<Sexp> {
     let value = i64::try_from(value).map_err(|_| error(format!("{value} does not fit I64")))?;
-    numbers::alloc(numbers::Number {
-        ty: numbers::NumberType::I64,
-        bits: i128::from(value) as u128,
-    })
-}
-
-unsafe fn unsigned(value: u32, ty: numbers::NumberType) -> R<Sexp> {
-    let source = numbers::Source::Int(numbers::Wide::Signed(i128::from(value)));
-    let number = numbers::convert(source, ty)
-        .ok_or_else(|| error(format!("{value} does not fit {}", ty.name())))?;
-    numbers::alloc(number)
+    numbers::alloc(value)
 }
 
 unsafe fn function(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Callback> {
@@ -809,12 +773,7 @@ unsafe fn verdict(call: &Call<'_>, parameter: &str, value: Sexp) -> R<bool> {
 /// A whole number that fits an R integer, given as an integer or a whole double.
 unsafe fn whole(call: &Call<'_>, parameter: &str, value: Sexp) -> R<i64> {
     if let Some(number) = numbers::read(value) {
-        if let numbers::Source::Int(numbers::Wide::Signed(number)) = numbers::source(number)
-            && let Ok(number) = i64::try_from(number)
-        {
-            return Ok(number);
-        }
-        return Err(wrong(call, parameter, "a whole number", value));
+        return Ok(number);
     }
     if length(value) == 1 && !value.is_object() {
         match value.kind() {
@@ -2011,44 +1970,31 @@ unsafe fn list_numbers(call: &Call<'_>) -> R<Vec<Number>> {
     Ok(numbers)
 }
 
-/// Folds the list's numbers with `integer` (checked), or totals them with `double` once any is a
-/// double, starting at `start`.
-/// The items of a list of native numbers, all of one type, read without converting them; `None`
-/// for any other list, including an empty one, which the R-number path handles.
-unsafe fn native_numbers(call: &Call<'_>) -> R<Option<Vec<numbers::Number>>> {
+/// The items of a list of `I64`s, read without converting them; `None` for any other list,
+/// including an empty one, which the R-number path handles.
+unsafe fn native_numbers(call: &Call<'_>) -> R<Option<Vec<i64>>> {
     let [list] = arguments(call, ["list"])?;
-    if list.kind() != SexpType::List || length(list) == 0 {
+    if list.kind() != SexpType::I64 || !list.is_array() || length(list) == 0 {
         return Ok(None);
     }
-    let items = list_elements(call, "list", list)?;
-    let Some(first) = items.first().and_then(|&item| numbers::read(item)) else {
-        return Ok(None);
-    };
-    let mut result = Vec::with_capacity(items.len());
-    for item in items {
-        match numbers::read(item) {
-            Some(number) if number.ty == first.ty => result.push(number),
-            _ => {
-                return Err(call.error(format!(
-                    "`list` must hold numbers of one type, all {}",
-                    first.ty.name()
-                )));
-            }
-        }
-    }
-    Ok(Some(result))
+    Ok(Some(list.slice::<i64>().to_vec()))
 }
 
 /// A sum or product of native numbers in their own type, where overflow is an error.
-unsafe fn fold_native(call: &Call<'_>, op: Op, items: &[numbers::Number]) -> R<Sexp> {
+unsafe fn fold_native(call: &Call<'_>, op: Op, items: &[i64]) -> R<Sexp> {
     let name = call.name();
-    let mut total = items[0];
-    for &item in &items[1..] {
+    let Some((&first, rest)) = items.split_first() else {
+        return Err(call.error("`list` is empty"));
+    };
+    let mut total = first;
+    for &item in rest {
         total = numbers::binary(name, op, total, item).map_err(|message| call.error(message))?;
     }
     numbers::alloc(total)
 }
 
+/// Folds the list's numbers with `integer` (checked), or totals them with `double` once any is a
+/// double, starting at `start`.
 unsafe fn fold_numbers(
     call: &Call<'_>,
     start: i32,
@@ -2125,7 +2071,7 @@ unsafe fn extreme(call: &Call<'_>, wanted: Ordering) -> R<Sexp> {
     if let Some(items) = native_numbers(call)? {
         let mut best = items[0];
         for &item in &items[1..] {
-            if numbers::order(item, best) == Some(wanted) {
+            if item.cmp(&best) == wanted {
                 best = item;
             }
         }
@@ -2183,17 +2129,11 @@ unsafe fn list_ends_with(call: &Call<'_>) -> R<Sexp> {
 unsafe fn sort_numbers(call: &Call<'_>, descending: bool) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
     if let Some(mut items) = native_numbers(call)? {
-        // An `F32` `NaN` is unordered, and a stable sort leaves it where the order puts it.
         items.sort_by(|left, right| {
-            let order = numbers::order(*left, *right).unwrap_or(Ordering::Equal);
+            let order = left.cmp(right);
             if descending { order.reverse() } else { order }
         });
-        let mut values = Vec::with_capacity(items.len());
-        for item in items {
-            let value = numbers::alloc(item)?;
-            values.push(value);
-        }
-        return sequence(call, list, &values);
+        return numbers::list(&items);
     }
     let mut numbers = list_numbers(call)?;
     // `number` refuses `NaN`, so the comparison is total.
@@ -2355,7 +2295,7 @@ unsafe fn list_concat_utf8(call: &Call<'_>) -> R<Sexp> {
     let string = text(call, "string", string)?.into_owned();
     let mut bytes = Vec::with_capacity(string.len());
     for &byte in string.as_bytes() {
-        bytes.push(unsigned(u32::from(byte), numbers::NumberType::U8)?);
+        bytes.push(numbers::alloc(i64::from(byte))?);
     }
     if owned_list(call, list) {
         return extend_in_place(list, &bytes);
@@ -2583,10 +2523,7 @@ unsafe fn str_count_utf8_bytes(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn str_to_utf8(call: &Call<'_>) -> R<Sexp> {
     let string = one_string(call)?;
-    unsigned_list(
-        string.as_bytes().iter().map(|&byte| u32::from(byte)),
-        numbers::NumberType::U8,
-    )
+    number_list(string.as_bytes().iter().map(|&byte| i64::from(byte)))
 }
 
 unsafe fn str_from_utf8(call: &Call<'_>) -> R<Sexp> {
@@ -2622,10 +2559,7 @@ unsafe fn utf8_bytes(call: &Call<'_>, bytes: Sexp) -> R<Vec<u8>> {
 
 unsafe fn str_to_i64(call: &Call<'_>) -> R<Sexp> {
     match one_string(call)?.parse::<i64>() {
-        Ok(value) => ok(numbers::alloc(numbers::Number {
-            ty: numbers::NumberType::I64,
-            bits: value as i128 as u128,
-        })?),
+        Ok(value) => ok(numbers::alloc(value)?),
         _ => err("InvalidNumStr"),
     }
 }
@@ -2661,7 +2595,7 @@ unsafe fn walk_bytes(call: &Call<'_>, with_index: bool) -> R<Sexp> {
     let mut state = state;
     for (at, &byte) in string.as_bytes().iter().enumerate() {
         state = scope(|| {
-            let byte = unsigned(u32::from(byte), numbers::NumberType::U8)?;
+            let byte = numbers::alloc(i64::from(byte))?;
             if with_index {
                 let index = whole_number(at + 1)?;
                 invoke(call, f, &[state, byte, index])
@@ -2691,10 +2625,7 @@ unsafe fn str_from_utf8_lossy(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn str_to_utf16(call: &Call<'_>) -> R<Sexp> {
     let string = one_string(call)?;
-    unsigned_list(
-        string.encode_utf16().map(u32::from),
-        numbers::NumberType::U16,
-    )
+    number_list(string.encode_utf16().map(i64::from))
 }
 
 unsafe fn str_from_utf16(call: &Call<'_>) -> R<Sexp> {
@@ -2734,7 +2665,7 @@ unsafe fn utf16_units(call: &Call<'_>, units: Sexp) -> R<Vec<u16>> {
 
 unsafe fn str_to_utf32(call: &Call<'_>) -> R<Sexp> {
     let string = one_string(call)?;
-    unsigned_list(string.chars().map(u32::from), numbers::NumberType::U32)
+    number_list(string.chars().map(|char| i64::from(u32::from(char))))
 }
 
 unsafe fn str_from_utf32(call: &Call<'_>) -> R<Sexp> {
@@ -2806,7 +2737,7 @@ unsafe fn num_to_str(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn num_compare(call: &Call<'_>) -> R<Sexp> {
     if numbers::has_number_argument(call) {
-        return ordering_tag(numbers::compare(call)?.unwrap_or(Ordering::Equal));
+        return ordering_tag(numbers::compare(call)?);
     }
     let (first, second) = two_numbers(call)?;
     let order = first
@@ -3874,7 +3805,7 @@ enum KeyKind {
     Integer,
     Double,
     Text,
-    Native(numbers::NumberType),
+    Native,
 }
 
 impl KeyKind {
@@ -3884,15 +3815,14 @@ impl KeyKind {
             KeyKind::Integer => "integer",
             KeyKind::Double => "double",
             KeyKind::Text => "character",
-            KeyKind::Native(ty) => ty.name(),
+            KeyKind::Native => "I64",
         }
     }
 }
 
-/// The payload a native number key hashes and compares by, which [`key_in`] has checked exists.
-unsafe fn native_key_bits(key: Sexp) -> Option<(numbers::NumberType, u128)> {
-    let number = numbers::read(key)?;
-    Some((number.ty, numbers::key_bits(number)?))
+/// The value an `I64` key hashes and compares by, which [`key_in`] has checked exists.
+unsafe fn native_key_bits(key: Sexp) -> Option<i64> {
+    numbers::read(key)
 }
 
 /// The key type of a collection whose keys are `stored` once it also holds a key of type `kind`,
@@ -3983,8 +3913,8 @@ unsafe fn key_in(value: Sexp) -> Option<(Key, KeyKind)> {
             (text != values::na_string()).then_some((Key::Text(text), KeyKind::Text))
         }
         SexpType::Record => {
-            let (ty, _) = native_key_bits(value)?;
-            Some((Key::Native(value), KeyKind::Native(ty)))
+            native_key_bits(value)?;
+            Some((Key::Native(value), KeyKind::Native))
         }
         _ => None,
     }
@@ -4016,7 +3946,7 @@ unsafe fn key_kind_of(keys: Sexp) -> Option<KeyKind> {
         SexpType::Real => Some(KeyKind::Double),
         SexpType::String => Some(KeyKind::Text),
         SexpType::List if length(keys) > 0 => {
-            numbers::number_type(keys.element(0)).map(KeyKind::Native)
+            numbers::is_number(keys.element(0)).then_some(KeyKind::Native)
         }
         _ => None,
     }
@@ -4179,7 +4109,7 @@ impl Collection {
                 }
                 vector
             }
-            Some(kind @ (KeyKind::Text | KeyKind::Native(_))) => {
+            Some(kind @ (KeyKind::Text | KeyKind::Native)) => {
                 let storage = if kind == KeyKind::Text {
                     SexpType::String
                 } else {

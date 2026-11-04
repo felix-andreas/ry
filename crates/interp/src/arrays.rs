@@ -5,8 +5,9 @@
 //! keeps R's unboxed storage, `.Call` code reads it as the vector it is, and converting it to an
 //! R vector only clears the bit. The bit promises three invariants that R vectors lack: the
 //! vector has no attributes, holds no NA, and is homogeneous. An Array of logical, integer,
-//! double or character items is that atomic vector; an Array of records, tuples, tags,
-//! dictionaries, sets or Arrays is a list. Setting any attribute clears the bit (see
+//! double or character items is that atomic vector, an Array of `I64`s is the dense `I64` vector
+//! (see `numbers`), and an Array of records, tuples, tags, dictionaries, sets or Arrays is a
+//! list. Setting any attribute clears the bit (see
 //! `Heap::set_attrib`), so no code path can produce an Array with names or a class.
 
 use {
@@ -31,6 +32,7 @@ pub enum Items {
     Integer,
     Double,
     Character,
+    I64,
     /// Records, tuples, tags, dictionaries, sets or Arrays, stored in a list.
     RyValues,
 }
@@ -42,6 +44,7 @@ impl Items {
             Items::Integer => "integer",
             Items::Double => "double",
             Items::Character => "character",
+            Items::I64 => "I64",
             Items::RyValues => "ry value",
         }
     }
@@ -52,6 +55,7 @@ impl Items {
             Items::Integer => SexpType::Integer,
             Items::Double => SexpType::Real,
             Items::Character => SexpType::String,
+            Items::I64 => SexpType::I64,
             Items::RyValues => SexpType::List,
         }
     }
@@ -64,6 +68,7 @@ pub unsafe fn items(array: Sexp) -> Items {
         SexpType::Integer => Items::Integer,
         SexpType::Real => Items::Double,
         SexpType::String => Items::Character,
+        SexpType::I64 => Items::I64,
         _ => Items::RyValues,
     }
 }
@@ -101,9 +106,9 @@ pub unsafe fn first_missing(vector: Sexp) -> Option<usize> {
     }
 }
 
-/// `items` with each plain R number converted to the native number type `ty` of the other items,
-/// as an unsuffixed literal converts where it meets a native number; or why one does not fit.
-unsafe fn literals_as(items: &[Sexp], ty: numbers::NumberType) -> R<Result<Vec<Sexp>, String>> {
+/// `items` with each plain R number converted to an `I64`, the type of the other items, as an
+/// unsuffixed literal converts where it meets an `I64`; or why one does not fit.
+unsafe fn literals_as_numbers(items: &[Sexp]) -> R<Result<Vec<Sexp>, String>> {
     let mut converted = Vec::with_capacity(items.len());
     for &item in items {
         let plain = matches!(item.kind(), SexpType::Integer | SexpType::Real)
@@ -117,13 +122,12 @@ unsafe fn literals_as(items: &[Sexp], ty: numbers::NumberType) -> R<Result<Vec<S
             converted.push(item);
             continue;
         };
-        match numbers::convert(source, ty) {
+        match numbers::convert(source) {
             Some(number) => converted.push(numbers::alloc(number)?),
             None => {
                 return Ok(Err(format!(
-                    "{} does not fit {}, the type of the list's other items",
-                    numbers::source_text(source),
-                    ty.name()
+                    "{} does not fit I64, the type of the list's other items",
+                    numbers::source_text(source)
                 )));
             }
         }
@@ -133,6 +137,9 @@ unsafe fn literals_as(items: &[Sexp], ty: numbers::NumberType) -> R<Result<Vec<S
 
 /// The item kind a single value contributes to an Array literal, or why it cannot be an item.
 unsafe fn item_kind(value: Sexp) -> Result<Items, String> {
+    if numbers::is_number(value) {
+        return Ok(Items::I64);
+    }
     if is_ry_value(value) {
         return Ok(Items::RyValues);
     }
@@ -168,6 +175,9 @@ pub unsafe fn describe(value: Sexp) -> String {
     if value == nil() {
         return "NULL".to_owned();
     }
+    if numbers::is_number(value) {
+        return "an I64".to_owned();
+    }
     let name = coerce::type_name(value);
     if value.kind().is_atomic() {
         format!("a {name} vector of length {}", length(value))
@@ -194,15 +204,16 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
 /// cannot form one. An empty Array is a logical vector of length zero.
 pub unsafe fn from_items(items: &[Sexp]) -> R<Result<Sexp, String>> {
     let converted;
-    let items = match items.iter().find_map(|&item| numbers::read(item)) {
-        Some(native) => match literals_as(items, native.ty)? {
+    let items = if items.iter().any(|&item| numbers::is_number(item)) {
+        match literals_as_numbers(items)? {
             Ok(items) => {
                 converted = items;
                 &converted[..]
             }
             Err(message) => return Ok(Err(message)),
-        },
-        None => items,
+        }
+    } else {
+        items
     };
     let mut kind = None;
     for (position, &value) in items.iter().enumerate() {
@@ -303,7 +314,7 @@ pub unsafe fn check_operands(
         return Ok(false);
     }
     let allowed = match class {
-        OperatorClass::Arithmetic => matches!(kind, Items::Integer | Items::Double),
+        OperatorClass::Arithmetic => matches!(kind, Items::Integer | Items::Double | Items::I64),
         OperatorClass::Comparison => kind != Items::RyValues,
         OperatorClass::Logic => kind == Items::Logical,
     };
@@ -387,7 +398,7 @@ pub unsafe fn subset2(array: Sexp, indices: &[Sexp], call: Sexp) -> R<Sexp> {
 pub unsafe fn subassign(array: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Option<Sexp>> {
     let kind = items(array);
     if !fits(kind, value, false) {
-        return Ok(None);
+        return refuse_mixed(kind, call);
     }
     let positions = match indices {
         [] => (0..length(array)).collect(),
@@ -431,7 +442,7 @@ pub unsafe fn subassign2(
 ) -> R<Option<Sexp>> {
     let kind = items(array);
     if !fits(kind, value, true) {
-        return Ok(None);
+        return refuse_mixed(kind, call);
     }
     let position = single_position(array, indices, call, "[[<-")?;
     let target = writable(array)?;
@@ -446,6 +457,7 @@ pub unsafe fn item(array: Sexp, position: usize) -> R<Sexp> {
         SexpType::Integer => values::scalar_integer(values::ints(array)[position]),
         SexpType::Real => values::scalar_real(values::reals(array)[position]),
         SexpType::String => values::scalar_string_charsxp(values::string_elt(array, position)),
+        SexpType::I64 => numbers::alloc(array.slice::<i64>()[position]),
         _ => Ok(values::list_elt(array, position)),
     }
 }
@@ -466,6 +478,7 @@ unsafe fn copy_item(from: Sexp, source: usize, to: Sexp, target: usize) {
             values::ints_mut(to)[target] = values::ints(from)[source]
         }
         SexpType::Real => values::reals_mut(to)[target] = values::reals(from)[source],
+        SexpType::I64 => to.slice_mut::<i64>()[target] = from.slice::<i64>()[source],
         SexpType::String => values::set_elt(to, target, values::string_elt(from, source)),
         _ => values::set_elt(to, target, values::list_elt(from, source)),
     }
@@ -476,6 +489,7 @@ unsafe fn store_single(kind: Items, value: Sexp, to: Sexp, target: usize) {
         Items::Logical | Items::Integer => values::ints_mut(to)[target] = values::ints(value)[0],
         Items::Double => values::reals_mut(to)[target] = values::reals(value)[0],
         Items::Character => values::set_elt(to, target, values::string_elt(value, 0)),
+        Items::I64 => to.slice_mut::<i64>()[target] = value.slice::<i64>()[0],
         Items::RyValues => values::set_elt(to, target, value),
     }
 }
@@ -493,6 +507,18 @@ unsafe fn writable(array: Sexp) -> R<Sexp> {
 /// Whether `value` can be stored in an Array of `kind` items: a single item of that kind, or
 /// (for `[<-`, which assigns several positions) an Array of them. An Array of ry values holds an
 /// Array as one item, so `[[<-` stores it whole.
+/// The fallback for a value an Array cannot hold. An R vector takes it, but a `List<I64>` has no
+/// R vector to fall back to, because its items cross into R only by an explicit conversion.
+unsafe fn refuse_mixed(kind: Items, call: Sexp) -> R<Option<Sexp>> {
+    if kind == Items::I64 {
+        return Err(error_in(
+            call,
+            "a `List<I64>` holds only `I64` items; convert it with `List.to_r()` to assign anything else",
+        ));
+    }
+    Ok(None)
+}
+
 unsafe fn fits(kind: Items, value: Sexp, single: bool) -> bool {
     if value.is_array() && !(single && kind == Items::RyValues) {
         return !single && items(value) == kind;
@@ -500,36 +526,15 @@ unsafe fn fits(kind: Items, value: Sexp, single: bool) -> bool {
     item_kind(value).is_ok_and(|found| found == kind)
 }
 
-/// An index of native integers (`I64` positions, as typed code writes them, or a list of them)
-/// as the R double vector the position rules read; any other index as it is. Positions are list
-/// lengths, far below 2^53, so the conversion is exact for every position in bounds.
+/// An `I64` index (a position, or a list of them, as typed code writes them) as the R double
+/// vector the position rules read; any other index as it is. Positions are list lengths, far
+/// below 2^53, so the conversion is exact for every position in bounds.
 unsafe fn native_positions(index: Sexp) -> R<Sexp> {
-    let integer = |number: numbers::Number| -> Option<f64> {
-        let source = numbers::source(number);
-        let value = numbers::to_double(source);
-        let fractional = matches!(
-            number.ty,
-            numbers::NumberType::F32 | numbers::NumberType::Dec
-        );
-        (!fractional).then_some(value)
-    };
-    if let Some(number) = numbers::read(index) {
-        return match integer(number) {
-            Some(value) => values::scalar_real(value),
-            None => Ok(index),
-        };
-    }
-    if index.kind() != SexpType::List || length(index) == 0 {
+    if index.kind() != SexpType::I64 {
         return Ok(index);
     }
-    let mut converted = Vec::with_capacity(length(index));
-    for position in 0..length(index) {
-        match numbers::read(values::list_elt(index, position)).and_then(integer) {
-            Some(value) => converted.push(value),
-            None => return Ok(index),
-        }
-    }
-    values::real_vector(&converted)
+    let positions: Vec<f64> = index.slice::<i64>().iter().map(|&position| position as f64).collect();
+    values::real_vector(&positions)
 }
 
 /// The one position `[[` and `[[<-` take: a positive whole number in bounds.

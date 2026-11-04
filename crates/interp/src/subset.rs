@@ -103,6 +103,7 @@ pub unsafe fn vector_element(vector: Sexp, index: usize) -> R<Sexp> {
         SexpType::Complex => values::scalar_complex(values::complexes(vector)[index]),
         SexpType::String => values::scalar_string_charsxp(vector.element(index)),
         SexpType::Raw => values::scalar_raw(values::raws(vector)[index]),
+        SexpType::I64 => crate::numbers::alloc(vector.slice::<i64>()[index]),
         _ => Err(error("object is not subsettable")),
     }
 }

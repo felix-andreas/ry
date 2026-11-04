@@ -1,10 +1,10 @@
 #==== native_types
 #---- number_suffixes_stay_as_written
-x <- 5i64+0xFFu8
-y <- c( 1.5f32 , 2dec )
+x <- 5i64+0xFFi64
+y <- c( 1.5f64 , 2i64 )
 #++++
-x <- 5i64 + 0xFFu8
-y <- c(1.5f32, 2dec)
+x <- 5i64 + 0xFFi64
+y <- c(1.5f64, 2i64)
 
 #---- fstrings_hug_their_interpolations
 s <- f"{ name } is {age+1}"

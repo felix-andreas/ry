@@ -67,7 +67,7 @@ takes R lists (standard-library design, "Values: R lists, R scalars and two new 
 
 This design changes four things:
 
-- **Scalars.** `I8` to `I128`, `U8` to `U128`, `F32`, `F64` and `Dec` are ry's numbers, `Bool` its
+- **Scalars.** `I64` and `F64` are ry's numbers, `Bool` its
   truth value and `Str` its string. None has an `NA`.
 - **`List<T>` is ry's list.** It is today's `Array<T>` renamed, with the same `[a, b, c]` literal,
   and it holds ry values only. `Array` is removed rather than kept as a second name.
@@ -86,10 +86,10 @@ older Rust compiler (`crates/compiler/builtins/roc/` at tag `alpha4-rolling`) wh
 
 | Feature | Roc | ry today | Decision |
 | --- | --- | --- | --- |
-| Integer types | `I8`-`I128`, `U8`-`U128` | R's 32-bit `integer` with `NA` | all ten, as Roc |
-| Fractional types | `F32`, `F64`, `Dec` | R's `double` | all three, as Roc |
+| Integer types | `I8`-`I128`, `U8`-`U128` | R's 32-bit `integer` with `NA` | `I64` only, until a program needs another width |
+| Fractional types | `F32`, `F64`, `Dec` | R's `double` | `F64` only, until a program needs another |
 | Literal default | `Dec` for every literal (legacy: `I64` for integers, `Dec` for fractions) | R's | R's (`double`, `integer`) when nothing constrains a literal |
-| Literal suffixes | `5.U8`, `1.5.F32` (legacy: `5u8`, `1.5f32`) | `1L` | legacy Roc's glued suffixes `5u8`, `1.5dec`, plus R's `L`, because R parses `5.U8` as the name-like number `5.` followed by `U8` |
+| Literal suffixes | `5.U8`, `1.5.F32` (legacy: `5u8`, `1.5f32`) | `1L` | glued suffixes `5i64` and `1.5f64`, plus R's `L`, because R parses `5.I64` as the name-like number `5.` followed by `I64` |
 | Integer overflow | crashes; `_wrap`, `_saturated`, `_try` variants | `NA` with a warning | an error; `_wrap`, `_saturated`, `_checked` variants |
 | Mixed number types | no implicit conversion | R's promotion | none, as Roc; `Num.to_*` converts |
 | `Bool` | nominal tag union `[False, True]` | `logical` with `NA` | `Bool`, two values, written `TRUE` and `FALSE` |
@@ -114,7 +114,7 @@ older Rust compiler (`crates/compiler/builtins/roc/` at tag `alpha4-rolling`) wh
 | Results | `Try(ok, err)` (legacy `Result`), postfix `?`, `??` for a default | `Result`, no operator | `Result`; `Result.with_default` for `??`; a `try` prefix |
 | `crash`, `dbg`, `expect` | builtins | `stop`, `print`, testthat | R's |
 | Inference | HM with rows | HM with joins | unchanged: HM with joins |
-| Generics | type variables | `<T>`, constraints | unchanged; constraints gain `number`, `int`, `frac` |
+| Generics | type variables | `<T>`, constraints | unchanged; constraints gain `number` |
 | Mutable variables, loops | `var $x`, `for`, `while`, ranges `a..<b` | R's `<-`, `for`, `while`, `a:b` | R's; `for` over a `List<T>` binds `T` |
 | Length and index type | `U64` | `integer` | `I64` |
 
@@ -126,14 +126,13 @@ The sections below give each decision's rules.
 
 | Type | Values | R counterpart |
 | --- | --- | --- |
-| `I8`, `I16`, `I32`, `I64`, `I128` | two's complement, every bit pattern a value | none (`I32` is not R's `integer`, see below) |
-| `U8`, `U16`, `U32`, `U64`, `U128` | unsigned | none (`U8` is not R's `raw`: `raw` has no arithmetic) |
-| `F32`, `F64` | IEEE 754, including `NaN` and the infinities | `F64` shares R's `double` representation |
-| `Dec` | fixed point, 18 decimal places in 128 bits | none |
+| `I64` | two's complement, every bit pattern a value | none (R's `integer` is 32 bits with `NA`) |
+| `F64` | IEEE 754, including `NaN` and the infinities | shares R's `double` representation |
 
-An `I32` differs from R's `integer` in two ways: `-2147483648` is an ordinary `I32`, where R reads
-that bit pattern as `NA`, and overflow is an error where R returns `NA` with a warning. That is why
-no integer type shares R's representation.
+Other widths (`I8` to `I128`, the unsigned types, `F32`, `Dec`) return only when a program shows it
+needs one. An R `integer` or `raw` value converts to `I64`. An `I64` differs from R's `integer` in
+that every bit pattern is a value and overflow is an error where R returns `NA` with a warning, so
+it does not share R's representation.
 
 An `F64` and an R `double` hold the same bits, and an `F64` is never `NA`. A `NaN` produced by
 arithmetic is an ordinary `F64`, as in Roc. R's `NA_real_` is a `NaN` with a reserved payload, and
@@ -164,23 +163,23 @@ places:
   constraint. The variable is decided by unification before any join of the variable's writes sees
   it, so a join never meets an undecided literal.
 
-`-` written directly before a literal is part of it, so `-2147483648` is an `I32` and `-128i8` an
-`I8`, as in Roc.
+`-` written directly before a literal is part of it, so `-9223372036854775808i64` is an `I64`, as
+in Roc.
 
 | Literal | May become |
 | --- | --- |
 | `5`, `5L`, `0x1F`, `1e3` | any number type that holds the value, or R's `double` (`integer` for `5L`) |
-| `1.5`, `1e-3` | `F32`, `F64`, `Dec`, or R's `double` |
-| `5i64`, `5u8`, `1.5f32`, `1.5dec` | exactly that type |
+| `1.5`, `1e-3` | `F64`, or R's `double` |
+| `5i64`, `1.5f64` | exactly that type |
 
-A literal that does not fit the type it is asked to take, such as `300` as a `U8` or `1.5` as an
+A literal that does not fit the type it is asked to take, such as `1.5` as an
 `I64`, is a `type-mismatch` at the literal. `NA`, `NaN` and `Inf` are R's constants and never take
 a ry type: `Num.nan_f64` and `Num.infinity_f64` are the ry spellings.
 
-The suffixes are new syntax. R reads `5u8`, `1.5f32` and `1.5dec` as a number followed by a name,
-and `5i64` as the complex `5i` followed by `64`, so each is a syntax error in R today. `5i` alone
-keeps its R meaning. A hex literal takes only the `i` and `u` suffixes (`0xFFu8`), because `f`, `d`,
-`e` and `c` are hex digits: R reads `0x1Ff32` as the number `0x1FF32`, and so does ry.
+The suffixes are new syntax. R reads `1.5f64` as a number followed by a name, and `5i64` as the
+complex `5i` followed by `64`, so each is a syntax error in R today. `5i` alone keeps its R meaning,
+and any other suffix is a syntax error in ry. A hex literal takes only the `i64` suffix (`0xFFi64`),
+because `f` is a hex digit: R reads `0x1Ff64` as the number `0x1FF64`, and so does ry.
 
 At run time an unsuffixed literal is the R value it always was. Where the checker gave it a ry type,
 the operator or typed parameter that receives it converts it, which the interpreter can do without
@@ -193,7 +192,7 @@ Both operands of an arithmetic operator have the same number type, and the resul
 There is no implicit conversion between number types, so `x + i` with an `F64` and an `I64` is a
 `type-mismatch` that suggests `Num.to_f64(i)`.
 
-| Operator | Integer types | `F32`, `F64`, `Dec` |
+| Operator | `I64` | `F64` |
 | --- | --- | --- |
 | `+ - *`, unary `-` | same type; overflow is an error | same type |
 | `/` | a `type-mismatch` that suggests `%/%` | same type |
@@ -211,10 +210,9 @@ for `NA`.
 
 ### Conversions
 
-`Num.to_i8` through `Num.to_u128`, `Num.to_f32`, `Num.to_f64` and `Num.to_dec` convert between
-number types. A conversion that may lose the value has a `_checked` form that returns
-`Result<T, :OutOfBounds>`, and the unchecked form is an error when the value does not fit, as
-Roc's crash. `Num.round`, `Num.floor`, `Num.ceiling` and `Num.truncate` take a fractional number
+`Num.to_i64` and `Num.to_f64` convert between the two number types. `Num.to_i64` may lose the
+value, so it has a `_checked` form that returns `Result<I64, :OutOfBounds>`, and the unchecked form
+is an error when the value is not whole or does not fit, as Roc's crash. `Num.round`, `Num.floor`, `Num.ceiling` and `Num.truncate` take a fractional number
 and return an `I64`, as Roc's do. This replaces the standard-library design's rounding that keeps
 the number type, which was written for R's `double`.
 
@@ -320,10 +318,10 @@ error that names the position and the reason.
 | From R | Function | To ry |
 | --- | --- | --- |
 | `double` | `Num.from_r` | `F64` |
-| `integer` | `Num.from_r` | `I32` |
+| `integer` | `Num.from_r` | `I64` |
 | `logical` | `Bool.from_r` | `Bool` |
 | `character` | `Str.from_r` | `Str` |
-| `double[]`, `integer[]`, `logical[]`, `character[]`, `raw[]` | `List.from_r` | `List<F64>`, `List<I32>`, `List<Bool>`, `List<Str>`, `List<U8>` |
+| `double[]`, `integer[]`, `logical[]`, `character[]`, `raw[]` | `List.from_r` | `List<F64>`, `List<I64>`, `List<Bool>`, `List<Str>`, `List<I64>` |
 | `list[T]` where `T` converts | `List.from_r` | `List<T'>` |
 | named list | `as.record` | a record |
 
@@ -335,7 +333,7 @@ directly, because R code loses nothing it relies on:
 - `List<F64>`, `List<Bool>` and `List<Str>` fit `double[]`, `logical[]` and `character[]`, and a
   `List` of records, tuples or tags fits `list[...]`.
 
-Every other ry value needs an explicit conversion: `Num.to_r` turns an integer type into R's
+Every other ry value needs an explicit conversion: `Num.to_r` turns an `I64` into R's
 `integer` when it fits in 32 bits and into a `double` otherwise (an error past 2^53), `List.to_r`
 does the same item by item, and `as.list` converts records, tuples, tags, dictionaries and sets, as
 it does today. Passing such a value to an R function is a `type-mismatch` that names the
@@ -345,16 +343,17 @@ conversion, and at run time the R function refuses it with the error records alr
 
 - The ry scalar types are atomic types of their own. None fits another, and none fits an R type
   except the three shared ones above.
-- A literal is typed by a fresh inference variable with a literal constraint (`number`, `frac`,
-  `str` or `bool` literal). Unification binds it like any constrained variable, and a variable
+- A literal is typed by a fresh inference variable with a literal constraint (an integer or a
+  fractional number literal, `str` or `bool` literal). Unification binds it like any constrained variable, and a variable
   still unbound when its function is generalized takes R's type. This is Roc's literal typing with
   R's defaults, and it is Hindley-Milner defaulting.
-- New constraints for generic code: `number` (every ry number type), `int` (the integer types),
-  `frac` (`F32`, `F64`, `Dec`) and `eq` (every ry type but a function), so
+- New constraints for generic code: `number` (`I64` or `F64`) and `eq` (every ry type but a
+  function), so
   `List.sum : <T: number> fn(list: List<T>) -> T`. The literal constraints are internal and never
   written.
-- The constraint lattice gains a ry side. Two ry constraints meet at the narrower one (`int` and
-  `frac` meet only at an error, `number` with either is that one, `eq` with any is the other). A
+- The constraint lattice gains a ry side. Two ry constraints meet at the narrower one (an integer
+  and a fractional literal meet only at an error, `number` with either is that one, `eq` with any
+  is the other). A
   ry constraint never meets an R one (`numeric`, `atomic`, `scalar numeric`, `key`), so a variable
   is either an R number or a ry number, and the meet is a `type-mismatch`. `key` and `item` widen to
   admit every `eq` ry type. A literal constraint meets `numeric` by taking R's type and meets a ry
@@ -372,21 +371,21 @@ provides them.
 **Scalars.**
 
 - Compiled code keeps every number, `Bool` and `Str` handle unboxed in registers and stack slots.
-  No number type reserves a bit pattern, so an `I32` uses all 2^32 values.
+  No number type reserves a bit pattern, so an `I64` uses all 2^64 values.
 - The boxed form, used by the interpreter and anywhere R code can observe a value, is:
   - `F64`: a length-one R `double` without attributes, which is exactly what the literal `1.5`
     evaluates to, so a literal needs no conversion;
   - `Bool`: a length-one R `logical` holding `TRUE` or `FALSE`;
   - `Str`: a length-one R `character` holding a UTF-8 `CHARSXP` that is not `NA_STRING`;
-  - every other number: one native number object, carrying its type and a 16-byte payload, with no
-    attributes, distinguishable from every R type by its type code.
+  - `I64`: one native number object holding the 64-bit value, with no attributes, distinguishable
+    from every R type by its type code.
 - Integer arithmetic traps on overflow, integer division by zero is an error, and float arithmetic
   is IEEE 754. No typed operation checks for `NA`, because no ry value holds one.
 
 **Lists.**
 
 - A `List<T>` is contiguous, with items stored unboxed at their natural width when `T` is a number
-  (8 bytes for `F64`, `I64` and `U64`, 4 for `I32` and `F32`, 1 for `U8`), as R's 4-byte
+  (8 bytes for `F64` and `I64`), as R's 4-byte
   `logical` for `Bool`, and as handles otherwise. `List<F64>`, `List<Bool>` and `List<Str>` use R's `double`, `logical` and `character`
   vector layouts, so they pass to R code and C code without a copy, as `Array<T>` does today.
 - An update through `xs[[i]] <- v`, `List.set`, `List.append` and the like reuses the storage when
@@ -438,7 +437,9 @@ The draft asked four questions of taste. Each took the recommended answer:
 
 ## Settled choices
 
-- ry has Roc's thirteen number types, `Bool` and `Str`, none with `NA`.
+- ry has two number types, `I64` and `F64`, plus `Bool` and `Str`, none with `NA`. The draft first
+  took all thirteen of Roc's number types. An orchestrator decision cut the set to `I64` and `F64`,
+  and another width returns only when a program shows it needs one.
 - Literals have R's type unless an expected type, the other operand or a later use asks for a ry
   number type.
 - `List<T>` replaces `Array<T>` and holds ry values only.
@@ -450,6 +451,4 @@ The draft asked four questions of taste. Each took the recommended answer:
 
 ## Open questions
 
-- Whether `Dec` arithmetic in the interpreter should be exact 128-bit or start as a checked `i128`
-  scaled by 10^18 with an error on overflow of intermediate products.
 - Whether a project can declare that unconstrained literals default to ry types instead of R's.

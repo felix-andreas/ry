@@ -52,40 +52,16 @@ pub fn lex(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
     (lexer.tokens, lexer.errors)
 }
 
-/// A ry number type that a literal's suffix names, as in `5i64` or `1.5f32`.
+/// A ry number type that a literal's suffix names, as in `5i64` or `1.5f64`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NumberType {
-    I8,
-    I16,
-    I32,
     I64,
-    I128,
-    U8,
-    U16,
-    U32,
-    U64,
-    U128,
-    F32,
     F64,
-    Dec,
 }
 
 impl NumberType {
-    pub const SUFFIXES: [(&'static str, NumberType); 13] = [
-        ("i8", NumberType::I8),
-        ("i16", NumberType::I16),
-        ("i32", NumberType::I32),
-        ("i64", NumberType::I64),
-        ("i128", NumberType::I128),
-        ("u8", NumberType::U8),
-        ("u16", NumberType::U16),
-        ("u32", NumberType::U32),
-        ("u64", NumberType::U64),
-        ("u128", NumberType::U128),
-        ("f32", NumberType::F32),
-        ("f64", NumberType::F64),
-        ("dec", NumberType::Dec),
-    ];
+    pub const SUFFIXES: [(&'static str, NumberType); 2] =
+        [("i64", NumberType::I64), ("f64", NumberType::F64)];
 
     pub fn from_suffix(suffix: &str) -> Option<NumberType> {
         NumberType::SUFFIXES
@@ -95,25 +71,25 @@ impl NumberType {
     }
 
     pub fn suffix(self) -> &'static str {
-        NumberType::SUFFIXES
-            .iter()
-            .find(|(_, number)| *number == self)
-            .map_or("", |(spelling, _)| spelling)
+        match self {
+            NumberType::I64 => "i64",
+            NumberType::F64 => "f64",
+        }
     }
 
     pub fn is_integer(self) -> bool {
-        !matches!(self, NumberType::F32 | NumberType::F64 | NumberType::Dec)
+        self == NumberType::I64
     }
 }
 
-/// A `SUFFIXED_NUMBER` token split into its number and the type its suffix names, so `0xFFu8`
-/// is `("0xFF", U8)` and `1e3f64` is `("1e3", F64)`.
+/// A `SUFFIXED_NUMBER` token split into its number and the type its suffix names, so `0xFFi64`
+/// is `("0xFF", I64)` and `1e3f64` is `("1e3", F64)`.
 pub fn split_number_suffix(token: &str) -> Option<(&str, NumberType)> {
     let hex = token.starts_with("0x") || token.starts_with("0X");
     let suffix_start = if hex {
-        token.rfind(['i', 'u'])?
+        token.rfind('i')?
     } else {
-        token.find(['i', 'u', 'f', 'd'])?
+        token.find(['i', 'f'])?
     };
     let number = NumberType::from_suffix(&token[suffix_start..])?;
     Some((&token[..suffix_start], number))
@@ -361,11 +337,12 @@ impl Lexer<'_> {
         }
     }
 
-    /// A ry type suffix glued to the number, as in `5i64`, `1.5f32` or `1.5dec`. R reads each
-    /// as a number directly followed by a name (and `5i64` as `5i` then `64`), a syntax error
-    /// in R, so no R text changes meaning. Only a run that starts like a suffix (`i`, `u` or
-    /// `f` then a digit, or `dec`) is one, so `5i`, `5L` and `5x` keep their R lexing. A hex
-    /// literal takes only `i` and `u`, because `f`, `d`, `e` and `c` are hex digits.
+    /// A ry type suffix glued to the number, `5i64` or `1.5f64`. R reads each as a number
+    /// directly followed by a name (and `5i64` as `5i` then `64`), a syntax error in R, so no R
+    /// text changes meaning. A run that starts like a suffix (`i`, `u` or `f` then a digit, or
+    /// `dec`) is one, so `5i`, `5L` and `5x` keep their R lexing, and a suffix of a number type
+    /// ry does not have, such as `5i32` or `1.5dec`, is an error that names the two it has. A hex
+    /// literal takes only `i64`, because `f`, `d`, `e` and `c` are hex digits.
     fn number_suffix(&mut self, start: usize, hex: bool) -> Option<SyntaxKind> {
         let starts_suffix = match self.text.as_bytes()[self.pos..] {
             [b'i' | b'u', digit, ..] => digit.is_ascii_digit(),
@@ -379,13 +356,13 @@ impl Lexer<'_> {
         let suffix_start = self.pos;
         self.eat_while(is_ident_continue);
         let suffix = &self.text[suffix_start..self.pos];
-        if NumberType::from_suffix(suffix).is_some() {
+        if NumberType::from_suffix(suffix).is_some_and(|number| !hex || number.is_integer()) {
             return Some(SUFFIXED_NUMBER);
         }
         let expected = if hex {
-            "a hex literal takes i8, i16, i32, i64, i128, u8, u16, u32, u64 or u128"
+            "a hex literal takes only i64"
         } else {
-            "use one of i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, f32, f64 or dec"
+            "use i64 or f64, the two number types ry has"
         };
         self.error(
             format!("`{suffix}` is not a number type suffix; {expected}"),

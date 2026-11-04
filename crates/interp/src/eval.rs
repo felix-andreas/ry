@@ -1844,7 +1844,7 @@ unsafe fn do_paren(call: &Call<'_>) -> R<Sexp> {
 
 /// The condition of `if` and `while`, with GNU R's messages.
 pub unsafe fn as_condition(value: Sexp, call: Sexp) -> R<bool> {
-    if value.kind() == SexpType::Record {
+    if crate::records::is_native(value) {
         return Err(crate::records::boundary_error(value, nil(), call));
     }
     let count = length(value);
@@ -1884,7 +1884,7 @@ pub unsafe fn as_condition(value: Sexp, call: Sexp) -> R<bool> {
 
 unsafe fn do_if(call: &Call<'_>) -> R<Sexp> {
     let condition = eval(call.arg(0), call.env)?;
-    if condition.kind() == SexpType::Record {
+    if crate::records::is_native(condition) {
         return Err(crate::records::boundary_error(
             condition,
             call.arg(0),
@@ -1932,6 +1932,13 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
     let count = match sequence.kind() {
         SexpType::Nil => 0,
         SexpType::Pairlist | SexpType::Language => values::pairlist_length(sequence),
+        SexpType::I64 if !sequence.is_array() => {
+            return Err(crate::records::boundary_error(
+                sequence,
+                call.arg(1),
+                call.call,
+            ));
+        }
         kind if kind.is_vector() => sequence.length() as usize,
         SexpType::Record => {
             return Err(crate::records::boundary_error(

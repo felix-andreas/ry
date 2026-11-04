@@ -2499,6 +2499,7 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
                 && (0..length(x)).all(|index| chars_equal(x.element(index), y.element(index)))
         }
         SexpType::Raw => values::raws(x) == values::raws(y),
+        SexpType::I64 => x.slice::<i64>() == y.slice::<i64>(),
         SexpType::List | SexpType::Expression => {
             length(x) == length(y)
                 && (0..length(x)).all(|index| identical(x.element(index), y.element(index), flags))
@@ -2554,12 +2555,6 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
         {
             x.record_layout() == y.record_layout()
                 && standard_library::collections_identical(x, y, flags)
-        }
-        SexpType::Record if matches!(records::native_kind(x), NativeKind::Number(_)) => {
-            match (crate::numbers::read(x), crate::numbers::read(y)) {
-                (Some(left), Some(right)) => crate::numbers::identical(left, right),
-                _ => false,
-            }
         }
         SexpType::Record => {
             x.record_layout() == y.record_layout()

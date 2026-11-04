@@ -1,36 +1,32 @@
 #==== number_suffixes
 #---- a_suffix_names_the_exact_type
 a <- 5i64
-b <- 255u8
-c <- 1.5f32
-d <- 2.5dec
-e <- 1.5f64
+b <- 0xFFi64
+c <- 1.5f64
 #++++
 a: I64
-b: U8
-c: F32
-d: Dec
-e: F64
+b: I64
+c: F64
 
 #---- a_suffixed_number_must_fit_its_type
-a <- 300u8
+a <- 9223372036854775808i64
 b <- 1.5i64
 #++++
 a: Unknown
 b: Unknown
-5..10 error[type-mismatch] this literal does not fit `U8`, which cannot hold its value exactly
-16..22 error[type-mismatch] this literal does not fit `I64`, which cannot hold its value exactly
+5..27 error[type-mismatch] this literal does not fit `I64`, which cannot hold its value exactly
+33..39 error[type-mismatch] this literal does not fit `I64`, which cannot hold its value exactly
 
 #---- suffixed_numbers_do_not_mix
-x <- 1i32 + 1i64
+x <- 1i64 + 1.5f64
 #++++
 x: Unknown
-5..16 error[type-mismatch] `+` is not defined between `I32` and `I64`. Number types are never converted into each other: convert one side, as in `Num.to_i32(x)`
+5..18 error[type-mismatch] `+` is not defined between `I64` and `F64`. Number types are never converted into each other: convert one side, as in `Num.to_i64(x)`
 
 #---- a_suffixed_number_decides_an_unsuffixed_one
-x <- 1u8 + 2
+x <- 1i64 + 2
 #++++
-x: U8
+x: I64
 
 #==== format_strings
 #---- a_format_string_is_a_str

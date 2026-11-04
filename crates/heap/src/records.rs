@@ -7,11 +7,6 @@
 //! elements and index in two. Sharing the record object keeps one boundary check, one tracer and
 //! one value-semantics rule for every ry value.
 //!
-//! A ry native number (`I8` through `U128`, `F32` and `Dec`) is a record object as well, whose
-//! layout names the number type and whose two raw slots hold a 16-byte payload: an integer
-//! sign- or zero-extended to 128 bits, an `F32` as its bits, or a `Dec` as its value times 10^18.
-//! `F64`, `Bool` and `Str` are R's own scalars and need no object of their own.
-//!
 //! Tag and field names are interned symbols, which the heap roots for its whole life, so the
 //! tables hold them without tracing.
 
@@ -37,82 +32,6 @@ pub enum Fields {
     Dict,
     /// Elements (an atomic vector, or `NULL` when empty) and the hash index.
     Set,
-    /// A native number of this type: two raw slots holding the payload, low word first.
-    Number(NumberType),
-}
-
-/// The ry number types that R has no representation for.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum NumberType {
-    I8,
-    I16,
-    I32,
-    I64,
-    I128,
-    U8,
-    U16,
-    U32,
-    U64,
-    U128,
-    F32,
-    Dec,
-}
-
-impl NumberType {
-    pub const ALL: [NumberType; 12] = [
-        NumberType::I8,
-        NumberType::I16,
-        NumberType::I32,
-        NumberType::I64,
-        NumberType::I128,
-        NumberType::U8,
-        NumberType::U16,
-        NumberType::U32,
-        NumberType::U64,
-        NumberType::U128,
-        NumberType::F32,
-        NumberType::Dec,
-    ];
-
-    /// The type's name in ry's type syntax, such as `I64`.
-    pub fn name(self) -> &'static str {
-        match self {
-            NumberType::I8 => "I8",
-            NumberType::I16 => "I16",
-            NumberType::I32 => "I32",
-            NumberType::I64 => "I64",
-            NumberType::I128 => "I128",
-            NumberType::U8 => "U8",
-            NumberType::U16 => "U16",
-            NumberType::U32 => "U32",
-            NumberType::U64 => "U64",
-            NumberType::U128 => "U128",
-            NumberType::F32 => "F32",
-            NumberType::Dec => "Dec",
-        }
-    }
-
-    /// The literal suffix, such as `i64` in `5i64`.
-    pub fn suffix(self) -> &'static str {
-        match self {
-            NumberType::I8 => "i8",
-            NumberType::I16 => "i16",
-            NumberType::I32 => "i32",
-            NumberType::I64 => "i64",
-            NumberType::I128 => "i128",
-            NumberType::U8 => "u8",
-            NumberType::U16 => "u16",
-            NumberType::U32 => "u32",
-            NumberType::U64 => "u64",
-            NumberType::U128 => "u128",
-            NumberType::F32 => "f32",
-            NumberType::Dec => "dec",
-        }
-    }
-
-    pub fn is_integer(self) -> bool {
-        !matches!(self, NumberType::F32 | NumberType::Dec)
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -122,7 +41,6 @@ pub enum NativeKind {
     Tag,
     Dict,
     Set,
-    Number(NumberType),
 }
 
 impl NativeKind {
@@ -134,7 +52,6 @@ impl NativeKind {
             NativeKind::Tag => "tag",
             NativeKind::Dict => "dict",
             NativeKind::Set => "set",
-            NativeKind::Number(number) => number.name(),
         }
     }
 
@@ -146,7 +63,6 @@ impl NativeKind {
             NativeKind::Tag => "ry_tag",
             NativeKind::Dict => "ry_dict",
             NativeKind::Set => "ry_set",
-            NativeKind::Number(_) => "ry_number",
         }
     }
 }
@@ -156,7 +72,6 @@ impl Layout {
         match (&self.tag, &self.fields) {
             (_, Fields::Dict) => NativeKind::Dict,
             (_, Fields::Set) => NativeKind::Set,
-            (_, Fields::Number(number)) => NativeKind::Number(*number),
             (Some(_), _) => NativeKind::Tag,
             (None, Fields::Named(_)) => NativeKind::Record,
             (None, Fields::Positional(_)) => NativeKind::Tuple,
@@ -168,7 +83,7 @@ impl Layout {
             Fields::Positional(count) => *count as usize,
             Fields::Named(names) => names.len(),
             Fields::Dict => 3,
-            Fields::Set | Fields::Number(_) => 2,
+            Fields::Set => 2,
         }
     }
 
@@ -176,7 +91,7 @@ impl Layout {
     pub fn names(&self) -> &[Sexp] {
         match &self.fields {
             Fields::Named(names) => names,
-            Fields::Positional(_) | Fields::Dict | Fields::Set | Fields::Number(_) => &[],
+            Fields::Positional(_) | Fields::Dict | Fields::Set => &[],
         }
     }
 }

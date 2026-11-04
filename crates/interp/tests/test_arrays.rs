@@ -46,7 +46,7 @@ const PRINTS: &[(&str, &str)] = &[
     ("as.vector(xs)", "[1] 1 2 3\n"),
     ("identical(as.vector(xs), c(1, 2, 3))", "[1] TRUE\n"),
     ("identical(xs, c(1, 2, 3))", "[1] FALSE\n"),
-    ("List.from_r(c(4L, 5L))", "[4i32, 5i32]\n"),
+    ("List.from_r(c(4L, 5L))", "[4i64, 5i64]\n"),
     ("List.from_r(list(1, 2))", "[1, 2]\n"),
     ("List.from_r(c(a = 1, b = 2))", "[1, 2]\n"),
     ("List.from_r(xs)", "[1, 2, 3]\n"),
@@ -334,11 +334,11 @@ unsafe fn round_trips() -> Vec<String> {
                 })
                 .collect();
             let vector = format!("c({})", items.join(", "));
-            // An R integer converts to a boxed `I32`, which the `i32` suffix writes.
+            // An R integer converts to a boxed `I64`, which the `i64` suffix writes.
             let literals: Vec<String> = items
                 .iter()
                 .map(|item| match item.strip_suffix('L') {
-                    Some(digits) => format!("{digits}i32"),
+                    Some(digits) => format!("{digits}i64"),
                     None => item.clone(),
                 })
                 .collect();

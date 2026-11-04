@@ -420,6 +420,10 @@ impl Deparser {
             },
             SexpType::Object => self.print("<S4 object of class structure>"),
             SexpType::Record => self.native(object),
+            SexpType::I64 => match crate::numbers::read(object) {
+                Some(number) => self.print(&crate::numbers::literal(number)),
+                None => self.print("<I64 vector>"),
+            },
             kind if kind.is_atomic() => self.vector(object),
             _ => self.print("<unknown>"),
         }
@@ -821,10 +825,6 @@ impl Deparser {
     /// A record, tuple or tag value, in the syntax that builds it: `(x = 1, y = 2)`, `(1L,)`,
     /// `()`, `:None` or `:Circle(radius = 2)`.
     unsafe fn native(&mut self, object: Sexp) {
-        if let Some(number) = crate::numbers::read(object) {
-            self.print(&crate::numbers::literal(number));
-            return;
-        }
         let layout = records::layout(object);
         if matches!(layout.kind(), NativeKind::Dict | NativeKind::Set) {
             self.collection(object, layout.kind() == NativeKind::Dict);
@@ -873,7 +873,9 @@ impl Deparser {
         // `[]` rebuilds as an empty logical Array, so an empty one of another type converts.
         if count == 0 {
             match object.kind() {
-                SexpType::Integer => return self.print("List.from_r(integer(0))"),
+                SexpType::Integer | SexpType::I64 => {
+                    return self.print("List.from_r(integer(0))");
+                }
                 SexpType::Real => return self.print("List.from_r(numeric(0))"),
                 SexpType::String => return self.print("List.from_r(character(0))"),
                 SexpType::List => return self.print("[]"),
@@ -888,6 +890,7 @@ impl Deparser {
                 SexpType::Logical => values::scalar_logical(values::ints(object)[index]),
                 SexpType::Integer => values::scalar_integer(values::ints(object)[index]),
                 SexpType::Real => values::scalar_real(values::reals(object)[index]),
+                SexpType::I64 => crate::numbers::alloc(object.slice::<i64>()[index]),
                 SexpType::String => {
                     values::scalar_string_charsxp(values::string_elt(object, index))
                 }

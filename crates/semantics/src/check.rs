@@ -332,8 +332,8 @@ pub enum TypeErrorKind<'db> {
     IntegerDivision {
         ty: Ty<'db>,
     },
-    /// A number literal that the ry number type it is asked to take cannot hold (`300` as a
-    /// `U8`, `1.5` as an `I64`).
+    /// A number literal that the ry number type it is asked to take cannot hold (`1.5` or `2^63`
+    /// as an `I64`).
     LiteralOutOfRange {
         expected: Ty<'db>,
     },
@@ -1125,6 +1125,13 @@ fn erase_residual_vars_at<'db>(
     };
     if constraint == Constraint::Unconstrained {
         return unknown(db);
+    }
+    // `Int` and `Frac` each admit one type, so a literal they describe is that type rather than
+    // a type parameter.
+    match constraint {
+        Constraint::Int => return native_scalar(db, NativeScalar::I64),
+        Constraint::Frac => return native_scalar(db, NativeScalar::F64),
+        _ => {}
     }
     if !closer.abstracted.contains(&table.find(var)) {
         return match constraint {
@@ -2427,19 +2434,8 @@ fn holds_ry_scalar(db: &dyn Db, ty: Ty<'_>) -> bool {
 /// The ry scalar a number suffix such as `i64` names.
 fn suffix_scalar(ty: NumberType) -> NativeScalar {
     match ty {
-        NumberType::I8 => NativeScalar::I8,
-        NumberType::I16 => NativeScalar::I16,
-        NumberType::I32 => NativeScalar::I32,
         NumberType::I64 => NativeScalar::I64,
-        NumberType::I128 => NativeScalar::I128,
-        NumberType::U8 => NativeScalar::U8,
-        NumberType::U16 => NativeScalar::U16,
-        NumberType::U32 => NativeScalar::U32,
-        NumberType::U64 => NativeScalar::U64,
-        NumberType::U128 => NativeScalar::U128,
-        NumberType::F32 => NativeScalar::F32,
         NumberType::F64 => NativeScalar::F64,
-        NumberType::Dec => NativeScalar::Dec,
     }
 }
 
@@ -6947,8 +6943,9 @@ impl<'db> Checker<'db, '_> {
 
     fn infer_unary_minus(&mut self, operand: ExprId) -> Ty<'db> {
         let operand_range = self.blame_range(operand);
-        // `-` written before a suffixed literal is part of it, as in Roc, so `-128i8` is checked
-        // as the `I8` it denotes rather than as `128i8` negated.
+        // `-` written before a suffixed literal is part of it, as in Roc, so
+        // `-9223372036854775808i64` is checked as the `I64` it denotes rather than as an
+        // out-of-range literal negated.
         let inferred = match self.module.kind(operand) {
             ExpressionKind::Literal(literal @ LiteralKind::Suffixed { number, ty }) => {
                 let scalar = suffix_scalar(*ty);

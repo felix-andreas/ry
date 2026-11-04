@@ -897,7 +897,10 @@ unsafe fn strict(
     class: OperatorClass,
     compute: impl Fn(&Call<'_>) -> R<Sexp>,
 ) -> R<Sexp> {
-    if !call.args.iter().any(|arg| arg.value.is_array()) {
+    // An `I64` operand, single or a list, has its own vectorized operators (see `numbers`).
+    if !call.args.iter().any(|arg| arg.value.is_array())
+        || call.args.iter().any(|arg| arg.value.kind() == SexpType::I64)
+    {
         return compute(call);
     }
     let operands: Vec<Sexp> = call.args.iter().map(|arg| arg.value).collect();
@@ -923,8 +926,8 @@ unsafe fn strict(
     Ok(result)
 }
 
-/// An operator on a list of ry values, such as native numbers, applied to each pair of items
-/// in turn. R's operator knows nothing of ry values, so the scalar operator runs once per item and
+/// An operator on a list of ry values, such as nested lists, applied to each pair of items in
+/// turn. R's operator knows nothing of ry values, so the scalar operator runs once per item and
 /// the results form a new list. Two lists must have one length, because a list is never recycled,
 /// and an operand that is not a list stands beside every item.
 unsafe fn item_by_item(
@@ -952,6 +955,13 @@ unsafe fn item_by_item(
         for arg in call.args {
             let value = if arg.value.is_array() {
                 let item = arrays::item(arg.value, position)?;
+                // No record, tuple, tag, dictionary or set defines an operator, so one gets the
+                // list's own message rather than the boundary error for one item.
+                if item.kind() == SexpType::Record {
+                    return Err(call.error(format!(
+                        "`{name}` is not defined for a list of ry value items"
+                    )));
+                }
                 crate::heap().root(item);
                 item
             } else {
@@ -980,7 +990,7 @@ unsafe fn arithmetic(call: &Call<'_>, op: Op) -> R<Sexp> {
     if call
         .args
         .iter()
-        .any(|arg| arg.value.kind() == SexpType::Record)
+        .any(|arg| matches!(arg.value.kind(), SexpType::Record | SexpType::I64))
     {
         return crate::numbers::arithmetic(call, op);
     }
@@ -1772,13 +1782,9 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
     if call
         .args
         .iter()
-        .any(|arg| arg.value.kind() == SexpType::Record)
+        .any(|arg| matches!(arg.value.kind(), SexpType::Record | SexpType::I64))
     {
-        // Unordered `F32` operands (a `NaN`) are unequal and in no order, as R's doubles are.
-        return crate::numbers::comparison(call, |ordering| match ordering {
-            Some(ordering) => comparison.holds(ordering),
-            None => comparison == Comparison::NotEqual,
-        });
+        return crate::numbers::comparison(call, |ordering| comparison.holds(ordering));
     }
     if call.len() != 2 {
         return Err(call.error("comparison is possible only for atomic and list types"));

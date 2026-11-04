@@ -107,21 +107,21 @@ Result.on_err : <T, A, B> fn(result: Result<T, A>, f: fn(A) -> Result<T, B>) -> 
 
 #' Converts an R vector or list into a `List`, checking every item: it refuses `NA`, a classed
 #' object and a ragged list, and drops names. A `double` vector becomes a `List<F64>`, an
-#' `integer` vector a `List<I32>`, a `logical` vector a `List<Bool>`, a `character` vector a
-#' `List<Str>` and a `raw` vector a `List<U8>`.
+#' `integer` or `raw` vector a `List<I64>`, a `logical` vector a `List<Bool>` and a `character`
+#' vector a `List<Str>`.
 #'
 #' ```r dput
 #' List.from_r(c(3, 1, 2))
 #' #> [3, 1, 2]
 #' ```
 List.from_r : fn(vector: logical[]) -> List<Bool>
-List.from_r : fn(vector: integer[]) -> List<I32>
+List.from_r : fn(vector: integer[]) -> List<I64>
 List.from_r : fn(vector: double[]) -> List<F64>
 List.from_r : fn(vector: character[]) -> List<Str>
-List.from_r : fn(vector: raw[]) -> List<U8>
+List.from_r : fn(vector: raw[]) -> List<I64>
 List.from_r : <T: item> fn(vector: list[T]) -> List<T>
 
-#' Converts a `List` into the R vector it shares a representation with. A list of ry integers
+#' Converts a `List` into the R vector it shares a representation with. A `List<I64>`
 #' becomes an `integer` vector when every item fits in 32 bits and a `double` vector otherwise. A
 #' `List<F64>`, `List<Bool>` or `List<Str>` already passes to R code as a vector without this call.
 #'
@@ -132,7 +132,7 @@ List.from_r : <T: item> fn(vector: list[T]) -> List<T>
 List.to_r : fn(list: List<F64>) -> double[]
 List.to_r : fn(list: List<Bool>) -> logical[]
 List.to_r : fn(list: List<Str>) -> character[]
-List.to_r : <T: int> fn(list: List<T>) -> integer[] | double[]
+List.to_r : fn(list: List<I64>) -> integer[] | double[]
 List.to_r : <T: item> fn(list: List<T>) -> list[T]
 
 #' The number of elements.
@@ -227,7 +227,7 @@ List.repeat : <T> fn(value: T, count: I64) -> List<T>
 #' List.range(3, 1)
 #' #> []
 #' ```
-List.range : <T: int> fn(start: T, end: T) -> List<T>
+List.range : fn(start: I64, end: I64) -> List<I64>
 
 #' The elements in reverse order.
 #'
@@ -676,7 +676,7 @@ List.prepend_if_ok : <T, E> fn(list: List<T>, result: Result<T, E>) -> List<T>
 #'
 #' ```r dput
 #' List.concat_utf8([104], "i")
-#' #> [104u8, 105u8]
+#' #> [104i64, 105i64]
 #' ```
 List.concat_utf8 : fn(list: List<I64>, string: Str) -> List<I64>
 
@@ -928,9 +928,9 @@ Str.count_utf8_bytes : fn(string: Str) -> I64
 #'
 #' ```r dput
 #' Str.to_utf8("hé")
-#' #> [104u8, 195u8, 169u8]
+#' #> [104i64, 195i64, 169i64]
 #' ```
-Str.to_utf8 : fn(string: Str) -> List<U8>
+Str.to_utf8 : fn(string: Str) -> List<I64>
 
 #' The string a list of bytes encodes, or `:Err(:BadUtf8)`.
 #'
@@ -938,7 +938,7 @@ Str.to_utf8 : fn(string: Str) -> List<U8>
 #' Str.from_utf8([104, 105])
 #' #> :Ok("hi")
 #' ```
-Str.from_utf8 : fn(bytes: List<U8>) -> Result<Str, :BadUtf8>
+Str.from_utf8 : fn(bytes: List<I64>) -> Result<Str, :BadUtf8>
 
 #' Decodes UTF-8 bytes, replacing each invalid sequence with U+FFFD.
 #'
@@ -946,9 +946,9 @@ Str.from_utf8 : fn(bytes: List<U8>) -> Result<Str, :BadUtf8>
 #' Str.from_utf8_lossy([104, 255, 105])
 #' #> "h�i"
 #' ```
-Str.from_utf8_lossy : fn(bytes: List<U8>) -> Str
+Str.from_utf8_lossy : fn(bytes: List<I64>) -> Str
 
-#' Parses a whole number that fits an `integer`, or `:Err(:InvalidNumStr)`.
+#' Parses a whole number that fits an `I64`, or `:Err(:InvalidNumStr)`.
 #'
 #' ```r dput
 #' Str.to_i64("4.2")
@@ -994,7 +994,7 @@ Str.caseless_ascii_equals : fn(first: Str, second: Str) -> Bool
 #' Str.walk_utf8("abc", 0, function(total, byte) total + Num.to_i64(byte))
 #' #> 294i64
 #' ```
-Str.walk_utf8 : <S> fn(string: Str, state: S, f: fn(S, U8) -> S) -> S
+Str.walk_utf8 : <S> fn(string: Str, state: S, f: fn(S, I64) -> S) -> S
 
 #' Folds the string's UTF-8 bytes, passing `f` each byte's 1-based position too.
 #'
@@ -1002,16 +1002,16 @@ Str.walk_utf8 : <S> fn(string: Str, state: S, f: fn(S, U8) -> S) -> S
 #' Str.walk_utf8_with_index("ab", [], function(seen, byte, i) List.append(seen, Num.to_i64(byte) * i))
 #' #> [97i64, 196i64]
 #' ```
-Str.walk_utf8_with_index : <S> fn(string: Str, state: S, f: fn(S, U8, I64) -> S) -> S
+Str.walk_utf8_with_index : <S> fn(string: Str, state: S, f: fn(S, I64, I64) -> S) -> S
 
 #' The string's UTF-16 code units, each an integer from 0 to 65535. A character outside the Basic
 #' Multilingual Plane takes two units, a surrogate pair.
 #'
 #' ```r dput
 #' Str.to_utf16("h\U0001F600")
-#' #> [104u16, 55357u16, 56832u16]
+#' #> [104i64, 55357i64, 56832i64]
 #' ```
-Str.to_utf16 : fn(string: Str) -> List<U16>
+Str.to_utf16 : fn(string: Str) -> List<I64>
 
 #' Decodes UTF-16 code units, or `:Err(:BadUtf16)` for an unpaired surrogate or a zero unit, which
 #' an R string cannot hold. A number outside 0 to 65535 is an error.
@@ -1020,7 +1020,7 @@ Str.to_utf16 : fn(string: Str) -> List<U16>
 #' Str.from_utf16([104, 55357])
 #' #> :Err(:BadUtf16)
 #' ```
-Str.from_utf16 : fn(units: List<U16>) -> Result<Str, :BadUtf16>
+Str.from_utf16 : fn(units: List<I64>) -> Result<Str, :BadUtf16>
 
 #' Decodes UTF-16 code units, replacing each unpaired surrogate and each zero unit with U+FFFD.
 #'
@@ -1028,15 +1028,15 @@ Str.from_utf16 : fn(units: List<U16>) -> Result<Str, :BadUtf16>
 #' Str.from_utf16_lossy([104, 105])
 #' #> "hi"
 #' ```
-Str.from_utf16_lossy : fn(units: List<U16>) -> Str
+Str.from_utf16_lossy : fn(units: List<I64>) -> Str
 
 #' The string's Unicode code points, one per character.
 #'
 #' ```r dput
 #' Str.to_utf32("h\u00e9")
-#' #> [104u32, 233u32]
+#' #> [104i64, 233i64]
 #' ```
-Str.to_utf32 : fn(string: Str) -> List<U32>
+Str.to_utf32 : fn(string: Str) -> List<I64>
 
 #' Builds a string from Unicode code points, or `:Err(:BadUtf32)` for a number that is not one (a
 #' surrogate, a negative number, or one above 1114111) and for zero.
@@ -1045,7 +1045,7 @@ Str.to_utf32 : fn(string: Str) -> List<U32>
 #' Str.from_utf32([55296])
 #' #> :Err(:BadUtf32)
 #' ```
-Str.from_utf32 : fn(code_points: List<U32>) -> Result<Str, :BadUtf32>
+Str.from_utf32 : fn(code_points: List<I64>) -> Result<Str, :BadUtf32>
 
 #' Builds a string from Unicode code points, replacing each number that is not one with U+FFFD.
 #'
@@ -1053,7 +1053,7 @@ Str.from_utf32 : fn(code_points: List<U32>) -> Result<Str, :BadUtf32>
 #' Str.from_utf32_lossy([82, 121])
 #' #> "Ry"
 #' ```
-Str.from_utf32_lossy : fn(code_points: List<U32>) -> Str
+Str.from_utf32_lossy : fn(code_points: List<I64>) -> Str
 
 #' Functions over single numbers, `integer` or `double`, and eight constants (`Num.pi`, `Num.tau`,
 #' `Num.e`, `Num.infinity` and the integer and double limits). A checked operation returns the
@@ -1134,7 +1134,7 @@ Num.is_gte : <T: number> fn(first: T, second: T) -> Bool
 #' Num.is_approx_eq(0.1 + 0.2, 0.3)
 #' #> TRUE
 #' ```
-Num.is_approx_eq : <T: frac> fn(first: T, second: T, [rtol]: F64, [atol]: F64) -> Bool
+Num.is_approx_eq : fn(first: F64, second: F64, [rtol]: F64, [atol]: F64) -> Bool
 
 #' Whether the number is zero.
 #'
@@ -1166,7 +1166,7 @@ Num.is_negative : <T: number> fn(number: T) -> Bool
 #' Num.is_even(4)
 #' #> TRUE
 #' ```
-Num.is_even : <T: int> fn(number: T) -> Bool
+Num.is_even : fn(number: I64) -> Bool
 
 #' Whether the number is a whole, odd number.
 #'
@@ -1174,7 +1174,7 @@ Num.is_even : <T: int> fn(number: T) -> Bool
 #' Num.is_odd(-3)
 #' #> TRUE
 #' ```
-Num.is_odd : <T: int> fn(number: T) -> Bool
+Num.is_odd : fn(number: I64) -> Bool
 
 #' Whether `first` is a whole multiple of `second`. Only zero is a multiple of zero.
 #'
@@ -1182,7 +1182,7 @@ Num.is_odd : <T: int> fn(number: T) -> Bool
 #' Num.is_multiple_of(12, 4)
 #' #> TRUE
 #' ```
-Num.is_multiple_of : <T: int> fn(first: T, second: T) -> Bool
+Num.is_multiple_of : fn(first: I64, second: I64) -> Bool
 
 #' Whether the number is neither infinite nor `NaN`.
 #'
@@ -1190,7 +1190,7 @@ Num.is_multiple_of : <T: int> fn(first: T, second: T) -> Bool
 #' Num.is_finite(1 / 0)
 #' #> FALSE
 #' ```
-Num.is_finite : <T: frac> fn(number: T) -> Bool
+Num.is_finite : fn(number: F64) -> Bool
 
 #' Whether the number is `Inf` or `-Inf`.
 #'
@@ -1198,7 +1198,7 @@ Num.is_finite : <T: frac> fn(number: T) -> Bool
 #' Num.is_infinite(-1 / 0)
 #' #> TRUE
 #' ```
-Num.is_infinite : <T: frac> fn(number: T) -> Bool
+Num.is_infinite : fn(number: F64) -> Bool
 
 #' The absolute value.
 #'
@@ -1230,7 +1230,7 @@ Num.neg : <T: number> fn(number: T) -> T
 #' Num.ceiling(1.2)
 #' #> 2i64
 #' ```
-Num.ceiling : <T: frac> fn(number: T) -> I64
+Num.ceiling : fn(number: F64) -> I64
 
 #' Rounds down to a whole number, as an `I64`.
 #'
@@ -1238,7 +1238,7 @@ Num.ceiling : <T: frac> fn(number: T) -> I64
 #' Num.floor(-1.2)
 #' #> -2i64
 #' ```
-Num.floor : <T: frac> fn(number: T) -> I64
+Num.floor : fn(number: F64) -> I64
 
 #' Rounds to the nearest whole number, halves away from zero, as an `I64`.
 #'
@@ -1246,7 +1246,7 @@ Num.floor : <T: frac> fn(number: T) -> I64
 #' Num.round(2.5)
 #' #> 3i64
 #' ```
-Num.round : <T: frac> fn(number: T) -> I64
+Num.round : fn(number: F64) -> I64
 
 #' Drops the fraction, rounding toward zero, as an `I64`.
 #'
@@ -1254,7 +1254,7 @@ Num.round : <T: frac> fn(number: T) -> I64
 #' Num.truncate(-1.7)
 #' #> -1i64
 #' ```
-Num.truncate : <T: frac> fn(number: T) -> I64
+Num.truncate : fn(number: F64) -> I64
 
 #' `base` raised to `exponent`. A result that is not a real number, as for `Num.pow(-1, 0.5)`, is an
 #' error.
@@ -1272,7 +1272,7 @@ Num.pow : <T: number> fn(base: T, exponent: T) -> T
 #' Num.sin(0)
 #' #> 0
 #' ```
-Num.sin : <T: frac> fn(number: T) -> T
+Num.sin : fn(number: F64) -> F64
 
 #' The cosine of an angle in radians.
 #'
@@ -1280,7 +1280,7 @@ Num.sin : <T: frac> fn(number: T) -> T
 #' Num.cos(0)
 #' #> 1
 #' ```
-Num.cos : <T: frac> fn(number: T) -> T
+Num.cos : fn(number: F64) -> F64
 
 #' The tangent of an angle in radians.
 #'
@@ -1288,7 +1288,7 @@ Num.cos : <T: frac> fn(number: T) -> T
 #' Num.tan(0)
 #' #> 0
 #' ```
-Num.tan : <T: frac> fn(number: T) -> T
+Num.tan : fn(number: F64) -> F64
 
 #' The arctangent, in radians.
 #'
@@ -1296,12 +1296,12 @@ Num.tan : <T: frac> fn(number: T) -> T
 #' Num.atan(1) * 4
 #' #> 3.14159265358979
 #' ```
-Num.atan : <T: frac> fn(number: T) -> T
+Num.atan : fn(number: F64) -> F64
 
 #' The sum, or `:Err(:Overflow)`; a `NaN` sum such as `Inf + -Inf` is `:Err(:Undefined)`.
 #'
 #' ```r dput
-#' Num.add_checked(2147483647i32, 1i32)
+#' Num.add_checked(9223372036854775807i64, 1i64)
 #' #> :Err(:Overflow)
 #' ```
 Num.add_checked : <T: number> fn(first: T, second: T) -> Result<T, :Overflow | :Undefined>
@@ -1325,50 +1325,50 @@ Num.mul_checked : <T: number> fn(first: T, second: T) -> Result<T, :Overflow | :
 #' Adds two numbers, clamping an integer result to the largest or smallest integer.
 #'
 #' ```r dput
-#' Num.add_saturated(127i8, 1i8)
-#' #> 127i8
+#' Num.add_saturated(9223372036854775807i64, 1i64)
+#' #> 9223372036854775807i64
 #' ```
 Num.add_saturated : <T: number> fn(first: T, second: T) -> T
 
 #' Subtracts `second` from `first`, clamping an integer result.
 #'
 #' ```r dput
-#' Num.sub_saturated(-127i8, 2i8)
-#' #> -128i8
+#' Num.sub_saturated(-9223372036854775807i64, 2i64)
+#' #> -9223372036854775808i64
 #' ```
 Num.sub_saturated : <T: number> fn(first: T, second: T) -> T
 
 #' Multiplies two numbers, clamping an integer result.
 #'
 #' ```r dput
-#' Num.mul_saturated(100000i32, 100000i32)
-#' #> 2147483647i32
+#' Num.mul_saturated(4294967296i64, 4294967296i64)
+#' #> 9223372036854775807i64
 #' ```
 Num.mul_saturated : <T: number> fn(first: T, second: T) -> T
 
 #' Adds two integers, wrapping around on overflow as two's complement arithmetic does.
 #'
 #' ```r dput
-#' Num.add_wrap(127i8, 1i8)
-#' #> -128i8
+#' Num.add_wrap(9223372036854775807i64, 1i64)
+#' #> -9223372036854775808i64
 #' ```
-Num.add_wrap : <T: int> fn(first: T, second: T) -> T
+Num.add_wrap : fn(first: I64, second: I64) -> I64
 
 #' Subtracts `second` from `first`, wrapping around on overflow.
 #'
 #' ```r dput
-#' Num.sub_wrap(0u8, 1u8)
-#' #> 255u8
+#' Num.sub_wrap(-9223372036854775808i64, 1i64)
+#' #> 9223372036854775807i64
 #' ```
-Num.sub_wrap : <T: int> fn(first: T, second: T) -> T
+Num.sub_wrap : fn(first: I64, second: I64) -> I64
 
 #' Multiplies two integers, wrapping around on overflow.
 #'
 #' ```r dput
-#' Num.mul_wrap(16u8, 16u8)
-#' #> 0u8
+#' Num.mul_wrap(4294967296i64, 4294967296i64)
+#' #> 0i64
 #' ```
-Num.mul_wrap : <T: int> fn(first: T, second: T) -> T
+Num.mul_wrap : fn(first: I64, second: I64) -> I64
 
 #' The quotient as a double, or `:Err(:DivByZero)`.
 #'
@@ -1376,7 +1376,7 @@ Num.mul_wrap : <T: int> fn(first: T, second: T) -> T
 #' Num.div_checked(7, 2)
 #' #> :Ok(3.5)
 #' ```
-Num.div_checked : <T: frac> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+Num.div_checked : fn(first: F64, second: F64) -> Result<F64, :DivByZero | :Undefined>
 
 #' The quotient rounded toward zero, or `:Err(:DivByZero)`; `Inf` divided by `Inf` is
 #' `:Err(:Undefined)`.
@@ -1387,7 +1387,7 @@ Num.div_checked : <T: frac> fn(first: T, second: T) -> Result<T, :DivByZero | :U
 #' Num.div_trunc_checked(Inf, Inf)
 #' #> :Err(:Undefined)
 #' ```
-Num.div_trunc_checked : <T: int> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+Num.div_trunc_checked : fn(first: I64, second: I64) -> Result<I64, :DivByZero | :Undefined>
 
 #' Divides and rounds up, or `:Err(:DivByZero)`.
 #'
@@ -1395,7 +1395,7 @@ Num.div_trunc_checked : <T: int> fn(first: T, second: T) -> Result<T, :DivByZero
 #' Num.div_ceil_checked(7, 2)
 #' #> :Ok(4)
 #' ```
-Num.div_ceil_checked : <T: int> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+Num.div_ceil_checked : fn(first: I64, second: I64) -> Result<I64, :DivByZero | :Undefined>
 
 #' The remainder of the truncated division, with the sign of `first`, or `:Err(:DivByZero)`.
 #'
@@ -1403,7 +1403,7 @@ Num.div_ceil_checked : <T: int> fn(first: T, second: T) -> Result<T, :DivByZero 
 #' Num.rem_checked(-7, 2)
 #' #> :Ok(-1)
 #' ```
-Num.rem_checked : <T: int> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+Num.rem_checked : fn(first: I64, second: I64) -> Result<I64, :DivByZero | :Undefined>
 
 #' The square root, or `:Err(:SqrtOfNegative)`.
 #'
@@ -1411,7 +1411,7 @@ Num.rem_checked : <T: int> fn(first: T, second: T) -> Result<T, :DivByZero | :Un
 #' Num.sqrt_checked(-1)
 #' #> :Err(:SqrtOfNegative)
 #' ```
-Num.sqrt_checked : <T: frac> fn(number: T) -> Result<T, :SqrtOfNegative>
+Num.sqrt_checked : fn(number: F64) -> Result<F64, :SqrtOfNegative>
 
 #' The natural logarithm, or `:Err(:LogNeedsPositive)`.
 #'
@@ -1419,20 +1419,20 @@ Num.sqrt_checked : <T: frac> fn(number: T) -> Result<T, :SqrtOfNegative>
 #' Num.log_checked(exp(2))
 #' #> :Ok(2)
 #' ```
-Num.log_checked : <T: frac> fn(number: T) -> Result<T, :LogNeedsPositive>
+Num.log_checked : fn(number: F64) -> Result<F64, :LogNeedsPositive>
 
 #' Converts an R number into a ry number, refusing `NA` and a length other than one: a `double`
-#' becomes an `F64` and an `integer` an `I32`.
+#' becomes an `F64` and an `integer` an `I64`.
 #'
 #' ```r dput
 #' Num.from_r(2.5)
 #' #> 2.5
 #' ```
-Num.from_r : fn(value: integer) -> I32
+Num.from_r : fn(value: integer) -> I64
 Num.from_r : fn(value: double) -> F64
 
-#' Converts a ry number into an R number: a fraction becomes a `double`, and an integer type an
-#' `integer` when it fits in 32 bits and a `double` otherwise. An `F64` already passes to R code
+#' Converts a ry number into an R number: an `F64` becomes a `double`, and an `I64` an `integer`
+#' when it fits in 32 bits and a `double` otherwise. An `F64` already passes to R code
 #' as a `double` without this call.
 #'
 #' ```r dput
@@ -1448,75 +1448,6 @@ Num.to_r : <T: number> fn(number: T) -> integer | double
 #' #> 3
 #' ```
 Num.to_f64 : <T: number> fn(number: T) -> F64
-
-#' The number as an `F32`, rounded to the nearest one.
-Num.to_f32 : <T: number> fn(number: T) -> F32
-
-#' The number as a `Dec`. A number a `Dec` cannot hold is an error.
-Num.to_dec : <T: number> fn(number: T) -> Dec
-
-#' The number as an `I8`. A number an `I8` cannot hold exactly, such as one with a
-#' fraction, is an error; `Num.to_i8_checked` returns `:Err(:OutOfBounds)` instead.
-Num.to_i8 : <T: number> fn(number: T) -> I8
-
-#' The number as an `I8`, or `:Err(:OutOfBounds)` when an `I8` cannot hold it exactly.
-Num.to_i8_checked : <T: number> fn(number: T) -> Result<I8, :OutOfBounds>
-
-#' The number as an `I16`. A number an `I16` cannot hold exactly, such as one with a
-#' fraction, is an error; `Num.to_i16_checked` returns `:Err(:OutOfBounds)` instead.
-Num.to_i16 : <T: number> fn(number: T) -> I16
-
-#' The number as an `I16`, or `:Err(:OutOfBounds)` when an `I16` cannot hold it exactly.
-Num.to_i16_checked : <T: number> fn(number: T) -> Result<I16, :OutOfBounds>
-
-#' The number as an `I32`. A number an `I32` cannot hold exactly, such as one with a
-#' fraction, is an error; `Num.to_i32_checked` returns `:Err(:OutOfBounds)` instead.
-Num.to_i32 : <T: number> fn(number: T) -> I32
-
-#' The number as an `I32`, or `:Err(:OutOfBounds)` when an `I32` cannot hold it exactly.
-Num.to_i32_checked : <T: number> fn(number: T) -> Result<I32, :OutOfBounds>
-
-#' The number as an `I128`. A number an `I128` cannot hold exactly, such as one with a
-#' fraction, is an error; `Num.to_i128_checked` returns `:Err(:OutOfBounds)` instead.
-Num.to_i128 : <T: number> fn(number: T) -> I128
-
-#' The number as an `I128`, or `:Err(:OutOfBounds)` when an `I128` cannot hold it exactly.
-Num.to_i128_checked : <T: number> fn(number: T) -> Result<I128, :OutOfBounds>
-
-#' The number as a `U8`. A number a `U8` cannot hold exactly, such as one with a
-#' fraction, is an error; `Num.to_u8_checked` returns `:Err(:OutOfBounds)` instead.
-Num.to_u8 : <T: number> fn(number: T) -> U8
-
-#' The number as a `U8`, or `:Err(:OutOfBounds)` when a `U8` cannot hold it exactly.
-Num.to_u8_checked : <T: number> fn(number: T) -> Result<U8, :OutOfBounds>
-
-#' The number as a `U16`. A number a `U16` cannot hold exactly, such as one with a
-#' fraction, is an error; `Num.to_u16_checked` returns `:Err(:OutOfBounds)` instead.
-Num.to_u16 : <T: number> fn(number: T) -> U16
-
-#' The number as a `U16`, or `:Err(:OutOfBounds)` when a `U16` cannot hold it exactly.
-Num.to_u16_checked : <T: number> fn(number: T) -> Result<U16, :OutOfBounds>
-
-#' The number as a `U32`. A number a `U32` cannot hold exactly, such as one with a
-#' fraction, is an error; `Num.to_u32_checked` returns `:Err(:OutOfBounds)` instead.
-Num.to_u32 : <T: number> fn(number: T) -> U32
-
-#' The number as a `U32`, or `:Err(:OutOfBounds)` when a `U32` cannot hold it exactly.
-Num.to_u32_checked : <T: number> fn(number: T) -> Result<U32, :OutOfBounds>
-
-#' The number as a `U64`. A number a `U64` cannot hold exactly, such as one with a
-#' fraction, is an error; `Num.to_u64_checked` returns `:Err(:OutOfBounds)` instead.
-Num.to_u64 : <T: number> fn(number: T) -> U64
-
-#' The number as a `U64`, or `:Err(:OutOfBounds)` when a `U64` cannot hold it exactly.
-Num.to_u64_checked : <T: number> fn(number: T) -> Result<U64, :OutOfBounds>
-
-#' The number as a `U128`. A number a `U128` cannot hold exactly, such as one with a
-#' fraction, is an error; `Num.to_u128_checked` returns `:Err(:OutOfBounds)` instead.
-Num.to_u128 : <T: number> fn(number: T) -> U128
-
-#' The number as a `U128`, or `:Err(:OutOfBounds)` when a `U128` cannot hold it exactly.
-Num.to_u128_checked : <T: number> fn(number: T) -> Result<U128, :OutOfBounds>
 
 #' The number as an `I64`, or `:Err(:OutOfBounds)` when an `I64` cannot hold it exactly, such as
 #' a number with a fraction. `Num.truncate` drops a fraction first.
@@ -1569,7 +1500,7 @@ Num.mul : <T: number> fn(first: T, second: T) -> T
 #' Num.div(7, 2)
 #' #> 3.5
 #' ```
-Num.div : <T: frac> fn(first: T, second: T) -> T
+Num.div : fn(first: F64, second: F64) -> F64
 
 #' The quotient rounded toward zero. A zero divisor is an error.
 #'
@@ -1577,7 +1508,7 @@ Num.div : <T: frac> fn(first: T, second: T) -> T
 #' Num.div_trunc(-7, 2)
 #' #> -3
 #' ```
-Num.div_trunc : <T: int> fn(first: T, second: T) -> T
+Num.div_trunc : fn(first: I64, second: I64) -> I64
 
 #' The quotient rounded up. A zero divisor is an error.
 #'
@@ -1585,7 +1516,7 @@ Num.div_trunc : <T: int> fn(first: T, second: T) -> T
 #' Num.div_ceil(7, 2)
 #' #> 4
 #' ```
-Num.div_ceil : <T: int> fn(first: T, second: T) -> T
+Num.div_ceil : fn(first: I64, second: I64) -> I64
 
 #' The remainder of the truncated division, with the sign of `first`. A zero divisor is an error.
 #'
@@ -1593,7 +1524,7 @@ Num.div_ceil : <T: int> fn(first: T, second: T) -> T
 #' Num.rem(-7, 2)
 #' #> -1
 #' ```
-Num.rem : <T: int> fn(first: T, second: T) -> T
+Num.rem : fn(first: I64, second: I64) -> I64
 
 #' `base` raised to a non-negative `exponent`, as an integer. A result that overflows is an error;
 #' `Num.pow` returns a double instead.
@@ -1602,7 +1533,7 @@ Num.rem : <T: int> fn(first: T, second: T) -> T
 #' Num.pow_int(3, 4)
 #' #> 81L
 #' ```
-Num.pow_int : <T: int> fn(base: T, exponent: T) -> T
+Num.pow_int : fn(base: I64, exponent: I64) -> I64
 
 #' The square root. A negative number is an error; `Num.sqrt_checked` returns
 #' `:Err(:SqrtOfNegative)` instead.
@@ -1611,7 +1542,7 @@ Num.pow_int : <T: int> fn(base: T, exponent: T) -> T
 #' Num.sqrt(16)
 #' #> 4
 #' ```
-Num.sqrt : <T: frac> fn(number: T) -> T
+Num.sqrt : fn(number: F64) -> F64
 
 #' The natural logarithm. A number that is not positive is an error; `Num.log_checked` returns
 #' `:Err(:LogNeedsPositive)` instead.
@@ -1620,7 +1551,7 @@ Num.sqrt : <T: frac> fn(number: T) -> T
 #' Num.log(Num.e)
 #' #> 1
 #' ```
-Num.log : <T: frac> fn(number: T) -> T
+Num.log : fn(number: F64) -> F64
 
 #' The arcsine in radians. A number outside -1 to 1 is an error.
 #'
@@ -1628,7 +1559,7 @@ Num.log : <T: frac> fn(number: T) -> T
 #' Num.asin(1)
 #' #> 1.5707963267949
 #' ```
-Num.asin : <T: frac> fn(number: T) -> T
+Num.asin : fn(number: F64) -> F64
 
 #' The arccosine in radians. A number outside -1 to 1 is an error.
 #'
@@ -1636,7 +1567,7 @@ Num.asin : <T: frac> fn(number: T) -> T
 #' Num.acos(1)
 #' #> 0
 #' ```
-Num.acos : <T: frac> fn(number: T) -> T
+Num.acos : fn(number: F64) -> F64
 
 #' Whether the number is `NaN`. It is the one library function that accepts `NaN`; `NA` is still an
 #' error.
@@ -1645,7 +1576,7 @@ Num.acos : <T: frac> fn(number: T) -> T
 #' Num.is_nan(0 / 0)
 #' #> TRUE
 #' ```
-Num.is_nan : <T: frac> fn(number: T) -> Bool
+Num.is_nan : fn(number: F64) -> Bool
 
 #' The bits set in both integers, in 32-bit two's complement.
 #'
@@ -1653,7 +1584,7 @@ Num.is_nan : <T: frac> fn(number: T) -> Bool
 #' Num.bitwise_and(12, 10)
 #' #> 8L
 #' ```
-Num.bitwise_and : <T: int> fn(first: T, second: T) -> T
+Num.bitwise_and : fn(first: I64, second: I64) -> I64
 
 #' The bits set in either integer.
 #'
@@ -1661,7 +1592,7 @@ Num.bitwise_and : <T: int> fn(first: T, second: T) -> T
 #' Num.bitwise_or(12, 10)
 #' #> 14L
 #' ```
-Num.bitwise_or : <T: int> fn(first: T, second: T) -> T
+Num.bitwise_or : fn(first: I64, second: I64) -> I64
 
 #' The bits set in exactly one of the integers. A result whose bit pattern is -2147483648 is an
 #' error, because R uses that value for `NA`; the same holds for every bit operation.
@@ -1670,7 +1601,7 @@ Num.bitwise_or : <T: int> fn(first: T, second: T) -> T
 #' Num.bitwise_xor(12, 10)
 #' #> 6L
 #' ```
-Num.bitwise_xor : <T: int> fn(first: T, second: T) -> T
+Num.bitwise_xor : fn(first: I64, second: I64) -> I64
 
 #' The integer with every bit flipped, which is `-number - 1`.
 #'
@@ -1678,7 +1609,7 @@ Num.bitwise_xor : <T: int> fn(first: T, second: T) -> T
 #' Num.bitwise_not(5)
 #' #> -6L
 #' ```
-Num.bitwise_not : <T: int> fn(number: T) -> T
+Num.bitwise_not : fn(number: I64) -> I64
 
 #' Shifts the bits left by `bits`, from 0 to 31. Bits shifted past the top are lost, as in Roc.
 #'
@@ -1686,7 +1617,7 @@ Num.bitwise_not : <T: int> fn(number: T) -> T
 #' Num.shift_left_by(1, 4)
 #' #> 16L
 #' ```
-Num.shift_left_by : <T: int> fn(number: T, bits: T) -> T
+Num.shift_left_by : fn(number: I64, bits: I64) -> I64
 
 #' Shifts the bits right by `bits`, copying the sign bit in, so a negative number stays negative.
 #'
@@ -1694,7 +1625,7 @@ Num.shift_left_by : <T: int> fn(number: T, bits: T) -> T
 #' Num.shift_right_by(-16, 2)
 #' #> -4L
 #' ```
-Num.shift_right_by : <T: int> fn(number: T, bits: T) -> T
+Num.shift_right_by : fn(number: I64, bits: I64) -> I64
 
 #' Shifts the bits right by `bits`, filling with zeros.
 #'
@@ -1702,7 +1633,7 @@ Num.shift_right_by : <T: int> fn(number: T, bits: T) -> T
 #' Num.shift_right_zf_by(-16, 28)
 #' #> 15L
 #' ```
-Num.shift_right_zf_by : <T: int> fn(number: T, bits: T) -> T
+Num.shift_right_zf_by : fn(number: I64, bits: I64) -> I64
 
 #' The number of set bits.
 #'
@@ -1710,7 +1641,7 @@ Num.shift_right_zf_by : <T: int> fn(number: T, bits: T) -> T
 #' Num.count_one_bits(255)
 #' #> 8L
 #' ```
-Num.count_one_bits : <T: int> fn(number: T) -> T
+Num.count_one_bits : fn(number: I64) -> I64
 
 #' The number of zero bits above the highest set bit, 32 for zero.
 #'
@@ -1718,7 +1649,7 @@ Num.count_one_bits : <T: int> fn(number: T) -> T
 #' Num.count_leading_zero_bits(1)
 #' #> 31L
 #' ```
-Num.count_leading_zero_bits : <T: int> fn(number: T) -> T
+Num.count_leading_zero_bits : fn(number: I64) -> I64
 
 #' The number of zero bits below the lowest set bit, 32 for zero.
 #'
@@ -1726,7 +1657,7 @@ Num.count_leading_zero_bits : <T: int> fn(number: T) -> T
 #' Num.count_trailing_zero_bits(8)
 #' #> 3L
 #' ```
-Num.count_trailing_zero_bits : <T: int> fn(number: T) -> T
+Num.count_trailing_zero_bits : fn(number: I64) -> I64
 
 #' The ratio of a circle's circumference to its diameter. It is a value, not a function.
 #'

@@ -560,9 +560,8 @@ impl Writer<'_, '_> {
         // Pairlist tails are written in a loop, so a long list costs no stack.
         loop {
             // ry's records, tuples and tagged unions have no R representation to write.
-            if object.kind() == SexpType::Record {
-                let kind = interp::records::native_kind(object);
-                return Err(error(interp::records::boundary_message("the value", kind)));
+            if interp::records::is_native(object) {
+                return Err(error(interp::records::boundary_message("the value", object)));
             }
             // ry compiles its own bytecode, which no other R can run, so a compiled body is
             // written as the expression it was compiled from.

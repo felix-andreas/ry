@@ -1,19 +1,17 @@
-//! ry's native numbers in the interpreter: `I8` through `U128`, `F32` and `Dec`. `F64`, `Bool` and
-//! `Str` are R's own length-one `double`, `logical` and `character`, so only these twelve need an
-//! object of their own, a record object whose layout names the type (see `heap::records`).
+//! ry's native `I64` in the interpreter. `F64`, `Bool` and `Str` are R's own length-one `double`,
+//! `logical` and `character`, so only the `I64` needs a type of its own: a dense vector of `i64`s
+//! (`SexpType::I64`, see `heap::object`). A single `I64` is a length-one vector, and a
+//! `List<I64>` is the same object at any length with the Array flag set.
 //!
-//! This is the correct, slow implementation the runtime contract in the native-types design asks
-//! for: every operation reads the payload, computes in Rust's matching primitive type and boxes
-//! the result. Integer arithmetic is checked, so overflow is an error, and `Dec` is a fixed-point
-//! `i128` scaled by 10^18 whose products and quotients go through 256-bit intermediates, so only
-//! a result that does not fit is an error.
+//! Arithmetic is checked, so overflow is an error, and an operator on lists works item by item on
+//! lists of one length, never recycling.
 //!
-//! An R number meeting a native number in an operator converts to its type exactly or raises an
-//! error, which is the run-time half of literal typing: `n + 1` with `n` an `I64` is an `I64`.
+//! An R number meeting an `I64` in an operator converts to it exactly or raises an error, which is
+//! the run-time half of literal typing: `n + 1` with `n` an `I64` is an `I64`.
 
 use {
     crate::{
-        arith::{self, Op},
+        arith::Op,
         arrays,
         builtins::Call,
         records,
@@ -21,72 +19,9 @@ use {
         unwind::{R, error},
         values::{self, length, nil, scalar_bool, scalar_integer, scalar_real},
     },
-    heap::{
-        object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, is_na_real},
-        records::{Fields, Layout},
-    },
+    heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, is_na_real},
     std::cmp::Ordering,
 };
-
-/// Runs `body` with `T` bound to the Rust primitive of an integer native type, or evaluates
-/// `fallback` for `F32` and `Dec`.
-macro_rules! with_int {
-    ($ty:expr, $t:ident => $body:expr, $fallback:expr) => {
-        match $ty {
-            NumberType::I8 => {
-                type $t = i8;
-                $body
-            }
-            NumberType::I16 => {
-                type $t = i16;
-                $body
-            }
-            NumberType::I32 => {
-                type $t = i32;
-                $body
-            }
-            NumberType::I64 => {
-                type $t = i64;
-                $body
-            }
-            NumberType::I128 => {
-                type $t = i128;
-                $body
-            }
-            NumberType::U8 => {
-                type $t = u8;
-                $body
-            }
-            NumberType::U16 => {
-                type $t = u16;
-                $body
-            }
-            NumberType::U32 => {
-                type $t = u32;
-                $body
-            }
-            NumberType::U64 => {
-                type $t = u64;
-                $body
-            }
-            NumberType::U128 => {
-                type $t = u128;
-                $body
-            }
-            NumberType::F32 | NumberType::Dec => $fallback,
-        }
-    };
-}
-
-pub use heap::records::NumberType;
-
-/// A native number: its type and its 16-byte payload, an integer sign- or zero-extended to 128
-/// bits, an `F32` as its bits, or a `Dec` as its value times 10^18.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Number {
-    pub ty: NumberType,
-    pub bits: u128,
-}
 
 /// The builtins whose operands may be native numbers: the arithmetic and comparison operators.
 pub fn takes_numbers(builtin: &str) -> bool {
@@ -96,228 +31,215 @@ pub fn takes_numbers(builtin: &str) -> bool {
     )
 }
 
-/// The type of `value` when it is a native number.
-pub unsafe fn number_type(value: Sexp) -> Option<NumberType> {
-    if value.kind() != SexpType::Record {
-        return None;
-    }
-    match crate::heap().layouts.get(value.record_layout())?.fields {
-        Fields::Number(ty) => Some(ty),
-        _ => None,
-    }
+/// Whether `value` is a single `I64`, as opposed to a `List<I64>` or an R value.
+pub unsafe fn is_number(value: Sexp) -> bool {
+    value.kind() == SexpType::I64 && !value.is_array() && value.length() == 1
 }
 
-/// `value` as a number, when it is a native number.
-pub unsafe fn read(value: Sexp) -> Option<Number> {
-    let ty = number_type(value)?;
-    let bits = u128::from(value.record_bits(0)) | (u128::from(value.record_bits(1)) << 64);
-    Some(Number { ty, bits })
+/// `value` as an `i64`, when it is a single `I64`.
+pub unsafe fn read(value: Sexp) -> Option<i64> {
+    is_number(value).then(|| value.slice::<i64>()[0])
 }
 
-/// A fresh native number object, rooted for the current scope.
-pub unsafe fn alloc(number: Number) -> R<Sexp> {
-    let heap = crate::heap();
-    let layout = heap.layouts.intern(Layout {
-        tag: None,
-        fields: Fields::Number(number.ty),
-    });
-    let object = heap
-        .alloc_number(layout, number.bits)
-        .map_err(|failure| error(failure.to_string()))?;
-    heap.root(object);
+/// A fresh single `I64`, rooted for the current scope.
+pub unsafe fn alloc(value: i64) -> R<Sexp> {
+    let object = values::alloc_uninit(SexpType::I64, 1)?;
+    object.slice_mut::<i64>()[0] = value;
     Ok(object)
 }
 
-/// The native number a suffixed literal such as `5i64` or `1.5dec` denotes, from its type and
-/// the literal's text without the suffix. The literal lowering calls this.
-pub unsafe fn from_text(ty: NumberType, text: &str) -> R<Sexp> {
-    alloc(parse(ty, text).map_err(error)?)
+/// A fresh `List<I64>` of `items`, rooted for the current scope.
+pub unsafe fn list(items: &[i64]) -> R<Sexp> {
+    let object = values::alloc_uninit(SexpType::I64, items.len())?;
+    object.slice_mut::<i64>().copy_from_slice(items);
+    Ok(arrays::finish(object))
 }
 
-/// Parses decimal (`5`, `-2.5`, `1e3`) or hexadecimal (`0xFF`) text as a number of type `ty`. The
-/// value must fit exactly, except that an `F32` rounds to the nearest `F32` as a float literal
-/// does.
-pub fn parse(ty: NumberType, text: &str) -> Result<Number, String> {
+/// The `I64` a suffixed literal such as `5i64` denotes, from the literal's text without the
+/// suffix. The literal lowering calls this.
+pub unsafe fn from_text(text: &str) -> R<Sexp> {
+    alloc(parse(text).map_err(error)?)
+}
+
+/// Parses decimal (`5`, `-2`, `1e3`) or hexadecimal (`0xFF`) text as an `I64`, which must hold
+/// the value exactly.
+pub fn parse(text: &str) -> Result<i64, String> {
     let trimmed = text.trim();
-    let failure = |reason: TextError| match reason {
+    parse_exact(trimmed).map_err(|reason| match reason {
         TextError::Malformed => format!("`{trimmed}` is not a number"),
-        TextError::Inexact => format!("{trimmed} does not fit {}", ty.name()),
-    };
-    match ty {
-        NumberType::F32 if !is_hex(trimmed) => {
-            let value: f32 = trimmed.parse().map_err(|_| failure(TextError::Malformed))?;
-            if value.is_infinite() {
-                return Err(failure(TextError::Inexact));
-            }
-            Ok(Number::f32(value))
-        }
-        NumberType::F32 => {
-            let value = parse_exact(trimmed, 0).map_err(failure)?;
-            convert(Source::Int(value), ty).ok_or_else(|| failure(TextError::Inexact))
-        }
-        NumberType::Dec => {
-            let raw = parse_exact(trimmed, DEC_DIGITS).map_err(failure)?;
-            match raw {
-                Wide::Signed(raw) => Ok(Number::dec(raw)),
-                Wide::Big(_) => Err(failure(TextError::Inexact)),
-            }
-        }
-        _ => {
-            let value = parse_exact(trimmed, 0).map_err(failure)?;
-            convert(Source::Int(value), ty).ok_or_else(|| failure(TextError::Inexact))
-        }
-    }
+        TextError::Inexact => format!("{trimmed} does not fit I64"),
+    })
 }
 
-/// The literal that rebuilds the number, as `print` and `deparse` show it: `5i64`, `1.5dec`,
-/// `255u8`. A non-finite `F32` has no literal, so it shows the conversion that builds it.
-pub fn literal(number: Number) -> String {
-    match number.ty {
-        NumberType::F32 => {
-            let value = number.as_f32();
-            if value.is_finite() {
-                format!("{}f32", float_text(f64::from(value), value.to_string()))
-            } else {
-                format!("Num.to_f32({})", to_text(number))
-            }
-        }
-        ty => format!("{}{}", to_text(number), ty.suffix()),
-    }
+/// The literal that rebuilds the number, as `print` and `deparse` show it: `5i64`.
+pub fn literal(value: i64) -> String {
+    format!("{value}i64")
 }
 
-/// The number as `Num.to_str` writes it, without a suffix.
-pub fn to_text(number: Number) -> String {
-    match number.ty {
-        NumberType::F32 => {
-            let value = number.as_f32();
-            if value.is_nan() {
-                "NaN".to_owned()
-            } else if value.is_infinite() {
-                if value > 0.0 { "Inf" } else { "-Inf" }.to_owned()
-            } else {
-                float_text(f64::from(value), value.to_string())
-            }
-        }
-        NumberType::Dec => dec_text(number.as_dec()),
-        ty => with_int!(ty, T => T::from_bits(number.bits).to_string(), String::new()),
-    }
-}
-
-/// Whether two numbers are the same value: equal integers or decimals of one type, or `F32`s that
-/// are equal or both `NaN`, as `identical()` compares doubles.
-pub fn identical(left: Number, right: Number) -> bool {
-    if left.ty != right.ty {
-        return false;
-    }
-    match left.ty {
-        NumberType::F32 => {
-            let (left, right) = (left.as_f32(), right.as_f32());
-            left == right || left.is_nan() && right.is_nan()
-        }
-        _ => left.bits == right.bits,
-    }
-}
-
-/// The payload a dictionary hashes and compares for the number as a key: the bits, with `-0`
-/// folded into `0`, or `None` for a `NaN`, which is no key.
-pub fn key_bits(number: Number) -> Option<u128> {
-    match number.ty {
-        NumberType::F32 => {
-            let value = number.as_f32();
-            (!value.is_nan()).then(|| u128::from((value + 0.0).to_bits()))
-        }
-        _ => Some(number.bits),
-    }
-}
-
-/// Whether a literal `match` pattern matches the number: a native number pattern of the same
-/// value, or an R number that converts exactly to the number's type and equals it.
-pub unsafe fn literal_matches(pattern: Sexp, number: Number) -> bool {
+/// Whether a literal `match` pattern matches the number: an `I64` pattern of the same value, or
+/// an R number that converts exactly to an `I64` and equals it.
+pub unsafe fn literal_matches(pattern: Sexp, value: i64) -> bool {
     let pattern = match read(pattern) {
-        Some(pattern) => pattern,
-        None => match r_source(pattern)
-            .ok()
-            .and_then(|source| convert(source, number.ty))
-        {
-            Some(pattern) => pattern,
-            None => return false,
-        },
+        Some(pattern) => Some(pattern),
+        None => r_source(pattern).ok().and_then(convert),
     };
-    identical(pattern, number)
+    pattern == Some(value)
 }
 
 // Operators.
 
-/// `+`, `-`, `*`, `/`, `^`, `%%` and `%/%` with a native number among the operands.
+/// `+`, `-`, `*`, `/`, `^`, `%%` and `%/%` with an `I64` or a `List<I64>` among the operands.
 pub unsafe fn arithmetic(call: &Call<'_>, op: Op) -> R<Sexp> {
     let name = call.name();
     match call.args {
         [single] => {
-            let Some(number) = read(single.value) else {
+            if single.value.kind() != SexpType::I64 {
                 return Err(refusal(call));
-            };
+            }
             match op {
                 Op::Add => Ok(single.value),
-                Op::Subtract => alloc(negate(number).map_err(|message| call.error(message))?),
+                Op::Subtract => {
+                    let items = single.value.slice::<i64>();
+                    let result = values::alloc_uninit(SexpType::I64, items.len())?;
+                    for (slot, &item) in result.slice_mut::<i64>().iter_mut().zip(items) {
+                        *slot = negate(item).map_err(|message| call.error(message))?;
+                    }
+                    Ok(shaped(result, single.value.is_array()))
+                }
                 _ => Err(call.error("invalid unary operator")),
             }
         }
         [left, right] => {
-            let (left, right) = operands(call, left.value, right.value)?;
-            alloc(binary(name, op, left, right).map_err(|message| call.error(message))?)
+            let operands = operands(call, left.value, right.value)?;
+            let result = values::alloc_uninit(SexpType::I64, operands.count)?;
+            let slots = result.slice_mut::<i64>();
+            for (position, slot) in slots.iter_mut().enumerate() {
+                let (a, b) = operands.at(position);
+                *slot = binary(name, op, a, b)
+                    .map_err(|message| call.error(operands.locate(message, position)))?;
+            }
+            Ok(shaped(result, operands.list))
         }
         _ => Err(call.error("operator needs one or two arguments")),
     }
 }
 
-/// A comparison with a native number among the operands, whose answer `holds` gives from the
-/// order of the two numbers, `None` when an `F32` `NaN` leaves them unordered.
-pub unsafe fn comparison(call: &Call<'_>, holds: impl Fn(Option<Ordering>) -> bool) -> R<Sexp> {
+/// A comparison with an `I64` or a `List<I64>` among the operands, whose answer `holds` gives
+/// from the order of two numbers: a `Bool`, or a `List<Bool>` for lists.
+pub unsafe fn comparison(call: &Call<'_>, holds: impl Fn(Ordering) -> bool) -> R<Sexp> {
     let [left, right] = call.args else {
         return Err(call.error("comparison needs two arguments"));
     };
-    let (left, right) = operands(call, left.value, right.value)?;
-    scalar_bool(holds(order(left, right)))
+    let operands = operands(call, left.value, right.value)?;
+    let result = values::alloc_uninit(SexpType::Logical, operands.count)?;
+    for (position, slot) in result.slice_mut::<i32>().iter_mut().enumerate() {
+        let (a, b) = operands.at(position);
+        *slot = i32::from(holds(a.cmp(&b)));
+    }
+    Ok(shaped(result, operands.list))
 }
 
-/// The two operands of an operator as numbers of one type: an R number beside a native number
-/// converts to the native number's type.
-unsafe fn operands(call: &Call<'_>, left: Sexp, right: Sexp) -> R<(Number, Number)> {
-    match (read(left), read(right)) {
-        (Some(first), Some(second)) if first.ty == second.ty => Ok((first, second)),
-        (Some(first), Some(second)) => Err(call.error(format!(
-            "`{}` needs two numbers of one type, not {} and {}; convert one with `Num.to_{}()`",
-            call.name(),
-            first.ty.name(),
-            second.ty.name(),
-            first.ty.suffix(),
-        ))),
-        (Some(first), None) => Ok((first, operand(call, first.ty, right)?)),
-        (None, Some(second)) => Ok((operand(call, second.ty, left)?, second)),
-        (None, None) => Err(refusal(call)),
+/// A fresh result vector as a list when an operand was one, and as a single value otherwise.
+unsafe fn shaped(result: Sexp, list: bool) -> Sexp {
+    if list { arrays::finish(result) } else { result }
+}
+
+/// The operands of a binary operator, at least one of them an `I64` or a `List<I64>`.
+struct Operands<'a> {
+    left: Operand<'a>,
+    right: Operand<'a>,
+    /// The number of results: the length of the list operands, or one.
+    count: usize,
+    list: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Operand<'a> {
+    Single(i64),
+    Items(&'a [i64]),
+}
+
+impl Operands<'_> {
+    fn at(&self, position: usize) -> (i64, i64) {
+        let item = |operand: Operand<'_>| match operand {
+            Operand::Single(value) => value,
+            // `count` is the length of every list operand, so the position is in bounds.
+            Operand::Items(items) => items[position],
+        };
+        (item(self.left), item(self.right))
+    }
+
+    /// An item's error message, naming the item when the operator works on lists.
+    fn locate(&self, message: String, position: usize) -> String {
+        if self.list {
+            format!("{message} (at item {})", position + 1)
+        } else {
+            message
+        }
     }
 }
 
-/// An R operand converted to `ty`, which must be a plain length-one double or integer.
-unsafe fn operand(call: &Call<'_>, ty: NumberType, value: Sexp) -> R<Number> {
+/// The two operands of an operator: an R number beside an `I64` converts to one, and two lists
+/// must have one length, because a list is never recycled.
+unsafe fn operands<'a>(call: &Call<'_>, left: Sexp, right: Sexp) -> R<Operands<'a>> {
+    let (left_operand, right_operand) = match (native_operand(left), native_operand(right)) {
+        (Some(first), Some(second)) => (first, second),
+        (Some(first), None) => (first, Operand::Single(r_operand(call, right)?)),
+        (None, Some(second)) => (Operand::Single(r_operand(call, left)?), second),
+        (None, None) => return Err(refusal(call)),
+    };
+    let count = match (left_operand, right_operand) {
+        (Operand::Items(first), Operand::Items(second)) if first.len() != second.len() => {
+            return Err(call.error(format!(
+                "`{}` needs lists of the same length, but they have {} and {} items; a list is never recycled",
+                call.name(),
+                first.len(),
+                second.len()
+            )));
+        }
+        (Operand::Items(items), _) | (_, Operand::Items(items)) => items.len(),
+        _ => 1,
+    };
+    Ok(Operands {
+        left: left_operand,
+        right: right_operand,
+        count,
+        list: left.is_array() || right.is_array(),
+    })
+}
+
+/// An `I64` operand: a single number, or the items of a list.
+unsafe fn native_operand<'a>(value: Sexp) -> Option<Operand<'a>> {
+    if value.kind() != SexpType::I64 {
+        return None;
+    }
+    let items = value.slice::<i64>();
+    Some(match items {
+        [single] if !value.is_array() => Operand::Single(*single),
+        _ => Operand::Items(items),
+    })
+}
+
+/// An R operand converted to an `I64`, which must be a plain length-one double or integer.
+unsafe fn r_operand(call: &Call<'_>, value: Sexp) -> R<i64> {
     if value.kind() == SexpType::Record {
         return Err(refusal(call));
     }
+    if value.is_array() {
+        return Err(call.error(format!(
+            "`{}` cannot combine I64 with {}; convert one side explicitly",
+            call.name(),
+            arrays::describe(value)
+        )));
+    }
     let source = r_source(value).map_err(|problem| {
         call.error(format!(
-            "`{}` cannot combine {} {} with {problem}",
-            call.name(),
-            article(ty),
-            ty.name()
+            "`{}` cannot combine an I64 with {problem}",
+            call.name()
         ))
     })?;
-    convert(source, ty).ok_or_else(|| {
-        call.error(format!(
-            "{} does not fit {}",
-            source_text(source),
-            ty.name()
-        ))
-    })
+    convert(source)
+        .ok_or_else(|| call.error(format!("{} does not fit I64", source_text(source))))
 }
 
 /// The boundary error for the operand that is a ry value but not a number.
@@ -328,197 +250,63 @@ unsafe fn refusal(call: &Call<'_>) -> crate::unwind::Unwind {
     }
 }
 
-fn article(ty: NumberType) -> &'static str {
-    match ty {
-        NumberType::I8 | NumberType::I16 | NumberType::I32 | NumberType::I64 => "an",
-        NumberType::I128 => "an",
-        _ => "a",
-    }
-}
-
-/// The result of a binary operator on two numbers of one type, or the error message.
-pub fn binary(name: &str, op: Op, left: Number, right: Number) -> Result<Number, String> {
-    let ty = left.ty;
-    match ty {
-        NumberType::F32 => {
-            let (a, b) = (left.as_f32(), right.as_f32());
-            let (wide_a, wide_b) = (f64::from(a), f64::from(b));
-            Ok(Number::f32(match op {
-                Op::Add => a + b,
-                Op::Subtract => a - b,
-                Op::Multiply => a * b,
-                Op::Divide => a / b,
-                Op::Power => arith::power(wide_a, wide_b) as f32,
-                Op::Modulo => arith::real_modulo(wide_a, wide_b) as f32,
-                Op::IntegerDivide => arith::real_integer_divide(wide_a, wide_b) as f32,
-            }))
-        }
-        NumberType::Dec => dec_binary(name, op, left.as_dec(), right.as_dec()).map(Number::dec),
-        _ => with_int!(
-            ty,
-            T => int_binary(name, op, T::from_bits(left.bits), T::from_bits(right.bits), ty)
-                .map(|value| Number::int(ty, value)),
-            Err(String::new())
-        ),
-    }
-}
-
-fn overflow(name: &str, ty: NumberType) -> String {
-    format!(
-        "integer overflow in `{name}`: the result does not fit {}",
-        ty.name()
-    )
-}
-
-fn int_binary<T: Int>(name: &str, op: Op, a: T, b: T, ty: NumberType) -> Result<T, String> {
-    let overflowed = || overflow(name, ty);
+/// The result of a binary operator on two `I64`s, or the error message.
+pub fn binary(name: &str, op: Op, a: i64, b: i64) -> Result<i64, String> {
+    let overflowed = || overflow(name);
     match op {
         Op::Add => a.checked_add(b).ok_or_else(overflowed),
         Op::Subtract => a.checked_sub(b).ok_or_else(overflowed),
         Op::Multiply => a.checked_mul(b).ok_or_else(overflowed),
-        Op::Divide => Err(format!(
-            "`/` divides fractional numbers, and {} is an integer type; use `%/%` for floored division",
-            ty.name()
-        )),
+        Op::Divide => Err(
+            "`/` divides fractional numbers, and I64 is an integer type; use `%/%` for floored division"
+                .to_owned(),
+        ),
         Op::IntegerDivide | Op::Modulo => {
-            if b == T::ZERO {
+            if b == 0 {
                 return Err(format!("integer division by zero in `{name}`"));
             }
             // `checked_rem` fails only for the most negative value by -1, whose remainder is 0.
-            let remainder = a.checked_rem(b).unwrap_or(T::ZERO);
-            let floored = remainder != T::ZERO && remainder.is_negative() != b.is_negative();
-            if op == Op::Modulo {
-                // The remainder and the divisor have opposite signs, so the sum cannot overflow.
-                return Ok(if floored {
-                    remainder.wrapping_add(b)
-                } else {
-                    remainder
-                });
-            }
-            let quotient = a.checked_div(b).ok_or_else(overflowed)?;
-            // A floored quotient is below zero, so one less still fits.
-            Ok(if floored {
-                quotient.wrapping_sub(T::ONE)
-            } else {
-                quotient
-            })
-        }
-        Op::Power => {
-            if b.is_negative() {
-                return Err(format!(
-                    "`^` on {} needs an exponent of zero or more",
-                    ty.name()
-                ));
-            }
-            match narrow::<u32>(b.wide()) {
-                Some(exponent) => a.checked_pow(exponent).ok_or_else(overflowed),
-                None if a == T::ZERO || a == T::ONE => Ok(a),
-                // -1 to an even power is 1, to an odd power -1.
-                None if a.wide() == Wide::Signed(-1) => {
-                    Ok(if b.to_bits() & 1 == 0 { T::ONE } else { a })
-                }
-                None => Err(overflowed()),
-            }
-        }
-    }
-}
-
-fn dec_binary(name: &str, op: Op, a: i128, b: i128) -> Result<i128, String> {
-    let overflowed = || format!("`{name}` overflows Dec: the result does not fit");
-    match op {
-        Op::Add => a.checked_add(b).ok_or_else(overflowed),
-        Op::Subtract => a.checked_sub(b).ok_or_else(overflowed),
-        Op::Multiply => dec_multiply(a, b).ok_or_else(overflowed),
-        Op::Divide => {
-            if b == 0 {
-                return Err("division by zero in `/` on Dec".to_owned());
-            }
-            dec_divide(a, b).ok_or_else(overflowed)
-        }
-        Op::IntegerDivide | Op::Modulo => {
-            if b == 0 {
-                return Err(format!("division by zero in `{name}` on Dec"));
-            }
             let remainder = a.checked_rem(b).unwrap_or(0);
             let floored = remainder != 0 && (remainder < 0) != (b < 0);
             if op == Op::Modulo {
+                // The remainder and the divisor have opposite signs, so the sum cannot overflow.
                 return Ok(if floored { remainder + b } else { remainder });
             }
             let quotient = a.checked_div(b).ok_or_else(overflowed)?;
-            let quotient = if floored { quotient - 1 } else { quotient };
-            quotient.checked_mul(DEC_SCALE).ok_or_else(overflowed)
+            // A floored quotient is below zero, so one less still fits.
+            Ok(if floored { quotient - 1 } else { quotient })
         }
         Op::Power => {
-            if b < 0 || b % DEC_SCALE != 0 {
-                return Err("`^` on Dec needs a whole exponent of zero or more".to_owned());
+            if b < 0 {
+                return Err("`^` on I64 needs an exponent of zero or more".to_owned());
             }
-            let mut exponent = b / DEC_SCALE;
-            let mut base = a;
-            let mut result = DEC_SCALE;
-            while exponent > 0 {
-                if exponent & 1 == 1 {
-                    result = dec_multiply(result, base).ok_or_else(overflowed)?;
-                }
-                exponent >>= 1;
-                if exponent > 0 {
-                    base = dec_multiply(base, base).ok_or_else(overflowed)?;
-                }
+            match u32::try_from(b) {
+                Ok(exponent) => a.checked_pow(exponent).ok_or_else(overflowed),
+                Err(_) if a == 0 || a == 1 => Ok(a),
+                // -1 to an even power is 1, to an odd power -1.
+                Err(_) if a == -1 => Ok(if b & 1 == 0 { 1 } else { -1 }),
+                Err(_) => Err(overflowed()),
             }
-            Ok(result)
         }
     }
+}
+
+fn overflow(name: &str) -> String {
+    format!("integer overflow in `{name}`: the result does not fit I64")
 }
 
 /// Unary minus.
-pub fn negate(number: Number) -> Result<Number, String> {
-    match number.ty {
-        NumberType::F32 => Ok(Number::f32(-number.as_f32())),
-        NumberType::Dec => number
-            .as_dec()
-            .checked_neg()
-            .map(Number::dec)
-            .ok_or_else(|| "`-` overflows Dec: the result does not fit".to_owned()),
-        ty => with_int!(
-            ty,
-            T => T::from_bits(number.bits)
-                .checked_neg()
-                .map(|value| Number::int(ty, value))
-                .ok_or_else(|| overflow("-", ty)),
-            Err(String::new())
-        ),
-    }
-}
-
-/// The order of two numbers of one type, `None` when an `F32` `NaN` leaves them unordered.
-pub fn order(left: Number, right: Number) -> Option<Ordering> {
-    match left.ty {
-        NumberType::F32 => left.as_f32().partial_cmp(&right.as_f32()),
-        NumberType::Dec => Some(left.as_dec().cmp(&right.as_dec())),
-        ty => with_int!(
-            ty,
-            T => Some(T::from_bits(left.bits).cmp(&T::from_bits(right.bits))),
-            None
-        ),
-    }
+pub fn negate(value: i64) -> Result<i64, String> {
+    value.checked_neg().ok_or_else(|| overflow("-"))
 }
 
 // Conversions.
 
-/// A value a conversion starts from: an exact integer, a float, or a decimal's raw value.
+/// A value a conversion starts from: an exact integer or an R double.
 #[derive(Clone, Copy)]
 pub enum Source {
-    Int(Wide),
-    F32(f32),
+    Int(i64),
     F64(f64),
-    Dec(i128),
-}
-
-pub fn source(number: Number) -> Source {
-    match number.ty {
-        NumberType::F32 => Source::F32(number.as_f32()),
-        NumberType::Dec => Source::Dec(number.as_dec()),
-        ty => with_int!(ty, T => Source::Int(T::from_bits(number.bits).wide()), Source::Dec(0)),
-    }
 }
 
 /// A plain length-one R double or integer as a conversion source, or what is wrong with it.
@@ -536,7 +324,7 @@ pub unsafe fn r_source(value: Sexp) -> Result<Source, String> {
         }
         SexpType::Integer if plain => match values::ints(value)[0] {
             NA_INTEGER => Err("`NA`".to_owned()),
-            number => Ok(Source::Int(Wide::Signed(i128::from(number)))),
+            number => Ok(Source::Int(i64::from(number))),
         },
         _ => Err(phrase(value)),
     }
@@ -545,107 +333,29 @@ pub unsafe fn r_source(value: Sexp) -> Result<Source, String> {
 /// The value as an error shows it.
 pub fn source_text(source: Source) -> String {
     match source {
-        Source::Int(Wide::Signed(value)) => value.to_string(),
-        Source::Int(Wide::Big(value)) => value.to_string(),
-        Source::F32(value) => to_text(Number::f32(value)),
+        Source::Int(value) => value.to_string(),
         Source::F64(value) => double_text(value),
-        Source::Dec(raw) => dec_text(raw),
     }
 }
 
-/// `source` converted to `ty`, or `None` when it does not fit: an integer out of range, a
-/// fractional value converted to an integer type, a decimal with more than 18 decimal places, or
-/// a finite value too large for an `F32`. A conversion to a float rounds to the nearest value.
-pub fn convert(source: Source, ty: NumberType) -> Option<Number> {
-    match ty {
-        NumberType::F32 => {
-            let value = match source {
-                Source::Int(Wide::Signed(value)) => value as f32,
-                Source::Int(Wide::Big(value)) => value as f32,
-                Source::F32(value) => value,
-                Source::F64(value) => value as f32,
-                Source::Dec(raw) => dec_text(raw).parse().ok()?,
-            };
-            let finite_source = match source {
-                Source::F32(value) => value.is_finite(),
-                Source::F64(value) => value.is_finite(),
-                Source::Int(_) | Source::Dec(_) => true,
-            };
-            (value.is_finite() || !finite_source).then(|| Number::f32(value))
-        }
-        NumberType::Dec => {
-            let raw = match source {
-                Source::Int(value) => narrow::<i128>(value)?.checked_mul(DEC_SCALE)?,
-                Source::F32(value) if value.is_finite() => {
-                    exact_dec(&float_text(f64::from(value), value.to_string()))?
-                }
-                Source::F64(value) if value.is_finite() => {
-                    exact_dec(&float_text(value, value.to_string()))?
-                }
-                Source::F32(_) | Source::F64(_) => return None,
-                Source::Dec(raw) => raw,
-            };
-            Some(Number::dec(raw))
-        }
-        _ => {
-            let value = match source {
-                Source::Int(value) => value,
-                Source::F32(value) => whole_float(f64::from(value))?,
-                Source::F64(value) => whole_float(value)?,
-                Source::Dec(raw) => {
-                    if raw % DEC_SCALE != 0 {
-                        return None;
-                    }
-                    Wide::Signed(raw / DEC_SCALE)
-                }
-            };
-            with_int!(ty, T => narrow::<T>(value).map(|value| Number::int(ty, value)), None)
-        }
+/// `source` as an `I64`, or `None` when it is fractional or out of range.
+pub fn convert(source: Source) -> Option<i64> {
+    // 2^63, the first double past `i64::MAX`.
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    match source {
+        Source::Int(value) => Some(value),
+        Source::F64(value) => (value.is_finite()
+            && value.fract() == 0.0
+            && (-LIMIT..LIMIT).contains(&value))
+        .then(|| value as i64),
     }
 }
 
 /// `source` as the nearest R double.
 pub fn to_double(source: Source) -> f64 {
     match source {
-        Source::Int(Wide::Signed(value)) => value as f64,
-        Source::Int(Wide::Big(value)) => value as f64,
-        Source::F32(value) => f64::from(value),
+        Source::Int(value) => value as f64,
         Source::F64(value) => value,
-        // The decimal text parses to the correctly rounded double.
-        Source::Dec(raw) => dec_text(raw).parse().unwrap_or(f64::NAN),
-    }
-}
-
-fn whole_float(value: f64) -> Option<Wide> {
-    const TWO_127: f64 = 170_141_183_460_469_231_731_687_303_715_884_105_728.0;
-    if !value.is_finite() || value.fract() != 0.0 {
-        return None;
-    }
-    if value >= 0.0 {
-        (value < 2.0 * TWO_127).then(|| Wide::from_unsigned(value as u128))
-    } else {
-        (value >= -TWO_127).then(|| Wide::Signed(value as i128))
-    }
-}
-
-fn exact_dec(text: &str) -> Option<i128> {
-    match parse_exact(text, DEC_DIGITS).ok()? {
-        Wide::Signed(raw) => Some(raw),
-        Wide::Big(_) => None,
-    }
-}
-
-/// A float's text for parsing or showing: Rust's shortest round-trip digits, in scientific
-/// notation when they would be long.
-fn float_text(value: f64, plain: String) -> String {
-    let magnitude = value.abs();
-    if magnitude != 0.0 && !(1e-5..1e16).contains(&magnitude) {
-        if value as f32 as f64 == value && plain.len() < 20 {
-            return plain;
-        }
-        format!("{:e}", value)
-    } else {
-        plain
     }
 }
 
@@ -655,7 +365,12 @@ fn double_text(value: f64) -> String {
     } else if value.is_infinite() {
         if value > 0.0 { "Inf" } else { "-Inf" }.to_owned()
     } else {
-        float_text(value, value.to_string())
+        let magnitude = value.abs();
+        if magnitude != 0.0 && !(1e-5..1e16).contains(&magnitude) {
+            format!("{value:e}")
+        } else {
+            value.to_string()
+        }
     }
 }
 
@@ -686,67 +401,40 @@ unsafe fn phrase(value: Sexp) -> String {
 
 // The standard library's number functions on native numbers.
 
-/// Whether a library call has a native number among its arguments, which sends an existing `Num`
-/// function to its native-number form.
+/// Whether a library call has an `I64` among its arguments, which sends an existing `Num`
+/// function to its `I64` form.
 pub unsafe fn has_number_argument(call: &Call<'_>) -> bool {
-    call.args.iter().any(|arg| number_type(arg.value).is_some())
+    call.args.iter().any(|arg| is_number(arg.value))
 }
 
-/// A number argument: a native number, or a plain R double or integer.
+/// A number argument: an `I64`, or a plain R double or integer.
 unsafe fn source_argument(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Source> {
     if let Some(number) = read(value) {
-        return Ok(source(number));
+        return Ok(Source::Int(number));
     }
     r_source(value).map_err(|_| wrong(call, parameter, "a single number", value))
 }
 
-/// `Num.to_i64(number)` and its siblings: the number converted to `ty`, an error when it does not
-/// fit, or with `checked`, `:Ok(value)` and `:Err(:OutOfBounds)`.
-unsafe fn convert_call(call: &Call<'_>, ty: NumberType, checked: bool) -> R<Sexp> {
+/// `Num.to_i64(number)`: the number as an `I64`, or an error when it does not fit.
+pub(crate) unsafe fn num_to_i64(call: &Call<'_>) -> R<Sexp> {
     let [value] = arguments(call, ["number"])?;
     let source = source_argument(call, "number", value)?;
-    match convert(source, ty) {
-        Some(number) if checked => ok(alloc(number)?),
+    match convert(source) {
         Some(number) => alloc(number),
-        None if checked => err("OutOfBounds"),
         None => Err(call.error(format!(
-            "{} does not fit {}; `{}_checked()` returns `:Err(:OutOfBounds)` instead",
-            source_text(source),
-            ty.name(),
-            call.name()
+            "{} does not fit I64; `Num.to_i64_checked()` returns `:Err(:OutOfBounds)` instead",
+            source_text(source)
         ))),
     }
 }
 
-macro_rules! conversions {
-    ($($convert:ident $(, $checked:ident)? => $ty:ident;)*) => {
-        $(
-            pub(crate) unsafe fn $convert(call: &Call<'_>) -> R<Sexp> {
-                convert_call(call, NumberType::$ty, false)
-            }
-
-            $(
-                pub(crate) unsafe fn $checked(call: &Call<'_>) -> R<Sexp> {
-                    convert_call(call, NumberType::$ty, true)
-                }
-            )?
-        )*
-    };
-}
-
-conversions! {
-    num_to_i8, num_to_i8_checked => I8;
-    num_to_i16, num_to_i16_checked => I16;
-    num_to_i32, num_to_i32_checked => I32;
-    num_to_i64, num_to_i64_checked => I64;
-    num_to_i128, num_to_i128_checked => I128;
-    num_to_u8, num_to_u8_checked => U8;
-    num_to_u16, num_to_u16_checked => U16;
-    num_to_u32, num_to_u32_checked => U32;
-    num_to_u64, num_to_u64_checked => U64;
-    num_to_u128, num_to_u128_checked => U128;
-    num_to_f32 => F32;
-    num_to_dec => Dec;
+/// `Num.to_i64_checked(number)`: `:Ok(value)`, or `:Err(:OutOfBounds)` when it does not fit.
+pub(crate) unsafe fn num_to_i64_checked(call: &Call<'_>) -> R<Sexp> {
+    let [value] = arguments(call, ["number"])?;
+    match convert(source_argument(call, "number", value)?) {
+        Some(number) => ok(alloc(number)?),
+        None => err("OutOfBounds"),
+    }
 }
 
 /// `Num.to_f64(number)`: the nearest R double.
@@ -755,30 +443,18 @@ pub(crate) unsafe fn num_to_f64(call: &Call<'_>) -> R<Sexp> {
     scalar_real(to_double(source_argument(call, "number", value)?))
 }
 
-/// The two numbers of a two-argument library function, of one native type.
-unsafe fn two_numbers(call: &Call<'_>) -> R<(Number, Number)> {
+/// The two numbers of a two-argument library function.
+unsafe fn two_numbers(call: &Call<'_>) -> R<(i64, i64)> {
     named_numbers(call, ["first", "second"])
 }
 
-unsafe fn library_operand(
-    call: &Call<'_>,
-    parameter: &str,
-    ty: NumberType,
-    value: Sexp,
-) -> R<Number> {
-    let source = r_source(value).map_err(|_| {
-        wrong(
-            call,
-            parameter,
-            &format!("{} {} or a plain R number", article(ty), ty.name()),
-            value,
-        )
-    })?;
-    convert(source, ty).ok_or_else(|| {
+unsafe fn library_operand(call: &Call<'_>, parameter: &str, value: Sexp) -> R<i64> {
+    let source = r_source(value)
+        .map_err(|_| wrong(call, parameter, "an I64 or a plain R number", value))?;
+    convert(source).ok_or_else(|| {
         call.error(format!(
-            "`{parameter}` is {}, which does not fit {}",
-            source_text(source),
-            ty.name()
+            "`{parameter}` is {}, which does not fit I64",
+            source_text(source)
         ))
     })
 }
@@ -791,91 +467,30 @@ pub enum Overflow {
     Check,
 }
 
-/// `Num.add_wrap` and its siblings on native numbers. `op` is `+`, `-` or `*`.
+/// `Num.add_wrap` and its siblings on `I64`s. `op` is `+`, `-` or `*`.
 pub unsafe fn overflowing(call: &Call<'_>, op: Op, overflow: Overflow) -> R<Sexp> {
-    let (left, right) = two_numbers(call)?;
-    let ty = left.ty;
-    let symbol = match op {
-        Op::Add => "+",
-        Op::Subtract => "-",
-        _ => "*",
+    let (a, b) = two_numbers(call)?;
+    let value = match (op, overflow) {
+        (Op::Add, Overflow::Wrap) => Some(a.wrapping_add(b)),
+        (Op::Subtract, Overflow::Wrap) => Some(a.wrapping_sub(b)),
+        (_, Overflow::Wrap) => Some(a.wrapping_mul(b)),
+        (Op::Add, Overflow::Saturate) => Some(a.saturating_add(b)),
+        (Op::Subtract, Overflow::Saturate) => Some(a.saturating_sub(b)),
+        (_, Overflow::Saturate) => Some(a.saturating_mul(b)),
+        (Op::Add, Overflow::Check) => a.checked_add(b),
+        (Op::Subtract, Overflow::Check) => a.checked_sub(b),
+        (_, Overflow::Check) => a.checked_mul(b),
     };
-    let result: Option<Number> = match ty {
-        NumberType::F32 if overflow == Overflow::Wrap => {
-            return Err(call.error(format!(
-                "`{}()` needs an integer type, not F32",
-                call.name()
-            )));
-        }
-        NumberType::Dec if overflow == Overflow::Wrap => {
-            return Err(call.error(format!(
-                "`{}()` needs an integer type, not Dec",
-                call.name()
-            )));
-        }
-        NumberType::F32 => {
-            let value = binary(symbol, op, left, right).map_err(|message| call.error(message))?;
-            let (a, b, result) = (left.as_f32(), right.as_f32(), value.as_f32());
-            if overflow == Overflow::Check {
-                return if result.is_infinite() && a.is_finite() && b.is_finite() {
-                    err("Overflow")
-                } else if result.is_nan() {
-                    err("Undefined")
-                } else {
-                    ok(alloc(value)?)
-                };
-            }
-            Some(value)
-        }
-        NumberType::Dec => {
-            let value = binary(symbol, op, left, right).ok();
-            match (value, overflow) {
-                (Some(value), Overflow::Check) => return ok(alloc(value)?),
-                (None, Overflow::Check) => return err("Overflow"),
-                (Some(value), _) => Some(value),
-                (None, _) => {
-                    let (a, b) = (left.as_dec(), right.as_dec());
-                    let negative = match op {
-                        Op::Multiply => (a < 0) != (b < 0),
-                        _ => a < 0,
-                    };
-                    Some(Number::dec(if negative { i128::MIN } else { i128::MAX }))
-                }
-            }
-        }
-        _ => with_int!(
-            ty,
-            T => {
-                let (a, b) = (T::from_bits(left.bits), T::from_bits(right.bits));
-                let value = match (op, overflow) {
-                    (Op::Add, Overflow::Wrap) => Some(a.wrapping_add(b)),
-                    (Op::Subtract, Overflow::Wrap) => Some(a.wrapping_sub(b)),
-                    (_, Overflow::Wrap) => Some(a.wrapping_mul(b)),
-                    (Op::Add, Overflow::Saturate) => Some(a.saturating_add(b)),
-                    (Op::Subtract, Overflow::Saturate) => Some(a.saturating_sub(b)),
-                    (_, Overflow::Saturate) => Some(a.saturating_mul(b)),
-                    (Op::Add, Overflow::Check) => a.checked_add(b),
-                    (Op::Subtract, Overflow::Check) => a.checked_sub(b),
-                    (_, Overflow::Check) => a.checked_mul(b),
-                };
-                value.map(|value| Number::int(ty, value))
-            },
-            None
-        ),
-    };
-    match (result, overflow) {
+    match (value, overflow) {
         (Some(value), Overflow::Check) => ok(alloc(value)?),
         (None, Overflow::Check) => err("Overflow"),
         (Some(value), _) => alloc(value),
-        (None, _) => Err(call.error(overflow_message(call.name(), ty))),
+        (None, _) => Err(call.error(overflow_message(call.name()))),
     }
 }
 
-fn overflow_message(name: &str, ty: NumberType) -> String {
-    format!(
-        "`{name}()` overflows: the result does not fit {}",
-        ty.name()
-    )
+fn overflow_message(name: &str) -> String {
+    format!("`{name}()` overflows: the result does not fit I64")
 }
 
 pub(crate) unsafe fn num_add_wrap(call: &Call<'_>) -> R<Sexp> {
@@ -890,46 +505,31 @@ pub(crate) unsafe fn num_mul_wrap(call: &Call<'_>) -> R<Sexp> {
     overflowing(call, Op::Multiply, Overflow::Wrap)
 }
 
-/// `Num.compare` on native numbers, `None` when one is a `NaN`.
-pub unsafe fn compare(call: &Call<'_>) -> R<Option<Ordering>> {
+/// `Num.compare` on `I64`s.
+pub unsafe fn compare(call: &Call<'_>) -> R<Ordering> {
     let (left, right) = two_numbers(call)?;
-    Ok(order(left, right))
+    Ok(left.cmp(&right))
 }
 
-/// `Num.min` and `Num.max` on native numbers.
+/// `Num.min` and `Num.max` on `I64`s.
 pub unsafe fn extreme(call: &Call<'_>, maximum: bool) -> R<Sexp> {
     let (left, right) = two_numbers(call)?;
-    let wanted = if maximum {
-        Ordering::Greater
+    alloc(if maximum {
+        left.max(right)
     } else {
-        Ordering::Less
-    };
-    let pick = if order(right, left) == Some(wanted) {
-        right
-    } else {
-        left
-    };
-    alloc(pick)
+        left.min(right)
+    })
 }
 
-/// `Num.abs` on a native number.
+/// `Num.abs` on an `I64`.
 pub unsafe fn absolute(call: &Call<'_>) -> R<Sexp> {
     let [value] = arguments(call, ["number"])?;
     let Some(number) = read(value) else {
         return Err(wrong(call, "number", "a number", value));
     };
-    let result = match number.ty {
-        NumberType::F32 => Some(Number::f32(number.as_f32().abs())),
-        NumberType::Dec => number.as_dec().checked_abs().map(Number::dec),
-        ty => with_int!(
-            ty,
-            T => T::from_bits(number.bits).checked_abs().map(|value| Number::int(ty, value)),
-            None
-        ),
-    };
-    match result {
+    match number.checked_abs() {
         Some(result) => alloc(result),
-        None => Err(call.error(overflow_message("Num.abs", number.ty))),
+        None => Err(call.error(overflow_message("Num.abs"))),
     }
 }
 
@@ -943,186 +543,101 @@ pub enum Rounding {
     Truncate,
 }
 
-/// `Num.round`, `Num.floor`, `Num.ceiling` and `Num.truncate` on a fractional number (an `F32`,
-/// a `Dec`, or for `Num.truncate` also an R double), whose result is an `I64`.
+/// `Num.round`, `Num.floor`, `Num.ceiling` and `Num.truncate` on an R double, whose result is an
+/// `I64`.
 pub unsafe fn round(call: &Call<'_>, rounding: Rounding) -> R<Sexp> {
     let [value] = arguments(call, ["number"])?;
-    let needed = "a fractional number (F32, F64 or Dec)";
-    let source = match read(value) {
-        Some(number) if number.ty.is_integer() => {
-            return Err(wrong(call, "number", needed, value));
-        }
-        Some(number) => source(number),
-        None => match r_source(value) {
-            Ok(source @ (Source::F64(_) | Source::Int(_))) => source,
-            _ => return Err(wrong(call, "number", needed, value)),
-        },
+    let needed = "a fractional number (F64)";
+    if is_number(value) {
+        return Err(wrong(call, "number", needed, value));
+    }
+    let whole = match r_source(value) {
+        Ok(Source::F64(value)) => Source::F64(match rounding {
+            Rounding::Nearest => value.round(),
+            Rounding::Floor => value.floor(),
+            Rounding::Ceiling => value.ceil(),
+            Rounding::Truncate => value.trunc(),
+        }),
+        Ok(source @ Source::Int(_)) => source,
+        Err(_) => return Err(wrong(call, "number", needed, value)),
     };
-    let whole = match source {
-        Source::F32(value) => Source::F64(round_float(f64::from(value), rounding)),
-        Source::F64(value) => Source::F64(round_float(value, rounding)),
-        Source::Dec(raw) => {
-            let quotient = raw / DEC_SCALE;
-            let remainder = raw % DEC_SCALE;
-            let whole = match rounding {
-                Rounding::Truncate => quotient,
-                Rounding::Floor if remainder < 0 => quotient - 1,
-                Rounding::Ceiling if remainder > 0 => quotient + 1,
-                Rounding::Floor | Rounding::Ceiling => quotient,
-                Rounding::Nearest if remainder.abs() * 2 >= DEC_SCALE => {
-                    quotient + remainder.signum()
-                }
-                Rounding::Nearest => quotient,
-            };
-            Source::Int(Wide::Signed(whole))
-        }
-        Source::Int(value) => Source::Int(value),
-    };
-    match convert(whole, NumberType::I64) {
+    match convert(whole) {
         Some(number) => alloc(number),
         None => Err(call.error(format!("{} does not fit I64", source_text(whole)))),
     }
 }
 
-fn round_float(value: f64, rounding: Rounding) -> f64 {
-    match rounding {
-        Rounding::Nearest => value.round(),
-        Rounding::Floor => value.floor(),
-        Rounding::Ceiling => value.ceil(),
-        Rounding::Truncate => value.trunc(),
-    }
-}
-
-/// `Num.to_str` on a native number.
+/// `Num.to_str` on an `I64`.
 pub unsafe fn text_of(call: &Call<'_>) -> R<Sexp> {
     let [value] = arguments(call, ["number"])?;
     match read(value) {
-        Some(number) => values::scalar_string(&to_text(number)),
+        Some(number) => values::scalar_string(&number.to_string()),
         None => Err(wrong(call, "number", "a number", value)),
     }
 }
 
-/// `List.range(start, end)`: the integers from `start` up to `end` in the endpoints' type, `I64`
-/// for two R numbers, or an empty list when `end` is smaller.
+/// `List.range(start, end)`: the `I64`s from `start` up to `end`, or an empty list when `end` is
+/// smaller.
 pub unsafe fn range(call: &Call<'_>, limit: usize) -> R<Sexp> {
     let [start, end] = arguments(call, ["start", "end"])?;
-    let (start, end) = match (read(start), read(end)) {
-        (Some(left), Some(right)) if left.ty == right.ty => (left, right),
-        (Some(left), None) => (left, library_operand(call, "end", left.ty, end)?),
-        (None, Some(right)) => (library_operand(call, "start", right.ty, start)?, right),
-        // Two R numbers are untyped literals, which count in `I64` as an integer literal types.
-        (None, None) => (
-            library_operand(call, "start", NumberType::I64, start)?,
-            library_operand(call, "end", NumberType::I64, end)?,
-        ),
-        (Some(left), Some(right)) => {
-            return Err(call.error(format!(
-                "`List.range()` needs two endpoints of one number type, not {} and {}",
-                left.ty.name(),
-                right.ty.name()
-            )));
-        }
+    let first = match read(start) {
+        Some(number) => number,
+        None => library_operand(call, "start", start)?,
     };
-    let ty = start.ty;
-    if !ty.is_integer() {
+    let last = match read(end) {
+        Some(number) => number,
+        None => library_operand(call, "end", end)?,
+    };
+    // Sized before anything is allocated, so a huge range fails at once.
+    let size = if last >= first {
+        u128::from(last.abs_diff(first)) + 1
+    } else {
+        0
+    };
+    if size > limit as u128 {
         return Err(call.error(format!(
-            "`List.range()` counts in an integer type, not {}",
-            ty.name()
+            "the list would have {size} elements, more than the limit of {limit}"
         )));
     }
-    let mut items = Vec::new();
-    with_int!(
-        ty,
-        T => {
-            let (mut current, last) = (T::from_bits(start.bits), T::from_bits(end.bits));
-            // Sized before anything is allocated, so a huge range fails at once.
-            let size = match (current.wide(), last.wide()) {
-                (Wide::Signed(first), Wide::Signed(last)) if last >= first => {
-                    (last.abs_diff(first)).saturating_add(1)
-                }
-                (Wide::Signed(first), Wide::Big(last)) => {
-                    last.saturating_sub(first as u128).saturating_add(1)
-                }
-                (Wide::Big(first), Wide::Big(last)) if last >= first => {
-                    (last - first).saturating_add(1)
-                }
-                _ => 0,
-            };
-            if size > limit as u128 {
-                return Err(call.error(format!(
-                    "the list would have {size} elements, more than the limit of {limit}"
-                )));
-            }
-            items
-                .try_reserve_exact(size as usize)
-                .map_err(|_| error(format!("cannot allocate a list of {size} elements")))?;
-            while current <= last {
-                items.push(alloc(Number::int(ty, current))?);
-                match current.checked_add(T::ONE) {
-                    Some(next) => current = next,
-                    None => break,
-                }
-            }
-        },
-        ()
-    );
-    Ok(arrays::finish(values::list_vector(&items)?))
+    let result = values::alloc_uninit(SexpType::I64, size as usize)?;
+    for (slot, number) in result.slice_mut::<i64>().iter_mut().zip(first..=last) {
+        *slot = number;
+    }
+    Ok(arrays::finish(result))
 }
 
 // The R boundary.
 
-/// `Num.from_r(value)`: a plain length-one double as an `F64` (itself) and an integer as an `I32`.
+/// `Num.from_r(value)`: a plain length-one double as an `F64` (itself) and an integer as an `I64`.
 pub(crate) unsafe fn num_from_r(call: &Call<'_>) -> R<Sexp> {
     let [value] = arguments(call, ["value"])?;
     let needed = "a single double or integer without attributes";
     match r_source(value) {
         Ok(Source::F64(number)) => scalar_real(number),
-        Ok(Source::Int(Wide::Signed(number))) => alloc(Number::int(NumberType::I32, number as i32)),
-        _ => Err(wrong(call, "value", needed, value)),
+        Ok(Source::Int(number)) => alloc(number),
+        Err(_) => Err(wrong(call, "value", needed, value)),
     }
 }
 
-/// `Num.to_r(number)`: an integer type as an R integer when it fits 32 bits and is not the bit
-/// pattern R reads as `NA`, otherwise as a double, which is an error past 2^53. An `F32` or a
-/// `Dec` becomes the nearest double, and an R double is itself.
+/// `Num.to_r(number)`: an `I64` as an R integer when it fits 32 bits and is not the bit pattern R
+/// reads as `NA`, otherwise as a double, which is an error past 2^53. An R double is itself.
 pub(crate) unsafe fn num_to_r(call: &Call<'_>) -> R<Sexp> {
     let [value] = arguments(call, ["number"])?;
-    let source = source_argument(call, "number", value)?;
-    match r_number(source) {
-        Ok(RNumber::Integer(number)) => scalar_integer(number),
-        Ok(RNumber::Double(number)) => scalar_real(number),
-        Err(message) => Err(call.error(message)),
+    match source_argument(call, "number", value)? {
+        Source::Int(number) => to_r(call, number),
+        Source::F64(number) => scalar_real(number),
     }
 }
 
-/// A native number as the R scalar `Num.to_r` gives for it.
-pub unsafe fn to_r(call: &Call<'_>, number: Number) -> R<Sexp> {
-    match r_number(source(number)) {
-        Ok(RNumber::Integer(value)) => scalar_integer(value),
-        Ok(RNumber::Double(value)) => scalar_real(value),
-        Err(message) => Err(call.error(message)),
-    }
-}
-
-enum RNumber {
-    Integer(i32),
-    Double(f64),
-}
-
-fn r_number(source: Source) -> Result<RNumber, String> {
-    const LIMIT: i128 = 1 << 53;
-    match source {
-        Source::Int(Wide::Signed(value)) => match i32::try_from(value) {
-            Ok(number) if number != NA_INTEGER => Ok(RNumber::Integer(number)),
-            _ if (-LIMIT..=LIMIT).contains(&value) => Ok(RNumber::Double(value as f64)),
-            _ => Err(format!(
-                "{value} is past 2^53, so an R double cannot hold it exactly"
-            )),
-        },
-        Source::Int(Wide::Big(value)) => Err(format!(
+/// An `I64` as the R scalar `Num.to_r` gives for it.
+pub unsafe fn to_r(call: &Call<'_>, value: i64) -> R<Sexp> {
+    const LIMIT: i64 = 1 << 53;
+    match i32::try_from(value) {
+        Ok(number) if number != NA_INTEGER => scalar_integer(number),
+        _ if (-LIMIT..=LIMIT).contains(&value) => scalar_real(value as f64),
+        _ => Err(call.error(format!(
             "{value} is past 2^53, so an R double cannot hold it exactly"
-        )),
-        source => Ok(RNumber::Double(to_double(source))),
+        ))),
     }
 }
 
@@ -1169,8 +684,8 @@ pub(crate) unsafe fn str_from_r(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `List.from_r(vector)`: the elements of a double, integer, logical, character or raw vector as
-/// a list of `F64`, `I32`, `Bool`, `Str` or `U8`, or the items of an R list converted the same
-/// way. Names are dropped; `NA`, a class and other attributes are refused.
+/// a list of `F64`, `I64`, `Bool` or `Str` (an integer and a raw byte both become an `I64`), or
+/// the items of an R list converted the same way. Names are dropped; `NA`, a class and other attributes are refused.
 pub(crate) unsafe fn list_from_r(call: &Call<'_>) -> R<Sexp> {
     let [vector] = arguments(call, ["vector"])?;
     if vector.is_array() {
@@ -1185,8 +700,7 @@ pub(crate) unsafe fn list_from_r(call: &Call<'_>) -> R<Sexp> {
             )));
         }
         // `F64`, `Bool` and `Str` share R's representation, so a vector of them without `NA` is
-        // already the packed layout their list uses: the conversion is one copy rather than one
-        // box per item. An R integer becomes a boxed `I32`, which takes the general path.
+        // already the packed layout their list uses, and the conversion is one copy.
         if let Some(position) = arrays::first_missing(vector) {
             return Err(call.error(format!(
                 "`vector` is `NA` at position {}, which no ry value holds",
@@ -1197,8 +711,25 @@ pub(crate) unsafe fn list_from_r(call: &Call<'_>) -> R<Sexp> {
         values::clear_attributes(copy);
         return Ok(arrays::finish(copy));
     }
+    if let SexpType::Integer | SexpType::Raw = vector.kind()
+        && vector.attrib() == nil()
+    {
+        let widened: Vec<i64> = if vector.kind() == SexpType::Integer {
+            let numbers = values::ints(vector);
+            if let Some(position) = numbers.iter().position(|&number| number == NA_INTEGER) {
+                return Err(call.error(format!(
+                    "`vector` is `NA` at position {}, which no ry value holds",
+                    position + 1
+                )));
+            }
+            numbers.iter().map(|&number| i64::from(number)).collect()
+        } else {
+            values::raws(vector).iter().map(|&byte| i64::from(byte)).collect()
+        };
+        return list(&widened);
+    }
     let items = from_r_items(call, vector)?;
-    Ok(arrays::finish(values::list_vector(&items)?))
+    arrays::from_items(&items)?.map_err(|message| call.error(message))
 }
 
 unsafe fn from_r_items(call: &Call<'_>, vector: Sexp) -> R<Vec<Sexp>> {
@@ -1235,7 +766,7 @@ unsafe fn from_r_items(call: &Call<'_>, vector: Sexp) -> R<Vec<Sexp>> {
                 if number == NA_INTEGER {
                     return Err(missing(position));
                 }
-                items.push(alloc(Number::int(NumberType::I32, number))?);
+                items.push(alloc(i64::from(number))?);
             }
         }
         SexpType::Logical => {
@@ -1257,20 +788,22 @@ unsafe fn from_r_items(call: &Call<'_>, vector: Sexp) -> R<Vec<Sexp>> {
         }
         SexpType::Raw => {
             for &byte in values::raws(vector) {
-                items.push(alloc(Number::int(NumberType::U8, byte))?);
+                items.push(alloc(i64::from(byte))?);
             }
         }
         SexpType::List => {
             for position in 0..count {
                 let item = vector.element(position);
-                if item.kind() == SexpType::Record {
+                if item.kind() == SexpType::Record || item.kind() == SexpType::I64 {
                     items.push(item);
                     continue;
                 }
                 let converted = from_r_items(call, item)?;
                 match converted.as_slice() {
                     [single] if item.kind() != SexpType::List => items.push(*single),
-                    _ => items.push(values::list_vector(&converted)?),
+                    _ => items.push(
+                        arrays::from_items(&converted)?.map_err(|message| call.error(message))?,
+                    ),
                 }
             }
         }
@@ -1287,163 +820,27 @@ unsafe fn from_r_items(call: &Call<'_>, vector: Sexp) -> R<Vec<Sexp>> {
     Ok(items)
 }
 
-// Representation helpers.
-
-const DEC_DIGITS: u32 = 18;
-const DEC_SCALE: i128 = 1_000_000_000_000_000_000;
-
-impl Number {
-    fn int<T: Int>(ty: NumberType, value: T) -> Number {
-        Number {
-            ty,
-            bits: value.to_bits(),
-        }
-    }
-
-    fn f32(value: f32) -> Number {
-        Number {
-            ty: NumberType::F32,
-            bits: u128::from(value.to_bits()),
-        }
-    }
-
-    fn dec(raw: i128) -> Number {
-        Number {
-            ty: NumberType::Dec,
-            bits: raw as u128,
-        }
-    }
-
-    fn as_f32(self) -> f32 {
-        f32::from_bits(self.bits as u32)
-    }
-
-    fn as_dec(self) -> i128 {
-        self.bits as i128
-    }
-}
-
-fn dec_text(raw: i128) -> String {
-    let magnitude = raw.unsigned_abs();
-    let scale = DEC_SCALE as u128;
-    let whole = magnitude / scale;
-    let fraction = magnitude % scale;
-    let sign = if raw < 0 { "-" } else { "" };
-    if fraction == 0 {
-        return format!("{sign}{whole}");
-    }
-    let digits = format!("{fraction:018}");
-    format!("{sign}{whole}.{}", digits.trim_end_matches('0'))
-}
-
-/// A decimal or decimal product as a 256-bit unsigned integer, least significant limb first.
-type U256 = [u64; 4];
-
-fn multiply_wide(left: u128, right: u128) -> U256 {
-    let (a0, a1) = (left as u64 as u128, left >> 64);
-    let (b0, b1) = (right as u64 as u128, right >> 64);
-    let low = a0 * b0;
-    let cross_one = a0 * b1;
-    let cross_two = a1 * b0;
-    let high = a1 * b1;
-    let middle = (low >> 64) + (cross_one as u64 as u128) + (cross_two as u64 as u128);
-    let top = high + (cross_one >> 64) + (cross_two >> 64) + (middle >> 64);
-    [low as u64, middle as u64, top as u64, (top >> 64) as u64]
-}
-
-/// The quotient of a 256-bit value by a 128-bit divisor, truncated, when it fits 128 bits.
-fn divide_wide(numerator: U256, divisor: u128) -> Option<u128> {
-    let mut quotient: U256 = [0; 4];
-    let mut remainder: u128 = 0;
-    for bit in (0..256).rev() {
-        let carry = remainder >> 127;
-        remainder = (remainder << 1) | u128::from((numerator[bit / 64] >> (bit % 64)) & 1);
-        if carry == 1 || remainder >= divisor {
-            remainder = remainder.wrapping_sub(divisor);
-            quotient[bit / 64] |= 1 << (bit % 64);
-        }
-    }
-    (quotient[2] == 0 && quotient[3] == 0)
-        .then(|| u128::from(quotient[0]) | (u128::from(quotient[1]) << 64))
-}
-
-/// A signed decimal raw value from its sign and magnitude, when it fits.
-fn signed(negative: bool, magnitude: u128) -> Option<i128> {
-    if negative {
-        if magnitude == 1 << 127 {
-            Some(i128::MIN)
-        } else {
-            i128::try_from(magnitude).ok().map(|value| -value)
-        }
-    } else {
-        i128::try_from(magnitude).ok()
-    }
-}
-
-/// `a * b` on decimals, truncated toward zero.
-fn dec_multiply(a: i128, b: i128) -> Option<i128> {
-    let product = multiply_wide(a.unsigned_abs(), b.unsigned_abs());
-    let magnitude = divide_wide(product, DEC_SCALE as u128)?;
-    signed((a < 0) != (b < 0), magnitude)
-}
-
-/// `a / b` on decimals, truncated toward zero. `b` is not zero.
-fn dec_divide(a: i128, b: i128) -> Option<i128> {
-    let numerator = multiply_wide(a.unsigned_abs(), DEC_SCALE as u128);
-    let magnitude = divide_wide(numerator, b.unsigned_abs())?;
-    signed((a < 0) != (b < 0), magnitude)
-}
-
-/// An exact integer of any of the integer types: `Big` holds the `U128` values past `i128::MAX`.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum Wide {
-    Signed(i128),
-    Big(u128),
-}
-
-impl Wide {
-    fn from_unsigned(value: u128) -> Wide {
-        match i128::try_from(value) {
-            Ok(value) => Wide::Signed(value),
-            Err(_) => Wide::Big(value),
-        }
-    }
-}
-
-fn narrow<T: TryFrom<i128> + TryFrom<u128>>(value: Wide) -> Option<T> {
-    match value {
-        Wide::Signed(value) => T::try_from(value).ok(),
-        Wide::Big(value) => T::try_from(value).ok(),
-    }
-}
+// Text.
 
 enum TextError {
     Malformed,
     Inexact,
 }
 
-fn is_hex(text: &str) -> bool {
-    let digits = text.strip_prefix('-').unwrap_or(text);
-    digits.starts_with("0x") || digits.starts_with("0X")
-}
-
-/// The exact value of decimal or hexadecimal `text` times 10^`scale`, which must be whole.
-fn parse_exact(text: &str, scale: u32) -> Result<Wide, TextError> {
+/// The exact value of decimal or hexadecimal `text`, which must be whole and fit an `i64`.
+fn parse_exact(text: &str) -> Result<i64, TextError> {
     let (negative, digits) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, text.strip_prefix('+').unwrap_or(text)),
     };
-    let magnitude = if let Some(hex) = digits
+    let magnitude: u128 = if let Some(hex) = digits
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))
     {
         if hex.is_empty() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(TextError::Malformed);
         }
-        let value = u128::from_str_radix(hex, 16).map_err(|_| TextError::Inexact)?;
-        value
-            .checked_mul(10u128.checked_pow(scale).ok_or(TextError::Inexact)?)
-            .ok_or(TextError::Inexact)?
+        u128::from_str_radix(hex, 16).map_err(|_| TextError::Inexact)?
     } else {
         let (mantissa, exponent) = match digits.find(['e', 'E']) {
             Some(at) => {
@@ -1463,7 +860,7 @@ fn parse_exact(text: &str, scale: u32) -> Result<Wide, TextError> {
         }
         let all: String = whole.chars().chain(fraction.chars()).collect();
         let mut significant = all.trim_start_matches('0');
-        let mut power = exponent - fraction.len() as i64 + i64::from(scale);
+        let mut power = exponent - fraction.len() as i64;
         if power < 0 {
             let dropped = usize::try_from(-power).map_err(|_| TextError::Inexact)?;
             if dropped >= significant.len() {
@@ -1495,117 +892,21 @@ fn parse_exact(text: &str, scale: u32) -> Result<Wide, TextError> {
         }
         value
     };
-    if negative {
-        signed(true, magnitude)
-            .map(Wide::Signed)
-            .ok_or(TextError::Inexact)
+    let signed = if negative {
+        i128::try_from(magnitude).map(|value| -value)
     } else {
-        Ok(Wide::from_unsigned(magnitude))
-    }
-}
-
-/// The operations the interpreter needs from each of Rust's integer types.
-trait Int: Copy + Ord + std::fmt::Display + TryFrom<i128> + TryFrom<u128> {
-    const ZERO: Self;
-    const ONE: Self;
-    fn from_bits(bits: u128) -> Self;
-    fn to_bits(self) -> u128;
-    fn wide(self) -> Wide;
-    fn is_negative(self) -> bool;
-    fn checked_add(self, other: Self) -> Option<Self>;
-    fn checked_sub(self, other: Self) -> Option<Self>;
-    fn checked_mul(self, other: Self) -> Option<Self>;
-    fn checked_div(self, other: Self) -> Option<Self>;
-    fn checked_rem(self, other: Self) -> Option<Self>;
-    fn checked_abs(self) -> Option<Self>;
-    fn checked_pow(self, exponent: u32) -> Option<Self>;
-    fn wrapping_add(self, other: Self) -> Self;
-    fn wrapping_sub(self, other: Self) -> Self;
-}
-
-macro_rules! int_common {
-    ($t:ty) => {
-        const ZERO: Self = 0;
-        const ONE: Self = 1;
-        fn from_bits(bits: u128) -> Self {
-            bits as $t
-        }
-        fn checked_add(self, other: Self) -> Option<Self> {
-            <$t>::checked_add(self, other)
-        }
-        fn checked_sub(self, other: Self) -> Option<Self> {
-            <$t>::checked_sub(self, other)
-        }
-        fn checked_mul(self, other: Self) -> Option<Self> {
-            <$t>::checked_mul(self, other)
-        }
-        fn checked_div(self, other: Self) -> Option<Self> {
-            <$t>::checked_div(self, other)
-        }
-        fn checked_rem(self, other: Self) -> Option<Self> {
-            <$t>::checked_rem(self, other)
-        }
-        fn checked_pow(self, exponent: u32) -> Option<Self> {
-            <$t>::checked_pow(self, exponent)
-        }
-        fn wrapping_add(self, other: Self) -> Self {
-            <$t>::wrapping_add(self, other)
-        }
-        fn wrapping_sub(self, other: Self) -> Self {
-            <$t>::wrapping_sub(self, other)
-        }
+        i128::try_from(magnitude)
     };
+    signed
+        .ok()
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or(TextError::Inexact)
 }
 
-macro_rules! signed_int {
-    ($($t:ty),*) => {
-        $(
-            impl Int for $t {
-                int_common!($t);
-                fn to_bits(self) -> u128 {
-                    self as i128 as u128
-                }
-                fn wide(self) -> Wide {
-                    Wide::Signed(self as i128)
-                }
-                fn is_negative(self) -> bool {
-                    self < 0
-                }
-                fn checked_abs(self) -> Option<Self> {
-                    <$t>::checked_abs(self)
-                }
-            }
-        )*
-    };
-}
+// The rest of `Num`.
 
-macro_rules! unsigned_int {
-    ($($t:ty),*) => {
-        $(
-            impl Int for $t {
-                int_common!($t);
-                fn to_bits(self) -> u128 {
-                    self as u128
-                }
-                fn wide(self) -> Wide {
-                    Wide::from_unsigned(self as u128)
-                }
-                fn is_negative(self) -> bool {
-                    false
-                }
-                fn checked_abs(self) -> Option<Self> {
-                    Some(self)
-                }
-            }
-        )*
-    };
-}
-
-signed_int!(i8, i16, i32, i64, i128);
-unsigned_int!(u8, u16, u32, u64, u128);
-
-/// The `Num` functions on native numbers that have no dedicated native path, picked by the
-/// function's name. A library function calls this when one of its arguments is a native number.
+/// The `Num` functions on `I64`s that have no dedicated path, picked by the function's name. A
+/// library function calls this when one of its arguments is an `I64`.
 pub unsafe fn library(call: &Call<'_>) -> R<Sexp> {
     let name = call.name();
     let fail = |message: String| call.error(message);
@@ -1624,12 +925,6 @@ pub unsafe fn library(call: &Call<'_>) -> R<Sexp> {
                 ["first", "second"]
             };
             let (left, right) = named_numbers(call, parameters)?;
-            if op == Op::Divide && is_zero(right) {
-                return Err(fail(
-                    "`second` is zero; `Num.div_checked()` returns `:Err(:DivByZero)` instead"
-                        .to_owned(),
-                ));
-            }
             alloc(binary(name, op, left, right).map_err(fail)?)
         }
         "Num.div_trunc" | "Num.div_ceil" | "Num.rem" => {
@@ -1641,218 +936,86 @@ pub unsafe fn library(call: &Call<'_>) -> R<Sexp> {
                 ))),
             }
         }
-        "Num.div_checked"
-        | "Num.div_trunc_checked"
-        | "Num.div_ceil_checked"
-        | "Num.rem_checked" => {
+        "Num.div_checked" => {
             let (left, right) = two_numbers(call)?;
-            let unchecked = name.trim_end_matches("_checked");
-            let result = if unchecked == "Num.div" {
-                if is_zero(right) {
-                    None
-                } else {
-                    Some(binary(unchecked, Op::Divide, left, right).map_err(fail)?)
-                }
-            } else {
-                division(unchecked, left, right).map_err(fail)?
-            };
-            match result {
-                Some(result) if result.ty == NumberType::F32 && result.as_f32().is_nan() => {
-                    err("Undefined")
-                }
+            ok(alloc(binary(name, Op::Divide, left, right).map_err(fail)?)?)
+        }
+        "Num.div_trunc_checked" | "Num.div_ceil_checked" | "Num.rem_checked" => {
+            let (left, right) = two_numbers(call)?;
+            match division(name.trim_end_matches("_checked"), left, right).map_err(fail)? {
                 Some(result) => ok(alloc(result)?),
                 None => err("DivByZero"),
             }
         }
         "Num.is_lt" | "Num.is_gt" | "Num.is_lte" | "Num.is_gte" => {
             let (left, right) = two_numbers(call)?;
-            let order = order(left, right);
             scalar_bool(match name {
-                "Num.is_lt" => order == Some(Ordering::Less),
-                "Num.is_gt" => order == Some(Ordering::Greater),
-                "Num.is_lte" => matches!(order, Some(Ordering::Less | Ordering::Equal)),
-                _ => matches!(order, Some(Ordering::Greater | Ordering::Equal)),
+                "Num.is_lt" => left < right,
+                "Num.is_gt" => left > right,
+                "Num.is_lte" => left <= right,
+                _ => left >= right,
             })
         }
         "Num.is_multiple_of" => {
             let (left, right) = two_numbers(call)?;
-            if is_zero(right) {
-                return scalar_bool(is_zero(left));
-            }
-            let remainder = binary(name, Op::Modulo, left, right).map_err(fail)?;
-            scalar_bool(is_zero(remainder))
+            // `checked_rem` fails only for the most negative value by -1, a multiple.
+            scalar_bool(match right {
+                0 => left == 0,
+                _ => left.checked_rem(right).unwrap_or(0) == 0,
+            })
         }
         "Num.abs_diff" => {
             let (left, right) = two_numbers(call)?;
-            let (low, high) = if order(left, right) == Some(Ordering::Greater) {
-                (right, left)
-            } else {
-                (left, right)
-            };
+            let (low, high) = (left.min(right), left.max(right));
             alloc(binary(name, Op::Subtract, high, low).map_err(fail)?)
         }
         "Num.neg" => alloc(negate(one_number(call)?).map_err(fail)?),
-        "Num.is_zero" | "Num.is_positive" | "Num.is_negative" => {
-            let number = one_number(call)?;
-            let sign = order(number, zero(number.ty));
-            scalar_bool(match name {
-                "Num.is_zero" => sign == Some(Ordering::Equal),
-                "Num.is_positive" => sign == Some(Ordering::Greater),
-                _ => sign == Some(Ordering::Less),
-            })
+        "Num.is_zero" => scalar_bool(one_number(call)? == 0),
+        "Num.is_positive" => scalar_bool(one_number(call)? > 0),
+        "Num.is_negative" => scalar_bool(one_number(call)? < 0),
+        "Num.is_even" => scalar_bool(one_number(call)? % 2 == 0),
+        "Num.is_odd" => scalar_bool(one_number(call)? % 2 != 0),
+        _ => {
+            one_number(call)?;
+            Err(fail(format!(
+                "`{name}()` takes a fractional number (F64), not an I64; convert it with `Num.to_f64()`"
+            )))
         }
-        "Num.is_even" | "Num.is_odd" => {
-            let number = one_number(call)?;
-            if !number.ty.is_integer() {
-                return Err(fail(format!(
-                    "`{name}()` takes an integer, not {} {}",
-                    article(number.ty),
-                    number.ty.name()
-                )));
-            }
-            scalar_bool((number.bits & 1 == 0) == (name == "Num.is_even"))
-        }
-        _ => fractional(call, name, one_number(call)?),
     }
 }
 
-/// The fractional `Num` functions (`Num.sqrt`, `Num.sin` and the rest) on an `F32` or a `Dec`,
-/// computed in double precision and rounded back to the argument's type.
-unsafe fn fractional(call: &Call<'_>, name: &str, number: Number) -> R<Sexp> {
-    if number.ty.is_integer() {
-        return Err(call.error(format!(
-            "`{name}()` takes a fractional number (F32, F64 or Dec), not {} {}",
-            article(number.ty),
-            number.ty.name()
-        )));
-    }
-    let value = to_double(source(number));
-    let back = |result: f64| -> R<Sexp> {
-        let source = Source::F64(result);
-        let converted = match number.ty {
-            NumberType::F32 => Some(Number::f32(result as f32)),
-            ty => convert(source, ty).or_else(|| dec_rounded(result)),
-        };
-        alloc(converted.ok_or_else(|| {
-            call.error(format!(
-                "`{name}()` gives {result}, which does not fit {}",
-                number.ty.name()
-            ))
-        })?)
-    };
-    match name {
-        "Num.sqrt" => back(value.sqrt()),
-        "Num.log" => back(value.ln()),
-        "Num.sin" => back(value.sin()),
-        "Num.cos" => back(value.cos()),
-        "Num.tan" => back(value.tan()),
-        "Num.asin" => back(value.asin()),
-        "Num.acos" => back(value.acos()),
-        "Num.atan" => back(value.atan()),
-        "Num.sqrt_checked" if value < 0.0 => err("SqrtOfNegative"),
-        "Num.sqrt_checked" => ok(back(value.sqrt())?),
-        "Num.log_checked" if value <= 0.0 => err("LogNeedsPositive"),
-        "Num.log_checked" => ok(back(value.ln())?),
-        "Num.is_nan" => scalar_bool(value.is_nan()),
-        "Num.is_finite" => scalar_bool(value.is_finite()),
-        "Num.is_infinite" => scalar_bool(value.is_infinite()),
-        _ => Err(call.error(format!("`{name}()` does not take native numbers"))),
-    }
-}
-
-/// A double rounded to the nearest `Dec`, for a fractional function whose exact result a `Dec`
-/// cannot hold.
-fn dec_rounded(value: f64) -> Option<Number> {
-    let scaled = (value * DEC_SCALE as f64).round();
-    (scaled.is_finite() && scaled.abs() < i128::MAX as f64).then(|| Number::dec(scaled as i128))
-}
-
-fn zero(ty: NumberType) -> Number {
-    Number { ty, bits: 0 }
-}
-
-fn is_zero(number: Number) -> bool {
-    order(number, zero(number.ty)) == Some(Ordering::Equal)
-}
-
-/// `Num.div_trunc`, `Num.div_ceil` or `Num.rem` on two numbers of one type: Roc's truncating
-/// quotient and remainder, or the quotient rounded up. `None` for a zero divisor.
-fn division(name: &str, left: Number, right: Number) -> Result<Option<Number>, String> {
-    if is_zero(right) {
+/// `Num.div_trunc`, `Num.div_ceil` or `Num.rem` on two `I64`s: Roc's truncating quotient and
+/// remainder, or the quotient rounded up. `None` for a zero divisor.
+fn division(name: &str, a: i64, b: i64) -> Result<Option<i64>, String> {
+    if b == 0 {
         return Ok(None);
     }
-    let ty = left.ty;
-    let result = match ty {
-        NumberType::F32 => {
-            let (a, b) = (left.as_f32(), right.as_f32());
-            Number::f32(match name {
-                "Num.div_trunc" => (a / b).trunc(),
-                "Num.div_ceil" => (a / b).ceil(),
-                _ => a % b,
-            })
-        }
-        NumberType::Dec => {
-            let (a, b) = (left.as_dec(), right.as_dec());
-            let overflowed = || format!("`{name}` overflows Dec: the result does not fit");
-            match name {
-                "Num.rem" => Number::dec(a % b),
-                _ => {
-                    let quotient = a / b;
-                    let rounds_up = name == "Num.div_ceil" && a % b != 0 && (a < 0) == (b < 0);
-                    let quotient = quotient + i128::from(rounds_up);
-                    Number::dec(quotient.checked_mul(DEC_SCALE).ok_or_else(overflowed)?)
-                }
-            }
-        }
-        _ => with_int!(
-            ty,
-            T => {
-                let (a, b) = (T::from_bits(left.bits), T::from_bits(right.bits));
-                let overflowed = || overflow(name, ty);
-                let value = match name {
-                    // Only the most negative value by -1 overflows, and its remainder is 0.
-                    "Num.rem" => a.checked_rem(b).unwrap_or(T::ZERO),
-                    _ => {
-                        let quotient = a.checked_div(b).ok_or_else(overflowed)?;
-                        let remainder = a.checked_rem(b).unwrap_or(T::ZERO);
-                        let rounds_up = name == "Num.div_ceil"
-                            && remainder != T::ZERO
-                            && a.is_negative() == b.is_negative();
-                        if rounds_up {
-                            quotient.checked_add(T::ONE).ok_or_else(overflowed)?
-                        } else {
-                            quotient
-                        }
-                    }
-                };
-                Number::int(ty, value)
-            },
-            return Err(String::new())
-        ),
-    };
-    Ok(Some(result))
+    let overflowed = || overflow(name);
+    // Only the most negative value by -1 overflows, and its remainder is 0.
+    let remainder = a.checked_rem(b).unwrap_or(0);
+    if name == "Num.rem" {
+        return Ok(Some(remainder));
+    }
+    let quotient = a.checked_div(b).ok_or_else(overflowed)?;
+    let rounds_up = name == "Num.div_ceil" && remainder != 0 && (a < 0) == (b < 0);
+    Ok(Some(if rounds_up {
+        quotient.checked_add(1).ok_or_else(overflowed)?
+    } else {
+        quotient
+    }))
 }
 
-unsafe fn one_number(call: &Call<'_>) -> R<Number> {
+unsafe fn one_number(call: &Call<'_>) -> R<i64> {
     let [value] = arguments(call, ["number"])?;
     read(value).ok_or_else(|| wrong(call, "number", "a number", value))
 }
 
-unsafe fn named_numbers(call: &Call<'_>, parameters: [&str; 2]) -> R<(Number, Number)> {
+unsafe fn named_numbers(call: &Call<'_>, parameters: [&str; 2]) -> R<(i64, i64)> {
     let [first, second] = arguments(call, parameters)?;
     match (read(first), read(second)) {
-        (Some(left), Some(right)) if left.ty == right.ty => Ok((left, right)),
-        (Some(left), Some(right)) => Err(call.error(format!(
-            "`{}()` needs two numbers of one type, not {} and {}",
-            call.name(),
-            left.ty.name(),
-            right.ty.name()
-        ))),
-        (Some(left), None) => Ok((left, library_operand(call, parameters[1], left.ty, second)?)),
-        (None, Some(right)) => Ok((
-            library_operand(call, parameters[0], right.ty, first)?,
-            right,
-        )),
+        (Some(left), Some(right)) => Ok((left, right)),
+        (Some(left), None) => Ok((left, library_operand(call, parameters[1], second)?)),
+        (None, Some(right)) => Ok((library_operand(call, parameters[0], first)?, right)),
         (None, None) => Err(wrong(call, parameters[0], "a number", first)),
     }
 }

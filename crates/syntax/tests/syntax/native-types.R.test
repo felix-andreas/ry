@@ -1,61 +1,76 @@
 #==== number_suffixes
-#---- integer_and_unsigned_suffixes
+#---- integer_suffix
 5i64
-5u8
--128i8
-170141183460469231731687303715884105727i128
+-9223372036854775808i64
 #++++
-SOURCE_FILE@0..59
+SOURCE_FILE@0..28
   LITERAL@0..4
     SUFFIXED_NUMBER@0..4 "5i64"
   NEWLINE@4..5 "\n"
-  LITERAL@5..8
-    SUFFIXED_NUMBER@5..8 "5u8"
-  NEWLINE@8..9 "\n"
-  UNARY_EXPR@9..15
-    MINUS@9..10 "-"
-    LITERAL@10..15
-      SUFFIXED_NUMBER@10..15 "128i8"
-  NEWLINE@15..16 "\n"
-  LITERAL@16..59
-    SUFFIXED_NUMBER@16..59 "170141183460469231731687303715884105727i128"
+  UNARY_EXPR@5..28
+    MINUS@5..6 "-"
+    LITERAL@6..28
+      SUFFIXED_NUMBER@6..28 "9223372036854775808i64"
 
-#---- float_and_decimal_suffixes
-1.5f32
+#---- float_suffix
+1.5f64
 1e3f64
-1.5dec
 .5f64
 #++++
-SOURCE_FILE@0..26
+SOURCE_FILE@0..19
   LITERAL@0..6
-    SUFFIXED_NUMBER@0..6 "1.5f32"
+    SUFFIXED_NUMBER@0..6 "1.5f64"
   NEWLINE@6..7 "\n"
   LITERAL@7..13
     SUFFIXED_NUMBER@7..13 "1e3f64"
   NEWLINE@13..14 "\n"
-  LITERAL@14..20
-    SUFFIXED_NUMBER@14..20 "1.5dec"
-  NEWLINE@20..21 "\n"
-  LITERAL@21..26
-    SUFFIXED_NUMBER@21..26 ".5f64"
+  LITERAL@14..19
+    SUFFIXED_NUMBER@14..19 ".5f64"
 
-#---- hex_takes_integer_suffixes
-0xFFu8
-0x10i32
-#++++
-SOURCE_FILE@0..14
-  LITERAL@0..6
-    SUFFIXED_NUMBER@0..6 "0xFFu8"
-  NEWLINE@6..7 "\n"
-  LITERAL@7..14
-    SUFFIXED_NUMBER@7..14 "0x10i32"
-
-#---- hex_digits_are_not_suffixes
-0x1Ff32
+#---- hex_takes_the_integer_suffix
+0xFFi64
 #++++
 SOURCE_FILE@0..7
   LITERAL@0..7
-    DOUBLE@0..7 "0x1Ff32"
+    SUFFIXED_NUMBER@0..7 "0xFFi64"
+
+#---- hex_digits_are_not_suffixes
+0x1Ff64
+#++++
+SOURCE_FILE@0..7
+  LITERAL@0..7
+    DOUBLE@0..7 "0x1Ff64"
+
+#---- other_widths_are_errors
+5i32
+1.5f32
+1.5dec
+5u8
+#++++
+SOURCE_FILE@0..22
+  ERROR@0..4
+    ERROR_TOKEN@0..4 "5i32"
+  NEWLINE@4..5 "\n"
+  ERROR@5..11
+    ERROR_TOKEN@5..11 "1.5f32"
+  NEWLINE@11..12 "\n"
+  ERROR@12..18
+    ERROR_TOKEN@12..18 "1.5dec"
+  NEWLINE@18..19 "\n"
+  ERROR@19..22
+    ERROR_TOKEN@19..22 "5u8"
+err: 0..4: `i32` is not a number type suffix; use i64 or f64, the two number types ry has
+err: 5..11: `f32` is not a number type suffix; use i64 or f64, the two number types ry has
+err: 12..18: `dec` is not a number type suffix; use i64 or f64, the two number types ry has
+err: 19..22: `u8` is not a number type suffix; use i64 or f64, the two number types ry has
+
+#---- hex_takes_no_other_width
+0xFFi32
+#++++
+SOURCE_FILE@0..7
+  ERROR@0..7
+    ERROR_TOKEN@0..7 "0xFFi32"
+err: 0..7: `i32` is not a number type suffix; a hex literal takes only i64
 
 #---- r_literals_keep_their_lexing
 5i
@@ -74,7 +89,7 @@ SOURCE_FILE@0..5
 SOURCE_FILE@0..3
   ERROR@0..3
     ERROR_TOKEN@0..3 "5u7"
-err: 0..3: `u7` is not a number type suffix; use one of i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, f32, f64 or dec
+err: 0..3: `u7` is not a number type suffix; use i64 or f64, the two number types ry has
 
 #---- malformed_hex_suffix
 0xFFu7
@@ -82,7 +97,7 @@ err: 0..3: `u7` is not a number type suffix; use one of i8, i16, i32, i64, i128,
 SOURCE_FILE@0..6
   ERROR@0..6
     ERROR_TOKEN@0..6 "0xFFu7"
-err: 0..6: `u7` is not a number type suffix; a hex literal takes i8, i16, i32, i64, i128, u8, u16, u32, u64 or u128
+err: 0..6: `u7` is not a number type suffix; a hex literal takes only i64
 
 #---- suffix_with_trailing_letters
 5i64x
@@ -90,7 +105,7 @@ err: 0..6: `u7` is not a number type suffix; a hex literal takes i8, i16, i32, i
 SOURCE_FILE@0..5
   ERROR@0..5
     ERROR_TOKEN@0..5 "5i64x"
-err: 0..5: `i64x` is not a number type suffix; use one of i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, f32, f64 or dec
+err: 0..5: `i64x` is not a number type suffix; use i64 or f64, the two number types ry has
 
 #==== fstrings
 #---- fstring_with_interpolations
@@ -1083,12 +1098,12 @@ err: 14..25: `..` ignores the remaining fields of a record pattern, so it needs 
 
 #---- suffixed_literal_pattern
 match (n) {
-  0u8 => :Zero
+  0i64 => :Zero
   -1i64 => :MinusOne
 }
 #++++
-SOURCE_FILE@0..49
-  MATCH_EXPR@0..49
+SOURCE_FILE@0..50
+  MATCH_EXPR@0..50
     IDENT@0..5 "match"
     WHITESPACE@5..6 " "
     PAREN_EXPR@6..9
@@ -1100,30 +1115,30 @@ SOURCE_FILE@0..49
     L_BRACE@10..11 "{"
     NEWLINE@11..12 "\n"
     WHITESPACE@12..14 "  "
-    MATCH_ARM@14..26
-      PATTERN_LITERAL@14..17
-        LITERAL@14..17
-          SUFFIXED_NUMBER@14..17 "0u8"
-      WHITESPACE@17..18 " "
-      FAT_ARROW@18..20 "=>"
-      WHITESPACE@20..21 " "
-      TAG_EXPR@21..26
-        COLON@21..22 ":"
-        NAME@22..26
-          IDENT@22..26 "Zero"
-    NEWLINE@26..27 "\n"
-    WHITESPACE@27..29 "  "
-    MATCH_ARM@29..47
-      PATTERN_LITERAL@29..34
-        MINUS@29..30 "-"
-        LITERAL@30..34
-          SUFFIXED_NUMBER@30..34 "1i64"
-      WHITESPACE@34..35 " "
-      FAT_ARROW@35..37 "=>"
-      WHITESPACE@37..38 " "
-      TAG_EXPR@38..47
-        COLON@38..39 ":"
-        NAME@39..47
-          IDENT@39..47 "MinusOne"
-    NEWLINE@47..48 "\n"
-    R_BRACE@48..49 "}"
+    MATCH_ARM@14..27
+      PATTERN_LITERAL@14..18
+        LITERAL@14..18
+          SUFFIXED_NUMBER@14..18 "0i64"
+      WHITESPACE@18..19 " "
+      FAT_ARROW@19..21 "=>"
+      WHITESPACE@21..22 " "
+      TAG_EXPR@22..27
+        COLON@22..23 ":"
+        NAME@23..27
+          IDENT@23..27 "Zero"
+    NEWLINE@27..28 "\n"
+    WHITESPACE@28..30 "  "
+    MATCH_ARM@30..48
+      PATTERN_LITERAL@30..35
+        MINUS@30..31 "-"
+        LITERAL@31..35
+          SUFFIXED_NUMBER@31..35 "1i64"
+      WHITESPACE@35..36 " "
+      FAT_ARROW@36..38 "=>"
+      WHITESPACE@38..39 " "
+      TAG_EXPR@39..48
+        COLON@39..40 ":"
+        NAME@40..48
+          IDENT@40..48 "MinusOne"
+    NEWLINE@48..49 "\n"
+    R_BRACE@49..50 "}"

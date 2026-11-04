@@ -285,57 +285,24 @@ pub enum Atomic {
 /// ry's own scalar types, in the order the standard library documents them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum NativeScalar {
-    I8,
-    I16,
-    I32,
     I64,
-    I128,
-    U8,
-    U16,
-    U32,
-    U64,
-    U128,
-    F32,
     F64,
-    Dec,
     Bool,
     Str,
 }
 
 impl NativeScalar {
-    pub const ALL: [NativeScalar; 15] = [
-        NativeScalar::I8,
-        NativeScalar::I16,
-        NativeScalar::I32,
+    pub const ALL: [NativeScalar; 4] = [
         NativeScalar::I64,
-        NativeScalar::I128,
-        NativeScalar::U8,
-        NativeScalar::U16,
-        NativeScalar::U32,
-        NativeScalar::U64,
-        NativeScalar::U128,
-        NativeScalar::F32,
         NativeScalar::F64,
-        NativeScalar::Dec,
         NativeScalar::Bool,
         NativeScalar::Str,
     ];
 
     pub fn name(self) -> &'static str {
         match self {
-            NativeScalar::I8 => "I8",
-            NativeScalar::I16 => "I16",
-            NativeScalar::I32 => "I32",
             NativeScalar::I64 => "I64",
-            NativeScalar::I128 => "I128",
-            NativeScalar::U8 => "U8",
-            NativeScalar::U16 => "U16",
-            NativeScalar::U32 => "U32",
-            NativeScalar::U64 => "U64",
-            NativeScalar::U128 => "U128",
-            NativeScalar::F32 => "F32",
             NativeScalar::F64 => "F64",
-            NativeScalar::Dec => "Dec",
             NativeScalar::Bool => "Bool",
             NativeScalar::Str => "Str",
         }
@@ -347,27 +314,16 @@ impl NativeScalar {
             .find(|scalar| scalar.name() == text)
     }
 
-    /// The type a literal suffix names: `i64` in `5i64`, `dec` in `1.5dec`.
-    pub fn from_suffix(suffix: &str) -> Option<NativeScalar> {
-        NativeScalar::ALL
-            .into_iter()
-            .take(13)
-            .find(|scalar| scalar.name().eq_ignore_ascii_case(suffix))
-    }
-
     pub fn is_number(self) -> bool {
-        !matches!(self, NativeScalar::Bool | NativeScalar::Str)
+        matches!(self, NativeScalar::I64 | NativeScalar::F64)
     }
 
     pub fn is_integer(self) -> bool {
-        self.integer_range().is_some()
+        self == NativeScalar::I64
     }
 
     pub fn is_fraction(self) -> bool {
-        matches!(
-            self,
-            NativeScalar::F32 | NativeScalar::F64 | NativeScalar::Dec
-        )
+        self == NativeScalar::F64
     }
 
     /// The R type whose representation this type shares, which it therefore fits.
@@ -376,49 +332,21 @@ impl NativeScalar {
             NativeScalar::F64 => Some(Atomic::Double),
             NativeScalar::Bool => Some(Atomic::Logical),
             NativeScalar::Str => Some(Atomic::Character),
-            _ => None,
+            NativeScalar::I64 => None,
         }
     }
 
-    /// The smallest and largest value of an integer type. `U128`'s maximum does not fit an
-    /// `i128`, so the upper bound is a `u128`.
-    pub fn integer_range(self) -> Option<(i128, u128)> {
-        Some(match self {
-            NativeScalar::I8 => (i8::MIN.into(), i8::MAX as u128),
-            NativeScalar::I16 => (i16::MIN.into(), i16::MAX as u128),
-            NativeScalar::I32 => (i32::MIN.into(), i32::MAX as u128),
-            NativeScalar::I64 => (i64::MIN.into(), i64::MAX as u128),
-            NativeScalar::I128 => (i128::MIN, i128::MAX as u128),
-            NativeScalar::U8 => (0, u8::MAX.into()),
-            NativeScalar::U16 => (0, u16::MAX.into()),
-            NativeScalar::U32 => (0, u32::MAX.into()),
-            NativeScalar::U64 => (0, u64::MAX.into()),
-            NativeScalar::U128 => (0, u128::MAX),
-            _ => return None,
-        })
-    }
-
-    /// Whether this number type holds `literal` exactly: an integer type holds a whole number in
-    /// its range, `F32` and `F64` a finite value in theirs, and `Dec` one with at most 18 decimal
-    /// places in its range.
+    /// Whether this number type holds `literal` exactly: `I64` holds a whole number in its range
+    /// and `F64` any finite value.
     pub fn holds(self, literal: &NumberLiteral) -> bool {
-        if let Some((low, high)) = self.integer_range() {
-            return match literal.whole {
-                Some(magnitude) if literal.negative => {
-                    magnitude <= low.unsigned_abs() && (magnitude == 0 || low < 0)
-                }
-                Some(magnitude) => magnitude <= high,
-                None => false,
-            };
-        }
         match self {
-            NativeScalar::F32 => literal.value.abs() <= f64::from(f32::MAX),
+            NativeScalar::I64 => match literal.whole {
+                Some(magnitude) if literal.negative => magnitude <= i64::MIN.unsigned_abs().into(),
+                Some(magnitude) => magnitude <= i64::MAX as u128,
+                None => false,
+            },
             NativeScalar::F64 => literal.value.is_finite(),
-            NativeScalar::Dec => {
-                literal.value.abs() < 1.7e20
-                    && literal.decimal_places.is_none_or(|places| places <= 18)
-            }
-            _ => false,
+            NativeScalar::Bool | NativeScalar::Str => false,
         }
     }
 }
@@ -612,11 +540,13 @@ pub enum Constraint {
     /// What a `List` can hold: a ry value (a ry scalar, record, tuple, tag, `List`, `Dict` or
     /// `Set`).
     ArrayItem,
-    /// Every ry number type.
+    /// A ry number: `I64` or `F64`.
     Number,
-    /// The ry integer types.
+    /// A number literal known to be whole and used as a ry number, which only `I64` admits. It
+    /// is never generalized, so no annotation spells it.
     Int,
-    /// `F32`, `F64` and `Dec`.
+    /// A number literal known to be fractional and used as a ry number, which only `F64` admits.
+    /// Like `Int`, it is never generalized.
     Frac,
     /// Every ry type but a function, the values `==` compares structurally.
     Eq,
@@ -632,15 +562,13 @@ pub enum Constraint {
 impl Constraint {
     /// Shared by rendering and parsing, so every constraint the checker prints can
     /// be written back in an annotation.
-    pub const SPELLINGS: [(&'static str, Constraint); 9] = [
+    pub const SPELLINGS: [(&'static str, Constraint); 7] = [
         ("numeric", Constraint::Numeric),
         ("atomic", Constraint::AtomicElement),
         ("key", Constraint::Key),
         ("scalar numeric", Constraint::ScalarNumeric),
         ("item", Constraint::ArrayItem),
         ("number", Constraint::Number),
-        ("int", Constraint::Int),
-        ("frac", Constraint::Frac),
         ("eq", Constraint::Eq),
     ];
 
@@ -702,18 +630,6 @@ impl Constraint {
         }
     }
 
-    /// The ry type a literal constraint defaults to where only a ry value fits, such as a `List`
-    /// item.
-    pub fn native_default(self) -> Option<NativeScalar> {
-        match self {
-            Constraint::WholeLiteral { integer: true } => Some(NativeScalar::I32),
-            Constraint::WholeLiteral { integer: false } | Constraint::Int => {
-                Some(NativeScalar::I64)
-            }
-            Constraint::FracLiteral | Constraint::Frac => Some(NativeScalar::F64),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]

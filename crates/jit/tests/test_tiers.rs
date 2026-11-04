@@ -637,7 +637,7 @@ fn traversals_agree_across_tiers() {
     // A library traversal whose callback inlines runs as a compiled loop. A list or an element
     // the loop does not expect, an `NA` answer or an integer overflow hands the call back to
     // tier 0, which must then give the same value or error.
-    // `List.from_r` turns R integers into boxed `I32`s, so the list of R integers the compiled
+    // `List.from_r` turns R integers into boxed `I64`s, so the list of R integers the compiled
     // integer loops read is written as a literal.
     let integers = (1..=50)
         .map(|item| format!("{item}L"))

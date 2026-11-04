@@ -90,17 +90,21 @@ pub unsafe fn slot_value(object: Sexp, index: usize) -> R<Sexp> {
     }
 }
 
-/// The error a builtin that does not understand native values raises for one, naming the
+/// Whether `value` is a ry value R code cannot read: a record, tuple, tag, dictionary or set, or
+/// an `I64` or `List<I64>`.
+pub unsafe fn is_native(value: Sexp) -> bool {
+    matches!(value.kind(), SexpType::Record | SexpType::I64)
+}
+
+/// The error a builtin that does not understand native values raises for `value`, naming the
 /// argument (`point`) and the conversion that fixes it.
-pub fn boundary_message(subject: &str, kind: NativeKind) -> String {
-    let conversion = match kind {
-        NativeKind::Number(_) => "Num.to_r()",
-        _ => "as.list()",
+pub unsafe fn boundary_message(subject: &str, value: Sexp) -> String {
+    let (name, conversion) = match value.kind() {
+        SexpType::I64 if value.is_array() => ("List<I64>", "List.to_r()"),
+        SexpType::I64 => ("I64", "Num.to_r()"),
+        _ => (native_kind(value).type_name(), "as.list()"),
     };
-    format!(
-        "{subject} is a ry {}, not an R object; convert it with `{conversion}`",
-        kind.type_name()
-    )
+    format!("{subject} is a ry {name}, not an R object; convert it with `{conversion}`")
 }
 
 /// Refuses a native value among `args`, for a builtin that is not in [`ACCEPTS_NATIVE`]. Only
@@ -108,14 +112,13 @@ pub fn boundary_message(subject: &str, kind: NativeKind) -> String {
 /// `skip_numbers`, for the operators that compute on native numbers, those pass through.
 pub unsafe fn check_native_args(call: Sexp, args: &[Arg], skip_numbers: bool) -> R<()> {
     for (position, arg) in args.iter().enumerate() {
-        if arg.value.kind() == SexpType::Record
-            && !(skip_numbers && crate::numbers::number_type(arg.value).is_some())
-        {
+        let kind = arg.value.kind();
+        if kind == SexpType::Record || (kind == SexpType::I64 && !skip_numbers) {
             let subject = argument_text(call, position)
                 .unwrap_or_else(|| format!("argument {}", position + 1));
             return Err(error_in(
                 call,
-                boundary_message(&subject, native_kind(arg.value)),
+                boundary_message(&subject, arg.value),
             ));
         }
     }
@@ -126,7 +129,7 @@ pub unsafe fn check_native_args(call: Sexp, args: &[Arg], skip_numbers: bool) ->
 /// or an `if` condition; `expression` is the code that produced it.
 pub unsafe fn boundary_error(value: Sexp, expression: Sexp, call: Sexp) -> Unwind {
     let subject = short_code(expression).unwrap_or_else(|| "the value".to_owned());
-    error_in(call, boundary_message(&subject, native_kind(value)))
+    error_in(call, boundary_message(&subject, value))
 }
 
 /// The source of argument `position` of `call`, in backticks, unless a `...` before it makes the
@@ -227,9 +230,9 @@ unsafe fn do_try(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_text(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     if let Some(number) = numbers::read(value) {
-        return scalar_string(&numbers::to_text(number));
+        return scalar_string(&number.to_string());
     }
-    if value.kind() == SexpType::Record || value.is_array() {
+    if is_native(value) || value.is_array() {
         return scalar_string(&deparse::deparse_one_line(value));
     }
     let as_character = values::install("as.character")?;
@@ -539,10 +542,6 @@ unsafe fn field_index(object: Sexp, name: &[u8], call: Sexp) -> R<usize> {
             call,
             "a set has no fields; test an element with `Set.contains(set, element)`",
         )),
-        NativeKind::Number(ty) => Err(error_in(
-            call,
-            format!("{} is a number and has no field `{}`", ty.name(), text()),
-        )),
         NativeKind::Tuple => Err(error_in(
             call,
             format!(
@@ -595,12 +594,6 @@ unsafe fn item_index(object: Sexp, indices: &[Sexp], call: Sexp) -> R<usize> {
             return Err(error_in(
                 call,
                 "a set cannot be indexed; test an element with `Set.contains(set, element)`",
-            ));
-        }
-        NativeKind::Number(ty) => {
-            return Err(error_in(
-                call,
-                format!("{} is a number and cannot be indexed", ty.name()),
             ));
         }
         NativeKind::Record | NativeKind::Tuple | NativeKind::Tag => {}
@@ -736,7 +729,7 @@ pub unsafe fn eval_bound_registers(
 /// Whether the value of the `match` guard `guard` holds, as `if` reads a condition, except that
 /// a record, tuple or tag gets the boundary error.
 pub unsafe fn guard_holds(condition: Sexp, guard: Sexp, call: Sexp) -> R<bool> {
-    if condition.kind() == SexpType::Record {
+    if is_native(condition) {
         return Err(boundary_error(condition, guard, call));
     }
     eval::as_condition(condition, call)
@@ -952,7 +945,7 @@ unsafe fn payload_matches(
     };
     let named = items.iter().any(|(tag, _)| *tag != nil());
     match &layout.fields {
-        Fields::Dict | Fields::Set | Fields::Number(_) => Ok(false),
+        Fields::Dict | Fields::Set => Ok(false),
         Fields::Positional(count) => {
             if named || rest || items.len() != *count as usize {
                 return Ok(false);
@@ -1218,6 +1211,10 @@ unsafe fn compare(
     prefix: &str,
     messages: &mut Vec<String>,
 ) -> R<()> {
+    if target.kind() == SexpType::I64 || current.kind() == SexpType::I64 {
+        compare_numbers(target, current, prefix, messages);
+        return Ok(());
+    }
     if target.kind() != SexpType::Record || current.kind() != SexpType::Record {
         if target.kind() == SexpType::Record || current.kind() == SexpType::Record {
             messages.push(format!(
@@ -1236,18 +1233,6 @@ unsafe fn compare(
             kind_phrase(target),
             kind_phrase(current)
         ));
-        return Ok(());
-    }
-    if let NativeKind::Number(_) = left.kind() {
-        if let (Some(left), Some(right)) = (numbers::read(target), numbers::read(current))
-            && !numbers::identical(left, right)
-        {
-            messages.push(format!(
-                "{prefix}target is {}, current is {}",
-                numbers::literal(left),
-                numbers::literal(right)
-            ));
-        }
         return Ok(());
     }
     if matches!(left.kind(), NativeKind::Dict | NativeKind::Set) {
@@ -1349,8 +1334,46 @@ unsafe fn compare_r(
     Ok(())
 }
 
+/// `all.equal` where either side is an `I64` or a `List<I64>`: exact, because the numbers are
+/// integers.
+unsafe fn compare_numbers(target: Sexp, current: Sexp, prefix: &str, messages: &mut Vec<String>) {
+    let same_shape = target.kind() == current.kind() && target.is_array() == current.is_array();
+    if !same_shape {
+        messages.push(format!(
+            "{prefix}target is {}, current is {}",
+            kind_phrase(target),
+            kind_phrase(current)
+        ));
+        return;
+    }
+    let (left, right) = (target.slice::<i64>(), current.slice::<i64>());
+    if left.len() != right.len() {
+        messages.push(format!(
+            "{prefix}Lengths ({}, {}) differ",
+            left.len(),
+            right.len()
+        ));
+        return;
+    }
+    let differences = left.iter().zip(right).filter(|(a, b)| a != b).count();
+    match (target.is_array(), left.iter().zip(right).find(|(a, b)| a != b)) {
+        (_, None) => {}
+        (false, Some((&a, &b))) => messages.push(format!(
+            "{prefix}target is {}, current is {}",
+            numbers::literal(a),
+            numbers::literal(b)
+        )),
+        (true, Some(_)) => messages.push(format!(
+            "{prefix}{differences} of {} items differ",
+            left.len()
+        )),
+    }
+}
+
 unsafe fn kind_phrase(value: Sexp) -> String {
-    if value.kind() == SexpType::Record {
+    if value.kind() == SexpType::I64 {
+        if value.is_array() { "a ry List<I64>" } else { "a ry I64" }.to_owned()
+    } else if value.kind() == SexpType::Record {
         format!("a ry {}", native_kind(value).type_name())
     } else {
         format!("of type {}", value.kind().name())

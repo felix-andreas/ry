@@ -12,9 +12,11 @@
 //! - a weak reference stores its key, value and finalizer;
 //! - a primitive stores its index in the primitive table;
 //! - a ry record, tuple or tag stores its interned layout id, its slot count, a mask of the
-//!   slots that hold raw numbers, and then its eight-byte slots. A ry native number is a record
-//!   object too, whose layout names its number type and whose two raw slots hold its 16-byte
-//!   payload.
+//!   slots that hold raw numbers, and then its eight-byte slots.
+//!
+//! A ry `I64` is a vector of its own type ([`SexpType::I64`]) with `REALSXP`'s layout: eight bytes
+//! per item, inline after the length and capacity. A single `I64` is a length-one vector, and a
+//! `List<I64>` is the same object at any length with the Array flag set.
 //!
 //! The accessors are `unsafe` because a handle is only valid while its object is reachable from a
 //! root. Holding one across an allocation without rooting it is a bug, and the GC stress tests
@@ -87,6 +89,10 @@ pub enum SexpType {
     /// A ry record, tuple or tag. GNU R leaves the code unused; the layout says which of the
     /// three a value is (see [`crate::records`]).
     Record = 27,
+    /// A ry `I64`: a dense vector of 64-bit signed integers with `REALSXP`'s layout. GNU R leaves
+    /// the code unused, so C code and R builtins that switch on the type refuse it instead of
+    /// reading its bits as doubles.
+    I64 = 28,
     /// A free heap slot. Seeing it through a handle means the handle outlived its object.
     Free = 31,
 }
@@ -119,6 +125,7 @@ impl SexpType {
             24 => SexpType::Raw,
             25 => SexpType::Object,
             27 => SexpType::Record,
+            28 => SexpType::I64,
             _ => return None,
         })
     }
@@ -156,6 +163,7 @@ impl SexpType {
             SexpType::Object => "S4",
             SexpType::Binding => "binding",
             SexpType::Record => "record",
+            SexpType::I64 => "I64",
             SexpType::Free => "FREESXP",
         }
     }
@@ -189,6 +197,7 @@ impl SexpType {
             SexpType::Object => "OBJSXP",
             SexpType::Binding => "BINDINGSXP",
             SexpType::Record => "RECORDSXP",
+            SexpType::I64 => "I64SXP",
             SexpType::Free => "FREESXP",
         }
     }
@@ -215,7 +224,7 @@ impl SexpType {
         Some(match self {
             SexpType::Char | SexpType::Raw => 1,
             SexpType::Logical | SexpType::Integer => 4,
-            SexpType::Real => 8,
+            SexpType::Real | SexpType::I64 => 8,
             SexpType::Complex => 16,
             SexpType::String | SexpType::List | SexpType::Expression => size_of::<Sexp>(),
             _ => return None,
@@ -953,13 +962,6 @@ impl Sexp {
         }
     }
 
-    /// The raw eight bytes of slot `index`, whatever the slot holds. A native number's two
-    /// slots are raw words that only [`Sexp::record_layout`]'s number type gives a meaning, so
-    /// they are read with this rather than [`Sexp::record_slot`].
-    pub unsafe fn record_bits(self, index: usize) -> u64 {
-        unsafe { *(self.record_slots() as *const u64).add(index) }
-    }
-
     /// The handle in slot `index`, if the slot holds one.
     pub unsafe fn record_handle(self, index: usize) -> Option<Sexp> {
         match unsafe { self.record_slot(index) } {
@@ -1000,21 +1002,6 @@ impl Sexp {
                     unboxed |= 1 << index;
                 }
                 *(self.record_slots() as *mut u64).add(index) = slot.encode();
-            }
-            payload.unboxed.set(unboxed);
-        }
-    }
-
-    /// Fills a fresh record whose slots are all raw words. Nothing may read the record before.
-    pub(crate) unsafe fn init_record_bits(self, layout: u32, words: &[u64]) {
-        unsafe {
-            let payload = self.payload::<RecordObject>();
-            payload.layout.set(layout);
-            payload.slot_count.set(words.len() as u32);
-            let mut unboxed = 0u64;
-            for (index, &word) in words.iter().enumerate() {
-                unboxed |= 1 << index;
-                *(self.record_slots() as *mut u64).add(index) = word;
             }
             payload.unboxed.set(unboxed);
         }

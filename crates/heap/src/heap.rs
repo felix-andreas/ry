@@ -619,6 +619,7 @@ impl Heap {
             SexpType::Logical
                 | SexpType::Integer
                 | SexpType::Real
+                | SexpType::I64
                 | SexpType::Complex
                 | SexpType::Raw
         ) {
@@ -1083,16 +1084,6 @@ impl Heap {
         for (index, slot) in slots.iter().enumerate() {
             self.layouts.observe(layout, index, slot_kind_of(*slot));
         }
-    }
-
-    /// A ry native number of the interned number `layout` (see [`crate::records::NumberType`]),
-    /// whose payload is stored in two raw slots, low word first.
-    pub unsafe fn alloc_number(&mut self, layout: u32, payload: u128) -> HeapResult<Sexp> {
-        let size = object_size(SexpType::Record, 2).ok_or(HeapError::TooLong)?;
-        let object = self.allocate(SexpType::Record, size, &[])?;
-        object.init_record_bits(layout, &[payload as u64, (payload >> 64) as u64]);
-        object.mark_not_mutable();
-        Ok(object)
     }
 
     /// Replaces slot `index` of `record`, storing `value` raw or as a handle as [`slot_for`]
@@ -2549,6 +2540,7 @@ unsafe fn is_leaf(object: Sexp, nil: Sexp) -> bool {
             | SexpType::Logical
             | SexpType::Integer
             | SexpType::Real
+            | SexpType::I64
             | SexpType::Complex
             | SexpType::Raw
     ) && !object.is_altrep()
@@ -2694,10 +2686,11 @@ impl Sexp {
 }
 
 /// Every type code a vector can have, for generators and tests.
-pub const VECTOR_TYPES: [SexpType; 8] = [
+pub const VECTOR_TYPES: [SexpType; 9] = [
     SexpType::Logical,
     SexpType::Integer,
     SexpType::Real,
+    SexpType::I64,
     SexpType::Complex,
     SexpType::String,
     SexpType::List,

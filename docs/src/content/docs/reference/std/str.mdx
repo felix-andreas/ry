@@ -36,7 +36,7 @@ expressions.
 | [`Str.to_utf8`](#strto_utf8) | The bytes of the string's UTF-8 encoding. |
 | [`Str.from_utf8`](#strfrom_utf8) | The string a list of bytes encodes, or `:Err(:BadUtf8)`. |
 | [`Str.from_utf8_lossy`](#strfrom_utf8_lossy) | Decodes UTF-8 bytes, replacing each invalid sequence with U+FFFD. |
-| [`Str.to_i64`](#strto_i64) | Parses a whole number that fits an `integer`, or `:Err(:InvalidNumStr)`. |
+| [`Str.to_i64`](#strto_i64) | Parses a whole number that fits an `I64`, or `:Err(:InvalidNumStr)`. |
 | [`Str.to_f64`](#strto_f64) | Parses a decimal number, or `:Err(:InvalidNumStr)`; `NA` and `NaN` are not numbers. |
 | [`Str.with_ascii_lowercased`](#strwith_ascii_lowercased) | Lowercases the ASCII letters and leaves every other character alone. |
 | [`Str.with_ascii_uppercased`](#strwith_ascii_uppercased) | Uppercases the ASCII letters. |
@@ -660,14 +660,14 @@ Str.count_utf8_bytes("hé")
 <TabItem label="Inline">
 
 ```r
-Str.to_utf8 <- function(string: Str) -> List<U8>
+Str.to_utf8 <- function(string: Str) -> List<I64>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: Str) -> List<U8>
+#: fn(string: Str) -> List<I64>
 Str.to_utf8 <- function(string)
 ```
 
@@ -678,7 +678,7 @@ The bytes of the string's UTF-8 encoding.
 
 ```r ry run runtime=ry dput
 Str.to_utf8("hé")
-#> [104u8, 195u8, 169u8]
+#> [104i64, 195i64, 169i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L933)
@@ -689,14 +689,14 @@ Str.to_utf8("hé")
 <TabItem label="Inline">
 
 ```r
-Str.from_utf8 <- function(bytes: List<U8>) -> Result<Str, :BadUtf8>
+Str.from_utf8 <- function(bytes: List<I64>) -> Result<Str, :BadUtf8>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(bytes: List<U8>) -> Result<Str, :BadUtf8>
+#: fn(bytes: List<I64>) -> Result<Str, :BadUtf8>
 Str.from_utf8 <- function(bytes)
 ```
 
@@ -718,14 +718,14 @@ Str.from_utf8([104, 105])
 <TabItem label="Inline">
 
 ```r
-Str.from_utf8_lossy <- function(bytes: List<U8>) -> Str
+Str.from_utf8_lossy <- function(bytes: List<I64>) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(bytes: List<U8>) -> Str
+#: fn(bytes: List<I64>) -> Str
 Str.from_utf8_lossy <- function(bytes)
 ```
 
@@ -761,7 +761,7 @@ Str.to_i64 <- function(string)
 </TabItem>
 </Tabs>
 
-Parses a whole number that fits an `integer`, or `:Err(:InvalidNumStr)`.
+Parses a whole number that fits an `I64`, or `:Err(:InvalidNumStr)`.
 
 ```r ry run runtime=ry dput
 Str.to_i64("4.2")
@@ -892,14 +892,14 @@ Str.caseless_ascii_equals("Content-Type", "content-type")
 <TabItem label="Inline">
 
 ```r
-Str.walk_utf8 <- function<S>(string: Str, state: S, f: fn(S, U8) -> S) -> S
+Str.walk_utf8 <- function<S>(string: Str, state: S, f: fn(S, I64) -> S) -> S
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <S> fn(string: Str, state: S, f: fn(S, U8) -> S) -> S
+#: <S> fn(string: Str, state: S, f: fn(S, I64) -> S) -> S
 Str.walk_utf8 <- function(string, state, f)
 ```
 
@@ -921,14 +921,14 @@ Str.walk_utf8("abc", 0, function(total, byte) total + Num.to_i64(byte))
 <TabItem label="Inline">
 
 ```r
-Str.walk_utf8_with_index <- function<S>(string: Str, state: S, f: fn(S, U8, I64) -> S) -> S
+Str.walk_utf8_with_index <- function<S>(string: Str, state: S, f: fn(S, I64, I64) -> S) -> S
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <S> fn(string: Str, state: S, f: fn(S, U8, I64) -> S) -> S
+#: <S> fn(string: Str, state: S, f: fn(S, I64, I64) -> S) -> S
 Str.walk_utf8_with_index <- function(string, state, f)
 ```
 
@@ -950,14 +950,14 @@ Str.walk_utf8_with_index("ab", [], function(seen, byte, i) List.append(seen, Num
 <TabItem label="Inline">
 
 ```r
-Str.to_utf16 <- function(string: Str) -> List<U16>
+Str.to_utf16 <- function(string: Str) -> List<I64>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: Str) -> List<U16>
+#: fn(string: Str) -> List<I64>
 Str.to_utf16 <- function(string)
 ```
 
@@ -969,7 +969,7 @@ Multilingual Plane takes two units, a surrogate pair.
 
 ```r ry run runtime=ry dput
 Str.to_utf16("h\U0001F600")
-#> [104u16, 55357u16, 56832u16]
+#> [104i64, 55357i64, 56832i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1014)
@@ -980,14 +980,14 @@ Str.to_utf16("h\U0001F600")
 <TabItem label="Inline">
 
 ```r
-Str.from_utf16 <- function(units: List<U16>) -> Result<Str, :BadUtf16>
+Str.from_utf16 <- function(units: List<I64>) -> Result<Str, :BadUtf16>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(units: List<U16>) -> Result<Str, :BadUtf16>
+#: fn(units: List<I64>) -> Result<Str, :BadUtf16>
 Str.from_utf16 <- function(units)
 ```
 
@@ -1010,14 +1010,14 @@ Str.from_utf16([104, 55357])
 <TabItem label="Inline">
 
 ```r
-Str.from_utf16_lossy <- function(units: List<U16>) -> Str
+Str.from_utf16_lossy <- function(units: List<I64>) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(units: List<U16>) -> Str
+#: fn(units: List<I64>) -> Str
 Str.from_utf16_lossy <- function(units)
 ```
 
@@ -1039,14 +1039,14 @@ Str.from_utf16_lossy([104, 105])
 <TabItem label="Inline">
 
 ```r
-Str.to_utf32 <- function(string: Str) -> List<U32>
+Str.to_utf32 <- function(string: Str) -> List<I64>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(string: Str) -> List<U32>
+#: fn(string: Str) -> List<I64>
 Str.to_utf32 <- function(string)
 ```
 
@@ -1057,7 +1057,7 @@ The string's Unicode code points, one per character.
 
 ```r ry run runtime=ry dput
 Str.to_utf32("h\u00e9")
-#> [104u32, 233u32]
+#> [104i64, 233i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1039)
@@ -1068,14 +1068,14 @@ Str.to_utf32("h\u00e9")
 <TabItem label="Inline">
 
 ```r
-Str.from_utf32 <- function(code_points: List<U32>) -> Result<Str, :BadUtf32>
+Str.from_utf32 <- function(code_points: List<I64>) -> Result<Str, :BadUtf32>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(code_points: List<U32>) -> Result<Str, :BadUtf32>
+#: fn(code_points: List<I64>) -> Result<Str, :BadUtf32>
 Str.from_utf32 <- function(code_points)
 ```
 
@@ -1098,14 +1098,14 @@ Str.from_utf32([55296])
 <TabItem label="Inline">
 
 ```r
-Str.from_utf32_lossy <- function(code_points: List<U32>) -> Str
+Str.from_utf32_lossy <- function(code_points: List<I64>) -> Str
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: fn(code_points: List<U32>) -> Str
+#: fn(code_points: List<I64>) -> Str
 Str.from_utf32_lossy <- function(code_points)
 ```
 

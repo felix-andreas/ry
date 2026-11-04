@@ -89,7 +89,7 @@ r: :Ok(F64) | :Err(:InvalidNumStr)
 #---- from_vector_keeps_the_element_type
 xs <- List.from_r(c(1L, 2L, 3L))
 #++++
-xs: List<I32>
+xs: List<I64>
 
 #---- walk_folds_to_the_state_type
 total <- List.walk([1, 2], 0, function(acc, x) acc + x)
@@ -190,16 +190,16 @@ back <- Str.from_utf16(units)
 points <- Str.to_utf32("hi")
 lossy <- Str.from_utf32_lossy(points)
 #++++
-units: List<U16>
+units: List<I64>
 back: :Ok(Str) | :Err(:BadUtf16)
-points: List<U32>
+points: List<I64>
 lossy: Str
 
 #---- from_utf32_needs_a_list_of_integers
 s <- Str.from_utf32("hi")
 #++++
 s: Unknown
-20..24 error[type-mismatch] expected `List<U32>`, found `character`. Convert an R vector with `List.from_r()`
+20..24 error[type-mismatch] expected `List<I64>`, found `character`. Convert an R vector with `List.from_r()`
 
 #==== num
 #---- checked_addition_keeps_the_number_type
@@ -252,7 +252,7 @@ n: I64
 a <- Num.bitwise_or("1", 2)
 #++++
 a: Unknown
-20..23 error[type-mismatch] expected `T`, found `character`
+20..23 error[type-mismatch] expected `I64`, found `character`
 
 #---- constants_are_doubles
 area <- Num.pi * 2

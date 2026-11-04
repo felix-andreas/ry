@@ -210,9 +210,8 @@ pub unsafe fn coerce_vector_quiet(
             return alloc(kind, 0);
         }
         SexpType::Symbol => return coerce_symbol(object, kind),
-        SexpType::Record => {
-            let native = crate::records::native_kind(object);
-            return Err(error(crate::records::boundary_message("the value", native)));
+        SexpType::Record | SexpType::I64 => {
+            return Err(error(crate::records::boundary_message("the value", object)));
         }
         SexpType::Pairlist | SexpType::Language | SexpType::Dots => {
             return coerce_pairlist(object, kind, warnings);

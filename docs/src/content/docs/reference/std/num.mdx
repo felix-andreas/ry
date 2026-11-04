@@ -60,29 +60,9 @@ any other. The bit operations take integers as 32-bit two's complement.
 | [`Num.rem_checked`](#numrem_checked) | The remainder of the truncated division, with the sign of `first`, or `:Err(:DivByZero)`. |
 | [`Num.sqrt_checked`](#numsqrt_checked) | The square root, or `:Err(:SqrtOfNegative)`. |
 | [`Num.log_checked`](#numlog_checked) | The natural logarithm, or `:Err(:LogNeedsPositive)`. |
-| [`Num.from_r`](#numfrom_r) | Converts an R number into a ry number, refusing `NA` and a length other than one: a `double` becomes an `F64` and an `integer` an `I32`. |
-| [`Num.to_r`](#numto_r) | Converts a ry number into an R number: a fraction becomes a `double`, and an integer type an `integer` when it fits in 32 bits and a `double` otherwise. |
+| [`Num.from_r`](#numfrom_r) | Converts an R number into a ry number, refusing `NA` and a length other than one: a `double` becomes an `F64` and an `integer` an `I64`. |
+| [`Num.to_r`](#numto_r) | Converts a ry number into an R number: an `F64` becomes a `double`, and an `I64` an `integer` when it fits in 32 bits and a `double` otherwise. |
 | [`Num.to_f64`](#numto_f64) | The number as an `F64`. |
-| [`Num.to_f32`](#numto_f32) | The number as an `F32`, rounded to the nearest one. |
-| [`Num.to_dec`](#numto_dec) | The number as a `Dec`. |
-| [`Num.to_i8`](#numto_i8) | The number as an `I8`. |
-| [`Num.to_i8_checked`](#numto_i8_checked) | The number as an `I8`, or `:Err(:OutOfBounds)` when an `I8` cannot hold it exactly. |
-| [`Num.to_i16`](#numto_i16) | The number as an `I16`. |
-| [`Num.to_i16_checked`](#numto_i16_checked) | The number as an `I16`, or `:Err(:OutOfBounds)` when an `I16` cannot hold it exactly. |
-| [`Num.to_i32`](#numto_i32) | The number as an `I32`. |
-| [`Num.to_i32_checked`](#numto_i32_checked) | The number as an `I32`, or `:Err(:OutOfBounds)` when an `I32` cannot hold it exactly. |
-| [`Num.to_i128`](#numto_i128) | The number as an `I128`. |
-| [`Num.to_i128_checked`](#numto_i128_checked) | The number as an `I128`, or `:Err(:OutOfBounds)` when an `I128` cannot hold it exactly. |
-| [`Num.to_u8`](#numto_u8) | The number as a `U8`. |
-| [`Num.to_u8_checked`](#numto_u8_checked) | The number as a `U8`, or `:Err(:OutOfBounds)` when a `U8` cannot hold it exactly. |
-| [`Num.to_u16`](#numto_u16) | The number as a `U16`. |
-| [`Num.to_u16_checked`](#numto_u16_checked) | The number as a `U16`, or `:Err(:OutOfBounds)` when a `U16` cannot hold it exactly. |
-| [`Num.to_u32`](#numto_u32) | The number as a `U32`. |
-| [`Num.to_u32_checked`](#numto_u32_checked) | The number as a `U32`, or `:Err(:OutOfBounds)` when a `U32` cannot hold it exactly. |
-| [`Num.to_u64`](#numto_u64) | The number as a `U64`. |
-| [`Num.to_u64_checked`](#numto_u64_checked) | The number as a `U64`, or `:Err(:OutOfBounds)` when a `U64` cannot hold it exactly. |
-| [`Num.to_u128`](#numto_u128) | The number as a `U128`. |
-| [`Num.to_u128_checked`](#numto_u128_checked) | The number as a `U128`, or `:Err(:OutOfBounds)` when a `U128` cannot hold it exactly. |
 | [`Num.to_i64_checked`](#numto_i64_checked) | The number as an `I64`, or `:Err(:OutOfBounds)` when an `I64` cannot hold it exactly, such as a number with a fraction. |
 | [`Num.to_i64`](#numto_i64) | The number as an `I64`. |
 | [`Num.add`](#numadd) | The sum. |
@@ -353,7 +333,7 @@ Num.is_gte(1.5, 2)
 ## `Num.is_approx_eq`
 
 ```r
-#: <T: frac> fn(first: T, second: T, [rtol]: F64, [atol]: F64) -> Bool
+#: fn(first: F64, second: F64, [rtol]: F64, [atol]: F64) -> Bool
 Num.is_approx_eq <- function(first, second, rtol, atol)
 ```
 
@@ -460,14 +440,14 @@ Num.is_negative(-1)
 <TabItem label="Inline">
 
 ```r
-Num.is_even <- function<T: int>(number: T) -> Bool
+Num.is_even <- function(number: I64) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(number: T) -> Bool
+#: fn(number: I64) -> Bool
 Num.is_even <- function(number)
 ```
 
@@ -489,14 +469,14 @@ Num.is_even(4)
 <TabItem label="Inline">
 
 ```r
-Num.is_odd <- function<T: int>(number: T) -> Bool
+Num.is_odd <- function(number: I64) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(number: T) -> Bool
+#: fn(number: I64) -> Bool
 Num.is_odd <- function(number)
 ```
 
@@ -518,14 +498,14 @@ Num.is_odd(-3)
 <TabItem label="Inline">
 
 ```r
-Num.is_multiple_of <- function<T: int>(first: T, second: T) -> Bool
+Num.is_multiple_of <- function(first: I64, second: I64) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(first: T, second: T) -> Bool
+#: fn(first: I64, second: I64) -> Bool
 Num.is_multiple_of <- function(first, second)
 ```
 
@@ -547,14 +527,14 @@ Num.is_multiple_of(12, 4)
 <TabItem label="Inline">
 
 ```r
-Num.is_finite <- function<T: frac>(number: T) -> Bool
+Num.is_finite <- function(number: F64) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> Bool
+#: fn(number: F64) -> Bool
 Num.is_finite <- function(number)
 ```
 
@@ -576,14 +556,14 @@ Num.is_finite(1 / 0)
 <TabItem label="Inline">
 
 ```r
-Num.is_infinite <- function<T: frac>(number: T) -> Bool
+Num.is_infinite <- function(number: F64) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> Bool
+#: fn(number: F64) -> Bool
 Num.is_infinite <- function(number)
 ```
 
@@ -692,14 +672,14 @@ Num.neg(2.5)
 <TabItem label="Inline">
 
 ```r
-Num.ceiling <- function<T: frac>(number: T) -> I64
+Num.ceiling <- function(number: F64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> I64
+#: fn(number: F64) -> I64
 Num.ceiling <- function(number)
 ```
 
@@ -721,14 +701,14 @@ Num.ceiling(1.2)
 <TabItem label="Inline">
 
 ```r
-Num.floor <- function<T: frac>(number: T) -> I64
+Num.floor <- function(number: F64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> I64
+#: fn(number: F64) -> I64
 Num.floor <- function(number)
 ```
 
@@ -750,14 +730,14 @@ Num.floor(-1.2)
 <TabItem label="Inline">
 
 ```r
-Num.round <- function<T: frac>(number: T) -> I64
+Num.round <- function(number: F64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> I64
+#: fn(number: F64) -> I64
 Num.round <- function(number)
 ```
 
@@ -779,14 +759,14 @@ Num.round(2.5)
 <TabItem label="Inline">
 
 ```r
-Num.truncate <- function<T: frac>(number: T) -> I64
+Num.truncate <- function(number: F64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> I64
+#: fn(number: F64) -> I64
 Num.truncate <- function(number)
 ```
 
@@ -838,14 +818,14 @@ Num.pow(2, 10)
 <TabItem label="Inline">
 
 ```r
-Num.sin <- function<T: frac>(number: T) -> T
+Num.sin <- function(number: F64) -> F64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> T
+#: fn(number: F64) -> F64
 Num.sin <- function(number)
 ```
 
@@ -868,14 +848,14 @@ Num.sin(0)
 <TabItem label="Inline">
 
 ```r
-Num.cos <- function<T: frac>(number: T) -> T
+Num.cos <- function(number: F64) -> F64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> T
+#: fn(number: F64) -> F64
 Num.cos <- function(number)
 ```
 
@@ -897,14 +877,14 @@ Num.cos(0)
 <TabItem label="Inline">
 
 ```r
-Num.tan <- function<T: frac>(number: T) -> T
+Num.tan <- function(number: F64) -> F64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> T
+#: fn(number: F64) -> F64
 Num.tan <- function(number)
 ```
 
@@ -926,14 +906,14 @@ Num.tan(0)
 <TabItem label="Inline">
 
 ```r
-Num.atan <- function<T: frac>(number: T) -> T
+Num.atan <- function(number: F64) -> F64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> T
+#: fn(number: F64) -> F64
 Num.atan <- function(number)
 ```
 
@@ -972,7 +952,7 @@ Num.add_checked <- function(first, second)
 The sum, or `:Err(:Overflow)`; a `NaN` sum such as `Inf + -Inf` is `:Err(:Undefined)`.
 
 ```r ry run runtime=ry dput
-Num.add_checked(2147483647i32, 1i32)
+Num.add_checked(9223372036854775807i64, 1i64)
 #> :Err(:Overflow)
 ```
 
@@ -1059,8 +1039,8 @@ Num.add_saturated <- function(first, second)
 Adds two numbers, clamping an integer result to the largest or smallest integer.
 
 ```r ry run runtime=ry dput
-Num.add_saturated(127i8, 1i8)
-#> 127i8
+Num.add_saturated(9223372036854775807i64, 1i64)
+#> 9223372036854775807i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1331)
@@ -1088,8 +1068,8 @@ Num.sub_saturated <- function(first, second)
 Subtracts `second` from `first`, clamping an integer result.
 
 ```r ry run runtime=ry dput
-Num.sub_saturated(-127i8, 2i8)
-#> -128i8
+Num.sub_saturated(-9223372036854775807i64, 2i64)
+#> -9223372036854775808i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1339)
@@ -1117,8 +1097,8 @@ Num.mul_saturated <- function(first, second)
 Multiplies two numbers, clamping an integer result.
 
 ```r ry run runtime=ry dput
-Num.mul_saturated(100000i32, 100000i32)
-#> 2147483647i32
+Num.mul_saturated(4294967296i64, 4294967296i64)
+#> 9223372036854775807i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1347)
@@ -1129,14 +1109,14 @@ Num.mul_saturated(100000i32, 100000i32)
 <TabItem label="Inline">
 
 ```r
-Num.add_wrap <- function<T: int>(first: T, second: T) -> T
+Num.add_wrap <- function(first: I64, second: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(first: T, second: T) -> T
+#: fn(first: I64, second: I64) -> I64
 Num.add_wrap <- function(first, second)
 ```
 
@@ -1146,8 +1126,8 @@ Num.add_wrap <- function(first, second)
 Adds two integers, wrapping around on overflow as two's complement arithmetic does.
 
 ```r ry run runtime=ry dput
-Num.add_wrap(127i8, 1i8)
-#> -128i8
+Num.add_wrap(9223372036854775807i64, 1i64)
+#> -9223372036854775808i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1355)
@@ -1158,14 +1138,14 @@ Num.add_wrap(127i8, 1i8)
 <TabItem label="Inline">
 
 ```r
-Num.sub_wrap <- function<T: int>(first: T, second: T) -> T
+Num.sub_wrap <- function(first: I64, second: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(first: T, second: T) -> T
+#: fn(first: I64, second: I64) -> I64
 Num.sub_wrap <- function(first, second)
 ```
 
@@ -1175,8 +1155,8 @@ Num.sub_wrap <- function(first, second)
 Subtracts `second` from `first`, wrapping around on overflow.
 
 ```r ry run runtime=ry dput
-Num.sub_wrap(0u8, 1u8)
-#> 255u8
+Num.sub_wrap(-9223372036854775808i64, 1i64)
+#> 9223372036854775807i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1363)
@@ -1187,14 +1167,14 @@ Num.sub_wrap(0u8, 1u8)
 <TabItem label="Inline">
 
 ```r
-Num.mul_wrap <- function<T: int>(first: T, second: T) -> T
+Num.mul_wrap <- function(first: I64, second: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(first: T, second: T) -> T
+#: fn(first: I64, second: I64) -> I64
 Num.mul_wrap <- function(first, second)
 ```
 
@@ -1204,8 +1184,8 @@ Num.mul_wrap <- function(first, second)
 Multiplies two integers, wrapping around on overflow.
 
 ```r ry run runtime=ry dput
-Num.mul_wrap(16u8, 16u8)
-#> 0u8
+Num.mul_wrap(4294967296i64, 4294967296i64)
+#> 0i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1371)
@@ -1216,14 +1196,14 @@ Num.mul_wrap(16u8, 16u8)
 <TabItem label="Inline">
 
 ```r
-Num.div_checked <- function<T: frac>(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+Num.div_checked <- function(first: F64, second: F64) -> Result<F64, :DivByZero | :Undefined>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+#: fn(first: F64, second: F64) -> Result<F64, :DivByZero | :Undefined>
 Num.div_checked <- function(first, second)
 ```
 
@@ -1245,14 +1225,14 @@ Num.div_checked(7, 2)
 <TabItem label="Inline">
 
 ```r
-Num.div_trunc_checked <- function<T: int>(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+Num.div_trunc_checked <- function(first: I64, second: I64) -> Result<I64, :DivByZero | :Undefined>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+#: fn(first: I64, second: I64) -> Result<I64, :DivByZero | :Undefined>
 Num.div_trunc_checked <- function(first, second)
 ```
 
@@ -1277,14 +1257,14 @@ Num.div_trunc_checked(Inf, Inf)
 <TabItem label="Inline">
 
 ```r
-Num.div_ceil_checked <- function<T: int>(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+Num.div_ceil_checked <- function(first: I64, second: I64) -> Result<I64, :DivByZero | :Undefined>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+#: fn(first: I64, second: I64) -> Result<I64, :DivByZero | :Undefined>
 Num.div_ceil_checked <- function(first, second)
 ```
 
@@ -1306,14 +1286,14 @@ Num.div_ceil_checked(7, 2)
 <TabItem label="Inline">
 
 ```r
-Num.rem_checked <- function<T: int>(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+Num.rem_checked <- function(first: I64, second: I64) -> Result<I64, :DivByZero | :Undefined>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(first: T, second: T) -> Result<T, :DivByZero | :Undefined>
+#: fn(first: I64, second: I64) -> Result<I64, :DivByZero | :Undefined>
 Num.rem_checked <- function(first, second)
 ```
 
@@ -1335,14 +1315,14 @@ Num.rem_checked(-7, 2)
 <TabItem label="Inline">
 
 ```r
-Num.sqrt_checked <- function<T: frac>(number: T) -> Result<T, :SqrtOfNegative>
+Num.sqrt_checked <- function(number: F64) -> Result<F64, :SqrtOfNegative>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> Result<T, :SqrtOfNegative>
+#: fn(number: F64) -> Result<F64, :SqrtOfNegative>
 Num.sqrt_checked <- function(number)
 ```
 
@@ -1364,14 +1344,14 @@ Num.sqrt_checked(-1)
 <TabItem label="Inline">
 
 ```r
-Num.log_checked <- function<T: frac>(number: T) -> Result<T, :LogNeedsPositive>
+Num.log_checked <- function(number: F64) -> Result<F64, :LogNeedsPositive>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> Result<T, :LogNeedsPositive>
+#: fn(number: F64) -> Result<F64, :LogNeedsPositive>
 Num.log_checked <- function(number)
 ```
 
@@ -1393,7 +1373,7 @@ Num.log_checked(exp(2))
 <TabItem label="Inline">
 
 ```r
-Num.from_r <- function(value: integer) -> I32
+Num.from_r <- function(value: integer) -> I64
 Num.from_r <- function(value: double) -> F64
 ```
 
@@ -1401,7 +1381,7 @@ Num.from_r <- function(value: double) -> F64
 <TabItem label="Comments">
 
 ```r
-#: fn(value: integer) -> I32
+#: fn(value: integer) -> I64
 Num.from_r <- function(value)
 
 #: fn(value: double) -> F64
@@ -1412,7 +1392,7 @@ Num.from_r <- function(value)
 </Tabs>
 
 Converts an R number into a ry number, refusing `NA` and a length other than one: a `double`
-becomes an `F64` and an `integer` an `I32`.
+becomes an `F64` and an `integer` an `I64`.
 
 ```r ry run runtime=ry dput
 Num.from_r(2.5)
@@ -1441,8 +1421,8 @@ Num.to_r <- function(number)
 </TabItem>
 </Tabs>
 
-Converts a ry number into an R number: a fraction becomes a `double`, and an integer type an
-`integer` when it fits in 32 bits and a `double` otherwise. An `F64` already passes to R code
+Converts a ry number into an R number: an `F64` becomes a `double`, and an `I64` an `integer`
+when it fits in 32 bits and a `double` otherwise. An `F64` already passes to R code
 as a `double` without this call.
 
 ```r ry run runtime=ry dput
@@ -1481,495 +1461,6 @@ Num.to_f64(3i64)
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1450)
 
-## `Num.to_f32`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_f32 <- function<T: number>(number: T) -> F32
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> F32
-Num.to_f32 <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as an `F32`, rounded to the nearest one.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1453)
-
-## `Num.to_dec`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_dec <- function<T: number>(number: T) -> Dec
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> Dec
-Num.to_dec <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as a `Dec`. A number a `Dec` cannot hold is an error.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1456)
-
-## `Num.to_i8`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_i8 <- function<T: number>(number: T) -> I8
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> I8
-Num.to_i8 <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as an `I8`. A number an `I8` cannot hold exactly, such as one with a
-fraction, is an error; `Num.to_i8_checked` returns `:Err(:OutOfBounds)` instead.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1460)
-
-## `Num.to_i8_checked`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_i8_checked <- function<T: number>(number: T) -> Result<I8, :OutOfBounds>
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> Result<I8, :OutOfBounds>
-Num.to_i8_checked <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as an `I8`, or `:Err(:OutOfBounds)` when an `I8` cannot hold it exactly.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1463)
-
-## `Num.to_i16`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_i16 <- function<T: number>(number: T) -> I16
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> I16
-Num.to_i16 <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as an `I16`. A number an `I16` cannot hold exactly, such as one with a
-fraction, is an error; `Num.to_i16_checked` returns `:Err(:OutOfBounds)` instead.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1467)
-
-## `Num.to_i16_checked`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_i16_checked <- function<T: number>(number: T) -> Result<I16, :OutOfBounds>
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> Result<I16, :OutOfBounds>
-Num.to_i16_checked <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as an `I16`, or `:Err(:OutOfBounds)` when an `I16` cannot hold it exactly.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1470)
-
-## `Num.to_i32`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_i32 <- function<T: number>(number: T) -> I32
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> I32
-Num.to_i32 <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as an `I32`. A number an `I32` cannot hold exactly, such as one with a
-fraction, is an error; `Num.to_i32_checked` returns `:Err(:OutOfBounds)` instead.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1474)
-
-## `Num.to_i32_checked`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_i32_checked <- function<T: number>(number: T) -> Result<I32, :OutOfBounds>
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> Result<I32, :OutOfBounds>
-Num.to_i32_checked <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as an `I32`, or `:Err(:OutOfBounds)` when an `I32` cannot hold it exactly.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1477)
-
-## `Num.to_i128`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_i128 <- function<T: number>(number: T) -> I128
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> I128
-Num.to_i128 <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as an `I128`. A number an `I128` cannot hold exactly, such as one with a
-fraction, is an error; `Num.to_i128_checked` returns `:Err(:OutOfBounds)` instead.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1481)
-
-## `Num.to_i128_checked`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_i128_checked <- function<T: number>(number: T) -> Result<I128, :OutOfBounds>
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> Result<I128, :OutOfBounds>
-Num.to_i128_checked <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as an `I128`, or `:Err(:OutOfBounds)` when an `I128` cannot hold it exactly.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1484)
-
-## `Num.to_u8`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_u8 <- function<T: number>(number: T) -> U8
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> U8
-Num.to_u8 <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as a `U8`. A number a `U8` cannot hold exactly, such as one with a
-fraction, is an error; `Num.to_u8_checked` returns `:Err(:OutOfBounds)` instead.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1488)
-
-## `Num.to_u8_checked`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_u8_checked <- function<T: number>(number: T) -> Result<U8, :OutOfBounds>
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> Result<U8, :OutOfBounds>
-Num.to_u8_checked <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as a `U8`, or `:Err(:OutOfBounds)` when a `U8` cannot hold it exactly.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1491)
-
-## `Num.to_u16`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_u16 <- function<T: number>(number: T) -> U16
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> U16
-Num.to_u16 <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as a `U16`. A number a `U16` cannot hold exactly, such as one with a
-fraction, is an error; `Num.to_u16_checked` returns `:Err(:OutOfBounds)` instead.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1495)
-
-## `Num.to_u16_checked`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_u16_checked <- function<T: number>(number: T) -> Result<U16, :OutOfBounds>
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> Result<U16, :OutOfBounds>
-Num.to_u16_checked <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as a `U16`, or `:Err(:OutOfBounds)` when a `U16` cannot hold it exactly.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1498)
-
-## `Num.to_u32`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_u32 <- function<T: number>(number: T) -> U32
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> U32
-Num.to_u32 <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as a `U32`. A number a `U32` cannot hold exactly, such as one with a
-fraction, is an error; `Num.to_u32_checked` returns `:Err(:OutOfBounds)` instead.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1502)
-
-## `Num.to_u32_checked`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_u32_checked <- function<T: number>(number: T) -> Result<U32, :OutOfBounds>
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> Result<U32, :OutOfBounds>
-Num.to_u32_checked <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as a `U32`, or `:Err(:OutOfBounds)` when a `U32` cannot hold it exactly.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1505)
-
-## `Num.to_u64`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_u64 <- function<T: number>(number: T) -> U64
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> U64
-Num.to_u64 <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as a `U64`. A number a `U64` cannot hold exactly, such as one with a
-fraction, is an error; `Num.to_u64_checked` returns `:Err(:OutOfBounds)` instead.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1509)
-
-## `Num.to_u64_checked`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_u64_checked <- function<T: number>(number: T) -> Result<U64, :OutOfBounds>
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> Result<U64, :OutOfBounds>
-Num.to_u64_checked <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as a `U64`, or `:Err(:OutOfBounds)` when a `U64` cannot hold it exactly.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1512)
-
-## `Num.to_u128`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_u128 <- function<T: number>(number: T) -> U128
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> U128
-Num.to_u128 <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as a `U128`. A number a `U128` cannot hold exactly, such as one with a
-fraction, is an error; `Num.to_u128_checked` returns `:Err(:OutOfBounds)` instead.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1516)
-
-## `Num.to_u128_checked`
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-Num.to_u128_checked <- function<T: number>(number: T) -> Result<U128, :OutOfBounds>
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T: number> fn(number: T) -> Result<U128, :OutOfBounds>
-Num.to_u128_checked <- function(number)
-```
-
-</TabItem>
-</Tabs>
-
-The number as a `U128`, or `:Err(:OutOfBounds)` when a `U128` cannot hold it exactly.
-
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1519)
-
 ## `Num.to_i64_checked`
 
 <Tabs syncKey="annotation-style">
@@ -1998,7 +1489,7 @@ Num.to_i64_checked(-3.7)
 #> :Err(:OutOfBounds)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1528)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1459)
 
 ## `Num.to_i64`
 
@@ -2028,7 +1519,7 @@ Num.to_i64(-3.0)
 #> -3i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1537)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1468)
 
 ## `Num.add`
 
@@ -2058,7 +1549,7 @@ List.walk([1, 2, 3], 0, Num.add)
 #> 6
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1546)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1477)
 
 ## `Num.sub`
 
@@ -2088,7 +1579,7 @@ Num.sub(10, 4)
 #> 6
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1555)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1486)
 
 ## `Num.mul`
 
@@ -2117,7 +1608,7 @@ Num.mul(6, 7)
 #> 42
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1563)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1494)
 
 ## `Num.div`
 
@@ -2125,14 +1616,14 @@ Num.mul(6, 7)
 <TabItem label="Inline">
 
 ```r
-Num.div <- function<T: frac>(first: T, second: T) -> T
+Num.div <- function(first: F64, second: F64) -> F64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(first: T, second: T) -> T
+#: fn(first: F64, second: F64) -> F64
 Num.div <- function(first, second)
 ```
 
@@ -2147,7 +1638,7 @@ Num.div(7, 2)
 #> 3.5
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1572)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1503)
 
 ## `Num.div_trunc`
 
@@ -2155,14 +1646,14 @@ Num.div(7, 2)
 <TabItem label="Inline">
 
 ```r
-Num.div_trunc <- function<T: int>(first: T, second: T) -> T
+Num.div_trunc <- function(first: I64, second: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(first: T, second: T) -> T
+#: fn(first: I64, second: I64) -> I64
 Num.div_trunc <- function(first, second)
 ```
 
@@ -2176,7 +1667,7 @@ Num.div_trunc(-7, 2)
 #> -3
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1580)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1511)
 
 ## `Num.div_ceil`
 
@@ -2184,14 +1675,14 @@ Num.div_trunc(-7, 2)
 <TabItem label="Inline">
 
 ```r
-Num.div_ceil <- function<T: int>(first: T, second: T) -> T
+Num.div_ceil <- function(first: I64, second: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(first: T, second: T) -> T
+#: fn(first: I64, second: I64) -> I64
 Num.div_ceil <- function(first, second)
 ```
 
@@ -2205,7 +1696,7 @@ Num.div_ceil(7, 2)
 #> 4
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1588)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1519)
 
 ## `Num.rem`
 
@@ -2213,14 +1704,14 @@ Num.div_ceil(7, 2)
 <TabItem label="Inline">
 
 ```r
-Num.rem <- function<T: int>(first: T, second: T) -> T
+Num.rem <- function(first: I64, second: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(first: T, second: T) -> T
+#: fn(first: I64, second: I64) -> I64
 Num.rem <- function(first, second)
 ```
 
@@ -2234,7 +1725,7 @@ Num.rem(-7, 2)
 #> -1
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1596)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1527)
 
 ## `Num.pow_int`
 
@@ -2242,14 +1733,14 @@ Num.rem(-7, 2)
 <TabItem label="Inline">
 
 ```r
-Num.pow_int <- function<T: int>(base: T, exponent: T) -> T
+Num.pow_int <- function(base: I64, exponent: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(base: T, exponent: T) -> T
+#: fn(base: I64, exponent: I64) -> I64
 Num.pow_int <- function(base, exponent)
 ```
 
@@ -2264,7 +1755,7 @@ Num.pow_int(3, 4)
 #> 81L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1605)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1536)
 
 ## `Num.sqrt`
 
@@ -2272,14 +1763,14 @@ Num.pow_int(3, 4)
 <TabItem label="Inline">
 
 ```r
-Num.sqrt <- function<T: frac>(number: T) -> T
+Num.sqrt <- function(number: F64) -> F64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> T
+#: fn(number: F64) -> F64
 Num.sqrt <- function(number)
 ```
 
@@ -2294,7 +1785,7 @@ Num.sqrt(16)
 #> 4
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1614)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1545)
 
 ## `Num.log`
 
@@ -2302,14 +1793,14 @@ Num.sqrt(16)
 <TabItem label="Inline">
 
 ```r
-Num.log <- function<T: frac>(number: T) -> T
+Num.log <- function(number: F64) -> F64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> T
+#: fn(number: F64) -> F64
 Num.log <- function(number)
 ```
 
@@ -2324,7 +1815,7 @@ Num.log(Num.e)
 #> 1
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1623)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1554)
 
 ## `Num.asin`
 
@@ -2332,14 +1823,14 @@ Num.log(Num.e)
 <TabItem label="Inline">
 
 ```r
-Num.asin <- function<T: frac>(number: T) -> T
+Num.asin <- function(number: F64) -> F64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> T
+#: fn(number: F64) -> F64
 Num.asin <- function(number)
 ```
 
@@ -2353,7 +1844,7 @@ Num.asin(1)
 #> 1.5707963267949
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1631)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1562)
 
 ## `Num.acos`
 
@@ -2361,14 +1852,14 @@ Num.asin(1)
 <TabItem label="Inline">
 
 ```r
-Num.acos <- function<T: frac>(number: T) -> T
+Num.acos <- function(number: F64) -> F64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> T
+#: fn(number: F64) -> F64
 Num.acos <- function(number)
 ```
 
@@ -2382,7 +1873,7 @@ Num.acos(1)
 #> 0
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1639)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1570)
 
 ## `Num.is_nan`
 
@@ -2390,14 +1881,14 @@ Num.acos(1)
 <TabItem label="Inline">
 
 ```r
-Num.is_nan <- function<T: frac>(number: T) -> Bool
+Num.is_nan <- function(number: F64) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: frac> fn(number: T) -> Bool
+#: fn(number: F64) -> Bool
 Num.is_nan <- function(number)
 ```
 
@@ -2412,7 +1903,7 @@ Num.is_nan(0 / 0)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1648)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1579)
 
 ## `Num.bitwise_and`
 
@@ -2420,14 +1911,14 @@ Num.is_nan(0 / 0)
 <TabItem label="Inline">
 
 ```r
-Num.bitwise_and <- function<T: int>(first: T, second: T) -> T
+Num.bitwise_and <- function(first: I64, second: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(first: T, second: T) -> T
+#: fn(first: I64, second: I64) -> I64
 Num.bitwise_and <- function(first, second)
 ```
 
@@ -2441,7 +1932,7 @@ Num.bitwise_and(12, 10)
 #> 8L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1656)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1587)
 
 ## `Num.bitwise_or`
 
@@ -2449,14 +1940,14 @@ Num.bitwise_and(12, 10)
 <TabItem label="Inline">
 
 ```r
-Num.bitwise_or <- function<T: int>(first: T, second: T) -> T
+Num.bitwise_or <- function(first: I64, second: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(first: T, second: T) -> T
+#: fn(first: I64, second: I64) -> I64
 Num.bitwise_or <- function(first, second)
 ```
 
@@ -2470,7 +1961,7 @@ Num.bitwise_or(12, 10)
 #> 14L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1664)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1595)
 
 ## `Num.bitwise_xor`
 
@@ -2478,14 +1969,14 @@ Num.bitwise_or(12, 10)
 <TabItem label="Inline">
 
 ```r
-Num.bitwise_xor <- function<T: int>(first: T, second: T) -> T
+Num.bitwise_xor <- function(first: I64, second: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(first: T, second: T) -> T
+#: fn(first: I64, second: I64) -> I64
 Num.bitwise_xor <- function(first, second)
 ```
 
@@ -2500,7 +1991,7 @@ Num.bitwise_xor(12, 10)
 #> 6L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1673)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1604)
 
 ## `Num.bitwise_not`
 
@@ -2508,14 +1999,14 @@ Num.bitwise_xor(12, 10)
 <TabItem label="Inline">
 
 ```r
-Num.bitwise_not <- function<T: int>(number: T) -> T
+Num.bitwise_not <- function(number: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(number: T) -> T
+#: fn(number: I64) -> I64
 Num.bitwise_not <- function(number)
 ```
 
@@ -2529,7 +2020,7 @@ Num.bitwise_not(5)
 #> -6L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1681)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1612)
 
 ## `Num.shift_left_by`
 
@@ -2537,14 +2028,14 @@ Num.bitwise_not(5)
 <TabItem label="Inline">
 
 ```r
-Num.shift_left_by <- function<T: int>(number: T, bits: T) -> T
+Num.shift_left_by <- function(number: I64, bits: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(number: T, bits: T) -> T
+#: fn(number: I64, bits: I64) -> I64
 Num.shift_left_by <- function(number, bits)
 ```
 
@@ -2558,7 +2049,7 @@ Num.shift_left_by(1, 4)
 #> 16L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1689)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1620)
 
 ## `Num.shift_right_by`
 
@@ -2566,14 +2057,14 @@ Num.shift_left_by(1, 4)
 <TabItem label="Inline">
 
 ```r
-Num.shift_right_by <- function<T: int>(number: T, bits: T) -> T
+Num.shift_right_by <- function(number: I64, bits: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(number: T, bits: T) -> T
+#: fn(number: I64, bits: I64) -> I64
 Num.shift_right_by <- function(number, bits)
 ```
 
@@ -2587,7 +2078,7 @@ Num.shift_right_by(-16, 2)
 #> -4L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1697)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1628)
 
 ## `Num.shift_right_zf_by`
 
@@ -2595,14 +2086,14 @@ Num.shift_right_by(-16, 2)
 <TabItem label="Inline">
 
 ```r
-Num.shift_right_zf_by <- function<T: int>(number: T, bits: T) -> T
+Num.shift_right_zf_by <- function(number: I64, bits: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(number: T, bits: T) -> T
+#: fn(number: I64, bits: I64) -> I64
 Num.shift_right_zf_by <- function(number, bits)
 ```
 
@@ -2616,7 +2107,7 @@ Num.shift_right_zf_by(-16, 28)
 #> 15L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1705)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1636)
 
 ## `Num.count_one_bits`
 
@@ -2624,14 +2115,14 @@ Num.shift_right_zf_by(-16, 28)
 <TabItem label="Inline">
 
 ```r
-Num.count_one_bits <- function<T: int>(number: T) -> T
+Num.count_one_bits <- function(number: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(number: T) -> T
+#: fn(number: I64) -> I64
 Num.count_one_bits <- function(number)
 ```
 
@@ -2645,7 +2136,7 @@ Num.count_one_bits(255)
 #> 8L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1713)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1644)
 
 ## `Num.count_leading_zero_bits`
 
@@ -2653,14 +2144,14 @@ Num.count_one_bits(255)
 <TabItem label="Inline">
 
 ```r
-Num.count_leading_zero_bits <- function<T: int>(number: T) -> T
+Num.count_leading_zero_bits <- function(number: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(number: T) -> T
+#: fn(number: I64) -> I64
 Num.count_leading_zero_bits <- function(number)
 ```
 
@@ -2674,7 +2165,7 @@ Num.count_leading_zero_bits(1)
 #> 31L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1721)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1652)
 
 ## `Num.count_trailing_zero_bits`
 
@@ -2682,14 +2173,14 @@ Num.count_leading_zero_bits(1)
 <TabItem label="Inline">
 
 ```r
-Num.count_trailing_zero_bits <- function<T: int>(number: T) -> T
+Num.count_trailing_zero_bits <- function(number: I64) -> I64
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(number: T) -> T
+#: fn(number: I64) -> I64
 Num.count_trailing_zero_bits <- function(number)
 ```
 
@@ -2703,7 +2194,7 @@ Num.count_trailing_zero_bits(8)
 #> 3L
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1729)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1660)
 
 ## `Num.pi`
 
@@ -2719,7 +2210,7 @@ Num.pi
 #> 3.14159265358979
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1737)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1668)
 
 ## `Num.tau`
 
@@ -2735,7 +2226,7 @@ Num.tau
 #> 6.28318530717959
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1745)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1676)
 
 ## `Num.e`
 
@@ -2751,7 +2242,7 @@ Num.e
 #> 2.71828182845905
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1753)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1684)
 
 ## `Num.max_i64`
 
@@ -2767,7 +2258,7 @@ Num.max_i64
 #> 9223372036854775807i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1761)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1692)
 
 ## `Num.min_i64`
 
@@ -2783,7 +2274,7 @@ Num.min_i64
 #> -9223372036854775808i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1769)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1700)
 
 ## `Num.max_f64`
 
@@ -2799,7 +2290,7 @@ Num.max_f64
 #> 1.79769313486232e+308
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1777)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1708)
 
 ## `Num.min_f64`
 
@@ -2815,7 +2306,7 @@ Num.min_f64
 #> -1.79769313486232e+308
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1785)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1716)
 
 ## `Num.infinity_f64`
 
@@ -2831,7 +2322,7 @@ c(Num.infinity_f64, -Num.infinity_f64)
 #> c(Inf, -Inf)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1793)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1724)
 
 ## `Num.nan_f64`
 
@@ -2842,4 +2333,4 @@ Num.nan_f64
 
 Not a number, the `F64` that arithmetic such as `0 / 0` produces. It is not R's `NA`.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1796)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1727)

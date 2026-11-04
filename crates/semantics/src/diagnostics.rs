@@ -3825,9 +3825,9 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         Constraint::ArrayItem => {
             "a `List` item (a ry value such as a number, `Bool`, `Str`, record, tuple or tag)"
         }
-        Constraint::Number => "a ry number (`I64`, `F64` or another number type)",
-        Constraint::Int => "a ry integer (`I8` to `I128` or `U8` to `U128`)",
-        Constraint::Frac => "a ry fraction (`F32`, `F64` or `Dec`)",
+        Constraint::Number => "a ry number (`I64` or `F64`)",
+        Constraint::Int => "an `I64`",
+        Constraint::Frac => "an `F64`",
         Constraint::Eq => "a value `==` can compare (anything but a function)",
         Constraint::WholeLiteral { .. } | Constraint::FracLiteral => "a number",
     }

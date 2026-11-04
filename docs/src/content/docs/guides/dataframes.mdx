@@ -460,7 +460,7 @@ A DataFrame type lists its columns, like a record. A column type is always a vec
 total_units <- function(sales: DataFrame{region: character, units: integer}) -> integer {
   sum(sales$units)
 }
-total_units(DataFrame(region = ["eu"], unit = [1L]))
+total_units(DataFrame(region = c("eu"), unit = c(1L)))
 ```
 
 </TabItem>
@@ -471,7 +471,7 @@ total_units(DataFrame(region = ["eu"], unit = [1L]))
 total_units <- function(sales) {
   sum(sales$units)
 }
-total_units(DataFrame(region = ["eu"], unit = [1L]))
+total_units(DataFrame(region = c("eu"), unit = c(1L)))
 ```
 
 </TabItem>

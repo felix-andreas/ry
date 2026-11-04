@@ -344,7 +344,7 @@ these rules:
   before `on.exit` code runs.
 - **Bindings are not checked.** `x: integer <- value` types `x` for the checker and is erased at
   run time. The one exception is an unsuffixed number literal bound to a ry number type:
-  `n: I64 <- 5` binds `5i64`, and `xs: List<U8> <- [1, 2]` converts each item, because the
+  `n: I64 <- 5` binds `5i64`, and `xs: List<I64> <- [1, 2]` converts each item, because the
   literal is R's `double` until something converts it (see [number literals](#number-literals)).
 - **Type definitions and `@Name(value)` do nothing at run time.** A definition is skipped, and
   `@Name(value)` runs as `(value)`.
@@ -1037,23 +1037,20 @@ and an R value reaches them only through an explicit conversion (see
 
 | Type | Values |
 | --- | --- |
-| `I8`, `I16`, `I32`, `I64`, `I128` | signed integers, every bit pattern a value |
-| `U8`, `U16`, `U32`, `U64`, `U128` | unsigned integers |
-| `F32`, `F64` | IEEE 754 floats, including `NaN` and the infinities |
-| `Dec` | a fixed-point decimal with 18 places, in 128 bits |
+| `I64` | a 64-bit signed integer, every bit pattern a value |
+| `F64` | an IEEE 754 double, including `NaN` and the infinities |
 
-An `F64` is stored as R's `double`, so an `F64` fits `double` and is passed to R code as is. No
-integer type shares R's `integer`, because R reads one 32-bit pattern as `NA` and overflows to `NA`
-with a warning: `-2147483648i32` is an ordinary `I32`, and overflow in any integer type is an error.
+An `F64` is stored as R's `double`, so an `F64` fits `double` and is passed to R code as is. An
+`I64` does not share R's `integer`, because R reads one 32-bit pattern as `NA` and overflows to `NA`
+with a warning: `-2147483648i64` is an ordinary `I64`, and overflow is an error.
 
-The constraints `number`, `int` and `frac` admit every number type, the integer types, and `F32`,
-`F64` and `Dec`.
+The constraint `number` admits both types.
 
 ### Number literals
 
-A suffix names a literal's type exactly: `5i64`, `255u8`, `1.5f32`, `2.5dec`, `1.5f64`. A hex
-literal takes only the `i` and `u` suffixes (`0xFFu8`), because `f`, `d`, `e` and `c` are hex digits.
-A `-` written directly before a literal is part of it, so `-128i8` is an `I8`.
+A suffix names a literal's type exactly: `5i64` or `1.5f64`. A hex literal takes only the `i64`
+suffix (`0xFFi64`), because `f` is a hex digit. A `-` written directly before a literal is part of
+it, so `-9223372036854775808i64` is an `I64`. Any other suffix is a syntax error.
 
 An unsuffixed literal, such as `5`, `5L` or `1.5`, has R's type unless a ry number type asks for it.
 A ry type asks in three places:
@@ -1066,7 +1063,7 @@ A ry type asks in three places:
   `for (x in xs) total <- total + x` with `xs: List<F64>`, `total` is an `F64`. A variable that
   nothing decides keeps R's type.
 
-A literal the type cannot hold exactly, such as `300` as a `U8` or `2.5` as an `I64`, is a
+A literal the type cannot hold exactly, such as `2.5` as an `I64`, is a
 `type-mismatch` at the literal:
 
 ```r
@@ -1082,16 +1079,16 @@ type-mismatch
 
 When the code runs, an unsuffixed literal is the R value it always was, and the operator or
 binding that the checker typed converts it. An annotated binding such as `n: I64 <- 5` binds the
-`I64`, and `xs: List<U8> <- [1, 2]` converts each item. A conversion that cannot be exact is an
+`I64`, and `xs: List<I64> <- [1, 2]` converts each item. A conversion that cannot be exact is an
 error, never a rounded value.
 
 ### Number arithmetic
 
-Both operands of an arithmetic operator or comparison have the same number type, and number types
-are never converted into each other: `1i32 + 1i64` is a `type-mismatch` that suggests
-`Num.to_i32()`.
+Both operands of an arithmetic operator or comparison have the same number type, and the two types
+are never converted into each other: `1i64 + 1.5f64` is a `type-mismatch` that tells you to convert
+one side.
 
-| Operator | Integer types | `F32`, `F64`, `Dec` |
+| Operator | `I64` | `F64` |
 | --- | --- | --- |
 | `+ - *`, unary `-` | the same type; overflow is an error | the same type |
 | `/` | a `type-mismatch` that suggests `%/%` or `Num.to_f64()` | the same type |
@@ -1101,9 +1098,9 @@ are never converted into each other: `1i32 + 1i64` is a `type-mismatch` that sug
 
 Integer division by zero is an error. `Num.div_trunc` and `Num.rem` give truncating division, and
 `Num.add_checked`, `Num.add_wrap` and `Num.add_saturated` (with their `sub` and `mul` siblings) give
-the other overflow behaviors. `Num.to_i8` through `Num.to_u128`, `Num.to_f32`, `Num.to_f64` and
-`Num.to_dec` convert between number types. Each is an error when the value does not fit, and each
-`_checked` form returns `:Err(:OutOfBounds)` instead.
+the other overflow behaviors. `Num.to_i64` and `Num.to_f64` convert between the two types.
+`Num.to_i64` is an error when the value is not whole or does not fit, and `Num.to_i64_checked`
+returns `:Err(:OutOfBounds)` instead.
 
 ### `Bool` and `Str`
 
@@ -1128,13 +1125,15 @@ code changes meaning.
 
 ### Crossing between R and ry scalars
 
-`Num.from_r` turns an R `double` into an `F64` and an R `integer` into an `I32`, and `Str.from_r`
+`Num.from_r` turns an R `double` into an `F64` and an R `integer` into an `I64`, and `Str.from_r`
 turns a `character` into a `Str`. Each stops with an error on `NA`, on a length other than one, and
-on attributes. `Num.to_r` goes the other way: an integer type becomes R's `integer` when it fits in
-32 bits and a `double` otherwise.
+on attributes. `Num.to_r` goes the other way: an `I64` becomes R's `integer` when it fits in 32
+bits and a `double` otherwise.
 
-Passing an integer type or a `Dec` to an R function is a `type-mismatch` that names `Num.to_r()`,
-and when the code runs, an R function that receives one stops with the same advice.
+Passing an `I64` to an R parameter typed as an R number is a `type-mismatch`, and when the code
+runs, an R function that receives one stops with an error that names `Num.to_r()`. The checker does
+not yet name `Num.to_r()` in its message, and it does not flag an `I64` passed to an untyped base
+function such as `sqrt()`.
 
 ## Lists
 
@@ -1149,7 +1148,7 @@ The type `List<T>` may be written in `#:` comments either way.
 exactly that type: items are never converted into each other, so `[1, "a"]` is a `type-mismatch` at
 `"a"`. An unsuffixed number literal is decided by the list it is in, as described under
 [number literals](#number-literals): `[1, 2]` is a `List<I64>`, `[1.5, 2]` is a `List<F64>`, and
-`[1i32, 2]` is a `List<I32>`. A literal the item type cannot hold exactly, such as `2.5` in
+`[1i64, 2]` is a `List<I64>`. A literal the item type cannot hold exactly, such as `2.5` in
 `[1, 2.5]`, is a `type-mismatch`. Tags are the one exception to exact item types: their types join
 into a tag union, so `[:Ok(1), :Err("no")]` is a list of `:Ok(double) | :Err(character)`.
 
@@ -1183,11 +1182,11 @@ suggests `List.from_r()`.
 | Operator | Items | Result |
 | --- | --- | --- |
 | `+ - * %% %/% ^`, unary `-` | numbers | `List<T>` |
-| `/` | fractional numbers (`F32`, `F64`, `Dec`) | `List<T>` |
+| `/` | `F64` | `List<T>` |
 | `== != < > <= >=` | numbers and `Str` for ordering, any item for equality | `List<Bool>` |
 | `& \| !` | `Bool` | `List<Bool>` |
 
-`/` on integer items is a `type-mismatch`, as it is on a single integer, and it decides undecided
+`/` on `I64` items is a `type-mismatch`, as it is on a single `I64`, and it decides undecided
 literal items as `F64`, so `[1, 2] / 2` is a `List<F64>`. When the code runs, two lists of different
 lengths are an error rather than recycled.
 

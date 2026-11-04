@@ -126,7 +126,7 @@ c1 <- List.from_r(c("a", "b"))
 d <- List.from_r(list((x = 1,), (x = 2,)))
 #++++
 a: List<F64>
-b: List<I32>
+b: List<I64>
 c1: List<Str>
 d: List<Record{x: double}>
 
@@ -338,7 +338,7 @@ doubled: Unknown
 bytes <- Str.walk_utf8_with_index("ab", [], function(seen, byte, i) List.append(seen, byte))
 total <- List.walk([1L, 2L], [], function(seen, item) List.append(seen, item))
 #++++
-bytes: List<U8>
+bytes: List<I64>
 total: List<I64>
 
 #---- an_update_callback_keeps_its_item_hint

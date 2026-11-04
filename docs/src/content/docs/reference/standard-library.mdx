@@ -14,13 +14,13 @@ the checker follows every step:
 <TabItem label="Inline">
 
 ```r
-parse_ids <- function(text: character) -> Result<list[integer], :InvalidNumStr> {
+parse_ids <- function(text: Str) -> Result<List<I64>, :InvalidNumStr> {
   parts <- List.map(Str.split_on(text, ","), Str.trim)
-  List.map_try(parts, Str.to_integer)
+  List.map_try(parts, Str.to_i64)
 }
 
-counts: Dict<character, integer> <- List.walk(list("a", "b", "a"), Dict.empty(), function(seen, word) {
-  Dict.update(seen, word, function(found) :Ok(Result.with_default(found, 0L) + 1L))
+counts: Dict<Str, I64> <- List.walk(["a", "b", "a"], Dict.empty(), function(seen, word) {
+  Dict.update(seen, word, function(found) :Ok(Result.with_default(found, 0i64) + 1i64))
 })
 
 List.sum(parse_ids("3, 1, 2"))
@@ -30,15 +30,15 @@ List.sum(parse_ids("3, 1, 2"))
 <TabItem label="Comments">
 
 ```r
-#: fn(text: character) -> Result<list[integer], :InvalidNumStr>
+#: fn(text: Str) -> Result<List<I64>, :InvalidNumStr>
 parse_ids <- function(text) {
   parts <- List.map(Str.split_on(text, ","), Str.trim)
-  List.map_try(parts, Str.to_integer)
+  List.map_try(parts, Str.to_i64)
 }
 
-#: Dict<character, integer>
-counts <- List.walk(list("a", "b", "a"), Dict.empty(), function(seen, word) {
-  Dict.update(seen, word, function(found) :Ok(Result.with_default(found, 0L) + 1L))
+#: Dict<Str, I64>
+counts <- List.walk(["a", "b", "a"], Dict.empty(), function(seen, word) {
+  Dict.update(seen, word, function(found) :Ok(Result.with_default(found, 0i64) + 1i64))
 })
 
 List.sum(parse_ids("3, 1, 2"))
@@ -50,11 +50,11 @@ List.sum(parse_ids("3, 1, 2"))
 ```text ry check typing
 type-mismatch
 
-  x expected `list[T]`, found `:Ok(list[integer]) | :Err(:InvalidNumStr)`
+  x expected `List<T>`, found `:Ok(List<I64>) | :Err(:InvalidNumStr)`
 ```
 
-`parse_ids("3, 1, 2")` is `:Ok(list(3L, 1L, 2L))`, `parse_ids("3, x")` is `:Err(:InvalidNumStr)`,
-and `counts` is `Dict.from_list(list(("a", 2L), ("b", 1L)))`. The last line is the mistake the
+`parse_ids("3, 1, 2")` is `:Ok([3i64, 1i64, 2i64])`, `parse_ids("3, x")` is `:Err(:InvalidNumStr)`,
+and `counts` is `Dict.from_list([("a", 2i64), ("b", 1i64)])`. The last line is the mistake the
 checker catches: the result has to be unwrapped, with `match` or `Result.with_default`, before its
 list can be summed.
 
@@ -75,15 +75,15 @@ These rules hold in every module:
   method syntax. The names live in ry's `ry` package, attached at startup as `package:ry`, so a
   definition of your own, or one from a package you attach, comes first, and `ry::List.map` still
   reaches the library's function.
-- **A collection is an R list.** `List.map` takes any list and returns a new one, and
-  `Str.split_on` returns a list of strings. `List.from_vector` turns an atomic vector into a list,
-  and `List.to_vector` turns a list of scalars back.
-- **Positions are 1-based** `integer`s, as in `xs[[1L]]`. A whole double such as `2` is accepted
-  too.
-- **A string is a length-one `character`, and a number a length-one `integer` or `double`.** `NA`
-  and `NaN` are refused with an error, because no function has an `NA` case to fall into. The one
-  exception is `Num.is_nan`, which accepts `NaN` because telling it apart is its job.
-- **Misuse is an error, not a tag.** An argument of the wrong type, an `NA`, or an `integer`
+- **A collection is a `List`.** `List.map` takes a list and returns a new one, and
+  `Str.split_on` returns a `List<Str>`. `List.from_r` turns an R vector or list into a `List`, and
+  `List.to_r` turns one back.
+- **Positions and lengths are 1-based `I64`s**, as in `xs[[1]]`.
+- **A string is a `Str`, and a number an `I64` or `F64`.** An R value that reaches a library
+  function as a length-one `character`, `integer` or `double` is accepted too. `NA` and `NaN` are
+  refused with an error, because no function has an `NA` case to fall into. The one exception is
+  `Num.is_nan`, which accepts `NaN` because telling it apart is its job.
+- **Misuse is an error, not a tag.** An argument of the wrong type, an `NA`, or an `I64`
   `List.sum` or `List.product` that overflows stops with an R error that names the problem. So
   does an unchecked `Num` operation whose result does not exist, such as `Num.div(1, 0)`, where
   Roc would crash; its `_checked` variant returns the failure as a tag instead.
@@ -116,10 +116,10 @@ Both keep insertion order, print as the call that rebuilds them, and compare wit
 regardless of order:
 
 ```r ry run runtime=ry
-d <- Dict.from_list(list(("b", 2), ("a", 1)))
+d <- Dict.from_list([("b", 2), ("a", 1)])
 d
-#> Dict.from_list(list(("b", 2), ("a", 1)))
-identical(d, Dict.from_list(list(("a", 1), ("b", 2))))
+#> Dict.from_list([("b", 2), ("a", 1)])
+identical(d, Dict.from_list([("a", 1), ("b", 2)]))
 #> [1] TRUE
 ```
 
@@ -151,7 +151,7 @@ time per entry instead of a full copy:
 seen <- Dict.empty()
 for (i in 1:100000) seen <- Dict.insert(seen, i, i * 2L)
 Dict.len(seen)
-#> 100000L
+#> 100000i64
 ```
 
 When another binding holds the value, as in `old <- seen; seen <- Dict.insert(seen, 0L, 0L)`, the

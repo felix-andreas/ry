@@ -20,7 +20,8 @@ use {
         strings::Encoding,
     },
     syntax::{
-        SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, Unexpected,
+        NumberType, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize,
+        Unexpected,
         split_number_suffix,
     },
 };
@@ -1311,10 +1312,10 @@ unsafe fn binary(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
     }
 }
 
-/// An unsuffixed number literal bound to a name annotated with a ry number type, as in
-/// `n: I64 <- 5`, is that number, because the checker types the binding so and the literal has no
-/// operand to convert it later; so are the items of a list literal bound to a `List` of one, as in
-/// `xs: List<U8> <- [1, 2]`. Any other value runs unchanged, as bindings are not checked.
+/// An unsuffixed number literal bound to a name annotated `I64`, as in `n: I64 <- 5`, is an
+/// `I64`, because the checker types the binding so and the literal has no operand to convert it
+/// later; so are the items of a list literal bound to a `List<I64>`, as in
+/// `xs: List<I64> <- [1, 2]`. Any other value runs unchanged, as bindings are not checked.
 unsafe fn with_annotated_literals(
     ascription: &SyntaxNode,
     node: &SyntaxNode,
@@ -1324,9 +1325,9 @@ unsafe fn with_annotated_literals(
         return Ok(value);
     };
     match annotation.kind() {
-        SyntaxKind::TYPE_REF => match (native_number_named(&annotation), number_literal_text(node))
+        SyntaxKind::TYPE_REF => match (names_i64(&annotation), number_literal_text(node))
         {
-            (Some(ty), Some(text)) => crate::numbers::from_text(ty, &text),
+            (true, Some(text)) => crate::numbers::from_text(&text),
             _ => Ok(value),
         },
         SyntaxKind::TYPE_APPLY if node.kind() == SyntaxKind::ARRAY_EXPR => {
@@ -1334,8 +1335,8 @@ unsafe fn with_annotated_literals(
                 .is_some_and(|name| name.text() == "List");
             let item = child_of_kind(&annotation, SyntaxKind::TYPE_ARG_LIST)
                 .and_then(|arguments| child_of_kind(&arguments, SyntaxKind::TYPE_REF))
-                .and_then(|item| native_number_named(&item));
-            let (true, Some(ty)) = (is_list, item) else {
+                .is_some_and(|item| names_i64(&item));
+            if !(is_list && item) {
                 return Ok(value);
             };
             let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) else {
@@ -1355,7 +1356,7 @@ unsafe fn with_annotated_literals(
                     _ => None,
                 };
                 if let Some(text) = text {
-                    crate::heap().set_car(cell, crate::numbers::from_text(ty, &text)?);
+                    crate::heap().set_car(cell, crate::numbers::from_text(&text)?);
                 }
                 cell = cell.cdr();
             }
@@ -1365,13 +1366,9 @@ unsafe fn with_annotated_literals(
     }
 }
 
-/// The ry number type a type reference such as `I64` names, other than `F64`, which is R's
-/// `double` at run time.
-fn native_number_named(annotation: &SyntaxNode) -> Option<crate::numbers::NumberType> {
-    let name = annotation.text().to_string();
-    crate::numbers::NumberType::ALL
-        .into_iter()
-        .find(|ty| ty.name() == name.trim())
+/// Whether a type reference names `I64`, the one ry number that is not R's `double` at run time.
+fn names_i64(annotation: &SyntaxNode) -> bool {
+    annotation.text().to_string().trim() == "I64"
 }
 
 /// The text of an unsuffixed integer or double literal, with its sign when a `-` is written
@@ -1997,32 +1994,15 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
 }
 
 /// A numeric literal: decimal, hexadecimal, or hexadecimal with a binary exponent.
-/// The value a suffixed number such as `5i64` runs as: an `F64` is an R double, and every other
-/// type is a native number.
+/// The value a suffixed number runs as: `1.5f64` is an R double and `5i64` a native `I64`.
 unsafe fn suffixed_number_value(text: &str, negative: bool) -> R<Sexp> {
-    use {crate::numbers::NumberType as Native, syntax::NumberType as Suffix};
     let (number, suffix) =
         split_number_suffix(text).ok_or_else(|| error(format!("malformed number `{text}`")))?;
-    let ty = match suffix {
-        Suffix::F64 if negative => return values::scalar_real(-parse_number(number)),
-        Suffix::F64 => return values::scalar_real(parse_number(number)),
-        Suffix::I8 => Native::I8,
-        Suffix::I16 => Native::I16,
-        Suffix::I32 => Native::I32,
-        Suffix::I64 => Native::I64,
-        Suffix::I128 => Native::I128,
-        Suffix::U8 => Native::U8,
-        Suffix::U16 => Native::U16,
-        Suffix::U32 => Native::U32,
-        Suffix::U64 => Native::U64,
-        Suffix::U128 => Native::U128,
-        Suffix::F32 => Native::F32,
-        Suffix::Dec => Native::Dec,
-    };
-    if negative {
-        crate::numbers::from_text(ty, &format!("-{number}"))
-    } else {
-        crate::numbers::from_text(ty, number)
+    match (suffix, negative) {
+        (NumberType::F64, true) => values::scalar_real(-parse_number(number)),
+        (NumberType::F64, false) => values::scalar_real(parse_number(number)),
+        (NumberType::I64, true) => crate::numbers::from_text(&format!("-{number}")),
+        (NumberType::I64, false) => crate::numbers::from_text(number),
     }
 }
 

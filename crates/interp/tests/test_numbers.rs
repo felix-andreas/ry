@@ -1,5 +1,5 @@
-//! ry's native numbers in the interpreter: arithmetic and comparison in each type, overflow and
-//! conversion errors, the standard library's conversions and overflow behaviors, the R boundary,
+//! ry's native `I64` in the interpreter: arithmetic and comparison, overflow and conversion
+//! errors, the standard library's conversions and overflow behaviors, the R boundary,
 //! printing as the literal that rebuilds the value, and numbers as dictionary keys and set
 //! elements. The interpreter is global to the process, so everything runs as one test.
 //!
@@ -10,7 +10,7 @@ use {
     heap::{Heap, object::Sexp},
     interp::{
         eval, lower,
-        numbers::{self, NumberType},
+        numbers,
         print,
         unwind::Unwind,
         values,
@@ -34,25 +34,14 @@ n <- Num.to_i64(5)
 const PRINTS: &[(&str, &str)] = &[
     // Printing shows the literal that rebuilds the value.
     ("n", "5i64\n"),
-    ("Num.to_u8(255)", "255u8\n"),
-    ("Num.to_i8(-128)", "-128i8\n"),
-    ("Num.to_dec(1.5)", "1.5dec\n"),
-    ("Num.to_dec(0.1)", "0.1dec\n"),
-    ("Num.to_f32(0.5)", "0.5f32\n"),
-    (
-        "Num.sub_wrap(Num.to_u128(0), 1)",
-        "340282366920938463463374607431768211455u128\n",
-    ),
+    ("Num.to_i64(-128)", "-128i64\n"),
+    ("Num.sub_wrap(Num.min_i64, 1)", "9223372036854775807i64\n"),
     ("format(n)", "[1] \"5i64\"\n"),
-    ("deparse(Num.to_dec(2))", "[1] \"2dec\"\n"),
-    ("list(n, Num.to_u8(1))", "[[1]]\n5i64\n\n[[2]]\n1u8\n\n"),
-    (
-        "(id = n, amount = Num.to_dec(9.99))",
-        "(amount = 9.99dec, id = 5i64)\n",
-    ),
+    ("deparse(Num.to_i64(2))", "[1] \"2i64\"\n"),
+    ("list(n, 1i64)", "[[1]]\n5i64\n\n[[2]]\n1i64\n\n"),
+    ("(id = n, amount = 9.99)", "(amount = 9.99, id = 5i64)\n"),
     // typeof and class.
     ("typeof(n)", "[1] \"I64\"\n"),
-    ("typeof(Num.to_dec(1))", "[1] \"Dec\"\n"),
     ("class(n)", "[1] \"ry_number\"\n"),
     ("length(n)", "[1] 1\n"),
     // Arithmetic keeps the type, and R numbers convert exactly.
@@ -63,13 +52,13 @@ const PRINTS: &[(&str, &str)] = &[
     ("-[1i64, 2i64]", "[-1i64, -2i64]\n"),
     ("[1i64, 2i64] < [1i64, 3i64]", "[FALSE, TRUE]\n"),
     ("[1i64, 2i64] == 2i64", "[FALSE, TRUE]\n"),
-    ("[1.5f32] > [0.5f32]", "[TRUE]\n"),
     // A list takes native integer positions, as typed code writes them.
     ("[10.5, 20, 30][[2i64]]", "[1] 20\n"),
     ("[10.5, 20, 30][List.range(2, 3)]", "[20, 30]\n"),
     ("List.sort_asc([3i64, 1i64, 2i64])", "[1i64, 2i64, 3i64]\n"),
+    ("List.sort_desc([3i64, 1i64, 2i64])", "[3i64, 2i64, 1i64]\n"),
     ("List.sum([3i64, 1i64])", "4i64\n"),
-    ("List.max([3u8, 1u8])", ":Ok(3u8)\n"),
+    ("List.max([3i64, 1i64])", ":Ok(3i64)\n"),
     ("n + 1", "6i64\n"),
     ("1L - n", "-4i64\n"),
     ("n * 3", "15i64\n"),
@@ -77,80 +66,72 @@ const PRINTS: &[(&str, &str)] = &[
     ("+n", "5i64\n"),
     ("n ^ 3", "125i64\n"),
     ("n ^ 0", "1i64\n"),
+    ("Num.to_i64(-1) ^ 4294967297", "-1i64\n"),
     // `%/%` and `%%` are floored, as in R.
     ("n %/% 2", "2i64\n"),
     ("-n %/% 2", "-3i64\n"),
     ("-n %% 3", "1i64\n"),
     ("n %% -3", "-1i64\n"),
-    ("Num.to_u8(200) + 55", "255u8\n"),
-    // Dec is fixed point with 18 decimals.
-    (
-        "Num.to_dec(0.1) + Num.to_dec(0.2) == Num.to_dec(0.3)",
-        "[1] TRUE\n",
-    ),
-    ("Num.to_dec(1) / 3", "0.333333333333333333dec\n"),
-    ("Num.to_dec(1.5) * 2", "3dec\n"),
-    ("Num.to_dec(-7.5) %/% 2", "-4dec\n"),
-    // F32 rounds after each operation.
-    ("Num.to_f32(0.1) + Num.to_f32(0.2)", "0.3f32\n"),
-    ("Num.to_f32(1) / 3", "0.33333334f32\n"),
-    ("Num.to_f64(Num.to_f32(0.1))", "[1] 0.1\n"),
+    ("Num.min_i64 %% -1", "0i64\n"),
     // Comparisons give R logicals.
     ("n == 5", "[1] TRUE\n"),
     ("n != 5", "[1] FALSE\n"),
     ("n < 6", "[1] TRUE\n"),
     ("n >= n", "[1] TRUE\n"),
-    ("Num.to_u8(3) > 4", "[1] FALSE\n"),
     // Conversions and their checked forms.
     ("Num.to_i64_checked(5)", ":Ok(5i64)\n"),
-    ("Num.to_u8_checked(256)", ":Err(:OutOfBounds)\n"),
-    ("Num.to_i8_checked(-1.5)", ":Err(:OutOfBounds)\n"),
-    ("Num.to_i32(Num.to_u8(7))", "7i32\n"),
+    ("Num.to_i64_checked(-1.5)", ":Err(:OutOfBounds)\n"),
+    ("Num.to_i64_checked(1e19)", ":Err(:OutOfBounds)\n"),
+    ("Num.to_i64(-9223372036854775808)", "-9223372036854775808i64\n"),
     ("Num.to_f64(n)", "[1] 5\n"),
-    ("Num.to_dec(n)", "5dec\n"),
     // Overflow behaviors.
-    ("Num.add_wrap(Num.to_u8(250), 10)", "4u8\n"),
-    ("Num.sub_wrap(Num.to_i8(-128), 1)", "127i8\n"),
-    ("Num.mul_wrap(Num.to_u8(16), 16)", "0u8\n"),
-    ("Num.add_saturated(Num.to_u8(250), 10)", "255u8\n"),
-    ("Num.sub_saturated(Num.to_u8(3), 10)", "0u8\n"),
-    ("Num.add_checked(Num.to_u8(250), 10)", ":Err(:Overflow)\n"),
+    ("Num.add_wrap(Num.max_i64, 1)", "-9223372036854775808i64\n"),
+    ("Num.mul_wrap(4294967296i64, 4294967296i64)", "0i64\n"),
+    ("Num.add_saturated(Num.max_i64, 10)", "9223372036854775807i64\n"),
+    ("Num.sub_saturated(Num.min_i64, 10)", "-9223372036854775808i64\n"),
+    ("Num.add_checked(Num.max_i64, 1)", ":Err(:Overflow)\n"),
     ("Num.add_checked(n, 1)", ":Ok(6i64)\n"),
     ("Num.abs(Num.to_i64(-3))", "3i64\n"),
     ("Num.min(n, 3)", "3i64\n"),
     ("Num.max(n, 3)", "5i64\n"),
+    ("Num.div_trunc(-7i64, 2)", "-3i64\n"),
+    ("Num.div_ceil(7i64, 2)", "4i64\n"),
+    ("Num.rem(-7i64, 2)", "-1i64\n"),
+    ("Num.rem_checked(n, 0)", ":Err(:DivByZero)\n"),
+    ("Num.is_even(n)", "[1] FALSE\n"),
+    ("Num.is_multiple_of(Num.min_i64, -1)", "[1] TRUE\n"),
     // Rounding gives I64.
     ("Num.round(2.5)", "3i64\n"),
     ("Num.round(-2.5)", "-3i64\n"),
     ("Num.floor(-1.2)", "-2i64\n"),
-    ("Num.ceiling(Num.to_dec(1.2))", "2i64\n"),
-    ("Num.truncate(Num.to_f32(-3.7))", "-3i64\n"),
+    ("Num.ceiling(1.2)", "2i64\n"),
+    ("Num.truncate(-3.7)", "-3i64\n"),
     ("Num.to_str(n)", "[1] \"5\"\n"),
-    ("Num.to_str(Num.to_dec(1.25))", "[1] \"1.25\"\n"),
     ("Num.max_i64", "9223372036854775807i64\n"),
     // The R boundary.
-    ("Num.from_r(3L)", "3i32\n"),
+    ("Num.from_r(3L)", "3i64\n"),
     ("Num.from_r(2.5)", "[1] 2.5\n"),
     ("Num.to_r(n)", "[1] 5\n"),
     ("typeof(Num.to_r(n))", "[1] \"integer\"\n"),
     ("Num.to_r(Num.to_i64(4294967296))", "[1] 4294967296\n"),
     ("Bool.from_r(TRUE)", "[1] TRUE\n"),
     ("Str.from_r(\"a\")", "[1] \"a\"\n"),
-    ("List.from_r(c(1L, 2L))", "[1i32, 2i32]\n"),
-    ("List.from_r(as.raw(255))", "[255u8]\n"),
+    ("List.from_r(c(1L, 2L))", "[1i64, 2i64]\n"),
+    ("List.from_r(as.raw(255))", "[255i64]\n"),
     ("List.to_r(List.from_r(c(1L, 2L)))", "[1] 1 2\n"),
     ("List.to_r(list(n, Num.to_i64(7)))", "[1] 5 7\n"),
     ("List.to_r(List.range(1, 3))", "[1] 1 2 3\n"),
     ("List.range(1, 3)", "[1i64, 2i64, 3i64]\n"),
     (
-        "List.range(Num.to_u8(254), Num.to_u8(255))",
-        "[254u8, 255u8]\n",
+        "List.range(Num.max_i64 - 1, Num.max_i64)",
+        "[9223372036854775806i64, 9223372036854775807i64]\n",
     ),
     ("List.range(3, 2)", "[]\n"),
     ("Str.to_i64(\"42\")", ":Ok(42i64)\n"),
+    ("Str.to_utf8(\"hé\")", "[104i64, 195i64, 169i64]\n"),
     // Equality is structural, and numbers are keys and set elements.
     ("identical(n, Num.to_i64(5))", "[1] TRUE\n"),
-    ("identical(n, Num.to_i32(5))", "[1] FALSE\n"),
+    ("identical(n, 5)", "[1] FALSE\n"),
     ("identical(list(n), list(Num.to_i64(5)))", "[1] TRUE\n"),
     ("identical((a = n), (a = Num.to_i64(5)))", "[1] TRUE\n"),
     ("all.equal(n, Num.to_i64(5))", "[1] TRUE\n"),
@@ -159,14 +140,14 @@ const PRINTS: &[(&str, &str)] = &[
         ":Ok(\"five\")\n",
     ),
     (
-        "Dict.get(Dict.single(n, \"five\"), Num.to_i32(5))",
-        "the dict's keys are I64, and this one is I32",
+        "Dict.get(Dict.single(n, \"five\"), 5)",
+        "the dict's keys are I64, and this one is double",
     ),
     (
         "{ d <- Dict.empty(); for (i in 1:50) d <- Dict.insert(d, Num.to_i64(i), i); [Dict.len(d), Result.with_default(Dict.get(d, Num.to_i64(37)), 0L)] }",
         "[50i64, 37i64]\n",
     ),
-    ("Dict.keys(Dict.single(Num.to_u8(1), TRUE))", "[1u8]\n"),
+    ("Dict.keys(Dict.single(1i64, TRUE))", "[1i64]\n"),
     (
         "Set.contains(Set.from_list(list(n, Num.to_i64(6))), Num.to_i64(6))",
         "[1] TRUE\n",
@@ -189,28 +170,25 @@ const PRINTS: &[(&str, &str)] = &[
 const ERRORS: &[(&str, &str)] = &[
     ("n + 1.5", "1.5 does not fit I64"),
     ("Num.to_i64(1.5)", "1.5 does not fit I64"),
-    ("Num.to_u8(256)", "256 does not fit U8"),
-    ("Num.to_u8(-1)", "-1 does not fit U8"),
+    ("Num.to_i64(1e19)", "does not fit I64"),
     (
         "Num.max_i64 + 1",
         "integer overflow in `+`: the result does not fit I64",
     ),
-    (
-        "Num.to_u8(255) + 1",
-        "integer overflow in `+`: the result does not fit U8",
-    ),
-    ("Num.to_u8(0) - 1", "the result does not fit U8"),
+    ("Num.min_i64 - 1", "the result does not fit I64"),
+    ("Num.max_i64 * 2", "the result does not fit I64"),
     ("-Num.min_i64", "does not fit I64"),
+    ("Num.min_i64 %/% -1", "does not fit I64"),
+    ("n ^ 64", "does not fit I64"),
     ("n / 2", "use `%/%`"),
     ("n %/% 0", "division by zero"),
     ("n %% 0", "division by zero"),
     ("n ^ -1", "exponent"),
-    ("n + Num.to_i32(1)", "I32"),
     ("n + c(1, 2)", "I64"),
     ("n + NA", "I64"),
-    ("Num.to_dec(1e30)", "does not fit Dec"),
-    ("Num.to_dec(1e-19)", "does not fit Dec"),
-    ("Num.add_wrap(Num.to_f32(1), 1)", "needs an integer type"),
+    ("Num.add_wrap(n, 1.5)", "does not fit I64"),
+    ("Num.sqrt(n)", "takes a fractional number (F64), not an I64"),
+    ("Num.abs(Num.min_i64)", "overflows"),
     // Builtins that do not understand native numbers refuse them by name.
     (
         "sum(n)",
@@ -218,15 +196,14 @@ const ERRORS: &[(&str, &str)] = &[
     ),
     ("c(n, 1)", "convert it with `Num.to_r()`"),
     ("if (n) 1", "`Num.to_r()`"),
-    ("n$x", "I64 is a number and has no field `x`"),
-    ("n[[1L]]", "I64 is a number and cannot be indexed"),
-    ("Num.to_r(Num.sub_wrap(Num.to_u64(0), 1))", "past 2^53"),
+    ("n$x", "an I64 is a number and has no field `x`"),
+    ("n[[1L]]", "an I64 is a number and cannot be indexed"),
+    ("Num.to_r(Num.max_i64)", "past 2^53"),
     ("Bool.from_r(NA)", "`value`"),
     ("List.from_r(c(1, NA))", "`NA` at position 2"),
     ("Num.round(n)", "a fractional number"),
     ("[1i64] + [1i64, 2i64]", "a list is never recycled"),
-    ("[1i64] + [1i32]", "two numbers of one type"),
-    ("List.range(Num.to_f32(1), 2)", "integer type"),
+    ("[1i64, 2.5]", "2.5 does not fit I64"),
 ];
 
 #[test]
@@ -242,34 +219,25 @@ fn native_numbers() {
         evaluate(SETUP).unwrap_or_else(|failure| panic!("the setup failed: {failure}"));
         let mut failures = Vec::new();
         // The entry point the suffixed-literal lowering calls.
-        for (ty, text, expected) in [
-            (NumberType::I64, "5", "5i64"),
-            (NumberType::U8, "0xff", "255u8"),
-            (NumberType::Dec, "1.50", "1.5dec"),
-            (
-                NumberType::I128,
-                "-170141183460469231731687303715884105728",
-                "-170141183460469231731687303715884105728i128",
-            ),
-            (NumberType::F32, "0.1", "0.1f32"),
+        for (text, expected) in [
+            ("5", "5i64"),
+            ("0xff", "255i64"),
+            ("1e3", "1000i64"),
+            ("-9223372036854775808", "-9223372036854775808i64"),
         ] {
-            match numbers::from_text(ty, text) {
+            match numbers::from_text(text) {
                 Ok(value) => {
                     let shown = numbers::read(value).map(numbers::literal);
                     if shown.as_deref() != Some(expected) {
-                        failures.push(format!("`{text}` as {}: built {shown:?}", ty.name()));
+                        failures.push(format!("`{text}`: built {shown:?}"));
                     }
                 }
                 Err(failure) => failures.push(format!("`{text}`: {}", message(failure))),
             }
         }
-        for (ty, text) in [
-            (NumberType::U8, "256"),
-            (NumberType::I8, "1.5"),
-            (NumberType::Dec, "1e-19"),
-        ] {
-            if numbers::parse(ty, text).is_ok() {
-                failures.push(format!("`{text}` as {} should not fit", ty.name()));
+        for text in ["9223372036854775808", "1.5", "0x10000000000000000", "1e-3"] {
+            if numbers::parse(text).is_ok() {
+                failures.push(format!("`{text}` should not fit I64"));
             }
         }
         for (code, expected) in PRINTS {

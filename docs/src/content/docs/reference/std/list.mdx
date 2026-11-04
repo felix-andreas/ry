@@ -105,10 +105,10 @@ a type error.
 
 ```r
 List.from_r <- function(vector: logical[]) -> List<Bool>
-List.from_r <- function(vector: integer[]) -> List<I32>
+List.from_r <- function(vector: integer[]) -> List<I64>
 List.from_r <- function(vector: double[]) -> List<F64>
 List.from_r <- function(vector: character[]) -> List<Str>
-List.from_r <- function(vector: raw[]) -> List<U8>
+List.from_r <- function(vector: raw[]) -> List<I64>
 List.from_r <- function<T: item>(vector: list[T]) -> List<T>
 ```
 
@@ -119,7 +119,7 @@ List.from_r <- function<T: item>(vector: list[T]) -> List<T>
 #: fn(vector: logical[]) -> List<Bool>
 List.from_r <- function(vector)
 
-#: fn(vector: integer[]) -> List<I32>
+#: fn(vector: integer[]) -> List<I64>
 List.from_r <- function(vector)
 
 #: fn(vector: double[]) -> List<F64>
@@ -128,7 +128,7 @@ List.from_r <- function(vector)
 #: fn(vector: character[]) -> List<Str>
 List.from_r <- function(vector)
 
-#: fn(vector: raw[]) -> List<U8>
+#: fn(vector: raw[]) -> List<I64>
 List.from_r <- function(vector)
 
 #: <T: item> fn(vector: list[T]) -> List<T>
@@ -140,8 +140,8 @@ List.from_r <- function(vector)
 
 Converts an R vector or list into a `List`, checking every item: it refuses `NA`, a classed
 object and a ragged list, and drops names. A `double` vector becomes a `List<F64>`, an
-`integer` vector a `List<I32>`, a `logical` vector a `List<Bool>`, a `character` vector a
-`List<Str>` and a `raw` vector a `List<U8>`.
+`integer` or `raw` vector a `List<I64>`, a `logical` vector a `List<Bool>` and a `character`
+vector a `List<Str>`.
 
 ```r ry run runtime=ry dput
 List.from_r(c(3, 1, 2))
@@ -159,7 +159,7 @@ List.from_r(c(3, 1, 2))
 List.to_r <- function(list: List<F64>) -> double[]
 List.to_r <- function(list: List<Bool>) -> logical[]
 List.to_r <- function(list: List<Str>) -> character[]
-List.to_r <- function<T: int>(list: List<T>) -> integer[] | double[]
+List.to_r <- function(list: List<I64>) -> integer[] | double[]
 List.to_r <- function<T: item>(list: List<T>) -> list[T]
 ```
 
@@ -176,7 +176,7 @@ List.to_r <- function(list)
 #: fn(list: List<Str>) -> character[]
 List.to_r <- function(list)
 
-#: <T: int> fn(list: List<T>) -> integer[] | double[]
+#: fn(list: List<I64>) -> integer[] | double[]
 List.to_r <- function(list)
 
 #: <T: item> fn(list: List<T>) -> list[T]
@@ -186,7 +186,7 @@ List.to_r <- function(list)
 </TabItem>
 </Tabs>
 
-Converts a `List` into the R vector it shares a representation with. A list of ry integers
+Converts a `List` into the R vector it shares a representation with. A `List<I64>`
 becomes an `integer` vector when every item fits in 32 bits and a `double` vector otherwise. A
 `List<F64>`, `List<Bool>` or `List<Str>` already passes to R code as a vector without this call.
 
@@ -493,14 +493,14 @@ List.repeat("x", 3)
 <TabItem label="Inline">
 
 ```r
-List.range <- function<T: int>(start: T, end: T) -> List<T>
+List.range <- function(start: I64, end: I64) -> List<I64>
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T: int> fn(start: T, end: T) -> List<T>
+#: fn(start: I64, end: I64) -> List<I64>
 List.range <- function(start, end)
 ```
 
@@ -2144,7 +2144,7 @@ Appends the UTF-8 bytes of a string to a list of bytes.
 
 ```r ry run runtime=ry dput
 List.concat_utf8([104], "i")
-#> [104u8, 105u8]
+#> [104i64, 105i64]
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L681)

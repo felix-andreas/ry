@@ -65,7 +65,7 @@ Set.empty()
 #> Set.empty()
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2096)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2027)
 
 ## `Set.with_capacity`
 
@@ -95,7 +95,7 @@ Set.capacity(Set.insert(Set.with_capacity(64), "a"))
 #> 64i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2105)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2036)
 
 ## `Set.single`
 
@@ -124,7 +124,7 @@ Set.single("a")
 #> Set.from_list(["a"])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2113)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2044)
 
 ## `Set.from_list`
 
@@ -153,7 +153,7 @@ Set.from_list([2, 1, 2])
 #> Set.from_list([2, 1])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2121)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2052)
 
 ## `Set.to_list`
 
@@ -182,7 +182,7 @@ Set.to_list(Set.from_list(["b", "a"]))
 #> ["b", "a"]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2129)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2060)
 
 ## `Set.len`
 
@@ -211,7 +211,7 @@ Set.len(Set.from_list([1, 1, 2]))
 #> 2i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2137)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2068)
 
 ## `Set.is_empty`
 
@@ -240,7 +240,7 @@ Set.is_empty(Set.empty())
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2145)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2076)
 
 ## `Set.contains`
 
@@ -269,7 +269,7 @@ Set.contains(Set.from_list([1, 2]), 2)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2153)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2084)
 
 ## `Set.insert`
 
@@ -298,7 +298,7 @@ Set.insert(Set.single(1), 2)
 #> Set.from_list([1, 2])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2161)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2092)
 
 ## `Set.remove`
 
@@ -327,7 +327,7 @@ Set.remove(Set.from_list([1, 2]), 1)
 #> Set.from_list([2])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2169)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2100)
 
 ## `Set.union`
 
@@ -356,7 +356,7 @@ Set.union(Set.from_list([1, 2]), Set.from_list([2, 3]))
 #> Set.from_list([1, 2, 3])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2177)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2108)
 
 ## `Set.intersection`
 
@@ -385,7 +385,7 @@ Set.intersection(Set.from_list([1, 2]), Set.from_list([2, 3]))
 #> Set.from_list([2])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2185)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2116)
 
 ## `Set.difference`
 
@@ -414,7 +414,7 @@ Set.difference(Set.from_list([1, 2]), Set.from_list([2, 3]))
 #> Set.from_list([1])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2193)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2124)
 
 ## `Set.walk`
 
@@ -443,7 +443,7 @@ Set.walk(Set.from_list([1, 2, 3]), 0, function(total, x) total + x)
 #> 6
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2201)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2132)
 
 ## `Set.walk_until`
 
@@ -472,7 +472,7 @@ Set.walk_until(Set.from_list([1, 2, 3]), 0, function(total, x) if (x > 2) :Break
 #> 3
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2209)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2140)
 
 ## `Set.map`
 
@@ -501,7 +501,7 @@ Set.map(Set.from_list([1, 2, 3]), function(x) x %% 2)
 #> Set.from_list([1, 0])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2217)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2148)
 
 ## `Set.join_map`
 
@@ -530,7 +530,7 @@ Set.join_map(Set.from_list([1, 2]), function(x) Set.from_list([x, x * 10]))
 #> Set.from_list([1, 10, 2, 20])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2225)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2156)
 
 ## `Set.keep_if`
 
@@ -559,7 +559,7 @@ Set.keep_if(Set.from_list([1, 2, 3]), function(x) x > 1)
 #> Set.from_list([2, 3])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2233)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2164)
 
 ## `Set.drop_if`
 
@@ -588,7 +588,7 @@ Set.drop_if(Set.from_list([1, 2, 3]), function(x) x > 1)
 #> Set.from_list([1])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2241)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2172)
 
 ## `Set.reserve`
 
@@ -617,7 +617,7 @@ Set.reserve(Set.single("a"), 1000)
 #> Set.from_list(["a"])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2249)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2180)
 
 ## `Set.capacity`
 
@@ -646,7 +646,7 @@ Set.capacity(Set.reserve(Set.single("a"), 9))
 #> 10i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2257)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2188)
 
 ## `Set.release_excess_capacity`
 
@@ -676,4 +676,4 @@ Set.capacity(Set.release_excess_capacity(Set.reserve(Set.single("a"), 9)))
 #> 1i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2266)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L2197)
