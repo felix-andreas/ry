@@ -68,6 +68,13 @@ const ALTREP_FLAG: i64 = 1 << 1;
 const ARRAY_FLAG: i64 = 1 << 4;
 pub(crate) const OBJECT_FLAG: i64 = 1 << 0;
 
+/// The subscripts of an element assignment: one position, or a matrix's row and column.
+#[derive(Clone, Copy)]
+enum Subscript {
+    Vector(usize),
+    Matrix(usize, usize),
+}
+
 /// Compiles `plan` and returns its entry point, its deoptimization exits and the size of its
 /// machine code in bytes.
 pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<(Entry, Box<[Exit]>, u32), Refusal> {
@@ -721,6 +728,15 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.fill_edges()?;
                 return Ok(true);
             }
+            Action::GuardNotObject { src } => {
+                let value = self.load_register(src);
+                let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
+                let object = self.builder.ins().band_imm_u(bits, OBJECT_FLAG);
+                let plain = self.builder.ins().icmp_imm_s(IntCC::Equal, object, 0);
+                let pc = self.plan.insts[position].pc;
+                let failed = self.deopt(pc, before.id, None, position, reason::SPECULATION);
+                self.guard(plain, failed);
+            }
             Action::BranchUnlessShape { src, layout } => {
                 let value = self.load_register(src);
                 let usable = self.plain_record(value);
@@ -1039,7 +1055,25 @@ impl<'p, 'b> Translator<'p, 'b> {
                 index,
                 value,
             } => {
-                self.sub_assign(position, &before, dst, slot, index, value)?;
+                self.sub_assign(
+                    position,
+                    &before,
+                    dst,
+                    slot,
+                    Subscript::Vector(index),
+                    value,
+                )?;
+                self.set_visible(&before, false);
+            }
+            Action::SubAssignMatrix {
+                dst,
+                slot,
+                row,
+                column,
+                value,
+            } => {
+                let subscript = Subscript::Matrix(row, column);
+                self.sub_assign(position, &before, dst, slot, subscript, value)?;
                 self.set_visible(&before, false);
             }
         }
@@ -1931,6 +1965,32 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.hand_off(position, before);
                 self.builder.switch_to_block(join);
             }
+            Intrinsic::MatrixElement => {
+                let vector = self.load_register(args[0]);
+                let (offset, in_range) =
+                    self.matrix_offset(vector, args[1], types[1], args[2], types[2])?;
+                let (kind, width) = match result {
+                    Ty::Dbl => (SexpType::Real, 8),
+                    Ty::Int => (SexpType::Integer, 4),
+                    _ => (SexpType::Logical, 4),
+                };
+                let actual = self.builder.ins().uload8(I32, flags(), vector, KIND);
+                let fits = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, actual, kind as i64);
+                let readable = self.builder.ins().band(in_range, fits);
+                self.hand_off_unless(position, before, readable);
+                let scaled = self.builder.ins().imul_imm_s(offset, width);
+                let address = self.builder.ins().iadd(vector, scaled);
+                if result == Ty::Dbl {
+                    let value = self.builder.ins().load(F64, flags(), address, DATA);
+                    self.builder.def_var(self.doubles[dst], value);
+                } else {
+                    let value = self.builder.ins().load(I32, flags(), address, DATA);
+                    self.builder.def_var(self.integers[dst], value);
+                }
+            }
             Intrinsic::Length => {
                 let value = if types[0].is_unboxed() {
                     self.builder.ins().iconst(I32, 1)
@@ -2419,12 +2479,12 @@ impl<'p, 'b> Translator<'p, 'b> {
         before: &StateRef<'p>,
         dst: usize,
         slot: usize,
-        index: usize,
+        subscript: Subscript,
         value: usize,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
         let target = before.slots[slot].ty;
-        let (index_ty, value_ty) = (before.registers[index], before.registers[value]);
+        let value_ty = before.registers[value];
         let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
         let mismatch = self.deopt(pc, before.id, None, position, reason::SPECULATION);
         // An unloaded variable is loaded first: a loop that calls a function every iteration
@@ -2468,50 +2528,74 @@ impl<'p, 'b> Translator<'p, 'b> {
         }
         let vector = self.load_slot_cell(slot);
         let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
-        let (position_value, in_range) = match index_ty {
-            Ty::Int => {
-                let index_value = self.use_register(index, Ty::Int);
-                let index_value = self.builder.ins().sextend(I64, index_value);
-                let positive =
+        // The zero-based element position and whether the store may happen in place, and for
+        // a matrix whether it holds doubles, which an integer or logical value converts to.
+        let (element_offset, in_range, real) = match subscript {
+            Subscript::Vector(index) => {
+                let (position_value, in_range) = self.subscript_position(
+                    before.registers[index],
+                    index,
+                    length,
+                    target.is_array(),
+                );
+                // An Array cannot hold a missing value, so storing one is tier 0's to do: it
+                // turns the Array into an R vector.
+                let in_range = match target {
+                    Ty::DblArr => {
+                        let element = self.use_register(value, Ty::Dbl);
+                        let present = self.builder.ins().fcmp(FloatCC::Ordered, element, element);
+                        self.builder.ins().band(in_range, present)
+                    }
+                    Ty::IntArr | Ty::LglArr => {
+                        let element = self.use_register(value, value_ty);
+                        let present = self.builder.ins().icmp_imm_s(
+                            IntCC::NotEqual,
+                            element,
+                            NA_INTEGER as i64,
+                        );
+                        self.builder.ins().band(in_range, present)
+                    }
+                    _ => in_range,
+                };
+                let real = matches!(target, Ty::DblVec | Ty::DblArr);
+                let real = self.builder.ins().iconst(I8, i64::from(real));
+                let offset = self.builder.ins().iadd_imm_s(position_value, -1);
+                (offset, in_range, real)
+            }
+            Subscript::Matrix(row, column) => {
+                let (offset, in_range) = self.matrix_offset(
+                    vector,
+                    row,
+                    before.registers[row],
+                    column,
+                    before.registers[column],
+                )?;
+                // A double goes only into a double matrix, an integer also into an integer one,
+                // and a logical into any of the three; anything else changes the matrix's type.
+                let kind = self.builder.ins().uload8(I32, flags(), vector, KIND);
+                let real = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, kind, SexpType::Real as i64);
+                let integer =
                     self.builder
                         .ins()
-                        .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, index_value, 1);
-                let within =
+                        .icmp_imm_s(IntCC::Equal, kind, SexpType::Integer as i64);
+                let logical =
                     self.builder
                         .ins()
-                        .icmp(IntCC::SignedLessThanOrEqual, index_value, length);
-                (index_value, self.builder.ins().band(positive, within))
+                        .icmp_imm_s(IntCC::Equal, kind, SexpType::Logical as i64);
+                let accepted = match value_ty {
+                    Ty::Dbl => real,
+                    Ty::Int => self.builder.ins().bor(real, integer),
+                    _ => {
+                        let either = self.builder.ins().bor(real, integer);
+                        self.builder.ins().bor(either, logical)
+                    }
+                };
+                let in_range = self.builder.ins().band(in_range, accepted);
+                (offset, in_range, real)
             }
-            _ => {
-                let index_value = self.use_register(index, Ty::Dbl);
-                let one = self.builder.ins().f64const(1.0);
-                let positive =
-                    self.builder
-                        .ins()
-                        .fcmp(FloatCC::GreaterThanOrEqual, index_value, one);
-                let within = self.within_length(index_value, length, target.is_array());
-                let in_range = self.builder.ins().band(positive, within);
-                let safe = self.builder.ins().select(in_range, index_value, one);
-                (self.builder.ins().fcvt_to_sint(I64, safe), in_range)
-            }
-        };
-        // An Array cannot hold a missing value, so storing one is tier 0's to do: it turns the
-        // Array into an R vector.
-        let in_range = match target {
-            Ty::DblArr => {
-                let element = self.use_register(value, Ty::Dbl);
-                let present = self.builder.ins().fcmp(FloatCC::Ordered, element, element);
-                self.builder.ins().band(in_range, present)
-            }
-            Ty::IntArr | Ty::LglArr => {
-                let element = self.use_register(value, value_ty);
-                let present =
-                    self.builder
-                        .ins()
-                        .icmp_imm_s(IntCC::NotEqual, element, NA_INTEGER as i64);
-                self.builder.ins().band(in_range, present)
-            }
-            _ => in_range,
         };
         let fast = self.builder.create_block();
         let slow = self.builder.create_block();
@@ -2558,27 +2642,28 @@ impl<'p, 'b> Translator<'p, 'b> {
         self.builder.ins().jump(store, &[fresh.into()]);
         self.builder.switch_to_block(store);
         let vector = self.builder.block_params(store)[0];
-        let element_offset = self.builder.ins().iadd_imm_s(position_value, -1);
-        match target {
-            Ty::DblVec | Ty::DblArr => {
-                let element = self.as_double(value, value_ty);
-                let scaled = self.builder.ins().imul_imm_s(element_offset, 8);
-                let address = self.builder.ins().iadd(vector, scaled);
-                self.builder.ins().store(flags(), element, address, DATA);
-            }
-            Ty::IntVec | Ty::LglVec | Ty::IntArr | Ty::LglArr => {
-                let element = self.use_register(value, value_ty);
-                let scaled = self.builder.ins().imul_imm_s(element_offset, 4);
-                let address = self.builder.ins().iadd(vector, scaled);
-                self.builder.ins().store(flags(), element, address, DATA);
-            }
-            _ => {
-                return Err(Refusal(
-                    "an element assignment into a vector of unknown type",
-                ));
-            }
-        }
+        let store_real = self.builder.create_block();
+        let store_integer = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(real, store_real, &[], store_integer, &[]);
+        self.builder.switch_to_block(store_real);
+        let element = self.as_double(value, value_ty);
+        let scaled = self.builder.ins().imul_imm_s(element_offset, 8);
+        let address = self.builder.ins().iadd(vector, scaled);
+        self.builder.ins().store(flags(), element, address, DATA);
         self.builder.ins().jump(join, &[]);
+        self.builder.switch_to_block(store_integer);
+        if value_ty == Ty::Dbl {
+            // Only a double vector takes a double, so this block never runs.
+            self.builder.ins().jump(join, &[]);
+        } else {
+            let element = self.use_register(value, value_ty);
+            let scaled = self.builder.ins().imul_imm_s(element_offset, 4);
+            let address = self.builder.ins().iadd(vector, scaled);
+            self.builder.ins().store(flags(), element, address, DATA);
+            self.builder.ins().jump(join, &[]);
+        }
 
         // Out of range: write the frame back, since tier 0 may read any variable while it grows
         // or rejects the vector, and forget the variable it rebinds.
@@ -2603,6 +2688,79 @@ impl<'p, 'b> Translator<'p, 'b> {
             self.def_register(dst, value_ty, copy);
         }
         Ok(())
+    }
+
+    /// The one-based position the subscript in register `index` names and whether it is in
+    /// `1..=bound`. A double truncates, as R does, and an `array` rejects a double past `bound`
+    /// before truncating. A negative `bound` rejects every subscript.
+    fn subscript_position(
+        &mut self,
+        index_ty: Ty,
+        index: usize,
+        bound: Value,
+        array: bool,
+    ) -> (Value, Value) {
+        match index_ty {
+            Ty::Int => {
+                let index_value = self.use_register(index, Ty::Int);
+                let index_value = self.builder.ins().sextend(I64, index_value);
+                let positive =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, index_value, 1);
+                let within =
+                    self.builder
+                        .ins()
+                        .icmp(IntCC::SignedLessThanOrEqual, index_value, bound);
+                (index_value, self.builder.ins().band(positive, within))
+            }
+            _ => {
+                let index_value = self.use_register(index, Ty::Dbl);
+                let one = self.builder.ins().f64const(1.0);
+                let positive =
+                    self.builder
+                        .ins()
+                        .fcmp(FloatCC::GreaterThanOrEqual, index_value, one);
+                let within = self.within_length(index_value, bound, array);
+                let in_range = self.builder.ins().band(positive, within);
+                let safe = self.builder.ins().select(in_range, index_value, one);
+                (self.builder.ins().fcvt_to_sint(I64, safe), in_range)
+            }
+        }
+    }
+
+    /// The zero-based position of element `[row, column]` of `vector` and whether `vector` is
+    /// an ordinary matrix (see [`runtime::jit_matrix_rows`]) with that element in range.
+    fn matrix_offset(
+        &mut self,
+        vector: Value,
+        row: usize,
+        row_ty: Ty,
+        column: usize,
+        column_ty: Ty,
+    ) -> Result<(Value, Value), Refusal> {
+        let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
+        let rows = self
+            .call(
+                runtime::jit_matrix_rows as *const () as usize,
+                &[I64],
+                Some(I64),
+                &[vector],
+            )
+            .ok_or(Refusal("a helper without a result"))?;
+        let (row_value, row_in_range) = self.subscript_position(row_ty, row, rows, false);
+        let (column_value, column_in_range) =
+            self.subscript_position(column_ty, column, length, false);
+        let row_offset = self.builder.ins().iadd_imm_s(row_value, -1);
+        let column_offset = self.builder.ins().iadd_imm_s(column_value, -1);
+        let column_start = self.builder.ins().imul(column_offset, rows);
+        let offset = self.builder.ins().iadd(column_start, row_offset);
+        let within = self
+            .builder
+            .ins()
+            .icmp(IntCC::SignedLessThan, offset, length);
+        let in_range = self.builder.ins().band(row_in_range, column_in_range);
+        Ok((offset, self.builder.ins().band(in_range, within)))
     }
 
     // Variables.

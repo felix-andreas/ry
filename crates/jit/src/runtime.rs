@@ -1142,6 +1142,42 @@ fn collection_kind(set: i32) -> NativeKind {
     }
 }
 
+/// The row count of `vector` when it is an ordinary matrix whose elements compiled code may
+/// store into: a double, integer or logical vector that is neither ALTREP, an Array nor an
+/// object, whose only attribute is a `dim` of two counts. -1 for anything else, whose element
+/// assignment tier 0 runs.
+pub unsafe extern "C" fn jit_matrix_rows(vector: *mut Header) -> i64 {
+    unsafe {
+        let Some(vector) = Sexp::from_raw(vector) else {
+            return -1;
+        };
+        if !matches!(
+            vector.kind(),
+            SexpType::Real | SexpType::Integer | SexpType::Logical
+        ) || vector.is_altrep()
+            || vector.is_array()
+            || vector.is_object()
+        {
+            return -1;
+        }
+        let attributes = vector.attrib();
+        if attributes.kind() != SexpType::Pairlist
+            || attributes.tag() != values::symbols().dim
+            || attributes.cdr().kind() != SexpType::Nil
+        {
+            return -1;
+        }
+        let dim = attributes.car();
+        if dim.kind() != SexpType::Integer || dim.is_altrep() {
+            return -1;
+        }
+        match dim.slice::<i32>() {
+            &[rows, _] if rows >= 0 => i64::from(rows),
+            _ => -1,
+        }
+    }
+}
+
 /// The tag of a plain tag value, or -1 for anything else.
 pub unsafe extern "C" fn jit_plain_tag(value: *mut Header) -> i64 {
     unsafe {

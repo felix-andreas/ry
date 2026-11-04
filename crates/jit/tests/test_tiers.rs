@@ -144,6 +144,51 @@ fn seeds_agree_across_tiers() {
             "(n = 5L)",
             false,
         ),
+        // Matrix element stores: integers into a double matrix in place, a copy of a shared
+        // matrix, a value that changes the matrix's type, a reshaped matrix, truncated double
+        // subscripts, and a subscript out of bounds, which is an error.
+        (
+            "m <- rep(0, n * n)\ndim(m) <- c(n, n)\nfor (i in 1:n) for (j in 1:n) m[i, j] <- i * j\nm",
+            "(n = 6L)",
+            false,
+        ),
+        (
+            "m <- rep(0, 4L)\ndim(m) <- c(2L, 2L)\nk <- m\nfor (i in 1:n) m[1L, i %% 2L + 1L] <- i\nlist(m, k)",
+            "(n = 5L)",
+            false,
+        ),
+        (
+            "m <- rep(TRUE, 6L)\ndim(m) <- c(3L, 2L)\nfor (i in 1:n) m[i %% 3L + 1L, i %% 2L + 1L] <- if (i < 4L) NA else i\nm",
+            "(n = 7L)",
+            false,
+        ),
+        (
+            "m <- rep(0, 4L)\ndim(m) <- c(2L, 2L)\nfor (i in 1:n) { if (i == 2L) attr(m, \"dim\") <- c(1L, 4L); m[1L, i %% 4L + 1L] <- i * 1.5 }\nm",
+            "(n = 6L)",
+            false,
+        ),
+        (
+            "m <- rep(0L, 9L)\ndim(m) <- c(3L, 3L)\nfor (i in 1:n) m[i * 0.7 + 1, 2.9] <- i\nm",
+            "(n = 3L)",
+            false,
+        ),
+        // Matrix element reads beside stores, a read that turns from integer to double, and
+        // one out of bounds.
+        (
+            "m <- rep(0L, 6L)\ndim(m) <- c(2L, 3L)\nfor (k in 1:n) for (j in 1:3) { m[k %% 2L + 1L, j] <- m[k %% 2L + 1L, j] + k; if (k == 20L) m <- m * 0.5 }\nm",
+            "(n = 30L)",
+            false,
+        ),
+        (
+            "m <- rep(1.5, 4L)\ndim(m) <- c(2L, 2L)\ns <- 0\nfor (i in 1:n) s <- s + m[1L, i]\ns",
+            "(n = 3L)",
+            true,
+        ),
+        (
+            "m <- rep(0, 4L)\ndim(m) <- c(2L, 2L)\nfor (i in 1:n) m[i, 1L] <- i\nm",
+            "(n = 3L)",
+            true,
+        ),
         // A `next` inside `switch`, which leaves compiled code from a nested evaluation.
         (
             "s <- 0\nfor (i in 1:n) { s <- s + 1; if (i %% 2 == 0) switch(\"a\", a = next) }\ns",
