@@ -47,12 +47,12 @@
           pkgs.rust-bin.fromRustupToolchain (
             pinned
             // {
-              targets = pinned.targets ++ [
+              targets = (pinned.targets or [ ]) ++ [
                 "x86_64-unknown-linux-gnu"
                 "x86_64-pc-windows-gnu"
                 "aarch64-apple-darwin"
               ];
-              components = pinned.components ++ [ "rust-analyzer" ];
+              components = (pinned.components or [ ]) ++ [ "rust-analyzer" ];
             }
           );
       };
