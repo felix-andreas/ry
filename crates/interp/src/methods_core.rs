@@ -1238,30 +1238,54 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
         bail!(skip);
     }
     let name_symbol = install_text(name.element(0))?;
-    let generic = crate::methods::visible_generic(name_symbol, place)?;
-    // `setMethod()` stores a method for a generic whose body does more than dispatch, such as
-    // `coerce` and `initialize`, exactly as for a standard one.
-    if !is_standard_generic(generic, true)? {
-        bail!(skip);
-    }
-    // A primitive whose methods are on: the function visible from `where` is the primitive,
-    // and the generic the methods package set up for it is its default method's generic.
+    let mut generic = crate::methods::visible_generic(name_symbol, place)?;
     let visible = visible_function(name_symbol, place)?;
     let primitive = match visible {
         Visible::Function(function)
             if matches!(function.kind(), SexpType::Builtin | SexpType::Special) =>
         {
-            if crate::dispatch::primitive_methods(function).map(|(found, _)| found) != Some(generic)
-                || get_attr(generic, install("default")?) != function
-            {
-                bail!(skip);
-            }
             Some(function)
         }
         _ => None,
     };
-    if primitive.is_none() && !has_closure_default(generic)? {
+    // The first method for a primitive: `getGeneric()` takes the methods package's generic for
+    // it from `.BasicFunsList` and caches it in `.genericTable`.
+    let mut generic_table = None;
+    if generic == nil()
+        && primitive.is_some()
+        && let Some(basic) = methods_value(".BasicFunsList")?
+        && let Some(basic_generic) = element(basic, name.element(0).bytes())
+    {
+        let Some(table) = methods_value(".genericTable")? else {
+            bail!(skip);
+        };
+        match quiet_value(name_symbol, table)? {
+            None => generic_table = Some(table),
+            Some(cached)
+                if cached == basic_generic
+                    || crate::sort::identical(cached, basic_generic, &Default::default()) => {}
+            Some(_) => bail!(skip),
+        }
+        generic = basic_generic;
+    }
+    // `setMethod()` stores a method for a generic whose body does more than dispatch, such as
+    // `coerce` and `initialize`, exactly as for a standard one.
+    if !is_standard_generic(generic, true)? {
         bail!(skip);
+    }
+    match primitive {
+        // The generic the methods package set up for a primitive has the primitive as its
+        // default method, and is the one its dispatch uses once methods are on.
+        Some(function) => {
+            if get_attr(generic, install("default")?) != function
+                || crate::dispatch::primitive_methods(function)
+                    .is_some_and(|(found, _)| found != generic)
+            {
+                bail!(skip);
+            }
+        }
+        None if !has_closure_default(generic)? => bail!(skip),
+        None => {}
     }
     // `getGeneric()` caches a generic it finds that is also the global binding.
     if let Some(global) = quiet_value(name_symbol, values::global_env())? {
@@ -1378,6 +1402,9 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
     };
     eval::define(label, method, meta_table)?;
     reset_inherited_methods(methods_table, all_table)?;
+    if let Some(table) = generic_table {
+        eval::define(name_symbol, generic, table)?;
+    }
     if let Some(primitive) = primitive {
         crate::dispatch::set_primitive_methods(primitive, "reset", generic, nil())?;
     }
