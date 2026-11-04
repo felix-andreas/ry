@@ -7685,14 +7685,13 @@ Each one trades a narrow class of missed errors for a class of false reports see
   `Makevars` that is not parallel-safe still installs (`install-serial-makevars.scenario`). Where
   the toolchain says exactly `-lblas` or `-llapack` on Linux, the home's Makeconf writes
   `-l:libblas.so.3` and `-l:liblapack.so.3` (`versioned_linear_algebra`), so the linker finds the
-  file the runtime opens when the package links, and the package records `libblas.so.3`. An
-  earlier shape probed the system with `dlopen` while assembling the home and linked
-  `lib/libRblas.so` to the result; a home built before BLAS was installed then kept the bare
-  flags for good, so the probe was dropped rather than keyed into the home's hash. Nothing in the
-  home depends on what the system had installed. A system with only an unversioned `libblas.so`
-  (no `.so.3`) fails to link; no distribution ships that layout. `bfd`, `gold` and `lld` all take
-  `-l:file` on the command line (`gold` rejects it inside a linker script, which ruled out a
-  `libRblas.so` script). `install` makes the library path absolute.
+  file the runtime opens when the package links, and the package records that file's soname
+  (`libblas.so.3` for Debian's reference BLAS; a distribution whose `libblas.so.3` is a link to
+  OpenBLAS may record `libopenblas.so.0`). Nothing in the home depends on what the system had
+  installed: a `dlopen` probe at home build would freeze the result into a cached home. A system
+  with only an unversioned `libblas.so` fails to link (unverified whether any distribution ships
+  that). `bfd`, `gold` and `lld` all take `-l:file` on the command line; `gold` rejects it inside
+  a linker script, which ruled out a `libRblas.so` script. `install` makes the library path absolute.
 - **What is not the bottleneck.** Installs never byte-compile (ry compiles closures when they
   run), and writing the lazy-load database is fast: 0.06 s for MASS against GNU R's 0.10 s on the
   same driver. The R half spends its time in Rd processing and help indices (MASS: 0.55 s and
