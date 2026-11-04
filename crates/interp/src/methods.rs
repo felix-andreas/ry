@@ -361,21 +361,21 @@ pub unsafe fn new_object_copying(class_def: Sexp, deep: bool) -> R<Sexp> {
             "C level NEW macro called with null class definition pointer",
         ));
     }
-    let virtual_flag = slot_value(class_def, "virtual")?;
-    let class_name = slot_value(class_def, "className")?;
+    let virtual_flag = crate::subset::get_slot(class_def, symbols().virtual_, nil())?;
+    let class_name = crate::subset::get_slot(class_def, symbols().class_name, nil())?;
     if values::as_logical_scalar(virtual_flag) != 0 {
         return Err(error(format!(
             "trying to generate an object from a virtual class (\"{}\")",
             values::first_string(class_name).unwrap_or_default()
         )));
     }
-    let prototype = slot_value(class_def, "prototype")?;
+    let prototype = crate::subset::get_slot(class_def, symbols().prototype, nil())?;
     let value = if deep {
         values::duplicate(prototype)?
     } else {
         values::shallow_duplicate(prototype)?
     };
-    let package = values::get_attr(class_name, values::install("package")?);
+    let package = values::get_attr(class_name, symbols().package);
     if value.kind() == SexpType::Object || package != nil() {
         values::set_attr(value, symbols().class, class_name)?;
         value.set_gp_bits(gp::S4_OBJECT, true);
@@ -759,7 +759,7 @@ pub(crate) unsafe fn cached_class_definition(class: Sexp, table: Sexp) -> R<Sexp
     if value == unbound() {
         return Ok(nil());
     }
-    let package_symbol = values::install("package")?;
+    let package_symbol = symbols().package;
     let package = values::get_attr(class, package_symbol);
     if package.kind() == SexpType::String && length(package) > 0 {
         let defined_package = values::get_attr(value, package_symbol);
@@ -879,7 +879,7 @@ unsafe fn run_unit(position: usize, lazy: Option<&[u8]>) -> R<()> {
 pub(crate) unsafe fn find_generic(symbol: Sexp, env: Sexp, package: &str) -> R<Sexp> {
     let heap = crate::heap();
     let generic_symbol = values::install("generic")?;
-    let package_symbol = values::install("package")?;
+    let package_symbol = symbols().package;
     let mut frame = env;
     while frame != values::empty_env() {
         if let Some(cell) = heap.frame_cell(frame, symbol) {

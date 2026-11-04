@@ -5910,45 +5910,22 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   call (`pkgload::load_all` 6.3 to 7.1 s, `library()` of an installed copy 0.6 s). Held back, the
   load takes about 0.27 s; first S4 use costs the full eager run on a miss (see the metadata cache
   below for a hit).
-- **The S4 metadata cache** (`DeferredS4::cache_key`, `s4_cache_path` in `loader.rs`;
-  `.ry_restore_s4`, `.ry_save_s4` in `runtime.R`). Previously every process ran the held-back
-  definitions through the `methods` package (about 330 ms on the bench package, 1.7x GNU R, the gap
-  being interpreter speed in `slot<-`, `list()` and `possibleExtends`). A full force now restores the
-  bindings the unit made (`.__C__*`, `.__T__*`, generics, generators) from the cache and caches
-  their metadata as `cacheMetaData` would, which is how GNU R loads an installed package's S4
-  objects, so the restored state is the same one an installed package would have. That is valid only
-  when the bindings are a pure function of the definitions' text: the key is set only when every
-  definition reads its own names or `PURE_S4_READS` (constructors and literals), and it covers the
-  definitions' text, package name and version, and the build id; the R version and imported packages'
-  versions are checked at restore. A run that signalled a message or warning is not saved, so a
-  diagnostic is never silenced. A force during the load never uses the cache, because only a full
-  force produces the whole unit's bindings. A miss still costs the full run.
-- **The S4 cache is a lazy-load database, and a restore replaces `cacheMetaData`**
-  (`.ry_save_s4`, `.ry_restore_s4`, `.ry_cache_restored_s4`, `.ry_s4_metadata` in `runtime.R`).
-  Previously the cache was one RDS file that a restore read whole (`readRDS` 170 to 370 ms for
-  2,900 definitions, 8 MB unserialized) and then ran `methods::cacheMetaData` (about 190 ms, which
-  touches every class and generic), so the first S4 use on a hit cost 380 to 460 ms. Now:
-  - The save runs after `cacheMetaData`, so the package's own generics are stored with their
-    method tables already merged, and writes `tools:::makeLazyLoadDB` into a fresh directory that
-    replaces the old one. A lazy-load database keeps environments shared between definitions (a
-    generic and its `.__T__` table), which per-value serialization would split. The restore binds
-    promises with `makeLazy` and checks the key first; `lazyLoadDBfetch` reads the whole file into
-    memory on the first fetch, so a later replacement cannot tear a session's promises.
-  - Instead of `cacheMetaData`, the restore puts the package's classes and plain generics into
-    `methods:::.classTable` and `.genericTable` as bindings that share the namespace's promises
-    (`importIntoEnv`), so no definition is read until something looks it up. This is exact because
-    the save records, per class and generic, whether `cacheMetaData` would do anything else: a
-    union's own members must already contain it (then `.recacheSubclasses` is a no-op for them,
-    and only foreign members such as `NULL` are recached, in order), and a plain generic is the
-    package's own non-group, non-primitive generic, for which `cacheMetaData` only merges tables
-    the save already merged. Anything else (a class name already in the table, a non-plain class)
-    runs the full class loop in `cacheMetaData`'s order, since then the order of updates decides
-    the table's contents; other packages' generics (`show`, `initialize`, `coerce`, primitives)
-    always run `cacheMetaData`'s per-generic steps (`.ry_cache_generic`). Packages with load actions
-    or `.requireCachedGenerics` are not saved, since a restore would not repeat what they do.
-  - Measured on the generated S4 package (2,877 definitions, Imports lubridate, data.table, xts):
-    first `new()` on a hit fell from 380 to 460 ms to about 30 to 60 ms; the save on a miss costs about
-    0.4 s.
+- **Each package generic is its own unit; there is no S4 metadata cache** (`DeferredS4` in
+  `loader.rs`; `.ry_force_s4`, `.ry_s4_placeholder` in `runtime.R`; `force_deferred_unit`,
+  `run_unit` in `interp/src/methods.rs`). Previously a first S4 use ran or restored every held-back
+  definition at once, and a lazy-load database of the resulting bindings (keyed on the
+  definitions' text, the build id and the imports' versions) made the restore fast. That cache was
+  derived state persisted across processes, it needed every definition to run together, and a miss
+  still paid the whole run. Now unit 0 holds the classes, unions, coercions and methods on other
+  packages' generics, and each package generic whose methods name only classes defined earlier
+  becomes its own unit, run on the first lookup of that generic (its name or its `.__T__` table) or
+  on dispatch to it. A generic that a class definition reads, or whose methods name a later class,
+  stays in unit 0. On `target/s4heavy`, unit 0 is about 416M instructions, and the lazy generics cost
+  nothing until called. Forcing a lazy generic runs unit 0 first when it has not
+  run, and it drops that generic's placeholders before unit 0's `cacheMetaData` visits the
+  namespace's methods tables, since the generic's own placeholder may be the promise whose
+  evaluation started the force. The native `cacheMetaData` skips generics still held back, and a
+  lazy unit ends with `ryS4CacheGeneric` (or `.ry_cache_generic` in R) for its one generic.
 - **The load-index cache** (`index_cache`, `read_index_cache`, `write_index_cache` in `loader.rs`).
   Previously every cold start parsed all files and derived their facts (about 280 ms on 4 cores).
   The whole `PackageIndex` is now cached per package root, keyed by an xxh3-128 over the build id
@@ -7484,15 +7461,20 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Switches.** `RY_METHODS_NATIVE=0` turns the definition fast paths off (the differential uses
   it), `RY_TRACE_METHODS_BAILS=1` prints why each call bailed, and `RY_PRINT_FAST_PATH_HASHES=1`
   prints the hashes of the installed functions, for adding a version.
-- **The S4 cache is interim.** The end state has no S4 cache: the cold native path itself reaches
-  a first `new()` under 100 ms, and then the cache is deleted (AGENTS.md, "Caching is a sign of a
-  slow design"). Until then it stays, because restoring is about 10 times faster than running the
-  definitions natively (61 ms against about 145 ms for the run alone, plus about 200 ms for the
-  save, on `target/s4heavy`), and incremental reload of it is not worth
-  building for a cache that is going away. It is saved uncompressed: the save fell from 344 to
-  about 190 ms and the cache grew from 1.5 to 9.4 MB, with the restore unchanged. Saving at process
-  exit instead of after the first run was rejected, because `.MTable` gathers inherited entries
-  during a session and the saved state would depend on what ran.
+- **The S4 cache is deleted** (AGENTS.md, "Caching is a sign of a slow design"). Per-generic
+  units plus the native definitions bring a cold first `new()` on `target/s4heavy` to 80 to 87 ms
+  (one run in five about 103 ms from machine noise), against 0.36 to 0.40 s with a cache miss
+  before.
+- **`setMethod` creates the implicit generic of a base S3 generic natively** (`implicit_generic`
+  in `methods_core.rs`). `setMethod("as.list", ...)` in a package namespace on a base closure
+  whose body calls `UseMethod` runs `setGeneric(f, where)`, which builds the generic with
+  `makeGeneric`, a `derivedDefaultMethod` of the base function, `.MTable`/`.AllMTable` holding
+  `ANY`, the entries in `.genericTable` and `methods:::.implicitTable`, and `.__T__f:base` in
+  the namespace, without the message R prints for a non-S3 function. The native path writes the
+  same objects (the differential compares `serialize()` output) and bails when `.BasicFunsList`,
+  `.__IG__table` or `.__IGM__table` would supply the generic, when either table already holds
+  the name, or outside a namespace. It removed 25 ms (`as.list`, `print`, `toString`) of the
+  cold run.
 - **The rest of the gap goes to a native class table, not more ported functions.** With
   `setMethod` on primitives, inherited single-argument dispatch and most
   `setClass` and `setGeneric` shapes native, a cold run of the 2,892 definitions takes about 145 ms and
@@ -7504,6 +7486,17 @@ Each one trades a narrow class of missed errors for a class of false reports see
   step is a native class table with dense class ids, a bitset extends relation and method tables
   keyed by id, which materializes the R objects (`classRepresentation`, `.MTable` environments)
   only when R code reads them.
+- **Per-generic units came before the class table, because they removed more for less.** Running
+  every definition cost about 670M instructions, and a large part of that was `setGeneric` and
+  `setMethod` for package generics that nothing calls at start-up, so not running them beat running
+  them faster. What remains is unit 0 (about 416M instructions on `target/s4heavy`, with the
+  implicit generics native): `setClass` 29% (`try_new`,
+  class-definition lookups, `combine_extensions`, `direct_extension`), lazy-load unserialization
+  of `methods` objects 12%, the collector 10%, symbol interning 8%, then dispatch,
+  `checkAtAssignment` and `setClassUnion`. The class table is still the shape for that `setClass`
+  share. The R-level metadata (`.classTable`, `.genericTable`, `classRepresentation` objects)
+  becomes views produced from it on demand, so R code that reads them sees GNU R's objects
+  while native definitions and dispatch never build them.
 - **Unions and `cacheMetaData` replicate GNU R's quirks, not its intent.** The native
   `setClassUnion` and `cacheMetaData` must leave state that `serialize()`s identically, so they
   copy behavior that looks like a bug: `.recacheSubclasses` tests `match(what, names(subDef@contains))`

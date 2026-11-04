@@ -23,6 +23,7 @@ use {
         },
     },
     heap::object::{Sexp, SexpType, gp},
+    rustc_hash::FxHashSet,
 };
 
 /// Returns `false` from a definition fast path so the R body runs. Setting
@@ -439,7 +440,7 @@ unsafe fn is_data_part_replacement(method: Sexp, data_class: &[u8]) -> R<bool> {
     if method.kind() != SexpType::Closure {
         return Ok(false);
     }
-    let (from, value) = (install("from")?, symbols().value);
+    let (from, value) = (symbols().from, symbols().value);
     let mut formal = method.car();
     for expected in [from, install("to")?, value] {
         if formal.kind() != SexpType::Pairlist || formal.tag() != expected {
@@ -772,7 +773,7 @@ unsafe fn identity_coerce(from: &[u8], to: &[u8]) -> R<bool> {
         return Ok(false);
     };
     Ok(method.kind() == SexpType::Closure
-        && crate::bytecode::closure_body(method) == install("from")?)
+        && crate::bytecode::closure_body(method) == symbols().from)
 }
 
 /// `possibleExtends(class1, class2, definition1, definition2)`, where `None` stands for a `NULL`
@@ -1475,6 +1476,176 @@ unsafe fn make_generic(
     Ok(generic)
 }
 
+/// An implicit generic that `setMethod()` makes for a base function, before it is stored.
+#[derive(Clone, Copy)]
+struct ImplicitGeneric {
+    generic: Sexp,
+    /// `where`'s copy of the methods table, `.__T__name:base`.
+    meta_table: Sexp,
+    /// The methods package's `.genericTable` and `.implicitTable`, which cache the generic.
+    generic_table: Sexp,
+    implicit_table: Sexp,
+}
+
+/// The generic `setGeneric(name, where = place)` takes for `function`, the closure bound to
+/// `name` in the base namespace, when that is an S3 generic: `.implicitGeneric()` makes it with
+/// `makeGeneric()` from the function as a `derivedDefaultMethod`, and `setGeneric()` finds its
+/// own version identical to it and keeps it. `setMethod()` reports making a generic only for a
+/// function that is not an S3 generic, so those take the R code. `None` where the R code would
+/// find a cached implicit generic, a saved implicit generic or group, or anything else to do.
+unsafe fn implicit_generic(name_symbol: Sexp, function: Sexp, place: Sexp) -> R<Option<ImplicitGeneric>> {
+    let base = values::base_namespace();
+    let name = name_symbol.car().bytes();
+    if function.kind() != SexpType::Closure
+        || function.has_gp(gp::S4_OBJECT)
+        || function.tag() != base
+        || quiet_value(name_symbol, base)? != Some(function)
+        || !crate::envir::is_namespace(place)
+        || !calls_use_method(crate::bytecode::closure_body(function))
+    {
+        return Ok(None);
+    }
+    let Some(package) = package_name(place)? else {
+        return Ok(None);
+    };
+    if package.element(0).bytes() == b"base" || in_basic_funs_entry(name)? {
+        return Ok(None);
+    }
+    if crate::heap()
+        .frame_cell(base, values::install(".__IG__table")?)
+        .is_some()
+    {
+        return Ok(None);
+    }
+    if let Some(groups) = methods_value(".__IGM__table")?
+        && (groups.kind() != SexpType::Environment
+            || crate::heap().frame_cell(groups, name_symbol).is_some())
+    {
+        return Ok(None);
+    }
+    let (Some(generic_table), Some(implicit_table)) =
+        (methods_value(".genericTable")?, methods_value(".implicitTable")?)
+    else {
+        return Ok(None);
+    };
+    if generic_table.kind() != SexpType::Environment
+        || implicit_table.kind() != SexpType::Environment
+        || crate::heap().frame_cell(generic_table, name_symbol).is_some()
+        || crate::heap().frame_cell(implicit_table, name_symbol).is_some()
+        || !assignable(place, name_symbol)
+    {
+        return Ok(None);
+    }
+    let formal_names = formal_names(function.car());
+    let mut signature: Vec<Sexp> = formal_names.clone();
+    signature.retain(|&symbol| symbol != symbols().dots);
+    if signature.is_empty() {
+        return Ok(None);
+    }
+
+    let heap = crate::heap();
+    let base_package = values::scalar_string("base")?;
+    heap.root(base_package);
+    let generic_name = values::scalar_string_charsxp(name_symbol.car())?;
+    values::set_attr(generic_name, symbols().package, base_package)?;
+    heap.root(generic_name);
+    let body = lcons(
+        install("standardGeneric")?,
+        cons(values::scalar_string_charsxp(name_symbol.car())?, nil())?,
+    )?;
+    heap.root(body);
+    let def = values::triple(SexpType::Closure, function.car(), body, base)?;
+    heap.root(def);
+    let generic = make_generic(name_symbol.car(), def, base_package, &formal_names, &signature)?;
+    heap.root(generic);
+
+    // `.derivedDefaultMethod(function)`, whose target is `ANY` for the first formal.
+    let any = values::scalar_string("ANY")?;
+    values::set_attr(any, symbols().package, values::scalar_string("methods")?)?;
+    heap.root(any);
+    let arguments = alloc_strings(formal_names.len())?;
+    for (index, symbol) in formal_names.iter().enumerate() {
+        heap.set_element(arguments, index, symbol.car());
+    }
+    heap.root(arguments);
+    let default = values::triple(SexpType::Closure, function.car(), function.cdr(), function.tag())?;
+    heap.root(default);
+    let target = signature_object(any, arguments)?;
+    for (attribute, value) in [
+        (symbols().target, target),
+        (symbols().defined, target),
+        (symbols().generic, generic_name),
+        (symbols().class, methods_class("derivedDefaultMethod")?),
+    ] {
+        values::set_attr(default, attribute, value)?;
+    }
+    append_attributes(function, default)?;
+    default.set_gp_bits(gp::S4_OBJECT, true);
+
+    let env = generic.tag();
+    eval::define(symbols().dot_method_symbol, default, env)?;
+    values::set_attr(generic, symbols().default, default)?;
+    values::set_attr(
+        generic,
+        install("skeleton")?,
+        generic_call(default, &formal_names)?,
+    )?;
+    // `.setupMethodsTables()` stores the default under `ANY` in both tables, and `where` gets a
+    // copy of the direct one.
+    let any_label = install("ANY")?;
+    for table in [symbols().mtable, symbols().all_mtable] {
+        if let Some(table) = quiet_value(table, env)? {
+            eval::define(any_label, default, table)?;
+        }
+    }
+    let meta_table = hashed_env(env)?;
+    eval::define(any_label, default, meta_table)?;
+    Ok(Some(ImplicitGeneric {
+        generic,
+        meta_table,
+        generic_table,
+        implicit_table,
+    }))
+}
+
+/// Whether `body` calls `UseMethod()` anywhere, which `isS3Generic()` asks of a closure.
+unsafe fn calls_use_method(body: Sexp) -> bool {
+    match body.kind() {
+        SexpType::Language => {
+            let head = body.car();
+            if head.kind() == SexpType::Symbol && head.car().bytes() == b"UseMethod" {
+                return true;
+            }
+            let mut cell = body;
+            while cell.kind() == SexpType::Language || cell.kind() == SexpType::Pairlist {
+                if calls_use_method(cell.car()) {
+                    return true;
+                }
+                cell = cell.cdr();
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// `generic.skeleton(name, def, default)`: the call of `default` on the generic's formals, with
+/// arguments after `...` passed by name.
+unsafe fn generic_call(default: Sexp, formal_names: &[Sexp]) -> R<Sexp> {
+    let dots = formal_names
+        .iter()
+        .position(|&symbol| symbol == symbols().dots);
+    let mut arguments = nil();
+    for (index, &symbol) in formal_names.iter().enumerate().rev() {
+        let tag = match dots {
+            Some(dots) if dots + 1 < formal_names.len() && index > dots => symbol,
+            _ => nil(),
+        };
+        arguments = values::cons_tagged(symbol, arguments, tag)?;
+    }
+    lcons(default, arguments)
+}
+
 /// `generic.skeleton(name, def, NULL)`: a call of a function with the generic's formals that
 /// reports the missing default method, on the formals as symbols. Arguments after `...` are
 /// passed by name.
@@ -1492,18 +1663,7 @@ unsafe fn generic_skeleton(generic_name: Sexp, formals: Sexp, formal_names: &[Se
     )?;
     let body = lcons(install("stop")?, cons(format, domain)?)?;
     let fallback = values::triple(SexpType::Closure, formals, body, values::base_env())?;
-    let dots = formal_names
-        .iter()
-        .position(|&symbol| symbol == symbols().dots);
-    let mut arguments = nil();
-    for (index, &symbol) in formal_names.iter().enumerate().rev() {
-        let tag = match dots {
-            Some(dots) if dots + 1 < formal_names.len() && index > dots => symbol,
-            _ => nil(),
-        };
-        arguments = values::cons_tagged(symbol, arguments, tag)?;
-    }
-    lcons(fallback, arguments)
+    generic_call(fallback, formal_names)
 }
 
 /// `setMethod(f, signature, definition)` for a standard generic found from `where`, or a
@@ -1566,6 +1726,18 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
         }
         generic = basic_generic;
     }
+    // `setMethod()` on a base function that is not generic yet, such as `as.list`, first runs
+    // `setGeneric(f, where = where)`, which takes the implicit generic of the base function. It
+    // is built here without effects and stored once the rest of the call is known to succeed.
+    let mut implicit = None;
+    if generic == nil()
+        && primitive.is_none()
+        && let Visible::Function(function) = visible
+        && let Some(made) = implicit_generic(name_symbol, function, place)?
+    {
+        generic = made.generic;
+        implicit = Some(made);
+    }
     // `setMethod()` stores a method for a generic whose body does more than dispatch, such as
     // `coerce` and `initialize`, exactly as for a standard one.
     if !is_standard_generic(generic, true)? {
@@ -1602,6 +1774,7 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
         slot_text(generic, "package")?,
     )?;
     let sealed_check_table = match visible {
+        _ if implicit.is_some() => None,
         Visible::None => None,
         Visible::Function(function) if primitive == Some(function) => None,
         Visible::Function(function) if function == generic => {
@@ -1667,6 +1840,8 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
         bail!(skip);
     }
     let meta_table = match quiet_value(table_symbol, place)? {
+        _ if implicit.is_some() && !assignable(place, table_symbol) => return Ok(skip),
+        Some(_) if implicit.is_some() => return Ok(skip),
         Some(table) if table.kind() == SexpType::Environment => Some(table),
         Some(_) => return Ok(skip),
         None => None,
@@ -1687,6 +1862,18 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
         }
     }
 
+    // `.GenericAssign()`: the implicit generic goes into `where`, the generic cache and the
+    // implicit generic cache, with a copy of its methods table as `where`'s metadata.
+    let meta_table = match implicit {
+        Some(made) => {
+            eval::define(name_symbol, generic, place)?;
+            eval::define(name_symbol, generic, made.generic_table)?;
+            eval::define(name_symbol, generic, made.implicit_table)?;
+            eval::define(table_symbol, made.meta_table, place)?;
+            Some(made.meta_table)
+        }
+        None => meta_table,
+    };
     let method = method_definition(definition, signature, generic)?;
     eval::define(label, method, methods_table)?;
     eval::define(label, method, all_table)?;
@@ -1966,8 +2153,9 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
     if !native_definitions() {
         bail!(skip);
     }
-    for name in ["access", "version", "sealed", "package", "S3methods"] {
-        if !eval::is_missing(install(name)?, frame)? {
+    let names = symbols();
+    for name in [names.access, names.version, names.sealed, names.package, names.s3_methods] {
+        if !eval::is_missing(name, frame)? {
             bail!(skip);
         }
     }
@@ -2011,7 +2199,7 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
     let mut own: Vec<(Sexp, Sexp)> = Vec::new();
     let mut virtual_class = false;
     if !eval::is_missing(symbols().slots, frame)? {
-        if !eval::is_missing(install("representation")?, frame)? {
+        if !eval::is_missing(symbols().representation, frame)? {
             bail!(skip);
         }
         let Some(slots) = forced_arg(frame, "slots")? else {
@@ -2021,7 +2209,7 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
             bail!(skip);
         };
         own = pairs;
-    } else if !eval::is_missing(install("representation")?, frame)? {
+    } else if !eval::is_missing(symbols().representation, frame)? {
         let Some(representation) = forced_arg(frame, "representation")? else {
             bail!(skip);
         };
@@ -2172,6 +2360,7 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
     // The slots: the class's own, then each superclass's, which include their superclasses'.
     let package_symbol = symbols().package;
     let mut slots: Vec<(Sexp, Sexp)> = Vec::with_capacity(own.len());
+    let mut slot_names: FxHashSet<&[u8]> = own.iter().map(|&(name, _)| name.bytes()).collect();
     for &(slot_name, slot_class) in &own {
         let Some(definition) = cached_class(values::scalar_string_charsxp(slot_class)?)? else {
             bail!(skip);
@@ -2190,9 +2379,7 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
         for index in 0..length(super_slots) {
             let slot_name = super_names.element(index);
             if matches!(slot_name.bytes(), b".Data" | b".S3Class")
-                || slots
-                    .iter()
-                    .any(|&(known, _)| known.bytes() == slot_name.bytes())
+                || !slot_names.insert(slot_name.bytes())
             {
                 bail!(skip);
             }
@@ -3916,7 +4103,7 @@ unsafe fn is_default_initialize(method: Sexp) -> R<bool> {
     let Some([(_, internal)]) = call_args::<1>(condition, ".Internal")? else {
         return Ok(false);
     };
-    Ok(internal.kind() == SexpType::Language && internal.car() == install("ryS4Initialize")?)
+    Ok(internal.kind() == SexpType::Language && internal.car() == symbols().ry_s4_initialize)
 }
 
 /// The extension from the new class to a superclass that `makeExtends()` makes once the class
@@ -3981,19 +4168,20 @@ unsafe fn direct_extension(
     };
     let extension = crate::methods::new_object(extension_class)?;
     crate::heap().root(extension);
+    let names = symbols();
     for (slot_name, value) in [
-        ("subClass", class_name),
-        ("superClass", super_name),
-        ("package", package),
-        ("coerce", coerce),
-        ("test", simple_test),
-        ("replace", replace),
-        ("simple", values::scalar_bool(true)?),
-        ("by", alloc_strings(0)?),
-        ("dataPart", values::scalar_bool(false)?),
-        ("distance", values::scalar_real(1.0)?),
+        (names.sub_class, class_name),
+        (names.super_class, super_name),
+        (names.package, package),
+        (names.coerce, coerce),
+        (names.test, simple_test),
+        (names.replace, replace),
+        (names.simple, values::scalar_bool(true)?),
+        (names.by, alloc_strings(0)?),
+        (names.data_part, values::scalar_bool(false)?),
+        (names.distance, values::scalar_real(1.0)?),
     ] {
-        crate::subset::assign_slot(extension, install(slot_name)?, value)?;
+        crate::subset::assign_slot(extension, slot_name, value)?;
     }
     Ok(extension)
 }
@@ -4016,7 +4204,7 @@ unsafe fn combine_extensions(
             return Ok(None);
         }
     }
-    let from = install("from")?;
+    let from = symbols().from;
     let to_coerce = slot(to_extension, symbols().coerce)?;
     let to_body = crate::bytecode::closure_body(to_coerce);
     let by_body = crate::bytecode::closure_body(slot(by_extension, symbols().coerce)?);
@@ -4467,6 +4655,15 @@ unsafe fn in_basic_funs(name: &[u8]) -> R<bool> {
         None => false,
         Some(value) => !is_false(value),
     })
+}
+
+/// Whether `.BasicFunsList` has an entry for `name` at all, a generic or `FALSE` for a function
+/// whose methods are prohibited, which `genericForBasic()` reads.
+unsafe fn in_basic_funs_entry(name: &[u8]) -> R<bool> {
+    let Some(functions) = methods_value(".BasicFunsList")? else {
+        return Ok(true);
+    };
+    Ok(element(functions, name).is_some())
 }
 
 #[derive(PartialEq, Eq)]

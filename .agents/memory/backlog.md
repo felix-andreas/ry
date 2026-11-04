@@ -74,21 +74,20 @@ methods package's core runs natively behind hash-guarded prologues"). `new()`, t
 `initialize()`, `validObject()`, `is()`, `extends()`, `setGeneric()`, `setMethod()` (including on
 primitives), `setClass()`, `setClassUnion()`,
 `cacheMetaData()` and single-argument inherited dispatch (`.InheritForDispatch`) are native when
-nothing observable would differ. On the S4-heavy bench package (2,892 definitions, `just
-bench-s4-first-use target/s4heavy lubridate,data.table,xts`) a cold first `new()` costs about
-0.36 to 0.40 s: running the definitions about 145 ms, caches 11 ms, the cache save about 200 ms.
-A warm one costs about 77 ms. The goal is under 100 ms cold without the S4 cache, which is deleted
-once that holds (`decisions.md`, "The S4 cache is interim").
+nothing observable would differ, and so is the implicit generic `setMethod` creates for a base
+S3 generic. A package's held-back S4 definitions run in units: classes and methods on other
+packages' generics at first S4 use, each package generic at its own first use
+(`decisions.md`, "Each package generic is its own unit"). There is no S4 cache. On the S4-heavy
+bench package (2,892 definitions, `just bench-s4-first-use target/s4heavy
+lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 
-- **Next: a native class table with dense ids** (`decisions.md`, "The rest of the gap goes to a
-  native class table"). The cold run is about 670M instructions against about 250M allowed, and the
-  profile is flat over metadata lookups, slot reads and extension objects, so porting further
-  functions one by one has stalled.
-- About 24 calls still bail (`RY_TRACE_METHODS_BAILS=1`): `setOldClass` (about 16 ms), the first
-  `setMethod` on `print`, `toString` and `as.list`, which create an implicit generic (about 20 ms),
-  `setMethod("[")` whose method formals need rematching (7 ms), the first union of a basic class
-  (about 8 ms), a few `setClass` shapes, and `cacheMetaData` delegating classes whose cached
-  definition differs, generics of other packages, group generics and primitives (about 14 ms).
+- **Next: a native class table with dense ids** (`decisions.md`, "Per-generic units came before
+  the class table"). Unit 0 is about 416M instructions, and `setClass` is 29% of it, spread over
+  class-definition lookups, `tryNew` and the extension objects `setIs` builds. The R-level metadata becomes views produced from the table.
+- About 23 calls still bail (`RY_TRACE_METHODS_BAILS=1`): `setOldClass`, `setMethod("[")` whose
+  method formals need rematching, the first union of a basic class, a few `setClass` shapes, and
+  `cacheMetaData` delegating classes whose cached definition differs, generics of other packages,
+  group generics and primitives.
 - A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
   4.5 µs per call.
 - `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every

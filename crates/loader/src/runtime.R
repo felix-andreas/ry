@@ -726,13 +726,21 @@ View <- function(x, title) {
   }
   lazy <- if (is.null(generic)) 0L else match(generic, deferred$lazy_generics, nomatch = 0L)
   units <- if (all) seq_along(state$s4_ran) - 1L else unique(c(0L, lazy))
+  units <- units[!state$s4_ran[units + 1L]]
+  unit_names <- function(unit) {
+    if (unit == 0L) deferred$first_names else deferred$lazy_names[[unit]]
+  }
+  # The first unit's `cacheMetaData()` visits every methods table in the namespace, so the
+  # placeholders of a lazy generic this force also runs go first: that generic's own
+  # placeholder may be the promise under evaluation that started the force.
+  .ry_remove_s4_placeholders(state, unlist(lapply(units[units != 0L], unit_names)))
   for (unit in units) {
     # A unit can reach another, which then runs inside it.
     if (state$s4_ran[[unit + 1L]]) {
       next
     }
     state$s4_ran[[unit + 1L]] <- TRUE
-    names <- if (unit == 0L) deferred$first_names else deferred$lazy_names[[unit]]
+    names <- unit_names(unit)
     if (unit == 0L) {
       .ry_restore_s4_labels(state)
     }
@@ -750,6 +758,10 @@ View <- function(x, title) {
       name <- deferred$lazy_generics[[unit]]
       if (!.Internal(ryS4CacheGeneric(ns, name))) {
         .ry_cache_generic(ns, methods::getPackageName(ns), name, methods::getPackageName(ns))
+      }
+      # The first unit's export sync ran while this generic's names were unbound.
+      if (0L %in% units) {
+        .ry_sync_exports(ns, state$namespace_spec, state$export_all)
       }
     }
     if (!is.null(state$package_env)) {

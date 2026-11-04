@@ -14,8 +14,9 @@ description: Release announcements and project news
 - **S4 definitions run natively.** `setClass()`, `setGeneric()`, `setMethod()` (also on
   primitives such as `length`), `setClassUnion()`, `methods::cacheMetaData()` and inherited single-argument dispatch run in Rust
   for the shapes packages usually write, with results identical to the methods package's R code.
-  On a generated package with 2,892 S4 definitions, the first `new()` after an uncached load takes
-  about 0.4 s instead of about 6 s.
+  A loaded package's S4 generics run at their own first use, so on a generated package with 2,892
+  S4 definitions the first `new()` after a cold load takes about 85 ms instead of about 6 s, with
+  no S4 cache on disk.
 - **`format()` shows external pointers** as GNU R does (`<pointer: 0x…>`), so `str()` of a value
   that holds one, such as an S4 class definition, no longer fails with "Found no format() method".
 
