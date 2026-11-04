@@ -3221,7 +3221,7 @@ unsafe fn try_new(class: Sexp, place: Sexp) -> R<Option<Sexp>> {
     if is_true(slot(definition, "virtual")?) {
         return slot(definition, "prototype").map(Some);
     }
-    let Some((methods_table, _)) = generic_tables("initialize")? else {
+    let Some((methods_table, all_table)) = generic_tables("initialize")? else {
         return Ok(None);
     };
     let contained = values::names(slot(definition, "contains")?);
@@ -3235,10 +3235,45 @@ unsafe fn try_new(class: Sexp, place: Sexp) -> R<Option<Sexp>> {
             return Ok(None);
         }
     }
+    // `new(definition)` makes the object and calls `initialize()` on it without arguments. Once
+    // dispatch has cached the default method for the object's class, that call returns the
+    // object and changes nothing, so the object is the whole result. Before that, the R call
+    // runs to fill the dispatch cache as GNU R does. The value becomes a slot of the new class's
+    // prototype, which `new()` copies deeply, so a shallow copy is enough here.
+    if interp().globals.deferred_definitions.is_empty() {
+        let value = crate::methods::new_object_copying(definition, false)?;
+        crate::heap().root(value);
+        let label = crate::methods::dispatch_class(value)?;
+        if let Some(method) = quiet_value(install_text(label.element(0))?, all_table)?
+            && is_default_initialize(method)?
+        {
+            return Ok(Some(value));
+        }
+    }
     let Some(new) = methods_value("new")? else {
         return Ok(None);
     };
     eval::eval(values::call(new, &[definition])?, place).map(Some)
+}
+
+/// Whether `method` is the default `initialize` method or a copy of it that inherited dispatch
+/// cached for some class. Only those carry the native prologue (`install_fast_paths`), so its
+/// `.Internal(ryS4Initialize(...))` call identifies them without comparing whole bodies.
+unsafe fn is_default_initialize(method: Sexp) -> R<bool> {
+    if method.kind() != SexpType::Closure {
+        return Ok(false);
+    }
+    let body = crate::bytecode::closure_body(method);
+    let Some([(_, prologue), _]) = call_args::<2>(body, "{")? else {
+        return Ok(false);
+    };
+    let Some([(_, condition), _]) = call_args::<2>(prologue, "if")? else {
+        return Ok(false);
+    };
+    let Some([(_, internal)]) = call_args::<1>(condition, ".Internal")? else {
+        return Ok(false);
+    };
+    Ok(internal.kind() == SexpType::Language && internal.car() == install("ryS4Initialize")?)
 }
 
 /// The extension from the new class to a superclass that `makeExtends()` makes once the class
