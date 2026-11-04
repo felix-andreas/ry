@@ -4052,7 +4052,9 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
     {
         return keep_factor(object, result);
     }
-    let plan = RepPlan::Cycle { total: out as usize };
+    let plan = RepPlan::Cycle {
+        total: out as usize,
+    };
     keep_factor(object, select_repeated(object, &plan, count, 1)?)
 }
 

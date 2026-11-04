@@ -430,15 +430,23 @@ impl Deparser {
     unsafe fn s4(&mut self, parts: S4Parts) {
         self.print("new(");
         self.print(&format::encode_string(&parts.class, Some('"')));
+        // GNU R writes the slots as a named list (`vec2buff`), which may break the line before
+        // every element.
+        let mut broken = false;
         for (name, value) in parts.slots {
             self.print(", ");
+            self.line_break(&mut broken);
             self.print(&quote_name(&name));
             self.print(" = ");
             self.deparse(value);
         }
         if let Some(data) = parts.data {
             self.print(", ");
+            self.line_break(&mut broken);
             self.deparse(data);
+        }
+        if broken {
+            self.indent -= 1;
         }
         self.print(")");
     }
@@ -485,7 +493,9 @@ impl Deparser {
             return;
         }
         let saved = self.opts;
-        self.opts &= !options::QUOTE_EXPRESSIONS;
+        // GNU R deparses a function without its source under its simple options, so constants
+        // in the formals and body show without their attributes.
+        self.opts &= !(options::QUOTE_EXPRESSIONS | options::SHOW_ATTRIBUTES | options::USE_SOURCE);
         self.print("function (");
         self.formals(function.car());
         self.print(") ");

@@ -7430,13 +7430,43 @@ Each one trades a narrow class of missed errors for a class of false reports see
   path completes, the R function's frame-local temporaries are not bound; only code that inspects
   that frame from outside (a debugger, `sys.frames()` from a validity method the fast path never
   calls) could see it.
+- **Versions.** `FAST_PATHS` lists the hashes each function may have, one per `methods` version the
+  fast path was checked against; the bundled GNU R 4.6.2 is the primary target. A miss on a
+  methods package whose version is the bundled one is an error at start-up, because it means the
+  base changed under the core; a miss on any other version keeps the R code. The R expressions the
+  native definitions fill in (coerce and replace methods) are R text in `METHODS_TEMPLATES` in
+  `methods_core.rs`, parsed once at install time.
+- **Definitions.** `setGeneric`, `setMethod` and `setClass` are native for the shapes a package
+  usually writes: local supers only, no `setClassUnion` member classes passed as a
+  classRepresentation, a `validity` that is `NULL` or a function of `object`. Anything else bails
+  to the R code before any effect. The native results are byte-identical to the R path (classes,
+  generics, method tables and `serialize()` output, compared on the generated S4 packages, the
+  Matrix sources and the methods package's own tests). Adding a direct subclass rebuilds the
+  superclass's whole subclass list as `completeSubclasses()` does, regenerating every indirect
+  extension (whose `by` and `to` carry the package attribute differently from the first time) and
+  repeating a class reached through two direct subclasses; appending would differ. One benign
+  exception to bailing before any effect: `setClass` evaluates `tryNew()` for slot prototypes
+  before its last checks, which fills the same `initialize` dispatch cache the R code fills.
+- **Switches.** `RY_METHODS_NATIVE=0` turns the definition fast paths off (the differential uses
+  it), `RY_TRACE_METHODS_BAILS=1` prints why each call bailed, and `RY_PRINT_METHODS_HASHES=1`
+  prints the hashes of the installed functions, for adding a version.
+- **The S4 cache is interim.** The end state has no S4 cache: the cold native path itself reaches
+  a first `new()` under 100 ms, and then the cache is deleted (AGENTS.md, "Caching is a sign of a
+  slow design"). Until then it stays, because restoring is about 10 times faster than running the
+  definitions natively (61 ms against about 850 ms), and incremental reload of it is not worth
+  building for a cache that is going away. It is saved uncompressed: the save fell from 344 to
+  about 190 ms and the cache grew from 1.5 to 9.4 MB, with the restore unchanged. Saving at process
+  exit instead of after the first run was rejected, because `.MTable` gathers inherited entries
+  during a session and the saved state would depend on what ran.
 - **Order.** Object creation and class queries came first because they are the run-time hot path
-  (`new()` 13.7 µs, `validObject` 3 µs, `is()` 2.3 µs against GNU R's 130, 73 and 11.8 µs). The
-  definition functions (`setMethod`, `setClass`, `cacheMetaData`) follow (`backlog.md`, "Open:
-  native methods core"). Whether the S4 metadata cache survives is decided once they are native.
-- **Impact.** Cold first `new()` on the bench package fell from 8.6 s to 6.3 s and the warm one from
-  94 to 103 ms to 78 to 88 ms. `crates/oracle/cases/s4__native_core_queries.R` pins the covered
-  functions, including their error messages and calls, against GNU R.
+  (`new()` 13.7 µs, `validObject` 3 µs, `is()` 2.3 µs against GNU R's 130, 73 and 11.8 µs). Then
+  the definition functions; `setClassUnion`, `cacheMetaData` and inherited dispatch remain
+  (`backlog.md`, "Open: native methods core").
+- **Impact.** Cold first `new()` on the bench package fell from 8.6 s to 6.3 s with the native
+  queries, and native definitions bring the generated `target/s4plain` package (2,892 definitions)
+  from about 2.2 s of S4 work to about 0.9 s. `crates/oracle/cases/s4__native_core_queries.R` and
+  `s4__native_definitions.R` pin the covered functions, including their error messages and calls,
+  against GNU R.
 
 ## Docs information architecture: Introduction, Tutorial, Reference, Development
 

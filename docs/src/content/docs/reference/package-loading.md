@@ -153,9 +153,10 @@ The saved definitions form a lazy-load database, like an installed package's R c
 reads only the classes and generics it uses. The `methods` package's class and generic tables get
 the package's own classes and generics as lazy entries too, and only what involves other packages
 (a union with `NULL` as a member, a `show` or `initialize` method) is cached when the definitions
-are restored. On a generated package with 2,877 S4 definitions, the first `new()` takes about 6 s
-when the definitions run and under 60 ms when they are restored. A saved entry is used only when all
-of these match the process that saved it:
+are restored. The database is stored uncompressed, which makes the save faster at the cost of disk
+space. On a generated package with 2,892 S4 definitions, the first `new()` takes about 0.85 s when
+the definitions run (the save included) and about 60 ms when they are restored. A saved entry is
+used only when all of these match the process that saved it:
 
 - the text of every held-back definition, the package's name and version, and the build of ry;
 - the R version, and the version of every package the namespace imports.

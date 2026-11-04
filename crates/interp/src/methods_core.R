@@ -7,5 +7,8 @@ list(
     initialize = quote(if (.Internal(ryS4Initialize(environment()))) return(.Object)),
     validObject = quote(if (.Internal(ryS4Valid(object, environment()))) return(TRUE)),
     is = quote(switch(.Internal(ryS4Is(object, environment())), return(FALSE), return(TRUE))),
-    extends = quote(switch(.Internal(ryS4Extends(environment())), return(FALSE), return(TRUE)))
+    extends = quote(switch(.Internal(ryS4Extends(environment())), return(FALSE), return(TRUE))),
+    setGeneric = quote(if (.Internal(ryS4SetGeneric(environment()))) return(name)),
+    setMethod = quote(if (.Internal(ryS4SetMethod(environment()))) return(invisible(f))),
+    setClass = quote(if (is.function(value <- .Internal(ryS4SetClass(environment())))) return(invisible(value)))
 )
