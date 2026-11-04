@@ -63,3 +63,7 @@ h <- Holder$new(value = 1)
 f <- function() value
 environment(f) <- as.environment(h)
 f()
+
+# A class definition holds an external pointer, which format() and str() show.
+format(getClass("Base", where = ns)@versionKey)
+str(list(key = getClass("Base", where = ns)@versionKey))

@@ -7458,10 +7458,26 @@ Each one trades a narrow class of missed errors for a class of false reports see
   about 190 ms and the cache grew from 1.5 to 9.4 MB, with the restore unchanged. Saving at process
   exit instead of after the first run was rejected, because `.MTable` gathers inherited entries
   during a session and the saved state would depend on what ran.
+- **Unions and `cacheMetaData` replicate GNU R's quirks, not its intent.** The native
+  `setClassUnion` and `cacheMetaData` must leave state that `serialize()`s identically, so they
+  copy behavior that looks like a bug: `.recacheSubclasses` tests `match(what, names(subDef@contains))`
+  with the subclass's own name, which is always `NA`, so every subclass of a union member gets its
+  union extension overwritten in place, re-sorted by distance and recached; `cacheMetaData` drops
+  duplicate generic names but not their packages, so the packages misalign after the first
+  duplicate; classes are visited in unsorted frame order and generics in sorted order; and
+  `completeExtends` resolves a class reached twice with `.resolveSuperclasses`' first consistent
+  candidate (`resolved_superclasses` in `crates/interp/src/methods_core.rs`). `.S3Extends` is not
+  ported, so a union member whose indirect extensions it would rewrite bails.
+- **`cacheMetaData` does the cheap cases and delegates the rest per item.** A class whose bound
+  definition is already the cached one (and, for a union, whose members' cached extensions match)
+  needs nothing; a package's own standard generic gets its tables merged natively. Anything else
+  runs GNU R's own loop body for that one item (`Template::CacheClassItem` and
+  `CacheGenericItem`), so the order of effects matches and a partial port is safe. On
+  `target/s4plain` this took `cacheMetaData` from 104 to 16 ms.
 - **Order.** Object creation and class queries came first because they are the run-time hot path
   (`new()` 13.7 µs, `validObject` 3 µs, `is()` 2.3 µs against GNU R's 130, 73 and 11.8 µs). Then
-  the definition functions; `setClassUnion`, `cacheMetaData` and inherited dispatch remain
-  (`backlog.md`, "Open: native methods core").
+  the definition functions, then `setClassUnion` and `cacheMetaData`; `as()`, `setDataPart()` and
+  inherited dispatch remain (`backlog.md`, "Open: native methods core").
 - **Impact.** Cold first `new()` on the bench package fell from 8.6 s to 6.3 s with the native
   queries, and native definitions bring the generated `target/s4plain` package (2,892 definitions)
   from about 2.2 s of S4 work to about 0.9 s. `crates/oracle/cases/s4__native_core_queries.R` and

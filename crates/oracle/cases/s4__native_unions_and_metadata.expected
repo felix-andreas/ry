@@ -32,9 +32,12 @@
 | [1] TRUE
 | [1] FALSE
 | [1] 1
+| [1] "<pointer: 0x7f786c616a80>"
+| List of 1
+|  $ key:<externalptr> 
 [messages]
 [warnings]
 [errors]
 [value]
-double
-| 1
+NULL
+| NULL

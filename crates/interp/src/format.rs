@@ -926,6 +926,7 @@ unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
             .collect(),
         SexpType::Nil => Vec::new(),
         SexpType::Environment => vec![Some(crate::print::environment_label(vector)?)],
+        SexpType::ExternalPtr => vec![Some(crate::print::pointer_text(vector))],
         _ => {
             return Err(call.error(
                 "Found no format() method for class \"".to_string() + vector.kind().name() + "\"",
