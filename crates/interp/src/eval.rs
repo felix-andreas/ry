@@ -1026,9 +1026,7 @@ pub unsafe fn apply_closure_owning(
         return value;
     }
     let env = bind_arguments(call, function, args, supplied)?;
-    let result = run_closure(call, function, env, sys_parent, args, Entry::Unchecked)?;
-    crate::heap().release_argument_promises(args.iter().map(|arg| arg.value));
-    Ok(result)
+    run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
 }
 
 /// A fresh environment for a call of the closure `function`, with `args` matched to its formals

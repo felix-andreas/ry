@@ -1322,7 +1322,6 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
     state.restarts = restarts;
     if let Ok(value) = result {
         let heap = crate::heap();
-        heap.release_argument_promises(promised.iter().map(|arg| arg.value));
         heap.release_enclosure(context_env, value);
     }
     result

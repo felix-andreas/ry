@@ -1844,38 +1844,7 @@ impl Heap {
         env.set_enclosure_unbarriered(empty);
     }
 
-    /// GNU R's `unpromiseArgs`: once a closure call returns, the argument list `arguments` that
-    /// the caller built for it gives up its promises, and each promise that only the list held
-    /// gives up its value and environment. The caller must not read the list or its promises
-    /// again.
-    pub unsafe fn release_arguments(&mut self, arguments: Sexp) {
-        if !arguments.tracks_references() {
-            return;
-        }
-        let nil = self.known.nil;
-        let mut cell = arguments;
-        while cell.kind() == SexpType::Pairlist {
-            let value = cell.car();
-            if value.kind() == SexpType::Promise && value.refcount() == 1 {
-                self.release_promise(value);
-            }
-            self.store(cell, value, nil);
-            cell.set_car_unbarriered(nil);
-            cell = cell.cdr();
-        }
-    }
-
-    /// [`Heap::release_arguments`] for arguments held in an uncounted slice, where a
-    /// promise whose reference count is zero is held only by that slice.
-    pub unsafe fn release_argument_promises(&mut self, values: impl Iterator<Item = Sexp>) {
-        for value in values {
-            if value.kind() == SexpType::Promise && value.refcount() == 0 {
-                self.release_promise(value);
-            }
-        }
-    }
-
-    /// Clears a promise that only a released frame or argument list held.
+    /// Clears a promise that only a released frame held.
     unsafe fn release_promise(&mut self, promise: Sexp) {
         let value = promise.car();
         if value != self.known.unbound {
