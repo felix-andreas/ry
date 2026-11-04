@@ -1703,3 +1703,33 @@ fn a_strict_mode_refusal_exits_one_before_any_r_starts() {
         assert_eq!(output.stdout, "", "{command}: nothing ran");
     }
 }
+
+/// `ry load --r-entry | head` and `ry check | head` close the pipe before ry is done writing. ry
+/// then ends quietly through SIGPIPE, as `cat` does, instead of panicking in `println!`.
+#[cfg(unix)]
+#[test]
+fn a_closed_stdout_ends_a_report_quietly() {
+    use std::{io, os::unix::process::ExitStatusExt, process::Stdio};
+
+    const SIGPIPE: i32 = 13;
+    let directory = project(&[("typo.R", "f <- function(rate) ratee\n")]);
+    for arguments in [&["load", "--r-entry"][..], &["check", "typo.R"]] {
+        // The read end is gone before ry starts, so its first write fails deterministically.
+        let (reader, writer) = io::pipe().expect("a pipe opens");
+        drop(reader);
+        let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .args(arguments)
+            .current_dir(directory.path())
+            .stdout(writer)
+            .stderr(Stdio::piped())
+            .output()
+            .expect("failed to run the ry binary");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.signal(),
+            Some(SIGPIPE),
+            "{arguments:?}: {stderr}"
+        );
+        assert!(!stderr.contains("panicked"), "{arguments:?}: {stderr}");
+    }
+}
