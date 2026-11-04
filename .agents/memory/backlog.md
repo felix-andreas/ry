@@ -37,18 +37,9 @@ The quality bar is four things.
 - **Preloaded base image.** Start-up still sources the baseloader and lazy-loads base, then attaches the default packages (about 140 ms for an empty script). The design draft is `docs/src/content/docs/contributing/design/base-image.md`.
 - **Windows linear algebra without GNU R.** No system LAPACK exists there, so `solve` and friends need `R_HOME` naming GNU R for its `Rblas.dll`/`Rlapack.dll`. Build R's reference BLAS and LAPACK (`src/extra/blas`, `src/modules/lapack` in the tarball) into the base tree on Windows; needs a Fortran compiler in the release workflow.
 - **The base build has run on Linux only.** `just package` runs `just base-r` on each release runner; macOS and Windows are unverified until the release workflow runs.
-- **Oracle expectations are GNU R 4.3.3 output**, while ry's default base is 4.6.2. Without GNU R, `oracle compare --engine ry` falls back to the recordings and passes 228 of 260 (`ry-jit` the same); the differences are corpus packages that are not installed, R's own 4.4 to 4.6 changes, and the gaps in the next section. Re-record under GNU R 4.6.2 (`RY_BLESS=1`, needs GNU R) and move CI to it, or keep CI on 4.3.3 through `R_HOME` (what `.github/pending/ci.yml` does).
+- **CI must run GNU R 4.6.2.** The oracle's expectations are GNU R 4.6.2 output (`contributing/corpus-and-oracle.md`, "The reference GNU R"); `.github/pending/ci.yml` installs 4.6.2 and waits for `just accept`. Without GNU R, `oracle compare --engine ry` and `--engine ry-jit` pass 251 of 251 and skip the 12 cases whose packages ry's bundled library lacks (data.table, bit64, rlang, knitr, rmarkdown, ragg, lattice). Those 12 expectations print what the packages' CRAN releases printed when recorded, so a package release can change them.
 - **Nix.** `flake.nix` fetches the tarball as a fixed-output derivation and builds the base in `postInstall`; `nix build` has not been run yet.
 - **Old base trees stay in the cache after an upgrade**, as runtimes do (see below).
-
-## Open: R 4.6 behavior ry does not emulate yet
-
-Found by `ORACLE_R=<GNU R 4.6.2>/bin/R oracle compare --engine ry` on the cases that differ from their 4.3.3 recordings. Each needs the change gated by `interp::system::r_at_least`.
-
-- **Complex formatting** (R 4.4): GNU R formats the real and imaginary parts with separate widths and digits (`1-1e-20i`, `2+1.615587e-27i`); ry still pads both parts to a shared format (`arith__complex_math`, `base__round_arity_dots_and_sinks`, `stats__arima_and_kalman`).
-- **`round()` and `signif()` argument matching** (R 4.6 NEWS, "no longer tolerate wrong argument names"): `round(banana = 2)` is "unused argument (banana = 2)", `signif(1, 2, 3)` is "unused argument (3)" (`base__round_arity_dots_and_sinks`).
-- **Bessel warnings** (R 4.6.2 reworked `src/nmath/bessel_*.c`): `besselY(1, 2^62)` warns "nu=4.61169e+18 > 1e+07 =: max_alpha_y, too large for bessel_y() algorithm" (`base__integer_range_and_bessel_warnings`). Port the new bounds and messages together.
-- **Date-times** (`datetime__time_zones`, `datetime__zone_offsets_and_strptime`): a repeated fall-back hour (`2024-11-03 01:30` in New York) formats as EST, `strptime("12:00:00.123", "%H:%M:%OS3")$sec` is 0.123 rather than NA, and a `%U`/`%W` week with a weekday gives that week's date. Check each against R 4.6's `src/main/datetime.c` and `Rstrptime.h` before changing it, since part of the fall-back difference depends on glibc (`contributing/corpus-and-oracle.md`).
 
 ## Open: the benchmark packages under ry's runtime
 

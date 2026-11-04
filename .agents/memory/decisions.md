@@ -5174,7 +5174,7 @@ check` releases its trees once, and memoized records are compact" below).
   rejected on unpack.
 - **Version emulation is kept for the opt-in:** `R_HOME` naming GNU R 4.3 or later makes ry
   behave like that release ("The runtime emulates the GNU R version it loads base R from" below).
-  The oracle's expectations are GNU R 4.3.3 output, so CI sets `R_HOME` to 4.3.3.
+  The oracle's expectations are GNU R 4.6.2 output, so CI sets `R_HOME` to 4.6.2.
 - **Impact.** One source of truth for the R version a user gets; start-up is unchanged (about
   140 ms for an empty script, the same tree shape as GNU R's). The preloaded heap image that
   would cut start-up further is a design draft (`docs/.../contributing/design/base-image.md`).
@@ -5196,12 +5196,15 @@ check` releases its trees once, and memoized records are compact" below).
   Additions such as `Tailcall`, `Exec`, `declare` and zstd compression exist under every version,
   because no older base R calls them.
 - **Range.** GNU R 4.3 and later; an older `R_HOME` stops `ry run` with an error naming the version.
-  The oracle and the interp and ry test suites are run under 4.3.3 and 4.6.1 (`ORACLE_R` and
-  `R_HOME` select the installation). Gates for 4.4 and 4.5 were placed from GNU R's sources and
-  NEWS, not from running those versions.
-- **The default packages' routine table is the union over versions** (`builtin_libraries.rs`), so
-  a routine GNU R removed (`C_pKS2` in 4.6) still resolves. Base R's own code never calls a removed
-  routine, so the extra entries are harmless; a script calling one directly differs from GNU R.
+  The oracle's expectations are recorded with GNU R 4.6.2; ry with `R_HOME` at GNU R 4.3.3 is
+  checked against a 4.3.3 recording of the same cases (`ORACLE_R` and `R_HOME` select the
+  installation). Gates for 4.4 and 4.5 were placed from GNU R's sources and NEWS, not from
+  running those versions.
+- **The default packages' routine table is the union over versions** (`builtin_libraries.rs`),
+  but a routine a release does not register is hidden from lookup and from `getDLLRegisteredRoutines`
+  (`registered_in_release`: stats' `pKolmogorov2x` and `pKS2` before 4.4, `pkolmogorov_two_exact`
+  and `pkolmogorov_two_limit` from 4.4). The table's positions stay fixed, because routine
+  pointers and image tokens index it.
 - **The C API surface stays R 4.6's whatever the version,** because a newer API is a superset; only
   the version macros in the generated `Rversion.h` follow base. A package compiled from source must
   be reinstalled when the linked base version changes.
@@ -6779,10 +6782,10 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Shape.** Each case of a harness is one seed of `for_each_seed`, and a harness that shares one generator across cases builds it as `SplitMix64(CONST ^ seed)`. `tools/fuzz-deep.py` finds harnesses by reading the sources, resolves each against its binary's `--list`, and runs it with `FUZZ_SEED` at a fresh start and `FUZZ_DEPTH`, which scales each loop's own default count. A scaled depth, rather than one `FUZZ_ITERS` count, keeps the proportions of a test with several loops of different sizes and needs no budget read out of the source.
 - **Why.** A single stream drawn across iterations neither replays one case nor moves to new inputs, so a deep campaign over it repeats the default run. Discovery from the sources means a new harness joins the campaign without being registered.
 
-## CI runs `just gate` against GNU R 4.3.3, and nothing ignored
+## CI runs `just gate` against GNU R 4.6.2, and nothing ignored
 
 - **Previous shape.** The live `ci.yml` used stable Rust, which cannot build the workspace (the toolchain is a pinned nightly for `allocator_api`), and tested only `crates/ry` through `default-members`. Its second job ran `-- --ignored` in a release build; once widened to the workspace that pulls in `ide::fuzz_deep` (about 55 minutes), the corpus benchmarks (which need a fetched corpus) and `format_directory` (which needs `RY_FORMAT_DIR`).
-- **Shape.** One job runs `just fmt-check`, `just clippy` and `just battery`, the recipes `just gate` runs, with the toolchain read from `rust-toolchain.toml`, so CI and the local gate cannot diverge. GNU R 4.3.3 is installed because the runtime's suites skip without an installation, which would leave the runtime untested; 4.3.3 is the oldest version the runtime supports and the one the suites are run against locally. The zlib, bzip2 and xz development packages are installed because libr links them. The ignored suites stay manual (`just fuzz-deep`, `just perf`), because none of them is a pass/fail gate that fits a push.
+- **Shape.** One job runs `just fmt-check`, `just clippy` and `just battery`, the recipes `just gate` runs, with the toolchain read from `rust-toolchain.toml`, so CI and the local gate cannot diverge. GNU R is installed because the runtime's suites skip without an installation, which would leave the runtime untested. It is 4.6.2, the release the oracle's expectations are recorded with and ry bundles as its base R (the live `ci.yml` still installs 4.3.3 until `.github/pending/ci.yml` is accepted). The zlib, bzip2 and xz development packages are installed because libr links them. The ignored suites stay manual (`just fuzz-deep`, `just perf`), because none of them is a pass/fail gate that fits a push.
 - **Triggers (user decision).** CI runs only on `workflow_dispatch`, never on push or pull request. The orchestrator starts it on main at its hourly check when main has new commits.
 - **Impact.** CI covers every crate except `zed_ry` (wasm), at most once an hour on main, or on any ref when started by hand.
 
