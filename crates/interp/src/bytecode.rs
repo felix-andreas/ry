@@ -553,6 +553,10 @@ pub enum Op {
     /// the integer scalar `table` holds for it, or the scalar 0 when no arm runs (see
     /// [`switch_table`]). The arms follow as a chain of [`Op::MatchLiteral`] tests.
     SwitchArm,
+    /// `dst variable row column value call`: `variable[row, column] <- value` or
+    /// `variable[[row, column]] <- value`, as `call` says, with the subscripts' values in
+    /// registers `row` and `column`, run as `<-` would run it.
+    SubAssignMatrix,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its last operand.
@@ -567,7 +571,7 @@ enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 41] = [
+pub const OPS: [Op; 42] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -609,6 +613,7 @@ pub const OPS: [Op; 41] = [
     Op::BoundEval,
     Op::MatchCondition,
     Op::SwitchArm,
+    Op::SubAssignMatrix,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1639,7 +1644,7 @@ impl Compiler {
             if matches!(name.as_str(), "<-" | "=")
                 && args.len() == 2
                 && args.iter().all(|(tag, _)| *tag == nil())
-                && let Some((kind, replacement, index)) =
+                && let Some((kind, replacement, subscripts)) =
                     self.element_assignment_target(args[0].1)?
             {
                 return self.element_assignment(
@@ -1648,7 +1653,7 @@ impl Compiler {
                     primitive,
                     replacement,
                     kind,
-                    index,
+                    &subscripts,
                     dst,
                     &args,
                 );
@@ -1680,7 +1685,7 @@ impl Compiler {
     unsafe fn element_assignment_target(
         &mut self,
         target: Sexp,
-    ) -> R<Option<(ElementKind, Sexp, Sexp)>> {
+    ) -> R<Option<(ElementKind, Sexp, SmallVec<[Sexp; 2]>)>> {
         if target.kind() != SexpType::Language || target.car().kind() != SexpType::Symbol {
             return Ok(None);
         }
@@ -1691,12 +1696,18 @@ impl Compiler {
             _ => return Ok(None),
         };
         let parts = values::pairlist_items(target.cdr());
-        let [(variable_tag, variable), (index_tag, index)] = parts.as_slice() else {
+        let Some(((variable_tag, variable), subscripts)) = parts.split_first() else {
             return Ok(None);
         };
-        if *variable_tag != nil() || *index_tag != nil() || variable.kind() != SexpType::Symbol {
+        if *variable_tag != nil()
+            || variable.kind() != SexpType::Symbol
+            || !(1..=2).contains(&subscripts.len())
+            || subscripts.iter().any(|(tag, _)| *tag != nil())
+            || (kind == ElementKind::Dollar && subscripts.len() != 1)
+        {
             return Ok(None);
         }
+        let index = &subscripts[0].1;
         if kind == ElementKind::Dollar {
             // `x$name` quotes its index; a one-string index is the same name.
             let name = match index.kind() {
@@ -1715,25 +1726,9 @@ impl Compiler {
             let index = values::scalar_string_charsxp(name)?;
             return Ok(self
                 .base_primitive(values::install("$<-")?, "$<-")?
-                .map(|primitive| (kind, primitive, index)));
+                .map(|primitive| (kind, primitive, smallvec![index])));
         }
-        let simple_index = match index.kind() {
-            SexpType::Symbol => {
-                *index != symbols().dots
-                    && *index != missing_arg()
-                    && eval::dot_dot_index(*index).is_none()
-                    && !self.formals.contains(index)
-                    && self
-                        .local_symbols
-                        .as_ref()
-                        .is_some_and(|found| found.contains(index))
-            }
-            SexpType::Integer | SexpType::Real => {
-                length(*index) == 1 && !values::has_attributes(*index)
-            }
-            _ => false,
-        };
-        if !simple_index {
+        if !subscripts.iter().all(|(_, index)| self.side_effect_free_index(*index, 0)) {
             return Ok(None);
         }
         let name = if kind == ElementKind::Double {
@@ -1744,7 +1739,37 @@ impl Compiler {
         let replacement = values::install(name)?;
         Ok(self
             .base_primitive(replacement, name)?
-            .map(|primitive| (kind, primitive, *index)))
+            .map(|primitive| (kind, primitive, subscripts.iter().map(|(_, index)| *index).collect())))
+    }
+
+    /// Whether evaluating the subscript `index` cannot change a variable, so the compiled
+    /// assignment may evaluate it before reading the target: a local variable that is not a
+    /// formal (which could be a promise), a numeric constant, or base arithmetic on those.
+    unsafe fn side_effect_free_index(&self, index: Sexp, depth: u32) -> bool {
+        match index.kind() {
+            SexpType::Symbol => {
+                index != symbols().dots
+                    && index != missing_arg()
+                    && eval::dot_dot_index(index).is_none()
+                    && !self.formals.contains(&index)
+                    && self
+                        .local_symbols
+                        .as_ref()
+                        .is_some_and(|found| found.contains(&index))
+            }
+            SexpType::Integer | SexpType::Real => length(index) == 1 && !values::has_attributes(index),
+            SexpType::Language if depth < 8 && index.car().kind() == SexpType::Symbol => {
+                let operator = symbol_name(index.car());
+                let arguments = values::pairlist_items(index.cdr());
+                ARITHS[..5].iter().any(|(_, name)| *name == &*operator)
+                    && (1..=2).contains(&arguments.len())
+                    && !self.frame_may_bind(index.car())
+                    && arguments.iter().all(|(tag, argument)| {
+                        *tag == nil() && self.side_effect_free_index(*argument, depth + 1)
+                    })
+            }
+            _ => false,
+        }
     }
 
     /// `x[i] <- value`, guarded by both `<-` and the replacement function.
@@ -1756,7 +1781,7 @@ impl Compiler {
         primitive: Sexp,
         replacement: Sexp,
         kind: ElementKind,
-        index_expression: Sexp,
+        subscripts: &[Sexp],
         dst: u32,
         args: &[(Sexp, Sexp)],
     ) -> R<()> {
@@ -1776,15 +1801,26 @@ impl Compiler {
         }
         let mark = self.next_register;
         let value = self.allocate();
-        let index = self.allocate();
         self.expression(args[1].1, value)?;
-        self.expression(index_expression, index)?;
+        let mut registers: SmallVec<[u32; 2]> = SmallVec::new();
+        for &subscript in subscripts {
+            let register = self.allocate();
+            self.expression(subscript, register)?;
+            registers.push(register);
+        }
         let variable = self.constant(target.cdr().car());
         let call_constant = self.constant(call);
-        self.emit(
-            Op::SubAssign,
-            &[dst, variable, index, value, call_constant, kind as u32],
-        );
+        match registers[..] {
+            [row, column] => self.emit(
+                Op::SubAssignMatrix,
+                &[dst, variable, row, column, value, call_constant],
+            ),
+            [index, ..] => self.emit(
+                Op::SubAssign,
+                &[dst, variable, index, value, call_constant, kind as u32],
+            ),
+            [] => self.evaluate(dst, call_constant),
+        }
         self.release_to(mark);
         let done = self.emit_patchable(Op::Jump, &[0]);
         for guard in guards {
@@ -2692,6 +2728,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::LogicRight => 5,
         Op::Closure => 4,
         Op::SubAssign => 6,
+        Op::SubAssignMatrix => 6,
         Op::SetSrcref => 2,
         Op::EndStatement => 3,
         Op::BranchUnlessPrimitive => 3,
@@ -3442,6 +3479,17 @@ unsafe fn step(
             set(operand(0), value);
             interp().visible = false;
         }
+        Op::SubAssignMatrix => {
+            let call = decoded.constants.element(operand(5));
+            let value = register(operand(4));
+            let variable = decoded.constants.element(operand(1));
+            let (row, column) = (register(operand(2)), register(operand(3)));
+            if !assign_matrix_element_in_place(env, variable, row, column, value)? {
+                eval::complex_assign(call, call.cdr().car(), value, env, false)?;
+            }
+            set(operand(0), value);
+            interp().visible = false;
+        }
     }
     *pc = next;
     Ok(None)
@@ -3534,8 +3582,15 @@ unsafe fn assign_element_in_place(
         SexpType::Real => index.slice::<f64>()[0],
         _ => return Ok(false),
     };
+    let count = length(target);
+    // Assigning one past the end appends, which a vector without attributes that a previous
+    // growth left room in (see `subset::grow`) does in place.
+    let appends = position == count as f64 + 1.0
+        && heap.is_resizable(target)
+        && target.capacity() > count as isize
+        && target.attrib() == nil();
     // NaN fails both comparisons, and `x[[2.7]]` truncates to the second element.
-    if !(position >= 1.0 && position < length(target) as f64 + 1.0) {
+    if !appends && !(position >= 1.0 && position < count as f64 + 1.0) {
         return Ok(false);
     }
     let position = position as usize - 1;
@@ -3543,6 +3598,9 @@ unsafe fn assign_element_in_place(
     moves::modifying(target)?;
     if values::maybe_shared(target) || !eval::reuse_permitted(env, target) {
         return Ok(false);
+    }
+    if appends {
+        heap.resize_vector(target, count as isize + 1)?;
     }
     match target.kind() {
         SexpType::Real => values::reals_mut(target)[position] = value.slice::<f64>()[0],
@@ -3554,6 +3612,85 @@ unsafe fn assign_element_in_place(
     }
     cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
     Ok(true)
+}
+
+/// `variable[row, column] <- value` on an atomic matrix, done in place when the matrix is the
+/// frame's own unshared value, `value` is one element of its type and both subscripts are in
+/// bounds. Returns false, having changed nothing, when the general assignment must run.
+unsafe fn assign_matrix_element_in_place(
+    env: Sexp,
+    variable: Sexp,
+    row: Sexp,
+    column: Sexp,
+    value: Sexp,
+) -> R<bool> {
+    let heap = crate::heap();
+    let Some(cell) = heap.frame_cell(env, variable) else {
+        return Ok(false);
+    };
+    let target = cell.cdr();
+    if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED)
+        || target == value
+        || target.is_object()
+        || target.is_altrep()
+        || !matches!(
+            target.kind(),
+            SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::String
+        )
+        || value.kind() != target.kind()
+        || length(value) != 1
+        || value.is_altrep()
+        || values::has_attributes(value)
+    {
+        return Ok(false);
+    }
+    let dim = values::get_attr(target, symbols().dim);
+    if dim.kind() != SexpType::Integer || length(dim) != 2 {
+        return Ok(false);
+    }
+    let rows = dim.slice::<i32>()[0];
+    let columns = dim.slice::<i32>()[1];
+    let Some(row) = matrix_subscript(row, rows) else {
+        return Ok(false);
+    };
+    let Some(column) = matrix_subscript(column, columns) else {
+        return Ok(false);
+    };
+    let position = row + column * rows as usize;
+    // The conditions under which `complex_assign` updates the variable's value in place.
+    moves::modifying(target)?;
+    if values::maybe_shared(target) || !eval::reuse_permitted(env, target) {
+        return Ok(false);
+    }
+    match target.kind() {
+        SexpType::Real => values::reals_mut(target)[position] = value.slice::<f64>()[0],
+        SexpType::Integer | SexpType::Logical => {
+            values::ints_mut(target)[position] = value.slice::<i32>()[0]
+        }
+        _ => heap.set_element(target, position, value.element(0)),
+    }
+    cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
+    Ok(true)
+}
+
+/// The zero-based position a one-element numeric matrix subscript selects in a dimension of
+/// `extent`, or `None` when it is out of bounds, NA, or anything but a plain number.
+unsafe fn matrix_subscript(index: Sexp, extent: i32) -> Option<usize> {
+    if index.is_altrep() || values::has_attributes(index) || length(index) != 1 {
+        return None;
+    }
+    let position = match index.kind() {
+        SexpType::Integer if index.slice::<i32>()[0] != NA_INTEGER => {
+            f64::from(index.slice::<i32>()[0])
+        }
+        SexpType::Real => index.slice::<f64>()[0],
+        _ => return None,
+    };
+    // NaN fails both comparisons, and `x[2.7, 1]` truncates to the second row.
+    if !(position >= 1.0 && position < f64::from(extent) + 1.0) {
+        return None;
+    }
+    Some(position as usize - 1)
 }
 
 unsafe fn call_builtin(

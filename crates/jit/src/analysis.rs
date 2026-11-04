@@ -2117,6 +2117,15 @@ impl<'a> Builder<'a> {
                 &[],
                 Effect::Opaque,
             ),
+            Op::SubAssignMatrix => {
+                let value = match state.registers[operand(4)] {
+                    Ty::Bottom => Ty::Boxed,
+                    ty => ty,
+                };
+                let action = self.opaque_step(state, Some((operand(0), value)), &[], Effect::Opaque);
+                state.visible = Some(false);
+                action
+            }
             Op::Guard => {
                 let symbol = self.constant(operand(0));
                 let expected = self.constant(operand(1));
@@ -3848,6 +3857,7 @@ pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
         Op::DispatchSubject => smallvec![operand(1), operand(3)],
         Op::Arithmetic => smallvec![operand(2), operand(3)],
         Op::SubAssign => smallvec![operand(2), operand(3)],
+        Op::SubAssignMatrix => smallvec![operand(2), operand(3), operand(4)],
         Op::JumpUnless | Op::Return | Op::ForEnd => smallvec![operand(0)],
         Op::ForInit | Op::ForStep | Op::LogicLeft => smallvec![operand(1)],
         Op::LogicRight => smallvec![operand(1), operand(2)],
@@ -3972,6 +3982,12 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
             kill(operand(0), live);
             gen_(operand(2), live);
             gen_(operand(3), live);
+        }
+        Op::SubAssignMatrix => {
+            kill(operand(0), live);
+            gen_(operand(2), live);
+            gen_(operand(3), live);
+            gen_(operand(4), live);
         }
     }
 }
