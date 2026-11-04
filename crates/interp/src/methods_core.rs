@@ -3850,7 +3850,50 @@ unsafe fn forced_arg(frame: Sexp, name: &str) -> R<Option<Sexp>> {
     if value == missing_arg() || value == unbound() {
         return Ok(None);
     }
+    if let Some(place) = default_where(frame, value)? {
+        crate::moves::forcing(value)?;
+        return eval::settle_promise(value, place).map(Some);
+    }
     eval::value_of(value).map(Some)
+}
+
+/// The value of `promise` when it is the unforced default `where = topenv(parent.frame())` of
+/// the methods function running in `frame`, worked out directly: `topenv()` of the frame that
+/// called that function, stopping at the `topLevelEnvironment` option. Both functions only read
+/// the call stack, so the result is the one evaluating the promise gives.
+unsafe fn default_where(frame: Sexp, promise: Sexp) -> R<Option<Sexp>> {
+    if promise.kind() != SexpType::Promise
+        || promise.car() != unbound()
+        || promise.tag() != frame
+        || frame.enclosure() != interp().globals.methods_namespace
+    {
+        return Ok(None);
+    }
+    let Some([(tag, inner)]) = call_args::<1>(promise.cdr(), "topenv")? else {
+        return Ok(None);
+    };
+    if tag != nil()
+        || inner.kind() != SexpType::Language
+        || inner.car() != install("parent.frame")?
+        || inner.cdr() != nil()
+    {
+        return Ok(None);
+    }
+    for name in ["topenv", "parent.frame"] {
+        let symbol = install(name)?;
+        if crate::heap().frame_cell(frame, symbol).is_some()
+            || crate::heap().frame_cell(frame.enclosure(), symbol).is_some()
+        {
+            return Ok(None);
+        }
+    }
+    let frames = &interp().frames;
+    let Some(record) = frames.iter().rev().find(|record| record.env == frame) else {
+        return Ok(None);
+    };
+    let caller = record.sys_parent;
+    let target = crate::envir::get_option("topLevelEnvironment");
+    Ok(Some(crate::envir::top_env(caller, target)))
 }
 
 /// A single, non-empty string without attributes.

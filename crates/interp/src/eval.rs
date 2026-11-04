@@ -351,7 +351,11 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
         eval(promise.cdr(), promise.tag())
     };
     promise.set_gp_bits(PROMISE_SEEN, false);
-    let value = result?;
+    settle_promise(promise, result?)
+}
+
+/// Stores `value` as the value of the unforced `promise`, as forcing it to that value does.
+pub unsafe fn settle_promise(promise: Sexp, value: Sexp) -> R<Sexp> {
     if promise.has_gp(gp::CHECKED_PROMISE) {
         crate::annotations::check_forced(promise, value)?;
     }
