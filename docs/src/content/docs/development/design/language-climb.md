@@ -50,12 +50,12 @@ one batch rather than being decided inside the climb.
 | baseline | 8/16 | 0 | not measured | The harness, the corpus, and the first friendliness gaps the generator found |
 | 1 | 13/17 | 0/10 | 10/20 | `&&` and `\|\|` on two `Bool`s give `Bool`. Arithmetic on number literals alone (`2 * 3.14159 * r`) adapts like a lone literal. Within one function, a variable written with a string, `TRUE`/`FALSE` or number literal is decided by the parameter it is passed to or the annotated binding it flows into |
 | 2 | 20/21 | 0/12 | 5/20 | In a strict file or a file with ry syntax, a top-level literal binding is a ry value (`rate <- 2.0` is an `F64`), and passing an `I64` or a `List<I64>` to an R function names `Num.to_r()` or `List.to_r()` |
-| 3 | 20/21 | 8/240 | 0/240 | A value of literals alone (logic, comparisons, an `if` of literals, a one-statement `{}`) adapts like a lone literal; a literal beside a `Bool` in `&&` takes `Bool`; an annotation decides a ry number a call left open. The generator now writes empty ranges, which exposed the empty-list gap below; an empty `I64` list sums to the `I64` 0 |
+| 3 | 20/21 | 8/240 | 0/240 | A value of literals alone (logic, comparisons, an `if` of literals, a one-statement `{}`) adapts like a lone literal; a literal beside a `Bool` in `&&` takes `Bool`; an annotation decides a ry number a call left open. The generator now writes empty ranges, which exposed the empty-list gap below; an empty list that carries the `I64` kind (from `List.range`) sums to the `I64` 0 |
 
 ## Open questions
 
 - **Empty lists lose their item type at run time.** ry's runtime stores a `List` by its items, so an
-  empty one built from no typed source, such as `List.map` over an empty list, is a `logical`
+  empty one built from no typed source, such as `[]` or `List.map` over an empty list, is a `logical`
   vector of length zero, and `List.sum` of it is R's `integer` 0 rather than the `I64` or `F64` the
   checker promised. Every unsound program the generator finds fails this way. The runtime cannot
   decide the type alone; the typed core, which compiles strict code with its types, or a checker

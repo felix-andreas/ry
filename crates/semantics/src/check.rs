@@ -2590,7 +2590,7 @@ fn literal_value_scalar(module: &Module, id: ExprId) -> Option<NativeScalar> {
         false => NativeScalar::I64,
     };
     if let Some(literal) = number_literal(module, id) {
-        return Some(number(literal.is_fraction() || literal.fractional_form));
+        return Some(literal.default_native());
     }
     match module.kind(id) {
         ExpressionKind::Binary {
@@ -2633,6 +2633,67 @@ fn literal_value_scalar(module: &Module, id: ExprId) -> Option<NativeScalar> {
             }
         }
         _ => None,
+    }
+}
+
+/// Whether every literal in a value of literals alone fits `target` as [`Checker::adapt_literal`]
+/// would adapt it, so the adaptation can run without leaving some leaves adapted when a later
+/// one fails.
+fn literal_leaves_fit(module: &Module, id: ExprId, target: NativeScalar) -> bool {
+    if let Some(literal) = number_literal(module, id) {
+        return target.is_number() && target.holds(&literal);
+    }
+    match module.kind(id) {
+        ExpressionKind::Paren(inner) => literal_leaves_fit(module, *inner, target),
+        ExpressionKind::Literal(LiteralKind::String(_)) => target == NativeScalar::Str,
+        ExpressionKind::Literal(LiteralKind::Logical(_)) => target == NativeScalar::Bool,
+        ExpressionKind::Unary {
+            operator: UnaryOperator::Not,
+            operand,
+        } => target == NativeScalar::Bool && literal_leaves_fit(module, *operand, target),
+        ExpressionKind::Binary {
+            operator, lhs, rhs, ..
+        } if is_arithmetic(*operator) => {
+            target.is_number()
+                && (*operator != BinaryOperator::Divide || target.is_fraction())
+                && literal_leaves_fit(module, *lhs, target)
+                && literal_leaves_fit(module, *rhs, target)
+        }
+        ExpressionKind::Binary {
+            operator: BinaryOperator::And2 | BinaryOperator::Or2,
+            lhs,
+            rhs,
+            ..
+        } => {
+            target == NativeScalar::Bool
+                && literal_leaves_fit(module, *lhs, target)
+                && literal_leaves_fit(module, *rhs, target)
+        }
+        ExpressionKind::Binary { lhs, rhs, .. } if is_literal_logic(module, id) => {
+            let number = if is_fractional_arithmetic(module, *lhs)
+                || is_fractional_arithmetic(module, *rhs)
+            {
+                NativeScalar::F64
+            } else {
+                NativeScalar::I64
+            };
+            target == NativeScalar::Bool
+                && literal_leaves_fit(module, *lhs, number)
+                && literal_leaves_fit(module, *rhs, number)
+        }
+        ExpressionKind::Block { statements } => match &module[*statements] {
+            [statement] => literal_leaves_fit(module, *statement, target),
+            _ => false,
+        },
+        ExpressionKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => {
+            literal_leaves_fit(module, *then_branch, target)
+                && literal_leaves_fit(module, *else_branch, target)
+        }
+        _ => false,
     }
 }
 
@@ -3154,7 +3215,7 @@ impl<'db> Checker<'db, '_> {
                             Some(literal) => {
                                 let native = self.binds_ry_value();
                                 let constraint = if literal.is_fraction()
-                                    || (native && literal.fractional_form)
+                                    || (native && literal.default_native() == NativeScalar::F64)
                                 {
                                     Constraint::FracLiteral
                                 } else {
@@ -5661,7 +5722,7 @@ impl<'db> Checker<'db, '_> {
         let ty = if let Some(literal) = number_literal(module, inner) {
             let constraint = if literal.integer {
                 Constraint::Int
-            } else if literal.is_fraction() || literal.fractional_form {
+            } else if literal.default_native() == NativeScalar::F64 {
                 Constraint::Frac
             } else {
                 Constraint::Number
@@ -7878,6 +7939,9 @@ impl<'db> Checker<'db, '_> {
             && !matches!(module.kind(value), ExpressionKind::Literal(_))
             && is_literal_logic(module, value)
         {
+            if !literal_leaves_fit(module, value, NativeScalar::Bool) {
+                return LiteralFit::NotLiteral;
+            }
             let fit = match *module.kind(value) {
                 ExpressionKind::Unary { operand, .. } => self.adapt_literal(operand, expected),
                 ExpressionKind::Binary {
@@ -7913,7 +7977,10 @@ impl<'db> Checker<'db, '_> {
         // `if (c) 0.1 else 3.0` and `{ 3L }` take the value of a branch or of the statement, so
         // each literal there adapts as it would written alone. The `if` was inferred already,
         // condition included, so only its literal leaves remain to adapt.
-        if target.is_some() && literal_value_scalar(module, value).is_some() {
+        if let Some(native) = target
+            && literal_value_scalar(module, value).is_some()
+            && literal_leaves_fit(module, value, native)
+        {
             let leaves = match *module.kind(value) {
                 ExpressionKind::If {
                     then_branch,
@@ -18891,7 +18958,7 @@ fn native_value_kind(db: &dyn Db, ty: Ty<'_>) -> Option<NativeValueKind> {
         TyKind::NativeRecord(_) => Some(NativeValueKind::Record),
         TyKind::NativeTuple(_) => Some(NativeValueKind::Tuple),
         TyKind::Tag(..) | TyKind::OtherTags => Some(NativeValueKind::Tag),
-        TyKind::Native(native) if native.shared_atomic().is_none() => Some(NativeValueKind::I64),
+        TyKind::Native(NativeScalar::I64) => Some(NativeValueKind::I64),
         TyKind::Named(..)
             if array_element(db, ty).is_some_and(|element| match element.kind(db) {
                 TyKind::Native(native) => native.shared_atomic().is_none(),

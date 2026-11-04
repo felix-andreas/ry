@@ -1066,8 +1066,9 @@ A ry type asks in three places:
 - **A top-level binding in a typed file.** In a strict file, or a file written with ry syntax (an
   inline annotation, a record, tuple, tag, `List` or `match`), a literal bound outside any function
   is a ry value: `count <- 3` is an `I64`, `rate <- 2.0` an `F64`, `name <- "ry"` a `Str` and
-  `flag <- TRUE` a `Bool`. A literal written with a decimal point or an exponent is an `F64`, and
-  arithmetic on literals alone is one literal, so `step <- 1 / 4` is an `F64`. Each top-level
+  `flag <- TRUE` a `Bool`. A literal written with a decimal point or an exponent (but not `1e3L`),
+  or a whole number past the range of `I64`, is an `F64`, and arithmetic on literals alone is one
+  literal, so `step <- 1 / 4` is an `F64`. Each top-level
   statement is checked on its own, so nothing later in the file decides the type. In any other file
   a top-level literal has R's type.
 
