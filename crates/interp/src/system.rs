@@ -1874,11 +1874,17 @@ fn resolve_fields(mut fields: Parsed, warnings: &mut Vec<String>) -> Option<Pars
         && (fields.month.is_none() || fields.day.is_none())
         && let Some(year) = fields.year
     {
-        // GNU R's formula from the weekday of 1 January, with the weekday not reduced modulo
-        // 7, so that `%u` 7 (Sunday) closes a Monday-first week.
+        // GNU R's formula from the weekday of 1 January. Through R 4.6.1 it puts the Sunday
+        // of a Monday-first week before that week's Monday; from R 4.6.2 on, Sunday closes it.
         let first = (days_from_civil(year, 1, 1) + 4).rem_euclid(7);
         let shift = i64::from(monday_first);
-        fields.yearday = Some((7 - (first - shift)) % 7 + (week - 1) * 7 + weekday - shift + 1);
+        let from_monday = weekday - shift;
+        let weeks_before = if r_at_least_release(4, 6, 2) && from_monday < 0 {
+            week
+        } else {
+            week - 1
+        };
+        fields.yearday = Some((7 - (first - shift)) % 7 + weeks_before * 7 + from_monday + 1);
     }
     // GNU R fills an unspecified year, month or day from today's date, except that a month
     // without a day is invalid, since today's day need not exist in that month.
@@ -2011,7 +2017,17 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
                 // GNU R reads `%OS` with `R_strtod`, so it takes the longest number there (`1e1`
                 // and `0x10` included) and keeps it only between 0 and 61; anything else, or no
                 // number at all, leaves the seconds as they were without failing. `%OSn` is for
-                // output only, so on input its digit is a literal the text must contain.
+                // output only, so on input its digit is a literal the text must contain. From
+                // R 4.6.2 on, that digit is skipped instead, and a number out of range makes the
+                // time `NA`.
+                let current = r_at_least_release(4, 6, 2);
+                if current
+                    && characters
+                        .as_str()
+                        .starts_with(|digit: char| digit.is_ascii_digit())
+                {
+                    characters.next();
+                }
                 let skipped = input.len() - input.trim_start().len();
                 let candidate = &input[skipped..];
                 let run = candidate
@@ -2025,6 +2041,8 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
                 if let Some((value, end)) = number {
                     if (0.0..=61.0).contains(&value) {
                         fields.second = value;
+                    } else if current && value.is_finite() {
+                        return None;
                     }
                     *input = &candidate[end..];
                 }
@@ -2799,6 +2817,20 @@ fn dir_name(path: &str, windows: bool) -> String {
     if path.is_empty() {
         return String::new();
     }
+    // From R 4.4 on, GNU R's Unix `dirname` drops every trailing separator, not only one.
+    if !windows && r_at_least(4, 4) {
+        let without_separators = path.trim_end_matches('/');
+        if without_separators.is_empty() {
+            return "/".to_owned();
+        }
+        return match without_separators.rfind('/') {
+            None => ".".to_owned(),
+            Some(position) => match without_separators[..position].trim_end_matches('/') {
+                "" => "/".to_owned(),
+                head => head.to_owned(),
+            },
+        };
+    }
     let path = if windows {
         path.replace('\\', "/")
     } else {
@@ -2989,10 +3021,28 @@ pub const MINIMUM_SVN_REVISION: u32 = 89194;
 /// with argument lists ry does not implement.
 pub const OLDEST_SUPPORTED_R: (u32, u32) = (4, 3);
 
-/// The version of the R in [`r_home`], read once.
+/// The newest GNU R release whose behavior ry emulates, which is the base R ry bundles.
+pub const NEWEST_EMULATED_R: (u32, u32, u32) = (4, 6, 2);
+
+/// The version of the R in [`r_home`], read once. With no base R found no session can start, so
+/// only code that runs outside a session, such as a unit test, sees the fallback: the newest
+/// release ry emulates.
 pub fn r_version() -> &'static RVersion {
     static VERSION: std::sync::OnceLock<RVersion> = std::sync::OnceLock::new();
-    VERSION.get_or_init(|| read_r_version(&r_home()))
+    VERSION.get_or_init(|| match located_r_home() {
+        Ok(home) => read_r_version(home),
+        Err(_) => {
+            let (major, minor, patch) = NEWEST_EMULATED_R;
+            RVersion {
+                major,
+                minor,
+                patch,
+                date: String::new(),
+                revision: MINIMUM_SVN_REVISION,
+                nickname: String::new(),
+            }
+        }
+    })
 }
 
 /// Reads the version from the installation itself: the base package's `DESCRIPTION` holds

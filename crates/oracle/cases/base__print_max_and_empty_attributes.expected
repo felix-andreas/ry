@@ -2,13 +2,14 @@
 |      [,1] [,2]
 | [1,]    1    7
 | [2,]    2    8
-|  [ reached getOption("max.print") -- omitted 4 rows ]
-|      [,1] [,2] [,3] [,4] [,5] [,6]
-|  [ reached getOption("max.print") -- omitted 2 rows ]
+|  [ reached 'max' / getOption("max.print") -- omitted 4 rows ]
+|      [,1] [,2] [,3]
+| [1,]    1    3    5
+|  [ reached 'max' / getOption("max.print") -- omitted 1 row and 3 columns ]
 |       [,1] [,2] [,3]
 |  [1,]    1   11   21
 |  [2,]    2   12   22
-|  [ reached getOption("max.print") -- omitted 8 rows ]
+|  [ reached 'max' / getOption("max.print") -- omitted 8 rows ]
 | , , 1
 | 
 |      [,1] [,2] [,3]
@@ -20,7 +21,7 @@
 |      [,1] [,2] [,3]
 | [1,]    7    9   11
 | 
-|  [ reached getOption("max.print") -- omitted 1 row(s) and 2 matrix slice(s) ]
+|  [ reached 'max' / getOption("max.print") -- omitted 2 slices ] 
 | List of 2
 |  $ dim     : int [1:2] 1 1
 |  $ dimnames:List of 2
@@ -62,7 +63,7 @@
 | [[3]]
 | [1] 3
 | 
-|  [ reached getOption("max.print") -- omitted 3 entries ]
+|  [ reached 'max' / getOption("max.print") -- omitted 3 entries ]
 | [[1]]
 | [1] 1
 | 
@@ -78,13 +79,13 @@
 |        [,1]
 | [1,]    1.0
 | [2,]    2.0
-|  [ reached getOption("max.print") -- omitted 2 rows ]
+|  [ reached 'max' / getOption("max.print") -- omitted 2 rows ]
 |      [,1] [,2]
 | [1,]    1    3
-|  [ reached getOption("max.print") -- omitted 1 row ]
+|  [ reached 'max' / getOption("max.print") -- omitted 1 row ]
 |      [,1]   [,2]
 | [1,]    1 1000.0
-|  [ reached getOption("max.print") -- omitted 1 row ]
+|  [ reached 'max' / getOption("max.print") -- omitted 1 row ]
 | [1] "2020-01-01" "2020-01-01"
 | [1] "2020-01-01" "2020-01-01" "2020-01-01"
 | NULL

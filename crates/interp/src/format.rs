@@ -433,6 +433,10 @@ thread_local! {
     static OUTPUT_DECIMAL: RefCell<String> = RefCell::new(".".to_owned());
 }
 
+pub(crate) fn output_decimal() -> String {
+    OUTPUT_DECIMAL.with(|decimal| decimal.borrow().clone())
+}
+
 pub fn set_output_decimal(mark: &str) {
     OUTPUT_DECIMAL.with(|decimal| *decimal.borrow_mut() = mark.to_owned());
 }
@@ -501,9 +505,18 @@ pub fn format_complex_common(values: &[Rcomplex], settings: Settings) -> (RealFo
         .collect();
     let reals: Vec<f64> = rounded.iter().map(|value| value.r).collect();
     let imaginaries: Vec<f64> = rounded.iter().map(|value| value.i.abs()).collect();
-    let real = format_real_common(&reals, settings);
+    let mut real = format_real_common(&reals, settings);
     let imaginary = format_real_common(&imaginaries, settings);
-    // The notation is chosen for both parts together: when either part alone would print in
+    // From R 4.4 on, each part chooses its notation on its own, and only the space an `NA`
+    // needs is shared.
+    if crate::system::r_at_least(4, 4) {
+        let has_na = rounded.len() < values.len();
+        if has_na && real.width + imaginary.width + 2 < settings.na_width {
+            real.width = settings.na_width - imaginary.width - 2;
+        }
+        return (real, imaginary);
+    }
+    // Through R 4.3, the notation is chosen for both parts together: when either part alone would print in
     // scientific notation, both print fixed only if that is narrower than both in scientific.
     // A part that is exactly zero throughout keeps its own format, so `1e80+0i` prints its zero
     // imaginary part plainly.

@@ -5171,10 +5171,10 @@ check` releases its trees once, and memoized records are compact" below).
   rejected on unpack.
 - **Version emulation is kept for the opt-in:** `R_HOME` naming GNU R 4.3 or later makes ry
   behave like that release ("The runtime emulates the GNU R version it loads base R from" below).
-  The oracle's expectations are GNU R 4.3.3 output, so CI sets `R_HOME` to 4.3.3.
-- **Impact.** One source of truth for the R version a user gets; start-up is unchanged (about
-  140 ms for an empty script, the same tree shape as GNU R's). The preloaded heap image that
-  would cut start-up further is a design draft (`docs/.../development/design/base-image.md`).
+  The oracle's expectations are GNU R 4.6.2 output, so CI sets `R_HOME` to 4.6.2.
+- **Impact.** One source of truth for the R version a user gets, with the same tree shape as
+  GNU R's. Start-up from that tree is cut by the start-up image ("The start-up image is written
+  in process and keyed by what start-up reads" below).
 
 ## The runtime emulates the GNU R version it loads base R from
 
@@ -5193,12 +5193,15 @@ check` releases its trees once, and memoized records are compact" below).
   Additions such as `Tailcall`, `Exec`, `declare` and zstd compression exist under every version,
   because no older base R calls them.
 - **Range.** GNU R 4.3 and later; an older `R_HOME` stops `ry run` with an error naming the version.
-  The oracle and the interp and ry test suites are run under 4.3.3 and 4.6.1 (`ORACLE_R` and
-  `R_HOME` select the installation). Gates for 4.4 and 4.5 were placed from GNU R's sources and
-  NEWS, not from running those versions.
-- **The default packages' routine table is the union over versions** (`builtin_libraries.rs`), so
-  a routine GNU R removed (`C_pKS2` in 4.6) still resolves. Base R's own code never calls a removed
-  routine, so the extra entries are harmless; a script calling one directly differs from GNU R.
+  The oracle's expectations are recorded with GNU R 4.6.2; ry with `R_HOME` at GNU R 4.3.3 is
+  checked against a 4.3.3 recording of the same cases (`ORACLE_R` and `R_HOME` select the
+  installation). Gates for 4.4 and 4.5 were placed from GNU R's sources and NEWS, not from
+  running those versions.
+- **The default packages' routine table is the union over versions** (`builtin_libraries.rs`),
+  but a routine a release does not register is hidden from lookup and from `getDLLRegisteredRoutines`
+  (`registered_in_release`: stats' `pKolmogorov2x` and `pKS2` before 4.4, `pkolmogorov_two_exact`
+  and `pkolmogorov_two_limit` from 4.4). The table's positions stay fixed, because routine
+  pointers and image tokens index it.
 - **The C API surface stays R 4.6's whatever the version,** because a newer API is a superset; only
   the version macros in the generated `Rversion.h` follow base. A package compiled from source must
   be reinstalled when the linked base version changes.
@@ -6777,10 +6780,10 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Shape.** Each case of a harness is one seed of `for_each_seed`, and a harness that shares one generator across cases builds it as `SplitMix64(CONST ^ seed)`. `tools/fuzz-deep.py` finds harnesses by reading the sources, resolves each against its binary's `--list`, and runs it with `FUZZ_SEED` at a fresh start and `FUZZ_DEPTH`, which scales each loop's own default count. A scaled depth, rather than one `FUZZ_ITERS` count, keeps the proportions of a test with several loops of different sizes and needs no budget read out of the source.
 - **Why.** A single stream drawn across iterations neither replays one case nor moves to new inputs, so a deep campaign over it repeats the default run. Discovery from the sources means a new harness joins the campaign without being registered.
 
-## CI runs `just gate` against GNU R 4.3.3, and nothing ignored
+## CI runs `just gate` against GNU R 4.6.2, and nothing ignored
 
 - **Previous shape.** The live `ci.yml` used stable Rust, which cannot build the workspace (the toolchain is a pinned nightly for `allocator_api`), and tested only `crates/ry` through `default-members`. Its second job ran `-- --ignored` in a release build; once widened to the workspace that pulls in `ide::fuzz_deep` (about 55 minutes), the corpus benchmarks (which need a fetched corpus) and `format_directory` (which needs `RY_FORMAT_DIR`).
-- **Shape.** One job runs `just fmt-check`, `just clippy` and `just battery`, the recipes `just gate` runs, with the toolchain read from `rust-toolchain.toml`, so CI and the local gate cannot diverge. GNU R 4.3.3 is installed because the runtime's suites skip without an installation, which would leave the runtime untested; 4.3.3 is the oldest version the runtime supports and the one the suites are run against locally. The zlib, bzip2 and xz development packages are installed because libr links them. The ignored suites stay manual (`just fuzz-deep`, `just perf`), because none of them is a pass/fail gate that fits a push.
+- **Shape.** One job runs `just fmt-check`, `just clippy` and `just battery`, the recipes `just gate` runs, with the toolchain read from `rust-toolchain.toml`, so CI and the local gate cannot diverge. GNU R is installed because the runtime's suites skip without an installation, which would leave the runtime untested. It is 4.6.2, the release the oracle's expectations are recorded with and ry bundles as its base R (the live `ci.yml` still installs 4.3.3 until `.github/pending/ci.yml` is accepted). The zlib, bzip2 and xz development packages are installed because libr links them. The ignored suites stay manual (`just fuzz-deep`, `just perf`), because none of them is a pass/fail gate that fits a push.
 - **Triggers (user decision).** CI runs only on `workflow_dispatch`, never on push or pull request. The orchestrator starts it on main at its hourly check when main has new commits.
 - **Impact.** CI covers every crate except `zed_ry` (wasm), at most once an hour on main, or on any ref when started by hand.
 
@@ -7517,3 +7520,38 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Impact.** The introduction and tutorial pages shrink from about 3,000 lines to about 1,300, a reader finds one page
   per step, and the sidebar keeps its place across navigation.
 
+## The start-up image is build output of the base tree, and every start re-reads the environment
+
+- **Previous source of truth.** Without an image, every start re-derived the same session from
+  base R's files (baseloader, lazy-loaded base, the six default packages, methods rebuilding its
+  S4 tables): an empty `ry run` took about 125 ms (median, Linux, bench profile). A first design
+  wrote the image at run time on the first eligible start, into `~/.cache/ry/image`, keyed by the
+  build, the session flags, base R's files, the library paths and the steering variables, with
+  every other environment read recorded through an `image::variable` wrapper and compared on load.
+- **What was structurally weak.** That image was a cache of derived state, and it had a cache's
+  failures: a key that missed an input (a shared `.Random.seed`, a stale lazy-load database of a
+  package outside R home, relative `R_LIBS`, start-up warnings shown only on the writing run), and
+  a wrapper every interpreter environment read had to remember to use.
+- **Target shape.** The image is build output. `ry-rcmd build-base` writes it as its last step
+  into the base tree (`library/base/R/ry-start.image`) in an emptied environment, a release embeds
+  it with the tree, and nothing writes it at run time. The header carries `RY_RUNTIME_ID`; an
+  image of another build is skipped silently (`just start-image` refreshes it in a development
+  checkout). After the load, each start clears the options and re-runs the environment-reading
+  steps: the C-level options, `.Machine`, `.Platform`, base R's profile, and the `.onLoad` hooks
+  of utils, grDevices and stats (`interp::session::start_from_image`). The image holds only what
+  those steps leave alone, the namespaces and their attachment, which depend on nothing in the
+  environment but `image::LOADING_VARIABLES`; a start that sets one runs the slow way. Strings
+  under the writer's R home are relocated to the tree the image file lives in
+  (`heap::image::Relocation`). The writer fails, failing the build, when start-up warned or left
+  `.Random.seed`. User packages get the same treatment as install-time output of `ry install`
+  (`backlog.md`).
+- **No "existing objects" check.** Rust state that holds heap objects across start-up must be a
+  fixed object, a heap root, or saved by `image::save_state`; a check that refused every object
+  live before start-up flagged only `package:ry`'s frame, which the loader overwrites safely.
+- **Impact.** Empty `ry run`: about 120 ms to 60 ms median. Re-running the environment steps
+  costs about 12 ms against loading a run-time image (47 ms). `methods::getClass("numeric")` with
+  `R_DEFAULT_PACKAGES=NULL` starts the slow way (63 ms; the run-time image keyed that variable and
+  took 56 ms). The four cache bugs cannot occur: no image depends on
+  the run-time environment. Options, the search path and namespace paths match a slow start
+  (`start-up-image.scenario`). Development builds start slowly after a runtime edit until the
+  image is rewritten. Analysis is unaffected: the image is runtime-only.

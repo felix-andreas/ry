@@ -1048,6 +1048,56 @@ impl Sexp {
         }
     }
 
+    /// Writes the flag byte whole, as an image load restores it.
+    pub(crate) unsafe fn set_flags(self, flags: u8) {
+        unsafe { self.header().flags.set(flags) }
+    }
+
+    pub(crate) unsafe fn set_refcount(self, count: u16) {
+        unsafe { self.header().refcount.set(count) }
+    }
+
+    /// Writes a fresh record's layout id and slot count, with every slot a handle until the
+    /// slots are stored.
+    pub(crate) unsafe fn init_record_header(self, layout: u32, slot_count: u32) {
+        unsafe {
+            let payload = self.payload::<RecordObject>();
+            payload.layout.set(layout);
+            payload.slot_count.set(slot_count);
+            payload.unboxed.set(0);
+        }
+    }
+
+    /// Slot `index` as its stored eight bytes, with whether they are a raw number.
+    pub(crate) unsafe fn record_slot_bits(self, index: usize) -> (u64, bool) {
+        unsafe {
+            let bits = *(self.record_slots() as *const u64).add(index);
+            let raw = index < UNBOXED_SLOTS && self.record_unboxed() & (1 << index) != 0;
+            (bits, raw)
+        }
+    }
+
+    /// Stores slot `index` from its eight bytes, as [`Sexp::record_slot_bits`] read them.
+    pub(crate) unsafe fn set_record_slot_bits(self, index: usize, bits: u64, raw: bool) {
+        unsafe {
+            if index < UNBOXED_SLOTS && raw {
+                let payload = self.payload::<RecordObject>();
+                payload.unboxed.set(payload.unboxed.get() | 1 << index);
+            }
+            *(self.record_slots() as *mut u64).add(index) = bits;
+        }
+    }
+
+    /// Clears a symbol's lookup caches, so the next lookup resolves again.
+    pub(crate) unsafe fn reset_symbol_caches(self) {
+        unsafe {
+            let symbol = self.symbol_payload();
+            symbol.epoch.set(symbol.epoch.get() + 1);
+            symbol.global_cell.set(None);
+            symbol.global_stamp.set(u64::MAX);
+        }
+    }
+
     pub(crate) unsafe fn set_altrep_flag(self) {
         unsafe { self.set_flag(flag_bits::ALTREP, true) }
     }

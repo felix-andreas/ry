@@ -16,4 +16,4 @@
 [errors]
 [value]
 list
-| list(scipen = -5)
+| list(scipen = -5L)

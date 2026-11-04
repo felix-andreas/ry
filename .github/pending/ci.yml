@@ -29,12 +29,11 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
-      # The oracle's expectations are GNU R 4.3.3 output, so the runtime's suites load base R from
-      # that release through R_HOME, which makes ry's runtime emulate it. 4.3.3 is also the oldest
-      # version the runtime supports.
+      # The oracle's expectations are GNU R 4.6.2 output, the release ry bundles as its base R, so
+      # the runtime's suites load base R from that release through R_HOME.
       - uses: r-lib/actions/setup-r@v2
         with:
-          r-version: "4.3.3"
+          r-version: "4.6.2"
       - name: R_HOME
         run: echo "R_HOME=$(R RHOME)" >> "$GITHUB_ENV"
       # libR links zlib, bzip2 and xz, as GNU R's does (crates/libr/build.rs).

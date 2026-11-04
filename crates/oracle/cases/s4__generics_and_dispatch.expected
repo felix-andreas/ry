@@ -2,7 +2,7 @@
 | [1] "area"
 | [1] 3.141593
 | [1] 6
-| [1] "unable to find an inherited method for function ‘area’ for signature ‘\"numeric\"’"
+| [1] "unable to find an inherited method for function ‘area’ for signature ‘shape = \"numeric\"’"
 | [1] TRUE
 | [1] TRUE
 | [1] TRUE
