@@ -345,7 +345,8 @@ pub(crate) mod gc_bits {
     /// bitmaps. Marks are sticky between collections, so a marked object outside a collection
     /// belongs to the old generation.
     pub const MARK: u8 = 1 << 0;
-    /// In the remembered set: an old object that may point at young objects.
+    /// In the remembered set: an old object that may point at young objects, or a tenured one
+    /// that may point at objects of the younger old generation.
     pub const REMEMBERED: u8 = 1 << 1;
     /// Survived a collection: the object's mark, which is sticky, was set at least once. Outside
     /// a collection this agrees with the mark, which lives in a side bitmap for small objects;
@@ -364,6 +365,11 @@ pub(crate) mod gc_bits {
     /// Released by a reconcile: a dead list or pairlist whose fields were given up and cleared,
     /// left for the collector to sweep.
     pub const RELEASED: u8 = 1 << 6;
+    /// In the oldest generation: survived an intermediate or a major collection. Only a major
+    /// collection frees such an object, and one that is neither remembered nor escaped points
+    /// only to tenured objects, which is what lets an intermediate collection skip tracing it.
+    /// Like `OLD`, it is never cleared while the object lives.
+    pub const TENURED: u8 = 1 << 7;
 }
 
 pub(crate) mod flag_bits {

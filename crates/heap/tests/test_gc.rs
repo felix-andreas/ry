@@ -341,11 +341,10 @@ fn run_checked(seed: u64, steps: usize, stress: bool, verify_reconcile: bool) {
                 _ if !verify_reconcile && rng.chance(2, 3) => {}
                 _ => {
                     sync_roots(&mut heap, &model);
-                    let major = rng.chance(1, 3);
-                    let kind = if major {
-                        Collection::Major
-                    } else {
-                        Collection::Minor
+                    let kind = match rng.below(4) {
+                        0 => Collection::Major,
+                        1 => Collection::Intermediate,
+                        _ => Collection::Minor,
                     };
                     heap.collect(kind);
                     verify(&mut heap, &mut model);
@@ -491,10 +490,10 @@ fn fuzz_temporaries_are_freed_and_live_vectors_kept() {
                 heap.set_element(holders[holder], slot, value);
                 model[holder][slot] = held;
                 if rng.chance(1, 40) {
-                    heap.collect(if rng.chance(1, 2) {
-                        Collection::Major
-                    } else {
-                        Collection::Minor
+                    heap.collect(match rng.below(3) {
+                        0 => Collection::Major,
+                        1 => Collection::Intermediate,
+                        _ => Collection::Minor,
                     });
                 }
                 let intact = |vector: Sexp, fill: f64| {
@@ -694,6 +693,66 @@ fn the_write_barrier_keeps_young_objects_stored_into_old_ones() {
         assert_eq!(old.element(0).kind(), SexpType::Integer);
         assert_eq!(old.element(0).slice::<i32>(), &[42]);
         assert_eq!(young.refcount(), 1, "a store counts as one reference");
+    }
+}
+
+#[test]
+fn a_tenured_object_keeps_the_younger_old_objects_stored_into_it() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        let tenured = heap.alloc_vector(SexpType::List, 2).expect("alloc");
+        heap.root(tenured);
+        heap.collect(Collection::Major);
+        // Stored while young: a minor collection promotes the child only to the younger old
+        // generation, so the tenured parent must stay remembered for the intermediate one.
+        let first = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        *first.slice_mut::<i32>().first_mut().expect("one element") = 1;
+        heap.set_element(tenured, 0, first);
+        heap.collect(Collection::Minor);
+        // Stored while old but untenured, after its only other holder let go of it.
+        let holder = heap.alloc_vector(SexpType::List, 1).expect("alloc");
+        heap.root(holder);
+        let second = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        *second.slice_mut::<i32>().first_mut().expect("one element") = 2;
+        heap.set_element(holder, 0, second);
+        heap.collect(Collection::Minor);
+        heap.set_element(tenured, 1, second);
+        heap.set_element(holder, 0, heap.nil());
+        heap.collect(Collection::Intermediate);
+        assert_eq!(tenured.element(0).slice::<i32>(), &[1]);
+        assert_eq!(tenured.element(1).slice::<i32>(), &[2]);
+        heap.collect(Collection::Minor);
+        heap.collect(Collection::Major);
+        assert_eq!(tenured.element(1).slice::<i32>(), &[2]);
+        assert_eq!(heap.stats().intermediate_collections, 1);
+    }
+}
+
+#[test]
+fn an_intermediate_collection_frees_promoted_garbage_but_not_tenured_garbage() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        let holder = heap.alloc_vector(SexpType::List, 2).expect("alloc");
+        heap.root(holder);
+        let tenured = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        heap.set_element(holder, 0, tenured);
+        heap.collect(Collection::Major);
+        let promoted = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        heap.set_element(holder, 1, promoted);
+        heap.collect(Collection::Minor);
+        heap.set_element(holder, 0, heap.nil());
+        heap.set_element(holder, 1, heap.nil());
+        let before = heap.stats().objects_freed;
+        heap.collect(Collection::Intermediate);
+        assert_eq!(heap.stats().objects_freed, before + 1);
+        if cfg!(debug_assertions) {
+            assert_eq!(promoted.kind(), SexpType::Free);
+        }
+        assert_eq!(tenured.kind(), SexpType::Integer);
+        heap.collect(Collection::Major);
+        assert_eq!(heap.stats().objects_freed, before + 2);
     }
 }
 

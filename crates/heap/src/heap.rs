@@ -74,6 +74,9 @@ pub struct Heap {
     /// Large objects allocated since the last collection, which a minor collection sweeps.
     young_large: Vec<Sexp>,
     remembered: Vec<Sexp>,
+    /// The vector cells of the tenured objects, as of the last intermediate or major collection,
+    /// to which an intermediate one adds what it marks.
+    tenured_vector_cells: u64,
     escaped: Vec<Sexp>,
     /// The elements each escaped list held when it escaped. Native stores through the pointer
     /// bypass the counts, so retiring the escape recounts the list from this snapshot.
@@ -230,7 +233,12 @@ pub struct Marker<'a> {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Collection {
+    /// Traces from the roots and the remembered set and frees young objects only.
     Minor,
+    /// Unmarks the younger old generation, traces everything outside the oldest one, and frees
+    /// the dead objects of both younger generations; survivors join the oldest. Tenured objects
+    /// are neither traced nor freed, which is what makes it cheaper than a major collection.
+    Intermediate,
     Major,
 }
 
@@ -380,6 +388,7 @@ const GROW_STEP_MIN: f64 = 80_000.0 * 8.0;
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct GcStats {
     pub minor_collections: u64,
+    pub intermediate_collections: u64,
     pub major_collections: u64,
     pub objects_freed: u64,
     /// Large vectors freed by reconciling the zero-count table, apart from a collection.
@@ -389,8 +398,9 @@ pub struct GcStats {
     pub pages: u64,
     pub large_objects: u64,
     /// The live objects' vector data in 8-byte cells, GNU R's `Vcells`. A major collection
-    /// counts it afresh, and a minor one adds what it marked, since only young objects are
-    /// unmarked when a minor collection starts and old objects die only in a major one.
+    /// counts it afresh, an intermediate one adds what it marked to the tenured objects' cells,
+    /// and a minor one adds what it marked to the total, since each starts with exactly the
+    /// objects it cannot free still marked.
     pub live_vector_cells: u64,
     /// The most objects and vector cells live after any collection since the last reset.
     pub max_live_objects: u64,
@@ -400,6 +410,12 @@ pub struct GcStats {
     pub user_time: Duration,
     pub system_time: Duration,
     pub elapsed_time: Duration,
+}
+
+impl GcStats {
+    pub fn collections(&self) -> u64 {
+        self.minor_collections + self.intermediate_collections + self.major_collections
+    }
 }
 
 /// What `gc()` reports, in GNU R's units: objects for its `Ncells` and 8-byte cells of vector
@@ -552,6 +568,7 @@ impl Heap {
             mapped: MappedPool::new(),
             young_large: Vec::new(),
             remembered: Vec::new(),
+            tenured_vector_cells: 0,
             escaped: Vec::new(),
             escaped_lists: Vec::new(),
             zero_count: Vec::new(),
@@ -674,14 +691,16 @@ impl Heap {
             }
         };
         format!(
-            "Garbage collection {} = {}+0+{} (level {}) ... \n\
+            "Garbage collection {} = {}+{}+{} (level {}) ... \n\
              {:.1} Mbytes of cons cells used ({}%)\n\
              {:.1} Mbytes of vectors used ({}%)\n",
-            stats.minor_collections + stats.major_collections,
+            stats.collections(),
             stats.minor_collections,
+            stats.intermediate_collections,
             stats.major_collections,
             match last {
                 Collection::Minor => 0,
+                Collection::Intermediate => 1,
                 Collection::Major => 2,
             },
             usage.object_megabytes,
@@ -1314,7 +1333,7 @@ impl Heap {
     // Stores, each through the write barrier and the reference counts.
 
     /// Records a store of `child` into `parent`. Only an old parent that is not yet remembered
-    /// can come to point at a young child, and the parent's header, which the store is about to
+    /// can come to point at a younger child, and the parent's header, which the store is about to
     /// write near, says whether it is one.
     #[inline(always)]
     pub unsafe fn write_barrier(&mut self, parent: Sexp, child: Sexp) {
@@ -1327,7 +1346,7 @@ impl Heap {
     #[inline(never)]
     unsafe fn write_barrier_slow(&mut self, parent: Sexp, child: Sexp) {
         debug_assert!(self.space.is_marked(parent), "an old object lost its mark");
-        if child.gc_bits() & gc_bits::OLD == 0 {
+        if younger(parent, child) {
             parent.set_gc_bit(gc_bits::REMEMBERED, true);
             self.remembered.push(parent);
         }
@@ -1402,9 +1421,7 @@ impl Heap {
         if count == 0 || to.gc_bits() & (gc_bits::OLD | gc_bits::REMEMBERED) != gc_bits::OLD {
             return;
         }
-        if (0..count)
-            .any(|offset| to.stored_element(to_start + offset).gc_bits() & gc_bits::OLD == 0)
-        {
+        if (0..count).any(|offset| younger(to, to.stored_element(to_start + offset))) {
             to.set_gc_bit(gc_bits::REMEMBERED, true);
             self.remembered.push(to);
         }
@@ -2041,6 +2058,8 @@ impl Heap {
                 if self.stress_counter >= spacing {
                     self.stress_counter = 0;
                     self.collect_keeping(Collection::Major, keep, request);
+                } else if self.stress_counter == spacing / 2 {
+                    self.collect_keeping(Collection::Intermediate, keep, request);
                 } else {
                     self.collect_keeping(Collection::Minor, keep, request);
                     self.escalate_if_full(keep, request);
@@ -2056,15 +2075,22 @@ impl Heap {
     }
 
     /// A minor collection keeps every old object, so the temporaries it found live and promoted
-    /// stay until a major one. Escalate, as GNU R does, when what is left would not hold the
-    /// request and a fifth of the smallest limit; without that margin, every large vector
-    /// allocated just below the limit would run a minor collection that frees nothing, and only
-    /// a major one moves the limit.
+    /// stay until a deeper one. Escalate, as GNU R does, when what is left would not hold the
+    /// request and a fifth of the smallest limit: first to an intermediate collection, which
+    /// frees the temporaries promoted since the last deeper one without tracing the tenured
+    /// heap, and only if that leaves the heap still full to a major one. Without the margin,
+    /// every large vector allocated just below the limit would run a collection that frees
+    /// nothing, and only a major one moves the limit.
     unsafe fn escalate_if_full(&mut self, keep: &[Sexp], request: usize) {
         let margin = request + self.policy.min_heap_limit / 5;
-        if self.old_bytes() + margin > self.policy.heap_limit {
-            self.stress_counter = 0;
-            self.collect_keeping(Collection::Major, keep, request);
+        for kind in [Collection::Intermediate, Collection::Major] {
+            if self.old_bytes() + margin <= self.policy.heap_limit {
+                return;
+            }
+            if kind == Collection::Major {
+                self.stress_counter = 0;
+            }
+            self.collect_keeping(kind, keep, request);
         }
     }
 
@@ -2331,15 +2357,41 @@ impl Heap {
             .is_some()
             .then(|| (Instant::now(), self.young_bytes, self.young_large_bytes));
         self.space.marked_vector_cells = 0;
-        if kind == Collection::Major {
-            self.clear_marks();
-        } else if self.policy.verify {
+        if kind != Collection::Major && self.policy.verify {
             self.verify_barrier();
+        }
+        match kind {
+            Collection::Minor => self.space.promote_bits = gc_bits::OLD,
+            Collection::Intermediate => {
+                self.unmark_untenured();
+                self.space.promote_bits = gc_bits::OLD | gc_bits::TENURED;
+            }
+            Collection::Major => {
+                self.clear_marks();
+                self.space.promote_bits = gc_bits::OLD | gc_bits::TENURED;
+            }
         }
         for &object in keep {
             self.mark(object);
         }
         self.mark_roots(kind);
+        if kind == Collection::Intermediate {
+            // A tenured object stays marked, so tracing stops at it; the ones that may point at
+            // younger objects are exactly the remembered and escaped ones, so tracing starts
+            // from them too. The others are unmarked now, and traced if anything reaches them.
+            for index in 0..self.remembered.len() {
+                let parent = self.remembered[index];
+                if parent.gc_bits() & gc_bits::TENURED != 0 {
+                    self.mark_stack.push(parent);
+                }
+            }
+            for index in 0..self.escaped.len() {
+                let parent = self.escaped[index];
+                if parent.gc_bits() & gc_bits::TENURED != 0 {
+                    self.mark_stack.push(parent);
+                }
+            }
+        }
         if kind == Collection::Minor {
             // Old objects are already marked, so their young children are pushed directly.
             for index in 0..self.remembered.len() {
@@ -2349,7 +2401,7 @@ impl Heap {
             // An escaped character vector can only have come to hold CHARSXPs, which point at
             // nothing, so marking every young CHARSXP covers whatever native code stored into it
             // without rereading its elements, each a cache miss on another object's header. A
-            // young CHARSXP that is in fact garbage survives until the next major collection.
+            // young CHARSXP that is in fact garbage survives until the next deeper collection.
             let mut escaped_strings = false;
             for index in 0..self.escaped.len() {
                 let parent = self.escaped[index];
@@ -2402,9 +2454,16 @@ impl Heap {
                 self.sweep_young();
                 self.stats.minor_collections += 1;
             }
+            Collection::Intermediate => {
+                self.strings.remove_dead(&self.space);
+                self.sweep_all();
+                self.space.tenure_marked();
+                self.stats.intermediate_collections += 1;
+            }
             Collection::Major => {
                 self.strings.remove_dead(&self.space);
                 self.sweep_all();
+                self.space.tenure_marked();
                 self.stats.major_collections += 1;
                 // The limit shrinks by a fifth at most per major collection rather than to what
                 // survived, so an explicit `gc()` between two large operations does not drop it
@@ -2420,8 +2479,22 @@ impl Heap {
                 self.mapped.trim();
             }
         }
-        for parent in self.remembered.drain(..) {
-            parent.set_gc_bit(gc_bits::REMEMBERED, false);
+        match kind {
+            // A minor collection promotes a tenured parent's young children only to the younger
+            // old generation, so the parent may still point below its own and stays remembered
+            // until a deeper collection tenures its children.
+            Collection::Minor => self.remembered.retain(|&parent| {
+                let tenured = parent.gc_bits() & gc_bits::TENURED != 0;
+                if !tenured {
+                    parent.set_gc_bit(gc_bits::REMEMBERED, false);
+                }
+                tenured
+            }),
+            Collection::Intermediate | Collection::Major => {
+                for parent in self.remembered.drain(..) {
+                    parent.set_gc_bit(gc_bits::REMEMBERED, false);
+                }
+            }
         }
         self.young_bytes = 0;
         self.young_large_bytes = 0;
@@ -2429,8 +2502,12 @@ impl Heap {
         let stats = &mut self.stats;
         stats.live_vector_cells = match kind {
             Collection::Minor => stats.live_vector_cells + self.space.marked_vector_cells,
+            Collection::Intermediate => self.tenured_vector_cells + self.space.marked_vector_cells,
             Collection::Major => self.space.marked_vector_cells,
         };
+        if kind != Collection::Minor {
+            self.tenured_vector_cells = stats.live_vector_cells;
+        }
         stats.max_live_objects = stats.max_live_objects.max(stats.live_objects);
         stats.max_vector_cells = stats.max_vector_cells.max(stats.live_vector_cells);
         if let Some((elapsed, (user, system))) = started {
@@ -2443,6 +2520,7 @@ impl Heap {
         if let (Some((started, young, young_large)), Some(log)) = (logged, &mut self.pause_log) {
             let kind = match kind {
                 Collection::Minor => "minor",
+                Collection::Intermediate => "intermediate",
                 Collection::Major => "major",
             };
             let line = format!(
@@ -2480,7 +2558,7 @@ impl Heap {
             &mut roots.handouts,
         ] {
             let start = match kind {
-                Collection::Major => 0,
+                Collection::Intermediate | Collection::Major => 0,
                 Collection::Minor => stack.scanned,
             };
             for &object in &stack.entries[start..] {
@@ -2501,7 +2579,7 @@ impl Heap {
             }
         };
         match kind {
-            Collection::Major => {
+            Collection::Intermediate | Collection::Major => {
                 self.roots.precious.keys().for_each(|&object| mark(object));
                 self.symbols.values().for_each(|&symbol| mark(symbol));
             }
@@ -2663,10 +2741,22 @@ impl Heap {
     }
 
     /// The write barrier's invariant: an old object that is neither remembered nor escaped
-    /// points only to old objects. A violation means some store skipped the barrier, and the
-    /// next minor collection would free a live child.
+    /// points only to old objects, and a tenured one only to tenured objects. A violation means
+    /// some store skipped the barrier, and the next minor or intermediate collection would free
+    /// a live child.
     unsafe fn verify_barrier(&self) {
         let check = |parent: Sexp| {
+            let tenured = parent.gc_bits() & gc_bits::TENURED != 0;
+            let slot_tenured = self.space.is_tenured_slot(parent);
+            if slot_tenured.is_some_and(|slot| slot != tenured)
+                || (tenured && !self.space.is_marked(parent))
+            {
+                panic!(
+                    "the header of a {:?} says it is {}tenured, but the collector disagrees",
+                    parent.kind(),
+                    if tenured { "" } else { "not " },
+                );
+            }
             if self.space.is_marked(parent) != (parent.gc_bits() & gc_bits::OLD != 0) {
                 panic!(
                     "the header of a {:?} says it is {}, but its mark disagrees",
@@ -2717,15 +2807,17 @@ impl Heap {
                 }
             }
             for (position, child) in children.into_iter().enumerate() {
-                if !self.space.is_marked(child) {
+                if !self.space.is_marked(child) || younger(parent, child) {
                     panic!(
-                        "write barrier violated: old {:?} (length {}) holds young {:?} at child {position}",
+                        "write barrier violated: {} {:?} (length {}) holds {} {:?} at child {position}",
+                        if tenured { "tenured" } else { "old" },
                         parent.kind(),
                         if parent.kind().shape() == Shape::Vector {
                             parent.length()
                         } else {
                             0
                         },
+                        if self.space.is_marked(child) { "untenured" } else { "young" },
                         child.kind(),
                     );
                 }
@@ -2738,6 +2830,16 @@ impl Heap {
         }
         for &object in &self.large {
             check(object);
+        }
+    }
+
+    /// Unmarks every object outside the oldest generation, as an intermediate collection starts.
+    unsafe fn unmark_untenured(&mut self) {
+        self.space.unmark_untenured();
+        for &object in &self.large {
+            if object.gc_bits() & gc_bits::TENURED == 0 {
+                object.set_gc_bit(gc_bits::MARK, false);
+            }
         }
     }
 
@@ -2946,6 +3048,14 @@ impl WellKnown {
             self.logical_na_value,
         ]
     }
+}
+
+/// Whether storing `child` into `parent`, an old object, makes the parent point below its own
+/// generation: at a young object, or from a tenured parent at an untenured one. The parent's
+/// generation bits must all be set in the child's.
+#[inline(always)]
+unsafe fn younger(parent: Sexp, child: Sexp) -> bool {
+    parent.gc_bits() & (gc_bits::OLD | gc_bits::TENURED) & !child.gc_bits() != 0
 }
 
 /// Whether tracing `object` would mark nothing: a CHARSXP or an atomic vector (logical, integer,

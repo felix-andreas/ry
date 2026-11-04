@@ -6,7 +6,9 @@
 //! operations on those bitmaps, so neither marking an already-marked object nor freeing a dead
 //! one touches the object's own memory. Marking an object for the first time also sets its
 //! header's `OLD` bit, which the write barrier reads; the collector scans that object next, so
-//! the header is about to be in cache anyway.
+//! the header is about to be in cache anyway. An intermediate or major collection also sets its
+//! `TENURED` bit, and a per-page tenured bitmap records the same slots so that an intermediate
+//! collection can unmark the younger old generation with word operations.
 //!
 //! Allocation bumps a pointer. The cursor of a size class claims a run of consecutive free slots
 //! in the allocated bitmap, which on a fresh or emptied page is the whole page, and then hands
@@ -90,6 +92,10 @@ pub(crate) struct Space {
     /// walk every page.
     total_live_slots: usize,
     marks: Vec<Bitmap>,
+    /// The slots marked when the last intermediate or major collection finished: the oldest
+    /// generation, whose objects carry `TENURED` in their headers. Only those collections free
+    /// a marked slot, so these bits are always a subset of the marks.
+    tenured: Vec<Bitmap>,
     allocated: Vec<Bitmap>,
     /// Slots whose object owns memory outside the heap: environments, whose frames spill.
     finalizable: Vec<Bitmap>,
@@ -107,6 +113,9 @@ pub(crate) struct Space {
     /// The vector data, in 8-byte cells, of the objects marked since the heap last reset it,
     /// counted as marking reaches each object because its header is in cache then.
     pub marked_vector_cells: u64,
+    /// The header bits a newly marked object gets: `OLD` in a minor collection, and `OLD` and
+    /// `TENURED` in an intermediate or major one.
+    pub promote_bits: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -163,6 +172,7 @@ impl Space {
             live_slots: Vec::new(),
             total_live_slots: 0,
             marks: Vec::new(),
+            tenured: Vec::new(),
             allocated: Vec::new(),
             finalizable: Vec::new(),
             interned: Vec::new(),
@@ -171,6 +181,7 @@ impl Space {
             empty_pages: Vec::new(),
             touched: Vec::new(),
             marked_vector_cells: 0,
+            promote_bits: gc_bits::OLD,
         }
     }
 
@@ -260,6 +271,7 @@ impl Space {
         self.page_class.push(EMPTY_PAGE);
         self.live_slots.push(0);
         self.marks.push([0; BITMAP_WORDS]);
+        self.tenured.push([0; BITMAP_WORDS]);
         self.allocated.push([0; BITMAP_WORDS]);
         self.finalizable.push([0; BITMAP_WORDS]);
         self.interned.push([0; BITMAP_WORDS]);
@@ -285,8 +297,8 @@ impl Space {
         }
     }
 
-    /// Marks `object` and says whether it was unmarked. An object marked for the first time
-    /// becomes old.
+    /// Marks `object` and says whether it was unmarked. A newly marked object gets
+    /// [`Space::promote_bits`].
     #[inline]
     pub unsafe fn mark(&mut self, object: Sexp) -> bool {
         let unmarked = match self.locate(object) {
@@ -303,10 +315,11 @@ impl Space {
             },
         };
         // A major collection marks every live object again, so the test keeps it from storing
-        // into the header of each one that is already old.
+        // into the header of each one that is already promoted.
         if unmarked {
-            if unsafe { object.gc_bits() } & gc_bits::OLD == 0 {
-                unsafe { object.set_gc_bit(gc_bits::OLD, true) };
+            let promote = self.promote_bits;
+            if unsafe { object.gc_bits() } & promote != promote {
+                unsafe { object.set_gc_bit(promote, true) };
             }
             self.marked_vector_cells += unsafe { vector_cells(object) };
         }
@@ -368,6 +381,26 @@ impl Space {
     /// Clears every mark, as a major collection starts.
     pub fn clear_marks(&mut self) {
         self.marks.fill([0; BITMAP_WORDS]);
+    }
+
+    /// Unmarks the objects outside the oldest generation, as an intermediate collection starts.
+    pub fn unmark_untenured(&mut self) {
+        for (marks, tenured) in self.marks.iter_mut().zip(&self.tenured) {
+            for (mark, tenured) in marks.iter_mut().zip(tenured) {
+                *mark &= tenured;
+            }
+        }
+    }
+
+    /// Makes every marked object tenured, after an intermediate or major collection swept.
+    pub fn tenure_marked(&mut self) {
+        self.tenured.copy_from_slice(&self.marks);
+    }
+
+    /// Whether `object`, a small object, is in the tenured bitmap; `None` for a large object.
+    pub fn is_tenured_slot(&self, object: Sexp) -> Option<bool> {
+        self.locate(object)
+            .map(|(page, word, bit)| self.tenured[page][word] & bit != 0)
     }
 
     /// The objects marked so far, which outside a collection are the old ones.
