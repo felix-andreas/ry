@@ -79,7 +79,7 @@ Release 0.4.2-beta: focus is untyped R (runtime speed, peak memory, S4 start-up)
 | Session | Work | State |
 | --- | --- | --- |
 | session_0111kWqDtXuaHtaQUjXKTBbT (bundle base R) | #338 merged (d64db8b9): recommended packages bundled (15 on Linux, 12 on macOS/Windows), Windows stray `R` argument fixed; dry run 4 started on it about 10:16 UTC | done unless dry run 4 fails |
-| in-session worker (release prep) | regression recheck vs 0.4.1-beta, bump to 0.4.2-beta, news.md, installation/README, bench-why --write | running |
+| in-session worker (release prep) | bump 81b2f296, news/docs f25eb890, results.json a4e42285; regression check clean except stats-only start-up peak +6 MiB (default start-up -6 MiB) | done; 0.4.2-beta cut started about 11:05 UTC (platforms linux, publish true) |
 | session_0111kWqBiUsHhdvToMM3XK3p (untyped speed) | #304 merged: argument arena, in-place `[[<-`/`[<-` growth, matrix subassign bytecode, a direct PCRE2 binding, in-place textConnection output | #337 merged (typed peak-memory fix); bench-real before/after in progress, then idle until the release; next the `<-`/rep/`[[<-` builtin costs and the JIT matrix store, then re-profile the call-heavy workloads (objects, validation, functional) |
 | session_0111kWqCm79QaDnkV4xwNbYT (native methods package) | merged as #333: first new() on an S4-heavy package 80-87 ms cold, S4 cache deleted, fixes the S4 forcing that #332 broke | done |
 | session_0111kWqBEE1AsUXHyHMAPyN2 (peak memory) | frame release at return merged as #332 (sales 2.17x GNU R, memory-peak guards green); the vector_arith swing is GNU R and machine noise | done, idle |
