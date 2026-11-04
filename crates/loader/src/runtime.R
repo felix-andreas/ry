@@ -673,6 +673,8 @@ View <- function(x, title) {
 # interpreter runs a unit once, so a placeholder that another environment shares still finds
 # the name bound after its unit ran.
 .ry_s4_placeholder <- function(state, name, generic) {
+  # The caller's argument reads its loop variable, which the promise would see at its last value.
+  force(generic)
   delayedAssign(name, {
     .Internal(ryLoaderForceUnit(state$root, generic))
     bound <- exists(name, envir = state$ns, inherits = FALSE)

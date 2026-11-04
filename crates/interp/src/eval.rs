@@ -343,6 +343,12 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
         ));
     }
     moves::forcing(promise)?;
+    // The code being forced can remove the last binding that holds the promise (a loader
+    // placeholder replaces itself), and the promise's environment must outlive its code, so
+    // the promise stays a root while it runs, as GNU R's pending-promise stack keeps it.
+    let heap = crate::heap();
+    let mark = heap.handle_mark();
+    heap.root(promise);
     promise.set_gp_bits(PROMISE_SEEN, true);
     let code = promise.attrib();
     let result = if code.kind() == SexpType::Bytecode {
@@ -351,7 +357,9 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
         eval(promise.cdr(), promise.tag())
     };
     promise.set_gp_bits(PROMISE_SEEN, false);
-    settle_promise(promise, result?)
+    let settled = result.and_then(|value| settle_promise(promise, value));
+    crate::heap().release_handles(mark);
+    settled
 }
 
 /// Stores `value` as the value of the unforced `promise`, as forcing it to that value does.
