@@ -39,8 +39,8 @@ ry fmt      # format in place (--check for CI)
 ry run      # run a script, or open a console that reloads your package as you edit it
 ```
 
-Checking and formatting never run your code. `ry run` needs GNU R installed, because ry's runtime
-reads base R's own R code from it.
+Checking and formatting never run your code. `ry run` needs no GNU R on Linux, because ry carries base R 4.6.2 inside the binary. The macOS and Windows
+builds (0.4.1-beta) read base R's own R code from an installed GNU R.
 
 ## Features
 

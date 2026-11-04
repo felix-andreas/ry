@@ -12,6 +12,13 @@ A run started by hand has two more inputs. `platforms` set to `linux` builds and
 Linux archive, and unticking `vscode` leaves the VS Code extension out of the release and the
 Marketplace. A tag push always releases every platform and the extension.
 
+## Platform tiers
+
+Linux x86_64 is tier 1: its archive must pass the smoke test before a release is cut. macOS on Apple
+silicon and Windows x86_64 are best effort. When either fails, start the workflow by hand with
+`platforms` set to `linux`; the release then has Linux binaries only, its notes say so, and macOS and
+Windows users stay on the last release that has their archive until a later release fixes the build.
+
 Every step of the workflow past runner setup is a `just` recipe (or `tools/smoke-test.sh`), so each
 one runs locally as well:
 

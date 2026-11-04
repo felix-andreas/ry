@@ -3,7 +3,45 @@ title: News
 description: Release announcements and project news
 ---
 
-## Unreleased
+## ry 0.4.2-beta, Linux only
+
+*Released in November 2026 as a pre-release.*
+
+Version 0.4.2-beta starts faster, uses less memory in common cases and loads S4 packages in a
+fraction of the time. It ships Linux x86_64 binaries only: macOS and Windows users stay on
+[0.4.1-beta](https://github.com/felix-andreas/ry/releases/tag/0.4.1-beta) until a later release
+fixes those builds ([Installation](/installation)).
+
+### Highlights
+
+- **Start-up.** On the benchmark machine an empty script runs in about 30 to 37 ms, against 119 to
+  143 ms on 0.4.1-beta, and `library(lattice)` takes about 58 ms instead of 158 ms. The release also
+  bundles all 15 recommended packages on Linux, so `library(lattice)` works without GNU R.
+- **S4 packages load lazily.** Each held-back S4 generic runs at its first use, and the S4 cache on
+  disk is gone. On a synthetic S4-heavy package the first `new()` takes 80 to 87 ms instead of 0.36
+  to 0.40 s.
+- **Frames are released at return**, and closure calls take their arguments from an arena, which
+  keeps the peak memory of call-heavy programs lower.
+- **Faster vector code.** `[[<-` and `[<-` grow vectors in place, matrix sub-assignment has its own
+  bytecode, the JIT reads and stores matrix elements natively, regular expressions run on PCRE2
+  directly, and `textConnection()` is implemented natively.
+- **Typed code uses less memory.** Typed list programs stay near GNU R's peak, and an empty typed
+  list keeps the item type the checker gave it.
+- **Packages build in parallel**, and `.libPaths()` includes GNU R's user and site libraries.
+  Stable hashes of base R functions ignore srcrefs.
+
+### Measured against 0.4.1-beta
+
+The untyped benchmark programs of the [Benchmarks](/benchmarks) page, best of 3 runs on a 4-core
+Xeon at 2.1 GHz, give identical results on both releases. Warm times differ by at most 10 percent
+(array_map 0.030 s to 0.033 s, fib 5 ms to 6 ms), and bond_book (0.416 s to 0.267 s), drawdown
+(0.037 s to 0.029 s) and array_sum (0.022 s to 0.018 s) are faster. The start-up peak of an empty
+script with `stats` attached is about 6 MiB higher (38.8 MiB to 45.0 MiB), and the peak of
+`array_map`, `closures`, `loop_sum`, `validate`, `vector_arith`, `sales` and `vasicek` is 2 to 44 MiB lower,
+while `array_dot`, `array_filter`, `array_sum`, `bond_book`, `expr_tree`, `fib`, `log_rank`, `orders` and `report` are 4 to 8 MiB higher
+and `drawdown` is 15 MiB higher.
+
+### Also in this release
 
 - **ry needs no GNU R to run R.** `ry run`, `ry load`, `ry test`, `ry document` and `ry install`
   use a build of base R 4.6.2 that ships inside `ry`, so `R.version` reports R 4.6.2. Set
@@ -22,6 +60,7 @@ description: Release announcements and project news
 
 ### Known limitations
 
+- **No macOS or Windows binaries.** 0.4.2-beta has a Linux x86_64 archive only.
 - **`ry R` still needs GNU R**, because it runs your code on GNU R itself.
 - **Linear algebra on Windows needs GNU R.** Windows has no system LAPACK, so `solve()` and its
   relatives need `R_HOME` naming a GNU R installation, whose `Rblas.dll` and `Rlapack.dll` they call.
