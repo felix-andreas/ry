@@ -46,3 +46,11 @@ new("Derived")@v
 new("Derived", v = 1)@v
 existsMethod("initialize", "Derived")
 hasMethod("initialize", "Derived")
+
+# A later method for a primitive caches its generic again after something uncached it.
+gt <- methods:::.genericTable
+rm("length", envir = gt)
+setClass("Tray", slots = c(n = "numeric"))
+setMethod("length", "Tray", function(x) 9L)
+exists("length", envir = gt, inherits = FALSE)
+length(new("Tray"))

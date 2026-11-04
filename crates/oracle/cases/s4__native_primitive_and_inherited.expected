@@ -25,10 +25,12 @@
 | [1] 1
 | [1] FALSE
 | [1] TRUE
+| [1] TRUE
+| [1] 9
 [messages]
 - An object of class “signature”
 [warnings]
 [errors]
 [value]
-logical
-| TRUE
+integer
+| 9L

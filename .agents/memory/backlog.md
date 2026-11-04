@@ -91,6 +91,20 @@ once that holds (`decisions.md`, "The S4 cache is interim").
   definition differs, generics of other packages, group generics and primitives (about 14 ms).
 - A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
   4.5 µs per call.
+- `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every
+  data part, so `new("MethodDefinition", f)` costs about 50 µs (GNU R about 340 µs).
+  `.mergeAttrs` decides the attribute order, so a native version must reproduce it exactly.
+- `as()` and the coerce methods it caches in `coerce`'s `.MTable`. Until it is native, the default
+  `initialize` bails whenever a slot value's class differs from the slot class and extends it (a
+  union member, a subclass), which costs about 200 µs per `new()`.
+- Multi-argument inherited dispatch (`.findInheritedMethods`), `getMethod`, `selectMethod` and
+  `existsMethod`.
+- Two methods-package tests fail on both the native and the R path, and pass on GNU R:
+  `basicRefClass.R` (`environment(foo) <- a` with a reference object signals "replacement object
+  is not an environment") and `namesAndSlots.R` (`names(a) <- "A"` on an S4 object without a
+  `names` slot does not signal an error).
+- Matrix's `load_all` from source stops in `load()` with `readChar` on an empty file name, on both
+  paths, after its class definitions have run.
 
 ## Open: collector throughput on the benchmark suites
 

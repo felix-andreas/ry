@@ -1532,14 +1532,20 @@ unsafe fn do_set_method(call: &Call<'_>) -> R<Sexp> {
         }
         _ => None,
     };
-    // The first method for a primitive: `getGeneric()` takes the methods package's generic for
-    // it from `.BasicFunsList` and caches it in `.genericTable`.
+    // For a primitive, `getGeneric()` takes the methods package's generic from `.BasicFunsList`
+    // and caches it in `.genericTable` on every call, not only the first: a detach uncaches it
+    // while the primitive keeps dispatching to the generic it registered.
     let mut generic_table = None;
-    if generic == nil()
-        && primitive.is_some()
+    if primitive.is_some()
         && let Some(basic) = methods_value(".BasicFunsList")?
         && let Some(basic_generic) = element(basic, name.element(0).bytes())
     {
+        if generic != nil()
+            && generic != basic_generic
+            && !crate::sort::identical(generic, basic_generic, &Default::default())
+        {
+            bail!(skip);
+        }
         let Some(table) = methods_value(".genericTable")? else {
             bail!(skip);
         };
@@ -3810,7 +3816,8 @@ pub(crate) unsafe fn inherited_method(
             package if package.kind() == SexpType::String && length(package) == 1 => {
                 package.element(0)
             }
-            _ => values::mkchar("methods")?,
+            package if package == nil() => values::mkchar("methods")?,
+            _ => return Ok(None),
         };
         let target = values::scalar_string_charsxp(class.element(0))?;
         crate::heap().root(target);
