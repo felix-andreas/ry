@@ -14,6 +14,7 @@ type ConsoleCallback = unsafe extern "C" fn(*const c_char, usize, c_int, *mut c_
 #[repr(C)]
 pub struct RyGcStats {
     pub minor_collections: u64,
+    pub intermediate_collections: u64,
     pub major_collections: u64,
     pub objects_freed: u64,
     pub live_objects: u64,
@@ -56,6 +57,7 @@ pub unsafe extern "C" fn ry_gc_stats(stats: *mut RyGcStats) {
     let current = runtime().heap.stats();
     *stats = RyGcStats {
         minor_collections: current.minor_collections,
+        intermediate_collections: current.intermediate_collections,
         major_collections: current.major_collections,
         objects_freed: current.objects_freed,
         live_objects: current.live_objects,
