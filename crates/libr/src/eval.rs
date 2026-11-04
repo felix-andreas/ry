@@ -1222,6 +1222,7 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
         site_profile: false,
         user_profile: false,
         interactive: false,
+        image: None,
     };
     match interp::session::start(options) {
         Ok(()) => 0,
@@ -1238,6 +1239,22 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn ry_runtime_id() -> *const c_char {
     concat!(env!("RY_RUNTIME_ID"), "\0").as_ptr().cast()
+}
+
+/// The text [`ry_run`] runs in place of reading its script, set by [`ry_set_script_source`].
+static SCRIPT_SOURCE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Makes the next [`ry_run`] run `source`, NUL-terminated bytes in the script's encoding, as its
+/// script instead of reading the file, which still names the script. Invalid UTF-8 is read as
+/// the file would be, each byte kept as itself. `ry run` passes the
+/// program the checker elaborated: each unsuffixed literal typed `I64` spelled with its suffix,
+/// because R would read it as a `double`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_set_script_source(source: *const c_char) {
+    let text = interp::values::escape_invalid_bytes(crate::strings::c_bytes(source)).into_owned();
+    *SCRIPT_SOURCE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text);
 }
 
 /// Runs R on ry's runtime the way `Rscript` does: starts the session (base R and the default
@@ -1300,7 +1317,15 @@ pub unsafe extern "C" fn ry_run(
             true,
         );
     }
-    if let (interp::session::Outcome::Completed, Some(path)) = (&outcome, &path) {
+    let source = SCRIPT_SOURCE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let (interp::session::Outcome::Completed, Some(path), Some(source)) =
+        (&outcome, &path, &source)
+    {
+        outcome = interp::session::run_text(source, path);
+    } else if let (interp::session::Outcome::Completed, Some(path)) = (&outcome, &path) {
         outcome = match std::fs::read(path) {
             Ok(bytes) => {
                 interp::session::run_text(&interp::values::escape_invalid_bytes(&bytes), path)
@@ -1320,6 +1345,37 @@ pub unsafe extern "C" fn ry_run(
     }
 }
 
+const IMAGE_HOST: interp::image::ImageHost = interp::image::ImageHost {
+    identity: env!("RY_RUNTIME_ID"),
+    fixed_objects: crate::altrep::image_objects,
+};
+
+/// Writes the start-up image of the R home `R_HOME` names to the NUL-terminated `path`: starts a
+/// session the slow way in this process's environment and saves it. Returns 0 once written, and
+/// 1 after reporting why it was not. The base tree's build calls this through
+/// `ry-rcmd write-start-image`; nothing else writes an image.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_write_start_image(path: *const c_char) -> c_int {
+    runtime();
+    if report_missing_r_home() {
+        return 1;
+    }
+    let path = std::path::PathBuf::from(
+        std::ffi::CStr::from_ptr(path)
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let written = interp::session::write_start_image(IMAGE_HOST, &path);
+    interp::system::remove_session_temp_dir();
+    match written {
+        Ok(()) => 0,
+        Err(unwind) => {
+            interp::session::report_toplevel(unwind);
+            1
+        }
+    }
+}
+
 /// Starts the session a script runs in: base R and the default packages, then the package
 /// loader as `tools:ry`. Reports why and returns false when either does not load.
 unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool {
@@ -1332,6 +1388,7 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
         site_profile: flags & RUN_FLAG_SITE_PROFILE != 0,
         user_profile: flags & RUN_FLAG_USER_PROFILE != 0,
         interactive: false,
+        image: Some(IMAGE_HOST),
     };
     if let Err(unwind) = interp::session::start(options) {
         interp::session::report_toplevel(unwind);
@@ -1549,6 +1606,7 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         site_profile: true,
         user_profile: true,
         interactive: true,
+        image: Some(IMAGE_HOST),
     };
     if let Err(unwind) = interp::session::start(options) {
         interp::session::report_toplevel(unwind);

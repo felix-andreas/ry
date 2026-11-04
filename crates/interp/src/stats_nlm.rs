@@ -1792,16 +1792,11 @@ impl Objective<'_> {
                         entry as f64
                     }
                 }
-                SexpType::Real if length(result) == 1 => {
-                    let entry = values::reals(result)[0];
-                    if entry.is_finite() {
-                        entry
-                    } else {
-                        self.call
-                            .warning("NA/Inf replaced by maximum positive value")?;
-                        f64::MAX
-                    }
-                }
+                SexpType::Real if length(result) == 1 => crate::stats_optimize::replace_non_finite(
+                    self.call,
+                    values::reals(result)[0],
+                    false,
+                )?,
                 _ => return Err(self.call.error("invalid function value in 'nlm' optimizer")),
             };
             let attribute = |name: &str, size: usize, wanted: bool| -> R<Option<Vec<f64>>> {

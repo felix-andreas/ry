@@ -24,10 +24,18 @@ pub fn lex(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
         tokens: Vec::with_capacity(text.len() / 2),
         errors: Vec::new(),
         in_annotation: false,
+        modes: Vec::new(),
     };
     while lexer.pos < text.len() {
         let start = lexer.pos;
-        let kind = lexer.next_token();
+        let kind = match lexer.modes.last() {
+            Some(&Mode::FormatText { quote, .. }) => lexer.format_text(quote),
+            _ => {
+                let kind = lexer.next_token();
+                lexer.track_interpolation_brace(kind);
+                kind
+            }
+        };
         debug_assert!(lexer.pos > start, "lexer must always make progress");
         let len = TextSize::from((lexer.pos - start) as u32);
         lexer.tokens.push(Token { kind, len });
@@ -35,7 +43,56 @@ pub fn lex(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
             lexer.in_annotation = false;
         }
     }
+    if let Some(start) = lexer.modes.iter().find_map(|mode| match mode {
+        Mode::FormatText { start, .. } => Some(*start),
+        Mode::Interpolation { .. } => None,
+    }) {
+        lexer.error("unterminated f-string; expected a closing quote", start);
+    }
     (lexer.tokens, lexer.errors)
+}
+
+/// A ry number type that a literal's suffix names, as in `5i64` or `1.5f64`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NumberType {
+    I64,
+    F64,
+}
+
+impl NumberType {
+    pub const SUFFIXES: [(&'static str, NumberType); 2] =
+        [("i64", NumberType::I64), ("f64", NumberType::F64)];
+
+    pub fn from_suffix(suffix: &str) -> Option<NumberType> {
+        NumberType::SUFFIXES
+            .iter()
+            .find(|(spelling, _)| *spelling == suffix)
+            .map(|(_, number)| *number)
+    }
+
+    pub fn suffix(self) -> &'static str {
+        match self {
+            NumberType::I64 => "i64",
+            NumberType::F64 => "f64",
+        }
+    }
+
+    pub fn is_integer(self) -> bool {
+        self == NumberType::I64
+    }
+}
+
+/// A `SUFFIXED_NUMBER` token split into its number and the type its suffix names, so `0xFFi64`
+/// is `("0xFF", I64)` and `1e3f64` is `("1e3", F64)`.
+pub fn split_number_suffix(token: &str) -> Option<(&str, NumberType)> {
+    let hex = token.starts_with("0x") || token.starts_with("0X");
+    let suffix_start = if hex {
+        token.rfind('i')?
+    } else {
+        token.find(['i', 'f'])?
+    };
+    let number = NumberType::from_suffix(&token[suffix_start..])?;
+    Some((&token[..suffix_start], number))
 }
 
 pub fn is_syntactic_name(text: &str) -> bool {
@@ -59,6 +116,18 @@ struct Lexer<'a> {
     errors: Vec<SyntaxError>,
     /// Inside an annotation, `#` starts a plain comment: annotations do not nest.
     in_annotation: bool,
+    /// The f-strings open around the current position, innermost last. An interpolation can
+    /// hold another f-string, so one flag would not do.
+    modes: Vec<Mode>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Mode {
+    /// Between an f-string's quotes and outside any interpolation.
+    FormatText { quote: u8, start: usize },
+    /// Inside an f-string's `{}`, where ordinary tokens are lexed. `depth` counts the braces
+    /// the expression itself opened, so only a `}` at depth 0 closes the interpolation.
+    Interpolation { depth: u32 },
 }
 
 impl Lexer<'_> {
@@ -140,6 +209,13 @@ impl Lexer<'_> {
                 "unterminated string; expected a closing quote",
             ),
             'r' | 'R' if matches!(self.peek(), Some('"' | '\'')) => self.raw_string(start),
+            // R reads `f"..."` as a name followed by a string, a syntax error, so the
+            // f-string takes no R text.
+            'f' if !self.in_annotation && matches!(self.peek(), Some('"' | '\'')) => {
+                let quote = self.bump().expect("a quote follows") as u8;
+                self.modes.push(Mode::FormatText { quote, start });
+                FSTRING_START
+            }
             c if is_ident_start(c) => self.ident_or_number(start, c),
             c if c.is_ascii_digit() => self.number(start),
             '`' => self.quoted(
@@ -249,12 +325,104 @@ impl Lexer<'_> {
             // `1e` lexes as `1` then the name `e`.
             self.exponent(['e', 'E']);
         }
+        if let Some(kind) = self.number_suffix(start, hex) {
+            return kind;
+        }
         if self.eat("L") {
             INTEGER
         } else if self.eat("i") {
             COMPLEX
         } else {
             DOUBLE
+        }
+    }
+
+    /// A ry type suffix glued to the number, `5i64` or `1.5f64`. R reads each as a number
+    /// directly followed by a name (and `5i64` as `5i` then `64`), a syntax error in R, so no R
+    /// text changes meaning. A run that starts like a suffix (`i`, `u` or `f` then a digit, or
+    /// `dec`) is one, so `5i`, `5L` and `5x` keep their R lexing, and a suffix of a number type
+    /// ry does not have, such as `5i32` or `1.5dec`, is an error that names the two it has. A hex
+    /// literal takes only `i64`, because `f`, `d`, `e` and `c` are hex digits.
+    fn number_suffix(&mut self, start: usize, hex: bool) -> Option<SyntaxKind> {
+        let starts_suffix = match self.text.as_bytes()[self.pos..] {
+            [b'i' | b'u', digit, ..] => digit.is_ascii_digit(),
+            [b'f', digit, ..] => !hex && digit.is_ascii_digit(),
+            [b'd', b'e', b'c', ..] => !hex,
+            _ => false,
+        };
+        if !starts_suffix {
+            return None;
+        }
+        let suffix_start = self.pos;
+        self.eat_while(is_ident_continue);
+        let suffix = &self.text[suffix_start..self.pos];
+        if NumberType::from_suffix(suffix).is_some_and(|number| !hex || number.is_integer()) {
+            return Some(SUFFIXED_NUMBER);
+        }
+        let expected = if hex {
+            "a hex literal takes only i64"
+        } else {
+            "use i64 or f64, the two number types ry has"
+        };
+        self.error(
+            format!("`{suffix}` is not a number type suffix; {expected}"),
+            start,
+        );
+        Some(ERROR_TOKEN)
+    }
+
+    /// An f-string's text up to the next interpolation or the closing quote, or else that
+    /// quote or the `{` that opens the interpolation. `{{` and `}}` are literal braces and
+    /// belong to the text.
+    fn format_text(&mut self, quote: u8) -> SyntaxKind {
+        let bytes = self.text.as_bytes();
+        match bytes[self.pos] {
+            byte if byte == quote => {
+                self.pos += 1;
+                self.modes.pop();
+                return FSTRING_END;
+            }
+            b'{' if bytes.get(self.pos + 1) != Some(&b'{') => {
+                self.pos += 1;
+                self.modes.push(Mode::Interpolation { depth: 0 });
+                return L_BRACE;
+            }
+            _ => {}
+        }
+        // The scan stops only at ASCII bytes, so it never splits a character.
+        while let Some(&byte) = bytes.get(self.pos) {
+            match byte {
+                _ if byte == quote => break,
+                b'\\' => {
+                    self.pos += 1;
+                    self.bump();
+                }
+                b'{' | b'}' if bytes.get(self.pos + 1) == Some(&byte) => self.pos += 2,
+                b'{' => break,
+                b'}' => {
+                    let brace = self.pos;
+                    self.pos += 1;
+                    self.error("a `}` in an f-string's text is written `}}`", brace);
+                }
+                _ => self.pos += 1,
+            }
+        }
+        FSTRING_TEXT
+    }
+
+    /// Keeps count of the braces inside an interpolation, so the `}` that closes it returns
+    /// the lexer to the f-string's text.
+    fn track_interpolation_brace(&mut self, kind: SyntaxKind) {
+        let Some(Mode::Interpolation { depth }) = self.modes.last_mut() else {
+            return;
+        };
+        match kind {
+            L_BRACE => *depth += 1,
+            R_BRACE if *depth == 0 => {
+                self.modes.pop();
+            }
+            R_BRACE => *depth -= 1,
+            _ => {}
         }
     }
 

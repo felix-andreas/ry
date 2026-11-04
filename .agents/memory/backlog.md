@@ -22,6 +22,25 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
+## Open: JIT register type for native numbers
+
+- Top performance debt. The JIT's `Ty` has `Int(i32)`, `Dbl`, `Lgl`, `Num`, the R vectors, `List` and `Arr`, but no register type for ry's own numbers. `I64` (which `List.range`, `List.len` and loop counters produce) is a length-1 `I64SXP` vector (`crates/interp/src/numbers.rs`), so typed loops run through the interpreter and allocate per operation.
+- Effect: typed benchmarks rewritten in ry types run 10 to 100 times slower than the earlier typed versions that used R `integer` and `double` (`tools/bench/why/results.json`).
+- Fix: an unboxed `I64` register type in the JIT with overflow-checked arithmetic that reads `List<I64>` buffers directly, and `for` over `List.range` lowered to a counted loop.
+
+## Open: the typed core
+
+- **Records, tags, `Result` and `Dict` results.** `validate` and `orders` refuse at `.ry_record` and `Result.with_default`, so they run on the scalar natives in `crates/jit/src/native.rs`. The design's pools (`typed-runtime.md`, "Representations") are not built.
+- **Default arguments and named `c()`.** `drawdown` never reaches the typed core.
+- **Elementwise fusion.** `vector_arith` allocates one 8 MB buffer per vector operation that does not die in place; fusing a chain of `VectorArith` whose intermediates die at once into one loop is the fix.
+- **Arguments that are unforced promises.** `typed::call` takes only values readable without forcing (constants, variables, forced promises), so `f(c(1, 2))` from untyped code takes the native path. Hooking the call after the interpreter forces the arguments would cover it.
+- **Code files and `ry build --exe`.** Code is compiled in memory at the first call; the install-time code file, mapped shared code and executables in `typed-runtime.md` are not built.
+- **`ToDbl` of a loop counter keeps its `NA` select**, because the backend does not track which locals are known not to be `NA`.
+- **Call-time speculation checks walk every lookup chain.** `still_resolves` re-walks each speculation's environment chain on every call; a per-binding version stamp would make the check one compare.
+- **Compiled closures stay rooted for the session.** Up to `MAX_COMPILED` closures are kept alive by their code; dropping the code with the closure needs a finalizer hook in the heap.
+- **Mutual recursion caches a refusal.** A typed closure that calls one still being compiled refuses, and the refusal is remembered, so mutually recursive typed functions always take the native path.
+- **Names a branch creates.** A name set in only one branch, or with different types in the two, is out of scope after the `if`, so reading it refuses; a loop body's names are out of scope after the loop. Local functions defined or rebound in a branch or loop refuse.
+
 ## Open: two Renviron readers
 
 - ry has two Renviron readers, the interpreter's startup one in `crates/interp/src/session.rs` and `rcmd::command_environment`. The interpreter's lets an already-set variable win, which differs from GNU R's `process_Renviron` (a file line always overrides). Merge them into one reader with GNU R's semantics.
@@ -34,21 +53,12 @@ The quality bar is four things.
 
 ## Open: what bundling base R left undone
 
-- **Preloaded base image.** Start-up still sources the baseloader and lazy-loads base, then attaches the default packages (about 140 ms for an empty script). The design draft is `docs/src/content/docs/development/design/base-image.md`.
+- **Start-up image follow-ups.** An empty `ry run` takes about 60 ms from the image, of which about 12 ms re-runs base R's profile and the utils, grDevices and stats hooks (`decisions.md`, "The start-up image is build output of the base tree"). Next: give user packages the same as install-time output of `ry install` (a per-library image of the installed namespaces, written when the library changes, never at run time); profile the load (the 6 MB bulk load and checksum against the 27 to 31 ms floor of `R_DEFAULT_PACKAGES=NULL`); ship images for other default-package sets (`R_DEFAULT_PACKAGES=NULL` with methods starts slowly, 63 ms); let interactive consoles and sessions with profiles load the image and run the profiles after it; let `ry_start_session` embedders and `ry load` use it; CI could check that a release's embedded image matches its runtime identity.
 - **Windows linear algebra without GNU R.** No system LAPACK exists there, so `solve` and friends need `R_HOME` naming GNU R for its `Rblas.dll`/`Rlapack.dll`. Build R's reference BLAS and LAPACK (`src/extra/blas`, `src/modules/lapack` in the tarball) into the base tree on Windows; needs a Fortran compiler in the release workflow.
 - **The base build has run on Linux only.** `just package` runs `just base-r` on each release runner; macOS and Windows are unverified until the release workflow runs.
-- **Oracle expectations are GNU R 4.3.3 output**, while ry's default base is 4.6.2. Without GNU R, `oracle compare --engine ry` falls back to the recordings and passes 228 of 260 (`ry-jit` the same); the differences are corpus packages that are not installed, R's own 4.4 to 4.6 changes, and the gaps in the next section. Re-record under GNU R 4.6.2 (`RY_BLESS=1`, needs GNU R) and move CI to it, or keep CI on 4.3.3 through `R_HOME` (what `.github/pending/ci.yml` does).
+- **CI must run GNU R 4.6.2.** The oracle's expectations are GNU R 4.6.2 output (`development/corpus-and-oracle.md`, "The reference GNU R"); `.github/pending/ci.yml` installs 4.6.2 and waits for `just accept`. Without GNU R, `oracle compare --engine ry` and `--engine ry-jit` pass 251 of 251 and skip the 12 cases whose packages ry's bundled library lacks (data.table, bit64, rlang, knitr, rmarkdown, ragg, lattice). Those 12 expectations print what the packages' CRAN releases printed when recorded, so a package release can change them.
 - **Nix.** `flake.nix` fetches the tarball as a fixed-output derivation and builds the base in `postInstall`; `nix build` has not been run yet.
 - **Old base trees stay in the cache after an upgrade**, as runtimes do (see below).
-
-## Open: R 4.6 behavior ry does not emulate yet
-
-Found by `ORACLE_R=<GNU R 4.6.2>/bin/R oracle compare --engine ry` on the cases that differ from their 4.3.3 recordings. Each needs the change gated by `interp::system::r_at_least`.
-
-- **Complex formatting** (R 4.4): GNU R formats the real and imaginary parts with separate widths and digits (`1-1e-20i`, `2+1.615587e-27i`); ry still pads both parts to a shared format (`arith__complex_math`, `base__round_arity_dots_and_sinks`, `stats__arima_and_kalman`).
-- **`round()` and `signif()` argument matching** (R 4.6 NEWS, "no longer tolerate wrong argument names"): `round(banana = 2)` is "unused argument (banana = 2)", `signif(1, 2, 3)` is "unused argument (3)" (`base__round_arity_dots_and_sinks`).
-- **Bessel warnings** (R 4.6.2 reworked `src/nmath/bessel_*.c`): `besselY(1, 2^62)` warns "nu=4.61169e+18 > 1e+07 =: max_alpha_y, too large for bessel_y() algorithm" (`base__integer_range_and_bessel_warnings`). Port the new bounds and messages together.
-- **Date-times** (`datetime__time_zones`, `datetime__zone_offsets_and_strptime`): a repeated fall-back hour (`2024-11-03 01:30` in New York) formats as EST, `strptime("12:00:00.123", "%H:%M:%OS3")$sec` is 0.123 rather than NA, and a `%U`/`%W` week with a weekday gives that week's date. Check each against R 4.6's `src/main/datetime.c` and `Rstrptime.h` before changing it, since part of the fall-back difference depends on glibc (`development/corpus-and-oracle.md`).
 
 ## Open: the benchmark packages under ry's runtime
 
@@ -63,29 +73,50 @@ Found by `ORACLE_R=<GNU R 4.6.2>/bin/R oracle compare --engine ry` on the cases 
 
 The methods package's core is moving into Rust behind hash-guarded prologues (`decisions.md`, "The
 methods package's core runs natively behind hash-guarded prologues"). `new()`, the default
-`initialize()`, `validObject()`, `is()` and `extends()` are native when nothing observable would
-differ. Remaining, in the order the cold first-`new()` profile of `target/s4heavy` ranks them:
+`initialize()`, `validObject()`, `is()`, `extends()`, `setGeneric()`, `setMethod()`, `setClass()`,
+`setClassUnion()` and `cacheMetaData()` are native when nothing observable would differ. On
+the S4-heavy bench package (2,892 definitions, `just bench-s4-first-use target/s4heavy
+lubridate,data.table,xts`) a cold first `new()` costs about 0.47 s (running the definitions about
+245 ms, `cacheMetaData` 16 ms, the cache save about 200 ms) and a warm one about 77 ms; the goal is under 100 ms cold without the S4 cache, which is deleted once
+that holds (`decisions.md`). Consider a native class table with dense ids and a bitset extends
+relation instead of porting function by function. A reload after editing a method or a class
+takes 0.2 to 0.45 s, and dispatch costs 2.3 to 4.5 µs per call. Remaining, largest first (per-call
+costs from `RY_TRACE_METHODS_BAILS=1` with a timer around each definition):
 
-- `setMethod`: `asMethodDefinition` and `new("MethodDefinition")`, `matchSignature`,
-  `isSealedMethod` (which calls `getMethod`), `.cacheMethodInTable`, `.addToMetaTable`, and
-  `.resetInheritedMethods`, which rescans the whole table on every call and so makes a package's
-  method definitions quadratic.
-- `setClass`, `setClassUnion`, `setIs` and `completeClassDefinition`; then `setGeneric`, `setAs`
-  and `setValidity`.
-- `cacheMetaData` and `.checkGroupSigLength` (the import cost, see "Start-up and imports are the
+- Native `setClass` itself: about 100 µs per call, 60 ms for 579 classes (callgrind with
+  `--toggle-collect='*do_set_class'` on a build with `CARGO_PROFILE_RELEASE_STRIP=false`). A slot
+  default runs R's `new()` only the first time a class is used, to fill `initialize`'s dispatch
+  cache (about a quarter of the cost, `.InheritForDispatch` in R); then come the templates each
+  direct extension instantiates (`substitute_symbols`) and symbol interning.
+- The S4 cache save (about 190 ms uncompressed, mostly `makeLazyLoadDB` serializing), which goes
+  away with the cache.
+- `setMethod` on a generic that is not yet a standard generic: primitives (`length`, `c`), base
+  functions that get an implicit generic (`as.list`, `print`, `toString`) and `initialize`. About
+  1.8 ms each, 33 ms for 19 calls.
+- Native `setMethod`: about 23 µs per call, 42 ms for 1,867 methods.
+- The first union of a basic class (`setClassUnion("Basic00OrNull", ...)`, about 9 ms), which
+  rebinds the basic member classes in `package:methods` on the R path. Later unions are
+  native (about 190 µs each).
+- `cacheMetaData` delegates a class to `.cacheClass` when its cached definition differs from the
+  bound one (77 classes on `s4plain`, real work) and a union whose members' cached extensions are
+  out of date, and delegates generics of other packages, group generics and primitives.
+- The `setClass` shapes that still bail: supers from another package, several `contains` with
+  data parts, and classes that are virtual for lack of slots.
+- `.checkGroupSigLength` and the imports' `cacheMetaData` (see "Start-up and imports are the
   floor of a warm `ry load`" below).
 - `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every
   data part, so `new("MethodDefinition", f)` costs about 50 µs (GNU R about 340 µs).
   `.mergeAttrs` decides the attribute order, so a native version must reproduce it exactly.
 - `as()` and the coerce methods it caches in `coerce`'s `.MTable`. Until it is native, the default
   `initialize` bails whenever a slot value's class differs from the slot class and extends it (a
-  union member, a subclass), which costs about 200 µs per `new()` (`new("Holder", value = "a",
-  point = q, n = 2L)` in the micro-benchmark below).
+  union member, a subclass), which costs about 200 µs per `new()`.
 - Inherited dispatch (`.findInheritedMethods`), `getMethod`, `selectMethod` and `existsMethod`.
-- The differential coverage: the methods package's own tests and the S4-heavy corpus (Matrix)
-  against GNU R for every function that turns native.
-- Then decide whether the S4 metadata cache survives native definitions. If it does, make it
-  incremental on reload (one changed definition today reruns the whole unit, about 6 to 10 s).
+- Two methods-package tests fail on both the native and the R path, and pass on GNU R:
+  `basicRefClass.R` (`environment(foo) <- a` with a reference object signals "replacement object
+  is not an environment") and `namesAndSlots.R` (`names(a) <- "A"` on an S4 object without a
+  `names` slot does not signal an error).
+- Matrix's `load_all` from source stops in `load()` with `readChar` on an empty file name, on both
+  paths, after its class definitions have run.
 
 Micro-benchmarks (release, per call): `new()` with three same-class slots 13.7 µs (GNU R 130 µs,
 ry before 179 µs), `validObject` 3.0 µs (GNU R 73 µs), `is(q, "Point")` 2.3 µs (GNU R 11.8 µs),

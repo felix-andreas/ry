@@ -10,7 +10,7 @@
 | <simpleError in `[[<-`(`*tmp*`, 1:2, value = 1): attempt to select more than one element in vectorIndex>
 | <simpleError in x[[NA]] <- 1: attempt to select more than one element in integerOneIndex>
 | <simpleError in x[[4]] <- NULL: replacement has length zero>
-| <simpleError in x[1] <- sum: incompatible types (from builtin to integer) in subassignment type fix>
+| <simpleError in x[1] <- sum: incompatible types (from integer to builtin) in subassignment type fix>
 | <subscriptOutOfBoundsError in `*tmp*`[["b"]]: subscript out of bounds>
 | <simpleError in `[[<-`(`*tmp*`, 1:3, value = 1): attempt to select more than one element in vectorIndex>
 | [1] "numeric"
@@ -22,7 +22,7 @@
 | E: x[[NA]] <- 1 | attempt to select more than one element in integerOneIndex 
 | E: x[[4]] <- NULL | replacement has length zero 
 | E: x[[4]] <- integer() | replacement has length zero 
-| E: x[1] <- sum | incompatible types (from builtin to integer) in subassignment type fix 
+| E: x[1] <- sum | incompatible types (from integer to builtin) in subassignment type fix 
 | E: x[1:2] <- integer() | replacement has length zero 
 | E: x[[0]] <- 1 | attempt to select less than one element in OneIndex <real> 
 | E: x[[-1]] <- 1 | attempt to select more than one element in OneIndex <real> 
@@ -48,85 +48,85 @@
 | lgl dbl | double | double 
 | lgl cplx | complex | complex 
 | lgl chr | character | character 
-| lgl raw | incompatible types (from raw to logical) in subassignment type fix | incompatible types (from raw to logical) in subassignment type fix 
+| lgl raw | incompatible types (from logical to raw) in subassignment type fix | incompatible types (from logical to raw) in subassignment type fix 
 | lgl list | list | list 
 | lgl expr | expression | expression 
-| lgl closure | incompatible types (from closure to logical) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| lgl builtin | incompatible types (from builtin to logical) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| lgl special | incompatible types (from special to logical) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| lgl symbol | incompatible types (from symbol to logical) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| lgl lang | incompatible types (from language to logical) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| lgl env | incompatible types (from environment to logical) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
+| lgl closure | incompatible types (from logical to closure) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| lgl builtin | incompatible types (from logical to builtin) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| lgl special | incompatible types (from logical to special) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| lgl symbol | incompatible types (from logical to symbol) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| lgl lang | incompatible types (from logical to language) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| lgl env | incompatible types (from logical to environment) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
 | int lgl | integer | integer 
 | int int | integer | integer 
 | int dbl | double | double 
 | int cplx | complex | complex 
 | int chr | character | character 
-| int raw | incompatible types (from raw to integer) in subassignment type fix | incompatible types (from raw to integer) in subassignment type fix 
+| int raw | incompatible types (from integer to raw) in subassignment type fix | incompatible types (from integer to raw) in subassignment type fix 
 | int list | list | list 
 | int expr | expression | expression 
-| int closure | incompatible types (from closure to integer) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| int builtin | incompatible types (from builtin to integer) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| int special | incompatible types (from special to integer) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| int symbol | incompatible types (from symbol to integer) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| int lang | incompatible types (from language to integer) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| int env | incompatible types (from environment to integer) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
+| int closure | incompatible types (from integer to closure) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| int builtin | incompatible types (from integer to builtin) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| int special | incompatible types (from integer to special) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| int symbol | incompatible types (from integer to symbol) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| int lang | incompatible types (from integer to language) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| int env | incompatible types (from integer to environment) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
 | dbl lgl | double | double 
 | dbl int | double | double 
 | dbl dbl | double | double 
 | dbl cplx | complex | complex 
 | dbl chr | character | character 
-| dbl raw | incompatible types (from raw to double) in subassignment type fix | incompatible types (from raw to double) in subassignment type fix 
+| dbl raw | incompatible types (from double to raw) in subassignment type fix | incompatible types (from double to raw) in subassignment type fix 
 | dbl list | list | list 
 | dbl expr | expression | expression 
-| dbl closure | incompatible types (from closure to double) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| dbl builtin | incompatible types (from builtin to double) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| dbl special | incompatible types (from special to double) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| dbl symbol | incompatible types (from symbol to double) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| dbl lang | incompatible types (from language to double) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| dbl env | incompatible types (from environment to double) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
+| dbl closure | incompatible types (from double to closure) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| dbl builtin | incompatible types (from double to builtin) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| dbl special | incompatible types (from double to special) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| dbl symbol | incompatible types (from double to symbol) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| dbl lang | incompatible types (from double to language) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| dbl env | incompatible types (from double to environment) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
 | cplx lgl | complex | complex 
 | cplx int | complex | complex 
 | cplx dbl | complex | complex 
 | cplx cplx | complex | complex 
 | cplx chr | character | character 
-| cplx raw | incompatible types (from raw to complex) in subassignment type fix | incompatible types (from raw to complex) in subassignment type fix 
+| cplx raw | incompatible types (from complex to raw) in subassignment type fix | incompatible types (from complex to raw) in subassignment type fix 
 | cplx list | list | list 
 | cplx expr | expression | expression 
-| cplx closure | incompatible types (from closure to complex) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| cplx builtin | incompatible types (from builtin to complex) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| cplx special | incompatible types (from special to complex) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| cplx symbol | incompatible types (from symbol to complex) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| cplx lang | incompatible types (from language to complex) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| cplx env | incompatible types (from environment to complex) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
+| cplx closure | incompatible types (from complex to closure) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| cplx builtin | incompatible types (from complex to builtin) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| cplx special | incompatible types (from complex to special) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| cplx symbol | incompatible types (from complex to symbol) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| cplx lang | incompatible types (from complex to language) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| cplx env | incompatible types (from complex to environment) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
 | chr lgl | character | character 
 | chr int | character | character 
 | chr dbl | character | character 
 | chr cplx | character | character 
 | chr chr | character | character 
-| chr raw | incompatible types (from raw to character) in subassignment type fix | incompatible types (from raw to character) in subassignment type fix 
+| chr raw | incompatible types (from character to raw) in subassignment type fix | incompatible types (from character to raw) in subassignment type fix 
 | chr list | list | list 
 | chr expr | expression | expression 
-| chr closure | incompatible types (from closure to character) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| chr builtin | incompatible types (from builtin to character) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| chr special | incompatible types (from special to character) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| chr symbol | incompatible types (from symbol to character) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| chr lang | incompatible types (from language to character) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| chr env | incompatible types (from environment to character) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| raw lgl | incompatible types (from logical to raw) in subassignment type fix | incompatible types (from logical to raw) in subassignment type fix 
-| raw int | incompatible types (from integer to raw) in subassignment type fix | incompatible types (from integer to raw) in subassignment type fix 
-| raw dbl | incompatible types (from double to raw) in subassignment type fix | incompatible types (from double to raw) in subassignment type fix 
-| raw cplx | incompatible types (from complex to raw) in subassignment type fix | incompatible types (from complex to raw) in subassignment type fix 
-| raw chr | incompatible types (from character to raw) in subassignment type fix | incompatible types (from character to raw) in subassignment type fix 
+| chr closure | incompatible types (from character to closure) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| chr builtin | incompatible types (from character to builtin) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| chr special | incompatible types (from character to special) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| chr symbol | incompatible types (from character to symbol) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| chr lang | incompatible types (from character to language) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| chr env | incompatible types (from character to environment) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| raw lgl | incompatible types (from raw to logical) in subassignment type fix | incompatible types (from raw to logical) in subassignment type fix 
+| raw int | incompatible types (from raw to integer) in subassignment type fix | incompatible types (from raw to integer) in subassignment type fix 
+| raw dbl | incompatible types (from raw to double) in subassignment type fix | incompatible types (from raw to double) in subassignment type fix 
+| raw cplx | incompatible types (from raw to complex) in subassignment type fix | incompatible types (from raw to complex) in subassignment type fix 
+| raw chr | incompatible types (from raw to character) in subassignment type fix | incompatible types (from raw to character) in subassignment type fix 
 | raw raw | raw | raw 
 | raw list | list | list 
 | raw expr | expression | expression 
-| raw closure | incompatible types (from closure to raw) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| raw builtin | incompatible types (from builtin to raw) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| raw special | incompatible types (from special to raw) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| raw symbol | incompatible types (from symbol to raw) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| raw lang | incompatible types (from language to raw) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
-| raw env | incompatible types (from environment to raw) in subassignment type fix | long vectors not supported yet: subassign.c:1841 
+| raw closure | incompatible types (from raw to closure) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| raw builtin | incompatible types (from raw to builtin) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| raw special | incompatible types (from raw to special) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| raw symbol | incompatible types (from raw to symbol) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| raw lang | incompatible types (from raw to language) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
+| raw env | incompatible types (from raw to environment) in subassignment type fix | long vectors not supported yet: subassign.c:1861 
 | list lgl | list | list 
 | list int | list | list 
 | list dbl | list | list 
@@ -138,7 +138,7 @@
 | list closure | cannot coerce type 'closure' to vector of type 'list' | list 
 | list builtin | cannot coerce type 'builtin' to vector of type 'list' | list 
 | list special | cannot coerce type 'special' to vector of type 'list' | list 
-| list symbol | list | list 
+| list symbol | 'symbol' object cannot be coerced to type 'list' | list 
 | list lang | list | list 
 | list env | environments cannot be coerced to other types | list 
 | expr lgl | expression | expression 
@@ -146,20 +146,20 @@
 | expr dbl | expression | expression 
 | expr cplx | expression | expression 
 | expr chr | expression | expression 
-| expr raw | incompatible types (from raw to expression) in subassignment type fix | incompatible types (from raw to expression) in subassignment type fix 
-| expr list | expression | incompatible types (from list to expression) in [[ assignment 
+| expr raw | incompatible types (from expression to raw) in subassignment type fix | incompatible types (from expression to raw) in subassignment type fix 
+| expr list | expression | incompatible types (from expression to list) in [[ assignment 
 | expr expr | expression | expression 
-| expr closure | incompatible types (from closure to expression) in subassignment type fix | incompatible types (from closure to expression) in subassignment type fix 
-| expr builtin | incompatible types (from builtin to expression) in subassignment type fix | incompatible types (from builtin to expression) in subassignment type fix 
-| expr special | incompatible types (from special to expression) in subassignment type fix | incompatible types (from special to expression) in subassignment type fix 
-| expr symbol | expression | expression 
+| expr closure | incompatible types (from expression to closure) in subassignment type fix | incompatible types (from expression to closure) in subassignment type fix 
+| expr builtin | incompatible types (from expression to builtin) in subassignment type fix | incompatible types (from expression to builtin) in subassignment type fix 
+| expr special | incompatible types (from expression to special) in subassignment type fix | incompatible types (from expression to special) in subassignment type fix 
+| expr symbol | 'symbol' object cannot be coerced to type 'list' | expression 
 | expr lang | expression | expression 
-| expr env | incompatible types (from environment to expression) in subassignment type fix | incompatible types (from environment to expression) in subassignment type fix 
+| expr env | incompatible types (from expression to environment) in subassignment type fix | incompatible types (from expression to environment) in subassignment type fix 
 | int 0L 1 => E: attempt to select less than one element in integerOneIndex 
 | int 0L NULL => E: replacement has length zero 
 | int 0L integer(0) => E: replacement has length zero 
 | int 0L 1:2 => E: more elements supplied than there are to replace 
-| int 0L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int 0L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int 0L list(1) => E: attempt to select less than one element in integerOneIndex 
 | int 0L "s" => E: attempt to select less than one element in integerOneIndex 
 | int 0L NA => E: attempt to select less than one element in integerOneIndex 
@@ -167,7 +167,7 @@
 | int 0 NULL => E: replacement has length zero 
 | int 0 integer(0) => E: replacement has length zero 
 | int 0 1:2 => E: more elements supplied than there are to replace 
-| int 0 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int 0 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int 0 list(1) => E: attempt to select less than one element in OneIndex <real> 
 | int 0 "s" => E: attempt to select less than one element in OneIndex <real> 
 | int 0 NA => E: attempt to select less than one element in OneIndex <real> 
@@ -175,7 +175,7 @@
 | int -1L NULL => E: replacement has length zero 
 | int -1L integer(0) => E: replacement has length zero 
 | int -1L 1:2 => E: more elements supplied than there are to replace 
-| int -1L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int -1L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int -1L list(1) => E: attempt to select more than one element in integerOneIndex 
 | int -1L "s" => E: attempt to select more than one element in integerOneIndex 
 | int -1L NA => E: attempt to select more than one element in integerOneIndex 
@@ -183,7 +183,7 @@
 | int -1 NULL => E: replacement has length zero 
 | int -1 integer(0) => E: replacement has length zero 
 | int -1 1:2 => E: more elements supplied than there are to replace 
-| int -1 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int -1 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int -1 list(1) => E: attempt to select more than one element in OneIndex <real> 
 | int -1 "s" => E: attempt to select more than one element in OneIndex <real> 
 | int -1 NA => E: attempt to select more than one element in OneIndex <real> 
@@ -191,7 +191,7 @@
 | int -2 NULL => E: replacement has length zero 
 | int -2 integer(0) => E: replacement has length zero 
 | int -2 1:2 => E: more elements supplied than there are to replace 
-| int -2 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int -2 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int -2 list(1) => E: attempt to select more than one element in OneIndex <real> 
 | int -2 "s" => E: attempt to select more than one element in OneIndex <real> 
 | int -2 NA => E: attempt to select more than one element in OneIndex <real> 
@@ -199,7 +199,7 @@
 | int NA NULL => E: replacement has length zero 
 | int NA integer(0) => E: replacement has length zero 
 | int NA 1:2 => E: more elements supplied than there are to replace 
-| int NA .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int NA .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int NA list(1) => E: attempt to select more than one element in integerOneIndex 
 | int NA "s" => E: attempt to select more than one element in integerOneIndex 
 | int NA NA => E: attempt to select more than one element in integerOneIndex 
@@ -207,7 +207,7 @@
 | int NA_integer_ NULL => E: replacement has length zero 
 | int NA_integer_ integer(0) => E: replacement has length zero 
 | int NA_integer_ 1:2 => E: more elements supplied than there are to replace 
-| int NA_integer_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int NA_integer_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int NA_integer_ list(1) => E: attempt to select more than one element in integerOneIndex 
 | int NA_integer_ "s" => E: attempt to select more than one element in integerOneIndex 
 | int NA_integer_ NA => E: attempt to select more than one element in integerOneIndex 
@@ -215,7 +215,7 @@
 | int NA_real_ NULL => E: replacement has length zero 
 | int NA_real_ integer(0) => E: replacement has length zero 
 | int NA_real_ 1:2 => E: more elements supplied than there are to replace 
-| int NA_real_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int NA_real_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int NA_real_ list(1) => E: [[ ]] subscript out of bounds 
 | int NA_real_ "s" => E: [[ ]] subscript out of bounds 
 | int NA_real_ NA => E: [[ ]] subscript out of bounds 
@@ -231,7 +231,7 @@
 | int integer(0) NULL => E: replacement has length zero 
 | int integer(0) integer(0) => E: replacement has length zero 
 | int integer(0) 1:2 => E: more elements supplied than there are to replace 
-| int integer(0) .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int integer(0) .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int integer(0) list(1) => E: attempt to select less than one element in OneIndex 
 | int integer(0) "s" => E: attempt to select less than one element in OneIndex 
 | int integer(0) NA => E: attempt to select less than one element in OneIndex 
@@ -239,7 +239,7 @@
 | int "a" NULL => E: replacement has length zero 
 | int "a" integer(0) => E: replacement has length zero 
 | int "a" 1:2 => E: more elements supplied than there are to replace 
-| int "a" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int "a" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int "a" list(1) => list(1L, 2L, 3L, a = list(1)) 
 | int "a" "s" => c("1", "2", "3", a = "s") 
 | int "a" NA => c(1L, 2L, 3L, a = NA) 
@@ -247,7 +247,7 @@
 | int "z" NULL => E: replacement has length zero 
 | int "z" integer(0) => E: replacement has length zero 
 | int "z" 1:2 => E: more elements supplied than there are to replace 
-| int "z" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int "z" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int "z" list(1) => list(1L, 2L, 3L, z = list(1)) 
 | int "z" "s" => c("1", "2", "3", z = "s") 
 | int "z" NA => c(1L, 2L, 3L, z = NA) 
@@ -255,7 +255,7 @@
 | int 4 NULL => E: replacement has length zero 
 | int 4 integer(0) => E: replacement has length zero 
 | int 4 1:2 => E: more elements supplied than there are to replace 
-| int 4 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int 4 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int 4 list(1) => list(1L, 2L, 3L, list(1)) 
 | int 4 "s" => c("1", "2", "3", "s") 
 | int 4 NA => c(1L, 2L, 3L, NA) 
@@ -263,7 +263,7 @@
 | int 2.7 NULL => E: replacement has length zero 
 | int 2.7 integer(0) => E: replacement has length zero 
 | int 2.7 1:2 => E: more elements supplied than there are to replace 
-| int 2.7 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int 2.7 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int 2.7 list(1) => list(1L, list(1), 3L) 
 | int 2.7 "s" => c("1", "s", "3") 
 | int 2.7 NA => c(1L, NA, 3L) 
@@ -271,7 +271,7 @@
 | int TRUE NULL => E: replacement has length zero 
 | int TRUE integer(0) => E: replacement has length zero 
 | int TRUE 1:2 => E: more elements supplied than there are to replace 
-| int TRUE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int TRUE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int TRUE list(1) => list(list(1), 2L, 3L) 
 | int TRUE "s" => c("s", "2", "3") 
 | int TRUE NA => c(NA, 2L, 3L) 
@@ -279,7 +279,7 @@
 | int FALSE NULL => E: replacement has length zero 
 | int FALSE integer(0) => E: replacement has length zero 
 | int FALSE 1:2 => E: more elements supplied than there are to replace 
-| int FALSE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int FALSE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int FALSE list(1) => E: attempt to select less than one element in integerOneIndex 
 | int FALSE "s" => E: attempt to select less than one element in integerOneIndex 
 | int FALSE NA => E: attempt to select less than one element in integerOneIndex 
@@ -295,7 +295,7 @@
 | int Inf NULL => E: replacement has length zero 
 | int Inf integer(0) => E: replacement has length zero 
 | int Inf 1:2 => E: more elements supplied than there are to replace 
-| int Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int Inf list(1) => E: [[ ]] subscript out of bounds 
 | int Inf "s" => E: [[ ]] subscript out of bounds 
 | int Inf NA => E: [[ ]] subscript out of bounds 
@@ -303,7 +303,7 @@
 | int -Inf NULL => E: replacement has length zero 
 | int -Inf integer(0) => E: replacement has length zero 
 | int -Inf 1:2 => E: more elements supplied than there are to replace 
-| int -Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int -Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int -Inf list(1) => E: attempt to select more than one element in OneIndex <real> 
 | int -Inf "s" => E: attempt to select more than one element in OneIndex <real> 
 | int -Inf NA => E: attempt to select more than one element in OneIndex <real> 
@@ -311,7 +311,7 @@
 | int list() NULL => E: replacement has length zero 
 | int list() integer(0) => E: replacement has length zero 
 | int list() 1:2 => E: more elements supplied than there are to replace 
-| int list() .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int list() .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int list() list(1) => E: attempt to select less than one element in OneIndex 
 | int list() "s" => E: attempt to select less than one element in OneIndex 
 | int list() NA => E: attempt to select less than one element in OneIndex 
@@ -319,7 +319,7 @@
 | int NULL NULL => E: replacement has length zero 
 | int NULL integer(0) => E: replacement has length zero 
 | int NULL 1:2 => E: more elements supplied than there are to replace 
-| int NULL .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int NULL .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int NULL list(1) => E: attempt to select less than one element in OneIndex 
 | int NULL "s" => E: attempt to select less than one element in OneIndex 
 | int NULL NA => E: attempt to select less than one element in OneIndex 
@@ -327,7 +327,7 @@
 | int "" NULL => E: replacement has length zero 
 | int "" integer(0) => E: replacement has length zero 
 | int "" 1:2 => E: more elements supplied than there are to replace 
-| int "" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| int "" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | int "" list(1) => structure(list(1L, 2L, 3L, list(1)), names = c("", "", "", "")) 
 | int "" "s" => structure(c("1", "2", "3", "s"), names = c("", "", "", "")) 
 | int "" NA => structure(c(1L, 2L, 3L, NA), names = c("", "", "", "")) 
@@ -335,7 +335,7 @@
 | named 0L NULL => E: replacement has length zero 
 | named 0L integer(0) => E: replacement has length zero 
 | named 0L 1:2 => E: more elements supplied than there are to replace 
-| named 0L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named 0L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named 0L list(1) => E: attempt to select less than one element in integerOneIndex 
 | named 0L "s" => E: attempt to select less than one element in integerOneIndex 
 | named 0L NA => E: attempt to select less than one element in integerOneIndex 
@@ -343,7 +343,7 @@
 | named 0 NULL => E: replacement has length zero 
 | named 0 integer(0) => E: replacement has length zero 
 | named 0 1:2 => E: more elements supplied than there are to replace 
-| named 0 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named 0 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named 0 list(1) => E: attempt to select less than one element in OneIndex <real> 
 | named 0 "s" => E: attempt to select less than one element in OneIndex <real> 
 | named 0 NA => E: attempt to select less than one element in OneIndex <real> 
@@ -351,7 +351,7 @@
 | named -1L NULL => E: replacement has length zero 
 | named -1L integer(0) => E: replacement has length zero 
 | named -1L 1:2 => E: more elements supplied than there are to replace 
-| named -1L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named -1L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named -1L list(1) => list(a = 1, b = list(1)) 
 | named -1L "s" => c(a = "1", b = "s") 
 | named -1L NA => c(a = 1, b = NA) 
@@ -359,7 +359,7 @@
 | named -1 NULL => E: replacement has length zero 
 | named -1 integer(0) => E: replacement has length zero 
 | named -1 1:2 => E: more elements supplied than there are to replace 
-| named -1 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named -1 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named -1 list(1) => list(a = 1, b = list(1)) 
 | named -1 "s" => c(a = "1", b = "s") 
 | named -1 NA => c(a = 1, b = NA) 
@@ -367,7 +367,7 @@
 | named -2 NULL => E: replacement has length zero 
 | named -2 integer(0) => E: replacement has length zero 
 | named -2 1:2 => E: more elements supplied than there are to replace 
-| named -2 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named -2 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named -2 list(1) => list(a = list(1), b = 2) 
 | named -2 "s" => c(a = "s", b = "2") 
 | named -2 NA => c(a = NA, b = 2) 
@@ -375,7 +375,7 @@
 | named NA NULL => E: replacement has length zero 
 | named NA integer(0) => E: replacement has length zero 
 | named NA 1:2 => E: more elements supplied than there are to replace 
-| named NA .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named NA .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named NA list(1) => E: attempt to select more than one element in integerOneIndex 
 | named NA "s" => E: attempt to select more than one element in integerOneIndex 
 | named NA NA => E: attempt to select more than one element in integerOneIndex 
@@ -383,7 +383,7 @@
 | named NA_integer_ NULL => E: replacement has length zero 
 | named NA_integer_ integer(0) => E: replacement has length zero 
 | named NA_integer_ 1:2 => E: more elements supplied than there are to replace 
-| named NA_integer_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named NA_integer_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named NA_integer_ list(1) => E: attempt to select more than one element in integerOneIndex 
 | named NA_integer_ "s" => E: attempt to select more than one element in integerOneIndex 
 | named NA_integer_ NA => E: attempt to select more than one element in integerOneIndex 
@@ -391,7 +391,7 @@
 | named NA_real_ NULL => E: replacement has length zero 
 | named NA_real_ integer(0) => E: replacement has length zero 
 | named NA_real_ 1:2 => E: more elements supplied than there are to replace 
-| named NA_real_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named NA_real_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named NA_real_ list(1) => E: [[ ]] subscript out of bounds 
 | named NA_real_ "s" => E: [[ ]] subscript out of bounds 
 | named NA_real_ NA => E: [[ ]] subscript out of bounds 
@@ -407,7 +407,7 @@
 | named integer(0) NULL => E: replacement has length zero 
 | named integer(0) integer(0) => E: replacement has length zero 
 | named integer(0) 1:2 => E: more elements supplied than there are to replace 
-| named integer(0) .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named integer(0) .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named integer(0) list(1) => E: attempt to select less than one element in OneIndex 
 | named integer(0) "s" => E: attempt to select less than one element in OneIndex 
 | named integer(0) NA => E: attempt to select less than one element in OneIndex 
@@ -415,7 +415,7 @@
 | named "a" NULL => E: replacement has length zero 
 | named "a" integer(0) => E: replacement has length zero 
 | named "a" 1:2 => E: more elements supplied than there are to replace 
-| named "a" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named "a" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named "a" list(1) => list(a = list(1), b = 2) 
 | named "a" "s" => c(a = "s", b = "2") 
 | named "a" NA => c(a = NA, b = 2) 
@@ -423,7 +423,7 @@
 | named "z" NULL => E: replacement has length zero 
 | named "z" integer(0) => E: replacement has length zero 
 | named "z" 1:2 => E: more elements supplied than there are to replace 
-| named "z" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named "z" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named "z" list(1) => list(a = 1, b = 2, z = list(1)) 
 | named "z" "s" => c(a = "1", b = "2", z = "s") 
 | named "z" NA => c(a = 1, b = 2, z = NA) 
@@ -431,7 +431,7 @@
 | named 4 NULL => E: replacement has length zero 
 | named 4 integer(0) => E: replacement has length zero 
 | named 4 1:2 => E: more elements supplied than there are to replace 
-| named 4 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named 4 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named 4 list(1) => list(a = 1, b = 2, NULL, list(1)) 
 | named 4 "s" => c(a = "1", b = "2", NA, "s") 
 | named 4 NA => c(a = 1, b = 2, NA, NA) 
@@ -439,7 +439,7 @@
 | named 2.7 NULL => E: replacement has length zero 
 | named 2.7 integer(0) => E: replacement has length zero 
 | named 2.7 1:2 => E: more elements supplied than there are to replace 
-| named 2.7 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named 2.7 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named 2.7 list(1) => list(a = 1, b = list(1)) 
 | named 2.7 "s" => c(a = "1", b = "s") 
 | named 2.7 NA => c(a = 1, b = NA) 
@@ -447,7 +447,7 @@
 | named TRUE NULL => E: replacement has length zero 
 | named TRUE integer(0) => E: replacement has length zero 
 | named TRUE 1:2 => E: more elements supplied than there are to replace 
-| named TRUE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named TRUE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named TRUE list(1) => list(a = list(1), b = 2) 
 | named TRUE "s" => c(a = "s", b = "2") 
 | named TRUE NA => c(a = NA, b = 2) 
@@ -455,7 +455,7 @@
 | named FALSE NULL => E: replacement has length zero 
 | named FALSE integer(0) => E: replacement has length zero 
 | named FALSE 1:2 => E: more elements supplied than there are to replace 
-| named FALSE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named FALSE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named FALSE list(1) => E: attempt to select less than one element in integerOneIndex 
 | named FALSE "s" => E: attempt to select less than one element in integerOneIndex 
 | named FALSE NA => E: attempt to select less than one element in integerOneIndex 
@@ -471,7 +471,7 @@
 | named Inf NULL => E: replacement has length zero 
 | named Inf integer(0) => E: replacement has length zero 
 | named Inf 1:2 => E: more elements supplied than there are to replace 
-| named Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named Inf list(1) => E: [[ ]] subscript out of bounds 
 | named Inf "s" => E: [[ ]] subscript out of bounds 
 | named Inf NA => E: [[ ]] subscript out of bounds 
@@ -479,7 +479,7 @@
 | named -Inf NULL => E: replacement has length zero 
 | named -Inf integer(0) => E: replacement has length zero 
 | named -Inf 1:2 => E: more elements supplied than there are to replace 
-| named -Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named -Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named -Inf list(1) => E: attempt to select more than one element in OneIndex <real> 
 | named -Inf "s" => E: attempt to select more than one element in OneIndex <real> 
 | named -Inf NA => E: attempt to select more than one element in OneIndex <real> 
@@ -487,7 +487,7 @@
 | named list() NULL => E: replacement has length zero 
 | named list() integer(0) => E: replacement has length zero 
 | named list() 1:2 => E: more elements supplied than there are to replace 
-| named list() .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named list() .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named list() list(1) => E: attempt to select less than one element in OneIndex 
 | named list() "s" => E: attempt to select less than one element in OneIndex 
 | named list() NA => E: attempt to select less than one element in OneIndex 
@@ -495,7 +495,7 @@
 | named NULL NULL => E: replacement has length zero 
 | named NULL integer(0) => E: replacement has length zero 
 | named NULL 1:2 => E: more elements supplied than there are to replace 
-| named NULL .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named NULL .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named NULL list(1) => E: attempt to select less than one element in OneIndex 
 | named NULL "s" => E: attempt to select less than one element in OneIndex 
 | named NULL NA => E: attempt to select less than one element in OneIndex 
@@ -503,7 +503,7 @@
 | named "" NULL => E: replacement has length zero 
 | named "" integer(0) => E: replacement has length zero 
 | named "" 1:2 => E: more elements supplied than there are to replace 
-| named "" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| named "" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | named "" list(1) => list(a = 1, b = 2, list(1)) 
 | named "" "s" => c(a = "1", b = "2", "s") 
 | named "" NA => c(a = 1, b = 2, NA) 
@@ -511,7 +511,7 @@
 | two 0L NULL => E: replacement has length zero 
 | two 0L integer(0) => E: replacement has length zero 
 | two 0L 1:2 => E: more elements supplied than there are to replace 
-| two 0L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two 0L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two 0L list(1) => E: attempt to select less than one element in integerOneIndex 
 | two 0L "s" => E: attempt to select less than one element in integerOneIndex 
 | two 0L NA => E: attempt to select less than one element in integerOneIndex 
@@ -519,7 +519,7 @@
 | two 0 NULL => E: replacement has length zero 
 | two 0 integer(0) => E: replacement has length zero 
 | two 0 1:2 => E: more elements supplied than there are to replace 
-| two 0 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two 0 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two 0 list(1) => E: attempt to select less than one element in OneIndex <real> 
 | two 0 "s" => E: attempt to select less than one element in OneIndex <real> 
 | two 0 NA => E: attempt to select less than one element in OneIndex <real> 
@@ -527,7 +527,7 @@
 | two -1L NULL => E: replacement has length zero 
 | two -1L integer(0) => E: replacement has length zero 
 | two -1L 1:2 => E: more elements supplied than there are to replace 
-| two -1L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two -1L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two -1L list(1) => list(5L, list(1)) 
 | two -1L "s" => c("5", "s") 
 | two -1L NA => c(5L, NA) 
@@ -535,7 +535,7 @@
 | two -1 NULL => E: replacement has length zero 
 | two -1 integer(0) => E: replacement has length zero 
 | two -1 1:2 => E: more elements supplied than there are to replace 
-| two -1 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two -1 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two -1 list(1) => list(5L, list(1)) 
 | two -1 "s" => c("5", "s") 
 | two -1 NA => c(5L, NA) 
@@ -543,7 +543,7 @@
 | two -2 NULL => E: replacement has length zero 
 | two -2 integer(0) => E: replacement has length zero 
 | two -2 1:2 => E: more elements supplied than there are to replace 
-| two -2 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two -2 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two -2 list(1) => list(list(1), 6L) 
 | two -2 "s" => c("s", "6") 
 | two -2 NA => c(NA, 6L) 
@@ -551,7 +551,7 @@
 | two NA NULL => E: replacement has length zero 
 | two NA integer(0) => E: replacement has length zero 
 | two NA 1:2 => E: more elements supplied than there are to replace 
-| two NA .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two NA .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two NA list(1) => E: attempt to select more than one element in integerOneIndex 
 | two NA "s" => E: attempt to select more than one element in integerOneIndex 
 | two NA NA => E: attempt to select more than one element in integerOneIndex 
@@ -559,7 +559,7 @@
 | two NA_integer_ NULL => E: replacement has length zero 
 | two NA_integer_ integer(0) => E: replacement has length zero 
 | two NA_integer_ 1:2 => E: more elements supplied than there are to replace 
-| two NA_integer_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two NA_integer_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two NA_integer_ list(1) => E: attempt to select more than one element in integerOneIndex 
 | two NA_integer_ "s" => E: attempt to select more than one element in integerOneIndex 
 | two NA_integer_ NA => E: attempt to select more than one element in integerOneIndex 
@@ -567,7 +567,7 @@
 | two NA_real_ NULL => E: replacement has length zero 
 | two NA_real_ integer(0) => E: replacement has length zero 
 | two NA_real_ 1:2 => E: more elements supplied than there are to replace 
-| two NA_real_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two NA_real_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two NA_real_ list(1) => E: [[ ]] subscript out of bounds 
 | two NA_real_ "s" => E: [[ ]] subscript out of bounds 
 | two NA_real_ NA => E: [[ ]] subscript out of bounds 
@@ -583,7 +583,7 @@
 | two integer(0) NULL => E: replacement has length zero 
 | two integer(0) integer(0) => E: replacement has length zero 
 | two integer(0) 1:2 => E: more elements supplied than there are to replace 
-| two integer(0) .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two integer(0) .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two integer(0) list(1) => E: attempt to select less than one element in OneIndex 
 | two integer(0) "s" => E: attempt to select less than one element in OneIndex 
 | two integer(0) NA => E: attempt to select less than one element in OneIndex 
@@ -591,7 +591,7 @@
 | two "a" NULL => E: replacement has length zero 
 | two "a" integer(0) => E: replacement has length zero 
 | two "a" 1:2 => E: more elements supplied than there are to replace 
-| two "a" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two "a" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two "a" list(1) => list(5L, 6L, a = list(1)) 
 | two "a" "s" => c("5", "6", a = "s") 
 | two "a" NA => c(5L, 6L, a = NA) 
@@ -599,7 +599,7 @@
 | two "z" NULL => E: replacement has length zero 
 | two "z" integer(0) => E: replacement has length zero 
 | two "z" 1:2 => E: more elements supplied than there are to replace 
-| two "z" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two "z" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two "z" list(1) => list(5L, 6L, z = list(1)) 
 | two "z" "s" => c("5", "6", z = "s") 
 | two "z" NA => c(5L, 6L, z = NA) 
@@ -607,7 +607,7 @@
 | two 4 NULL => E: replacement has length zero 
 | two 4 integer(0) => E: replacement has length zero 
 | two 4 1:2 => E: more elements supplied than there are to replace 
-| two 4 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two 4 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two 4 list(1) => list(5L, 6L, NULL, list(1)) 
 | two 4 "s" => c("5", "6", NA, "s") 
 | two 4 NA => c(5L, 6L, NA, NA) 
@@ -615,7 +615,7 @@
 | two 2.7 NULL => E: replacement has length zero 
 | two 2.7 integer(0) => E: replacement has length zero 
 | two 2.7 1:2 => E: more elements supplied than there are to replace 
-| two 2.7 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two 2.7 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two 2.7 list(1) => list(5L, list(1)) 
 | two 2.7 "s" => c("5", "s") 
 | two 2.7 NA => c(5L, NA) 
@@ -623,7 +623,7 @@
 | two TRUE NULL => E: replacement has length zero 
 | two TRUE integer(0) => E: replacement has length zero 
 | two TRUE 1:2 => E: more elements supplied than there are to replace 
-| two TRUE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two TRUE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two TRUE list(1) => list(list(1), 6L) 
 | two TRUE "s" => c("s", "6") 
 | two TRUE NA => c(NA, 6L) 
@@ -631,7 +631,7 @@
 | two FALSE NULL => E: replacement has length zero 
 | two FALSE integer(0) => E: replacement has length zero 
 | two FALSE 1:2 => E: more elements supplied than there are to replace 
-| two FALSE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two FALSE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two FALSE list(1) => E: attempt to select less than one element in integerOneIndex 
 | two FALSE "s" => E: attempt to select less than one element in integerOneIndex 
 | two FALSE NA => E: attempt to select less than one element in integerOneIndex 
@@ -647,7 +647,7 @@
 | two Inf NULL => E: replacement has length zero 
 | two Inf integer(0) => E: replacement has length zero 
 | two Inf 1:2 => E: more elements supplied than there are to replace 
-| two Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two Inf list(1) => E: [[ ]] subscript out of bounds 
 | two Inf "s" => E: [[ ]] subscript out of bounds 
 | two Inf NA => E: [[ ]] subscript out of bounds 
@@ -655,7 +655,7 @@
 | two -Inf NULL => E: replacement has length zero 
 | two -Inf integer(0) => E: replacement has length zero 
 | two -Inf 1:2 => E: more elements supplied than there are to replace 
-| two -Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two -Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two -Inf list(1) => E: attempt to select more than one element in OneIndex <real> 
 | two -Inf "s" => E: attempt to select more than one element in OneIndex <real> 
 | two -Inf NA => E: attempt to select more than one element in OneIndex <real> 
@@ -663,7 +663,7 @@
 | two list() NULL => E: replacement has length zero 
 | two list() integer(0) => E: replacement has length zero 
 | two list() 1:2 => E: more elements supplied than there are to replace 
-| two list() .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two list() .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two list() list(1) => E: attempt to select less than one element in OneIndex 
 | two list() "s" => E: attempt to select less than one element in OneIndex 
 | two list() NA => E: attempt to select less than one element in OneIndex 
@@ -671,7 +671,7 @@
 | two NULL NULL => E: replacement has length zero 
 | two NULL integer(0) => E: replacement has length zero 
 | two NULL 1:2 => E: more elements supplied than there are to replace 
-| two NULL .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two NULL .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two NULL list(1) => E: attempt to select less than one element in OneIndex 
 | two NULL "s" => E: attempt to select less than one element in OneIndex 
 | two NULL NA => E: attempt to select less than one element in OneIndex 
@@ -679,7 +679,7 @@
 | two "" NULL => E: replacement has length zero 
 | two "" integer(0) => E: replacement has length zero 
 | two "" 1:2 => E: more elements supplied than there are to replace 
-| two "" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| two "" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | two "" list(1) => structure(list(5L, 6L, list(1)), names = c("", "", "")) 
 | two "" "s" => structure(c("5", "6", "s"), names = c("", "", "")) 
 | two "" NA => structure(c(5L, 6L, NA), names = c("", "", "")) 
@@ -751,7 +751,7 @@
 | list 1:2 NULL => E: replacement has length zero 
 | list 1:2 integer(0) => E: replacement has length zero 
 | list 1:2 1:2 => E: more elements supplied than there are to replace 
-| list 1:2 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| list 1:2 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | list 1:2 list(1) => list(list(1, list(1)), 2, 3) 
 | list 1:2 "s" => list(c("1", "s"), 2, 3) 
 | list 1:2 NA => list(c(1, NA), 2, 3) 
@@ -815,7 +815,7 @@
 | list c(TRUE, FALSE) NULL => E: replacement has length zero 
 | list c(TRUE, FALSE) integer(0) => E: replacement has length zero 
 | list c(TRUE, FALSE) 1:2 => E: more elements supplied than there are to replace 
-| list c(TRUE, FALSE) .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| list c(TRUE, FALSE) .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | list c(TRUE, FALSE) list(1) => E: attempt to select less than one element in integerOneIndex 
 | list c(TRUE, FALSE) "s" => E: attempt to select less than one element in integerOneIndex 
 | list c(TRUE, FALSE) NA => E: attempt to select less than one element in integerOneIndex 
@@ -1053,7 +1053,7 @@
 | chr 0L NULL => E: replacement has length zero 
 | chr 0L integer(0) => E: replacement has length zero 
 | chr 0L 1:2 => E: more elements supplied than there are to replace 
-| chr 0L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr 0L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr 0L list(1) => E: attempt to select less than one element in integerOneIndex 
 | chr 0L "s" => E: attempt to select less than one element in integerOneIndex 
 | chr 0L NA => E: attempt to select less than one element in integerOneIndex 
@@ -1061,7 +1061,7 @@
 | chr 0 NULL => E: replacement has length zero 
 | chr 0 integer(0) => E: replacement has length zero 
 | chr 0 1:2 => E: more elements supplied than there are to replace 
-| chr 0 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr 0 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr 0 list(1) => E: attempt to select less than one element in OneIndex <real> 
 | chr 0 "s" => E: attempt to select less than one element in OneIndex <real> 
 | chr 0 NA => E: attempt to select less than one element in OneIndex <real> 
@@ -1069,7 +1069,7 @@
 | chr -1L NULL => E: replacement has length zero 
 | chr -1L integer(0) => E: replacement has length zero 
 | chr -1L 1:2 => E: more elements supplied than there are to replace 
-| chr -1L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr -1L .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr -1L list(1) => list("p", list(1)) 
 | chr -1L "s" => c("p", "s") 
 | chr -1L NA => c("p", NA) 
@@ -1077,7 +1077,7 @@
 | chr -1 NULL => E: replacement has length zero 
 | chr -1 integer(0) => E: replacement has length zero 
 | chr -1 1:2 => E: more elements supplied than there are to replace 
-| chr -1 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr -1 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr -1 list(1) => list("p", list(1)) 
 | chr -1 "s" => c("p", "s") 
 | chr -1 NA => c("p", NA) 
@@ -1085,7 +1085,7 @@
 | chr -2 NULL => E: replacement has length zero 
 | chr -2 integer(0) => E: replacement has length zero 
 | chr -2 1:2 => E: more elements supplied than there are to replace 
-| chr -2 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr -2 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr -2 list(1) => list(list(1), "q") 
 | chr -2 "s" => c("s", "q") 
 | chr -2 NA => c(NA, "q") 
@@ -1093,7 +1093,7 @@
 | chr NA NULL => E: replacement has length zero 
 | chr NA integer(0) => E: replacement has length zero 
 | chr NA 1:2 => E: more elements supplied than there are to replace 
-| chr NA .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr NA .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr NA list(1) => E: attempt to select more than one element in integerOneIndex 
 | chr NA "s" => E: attempt to select more than one element in integerOneIndex 
 | chr NA NA => E: attempt to select more than one element in integerOneIndex 
@@ -1101,7 +1101,7 @@
 | chr NA_integer_ NULL => E: replacement has length zero 
 | chr NA_integer_ integer(0) => E: replacement has length zero 
 | chr NA_integer_ 1:2 => E: more elements supplied than there are to replace 
-| chr NA_integer_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr NA_integer_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr NA_integer_ list(1) => E: attempt to select more than one element in integerOneIndex 
 | chr NA_integer_ "s" => E: attempt to select more than one element in integerOneIndex 
 | chr NA_integer_ NA => E: attempt to select more than one element in integerOneIndex 
@@ -1109,7 +1109,7 @@
 | chr NA_real_ NULL => E: replacement has length zero 
 | chr NA_real_ integer(0) => E: replacement has length zero 
 | chr NA_real_ 1:2 => E: more elements supplied than there are to replace 
-| chr NA_real_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr NA_real_ .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr NA_real_ list(1) => E: [[ ]] subscript out of bounds 
 | chr NA_real_ "s" => E: [[ ]] subscript out of bounds 
 | chr NA_real_ NA => E: [[ ]] subscript out of bounds 
@@ -1125,7 +1125,7 @@
 | chr integer(0) NULL => E: replacement has length zero 
 | chr integer(0) integer(0) => E: replacement has length zero 
 | chr integer(0) 1:2 => E: more elements supplied than there are to replace 
-| chr integer(0) .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr integer(0) .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr integer(0) list(1) => E: attempt to select less than one element in OneIndex 
 | chr integer(0) "s" => E: attempt to select less than one element in OneIndex 
 | chr integer(0) NA => E: attempt to select less than one element in OneIndex 
@@ -1133,7 +1133,7 @@
 | chr "a" NULL => E: replacement has length zero 
 | chr "a" integer(0) => E: replacement has length zero 
 | chr "a" 1:2 => E: more elements supplied than there are to replace 
-| chr "a" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr "a" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr "a" list(1) => list("p", "q", a = list(1)) 
 | chr "a" "s" => c("p", "q", a = "s") 
 | chr "a" NA => c("p", "q", a = NA) 
@@ -1141,7 +1141,7 @@
 | chr "z" NULL => E: replacement has length zero 
 | chr "z" integer(0) => E: replacement has length zero 
 | chr "z" 1:2 => E: more elements supplied than there are to replace 
-| chr "z" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr "z" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr "z" list(1) => list("p", "q", z = list(1)) 
 | chr "z" "s" => c("p", "q", z = "s") 
 | chr "z" NA => c("p", "q", z = NA) 
@@ -1149,7 +1149,7 @@
 | chr 4 NULL => E: replacement has length zero 
 | chr 4 integer(0) => E: replacement has length zero 
 | chr 4 1:2 => E: more elements supplied than there are to replace 
-| chr 4 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr 4 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr 4 list(1) => list("p", "q", NULL, list(1)) 
 | chr 4 "s" => c("p", "q", NA, "s") 
 | chr 4 NA => c("p", "q", NA, NA) 
@@ -1157,7 +1157,7 @@
 | chr 2.7 NULL => E: replacement has length zero 
 | chr 2.7 integer(0) => E: replacement has length zero 
 | chr 2.7 1:2 => E: more elements supplied than there are to replace 
-| chr 2.7 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr 2.7 .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr 2.7 list(1) => list("p", list(1)) 
 | chr 2.7 "s" => c("p", "s") 
 | chr 2.7 NA => c("p", NA) 
@@ -1165,7 +1165,7 @@
 | chr TRUE NULL => E: replacement has length zero 
 | chr TRUE integer(0) => E: replacement has length zero 
 | chr TRUE 1:2 => E: more elements supplied than there are to replace 
-| chr TRUE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr TRUE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr TRUE list(1) => list(list(1), "q") 
 | chr TRUE "s" => c("s", "q") 
 | chr TRUE NA => c(NA, "q") 
@@ -1173,7 +1173,7 @@
 | chr FALSE NULL => E: replacement has length zero 
 | chr FALSE integer(0) => E: replacement has length zero 
 | chr FALSE 1:2 => E: more elements supplied than there are to replace 
-| chr FALSE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr FALSE .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr FALSE list(1) => E: attempt to select less than one element in integerOneIndex 
 | chr FALSE "s" => E: attempt to select less than one element in integerOneIndex 
 | chr FALSE NA => E: attempt to select less than one element in integerOneIndex 
@@ -1189,7 +1189,7 @@
 | chr Inf NULL => E: replacement has length zero 
 | chr Inf integer(0) => E: replacement has length zero 
 | chr Inf 1:2 => E: more elements supplied than there are to replace 
-| chr Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr Inf list(1) => E: [[ ]] subscript out of bounds 
 | chr Inf "s" => E: [[ ]] subscript out of bounds 
 | chr Inf NA => E: [[ ]] subscript out of bounds 
@@ -1197,7 +1197,7 @@
 | chr -Inf NULL => E: replacement has length zero 
 | chr -Inf integer(0) => E: replacement has length zero 
 | chr -Inf 1:2 => E: more elements supplied than there are to replace 
-| chr -Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr -Inf .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr -Inf list(1) => E: attempt to select more than one element in OneIndex <real> 
 | chr -Inf "s" => E: attempt to select more than one element in OneIndex <real> 
 | chr -Inf NA => E: attempt to select more than one element in OneIndex <real> 
@@ -1205,7 +1205,7 @@
 | chr list() NULL => E: replacement has length zero 
 | chr list() integer(0) => E: replacement has length zero 
 | chr list() 1:2 => E: more elements supplied than there are to replace 
-| chr list() .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr list() .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr list() list(1) => E: attempt to select less than one element in OneIndex 
 | chr list() "s" => E: attempt to select less than one element in OneIndex 
 | chr list() NA => E: attempt to select less than one element in OneIndex 
@@ -1213,7 +1213,7 @@
 | chr NULL NULL => E: replacement has length zero 
 | chr NULL integer(0) => E: replacement has length zero 
 | chr NULL 1:2 => E: more elements supplied than there are to replace 
-| chr NULL .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr NULL .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr NULL list(1) => E: attempt to select less than one element in OneIndex 
 | chr NULL "s" => E: attempt to select less than one element in OneIndex 
 | chr NULL NA => E: attempt to select less than one element in OneIndex 
@@ -1221,16 +1221,14 @@
 | chr "" NULL => E: replacement has length zero 
 | chr "" integer(0) => E: replacement has length zero 
 | chr "" 1:2 => E: more elements supplied than there are to replace 
-| chr "" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1841 
+| chr "" .Primitive("sum") => E: long vectors not supported yet: subassign.c:1861 
 | chr "" list(1) => structure(list("p", "q", list(1)), names = c("", "", "")) 
 | chr "" "s" => structure(c("p", "q", "s"), names = c("", "", "")) 
 | chr "" NA => structure(c("p", "q", NA), names = c("", "", "")) 
 [messages]
 [warnings]
 - Coercing LHS to a list (in l$a$b <- 1)
-- 'symbol' object cannot be coerced to type 'list' (in x[1] <- ys[[yn]])
 - number of items to replace is not a multiple of replacement length (in x[1] <- ys[[yn]])
-- 'symbol' object cannot be coerced to type 'list' (in x[1] <- ys[[yn]])
 - number of items to replace is not a multiple of replacement length (in x[1] <- ys[[yn]])
 [errors]
 [value]

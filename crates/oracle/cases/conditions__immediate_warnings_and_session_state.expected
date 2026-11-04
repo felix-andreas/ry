@@ -11,7 +11,7 @@
 | [1] "C"
 | [1] "A" "B" "a" "b"
 | [1] ""
-| [1] "incompatible types (from pairlist to integer) in subassignment type fix"
+| [1] "incompatible types (from integer to pairlist) in subassignment type fix"
 | List of 2
 |  $ : num 1
 |  $ : num 5

@@ -6,14 +6,14 @@ requires ry-runtime
 
 file updates.R
 | h <- function(d, k) { inc <- function(x) x + 1L; Dict.insert(d, k, inc(k)) }
-| f <- function() { d <- Dict.empty(); for (i in 1:5) d <- h(d, i); keep <- d; d <- h(d, 9L); c(Dict.len(keep), Dict.len(d)) }
+| f <- function() { d <- Dict.empty(); for (i in 1:5) d <- h(d, i); keep <- d; d <- h(d, 9L); c(Num.to_r(Dict.len(keep)), Num.to_r(Dict.len(d))) }
 | print(f())
 | g <- function(d) { s <- function() length(d); List.append(d, s) }
 | f2 <- function() { d <- list(1, 2); for (i in 1:4) d <- g(d); c(length(d), d[[6L]](), d[[3L]]()) }
 | print(f2())
 | e <- quote(List.append(d, k))
 | shared <- eval(bquote(function(d, k) if (length(.(e)) > 100L) d else .(e)))
-| f3 <- function() { d <- list(); for (i in 1:6) d <- shared(d, i); List.to_vector(d) }
+| f3 <- function() { d <- list(); for (i in 1:6) d <- shared(d, i); List.to_r(d) }
 | print(f3())
 
 run ry run --runtime ry updates.R

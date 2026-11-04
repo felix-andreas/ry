@@ -25,9 +25,11 @@ pub fn sexp_type(code: SEXPTYPE) -> ApiResult<SexpType> {
 /// it can move the handle through a list, but every accessor that would read it as R data
 /// raises the conversion error instead.
 pub unsafe fn refuse_native(object: Sexp) -> ApiResult<()> {
-    if object.kind() == SexpType::Record {
-        let kind = interp::records::native_kind(object);
-        return Err(error(interp::records::boundary_message("the value", kind)));
+    if interp::records::is_native(object) {
+        return Err(error(interp::records::boundary_message(
+            "the value",
+            object,
+        )));
     }
     Ok(())
 }

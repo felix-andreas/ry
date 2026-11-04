@@ -1109,6 +1109,26 @@ pub unsafe extern "C" fn jit_found(
     }
 }
 
+/// Stores the count a compiled `List.count_if` loop reached into register `dst`, as the `I64`
+/// the library gives. Returns 0, with the error parked, when boxing it fails.
+pub unsafe extern "C" fn jit_count(activation: *mut Activation, dst: i64, count: i64) -> i32 {
+    unsafe {
+        checked(activation, 0, |activation| {
+            let count = usize::try_from(count).unwrap_or(usize::MAX);
+            match scoped(|| standard_library::whole_number(count)) {
+                Ok(answer) => {
+                    *activation.registers.add(dst as usize) = answer;
+                    1
+                }
+                Err(unwind) => {
+                    park(activation, unwind);
+                    0
+                }
+            }
+        })
+    }
+}
+
 /// Key kinds [`jit_collection_position`] takes.
 pub mod key {
     pub const INTEGER: i32 = 0;

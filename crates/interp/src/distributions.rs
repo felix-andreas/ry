@@ -104,7 +104,10 @@ macro_rules! distributions {
             }),)*
             ("rmultinom", |call| unsafe { rmultinom_routine(call.arg(0), call.arg(1), call.arg(2)) }),
             ("signrank_free", |_| Ok(nil())),
-            ("wilcox_free", |_| Ok(nil())),
+            ("wilcox_free", |_| {
+                wilcox_free();
+                Ok(nil())
+            }),
         ];
     };
     (@call math $vectors:tt $function:expr, $args:expr, $interface:expr) => {

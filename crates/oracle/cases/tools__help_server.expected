@@ -1,9 +1,11 @@
 [stdout]
-| [1] 364
+| [1] 402
 | [1] "<!DOCTYPE html><html><head><title>R: Fitting Linear Models</title>"
-| [1] "@media screen {"  "    .container {"
-| [1] "<!DOCTYPE html>"                     "<html>"                             
-| [3] "<head><title>R: httpd error</title>"
+| [1] ""                                                             
+| [2] "/* Adapted from R.css with the following additional features:"
+| [1] "<!DOCTYPE html>"                           
+| [2] "<html>"                                    
+| [3] "<head><title>R: The R Base Package</title>"
 | [1] "/custom/probe/echo/a b|x|y|||1|a b&c||z"
 | [1] "/custom/probe/echo||"
 | [1] "bytes"

@@ -1,28 +1,26 @@
 #==== standard_library
 #---- hover_on_a_library_function
-doubled <- List.m$0ap(list(1L, 2L), function(x) x * 2L)
+doubled <- List.m$0ap([1, 2], function(x) x * 2)
 #++++
-hover 11..19: List.map: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer]
-hover-definition: package std (2 declaration(s), declared in stub source std at `List.map`)
+hover 11..19: List.map: fn(list: List<I64>, f: fn(I64) -> I64) -> List<I64>
+hover-definition: package std (1 declaration(s), declared in stub source std at `List.map`)
 hover-documentation: Applies `f` to every element.
 hover-documentation:
 hover-documentation: ```r dput
-hover-documentation: List.map(list(1L, 2L, 3L), function(x) x * 2L)
-hover-documentation: #> list(2L, 4L, 6L)
+hover-documentation: List.map([1, 2, 3], function(x) x * 2)
+hover-documentation: #> [2, 4, 6]
 hover-documentation: ```
 definition: stub source std at `List.map`
 references: none
 rename: none
-signature: <T, U: item> fn(list: Array<T>, f: fn(T) -> U) -> Array<U>
-parameters: [list: Array<T>] | f: fn(T) -> U
-signature: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer] (active)
-parameters: [list: list[integer]] | f: fn(integer) -> integer
+signature: fn(list: List<I64>, f: fn(I64) -> I64) -> List<I64>
+parameters: [list: List<I64>] | f: fn(I64) -> I64
 action: Add inferred type annotation for `doubled`
-  edit 7..7 -> ": list[integer]"
+  edit 7..7 -> ": List<I64>"
 action: Add inferred type annotations for the whole file
-  edit 7..7 -> ": list[integer]"
+  edit 7..7 -> ": List<I64>"
 completion (14): List.map, List.map2, List.map3, List.map4, List.map_try, List.map_with_index, List.max, List.min
-hint @7: list[integer]
+hint @7: List<I64>
 hint @20list =
 
 #---- completion_after_a_module_prefix
@@ -35,16 +33,16 @@ definition: installed Str.to_ from base, stats, utils, methods, graphics, grDevi
 references: none
 rename: none
 signature: none
-completion (5): Str.to_double, Str.to_integer, Str.to_utf16, Str.to_utf32, Str.to_utf8
+completion (5): Str.to_f64, Str.to_i64, Str.to_utf16, Str.to_utf32, Str.to_utf8
 
 #---- hover_on_a_dict_value
-d <- Dict.from_list(list(("a", 1)))
+d <- Dict.from_list([("a", 1)])
 got <- Dict.ge$0t(d, "a")
 #++++
-hover 43..51: Dict.get: fn(
-hover 43..51:   dict: Dict<character, double>,
-hover 43..51:   key: character,
-hover 43..51: ) -> :Ok(double) | :Err(:KeyNotFound)
+hover 39..47: Dict.get: fn(
+hover 39..47:   dict: Dict<character, double>,
+hover 39..47:   key: character,
+hover 39..47: ) -> :Ok(double) | :Err(:KeyNotFound)
 hover-definition: package std (1 declaration(s), declared in stub source std at `Dict.get`)
 hover-documentation: The value for `key`, or `:Err(:KeyNotFound)`.
 hover-documentation:
@@ -58,15 +56,15 @@ rename: none
 signature: fn(dict: Dict<character, double>, key: character) -> :Ok(double) | :Err(:KeyNotFound)
 parameters: [dict: Dict<character, double>] | key: character
 action: Add inferred type annotation for `got`
-  edit 39..39 -> ": :Ok(double) | :Err(:KeyNotFound)"
+  edit 35..35 -> ": :Ok(double) | :Err(:KeyNotFound)"
 action: Add inferred type annotations for the whole file
   edit 1..1 -> ": Dict<character, double>"
-  edit 39..39 -> ": :Ok(double) | :Err(:KeyNotFound)"
+  edit 35..35 -> ": :Ok(double) | :Err(:KeyNotFound)"
 completion (2): Dict.get, Dict.single
 hint @1: Dict<character, double>
-hint @39: :Ok(double) | :Err(:KeyNotFound)
-hint @52dict =
-hint @55key =
+hint @35: :Ok(double) | :Err(:KeyNotFound)
+hint @48dict =
+hint @51key =
 
 #---- annotation_completion_offers_library_types
 #: Res$0
@@ -120,29 +118,27 @@ hint @175FUN.VALUE =
 
 #==== qualified_standard_library
 #---- hover_on_a_qualified_library_function
-doubled <- std::List.m$0ap(list(1L, 2L), function(x) x * 2L)
+doubled <- std::List.m$0ap([1, 2], function(x) x * 2)
 #++++
-hover 11..24: List.map: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer]
-hover-definition: package std (2 declaration(s), declared in stub source std at `List.map`)
+hover 11..24: List.map: fn(list: List<I64>, f: fn(I64) -> I64) -> List<I64>
+hover-definition: package std (1 declaration(s), declared in stub source std at `List.map`)
 hover-documentation: Applies `f` to every element.
 hover-documentation:
 hover-documentation: ```r dput
-hover-documentation: List.map(list(1L, 2L, 3L), function(x) x * 2L)
-hover-documentation: #> list(2L, 4L, 6L)
+hover-documentation: List.map([1, 2, 3], function(x) x * 2)
+hover-documentation: #> [2, 4, 6]
 hover-documentation: ```
 definition: stub source std at `List.map`
 references: none
 rename: none
-signature: <T, U: item> fn(list: Array<T>, f: fn(T) -> U) -> Array<U>
-parameters: [list: Array<T>] | f: fn(T) -> U
-signature: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer] (active)
-parameters: [list: list[integer]] | f: fn(integer) -> integer
+signature: fn(list: List<I64>, f: fn(I64) -> I64) -> List<I64>
+parameters: [list: List<I64>] | f: fn(I64) -> I64
 action: Add inferred type annotation for `doubled`
-  edit 7..7 -> ": list[integer]"
+  edit 7..7 -> ": List<I64>"
 action: Add inferred type annotations for the whole file
-  edit 7..7 -> ": list[integer]"
+  edit 7..7 -> ": List<I64>"
 completion (14): List.map, List.map2, List.map3, List.map4, List.map_try, List.map_with_index, List.max, List.min
-hint @7: list[integer]
+hint @7: List<I64>
 hint @25list =
 
 #---- completion_after_std
@@ -170,34 +166,32 @@ completion: none
 
 #---- prelude_off_hover_on_a_qualified_library_function
 # [check] prelude = false
-doubled <- std::List.m$0ap(list(1L, 2L), function(x) x * 2L)
+doubled <- std::List.m$0ap([1, 2], function(x) x * 2)
 #++++
-hover 37..50: List.map: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer]
-hover-definition: package std (2 declaration(s), declared in stub source std at `List.map`)
+hover 37..50: List.map: fn(list: List<I64>, f: fn(I64) -> I64) -> List<I64>
+hover-definition: package std (1 declaration(s), declared in stub source std at `List.map`)
 hover-documentation: Applies `f` to every element.
 hover-documentation:
 hover-documentation: ```r dput
-hover-documentation: List.map(list(1L, 2L, 3L), function(x) x * 2L)
-hover-documentation: #> list(2L, 4L, 6L)
+hover-documentation: List.map([1, 2, 3], function(x) x * 2)
+hover-documentation: #> [2, 4, 6]
 hover-documentation: ```
 definition: stub source std at `List.map`
 references: none
 rename: none
-signature: <T, U: item> fn(list: Array<T>, f: fn(T) -> U) -> Array<U>
-parameters: [list: Array<T>] | f: fn(T) -> U
-signature: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer] (active)
-parameters: [list: list[integer]] | f: fn(integer) -> integer
+signature: fn(list: List<I64>, f: fn(I64) -> I64) -> List<I64>
+parameters: [list: List<I64>] | f: fn(I64) -> I64
 action: Add inferred type annotation for `doubled`
-  edit 33..33 -> ": list[integer]"
+  edit 33..33 -> ": List<I64>"
 action: Add inferred type annotations for the whole file
-  edit 33..33 -> ": list[integer]"
+  edit 33..33 -> ": List<I64>"
 completion (14): List.map, List.map2, List.map3, List.map4, List.map_try, List.map_with_index, List.max, List.min
-hint @33: list[integer]
+hint @33: List<I64>
 hint @51list =
 
 #---- prelude_off_bare_library_name_has_no_library_hover
 # [check] prelude = false
-doubled <- List.m$0ap(list(1L, 2L), function(x) x * 2L)
+doubled <- List.m$0ap([1, 2], function(x) x * 2)
 #++++
 hover 37..45: List.map
 hover-definition: installed List.map from base, stats, utils, methods, graphics, grDevices, datasets

@@ -300,7 +300,7 @@ macro_rules! plain_rooted {
     ($($type:ty),*) => { $(impl Rooted for $type {})* };
 }
 
-plain_rooted!((), bool, i32, u32, usize, isize, f64, String);
+plain_rooted!((), bool, i32, u32, usize, isize, f64, Option<f64>, String);
 
 impl Unwind {
     pub fn root(&self) {

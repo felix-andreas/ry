@@ -21,6 +21,8 @@
 
 pub mod arena;
 pub mod env;
+pub mod image;
+pub use image::{Fixed, ImageError, Relocation};
 pub mod large;
 pub mod object;
 pub mod records;
@@ -794,6 +796,7 @@ impl Heap {
             SexpType::Logical
                 | SexpType::Integer
                 | SexpType::Real
+                | SexpType::I64
                 | SexpType::Complex
                 | SexpType::Raw
         ) {
@@ -1350,6 +1353,12 @@ impl Heap {
         self.symbols.insert(name, symbol);
         self.new_roots.push(symbol);
         Ok(symbol)
+    }
+
+    /// The interned symbol named `name`, if one exists, without installing it.
+    pub unsafe fn find_symbol(&self, name: &[u8]) -> Option<Sexp> {
+        let name = self.find_interned(name, 0)?;
+        self.symbols.get(&name).copied()
     }
 
     pub fn symbol_count(&self) -> usize {
@@ -3151,6 +3160,7 @@ unsafe fn is_leaf(object: Sexp, nil: Sexp) -> bool {
             | SexpType::Logical
             | SexpType::Integer
             | SexpType::Real
+            | SexpType::I64
             | SexpType::Complex
             | SexpType::Raw
     ) && !object.is_altrep()
@@ -3332,10 +3342,11 @@ unsafe fn reclaimable(object: Sexp) -> bool {
 }
 
 /// Every type code a vector can have, for generators and tests.
-pub const VECTOR_TYPES: [SexpType; 8] = [
+pub const VECTOR_TYPES: [SexpType; 9] = [
     SexpType::Logical,
     SexpType::Integer,
     SexpType::Real,
+    SexpType::I64,
     SexpType::Complex,
     SexpType::String,
     SexpType::List,

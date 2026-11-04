@@ -9,9 +9,9 @@ use {
         diagnostics::nearest_name,
         stubs::stubs,
         types::{
-            Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, Ty, TyKind,
-            array_element, contains_inference_var, for_each_child_type, is_ry_value_type,
-            map_child_types, scalar, substitute_rigid, union_of, unknown,
+            Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeScalar, Ty,
+            TyKind, array_element, contains_inference_var, for_each_child_type, is_ry_value_type,
+            map_child_types, native_scalar, scalar, substitute_rigid, union_of, unknown,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -342,7 +342,9 @@ impl<'db> InferenceTable<'db> {
                     element,
                     Entry::Unbound {
                         level: element_level,
-                        constraint: element_constraint.join(Constraint::ScalarNumeric),
+                        constraint: element_constraint
+                            .join(Constraint::ScalarNumeric)
+                            .unwrap_or(element_constraint),
                     },
                 );
             }
@@ -409,6 +411,23 @@ impl<'db> InferenceTable<'db> {
                 else {
                     unreachable!("shallow resolve leaves only unbound variables")
                 };
+                // A text or logical literal that meets a `List` item takes the ry type, the only
+                // member of its constraint a `List` holds.
+                let literal_item = match (left_constraint, right_constraint) {
+                    (Constraint::StrLiteral, Constraint::ArrayItem)
+                    | (Constraint::ArrayItem, Constraint::StrLiteral) => Some(NativeScalar::Str),
+                    (Constraint::BoolLiteral, Constraint::ArrayItem)
+                    | (Constraint::ArrayItem, Constraint::BoolLiteral) => Some(NativeScalar::Bool),
+                    _ => None,
+                };
+                if let Some(native) = literal_item {
+                    let item = native_scalar(db, native);
+                    self.bind(db, left, item)?;
+                    return self.bind(db, right, item);
+                }
+                let Some(constraint) = left_constraint.join(right_constraint) else {
+                    return Err(UnifyError::Mismatch(a, b));
+                };
                 let (winner, loser) = if left.0 <= right.0 {
                     (left, right)
                 } else {
@@ -418,7 +437,7 @@ impl<'db> InferenceTable<'db> {
                     winner,
                     Entry::Unbound {
                         level: left_level.min(right_level),
-                        constraint: left_constraint.join(right_constraint),
+                        constraint,
                     },
                 );
                 self.set(loser, Entry::Redirect(winner));
@@ -605,7 +624,12 @@ impl<'db> InferenceTable<'db> {
                 level,
                 constraint: existing,
             } => {
-                let joined = existing.join(constraint);
+                let Some(joined) = existing.join(constraint) else {
+                    return Err(UnifyError::ConstraintRejected(
+                        constraint,
+                        Ty::new(db, TyKind::Var(representative)),
+                    ));
+                };
                 if joined != existing {
                     self.set(
                         representative,
@@ -1032,13 +1056,44 @@ impl<'db> InferenceTable<'db> {
                 TyKind::Vector(expected_element) | TyKind::List(expected_element),
             ) if array_element(db, actual).is_some() => {
                 let element = array_element(db, actual).map(|element| self.resolve(db, element));
-                let Some(element) = element else {
+                let Some(mut element) = element else {
                     return false;
                 };
-                let atomic = !is_ry_value_type(db, element);
-                atomic == matches!(expected.kind(db), TyKind::Vector(_))
-                    && self.compatible_probe(db, element, *expected_element, depth + 1)
+                // An undecided number item (`[1, 2]`) passed to R code is the `F64` that shares
+                // R's `double`.
+                if matches!(expected.kind(db), TyKind::Vector(_))
+                    && matches!(
+                        self.open_constraint(db, element),
+                        Some(Constraint::Number | Constraint::Frac)
+                    )
+                {
+                    let f64 = native_scalar(db, NativeScalar::F64);
+                    if self.unify(db, element, f64).is_err() {
+                        return false;
+                    }
+                    element = f64;
+                }
+                match (element.kind(db), expected.kind(db)) {
+                    (TyKind::Native(native), TyKind::Vector(_)) => {
+                        native.shared_atomic().is_some_and(|atomic| {
+                            self.compatible_probe(
+                                db,
+                                scalar(db, atomic),
+                                *expected_element,
+                                depth + 1,
+                            )
+                        })
+                    }
+                    (TyKind::Native(_), _) | (_, TyKind::Vector(_)) => false,
+                    _ => self.compatible_probe(db, element, *expected_element, depth + 1),
+                }
             }
+            // `F64`, `Bool` and `Str` share the representation of R's `double`, `logical` and
+            // `character`, so they pass to R code as those; no other ry number does.
+            (TyKind::Native(native), _) => match native.shared_atomic() {
+                Some(atomic) => self.compatible_probe(db, scalar(db, atomic), expected, depth + 1),
+                None => false,
+            },
             // Only the projection direction: structural into nominal happens only via `@new`.
             (TyKind::Named(actual_name, actual_arguments), _) => {
                 match self.representation(db, *actual_name, actual_arguments) {
@@ -1704,7 +1759,7 @@ fn constraint_rejects<'db>(
         table
             .rigid_constraints
             .get(name)
-            .is_some_and(|declared| declared.join(constraint) == *declared)
+            .is_some_and(|declared| declared.join(constraint) == Some(*declared))
     };
     // A union satisfies a bound when every member does: `double | integer` is a number either way.
     if let TyKind::Union(members) = ty.kind(db) {
@@ -1751,10 +1806,11 @@ fn constraint_rejects<'db>(
             TyKind::Scalar(
                 Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Character,
             )
+            | TyKind::Native(_)
             | TyKind::Any
             | TyKind::Unknown => true,
             TyKind::Rigid(name) => binder_implies(name),
-            _ => false,
+            _ => is_ry_value_type(db, ty),
         },
         Constraint::ScalarNumeric => match ty.kind(db) {
             TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double)
@@ -1765,13 +1821,54 @@ fn constraint_rejects<'db>(
             _ => false,
         },
         Constraint::ArrayItem => match ty.kind(db) {
-            TyKind::Scalar(
-                Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Character,
-            )
+            TyKind::Any | TyKind::Unknown => true,
+            TyKind::Rigid(name) => binder_implies(name),
+            _ => is_ry_value_type(db, ty),
+        },
+        Constraint::Number | Constraint::Int | Constraint::Frac => match ty.kind(db) {
+            TyKind::Native(native) => match constraint {
+                Constraint::Int => native.is_integer(),
+                Constraint::Frac => native.is_fraction(),
+                _ => native.is_number(),
+            },
+            TyKind::Any | TyKind::Unknown => true,
+            TyKind::Rigid(name) => binder_implies(name),
+            _ => false,
+        },
+        Constraint::Eq => match ty.kind(db) {
+            TyKind::Function(_) => false,
+            TyKind::Rigid(name) => binder_implies(name),
+            _ => true,
+        },
+        Constraint::WholeLiteral { integer } => match ty.kind(db) {
+            TyKind::Native(native) => native.is_number(),
+            TyKind::Scalar(Atomic::Double) => true,
+            TyKind::Scalar(Atomic::Integer) => integer,
+            TyKind::Any | TyKind::Unknown => true,
+            TyKind::Rigid(name) => binder_implies(name),
+            _ => false,
+        },
+        Constraint::FracLiteral => match ty.kind(db) {
+            TyKind::Native(native) => native.is_fraction(),
+            TyKind::Scalar(Atomic::Double) | TyKind::Any | TyKind::Unknown => true,
+            TyKind::Rigid(name) => binder_implies(name),
+            _ => false,
+        },
+        Constraint::StrLiteral => match ty.kind(db) {
+            TyKind::Native(NativeScalar::Str)
+            | TyKind::Scalar(Atomic::Character)
             | TyKind::Any
             | TyKind::Unknown => true,
             TyKind::Rigid(name) => binder_implies(name),
-            _ => is_ry_value_type(db, ty),
+            _ => false,
+        },
+        Constraint::BoolLiteral => match ty.kind(db) {
+            TyKind::Native(NativeScalar::Bool)
+            | TyKind::Scalar(Atomic::Logical)
+            | TyKind::Any
+            | TyKind::Unknown => true,
+            TyKind::Rigid(name) => binder_implies(name),
+            _ => false,
         },
     };
     (!admissible).then_some(UnifyError::ConstraintRejected(constraint, ty))

@@ -15,6 +15,16 @@ was declined.
 
 ## Drafts
 
+### [Typed ry's native value types](/development/design/native-types/)
+
+ry's own value types (`I64`, `F64`, `Bool`, `Str`, `List<T>`) and the record, tag and pattern
+additions, with the explicit R boundary and the runtime contract.
+
+### [Typed ry's hill climb](/development/design/language-climb/)
+
+How typed ry grows: a fitness function over speed against Rust, friendliness cases and soundness
+fuzzing, run by `just climb`, and the log of each step.
+
 ### [Open type-system questions](/development/design/open-questions/)
 
 Type-system questions with no settled answer: tagged unions, S3 dispatch, modeling data frames and
@@ -81,8 +91,3 @@ How typed ry runs close to Rust's speed: a typed core IR compiled ahead of time 
 types, Rust-like layouts for numbers, strings, lists, records and tags, direct calls with no
 environment, native values freed by compiler-inserted reference counts with in-place reuse, and
 conversion only at the R boundary. It builds to the runtime contract of the native-types design.
-
-### [Preloaded base image](/development/design/base-image/)
-
-How ry's runtime could start from one mapped image of base R with the default packages already
-loaded, and which interpreter state lives outside the heap and how each piece is restored.

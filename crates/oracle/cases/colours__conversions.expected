@@ -61,7 +61,10 @@
 | green
 | blue 
 | [1] "invalid color name 'notacolour'"
-| [1] "invalid RGB specification"
+|       [,1]
+| red    170
+| green  187
+| blue   204
 | [1] "numerical color values must be >= 0, found -1"
 |   [,1]
 | h    0
@@ -97,8 +100,7 @@
 |  [5] "Accent"          "Dark 2"          "Paired"          "Pastel 1"       
 |  [9] "Pastel 2"        "Set 1"           "Set 2"           "Set 3"          
 | [13] "Tableau 10"      "Classic Tableau" "Polychrome 36"   "Alphabet"       
-|       black      orange     skyblue bluishgreen 
-|   "#000000"   "#E69F00"   "#56B4E9"   "#009E73" 
+| [1] "#000000" "#E69F00" "#56B4E9" "#009E73"
 | [1] "#4B0055" "#00588B" "#009B95" "#53CC67" "#FDE333"
 | [1] "#FF0000" "#FFDB00" "#49FF00" "#00FF92" "#0092FF" "#4900FF" "#FF00DB"
 | [1] "#FF0000" "#FF8000" "#FFFF00" "#FFFF80"

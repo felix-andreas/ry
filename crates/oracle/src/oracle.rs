@@ -494,10 +494,13 @@ fn collect_cases(path: &Path, cases: &mut Vec<PathBuf>) {
 /// rmarkdown` comment, because without them it fails in an environment-specific way (a missing
 /// vignette engine reports a temporary path) rather than in a way two engines can agree on.
 /// When GNU R cannot list its packages, every case is kept.
-pub fn runnable_cases(cases: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<(PathBuf, Vec<String>)>) {
+pub fn runnable_cases(
+    cases: Vec<PathBuf>,
+    installed: impl FnOnce() -> Option<Vec<String>>,
+) -> (Vec<PathBuf>, Vec<(PathBuf, Vec<String>)>) {
     let required: Vec<Vec<String>> = cases.iter().map(|case| case_requirements(case)).collect();
     let installed = match required.iter().any(|packages| !packages.is_empty()) {
-        true => installed_packages(),
+        true => installed(),
         false => None,
     };
     let Some(installed) = installed else {
@@ -548,6 +551,16 @@ pub fn installed_packages() -> Option<Vec<String>> {
             .map(str::to_string)
             .collect()
     })
+}
+
+/// The packages `engine` can load, asked of the engine itself by running a probe script. A
+/// comparison against the recorded outcomes uses it, since no GNU R is there to ask.
+pub fn engine_packages(engine: &dyn Engine) -> Option<Vec<String>> {
+    let scratch = Scratch::new(Path::new("packages")).ok()?;
+    let probe = scratch.path().join("packages.R");
+    std::fs::write(&probe, "cat(rownames(installed.packages()), sep = '\\n')\n").ok()?;
+    let outcome = engine.run(&probe).ok()?;
+    Some(outcome.stdout.lines().map(str::to_string).collect())
 }
 
 pub fn expected_path(case: &Path) -> PathBuf {

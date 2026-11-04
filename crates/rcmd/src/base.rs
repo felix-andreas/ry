@@ -308,6 +308,78 @@ pub fn build(sources: &BuildSources<'_>, output: &Path) -> Result<()> {
     fs::rename(&staging, output).map_err(io_error(output))
 }
 
+/// The start-up image of a built base tree (`interp::image`), whose sessions load it in place of
+/// base R's loader and the default packages: [`build`] writes it as its last step, and this
+/// writes it again over the tree at `root` with the runtime `libr` and the front end `rcmd`,
+/// which a runtime of another build needs, because an image loads only into the build that wrote
+/// it.
+pub fn write_start_image(root: &Path, rcmd: &Path, libr: &Path) -> Result<()> {
+    let libr_link = libr_path(root);
+    let front_end = if Platform::HOST == Platform::Windows {
+        root.join("bin").join("R.exe")
+    } else {
+        root.join("bin/exec/ry-rcmd")
+    };
+    let work = root.join(format!(".image-{}", staging_suffix()));
+    for path in [&libr_link, &front_end, &work] {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(io_error(parent))?;
+        }
+    }
+    fs::create_dir_all(&work).map_err(io_error(&work))?;
+    remove_if_present(&libr_link)?;
+    remove_if_present(&front_end)?;
+    crate::link(libr, &libr_link)?;
+    crate::link(rcmd, &front_end)?;
+    let written = run_image_writer(&front_end, root, &work);
+    fs::remove_dir_all(&work).map_err(io_error(&work))?;
+    remove_if_present(&libr_link)?;
+    remove_if_present(&front_end)?;
+    for directory in ["lib", "bin/exec", "bin/x64"] {
+        let path = root.join(directory);
+        if path.is_dir() && read_directory(&path)?.is_empty() {
+            fs::remove_dir(&path).map_err(io_error(&path))?;
+        }
+    }
+    written
+}
+
+/// Runs `front_end write-start-image` in the home `root`. The environment is emptied down to
+/// what finds programs and temporary files, because the image holds start-up as this one
+/// environment ran it; the steps that read the environment run again on every start.
+fn run_image_writer(front_end: &Path, root: &Path, work: &Path) -> Result<()> {
+    let image = root.join("library/base/R/ry-start.image");
+    let mut command = Command::new(front_end);
+    command
+        .arg("write-start-image")
+        .arg(&image)
+        .current_dir(work)
+        .env_clear()
+        .env("R_HOME", root)
+        .env("HOME", work)
+        .env("R_LIBS_USER", "NULL")
+        .env("R_LIBS_SITE", "NULL");
+    for name in ["PATH", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    let output = command
+        .output()
+        .map_err(|error| Error::Command("ry-rcmd write-start-image".into(), error.to_string()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(Error::Command(
+        "ry-rcmd write-start-image".into(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    ))
+}
+
 /// The version fields a build reads from the R sources.
 struct Release {
     /// `4.6.2`.
@@ -432,6 +504,7 @@ impl<'a> Builder<'a> {
         )?;
         self.build_help()?;
         self.compile_native()?;
+        run_image_writer(&self.front_end(), &self.root, &self.work)?;
         self.finish()
     }
 

@@ -551,7 +551,15 @@ View <- function(x, title) {
       assign(name, utils::read.table(file, header = TRUE, as.is = FALSE, ...), envir = lazydata)
     }
     switch(tolower(sub("^.*\\.", "", path)),
-      r = sys.source(file, envir = lazydata, chdir = TRUE),
+      r = {
+        # `data()` runs a script in a child of the global environment, which reaches the
+        # `system.file()` shim on `tools:ry`; `lazydata`'s parent is the base environment.
+        scratch <- new.env(parent = globalenv())
+        sys.source(file, envir = scratch, chdir = TRUE)
+        for (object in ls(scratch, all.names = TRUE)) {
+          assign(object, get(object, envir = scratch), envir = lazydata)
+        }
+      },
       rda = , rdata = load(file, envir = lazydata),
       csv = table(sep = ";"),
       tab = , txt = table()
@@ -929,7 +937,7 @@ View <- function(x, title) {
     unlink(temporary, recursive = TRUE)
     dir.create(temporary, recursive = TRUE, showWarnings = FALSE)
     tools:::makeLazyLoadDB(values, file.path(temporary, "s4"),
-      variables = c(".ry_s4_meta", names))
+      variables = c(".ry_s4_meta", names), compress = FALSE)
     unlink(cache$path, recursive = TRUE)
     if (!file.rename(temporary, cache$path)) {
       stop("cannot move the database into place")

@@ -1,13 +1,12 @@
-# Closures and lapply: small closures called in a loop, then lapply and vapply over a sequence.
-closures <- function(n: integer) -> double {
-  add <- function(a: double, b: double) -> double a + b
+# Closures and list maps: small closures called in a loop, then two maps over a range.
+closures <- function(n: I64) -> F64 {
+  add <- function(a: F64, b: F64) -> F64 a + b
   scale <- 3
-  times_scale <- function(a: double) -> double a * scale
-  s <- 0
-  for (i in 1:n) s <- add(s, times_scale(i))
-  squares <- lapply(seq_len(n), function(x: integer) -> double x * (x + 0.5))
-  halves <- vapply(seq_len(n), function(x: integer) -> double x / 2, numeric(1))
-  squared: double[] <- unlist(squares)
-  s + sum(squared) + sum(halves)
+  times_scale <- function(a: F64) -> F64 a * scale
+  s: F64 <- 0
+  for (i in List.range(1, n)) s <- add(s, times_scale(Num.to_f64(i)))
+  squares <- List.map(List.range(1, n), function(x: I64) -> F64 Num.to_f64(x) * (Num.to_f64(x) + 0.5))
+  halves <- List.map(List.range(1, n), function(x: I64) -> F64 Num.to_f64(x) / 2)
+  s + List.sum(squares) + List.sum(halves)
 }
-measure("closures", function() closures(300000L))
+measure("closures", function() closures(300000))

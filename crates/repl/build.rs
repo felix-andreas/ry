@@ -52,6 +52,11 @@ fn embed_base(out_dir: &Path) {
                 );
             }
             println!("cargo:rerun-if-changed={}", manifest.display());
+            // `ry-rcmd start-image` rewrites the start-up image without touching the manifest.
+            println!(
+                "cargo:rerun-if-changed={}",
+                root.join("library/base/R/ry-start.image").display()
+            );
             let mut archive = Vec::new();
             append_tree(&root, "", &mut archive);
             let level = if env::var("PROFILE").is_ok_and(|profile| profile == "release") {

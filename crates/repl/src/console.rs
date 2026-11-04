@@ -884,8 +884,10 @@ fn token_style(kind: SyntaxKind) -> Style {
         | IN_KW => Style::new().fg(Color::Blue).bold(),
         TRUE_KW | FALSE_KW | NULL_KW | NA_KW | NA_INTEGER_KW | NA_REAL_KW | NA_COMPLEX_KW
         | NA_CHARACTER_KW | INF_KW | NAN_KW => Style::new().fg(Color::Purple),
-        STRING | RAW_STRING => Style::new().fg(Color::Green),
-        INTEGER | DOUBLE | COMPLEX => Style::new().fg(Color::Cyan),
+        STRING | RAW_STRING | FSTRING_START | FSTRING_TEXT | FSTRING_END => {
+            Style::new().fg(Color::Green)
+        }
+        INTEGER | DOUBLE | COMPLEX | SUFFIXED_NUMBER => Style::new().fg(Color::Cyan),
         COMMENT | ANNOTATION_MARKER => Style::new().fg(Color::DarkGray),
         ERROR_TOKEN => Style::new().fg(Color::Red).underline(),
         _ => Style::new(),

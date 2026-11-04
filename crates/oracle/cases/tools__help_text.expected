@@ -14,7 +14,7 @@
 |      
 | Arguments:
 | 
-|        x: An R object.  Currently there are methods for numeric/logical
+|        x: an R object.  Currently there are methods for numeric/logical
 |           vectors and date, date-time and time interval objects.
 |           Complex vectors are allowed for ‘trim = 0’, only.
 | 
@@ -41,8 +41,8 @@
 | 
 | References:
 | 
-|      Becker, R. A., Chambers, J. M. and Wilks, A. R. (1988) _The New S
-|      Language_.  Wadsworth & Brooks/Cole.
+|      Becker RA, Chambers JM, Wilks AR (1988). _The New S Language_.
+|      Chapman and Hall/CRC, London. ISBN 053409192X.
 | 
 | See Also:
 | 
@@ -55,17 +55,17 @@
 |      xm <- mean(x)
 |      c(xm, mean(x, trim = 0.10))
 |      
-| [1] 103
+| [1] 105
 | [1] "<!DOCTYPE html><html><head><title>R: Arithmetic Mean</title>"                                   
-| [2] "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" />"                      
-| [3] "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=yes\" />"
+| [2] "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\">"                        
+| [3] "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=yes\">"  
 | [4] "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.15.3/dist/katex.min.css\">"
-| [1] "\\inputencoding{utf8}"                         
-| [2] "\\HeaderA{mean}{Arithmetic Mean}{mean}"        
-| [3] "\\methaliasA{mean.default}{mean}{mean.default}"
-| [4] "\\keyword{univar}{mean}"                       
-| [5] "%"                                             
-| [6] "\\begin{Description}"                          
+| [1] "\\HeaderA{mean}{Arithmetic Mean}{mean}"             
+| [2] "\\methaliasA{mean.default}{mean}{mean.default}"     
+| [3] "\\keyword{univar}{mean}"                            
+| [4] "%"                                                  
+| [5] "\\begin{Description}"                               
+| [6] "Generic function for the (trimmed) arithmetic mean."
 | ### Name: mean
 | ### Title: Arithmetic Mean
 | ### Aliases: mean mean.default
@@ -103,7 +103,8 @@
 | 
 |      ...: numeric or complex or logical vectors.
 | 
-|    na.rm: logical.  Should missing values (including ‘NaN’) be removed?
+|    na.rm: logical (‘TRUE’ or ‘FALSE’).  Should missing values
+|           (including ‘NaN’) be removed?
 | 
 | _D_e_t_a_i_l_s:
 | 
@@ -145,8 +146,8 @@
 | 
 | _R_e_f_e_r_e_n_c_e_s:
 | 
-|      Becker, R. A., Chambers, J. M. and Wilks, A. R. (1988) _The New S
-|      Language_.  Wadsworth & Brooks/Cole.
+|      Becker RA, Chambers JM, Wilks AR (1988). _The New S Language_.
+|      Chapman and Hall/CRC, London. ISBN 053409192X.
 | 
 | _S_e_e _A_l_s_o:
 | 
@@ -169,12 +170,12 @@
 |      sum(1:5, NA, na.rm = TRUE)
 |      
 | 
-| [1] "Package:            tools" "Version:            4.3.3"
+| [1] "Package:            tools" "Version:            4.6.2"
 | [3] "Priority:           base" 
 [messages]
 [warnings]
 [errors]
 [value]
 character
-| c("Package:            tools", "Version:            4.3.3", "Priority:           base"
+| c("Package:            tools", "Version:            4.6.2", "Priority:           base"
 | )

@@ -263,7 +263,7 @@ fn ry_syntax_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let (what, range) = match node.kind() {
                 SyntaxKind::RECORD_EXPR => ("record", node.text_range()),
                 SyntaxKind::TUPLE_EXPR => ("tuple", node.text_range()),
-                SyntaxKind::ARRAY_EXPR => ("Array", node.text_range()),
+                SyntaxKind::ARRAY_EXPR => ("List", node.text_range()),
                 SyntaxKind::TAG_EXPR => ("tag", node.text_range()),
                 // The arms can be long, so the head `match (x)` stands for the expression.
                 _ => {
@@ -2881,15 +2881,18 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 renderer.render(db, *expected),
                 renderer.render(db, *found)
             );
-            // An R vector never becomes an Array implicitly, because the conversion checks
+            // An R vector never becomes a `List` implicitly, because the conversion checks
             // every item; say which call does it.
-            if array_element(db, *expected).is_some()
-                && matches!(
-                    found.kind(db),
-                    TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::NamedVector(_) | TyKind::List(_)
-                )
-            {
-                message.push_str(". Convert an R vector with `as.Array()`");
+            if array_element(db, *expected).is_some() {
+                match found.kind(db) {
+                    TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::NamedVector(_) => {
+                        message.push_str(". Convert an R vector with `List.from_r()`");
+                    }
+                    TyKind::List(_) | TyKind::NamedList(_) | TyKind::Tuple(_) | TyKind::Record(_) => {
+                        message.push_str(". Convert an R list with `List.from_r()`");
+                    }
+                    _ => {}
+                }
             }
             message
         }
@@ -3103,6 +3106,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         TypeErrorKind::NotAList { found } => {
             format!("expected a list, found `{}`", renderer.render(db, *found))
         }
+        TypeErrorKind::TryNotResult { found } => format!(
+            "`try` needs a result such as `:Ok(value) | :Err(error)`, but this is `{}`",
+            renderer.render(db, *found)
+        ),
+        TypeErrorKind::TryOutsideFunction => "`try` returns an `:Err` early from the function around it, but this one is not inside a function. Use `match` to handle the error here".to_owned(),
+        TypeErrorKind::RecordUpdateBase { found } => format!(
+            "only a record can be updated with `..`, but this is `{}`",
+            renderer.render(db, *found)
+        ),
         TypeErrorKind::NotIterable { found } => format!(
             "this `for` sequence is `{}`, which cannot be iterated. Expected a vector or list.",
             renderer.render(db, *found)
@@ -3352,12 +3364,12 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *container)
         ),
         TypeErrorKind::ArrayItemsDiffer { first, found } => format!(
-            "this item is `{}`, but the Array's first item is `{}`. An Array's items share one type and are never converted into each other",
+            "this item is `{}`, but the list's first item is `{}`. A `List`'s items share one type and are never converted into each other",
             renderer.render(db, *found),
             renderer.render(db, *first)
         ),
         TypeErrorKind::ArrayItemType { found } => format!(
-            "an Array cannot hold `{}`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags",
+            "a `List` cannot hold `{}`. Its items are ry values: numbers such as `I64` and `F64`, `Bool`, `Str`, records, tuples, tags and other collections",
             renderer.render(db, *found)
         ),
         TypeErrorKind::ArrayOperands {
@@ -3377,35 +3389,78 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 )
             };
             let reason = if is_r_vector(*left) || is_r_vector(*right) {
-                "Convert the R vector with `as.Array()` first"
+                "Convert the R vector with `List.from_r()` first"
             } else if left == right
                 || array_element(db, *left) == Some(*right)
                 || array_element(db, *right) == Some(*left)
             {
                 match *operator {
-                    "&" | "|" => "On Arrays it takes `logical` items",
-                    _ => "On Arrays it takes `integer` or `double` items",
+                    "&" | "|" => "On lists it takes `Bool` items",
+                    _ => "On lists it takes number items",
                 }
             } else {
-                "Both sides must have one item type, and `integer` and `double` are never converted into each other"
+                "Both sides must have one item type, and number types are never converted into each other"
             };
             format!("{head}. {reason}")
         }
         TypeErrorKind::ArrayIndex { double, found } => {
             let rule = if *double {
-                "`x[[i]]` on an Array takes one position, an `integer` or `double`"
+                "`x[[i]]` on a `List` takes one position, an `I64`"
             } else {
-                "`x[i]` on an Array takes one index: positions, or a `logical` mask"
+                "`x[i]` on a `List` takes one index: a `List<I64>` of positions, or a `List<Bool>` mask"
             };
             match found {
                 Some(found) => format!(
-                    "{rule}, but this index is `{}`. An Array has one dimension and no names",
+                    "{rule}, but this index is `{}`. A `List` has one dimension and no names",
                     renderer.render(db, *found)
                 ),
-                None => format!("{rule}. An Array has one dimension and no names"),
+                None => format!("{rule}. A `List` has one dimension and no names"),
             }
         }
-        TypeErrorKind::ArrayMissingValue => "an Array holds no missing values. Mark an item that may be missing with a tag instead, as in `[:Some(1), :None]`".to_owned(),
+        TypeErrorKind::NumberOperands {
+            operator,
+            left,
+            right: None,
+        } => format!(
+            "`{operator}` is not defined on `{}`. It takes a number",
+            renderer.render(db, *left)
+        ),
+        TypeErrorKind::NumberOperands {
+            operator,
+            left,
+            right: Some(right),
+        } => {
+            let head = format!(
+                "`{operator}` is not defined between `{}` and `{}`",
+                renderer.render(db, *left),
+                renderer.render(db, *right)
+            );
+            let native = |ty: Ty<'_>| match ty.kind(db) {
+                TyKind::Native(native) => Some(*native),
+                _ => None,
+            };
+            match (native(*left), native(*right)) {
+                (Some(left), Some(right)) if left != right && left.is_number() && right.is_number() => {
+                    format!(
+                        "{head}. Number types are never converted into each other: convert one side, as in `Num.to_{}(x)`",
+                        left.name().to_lowercase()
+                    )
+                }
+                (Some(_), Some(_)) => head,
+                _ => format!(
+                    "{head}. A ry value meets an R value only through a conversion such as `Num.from_r()`"
+                ),
+            }
+        }
+        TypeErrorKind::IntegerDivision { ty } => format!(
+            "`/` is not defined on `{}`, because an integer type has no exact quotient. Use `%/%` for floored division, or convert to `F64` with `Num.to_f64()`",
+            renderer.render(db, *ty)
+        ),
+        TypeErrorKind::LiteralOutOfRange { expected } => format!(
+            "this literal does not fit `{}`, which cannot hold its value exactly",
+            renderer.render(db, *expected)
+        ),
+        TypeErrorKind::ArrayMissingValue => "a `List` holds no missing values. Mark an item that may be missing with a tag instead, as in `[:Some(1), :None]`".to_owned(),
         TypeErrorKind::ConflictingTags { first, second } => format!(
             "these branches build `{}` and `{}`, one tag with two payload shapes. Within a union a tag has one shape, so that a `match` can tell its cases apart",
             renderer.render(db, *first),
@@ -3571,6 +3626,7 @@ impl<'db> TypeRenderer<'db> {
             TyKind::Unknown => "Unknown".to_owned(),
             TyKind::Null => "NULL".to_owned(),
             TyKind::Scalar(atomic) => atomic_name(*atomic).to_owned(),
+            TyKind::Native(native) => native.name().to_owned(),
             TyKind::Vector(element) => format!("{}[]", self.render(db, *element)),
             TyKind::NamedVector(element) => format!("{}[named]", self.render(db, *element)),
             TyKind::List(element) => format!("list[{}]", self.render(db, *element)),
@@ -3767,8 +3823,15 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         Constraint::Key => "a key (a `logical`, `integer`, `double` or `character` scalar)",
         Constraint::ScalarNumeric => "a scalar numeric value (`integer` or `double`)",
         Constraint::ArrayItem => {
-            "an Array item (a single `logical`, `integer`, `double` or `character` value, or a ry value such as a record, tuple or tag)"
+            "a `List` item (a ry value such as a number, `Bool`, `Str`, record, tuple or tag)"
         }
+        Constraint::Number => "a ry number (`I64` or `F64`)",
+        Constraint::Int => "an `I64`",
+        Constraint::Frac => "an `F64`",
+        Constraint::Eq => "a value `==` can compare (anything but a function)",
+        Constraint::WholeLiteral { .. } | Constraint::FracLiteral => "a number",
+        Constraint::StrLiteral => "a string",
+        Constraint::BoolLiteral => "`TRUE` or `FALSE`",
     }
 }
 

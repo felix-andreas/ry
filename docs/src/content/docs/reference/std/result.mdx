@@ -32,14 +32,14 @@ annotation can use it.
 <TabItem label="Inline">
 
 ```r
-Result.is_ok <- function<T, E>(result: Result<T, E>) -> logical
+Result.is_ok <- function<T, E>(result: Result<T, E>) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T, E> fn(result: Result<T, E>) -> logical
+#: <T, E> fn(result: Result<T, E>) -> Bool
 Result.is_ok <- function(result)
 ```
 
@@ -49,11 +49,11 @@ Result.is_ok <- function(result)
 Whether the result is `:Ok`.
 
 ```r ry run runtime=ry dput
-Result.is_ok(:Ok(1L))
+Result.is_ok(:Ok(1))
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L32)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L34)
 
 ## `Result.is_err`
 
@@ -61,14 +61,14 @@ Result.is_ok(:Ok(1L))
 <TabItem label="Inline">
 
 ```r
-Result.is_err <- function<T, E>(result: Result<T, E>) -> logical
+Result.is_err <- function<T, E>(result: Result<T, E>) -> Bool
 ```
 
 </TabItem>
 <TabItem label="Comments">
 
 ```r
-#: <T, E> fn(result: Result<T, E>) -> logical
+#: <T, E> fn(result: Result<T, E>) -> Bool
 Result.is_err <- function(result)
 ```
 
@@ -78,11 +78,11 @@ Result.is_err <- function(result)
 Whether the result is `:Err`.
 
 ```r ry run runtime=ry dput
-Result.is_err(:Ok(1L))
+Result.is_err(:Ok(1))
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L40)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L42)
 
 ## `Result.with_default`
 
@@ -107,11 +107,11 @@ Result.with_default <- function(result, default)
 The `:Ok` value, or `default` for an `:Err`.
 
 ```r ry run runtime=ry dput
-Result.with_default(:Err(:Missing), 0L)
-#> 0L
+Result.with_default(:Err(:Missing), 0)
+#> 0
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L48)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L50)
 
 ## `Result.map`
 
@@ -136,11 +136,11 @@ Result.map <- function(result, f)
 Applies `f` to an `:Ok` value and leaves an `:Err` alone.
 
 ```r ry run runtime=ry dput
-Result.map(:Ok(2L), function(x) x * 10L)
-#> :Ok(20L)
+Result.map(:Ok(2), function(x) x * 10)
+#> :Ok(20)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L56)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L58)
 
 ## `Result.map_err`
 
@@ -169,7 +169,7 @@ Result.map_err(:Err("disk full"), function(e) :IoError(e))
 #> :Err(:IoError("disk full"))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L64)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L66)
 
 ## `Result.map_both`
 
@@ -194,11 +194,11 @@ Result.map_both <- function(result, on_ok, on_err)
 Applies `on_ok` to an `:Ok` value or `on_err` to an `:Err` value.
 
 ```r ry run runtime=ry dput
-Result.map_both(:Err(404L), function(x) x, function(code) Str.concat("HTTP ", Num.to_str(code)))
+Result.map_both(:Err(404), function(x) x, function(code) Str.concat("HTTP ", Num.to_str(code)))
 #> :Err("HTTP 404")
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L72)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L74)
 
 ## `Result.map2`
 
@@ -223,11 +223,11 @@ Result.map2 <- function(first, second, f)
 Combines two `:Ok` values with `f`, or returns the first `:Err`.
 
 ```r ry run runtime=ry dput
-Result.map2(Str.to_integer("6"), Str.to_integer("7"), function(a, b) a * b)
-#> :Ok(42L)
+Result.map2(Str.to_i64("6"), Str.to_i64("7"), function(a, b) a * b)
+#> :Ok(42i64)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L80)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L82)
 
 ## `Result.and_then`
 
@@ -253,11 +253,11 @@ Chains a step that can fail: `f` gets the `:Ok` value and returns the next resul
 of the chain joins both, so a step can fail with a reason of its own.
 
 ```r ry run runtime=ry dput
-Result.and_then(Str.to_integer("-3"), function(n) if (n > 0L) :Ok(n) else :Err(:NotPositive))
+Result.and_then(Str.to_i64("-3"), function(n) if (n > 0) :Ok(n) else :Err(:NotPositive))
 #> :Err(:NotPositive)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L89)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L91)
 
 ## `Result.on_err`
 
@@ -282,8 +282,8 @@ Result.on_err <- function(result, f)
 Recovers from an `:Err`: `f` gets the error and returns the next result.
 
 ```r ry run runtime=ry dput
-Result.on_err(Str.to_integer("x"), function(e) :Ok(0L))
-#> :Ok(0L)
+Result.on_err(Str.to_i64("x"), function(e) :Ok(0))
+#> :Ok(0)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L97)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L99)

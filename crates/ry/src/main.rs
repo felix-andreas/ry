@@ -220,6 +220,16 @@ fn main() -> ExitCode {
         return run_debug_adapter();
     }
 
+    // Rust ignores SIGPIPE, so a write to a closed pipe returns an error and `println!` panics on
+    // it: `ry check | head` would end in a panic message. The commands below only write a report,
+    // so they take the default disposition back and end silently, as `cat` and `grep` do. The
+    // language server keeps the error, because it shuts down through its own transport.
+    #[cfg(unix)]
+    if !matches!(cli.command, Command::Server { .. }) {
+        // SAFETY: no other thread exists yet, and SIG_DFL is a valid disposition for SIGPIPE.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
+
     // Recursive tree walks can exceed a constrained `ulimit -s` main stack.
     let command = move || match cli.command {
         Command::Check {
@@ -373,8 +383,9 @@ fn release_executable_code() {
 /// Runs `file` and exits with its status: 1 for a top-level error or a script strict mode
 /// refuses, 2 when the script cannot be read or the runtime cannot start.
 fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode {
-    // R reads a script in the session's encoding, so a Latin-1 script is valid R; the runtime
-    // reads the bytes itself, and the check sees them with invalid UTF-8 replaced.
+    // R reads a script in the session's encoding, so a Latin-1 script is valid R. The check
+    // sees each invalid byte as `?`, which keeps every offset, and the elaborated program is
+    // the file's own bytes with the literals respelled.
     let source = match fs::read(file) {
         Ok(source) => source,
         Err(error) => {
@@ -385,9 +396,15 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
     let Some(mut preflight) = Preflight::discover(file, file.to_path_buf()) else {
         return ExitCode::from(2);
     };
-    if preflight.check(&String::from_utf8_lossy(&source)) == Verdict::Refuse {
-        return ExitCode::from(1);
+    let mut text = String::with_capacity(source.len());
+    for chunk in source.utf8_chunks() {
+        text.push_str(chunk.valid());
+        text.extend(std::iter::repeat_n('?', chunk.invalid().len()));
     }
+    let Some(literals) = preflight.check_literals(&text) else {
+        return ExitCode::from(1);
+    };
+    let program = (!literals.is_empty()).then(|| preflight::with_i64_suffixes(&source, &literals));
     let flags = runtime_flags(preflight.config());
     drop(preflight);
     match runtime {
@@ -395,7 +412,15 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
             #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
             release_executable_code();
             runtime_exit(checking_loads().and_then(|()| {
-                repl::run_on_ry_runtime(Some(file), None, &arguments, flags, None, None)
+                repl::run_on_ry_runtime(
+                    Some(file),
+                    program.as_deref(),
+                    None,
+                    &arguments,
+                    flags,
+                    None,
+                    None,
+                )
             }))
         }
         Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
@@ -443,13 +468,13 @@ fn run_console(
     // filter does not check it a second time, and later commands see its definitions.
     let input = match script {
         Some(script) => {
-            if preflight.check(&script) == Verdict::Refuse {
+            let Some(program) = preflight.check(&script) else {
                 return ExitCode::from(1);
-            }
+            };
             preflight.rename(console);
             match runtime {
                 Runtime::GnuR => preflight::erase(&script),
-                Runtime::Ry => script,
+                Runtime::Ry => program,
             }
         }
         None => String::new(),
@@ -754,6 +779,7 @@ fn run_load(
             let status = checking_loads().and_then(|()| {
                 repl::run_on_ry_runtime(
                     file,
+                    None,
                     Some(&input),
                     &[],
                     runtime_flags(preflight.config()),

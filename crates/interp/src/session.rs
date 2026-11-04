@@ -31,12 +31,63 @@ pub struct StartOptions {
     /// `interactive()`, which also makes `keep.source` default to `TRUE` (base R's system
     /// profile sets it from `interactive()`).
     pub interactive: bool,
+    /// Lets a start that [`crate::image::applies`] to load the start-up image of its R home;
+    /// `None` always starts the slow way.
+    pub image: Option<crate::image::ImageHost>,
 }
 
 /// Starts the session. Errors here are fatal: base R did not load.
 pub unsafe fn start(options: StartOptions) -> R<()> {
     interp().command_args = options.command_args;
     interp().interactive = options.interactive;
+    prepare_process();
+    let home = crate::system::r_home();
+    let site_profile = options.site_profile.then(site_profile_path).flatten();
+    let user_profile = options.user_profile.then(user_profile_path).flatten();
+    if let Some(host) = &options.image
+        && crate::image::applies(
+            options.interactive,
+            site_profile.is_some() || user_profile.is_some(),
+        )
+    {
+        match crate::image::load(host, &home) {
+            Ok(true) => return start_from_image(&home),
+            Ok(false) => {}
+            Err(crate::image::LoadError::Untouched(message)) => {
+                write_console(
+                    format!("ry: starting without the start-up image: {message}\n").as_bytes(),
+                    true,
+                );
+            }
+            Err(crate::image::LoadError::Partial(message)) => {
+                return Err(error(format!(
+                    "the start-up image did not load: {message}; set RY_IMAGE=0 to start \
+                     without it"
+                )));
+            }
+        }
+    }
+    start_slowly(&home, site_profile, user_profile)?;
+    Ok(())
+}
+
+/// Starts a session the slow way in the process's environment and writes its start-up image to
+/// `path`, as the base tree's build does. Fails when start-up warned, since a start from the
+/// image would not print the warning.
+pub unsafe fn write_start_image(host: crate::image::ImageHost, path: &std::path::Path) -> R<()> {
+    interp().interactive = false;
+    prepare_process();
+    let home = crate::system::r_home();
+    let before = crate::image::before();
+    if start_slowly(&home, None, None)? {
+        return Err(error("start-up warned, so it cannot be imaged"));
+    }
+    crate::image::write(&host, &home, path, &before).map_err(error)
+}
+
+/// The process state every start sets before R code runs: the C library's locale, the system
+/// `Renviron`, and the interpreter's locale.
+unsafe fn prepare_process() {
     // The runtime reports a UTF-8 locale (`l10n_info`), so the C library's character
     // functions must agree: iconv's `//TRANSLIT` and packages calling `mbrtowc` read
     // LC_CTYPE, which stays "C" (ASCII) until something sets it. Numeric formatting keeps
@@ -44,12 +95,94 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     libc::setlocale(libc::LC_CTYPE, c"C.UTF-8".as_ptr());
     read_renviron();
     crate::system::init_locale();
+}
+
+/// The start-up steps that read the process environment, run after the image loads: the
+/// C-level options and the variables that describe this machine, base R's profile, and the
+/// `.onLoad` hooks of the default packages that set options from the environment. Every option
+/// is removed first, so that the hooks, which set only options not yet set, see the order GNU
+/// R's start-up gives them.
+unsafe fn start_from_image(home: &str) -> R<()> {
+    crate::envir::clear_options()?;
+    define_process_variables()?;
+    source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
+    // The profile attaches a new `Autoloads` at position 2, in front of the default packages;
+    // the image's own sits behind them, where the slow start put it.
+    eval_text(
+        "detach(pos = 2L); .AutoloadEnv <- as.environment(\"Autoloads\")",
+        base_env(),
+    )?;
+    // utils' hook also assigns `osVersion`, this machine's, into its sealed namespace.
+    eval_text(
+        "local(for (name in c(\"utils\", \"grDevices\", \"stats\")) { \
+         namespace <- asNamespace(name); \
+         if (name == \"utils\") unlockBinding(\"osVersion\", namespace); \
+         namespace$.onLoad(dirname(getNamespaceInfo(name, \"path\")), name); \
+         if (name == \"utils\") lockBinding(\"osVersion\", namespace) })",
+        base_env(),
+    )?;
+    remove_library_site()?;
+    conditions::print_warnings()
+}
+
+/// The options and base variables that depend on this process: the C-level options,
+/// `.Machine`, `.Platform` and the graphics device variables.
+unsafe fn define_process_variables() -> R<()> {
     crate::envir::install_default_options()?;
     let machine = crate::system::machine()?;
     eval::define(values::install(".Machine")?, machine, base_env())?;
     let platform = crate::system::platform()?;
     eval::define(values::install(".Platform")?, platform, base_env())?;
-    crate::graphics::define_device_variables()?;
+    crate::graphics::define_device_variables()
+}
+
+/// The base profile binds `.Library.site` in the global environment too, so that a site profile
+/// can assign it directly; GNU R's global environment no longer holds it afterwards.
+unsafe fn remove_library_site() -> R<()> {
+    eval_text(
+        "if (exists(\".Library.site\", envir = globalenv(), inherits = FALSE)) \
+         rm(\".Library.site\", envir = globalenv())",
+        global_env(),
+    )?;
+    Ok(())
+}
+
+/// The site profile to source: `R_PROFILE`, else `R_HOME/etc/Rprofile.site`, if it exists.
+fn site_profile_path() -> Option<String> {
+    let site = std::env::var("R_PROFILE")
+        .ok()
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| format!("{}/etc/Rprofile.site", crate::system::r_home()));
+    std::path::Path::new(&site).exists().then_some(site)
+}
+
+/// The user profile to source: `R_PROFILE_USER`, else `./.Rprofile`, else `~/.Rprofile`, if it
+/// exists. A set `R_PROFILE_USER` is the only candidate, even when the file is missing (callr
+/// points it at its own profile).
+fn user_profile_path() -> Option<String> {
+    let user = match std::env::var("R_PROFILE_USER")
+        .ok()
+        .filter(|path| !path.is_empty())
+    {
+        Some(path) => Some(crate::connections::expand_path(&path)),
+        None => [
+            ".Rprofile".to_owned(),
+            crate::connections::expand_path("~/.Rprofile"),
+        ]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).exists()),
+    };
+    user.filter(|path| std::path::Path::new(path).exists())
+}
+
+/// Start-up from the C-level options to the default packages, as GNU R runs it. Returns whether
+/// start-up warned.
+unsafe fn start_slowly(
+    home: &str,
+    site_profile: Option<String>,
+    user_profile: Option<String>,
+) -> R<bool> {
+    define_process_variables()?;
     eval::define(
         values::install(".BaseNamespaceEnv")?,
         base_namespace(),
@@ -60,7 +193,6 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
         base_namespace(),
         crate::heap().known().namespace_registry,
     )?;
-    let home = crate::system::r_home();
     let version = crate::system::r_version();
     let (major, minor) = crate::system::OLDEST_SUPPORTED_R;
     if (version.major, version.minor) < (major, minor) {
@@ -75,45 +207,18 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
     eval_text(".OptRequireMethods()", global_env())?;
     // GNU R's order: the site profile, then the user profile, both after `methods` loads.
-    if options.site_profile {
-        let site = std::env::var("R_PROFILE")
-            .ok()
-            .filter(|path| !path.is_empty())
-            .unwrap_or_else(|| format!("{home}/etc/Rprofile.site"));
-        if std::path::Path::new(&site).exists() {
-            source_file(&site, base_env())?;
-        }
+    if let Some(site) = site_profile {
+        source_file(&site, base_env())?;
     }
-    // The base profile binds `.Library.site` in the global environment too, so that a site
-    // profile can assign it directly; GNU R's global environment no longer holds it afterwards.
-    eval_text(
-        "if (exists(\".Library.site\", envir = globalenv(), inherits = FALSE)) \
-         rm(\".Library.site\", envir = globalenv())",
-        global_env(),
-    )?;
-    if options.user_profile {
-        // A set `R_PROFILE_USER` is the only candidate, even when the file is missing (callr
-        // points it at its own profile).
-        let user = match std::env::var("R_PROFILE_USER")
-            .ok()
-            .filter(|path| !path.is_empty())
-        {
-            Some(path) => Some(crate::connections::expand_path(&path)),
-            None => [
-                ".Rprofile".to_owned(),
-                crate::connections::expand_path("~/.Rprofile"),
-            ]
-            .into_iter()
-            .find(|path| std::path::Path::new(path).exists()),
-        };
-        if let Some(user) = user.filter(|path| std::path::Path::new(path).exists()) {
-            source_file(&user, global_env())?;
-        }
+    remove_library_site()?;
+    if let Some(user) = user_profile {
+        source_file(&user, global_env())?;
     }
     eval_text(".First.sys()", global_env())?;
     crate::frame::attach_package()?;
+    let warned = !interp().warnings.is_empty();
     conditions::print_warnings()?;
-    Ok(())
+    Ok(warned)
 }
 
 /// GNU R 4.3.3's `registerS3methods()`, as [`stable_hash`] of its formals and body. Setting

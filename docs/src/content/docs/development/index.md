@@ -95,24 +95,18 @@ of `libr` and the crates it links, so editing the formatter or the IDE layer nev
   deliberately not a `ry.toml` key, because the configuration file is a user-facing contract.
 - `ry debug ast <file>` prints a file's syntax tree.
 - `ry debug erase <file>...` rewrites files in place as their erasure, the plain R that `ry R` runs.
-- `ry debug analysis-stats [path]` (or `just stats`) runs the full pipeline over a workspace,
-  through the same queries the language server uses. It prints the wall time and resident-memory
-  growth of each phase, the slowest files by type-checking time, and an incremental probe that
-  reports keystroke latency and rechecks per keystroke. An editor-coverage table then counts how
-  often hover and goto-definition answer at sampled identifiers, grouped by role (call head,
-  variable, argument name, `$` field, `pkg::name`), and how often signature help answers inside a
-  call, with a few unanswered lines per role. A completion table then deletes the tail of sampled
-  identifiers (half the name, then all but two characters) and counts how often the original name
-  is in the top five, with the latency percentiles of those requests. A references table checks
-  find-references on sampled package bindings against an independent lexical resolver
-  (`crates/ry/src/scope_oracle.rs`), which knows only the syntax tree and R's scoping rules, and
-  counts a sample as found when the two sets of occurrences are equal. Every second sample also
-  renames the binding and renames it back, which must succeed and restore the text. Both are
-  grouped into function locals and package-level names. The resolver leaves out names whose binding
-  scoping does not decide: inside a formula or quoted code, a `:=` target, an argument of a call it
-  cannot see, and a `<<-` target that no enclosing function or file defines. It also follows ry in
-  giving each `for` loop's variable its own binding, which later assignments continue. It forces `[check] typing` on. Build with
-  `--release` when absolute numbers matter; a debug build still gives honest ratios.
+- `ry debug analysis-stats [path]` (or `just stats`) runs the full pipeline over a workspace through
+  the language server's queries, with `[check] typing` forced on, and prints:
+  - the wall time and resident-memory growth of each phase, and the slowest files to type-check;
+  - keystroke latency and rechecks per keystroke, from an incremental probe;
+  - how often hover, goto-definition and signature help answer at sampled identifiers, by role
+    (call head, variable, argument name, `$` field, `pkg::name`);
+  - how often completion of a truncated identifier puts the original name in the top five, with
+    latency percentiles;
+  - whether find-references on sampled package bindings agrees with an independent lexical resolver
+    (`crates/ry/src/scope_oracle.rs`), and whether renaming a binding and back restores the text.
+
+  Build with `--release` when absolute numbers matter; a debug build gives honest ratios.
 
 ## The docs site
 
@@ -129,12 +123,8 @@ follows them across pages: `Untyped` (the plain R a reader starts from), then `C
 `match`, Arrays, `DataFrame`, the standard library, nominal types) or when its subject is an
 annotation itself. Pages with tabs are `.mdx`. Use one tab group per idea, not one per snippet.
 
-Every block of `ry` output on a page is a test: mark it as described in
-[Docs examples](/development/testing#docs-examples), and `just docs-test` runs each tab through the
-real binary and compares the output. An output block after `</Tabs>` must hold for every tab, and a
-tab group with no output block must give the same findings in every tab. When the output differs
-between tabs, as it often does between `Untyped` and the typed tabs, each tab holds its own output
-block after its code, and a tab left without one must report no errors.
+Every block of `ry` output on a page is a test that `just docs-test` runs through the real binary;
+[Docs examples](/development/testing#docs-examples) has the marker format and the rules for tabs.
 
 Agents read the site as Markdown. Every page is also served at its URL plus `.md` (for example
 `/tutorial/types.md`), with the frontmatter, imports and components removed and each tab
@@ -147,8 +137,8 @@ has a "View as Markdown" link. The code is `docs/src/lib/markdown.ts`, the three
 quoted, because YAML reads the rest of the line as a comment.
 
 Run `just docs` for a live preview, and `cd docs && bun run build` (or `pnpm build`) for a full
-build, which needs Node 22.23.4 or newer. The live site changes only when someone deploys it with `just docs-deploy` or
-the Docs workflow ([Releasing](/development/releasing#deploying-the-docs-site)).
+build, which needs Node 22.23.4 or newer. The live site changes only when someone deploys it with
+`just docs-deploy` or the Docs workflow ([Releasing](/development/releasing#deploying-the-docs-site)).
 
 [Formatting rules](/reference/formatting-rules) is generated, so do not edit it by hand. Edit
 `crates/format/tests/formatter.template.md` and regenerate the page with `just format-docs`.

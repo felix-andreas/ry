@@ -404,6 +404,17 @@ pub(crate) unsafe fn guarded_sexp(body: impl FnOnce() -> Option<Sexp>) -> R<Sexp
     Ok(value)
 }
 
+/// Whether a device other than the null device is open.
+pub(crate) fn has_open_device() -> bool {
+    with_engine(|engine| {
+        engine
+            .devices
+            .iter()
+            .skip(1)
+            .any(|device| !device.is_null())
+    })
+}
+
 /// Marks what the engine keeps alive: every device's display list and event environment.
 pub unsafe fn trace(marker: &mut Marker<'_>) {
     ENGINE.with(|engine| {

@@ -117,6 +117,12 @@ bench-why *args:
     cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/why/run.py {{ args }}
 
+# Scores typed ry's hill climb: speed against Rust, friendliness cases, and seeded soundness fuzzing, e.g.
+# `just climb`, `just climb --only friendly`, or `just climb --log "adapt literal arithmetic"` to append a step to tools/climb/log.tsv.
+climb *args:
+    cargo build --release -p ry-lang -p libr
+    python3 -I tools/climb/run.py {{ args }}
+
 # Times base R kernels (sort, regex, grouping, xts/zoo rolling ops, ...) on GNU R and ry's runtime with checksums, e.g. `just bench-base --rows 1e6 --memory`. zoo and xts load from RY_BENCH_RLIB.
 bench-base *args:
     cargo build --release -p ry-lang -p libr -p rcmd
@@ -262,6 +268,23 @@ base-r profile="release" target="":
     	*) library=libR.so rcmd=ry-rcmd ;;
     esac
     tools/base-r/build.sh "$output" "$build/$rcmd" "$build/$library"
+
+# Write the start-up image of target/base-r again for this checkout's runtime. `just base-r` writes
+# it too, but an image loads only into the runtime build that wrote it, so after an edit to the
+# runtime every start is the slow one until this runs.
+start-image profile="release":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    profile={{ quote(profile) }}
+    target_root="${CARGO_TARGET_DIR:-target}"
+    case "$profile" in dev | test) directory=debug ;; bench) directory=release ;; *) directory=$profile ;; esac
+    cargo build --profile "$profile" -p libr -p rcmd
+    case "$(rustc -vV | sed -n 's/^host: //p')" in
+    	*windows*) library=R.dll rcmd=ry-rcmd.exe ;;
+    	*apple*) library=libR.dylib rcmd=ry-rcmd ;;
+    	*) library=libR.so rcmd=ry-rcmd ;;
+    esac
+    "$target_root/$directory/$rcmd" start-image "$target_root/base-r" --libr "$target_root/$directory/$library"
 
 # Build a release archive into release/VERSION: `ry` alone, with ry's runtime (libR) and base R
 # embedded in it, LICENSE and THIRD_PARTY_NOTICES. TARGET defaults to this machine; Windows builds for x86_64-pc-windows-gnullvm with

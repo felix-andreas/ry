@@ -936,6 +936,22 @@ unsafe fn symbol_text(symbol: Sexp) -> String {
 static REGISTRY: Global<Vec<Sexp>> = Global::new(Vec::new());
 static BUILTINS: Global<Option<Builtins>> = Global::new(None);
 
+/// The start-up image's view of the runtime: the ALTREP classes, which hold the addresses of
+/// their methods and so must be the loading process's own, by registration order; or why the
+/// runtime's state rules out an image.
+pub(crate) unsafe fn image_objects() -> Result<Vec<Sexp>, String> {
+    builtins().map_err(|_| "ry's ALTREP classes cannot be registered".to_owned())?;
+    crate::frame_altrep::register();
+    let runtime = crate::runtime();
+    if !runtime.dlls.is_empty() || !runtime.unloaded_dlls.is_empty() {
+        return Err("a shared library is loaded".to_owned());
+    }
+    if !runtime.c_callables.is_empty() || !runtime.truelengths.is_empty() {
+        return Err("native code changed the runtime's tables".to_owned());
+    }
+    Ok(registry().clone())
+}
+
 fn registry<'a>() -> &'a mut Vec<Sexp> {
     // SAFETY: the API is single-threaded, see `Global`.
     unsafe { &mut *REGISTRY.as_ptr() }

@@ -1,0 +1,21 @@
+[package]
+name = "typed"
+description = "ry's typed core: native values, the typed IR and its ahead-of-time compiler"
+edition = "2024"
+version.workspace = true
+license = "GPL-2.0-or-later"
+publish = false
+
+[lib]
+path = "src/typed.rs"
+
+[dependencies]
+heap = { path = "../heap" }
+interp = { path = "../interp" }
+rustc-hash.workspace = true
+smallvec = "1.15"
+cranelift-codegen = "0.136"
+cranelift-frontend = "0.136"
+cranelift-jit = "0.136"
+cranelift-module = "0.136"
+cranelift-native = "0.136"

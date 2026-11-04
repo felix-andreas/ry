@@ -7,7 +7,10 @@ format(as.POSIXct("2010-07-05 10:00", tz = "Europe/Paris"), usetz = TRUE)
 format(as.POSIXct("2013-01-01", tz = "Asia/Kolkata"), "%z %Z")
 
 # A time in the spring-forward gap, and the two readings of a time the clocks pass twice.
+# glibc's mktime starts from the offset its previous call found, so a repeated time with an
+# unknown isdst reads from whichever offset came last; a summer time pins it to daylight time.
 unclass(as.POSIXct("2010-03-14 02:30:00", tz = ny))
+invisible(as.POSIXct("2010-07-01 12:00:00", tz = ny))
 unclass(as.POSIXct("2010-11-07 01:30:00", tz = ny))
 lt <- as.POSIXlt("2010-11-07 01:30:00", tz = ny)
 lt$isdst <- 0L

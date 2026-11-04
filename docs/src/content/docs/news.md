@@ -8,6 +8,15 @@ description: Release announcements and project news
 - **ry needs no GNU R to run R.** `ry run`, `ry load`, `ry test`, `ry document` and `ry install`
   use a build of base R 4.6.2 that ships inside `ry`, so `R.version` reports R 4.6.2. Set
   `R_HOME` to a GNU R installation to emulate that release instead ([Installation](/installation#r)).
+- **Typed code runs on native values.** A typed function in strict mode compiles before its first
+  call to native code over numbers, strings and lists, so typed programs that build strings or
+  call local functions run 10 to 120 times faster than on GNU R ([Benchmarks](/benchmarks)).
+- **S4 definitions run natively.** `setClass()`, `setGeneric()`, `setMethod()`,
+  `setClassUnion()` and `methods::cacheMetaData()` run in Rust for the shapes packages usually
+  write, with results identical to the methods package's R code. On a generated package with 2,892
+  S4 definitions, the first `new()` after an uncached load takes about 0.5 s instead of about 6 s.
+- **`format()` shows external pointers** as GNU R does (`<pointer: 0x…>`), so `str()` of a value
+  that holds one, such as an S4 class definition, no longer fails with "Found no format() method".
 
 ### Known limitations
 

@@ -8,5 +8,5 @@
 - caught: careful
 [warnings]
 [errors]
-- unable to find an inherited method for function ‘f’ for signature ‘"character"’ (in (function (classes, fdef, mtable) )
+- unable to find an inherited method for function ‘f’ for signature ‘x = "character"’
 [value]
