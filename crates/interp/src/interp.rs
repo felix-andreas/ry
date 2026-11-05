@@ -34,6 +34,7 @@ pub mod base_fast_paths;
 pub mod builtin_libraries;
 pub mod builtins;
 pub mod bytecode;
+pub mod code_image;
 pub mod coerce;
 pub mod conditions;
 pub mod connections;
@@ -341,6 +342,8 @@ pub struct Interp {
     pub forks: fork::Forks,
     /// The environment of `package:ry` (see [`crate::standard_library::builtins_env`]).
     pub builtins_env: Option<Sexp>,
+    /// The compiled code images of installed packages ([`code_image`]).
+    pub code_image: code_image::State,
 }
 
 struct InterpState {
@@ -458,6 +461,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         #[cfg(unix)]
         forks: fork::Forks::default(),
         builtins_env: None,
+        code_image: code_image::State::default(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();

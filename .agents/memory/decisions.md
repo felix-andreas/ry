@@ -7787,10 +7787,38 @@ Each one trades a narrow class of missed errors for a class of false reports see
   stamped with the ry build; a different build ignores the stamp and compiles at first call. Base R
   is compiled into a section of the base image keyed by the runtime hash (`base-image.md`). `ry
   load` and scripts compile at first call, so that tier must be cheap. `r-runtime.md`, "Where
-  bytecode comes from", is the spec. Not implemented yet: the bytecode format changes with the
-  call-path redesign (`development/design/call-path.md`), so its on-disk form waits for that.
+  bytecode comes from", is the spec. Installed packages are implemented as code images
+  (below); the base image's code section is not.
 - **Impact.** One source of truth (the package's R code plus the install output derived from it),
-  no invalidation logic, and no hashing at load.
+  and no invalidation logic.
+
+## Code images: compiled code beside the lazy-load database
+
+- **Shape.** `R CMD INSTALL` writes `R/<pkg>.ryc` beside `R/<pkg>.rdb` (`crates/interp/src/code_image.rs`,
+  driver `crates/rcmd/src/code-image.R`). A fresh session records every fetch from the package's
+  databases (`ryCodeImageRecord`), loads the namespace, forces every binding, optionally trains
+  (`--ry-train=tests|examples|<script>`, `ry install --train`), and compiles and writes each recorded
+  closure (`ryCodeImageWrite`). A failure warns and leaves the package without an image.
+- **Identity without a second key.** A closure is named by its record's database offset plus the
+  order the stream reader creates closures (`serialize::unserialize_with_closures`), which depends
+  on the record bytes alone. The image stores each record's length and FNV-1a hash and the database
+  length, so a database rewritten by another install (GNU R's, or a different version) is ignored
+  record by record; the hash is computed only for databases that have an image.
+- **No second copy of the source.** A code object is encoded against its closure's body: every
+  language object the code points at is written as its preorder number in the body
+  (`serialize::walk_source`). Nested function bodies are compiled eagerly at install
+  (`bytecode::compile_nested_functions`) so their code is in the image too.
+- **Stamp.** The runtime identity (`RY_RUNTIME_ID`, passed in `StartOptions::build`) and a layout
+  magic; any other build reads the image as absent. Payloads carry a hash; a mismatch is an error
+  telling the user to reinstall, because the file is build output and corruption is not expected.
+- **Training.** A trained image keeps each code object's PROFILE counters, inline-cache hints and
+  FEEDBACK words. Persisted entry counts at or above the tier-up threshold make a hot body enter the
+  optimizing tier at its first call in a new process. TIER1 code and inline caches are not saved:
+  the first is process-local machine code, the second holds heap pointers.
+- **Native code.** The image reserves an offset/length pair for install-time native code, written
+  as zeros. Filling it waits for the shared SSA IR of `crates/jit` and `crates/typed`
+  (`backlog.md`, "Install-time native code").
+- `RY_CODE_IMAGE=0` ignores images at load; `--ry-no-code-image` skips writing one.
 
 ## Vectors grow in place into spare capacity
 

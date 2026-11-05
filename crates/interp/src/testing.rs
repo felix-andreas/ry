@@ -4,7 +4,7 @@
 
 use {
     crate::{
-        deparse, eval,
+        bytecode, code_image, deparse, eval,
         graphics_render::{
             Affine, Clip, Definition, Drawing, Extend, Fill, FillRule, Format, Item, Mark,
             Operator, Outline, Page, Pattern, Rect, Segment, Stop, Stroke, circle_outline,
@@ -14,7 +14,10 @@ use {
         unwind::Unwind,
         values,
     },
-    heap::{Heap, object::Sexp},
+    heap::{
+        Heap,
+        object::{Sexp, SexpType},
+    },
     std::sync::{Mutex, Once},
     syntax::testing::Entropy,
 };
@@ -122,6 +125,152 @@ unsafe fn outcomes(body: &str, a: &str, b: &str) -> (String, Vec<String>) {
             .collect();
         (direct, compiled)
     }
+}
+
+/// Bodies that put into a code object what the arithmetic generator does not: strings, nested
+/// functions, named arguments and calls the compiler leaves to the evaluator.
+const IMAGE_BODIES: &[&str] = &[
+    "g <- function(x, y = 2L) x * y + a; g(b) + g(a, y = 3L)",
+    "v <- c(first = a, second = b); if (length(v) > 1L) v[[\"second\"]] else \"none\"",
+    "h <- function(n) { total <- 0; for (i in seq_len(n)) total <- total + i; total }; h(3L) + a",
+    "s <- list(x = a, y = \"text\", z = NULL); is.null(s$z) && !is.null(s$x)",
+    "k <- 0L; repeat { k <- k + 1L; if (k >= 3L) break }; k * b",
+];
+
+/// A compiled closure survives the code image's encoding: decoding its code against the same
+/// body gives an object that encodes to the same bytes and computes what the AST evaluator
+/// computes, trained or not, and every mutation of the encoding decodes or fails with an R error.
+pub fn check_code_image_round_trip(entropy: &mut impl Entropy) {
+    let body = if entropy.below(3) == 0 {
+        IMAGE_BODIES[entropy.below(IMAGE_BODIES.len())].to_owned()
+    } else {
+        program(entropy)
+    };
+    let arguments = ["3L", "-2.5", "NA", "TRUE", "0", "[3L]"];
+    let a = arguments[entropy.below(arguments.len())];
+    let b = arguments[entropy.below(arguments.len())];
+    let mutations: Vec<(usize, u8)> = (0..8)
+        .map(|_| (entropy.below(1 << 16), entropy.below(256) as u8))
+        .collect();
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed, and every object it reads is rooted by the
+        // global environment or the handle scope.
+        unsafe {
+            let (direct, _) = outcomes(&body, a, b);
+            let mark = crate::heap().handle_mark();
+            let reset = format!("a <- {a}\nb <- {b}\ns <- 7L\nk <- 0L\ni <- 0L");
+            let global = values::global_env();
+            let compiled = (|| -> Result<Option<(Sexp, Sexp, Sexp)>, Unwind> {
+                let function = eval::find_var(values::install("f")?, global)?;
+                let code = bytecode::compiled_body(function)?;
+                if code.kind() != SexpType::Bytecode {
+                    return Ok(None);
+                }
+                Ok(Some((function, code, bytecode::source_body(function))))
+            })();
+            let Ok(Some((function, code, source))) = compiled else {
+                crate::heap().release_handles(mark);
+                return;
+            };
+            for trained in [false, true] {
+                let Some(bytes) = code_image::encode(code, source, trained) else {
+                    continue;
+                };
+                let decoded = code_image::decode_untrusted(&bytes, source)
+                    .unwrap_or_else(|_| panic!("`{body}`: an encoded code object must decode"));
+                crate::heap().root(decoded);
+                assert_eq!(
+                    code_image::encode(decoded, source, trained).as_deref(),
+                    Some(&bytes[..]),
+                    "`{body}`: decoding then encoding must give the same bytes (trained: {trained})"
+                );
+                let copy = eval::make_closure(function.car(), source, values::nil(), global)
+                    .unwrap_or_else(|_| panic!("cannot make a closure"));
+                crate::heap().set_cdr(copy, decoded);
+                eval::define(
+                    values::install("g_image").unwrap_or_else(|_| panic!("cannot install")),
+                    copy,
+                    global,
+                )
+                .unwrap_or_else(|_| panic!("cannot define the decoded closure"));
+                run(&reset);
+                let outcome = run(&format!("g_image({a}, {b})"));
+                assert_eq!(
+                    direct, outcome,
+                    "`{body}` with a = {a}, b = {b}: the decoded code must compute what the \
+                     evaluator does (trained: {trained})"
+                );
+                for &(position, value) in &mutations {
+                    let mut mutated = bytes.clone();
+                    let at = position % mutated.len().max(1);
+                    match mutated.get_mut(at) {
+                        Some(byte) if value % 4 != 0 => *byte ^= value,
+                        _ => mutated.truncate(at),
+                    }
+                    // A mutation may decode to some other valid object; it must only never panic.
+                    if let Ok(object) = code_image::decode_untrusted(&mutated, source) {
+                        crate::heap().root(object);
+                    }
+                }
+            }
+            crate::heap().release_handles(mark);
+        }
+    });
+}
+
+/// An image file's record table reads back as it was written, an image of another build or
+/// database reads as absent, and a corrupted file reads as absent or fails with a message, never
+/// panics or names a payload outside the file.
+pub fn check_code_image_file(entropy: &mut impl Entropy) {
+    let count = entropy.below(6);
+    let mut offset = 0u64;
+    let mut records = Vec::new();
+    let mut payloads = Vec::new();
+    for _ in 0..count {
+        offset += 1 + entropy.below(1000) as u64;
+        records.push((offset, entropy.below(5000) as u32, entropy.next_u64()));
+        payloads.push((0..entropy.below(40)).map(|_| entropy.below(256) as u8).collect::<Vec<u8>>());
+    }
+    let database_length = offset + entropy.below(100) as u64;
+    let build = "fuzz-build";
+    let trained = entropy.below(2) == 0;
+    let mutations: Vec<(usize, u8)> = (0..1 + entropy.below(4))
+        .map(|_| (entropy.below(1 << 16), entropy.below(256) as u8))
+        .collect();
+    with_interpreter(|| {
+        let bytes = code_image::image_bytes(build, trained, database_length, &records, &payloads)
+            .unwrap_or_else(|_| panic!("a small image must write"));
+        let entries = code_image::parse(&bytes, build, database_length)
+            .unwrap_or_else(|message| panic!("a written image must parse: {message}"))
+            .unwrap_or_else(|| panic!("a written image must belong to its build"));
+        assert_eq!(entries.len(), records.len());
+        for ((entry, record), payload) in entries.iter().zip(&records).zip(&payloads) {
+            assert_eq!((entry.offset, entry.length, entry.hash), *record);
+            let start = entry.payload_offset as usize;
+            assert_eq!(
+                bytes.get(start..start + entry.payload_length as usize),
+                Some(&payload[..])
+            );
+        }
+        assert_eq!(code_image::parse(&bytes, "another-build", database_length), Ok(None));
+        assert_eq!(code_image::parse(&bytes, build, database_length + 1), Ok(None));
+        let mut mutated = bytes.clone();
+        for &(position, value) in &mutations {
+            let at = position % mutated.len().max(1);
+            match mutated.get_mut(at) {
+                Some(byte) if value % 4 != 0 => *byte ^= value,
+                _ => mutated.truncate(at),
+            }
+        }
+        if let Ok(Some(entries)) = code_image::parse(&mutated, build, database_length) {
+            for entry in entries {
+                assert!(
+                    entry.payload_offset + u64::from(entry.payload_length) <= mutated.len() as u64,
+                    "a parsed image must not name a payload outside the file"
+                );
+            }
+        }
+    });
 }
 
 /// The deparsed value of the last expression of `text` in the global environment, or `error`.

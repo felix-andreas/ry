@@ -29,6 +29,7 @@ pub const MINIMUM_SVN_REVISION: u32 = 89194;
 
 /// The R-level half of an installation, run on ry's interpreter.
 const INSTALL_DRIVER: &str = include_str!("install.R");
+const CODE_IMAGE_DRIVER: &str = include_str!("code-image.R");
 
 /// ry's C headers, `crates/libr/include` as built, by path relative to `include/`.
 mod headers {
@@ -1458,6 +1459,7 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                         "-l" | "--library" => library = rest.next().map(PathBuf::from),
                         "--install-tests" => options.tests = true,
                         "--no-test-load" => options.test_load = false,
+                        "--ry-no-code-image" => options.code_image = false,
                         "--build" => build = true,
                         "--no-docs" | "--no-help" => options.driver_flags.push("--no-docs".into()),
                         // A single-architecture build has nothing to skip, and every build
@@ -1469,6 +1471,8 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                         other => {
                             if let Some(path) = other.strip_prefix("--library=") {
                                 library = Some(PathBuf::from(path));
+                            } else if let Some(training) = other.strip_prefix("--ry-train=") {
+                                options.training = Training::parse(training)?;
                             } else if !other.starts_with('-') {
                                 packages.push(PathBuf::from(other));
                             } else {
@@ -1491,6 +1495,9 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                             installed.name,
                             tarball.display()
                         ));
+                    }
+                    if let Some(code_image) = &installed.code_image {
+                        output.push_str(&format!("** {code_image}\n"));
                     }
                     output.push_str(&format!("* DONE ({})\n", installed.name));
                 }
@@ -1638,6 +1645,9 @@ pub struct Installed {
     pub directory: PathBuf,
     /// The package's shared object, when it has compiled code.
     pub library: Option<PathBuf>,
+    /// What writing the package's code image reported: how many closures it compiled, or the
+    /// warning that it was left out.
+    pub code_image: Option<String>,
 }
 
 /// How `R CMD INSTALL` installs a package.
@@ -1650,6 +1660,48 @@ pub struct InstallOptions {
     /// `--no-docs`, `--no-data`, `--no-inst`, `--no-demo`, `--no-exec` and `--no-R`, which the
     /// R-level half reads.
     pub driver_flags: Vec<String>,
+    /// Writes the compiled code image beside each lazy-load database; `--ry-no-code-image` turns
+    /// it off.
+    pub code_image: bool,
+    /// The workload the code image is trained on before it is written (`--ry-train=`).
+    pub training: Training,
+}
+
+/// The workload an install runs before it writes the package's code image, so that the image
+/// carries the type feedback and tier counters the run left.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Training {
+    /// Compiles every closure without running anything.
+    #[default]
+    None,
+    /// Sources each `.R` file in the package's `tests/`.
+    Tests,
+    /// Runs the examples of the package's help pages.
+    Examples,
+    /// Sources a script.
+    Script(PathBuf),
+}
+
+impl Training {
+    /// Parses the value of `--ry-train=`: `tests`, `examples`, or the path of a script.
+    pub fn parse(value: &str) -> Result<Training> {
+        match value {
+            "none" => Ok(Training::None),
+            "tests" => Ok(Training::Tests),
+            "examples" => Ok(Training::Examples),
+            script => {
+                let path = PathBuf::from(script);
+                if !path.is_file() {
+                    return Err(Error::Usage(format!(
+                        "--ry-train takes tests, examples or the path of a script, and {script} is none of them"
+                    )));
+                }
+                std::path::absolute(&path)
+                    .map(Training::Script)
+                    .map_err(io_error(&path))
+            }
+        }
+    }
 }
 
 impl Default for InstallOptions {
@@ -1658,6 +1710,8 @@ impl Default for InstallOptions {
             tests: false,
             test_load: true,
             driver_flags: Vec::new(),
+            code_image: true,
+            training: Training::None,
         }
     }
 }
@@ -1866,6 +1920,7 @@ fn install_binary(
         name: name.to_owned(),
         directory: target,
         library: library_path,
+        code_image: None,
     })
 }
 
@@ -1988,6 +2043,9 @@ fn install_source(
             "installing the R code of package '{name}' failed\n{error}"
         ))
     })?;
+    let code_image = options
+        .code_image
+        .then(|| write_code_image(home, staging, &build, name, &staged_library, &r_libs, options));
     if options.test_load {
         let check = staging.join("test-load.R");
         write(
@@ -2020,7 +2078,51 @@ fn install_source(
                 .find(|path| path.exists())
         }),
         directory: target,
+        code_image,
     })
+}
+
+/// Writes the code image of the package `name` staged in `staged_library`, in a fresh session
+/// that loads it, trains on `options.training`, and compiles every closure of its lazy-load
+/// database. An image speeds up the package's first calls but is not part of what the package
+/// means, so a failure leaves the package without one and turns into a warning.
+fn write_code_image(
+    home: &Path,
+    staging: &Path,
+    build: &Path,
+    name: &str,
+    staged_library: &Path,
+    r_libs: &str,
+    options: &InstallOptions,
+) -> String {
+    let driver = staging.join("code-image.R");
+    let training = match &options.training {
+        Training::None => "none".to_owned(),
+        Training::Tests => "tests".to_owned(),
+        Training::Examples => "examples".to_owned(),
+        Training::Script(path) => path.display().to_string(),
+    };
+    let written = write(&driver, CODE_IMAGE_DRIVER).and_then(|()| {
+        run_r(
+            home,
+            staging,
+            &driver,
+            &[
+                name.to_owned(),
+                staged_library.display().to_string(),
+                build.display().to_string(),
+                training,
+            ],
+            r_libs,
+        )
+    });
+    match written {
+        Ok(output) => {
+            let counts = output.lines().last().unwrap_or_default();
+            format!("code image: {counts}")
+        }
+        Err(error) => format!("Warning: the code image of '{name}' was not written\n{error}"),
+    }
 }
 
 /// Builds the compiled code of the package source tree at `package` in place, against ry's R

@@ -261,6 +261,57 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Sexp> {
     }
 }
 
+/// Compiles, ahead of their first call, the functions `code` defines with `function(...)`
+/// expressions, as [`Op::Closure`] would at the first run of each, and the functions those
+/// define in turn. `env` stands in for the frame such a function closes over, which compiling
+/// reads only to resolve names it then guards at run time, so any frame below the enclosure gives
+/// correct code. Installing a package calls this, so that a package's nested functions (R6
+/// methods, callbacks) are written with its top-level ones.
+///
+/// # Safety
+/// `code` is a live code object made by this module.
+pub unsafe fn compile_nested_functions(code: Sexp, env: Sexp) -> R<()> {
+    let words = values::ints(code.car()).to_vec();
+    let constants = code.cdr();
+    let mut pc = 0;
+    while pc < words.len() {
+        let word = words[pc] as u32;
+        let Some(op) = op_of(word) else {
+            return Err(error("compiled code holds an invalid instruction"));
+        };
+        let operand = |index: usize| words.get(pc + 1 + index).map(|&word| word as usize);
+        if op == Op::Closure
+            && let (Some(formals), Some(body), Some(srcref)) = (operand(1), operand(2), operand(3))
+            && body < length(constants)
+        {
+            let source = constants.element(body);
+            let nested = if source.kind() == SexpType::Bytecode {
+                Some(source)
+            } else if worth_compiling(source) {
+                let closure = eval::make_closure(
+                    constants.element(formals),
+                    source,
+                    constants.element(srcref),
+                    env,
+                )?;
+                crate::heap().root(closure);
+                let compiled = compile(source, closure).ok().flatten();
+                if let Some(compiled) = compiled {
+                    crate::heap().set_element(constants, body, compiled);
+                }
+                compiled
+            } else {
+                None
+            };
+            if let Some(nested) = nested {
+                compile_nested_functions(nested, env)?;
+            }
+        }
+        pc += 1 + operand_count(op);
+    }
+    Ok(())
+}
+
 pub unsafe fn is_compiled(function: Sexp) -> bool {
     function.cdr().kind() == SexpType::Bytecode
 }
