@@ -2115,7 +2115,17 @@ unsafe fn logic(call: &Call<'_>, is_and: bool) -> R<Sexp> {
 }
 
 unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
-    let operand = values::materialize(call.arg(0))?;
+    let operand = call.arg(0);
+    // A plain scalar flag (the usual `!is.null(x)`) answers with a shared constant.
+    if operand.kind() == SexpType::Logical
+        && !operand.is_altrep()
+        && operand.length() == 1
+        && operand.attrib() == nil()
+    {
+        let value = *operand.slice::<i32>().get_unchecked(0);
+        return values::scalar_logical(if value == NA_LOGICAL { NA_LOGICAL } else { 1 - value });
+    }
+    let operand = values::materialize(operand)?;
     let count = length(operand);
     match operand.kind() {
         SexpType::Raw => {

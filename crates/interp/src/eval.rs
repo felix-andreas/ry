@@ -478,6 +478,7 @@ pub fn builtin_index(definition: &BuiltinDef) -> usize {
         / size_of::<BuiltinDef>()
 }
 
+#[inline]
 pub unsafe fn builtin_def(function: Sexp) -> R<&'static BuiltinDef> {
     interp()
         .builtin(function.primitive_index())
@@ -496,7 +497,35 @@ pub unsafe fn call_builtin(
 }
 
 /// [`call_builtin`], offering the builtin `reusable` to update in place (see [`Call::reusable`]).
+//
+// The common call (no profile being taken, the arity right, no names to check, no replacement
+// target to copy) runs straight through; anything else takes the out-of-line path, so this
+// frame stays small enough that entry and exit cost a handful of instructions.
+#[inline]
 unsafe fn call_builtin_reusing(
+    definition: &BuiltinDef,
+    call: Sexp,
+    op: Sexp,
+    args: &[Arg],
+    env: Sexp,
+    reusable: Option<Sexp>,
+) -> R<Sexp> {
+    let checks = definition.checks;
+    if activity::enabled()
+        || PROFILE_TICK.load(Ordering::Relaxed)
+        || (checks.arity && args.len() != definition.arity as usize)
+        || (checks.names && args.iter().any(|arg| arg.tag != nil()))
+        || (checks.replacement && args.first().is_some_and(|target| target.value.refcount() >= 1))
+    {
+        return call_builtin_checked(definition, call, op, args, env, reusable);
+    }
+    run_builtin(definition, call, op, args, env, reusable)
+}
+
+/// The builtin call [`call_builtin_reusing`] hands off: it publishes the activity, raises the
+/// arity and name errors, takes a profile sample, and copies a shared replacement target.
+#[inline(never)]
+unsafe fn call_builtin_checked(
     definition: &BuiltinDef,
     call: Sexp,
     op: Sexp,
@@ -551,8 +580,21 @@ unsafe fn call_builtin_reusing(
         }
         _ => args,
     };
-    let function = definition.function;
-    let visibility = definition.visibility;
+    run_builtin(definition, call, op, args, env, reusable)
+}
+
+/// Runs a builtin whose call passed the checks: refuses a native value it cannot take, runs it
+/// in its own handle scope, sets visibility, and signals an error it raised.
+#[inline(always)]
+unsafe fn run_builtin(
+    definition: &BuiltinDef,
+    call: Sexp,
+    op: Sexp,
+    args: &[Arg],
+    env: Sexp,
+    reusable: Option<Sexp>,
+) -> R<Sexp> {
+    let checks = definition.checks;
     let context = Call {
         call,
         op,
@@ -560,41 +602,52 @@ unsafe fn call_builtin_reusing(
         env,
         reusable,
     };
-    let skip_numbers = match checks.native {
-        NativeArgs::Accepted | NativeArgs::RefusedExceptNumbers => true,
-        NativeArgs::Refused => false,
-        NativeArgs::RefusedExceptArrayIndexes => {
-            args.first().is_some_and(|target| target.value.is_array())
-        }
-    };
-    let result = if checks.native != NativeArgs::Accepted
-        && let Err(refused) = crate::records::check_native_args(call, args, skip_numbers)
+    if checks.native != NativeArgs::Accepted
+        && args
+            .iter()
+            .any(|arg| matches!(arg.value.kind(), SexpType::Record | SexpType::I64))
     {
-        Err(refused)
-    } else {
-        // An ALTREP method's error, parked by the element accessor the builtin went through,
-        // is raised before the builtin's value goes anywhere, so `tryCatch` around the call
-        // sees it and no code acts on the placeholder the read returned.
-        scope(|| function(&context)).and_then(|value| crate::unwind::raise_parked().map(|()| value))
-    };
-    // A jump out of the builtin (`return(invisible(x))`) keeps the visibility of the value it
-    // carries.
-    if result.is_ok() {
-        match visibility {
-            Visibility::On => interp().visible = true,
-            Visibility::Off => interp().visible = false,
-            Visibility::Keep => {}
-        }
+        let skip_numbers = match checks.native {
+            NativeArgs::Accepted | NativeArgs::RefusedExceptNumbers => true,
+            NativeArgs::Refused => false,
+            NativeArgs::RefusedExceptArrayIndexes => {
+                args.first().is_some_and(|target| target.value.is_array())
+            }
+        };
+        crate::records::check_native_args(call, args, skip_numbers)?;
     }
-    match result {
-        Err(Unwind::Error(mut failure)) => {
+    // An ALTREP method's error, parked by the element accessor the builtin went through, is
+    // raised before the builtin's value goes anywhere, so `tryCatch` around the call sees it
+    // and no code acts on the placeholder the read returned.
+    match scope(|| (definition.function)(&context)) {
+        Ok(value) => {
+            if let Err(unwind) = crate::unwind::raise_parked() {
+                return Err(builtin_failure(definition, unwind));
+            }
+            match definition.visibility {
+                Visibility::On => interp().visible = true,
+                Visibility::Off => interp().visible = false,
+                Visibility::Keep => {}
+            }
+            Ok(value)
+        }
+        Err(unwind) => Err(builtin_failure(definition, unwind)),
+    }
+}
+
+/// The unwind a failing builtin raises: an error it returned is signalled, naming the
+/// primitive's call as `errorcall` does.
+#[cold]
+#[inline(never)]
+unsafe fn builtin_failure(definition: &BuiltinDef, unwind: Unwind) -> Unwind {
+    match unwind {
+        Unwind::Error(mut failure) => {
             if failure.call == unbound() && matches!(definition.kind, Kind::Builtin) {
-                // A primitive's own error names the primitive's call, as `errorcall` does.
                 failure.call = unbound();
             }
-            Err(conditions::signal_error(failure))
+            conditions::signal_error(failure)
         }
-        result => result,
+        unwind => unwind,
     }
 }
 
@@ -849,21 +902,36 @@ pub unsafe fn promise_args(arguments: Sexp, env: Sexp) -> R<Args> {
 /// [`promise_args`], appending to `args`, which a caller keeps on its own stack instead of
 /// moving a returned argument vector through every frame.
 pub unsafe fn promise_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
-    closure_args_into(arguments, env, args, false)
+    closure_args_into::<PROMISES>(arguments, env, args)
 }
 
 /// The arguments of a closure call that compiled code makes. GNU R's byte code passes a
 /// constant argument as its value instead of a promise (`PUSHCONSTARG`), and native code can
 /// tell: rlang's `env_dot_type()` reports such a `...` element as a value, not delayed.
 pub unsafe fn compiled_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
-    closure_args_into(arguments, env, args, true)
+    closure_args_into::<COMPILED>(arguments, env, args)
 }
 
-unsafe fn closure_args_into(
+/// [`compiled_args_into`] for a call of an effect-free closure (see [`crate::effects`]) whose
+/// other arguments cannot assign a variable, made while no calling handler is established: a
+/// variable argument is bound to its value, or to the caller's own promise for it, instead of a
+/// new promise.
+pub unsafe fn eager_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
+    closure_args_into::<EAGER>(arguments, env, args)
+}
+
+/// How [`closure_args_into`] passes an argument: every one as a promise, as GNU R's AST
+/// evaluator does.
+const PROMISES: u8 = 0;
+/// A constant as its own value, as GNU R's byte code does.
+const COMPILED: u8 = 1;
+/// A constant or a variable as its value.
+const EAGER: u8 = 2;
+
+unsafe fn closure_args_into<const MODE: u8>(
     mut arguments: Sexp,
     env: Sexp,
     args: &mut Args,
-    constants_as_values: bool,
 ) -> R<()> {
     let dots = symbols().dots;
     while arguments.kind() == SexpType::Pairlist {
@@ -890,7 +958,18 @@ unsafe fn closure_args_into(
                 expression.kind(),
                 SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
             );
-            let value = if expression == missing_arg() || (constants_as_values && constant) {
+            let eager = if MODE == EAGER
+                && expression.kind() == SexpType::Symbol
+                && expression != missing_arg()
+            {
+                crate::effects::eager_argument(expression, env)
+            } else {
+                None
+            };
+            let value = if let Some(value) = eager {
+                value
+            } else if expression == missing_arg() || (MODE != PROMISES && constant)
+            {
                 expression
             } else if expression.kind() == SexpType::Bytecode {
                 compiled_promise(expression, env)?
@@ -1040,7 +1119,7 @@ pub unsafe fn bind_arguments(
         None
     } else {
         activity::count(Counter::FormalsMatchedByName);
-        Some(match_args(formals, args, call)?)
+        Some(match_args_cached(function, formals, args, call)?)
     };
     let env = frame_environment(function, formals)?;
     let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
@@ -1391,11 +1470,59 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
 /// positions. Returns one value per formal: the supplied value or promise, `R_MissingArg`, or
 /// for `...` a `DOTSXP` of what it collects.
 pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> {
-    let missing = missing_arg();
-    let dots_symbol = symbols().dots;
-    if let Some(matched) = match_positional_args(formals, args, missing, dots_symbol)? {
+    if let Some(matched) = match_positional_args(formals, args, missing_arg(), symbols().dots)? {
         return Ok(matched);
     }
+    let plan = match_plan(formals, args, call)?;
+    matched_from_plan(formals, args, &plan)
+}
+
+/// Which formal each argument binds to: an argument that `...` collects maps to the position of
+/// `...`. The plan depends only on the formals and the argument names, so a call site that
+/// passes the same names to the same function reuses it ([`match_args_cached`]).
+type Plan = SmallVec<[u32; 8]>;
+
+/// [`match_args`] for a call of the compiled closure `function`, reusing the plan of the last
+/// call of its body when it had the same formals and argument names. The cache holds one entry
+/// in the body's `MATCHES` constant: a list of the formals, the plan, and the argument tags.
+unsafe fn match_args_cached(function: Sexp, formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> {
+    let code = function.cdr();
+    if code.kind() != SexpType::Bytecode || !args.iter().any(is_named) {
+        return match_args(formals, args, call);
+    }
+    let constants = code.cdr();
+    let entry = constants.element(bytecode::MATCHES);
+    if entry != nil()
+        && entry.element(0) == formals
+        && length(entry) == args.len() + 2
+        && args
+            .iter()
+            .enumerate()
+            .all(|(index, arg)| entry.element(index + 2) == arg.tag)
+    {
+        let plan: Plan = entry.element(1).slice::<i32>().iter().map(|&formal| formal as u32).collect();
+        return matched_from_plan(formals, args, &plan);
+    }
+    let plan = match_plan(formals, args, call)?;
+    let stored: SmallVec<[i32; 8]> = plan.iter().map(|&formal| formal as i32).collect();
+    let stored = values::integer_vector(&stored)?;
+    let entry = alloc(SexpType::List, args.len() + 2)?;
+    let heap = crate::heap();
+    heap.set_element(entry, 0, formals);
+    heap.set_element(entry, 1, stored);
+    for (index, arg) in args.iter().enumerate() {
+        heap.set_element(entry, index + 2, arg.tag);
+    }
+    heap.set_element(constants, bytecode::MATCHES, entry);
+    matched_from_plan(formals, args, &plan)
+}
+
+fn is_named(arg: &Arg) -> bool {
+    unsafe { arg.tag.kind() == SexpType::Symbol && !arg.tag.car().bytes().is_empty() }
+}
+
+unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
+    let dots_symbol = symbols().dots;
     // Every closure call matches its arguments, so the working state stays off the heap for the
     // usual handful of formals and arguments.
     let mut formal_symbols: SmallVec<[Sexp; 8]> = SmallVec::new();
@@ -1408,7 +1535,8 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
         cell = cell.cdr();
     }
     let count = formal_symbols.len();
-    let mut matched: SmallVec<[Option<Sexp>; 8]> = smallvec![None; count];
+    let mut matched: SmallVec<[bool; 8]> = smallvec![false; count];
+    let mut plan: Plan = smallvec![0; args.len()];
     let mut used: SmallVec<[bool; 8]> = smallvec![false; args.len()];
     let dots_position = formal_symbols
         .iter()
@@ -1434,7 +1562,7 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
             if let Some(name) = name
                 && *name == formal_name
             {
-                if matched[formal_index].is_some() {
+                if matched[formal_index] {
                     return Err(error_in(
                         call,
                         format!(
@@ -1443,7 +1571,8 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
                         ),
                     ));
                 }
-                matched[formal_index] = Some(args[arg_index].value);
+                matched[formal_index] = true;
+                plan[arg_index] = formal_index as u32;
                 used[arg_index] = true;
             }
         }
@@ -1452,7 +1581,7 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
     let partial_limit = dots_position.unwrap_or(count);
     let mut partial_owner: SmallVec<[Option<usize>; 8]> = smallvec![None; args.len()];
     for (formal_index, &formal) in formal_symbols.iter().enumerate().take(partial_limit) {
-        if matched[formal_index].is_some() {
+        if matched[formal_index] {
             continue;
         }
         let formal_name = formal.car().bytes();
@@ -1474,7 +1603,7 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
                         ),
                     ));
                 }
-                if matched[formal_index].is_some() {
+                if matched[formal_index] {
                     return Err(error_in(
                         call,
                         format!(
@@ -1483,23 +1612,23 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
                         ),
                     ));
                 }
-                matched[formal_index] = Some(args[arg_index].value);
+                matched[formal_index] = true;
+                plan[arg_index] = formal_index as u32;
                 used[arg_index] = true;
                 partial_owner[arg_index] = Some(formal_index);
             }
         }
     }
     // Positional matches up to `...`; everything left goes to `...`.
-    let mut dots_items: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
     let mut unused: SmallVec<[usize; 4]> = SmallVec::new();
     let mut formal_index = 0;
-    for (arg_index, arg) in args.iter().enumerate() {
+    for arg_index in 0..args.len() {
         if used[arg_index] {
             continue;
         }
         if arg_names[arg_index].is_some() {
-            if dots_position.is_some() {
-                dots_items.push((arg.tag, arg.value));
+            if let Some(position) = dots_position {
+                plan[arg_index] = position as u32;
             } else {
                 unused.push(arg_index);
             }
@@ -1507,15 +1636,16 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
         }
         while formal_index < count
             && formal_symbols[formal_index] != dots_symbol
-            && matched[formal_index].is_some()
+            && matched[formal_index]
         {
             formal_index += 1;
         }
         if formal_index < count && formal_symbols[formal_index] != dots_symbol {
-            matched[formal_index] = Some(arg.value);
+            matched[formal_index] = true;
+            plan[arg_index] = formal_index as u32;
             formal_index += 1;
-        } else if dots_position.is_some() {
-            dots_items.push((arg.tag, arg.value));
+        } else if let Some(position) = dots_position {
+            plan[arg_index] = position as u32;
         } else {
             unused.push(arg_index);
         }
@@ -1546,20 +1676,49 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
             ),
         ));
     }
-    let mut result: Matched = matched
-        .into_iter()
-        .map(|value| value.unwrap_or(missing))
-        .collect();
+    Ok(plan)
+}
+
+/// One value per formal from a plan: the argument mapped to it, the arguments mapped to `...`
+/// in order as a `DOTSXP`, or `R_MissingArg`.
+unsafe fn matched_from_plan(formals: Sexp, args: &[Arg], plan: &[u32]) -> R<Matched> {
+    let missing = missing_arg();
+    let dots_symbol = symbols().dots;
+    let mut result = Matched::new();
+    let mut dots_position = None;
+    let mut cell = formals;
+    while matches!(
+        cell.kind(),
+        SexpType::Pairlist | SexpType::Language | SexpType::Dots
+    ) {
+        if cell.tag() == dots_symbol {
+            dots_position = Some(result.len() as u32);
+        }
+        result.push(missing);
+        cell = cell.cdr();
+    }
+    for (arg, &formal) in args.iter().zip(plan) {
+        if Some(formal) != dots_position
+            && let Some(slot) = result.get_mut(formal as usize)
+        {
+            *slot = arg.value;
+        }
+    }
     if let Some(position) = dots_position {
-        result[position] = if dots_items.is_empty() {
-            missing
-        } else {
-            let mut list = nil();
-            for &(tag, value) in dots_items.iter().rev() {
-                list = triple(SexpType::Dots, value, list, tag)?;
-            }
-            list
-        };
+        let mut list = nil();
+        for (arg, _) in args
+            .iter()
+            .zip(plan)
+            .rev()
+            .filter(|(_, formal)| **formal == position)
+        {
+            list = triple(SexpType::Dots, arg.value, list, arg.tag)?;
+        }
+        if list != nil()
+            && let Some(slot) = result.get_mut(position as usize)
+        {
+            *slot = list;
+        }
     }
     Ok(result)
 }
@@ -1573,8 +1732,6 @@ unsafe fn match_positional_args(
     missing: Sexp,
     dots_symbol: Sexp,
 ) -> R<Option<Matched>> {
-    let is_named =
-        |arg: &Arg| arg.tag.kind() == SexpType::Symbol && !arg.tag.car().bytes().is_empty();
     if args.iter().any(is_named) {
         return Ok(None);
     }
@@ -1911,7 +2068,29 @@ unsafe fn do_paren(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// The condition of `if` and `while`, with GNU R's messages.
+#[inline]
 pub unsafe fn as_condition(value: Sexp, call: Sexp) -> R<bool> {
+    if let Some(flag) = plain_flag(value) {
+        return Ok(flag != 0);
+    }
+    general_condition(value, call)
+}
+
+/// The element of a plain length-one logical vector that is not `NA`: the operand nearly every
+/// condition and `&&` operand is, read without a call.
+#[inline(always)]
+unsafe fn plain_flag(value: Sexp) -> Option<i32> {
+    if value.kind() == SexpType::Logical && !value.is_altrep() && value.length() == 1 {
+        let flag = *value.slice::<i32>().get_unchecked(0);
+        if flag != heap::object::NA_LOGICAL {
+            return Some(flag);
+        }
+    }
+    None
+}
+
+#[inline(never)]
+unsafe fn general_condition(value: Sexp, call: Sexp) -> R<bool> {
     if crate::records::is_native(value) {
         return Err(crate::records::boundary_error(value, nil(), call));
     }
@@ -2264,7 +2443,16 @@ unsafe fn logical_operand(value: Sexp, call: &Call<'_>, side: &str) -> R<i32> {
 
 /// An operand of `&&` or `||` (`operator`) as `TRUE`, `FALSE` or `NA`, with GNU R's errors for
 /// the `side` (`"x"` or `"y"`) that is not a logical scalar.
+#[inline]
 pub unsafe fn logical_operand_of(value: Sexp, call: Sexp, operator: &str, side: &str) -> R<i32> {
+    if let Some(flag) = plain_flag(value) {
+        return Ok(flag);
+    }
+    general_logical_operand(value, call, operator, side)
+}
+
+#[inline(never)]
+unsafe fn general_logical_operand(value: Sexp, call: Sexp, operator: &str, side: &str) -> R<i32> {
     if !matches!(
         value.kind(),
         SexpType::Logical

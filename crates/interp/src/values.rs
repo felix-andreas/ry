@@ -767,32 +767,40 @@ pub unsafe fn materialize(object: Sexp) -> R<Sexp> {
 }
 
 macro_rules! typed_slice {
-    ($name:ident, $name_mut:ident, $type:ty) => {
+    ($name:ident, $name_mut:ident, $altrep:ident, $type:ty) => {
         /// The elements, which must be of the matching type. An ALTREP vector is materialized.
-        #[inline]
+        #[inline(always)]
         pub unsafe fn $name<'a>(object: Sexp) -> &'a [$type] {
             if object.is_altrep() {
-                // The accessor cannot fail, so a method's error is parked, as for elements.
-                // The class's own data pointer comes first, since materializing copies the
-                // whole vector on every read.
-                let data = match (interp().hooks.altrep_dataptr)(object) {
-                    Ok(Some(pointer)) if pointer.is_null() => Ok(&[][..]),
-                    Ok(Some(pointer)) => Ok(std::slice::from_raw_parts(
-                        pointer.cast::<$type>(),
-                        length(object),
-                    )),
-                    Ok(None) => materialize(object).map(|vector| vector.slice::<$type>()),
-                    Err(unwind) => Err(unwind),
-                };
-                match data {
-                    Ok(slice) => slice,
-                    Err(unwind) => {
-                        crate::unwind::park(unwind);
-                        &[]
-                    }
-                }
+                $altrep(object)
             } else {
                 object.slice::<$type>()
+            }
+        }
+
+        // Out of line, so that the plain-vector read every builtin does inlines to a type test
+        // and a pointer.
+        #[cold]
+        #[inline(never)]
+        unsafe fn $altrep<'a>(object: Sexp) -> &'a [$type] {
+            // The accessor cannot fail, so a method's error is parked, as for elements. The
+            // class's own data pointer comes first, since materializing copies the whole vector
+            // on every read.
+            let data = match (interp().hooks.altrep_dataptr)(object) {
+                Ok(Some(pointer)) if pointer.is_null() => Ok(&[][..]),
+                Ok(Some(pointer)) => Ok(std::slice::from_raw_parts(
+                    pointer.cast::<$type>(),
+                    length(object),
+                )),
+                Ok(None) => materialize(object).map(|vector| vector.slice::<$type>()),
+                Err(unwind) => Err(unwind),
+            };
+            match data {
+                Ok(slice) => slice,
+                Err(unwind) => {
+                    crate::unwind::park(unwind);
+                    &[]
+                }
             }
         }
 
@@ -804,10 +812,10 @@ macro_rules! typed_slice {
     };
 }
 
-typed_slice!(ints, ints_mut, i32);
-typed_slice!(reals, reals_mut, f64);
-typed_slice!(complexes, complexes_mut, Rcomplex);
-typed_slice!(raws, raws_mut, u8);
+typed_slice!(ints, ints_mut, ints_altrep, i32);
+typed_slice!(reals, reals_mut, reals_altrep, f64);
+typed_slice!(complexes, complexes_mut, complexes_altrep, Rcomplex);
+typed_slice!(raws, raws_mut, raws_altrep, u8);
 
 #[inline]
 pub unsafe fn string_elt(object: Sexp, index: usize) -> Sexp {
