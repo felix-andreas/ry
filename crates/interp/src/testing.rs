@@ -177,7 +177,9 @@ pub fn check_code_image_round_trip(entropy: &mut impl Entropy) {
                     continue;
                 };
                 let decoded = code_image::decode_untrusted(&bytes, source)
-                    .unwrap_or_else(|_| panic!("`{body}`: an encoded code object must decode"));
+                    .unwrap_or_else(|failure| {
+                        panic!("`{body}`: an encoded code object must decode: {failure:?}")
+                    });
                 crate::heap().root(decoded);
                 assert_eq!(
                     code_image::encode(decoded, source, trained).as_deref(),

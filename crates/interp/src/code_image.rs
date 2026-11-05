@@ -63,7 +63,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
 const MAGIC: &[u8; 8] = b"RYCODE\x00\x01";
 
 /// The bytes of one record table entry.
-const ENTRY_SIZE: usize = 44;
+const ENTRY_SIZE: usize = 40;
 
 /// The flag bit of an image written after a training run.
 const TRAINED: u32 = 1;

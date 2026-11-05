@@ -1479,6 +1479,15 @@ impl CodeInput<'_> {
         Ok((value >> 1) as i64 ^ -((value & 1) as i64))
     }
 
+    /// A count of at most `limit`, for items that take no bytes of their own.
+    pub fn bounded(&mut self, limit: usize) -> R<usize> {
+        let count = self.varint()?;
+        usize::try_from(count)
+            .ok()
+            .filter(|&count| count <= limit)
+            .ok_or_else(|| error("the code image holds an impossible length"))
+    }
+
     /// A count of items that each take at least one byte, so a corrupt count is caught before
     /// anything that large is allocated.
     pub fn count(&mut self) -> R<usize> {
@@ -1576,6 +1585,9 @@ impl Encoder<'_> {
         }
         self.value(constants.element(SOURCE), depth + 1)?;
         let caches = length(constants.element(EPOCHS));
+        if caches > words.len().saturating_mul(4) {
+            return Err(Unencodable("more inline caches than the code has room for"));
+        }
         write_varint(self.out, caches as u64);
         let loops = values::ints(constants.element(LOOPS));
         write_varint(self.out, loops.len() as u64);
@@ -1842,7 +1854,8 @@ impl Decoder<'_, '_> {
         }
         let source = self.value(depth + 1)?;
         heap.root(source);
-        let caches = self.input.count()?;
+        // Inline caches take no bytes of their own, so their count is bounded by the code's size.
+        let caches = self.input.bounded(word_count.saturating_mul(4))?;
         let loop_count = self.input.count()?;
         if loop_count % 4 != 0 {
             return Err(error("the code image holds a malformed loop table"));
@@ -1881,7 +1894,7 @@ impl Decoder<'_, '_> {
                 }
                 let mut position = 0;
                 while position < word_count {
-                    let zeros = self.input.count()?;
+                    let zeros = self.input.bounded(word_count)?;
                     position = position
                         .checked_add(zeros)
                         .filter(|&end| end <= word_count)
