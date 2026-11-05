@@ -22,6 +22,8 @@
 //! to date before anything that can observe it runs, and slots are forgotten after anything that
 //! can change it, so code outside the compiled body never sees the difference.
 
+pub use interp::effects::{Speculation, base_builtin, resolve_function};
+
 use {
     crate::native::{self, Native},
     bumpalo::Bump,
@@ -29,7 +31,7 @@ use {
     interp::{
         annotations::{self, Declared, Entry},
         bytecode::{self, ARITHS, Arith, FEEDBACK, Op, feedback, operand_count},
-        values,
+        effects, values,
     },
     rustc_hash::{FxBuildHasher, FxHashSet},
     smallvec::{SmallVec, smallvec},
@@ -951,18 +953,6 @@ pub enum Action<'a> {
         column: usize,
         value: usize,
     },
-}
-
-/// A function lookup compiled code assumes still resolves as it did at compile time.
-#[derive(Clone, Debug)]
-pub struct Speculation {
-    pub symbol: Sexp,
-    /// The environment the lookup starts from, which differs from the compiled body's enclosure
-    /// for a function an inlined or directly called closure looks up from its own environment.
-    pub env: Sexp,
-    /// The binding cell the lookup found.
-    pub cell: Sexp,
-    pub function: Sexp,
 }
 
 pub struct Block {
@@ -2138,6 +2128,17 @@ impl<'a> Builder<'a> {
                 &[],
                 Effect::Opaque,
             ),
+            Op::Replace => {
+                let value = match state.registers[operand(5) + operand(6) - 1] {
+                    Ty::Bottom => Ty::Boxed,
+                    ty => ty,
+                };
+                let action =
+                    self.opaque_step(state, Some((operand(0), value)), &[], Effect::Opaque);
+                state.registers[operand(5)] = Ty::Boxed;
+                state.visible = Some(false);
+                action
+            }
             Op::SubAssignMatrix => {
                 let slot = self.slot(self.constant(operand(1)));
                 let (row, column, value) = (
@@ -2192,7 +2193,7 @@ impl<'a> Builder<'a> {
                 }
                 Action::FallThrough
             }
-            Op::Jump => {
+            Op::Jump | Op::Resume => {
                 self.push_edge(operand(0), state);
                 return Ok(Action::Jump);
             }
@@ -2750,7 +2751,7 @@ impl<'a> Builder<'a> {
         }
         let function = self.resolve_head(lowering, head)?;
         let name = base_builtin(function, head)?;
-        match (name.as_str(), args.as_slice()) {
+        match (name, args.as_slice()) {
             ("(" | "{", [(_, inner)]) => self.lower_step(lowering, *inner, depth),
             ("if", [(_, condition), (_, then), (_, otherwise)]) => {
                 let condition = self.lower_expression(lowering, *condition, depth)?;
@@ -3092,7 +3093,7 @@ impl<'a> Builder<'a> {
                     .iter()
                     .map(|&register| lowering.state.registers[register])
                     .collect();
-                match (name.as_str(), registers.as_slice()) {
+                match (name, registers.as_slice()) {
                     ("(" | "{", [inner]) => Some(*inner),
                     ("if", [condition, then, otherwise]) if types[0] == Ty::Lgl => {
                         self.select(lowering, *condition, *then, *otherwise)
@@ -3434,28 +3435,21 @@ impl<'a> Builder<'a> {
         Ok(self.opaque_step(state, Some((dst, feedback)), &[], Effect::Opaque))
     }
 
-    /// Whether `function` can never assign a variable in its caller's frame or anywhere else:
-    /// its defaults and body call only itself and base builtins from [`FRAME_SAFE_BUILTINS`],
-    /// and assign only to its own locals. Each function a call resolves to is recorded as a
-    /// speculation from the closure's environment, so a redefinition invalidates the code.
-    /// Calling handlers are the remaining way R code could run inside such a call; the direct
-    /// call checks for them when it runs.
+    /// Whether `function` is effect-free (see `interp::effects`), so a direct call may bind its
+    /// arguments to values. Each function lookup the fact rests on is recorded as a speculation,
+    /// so a redefinition invalidates the code. Calling handlers are the remaining way R code
+    /// could run inside such a call; the direct call checks for them when it runs.
     unsafe fn frame_safe(&mut self, function: Sexp) -> bool {
         if let Some(&safe) = self.frame_safe.get(&function) {
             return safe;
         }
-        // A recursive call is safe exactly when the rest of the body is, so it is assumed safe
-        // while the body is walked.
-        self.frame_safe.insert(function, true);
-        let mut found = List::new_in(self.arena);
-        let defaults = values::pairlist_items(function.car());
-        let safe = defaults
-            .iter()
-            .all(|&(_, default)| safe_expression(default, function, &mut found))
-            && safe_expression(bytecode::closure_body(function), function, &mut found);
-        if safe {
-            self.speculations.extend(found);
-        }
+        let safe = match effects::effect_free_lookups(function) {
+            Ok(Some(lookups)) => {
+                self.speculations.extend(lookups);
+                true
+            }
+            Ok(None) | Err(_) => false,
+        };
         self.frame_safe.insert(function, safe);
         safe
     }
@@ -3479,189 +3473,6 @@ impl<'a> Builder<'a> {
         self.speculated.insert(symbol, function);
         function
     }
-}
-
-/// Base builtins that never run R code of the caller's choosing nor touch any environment but
-/// their own arguments, apart from S3 dispatch on a classed argument.
-const FRAME_SAFE_BUILTINS: &[&str] = &[
-    "{",
-    "(",
-    "if",
-    "for",
-    "while",
-    "repeat",
-    "break",
-    "next",
-    "return",
-    "invisible",
-    "+",
-    "-",
-    "*",
-    "/",
-    "^",
-    "%%",
-    "%/%",
-    "==",
-    "!=",
-    "<",
-    ">",
-    "<=",
-    ">=",
-    "!",
-    "&",
-    "|",
-    "&&",
-    "||",
-    "sqrt",
-    "exp",
-    "log",
-    "abs",
-    "floor",
-    "ceiling",
-    "trunc",
-    "round",
-    "signif",
-    "sin",
-    "cos",
-    "tan",
-    "log2",
-    "log10",
-    "log1p",
-    "expm1",
-    "length",
-    "[",
-    "[[",
-    "c",
-    "is.na",
-    "is.null",
-    "sum",
-    "prod",
-    "max",
-    "min",
-    "cumsum",
-    "cumprod",
-    "seq_len",
-    "seq_along",
-    ":",
-    "vector",
-    "numeric",
-    "integer",
-    "double",
-    "logical",
-    "character",
-    "rep",
-    "rep.int",
-    "rep_len",
-    "nchar",
-    "any",
-    "all",
-    "which",
-    "rev",
-    "as.integer",
-    "as.numeric",
-    "as.double",
-    "as.logical",
-    "is.numeric",
-    "is.character",
-    "is.logical",
-    "identical",
-    "range",
-    "pmin",
-    "pmax",
-];
-
-/// Whether `expression`, in the body of `function`, keeps `function` frame-safe (see
-/// `Builder::frame_safe`), collecting the speculation for every function it calls.
-unsafe fn safe_expression(expression: Sexp, function: Sexp, found: &mut List<Speculation>) -> bool {
-    if expression.kind() != SexpType::Language {
-        return true;
-    }
-    let head = expression.car();
-    if head.kind() != SexpType::Symbol {
-        return false;
-    }
-    let Some(speculation) = resolve_function(head, function.tag()) else {
-        return false;
-    };
-    let callee = speculation.function;
-    let arguments = values::pairlist_items(expression.cdr());
-    let safe = if callee == function {
-        true
-    } else {
-        match base_builtin(callee, head).as_deref() {
-            // An assignment to a symbol binds in the function's own frame; one to `x[i]`
-            // also calls the replacement builtin, and any other target could call a closure.
-            Some("<-" | "=") => match arguments.first() {
-                Some(&(_, target)) if target.kind() == SexpType::Symbol => true,
-                Some(&(_, target))
-                    if target.kind() == SexpType::Language
-                        && target.car().kind() == SexpType::Symbol =>
-                {
-                    let index = values::symbol_name(target.car());
-                    matches!(index.as_ref(), "[" | "[[")
-                        && values::pairlist_items(target.cdr())
-                            .first()
-                            .is_some_and(|&(_, value)| value.kind() == SexpType::Symbol)
-                }
-                _ => false,
-            },
-            Some(name) => FRAME_SAFE_BUILTINS.contains(&name),
-            None => false,
-        }
-    };
-    if !safe {
-        return false;
-    }
-    found.push(speculation);
-    arguments
-        .iter()
-        .all(|&(_, argument)| safe_expression(argument, function, found))
-}
-
-/// The name of the base builtin `function`, when `symbol` names it.
-pub(crate) unsafe fn base_builtin(function: Sexp, symbol: Sexp) -> Option<String> {
-    if !matches!(function.kind(), SexpType::Builtin | SexpType::Special) {
-        return None;
-    }
-    let name = interp::eval::builtin_def(function).ok()?.name;
-    (values::symbol_name(symbol) == name).then(|| name.to_string())
-}
-
-/// Walks from `enclosure` to the binding a function lookup of `symbol` finds, as tier 0 does,
-/// but gives up instead of forcing a promise, calling an active binding, or passing a binding
-/// that holds something other than a function.
-pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation> {
-    let heap = interp::heap();
-    let mut env = start;
-    let empty = heap.known().empty_env;
-    while env != empty {
-        if let Some(cell) = heap.frame_cell(env, symbol) {
-            if cell.has_gp(gp::ACTIVE_BINDING) {
-                return None;
-            }
-            let mut value = cell.cdr();
-            if value.kind() == SexpType::Promise {
-                if value.car() == values::unbound() {
-                    return None;
-                }
-                value = value.car();
-            }
-            // A binding passed over for holding a non-function could later hold a function
-            // without moving any epoch or stamp, because only the binding found is watched, so
-            // such a lookup is not speculated on.
-            if !values::is_function(value) {
-                return None;
-            }
-            return Some(Speculation {
-                symbol,
-                env: start,
-                cell,
-                function: value,
-            });
-        }
-        env = env.enclosure();
-    }
-    None
 }
 
 /// The closure a variable lookup of `symbol` finds from `start`, as tier 0 finds it but
@@ -3931,6 +3742,7 @@ pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
         Op::Arithmetic => smallvec![operand(2), operand(3)],
         Op::SubAssign => smallvec![operand(2), operand(3)],
         Op::SubAssignMatrix => smallvec![operand(2), operand(3), operand(4)],
+        Op::Replace => (operand(5) + 1..operand(5) + operand(6)).collect(),
         Op::JumpUnless | Op::Return | Op::ForEnd => smallvec![operand(0)],
         Op::ForInit | Op::ForStep | Op::LogicLeft => smallvec![operand(1)],
         Op::LogicRight => smallvec![operand(1), operand(2)],
@@ -3941,7 +3753,7 @@ pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
 
 pub fn jump_target(inst: &Inst) -> Option<usize> {
     match inst.op {
-        Op::Jump => Some(inst.operand(0)),
+        Op::Jump | Op::Resume => Some(inst.operand(0)),
         Op::JumpUnless => Some(inst.operand(2)),
         Op::BranchUnlessBuiltin | Op::BranchIfObject => Some(inst.operand(1)),
         Op::MatchShape | Op::MatchTag | Op::MatchLiteral => Some(inst.operand(2)),
@@ -3958,6 +3770,7 @@ fn ends_block(op: Op) -> bool {
     matches!(
         op,
         Op::Jump
+            | Op::Resume
             | Op::JumpUnless
             | Op::BranchUnlessBuiltin
             | Op::BranchUnlessPrimitive
@@ -3974,7 +3787,7 @@ fn ends_block(op: Op) -> bool {
 }
 
 fn falls_through(op: Op) -> bool {
-    !matches!(op, Op::Jump | Op::Return)
+    !matches!(op, Op::Jump | Op::Resume | Op::Return)
 }
 
 /// Updates `live` from after `inst` to before it.
@@ -4030,7 +3843,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
             kill(operand(0), live);
             gen_(operand(1), live);
         }
-        Op::Guard | Op::Jump | Op::Invisible | Op::Visible | Op::SetSrcref => {}
+        Op::Guard | Op::Jump | Op::Resume | Op::Invisible | Op::Visible | Op::SetSrcref => {}
         Op::EndStatement => {
             kill(operand(0), live);
             for register in operand(1)..operand(2) {
@@ -4061,6 +3874,13 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
             gen_(operand(2), live);
             gen_(operand(3), live);
             gen_(operand(4), live);
+        }
+        Op::Replace => {
+            kill(operand(0), live);
+            kill(operand(5), live);
+            for register in operand(5) + 1..operand(5) + operand(6) {
+                gen_(register, live);
+            }
         }
     }
 }

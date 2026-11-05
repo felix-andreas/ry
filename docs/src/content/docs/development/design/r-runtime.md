@@ -677,11 +677,12 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   only before something that could observe it runs (a generic call, a dispatching operation, the
   first read of a formal whose default is an expression, a return, a deoptimization) and reloads it
   after something that could change it.
-- **Calls.** A call to a frame-safe closure whose binding was resolved at compile time is direct:
+- **Calls.** A call to an effect-free closure whose binding was resolved at compile time is direct:
   effect-free arguments are evaluated eagerly and passed as already forced promises, bound by
   position without the general matcher. Evaluating early is invisible only if nothing can assign
-  what an argument reads before the callee forces it, so the callee must be frame-safe: its body
-  and defaults call only itself and a fixed list of base builtins, and assign only its own locals.
+  what an argument reads before the callee forces it, so the callee must be effect-free (the fact
+  tier 0 also reads, `crates/interp/src/effects.rs`): its body and defaults call only itself, a
+  fixed list of base builtins and other effect-free closures, and assign only its own locals.
   When a calling handler is established, a handler could run R code in between, so compiled code
   then runs tier 0's call instruction, which makes the call lazily, and continues after it. A test
   harness always has handlers, so leaving the body for tier 0 there would interpret most of it. A call of a small closure defined in the same body, which computes a scalar
@@ -723,32 +724,108 @@ that changes it. `prior-art.md` gives the reasoning behind each source engine's 
 
 The gaps come from `ry run --profile-summary` on the nine `just bench-real` workloads (JIT on: tier-0
 instructions 23 to 44% of the time, closure call setup 12 to 24%, builtins about 25%, S3 method
-lookup up to 17%) and from callgrind on `seq(1, 10, by = 2)`, which costs 141.6k instructions per
-call on ry and about 106k on GNU R 4.3.3.
+lookup up to 17%) and from callgrind on `seq(1, 10, by = 2)`, which costs 121.4k instructions per
+call on ry (JIT off, down from 141.6k when this table started) and about 106k on GNU R 4.3.3. A
+plain closure call, `f(x, y = 2) x + y` called from a loop, costs 3,968 instructions on ry and
+4,602 on GNU R; timed as the median of 9 interleaved runs of 3 million calls, it takes 0.445 µs
+on ry and 0.525 µs on GNU R.
+
+What remains of the `seq()` gap is spread thin. Tier-0 dispatch (loading the op word, decoding it
+and jumping) costs about 11k instructions per call, about 13 per op over about 860 ops: 196 jumps,
+154 guards, 95 variable reads, 75 constants and 69 builtin calls. Of the rest, `pmin()` costs
+55.9k on ry against 43.5k on GNU R, mostly in the `vapply()` it calls. No single step-2 row closes
+a gap that size, so shrinking the op count and the cost per op (step 3) comes forward.
+
+**Target.** Untyped R with the JIT on runs at 10 times GNU R's speed on one thread, measured as the
+geometric mean over the `just bench-real` workloads and over the package corpus
+(`just bench-packages`). The milestones are 1.5x and then 3x. Today the workloads run at 0.9x
+(`results.json`) and the corpus at 1.06x (22 packages whose tests pass on both engines). Parallelism
+is deferred: the architecture keeps it possible (`decisions.md`, "Single-thread first"), but the
+target does not count on it.
+
+**Where the time goes.** `ry run --profile-summary` splits a run into the buckets below. R code is
+everything the evaluator does for R-level code: tier-0 instructions, closure call setup, lookups,
+S3 and S4 dispatch, condition handling and tier-1 code. Native code is split by owner: ry's own
+ports of base and recommended code (nmath, fft and the rest of `stats`) are ry's to speed up, while
+third-party CRAN C code is fixed on one thread, because packages assume R's C API is
+single-threaded. I/O is the file and connection builtins, and waiting is `Sys.sleep` and waits on
+child processes (`processx`). Shares are of one run with the JIT on.
+
+| Workload | R code | builtins | native, ry ports | native, CRAN | GC | I/O | waiting | start-up |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| conditions | 72% | 20% | 0% | 0% | 5% | 0% | 0% | 3% |
+| functional | 64% | 21% | 0% | 3% | 10% | 0% | 0% | 2% |
+| objects | 66% | 26% | 0% | 0% | 6% | 0% | 0% | 2% |
+| records | 55% | 31% | 0% | 0% | 11% | 0% | 0% | 3% |
+| simulation | 3% | 51% | 40% (`stats`) | 0% | 2% | 0% | 0% | 4% |
+| strings | 62% | 30% | 0% | 1% | 4% | 0% | 0% | 2% |
+| tables | 53% | 27% | 4% | 9% (`data.table`) | 2% | 0% | 0% | 5% |
+| timeseries | 59% | 24% | 0% | 13% (`xts`) | 3% | 0% | 0% | 1% |
+| validation | 71% | 24% | 0% | 0% | 3% | 0% | 0% | 2% |
+| **workload mean** | **56%** | **28%** | **5%** | **3%** | **5%** | **0%** | **0%** | **3%** |
+| **corpus mean** (26 packages) | **27%** | **18%** | **0%** | **2%** | **4%** | **27%** | **10%** | **12%** |
+
+The corpus differs in kind. Its I/O is mostly `unlink`: testthat removes a temporary directory
+around each test, and `rmdir` takes 1 to 4 ms on the measuring machine's ext4 volume, for GNU R as
+much as for ry (94 s over the corpus). Its waiting is `rlang` and `purrr` (about 90% each) and
+`foreach` (68%) waiting on child R processes. Start-up dominates the smallest suites (`abind` 74%,
+`zoo` 81%). The builtins that take the most time are `attributes`, `.Call`, `c`, `vapply`, `[[`,
+`forceAndCall`, `[<-` and `<-` on the workloads, and `as.POSIXlt`, `[[`, `c`, `[`,
+`lazyLoadDBfetch` and `match` on the corpus.
+
+**The arithmetic.** Speeding each bucket up by the factor below, with CRAN native code, I/O and
+waiting fixed, gives these geometric means over GNU R (Amdahl's law per workload, starting from
+today's ratio):
+
+| Plan | R code | builtins | ry ports | GC, start-up | workloads | corpus |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1.5x milestone | 2x | 1.5x | 1x | 1x | 1.43x | 1.31x |
+| corpus 1.5x | 3x | 2x | 1x | 2x | | 1.60x |
+| 3x milestone | 5x | 3x | 3x | 2x | 3.08x | 1.79x |
+| 10x target | 30x | 10x | 10x | 10x | 10.96x | 2.58x |
+| ceiling: only the fixed buckets left | | | | | `tables` 8.9x, `timeseries` 8.1x | 3.50x |
+
+So 10x on the workloads is reachable on one thread: R code needs about 30x (tier 1 for most of it,
+row (c) below) and builtins about 10x (row (a)). `tables` and `timeseries` stop near 9x and 8x
+because of `data.table`'s and `xts`'s C code, and the geometric mean carries them. On the corpus the
+single-thread ceiling on this machine is 3.5x, because I/O and child-process waits take 37% of its
+time and cost GNU R the same. Two things move that ceiling: child processes that run ry speed up
+with it (callr starts `R.home()`'s R; which engine the corpus's children run is unverified), and
+I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone needs one of them.
+
+| Target row | Status | What it needs |
+| --- | --- | --- |
+| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | planned | builtins from 28% (workloads) and 18% (corpus) to 10x faster; the top of the ranking above first |
+| (b) Automatic parallelism for effect-free apply-family calls and long element-wise operations, deterministic, with bit-identical reductions | deferred, architecture-ready | the effect-free fact per function and the invariants in `decisions.md`; package native code stays single-threaded |
+| (c) Tier-1 compilation of most R-level time | planned | R code from 56% (workloads) to 30x faster; tier 1 today runs under 3% of the time on eight of nine workloads |
+| (d) Native code shrinks only through ry-native replacements or parallelism | planned | ry's own ports (`stats`: 40% of `simulation`) are ry's to speed up; third-party C stays: `data.table` and `xts` on the workloads, `data.table` and `rlang` on the corpus |
 
 | Idea | Source engine | Status | Measured gap it targets | Code |
 | --- | --- | --- | --- | --- |
 | **1. Tier-0 call path** | | | | |
-| Op words carry their operand count; one dispatch loop with one error exit | JSC LLInt | built | dispatch, about 15 instructions per op | `interpret` in `crates/interp/src/bytecode.rs` |
+| Op words carry their operand count; one cold error exit | JSC LLInt | built | dispatch, about 15 instructions per op | `interpret`, `failed` in `crates/interp/src/bytecode.rs` |
 | Slot hints at lookup sites, behind the frame's symbol filter | JSC, V8 inline caches | built | variable lookup | `cached_cell`, `Frame::find_hinted` in `crates/heap/src/env.rs` |
 | Function lookups skip frames that cannot bind the symbol | ry | built | `lookup_function` | `lookup_function` in `bytecode.rs` |
 | Lookup stamps compared as their bits | V8 | built | 1.25k per `seq()` call | `LookupCache` in `bytecode.rs` |
 | Hash index only for frames over 32 bindings | ry | built | 3k per `seq()` call (`Frame::insert`) | `INDEX_THRESHOLD` in `env.rs` |
 | Builtin checks derived at registration | GNU R `PRIMARITY` | built | builtin call overhead | `Checks` in `crates/interp/src/builtins.rs` |
-| A per-closure call plan for `run_closure`'s bookkeeping | JSC `CodeBlock` | rejected, folded into slot frames | annotation, `on.exit`, move-tracking and depth checks measure 1.3k of 141.6k instructions per `seq()` call and already exit early; the rest of `run_closure` is the frame record push and pop, which slot frames replace | |
+| A per-closure call plan for `run_closure`'s bookkeeping | JSC `CodeBlock` | rejected, measured | annotation, `on.exit`, move-tracking and depth checks measure 1.3k of 141.6k instructions per `seq()` call and already exit early; the rest of `run_closure` is the frame record push and pop, which slot frames replace | |
 | **2. Call facts ahead of time** | | | | |
-| Version-stamped bindings: a function guard is one compare | JSC watchpoints, V8 property cells | next | 117 guards per `seq()` call, each a cached lookup | |
-| Frames as slot arrays, environment reified on demand | Ř, V8 | planned | closure call setup 12 to 24%; `Frame::insert` 2.6k, `clear_frame` 2.3k, `release_frame` 1.9k per `seq()` call | |
-| Promise elision for strict, effect-free arguments | Ř | planned | `closure_args_into` 3.8% of a call microbenchmark | |
+| Version-stamped bindings: a function guard is one compare | JSC watchpoints, V8 property cells | built | 154 guards per `seq()` call; 141.6k to 139.7k instructions per call | the `Op::Guard` arm and `cached_cell` in `bytecode.rs` |
+| Frames cleared in place, without copying the cell list | ry | built | `clear_frame`; 139.7k to 136.6k per `seq()` call, with the two rows below | `Heap::clear_frame` in `crates/heap/src/heap.rs` |
+| Untyped closures skip the signature lookup; `on.exit` handling only when an exit expression exists | ry | built | part of the 3.1k above | `signature_of` in `crates/interp/src/annotations.rs`, `run_closure` in `eval.rs` |
+| Frames as slot arrays, environment reified on demand | Ř, V8 | rejected for now, measured | binding cells cost about 420 of a closure call's 3,968 instructions (defining formals 100, `Frame::insert` 114, clearing 97, lookups 110); values held inline would save 100 to 150 of them, about 3%, while about 180 call sites read cells and reifying a frame would need allocation behind shared references. A closure call already costs less than on GNU R | |
+| Promise elision for strict, effect-free arguments | Ř | done in tier 0 (`crates/interp/src/effects.rs`) | `closure_args_into` 3.8% of a call microbenchmark | `f(i, 1)` 3,968 to 3,411 instructions per call; `seq()` unchanged, its helpers are not effect-free |
 | The promargs pairlist built only when asked for | GNU R | planned | `args_pairlist` 2.7% of a call microbenchmark | |
-| Per-site argument-match caches | V8, JSC | planned | `match_args` 2.8k, `bind_arguments` 2.8k per `seq()` call | |
+| Argument-match caches, one entry per closure body | V8, JSC | done (`eval::match_args_cached`) | `match_args` 2.8k, `bind_arguments` 2.8k per `seq()` call | matching in `seq()` 3.6k to 1.0k instructions; 1.0 to 1.2 million named calls per `bench-real` workload |
 | Polymorphic inline caches for S3 and S4, keyed on the class vector | Self, V8 | planned | S3 method lookup up to 17% (`timeseries`) | |
 | Closed bindings per locked namespace, reopened by `unlockBinding` and `assignInNamespace` | Bun, Roc | planned | namespace function lookups | |
 | Precise counts and borrowed parameters in tier 0 | Roc (Perceus) | planned | copies and peak memory | |
-| Getter and setter call instructions for complex assignment | GNU R bytecode | planned | `names(x) <-`, `attr<-`, `x$a$b <-` 2.7 to 6.6 times slower | |
+| Setter instruction for one-level complex assignment | GNU R bytecode | built | `attributes(m) <- NULL` 4.2k to 1.5k instructions (GNU R 1.1k); `mostattributes(m) <-` 11.0k to 9.5k (GNU R 6.9k); `seq()` 136.2k to 135.0k | `Op::Replace`, `replace_variable` in `bytecode.rs` |
+| Getter instructions for nested complex assignment (`names(x)[2] <-`, `x$a$b <-`) | GNU R bytecode | planned | the nested levels still build their calls in `complex_assign` | |
 | **3. LLInt- and LuaJIT-grade tier 0** | | | | |
 | In-place specialization (quickening) with value profiles | CPython (PEP 659), JSC | planned | tier-0 instructions 23 to 44%; JIT-off scalar loops 0.35 to 0.41 times GNU R | |
-| Tail-call dispatch, one indirect jump per handler | LuaJIT, JSC | planned (needs `become`) | the shared indirect jump, about 28% of a scalar loop | |
+| Tail-call dispatch, one indirect jump per handler | LuaJIT, JSC | built | the shared indirect jump; measured level with the match loop (121.4k against 120.8k per `seq()`), since handlers that call out still need a frame. The handler signature is `(activation, pc)` so that few values stay live across calls | `handlers!` in `bytecode.rs` |
 | Dense feedback storage, one slot per profiled instruction | V8 | planned | feedback is one `i32` per code word | |
 | One description of each instruction's semantics, shared by tier 0 and the baseline | Deegen (LuaJIT Remake) | planned | the baseline drifting from tier 0 | |
 | Lazy fused vectors for element-wise arithmetic, as ALTREP objects | Riposte, pqR | planned | intermediate vectors in untyped vector code | |
@@ -764,10 +841,11 @@ call on ry and about 106k on GNU R 4.3.3.
 | **5. Memory and start-up** | | | | |
 | A start-up image mapped read-only and shared | V8 snapshots, Bun | planned | stats-only start-up peak | |
 | Per-package images compiled at install time | Bun | planned | package load and warm-up | |
+| One SSA IR for tier 1 and the typed core: typed facts unguarded, untyped speculations guarded with deoptimization exits; install-time code through the typed AOT pipeline, with its deoptimization metadata and watched bindings in the code file | Ř (PIR), Graal | planned, with the first of the install-time images and the baseline tier | two SSA forms and two lowerings to Cranelift | `crates/jit`, `crates/typed` |
 | Profiles from a training run (the package's tests and examples) stored in the per-package image | HHVM Jump-Start, Project Leyden | planned | hot closures that never reach tier 1's thresholds | |
 | Images shared across worker processes | Bun | planned | resident memory per `parallel` worker | |
 | Concurrent tracing and Immix line reuse | LXR | planned, after collector pauses are measured | collector pauses, fragmentation | |
-| A stackless tier 0 | Bend | planned, with the tail-call handlers | Rust frame setup per R call | |
+| A stackless tier 0 | Bend | planned, on the tail-call handlers | Rust frame setup per R call | |
 | **Rejected** | | | | |
 | Copy-and-patch as a tier | CPython (PEP 744) | rejected | | |
 | Meta-tracing | PyPy | rejected | | |

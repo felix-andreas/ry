@@ -205,7 +205,11 @@ def run_corpus(args):
         version = versions[name]
         work = pathlib.Path(tempfile.mkdtemp(prefix=f"ry-corpus-{name}-"))
         try:
-            kind, tests = unpack_tests(name, version, work)
+            unpacked = unpack_tests(name, version, work)
+            if unpacked is None:
+                print(f"{name} {version} ships no tests; skipped", file=sys.stderr)
+                continue
+            kind, tests = unpacked
             row = {"package": name, "version": version, "runner": kind}
             results = {key: [] for key, _, _ in engines}
             for _ in range(args.repeat):
@@ -226,7 +230,8 @@ def run_corpus(args):
             {"machine": cpu, "r": r_version, "repeat": args.repeat, "packages": rows}, indent=2) + "\n")
 
 def unpack_tests(name, version, work):
-    """Extracts the package's tests from its locked tarball and says how they run."""
+    """Extracts the package's tests from its locked tarball and says how they run, or `None` when
+    it ships none."""
     tarball = corpus / "repo" / "src" / "contrib" / f"{name}_{version}.tar.gz"
     with tarfile.open(tarball) as archive:
         members = [member for member in archive.getmembers()
@@ -240,7 +245,7 @@ def unpack_tests(name, version, work):
         return "tinytest", package / "inst" / "tinytest"
     if (package / "tests").is_dir():
         return "scripts", package / "tests"
-    raise SystemExit(f"{name} {version} ships no tests")
+    return None
 
 def run_suite(command, env, name, kind, tests, work):
     """Wall seconds and the outcome of one run of a package's tests, or `None` seconds and why."""

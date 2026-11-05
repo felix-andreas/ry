@@ -21,6 +21,10 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 // Every `unsafe fn` here has one contract: the handles it takes are live objects of this heap.
 #![allow(clippy::missing_safety_doc)]
+// The bytecode interpreter's op handlers chain with guaranteed tail calls (`become`), which is
+// what keeps its state in registers between instructions. The toolchain is a pinned nightly.
+#![feature(explicit_tail_calls)]
+#![allow(incomplete_features)]
 
 pub mod annotations;
 mod approximate;
@@ -40,6 +44,7 @@ pub mod deparse;
 pub mod dispatch;
 pub mod distributions;
 pub mod envir;
+pub mod effects;
 pub mod eval;
 #[cfg(unix)]
 mod fft;
