@@ -149,6 +149,14 @@ fn main() -> ExitCode {
     if let Command::Run {
         profile_summary: Some(path),
         ..
+    }
+    | Command::Load {
+        profile_summary: Some(path),
+        ..
+    }
+    | Command::Test {
+        profile_summary: Some(path),
+        ..
     } = &cli.command
     {
         // The runtime reads the variable when its session starts, which may be in a child
@@ -197,6 +205,7 @@ fn main() -> ExitCode {
         reporter,
         watch,
         runtime,
+        ..
     } = &cli.command
     {
         return run_test(

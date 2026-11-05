@@ -23,3 +23,39 @@ expect file summary.md lacks "secret_scoring_model"
 expect file summary.md lacks "classify_customer"
 expect file summary.md lacks "confidential_input"
 expect file summary.md lacks "hidden failure text"
+
+# The same summary covers a package load and the code run after it, as a CI job that runs its
+# test suite through `ry load -e` would.
+file DESCRIPTION
+| Package: privatepkg
+| Version: 0.1.0
+file NAMESPACE
+| export(secret_pricing_rule)
+file R/pricing.R
+| secret_pricing_rule <- function(confidential_amount) confidential_amount * 1.07
+
+run ry load --profile-summary load-summary.md -e "for (i in 1:20000) secret_pricing_rule(i)" -e "cat('loaded\n')"
+expect exit 0
+expect stdout "loaded"
+expect file load-summary.md "## Time split"
+expect file load-summary.md "closure calls"
+expect file load-summary.md lacks "secret_pricing_rule"
+expect file load-summary.md lacks "confidential_amount"
+expect file load-summary.md lacks "privatepkg"
+
+# A directory in the environment gives every session its own summary, child processes included,
+# so the workers a test suite starts are profiled too.
+env RY_PROFILE_SUMMARY_DIR $ROOT/profiles
+run ry load -e "status <- system2(file.path(R.home('bin'), 'Rscript'), c('-e', shQuote('cat(\"child\\n\")'))); stopifnot(status == 0L)"
+expect exit 0
+expect stdout "child"
+
+env RY_PROFILE_SUMMARY_DIR $ROOT/unused
+file count.R
+| summaries <- list.files("profiles", pattern = "^ry-profile-.*[.]md$", full.names = TRUE)
+| cat(length(summaries), "summaries\n")
+| text <- unlist(lapply(summaries, readLines))
+| stopifnot(any(grepl("## Time split", text)), !any(grepl("secret_pricing_rule", text)))
+run ry run count.R
+expect exit 0
+expect stdout "2 summaries"

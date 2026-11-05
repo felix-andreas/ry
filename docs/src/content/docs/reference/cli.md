@@ -185,10 +185,26 @@ like `R --no-echo`, except that it keeps going after an error.
 ### Profile summary
 
 `ry run --profile-summary FILE script.R` runs the script and, when it ends, writes a Markdown
-summary of where the time went to FILE. Setting `RY_PROFILE_SUMMARY=FILE` does the same for any
-session of ry's runtime. Only the process that reads the variable is profiled: time spent in child
-processes (`callr`, `parallel`'s workers) does not count. The summary is meant to be shared from a private code
-base: it holds no source code, no names from your code and no data. It lists:
+summary of where the time went to FILE. `ry load --profile-summary FILE -e CODE` profiles a package
+load and the code after it, and `ry test --profile-summary FILE` a test run, the same way. Setting
+`RY_PROFILE_SUMMARY=FILE` does the same for any session of ry's runtime. Only the process that
+reads that variable is profiled: time spent in child processes (`callr`, `parallel`'s workers)
+does not count.
+
+To profile child processes too, set `RY_PROFILE_SUMMARY_DIR=DIR`. Every session of ry's runtime
+that starts with the variable set writes its own summary to `DIR/ry-profile-<start>-<pid>.md` when
+it ends, and child processes inherit the variable, so a CI job that runs several test processes,
+each with its own workers, leaves one summary per process:
+
+```sh
+RY_PROFILE_SUMMARY_DIR=profiles ry load -e 'testthat::test_dir("tests/testthat")'
+```
+
+A process forked from a session (`parallel::mclapply`) writes no summary. The directory is created
+if it does not exist.
+
+The summary is meant to be shared from a private code base: it holds no source code, no names from
+your code and no data. It lists:
 
 - the time split after start-up: tier-0 bytecode, the AST evaluator, closure call setup, variable
   lookups past the inline caches, builtins, S3 and S4 method lookup, native code, condition
