@@ -1371,8 +1371,8 @@ pub fn diff<'text>(
     // Names whose laziness flipped: a second writer appeared or went away, or, for a constant
     // of a strict file, a name it mentions or a function it calls changed in another file.
     // The latter can flip a name no dirty item writes, so every name is a candidate, unless
-    // the analysis reused the whole map.
-    let flipped: FxHashSet<&str> = if Arc::ptr_eq(&old.bindings, &index.bindings) {
+    // the analysis reused the whole map. A full load binds every name, so nothing flips.
+    let flipped: FxHashSet<&str> = if full || Arc::ptr_eq(&old.bindings, &index.bindings) {
         FxHashSet::default()
     } else {
         old.bindings
@@ -1448,7 +1448,10 @@ pub fn diff<'text>(
                 old_path != path || position(previous) != position(item)
             }
             _ => {
-                changed.insert(name.to_owned());
+                // A full load reruns everything, so it needs no record of what changed.
+                if !full {
+                    changed.insert(name.to_owned());
+                }
                 true
             }
         };
@@ -1495,8 +1498,9 @@ pub fn diff<'text>(
     }
     let mut fresh: FxHashSet<(usize, usize)> = FxHashSet::default();
     let mut vanished: Vec<&IndexedItem> = Vec::new();
+    // A full load reruns every eager statement, so none needs to be marked fresh.
     for (file_position, (file, dirty)) in index.files.iter().zip(&new_dirty).enumerate() {
-        if !*dirty && flipped.is_empty() {
+        if full || (!*dirty && flipped.is_empty()) {
             continue;
         }
         let eager_positions: Vec<usize> = file
@@ -1594,9 +1598,14 @@ pub fn diff<'text>(
             })
             .collect()
     };
-    let mut bound: FxHashSet<String> = bind.iter().filter_map(|code| code.name.clone()).collect();
-    loop {
-        if !full && !changed.is_empty() {
+    let mut bound: FxHashSet<String> = match full {
+        true => FxHashSet::default(),
+        false => bind.iter().filter_map(|code| code.name.clone()).collect(),
+    };
+    // A full load reruns every statement already, so only a reload looks for what a change
+    // reaches.
+    while !full {
+        if !changed.is_empty() {
             let roots: Vec<&str> = eager
                 .iter()
                 .flat_map(|(_, item, _, _)| item.reads.iter().map(String::as_str))
@@ -1853,14 +1862,16 @@ pub fn diff<'text>(
 fn deferred_s4(index: &PackageIndex) -> Result<Option<DeferredS4>, String> {
     // Each name's writer count and the collation position of its first writer.
     let mut writers: FxHashMap<&str, (u32, usize)> = FxHashMap::default();
-    let mut positions: FxHashMap<(u32, u32), usize> = FxHashMap::default();
+    // The collation position of each file's first item; an item's position adds its place in
+    // the file.
+    let mut file_starts = Vec::with_capacity(index.files.len());
     let mut position = 0;
-    for (file_position, file) in index.files.iter().enumerate() {
-        for (item_position, item) in file.items.items.iter().enumerate() {
+    for file in &index.files {
+        file_starts.push(position);
+        for item in &file.items.items {
             for name in &item.binds {
                 writers.entry(name.as_str()).or_insert((0, position)).0 += 1;
             }
-            positions.insert((file_position as u32, item_position as u32), position);
             position += 1;
         }
     }
@@ -1885,9 +1896,13 @@ fn deferred_s4(index: &PackageIndex) -> Result<Option<DeferredS4>, String> {
         });
         match &item.s4 {
             Some(definition) => {
-                let Some(&position) = positions.get(&at) else {
-                    return Err(format!("{path}:{} has no collation position", item.span.line));
+                let Some(&start) = file_starts.get(at.0 as usize) else {
+                    return Err(format!(
+                        "{path}:{} has no collation position",
+                        item.span.line
+                    ));
                 };
+                let position = start + at.1 as usize;
                 definitions.push((eager_position, position, path, item, definition))
             }
             None if registers => {
@@ -1963,13 +1978,17 @@ fn deferred_s4(index: &PackageIndex) -> Result<Option<DeferredS4>, String> {
             | S4Definition::Coerce { .. } => {}
         }
     }
+    let own_classes: FxHashSet<&str> = classes.iter().map(String::as_str).collect();
+    let own_generics: FxHashSet<&str> = generics.iter().map(String::as_str).collect();
     let mut foreign_methods = Vec::new();
     let mut names = Vec::new();
     // A method for another package's generic is found only through its label, or a primitive's
     // dispatch on one of the held-back classes, so neither sees an object of another package's
     // class that a held-back union contains: dispatch would pick another method for it.
     let mut foreign = |generic: &str, signature: Vec<(Option<String>, String)>| {
-        let reaches_own = signature.iter().any(|(_, class)| classes.contains(class));
+        let reaches_own = signature
+            .iter()
+            .any(|(_, class)| own_classes.contains(class.as_str()));
         let mixed_union = signature
             .iter()
             .find(|(_, class)| mixed.contains(class.as_str()))
@@ -1995,7 +2014,9 @@ fn deferred_s4(index: &PackageIndex) -> Result<Option<DeferredS4>, String> {
             S4Definition::Class { .. }
             | S4Definition::Union { .. }
             | S4Definition::Generic { .. } => Ok(()),
-            S4Definition::Method { generic, .. } if generics.contains(generic) => Ok(()),
+            S4Definition::Method { generic, .. } if own_generics.contains(generic.as_str()) => {
+                Ok(())
+            }
             S4Definition::Method { generic, signature } => foreign(generic, signature.clone()),
             S4Definition::Coerce { from, to, replace } => {
                 let signature = vec![
@@ -2010,7 +2031,7 @@ fn deferred_s4(index: &PackageIndex) -> Result<Option<DeferredS4>, String> {
                     }
                 })
             }
-            S4Definition::Validity { class } if classes.contains(class) => Ok(()),
+            S4Definition::Validity { class } if own_classes.contains(class.as_str()) => Ok(()),
             S4Definition::Validity { class } => Err(format!(
                 "a validity method for the class \"{class}\", which another package defines"
             )),
@@ -2037,7 +2058,12 @@ fn deferred_s4(index: &PackageIndex) -> Result<Option<DeferredS4>, String> {
         }
         names.extend(item.binds.iter().cloned());
     }
-    let lazy_generics = lazy_generics(&definitions, &generics, &index.package);
+    let lazy_generics = lazy_generics(&definitions, &generics, &own_generics, &index.package);
+    let unit_of: FxHashMap<&str, u32> = lazy_generics
+        .iter()
+        .zip(1..)
+        .map(|(lazy, unit)| (lazy.generic.as_str(), unit))
+        .collect();
     let units = definitions
         .iter()
         .map(|(_, _, _, _, definition)| {
@@ -2045,10 +2071,7 @@ fn deferred_s4(index: &PackageIndex) -> Result<Option<DeferredS4>, String> {
                 S4Definition::Generic { generic } | S4Definition::Method { generic, .. } => generic,
                 _ => return 0,
             };
-            lazy_generics
-                .iter()
-                .position(|lazy| &lazy.generic == generic)
-                .map_or(0, |position| position as u32 + 1)
+            unit_of.get(generic.as_str()).copied().unwrap_or(0)
         })
         .collect();
     names.extend(classes.iter().map(|class| format!(".__C__{class}")));
@@ -2077,6 +2100,7 @@ fn deferred_s4(index: &PackageIndex) -> Result<Option<DeferredS4>, String> {
 fn lazy_generics(
     definitions: &[(usize, usize, &str, &IndexedItem, &S4Definition)],
     generics: &[String],
+    own_generics: &FxHashSet<&str>,
     package: &str,
 ) -> Vec<LazyGeneric> {
     let defined_at: FxHashMap<&str, usize> = definitions
@@ -2099,21 +2123,28 @@ fn lazy_generics(
     // Who reads each name: the generic of the reading statement, or `None` for a statement
     // that stays in the first unit.
     let mut readers: FxHashMap<&str, FxHashSet<Option<&str>>> = FxHashMap::default();
-    for &(_, _, _, item, definition) in definitions {
-        let reader =
-            generic_of(definition).filter(|generic| generics.iter().any(|own| own == generic));
+    // Each own generic's statements in collation order, gathered in one pass so the work stays
+    // linear in the number of statements however many generics the package defines.
+    let mut statements: FxHashMap<&str, Vec<(usize, &IndexedItem, &S4Definition)>> =
+        FxHashMap::default();
+    for &(_, position, _, item, definition) in definitions {
+        let reader = generic_of(definition).filter(|generic| own_generics.contains(generic));
         for name in &item.reads {
             readers.entry(name.as_str()).or_default().insert(reader);
+        }
+        if let Some(generic) = reader {
+            statements
+                .entry(generic)
+                .or_default()
+                .push((position, item, definition));
         }
     }
     let mut lazy = Vec::new();
     for generic in generics {
         let mut names = vec![generic.clone(), format!(".__T__{generic}:{package}")];
         let mut ordered = true;
-        for &(_, position, _, item, definition) in definitions {
-            if generic_of(definition) != Some(generic.as_str()) {
-                continue;
-            }
+        for &(position, item, definition) in statements.get(generic.as_str()).into_iter().flatten()
+        {
             names.extend(item.binds.iter().cloned());
             if let S4Definition::Method { signature, .. } = definition {
                 ordered &= signature.iter().all(|(_, class)| {
