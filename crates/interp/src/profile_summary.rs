@@ -21,22 +21,28 @@ use {
     smallvec::SmallVec,
     std::{
         fmt::Write as _,
+        path::PathBuf,
         sync::{
             Mutex,
             atomic::{AtomicBool, Ordering},
         },
         thread::JoinHandle,
-        time::{Duration, Instant},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     },
 };
 
 /// The environment variable that names the summary file; `--profile-summary` sets it.
 pub const VARIABLE: &str = "RY_PROFILE_SUMMARY";
 
+/// The environment variable that names a directory where every session writes a summary of its
+/// own process. Child processes inherit it, so a test suite that starts workers gets one summary
+/// per worker.
+pub const DIRECTORY_VARIABLE: &str = "RY_PROFILE_SUMMARY_DIR";
+
 const INTERVAL: Duration = Duration::from_millis(1);
 
 struct Sampler {
-    path: String,
+    path: PathBuf,
     /// The process that started sampling. A forked child inherits this record but not the
     /// sampling thread, so it writes nothing.
     process: u32,
@@ -143,14 +149,27 @@ static READY_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// Starts collecting a summary when [`VARIABLE`] names a file.
 pub fn start_from_environment() {
-    let Some(path) = std::env::var_os(VARIABLE).filter(|path| !path.is_empty()) else {
+    let path = if let Some(path) = std::env::var_os(VARIABLE).filter(|path| !path.is_empty()) {
+        // Subprocesses (callr, parallel's socket clusters) would overwrite the file with a
+        // summary of themselves, so only this process profiles.
+        // SAFETY: the session starts before R code can start threads that read the environment.
+        unsafe { std::env::remove_var(VARIABLE) };
+        PathBuf::from(path)
+    } else if let Some(directory) =
+        std::env::var_os(DIRECTORY_VARIABLE).filter(|directory| !directory.is_empty())
+    {
+        // Process ids are reused over a long CI run, so the start time keeps names apart.
+        let started = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis());
+        PathBuf::from(directory).join(format!("ry-profile-{started}-{}.md", std::process::id()))
+    } else {
         return;
     };
-    let path = path.to_string_lossy().into_owned();
-    // Subprocesses (callr, parallel's socket clusters) would overwrite the file with a summary
-    // of themselves, so only this process profiles.
-    // SAFETY: the session starts before R code can start threads that read the environment.
-    unsafe { std::env::remove_var(VARIABLE) };
+    // The summary is written when the session ends, after R code may have changed the
+    // working directory (into `tempdir()`, which the session then deletes), so a relative
+    // path is fixed against the directory the session started in.
+    let path = std::path::absolute(&path).unwrap_or(path);
     activity::set_enabled(true);
     let global = activity::label(GLOBAL_LABEL);
     let thread = std::thread::spawn(move || {
@@ -251,10 +270,16 @@ pub fn finish() -> R<()> {
     let ready = lock(&READY_AT).map(|ready| ready.duration_since(sampler.started));
     let text =
         report(&samples, elapsed, ready).map_err(|_| error("cannot format the profile summary"))?;
-    std::fs::write(&sampler.path, text).map_err(|failure| {
+    let written = match sampler.path.parent() {
+        Some(directory) if !directory.as_os_str().is_empty() => {
+            std::fs::create_dir_all(directory).and_then(|()| std::fs::write(&sampler.path, text))
+        }
+        _ => std::fs::write(&sampler.path, text),
+    };
+    written.map_err(|failure| {
         error(format!(
             "cannot write the profile summary to '{}': {failure}",
-            sampler.path
+            sampler.path.display()
         ))
     })
 }

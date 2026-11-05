@@ -413,11 +413,14 @@ pub unsafe fn cached_field(object: Sexp, name: Sexp, shape: Sexp) -> R<Option<Se
     slot_value(object, index).map(Some)
 }
 
-/// `object[[index]]` for a constant `index` through a site's `shape` cache
-/// (`bytecode::Op::Item`), like [`cached_field`]: the item when `object` is a plain record or
-/// tuple that has it, and `None` for `[[`'s own path otherwise, which dispatches, reads a vector
-/// or raises the error.
+/// `object[[index]]` for a constant `index` (a whole positive number or a name that is not
+/// `NA`) through a site's `shape` cache (`bytecode::Op::Item`), like [`cached_field`]: the item
+/// when `object` is a plain record or tuple that has it, or a list with no class, and `None` for
+/// `[[`'s own path otherwise, which dispatches, reads a vector or raises the error.
 pub unsafe fn cached_item(object: Sexp, index: Sexp, shape: Sexp) -> R<Option<Sexp>> {
+    if object.kind() == SexpType::List && !object.is_object() && !object.is_altrep() && !object.is_array() {
+        return Ok(list_item(object, index));
+    }
     if object.kind() != SexpType::Record || object.is_object() {
         return Ok(None);
     }
@@ -448,6 +451,30 @@ pub unsafe fn cached_item(object: Sexp, index: Sexp, shape: Sexp) -> R<Option<Se
     cache[0] = id as i32;
     cache[1] = slot as i32;
     slot_value(object, slot).map(Some)
+}
+
+/// `list[[index]]` as `[[` reads it, for a list `[[` cannot dispatch on: the element at a
+/// position inside the list, or for a name the first element with exactly that name, and
+/// `NULL` when no element has it. `None` leaves a position out of bounds, which is an error, to
+/// `[[` itself.
+unsafe fn list_item(list: Sexp, index: Sexp) -> Option<Sexp> {
+    if index.kind() == SexpType::String {
+        let wanted = index.element(0);
+        if wanted.bytes().is_empty() {
+            return Some(nil());
+        }
+        let names = values::get_attr(list, symbols().names);
+        if names.kind() != SexpType::String {
+            return Some(nil());
+        }
+        let found = (0..length(names)).find(|&at| {
+            let name = names.element(at);
+            name == wanted || (name != values::na_string() && name.bytes() == wanted.bytes())
+        });
+        return Some(found.map_or(nil(), |at| list.element(at)));
+    }
+    let position = values::as_real_scalar(index) as usize;
+    (position >= 1 && position <= length(list)).then(|| list.element(position - 1))
 }
 
 /// Whether `object` is a plain (unclassed) value of layout `layout`, the test a compiled

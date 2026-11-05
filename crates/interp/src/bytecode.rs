@@ -42,10 +42,11 @@
 
 use {
     crate::{
+        Interp,
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
         conditions, dispatch, effects,
         eval::{self, SwitchSelector, as_condition},
-        Interp, interp, moves,
+        interp, moves,
         unwind::{Jump, R, Unwind, error, error_in},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
@@ -811,12 +812,8 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         summary: nil(),
     };
     let slot = compiler.cache();
-    compiler.summary = effects::summarize(
-        function.car(),
-        body,
-        compiler.local_symbols.as_ref(),
-        slot,
-    )?;
+    compiler.summary =
+        effects::summarize(function.car(), body, compiler.local_symbols.as_ref(), slot)?;
     compiler.assemble(body).map(Some)
 }
 
@@ -1529,11 +1526,17 @@ impl Compiler {
             .iter()
             .any(|(_, value)| compiles_as_promise(*value));
         self.constant(if worth_compiling { unbound() } else { nil() });
-        let eager = arguments.iter().any(|(_, value)| value.kind() == SexpType::Symbol)
+        let eager = arguments
+            .iter()
+            .any(|(_, value)| value.kind() == SexpType::Symbol)
             && arguments
                 .iter()
                 .all(|(_, value)| self.cannot_assign(*value, 0));
-        let flag = if eager { values::scalar_logical(1)? } else { nil() };
+        let flag = if eager {
+            values::scalar_logical(1)?
+        } else {
+            nil()
+        };
         self.constant(flag);
         Ok(index)
     }
@@ -1897,8 +1900,10 @@ impl Compiler {
             return Ok(None);
         };
         let constant = |value: Sexp| {
-            matches!(value.kind(), SexpType::String | SexpType::Logical | SexpType::Nil)
-                && length(value) <= 1
+            matches!(
+                value.kind(),
+                SexpType::String | SexpType::Logical | SexpType::Nil
+            ) && length(value) <= 1
                 && !values::has_attributes(value)
         };
         if *variable_tag != nil()
@@ -1957,7 +1962,16 @@ impl Compiler {
         let whole = self.constant(call);
         self.emit(
             Op::Replace,
-            &[dst, variable, setter_symbol, cache, setter_call, base, count, whole],
+            &[
+                dst,
+                variable,
+                setter_symbol,
+                cache,
+                setter_call,
+                base,
+                count,
+                whole,
+            ],
         );
         self.release_to(mark);
         self.cold_fallback(&[guard], call, dst)?;
@@ -1966,8 +1980,8 @@ impl Compiler {
 
     /// Whether evaluating the subscript `index` cannot change a variable of the frame, so the
     /// compiled assignment may evaluate it before reading the target: a variable of the frame (a
-    /// formal's promise runs in the caller's frame), a numeric constant, or base arithmetic on
-    /// those.
+    /// formal's promise runs in the caller's frame), a numeric constant, a name, or base
+    /// arithmetic on variables and numbers.
     unsafe fn side_effect_free_index(&self, index: Sexp, depth: u32) -> bool {
         match index.kind() {
             SexpType::Symbol => {
@@ -1983,6 +1997,8 @@ impl Compiler {
             SexpType::Integer | SexpType::Real => {
                 length(index) == 1 && !values::has_attributes(index)
             }
+            // A name is a subscript, but an operand of arithmetic would be an error.
+            SexpType::String => depth == 0 && length(index) == 1 && !values::has_attributes(index),
             SexpType::Language if depth < 8 && index.car().kind() == SexpType::Symbol => {
                 let operator = symbol_name(index.car());
                 let arguments = values::pairlist_items(index.cdr());
@@ -3315,7 +3331,11 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
         exit: Ok(nil()),
         machine,
     };
-    let handlers = if SINGLE { &STEP_HANDLERS } else { &RUN_HANDLERS };
+    let handlers = if SINGLE {
+        &STEP_HANDLERS
+    } else {
+        &RUN_HANDLERS
+    };
     if !SINGLE {
         release(&state);
     }
@@ -3404,7 +3424,11 @@ unsafe fn failed<const SINGLE: bool>(
     at: usize,
     unwind: Unwind,
 ) -> usize {
-    let resumed = if SINGLE { Err(unwind) } else { continue_after(state.machine, at, unwind) };
+    let resumed = if SINGLE {
+        Err(unwind)
+    } else {
+        continue_after(state.machine, at, unwind)
+    };
     match resumed {
         Ok(pc) => pc,
         Err(unwind) => {
@@ -3413,7 +3437,6 @@ unsafe fn failed<const SINGLE: bool>(
         }
     }
 }
-
 
 static RUN_HANDLERS: [Handler; OPS.len()] = handler_table::<false>();
 static STEP_HANDLERS: [Handler; OPS.len()] = handler_table::<true>();
@@ -3552,6 +3575,17 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
     let first = instruction.operand(3);
     let count = instruction.operand(4);
     let definition = eval::builtin_def(function)?;
+    if count == 1
+        && let Some(unary) = definition.unary
+        && call.cdr().tag() == nil()
+        && call.cdr().car() != missing_arg()
+        && let Some(value) = unary(instruction.register(first))?
+    {
+        (*state.interp).visible = true;
+        state.record(instruction.at, value);
+        instruction.output(0, value);
+        return Ok(Flow::Next);
+    }
     let mut args = eval::Args::new();
     let mut cell = call.cdr();
     for index in 0..count {
@@ -3764,7 +3798,10 @@ unsafe fn op_branch_unless_primitive(
 }
 
 #[inline(always)]
-unsafe fn op_branch_if_object(_state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+unsafe fn op_branch_if_object(
+    _state: &mut Activation<'_, '_>,
+    instruction: Instruction,
+) -> R<Flow> {
     if instruction.input(0).is_object() {
         return Ok(Flow::Goto(instruction.operand(1)));
     }
@@ -3998,7 +4035,10 @@ unsafe fn op_logic_right(state: &mut Activation<'_, '_>, instruction: Instructio
         if is_and { "&&" } else { "||" },
         "y",
     )?;
-    instruction.output(0, values::scalar_logical(logic_result(is_and, left, right))?);
+    instruction.output(
+        0,
+        values::scalar_logical(logic_result(is_and, left, right))?,
+    );
     (*state.interp).visible = true;
     Ok(Flow::Next)
 }
@@ -4051,7 +4091,10 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
 }
 
 #[inline(always)]
-unsafe fn op_sub_assign_matrix(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+unsafe fn op_sub_assign_matrix(
+    state: &mut Activation<'_, '_>,
+    instruction: Instruction,
+) -> R<Flow> {
     let env = state.env;
     let call = state.constant(instruction, 5);
     let value = instruction.input(4);
@@ -4082,7 +4125,11 @@ unsafe fn op_replace(state: &mut Activation<'_, '_>, instruction: Instruction) -
     let done = replace_variable(
         env,
         state.constant(instruction, 1),
-        (state.constant(instruction, 2), state.cache, instruction.operand(3)),
+        (
+            state.constant(instruction, 2),
+            state.cache,
+            instruction.operand(3),
+        ),
         state.constant(instruction, 4),
         whole,
         std::slice::from_raw_parts_mut(instruction.registers.add(first), count),
@@ -4187,9 +4234,13 @@ unsafe fn assign_element_in_place(
         // `$<-` on a list replaces the first element whose name matches exactly; a name `x`
         // lacks appends an element, which `complex_assign` does.
         SexpType::String => {
+            // An empty or `NA` name matches no element.
             let wanted = index.element(0);
             let names = values::get_attr(target, symbols().names);
-            if wanted == values::na_string() || names.kind() != SexpType::String {
+            if wanted == values::na_string()
+                || wanted.bytes().is_empty()
+                || names.kind() != SexpType::String
+            {
                 return Ok(false);
             }
             let wanted_bytes = wanted.bytes();

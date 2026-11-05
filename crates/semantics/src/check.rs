@@ -787,7 +787,6 @@ fn check_item_in<'db>(
         },
         environment: Environment::default(),
         scheme_arena: Vec::new(),
-        literal_vars: Vec::new(),
         literal_reads: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
         recorded: RecordedTypes(vec![None; module.expression_count()]),
         recorded_patterns: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
@@ -1451,11 +1450,6 @@ struct Checker<'db, 'a> {
     expression_annotations: ArenaMap<'a, ExprId, Annotation<'db>>,
     environment: Environment<'db>,
     scheme_arena: Vec<TypeScheme<'db>>,
-    /// The inference variables that type a literal whose type its use decides: a `List`
-    /// item (`true`, defaulting to a ry number) or a variable written with a literal
-    /// (`false`, defaulting to R's type). Nothing quantifies them: a function generalizes
-    /// over its parameters, never over a literal it wrote.
-    literal_vars: Vec<(Ty<'db>, bool)>,
     /// The reads that may keep a literal variable open, because they are an operand whose
     /// other operand may decide it. Every other read decides it as R's type.
     literal_reads: ArenaSet<'a, ExprId>,
@@ -2824,18 +2818,21 @@ impl<'db> Checker<'db, '_> {
         self.top_level_ry_values && self.return_frames.is_empty()
     }
 
+    /// Nothing quantifies a literal variable: a function generalizes over its parameters,
+    /// never over a literal it wrote.
     fn fresh_literal(&mut self, constraint: Constraint, native: bool) -> Ty<'db> {
-        let ty = self.fresh(constraint);
-        self.literal_vars.push((ty, native));
-        ty
+        let var = self.table.fresh_literal(constraint, native);
+        Ty::new(self.db, TyKind::Var(var))
     }
 
     /// Binds every literal variable nothing decided to its default: a ry number for a `List`
     /// item, R's type for a variable written with a literal.
     fn default_literal_vars(&mut self) {
-        for index in 0..self.literal_vars.len() {
-            let (ty, native) = self.literal_vars[index];
-            self.default_literal_var(ty, native);
+        for index in 0..self.table.literals().len() {
+            let Some(&(var, native)) = self.table.literals().get(index) else {
+                break;
+            };
+            self.default_literal_var(Ty::new(self.db, TyKind::Var(var)), native);
         }
     }
 
@@ -2902,10 +2899,9 @@ impl<'db> Checker<'db, '_> {
         ) {
             return false;
         }
-        let literal_vars = &self.literal_vars;
-        literal_vars.iter().any(|&(literal, native)| {
-            !native && matches!(literal.kind(self.db), TyKind::Var(other) if self.table.find(*other) == representative)
-        })
+        self.table
+            .literal_of(representative)
+            .is_some_and(|(_, native)| !native)
     }
 
     fn unify_or_report(&mut self, range: TextRange, expected: Ty<'db>, found: Ty<'db>) {
@@ -2922,10 +2918,8 @@ impl<'db> Checker<'db, '_> {
         self.table.collect_unbound_vars(self.db, ty, &mut open);
         for var in open {
             let representative = self.table.find(var);
-            if let Some(&(literal, native)) = self.literal_vars.iter().find(|(literal, _)| {
-                matches!(literal.kind(self.db), TyKind::Var(other) if self.table.find(*other) == representative)
-            }) {
-                self.default_literal_var(literal, native);
+            if let Some((literal, native)) = self.table.literal_of(representative) {
+                self.default_literal_var(Ty::new(self.db, TyKind::Var(literal)), native);
             }
         }
         self.table.resolve(self.db, ty)
@@ -18065,11 +18059,8 @@ impl<'db> Checker<'db, '_> {
             // Escaped below the binding level: stays monomorphic.
             return ty;
         }
-        let literal = self.literal_vars.iter().find(|(literal, _)| {
-            matches!(literal.kind(self.db), TyKind::Var(other) if self.table.find(*other) == representative)
-        });
-        if let Some(&(literal, native)) = literal {
-            self.default_literal_var(literal, native);
+        if let Some((literal, native)) = self.table.literal_of(representative) {
+            self.default_literal_var(Ty::new(self.db, TyKind::Var(literal)), native);
             return self.table.resolve(self.db, ty);
         }
         let letter = (b'T' + (binders.len() as u8 % 7)) as char;

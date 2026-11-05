@@ -1,0 +1,42 @@
+[stdout]
+|           Base     BaseOrNULL 
+|       "Base:1" "BaseOrNULL:2" 
+|             C1           Base     BaseOrNULL 
+|         "C1:1"       "Base:2" "BaseOrNULL:3" 
+|            NULL            Base           .NULL              C2 
+|      "NULL:1[]"      "Base:1[]" ".NULL:2[NULL]"      "C2:3[C1]" 
+| [1] TRUE
+| [1] TRUE
+|      C      S      M      U     U3 
+|  "C:1"  "S:2"  "M:3"  "U:4" "U3:2" 
+|        C        D 
+|  "C:1[]" "D:2[C]" 
+|      C      S      M      U     U3 
+|  "C:1"  "S:2"  "M:3"  "U:4" "U3:2" 
+|      D      C      S     U3      M      U 
+|  "D:1"  "C:2"  "S:3" "U3:3"  "M:4"  "U:5" 
+|        C        D 
+|  "C:1[]" "D:2[C]" 
+|        M        C        E 
+|  "M:1[]" "C:3[S]" "E:5[D]" 
+|      F      E      D      C      S     U3      M      U 
+|  "F:1"  "E:2"  "D:3"  "C:4"  "S:5" "U3:5"  "M:6"  "U:7" 
+|      C      S     U3      M      U 
+|  "C:1"  "S:2" "U3:2"  "M:3"  "U:4" 
+| [1] "h"
+| M M 
+| S M 
+| C U3 
+| D U3 
+| E U3 
+| G U3 
+| C1 BaseOrNULL 
+| C2 BaseOrNULL 
+| [1] "BaseOrNULL"
+| [1] "G"  "F"  "E"  "D"  "C"  "S"  "U3" "M"  "U" 
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("G", "F", "E", "D", "C", "S", "U3", "M", "U")

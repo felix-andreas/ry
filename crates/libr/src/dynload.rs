@@ -22,8 +22,13 @@ use {
     std::ffi::{CString, c_char, c_int, c_void},
 };
 
-/// What GNU R calls `DllInfo`. Packages only hold pointers to it, so its layout is ry's.
+/// What GNU R calls `DllInfo`. Packages mostly hold pointers to it, but some read GNU R's
+/// leading `path` and `name` fields directly (stringi's `R_init_stringi` reads `dll->path` to
+/// find its ICU data), so those two come first as C strings, in GNU R's order.
+#[repr(C)]
 pub struct Dll {
+    c_path: *mut c_char,
+    c_name: *mut c_char,
     pub path: String,
     pub name: String,
     handle: *mut c_void,
@@ -77,9 +82,23 @@ pub struct CMethodDef {
     types: *mut u32,
 }
 
+impl Drop for Dll {
+    fn drop(&mut self) {
+        // SAFETY: both pointers come from `CString::into_raw` in `Dll::new` and are freed only here.
+        unsafe {
+            drop(CString::from_raw(self.c_path));
+            drop(CString::from_raw(self.c_name));
+        }
+    }
+}
+
 impl Dll {
     fn new(path: String, name: String, handle: *mut c_void) -> Dll {
         Dll {
+            // A path or name with an interior NUL cannot be opened or registered, so an empty C
+            // string loses nothing a package could use.
+            c_path: CString::new(path.as_str()).unwrap_or_default().into_raw(),
+            c_name: CString::new(name.as_str()).unwrap_or_default().into_raw(),
             path,
             name,
             handle,

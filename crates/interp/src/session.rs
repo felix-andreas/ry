@@ -105,6 +105,7 @@ unsafe fn prepare_process() {
 /// is removed first, so that the hooks, which set only options not yet set, see the order GNU
 /// R's start-up gives them.
 unsafe fn start_from_image(home: &str) -> R<()> {
+    crate::base_fast_paths::register_native_entries(base_namespace())?;
     crate::envir::clear_options()?;
     define_process_variables()?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;

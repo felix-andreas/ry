@@ -337,6 +337,10 @@ pub mod gp {
     /// cell, or binding the symbol in a function frame, moves the heap's binding epoch and the
     /// symbol's lookup stamp, so compiled code revalidates a lookup only when both moved.
     pub const WATCHED: u16 = 1 << 10;
+    /// A base closure whose whole call runs natively when its arguments are already values
+    /// (`interp::base_fast_paths::native_entry`). The bit only filters: the interpreter's
+    /// registry, keyed by the closure's identity, decides.
+    pub const NATIVE_ENTRY: u16 = 1 << 11;
     /// A function definition's formals pairlist (or its body, when it has no formals) for which
     /// the interpreter registered inline-annotation checks.
     pub const TYPED_DEFINITION: u16 = 1 << 12;

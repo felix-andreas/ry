@@ -148,6 +148,10 @@ A load holds them back only when all of these hold, and otherwise runs every one
 - Every name the definitions bind is written by them alone.
 - No generic they define already exists as a function the namespace can see.
 
+The load reads each S4 call's arguments as R matches them, by exact name, then by unique partial
+name, then by position, so `setAs(from = "numeric", to = "Quantity", function(from) ...)` and
+`setClassUnion("NumOrNull", mem = c("numeric", "NULL"))` are recognized like their positional forms.
+
 `options(ry.load.lazy_s4 = FALSE)` turns this off. The load's summary counts the definitions it held
 back, as in `Loaded shapes: 1 definition bound lazily, 1 top-level statement run, 6 S4 definitions held
 back until first use, in 5 ms.` A reload that changes one of them, or a name they bind, runs them all
@@ -230,6 +234,13 @@ otherwise. With the option on, each definition that takes the R code says which 
 
 ```
 ry: setClass("Num") runs the methods package's R code: a superclass is a basic class or comes from another package (methods_core.rs:2682)
+```
+
+A fresh load whose S4 definitions run in place, because one of the conditions above fails, says so
+with the first definition that keeps them there:
+
+```
+  S4 definitions run at load: R/a.R:5: a method for another package's generic `show` whose signature names none of the package's classes
 ```
 
 The R code gives the same classes and methods, only more slowly (a few milliseconds per

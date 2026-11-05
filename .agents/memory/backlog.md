@@ -111,9 +111,21 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **Next: a native class table with dense ids** (`decisions.md`, "Per-generic units came before
   the class table"). Unit 0 is about 416M instructions, and `setClass` is 29% of it, spread over
   class-definition lookups, `tryNew` and the extension objects `setIs` builds. The R-level metadata becomes views produced from the table.
+- **WIP: the first union of a session, natively** (branch `native-first-union`, draft PR #350,
+  not built or reviewed in its latest form). The first `setClassUnion` falls back because
+  `initialize`'s dispatch cache has no `ClassUnionRepresentation` entry yet; the branch caches the
+  inherited method itself, but only when it is the default `initialize`, and only after every
+  check that can still bail. The oracle cases `s4__native_first_union` and
+  `s4__union_initialize_method` on the branch pin it. Main has a related bug: the native union
+  and `setClass` skip a package's `initialize` method for `classRepresentation`, which GNU R calls.
+- `deparse()` of an S4 object whose class is not defined prints `new("Zzz")`, where GNU R
+  errors ("cannot get a slot ("slots") from an object of type "NULL"") because `getClassDef`
+  returns `NULL` (`s4_parts` in `crates/interp/src/deparse.rs`).
 - **What still falls back** (`RY_LOAD_VERBOSE=true ry load .` names each with its reason):
   classes with a basic-type or other-package superclass (`contains = "numeric"`, `"list"`,
-  `"data.frame"`, an old class), a second superclass that has superclasses of its own,
+  `"data.frame"`, an old class), a second superclass that has superclasses of its own, a class
+  under a union whose members are not all cached yet, a method that omits an argument its
+  signature names, a generic whose body is not `standardGeneric("f")` (braced or not),
   `setOldClass`, the first union of a session (dispatch caches not filled), a union of unions,
   `setMethod("[")` whose formals need rematching, and `cacheMetaData` delegating classes whose
   cached definition differs, other packages' generics, group generics and primitives.
@@ -137,6 +149,7 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 ## Open: collector throughput on the benchmark suites
 
 - **Measure first.** Generate the suites (`python3 tools/bench/generate.py --out .bench --lines 300000 --files 500`), install the corpus library (`just corpus`; the polars R package builds from source and takes the longest), then run `just bench-compare .bench/finbench .bench/dsbench .bench/biobench` with `RY_GC_LOG=<file>` set. The report's last block gives each runtime's `gc.time()` total and share of suite time; the log gives every pause (kind, nanoseconds, young small and large bytes, old bytes), from which pause p50 and p99 and collections per second follow. Fix the largest cost the numbers show, then check each object type's allocation path against `decisions.md`, "Data-oriented design and explicit allocators" (open audit items: "Open: data-oriented layouts and explicit allocators").
+- **`gc()`'s "max used" is sampled only at collections**, so it reads below the process peak (575 MB against an 833 MB VmHWM for a loop that makes and drops large vectors; GNU R reports 1,054 MB because it counts at allocation). Updating the peak on each large-vector allocation would match GNU R's meaning (`crates/heap/src/heap.rs`, `crates/heap/tests/test_gc.rs` `released_old_vectors_leave_the_peak_at_one_vector`).
 - **`for` over a compact `1:n` expands it.** Both tiers materialize the sequence (40 MB for ten million elements) before the loop; GNU R iterates the compact form. Iterating start and step directly removes the allocation, the page faults and `loop_sum`'s peak.
 - **Builder peaks still above GNU R's by more than 10%** (fresh process per case, 2e7 doubles, peak over the inputs in MB, ry against GNU R 4.3.3): `x * 2 + 1` 305/153 (GNU R writes the result into an unshared temporary operand; ry cannot take a reference count of 0 as proof yet, because bytecode registers and JIT slots hold uncounted references, `eval::reuse_permitted`), `seq(1, n, by = 1)` 381/305, `vapply(l, function(v) v + 1, numeric(1))` over a 1e6 list 112/58, `unlist` 20/4. `resolve()` in `crates/interp/src/subset.rs` still builds a `Vec<usize>` per general subscript.
 - **Minor collections during a package load cost about 24M instructions each**, most of it re-marking every child of a remembered old object (namespace frames being filled). Card marking would re-mark only the dirty part. `library()` of 11 packages runs 5 of them, 118M of 1,133M instructions.
@@ -815,6 +828,12 @@ change that does not pay.
 - **Typed Array loops trail untyped ones slightly.** `python3 tools/bench/why/run.py --filter array` (GNU R / ry untyped / ry typed and strict, seconds, 4-core Xeon): array_dot 0.188/0.021/0.022, array_filter 0.167/0.022/0.026, array_map 0.247/0.038/0.041, array_sum 0.116/0.024/0.027. The JIT compiles Array element loops natively, but the typed program still pays 5 to 15 percent over the plain-vector one; find where (the strict operator check, `as.Array`, or the annotation checks) before calling Arrays a speed feature.
 
 ## Open: untyped R against GNU R
+
+- `missing()` costs about a whole closure call (2,626 instructions against GNU R's 2,590); it is a
+  special, so a fast path needs its own bytecode op. The unary builtin path and native entries
+  skip `call_builtin_checked`, so `--profile-summary` counters and Rprof do not see those calls.
+  The `Reduce` prologue never binds `ind` in its frame, which only an `f` that reads
+  `parent.frame()` can observe.
 
 Target: plain, untyped R at least 1.5 times faster than GNU R. A private 300K-line code base runs
 about 3% slower than on GNU R, and `just bench-real` (`tools/bench/real/`, results in
