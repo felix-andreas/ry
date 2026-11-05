@@ -21,10 +21,11 @@ use {
     smallvec::SmallVec,
 };
 
-/// Frames this small are scanned; larger ones keep a hash index beside the cells. Scanning a
-/// dozen cells is cheaper than building the index, which a call to a function with many
-/// formals (`identical` has nine) would otherwise pay on every call.
-const INDEX_THRESHOLD: usize = 16;
+/// Frames this small are scanned; larger ones keep a hash index beside the cells. A scan is
+/// guarded by the frame's symbol filter and usually skipped by a lookup site's slot hint, so
+/// it stays cheaper than building the index, which a call of a base closure with many formals
+/// and locals (`seq.default` binds about 20) would otherwise pay on every call.
+const INDEX_THRESHOLD: usize = 32;
 
 /// The bindings a frame holds without a second allocation: as many as keep the environment object,
 /// with its symbol filter, in the 192-byte size class.

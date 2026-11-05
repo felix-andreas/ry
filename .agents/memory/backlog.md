@@ -831,7 +831,8 @@ calls of `function(x, y = 2) x + y`, `RY_JIT=off`) and on `timeseries`. Fixed:
 - **Tier-0 dispatch** is one loop over op words that carry their operand count, lookup sites
   keep slot hints into the frame, function lookups skip frames that cannot bind the symbol, and
   builtin checks are derived at registration (`decisions.md`, "Tier 0 runs on facts fixed before
-  the code runs"): `seq(1, 10, by = 2)` 160.4k to 145.5k instructions (GNU R about 106k).
+  the code runs"): `seq(1, 10, by = 2)` 160.4k to 145.5k instructions (GNU R about 106k);
+  a 32-binding index threshold and stamps compared as bits took it to 141.6k.
 - **`x$name <- v` in tier 0** compiles to the in-place `SubAssign` (kind `Dollar`) when `x` is a
   local, unshared, classless list that already has the name: 0.76 s to 0.16 s per million
   (GNU R 0.09 s). `complex_assign` caches `f<-` symbols per getter and allocates no vectors.
@@ -860,30 +861,17 @@ awfy 0.66x, rcp 0.55x, shootout 0.98x geometric mean; JIT on 1.35x, 2.48x and 1.
 JIT-off losers are scalar loops (rcp vector-while 0.35x, fannkuchredux_naive 0.38x,
 mandelbrot 0.41x), which tier-0 dispatch and scalar allocation decide.
 
-Open, largest first:
-
-1. **Allocation per call.** Each argument gets a promise (`closure_args_into`, 3.8%), the frame
-   records a promargs pairlist (`args_pairlist`, 2.7%), and a scalar result allocates
-   (`scalar_real` from `fast_arithmetic`, 2%); sweeping and refilling pages adds 3.4%. Build the
-   promargs list only when `sys.call`, `match.call`, `UseMethod` or native code asks for it
-   (the caller's `Args` outlive the callee), reserve the promises with the frame's batch
-   `reserve`, and reuse an unshared scalar register in place.
-2. **Per-call bookkeeping in `run_closure`** (6% self): the srcref attribute walk, `stacker`'s
-   thread-local stack check, the annotation lookup, three `Rc` clones of the handler and restart
-   stacks, and a 9-field `Frame` push. A per-closure call plan (has a srcref, is typed, formals
-   count) computed once would remove most of it.
-3. **S3 lookup itself:** `lookup_method` still walks the calling frames to the top environment and
-   probes a hash map per class. The per-site polymorphic cache in `prior-art.md` is the next cut.
-4. **Complex assignment** stays 2.7 to 6.6 times slower than GNU R for `names(x) <-`, `attr<-`
-   and nested `x$a$b <-` (a million assignments in a loop, JIT off). Each
-   level builds two `*tmp*` promises and two pairlists and calls the replacement through
-   `apply_call`; GNU R's bytecode has `SETTER_CALL` and `GETTER_CALL` instructions that pass the
-   values without promises. Compile those into tier 0 the same way.
-5. **Tier-0 dispatch:** the one shared indirect jump is about 28% of a scalar loop with the JIT
-   off, which runs about 5 times slower than GNU R. Tail-call handlers need nightly `become`
-   (`prior-art.md`, JavaScriptCore).
-6. **Feedback storage:** one `i32` per code word, operands included; slot it densely
-   (`prior-art.md`, V8).
+The open work, in build order with the gap each item targets, is the roadmap in
+`r-runtime.md` ("Untyped performance roadmap"); update its status column with each change. Numbers
+behind its rows, kept here: `closure_args_into` 3.8% and `args_pairlist` 2.7% of a 3-million-call
+microbenchmark, `scalar_real` from `fast_arithmetic` 2%, page sweep and refill 3.4%, `run_closure`
+6% self (srcref walk, `stacker` check, annotation lookup, three `Rc` clones, a 9-field `Frame`
+push); `lookup_method` walks the calling frames to the top environment and probes a hash map per
+class; complex assignment 2.7 to 6.6 times slower than GNU R (two `*tmp*` promises and two
+pairlists per level, through `apply_call`); the shared dispatch jump about 28% of a JIT-off scalar
+loop; feedback one `i32` per code word. Per `seq(1, 10, by = 2)` call (141.6k instructions, GNU R
+about 106k): `execute_code` self 36.6k (about 680 ops), `call_builtin_reusing` 9.5k over 65 builtin
+calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 
 ## Open: performance and memory
 

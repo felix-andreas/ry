@@ -16,11 +16,12 @@
 //! A `BCODESXP` holds:
 //! - `car`: the instruction words, an integer vector.
 //! - `cdr`: the constants, a list. The first is the source expression, the second the cache
-//!   epochs (a double vector), the third the type feedback (a raw vector with one byte per
+//!   stamps (a double vector holding each stamp's bits), the third the type feedback (a raw vector with one byte per
 //!   instruction word, set at the position of the instruction that produced a value), the fourth
 //!   the loop table (an integer vector of `start, end, exit, step` quadruples), the fifth the
 //!   number of registers the code uses, the sixth the profile counters (an integer vector, see
-//!   [`profile`]) and the seventh the optimizing tier's compiled code, `NULL` until it exists.
+//!   [`profile`]) the seventh the optimizing tier's compiled code, `NULL` until it exists, and the eighth the
+//!   slot hints (an integer vector, one per lookup site).
 //! - `tag`: the inline caches, a list with two slots per cache: the enclosure the lookup started
 //!   from and the binding cell it found. The list holds them weakly, because closures that share
 //!   a body share its code, and a strong cache would keep the last caller's environment alive.
@@ -1433,7 +1434,8 @@ impl Compiler {
         let constants = values::alloc(SexpType::List, FIRST_CONSTANT + compiler.constants.len())?;
         heap.set_element(constants, SOURCE, source);
         let epochs = values::alloc(SexpType::Real, compiler.caches as usize)?;
-        values::reals_mut(epochs).fill(-1.0);
+        // No stamp is all ones, so every cache starts empty.
+        values::reals_mut(epochs).fill(f64::from_bits(u64::MAX));
         heap.set_element(constants, EPOCHS, epochs);
         let hints = values::alloc(SexpType::Integer, compiler.caches as usize)?;
         values::ints_mut(hints).fill(0);
@@ -4095,7 +4097,9 @@ unsafe fn walk_function_frames(symbol: Sexp, mut env: Sexp, hint: &mut u32) -> R
 /// code object and never resized, so their storage is addressed directly.
 #[derive(Clone, Copy)]
 struct LookupCache {
-    epochs: *mut f64,
+    /// Read as the stamps' bits, which compare in one instruction where a conversion to `f64`
+    /// took several.
+    epochs: *mut u64,
     caches: Sexp,
     slots: *const Sexp,
     /// Per lookup slot, where the binding sat in the frame that last bound the symbol.
@@ -4106,7 +4110,7 @@ impl LookupCache {
     unsafe fn of(code: Sexp) -> Self {
         let caches = code.tag();
         LookupCache {
-            epochs: values::reals_mut(code.cdr().element(EPOCHS)).as_mut_ptr(),
+            epochs: values::reals_mut(code.cdr().element(EPOCHS)).as_mut_ptr() as *mut u64,
             caches,
             slots: caches.data() as *const Sexp,
             hints: values::ints_mut(code.cdr().element(HINTS)).as_mut_ptr() as *mut u32,
@@ -4121,7 +4125,7 @@ unsafe fn cached_cell(
     cache: LookupCache,
     slot: usize,
 ) -> Option<Sexp> {
-    if *cache.epochs.add(slot) != crate::heap().lookup_stamp(symbol) as f64
+    if *cache.epochs.add(slot) != crate::heap().lookup_stamp(symbol)
         || *cache.slots.add(slot * 2) != enclosure
     {
         return None;
@@ -4133,7 +4137,7 @@ unsafe fn fill_cache(symbol: Sexp, enclosure: Sexp, cell: Sexp, cache: LookupCac
     let heap = crate::heap();
     heap.set_element(cache.caches, slot * 2, enclosure);
     heap.set_element(cache.caches, slot * 2 + 1, cell);
-    *cache.epochs.add(slot) = heap.lookup_stamp(symbol) as f64;
+    *cache.epochs.add(slot) = heap.lookup_stamp(symbol);
 }
 
 /// The cell a lookup from `enclosure` finds, when the result can be cached: the walk passes no
