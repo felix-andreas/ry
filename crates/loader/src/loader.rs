@@ -198,6 +198,8 @@ pub struct Plan {
     pub run_writes: Option<Vec<String>>,
     /// Statements of `run` that a backend may hold back until first use instead.
     pub deferred_s4: Option<DeferredS4>,
+    /// Why a fresh load with S4 definitions cannot hold them back: the statement and the rule.
+    pub s4_eager_reason: Option<String>,
     pub sysdata: SysdataChange,
     /// `Some` when the datasets must be read again: every file of `data/` to read, in order,
     /// into a cleared lazy data environment. Empty when the last dataset went away.
@@ -1672,7 +1674,11 @@ pub fn diff<'text>(
             names.into_iter().collect()
         });
     // A fresh load runs every eager statement, so positions in `eager` are positions in `run`.
-    let deferred_s4 = if full { deferred_s4(index) } else { None };
+    let (deferred_s4, s4_eager_reason) = match full.then(|| deferred_s4(index)) {
+        Some(Ok(deferred)) => (deferred, None),
+        Some(Err(reason)) => (None, Some(reason)),
+        None => (None, None),
+    };
     // Another statement may make the same registration, which then stays.
     let registered: BTreeSet<&Registration> = eager
         .iter()
@@ -1824,6 +1830,7 @@ pub fn diff<'text>(
         run,
         run_writes,
         deferred_s4,
+        s4_eager_reason,
         sysdata,
         data,
         s3_register,
@@ -1841,8 +1848,9 @@ pub fn diff<'text>(
 }
 
 /// The package's [`DeferredS4`], positioned in its eager statements, when every S4 definition
-/// qualifies.
-fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
+/// qualifies; `None` when it has none. The error names the statement that keeps them eager and
+/// why, which a verbose load reports.
+fn deferred_s4(index: &PackageIndex) -> Result<Option<DeferredS4>, String> {
     // Each name's writer count and the collation position of its first writer.
     let mut writers: FxHashMap<&str, (u32, usize)> = FxHashMap::default();
     let mut positions: FxHashMap<(u32, u32), usize> = FxHashMap::default();
@@ -1864,7 +1872,7 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
     let mut definitions = Vec::new();
     for (eager_position, eager) in index.bindings.eager.iter().enumerate() {
         let at = eager.at;
-        let Some((_, item)) = index.item_at(at) else {
+        let Some((path, item)) = index.item_at(at) else {
             continue;
         };
         let registers = item.registrations.iter().any(|registration| {
@@ -1877,14 +1885,24 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
         });
         match &item.s4 {
             Some(definition) => {
-                definitions.push((eager_position, *positions.get(&at)?, item, definition))
+                let Some(&position) = positions.get(&at) else {
+                    return Err(format!("{path}:{} has no collation position", item.span.line));
+                };
+                definitions.push((eager_position, position, path, item, definition))
             }
-            None if registers => return None,
+            None if registers => {
+                return Err(format!(
+                    "{path}:{} is an S4 registration the loader cannot hold back; only `setClass`, \
+                     `setGeneric` with its own definition, `setMethod`, `setReplaceMethod`, \
+                     `setValidity`, `setClassUnion` and `setAs` with literal names can wait",
+                    item.span.line
+                ));
+            }
             None => {}
         }
     }
     if definitions.is_empty() {
-        return None;
+        return Ok(None);
     }
     // A coercion that names none of the classes held back reads nothing held back and runs in
     // place. A union that names other packages' classes, as `c("Quantity", "NULL")` and
@@ -1895,7 +1913,7 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
     // below for what that leaves to watch.
     let mut held: FxHashSet<&str> = definitions
         .iter()
-        .filter_map(|(_, _, _, definition)| match definition {
+        .filter_map(|(_, _, _, _, definition)| match definition {
             S4Definition::Class { class } => Some(class.as_str()),
             _ => None,
         })
@@ -1903,7 +1921,7 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
     let mut mixed: FxHashSet<&str> = FxHashSet::default();
     let mut kept = Vec::with_capacity(definitions.len());
     for definition in definitions {
-        match definition.3 {
+        match definition.4 {
             S4Definition::Union { class, members } => {
                 if !members.iter().all(|member| held.contains(member.as_str())) {
                     mixed.insert(class);
@@ -1917,7 +1935,11 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
                 // `setAs` from another package's class to a union that may contain it
                 // records the coercion in that class's own definition, as `setIs` does.
                 if !held.contains(from.as_str()) && mixed.contains(to.as_str()) {
-                    return None;
+                    return Err(format!(
+                        "{}:{}: `setAs` from another package's class \"{from}\" to the class \
+                         union \"{to}\", whose members include other packages' classes",
+                        definition.2, definition.3.span.line
+                    ));
                 }
             }
             _ => {}
@@ -1926,11 +1948,11 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
     }
     let definitions = kept;
     if definitions.is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut classes = Vec::new();
     let mut generics = Vec::new();
-    for (_, _, _, definition) in &definitions {
+    for (_, _, _, _, definition) in &definitions {
         match definition {
             S4Definition::Class { class } | S4Definition::Union { class, .. } => {
                 classes.push(class.clone())
@@ -1948,51 +1970,77 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
     // class that a held-back union contains: dispatch would pick another method for it.
     let mut foreign = |generic: &str, signature: Vec<(Option<String>, String)>| {
         let reaches_own = signature.iter().any(|(_, class)| classes.contains(class));
-        let names_mixed = signature
+        let mixed_union = signature
             .iter()
-            .any(|(_, class)| mixed.contains(class.as_str()));
+            .find(|(_, class)| mixed.contains(class.as_str()))
+            .map(|(_, class)| class.clone());
         foreign_methods.push(ForeignMethod {
             generic: generic.to_owned(),
             signature,
         });
-        reaches_own && !names_mixed
+        match mixed_union {
+            _ if !reaches_own => Err(format!(
+                "a method for another package's generic `{generic}` whose signature names none \
+                 of the package's classes"
+            )),
+            Some(union) => Err(format!(
+                "a method for another package's generic `{generic}` on the class union \
+                 \"{union}\", whose members include other packages' classes"
+            )),
+            None => Ok(()),
+        }
     };
-    for (_, position, item, definition) in &definitions {
+    for (_, position, path, item, definition) in &definitions {
         let reaches_own = match definition {
             S4Definition::Class { .. }
             | S4Definition::Union { .. }
-            | S4Definition::Generic { .. } => true,
-            S4Definition::Method { generic, .. } if generics.contains(generic) => true,
+            | S4Definition::Generic { .. } => Ok(()),
+            S4Definition::Method { generic, .. } if generics.contains(generic) => Ok(()),
             S4Definition::Method { generic, signature } => foreign(generic, signature.clone()),
             S4Definition::Coerce { from, to, replace } => {
                 let signature = vec![
                     (Some("from".to_owned()), from.clone()),
                     (Some("to".to_owned()), to.clone()),
                 ];
-                let coerce = foreign("coerce", signature.clone());
-                coerce && (!replace || foreign("coerce<-", signature))
+                foreign("coerce", signature.clone()).and_then(|()| {
+                    if *replace {
+                        foreign("coerce<-", signature)
+                    } else {
+                        Ok(())
+                    }
+                })
             }
-            S4Definition::Validity { class } => classes.contains(class),
+            S4Definition::Validity { class } if classes.contains(class) => Ok(()),
+            S4Definition::Validity { class } => Err(format!(
+                "a validity method for the class \"{class}\", which another package defines"
+            )),
         };
-        let reads_settled = item.reads.iter().all(|name| {
+        let line = item.span.line;
+        reaches_own.map_err(|reason| format!("{path}:{line}: {reason}"))?;
+        if let Some(name) = item.reads.iter().find(|name| {
             writers
                 .get(name.as_str())
-                .is_none_or(|&(count, first)| count == 1 && first < *position)
-        });
-        let writes_alone = item.binds.iter().all(|name| {
+                .is_some_and(|&(count, first)| count != 1 || first >= *position)
+        }) {
+            return Err(format!(
+                "{path}:{line} reads `{name}`, which is written more than once or only after it"
+            ));
+        }
+        if let Some(name) = item.binds.iter().find(|name| {
             writers
                 .get(name.as_str())
-                .is_some_and(|&(count, _)| count == 1)
-        });
-        if !reaches_own || !reads_settled || !writes_alone {
-            return None;
+                .is_none_or(|&(count, _)| count != 1)
+        }) {
+            return Err(format!(
+                "{path}:{line} binds `{name}`, which another statement writes too"
+            ));
         }
         names.extend(item.binds.iter().cloned());
     }
     let lazy_generics = lazy_generics(&definitions, &generics, &index.package);
     let units = definitions
         .iter()
-        .map(|(_, _, _, definition)| {
+        .map(|(_, _, _, _, definition)| {
             let generic = match definition {
                 S4Definition::Generic { generic } | S4Definition::Method { generic, .. } => generic,
                 _ => return 0,
@@ -2011,7 +2059,7 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
     );
     names.sort_unstable();
     names.dedup();
-    Some(DeferredS4 {
+    Ok(Some(DeferredS4 {
         run: definitions.iter().map(|(position, ..)| *position).collect(),
         classes,
         generics,
@@ -2019,7 +2067,7 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
         names,
         units,
         lazy_generics,
-    })
+    }))
 }
 
 /// The package's own generics that can each run on first use, apart from the classes: every
@@ -2027,13 +2075,13 @@ fn deferred_s4(index: &PackageIndex) -> Option<DeferredS4> {
 /// reads a name they bind, and every class of the package that a method's signature names is
 /// defined before that method, so the method sees the same classes when it runs later.
 fn lazy_generics(
-    definitions: &[(usize, usize, &IndexedItem, &S4Definition)],
+    definitions: &[(usize, usize, &str, &IndexedItem, &S4Definition)],
     generics: &[String],
     package: &str,
 ) -> Vec<LazyGeneric> {
     let defined_at: FxHashMap<&str, usize> = definitions
         .iter()
-        .filter_map(|&(_, position, _, definition)| match definition {
+        .filter_map(|&(_, position, _, _, definition)| match definition {
             S4Definition::Class { class } | S4Definition::Union { class, .. } => {
                 Some((class.as_str(), position))
             }
@@ -2051,7 +2099,7 @@ fn lazy_generics(
     // Who reads each name: the generic of the reading statement, or `None` for a statement
     // that stays in the first unit.
     let mut readers: FxHashMap<&str, FxHashSet<Option<&str>>> = FxHashMap::default();
-    for &(_, _, item, definition) in definitions {
+    for &(_, _, _, item, definition) in definitions {
         let reader =
             generic_of(definition).filter(|generic| generics.iter().any(|own| own == generic));
         for name in &item.reads {
@@ -2062,7 +2110,7 @@ fn lazy_generics(
     for generic in generics {
         let mut names = vec![generic.clone(), format!(".__T__{generic}:{package}")];
         let mut ordered = true;
-        for &(_, position, item, definition) in definitions {
+        for &(_, position, _, item, definition) in definitions {
             if generic_of(definition) != Some(generic.as_str()) {
                 continue;
             }
@@ -2228,6 +2276,7 @@ impl Plan {
             run: Vec::new(),
             run_writes: Some(Vec::new()),
             deferred_s4: None,
+            s4_eager_reason: None,
             sysdata: SysdataChange::Keep,
             data: None,
             s3_register: Vec::new(),
