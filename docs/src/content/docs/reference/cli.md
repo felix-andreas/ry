@@ -201,7 +201,11 @@ RY_PROFILE_SUMMARY_DIR=profiles ry load -e 'testthat::test_dir("tests/testthat")
 ```
 
 A process forked from a session (`parallel::mclapply`) writes no summary. The directory is created
-if it does not exist.
+if it does not exist, and a relative path is taken from the directory the session started in. When
+both variables are set, the process that reads `RY_PROFILE_SUMMARY` writes to that file, and its
+child processes write to the directory.
+
+Only ry's runtime profiles: under `--runtime gnu-r` the flag and both variables have no effect.
 
 The summary is meant to be shared from a private code base: it holds no source code, no names from
 your code and no data. It lists:

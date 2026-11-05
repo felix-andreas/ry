@@ -21,11 +21,11 @@ use {
     smallvec::SmallVec,
     std::{
         fmt::Write as _,
+        path::PathBuf,
         sync::{
             Mutex,
             atomic::{AtomicBool, Ordering},
         },
-        path::PathBuf,
         thread::JoinHandle,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     },
@@ -162,13 +162,14 @@ pub fn start_from_environment() {
         let started = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| since.as_millis());
-        PathBuf::from(directory).join(format!(
-            "ry-profile-{started}-{}.md",
-            std::process::id()
-        ))
+        PathBuf::from(directory).join(format!("ry-profile-{started}-{}.md", std::process::id()))
     } else {
         return;
     };
+    // The summary is written when the session ends, after R code may have changed the
+    // working directory (into `tempdir()`, which the session then deletes), so a relative
+    // path is fixed against the directory the session started in.
+    let path = std::path::absolute(&path).unwrap_or(path);
     activity::set_enabled(true);
     let global = activity::label(GLOBAL_LABEL);
     let thread = std::thread::spawn(move || {

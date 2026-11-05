@@ -44,9 +44,11 @@ expect file load-summary.md lacks "confidential_amount"
 expect file load-summary.md lacks "privatepkg"
 
 # A directory in the environment gives every session its own summary, child processes included,
-# so the workers a test suite starts are profiled too.
-env RY_PROFILE_SUMMARY_DIR $ROOT/profiles
-run ry load -e "status <- system2(file.path(R.home('bin'), 'Rscript'), c('-e', shQuote('cat(\"child\\n\")'))); stopifnot(status == 0L)"
+# so the workers a test suite starts are profiled too. A relative directory is taken from where
+# the session started, so the parent's summary does not follow it into the temporary directory
+# the session deletes when it ends.
+env RY_PROFILE_SUMMARY_DIR profiles
+run ry load -e "status <- system2(file.path(R.home('bin'), 'Rscript'), c('-e', shQuote('cat(\"child\\n\")'))); stopifnot(status == 0L); setwd(tempdir())"
 expect exit 0
 expect stdout "child"
 
