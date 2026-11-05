@@ -735,7 +735,7 @@ call on ry and about 106k on GNU R 4.3.3.
 | Lookup stamps compared as their bits | V8 | built | 1.25k per `seq()` call | `LookupCache` in `bytecode.rs` |
 | Hash index only for frames over 32 bindings | ry | built | 3k per `seq()` call (`Frame::insert`) | `INDEX_THRESHOLD` in `env.rs` |
 | Builtin checks derived at registration | GNU R `PRIMARITY` | built | builtin call overhead | `Checks` in `crates/interp/src/builtins.rs` |
-| A per-closure call plan for `run_closure`'s bookkeeping (srcref, annotation, stack check) | JSC `CodeBlock` | next | `run_closure` 3.4k self per `seq()` call, 6% of a call microbenchmark | |
+| A per-closure call plan for `run_closure`'s bookkeeping | JSC `CodeBlock` | rejected, folded into slot frames | annotation, `on.exit`, move-tracking and depth checks measure 1.3k of 141.6k instructions per `seq()` call and already exit early; the rest of `run_closure` is the frame record push and pop, which slot frames replace | |
 | **2. Call facts ahead of time** | | | | |
 | Version-stamped bindings: a function guard is one compare | JSC watchpoints, V8 property cells | next | 117 guards per `seq()` call, each a cached lookup | |
 | Frames as slot arrays, environment reified on demand | Ř, V8 | planned | closure call setup 12 to 24%; `Frame::insert` 2.6k, `clear_frame` 2.3k, `release_frame` 1.9k per `seq()` call | |
