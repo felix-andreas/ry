@@ -757,7 +757,7 @@ a gap that size, so shrinking the op count and the cost per op (step 3) comes fo
 | Closed bindings per locked namespace, reopened by `unlockBinding` and `assignInNamespace` | Bun, Roc | planned | namespace function lookups | |
 | Precise counts and borrowed parameters in tier 0 | Roc (Perceus) | planned | copies and peak memory | |
 | Setter instruction for one-level complex assignment | GNU R bytecode | built | `attributes(m) <- NULL` 4.2k to 1.5k instructions (GNU R 1.1k); `mostattributes(m) <-` 11.0k to 9.5k (GNU R 6.9k); `seq()` 136.2k to 135.0k | `Op::Replace`, `replace_variable` in `bytecode.rs` |
-| Native prologues for hot base closures (`match.arg`, `stopifnot`, `setdiff`, `structure`, `format.default`), installed by hash on the R version they were written from | ry, after the methods core | built | bench-real `validation` 0.6x to 1.64x GNU R; 2.71G to 1.32G instructions (JIT off) | `crates/interp/src/base_fast_paths.rs` |
+| Native prologues for hot base closures (`match.arg`, `stopifnot`, `setdiff`, `structure`, `format.default`), installed by hash on the R version they were written from | ry, after the methods core | built | bench-real `validation` 0.6x to 1.87x GNU R; 2.71G to 1.32G instructions (JIT off) | `crates/interp/src/base_fast_paths.rs` |
 | Getter instructions for nested complex assignment (`names(x)[2] <-`, `x$a$b <-`) | GNU R bytecode | planned | the nested levels still build their calls in `complex_assign` | |
 | **3. LLInt- and LuaJIT-grade tier 0** | | | | |
 | In-place specialization (quickening) with value profiles | CPython (PEP 659), JSC | planned | tier-0 instructions 23 to 44%; JIT-off scalar loops 0.35 to 0.41 times GNU R | |
