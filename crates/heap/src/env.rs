@@ -43,6 +43,11 @@ struct Binding {
 /// dangling address, so a lookup never matches it.
 const REMOVED: Sexp = Sexp::dangling();
 
+/// The [`Frame::formals`] bit set once some symbol is bound twice, which only duplicate formals
+/// do. Hinted lookups are off in such a frame, because a hint at the later duplicate would answer
+/// with the wrong cell.
+const SHADOWED: u32 = 1 << 31;
+
 /// GNU R's default and minimum hash table size (`HASHMINSIZE`).
 const HASH_MINIMUM_SIZE: u32 = 29;
 
@@ -62,6 +67,8 @@ pub struct Frame {
     table: Option<Box<HashTable>>,
     /// How many leading slots are a closure's formals, which GNU R lists after the locals and
     /// in their own order.
+    /// The top bit is [`SHADOWED`], kept here because a field of its own would push the
+    /// environment object out of its size class.
     formals: u32,
     /// How many slots hold [`REMOVED`].
     removed: u32,
@@ -69,10 +76,6 @@ pub struct Frame {
     /// not bind the symbol (a call to `length` from a function body asks the function's frame
     /// first), and a clear bit answers those without scanning. Removal leaves the bit set.
     filter: u64,
-    /// Whether some symbol is bound twice, which only duplicate formals do. Hinted lookups are
-    /// off in such a frame, because a hint at the later duplicate would answer with the wrong
-    /// cell.
-    shadowed: bool,
 }
 
 /// The [`Frame::filter`] bit for `symbol`: a multiplicative hash of its address, since a
@@ -100,7 +103,6 @@ impl Frame {
         write(addr_of_mut!((*frame).formals), 0);
         write(addr_of_mut!((*frame).removed), 0);
         write(addr_of_mut!((*frame).filter), 0);
-        write(addr_of_mut!((*frame).shadowed), false);
         if bindings > INLINE_BINDINGS {
             (*frame).bindings.reserve_exact(bindings);
         }
@@ -148,7 +150,7 @@ impl Frame {
         }
         if let Some(binding) = self.bindings.get(*hint as usize)
             && binding.symbol == symbol
-            && !self.shadowed
+            && self.formals & SHADOWED == 0
         {
             return Some(binding.cell);
         }
@@ -192,7 +194,7 @@ impl Frame {
 
     /// Marks every cell bound so far as a closure formal.
     pub fn mark_formals(&mut self) {
-        self.formals = self.bindings.len() as u32;
+        self.formals = self.formals & SHADOWED | self.bindings.len() as u32;
     }
 
     /// The cells in the order GNU R lists the frame in.
@@ -201,7 +203,7 @@ impl Frame {
     /// Every cell in the frame must be live, which holds while the environment is reachable.
     pub unsafe fn listed_cells(&self) -> Vec<Sexp> {
         let Some(table) = &self.table else {
-            let formals = (self.formals as usize).min(self.bindings.len());
+            let formals = ((self.formals & !SHADOWED) as usize).min(self.bindings.len());
             let (formals, locals) = self.bindings.split_at(formals);
             return locals
                 .iter()
@@ -251,7 +253,7 @@ impl Frame {
     /// first match in GNU R's frame list does.
     pub(crate) fn insert(&mut self, symbol: Sexp, cell: Sexp) {
         if self.filter & filter_bit(symbol) != 0 && self.find_position(symbol).is_some() {
-            self.shadowed = true;
+            self.formals |= SHADOWED;
         }
         let position = self.bindings.len() as u32;
         self.bindings.push(Binding { symbol, cell });
@@ -307,7 +309,7 @@ impl Frame {
         }
         // Only formals repeat a symbol, and a duplicate behind the removed one now answers for it.
         if let Some(index) = &mut self.index
-            && let Some(duplicate) = (position + 1..self.formals as usize)
+            && let Some(duplicate) = (position + 1..(self.formals & !SHADOWED) as usize)
                 .find(|&later| self.bindings[later].symbol == symbol)
         {
             index.insert(symbol, duplicate as u32);
@@ -320,7 +322,7 @@ impl Frame {
 
     /// Drops the removed slots, keeping the live bindings in insertion order.
     fn compact(&mut self) {
-        let formals = self.bindings[..(self.formals as usize).min(self.bindings.len())]
+        let formals = self.bindings[..((self.formals & !SHADOWED) as usize).min(self.bindings.len())]
             .iter()
             .filter(|binding| binding.symbol != REMOVED)
             .count();
@@ -328,7 +330,7 @@ impl Frame {
             table.compact(&self.bindings);
         }
         self.bindings.retain(|binding| binding.symbol != REMOVED);
-        self.formals = formals as u32;
+        self.formals = self.formals & SHADOWED | formals as u32;
         self.removed = 0;
         if let Some(index) = &mut self.index {
             index.clear();
@@ -366,7 +368,7 @@ impl Frame {
                     (binding.symbol != REMOVED).then_some((binding.symbol, binding.cell))
                 })
                 .collect(),
-            formals: self.formals,
+            formals: self.formals & !SHADOWED,
             removed: self.removed,
             table: self.table.as_ref().map(|table| TableImage {
                 heads: table.heads.clone(),
@@ -417,10 +419,13 @@ impl Frame {
                     count: table.count,
                 })
             }),
-            formals: image.formals,
+            formals: if shadowed {
+                image.formals | SHADOWED
+            } else {
+                image.formals
+            },
             removed: image.removed,
             filter,
-            shadowed,
         }
     }
 }
