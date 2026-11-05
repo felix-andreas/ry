@@ -254,8 +254,12 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
         }
     }
     if found.is_none() {
-        let mut partial =
-            (0..count).filter(|&index| choices.element(index).bytes().starts_with(target.bytes()));
+        let mut partial = (0..count).filter(|&index| {
+            choices
+                .element(index)
+                .bytes()
+                .starts_with(target.bytes())
+        });
         if let (Some(index), None) = (partial.next(), partial.next()) {
             found = Some(index);
         }

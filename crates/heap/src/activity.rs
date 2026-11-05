@@ -163,8 +163,7 @@ pub const BUILTIN_SLOTS: usize = 4096;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static CURRENT: AtomicU32 = AtomicU32::new(0);
-static COUNTERS: [AtomicU64; Counter::ALL.len()] =
-    [const { AtomicU64::new(0) }; Counter::ALL.len()];
+static COUNTERS: [AtomicU64; Counter::ALL.len()] = [const { AtomicU64::new(0) }; Counter::ALL.len()];
 static BUILTINS: [AtomicU64; BUILTIN_SLOTS] = [const { AtomicU64::new(0) }; BUILTIN_SLOTS];
 static LABELS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static FRAME_OWNERS: [AtomicU32; FRAME_SLOTS] = [const { AtomicU32::new(0) }; FRAME_SLOTS];
@@ -252,9 +251,7 @@ pub fn counter(counter: Counter) -> u64 {
 }
 
 pub fn builtin_count(index: usize) -> u64 {
-    BUILTINS
-        .get(index)
-        .map_or(0, |slot| slot.load(Ordering::Relaxed))
+    BUILTINS.get(index).map_or(0, |slot| slot.load(Ordering::Relaxed))
 }
 
 /// A small id for `name`, such as a native library's package, to use as an activity's detail.

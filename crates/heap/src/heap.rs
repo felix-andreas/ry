@@ -1624,12 +1624,7 @@ impl Heap {
 
     /// [`Heap::frame_cell`] through a lookup site's position hint (see [`Frame::find_hinted`]).
     #[inline(always)]
-    pub unsafe fn frame_cell_hinted(
-        &self,
-        env: Sexp,
-        symbol: Sexp,
-        hint: &mut u32,
-    ) -> Option<Sexp> {
+    pub unsafe fn frame_cell_hinted(&self, env: Sexp, symbol: Sexp, hint: &mut u32) -> Option<Sexp> {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return self.frame_cell(env, symbol);
         }

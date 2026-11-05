@@ -28,9 +28,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=RY_BUILD");
     let version = env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
     match env::var("RY_BUILD") {
-        Ok(build) if !build.is_empty() => {
-            println!("cargo:rustc-env=RY_VERSION={version} ({build})")
-        }
+        Ok(build) if !build.is_empty() => println!("cargo:rustc-env=RY_VERSION={version} ({build})"),
         _ => println!("cargo:rustc-env=RY_VERSION={version}"),
     }
     println!("cargo:rerun-if-env-changed=WINDRES");

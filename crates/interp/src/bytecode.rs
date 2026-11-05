@@ -42,11 +42,10 @@
 
 use {
     crate::{
-        Interp,
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
         conditions, dispatch, effects,
         eval::{self, SwitchSelector, as_condition},
-        interp, moves,
+        Interp, interp, moves,
         unwind::{Jump, R, Unwind, error, error_in},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
@@ -812,8 +811,12 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         summary: nil(),
     };
     let slot = compiler.cache();
-    compiler.summary =
-        effects::summarize(function.car(), body, compiler.local_symbols.as_ref(), slot)?;
+    compiler.summary = effects::summarize(
+        function.car(),
+        body,
+        compiler.local_symbols.as_ref(),
+        slot,
+    )?;
     compiler.assemble(body).map(Some)
 }
 
@@ -1526,17 +1529,11 @@ impl Compiler {
             .iter()
             .any(|(_, value)| compiles_as_promise(*value));
         self.constant(if worth_compiling { unbound() } else { nil() });
-        let eager = arguments
-            .iter()
-            .any(|(_, value)| value.kind() == SexpType::Symbol)
+        let eager = arguments.iter().any(|(_, value)| value.kind() == SexpType::Symbol)
             && arguments
                 .iter()
                 .all(|(_, value)| self.cannot_assign(*value, 0));
-        let flag = if eager {
-            values::scalar_logical(1)?
-        } else {
-            nil()
-        };
+        let flag = if eager { values::scalar_logical(1)? } else { nil() };
         self.constant(flag);
         Ok(index)
     }
@@ -1900,10 +1897,8 @@ impl Compiler {
             return Ok(None);
         };
         let constant = |value: Sexp| {
-            matches!(
-                value.kind(),
-                SexpType::String | SexpType::Logical | SexpType::Nil
-            ) && length(value) <= 1
+            matches!(value.kind(), SexpType::String | SexpType::Logical | SexpType::Nil)
+                && length(value) <= 1
                 && !values::has_attributes(value)
         };
         if *variable_tag != nil()
@@ -1962,16 +1957,7 @@ impl Compiler {
         let whole = self.constant(call);
         self.emit(
             Op::Replace,
-            &[
-                dst,
-                variable,
-                setter_symbol,
-                cache,
-                setter_call,
-                base,
-                count,
-                whole,
-            ],
+            &[dst, variable, setter_symbol, cache, setter_call, base, count, whole],
         );
         self.release_to(mark);
         self.cold_fallback(&[guard], call, dst)?;
@@ -3329,11 +3315,7 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
         exit: Ok(nil()),
         machine,
     };
-    let handlers = if SINGLE {
-        &STEP_HANDLERS
-    } else {
-        &RUN_HANDLERS
-    };
+    let handlers = if SINGLE { &STEP_HANDLERS } else { &RUN_HANDLERS };
     if !SINGLE {
         release(&state);
     }
@@ -3422,11 +3404,7 @@ unsafe fn failed<const SINGLE: bool>(
     at: usize,
     unwind: Unwind,
 ) -> usize {
-    let resumed = if SINGLE {
-        Err(unwind)
-    } else {
-        continue_after(state.machine, at, unwind)
-    };
+    let resumed = if SINGLE { Err(unwind) } else { continue_after(state.machine, at, unwind) };
     match resumed {
         Ok(pc) => pc,
         Err(unwind) => {
@@ -3435,6 +3413,7 @@ unsafe fn failed<const SINGLE: bool>(
         }
     }
 }
+
 
 static RUN_HANDLERS: [Handler; OPS.len()] = handler_table::<false>();
 static STEP_HANDLERS: [Handler; OPS.len()] = handler_table::<true>();
@@ -3785,10 +3764,7 @@ unsafe fn op_branch_unless_primitive(
 }
 
 #[inline(always)]
-unsafe fn op_branch_if_object(
-    _state: &mut Activation<'_, '_>,
-    instruction: Instruction,
-) -> R<Flow> {
+unsafe fn op_branch_if_object(_state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     if instruction.input(0).is_object() {
         return Ok(Flow::Goto(instruction.operand(1)));
     }
@@ -4022,10 +3998,7 @@ unsafe fn op_logic_right(state: &mut Activation<'_, '_>, instruction: Instructio
         if is_and { "&&" } else { "||" },
         "y",
     )?;
-    instruction.output(
-        0,
-        values::scalar_logical(logic_result(is_and, left, right))?,
-    );
+    instruction.output(0, values::scalar_logical(logic_result(is_and, left, right))?);
     (*state.interp).visible = true;
     Ok(Flow::Next)
 }
@@ -4078,10 +4051,7 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
 }
 
 #[inline(always)]
-unsafe fn op_sub_assign_matrix(
-    state: &mut Activation<'_, '_>,
-    instruction: Instruction,
-) -> R<Flow> {
+unsafe fn op_sub_assign_matrix(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let env = state.env;
     let call = state.constant(instruction, 5);
     let value = instruction.input(4);
@@ -4112,11 +4082,7 @@ unsafe fn op_replace(state: &mut Activation<'_, '_>, instruction: Instruction) -
     let done = replace_variable(
         env,
         state.constant(instruction, 1),
-        (
-            state.constant(instruction, 2),
-            state.cache,
-            instruction.operand(3),
-        ),
+        (state.constant(instruction, 2), state.cache, instruction.operand(3)),
         state.constant(instruction, 4),
         whole,
         std::slice::from_raw_parts_mut(instruction.registers.add(first), count),

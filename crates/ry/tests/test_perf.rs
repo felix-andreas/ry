@@ -208,16 +208,8 @@ fn typed_array_dot_peak_memory_stays_near_gnu_r() {
         assert_eq!(exit, 0, "the program failed: {command:?}");
         peak
     };
-    let gnu_r = peak(
-        Command::new("Rscript")
-            .arg("--vanilla")
-            .arg(script("untyped")),
-    );
-    let ry = peak(
-        Command::new(binary)
-            .args(["run", "--runtime", "ry"])
-            .arg(script("typed")),
-    );
+    let gnu_r = peak(Command::new("Rscript").arg("--vanilla").arg(script("untyped")));
+    let ry = peak(Command::new(binary).args(["run", "--runtime", "ry"]).arg(script("typed")));
     let ratio = ry as f64 / gnu_r as f64;
     eprintln!(
         "array_dot: peak {} MiB typed on ry, {} MiB untyped on GNU R ({ratio:.2}x)",

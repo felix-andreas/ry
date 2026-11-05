@@ -23,6 +23,7 @@
 //! can change it, so code outside the compiled body never sees the difference.
 
 pub use interp::effects::{Speculation, base_builtin, resolve_function};
+
 use {
     crate::native::{self, Native},
     bumpalo::Bump,

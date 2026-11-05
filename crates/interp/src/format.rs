@@ -832,9 +832,7 @@ pub(crate) unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
     } else {
         let digits = values::as_integer_scalar(digits);
         if digits == NA_INTEGER || !(1..=22).contains(&digits) {
-            return Err(error(format!(
-                "invalid value {digits} for 'digits' argument"
-            )));
+            return Err(error(format!("invalid value {digits} for 'digits' argument")));
         }
         Settings::with_digits(digits as usize)
     };

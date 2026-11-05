@@ -2123,11 +2123,7 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
         && operand.attrib() == nil()
     {
         let value = *operand.slice::<i32>().get_unchecked(0);
-        return values::scalar_logical(if value == NA_LOGICAL {
-            NA_LOGICAL
-        } else {
-            1 - value
-        });
+        return values::scalar_logical(if value == NA_LOGICAL { NA_LOGICAL } else { 1 - value });
     }
     let operand = values::materialize(operand)?;
     let count = length(operand);

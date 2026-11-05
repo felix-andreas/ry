@@ -147,7 +147,9 @@ fn run_hinted(seed: u64) {
                     heap.remove_binding(env, symbols[which]).expect("remove");
                 }
                 // A second cell for a bound symbol, as duplicate formals bind one.
-                6 => heap.define_unbound(env, symbols[which], nil).expect("bind"),
+                6 => heap
+                    .define_unbound(env, symbols[which], nil)
+                    .expect("bind"),
                 _ => hints[which] = rng.below(64) as u32,
             }
             for (index, &symbol) in symbols.iter().enumerate() {
