@@ -204,7 +204,9 @@ unsafe fn compiled_for<'a>(
             if !address.is_null() && (*address).portable {
                 let compiled = &*address;
                 let enclosure = machine.env.enclosure();
-                if compiled.checked.get().weak_key() != enclosure {
+                if compiled.checked.get().weak_key() != enclosure
+                    && !runtime::sibling_of_checked(compiled, enclosure)
+                {
                     // The epoch and stamps were proven for another enclosure's lookups, so the
                     // next run walks every speculation from this one before trusting them.
                     let heap = heap();
@@ -362,6 +364,19 @@ unsafe fn compile_in<'a>(
         }
         let (entry, exits, size) = codegen::compile(&plan, machine.code)?;
         let generated = started.elapsed() - planned;
+        let rooted: Box<[bool]> = plan
+            .speculations
+            .iter()
+            .map(|speculation| speculation.env == enclosure)
+            .collect();
+        let portable = plan
+            .speculations
+            .iter()
+            .zip(&rooted)
+            .all(|(speculation, &rooted)| {
+                (rooted || long_lived(speculation.env))
+                    && owner(speculation).is_some_and(|env| long_lived(env))
+            });
         if logging() {
             // The instructions left to tier 0 are where compiled code is slow.
             // A builtin call lists its argument types, which say why it was not an intrinsic.
@@ -386,12 +401,13 @@ unsafe fn compile_in<'a>(
                 })
                 .collect();
             eprintln!(
-                "jit: compiled {} in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations; {} native, {} loops; tier 0 runs: {})",
+                "jit: compiled {} in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations{}; {} native, {} loops; tier 0 runs: {})",
                 describe(machine.code),
                 (planned + generated).as_micros(),
                 planned.as_micros(),
                 generated.as_micros(),
                 plan.speculations.len(),
+                if portable { ", portable" } else { "" },
                 plan.native_actions(),
                 plan.loop_headers.len(),
                 if steps.is_empty() {
@@ -406,19 +422,6 @@ unsafe fn compile_in<'a>(
             .iter()
             .map(|&block| plan.insts[plan.blocks[block].start].pc)
             .collect();
-        let rooted: Box<[bool]> = plan
-            .speculations
-            .iter()
-            .map(|speculation| speculation.env == enclosure)
-            .collect();
-        let portable = plan
-            .speculations
-            .iter()
-            .zip(&rooted)
-            .all(|(speculation, &rooted)| {
-                (rooted || long_lived(speculation.env))
-                    && owner(speculation).is_some_and(|env| long_lived(env))
-            });
         let compiled = Box::new(Compiled {
             entry,
             enclosure,

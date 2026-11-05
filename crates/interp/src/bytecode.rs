@@ -1692,6 +1692,19 @@ impl Compiler {
 
     unsafe fn call(&mut self, call: Sexp, dst: u32) -> R<()> {
         let head = call.car();
+        if head.kind() == SexpType::Language {
+            // A head that is itself a call, most often `pkg::f`, evaluates to the function and
+            // then calls it like a named one, so its arguments become compiled promises: a
+            // `function` argument (`purrr::map(x, function(v) ...)`) then shares one compiled
+            // body across calls instead of each closure compiling and tiering up on its own.
+            let call_constant = self.call_site(call)?;
+            let mark = self.next_register;
+            let function = self.allocate();
+            self.expression(head, function)?;
+            self.generic_call(dst, function, call_constant, None);
+            self.release_to(mark);
+            return Ok(());
+        }
         if head.kind() != SexpType::Symbol {
             return self.fallback(call, dst);
         }
