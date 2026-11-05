@@ -2876,6 +2876,34 @@ pub unsafe fn force_and_call(call: Sexp, count: usize, env: Sexp) -> R<Sexp> {
     force_and_call_with(call, count, env, None, None)
 }
 
+/// Calls `function` for `call`, whose arguments are untagged expressions that already
+/// evaluated to `values` in `env`, as `forceAndCall(length(values), ...)` would after forcing
+/// them: a closure receives forced promises of the expressions, and a builtin the values.
+pub unsafe fn call_with_values(call: Sexp, function: Sexp, values: &[Sexp], env: Sexp) -> R<Sexp> {
+    let mut args = Args::new();
+    if function.kind() == SexpType::Closure {
+        let mut expression = call.cdr();
+        for &value in values {
+            let promise = forced_promise(expression.car(), value)?;
+            crate::heap().root(promise);
+            args.push(Arg {
+                tag: nil(),
+                value: promise,
+            });
+            expression = expression.cdr();
+        }
+        return apply_closure_owning(call, function, &args, env, None);
+    }
+    let definition = builtin_def(function)?;
+    args.extend(values.iter().map(|&value| Arg { tag: nil(), value }));
+    if definition.generic != Generic::None
+        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
+    {
+        return Ok(value);
+    }
+    call_builtin(definition, call, function, &args, env)
+}
+
 /// The storage type every first value of a run of [`force_and_call_with`] calls shares, as the
 /// elements of one atomic vector do, with the annotation checks that type settles for the last
 /// closure called. A typed `FUN` then has its argument checked once per run instead of once per

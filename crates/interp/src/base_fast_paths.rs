@@ -31,6 +31,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rySetdiff", 0, do_setdiff),
     internal("ryStructure", 0, do_structure),
     internal("ryFormatDefault", 0, do_format_default),
+    internal("ryReduce", 0, do_reduce),
 ];
 
 /// The base functions that get a fast path, with the internal their prologue calls and the
@@ -42,6 +43,7 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("setdiff", "rySetdiff", 0x9f92f07db3152727),
     ("structure", "ryStructure", 0xe1de236049200229),
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
+    ("Reduce", "ryReduce", 0xd929e4c219983788),
 ];
 
 /// Puts the fast paths in front of the base namespace's functions, changing each closure in
@@ -339,6 +341,134 @@ unsafe fn do_stopifnot(call: &Call<'_>) -> R<Sexp> {
         }
     }
     finish(frame, nil(), false)
+}
+
+/// `Reduce(f, x, init, right)` without `accumulate`, over a plain vector and with `f` a closure
+/// or a builtin. The R body calls `forceAndCall(2, f, init, x[[i]])` per element, which builds a
+/// call and evaluates `x[[i]]` through the evaluator each time; this loop reads the element
+/// directly and passes both arguments as forced promises of the same expressions, so `f` sees
+/// the same call, the same `substitute()` results and the same frame variables `init` and `i`.
+unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.env;
+    let missing_init = !is_supplied(frame, "init")?;
+    let Some(x) = argument(frame, "x")? else {
+        return decline();
+    };
+    // `is.vector(x) && !is.object(x)`, and `length(x)` cannot dispatch.
+    let plain = matches!(
+        x.kind(),
+        SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::String
+            | SexpType::Raw
+            | SexpType::List
+    ) && !x.is_object()
+        && !x.is_altrep()
+        && only_names(x);
+    let count = length(x);
+    if !plain || count == 0 {
+        return decline();
+    }
+    // `match.fun(f)` returns a function as it is.
+    let Some(function) = argument(frame, "f")? else {
+        return decline();
+    };
+    if !matches!(function.kind(), SexpType::Closure | SexpType::Builtin) {
+        return decline();
+    }
+    // The R body reads `right` before `accumulate` when `init` is missing, and after otherwise.
+    let (right, accumulate) = if missing_init {
+        let right = flag(frame, "right")?;
+        (right, flag(frame, "accumulate")?)
+    } else {
+        let accumulate = flag(frame, "accumulate")?;
+        (flag(frame, "right")?, accumulate)
+    };
+    let (Some(right), Some(false)) = (right, accumulate) else {
+        return decline();
+    };
+    let symbols = symbols();
+    let heap = crate::heap();
+    let init_symbol = install("init")?;
+    let i_symbol = install("i")?;
+    eval::define(install("mis")?, values::scalar_logical(missing_init as i32)?, frame)?;
+    eval::define(install("len")?, values::scalar_integer(count as i32)?, frame)?;
+    eval::define(install("f")?, function, frame)?;
+    let element_call = values::call(symbols.bracket2, &[install("x")?, i_symbol])?;
+    heap.root(element_call);
+    let arguments = if right {
+        [element_call, init_symbol]
+    } else {
+        [init_symbol, element_call]
+    };
+    let inner_call = values::call(install("f")?, &arguments)?;
+    heap.root(inner_call);
+    let positions = if !missing_init {
+        0..count
+    } else if right {
+        0..count - 1
+    } else {
+        1..count
+    };
+    if missing_init {
+        let first = if right { count } else { 1 };
+        let index = values::scalar_integer(first as i32)?;
+        heap.root(index);
+        let value = crate::subset::subset2(x, &[index], Some(true), element_call)?;
+        eval::define(init_symbol, value, frame)?;
+    } else if argument(frame, "init")?.is_none() {
+        return decline();
+    }
+    let step = |position: usize| -> R<()> {
+        let index = values::scalar_integer(position as i32 + 1)?;
+        eval::define(i_symbol, index, frame)?;
+        let element = crate::subset::subset2(x, &[index], Some(true), element_call)?;
+        crate::heap().root(element);
+        let init = eval::find_var_in_frame(init_symbol, frame)?;
+        let init = eval::value_of(init)?;
+        let values = if right { [element, init] } else { [init, element] };
+        let value = eval::call_with_values(inner_call, function, &values, frame)?;
+        eval::define(init_symbol, value, frame)
+    };
+    if right {
+        for position in positions.rev() {
+            crate::scope(|| step(position))?;
+        }
+    } else {
+        for position in positions {
+            crate::scope(|| step(position))?;
+        }
+    }
+    let value = eval::value_of(eval::find_var_in_frame(init_symbol, frame)?)?;
+    finish(frame, value, true)
+}
+
+/// Whether `value` has no attribute other than `names`, as `is.vector` requires.
+unsafe fn only_names(value: Sexp) -> bool {
+    let mut cell = value.attrib();
+    while cell.kind() == SexpType::Pairlist {
+        if cell.tag() != symbols().names {
+            return false;
+        }
+        cell = cell.cdr();
+    }
+    true
+}
+
+/// The formal `name` forced as `if (name)` reads it, when it is a single `TRUE` or `FALSE`.
+unsafe fn flag(frame: Sexp, name: &str) -> R<Option<bool>> {
+    let Some(value) = argument(frame, name)? else {
+        return Ok(None);
+    };
+    if value.kind() != SexpType::Logical || length(value) != 1 || value.attrib() != nil() {
+        return Ok(None);
+    }
+    Ok(match values::ints(value)[0] {
+        NA_LOGICAL => None,
+        flag => Some(flag != 0),
+    })
 }
 
 /// `setdiff(x, y)` of plain vectors: `unique(x)` without names, less the elements `y` has.

@@ -173,9 +173,38 @@
 | List of 1
 |  $ p:List of 1
 |   ..$ : num 2
+| f(init, x[[i]])
+| [1] 1 2 3 4
+| [1] "x y z"
+| [1] "a b c init"
+| [1] "init a b c"
+| [1] 110
+| [1] 9
+| [1] 10
+| [[1]]
+| [[1]][[1]]
+| NULL
+| 
+| [[1]][[2]]
+| [1] 1
+| 
+| 
+| [[2]]
+| NULL
+| 
+| [1] NA
+| init forced
+| [1] 6
+| init
+| init
+| [1] 6
+| attr(,"class")
+| [1] "money"
+| [1]   1   2   6  24 120
 [messages]
 [warnings]
+- ‘+’ not meaningful for factors (in Ops.factor(init, x[[i]]))
+- ‘+’ not meaningful for factors (in Ops.factor(init, x[[i]]))
 [errors]
+- missing value where TRUE/FALSE needed (in if (!accumulate) {)
 [value]
-NULL
-| NULL
