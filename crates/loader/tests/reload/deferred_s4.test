@@ -100,12 +100,12 @@ run .onLoad
 #---- a_reference_class_keeps_everything_eager
 #~~~~ R/a.R
 setClass("Sq", representation(side = "numeric"))
-Account <- setRefClass("Account", fields = list(total = "numeric"))
+Account <- setRefClass("Account", fields = list(total = "numeric"), sealed = FALSE)
 #++++
 rebuild imports (0 directives)
 source R/a.R
 run R/a.R:1 setClass("Sq", representation(side = "numeric"))
-run R/a.R:2 Account <- setRefClass("Account", fields = list(total = "numeric"))
+run R/a.R:2 Account <- setRefClass("Account", fields = list(total = "numeric"), sealed = FALSE)
 S4 runs at load: R/a.R:2 is an S4 registration the loader cannot hold back; only `setClass`, `setGeneric` with its own definition, `setMethod`, `setReplaceMethod`, `setValidity`, `setClassUnion` and `setAs` with literal names can wait
 sync exports
 run .onLoad
@@ -307,5 +307,21 @@ source R/a.R
 hold back R/a.R:1 setClass("A", representation(a = "numeric"))
 hold back R/a.R:2 setClassUnion("AorNULL", member = c("A", "NULL"))
 placeholders .__C__A .__C__AorNULL
+sync exports
+run .onLoad
+
+#---- a_generic_with_a_group_argument_is_held_back
+#~~~~ R/a.R
+setClass("Sq", representation(side = "numeric"))
+setGeneric("area", function(shape) standardGeneric("area"), group = list())
+setMethod("area", "Sq", function(shape) shape@side^2)
+#++++
+rebuild imports (0 directives)
+source R/a.R
+hold back R/a.R:1 setClass("Sq", representation(side = "numeric"))
+hold back R/a.R:2 setGeneric("area", function(shape) standardGeneric("area"), group = list())
+hold back R/a.R:3 setMethod("area", "Sq", function(shape) shape@side^2)
+placeholders .__C__Sq .__T__area:demo area
+generics run on first use area
 sync exports
 run .onLoad

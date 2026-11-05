@@ -922,8 +922,9 @@ fn registrations(node: &SyntaxNode) -> Vec<Registration> {
     registration.into_iter().collect()
 }
 
-/// The formal arguments of the methods package's definition functions, up to the first `...`.
-/// `setReplaceMethod(f, ...)` passes its other arguments on to `setMethod()`, which matches them.
+/// The formal arguments of the methods package's definition functions, in GNU R's order.
+/// `setReplaceMethod(f, ..., where)` passes its other arguments on to `setMethod()`, which
+/// matches them, so its list is `setMethod()`'s with `where` behind the `...`.
 fn s4_formals(callee: &str) -> Option<&'static [&'static str]> {
     Some(match callee {
         "setClass" => &[
@@ -940,25 +941,43 @@ fn s4_formals(callee: &str) -> Option<&'static [&'static str]> {
             "S3methods",
             "slots",
         ],
-        "setRefClass" => &["Class", "fields", "contains", "methods", "where", "inheritPackage"],
+        "setRefClass" => &[
+            "Class",
+            "fields",
+            "contains",
+            "methods",
+            "where",
+            "inheritPackage",
+            "...",
+        ],
         "setGeneric" => &[
             "name",
             "def",
+            "group",
+            "valueClass",
             "where",
             "package",
-            "valueClass",
+            "signature",
             "useAsDefault",
             "genericFunction",
             "simpleInheritanceOnly",
-            "signature",
         ],
-        "setMethod" | "setReplaceMethod" => &[
+        "setMethod" => &[
             "f",
             "signature",
             "definition",
             "where",
             "valueClass",
             "sealed",
+        ],
+        "setReplaceMethod" => &[
+            "f",
+            "signature",
+            "definition",
+            "valueClass",
+            "sealed",
+            "...",
+            "where",
         ],
         "setValidity" => &["Class", "method", "where"],
         "setClassUnion" => &["name", "members", "where"],
@@ -968,19 +987,26 @@ fn s4_formals(callee: &str) -> Option<&'static [&'static str]> {
 }
 
 /// R's argument matching for a call to a function with `formals`: exact names first, then
-/// unique partial names, then the unnamed arguments in order. `None` where R signals an error,
-/// for an argument that matches no formal or more than one, or a formal matched twice.
+/// unique partial names of the formals before `...`, then the unnamed arguments in order into
+/// the formals before `...`. A `...` formal takes every argument left over. `None` where R
+/// signals an error: an argument left over without `...`, a partial name that matches more than
+/// one formal, or a formal matched twice. The `...` slot itself is always `None`.
 fn match_arguments<'a>(
     arguments: &'a [CallArgument],
     formals: &[&str],
 ) -> Option<Vec<Option<&'a SyntaxNode>>> {
+    let dots = formals.iter().position(|formal| *formal == "...");
+    let before_dots = dots.unwrap_or(formals.len());
     let mut matched: Vec<Option<&SyntaxNode>> = vec![None; formals.len()];
     let mut used = vec![false; arguments.len()];
     for (index, argument) in arguments.iter().enumerate() {
         let Some(name) = argument.name.as_deref() else {
             continue;
         };
-        if let Some(formal) = formals.iter().position(|formal| *formal == name) {
+        if let Some(formal) = formals
+            .iter()
+            .position(|formal| *formal == name && *formal != "...")
+        {
             if matched[formal].is_some() {
                 return None;
             }
@@ -996,30 +1022,34 @@ fn match_arguments<'a>(
         if used[index] {
             continue;
         }
-        let mut candidates =
-            (0..formals.len()).filter(|&formal| !exact[formal] && formals[formal].starts_with(name));
-        let (Some(formal), None) = (candidates.next(), candidates.next()) else {
-            return None;
-        };
-        if matched[formal].is_some() {
-            return None;
+        let mut candidates = (0..before_dots)
+            .filter(|&formal| !exact[formal] && formals[formal].starts_with(name));
+        match (candidates.next(), candidates.next()) {
+            (Some(formal), None) => {
+                if matched[formal].is_some() {
+                    return None;
+                }
+                matched[formal] = Some(&argument.value);
+                used[index] = true;
+            }
+            (Some(_), Some(_)) => return None,
+            (None, _) if dots.is_some() => used[index] = true,
+            (None, _) => return None,
         }
-        matched[formal] = Some(&argument.value);
-        used[index] = true;
     }
-    let free: Vec<usize> = (0..formals.len())
+    let free: Vec<usize> = (0..before_dots)
         .filter(|&formal| matched[formal].is_none())
         .collect();
     let mut free = free.into_iter();
-    let positional: Vec<usize> = arguments
-        .iter()
-        .enumerate()
-        .filter(|(index, argument)| argument.name.is_none() && !used[*index])
-        .map(|(index, _)| index)
-        .collect();
-    for index in positional {
-        let formal = free.next()?;
-        matched[formal] = Some(&arguments[index].value);
+    for (index, argument) in arguments.iter().enumerate() {
+        if argument.name.is_some() || used[index] {
+            continue;
+        }
+        match free.next() {
+            Some(formal) => matched[formal] = Some(&argument.value),
+            None if dots.is_some() => {}
+            None => return None,
+        }
     }
     Some(matched)
 }
