@@ -653,7 +653,11 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 
 - **When it compiles.** Tier 0 counts entries and backward jumps per body. A body compiles on its
   3000th entry, and a running loop compiles after 10,000 backward jumps and continues in compiled
-  code at the loop header (on-stack replacement). The thresholds are high because Cranelift is an
+  code at the loop header (on-stack replacement). A body waits one more threshold per 250
+  instruction words before it compiles, because compile cost grows with size (about 10 µs per
+  word, 200 ms for `rbind`) and the saving per entry does not, and the wait doubles with each
+  recompile. Tier 0 records type feedback
+  only for a body halfway to either threshold, or one with compiled code. The thresholds are high because Cranelift is an
   optimizing compiler: a lower one compiled the methods package's code that a package load runs
   only a few dozen times, which made the load slower, and on a test suite, whose bodies mostly run
   a few hundred to a few thousand times, 1000 entries cost more to compile than it saved. A fully typed closure, one with an inline
@@ -666,9 +670,11 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   is declined without counting against the body, which then follows the thresholds.
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
-  register's and variable's type and where each variable's value lives. Cranelift's frontend builds
-  the SSA form from that plan. There is no separate R-level IR yet, so the optimizations that need
-  one (vector fusion, bounds-check elimination, inlining) are not built.
+  register's and variable's type and where each variable's value lives. The translator builds the
+  plan into the mid-level SSA IR of `crates/ssa`, which the typed core builds too, and that crate's
+  one lowering emits it through Cranelift. A guard in the IR is an instruction whose failure
+  branches to a cold deoptimization block. The optimizations that need an R-level IR above it
+  (vector fusion, bounds-check elimination) are not built.
 - **Unboxing.** Integers, doubles and logicals of length one without attributes live in machine
   registers, with R's `NA` and overflow rules. Element reads and writes on integer, double and
   logical vectors are inline, and a write copies only when the vector is shared.
@@ -685,8 +691,12 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   fixed list of base builtins and other effect-free closures, and assign only its own locals.
   When a calling handler is established, a handler could run R code in between, so compiled code
   then runs tier 0's call instruction, which makes the call lazily, and continues after it. A test
-  harness always has handlers, so leaving the body for tier 0 there would interpret most of it. A call of a small closure defined in the same body, which computes a scalar
-  from scalars without effects, is inlined on unboxed registers. A closure whose whole body is
+  harness always has handlers, so leaving the body for tier 0 there would interpret most of it. A call of a closure that computes a scalar from scalars without
+  effects is inlined on unboxed registers, whether the closure is made in the same body or bound
+  globally (then guarded by the binding epoch), and whether its body is one expression or a block
+  of local assignments ending in a value or `return(value)`. A failed guard inside the inlined
+  body hands the whole call back to tier 0, which reruns it lazily; nothing is lost, because the
+  body has no effects. A closure whose whole body is
   such a computation, branches, locals and calls of itself or other such closures included, is
   compiled once per argument type to a native function on unboxed values with no frame
   (`crates/jit/src/native.rs`), so a recursive scalar function runs entirely in machine code. It
@@ -710,6 +720,11 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 - **The C API and the collector.** Every boxed value compiled code holds is stored in the register
   window or a slot's root cell, which the collector scans, so every object is a valid `SEXP` at every
   allocation and every helper call.
+- **Baseline code.** Below tier 1, a body gets baseline machine code at its 200th entry or
+  backward jump (`crates/jit/src/baseline.rs`): per instruction, a call to tier 0's step for it
+  and direct branches on the pc it answers, emitted by ry's own x86-64 and aarch64 assembler in
+  a median of 28 µs. It keeps tier 0's activation, so it needs no deoptimization metadata, and
+  `RY_JIT=baseline` runs every body in it alone.
 - **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
   call still enters through tier 0's call path and allocates a frame and forced promises), result
   types for multi-index subscripts such as `m[i, ]`, and freeing the machine code of invalidated
@@ -832,17 +847,17 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | Lazy fused vectors for element-wise arithmetic, as ALTREP objects | Riposte, pqR | planned | intermediate vectors in untyped vector code | |
 | **4. Optimizing tiers** | | | | |
 | Per-argument-type native functions for scalar closures | Julia | built | recursive scalar functions | `crates/jit/src/native.rs` |
-| Baseline compiler from bytecode, no optimization | V8 Sparkplug | planned | warm code under the 3000-entry threshold | |
+| Baseline compiler from bytecode, no optimization | V8 Sparkplug | built; a body gets it at 200 entries or backward jumps | warm code under the 3000-entry threshold. Compiles in a median of 28 µs per body (at most about 0.5 ms), but a call per instruction measures level with tier 0's tail-call handlers (a scalar loop 0.53 s against 0.47 to 0.51 s), so its speed waits for inline fast paths of variable access and arithmetic. `RY_JIT=baseline` runs it alone | `crates/jit/src/baseline.rs`, `assembler.rs` |
 | Lazy basic block versioning as the baseline's second stage | YJIT | planned | type checks left inside handlers in warm code | |
-| A lower Cranelift threshold once the baseline tier exists | HotSpot, .NET tiering | planned | tier 1 under 3% of the time on eight of nine workloads | |
-| Cross-closure inlining with deoptimization | Ř (PIR) | planned | calls from compiled code re-enter tier 0 | |
+| A lower Cranelift threshold once the baseline tier exists | HotSpot, .NET tiering | measured, kept at 3000 entries; large bodies wait in proportion to their size | tier 1 under 3% of the time on eight of nine workloads. Callgrind geomean against JIT off: 1000 entries 1.015, 2000 1.016, 3000 1.013, 6000 1.010, 10,000 1.010, so the threshold does not decide on against off | `SIZE_WAIT_WORDS` in `crates/jit/src/jit.rs` |
+| Cross-closure inlining with deoptimization | Ř (PIR) | partly built: effect-free closures, single-expression or block bodies, guarded on callee identity; a failed guard reruns the whole call in tier 0. Callees with effects, which need frame materialization, are planned | calls from compiled code re-enter tier 0 | `inline`, `lower_block` in `crates/jit/src/analysis.rs` |
 | Escape analysis, scalar replacement, vector fusion | Graal, goose | planned | scalar and intermediate vector allocation | |
 | Per-signature numeric specialization of vector code | Julia | planned | | |
 | Effect-free `lapply`, `vapply`, `Map` and long element-wise operations across cores; reductions stay sequential | Bend | planned | wall time of independent per-element work | |
 | **5. Memory and start-up** | | | | |
 | A start-up image mapped read-only and shared | V8 snapshots, Bun | planned | stats-only start-up peak | |
 | Per-package images compiled at install time | Bun | planned | package load and warm-up | |
-| One SSA IR for tier 1 and the typed core: typed facts unguarded, untyped speculations guarded with deoptimization exits; install-time code through the typed AOT pipeline, with its deoptimization metadata and watched bindings in the code file | Ř (PIR), Graal | planned, with the first of the install-time images and the baseline tier | two SSA forms and two lowerings to Cranelift | `crates/jit`, `crates/typed` |
+| One SSA IR for tier 1 and the typed core: typed facts unguarded, untyped speculations guarded with deoptimization exits; install-time code through the typed AOT pipeline, with its deoptimization metadata and watched bindings in the code file | Ř (PIR), Graal | IR built; install-time code planned | two SSA forms and two lowerings to Cranelift | `crates/ssa` |
 | Profiles from a training run (the package's tests and examples) stored in the per-package image | HHVM Jump-Start, Project Leyden | planned | hot closures that never reach tier 1's thresholds | |
 | Images shared across worker processes | Bun | planned | resident memory per `parallel` worker | |
 | Concurrent tracing and Immix line reuse | LXR | planned, after collector pauses are measured | collector pauses, fragmentation | |
