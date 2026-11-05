@@ -828,7 +828,10 @@ calls of `function(x, y = 2) x + y`, `RY_JIT=off`) and on `timeseries`. Fixed:
   symbol pair to the name.
 - **The method cache flushed on every collection.** Now a GC root, keyed only on the binding epoch.
 - **`.Call` interned four control-argument names per call** (0.5% of `timeseries`).
-- **Tier-0 dispatch** reads the operand width from a table indexed by the opcode word.
+- **Tier-0 dispatch** is one loop over op words that carry their operand count, lookup sites
+  keep slot hints into the frame, function lookups skip frames that cannot bind the symbol, and
+  builtin checks are derived at registration (`decisions.md`, "Tier 0 runs on facts fixed before
+  the code runs"): `seq(1, 10, by = 2)` 160.4k to 145.5k instructions (GNU R about 106k).
 - **`x$name <- v` in tier 0** compiles to the in-place `SubAssign` (kind `Dollar`) when `x` is a
   local, unshared, classless list that already has the name: 0.76 s to 0.16 s per million
   (GNU R 0.09 s). `complex_assign` caches `f<-` symbols per getter and allocates no vectors.
@@ -851,6 +854,11 @@ calls of `function(x, y = 2) x + y`, `RY_JIT=off`) and on `timeseries`. Fixed:
 - **A text output connection rebuilt its vector per line**, which made `capture.output` of n lines
   n squared strings; it appends in place (`connections::push_text_line`). fasta 0.94 s, GNU R
   0.97 s; reversecomplement 0.18 s, GNU R 1.07 s.
+
+Public suites (`just bench-real --public all --filter /`, one run, JIT off against GNU R 4.3.3):
+awfy 0.66x, rcp 0.55x, shootout 0.98x geometric mean; JIT on 1.35x, 2.48x and 1.29x. The
+JIT-off losers are scalar loops (rcp vector-while 0.35x, fannkuchredux_naive 0.38x,
+mandelbrot 0.41x), which tier-0 dispatch and scalar allocation decide.
 
 Open, largest first:
 

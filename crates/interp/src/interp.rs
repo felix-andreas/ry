@@ -54,6 +54,7 @@ pub mod http;
 pub mod image;
 pub mod latex;
 pub mod linalg;
+pub mod linpack;
 pub mod long_double;
 pub mod lower;
 #[path = "../../rcmd/src/makeconf.rs"]
@@ -77,7 +78,6 @@ pub mod rmath;
 pub mod serialize;
 pub mod session;
 pub mod sort;
-pub mod linpack;
 pub mod standard_library;
 pub mod stats;
 pub mod stats_arima;
@@ -150,7 +150,10 @@ pub fn frame_args(state: &Interp, index: usize) -> &[Arg] {
         .frames
         .get(index + 1)
         .map_or(state.frame_args.len(), |next| next.args as usize);
-    state.frame_args.get(frame.args as usize..end).unwrap_or(&[])
+    state
+        .frame_args
+        .get(frame.args as usize..end)
+        .unwrap_or(&[])
 }
 
 /// Keeps the first `depth` frames and drops the rest with their arguments.

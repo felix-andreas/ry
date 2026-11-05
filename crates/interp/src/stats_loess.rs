@@ -129,8 +129,7 @@ pub unsafe fn loess_raw(call: &NativeCall<'_>) -> R<Sexp> {
         }
         "direct/approximate" => {
             let weights = used_weights(2)?;
-            let (fit, influence) =
-                workspace.lowesf(&x, &y, &weights, &x, n, Influence::Diagonal);
+            let (fit, influence) = workspace.lowesf(&x, &y, &weights, &x, n, Influence::Diagonal);
             surface = Some(fit);
             let singular = workspace.solver.singular;
             trace = forward_sum(&influence);
@@ -236,8 +235,7 @@ pub unsafe fn loess_dfitse(call: &NativeCall<'_>) -> R<Sexp> {
     let family = values::as_integer_scalar(arguments[5]);
     let mut workspace = Workspace::new(config);
     if family == 1 {
-        let (fit, operator) =
-            workspace.lowesf(&x, &y, &weights, &evaluate, m, Influence::Full);
+        let (fit, operator) = workspace.lowesf(&x, &y, &weights, &evaluate, m, Influence::Full);
         arguments[14] = values::real_vector(&fit)?;
         arguments[15] = values::real_vector(&operator)?;
     } else if family == 0 {
@@ -678,8 +676,7 @@ impl Tree {
                 alpha = alpha.min(t);
                 beta = beta.max(t);
             }
-            let margin =
-                0.005 * (beta - alpha).max(1e-10 * alpha.abs().max(beta.abs()) + 1e-30);
+            let margin = 0.005 * (beta - alpha).max(1e-10 * alpha.abs().max(beta.abs()) + 1e-30);
             alpha -= margin;
             beta += margin;
             self.set_vertex(1, k, alpha);
@@ -777,7 +774,8 @@ impl Tree {
         while cell <= self.nc {
             let mut diameter = 0.0;
             for k in 1..=nonparametric {
-                let extent = self.vertex(self.corner(cell, vc), k) - self.vertex(self.corner(cell, 1), k);
+                let extent =
+                    self.vertex(self.corner(cell, vc), k) - self.vertex(self.corner(cell, 1), k);
                 diameter += extent * extent;
             }
             let diameter = f64::sqrt(diameter);
@@ -1087,16 +1085,56 @@ fn ehg128(tree: &Tree, z: &[f64], vval: &[f64], warnings: &mut Vec<String>) -> f
 
     if d == 2 {
         let (gn, gpn) = blend_edge(
-            tree, vval, z, &path, j, 2, tree.vertex(ur, 2), [3, 4], true, [1, 2], 1,
+            tree,
+            vval,
+            z,
+            &path,
+            j,
+            2,
+            tree.vertex(ur, 2),
+            [3, 4],
+            true,
+            [1, 2],
+            1,
         );
         let (gs, gps) = blend_edge(
-            tree, vval, z, &path, j, 2, tree.vertex(ll, 2), [1, 2], false, [3, 4], 1,
+            tree,
+            vval,
+            z,
+            &path,
+            j,
+            2,
+            tree.vertex(ll, 2),
+            [1, 2],
+            false,
+            [3, 4],
+            1,
         );
         let (ge, gpe) = blend_edge(
-            tree, vval, z, &path, j, 1, tree.vertex(ur, 1), [2, 4], true, [1, 3], 2,
+            tree,
+            vval,
+            z,
+            &path,
+            j,
+            1,
+            tree.vertex(ur, 1),
+            [2, 4],
+            true,
+            [1, 3],
+            2,
         );
         let (gw, gpw) = blend_edge(
-            tree, vval, z, &path, j, 1, tree.vertex(ll, 1), [1, 3], false, [2, 4], 2,
+            tree,
+            vval,
+            z,
+            &path,
+            j,
+            1,
+            tree.vertex(ll, 1),
+            [1, 3],
+            false,
+            [2, 4],
+            2,
         );
         let h = (z[1] - tree.vertex(ll, 2)) / (tree.vertex(ur, 2) - tree.vertex(ll, 2));
         let (phi0, phi1, psi0, psi1) = hermite(h);
@@ -1143,7 +1181,13 @@ fn blend_edge(
     along: usize,
 ) -> (f64, f64) {
     let width = tree.d + 1;
-    let components = |vertex: usize| [vval[width * vertex], vval[1 + width * vertex], vval[2 + width * vertex]];
+    let components = |vertex: usize| {
+        [
+            vval[width * vertex],
+            vval[1 + width * vertex],
+            vval[2 + width * vertex],
+        ]
+    };
     let ll = tree.corner(j, 1);
     let ur = tree.corner(j, tree.vc);
     let mut v0 = tree.vertex(ll, along);
@@ -1240,7 +1284,11 @@ impl Workspace {
             tree: Tree::new(d, nvmax, nvmax),
             vval: vec![0.0; (d + 1) * (nvmax + 1)],
             vval2: vec![0.0; (d + 1) * (nvmax + 1)],
-            neighbourhoods: if keep { vec![0; nvmax * nf] } else { Vec::new() },
+            neighbourhoods: if keep {
+                vec![0; nvmax * nf]
+            } else {
+                Vec::new()
+            },
             vertex_operator: if keep {
                 vec![0.0; (d + 1) * nvmax * nf]
             } else {
@@ -1265,7 +1313,14 @@ impl Workspace {
         }
         let leaf_size = (n as f64 * self.config.cell).floor() as i64;
         self.order = (1..=n).collect();
-        let built = tree.build(x, n, &mut self.order, leaf_size, 0.0, self.config.nonparametric);
+        let built = tree.build(
+            x,
+            n,
+            &mut self.order,
+            leaf_size,
+            0.0,
+            self.config.nonparametric,
+        );
         if !built {
             self.solver.warnings.push(loess_warning(180));
         }
@@ -1342,12 +1397,8 @@ impl Workspace {
                         for (i5, coordinate) in point.iter_mut().enumerate() {
                             *coordinate = x[(target - 1) + n * i5];
                         }
-                        let term = ehg128(
-                            &self.tree,
-                            &point,
-                            &self.vval2,
-                            &mut self.solver.warnings,
-                        );
+                        let term =
+                            ehg128(&self.tree, &point, &self.vval2, &mut self.solver.warnings);
                         self.diagonal[target - 1] += term;
                         for i5 in 0..=d {
                             self.vval2[i5 + width * l] = 0.0;
@@ -1458,8 +1509,8 @@ impl Workspace {
                         self.solver.left_vector_response(j);
                         for i in 1..=nf {
                             let target = self.solver.psi[i - 1] - 1;
-                            operator[(l - 1) + m * target] += self.solver.right(1, j)
-                                * self.solver.eta[i - 1];
+                            operator[(l - 1) + m * target] +=
+                                self.solver.right(1, j) * self.solver.eta[i - 1];
                         }
                     }
                 }
@@ -1501,12 +1552,8 @@ impl Workspace {
                 for (k, coordinate) in point.iter_mut().enumerate() {
                     *coordinate = points[(i - 1) + m * k];
                 }
-                result[(i - 1) + m * (j - 1)] = ehg128(
-                    &self.tree,
-                    &point,
-                    &self.vval2,
-                    &mut self.solver.warnings,
-                );
+                result[(i - 1) + m * (j - 1)] =
+                    ehg128(&self.tree, &point, &self.vval2, &mut self.solver.warnings);
             }
         }
         result
@@ -1784,7 +1831,11 @@ impl Solver {
             self.gamma[j - 1] = if self.tolerance < self.sigma[j - 1] {
                 // SAFETY: both vectors hold at least `k` doubles.
                 let dot = unsafe {
-                    ddot(k as isize, self.left[15 * (j - 1)..].as_ptr(), self.eta.as_ptr())
+                    ddot(
+                        k as isize,
+                        self.left[15 * (j - 1)..].as_ptr(),
+                        self.eta.as_ptr(),
+                    )
                 };
                 dot / self.sigma[j - 1]
             } else {
@@ -1863,7 +1914,11 @@ impl Solver {
             self.gamma[j - 1] = if self.tolerance < self.sigma[j - 1] {
                 // SAFETY: both vectors hold at least `k` doubles.
                 let dot = unsafe {
-                    ddot(k as isize, self.left[15 * (j - 1)..].as_ptr(), self.eta.as_ptr())
+                    ddot(
+                        k as isize,
+                        self.left[15 * (j - 1)..].as_ptr(),
+                        self.eta.as_ptr(),
+                    )
                 };
                 dot / self.sigma[j - 1]
             } else {
@@ -2072,8 +2127,7 @@ fn ehg176(z: f64) -> f64 {
         -6.4170e-2, -2.0636e-2, 4.0172e-2,
     ];
     const SLOPES: [f64; 10] = [
-        4.4844, -0.7736, -0.3495, -0.7286, 0.1611, -0.7978, -0.4457, 3.2813e-2, 0.3350,
-        -4.1032e-2,
+        4.4844, -0.7736, -0.3495, -0.7286, 0.1611, -0.7978, -0.4457, 3.2813e-2, 0.3350, -4.1032e-2,
     ];
 
     let mut tree = Tree::new(1, 10, 17);
@@ -2135,7 +2189,9 @@ fn numbers_message(prefix: &str, values: &[f64]) -> String {
                 value,
             )
         };
-        message.push_str(&String::from_utf8_lossy(&buffer[..written.clamp(0, 63) as usize]));
+        message.push_str(&String::from_utf8_lossy(
+            &buffer[..written.clamp(0, 63) as usize],
+        ));
     }
     message.push('\n');
     message

@@ -507,9 +507,9 @@ fn may_have_non_finite_complex(screen: Screen, values: &[Rcomplex]) -> bool {
             let (head, pairs) = values.split_at(values.len() & 1);
             head.iter()
                 .any(|value| !value.r.is_finite() || !value.i.is_finite())
-                || pairs.chunks_exact(2).any(|pair| {
-                    !(pair[0].r + pair[0].i + pair[1].r + pair[1].i).is_finite()
-                })
+                || pairs
+                    .chunks_exact(2)
+                    .any(|pair| !(pair[0].r + pair[0].i + pair[1].r + pair[1].i).is_finite())
         }
         Screen::Sum => {
             let mut sum = 0.0;
@@ -561,28 +561,28 @@ fn host_real_product(
                 none, &x_rows, &x_cols, &one, x, &x_rows, y, &unit, &zero, z_pointer, &unit, 1,
             ),
             Product::Matrix if x_rows == 1 => (blas.dgemv)(
-                transposed, &y_rows, &y_cols, &one, y, &y_rows, x, &unit, &zero, z_pointer,
-                &unit, 1,
+                transposed, &y_rows, &y_cols, &one, y, &y_rows, x, &unit, &zero, z_pointer, &unit,
+                1,
             ),
             Product::Matrix => (blas.dgemm)(
                 none, none, &x_rows, &y_cols, &x_cols, &one, x, &x_rows, y, &y_rows, &zero,
                 z_pointer, &x_rows, 1, 1,
             ),
             Product::Cross if symmetric => (blas.dsyrk)(
-                upper, transposed, &x_cols, &x_rows, &one, x, &x_rows, &zero, z_pointer,
-                &x_cols, 1, 1,
+                upper, transposed, &x_cols, &x_rows, &one, x, &x_rows, &zero, z_pointer, &x_cols,
+                1, 1,
             ),
             Product::Cross if y_cols == 1 => (blas.dgemv)(
-                transposed, &x_rows, &x_cols, &one, x, &x_rows, y, &unit, &zero, z_pointer,
-                &unit, 1,
+                transposed, &x_rows, &x_cols, &one, x, &x_rows, y, &unit, &zero, z_pointer, &unit,
+                1,
             ),
             Product::Cross if x_cols == 1 => (blas.dgemv)(
-                transposed, &y_rows, &y_cols, &one, y, &y_rows, x, &unit, &zero, z_pointer,
-                &unit, 1,
+                transposed, &y_rows, &y_cols, &one, y, &y_rows, x, &unit, &zero, z_pointer, &unit,
+                1,
             ),
             Product::Cross => (blas.dgemm)(
-                transposed, none, &x_cols, &y_cols, &x_rows, &one, x, &x_rows, y, &y_rows,
-                &zero, z_pointer, &x_cols, 1, 1,
+                transposed, none, &x_cols, &y_cols, &x_rows, &one, x, &x_rows, y, &y_rows, &zero,
+                z_pointer, &x_cols, 1, 1,
             ),
             Product::TransposedCross if symmetric => (blas.dsyrk)(
                 upper, none, &x_rows, &x_cols, &one, x, &x_rows, &zero, z_pointer, &x_rows, 1, 1,
@@ -594,8 +594,8 @@ fn host_real_product(
                 none, &y_rows, &y_cols, &one, y, &y_rows, x, &unit, &zero, z_pointer, &unit, 1,
             ),
             Product::TransposedCross => (blas.dgemm)(
-                none, transposed, &x_rows, &y_rows, &x_cols, &one, x, &x_rows, y, &y_rows,
-                &zero, z_pointer, &x_rows, 1, 1,
+                none, transposed, &x_rows, &y_rows, &x_cols, &one, x, &x_rows, y, &y_rows, &zero,
+                z_pointer, &x_rows, 1, 1,
             ),
         }
     }
@@ -646,12 +646,12 @@ fn host_complex_product(
                 &x_rows, 1, 1,
             ),
             Product::Cross => (blas.zgemm)(
-                transposed, none, &x_cols, &y_cols, &x_rows, &one, x, &x_rows, y, &y_rows,
-                &zero, z, &x_cols, 1, 1,
+                transposed, none, &x_cols, &y_cols, &x_rows, &one, x, &x_rows, y, &y_rows, &zero,
+                z, &x_cols, 1, 1,
             ),
             Product::TransposedCross => (blas.zgemm)(
-                none, transposed, &x_rows, &y_rows, &x_cols, &one, x, &x_rows, y, &y_rows,
-                &zero, z, &x_rows, 1, 1,
+                none, transposed, &x_rows, &y_rows, &x_cols, &one, x, &x_rows, y, &y_rows, &zero,
+                z, &x_rows, 1, 1,
             ),
         }
     }

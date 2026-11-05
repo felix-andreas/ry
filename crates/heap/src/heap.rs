@@ -1590,6 +1590,15 @@ impl Heap {
         (*env.frame_ptr()).find(symbol)
     }
 
+    /// [`Heap::frame_cell`] through a lookup site's position hint (see [`Frame::find_hinted`]).
+    #[inline(always)]
+    pub unsafe fn frame_cell_hinted(&self, env: Sexp, symbol: Sexp, hint: &mut u32) -> Option<Sexp> {
+        if self.is_symbol_frame(env) || env == self.known.empty_env {
+            return self.frame_cell(env, symbol);
+        }
+        (*env.frame_ptr()).find_hinted(symbol, hint)
+    }
+
     /// The binding cells of `env`'s own frame. The global frame's bindings live on the symbols,
     /// so it has none here.
     pub unsafe fn local_cells(&self, env: Sexp) -> impl Iterator<Item = Sexp> + '_ {
@@ -1607,6 +1616,17 @@ impl Heap {
             cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
             return Ok(());
         }
+        self.define_unbound(env, symbol, value)
+    }
+
+    /// [`Heap::define`] for a `symbol` that `env`'s own frame does not bind, which the caller
+    /// just found by probing it.
+    pub unsafe fn define_unbound(
+        &mut self,
+        env: Sexp,
+        symbol: Sexp,
+        value: Sexp,
+    ) -> HeapResult<()> {
         if env == self.known.empty_env {
             return Err(HeapError::EmptyEnvironment);
         }

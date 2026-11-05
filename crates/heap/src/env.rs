@@ -15,7 +15,11 @@
 //! The base environment and the base namespace have no `Frame`: their cells hang off the symbols
 //! themselves, so a lookup of a base function is one load from the interned symbol.
 
-use {crate::object::Sexp, rustc_hash::FxHashMap, smallvec::SmallVec};
+use {
+    crate::object::Sexp,
+    rustc_hash::{FxHashMap, FxHashSet},
+    smallvec::SmallVec,
+};
 
 /// Frames this small are scanned; larger ones keep a hash index beside the cells. Scanning a
 /// dozen cells is cheaper than building the index, which a call to a function with many
@@ -39,6 +43,11 @@ struct Binding {
 /// dangling address, so a lookup never matches it.
 const REMOVED: Sexp = Sexp::dangling();
 
+/// The [`Frame::formals`] bit set once some symbol is bound twice, which only duplicate formals
+/// do. Hinted lookups are off in such a frame, because a hint at the later duplicate would answer
+/// with the wrong cell.
+const SHADOWED: u32 = 1 << 31;
+
 /// GNU R's default and minimum hash table size (`HASHMINSIZE`).
 const HASH_MINIMUM_SIZE: u32 = 29;
 
@@ -58,6 +67,8 @@ pub struct Frame {
     table: Option<Box<HashTable>>,
     /// How many leading slots are a closure's formals, which GNU R lists after the locals and
     /// in their own order.
+    /// The top bit is [`SHADOWED`], kept here because a field of its own would push the
+    /// environment object out of its size class.
     formals: u32,
     /// How many slots hold [`REMOVED`].
     removed: u32,
@@ -122,19 +133,43 @@ impl Frame {
     /// The binding cell for `symbol`, if the frame binds it.
     #[inline]
     pub fn find(&self, symbol: Sexp) -> Option<Sexp> {
+        let position = self.find_position(symbol)?;
+        self.bindings.get(position).map(|binding| binding.cell)
+    }
+
+    /// [`Frame::find`] that tries position `*hint` first and leaves the binding's position in
+    /// it. Calls of one function bind their formals and locals in the same order, so a hint a
+    /// compiled lookup site kept from an earlier call answers with one comparison in the
+    /// frames of later calls. A removed slot holds no real symbol, and a frame that binds a
+    /// symbol twice ignores hints, so a stale hint never matches the wrong binding.
+    #[inline(always)]
+    pub fn find_hinted(&self, symbol: Sexp, hint: &mut u32) -> Option<Sexp> {
+        // Most probes miss, so the filter comes before the hint.
+        if self.filter & filter_bit(symbol) == 0 {
+            return None;
+        }
+        if let Some(binding) = self.bindings.get(*hint as usize)
+            && binding.symbol == symbol
+            && self.formals & SHADOWED == 0
+        {
+            return Some(binding.cell);
+        }
+        let position = self.find_position(symbol)?;
+        *hint = position as u32;
+        self.bindings.get(position).map(|binding| binding.cell)
+    }
+
+    #[inline]
+    fn find_position(&self, symbol: Sexp) -> Option<usize> {
         if self.filter & filter_bit(symbol) == 0 {
             return None;
         }
         match &self.index {
-            Some(index) => self
-                .bindings
-                .get(*index.get(&symbol)? as usize)
-                .map(|binding| binding.cell),
+            Some(index) => Some(*index.get(&symbol)? as usize),
             None => self
                 .bindings
                 .iter()
-                .find(|binding| binding.symbol == symbol)
-                .map(|binding| binding.cell),
+                .position(|binding| binding.symbol == symbol),
         }
     }
 
@@ -159,7 +194,7 @@ impl Frame {
 
     /// Marks every cell bound so far as a closure formal.
     pub fn mark_formals(&mut self) {
-        self.formals = self.bindings.len() as u32;
+        self.formals = self.formals & SHADOWED | self.bindings.len() as u32;
     }
 
     /// The cells in the order GNU R lists the frame in.
@@ -168,7 +203,7 @@ impl Frame {
     /// Every cell in the frame must be live, which holds while the environment is reachable.
     pub unsafe fn listed_cells(&self) -> Vec<Sexp> {
         let Some(table) = &self.table else {
-            let formals = (self.formals as usize).min(self.bindings.len());
+            let formals = ((self.formals & !SHADOWED) as usize).min(self.bindings.len());
             let (formals, locals) = self.bindings.split_at(formals);
             return locals
                 .iter()
@@ -217,6 +252,9 @@ impl Frame {
     /// symbol the frame already binds, and then the first cell keeps answering lookups, as the
     /// first match in GNU R's frame list does.
     pub(crate) fn insert(&mut self, symbol: Sexp, cell: Sexp) {
+        if self.filter & filter_bit(symbol) != 0 && self.find_position(symbol).is_some() {
+            self.formals |= SHADOWED;
+        }
         let position = self.bindings.len() as u32;
         self.bindings.push(Binding { symbol, cell });
         self.filter |= filter_bit(symbol);
@@ -271,7 +309,7 @@ impl Frame {
         }
         // Only formals repeat a symbol, and a duplicate behind the removed one now answers for it.
         if let Some(index) = &mut self.index
-            && let Some(duplicate) = (position + 1..self.formals as usize)
+            && let Some(duplicate) = (position + 1..(self.formals & !SHADOWED) as usize)
                 .find(|&later| self.bindings[later].symbol == symbol)
         {
             index.insert(symbol, duplicate as u32);
@@ -284,7 +322,7 @@ impl Frame {
 
     /// Drops the removed slots, keeping the live bindings in insertion order.
     fn compact(&mut self) {
-        let formals = self.bindings[..(self.formals as usize).min(self.bindings.len())]
+        let formals = self.bindings[..((self.formals & !SHADOWED) as usize).min(self.bindings.len())]
             .iter()
             .filter(|binding| binding.symbol != REMOVED)
             .count();
@@ -292,7 +330,7 @@ impl Frame {
             table.compact(&self.bindings);
         }
         self.bindings.retain(|binding| binding.symbol != REMOVED);
-        self.formals = formals as u32;
+        self.formals = self.formals & SHADOWED | formals as u32;
         self.removed = 0;
         if let Some(index) = &mut self.index {
             index.clear();
@@ -330,7 +368,7 @@ impl Frame {
                     (binding.symbol != REMOVED).then_some((binding.symbol, binding.cell))
                 })
                 .collect(),
-            formals: self.formals,
+            formals: self.formals & !SHADOWED,
             removed: self.removed,
             table: self.table.as_ref().map(|table| TableImage {
                 heads: table.heads.clone(),
@@ -355,8 +393,11 @@ impl Frame {
             })
             .collect();
         let mut filter = 0;
+        let mut seen = FxHashSet::default();
+        let mut shadowed = false;
         for binding in bindings.iter().filter(|binding| binding.symbol != REMOVED) {
             filter |= filter_bit(binding.symbol);
+            shadowed |= !seen.insert(binding.symbol);
         }
         let index = (bindings.len() > INDEX_THRESHOLD).then(|| {
             let mut index = FxHashMap::with_capacity_and_hasher(bindings.len(), Default::default());
@@ -378,7 +419,11 @@ impl Frame {
                     count: table.count,
                 })
             }),
-            formals: image.formals,
+            formals: if shadowed {
+                image.formals | SHADOWED
+            } else {
+                image.formals
+            },
             removed: image.removed,
             filter,
         }

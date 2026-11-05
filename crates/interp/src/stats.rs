@@ -1009,8 +1009,13 @@ unsafe fn mvfft(call: &NativeCall<'_>) -> R<Sexp> {
     };
     let z = complex_copy(call.arg(0))?;
     let inverse = fft_inverse(call);
-    fft_columns(complex_doubles(values::complexes_mut(z)), dims[0], dims[1], inverse)
-        .map_err(|_| call.error("fft factorization error"))?;
+    fft_columns(
+        complex_doubles(values::complexes_mut(z)),
+        dims[0],
+        dims[1],
+        inverse,
+    )
+    .map_err(|_| call.error("fft factorization error"))?;
     Ok(z)
 }
 
