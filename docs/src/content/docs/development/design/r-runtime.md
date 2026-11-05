@@ -769,9 +769,11 @@ The corpus differs in kind. Its I/O is mostly `unlink`: testthat removes a tempo
 around each test, and `rmdir` takes 1 to 4 ms on the measuring machine's ext4 volume, for GNU R as
 much as for ry (94 s over the corpus). Its waiting is `rlang` and `purrr` (about 90% each) and
 `foreach` (68%) waiting on child R processes. Start-up dominates the smallest suites (`abind` 74%,
-`zoo` 81%). The builtins that take the most time are `attributes`, `.Call`, `c`, `vapply`, `[[`,
-`forceAndCall`, `[<-` and `<-` on the workloads, and `as.POSIXlt`, `[[`, `c`, `[`,
-`lazyLoadDBfetch` and `match` on the corpus.
+`zoo` 81%). Averaged over the nine workloads, the builtins that take the most time are `[<-` and
+`exp` (1.8% each, all on `simulation`'s 30,000-element vectors, where ry already runs twice as fast
+as GNU R), then `vapply` (1.2%), `ryStructure`, `.Call`, `<-`, `[`, `lapply`, `list`,
+`ryFormatDefault` and `forceAndCall` (0.7 to 1.0% each). On the corpus they are `as.POSIXlt`, `[[`,
+`c`, `[`, `lazyLoadDBfetch` and `match` (measured before the row (a) fast paths below).
 
 **The arithmetic.** Speeding each bucket up by the factor below, with CRAN native code, I/O and
 waiting fixed, gives these geometric means over GNU R (Amdahl's law per workload, starting from
@@ -795,7 +797,7 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 
 | Target row | Status | What it needs |
 | --- | --- | --- |
-| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | planned | builtins from 28% (workloads) and 18% (corpus) to 10x faster; the top of the ranking above first |
+| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | in progress | builtins from 28% (workloads) and 18% (corpus) to 10x faster; the top of the ranking above first. Built: `attributes`, `c`, `[[` and `[[<-` with constant subscripts, `forceAndCall`, a builtin `FUN` in the apply family, `Reduce` (the "Builtin fast paths" row below). Next: the closure call inside `vapply` and `lapply` (rebinding `i` and building a promise per element), `$<-` and `[[<-` that append a name, `ryStructure`, `round` |
 | (b) Automatic parallelism for effect-free apply-family calls and long element-wise operations, deterministic, with bit-identical reductions | deferred, architecture-ready | the effect-free fact per function and the invariants in `decisions.md`; package native code stays single-threaded |
 | (c) Tier-1 compilation of most R-level time | planned | R code from 56% (workloads) to 30x faster; tier 1 today runs under 3% of the time on eight of nine workloads |
 | (d) Native code shrinks only through ry-native replacements or parallelism | planned | ry's own ports (`stats`: 40% of `simulation`) are ry's to speed up; third-party C stays: `data.table` and `xts` on the workloads, `data.table` and `rlang` on the corpus |
@@ -822,7 +824,8 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | Closed bindings per locked namespace, reopened by `unlockBinding` and `assignInNamespace` | Bun, Roc | planned | namespace function lookups | |
 | Precise counts and borrowed parameters in tier 0 | Roc (Perceus) | planned | copies and peak memory | |
 | Setter instruction for one-level complex assignment | GNU R bytecode | built | `attributes(m) <- NULL` 4.2k to 1.5k instructions (GNU R 1.1k); `mostattributes(m) <-` 11.0k to 9.5k (GNU R 6.9k); `seq()` 136.2k to 135.0k | `Op::Replace`, `replace_variable` in `bytecode.rs` |
-| Native prologues for hot base closures (`match.arg`, `stopifnot`, `setdiff`, `structure`, `format.default`), installed by hash on the R version they were written from | ry, after the methods core | built | bench-real `validation` 0.6x to 1.87x GNU R; 2.71G to 1.32G instructions (JIT off) | `crates/interp/src/base_fast_paths.rs` |
+| Native prologues for hot base closures (`match.arg`, `stopifnot`, `setdiff`, `structure`, `format.default`, `Reduce`), installed by hash on the R version they were written from | ry, after the methods core | built | bench-real `validation` 0.6x to 1.87x GNU R; 2.71G to 1.32G instructions (JIT off) | `crates/interp/src/base_fast_paths.rs` |
+| Builtin fast paths without string round trips or repeated evaluation: `attributes` and `c` take names as CHARSXPs instead of interning them again; the compiled `[[` read serves classless lists and the in-place element assignment takes a constant name; `forceAndCall` reuses its call's argument cells; `lapply` and `vapply` hand a builtin `FUN` (or `[[`) the element they read; `Reduce` gets a native prologue | ry | built | instructions per call, JIT off, before and after (GNU R): `attributes` on an xts object 4,183 to 1,786 (2,692); `c(1:3, 4.5)` 4,262 to 2,131 (2,731); `c(a, z = 3)` 5,964 to 4,616 (4,299); `x[[2L]]` 1,150 to 698 (709); `x[["fee"]]` 1,674 to 693 (1,805); `x[["net"]] <- 3` 4,910 to 987 (2,011); `forceAndCall(2, f, x, y)` 5,520 to 4,232 (5,198); `` vapply(rows, `[[`, 0, "fee") `` over 100 rows 421.8k to 260.0k (363.4k); `Reduce(f, x)` over 100 elements 748.7k to 423.1k (688.8k) | `do_attributes`, `do_c` in `crates/interp/src/subset.rs`; `cached_item` in `records.rs`; `do_force_and_call`, `force_and_call_with`, `call_with_values` in `eval.rs`; `do_reduce` in `base_fast_paths.rs` |
 | Getter instructions for nested complex assignment (`names(x)[2] <-`, `x$a$b <-`) | GNU R bytecode | planned | the nested levels still build their calls in `complex_assign` | |
 | **3. LLInt- and LuaJIT-grade tier 0** | | | | |
 | In-place specialization (quickening) with value profiles | CPython (PEP 659), JSC | planned | tier-0 instructions 23 to 44%; JIT-off scalar loops 0.35 to 0.41 times GNU R | |

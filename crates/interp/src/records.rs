@@ -418,7 +418,7 @@ pub unsafe fn cached_field(object: Sexp, name: Sexp, shape: Sexp) -> R<Option<Se
 /// when `object` is a plain record or tuple that has it, or a list with no class, and `None` for
 /// `[[`'s own path otherwise, which dispatches, reads a vector or raises the error.
 pub unsafe fn cached_item(object: Sexp, index: Sexp, shape: Sexp) -> R<Option<Sexp>> {
-    if object.kind() == SexpType::List && !object.is_object() && !object.is_altrep() {
+    if object.kind() == SexpType::List && !object.is_object() && !object.is_altrep() && !object.is_array() {
         return Ok(list_item(object, index));
     }
     if object.kind() != SexpType::Record || object.is_object() {
