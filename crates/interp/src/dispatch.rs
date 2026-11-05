@@ -252,6 +252,8 @@ pub struct MethodCache {
     names: FxHashMap<(Sexp, Sexp), Sexp>,
     sites: FxHashMap<Sexp, Vec<SiteEntry>>,
     pub s4: crate::methods::S4Cache,
+    /// The `.Group` NextMethod defines when there is no group: `""`, shared and not mutable.
+    blank_group: Option<Sexp>,
 }
 
 /// The class vectors one site remembers. Real generics see one to three at a site; a site that
@@ -308,6 +310,9 @@ struct MethodStrings {
 
 pub unsafe fn trace_method_cache(cache: &MethodCache, marker: &mut heap::Marker<'_>) {
     crate::methods::trace_s4_cache(&cache.s4, marker);
+    if let Some(blank) = cache.blank_group {
+        marker.mark(blank);
+    }
     for (&(name, top, table, _), &cell) in &cache.entries {
         marker.mark(name);
         marker.mark(top);
@@ -1104,15 +1109,25 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     }
     let generic_string = generic.element(0);
     let generic_symbol = values::install_charsxp(generic_string)?;
-    let group = read(symbols.dot_group)?;
-    let group_string = (group != unbound()
-        && group.kind() == SexpType::String
-        && length(group) == 1
-        && group.element(0).length() > 0)
-        .then(|| group.element(0));
-    let group_symbol = match group_string {
-        Some(group) => Some(values::install_charsxp(group)?),
-        None => None,
+    // The next method's frame always gets `.Group`, empty when there is no group.
+    let group = match read(symbols.dot_group)? {
+        group if group == unbound() => match interp().method_cache.blank_group {
+            Some(blank) => blank,
+            None => {
+                let blank = values::scalar_string_charsxp(values::blank_string())?;
+                blank.mark_not_mutable();
+                interp().method_cache.blank_group = Some(blank);
+                blank
+            }
+        },
+        group => group,
+    };
+    if group.kind() != SexpType::String || length(group) != 1 {
+        return Err(error("invalid 'group' argument found in 'NextMethod'"));
+    }
+    let group_symbol = match group.element(0) {
+        name if name == values::na_string() || name.length() == 0 => None,
+        name => Some(values::install_charsxp(name)?),
     };
     let call_env = {
         let value = read(symbols.dot_generic_call_env)?;
@@ -1224,7 +1239,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         }
         args.push(*extra);
     }
-    let next_classes = class_suffix(classes, (next_index + 1).min(class_count))?;
+    let next_classes = class_suffix(classes, next_index.min(class_count))?;
     values::set_attr(next_classes, symbols.previous, classes)?;
     let method_charsxp = next_name.car();
     // For a group generic `.Method` has one entry per operand, empty for an operand that did
@@ -1252,7 +1267,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     let strings = MethodStrings {
         name: next_name,
         generic,
-        group: if group_string.is_some() { group } else { nil() },
+        group,
         classes: next_classes,
         method: method_string,
     };
@@ -2056,10 +2071,11 @@ pub unsafe fn do_standard_generic(call: &Call<'_>) -> R<Sexp> {
 /// The innermost function on the call stack whose `generic` attribute names `name`, which is
 /// how `standardGeneric` finds the generic it was called from.
 unsafe fn this_generic(name: Sexp) -> R<Sexp> {
-    let wanted = match values::string_elt(name, 0) {
-        string if string == values::na_string() => &[][..],
-        string => string.bytes(),
-    };
+    let wanted = values::string_elt(name, 0);
+    if wanted == values::na_string() {
+        return Ok(nil());
+    }
+    let wanted = wanted.bytes();
     for frame in interp().frames.iter().rev() {
         let function = frame.function;
         if function.kind() != SexpType::Closure {

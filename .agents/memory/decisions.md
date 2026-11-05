@@ -1934,8 +1934,8 @@ held; `setMethod` and `removeMethod` rewrite that binding, so the entry misses. 
 are cached only once `.InheritForDispatch` stored them under the label. Both caches are GC roots and
 are cleared when full rather than evicted. Callgrind instructions per dispatch, JIT off, GNU R
 4.3.3 in brackets: `UseMethod` 8,684 to 7,537 (9,824); `UseMethod` plus `NextMethod` 23,206 to
-18,629 (19,030); `standardGeneric` 14,127 to 8,447 (11,681). Oracle cases
-`dispatch__site_cache_invalidation` and `s4__method_cache_invalidation` pin the invalidation shapes.
+18,977 (19,030); `standardGeneric` 14,127 to 8,447 (11,681). Oracle cases
+`dispatch__site_cache_invalidation` and `s4__method_cache_invalidation` pin the invalidation shapes. NextMethod passes `.Class` from the class whose method it found and always defines `.Group` (`""` without a group, one shared vector), as GNU R does (`dispatch__next_method_class_and_group`).
 
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the

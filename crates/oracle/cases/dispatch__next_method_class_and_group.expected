@@ -1,0 +1,32 @@
+[stdout]
+| [1] "a" "b" "c"
+| [1] "b" "c"
+| attr(,"previous")
+| [1] "a" "b" "c"
+| [1] "c"
+| attr(,"previous")
+| [1] "b" "c"
+| attr(,"previous")attr(,"previous")
+| [1] "a" "b" "c"
+| [1] "b" "c"
+| attr(,"previous")
+| [1] "a" "b" "c"
+| character(0)
+| attr(,"previous")
+| [1] "c"
+| attr(,"previous")attr(,"previous")
+| [1] "b" "c"
+| attr(,"previous")attr(,"previous")attr(,"previous")
+| [1] "a" "b" "c"
+| [1] TRUE
+| [1] ""
+| [1] "c"
+| attr(,"previous")
+| [1] "a" "b" "c"
+| [1] ""
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| ""

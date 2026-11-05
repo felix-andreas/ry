@@ -275,6 +275,9 @@ unsafe fn class_keys(signature: &[Sexp], argument_values: &[Sexp]) -> R<SmallVec
         let class = if value == missing_arg() {
             symbols().missing.car()
         } else if symbol == symbols().dots {
+            if value.kind() != SexpType::String || length(value) == 0 {
+                return Err(error("'.dotsClass' did not return a class"));
+            }
             values::string_elt(value, 0)
         } else {
             values::string_elt(dispatch::class_of(value)?, 0)
