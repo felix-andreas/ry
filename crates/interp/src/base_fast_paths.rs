@@ -21,7 +21,7 @@ use {
         unwind::{R, Unwind, jump},
         values::{self, install, length, missing_arg, nil, symbols},
     },
-    heap::object::{NA_LOGICAL, Sexp, SexpType},
+    heap::object::{NA_LOGICAL, Sexp, SexpType, gp},
     smallvec::SmallVec,
 };
 
@@ -123,16 +123,14 @@ unsafe fn argument(frame: Sexp, name: &str) -> R<Option<Sexp>> {
     Ok(Some(value))
 }
 
-/// Whether the formal `name` holds its own default, untouched: either no value at all or the
-/// default's promise, which is evaluated in the frame itself. An argument the caller passed on
-/// from its own missing formal is not a default, because forcing it raises an error.
+/// Whether the formal `name` holds its own default, untouched: no value at all, or the default
+/// the call bound because the argument was left out. An argument the caller passed on from its
+/// own missing formal is not a default, because forcing it raises an error.
 unsafe fn is_default(frame: Sexp, name: &str) -> R<bool> {
     let Some(cell) = crate::heap().frame_cell(frame, install(name)?) else {
         return Ok(true);
     };
-    let value = cell.cdr();
-    Ok(value == missing_arg()
-        || (value.kind() == SexpType::Promise && value.tag() == frame))
+    Ok(cell.cdr() == missing_arg() || cell.has_gp(gp::BINDING_MISSING))
 }
 
 /// Whether the call supplied the formal `name`, as `missing(name)` is false.
