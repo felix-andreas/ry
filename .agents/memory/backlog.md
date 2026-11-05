@@ -2500,6 +2500,15 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   preorder position in the body, should make decoding a fraction of compiling; measure with
   callgrind on `library()` plus a first call of the twelve packages in `decisions.md`, "Code
   images".
+- **Where `library()` time goes, and what code images cannot remove.** On `library()` of twelve
+  CRAN packages (1,200.7M instructions for the whole process without images), compiling is 74.5M
+  (6.2%), and images remove only 4.0M of it, because most compiling during a load is base-package
+  code and code `.onLoad` runs once. Lazy-load fetches are 313M (26%), almost all of it
+  `serialize::unserialize` (278M) decoding the records the namespace forces. Collection is 118M
+  (9.8%). Fetches and collection are the load cost. An eager namespace image was measured not to
+  help (`decisions.md`, "Installed packages load through native fast paths"), so the lever is a
+  faster record reader and fewer forced fetches (S3 registration forcing every method), not
+  another image.
 - **Code images are about six times the size of the lazy-load database** (MASS: 706 KB `.ryc`
   against a 120 KB compressed `.rdb`), because instruction words, constants and feedback are
   stored uncompressed. Compress payloads, or pack the instruction stream, if install size matters.
