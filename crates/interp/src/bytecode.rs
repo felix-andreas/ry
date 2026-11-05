@@ -559,6 +559,13 @@ pub enum Op {
     /// `variable[[row, column]] <- value`, as `call` says, with the subscripts' values in
     /// registers `row` and `column`, run as `<-` would run it.
     SubAssignMatrix,
+    /// `dst variable setter cache call base count whole`: `whole`, an assignment such as
+    /// `names(x) <- value`, through the replacement function `setter` names (looked up through
+    /// lookup slot `cache`). Registers `base + 1..base + count` hold the other arguments and the
+    /// value last; the instruction puts the variable's value in `base`, calls the replacement as
+    /// `call`, and binds the result to the variable. What [`replace_variable`] does not handle
+    /// runs `whole` as `<-` would.
+    Replace,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its last operand.
@@ -573,7 +580,7 @@ enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 42] = [
+pub const OPS: [Op; 43] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -616,6 +623,7 @@ pub const OPS: [Op; 42] = [
     Op::MatchCondition,
     Op::SwitchArm,
     Op::SubAssignMatrix,
+    Op::Replace,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1664,6 +1672,13 @@ impl Compiler {
                     &args,
                 );
             }
+            if matches!(name.as_str(), "<-" | "=")
+                && args.len() == 2
+                && args.iter().all(|(tag, _)| *tag == nil())
+                && let Some(setter) = self.replacement_target(args[0].1)?
+            {
+                return self.replacement(call, head, primitive, setter, dst, &args);
+            }
             if inlined {
                 return self.guarded(call, head, primitive, dst, &name, &args);
             }
@@ -1753,6 +1768,92 @@ impl Compiler {
                 subscripts.iter().map(|(_, index)| *index).collect(),
             )
         }))
+    }
+
+    /// For `f(x, ...) <- value` other than the element assignments: the replacement function's
+    /// symbol, when `x` is a variable and the other arguments can be evaluated before the
+    /// variable is read without anyone noticing.
+    unsafe fn replacement_target(&mut self, target: Sexp) -> R<Option<Sexp>> {
+        if target.kind() != SexpType::Language || target.car().kind() != SexpType::Symbol {
+            return Ok(None);
+        }
+        let getter = symbol_name(target.car());
+        if matches!(&*getter, "[" | "[[" | "$" | "@") {
+            return Ok(None);
+        }
+        let parts = values::pairlist_items(target.cdr());
+        let Some(((variable_tag, variable), rest)) = parts.split_first() else {
+            return Ok(None);
+        };
+        let constant = |value: Sexp| {
+            matches!(value.kind(), SexpType::String | SexpType::Logical | SexpType::Nil)
+                && length(value) <= 1
+                && !values::has_attributes(value)
+        };
+        if *variable_tag != nil()
+            || variable.kind() != SexpType::Symbol
+            || *variable == symbols().dots
+            || eval::dot_dot_index(*variable).is_some()
+            || !rest.iter().all(|(tag, value)| {
+                *tag != symbols().value
+                    && (constant(*value) || self.side_effect_free_index(*value, 0))
+            })
+        {
+            return Ok(None);
+        }
+        Ok(Some(values::install(&format!("{getter}<-"))?))
+    }
+
+    /// `f(x, ...) <- value`, guarded by `<-`: the value, then the other arguments, evaluate
+    /// into registers, and [`Op::Replace`] reads the variable, calls the replacement function
+    /// and binds its result.
+    unsafe fn replacement(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        setter: Sexp,
+        dst: u32,
+        args: &[(Sexp, Sexp)],
+    ) -> R<()> {
+        let target = args[0].1;
+        let probe = self.frame_may_bind(head) as u32;
+        let symbol = self.constant(head);
+        let expected = self.constant(primitive);
+        let cache = self.cache();
+        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let rest = values::pairlist_items(target.cdr().cdr());
+        let count = rest.len() as u32 + 2;
+        let mark = self.next_register;
+        let base = self.next_register;
+        for _ in 0..count {
+            self.allocate();
+        }
+        self.expression(args[1].1, base + count - 1)?;
+        for (index, (_, value)) in rest.iter().enumerate() {
+            self.expression(*value, base + 1 + index as u32)?;
+        }
+        // The call the builtin sees, as GNU R builds it: `` `f<-`(`*tmp*`, ..., value = <rhs>) ``.
+        let mut items: SmallVec<[(Sexp, Sexp); 6]> =
+            smallvec![(nil(), setter), (nil(), symbols().tmp)];
+        items.extend(rest.iter().copied());
+        items.push((symbols().value, args[1].1));
+        let setter_call = values::pairlist(&items, SexpType::Language)?;
+        let variable = self.constant(target.cdr().car());
+        let setter_symbol = self.constant(setter);
+        let cache = self.cache();
+        let setter_call = self.constant(setter_call);
+        let whole = self.constant(call);
+        self.emit(
+            Op::Replace,
+            &[dst, variable, setter_symbol, cache, setter_call, base, count, whole],
+        );
+        self.release_to(mark);
+        let done = self.emit_patchable(Op::Jump, &[0]);
+        self.patch(guard);
+        self.fallback(call, dst)?;
+        self.patch(done);
+        Ok(())
     }
 
     /// Whether evaluating the subscript `index` cannot change a variable of the frame, so the
@@ -2754,6 +2855,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::Closure => 4,
         Op::SubAssign => 6,
         Op::SubAssignMatrix => 6,
+        Op::Replace => 8,
         Op::SetSrcref => 2,
         Op::EndStatement => 3,
         Op::BranchUnlessPrimitive => 3,
@@ -3586,6 +3688,24 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, mut pc: usize
                         set(operand(0), value);
                         interp().visible = false;
                     }
+                    Op::Replace => {
+                        let whole = decoded.constants.element(operand(7));
+                        let (first, count) = (operand(5), operand(6));
+                        let value = register(first + count - 1);
+                        let done = tri!('failed, replace_variable(
+                            env,
+                            decoded.constants.element(operand(1)),
+                            (decoded.constants.element(operand(2)), decoded.cache, operand(3)),
+                            decoded.constants.element(operand(4)),
+                            whole,
+                            std::slice::from_raw_parts_mut(registers.add(first), count),
+                        ));
+                        if !done {
+                            tri!('failed, eval::complex_assign(whole, whole.cdr().car(), value, env, false));
+                        }
+                        set(operand(0), value);
+                        interp().visible = false;
+                    }
                 }
                 pc = next;
             }
@@ -3759,6 +3879,119 @@ unsafe fn subscript_value(env: Sexp, index: Sexp) -> R<Option<Sexp>> {
 /// `variable[row, column] <- value` on an atomic matrix, done in place when the matrix is the
 /// frame's own unshared value, `value` is one element of its type and both subscripts are in
 /// bounds. Returns false, having changed nothing, when the general assignment must run.
+/// [`Op::Replace`]'s one-level update of a local variable, as `complex_assign` runs it, through
+/// a builtin replacement or a closure that takes only the target and the value: `false`
+/// leaves the assignment to `complex_assign`. `args` are the call's argument registers, the
+/// first for the variable's value and the last holding the value assigned.
+unsafe fn replace_variable(
+    env: Sexp,
+    variable: Sexp,
+    (setter, cache, slot): (Sexp, LookupCache, usize),
+    setter_call: Sexp,
+    whole: Sexp,
+    args: &mut [Sexp],
+) -> R<bool> {
+    let heap = crate::heap();
+    let Some(cell) = heap.frame_cell(env, variable) else {
+        return Ok(false);
+    };
+    if cell.has_gp(gp::BINDING_LOCKED | gp::ACTIVE_BINDING) {
+        return Ok(false);
+    }
+    let mut target = cell.cdr();
+    if target.kind() == SexpType::Promise {
+        target = target.car();
+    }
+    if target == unbound() || target == missing_arg() {
+        return Ok(false);
+    }
+    // `complex_assign` reads the variable before it looks the replacement up, so a missing
+    // variable is the error both report.
+    let function = lookup_function(setter, env, cache, slot, unbound())?;
+    let builtin = match function.kind() {
+        // An object may dispatch to a replacement method, which `complex_assign` calls with the
+        // `*tmp*` and value promises it expects.
+        SexpType::Builtin => {
+            if target.is_object() {
+                return Ok(false);
+            }
+            Some(eval::builtin_def(function)?)
+        }
+        SexpType::Closure if args.len() == 2 => None,
+        _ => return Ok(false),
+    };
+    moves::modifying(target)?;
+    // Registers count no reference, so an argument that is the target itself, as in
+    // `names(x) <- x`, must not watch the replacement change it.
+    if values::maybe_shared(target)
+        || !eval::reuse_permitted(env, target)
+        || args[1..].contains(&target)
+    {
+        let was_array = target.is_array();
+        target = values::shallow_duplicate(target)?;
+        target.set_array(was_array);
+    }
+    args[0] = target;
+    heap.count_transient_binding(env, symbols().tmp);
+    let state = interp();
+    state.tmp_values.push((env, target));
+    let result = match builtin {
+        Some(definition) => {
+            let mut arguments = eval::Args::new();
+            let mut item = setter_call.cdr();
+            for &value in args.iter() {
+                arguments.push(Arg {
+                    tag: item.tag(),
+                    value,
+                });
+                item = item.cdr();
+            }
+            let outer = state
+                .assignment_call
+                .replace((setter_call, whole, state.frames.len()));
+            let result = eval::call_builtin(definition, setter_call, function, &arguments, env);
+            interp().assignment_call = outer;
+            result
+        }
+        None => replace_with_closure(function, setter, whole, target, args[1], env),
+    };
+    interp().tmp_values.pop();
+    eval::assign_local(variable, result?, env, Some(cell))?;
+    Ok(true)
+}
+
+/// Calls the replacement closure `function` as `` `f<-`(`*tmp*`, value = <promise>) ``, with
+/// the promises `complex_assign` passes: neither counts a reference, so a replacement that
+/// updates its target in place leaves it unshared for the next update.
+unsafe fn replace_with_closure(
+    function: Sexp,
+    setter: Sexp,
+    whole: Sexp,
+    target: Sexp,
+    value: Sexp,
+    env: Sexp,
+) -> R<Sexp> {
+    let heap = crate::heap();
+    let tmp = symbols().tmp;
+    let object = eval::forced_promise(tmp, target)?;
+    heap.untrack_references(object);
+    heap.root(object);
+    let value = eval::forced_promise(whole.cdr().cdr().car(), value)?;
+    heap.untrack_references(value);
+    heap.root(value);
+    let call = values::pairlist(
+        &[(nil(), setter), (nil(), tmp), (symbols().value, value)],
+        SexpType::Language,
+    )?;
+    heap.root(call);
+    let arguments = values::pairlist(
+        &[(nil(), object), (symbols().value, value)],
+        SexpType::Pairlist,
+    )?;
+    heap.root(arguments);
+    eval::apply_call(call, function, arguments, env)
+}
+
 unsafe fn assign_matrix_element_in_place(
     env: Sexp,
     variable: Sexp,

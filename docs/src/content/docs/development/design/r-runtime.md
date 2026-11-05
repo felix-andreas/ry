@@ -723,8 +723,17 @@ that changes it. `prior-art.md` gives the reasoning behind each source engine's 
 
 The gaps come from `ry run --profile-summary` on the nine `just bench-real` workloads (JIT on: tier-0
 instructions 23 to 44% of the time, closure call setup 12 to 24%, builtins about 25%, S3 method
-lookup up to 17%) and from callgrind on `seq(1, 10, by = 2)`, which costs 141.6k instructions per
-call on ry and about 106k on GNU R 4.3.3.
+lookup up to 17%) and from callgrind on `seq(1, 10, by = 2)`, which costs 135.0k instructions per
+call on ry (JIT off, down from 141.6k when this table started) and about 106k on GNU R 4.3.3. A
+plain closure call, `f(x, y = 2) x + y` called from a loop, costs 3,968 instructions on ry and
+4,602 on GNU R; timed as the median of 9 interleaved runs of 3 million calls, it takes 0.445 µs
+on ry and 0.525 µs on GNU R.
+
+What remains of the `seq()` gap is spread thin. Tier-0 dispatch (loading the op word, decoding it
+and jumping) costs about 11k instructions per call, about 13 per op over about 860 ops: 196 jumps,
+154 guards, 95 variable reads, 75 constants and 69 builtin calls. Of the rest, `pmin()` costs
+55.9k on ry against 43.5k on GNU R, mostly in the `vapply()` it calls. No single step-2 row closes
+a gap that size, so shrinking the op count and the cost per op (step 3) comes forward.
 
 | Idea | Source engine | Status | Measured gap it targets | Code |
 | --- | --- | --- | --- | --- |
@@ -735,17 +744,20 @@ call on ry and about 106k on GNU R 4.3.3.
 | Lookup stamps compared as their bits | V8 | built | 1.25k per `seq()` call | `LookupCache` in `bytecode.rs` |
 | Hash index only for frames over 32 bindings | ry | built | 3k per `seq()` call (`Frame::insert`) | `INDEX_THRESHOLD` in `env.rs` |
 | Builtin checks derived at registration | GNU R `PRIMARITY` | built | builtin call overhead | `Checks` in `crates/interp/src/builtins.rs` |
-| A per-closure call plan for `run_closure`'s bookkeeping | JSC `CodeBlock` | rejected, folded into slot frames | annotation, `on.exit`, move-tracking and depth checks measure 1.3k of 141.6k instructions per `seq()` call and already exit early; the rest of `run_closure` is the frame record push and pop, which slot frames replace | |
+| A per-closure call plan for `run_closure`'s bookkeeping | JSC `CodeBlock` | rejected, measured | annotation, `on.exit`, move-tracking and depth checks measure 1.3k of 141.6k instructions per `seq()` call and already exit early; the rest of `run_closure` is the frame record push and pop, which slot frames replace | |
 | **2. Call facts ahead of time** | | | | |
-| Version-stamped bindings: a function guard is one compare | JSC watchpoints, V8 property cells | next | 117 guards per `seq()` call, each a cached lookup | |
-| Frames as slot arrays, environment reified on demand | Ř, V8 | planned | closure call setup 12 to 24%; `Frame::insert` 2.6k, `clear_frame` 2.3k, `release_frame` 1.9k per `seq()` call | |
+| Version-stamped bindings: a function guard is one compare | JSC watchpoints, V8 property cells | built | 154 guards per `seq()` call; 141.6k to 139.7k instructions per call | the `Op::Guard` arm and `cached_cell` in `bytecode.rs` |
+| Frames cleared in place, without copying the cell list | ry | built | `clear_frame`; 139.7k to 136.6k per `seq()` call, with the two rows below | `Heap::clear_frame` in `crates/heap/src/heap.rs` |
+| Untyped closures skip the signature lookup; `on.exit` handling only when an exit expression exists | ry | built | part of the 3.1k above | `signature_of` in `crates/interp/src/annotations.rs`, `run_closure` in `eval.rs` |
+| Frames as slot arrays, environment reified on demand | Ř, V8 | rejected for now, measured | binding cells cost about 420 of a closure call's 3,968 instructions (defining formals 100, `Frame::insert` 114, clearing 97, lookups 110); values held inline would save 100 to 150 of them, about 3%, while about 180 call sites read cells and reifying a frame would need allocation behind shared references. A closure call already costs less than on GNU R | |
 | Promise elision for strict, effect-free arguments | Ř | planned | `closure_args_into` 3.8% of a call microbenchmark | |
 | The promargs pairlist built only when asked for | GNU R | planned | `args_pairlist` 2.7% of a call microbenchmark | |
 | Per-site argument-match caches | V8, JSC | planned | `match_args` 2.8k, `bind_arguments` 2.8k per `seq()` call | |
 | Polymorphic inline caches for S3 and S4, keyed on the class vector | Self, V8 | planned | S3 method lookup up to 17% (`timeseries`) | |
 | Closed bindings per locked namespace, reopened by `unlockBinding` and `assignInNamespace` | Bun, Roc | planned | namespace function lookups | |
 | Precise counts and borrowed parameters in tier 0 | Roc (Perceus) | planned | copies and peak memory | |
-| Getter and setter call instructions for complex assignment | GNU R bytecode | planned | `names(x) <-`, `attr<-`, `x$a$b <-` 2.7 to 6.6 times slower | |
+| Setter instruction for one-level complex assignment | GNU R bytecode | built | `attributes(m) <- NULL` 4.2k to 1.5k instructions (GNU R 1.1k); `mostattributes(m) <-` 11.0k to 9.5k (GNU R 6.9k); `seq()` 136.2k to 135.0k | `Op::Replace`, `replace_variable` in `bytecode.rs` |
+| Getter instructions for nested complex assignment (`names(x)[2] <-`, `x$a$b <-`) | GNU R bytecode | planned | the nested levels still build their calls in `complex_assign` | |
 | **3. LLInt- and LuaJIT-grade tier 0** | | | | |
 | In-place specialization (quickening) with value profiles | CPython (PEP 659), JSC | planned | tier-0 instructions 23 to 44%; JIT-off scalar loops 0.35 to 0.41 times GNU R | |
 | Tail-call dispatch, one indirect jump per handler | LuaJIT, JSC | planned (needs `become`) | the shared indirect jump, about 28% of a scalar loop | |

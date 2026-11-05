@@ -1774,7 +1774,8 @@ impl Heap {
     /// `closures` a closure, bound only there whose environment is `env` and that no root
     /// flagged by a reconcile holds.
     unsafe fn frame_cycles(&self, env: Sexp, result: Sexp, closures: bool) -> usize {
-        self.local_cells(env)
+        (*env.frame_ptr())
+            .cells()
             .filter(|cell| {
                 let value = cell.cdr();
                 cell.tracks_references()
@@ -1790,9 +1791,11 @@ impl Heap {
 
     /// Releases the bindings of a frame nothing else references, and its enclosure.
     unsafe fn clear_frame(&mut self, env: Sexp) {
-        let cells: SmallVec<[Sexp; 16]> = self.local_cells(env).collect();
         let nil = self.known.nil;
-        for &cell in &cells {
+        // Clearing a binding changes no frame, so the cells are read in place rather than
+        // copied out first, and `nil` is immortal, so storing it needs no count or barrier.
+        let frame: *const Frame = env.frame_ptr();
+        for cell in (*frame).cells() {
             if cell.has_gp(gp::BINDING_LOCKED | gp::ACTIVE_BINDING) || !cell.tracks_references() {
                 continue;
             }
@@ -1811,7 +1814,9 @@ impl Heap {
                 }
                 _ => {}
             }
-            self.store(cell, value, nil);
+            if value.release_reference() {
+                self.note_zero(value);
+            }
             cell.set_cdr_unbarriered(nil);
         }
         // The enclosure counts a reference to the frame of the function that defined the callee,

@@ -567,7 +567,13 @@ pub unsafe fn is_typed(function: Sexp) -> bool {
 }
 
 unsafe fn signature_of(function: Sexp) -> Option<Sexp> {
-    signature_for(function.car(), crate::bytecode::closure_body(function))
+    let formals = function.car();
+    // Every closure call asks, and almost none is typed: the formals' bit answers before the
+    // body's source is looked up.
+    if formals.kind() == SexpType::Pairlist && !formals.has_gp(gp::TYPED_DEFINITION) {
+        return None;
+    }
+    signature_for(formals, crate::bytecode::closure_body(function))
 }
 
 /// The signature of the definition with these formals and this body (as source).

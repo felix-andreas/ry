@@ -2138,6 +2138,17 @@ impl<'a> Builder<'a> {
                 &[],
                 Effect::Opaque,
             ),
+            Op::Replace => {
+                let value = match state.registers[operand(5) + operand(6) - 1] {
+                    Ty::Bottom => Ty::Boxed,
+                    ty => ty,
+                };
+                let action =
+                    self.opaque_step(state, Some((operand(0), value)), &[], Effect::Opaque);
+                state.registers[operand(5)] = Ty::Boxed;
+                state.visible = Some(false);
+                action
+            }
             Op::SubAssignMatrix => {
                 let slot = self.slot(self.constant(operand(1)));
                 let (row, column, value) = (
@@ -3931,6 +3942,7 @@ pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
         Op::Arithmetic => smallvec![operand(2), operand(3)],
         Op::SubAssign => smallvec![operand(2), operand(3)],
         Op::SubAssignMatrix => smallvec![operand(2), operand(3), operand(4)],
+        Op::Replace => (operand(5) + 1..operand(5) + operand(6)).collect(),
         Op::JumpUnless | Op::Return | Op::ForEnd => smallvec![operand(0)],
         Op::ForInit | Op::ForStep | Op::LogicLeft => smallvec![operand(1)],
         Op::LogicRight => smallvec![operand(1), operand(2)],
@@ -4061,6 +4073,13 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
             gen_(operand(2), live);
             gen_(operand(3), live);
             gen_(operand(4), live);
+        }
+        Op::Replace => {
+            kill(operand(0), live);
+            kill(operand(5), live);
+            for register in operand(5) + 1..operand(5) + operand(6) {
+                gen_(register, live);
+            }
         }
     }
 }

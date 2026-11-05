@@ -1236,8 +1236,12 @@ pub unsafe fn run_closure(
     crate::annotations::leave(depth);
     // `return()` may also come from an `on.exit` expression, which runs in the same frame and
     // so returns from it too.
-    let result = catch_return(env, run_on_exit(depth, result));
     let state = interp();
+    let result = if state.frames[depth - 1].on_exit.is_empty() {
+        result
+    } else {
+        catch_return(env, run_on_exit(depth, result))
+    };
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = state.frames[depth - 1].handlers.clone();
     let closures = state.frames[depth - 1].closures;
