@@ -2506,6 +2506,26 @@ Nothing loaded packages before; `development/design/r-runtime.md` section 6 and 
   backend needs no `DllInfo`, no RDS round trip and no source strings in R memory.
 - **Planning runs on its own thread** with `ANALYSIS_STACK_SIZE`, as every analysis entry point
   does, because the analysis recurses as deeply as the code nests.
+- **The first plan of a process is made cheap, not cached.** A process's first plan is a full load,
+  even when no file changed since the last process, so it pays `diff` over the whole package.
+  - **What was slow:** `deferred_s4` and `lazy_generics` scanned a `Vec` of generics or classes
+    once per S4 definition, and `lazy_generics` walked every definition once per generic. That
+    cost grows with generics × definitions, so an S4-heavy package paid most. The full-load path
+    also built reload-only state it never read: `flipped`, the eager LCS, `changed` and the
+    rerun fixpoint.
+  - **Target shape:** hash sets of the package's own classes and generics; one pass that groups
+    each generic's statements; per-file start offsets instead of a map of item positions; and a
+    full load skips the reload bookkeeping, since it reruns every statement anyway.
+  - **Why not a stamp-keyed plan:** persisting the full plan would add a second on-disk copy
+    derived from the index, which the index cache already keys by content. Once the diff is
+    linear, the plan is a small fraction of a load.
+  - **Impact:** on a 591-file, 65,000-line S4 package (`tools/loader-bench/s4_package.py`),
+    `ryLoaderPlan` drops from 38 ms to 14 ms, and the plan thread from 116M to 35M
+    instructions, with a byte-identical plan.
+  - **What remains, all linear in package size:** `diff` itself (about 7 ms there), reading
+    the sources' stamps (3 to 6 ms), and converting the plan to an R value (about a third of the plan thread). The
+    `prepare` thread also deserializes the cached index (18 ms for 1.7 MB of bincode) while R
+    starts. That runs in parallel unless the plan arrives first.
 - **Runtime fixes the load path needed, each pinned by an oracle case:** `readDCF`, `load()`/`save()`
   of XDR workspaces (`R/sysdata.rda`, gzip, bzip2 or xz through `gzfile()`), `readChar` on a connection, comparisons and `&`/`|` keeping
   only names, dim and dimnames, and two hot paths (`match()` on interned ASCII strings by pointer,
