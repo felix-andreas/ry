@@ -1,0 +1,15 @@
+[stdout]
+| [1] 5
+| [1] "new(\"classRepresentation\", slots = list(x = structure(\"numeric\", package = \"methods\")), "
+| [1] 35
+| [1] "new(\"classRepresentation\", slots = list(.Data = structure(\"numeric\", package = \"methods\")), "
+| [1] "        dataPart = FALSE, distance = 2)), virtual = FALSE, prototype = getClass(\"S4\")@prototype, "
+| [1] "getClass(\"S4\")@prototype"
+| [1] 35
+| [1] "new(\"N\", .Data = c(1.5, 2.5))"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "new(\"N\", .Data = c(1.5, 2.5))"
