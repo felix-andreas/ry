@@ -901,14 +901,14 @@ pub unsafe fn promise_args(arguments: Sexp, env: Sexp) -> R<Args> {
 /// [`promise_args`], appending to `args`, which a caller keeps on its own stack instead of
 /// moving a returned argument vector through every frame.
 pub unsafe fn promise_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
-    closure_args_into(arguments, env, args, ArgumentMode::Promises)
+    closure_args_into::<PROMISES>(arguments, env, args)
 }
 
 /// The arguments of a closure call that compiled code makes. GNU R's byte code passes a
 /// constant argument as its value instead of a promise (`PUSHCONSTARG`), and native code can
 /// tell: rlang's `env_dot_type()` reports such a `...` element as a value, not delayed.
 pub unsafe fn compiled_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
-    closure_args_into(arguments, env, args, ArgumentMode::Compiled)
+    closure_args_into::<COMPILED>(arguments, env, args)
 }
 
 /// [`compiled_args_into`] for a call of an effect-free closure (see [`crate::effects`]) whose
@@ -916,24 +916,21 @@ pub unsafe fn compiled_args_into(arguments: Sexp, env: Sexp, args: &mut Args) ->
 /// variable argument is bound to its value, or to the caller's own promise for it, instead of a
 /// new promise.
 pub unsafe fn eager_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
-    closure_args_into(arguments, env, args, ArgumentMode::Eager)
+    closure_args_into::<EAGER>(arguments, env, args)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ArgumentMode {
-    /// Every argument is a promise, as in GNU R's AST evaluator.
-    Promises,
-    /// A constant is its own value, as in GNU R's byte code.
-    Compiled,
-    /// A constant or a variable is its value.
-    Eager,
-}
+/// How [`closure_args_into`] passes an argument: every one as a promise, as GNU R's AST
+/// evaluator does.
+const PROMISES: u8 = 0;
+/// A constant as its own value, as GNU R's byte code does.
+const COMPILED: u8 = 1;
+/// A constant or a variable as its value.
+const EAGER: u8 = 2;
 
-unsafe fn closure_args_into(
+unsafe fn closure_args_into<const MODE: u8>(
     mut arguments: Sexp,
     env: Sexp,
     args: &mut Args,
-    mode: ArgumentMode,
 ) -> R<()> {
     let dots = symbols().dots;
     while arguments.kind() == SexpType::Pairlist {
@@ -960,7 +957,7 @@ unsafe fn closure_args_into(
                 expression.kind(),
                 SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
             );
-            let eager = if mode == ArgumentMode::Eager
+            let eager = if MODE == EAGER
                 && expression.kind() == SexpType::Symbol
                 && expression != missing_arg()
             {
@@ -970,7 +967,7 @@ unsafe fn closure_args_into(
             };
             let value = if let Some(value) = eager {
                 value
-            } else if expression == missing_arg() || (mode != ArgumentMode::Promises && constant)
+            } else if expression == missing_arg() || (MODE != PROMISES && constant)
             {
                 expression
             } else if expression.kind() == SexpType::Bytecode {

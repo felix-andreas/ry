@@ -2751,7 +2751,7 @@ impl<'a> Builder<'a> {
         }
         let function = self.resolve_head(lowering, head)?;
         let name = base_builtin(function, head)?;
-        match (name.as_str(), args.as_slice()) {
+        match (name, args.as_slice()) {
             ("(" | "{", [(_, inner)]) => self.lower_step(lowering, *inner, depth),
             ("if", [(_, condition), (_, then), (_, otherwise)]) => {
                 let condition = self.lower_expression(lowering, *condition, depth)?;
@@ -3093,7 +3093,7 @@ impl<'a> Builder<'a> {
                     .iter()
                     .map(|&register| lowering.state.registers[register])
                     .collect();
-                match (name.as_str(), registers.as_slice()) {
+                match (name, registers.as_slice()) {
                     ("(" | "{", [inner]) => Some(*inner),
                     ("if", [condition, then, otherwise]) if types[0] == Ty::Lgl => {
                         self.select(lowering, *condition, *then, *otherwise)

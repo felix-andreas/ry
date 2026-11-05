@@ -103,34 +103,54 @@ pub unsafe fn effect_free(function: Sexp) -> R<bool> {
     }
     let slot = CacheSlot::of(code, values::ints(summary.element(0))[0] as usize);
     let enclosure = function.tag();
+    let home = home_of(enclosure);
     let heap = crate::heap();
-    if slot.key() == enclosure {
-        let proof = slot.value();
+    let key = slot.key();
+    let proof = slot.value();
+    let current = key == enclosure
+        || (key == home
+            && match proof_kind(proof) {
+                Proof::Fails => true,
+                Proof::HoldsHere => false,
+                Proof::HoldsFromHome => !frames_bind(enclosure, home, summary),
+            });
+    if current {
         let epoch = heap.binding_epoch();
         if slot.stamp() == epoch {
-            return Ok(proof_holds(proof));
+            return Ok(proof_kind(proof) != Proof::Fails);
         }
         let stamps = values::reals(proof.element(0));
-        let unchanged = (1..values::length(proof)).all(|index| {
-            stamps[index].to_bits() == heap.lookup_stamp(proof.element(index))
-        });
+        let unchanged = (1..values::length(proof))
+            .all(|index| stamps[index].to_bits() == heap.lookup_stamp(proof.element(index)));
         if unchanged {
             slot.set_stamp(epoch);
-            return Ok(proof_holds(proof));
+            return Ok(proof_kind(proof) != Proof::Fails);
         }
     }
     let mut found = Vec::new();
     let holds = resolve(function, &mut found, &mut SmallVec::new())?;
+    // A failed proof stays sound for any enclosure, because a binding in a function frame on
+    // the way could only make a call resolve to something else. A proof that holds carries over
+    // to another enclosure with the same home only when no function frame on the way bound any
+    // name the body calls.
+    let (kind, key) = if !holds {
+        (Proof::Fails, home)
+    } else if frames_bind(enclosure, home, summary) {
+        (Proof::HoldsHere, enclosure)
+    } else {
+        (Proof::HoldsFromHome, home)
+    };
     let proof = values::alloc(SexpType::List, 1 + found.len())?;
     heap.root(proof);
     let stamps = values::alloc(SexpType::Real, 1 + found.len())?;
     values::set_elt(proof, 0, stamps);
-    values::reals_mut(stamps)[0] = if holds { 1.0 } else { 0.0 };
+    values::reals_mut(stamps)[0] = kind as u8 as f64;
     for (index, speculation) in found.iter().enumerate() {
         values::set_elt(proof, 1 + index, speculation.symbol);
-        values::reals_mut(stamps)[1 + index] = f64::from_bits(heap.lookup_stamp(speculation.symbol));
+        values::reals_mut(stamps)[1 + index] =
+            f64::from_bits(heap.lookup_stamp(speculation.symbol));
     }
-    slot.fill(enclosure, proof, heap.binding_epoch());
+    slot.fill(key, proof, heap.binding_epoch());
     Ok(holds)
 }
 
@@ -204,9 +224,52 @@ pub unsafe fn base_builtin(function: Sexp, symbol: Sexp) -> Option<&'static str>
     (*symbol_name(symbol) == *name).then_some(name)
 }
 
-/// Whether a stored proof says the fact holds: its stamps vector starts with the verdict.
-unsafe fn proof_holds(proof: Sexp) -> bool {
-    values::reals(proof.element(0))[0] != 0.0
+/// What a stored proof says, held as the first element of its stamps vector. A proof is
+/// filled under its enclosure for [`Proof::HoldsHere`] and under the enclosure's home (see
+/// [`home_of`]) otherwise, so that a closure made afresh by each call of its parent, such as a
+/// helper defined inside a function, shares one proof.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum Proof {
+    Fails = 0,
+    /// The fact holds, and some name the body calls resolved in a function frame.
+    HoldsHere = 1,
+    /// The fact holds, and every name the body calls resolved past the function frames.
+    HoldsFromHome = 2,
+}
+
+unsafe fn proof_kind(proof: Sexp) -> Proof {
+    if proof == nil() {
+        return Proof::HoldsHere;
+    }
+    match values::reals(proof.element(0))[0] as u8 {
+        0 => Proof::Fails,
+        2 => Proof::HoldsFromHome,
+        _ => Proof::HoldsHere,
+    }
+}
+
+/// The first environment from `env` outward that is not a function frame: a namespace, the
+/// global environment or another long-lived one.
+unsafe fn home_of(mut env: Sexp) -> Sexp {
+    let empty = crate::heap().known().empty_env;
+    while env != empty && env.has_gp(gp::FUNCTION_FRAME) {
+        env = env.enclosure();
+    }
+    env
+}
+
+/// Whether a function frame from `env` up to `home` binds a name the `summary` lists as called.
+unsafe fn frames_bind(mut env: Sexp, home: Sexp, summary: Sexp) -> bool {
+    let heap = crate::heap();
+    let count = values::length(summary);
+    while env != home {
+        if (1..count).any(|index| heap.frame_cell(env, summary.element(index)).is_some()) {
+            return true;
+        }
+        env = env.enclosure();
+    }
+    false
 }
 
 /// Adds the symbols `expression` calls to `calls`; `false` when it calls something that is not
