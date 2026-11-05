@@ -677,11 +677,12 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   only before something that could observe it runs (a generic call, a dispatching operation, the
   first read of a formal whose default is an expression, a return, a deoptimization) and reloads it
   after something that could change it.
-- **Calls.** A call to a frame-safe closure whose binding was resolved at compile time is direct:
+- **Calls.** A call to an effect-free closure whose binding was resolved at compile time is direct:
   effect-free arguments are evaluated eagerly and passed as already forced promises, bound by
   position without the general matcher. Evaluating early is invisible only if nothing can assign
-  what an argument reads before the callee forces it, so the callee must be frame-safe: its body
-  and defaults call only itself and a fixed list of base builtins, and assign only its own locals.
+  what an argument reads before the callee forces it, so the callee must be effect-free (the fact
+  tier 0 also reads, `crates/interp/src/effects.rs`): its body and defaults call only itself, a
+  fixed list of base builtins and other effect-free closures, and assign only its own locals.
   When a calling handler is established, a handler could run R code in between, so compiled code
   then runs tier 0's call instruction, which makes the call lazily, and continues after it. A test
   harness always has handlers, so leaving the body for tier 0 there would interpret most of it. A call of a small closure defined in the same body, which computes a scalar

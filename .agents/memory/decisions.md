@@ -3221,7 +3221,7 @@ first lines R had already read, leaving R mid-command.
   skipping promises (`jit_call` in `crates/jit/src/runtime.rs`, `eval::bind_arguments`). Early
   evaluation is only invisible when the callee cannot assign anything an argument reads before
   forcing it (`g <- function(x) { assign("y", 99, envir = parent.frame()); x }`), so the callee must
-  be frame-safe (`analysis.rs`, `frame_safe`): it calls only itself and `FRAME_SAFE_BUILTINS`, each
+  be effect-free (`interp::effects::effect_free_lookups`, read by `analysis.rs` `frame_safe`): it calls only itself and `EFFECT_FREE_BUILTINS`, each
   lookup recorded as a speculation from the callee's environment, and the call defers to tier 0
   while a calling handler is established. A frame-safe callee cannot call `substitute()`,
   `missing()` or `sys.call()`, so no promise is needed, and the frame records no argument list
@@ -7866,3 +7866,13 @@ Each one trades a narrow class of missed errors for a class of false reports see
   - warnings, conditions and the RNG stream are collected per task and merge in a deterministic order.
 - **Package native code stays single-threaded by contract**, because packages assume R's C API is. A parallel task may run only ry-owned code: R-level code, builtins, and ry's own ports (nmath, fft, loess and the rest of base and stats).
 - **Known gaps against the invariants:** `interp()` and `heap()` are process globals today (`crates/interp/src/interp.rs`); tier 0 caches the `Interp` pointer per activation, which is the first step toward a passed context.
+
+## The effect-free fact is stored per code object and resolved per enclosure
+
+- **Previous source of truth.** The JIT walked a callee's body itself (`analysis.rs`, `safe_expression` and `FRAME_SAFE_BUILTINS`) to decide whether arguments may be bound eagerly. Tier 0 had no such fact, so every closure call built a promise per argument.
+- **Stored half.** The bytecode compiler records a summary in the code object's `SUMMARY` constant (`crates/interp/src/effects.rs`, `summarize`): nil when the body assigns non-locally or calls anything other than a symbol, otherwise the names it calls. It is computed once per `function` expression and shared by every closure that expression creates.
+- **Resolved half.** `effect_free` resolves the called names from the closure's environment: each must be `<-`, `=`, `[<-`, `[[<-`, a builtin in `EFFECT_FREE_BUILTINS`, or a closure that is itself effect-free (depth 8, recursion keyed on code and enclosure). Each dependency's symbol and cell are marked watched, and the proof stores their `lookup_stamp`s in the call site's lookup cache, so any rebinding invalidates it.
+- **Home keying.** Helpers created per call (`is.logint` inside `seq.default`) get a new enclosure every call, so a proof keyed on the enclosure missed every time at about 950 instructions per miss. A proof is keyed on the first ancestor that is not a function frame unless the frames in between bind a called name (`Proof::HoldsHere`), and a failing proof is always keyed on the home.
+- **When a call binds eagerly** (`op_call_generic`): the compiler marked the call site eager (at least one symbol argument, and no argument can assign: symbols, constants, and nested calls of effect-free builtins), the callee is effect-free, and no calling handler is established. A symbol argument bound to a value or a forced promise passes the value; an unforced promise passes itself; a missing, unbound or active binding keeps its promise (`eager_argument`).
+- **Impact.** One computation of the fact for tier 0, the JIT and later the parallel apply family. The JIT's private walk is deleted.
+
