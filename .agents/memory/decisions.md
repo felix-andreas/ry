@@ -1933,8 +1933,8 @@ arguments' first classes, each holding the table's binding cell for the label an
 held; `setMethod` and `removeMethod` rewrite that binding, so the entry misses. Inherited methods
 are cached only once `.InheritForDispatch` stored them under the label. Both caches are GC roots and
 are cleared when full rather than evicted. Callgrind instructions per dispatch, JIT off, GNU R
-4.3.3 in brackets: `UseMethod` 8,684 to 7,537 (9,824); `UseMethod` plus `NextMethod` 23,206 to
-18,977 (19,030); `standardGeneric` 14,127 to 8,447 (11,681). Oracle cases
+4.3.3 in brackets: `UseMethod` 8,750 to 7,688 (9,824); `UseMethod` plus `NextMethod` 23,144 to
+19,040 (19,030, parity); `standardGeneric` 14,263 to 8,688 (11,681). Oracle cases
 `dispatch__site_cache_invalidation` and `s4__method_cache_invalidation` pin the invalidation shapes. NextMethod passes `.Class` from the class whose method it found and always defines `.Group` (`""` without a group, one shared vector), as GNU R does (`dispatch__next_method_class_and_group`).
 
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
@@ -3242,7 +3242,7 @@ first lines R had already read, leaving R mid-command.
   skipping promises (`jit_call` in `crates/jit/src/runtime.rs`, `eval::bind_arguments`). Early
   evaluation is only invisible when the callee cannot assign anything an argument reads before
   forcing it (`g <- function(x) { assign("y", 99, envir = parent.frame()); x }`), so the callee must
-  be frame-safe (`analysis.rs`, `frame_safe`): it calls only itself and `FRAME_SAFE_BUILTINS`, each
+  be effect-free (`interp::effects::effect_free_lookups`, read by `analysis.rs` `frame_safe`): it calls only itself and `EFFECT_FREE_BUILTINS`, each
   lookup recorded as a speculation from the callee's environment, and the call defers to tier 0
   while a calling handler is established. A frame-safe callee cannot call `substitute()`,
   `missing()` or `sys.call()`, so no promise is needed, and the frame records no argument list
@@ -7864,3 +7864,43 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Version-stamped guards.** `Op::Guard` compares the lookup slot's stamp and enclosure (`cached_cell`) and then the cell's value; a cached cell never becomes active (`makeActiveBinding` refuses a regular binding) and a binding added in front moves the symbol's stamp, so no further check is needed.
 - **One-level setters compile.** `f(x, ...) <- value`, with `x` a variable and the other arguments free of side effects, compiles to `Op::Replace`. `replace_variable` mirrors `complex_assign` for one level: a builtin replacement is called on the argument values (objects fall back, since they may dispatch), a closure replacement taking only `x` and `value` gets the same uncounted `*tmp*` and value promises, and everything else falls back to `complex_assign`. An argument register that is the target itself forces a copy, because registers count no reference.
 - **Pivot.** No remaining step-2 row targets a gap the size of `seq()`'s 29k: dispatch is about 11k (13 instructions per op over about 860 ops), and `pmin()` alone is 12.4k behind (mostly `vapply()`). Op-count and per-op work (step 3: quickening, superinstructions, out-of-line slow paths) comes forward, interleaved with the remaining step-2 rows (argument-match caches, S3/S4 inline caches).
+- **Tail-call handlers.** Tier 0 runs one handler per op, chained with `become` (`#![feature(explicit_tail_calls)]`, the pinned nightly). A handler takes only `(&mut Activation, pc)` and returns nothing; code, registers, the `Interp` pointer and the result (`Activation::exit`, with `STOP` as the next pc that ends the chain) live in the activation. The first shape, which passed code, pc and registers as arguments and returned `R<Sexp>` through an sret pointer, kept five values live across every call and gave each handler a six-register prologue, which cancelled the dispatch savings (121.5k against 120.8k per `seq()`). Outlining the bodies of instructions that call out made it worse (131k), because the wrapper still needed a frame to keep its arguments across the call. The two-argument shape measures 121.4k, level with the match loop: handler cost equals the old loop's, and the remaining per-op cost is the instruction work, not the dispatch. The structure stays because a stackless tier 0 and quickened handlers build on it; the error path (`failed`) is cold and out of line.
+
+## One SSA IR and one install-time pipeline for typed and untyped compiled code
+
+- **Previous shape.** Tier 1 lowers bytecode to its own SSA (`crates/jit/src/analysis.rs`, `codegen.rs`), and the typed core lowers checked ry to a second SSA form (`crates/typed/src/ir.rs`, `lower.rs`, `backend.rs`). Both emit through Cranelift, so the two forms duplicate the instruction set, the lowering to Cranelift and the optimization passes, and they can drift.
+- **Target shape.** One mid-level SSA IR. Typed facts enter it unguarded; untyped speculations, taken from training-run profiles or run-time feedback, carry guards and deoptimization exits. Install-time code for untyped R goes through the typed AOT pipeline in `typed-runtime.md` (the same `ry install` step and code file: position-independent, mapped read-only, a per-process table, build and interface stamps, written by rename; the same Cranelift backend; no code cache). The code file stores the deoptimization metadata and the bindings each function watches, so `unlockBinding` and `assignInNamespace` invalidate install-time code exactly as they invalidate JIT code. The run-time JIT stays for fallbacks and new profiles, which is why `prior-art.md` rejects compiling every fallback at build time.
+- **When.** The IRs merge in the first change that builds either the install-time images or the baseline tier.
+- **Impact.** One source of truth for the instruction semantics and the lowering (correctness), one pass pipeline instead of two (simplicity), and typed facts that remove guards from untyped code that calls typed code (performance). Analysis is unaffected: the IR is runtime build output, never a salsa input.
+
+## Single-thread first, parallel-ready architecture (user directive)
+
+- **Scope.** Performance work targets one thread. The parallel runtime (thread pool, atomic counts, parallel GC) is deferred, and the roadmap row for automatic parallelism is "deferred, architecture-ready".
+- **The effect-free fact.** One stored per-function body fact in the function summary says whether calling the function has effects. Untyped code gets it from bytecode at compile time and at install time; strict and locked typed code gets it statically. Promise elision for effect-free arguments reads it today, and the parallel apply family reads the same fact later. There is no second computation of it.
+- **Invariants that keep parallelism possible**, to hold while the call path and heap are redesigned:
+  - interpreter and allocation state live in an explicit context passed through calls, not in globals or scattered thread-locals;
+  - allocation goes through a per-context bump buffer;
+  - GC safepoints are polled at allocation and at loop back edges;
+  - the reference-count field leaves room for a "shared across threads" mark, so only marked objects switch to atomic counts (as in Lean 4);
+  - inline caches and type feedback change only through monotonic state transitions, so a concurrent reader always sees a valid state;
+  - the symbol and CHARSXP tables can be read concurrently;
+  - warnings, conditions and the RNG stream are collected per task and merge in a deterministic order.
+- **Package native code stays single-threaded by contract**, because packages assume R's C API is. A parallel task may run only ry-owned code: R-level code, builtins, and ry's own ports (nmath, fft, loess and the rest of base and stats).
+- **Known gaps against the invariants:** `interp()` and `heap()` are process globals today (`crates/interp/src/interp.rs`); tier 0 caches the `Interp` pointer per activation, which is the first step toward a passed context.
+
+## The effect-free fact is stored per code object and resolved per enclosure
+
+- **Previous source of truth.** The JIT walked a callee's body itself (`analysis.rs`, `safe_expression` and `FRAME_SAFE_BUILTINS`) to decide whether arguments may be bound eagerly. Tier 0 had no such fact, so every closure call built a promise per argument.
+- **Stored half.** The bytecode compiler records a summary in the code object's `SUMMARY` constant (`crates/interp/src/effects.rs`, `summarize`): nil when the body assigns non-locally or calls anything other than a symbol, otherwise the names it calls. It is computed once per `function` expression and shared by every closure that expression creates.
+- **Resolved half.** `effect_free` resolves the called names from the closure's environment: each must be `<-`, `=`, `[<-`, `[[<-`, a builtin in `EFFECT_FREE_BUILTINS`, or a closure that is itself effect-free (depth 8, recursion keyed on code and enclosure). Each dependency's symbol and cell are marked watched, and the proof stores their `lookup_stamp`s in the call site's lookup cache, so any rebinding invalidates it.
+- **Home keying.** Helpers created per call (`is.logint` inside `seq.default`) get a new enclosure every call, so a proof keyed on the enclosure missed every time at about 950 instructions per miss. A proof is keyed on the first ancestor that is not a function frame unless the frames in between bind a called name (`Proof::HoldsHere`), and a failing proof is always keyed on the home.
+- **When a call binds eagerly** (`op_call_generic`): the compiler marked the call site eager (at least one symbol argument, and no argument can assign: symbols, constants, and nested calls of effect-free builtins), the callee is effect-free, and no calling handler is established. A symbol argument bound to a value or a forced promise passes the value; an unforced promise passes itself; a missing, unbound or active binding keeps its promise (`eager_argument`).
+- **Impact.** One computation of the fact for tier 0, the JIT and later the parallel apply family. The JIT's private walk is deleted.
+
+## Argument-match caches live in the callee's code, not at the call site
+
+- **Previous shape.** Every call that names an argument ran GNU R's three-pass matcher (`eval::match_args`): exact names, partial names, positions. `validation` and `objects` in `tools/bench/real` make 1.0 to 1.2 million such calls each.
+- **Chosen shape.** Matching produces a plan, one formal index per argument (`Plan` in `eval.rs`), and the result is built from the plan. The plan depends only on the formals and the argument tags, so the callee's compiled body keeps its last plan in the `MATCHES` constant with the formals and the tags it was made for, and a call with the same formals and identical tag symbols reuses it (`match_args_cached`). A failed match is never stored, so errors come from the full matcher.
+- **Why the callee and not the call site.** Calls that pass `...` (633k in `validation`) and S3 dispatch have no compiled call site whose tags are fixed. Keying on the callee covers them all, and the check (one pointer compare per argument) is cheap enough that a miss costs only the full match plus three small allocations. A body called with alternating name patterns thrashes the one entry; revisit with two entries if a profile shows it.
+- **Impact.** Matching inside `seq(1, 10, by = 2)` drops from about 3.6k to 1.0k instructions. Unpositional calls on uncompiled closures keep the full matcher.
+

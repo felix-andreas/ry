@@ -154,6 +154,15 @@ fn main() -> ExitCode {
         // The runtime reads the variable when its session starts, which may be in a child
         // process; the absolute path keeps it right if the script changes directory.
         let path = std::path::absolute(path).unwrap_or_else(|_| path.clone());
+        // The summary is written when the session ends, so an unwritable path fails up front
+        // rather than after the whole run.
+        if let Err(failure) = std::fs::File::create(&path) {
+            eprintln!(
+                "error: cannot write the profile summary to '{}': {failure}",
+                path.display()
+            );
+            return ExitCode::from(2);
+        }
         // SAFETY: no other thread exists yet to read the environment concurrently.
         unsafe { env::set_var("RY_PROFILE_SUMMARY", path) };
     }
