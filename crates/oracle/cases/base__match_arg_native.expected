@@ -31,9 +31,10 @@
 | [1] FALSE
 | [1] TRUE
 | [1] "match.arg(\"a\", c(\"ab\", \"ac\"))"
+| [1] "argument \"s\" is missing, with no default"
 [messages]
 [warnings]
 [errors]
 [value]
 character
-| "match.arg(\"a\", c(\"ab\", \"ac\"))"
+| "argument \"s\" is missing, with no default"

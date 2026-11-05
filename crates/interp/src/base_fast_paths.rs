@@ -18,7 +18,7 @@ use {
         eval, interp,
         session::{FNV_OFFSET, eval_text, stable_hash},
         sort::{self, IdenticalFlags},
-        unwind::{R, jump},
+        unwind::{R, Unwind, jump},
         values::{self, install, length, missing_arg, nil, symbols},
     },
     heap::object::{NA_LOGICAL, Sexp, SexpType},
@@ -123,6 +123,18 @@ unsafe fn argument(frame: Sexp, name: &str) -> R<Option<Sexp>> {
     Ok(Some(value))
 }
 
+/// Whether the formal `name` holds its own default, untouched: either no value at all or the
+/// default's promise, which is evaluated in the frame itself. An argument the caller passed on
+/// from its own missing formal is not a default, because forcing it raises an error.
+unsafe fn is_default(frame: Sexp, name: &str) -> R<bool> {
+    let Some(cell) = crate::heap().frame_cell(frame, install(name)?) else {
+        return Ok(true);
+    };
+    let value = cell.cdr();
+    Ok(value == missing_arg()
+        || (value.kind() == SexpType::Promise && value.tag() == frame))
+}
+
 /// Whether the call supplied the formal `name`, as `missing(name)` is false.
 unsafe fn is_supplied(frame: Sexp, name: &str) -> R<bool> {
     Ok(!eval::is_missing(install(name)?, frame)?)
@@ -191,7 +203,7 @@ unsafe fn is_ascii(text: Sexp) -> bool {
 /// the caller's frame, as the R body does through `sys.function(sys.parent())`.
 unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env;
-    if is_supplied(frame, "several.ok")? {
+    if !is_default(frame, "several.ok")? {
         return decline();
     }
     // The R body evaluates a missing `choices` before it forces `arg`, and a supplied one after.
@@ -322,7 +334,9 @@ unsafe fn do_stopifnot(call: &Call<'_>) -> R<Sexp> {
         if value.kind() != SexpType::Logical || value.is_object() {
             return decline();
         }
-        if values::ints(value).iter().any(|&element| element != 1) {
+        let all_true = values::ints(value).iter().all(|&element| element == 1);
+        crate::unwind::raise_parked()?;
+        if !all_true {
             return decline();
         }
     }
@@ -420,7 +434,10 @@ unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
         if name.as_bytes() == b"class" {
             let factor = value.kind() == SexpType::String
                 && (0..length(value)).any(|index| value.element(index).bytes() == b"factor");
-            if value.kind() != SexpType::String || value.attrib() != nil() || factor {
+            // The R body's `any(class == "factor")` fails on an NA element.
+            let na = value.kind() == SexpType::String
+                && (0..length(value)).any(|index| value.element(index) == values::na_string());
+            if value.kind() != SexpType::String || value.attrib() != nil() || factor || na {
                 return decline();
             }
         } else if !sets_unchecked(name.as_bytes()) {
@@ -461,7 +478,7 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
         "zero.print",
         "drop0trailing",
     ] {
-        if is_supplied(frame, name)? {
+        if !is_default(frame, name)? {
             return decline();
         }
     }
@@ -486,9 +503,9 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
         };
         args.push(value);
     }
-    let na_digits = values::scalar_integer(3)?;
-    crate::heap().root(na_digits);
-    args.push(na_digits);
+    let justify_none = values::scalar_integer(3)?;
+    crate::heap().root(justify_none);
+    args.push(justify_none);
     for name in ["na.encode", "scientific", "decimal.mark"] {
         let Some(value) = argument(frame, name)? else {
             return decline();
@@ -498,6 +515,7 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
     let decimal_mark = args[8];
     // `prettyNum()` warns when the decimal mark equals the empty big mark.
     if decimal_mark.kind() != SexpType::String
+        || decimal_mark.is_object()
         || length(decimal_mark) != 1
         || decimal_mark.element(0) == values::na_string()
         || decimal_mark.element(0).bytes().is_empty()
@@ -505,8 +523,10 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
         return decline();
     }
     // A bad argument makes the internal fail; the R body then reports it from its own call.
-    let Ok(result) = kernel(crate::format::do_format, &args, frame) else {
-        return decline();
+    let result = match kernel(crate::format::do_format, &args, frame) {
+        Ok(result) => result,
+        Err(Unwind::Error(_)) => return decline(),
+        Err(other) => return Err(other),
     };
     finish(frame, result, true)
 }

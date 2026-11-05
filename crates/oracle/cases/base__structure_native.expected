@@ -75,9 +75,15 @@
 | [1] "r1" "r2"
 | 
 | [1] TRUE
+| [1] "missing value where TRUE/FALSE needed"
+| [1] "missing value where TRUE/FALSE needed"
+| [1] "attempt to set invalid 'class' attribute"
+| [1] "attempt to set invalid 'class' attribute"
+| NULL
+| [1] 1 2 3
 [messages]
 [warnings]
 [errors]
 [value]
-logical
-| TRUE
+integer
+| 1:3

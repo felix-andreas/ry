@@ -819,60 +819,71 @@ pub fn justify(items: Vec<String>, right: bool) -> Vec<String> {
 /// `format(x, trim, digits, nsmall, width, justify, na.encode, scientific, decimal.mark)`.
 pub(crate) unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
     let vector = values::materialize(call.arg(0))?;
+    // GNU R's `do_format` checks in this order and reports against the closure that called
+    // `.Internal(format())`, as `error()` does.
     let trim = values::as_logical_scalar(call.arg(1));
     if trim == NA_LOGICAL {
-        return Err(call.error("invalid 'trim' argument"));
+        return Err(error("invalid 'trim' argument"));
     }
     let trim = trim == 1;
     let digits = call.arg(2);
-    let nsmall = values::as_integer_scalar(call.arg(3));
-    if nsmall == NA_INTEGER || !(0..=20).contains(&nsmall) {
-        return Err(call.error("invalid 'nsmall' argument"));
-    }
-    let nsmall = nsmall as usize;
-    let width = call.arg(4);
-    let justify_mode = values::as_integer_scalar(call.arg(5));
-    if justify_mode == NA_INTEGER || !(0..=3).contains(&justify_mode) {
-        return Err(call.error("invalid 'justify' argument"));
-    }
-    let na_encode = values::as_logical_scalar(call.arg(6));
-    if na_encode == NA_LOGICAL {
-        return Err(call.error("invalid 'na.encode' argument"));
-    }
-    let na_encode = na_encode != 0;
-    let scientific = call.arg(7);
     let mut settings = if digits == nil() {
         Settings::current()
     } else {
         let digits = values::as_integer_scalar(digits);
         if digits == NA_INTEGER || !(1..=22).contains(&digits) {
-            return Err(call.error(format!("invalid value {digits} for 'digits' argument")));
+            return Err(error(format!("invalid value {digits} for 'digits' argument")));
         }
         Settings::with_digits(digits as usize)
     };
-    settings.nsmall = nsmall;
-    if scientific != nil() {
-        if scientific.kind() == SexpType::Logical {
-            // `NA`, the default of `format.default`, keeps `options(scipen)`. The penalties
-            // outweigh any width, so even `.Machine$double.xmax` prints all 309 digits.
-            match values::as_logical_scalar(scientific) {
-                1 => settings.scipen = -10_000,
-                0 => settings.scipen = 10_000,
-                _ => {}
-            }
-        } else {
-            settings.scipen = values::as_integer_scalar(scientific);
-        }
+    let nsmall = values::as_integer_scalar(call.arg(3));
+    if nsmall == NA_INTEGER || !(0..=20).contains(&nsmall) {
+        return Err(error("invalid 'nsmall' argument"));
     }
+    settings.nsmall = nsmall as usize;
+    let width = call.arg(4);
     let min_width = if width == nil() {
         0
     } else {
         let width = values::as_integer_scalar(width);
         if width == NA_INTEGER {
-            return Err(call.error("invalid 'width' argument"));
+            return Err(error("invalid 'width' argument"));
         }
         width.max(0) as usize
     };
+    let justify_mode = values::as_integer_scalar(call.arg(5));
+    if justify_mode == NA_INTEGER || !(0..=3).contains(&justify_mode) {
+        return Err(error("invalid 'justify' argument"));
+    }
+    let na_encode = values::as_logical_scalar(call.arg(6));
+    if na_encode == NA_LOGICAL {
+        return Err(error("invalid 'na.encode' argument"));
+    }
+    let na_encode = na_encode != 0;
+    let scientific = call.arg(7);
+    if length(scientific) != 1 {
+        return Err(error("invalid 'scientific' argument"));
+    }
+    match scientific.kind() {
+        // `NA`, the default of `format.default`, keeps `options(scipen)`. The penalties
+        // outweigh any width, so even `.Machine$double.xmax` prints all 309 digits.
+        SexpType::Logical => match values::as_logical_scalar(scientific) {
+            1 => settings.scipen = -10_000,
+            0 => settings.scipen = 10_000,
+            _ => {}
+        },
+        SexpType::Integer | SexpType::Real if !values::inherits(scientific, "factor") => {
+            let penalty = values::as_integer_scalar(scientific);
+            if penalty != NA_INTEGER {
+                settings.scipen = penalty;
+            }
+        }
+        _ => return Err(error("invalid 'scientific' argument")),
+    }
+    let decimal_mark = call.arg(8);
+    if decimal_mark.kind() != SexpType::String || length(decimal_mark) != 1 {
+        return Err(error("invalid 'decimal.mark' argument"));
+    }
     let items: Vec<Option<String>> = match vector.kind() {
         SexpType::String => {
             let strings = values::strings(vector);

@@ -3813,10 +3813,10 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
     if symbol == symbols.class {
         // GNU R's `classgets`: printing or dispatching on a class that is not character would
         // read its elements as strings.
-        if value != nil() && length(value) > 0 {
-            if value.kind() != SexpType::String {
-                return Err(error_in(call, "attempt to set invalid 'class' attribute"));
-            }
+        if value != nil() && value.kind() != SexpType::String {
+            return Err(error_in(call, "attempt to set invalid 'class' attribute"));
+        }
+        if value != nil() {
             let factor = (0..length(value)).any(|index| value.element(index).bytes() == b"factor");
             if factor && object.kind() != SexpType::Integer {
                 return Err(error_in(

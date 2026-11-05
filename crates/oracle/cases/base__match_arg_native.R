@@ -26,3 +26,4 @@ print(p("x", c("x", "y")))
 q <- function(v = c("one", "two")) { r <- match.arg(v); invisible(r) }
 print(withVisible(q("two"))$visible); print(withVisible(match.arg("x", c("x", "y")))$visible)
 print(tryCatch(match.arg("a", c("ab", "ac")), error = function(e) deparse(conditionCall(e))))
+g <- function(a, s) match.arg(a, c("x", "y"), several.ok = s); print(tryCatch(g("x"), error = conditionMessage))

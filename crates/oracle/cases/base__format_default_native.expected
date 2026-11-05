@@ -44,9 +44,17 @@
 | [1] "invalid value 0 for 'digits' argument"
 | [1] "2.5"
 | [1] "2.500"
+| [1] "argument \"j\" is missing, with no default"
+| [1] "argument \"b\" is missing, with no default"
+| [1] "invalid 'scientific' argument"
+| [1] "invalid 'scientific' argument"
+| [1] "invalid 'decimal.mark' argument"
+| [1] "123456"
+| [1] "123456"
+| [1] "prettyNum(.Internal(format(x, trim, digits, nsmall, width, 3L, "
 [messages]
 [warnings]
 [errors]
 [value]
 character
-| "2.500"
+| "prettyNum(.Internal(format(x, trim, digits, nsmall, width, 3L, "

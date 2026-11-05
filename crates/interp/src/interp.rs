@@ -26,6 +26,7 @@ pub mod annotations;
 mod approximate;
 pub mod arith;
 pub mod arrays;
+pub mod base_fast_paths;
 pub mod builtin_libraries;
 pub mod builtins;
 pub mod bytecode;
@@ -60,7 +61,6 @@ pub mod lower;
 #[path = "../../rcmd/src/makeconf.rs"]
 mod makeconf;
 pub mod methods;
-pub mod base_fast_paths;
 pub mod methods_core;
 pub mod moves;
 pub mod native;
