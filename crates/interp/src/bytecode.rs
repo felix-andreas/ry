@@ -3350,6 +3350,20 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, mut pc: usize
                     Op::Guard => {
                         let symbol = decoded.constants.element(operand(0));
                         let expected = decoded.constants.element(operand(1));
+                        // The usual guard is a call to a base function from a closure whose frame
+                        // cannot bind the name: the cell the cache resolved still holding the
+                        // expected function is the whole check. A cached cell never becomes
+                        // active (`makeActiveBinding` refuses a regular binding), and a binding
+                        // that appears in front of it moves the stamp.
+                        let enclosure = env.enclosure();
+                        if operand(3) == 0
+                            && !enclosure.has_gp(gp::FUNCTION_FRAME)
+                            && let Some(cell) = cached_cell(symbol, enclosure, decoded.cache, operand(2))
+                            && cell.cdr() == expected
+                        {
+                            pc = next;
+                            continue;
+                        }
                         let found = if operand(3) == 0 {
                             lookup_enclosing_function(symbol, env, decoded.cache, operand(2))
                         } else {
