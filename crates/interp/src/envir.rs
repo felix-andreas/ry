@@ -1525,8 +1525,14 @@ unsafe fn do_local_s4_generics(call: &Call<'_>) -> R<Sexp> {
     let env = environment_arg(call.arg(1), "env")?;
     let is_generic = call.arg(2);
     let mut generic = Vec::with_capacity(length(names));
+    // A generic appears once per method registered for it, and its answer is the same each time.
+    let mut answered = rustc_hash::FxHashMap::<Sexp, i32>::default();
     for index in 0..length(names) {
         let symbol = values::install_charsxp(names.element(index))?;
+        if let Some(&answer) = answered.get(&symbol) {
+            generic.push(answer);
+            continue;
+        }
         let binding = find_var(symbol, env)?;
         // A generic still in its lazy-load database whose record is a closure without a class
         // or the S4 bit cannot be an S4 generic, so registering methods for it leaves it
@@ -1536,6 +1542,7 @@ unsafe fn do_local_s4_generics(call: &Call<'_>) -> R<Sexp> {
             && !is_object
             && levels & gp::S4_OBJECT == 0
         {
+            answered.insert(symbol, 0);
             generic.push(0);
             continue;
         }
@@ -1550,6 +1557,7 @@ unsafe fn do_local_s4_generics(call: &Call<'_>) -> R<Sexp> {
                 &eval::value_args(&[value]),
                 call.env,
             )?);
+        answered.insert(symbol, i32::from(is_s4_generic));
         generic.push(i32::from(is_s4_generic));
     }
     values::logical_vector(&generic)

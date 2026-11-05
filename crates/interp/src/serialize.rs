@@ -1037,7 +1037,7 @@ pub fn decompress_record(record: &[u8], kind: i32) -> R<Vec<u8>> {
         error(format!("lazy-load database is corrupt: {failure}"))
     };
     match method {
-        b'1' => inflate_into(payload, &mut output).map_err(|failure| corrupt(&failure))?,
+        b'1' => inflate_into(payload, &mut output, usize::MAX).map_err(|failure| corrupt(&failure))?,
         b'0' => output.extend_from_slice(payload),
         // A raw LZMA2 stream (GNU R writes no xz container), which `datasets` and packages built
         // with `--data-compress=xz` use.
@@ -1054,7 +1054,7 @@ pub fn decompress_record(record: &[u8], kind: i32) -> R<Vec<u8>> {
                 .read_to_end(&mut output)
                 .map_err(|failure| corrupt(&failure))?;
         }
-        _ => inflate_into(body, &mut output).map_err(|failure| corrupt(&failure))?,
+        _ => inflate_into(body, &mut output, usize::MAX).map_err(|failure| corrupt(&failure))?,
     }
     if output.len() != expected {
         return Err(corrupt(&"its length does not match"));
@@ -1062,11 +1062,32 @@ pub fn decompress_record(record: &[u8], kind: i32) -> R<Vec<u8>> {
     Ok(output)
 }
 
+/// The first `limit` bytes (or fewer, for a shorter record) of the stream a lazy-load record
+/// holds, or `None` for a compression other than zlib, which is read whole instead.
+fn record_prefix(record: &[u8], kind: i32, limit: usize) -> R<Option<Vec<u8>>> {
+    if kind == 0 {
+        return Ok(Some(record[..record.len().min(limit)].to_vec()));
+    }
+    let body = record.get(4..).unwrap_or_default();
+    let payload = match kind {
+        2 | 3 => match body.split_first() {
+            Some((b'1', payload)) => payload,
+            _ => return Ok(None),
+        },
+        _ => body,
+    };
+    let mut output = Vec::with_capacity(limit);
+    inflate_into(payload, &mut output, limit)
+        .map_err(|failure| error(format!("lazy-load database is corrupt: {failure}")))?;
+    Ok(Some(output))
+}
+
 /// Inflates the zlib stream `input` into `output`, whose capacity is the size the record states.
 /// A package load fetches hundreds of records, so one inflater is reset between them rather than
 /// built per record, and the stream is decoded straight from the record without the intermediate
 /// buffer a reading decoder allocates.
-fn inflate_into(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
+/// Inflating stops once `output` holds `limit` bytes, which reads the start of a record alone.
+fn inflate_into(input: &[u8], output: &mut Vec<u8>, limit: usize) -> Result<(), String> {
     thread_local! {
         static INFLATER: std::cell::RefCell<Decompress> = std::cell::RefCell::new(Decompress::new(true));
     }
@@ -1082,7 +1103,7 @@ fn inflate_into(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
             let status = inflater
                 .decompress_vec(rest, output, FlushDecompress::Finish)
                 .map_err(|failure| failure.to_string())?;
-            if status == Status::StreamEnd {
+            if status == Status::StreamEnd || output.len() >= limit {
                 return Ok(());
             }
             if (inflater.total_in(), inflater.total_out()) == before {
@@ -1107,6 +1128,16 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
 /// `file`. It is decoded (or copied) out of the cached file, because unserializing it can run a
 /// refhook that fetches from another database and so inserts into the cache.
 unsafe fn lazy_record(key: Sexp, file: &str, compressed: i32) -> R<Vec<u8>> {
+    let record = cached_record(key, file)?;
+    if compressed != 0 {
+        decompress_record(record, compressed)
+    } else {
+        Ok(record.to_vec())
+    }
+}
+
+/// The bytes of the record at `key` (offset and length) in the cached database `file`.
+unsafe fn cached_record(key: Sexp, file: &str) -> R<&'static [u8]> {
     let offset = crate::subset::numeric_element(key, 0) as usize;
     let size = crate::subset::numeric_element(key, 1) as usize;
     let cache = file_cache();
@@ -1115,14 +1146,9 @@ unsafe fn lazy_record(key: Sexp, file: &str, compressed: i32) -> R<Vec<u8>> {
             .map_err(|failure| error(format!("cannot open file '{file}': {failure}")))?;
         cache.insert(file.to_owned(), bytes);
     }
-    let record = cache[file]
+    cache[file]
         .get(offset..offset.saturating_add(size))
-        .ok_or_else(|| error("lazy-load database is corrupt"))?;
-    if compressed != 0 {
-        decompress_record(record, compressed)
-    } else {
-        Ok(record.to_vec())
-    }
+        .ok_or_else(|| error("lazy-load database is corrupt"))
 }
 
 /// The object a lazy-load promise (`lazyLoadDBfetch(key, datafile, compressed, envhook)` as
@@ -1160,7 +1186,12 @@ pub unsafe fn lazy_record_header(promise: Sexp) -> R<Option<(u32, bool, u16)>> {
         return Ok(None);
     }
     let file = values::require_string(file, "file")?;
-    let data = lazy_record(key, &file, values::as_integer_scalar(compressed))?;
+    // The format line, the header (with a version-3 encoding name) and the object's flags fit
+    // in the first 64 bytes, so only those are inflated.
+    let record = cached_record(key, &file)?;
+    let Some(data) = record_prefix(record, values::as_integer_scalar(compressed), 64)? else {
+        return Ok(None);
+    };
     let (format, skip) = match data.get(..2) {
         Some(b"X\n") => (Format::Xdr, 2),
         Some(b"B\n") => (Format::Binary, 2),
