@@ -279,7 +279,7 @@ unsafe fn dimension(args: &[Arg], position: usize) -> R<Option<Sexp>> {
     let Some([x]) = resolved_all::<1>(args)? else {
         return Ok(None);
     };
-    if x.is_object() {
+    if x.is_object() || crate::builtins::is_native_value(x) {
         return Ok(None);
     }
     let dim = values::get_attr(x, symbols().dim);
@@ -681,14 +681,23 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         return decline();
     }
     // The R body reads `right` before `accumulate` when `init` is missing, and after otherwise.
+    // A flag that is not TRUE or FALSE stops the R body with an error before it reads the
+    // other one, so the prologue declines before forcing it.
     let (right, accumulate) = if missing_init {
-        let right = flag(frame, "right")?;
+        let Some(right) = flag(frame, "right")? else {
+            return decline();
+        };
         (right, flag(frame, "accumulate")?)
     } else {
-        let accumulate = flag(frame, "accumulate")?;
-        (flag(frame, "right")?, accumulate)
+        let Some(accumulate) = flag(frame, "accumulate")? else {
+            return decline();
+        };
+        let Some(right) = flag(frame, "right")? else {
+            return decline();
+        };
+        (right, Some(accumulate))
     };
-    let (Some(right), Some(false)) = (right, accumulate) else {
+    let Some(false) = accumulate else {
         return decline();
     };
     let symbols = symbols();
