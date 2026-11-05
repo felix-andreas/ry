@@ -753,7 +753,7 @@ a gap that size, so shrinking the op count and the cost per op (step 3) comes fo
 | Promise elision for strict, effect-free arguments | Ř | planned | `closure_args_into` 3.8% of a call microbenchmark | |
 | The promargs pairlist built only when asked for | GNU R | planned | `args_pairlist` 2.7% of a call microbenchmark | |
 | Per-site argument-match caches | V8, JSC | planned | `match_args` 2.8k, `bind_arguments` 2.8k per `seq()` call | |
-| Polymorphic inline caches for S3 and S4, keyed on the class vector | Self, V8 | planned | S3 method lookup up to 17% (`timeseries`) | |
+| Polymorphic inline caches for S3 and S4, keyed on the class vector | Self, V8 | built | S3 method lookup up to 17% (`timeseries`); instructions per dispatch: `UseMethod` 8.7k to 7.5k (GNU R 9.8k), with `NextMethod` 23.2k to 18.6k (GNU R 19.0k), `standardGeneric` 14.1k to 8.4k (GNU R 11.7k) | `resolve_s3`, `site_hit` in `crates/interp/src/dispatch.rs`; `S4Cache`, `dispatch_generic` in `crates/interp/src/methods.rs` |
 | Closed bindings per locked namespace, reopened by `unlockBinding` and `assignInNamespace` | Bun, Roc | planned | namespace function lookups | |
 | Precise counts and borrowed parameters in tier 0 | Roc (Perceus) | planned | copies and peak memory | |
 | Setter instruction for one-level complex assignment | GNU R bytecode | built | `attributes(m) <- NULL` 4.2k to 1.5k instructions (GNU R 1.1k); `mostattributes(m) <-` 11.0k to 9.5k (GNU R 6.9k); `seq()` 136.2k to 135.0k | `Op::Replace`, `replace_variable` in `bytecode.rs` |

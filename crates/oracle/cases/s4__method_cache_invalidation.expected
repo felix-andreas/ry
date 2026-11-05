@@ -1,0 +1,30 @@
+[stdout]
+| [1] "kind"
+| [1] "base" "base" "base"
+| [1] "mid" "mid" "mid"
+| [1] "mid" "mid" "mid"
+| [1] "leaf > mid" "leaf > mid" "leaf > mid"
+| [1] "leaf v2" "leaf v2" "leaf v2"
+| [1] TRUE
+| [1] "mid" "mid" "mid"
+| [1] TRUE
+| [1] "base" "base" "base"
+| [1] "base" "base" "base"
+| [1] "pair"
+| [1] "numeric, missing" "numeric, missing"
+| [1] "numeric, character" "numeric, character"
+| [1] "numeric, missing"   "numeric, character" "any"               
+| [4] "any"                "any"                "numeric, missing"  
+| [1] "integer, missing" "numeric, missing"
+| [1] "any" "any"
+| [1] "dots"
+| [1] "numeric dots" "numeric dots"
+| [1] "character dots" "numeric dots"  
+| [1] "kind"
+| [1] "new generic" "new generic" "new generic"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("new generic", "new generic", "new generic")

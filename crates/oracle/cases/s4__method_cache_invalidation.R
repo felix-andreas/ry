@@ -1,0 +1,48 @@
+# S4 dispatch through one generic sees methods set, replaced and removed after the first call.
+suppressMessages(library(methods))
+setClass("Base", representation(x = "numeric"))
+setClass("Mid", contains = "Base")
+setClass("Leaf", contains = "Mid")
+setGeneric("kind", function(object, ...) standardGeneric("kind"))
+setMethod("kind", "Base", function(object, ...) "base")
+leaf <- new("Leaf", x = 1)
+mid <- new("Mid", x = 1)
+calls <- function(object) vapply(1:3, function(i) kind(object), "")
+
+print(calls(leaf))
+setMethod("kind", "Mid", function(object, ...) "mid")
+print(calls(leaf))
+print(calls(mid))
+setMethod("kind", "Leaf", function(object, ...) paste("leaf >", callNextMethod()))
+print(calls(leaf))
+setMethod("kind", "Leaf", function(object, ...) "leaf v2")
+print(calls(leaf))
+removeMethod("kind", "Leaf")
+print(calls(leaf))
+removeMethod("kind", "Mid")
+print(calls(leaf))
+print(calls(mid))
+
+# Basic classes, a missing argument, and more classes than one site holds.
+setGeneric("pair", function(a, b) standardGeneric("pair"))
+setMethod("pair", signature("numeric", "missing"), function(a, b) "numeric, missing")
+setMethod("pair", signature("numeric", "character"), function(a, b) "numeric, character")
+setMethod("pair", signature("ANY", "ANY"), function(a, b) "any")
+print(vapply(1:2, function(i) pair(1), ""))
+print(vapply(1:2, function(i) pair(1, "a"), ""))
+print(c(pair(1L), pair(1L, "a"), pair("a", 1), pair(TRUE, TRUE), pair(list(), NULL), pair(1)))
+setMethod("pair", signature("integer", "missing"), function(a, b) "integer, missing")
+print(c(pair(1L), pair(1)))
+print(c(pair(matrix(1:4, 2)), pair(matrix(1.5, 1))))
+
+# Dispatch on the dots.
+setGeneric("dots", function(...) standardGeneric("dots"))
+setMethod("dots", "numeric", function(...) "numeric dots")
+print(vapply(1:2, function(i) dots(1, 2), ""))
+setMethod("dots", "character", function(...) "character dots")
+print(c(dots("a"), dots(1)))
+
+# A generic redefined after use starts with fresh methods.
+setGeneric("kind", function(object, ...) standardGeneric("kind"))
+setMethod("kind", "Base", function(object, ...) "new generic")
+print(calls(leaf))

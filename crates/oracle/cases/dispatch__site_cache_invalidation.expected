@@ -1,0 +1,38 @@
+[stdout]
+| [1] "default"
+| [1] "parent"
+| [1] "child, then parent"
+| [1] "child v2"
+| [1] "parent"
+| [1] "parent"
+| [1] "default"
+|         a         b         c         d         e         a         e        zz 
+|       "a"       "b"       "c"       "d"       "e"       "a"       "e" "default" 
+|         a         c         e 
+|       "a" "default"       "e" 
+| [1] "matrix"   "integer"  "numeric"  "function"
+| [1] "numeric" "numeric"
+| [1] "numeric"
+| [1] "registered"
+| [1] "global wins"
+| [1] "registered"
+| [1] "default" "default" "default"
+| [1] "x1 > x3"
+| [1] "x1 > x2 > x3"
+| [1] "x1 > x3"
+| [1] "x1 > x3"
+| [1] "x1 > x3"
+| [1] "x1 > x3"
+| [1] 3
+| [1] "Ops +"
+| [1] "plus method"
+| [1] "Ops *"
+| [1] "Ops +"
+| [1] 3
+| [1] "a" "b" "a" "d"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("a", "b", "a", "d")
