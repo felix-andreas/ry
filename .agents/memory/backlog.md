@@ -824,6 +824,16 @@ Where the time goes, JIT on, from `--profile-summary` on the nine workloads: tie
 but `functional`: most hot code sits in closures called a few thousand times, under the entry
 threshold, so tier 0 and the call path decide the result.
 
+The testthat workload (`tools/bench/real/testthat.R`, 36 `test_that()` blocks per repeat) stands in
+for package CI. Its `--profile-summary`: tier 0 33%, builtins 26%, call setup 25%, GC 4.8%,
+compiled code 0.7%; 1.33M closure calls create 1.73M promises (1.30 per call, against 1.42 in a
+user's profile taken before promise elision), and a quarter of the calls go through the
+argument-match cache because they pass names or `...` (the counter counts cache hits too). Its
+callgrind profile is flat, with no function above 2% of instructions, so the gains are fewer
+ops per call (the baseline tier, inline predicate fast paths) rather than one hotspot. Open:
+promise elision covers few testthat arguments, because most are calls rather than constants or
+evaluated symbols; about 8 objects are allocated per closure call (10.9M freed over the run).
+
 Data-oriented audit of the call path, measured with `perf` on a tier-0 microbenchmark (3 million
 calls of `function(x, y = 2) x + y`, `RY_JIT=off`) and on `timeseries`. Fixed:
 
