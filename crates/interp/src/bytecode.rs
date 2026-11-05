@@ -20,8 +20,9 @@
 //!   instruction word, set at the position of the instruction that produced a value), the fourth
 //!   the loop table (an integer vector of `start, end, exit, step` quadruples), the fifth the
 //!   number of registers the code uses, the sixth the profile counters (an integer vector, see
-//!   [`profile`]) the seventh the optimizing tier's compiled code, `NULL` until it exists, and the eighth the
-//!   slot hints (an integer vector, one per lookup site).
+//!   [`profile`]) the seventh the optimizing tier's compiled code, `NULL` until it exists, the eighth the
+//!   slot hints (an integer vector, one per lookup site), and the ninth the stored half of the
+//!   effect-free fact (see [`crate::effects`]).
 //! - `tag`: the inline caches, a list with two slots per cache: the enclosure the lookup started
 //!   from and the binding cell it found. The list holds them weakly, because closures that share
 //!   a body share its code, and a strong cache would keep the last caller's environment alive.
@@ -41,7 +42,7 @@
 use {
     crate::{
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
-        conditions, dispatch,
+        conditions, dispatch, effects,
         eval::{self, SwitchSelector, as_condition},
         Interp, interp, moves,
         unwind::{Jump, R, Unwind, error, error_in},
@@ -280,7 +281,8 @@ pub const REGISTERS: usize = 4;
 pub const PROFILE: usize = 5;
 pub const TIER1: usize = 6;
 pub const HINTS: usize = 7;
-pub const FIRST_CONSTANT: usize = 8;
+pub const SUMMARY: usize = 8;
+pub const FIRST_CONSTANT: usize = 9;
 
 /// The profile counters, positions in the `PROFILE` integer vector.
 pub mod profile {
@@ -370,6 +372,7 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         srcref: nil(),
         rebinding: None,
         tail_updates: (Vec::new(), nil()),
+        summary: nil(),
         bound: None,
         cold: Vec::new(),
     };
@@ -743,6 +746,8 @@ struct Compiler {
     bound: Option<Bound>,
     /// Guard fallbacks laid out after the body's `Return` (see [`Compiler::cold_fallback`]).
     cold: Vec<Cold>,
+    /// The stored half of the effect-free fact, `NULL` for an argument's code.
+    summary: Sexp,
 }
 
 /// A guard fallback compiled out of line: the guards that fail to it, its instruction, and where
@@ -801,7 +806,15 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         bound: None,
         tail_updates: tail_updates(body, function),
         cold: Vec::new(),
+        summary: nil(),
     };
+    let slot = compiler.cache();
+    compiler.summary = effects::summarize(
+        function.car(),
+        body,
+        compiler.local_symbols.as_ref(),
+        slot,
+    )?;
     compiler.assemble(body).map(Some)
 }
 
@@ -1479,6 +1492,7 @@ impl Compiler {
         values::ints_mut(profile).fill(0);
         heap.set_element(constants, PROFILE, profile);
         heap.set_element(constants, TIER1, nil());
+        heap.set_element(constants, SUMMARY, compiler.summary);
         let loops = values::alloc(SexpType::Integer, compiler.loops.len() * 4)?;
         for (index, entry) in compiler.loops.iter().enumerate() {
             let slots = &mut values::ints_mut(loops)[index * 4..index * 4 + 4];
@@ -1504,14 +1518,47 @@ impl Compiler {
     /// The constant for a call that may call a closure, followed by the arguments its promises
     /// are made from: the unbound marker when an argument is worth compiling, which
     /// [`Op::CallGeneric`] replaces with the compiled arguments the first time it calls a
-    /// closure here, or `NULL` when none is.
-    unsafe fn call_site(&mut self, call: Sexp) -> u32 {
+    /// closure here, or `NULL` when none is. A third constant is `TRUE` when a call of an
+    /// effect-free closure may bind symbol arguments to their values (see [`eager_site`]).
+    unsafe fn call_site(&mut self, call: Sexp) -> R<u32> {
         let index = self.constant(call);
-        let worth_compiling = values::pairlist_items(call.cdr())
+        let arguments = values::pairlist_items(call.cdr());
+        let worth_compiling = arguments
             .iter()
             .any(|(_, value)| compiles_as_promise(*value));
         self.constant(if worth_compiling { unbound() } else { nil() });
-        index
+        let eager = arguments.iter().any(|(_, value)| value.kind() == SexpType::Symbol)
+            && arguments
+                .iter()
+                .all(|(_, value)| self.cannot_assign(*value, 0));
+        let flag = if eager { values::scalar_logical(1)? } else { nil() };
+        self.constant(flag);
+        Ok(index)
+    }
+
+    /// Whether evaluating the argument `expression` in this frame can assign no variable, so
+    /// that reading another argument's variable when the call starts gives what reading it when
+    /// the callee forces it would: a variable, a constant, or base builtins that touch nothing
+    /// but their arguments, called on those, with no name this frame could rebind.
+    unsafe fn cannot_assign(&self, expression: Sexp, depth: u32) -> bool {
+        match expression.kind() {
+            SexpType::Symbol => {
+                expression != symbols().dots
+                    && expression != missing_arg()
+                    && eval::dot_dot_index(expression).is_none()
+            }
+            SexpType::Language if depth < 8 && expression.car().kind() == SexpType::Symbol => {
+                let head = expression.car();
+                !matches!(&*symbol_name(head), "<-" | "=" | "[<-" | "[[<-")
+                    && effects::EFFECT_FREE_BUILTINS.contains(&&*symbol_name(head))
+                    && !self.frame_may_bind(head)
+                    && values::pairlist_items(expression.cdr())
+                        .iter()
+                        .all(|(_, argument)| self.cannot_assign(*argument, depth + 1))
+            }
+            SexpType::Language | SexpType::Promise | SexpType::Bytecode => false,
+            _ => true,
+        }
     }
 
     unsafe fn frame_may_bind(&self, symbol: Sexp) -> bool {
@@ -2370,7 +2417,7 @@ impl Compiler {
                 let body = self.constant(expression);
                 let srcref = self.constant(nil());
                 self.emit(Op::Closure, &[function, formals, body, srcref]);
-                let call_constant = self.call_site(immediate_call);
+                let call_constant = self.call_site(immediate_call)?;
                 self.emit(Op::CallGeneric, &[dst, function, call_constant]);
                 self.release_to(mark);
             }
@@ -2514,7 +2561,7 @@ impl Compiler {
     ) -> R<()> {
         let symbol = self.constant(head);
         let expected = self.constant(primitive);
-        let call_constant = self.call_site(call);
+        let call_constant = self.call_site(call)?;
         let cache = self.cache();
         let mark = self.next_register;
         let function = self.allocate();
@@ -2760,7 +2807,7 @@ impl Compiler {
     ) -> R<()> {
         let symbol = self.constant(head);
         let expected = self.constant(primitive);
-        let call_constant = self.call_site(call);
+        let call_constant = self.call_site(call)?;
         let name_constant = self.constant(name);
         let shape = self.shape()?;
         let cache = self.cache();
@@ -2791,7 +2838,7 @@ impl Compiler {
             _ => None,
         };
         let symbol = self.constant(head);
-        let call_constant = self.call_site(call);
+        let call_constant = self.call_site(call)?;
         let cache = self.cache();
         let mark = self.next_register;
         let function = self.allocate();
@@ -3527,7 +3574,18 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             compiled
         };
         let mut args = eval::Args::new();
-        eval::compiled_args_into(arguments, state.env, &mut args)?;
+        // Binding a variable's value instead of a promise for it is invisible when the callee
+        // cannot assign anything before forcing it, nor look at the promise (`substitute`,
+        // `missing`), and no handler can run R code in between.
+        let eager = state.constants.element(instruction.operand(2) + 2);
+        if eager != nil()
+            && !effects::calling_handler_established()
+            && effects::effect_free(function)?
+        {
+            eval::eager_args_into(arguments, state.env, &mut args)?;
+        } else {
+            eval::compiled_args_into(arguments, state.env, &mut args)?;
+        }
         eval::apply_closure_owning(call, function, &args, state.env, None)?
     } else {
         // A special reads its arguments as expressions, so they stay uncompiled.
@@ -4667,6 +4725,46 @@ impl LookupCache {
             slots: caches.data() as *const Sexp,
             hints: values::ints_mut(code.cdr().element(HINTS)).as_mut_ptr() as *mut u32,
         }
+    }
+}
+
+/// One of a code object's inline caches, used whole for something other than a lookup: a key
+/// held weakly, a value, and a stamp of the caller's choosing.
+#[derive(Clone, Copy)]
+pub(crate) struct CacheSlot {
+    cache: LookupCache,
+    slot: usize,
+}
+
+impl CacheSlot {
+    pub(crate) unsafe fn of(code: Sexp, slot: usize) -> Self {
+        CacheSlot {
+            cache: LookupCache::of(code),
+            slot,
+        }
+    }
+
+    pub(crate) unsafe fn key(self) -> Sexp {
+        *self.cache.slots.add(self.slot * 2)
+    }
+
+    pub(crate) unsafe fn value(self) -> Sexp {
+        *self.cache.slots.add(self.slot * 2 + 1)
+    }
+
+    pub(crate) unsafe fn stamp(self) -> u64 {
+        *self.cache.epochs.add(self.slot)
+    }
+
+    pub(crate) unsafe fn set_stamp(self, stamp: u64) {
+        *self.cache.epochs.add(self.slot) = stamp;
+    }
+
+    pub(crate) unsafe fn fill(self, key: Sexp, value: Sexp, stamp: u64) {
+        let heap = crate::heap();
+        heap.set_element(self.cache.caches, self.slot * 2, key);
+        heap.set_element(self.cache.caches, self.slot * 2 + 1, value);
+        self.set_stamp(stamp);
     }
 }
 

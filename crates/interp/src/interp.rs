@@ -44,6 +44,7 @@ pub mod deparse;
 pub mod dispatch;
 pub mod distributions;
 pub mod envir;
+pub mod effects;
 pub mod eval;
 #[cfg(unix)]
 mod fft;
