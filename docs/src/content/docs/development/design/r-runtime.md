@@ -815,7 +815,7 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | Frames cleared in place, without copying the cell list | ry | built | `clear_frame`; 139.7k to 136.6k per `seq()` call, with the two rows below | `Heap::clear_frame` in `crates/heap/src/heap.rs` |
 | Untyped closures skip the signature lookup; `on.exit` handling only when an exit expression exists | ry | built | part of the 3.1k above | `signature_of` in `crates/interp/src/annotations.rs`, `run_closure` in `eval.rs` |
 | Frames as slot arrays, environment reified on demand | Ř, V8 | rejected for now, measured | binding cells cost about 420 of a closure call's 3,968 instructions (defining formals 100, `Frame::insert` 114, clearing 97, lookups 110); values held inline would save 100 to 150 of them, about 3%, while about 180 call sites read cells and reifying a frame would need allocation behind shared references. A closure call already costs less than on GNU R | |
-| Promise elision for strict, effect-free arguments | Ř | planned | `closure_args_into` 3.8% of a call microbenchmark | |
+| Promise elision for strict, effect-free arguments | Ř | done in tier 0 (`crates/interp/src/effects.rs`) | `closure_args_into` 3.8% of a call microbenchmark | `f(i, 1)` 3,968 to 3,411 instructions per call; `seq()` unchanged, its helpers are not effect-free |
 | The promargs pairlist built only when asked for | GNU R | planned | `args_pairlist` 2.7% of a call microbenchmark | |
 | Per-site argument-match caches | V8, JSC | planned | `match_args` 2.8k, `bind_arguments` 2.8k per `seq()` call | |
 | Polymorphic inline caches for S3 and S4, keyed on the class vector | Self, V8 | planned | S3 method lookup up to 17% (`timeseries`) | |
