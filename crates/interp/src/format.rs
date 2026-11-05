@@ -788,13 +788,7 @@ pub unsafe fn format_vector(
                             text.into_owned()
                         }
                     }
-                    None => {
-                        if quote {
-                            "NA".to_owned()
-                        } else {
-                            na_string.to_owned()
-                        }
-                    }
+                    None => na_string.to_owned(),
                 })
                 .collect();
             items

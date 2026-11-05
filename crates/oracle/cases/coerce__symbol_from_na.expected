@@ -1,0 +1,16 @@
+[stdout]
+| `NA`
+| `NA`
+| [[1]]
+| a
+| 
+| [[2]]
+| `NA`
+| 
+| [1] "invalid data of mode 'character' (too short)"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "invalid data of mode 'character' (too short)"

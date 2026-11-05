@@ -4533,6 +4533,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     let result = alloc(kind, rows * cols)?;
     let mut offset = 0usize;
     let mut bound_names: Vec<String> = Vec::new();
+    let mut matrix_named = false;
     let mut other_names = nil();
     for (position, &(value, count, is_matrix)) in pieces.iter().enumerate() {
         let source_length = length(value);
@@ -4575,6 +4576,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                 } else {
                     nil()
                 };
+                matrix_named |= names != nil();
                 bound_names.push(if names != nil() {
                     values::string_at(names, line)
                         .map(|text| text.into_owned())
@@ -4607,7 +4609,9 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     }
     let dim = values::integer_vector(&[rows as i32, cols as i32])?;
     values::set_attr(result, symbols().dim, dim)?;
-    let bound = if bound_names.iter().any(|name| !name.is_empty()) {
+    // GNU R keeps the bound names whenever a matrix argument had names on that axis, even
+    // when every one of them is empty.
+    let bound = if matrix_named || bound_names.iter().any(|name| !name.is_empty()) {
         string_vector(&bound_names)?
     } else {
         nil()

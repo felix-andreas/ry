@@ -729,9 +729,19 @@ pub unsafe fn as_vector(object: Sexp, mode: &str) -> R<Sexp> {
     };
     if kind == SexpType::Symbol {
         values::refuse_bytes(object)?;
-        let text = values::as_string_scalar(object)?
-            .ok_or_else(|| error("invalid type/length (symbol/0) in vector allocation"))?;
-        return values::install(&text);
+        // A missing first element names the symbol `NA`, as GNU R's `installTrChar` of
+        // `NA_STRING` does; only an empty vector has no name to give.
+        return match values::as_string_scalar(object)? {
+            Some(text) => values::install(&text),
+            None if object.kind().is_atomic() && values::length(object) > 0 => {
+                values::install("NA")
+            }
+            None if object.kind().is_atomic() => Err(error(format!(
+                "invalid data of mode '{}' (too short)",
+                object.kind().name()
+            ))),
+            None => Err(error("invalid type/length (symbol/0) in vector allocation")),
+        };
     }
     if kind == SexpType::Closure {
         if values::is_function(object) {
