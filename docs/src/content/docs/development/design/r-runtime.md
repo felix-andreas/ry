@@ -641,9 +641,10 @@ The IR represents environments, promises and boxed values explicitly, so they ca
 Cranelift is the right backend: it is a Rust crate, it was designed to compile much faster than
 LLVM's optimizing pipeline, and it supports the stack maps the GC needs. LLVM would add a large C++
 dependency and compile latency in exchange for low-level optimizations that matter less than the
-R-level ones above. Copy-and-patch is the candidate for an optional baseline tier between the two, if
-measurements show that tier 0 is too slow for code that is warm but not hot; rcp's results suggest
-that the gain over a good interpreter is real but modest.
+R-level ones above. Code that is warm but not hot gets a baseline tier between the two, in the style of V8's
+Sparkplug: a single pass from bytecode to machine code that keeps tier 0's frame layout and feedback,
+so it needs no deoptimization. Copy-and-patch was the other candidate and is rejected (see the
+roadmap below).
 
 ### What tier 1 does today
 
@@ -712,6 +713,67 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   call still enters through tier 0's call path and allocates a frame and forced promises), result
   types for multi-index subscripts such as `m[i, ]`, and freeing the machine code of invalidated
   bodies.
+
+### Untyped performance roadmap
+
+Plain untyped R decides how ry compares with GNU R, because most hot R code sits in closures called
+a few thousand times, under tier 1's entry threshold. This table lists every idea ry has adopted,
+plans or rejected for that code, in the order it is built. A status changes with the pull request
+that changes it. `prior-art.md` gives the reasoning behind each source engine's verdict.
+
+The gaps come from `ry run --profile-summary` on the nine `just bench-real` workloads (JIT on: tier-0
+instructions 23 to 44% of the time, closure call setup 12 to 24%, builtins about 25%, S3 method
+lookup up to 17%) and from callgrind on `seq(1, 10, by = 2)`, which costs 141.6k instructions per
+call on ry and about 106k on GNU R 4.3.3.
+
+| Idea | Source engine | Status | Measured gap it targets | Code |
+| --- | --- | --- | --- | --- |
+| **1. Tier-0 call path** | | | | |
+| Op words carry their operand count; one dispatch loop with one error exit | JSC LLInt | built | dispatch, about 15 instructions per op | `interpret` in `crates/interp/src/bytecode.rs` |
+| Slot hints at lookup sites, behind the frame's symbol filter | JSC, V8 inline caches | built | variable lookup | `cached_cell`, `Frame::find_hinted` in `crates/heap/src/env.rs` |
+| Function lookups skip frames that cannot bind the symbol | ry | built | `lookup_function` | `lookup_function` in `bytecode.rs` |
+| Lookup stamps compared as their bits | V8 | built | 1.25k per `seq()` call | `LookupCache` in `bytecode.rs` |
+| Hash index only for frames over 32 bindings | ry | built | 3k per `seq()` call (`Frame::insert`) | `INDEX_THRESHOLD` in `env.rs` |
+| Builtin checks derived at registration | GNU R `PRIMARITY` | built | builtin call overhead | `Checks` in `crates/interp/src/builtins.rs` |
+| A per-closure call plan for `run_closure`'s bookkeeping | JSC `CodeBlock` | rejected, folded into slot frames | annotation, `on.exit`, move-tracking and depth checks measure 1.3k of 141.6k instructions per `seq()` call and already exit early; the rest of `run_closure` is the frame record push and pop, which slot frames replace | |
+| **2. Call facts ahead of time** | | | | |
+| Version-stamped bindings: a function guard is one compare | JSC watchpoints, V8 property cells | next | 117 guards per `seq()` call, each a cached lookup | |
+| Frames as slot arrays, environment reified on demand | Ř, V8 | planned | closure call setup 12 to 24%; `Frame::insert` 2.6k, `clear_frame` 2.3k, `release_frame` 1.9k per `seq()` call | |
+| Promise elision for strict, effect-free arguments | Ř | planned | `closure_args_into` 3.8% of a call microbenchmark | |
+| The promargs pairlist built only when asked for | GNU R | planned | `args_pairlist` 2.7% of a call microbenchmark | |
+| Per-site argument-match caches | V8, JSC | planned | `match_args` 2.8k, `bind_arguments` 2.8k per `seq()` call | |
+| Polymorphic inline caches for S3 and S4, keyed on the class vector | Self, V8 | planned | S3 method lookup up to 17% (`timeseries`) | |
+| Closed bindings per locked namespace, reopened by `unlockBinding` and `assignInNamespace` | Bun, Roc | planned | namespace function lookups | |
+| Precise counts and borrowed parameters in tier 0 | Roc (Perceus) | planned | copies and peak memory | |
+| Getter and setter call instructions for complex assignment | GNU R bytecode | planned | `names(x) <-`, `attr<-`, `x$a$b <-` 2.7 to 6.6 times slower | |
+| **3. LLInt- and LuaJIT-grade tier 0** | | | | |
+| In-place specialization (quickening) with value profiles | CPython (PEP 659), JSC | planned | tier-0 instructions 23 to 44%; JIT-off scalar loops 0.35 to 0.41 times GNU R | |
+| Tail-call dispatch, one indirect jump per handler | LuaJIT, JSC | planned (needs `become`) | the shared indirect jump, about 28% of a scalar loop | |
+| Dense feedback storage, one slot per profiled instruction | V8 | planned | feedback is one `i32` per code word | |
+| One description of each instruction's semantics, shared by tier 0 and the baseline | Deegen (LuaJIT Remake) | planned | the baseline drifting from tier 0 | |
+| Lazy fused vectors for element-wise arithmetic, as ALTREP objects | Riposte, pqR | planned | intermediate vectors in untyped vector code | |
+| **4. Optimizing tiers** | | | | |
+| Per-argument-type native functions for scalar closures | Julia | built | recursive scalar functions | `crates/jit/src/native.rs` |
+| Baseline compiler from bytecode, no optimization | V8 Sparkplug | planned | warm code under the 3000-entry threshold | |
+| Lazy basic block versioning as the baseline's second stage | YJIT | planned | type checks left inside handlers in warm code | |
+| A lower Cranelift threshold once the baseline tier exists | HotSpot, .NET tiering | planned | tier 1 under 3% of the time on eight of nine workloads | |
+| Cross-closure inlining with deoptimization | Ř (PIR) | planned | calls from compiled code re-enter tier 0 | |
+| Escape analysis, scalar replacement, vector fusion | Graal, goose | planned | scalar and intermediate vector allocation | |
+| Per-signature numeric specialization of vector code | Julia | planned | | |
+| Effect-free `lapply`, `vapply`, `Map` and long element-wise operations across cores; reductions stay sequential | Bend | planned | wall time of independent per-element work | |
+| **5. Memory and start-up** | | | | |
+| A start-up image mapped read-only and shared | V8 snapshots, Bun | planned | stats-only start-up peak | |
+| Per-package images compiled at install time | Bun | planned | package load and warm-up | |
+| Profiles from a training run (the package's tests and examples) stored in the per-package image | HHVM Jump-Start, Project Leyden | planned | hot closures that never reach tier 1's thresholds | |
+| Images shared across worker processes | Bun | planned | resident memory per `parallel` worker | |
+| Concurrent tracing and Immix line reuse | LXR | planned, after collector pauses are measured | collector pauses, fragmentation | |
+| A stackless tier 0 | Bend | planned, with the tail-call handlers | Rust frame setup per R call | |
+| **Rejected** | | | | |
+| Copy-and-patch as a tier | CPython (PEP 744) | rejected | | |
+| Meta-tracing | PyPy | rejected | | |
+| A partial-evaluation framework (AST interpreters) | Truffle and Graal | rejected | | |
+| Generating the interpreter and baseline from LLVM IR | Deegen | rejected | | |
+| Freeing R objects when their count reaches zero | LXR | rejected | | |
 
 ### How the static types feed the JIT
 

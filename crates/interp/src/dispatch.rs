@@ -1229,7 +1229,7 @@ unsafe fn dispatch_promised(
         // S4 methods get the promises too, as GNU R's `R_possible_dispatch` does, and an S4
         // object without one falls back to S3 methods of its class.
         let value = if object.has_gp(gp::S4_OBJECT)
-            && let Some(value) = s4_dispatch(op, call, promised, env)?
+            && let Some(value) = s4_dispatch_holding(op, call, promised, env)?
         {
             Some(value)
         } else if let Some(found) = find_s3_method(
@@ -1260,6 +1260,21 @@ unsafe fn dispatch_promised(
         });
     }
     Ok(None)
+}
+
+/// [`s4_dispatch`] with the promises counted as referenced while it runs. Only this frame of
+/// Rust holds them, so a generic that finds no method would otherwise release them with its
+/// frame (clearing their values and environments), and the primitive's own fallback would then
+/// force a cleared promise.
+unsafe fn s4_dispatch_holding(op: Sexp, call: Sexp, promised: &Args, env: Sexp) -> R<Option<Sexp>> {
+    for arg in promised {
+        arg.value.increment_refcount();
+    }
+    let result = s4_dispatch(op, call, promised, env);
+    for arg in promised {
+        arg.value.decrement_refcount();
+    }
+    result
 }
 
 /// Whether `value` is an unforced promise of a symbol that is a missing argument where the

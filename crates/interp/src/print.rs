@@ -1052,6 +1052,9 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
             }
             "na.print" => {
                 if argument != nil() {
+                    if argument.kind() != SexpType::String || values::length(argument) == 0 {
+                        return Err(call.error("invalid 'na.print' specification"));
+                    }
                     let text = values::first_string(argument)
                         .map(|text| text.into_owned())
                         .unwrap_or_default();

@@ -1,0 +1,11 @@
+[stdout]
+| [1] 1
+| [1] 2
+| [1] "A"
+| [1] "this S4 class is not subsettable"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "this S4 class is not subsettable"

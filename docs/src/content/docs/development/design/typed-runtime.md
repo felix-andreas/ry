@@ -393,6 +393,24 @@ entries for typed code.
 operations. A count that would overflow saturates, and a saturated value is never freed, which
 leaks it rather than corrupting memory, and is reported by the leak check below.
 
+**Parallel library functions (planned).** Because native values are immutable and acyclic,
+`List.map`, `List.walk` and the `Dict` and `Set` builders can split their work across cores when
+the function they apply is free of effects. Two costs decide the design (`prior-art.md`, "Bend"):
+
+- **Counts on shared values** follow Lean 4: a value is single-threaded by default and its count
+  is a plain integer. Before a library function splits, it marks every value reachable from its
+  input and the function's captures as shared, while only one thread can see them, and only a
+  shared value's `dup` and `drop` use atomic operations. A shared value reaches only shared values,
+  so the marking pass visits each value at most once over a run, and single-threaded code pays one
+  branch on the tag bit. Each worker allocates from its own pools.
+- **The effect-free fact** is computed by the typed core, not taken from `@pure`, which is trusted
+  without checking the body; a wrong declaration would otherwise become a data race. For strict
+  and locked code the typed core sees every callee: a body is effect-free when it calls only
+  standard-library functions without effects and functions with the same fact, and a call across
+  the R boundary, I/O or a random draw makes it effectful. No such fact exists yet. A failing
+  element does not stop the others, and the split reports the failure with the lowest index,
+  which is the one a sequential run reports.
+
 ## The R boundary
 
 The entry and exit stubs are the boundary for calls, and `Num.from_r`, `List.from_r`, `List.to_r`,
