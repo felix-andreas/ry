@@ -1371,7 +1371,7 @@ pub fn diff<'text>(
     // Names whose laziness flipped: a second writer appeared or went away, or, for a constant
     // of a strict file, a name it mentions or a function it calls changed in another file.
     // The latter can flip a name no dirty item writes, so every name is a candidate, unless
-    // the analysis reused the whole map. A full load binds every name, so nothing flips.
+    // the analysis reused the whole map. A full load has no clean file for a flip to reach.
     let flipped: FxHashSet<&str> = if full || Arc::ptr_eq(&old.bindings, &index.bindings) {
         FxHashSet::default()
     } else {
