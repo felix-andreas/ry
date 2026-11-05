@@ -75,6 +75,16 @@ pub struct Call<'a> {
 
 pub type BuiltinFn = unsafe fn(&Call<'_>) -> R<Sexp>;
 
+/// Whether `value` is a ry record or `I64`, which a builtin that refuses ry values raises an
+/// error for, so a [`UnaryFn`] declines it.
+pub unsafe fn is_native_value(value: Sexp) -> bool {
+    matches!(value.kind(), SexpType::Record | SexpType::I64)
+}
+
+/// A builtin's result for one argument value when that takes no dispatch, no checks and no
+/// handle scope, or `None` for the full call (see [`BuiltinDef::unary`]).
+pub type UnaryFn = unsafe fn(Sexp) -> R<Option<Sexp>>;
+
 pub struct BuiltinDef {
     pub name: &'static str,
     pub kind: Kind,
@@ -96,6 +106,12 @@ pub struct BuiltinDef {
     /// Derived from the fields above by [`register`].
     pub checks: Checks,
     pub function: BuiltinFn,
+    /// The result for one untagged argument in the common case, which a compiled call tries
+    /// before the full call: set by [`BuiltinDef::unary`] on builtins such as `is.null` and
+    /// `length` whose call costs several times their work. It must decline every value the
+    /// full call would treat differently (an object that dispatches, a ry value the builtin
+    /// refuses, an ALTREP vector), and its result is visible.
+    pub unary: Option<UnaryFn>,
     pub object: Option<Sexp>,
 }
 
@@ -171,6 +187,7 @@ pub const fn builtin(name: &'static str, arity: i32, function: BuiltinFn) -> Bui
         reuses_first_argument: false,
         checks: Checks::UNDERIVED,
         function,
+        unary: None,
         object: None,
     }
 }
@@ -213,6 +230,13 @@ impl BuiltinDef {
 
     pub const fn generic(self, generic: Generic) -> BuiltinDef {
         BuiltinDef { generic, ..self }
+    }
+
+    pub const fn unary(self, unary: UnaryFn) -> BuiltinDef {
+        BuiltinDef {
+            unary: Some(unary),
+            ..self
+        }
     }
 
     /// GNU R's `DispatchOrEval`, for the specials `[`, `[[`, `[<-` and `[[<-`: the evaluator
@@ -273,6 +297,7 @@ impl BuiltinDef {
             reuses_first_argument: self.reuses_first_argument,
             checks: self.checks,
             function: self.function,
+            unary: self.unary,
             object: self.object,
         }
     }
