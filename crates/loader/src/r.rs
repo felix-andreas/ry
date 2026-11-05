@@ -163,6 +163,12 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
             RValue::Logical(plan.run.iter().any(|code| code.registers_s4)),
         ),
         (
+            "s4_eager_reason".into(),
+            plan.s4_eager_reason
+                .as_ref()
+                .map_or(RValue::Null, |reason| RValue::Character(vec![reason.clone()])),
+        ),
+        (
             "deferred_s4".into(),
             plan.deferred_s4.as_ref().map_or(RValue::Null, |deferred| {
                 RValue::List(vec![

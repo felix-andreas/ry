@@ -5922,6 +5922,12 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   when either side is a held-back class; `as()` reaches it through `.quickCoerceSelect`, which
   reads the label placeholder. A coercion between other packages' classes runs in place. Before,
   any `setAs` made the unit eager because `setAs` was not in `PURE_S4_READS`.
+- **S4 calls are matched as R matches arguments** (`match_arguments` and `s4_formals` in
+  `crates/semantics/src/load_index.rs`): exact names, then unique partial names, then positions,
+  against each definition function's formals. Reading arguments by name alone missed
+  `setAs(from =, to =, function(from) ...)` and `setClassUnion("U", mem = ...)`, which kept the
+  whole package eager. A load that keeps S4 in place reports the first definition that forces it
+  (`deferred_s4` returns `Err(reason)`, printed by `runtime.R` under `ry.load.verbose`).
 - **No `cacheMetaData` while held back** (`.ry_apply`). The sync after a load called
   `cacheMetaData`, which reads every `.__C__`/`.__T__` binding and so forced the unit. Each
   definition already caches what it defines as it runs, and `.ry_force_s4` ends with the same
@@ -6650,6 +6656,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Shape.** `library_candidates` (`crates/interp/src/linalg.rs`) tries, in order: the sonames, so `LD_LIBRARY_PATH` stays the user's override and a distribution's R gets the library it links; Accelerate on macOS; each library `BLAS_LIBS` (and for LAPACK, `LAPACK_LIBS` then `BLAS_LIBS`) names, in its `-L` directories and then by soname; and `R_HOME/lib/libRblas`/`libRlapack` last, because R's own libraries leave `xerbla_` to GNU R's `libR`. A candidate must define every routine of the table, so a BLAS tried for LAPACK is passed over. Opening LAPACK loads BLAS first, so a LAPACK whose BLAS sits in a directory of its own resolves the dependency by soname. A failure lists every place searched and the fix.
 - **One Makeconf reader.** `make_assignments` and `expand_make` live in `crates/rcmd/src/makeconf.rs`, which `interp` includes by path, as `repl` includes `gnu_r_home.rs`. `Toolchain::for_gnu_r_home` on Linux keeps the default compilers but takes `BLAS_LIBS` and `LAPACK_LIBS` from GNU R's `Makeconf` (`Toolchain::with_makeconf_libraries`), so compiled packages link the same libraries the interpreter loads.
 - **Impact.** No change where the sonames load. `La_library()` already reports the file the routines came from; `extSoftVersion()["BLAS"]` now does too. The candidate order is pinned by unit tests in `linalg.rs` and `rcmd.rs`.
+
+- **ry carries the last resort on Linux.** A release archive held only `libR`, so a system with neither library (NixOS without GNU R) had nothing left to load. `tools/base-r/lapack.sh` builds GNU R's reference `libRblas.so` and `libRlapack.so` beside the runtime; `repl`'s build script embeds them with it, and `rcmd::assemble` links them into the R home's `lib/`, where the existing last candidates find them. They define `xerbla_` in libRblas rather than in libR, so libR still does not interpose on a system BLAS's handler, and they link no Fortran runtime (`tools/base-r/fortran.c` supplies the one routine they need), because libgfortran's static archive is not position independent on Ubuntu and a system without LAPACK rarely has the shared one. The smoke test hides the system's libraries in a user and mount namespace and runs `solve()`.
 
 ## Reference Class and R6 method bodies resolve object members in naming
 
@@ -7568,7 +7576,13 @@ Each one trades a narrow class of missed errors for a class of false reports see
   direct superclasses go through `setIs`; `completeSubclasses` then records the new class in each
   ancestor only when `possibleExtends(new, ancestor)` is false, so a union that already lists the
   new class or any direct superclass among its subclasses is skipped (a later subclass of a union
-  member is not added to the union). The class cache and the namespace binding of a superclass
+  member is not added to the union). A class whose ancestor is a union member follows GNU R's
+  order exactly: ancestors are recorded first (a union already related to the class is skipped,
+  any other union re-caches its subclasses' `contains` right after, resorting them by distance and
+  dropping their `conflicts` attribute as R's sort does), and only then the direct superclasses,
+  where the first one is recorded on the definition read before those steps and later ones on a
+  fresh read (`record_subclasses`, `recache_subclasses`). Recaching bails when a union member is
+  not cached yet or has a non-numeric distance (`recachable`). The class cache and the namespace binding of a superclass
   may legitimately differ after `setClassUnion` (GNU R orders the extensions differently in each),
   and `getClassDef` reads the cache, so `local_class` takes the cached definition and only
   requires a binding to exist. `prototype()` objects reduce to the list `do.call("prototype",
@@ -7579,7 +7593,13 @@ Each one trades a narrow class of missed errors for a class of false reports see
   `rematchDefinition` gives: the generic's formals, `.local <- definition; .local(args)`, args
   after `...` and from the first `missing` signature position passed by name, and the method's
   defaults kept unless they are a symbol or missing (`.copyMethodDefaults` then `matchDefaults`).
-  A renamed single argument, an omitted argument, a different order or a method without `...` bail.
+  A method that only omits the generic's `...` gets the generic's formals in place, with its own
+  body and environment, as `conformMethod` and `rematchDefinition` leave it. An omitted argument
+  bails only when the signature names it (R then fills `missing` into the signature), and a renamed
+  argument becomes a `.local` wrapper. A different order, or added formals with no `...` in the
+  generic, bail.
+- **`setGeneric` accepts a braced body.** `function(x) { standardGeneric("f") }` gives a
+  `nonstandardGenericFunction`, as GNU R's `.NonstandardGenericTest` does; any other body bails.
 - **Every fallback says why.** `bail!(skip, "reason")` records the reason and line, and
   `report_fallback` prints them under `RY_LOAD_VERBOSE` for the four definition functions, so a
   slow load names the definitions to fix without a profiler (`reference/package-loading.md`).

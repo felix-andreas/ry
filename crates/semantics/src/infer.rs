@@ -53,6 +53,11 @@ pub struct Snapshot {
 pub struct InferenceTable<'db> {
     entries: Vec<Entry<'db>>,
     undo: Vec<(InferenceVar, Entry<'db>)>,
+    /// The variables that type a literal whose use decides its type, oldest first, each with
+    /// whether its default is a ry type (a `List` item) rather than R's (a variable written with
+    /// a literal). The table owns them so that a rollback drops a discarded variable together
+    /// with its entry: a stale record would default whichever variable reuses its id.
+    literals: Vec<(InferenceVar, bool)>,
     pub level: u32,
     /// `None` (no globals at all) reads as an empty table.
     pub definitions: Option<TypeDefinitions<'db>>,
@@ -108,6 +113,27 @@ impl<'db> InferenceTable<'db> {
         Ty::new(db, TyKind::Var(var))
     }
 
+    /// A fresh variable for a literal whose use decides its type; `native` makes its default a
+    /// ry type.
+    pub fn fresh_literal(&mut self, constraint: Constraint, native: bool) -> InferenceVar {
+        let var = self.fresh(constraint);
+        self.literals.push((var, native));
+        var
+    }
+
+    /// The literal variables, oldest first, with whether each defaults to a ry type.
+    pub fn literals(&self) -> &[(InferenceVar, bool)] {
+        &self.literals
+    }
+
+    /// The literal variable that `representative` stands for, if any.
+    pub fn literal_of(&self, representative: InferenceVar) -> Option<(InferenceVar, bool)> {
+        self.literals
+            .iter()
+            .find(|(literal, _)| self.find(*literal) == representative)
+            .copied()
+    }
+
     /// The id the next fresh variable gets, so a caller can tell the variables it creates
     /// from here on.
     pub fn next_var(&self) -> InferenceVar {
@@ -130,6 +156,14 @@ impl<'db> InferenceTable<'db> {
             }
         }
         self.entries.truncate(snapshot.entries);
+        // Ids grow with creation, so the discarded literals are the newest.
+        while self
+            .literals
+            .last()
+            .is_some_and(|(var, _)| var.0 as usize >= snapshot.entries)
+        {
+            self.literals.pop();
+        }
     }
 
     fn set(&mut self, var: InferenceVar, entry: Entry<'db>) {

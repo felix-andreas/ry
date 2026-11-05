@@ -60,6 +60,7 @@ rebuild imports (0 directives)
 source R/a.R
 run R/a.R:1 setClass("Sq", representation(side = "numeric"))
 run R/a.R:2 setMethod("show", "numeric", function(object) cat("number\n"))
+S4 runs at load: R/a.R:2: a method for another package's generic `show` whose signature names none of the package's classes
 sync exports
 run .onLoad
 
@@ -99,12 +100,13 @@ run .onLoad
 #---- a_reference_class_keeps_everything_eager
 #~~~~ R/a.R
 setClass("Sq", representation(side = "numeric"))
-Account <- setRefClass("Account", fields = list(total = "numeric"))
+Account <- setRefClass("Account", fields = list(total = "numeric"), sealed = FALSE)
 #++++
 rebuild imports (0 directives)
 source R/a.R
 run R/a.R:1 setClass("Sq", representation(side = "numeric"))
-run R/a.R:2 Account <- setRefClass("Account", fields = list(total = "numeric"))
+run R/a.R:2 Account <- setRefClass("Account", fields = list(total = "numeric"), sealed = FALSE)
+S4 runs at load: R/a.R:2 is an S4 registration the loader cannot hold back; only `setClass`, `setGeneric` with its own definition, `setMethod`, `setReplaceMethod`, `setValidity`, `setClassUnion` and `setAs` with literal names can wait
 sync exports
 run .onLoad
 
@@ -117,6 +119,7 @@ rebuild imports (0 directives)
 source R/a.R
 run R/a.R:1 setClass("Sq", representation(side = "numeric"), prototype(side = DEFAULT))
 run R/a.R:2 DEFAULT <- 1
+S4 runs at load: R/a.R:1 reads `DEFAULT`, which is written more than once or only after it
 sync exports
 run .onLoad
 
@@ -129,6 +132,7 @@ rebuild imports (0 directives)
 source R/a.R
 run R/a.R:1 Sq <- setClass("Sq", representation(side = "numeric"))
 run R/a.R:2 Sq <- function(...) new("Sq", ...)
+S4 runs at load: R/a.R:1 binds `Sq`, which another statement writes too
 sync exports
 run .onLoad
 
@@ -227,6 +231,7 @@ source R/a.R
 run R/a.R:1 setClass("Sq", representation(side = "numeric"))
 run R/a.R:2 setClassUnion("SqOrNull", c("Sq", "NULL"))
 run R/a.R:3 setMethod("show", "SqOrNull", function(object) cat("square or nothing\n"))
+S4 runs at load: R/a.R:3: a method for another package's generic `show` on the class union "SqOrNull", whose members include other packages' classes
 sync exports
 run .onLoad
 
@@ -273,5 +278,50 @@ hold back R/a.R:2 setMethod("length", "Sq", function(x) 4L)
 hold back R/a.R:3 setMethod("as.list", "Sq", function(x, ...) list(x@side))
 placeholders .__C__Sq
 forced by other packages' generics as.list length
+sync exports
+run .onLoad
+
+#---- a_coercion_with_named_from_and_to_and_a_positional_definition_is_held_back
+#~~~~ R/a.R
+setClass("A", representation(a = "numeric"))
+setClass("B", representation(b = "numeric"))
+setAs(from = "A", to = "B", function(from) new("B", b = from@a))
+#++++
+rebuild imports (0 directives)
+source R/a.R
+hold back R/a.R:1 setClass("A", representation(a = "numeric"))
+hold back R/a.R:2 setClass("B", representation(b = "numeric"))
+hold back R/a.R:3 setAs(from = "A", to = "B", function(from) new("B", b = from@a))
+placeholders .__C__A .__C__B
+forced by other packages' generics coerce
+sync exports
+run .onLoad
+
+#---- a_union_whose_members_argument_is_partially_named_is_held_back
+#~~~~ R/a.R
+setClass("A", representation(a = "numeric"))
+setClassUnion("AorNULL", member = c("A", "NULL"))
+#++++
+rebuild imports (0 directives)
+source R/a.R
+hold back R/a.R:1 setClass("A", representation(a = "numeric"))
+hold back R/a.R:2 setClassUnion("AorNULL", member = c("A", "NULL"))
+placeholders .__C__A .__C__AorNULL
+sync exports
+run .onLoad
+
+#---- a_generic_with_a_group_argument_is_held_back
+#~~~~ R/a.R
+setClass("Sq", representation(side = "numeric"))
+setGeneric("area", function(shape) standardGeneric("area"), group = list())
+setMethod("area", "Sq", function(shape) shape@side^2)
+#++++
+rebuild imports (0 directives)
+source R/a.R
+hold back R/a.R:1 setClass("Sq", representation(side = "numeric"))
+hold back R/a.R:2 setGeneric("area", function(shape) standardGeneric("area"), group = list())
+hold back R/a.R:3 setMethod("area", "Sq", function(shape) shape@side^2)
+placeholders .__C__Sq .__T__area:demo area
+generics run on first use area
 sync exports
 run .onLoad
