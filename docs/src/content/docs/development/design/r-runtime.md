@@ -657,7 +657,8 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   instruction words before it compiles, because compile cost grows with size (about 10 µs per
   word, 200 ms for `rbind`) and the saving per entry does not, and the wait doubles with each
   recompile. Tier 0 records type feedback
-  only for a body halfway to either threshold, or one with compiled code. The thresholds are high because Cranelift is an
+  only for a body halfway to either threshold, one with compiled code, and the first activation of
+  a body with a loop. The thresholds are high because Cranelift is an
   optimizing compiler: a lower one compiled the methods package's code that a package load runs
   only a few dozen times, which made the load slower, and on a test suite, whose bodies mostly run
   a few hundred to a few thousand times, 1000 entries cost more to compile than it saved. A fully typed closure, one with an inline

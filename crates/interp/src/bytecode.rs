@@ -302,16 +302,17 @@ pub mod profile {
     pub const BACK_EDGES: usize = 1;
     /// The optimizing tier's state for this code, which only that tier interprets.
     pub const TIER_STATE: usize = 2;
-    /// Nonzero while tier 0 records type feedback for this code: from the start for a body
-    /// with a loop, and once a body has optimized code or is halfway to the entry threshold.
-    /// Recording costs a type test and a store per value, and most bodies never get near a
-    /// threshold, so recording from the first entry made every call of cold package code slower
-    /// with the optimizing tier installed than without it. Half a threshold of activations still
-    /// sees every type a compile would specialize on. A loop is different: it can turn hot
-    /// inside a body's only activation, and compiling it needs the types of the instructions
-    /// that ran before it, which starting to record at the loop would miss. The decision is one
-    /// word, read at every activation, because deciding it there from the code's other
-    /// constants cost 25 instructions per call.
+    /// Nonzero while tier 0 records type feedback for this code: during the first activation
+    /// of a body with a loop, once a body is halfway to the entry or the back-edge threshold,
+    /// and while it has optimized code. Recording costs a type test and a store per value, and
+    /// most bodies never get near a threshold, so recording from the first entry made every
+    /// call of cold package code slower with the optimizing tier installed than without it.
+    /// Half a threshold still sees every type a compile would specialize on. A loop can turn hot
+    /// inside a body's only activation, so a loop that reaches half its threshold starts
+    /// recording in the running activation, and the first activation records the instructions
+    /// before the loop, which that would miss. The decision is one word, read at every
+    /// activation, because deciding it there from the code's other constants cost 25
+    /// instructions per call.
     pub const RECORDING: usize = 3;
     pub const LENGTH: usize = 4;
 }
@@ -3127,11 +3128,15 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
         mark,
         loops: &mut loops,
     };
-    if let Some(tier) = interp().bytecode.tier
-        && entries == tier.entry_threshold / 2
-        && profile[profile::TIER_STATE] >= 0
-    {
-        profile[profile::RECORDING] = 1;
+    if let Some(tier) = interp().bytecode.tier {
+        if entries == tier.entry_threshold / 2 && profile[profile::TIER_STATE] >= 0 {
+            profile[profile::RECORDING] = 1;
+        } else if entries == 2
+            && entries < tier.entry_threshold / 2
+            && constants.element(TIER1) == nil()
+        {
+            profile[profile::RECORDING] = 0;
+        }
     }
     // Most bodies never compile, and asking the tier about every call of every body cost more
     // than the compiled code saved on a test suite.
@@ -3613,7 +3618,7 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
         if let Err(unwind) = crate::unwind::poll_interrupt() {
             pc = failed::<SINGLE>(state, at, unwind);
         } else if let Some(tier) = (*state.interp).bytecode.tier {
-            match back_edge(state.machine, &tier, pc) {
+            match back_edge(state, &tier, pc) {
                 BackEdge::Continue(resume) => pc = resume,
                 BackEdge::Finished(result) => {
                     state.exit = result;
@@ -3650,7 +3655,7 @@ unsafe extern "C" fn step_jump(state: *mut std::ffi::c_void, at: usize) -> usize
             if let Err(unwind) = crate::unwind::poll_interrupt() {
                 pc = failed::<false>(state, at, unwind);
             } else if let Some(tier) = (*state.interp).bytecode.tier {
-                match back_edge(state.machine, &tier, pc) {
+                match back_edge(state, &tier, pc) {
                     BackEdge::Continue(resume) => pc = resume,
                     BackEdge::Finished(result) => {
                         state.exit = result;
@@ -4292,9 +4297,14 @@ enum BackEdge {
 }
 
 #[inline(never)]
-unsafe fn back_edge(machine: &mut Machine<'_>, tier: &Tier, pc: usize) -> BackEdge {
+unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> BackEdge {
+    let machine = &mut *state.machine;
     let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
     profile[profile::BACK_EDGES] = profile[profile::BACK_EDGES].saturating_add(1);
+    if profile[profile::BACK_EDGES] == tier.back_edge_threshold / 2 {
+        profile[profile::RECORDING] = 1;
+        state.feedback = values::ints_mut(machine.code.cdr().element(FEEDBACK)).as_mut_ptr();
+    }
     if profile[profile::BACK_EDGES] == tier.baseline_threshold
         && machine.code.cdr().element(BASELINE) == nil()
     {

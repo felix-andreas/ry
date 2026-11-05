@@ -7941,9 +7941,9 @@ Each one trades a narrow class of missed errors for a class of false reports see
 ## Tier 0 records feedback only for bodies halfway to a threshold
 
 - **Previous shape.** `warm()` decided at every activation whether tier 0 should record type feedback, from the code's other constants: about 25 instructions per call, 30 to 60M instructions on `objects`. Bodies with a loop recorded from their first entry.
-- **Chosen shape.** One profile word, `profile::RECORDING` (`crates/interp/src/bytecode.rs`), set when a body reaches half the entry threshold, when its loop reaches half the back-edge threshold (inside the running activation, so a loop in a body's only activation still has feedback when it compiles), and when tier-1 code is installed, so a deoptimized activation records the profile the next compile reads.
-- **Loop bodies still record from their first entry.** Starting at half the back-edge threshold instead left the instructions before the loop without feedback, and the on-stack compile handed the loop's `SubAssign` back to tier 0: a scalar loop ran 0.40 s instead of 0.04 s.
-- **Impact.** The tier machinery with nothing compiling (`RY_JIT_THRESHOLDS=0,0,0`) costs 0.0 to 1.2% more instructions than `RY_JIT=off` on the `bench-real` workloads (geomean 0.6%), mostly feedback recording in bodies with loops.
+- **Chosen shape.** One profile word, `profile::RECORDING` (`crates/interp/src/bytecode.rs`). It is on during the first activation of a body with a loop, when a body reaches half the entry threshold, when its loop reaches half the back-edge threshold (inside the running activation), and while tier-1 code is installed, so a deoptimized activation records the profile the next compile reads.
+- **Why the first activation of a loop body records.** Starting only at half the back-edge threshold left the instructions before the loop without feedback, and the on-stack compile handed the loop's `SubAssign` back to tier 0: a scalar loop ran 0.40 s instead of 0.04 s. Recording in every activation of a loop body instead cost base `Reduce`, `Filter` and `Map` a type test and store per value on every call.
+- **Impact.** The tier machinery with nothing compiling (`RY_JIT_THRESHOLDS=0,0,0`) costs 0.0 to 0.9% more instructions than `RY_JIT=off` on the `bench-real` workloads (geomean 0.5%). Cachegrind on `functional` shows I1 misses up 3.5% and D1 misses up 1%, so the 4 to 5% wall gap single runs show is noise.
 
 ## Tier 1 keeps the 3000-entry threshold
 
