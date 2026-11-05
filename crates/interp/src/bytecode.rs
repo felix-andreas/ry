@@ -1953,8 +1953,8 @@ impl Compiler {
 
     /// Whether evaluating the subscript `index` cannot change a variable of the frame, so the
     /// compiled assignment may evaluate it before reading the target: a variable of the frame (a
-    /// formal's promise runs in the caller's frame), a numeric constant, or base arithmetic on
-    /// those.
+    /// formal's promise runs in the caller's frame), a numeric constant, a name, or base
+    /// arithmetic on variables and numbers.
     unsafe fn side_effect_free_index(&self, index: Sexp, depth: u32) -> bool {
         match index.kind() {
             SexpType::Symbol => {
@@ -1970,6 +1970,8 @@ impl Compiler {
             SexpType::Integer | SexpType::Real => {
                 length(index) == 1 && !values::has_attributes(index)
             }
+            // A name is a subscript, but an operand of arithmetic would be an error.
+            SexpType::String => depth == 0 && length(index) == 1 && !values::has_attributes(index),
             SexpType::Language if depth < 8 && index.car().kind() == SexpType::Symbol => {
                 let operator = symbol_name(index.car());
                 let arguments = values::pairlist_items(index.cdr());
@@ -4174,9 +4176,13 @@ unsafe fn assign_element_in_place(
         // `$<-` on a list replaces the first element whose name matches exactly; a name `x`
         // lacks appends an element, which `complex_assign` does.
         SexpType::String => {
+            // An empty or `NA` name matches no element.
             let wanted = index.element(0);
             let names = values::get_attr(target, symbols().names);
-            if wanted == values::na_string() || names.kind() != SexpType::String {
+            if wanted == values::na_string()
+                || wanted.bytes().is_empty()
+                || names.kind() != SexpType::String
+            {
                 return Ok(false);
             }
             let wanted_bytes = wanted.bytes();
