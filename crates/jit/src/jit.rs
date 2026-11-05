@@ -83,9 +83,6 @@ impl Mode {
 const ENTRY_THRESHOLD: i32 = 3000;
 /// Backward jumps a body takes before a loop compiles, in the default mode, for the same reason.
 const BACK_EDGE_THRESHOLD: i32 = 10_000;
-/// Entries or backward jumps after which a body gets baseline code. Baseline code costs a few
-/// microseconds to compile, about as much as interpreting a body a few dozen times.
-const BASELINE_THRESHOLD: i32 = 200;
 /// Tier 1 compiles a body in time that grows with its length, about 10 us per instruction word,
 /// while a hot body's saving per entry depends on how much of it runs, not on how long it is.
 /// So in the default mode a body longer than this many words, on turning hot, waits for one more
@@ -114,13 +111,19 @@ pub fn install_mode(mode: Mode) {
             bytecode::set_tier(None);
             return;
         }
-        Mode::On => (ENTRY_THRESHOLD, BACK_EDGE_THRESHOLD, BASELINE_THRESHOLD),
+        // Baseline code calls tier 0's step for every instruction, which saves instructions but
+        // spreads a hot path over more code than tier 0's shared handlers: with bodies getting it
+        // at 200 entries, `validation` ran 1% fewer instructions with 8% more instruction-cache
+        // misses and 5% more mispredicted branches, and more wall time. The default leaves it out
+        // until it inlines the common instructions' fast paths.
+        Mode::On => (ENTRY_THRESHOLD, BACK_EDGE_THRESHOLD, i32::MAX),
         // Compiling on the second run rather than the first gives the compiled code the type
         // feedback of one interpreted run, so forced compilation exercises the specialized paths.
         Mode::Force => (2, 1, 1),
         Mode::Baseline => (i32::MAX, i32::MAX, 1),
     };
-    let (entries, back_edges, baseline) = thresholds_override().unwrap_or((entries, back_edges, baseline));
+    let (entries, back_edges, baseline) =
+        thresholds_override().unwrap_or((entries, back_edges, baseline));
     MODE.with(|current| current.set(mode));
     bytecode::set_tier(Some(Tier {
         enter,
@@ -137,11 +140,13 @@ pub fn install_mode(mode: Mode) {
 /// them; `0` stands for never.
 fn thresholds_override() -> Option<(i32, i32, i32)> {
     let text = std::env::var("RY_JIT_THRESHOLDS").ok()?;
-    let mut parts = text.split(',').map(|part| match part.trim().parse::<i32>() {
-        Ok(0) => Some(i32::MAX),
-        Ok(value) => Some(value),
-        Err(_) => None,
-    });
+    let mut parts = text
+        .split(',')
+        .map(|part| match part.trim().parse::<i32>() {
+            Ok(0) => Some(i32::MAX),
+            Ok(value) => Some(value),
+            Err(_) => None,
+        });
     Some((parts.next()??, parts.next()??, parts.next()??))
 }
 
@@ -473,8 +478,7 @@ unsafe fn compile_in<'a>(
                 plan.speculations.len(),
                 if portable { ", portable" } else { "" },
                 plan.native_actions(),
-                plan
-                    .actions
+                plan.actions
                     .iter()
                     .filter(|action| matches!(action, analysis::Action::Inline { .. }))
                     .count(),
