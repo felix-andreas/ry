@@ -5922,6 +5922,12 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   when either side is a held-back class; `as()` reaches it through `.quickCoerceSelect`, which
   reads the label placeholder. A coercion between other packages' classes runs in place. Before,
   any `setAs` made the unit eager because `setAs` was not in `PURE_S4_READS`.
+- **S4 calls are matched as R matches arguments** (`match_arguments` and `s4_formals` in
+  `crates/semantics/src/load_index.rs`): exact names, then unique partial names, then positions,
+  against each definition function's formals. Reading arguments by name alone missed
+  `setAs(from =, to =, function(from) ...)` and `setClassUnion("U", mem = ...)`, which kept the
+  whole package eager. A load that keeps S4 in place reports the first definition that forces it
+  (`deferred_s4` returns `Err(reason)`, printed by `runtime.R` under `ry.load.verbose`).
 - **No `cacheMetaData` while held back** (`.ry_apply`). The sync after a load called
   `cacheMetaData`, which reads every `.__C__`/`.__T__` binding and so forced the unit. Each
   definition already caches what it defines as it runs, and `.ry_force_s4` ends with the same
@@ -6650,6 +6656,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Shape.** `library_candidates` (`crates/interp/src/linalg.rs`) tries, in order: the sonames, so `LD_LIBRARY_PATH` stays the user's override and a distribution's R gets the library it links; Accelerate on macOS; each library `BLAS_LIBS` (and for LAPACK, `LAPACK_LIBS` then `BLAS_LIBS`) names, in its `-L` directories and then by soname; and `R_HOME/lib/libRblas`/`libRlapack` last, because R's own libraries leave `xerbla_` to GNU R's `libR`. A candidate must define every routine of the table, so a BLAS tried for LAPACK is passed over. Opening LAPACK loads BLAS first, so a LAPACK whose BLAS sits in a directory of its own resolves the dependency by soname. A failure lists every place searched and the fix.
 - **One Makeconf reader.** `make_assignments` and `expand_make` live in `crates/rcmd/src/makeconf.rs`, which `interp` includes by path, as `repl` includes `gnu_r_home.rs`. `Toolchain::for_gnu_r_home` on Linux keeps the default compilers but takes `BLAS_LIBS` and `LAPACK_LIBS` from GNU R's `Makeconf` (`Toolchain::with_makeconf_libraries`), so compiled packages link the same libraries the interpreter loads.
 - **Impact.** No change where the sonames load. `La_library()` already reports the file the routines came from; `extSoftVersion()["BLAS"]` now does too. The candidate order is pinned by unit tests in `linalg.rs` and `rcmd.rs`.
+
+- **ry carries the last resort on Linux.** A release archive held only `libR`, so a system with neither library (NixOS without GNU R) had nothing left to load. `tools/base-r/lapack.sh` builds GNU R's reference `libRblas.so` and `libRlapack.so` beside the runtime; `repl`'s build script embeds them with it, and `rcmd::assemble` links them into the R home's `lib/`, where the existing last candidates find them. They define `xerbla_` in libRblas rather than in libR, so libR still does not interpose on a system BLAS's handler, and they link no Fortran runtime (`tools/base-r/fortran.c` supplies the one routine they need), because libgfortran's static archive is not position independent on Ubuntu and a system without LAPACK rarely has the shared one. The smoke test hides the system's libraries in a user and mount namespace and runs `solve()`.
 
 ## Reference Class and R6 method bodies resolve object members in naming
 
@@ -7568,7 +7576,13 @@ Each one trades a narrow class of missed errors for a class of false reports see
   direct superclasses go through `setIs`; `completeSubclasses` then records the new class in each
   ancestor only when `possibleExtends(new, ancestor)` is false, so a union that already lists the
   new class or any direct superclass among its subclasses is skipped (a later subclass of a union
-  member is not added to the union). The class cache and the namespace binding of a superclass
+  member is not added to the union). A class whose ancestor is a union member follows GNU R's
+  order exactly: ancestors are recorded first (a union already related to the class is skipped,
+  any other union re-caches its subclasses' `contains` right after, resorting them by distance and
+  dropping their `conflicts` attribute as R's sort does), and only then the direct superclasses,
+  where the first one is recorded on the definition read before those steps and later ones on a
+  fresh read (`record_subclasses`, `recache_subclasses`). Recaching bails when a union member is
+  not cached yet or has a non-numeric distance (`recachable`). The class cache and the namespace binding of a superclass
   may legitimately differ after `setClassUnion` (GNU R orders the extensions differently in each),
   and `getClassDef` reads the cache, so `local_class` takes the cached definition and only
   requires a binding to exist. `prototype()` objects reduce to the list `do.call("prototype",
@@ -7579,7 +7593,13 @@ Each one trades a narrow class of missed errors for a class of false reports see
   `rematchDefinition` gives: the generic's formals, `.local <- definition; .local(args)`, args
   after `...` and from the first `missing` signature position passed by name, and the method's
   defaults kept unless they are a symbol or missing (`.copyMethodDefaults` then `matchDefaults`).
-  A renamed single argument, an omitted argument, a different order or a method without `...` bail.
+  A method that only omits the generic's `...` gets the generic's formals in place, with its own
+  body and environment, as `conformMethod` and `rematchDefinition` leave it. An omitted argument
+  bails only when the signature names it (R then fills `missing` into the signature), and a renamed
+  argument becomes a `.local` wrapper. A different order, or added formals with no `...` in the
+  generic, bail.
+- **`setGeneric` accepts a braced body.** `function(x) { standardGeneric("f") }` gives a
+  `nonstandardGenericFunction`, as GNU R's `.NonstandardGenericTest` does; any other body bails.
 - **Every fallback says why.** `bail!(skip, "reason")` records the reason and line, and
   `report_fallback` prints them under `RY_LOAD_VERBOSE` for the four definition functions, so a
   slow load names the definitions to fix without a profiler (`reference/package-loading.md`).
@@ -7915,6 +7935,14 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **`Reduce`** (`ryReduce`) covers `accumulate = FALSE` over a plain vector with a closure or builtin `f`, both directions, `init` given or not. It binds `mis`, `len`, `f`, `init` and `i` in Reduce's frame as the body does, and calls `f` through `eval::call_with_values`: forced promises of the body's own expressions `init` and `x[[i]]`, so `sys.call()` and `substitute()` inside `f` match. `right` and `accumulate` are forced in the body's order, which depends on whether `init` is missing.
 - **Measurement.** `validation` (bench-real harness, 3 processes): GNU R 4.3.3 0.660 s, ry 0.353 s with the JIT on and 0.373 s with it off (1.87x and 1.77x; it was 0.58 to 0.65x). Callgrind, JIT off, validation(1000) plus a warm-up run of 300, start-up included: 2.71G instructions before, 1.32G after (GNU R 3.16G). Per call: `format(2.5, nsmall = 3)` 4.7 µs (GNU R 13.9 µs, ry before 18 µs).
 - **Next candidates** from the same profile: `tryCatch` on the error path, `utils::modifyList` (needs an install hook when utils loads), `sprintf`, `vapply`.
+
+## Why the JIT made code slower, and the three fixes
+
+- **Measured.** `bench-real` put JIT on at 1.13x GNU R against 1.19x with it off. Callgrind (one cold and one warm run) showed JIT on costing 4 to 5% more instructions on `functional` and `records`. Wall time on the measuring VM varies by about 10% run to run, so most of the per-workload gap in the table was noise; what was real is below.
+- **Sibling enclosures re-walked every speculation.** Portable code (`Compiled::portable`) proved its lookups for one enclosure, and an activation from any other enclosure allocated a weak reference, re-pointed the proof at itself and walked every speculation. Closures from one `function` expression alternate enclosures constantly (`lapply(1:50, make_scaler)` then calling each), which made such a loop 2.7x slower than tier 0. An enclosure whose parent is the checked enclosure's parent now shares the proof and checks only its own frame for the rooted names (`runtime::sibling_of_checked`, `binds_rooted_function`): 0.74 s to 0.32 s on that loop (tier 0: 0.23 s).
+- **Revalidation after every helper.** Each variable load, tier-0 step and call from compiled code ran `valid`, about 50 instructions, even when the code it ran bound nothing. Any binding that could change a function lookup moves the binding epoch (watched names included), so `still_valid` skips the check when the epoch did not move. `functional`: 140M instructions of `valid` gone.
+- **`pkg::f(...)` calls were not compiled.** The bytecode compiler sent every call whose head is not a symbol to the AST evaluator, so a `function` argument of `purrr::map_dbl(x, function(v) ...)` became a new closure with its own body on every call: it compiled to bytecode, recorded feedback and compiled in tier 1 again on every run (24 of `functional`'s 33 tier-1 compiles). A call head that is a call now evaluates into a register and calls through `Op::CallGeneric`, so its arguments are compiled promises and the closure shares one body.
+- **What remains is compile cost.** Cranelift takes 0.5 to 1 ms for a five-instruction body and 263 ms for `rbind`'s (343 KB of code), 78% of `functional`'s and 40% of `records`' extra instructions. Warm runs do not pay it, but scripts and tests do. The baseline tier (the Sparkplug-style decision above) is the fix, not a cheaper Cranelift setting.
 
 ## Builtin fast paths take names as CHARSXPs and evaluate nothing twice
 

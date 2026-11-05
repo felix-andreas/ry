@@ -116,6 +116,32 @@ case "$ry" in
 *) output=$(run_ry run linalg.R 2>&1 | tr -d '\r') || true ;;
 esac
 if [ "$output" = "163 0.2 0.6 " ]; then pass "ry run calls BLAS and LAPACK"; else fail "ry run linear algebra: $output"; fi
+# A Linux without a system BLAS and LAPACK, such as NixOS, uses the reference libRblas and
+# libRlapack that ry carries beside its runtime. A user and mount namespace hides the system's by
+# mounting /dev/null over each file the loader cache names.
+case "$ry" in
+*.exe) ;;
+*)
+	if [ "$(uname -s)" = Linux ]; then
+		if ls "$scratch/cache/ry/runtime/"*/libRlapack.so "$scratch/cache/ry/runtime/"*/libRblas.so >/dev/null 2>&1; then
+			pass "ry carries libRblas.so and libRlapack.so"
+		else
+			fail "ry extracted no libRblas.so and libRlapack.so into $scratch/cache/ry/runtime"
+		fi
+		if command -v unshare >/dev/null 2>&1 && unshare -rm true 2>/dev/null; then
+			system=$(/sbin/ldconfig -p 2>/dev/null | awk '/lib(blas|lapack)\.so/ { print $NF }' | xargs -r realpath -e 2>/dev/null | sort -u | tr '\n' ' ')
+			output=$(env -u R_HOME unshare -rm sh -c 'for file in $1; do mount --bind /dev/null "$file"; done; shift; exec "$@"' sh "$system" "$ry" run linalg.R 2>&1 | tr -d '\r') || true
+			if [ "$output" = "163 0.2 0.6 " ]; then
+				pass "ry run falls back to its own BLAS and LAPACK"
+			else
+				fail "ry run linear algebra without the system's BLAS and LAPACK: $output"
+			fi
+		else
+			echo "skip  linear algebra without the system's BLAS and LAPACK (no user namespaces)"
+		fi
+	fi
+	;;
+esac
 
 # Compiled packages download from CRAN and need a C compiler, so they run only when asked.
 if [ -n "${RY_SMOKE_PACKAGES:-}" ]; then

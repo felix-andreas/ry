@@ -111,7 +111,9 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
   class-definition lookups, `tryNew` and the extension objects `setIs` builds. The R-level metadata becomes views produced from the table.
 - **What still falls back** (`RY_LOAD_VERBOSE=true ry load .` names each with its reason):
   classes with a basic-type or other-package superclass (`contains = "numeric"`, `"list"`,
-  `"data.frame"`, an old class), a second superclass that has superclasses of its own,
+  `"data.frame"`, an old class), a second superclass that has superclasses of its own, a class
+  under a union whose members are not all cached yet, a method that omits an argument its
+  signature names, a generic whose body is not `standardGeneric("f")` (braced or not),
   `setOldClass`, the first union of a session (dispatch caches not filled), a union of unions,
   `setMethod("[")` whose formals need rematching, and `cacheMetaData` delegating classes whose
   cached definition differs, other packages' generics, group generics and primitives.
@@ -135,6 +137,7 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 ## Open: collector throughput on the benchmark suites
 
 - **Measure first.** Generate the suites (`python3 tools/bench/generate.py --out .bench --lines 300000 --files 500`), install the corpus library (`just corpus`; the polars R package builds from source and takes the longest), then run `just bench-compare .bench/finbench .bench/dsbench .bench/biobench` with `RY_GC_LOG=<file>` set. The report's last block gives each runtime's `gc.time()` total and share of suite time; the log gives every pause (kind, nanoseconds, young small and large bytes, old bytes), from which pause p50 and p99 and collections per second follow. Fix the largest cost the numbers show, then check each object type's allocation path against `decisions.md`, "Data-oriented design and explicit allocators" (open audit items: "Open: data-oriented layouts and explicit allocators").
+- **`gc()`'s "max used" is sampled only at collections**, so it reads below the process peak (575 MB against an 833 MB VmHWM for a loop that makes and drops large vectors; GNU R reports 1,054 MB because it counts at allocation). Updating the peak on each large-vector allocation would match GNU R's meaning (`crates/heap/src/heap.rs`, `crates/heap/tests/test_gc.rs` `released_old_vectors_leave_the_peak_at_one_vector`).
 - **`for` over a compact `1:n` expands it.** Both tiers materialize the sequence (40 MB for ten million elements) before the loop; GNU R iterates the compact form. Iterating start and step directly removes the allocation, the page faults and `loop_sum`'s peak.
 - **Builder peaks still above GNU R's by more than 10%** (fresh process per case, 2e7 doubles, peak over the inputs in MB, ry against GNU R 4.3.3): `x * 2 + 1` 305/153 (GNU R writes the result into an unshared temporary operand; ry cannot take a reference count of 0 as proof yet, because bytecode registers and JIT slots hold uncounted references, `eval::reuse_permitted`), `seq(1, n, by = 1)` 381/305, `vapply(l, function(v) v + 1, numeric(1))` over a 1e6 list 112/58, `unlist` 20/4. `resolve()` in `crates/interp/src/subset.rs` still builds a `Vec<usize>` per general subscript.
 - **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `development/robustness.md`).
@@ -823,6 +826,16 @@ Where the time goes, JIT on, from `--profile-summary` on the nine workloads: tie
 (`timeseries`, xts and zoo), native code 14% (`tables`). Tier 1 runs under 3% of the time on all
 but `functional`: most hot code sits in closures called a few thousand times, under the entry
 threshold, so tier 0 and the call path decide the result.
+
+The testthat workload (`tools/bench/real/testthat.R`, 36 `test_that()` blocks per repeat) stands in
+for package CI. Its `--profile-summary`: tier 0 33%, builtins 26%, call setup 25%, GC 4.8%,
+compiled code 0.7%; 1.33M closure calls create 1.73M promises (1.30 per call, against 1.42 in a
+user's profile taken before promise elision), and a quarter of the calls go through the
+argument-match cache because they pass names or `...` (the counter counts cache hits too). Its
+callgrind profile is flat, with no function above 2% of instructions, so the gains are fewer
+ops per call (the baseline tier, inline predicate fast paths) rather than one hotspot. Open:
+promise elision covers few testthat arguments, because most are calls rather than constants or
+evaluated symbols; about 8 objects are allocated per closure call (10.9M freed over the run).
 
 Data-oriented audit of the call path, measured with `perf` on a tier-0 microbenchmark (3 million
 calls of `function(x, y = 2) x + y`, `RY_JIT=off`) and on `timeseries`. Fixed:
