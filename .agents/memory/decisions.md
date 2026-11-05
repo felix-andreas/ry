@@ -7808,9 +7808,15 @@ Each one trades a narrow class of missed errors for a class of false reports see
   language object the code points at is written as its preorder number in the body
   (`serialize::walk_source`). Nested function bodies are compiled eagerly at install
   (`bytecode::compile_nested_functions`) so their code is in the image too.
+- **Decoded at the first call, not at the fetch.** A fetch notes where each closure's code lies
+  (`code_image::State::pending`, keyed by body, the body preserved so its address cannot be
+  reused) and `bytecode::run_body` decodes it at the first call. Decoding at the fetch cost more
+  instructions on `library()` than it saved, because a namespace fetches many closures it never
+  calls (every registered S3 method).
 - **Stamp.** The runtime identity (`RY_RUNTIME_ID`, passed in `StartOptions::build`) and a layout
   magic; any other build reads the image as absent. Payloads carry a hash; a mismatch is an error
-  telling the user to reinstall, because the file is build output and corruption is not expected.
+  telling the user to reinstall, because the file is build output and corruption is not expected;
+  it is checked at the first decode from each record.
 - **Training.** A trained image keeps each code object's PROFILE counters, inline-cache hints and
   FEEDBACK words. Persisted entry counts at or above the tier-up threshold make a hot body enter the
   optimizing tier at its first call in a new process. TIER1 code and inline caches are not saved:

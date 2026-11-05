@@ -60,4 +60,9 @@ if (training == "tests") {
 }
 
 counts <- .Internal(ryCodeImageWrite(trained))
-cat(paste(names(counts), counts, sep = "=", collapse = " "), "\n", sep = "")
+summary <- sprintf("closures=%d written=%d", counts[["closures"]], counts[["written"]])
+left_out <- counts[-(1:2)]
+if (length(left_out)) {
+    summary <- sprintf("%s (left out: %s)", summary, paste0(names(left_out), " (", left_out, ")", collapse = ", "))
+}
+cat(summary, "\n", sep = "")

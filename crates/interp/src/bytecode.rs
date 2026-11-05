@@ -1,6 +1,7 @@
 //! The tier-0 bytecode interpreter.
 //!
-//! A closure body compiles to bytecode on its second call. The code replaces the body as a
+//! A closure body compiles to bytecode on its second call, unless its package's code image
+//! holds its code, which it takes at its first call. The code replaces the body as a
 //! `BCODESXP`, as GNU R stores compiled closures, so it lives and dies with the closure and
 //! everything that reads a body as source (`body()`, `deparse`, `identical`, serialization)
 //! goes through [`closure_body`], which returns the expression.
@@ -207,6 +208,9 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     if body.kind() == SexpType::Bytecode {
         return run(function, body, env);
     }
+    if let Some(code) = crate::code_image::take_pending(function, body)? {
+        return run(function, code, env);
+    }
     if !worth_compiling(body) {
         return eval::eval(body, env);
     }
@@ -251,6 +255,9 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Sexp> {
     let body = function.cdr();
     if body.kind() == SexpType::Bytecode {
         return Ok(body);
+    }
+    if let Some(code) = crate::code_image::take_pending(function, body)? {
+        return Ok(code);
     }
     match compile(body, function)? {
         Some(code) => {

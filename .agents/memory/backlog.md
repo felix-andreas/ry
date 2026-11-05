@@ -2487,6 +2487,18 @@ The end-to-end guard rests on the corpus suites.
 
 What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pressing first.
 
+- **Install-time native code.** A code image (`crates/interp/src/code_image.rs`) reserves an
+  offset and length for native code and writes zeros. The end shape compiles every package closure
+  through the shared SSA IR and the typed AOT pipeline at install, position-independent and stamped
+  as `typed-runtime.md` describes, so a session maps it instead of tiering up. It waits for tier 1's
+  IR to merge with the typed core's in `crates/jit` and `crates/typed` (`r-runtime.md`, "Code
+  images of installed packages").
+- **Code images are about six times the size of the lazy-load database** (MASS: 706 KB `.ryc`
+  against a 120 KB compressed `.rdb`), because instruction words, constants and feedback are
+  stored uncompressed. Compress payloads, or pack the instruction stream, if install size matters.
+- **The base packages have no code image.** GNU R's build makes `stats`, `utils` and the other
+  base packages' lazy-load databases without `R CMD INSTALL`, so their closures compile at first
+  call; the recommended packages, which `tools/base-r/build.sh` installs, do get images.
 - **Inline annotation checks have known holes** (typing reference, "Inline annotations at run time").
   A promise that escapes its frame unforced (returned inside a closure, or stored) is never checked,
   because the pending check is dropped at exit. A function without parameters whose body is a
@@ -2749,6 +2761,7 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
 
+- **Code images of installed packages.** `R CMD INSTALL` writes each closure's tier-0 code and, with `--ry-train`, its trained profile beside the lazy-load database. `decisions.md`, "Code images: compiled code beside the lazy-load database".
 - **Console attach and the data viewer.** `ry run` serves the debugger, a paged data viewer and live values over a Unix socket; VS Code attaches, opens `View()`, and hover/completion read the console. `decisions.md`, "A running console is a debug adapter".
 - **R Markdown and Quarto in the editor.** Chunks of a `.Rmd`/`.qmd`/`.Rnw` are one script for diagnostics, hover, completion and goto, and `ry fmt` formats each chunk. `decisions.md`, "Literate documents keep their offsets".
 - **Arrays.** `[1, 2, 3]` parses, formats, types as `Array<T>` and runs as a flagged R vector with strict operators and indexing. `decisions.md`, "An Array is a flagged R vector".

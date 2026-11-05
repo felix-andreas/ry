@@ -3,6 +3,11 @@
 //! `R/<package>.rdb`), so that a closure fetched from the database runs compiled code from its
 //! first call instead of compiling at its second.
 //!
+//! A fetch does not decode anything: it notes where each closure's code lies in the image, and
+//! the closure's first call decodes it ([`take_pending`]). A package's namespace fetches many
+//! closures it never calls (every S3 method it registers, for one), and those cost a table entry
+//! rather than a decoded code object.
+//!
 //! An image is build output, never a cache. It is stamped with the runtime build that wrote it,
 //! and a different build ignores it, so nothing ever checks whether its code is still current.
 //! Each record carries the length and hash of the database record it was compiled from, so an
@@ -50,8 +55,10 @@ use {
     },
     rustc_hash::FxHashMap,
     std::{
+        cell::Cell,
         collections::BTreeMap,
         path::{Path, PathBuf},
+        rc::Rc,
     },
 };
 
@@ -77,7 +84,10 @@ pub fn path(database: &str) -> PathBuf {
 /// image, so its absence is looked up once.
 #[derive(Default)]
 pub struct State {
-    images: FxHashMap<String, Option<Image>>,
+    images: FxHashMap<String, Option<Rc<Image>>>,
+    /// Per closure body fetched from an image but not called yet, where its code lies. Each body
+    /// is preserved while it waits, so its address cannot be reused by an unrelated object.
+    pending: FxHashMap<Sexp, Pending>,
     /// The fetches an install records while it loads the package it is writing images for.
     recording: Option<Recording>,
     /// The runtime build images are stamped with; empty when the host named none, which turns
@@ -88,6 +98,18 @@ pub struct State {
 struct Image {
     file: ImageFile,
     entries: Vec<Entry>,
+    /// One bit per entry, set once its payload's hash has been checked.
+    verified: Vec<Cell<u64>>,
+}
+
+/// Where the code of a fetched closure lies: `start..end` of the image's bytes, inside the
+/// payload of `entry`.
+struct Pending {
+    image: Rc<Image>,
+    database: Rc<str>,
+    entry: u32,
+    start: u32,
+    end: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,62 +201,164 @@ pub unsafe fn read_record(database: &str, record: Record, data: &[u8], hook: Sex
         record_fetch(database, record, &closures)?;
         return Ok(value);
     }
-    let Some(payload) = payload(database, record)? else {
+    let Some((image, entry)) = matching_entry(database, record) else {
         return serialize::unserialize(data, hook);
     };
     let (value, closures) = serialize::unserialize_with_closures(data, hook)?;
     crate::heap().root(value);
-    attach(&payload, &closures).map_err(|failure| {
-        error(format!(
-            "the code image {} is corrupt ({}); reinstall the package",
-            path(database).display(),
-            match failure {
-                Unwind::Error(failure) => failure.message,
-                _ => "interrupted".to_owned(),
-            }
-        ))
-    })?;
+    note_pending(&image, entry, database, &closures).map_err(|message| corrupt(database, &message))?;
     Ok(value)
 }
 
-/// A copy of the payload the image of `database` holds for `record`, when it was written for
-/// exactly this record. The copy is small, and the image's map stays valid only until the image is
-/// forgotten, which the record's own hook could do.
-unsafe fn payload(database: &str, record: Record) -> R<Option<Vec<u8>>> {
-    let Some(Some(image)) = interp().code_image.images.get(database) else {
-        return Ok(None);
-    };
-    let Ok(position) = image
-        .entries
-        .binary_search_by_key(&record.offset, |entry| entry.offset)
-    else {
-        return Ok(None);
-    };
-    let entry = image.entries[position];
-    if entry.length as usize != record.length || entry.hash != record.hash {
+/// The compiled code of `function`, whose body `body` was fetched from an image and has not run
+/// yet, decoded now and installed as its body. `None` when the body has no code waiting.
+///
+/// # Safety
+/// Runs on the interpreter's thread; `body` is `function`'s body.
+pub unsafe fn take_pending(function: Sexp, body: Sexp) -> R<Option<Sexp>> {
+    let state = &mut interp().code_image;
+    if state.pending.is_empty() {
         return Ok(None);
     }
-    let corrupt = || {
-        error(format!(
-            "the code image {} is corrupt; reinstall the package",
-            path(database).display()
-        ))
+    let Some(pending) = state.pending.remove(&body) else {
+        return Ok(None);
     };
-    let start = usize::try_from(entry.payload_offset).map_err(|_| corrupt())?;
+    let heap = crate::heap();
+    heap.release(body);
+    let code = decode_pending(&pending, body)
+        .map_err(|message| corrupt(&pending.database, &message))?;
+    heap.set_cdr(function, code);
+    Ok(Some(code))
+}
+
+fn corrupt(database: &str, message: &str) -> Unwind {
+    error(format!(
+        "the code image {} is corrupt ({message}); reinstall the package",
+        path(database).display()
+    ))
+}
+
+/// The image of `database` and the index of its entry for `record`, when it was written for
+/// exactly this record.
+fn matching_entry(database: &str, record: Record) -> Option<(Rc<Image>, usize)> {
+    let Some(Some(image)) = interp().code_image.images.get(database) else {
+        return None;
+    };
+    let position = image
+        .entries
+        .binary_search_by_key(&record.offset, |entry| entry.offset)
+        .ok()?;
+    let entry = image.entries[position];
+    (entry.length as usize == record.length && entry.hash == record.hash)
+        .then(|| (Rc::clone(image), position))
+}
+
+/// Notes, for each closure in `closures` the payload of `entry` holds code for, where that code
+/// lies, without decoding it.
+unsafe fn note_pending(
+    image: &Rc<Image>,
+    entry: usize,
+    database: &str,
+    closures: &[Sexp],
+) -> Result<(), String> {
+    let (payload_start, payload) = payload(image, entry)?;
+    let mut input = CodeInput {
+        bytes: payload,
+        position: 0,
+    };
+    let failed = |failure: Unwind| match failure {
+        Unwind::Error(failure) => failure.message,
+        _ => "interrupted".to_owned(),
+    };
+    if input.count().map_err(failed)? != closures.len() {
+        return Err("its closures do not match the database's".to_owned());
+    }
+    let database: Rc<str> = Rc::from(database);
+    let state = &mut interp().code_image;
+    let heap = crate::heap();
+    for &closure in closures {
+        let size = input.count().map_err(failed)?;
+        if size == 0 {
+            continue;
+        }
+        let start = input.position;
+        let end = start
+            .checked_add(size)
+            .filter(|&end| end <= payload.len())
+            .ok_or("a code object runs past its record")?;
+        input.position = end;
+        let body = closure.cdr();
+        if body.kind() != SexpType::Language {
+            return Err("it holds code for a closure whose body is not a call".to_owned());
+        }
+        let absolute = |offset: usize| {
+            u32::try_from(payload_start + offset).map_err(|_| "a payload lies past 4GB".to_owned())
+        };
+        let pending = Pending {
+            image: Rc::clone(image),
+            database: Rc::clone(&database),
+            entry: entry as u32,
+            start: absolute(start)?,
+            end: absolute(end)?,
+        };
+        if state.pending.insert(body, pending).is_none() {
+            heap.preserve(body);
+        }
+    }
+    if input.position != payload.len() {
+        return Err("it holds more than its closures".to_owned());
+    }
+    Ok(())
+}
+
+/// The payload of `entry` and where it starts in the image.
+fn payload(image: &Image, entry: usize) -> Result<(usize, &[u8]), String> {
+    let record = image.entries.get(entry).ok_or("a record is missing")?;
+    let start = usize::try_from(record.payload_offset).map_err(|_| "a payload lies past 4GB")?;
     let bytes = image
         .file
         .bytes()
-        .get(start..start.saturating_add(entry.payload_length as usize))
-        .ok_or_else(corrupt)?;
-    if hash(bytes) != entry.payload_hash {
-        return Err(corrupt());
+        .get(start..start.saturating_add(record.payload_length as usize))
+        .ok_or("a payload lies outside the file")?;
+    Ok((start, bytes))
+}
+
+/// Decodes the code `pending` points at for `body`, checking the hash of its record's payload the
+/// first time code is taken from that record.
+unsafe fn decode_pending(pending: &Pending, body: Sexp) -> Result<Sexp, String> {
+    let image = &*pending.image;
+    let entry = pending.entry as usize;
+    let word = image.verified.get(entry / 64).ok_or("a record is missing")?;
+    let bit = 1u64 << (entry % 64);
+    if word.get() & bit == 0 {
+        let (_, bytes) = payload(image, entry)?;
+        if image.entries.get(entry).map(|entry| entry.payload_hash) != Some(hash(bytes)) {
+            return Err("a payload's hash does not match".to_owned());
+        }
+        word.set(word.get() | bit);
     }
-    Ok(Some(bytes.to_vec()))
+    let bytes = image
+        .file
+        .bytes()
+        .get(..pending.end as usize)
+        .ok_or("a code object runs past its record")?;
+    let mut input = CodeInput {
+        bytes,
+        position: pending.start as usize,
+    };
+    let code = decode_code(&mut input, &walk_source(body)).map_err(|failure| match failure {
+        Unwind::Error(failure) => failure.message,
+        _ => "interrupted".to_owned(),
+    })?;
+    if input.position != pending.end as usize || bytecode::source_of(code) != body {
+        return Err("a code object does not match its closure".to_owned());
+    }
+    Ok(code)
 }
 
 /// Opens the image of `database`. `None` when there is none, `RY_CODE_IMAGE=0` turns images off,
 /// or another build wrote it.
-fn open(database: &str, build: &str) -> R<Option<Image>> {
+fn open(database: &str, build: &str) -> R<Option<Rc<Image>>> {
     if std::env::var_os("RY_CODE_IMAGE").is_some_and(|value| value == "0") {
         return Ok(None);
     }
@@ -253,7 +377,11 @@ fn open(database: &str, build: &str) -> R<Option<Image>> {
         .map_err(|failure| error(format!("cannot read {database}: {failure}")))?
         .len();
     match parse(file.bytes(), build, database_length) {
-        Ok(Some(entries)) => Ok(Some(Image { file, entries })),
+        Ok(Some(entries)) => Ok(Some(Rc::new(Image {
+            verified: (0..entries.len().div_ceil(64)).map(|_| Cell::new(0)).collect(),
+            file,
+            entries,
+        }))),
         Ok(None) => Ok(None),
         Err(message) => Err(error(format!(
             "the code image {} is corrupt ({message}); reinstall the package",
@@ -309,47 +437,6 @@ pub fn parse(bytes: &[u8], build: &str, database_length: u64) -> Result<Option<V
     let _native_offset = input.u64().map_err(failed)?;
     let _native_length = input.u64().map_err(failed)?;
     Ok(Some(entries))
-}
-
-/// Gives each closure in `closures` the code the payload holds for it.
-unsafe fn attach(payload: &[u8], closures: &[Sexp]) -> R<()> {
-    let mut input = CodeInput {
-        bytes: payload,
-        position: 0,
-    };
-    if input.count()? != closures.len() {
-        return Err(error("its closures do not match the database's"));
-    }
-    let heap = crate::heap();
-    for &closure in closures {
-        let size = input.count()?;
-        if size == 0 {
-            continue;
-        }
-        let end = input
-            .position
-            .checked_add(size)
-            .filter(|&end| end <= payload.len())
-            .ok_or_else(|| error("a code object runs past its record"))?;
-        let body = closure.cdr();
-        let mut code_input = CodeInput {
-            bytes: payload.get(..end).ok_or_else(|| error("a code object runs past its record"))?,
-            position: input.position,
-        };
-        input.position = end;
-        if body.kind() != SexpType::Language {
-            return Err(error("it holds code for a closure whose body is not a call"));
-        }
-        let code = decode_code(&mut code_input, &walk_source(body))?;
-        if code_input.position != end || bytecode::source_of(code) != body {
-            return Err(error("a code object does not match its closure"));
-        }
-        heap.set_cdr(closure, code);
-    }
-    if input.position != payload.len() {
-        return Err(error("it holds more than its closures"));
-    }
-    Ok(())
 }
 
 /// The FNV-1a hash of `bytes`, the same in every build.
@@ -463,6 +550,12 @@ unsafe fn write_image(
         for index in 0..count {
             let closure = recorded.closures.element(index * 2);
             let body = recorded.closures.element(index * 2 + 1);
+            // A body that is a symbol or a constant evaluates directly and never compiles, so it
+            // is not counted as a closure the image could hold.
+            if body.kind() != SexpType::Language {
+                write_varint(&mut payload, 0);
+                continue;
+            }
             summary.closures += 1;
             match compiled_code(closure, body, trained) {
                 Ok(code) => {
@@ -536,9 +629,6 @@ unsafe fn compiled_code(closure: Sexp, body: Sexp, trained: bool) -> Result<Vec<
     }
     if bytecode::source_body(closure) != body {
         return Err(Unencodable("a body replaced after loading"));
-    }
-    if body.kind() != SexpType::Language {
-        return Err(Unencodable("a body that is not a call"));
     }
     let code = match bytecode::compiled_body(closure) {
         Ok(code) if code.kind() == SexpType::Bytecode => code,

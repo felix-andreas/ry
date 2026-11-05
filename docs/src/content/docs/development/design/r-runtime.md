@@ -559,13 +559,53 @@ Bytecode is build output, never a cache, so nothing checks whether a stored copy
 - **Installed packages.** `ry install` and `R CMD INSTALL` compile every closure of the package and
   write the bytecode beside its lazy-load database, stamped with the ry build that wrote it. A
   different ry build ignores a stamp it did not write and compiles at first call instead, which is
-  always correct; reinstalling refreshes it.
+  always correct; reinstalling refreshes it. This is the code image, described below.
 - **Base R.** The base and recommended packages are compiled when the base image is built and live
   in a section of the image beside the heap arenas, keyed by the same runtime hash that keys the
   image (`base-image.md`).
 - **Code under development.** `ry load` and scripts compile each closure at its first call. That
   first tier must be cheap enough that compiling a session's working set costs less than reading a
   cache would, which is the bar `ry load`'s lazy loading sets.
+
+### Code images of installed packages
+
+`R CMD INSTALL` writes `R/<package>.ryc` beside `R/<package>.rdb` (`crates/interp/src/code_image.rs`).
+After the R code is installed, a fresh session loads the namespace, fetches every binding from the
+lazy-load database, and compiles each closure the fetches made, nested function bodies included.
+When a later session fetches the same record, it notes where each closure's code lies in the image,
+and the closure's first call decodes that code instead of running the body as an expression, so
+`f` runs compiled from its first call and never compiles. Decoding waits for the call because a
+namespace fetches many closures it never calls, such as every S3 method it registers.
+
+- **Identity.** A record is identified by its offset in the database, its length and an FNV-1a hash
+  of its stored bytes; a closure within the record by the order the stream reader creates closures.
+  An image written for other bytes (a reinstall by GNU R, another version) is ignored record by
+  record. Only databases that have an image pay for the hash.
+- **No copy of the source.** A code object points into its closure's body, so the image stores those
+  pointers as the preorder position of the object in the body. The body itself comes from the
+  database, as without an image.
+- **Stamp.** The file starts with a layout magic and the runtime build's identity; any other build
+  reads the image as absent and compiles at the second call as usual. A payload whose hash does not
+  match, checked when the first closure of its record is called, is an error that asks for a
+  reinstall, because the file is build output.
+- **Training.** `--ry-train=tests`, `--ry-train=examples` or `--ry-train=<script>` (`ry install
+  --train`) runs that workload in the same session before the image is written, and the image keeps
+  each code object's entry and back-edge counters, optimizing-tier state, inline-cache slot hints
+  and type feedback. A body whose training entries crossed the tier-up threshold enters the
+  optimizing tier at its first call in a new process. Machine code and inline caches are not saved:
+  the first is per process, the second holds heap addresses.
+- **Off switches.** `RY_CODE_IMAGE=0` ignores images when loading; `R CMD INSTALL
+  --ry-no-code-image` writes none. A failure while writing an image warns and installs the package
+  without one.
+- **Native code.** The file reserves an offset and length for install-time native code, both 0 today.
+  The end shape compiles untyped bodies through the same SSA IR and AOT pipeline the typed core uses
+  ("One SSA IR and one install-time pipeline" in `decisions.md`); it lands once tier 1 and the typed
+  core share that IR, and fills the reserved section with position-independent code mapped
+  read-only, as `typed-runtime.md` describes for the code file.
+
+The image is uncompressed and about six times the size of the compressed database (MASS: 706 KB
+against 120 KB). It is mapped, not read, so a session pays only for the pages of the records it
+fetches.
 
 ### Tiers
 

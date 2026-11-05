@@ -1,7 +1,8 @@
 # A user installs their package with a training run. The install writes the compiled code of
 # every closure beside the package's lazy-load database, so a new session runs the package's
-# functions compiled from their first call, and a function that ran hot in training enters the
-# optimizing tier at its first call.
+# functions compiled from their first call (`twice` has no loop, so without the image it would
+# stay uncompiled after one call), and a function that ran hot in training enters the optimizing
+# tier at its first call.
 
 requires ry-runtime
 
@@ -32,9 +33,9 @@ expect stdout "code image: closures=2 written=2"
 
 file use.R
 | library(tally, lib.loc = "library")
-| print(twice)
 | print(twice(4))
 | print(tally(1:10))
+| print(twice)
 
 run ry run --runtime ry use.R
 expect exit 0
