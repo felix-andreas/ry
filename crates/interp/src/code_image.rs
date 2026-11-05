@@ -1,12 +1,13 @@
 //! Code images: the compiled code of an installed package's closures, written beside each
 //! lazy-load database when the package is installed (`R/<package>.ryc` beside
-//! `R/<package>.rdb`), so that a closure fetched from the database runs compiled code from its
-//! first call instead of compiling at its second.
+//! `R/<package>.rdb`), so that a closure fetched from the database takes its code from the image
+//! instead of compiling it, and a trained image brings the type feedback and counters of its
+//! training run.
 //!
 //! A fetch does not decode anything: it notes where each closure's code lies in the image, and
-//! the closure's first call decodes it ([`take_pending`]). A package's namespace fetches many
-//! closures it never calls (every S3 method it registers, for one), and those cost a table entry
-//! rather than a decoded code object.
+//! the call that would compile the closure decodes it instead ([`take_pending`]). Decoding costs
+//! about as much as compiling, so it pays only where compiling would happen: a namespace fetches
+//! many closures it never calls (every S3 method it registers) and calls many only once.
 //!
 //! An image is build output, never a cache. It is stamped with the runtime build that wrote it,
 //! and a different build ignores it, so nothing ever checks whether its code is still current.
@@ -210,8 +211,8 @@ pub unsafe fn read_record(database: &str, record: Record, data: &[u8], hook: Sex
     Ok(value)
 }
 
-/// The compiled code of `function`, whose body `body` was fetched from an image and has not run
-/// yet, decoded now and installed as its body. `None` when the body has no code waiting.
+/// The compiled code of `function`, whose body `body` was fetched from an image and has not
+/// compiled yet, decoded now and installed as its body. `None` when the body has no code waiting.
 ///
 /// # Safety
 /// Runs on the interpreter's thread; `body` is `function`'s body.

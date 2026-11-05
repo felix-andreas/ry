@@ -2493,6 +2493,13 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   as `typed-runtime.md` describes, so a session maps it instead of tiering up. It waits for tier 1's
   IR to merge with the typed core's in `crates/jit` and `crates/typed` (`r-runtime.md`, "Code
   images of installed packages").
+- **Decoding an image's code costs about as much as compiling it** (about 65k instructions per
+  closure on CRAN packages), so an untrained image saves nothing measurable. The decoder reads
+  every instruction word and feedback word as a varint and re-interns each symbol constant by
+  name. Storing words as fixed-width little-endian runs that copy in bulk, and symbols as their
+  preorder position in the body, should make decoding a fraction of compiling; measure with
+  callgrind on `library()` plus a first call of the twelve packages in `decisions.md`, "Code
+  images".
 - **Code images are about six times the size of the lazy-load database** (MASS: 706 KB `.ryc`
   against a 120 KB compressed `.rdb`), because instruction words, constants and feedback are
   stored uncompressed. Compress payloads, or pack the instruction stream, if install size matters.

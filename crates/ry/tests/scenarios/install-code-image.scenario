@@ -1,8 +1,8 @@
 # A user installs their package with a training run. The install writes the compiled code of
-# every closure beside the package's lazy-load database, so a new session runs the package's
-# functions compiled from their first call (`twice` has no loop, so without the image it would
-# stay uncompiled after one call), and a function that ran hot in training enters the optimizing
-# tier at its first call.
+# every closure beside the package's lazy-load database, so a new session takes each function's
+# code from the image instead of compiling it, and a function that ran hot in training enters
+# the optimizing tier at its first call. Without the image the same function first has to grow
+# hot again.
 
 requires ry-runtime
 
@@ -34,6 +34,7 @@ expect stdout "code image: closures=2 written=2"
 file use.R
 | library(tally, lib.loc = "library")
 | print(twice(4))
+| print(twice(4))
 | print(tally(1:10))
 | print(twice)
 
@@ -51,5 +52,5 @@ expect stderr "jit: compiled { total <- 0"
 env RY_CODE_IMAGE 0
 run ry run --runtime ry use.R
 expect exit 0
-expect stdout lacks "<bytecode>"
 expect stdout "[1] 55"
+expect stderr lacks "jit: compiled { total <- 0"

@@ -573,9 +573,11 @@ Bytecode is build output, never a cache, so nothing checks whether a stored copy
 After the R code is installed, a fresh session loads the namespace, fetches every binding from the
 lazy-load database, and compiles each closure the fetches made, nested function bodies included.
 When a later session fetches the same record, it notes where each closure's code lies in the image,
-and the closure's first call decodes that code instead of running the body as an expression, so
-`f` runs compiled from its first call and never compiles. Decoding waits for the call because a
-namespace fetches many closures it never calls, such as every S3 method it registers.
+and the call that would compile the closure (its second, or its first when the body has a loop)
+decodes that code instead. Decoding costs about as much as compiling, so the image does not move
+compilation earlier: a namespace fetches many closures it never calls, such as every S3 method it
+registers, and calls many others only once. What the image adds is what compiling cannot produce,
+the trained profile below, and the native code it reserves room for.
 
 - **Identity.** A record is identified by its offset in the database, its length and an FNV-1a hash
   of its stored bytes; a closure within the record by the order the stream reader creates closures.

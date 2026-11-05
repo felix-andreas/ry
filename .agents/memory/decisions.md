@@ -7808,11 +7808,15 @@ Each one trades a narrow class of missed errors for a class of false reports see
   language object the code points at is written as its preorder number in the body
   (`serialize::walk_source`). Nested function bodies are compiled eagerly at install
   (`bytecode::compile_nested_functions`) so their code is in the image too.
-- **Decoded at the first call, not at the fetch.** A fetch notes where each closure's code lies
-  (`code_image::State::pending`, keyed by body, the body preserved so its address cannot be
-  reused) and `bytecode::run_body` decodes it at the first call. Decoding at the fetch cost more
-  instructions on `library()` than it saved, because a namespace fetches many closures it never
-  calls (every registered S3 method).
+- **Decoded where compiling would happen, not at the fetch.** A fetch notes where each closure's
+  code lies (`code_image::State::pending`, keyed by body, the body preserved so its address cannot
+  be reused) and `bytecode::run_body` decodes it at the call that would compile the body. Decoding
+  every fetched closure cost 2% more instructions on `library()` of twelve CRAN packages, because
+  a namespace fetches many closures it never calls (every registered S3 method); decoding at the
+  first call still cost more than it saved, because decoding costs about what compiling does
+  (about 65k instructions per closure) and many closures run once. Untrained tier-0 code is
+  therefore not a speedup; the image's value is the trained profile and the reserved native
+  section.
 - **Stamp.** The runtime identity (`RY_RUNTIME_ID`, passed in `StartOptions::build`) and a layout
   magic; any other build reads the image as absent. Payloads carry a hash; a mismatch is an error
   telling the user to reinstall, because the file is build output and corruption is not expected;
@@ -7825,6 +7829,11 @@ Each one trades a narrow class of missed errors for a class of false reports see
   as zeros. Filling it waits for the shared SSA IR of `crates/jit` and `crates/typed`
   (`backlog.md`, "Install-time native code").
 - `RY_CODE_IMAGE=0` ignores images at load; `--ry-no-code-image` skips writing one.
+- **Measured** (callgrind, whole process): `library()` of R6, magrittr, glue, rlang, lifecycle,
+  cli, vctrs, purrr, assertthat, zoo, jsonlite and digest is 1,201.9M instructions with images
+  and 1,200.7M without; a first-result script over rlang, purrr, vctrs, glue and cli 1,323.8M
+  against 1,321.9M. A trained image of a loop-heavy function saves its warm-up (12M of the 76M a
+  200-call workload adds to an empty run), a constant that does not grow with the run.
 
 ## Vectors grow in place into spare capacity
 
