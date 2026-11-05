@@ -1291,9 +1291,9 @@ unsafe fn has_compiled_code(name: &str) -> bool {
     }
 }
 
-/// The outcome of four calls of a closure with `body` under tier 0, and of four calls of a
-/// fresh closure with the same body under the forced JIT. Each closure is new, so the JIT's run
-/// starts from its own profile and compiles from the second call on.
+/// The outcome of four calls of a closure with `body` under tier 0, then of four calls of a
+/// fresh closure with the same body under the forced JIT and four under the baseline tier alone.
+/// Each closure is new, so each run starts from its own profile.
 unsafe fn outcomes(case: usize, body: &str, call: &str) -> (String, Vec<String>) {
     unsafe {
         let formals = "a = 1L, b = 2, v = c(1, 2), n = 5L, k = total * 2L, d = (s <- 100)";
@@ -1310,7 +1310,13 @@ unsafe fn outcomes(case: usize, body: &str, call: &str) -> (String, Vec<String>)
         jit::install_mode(Mode::Force);
         let compiled_name = format!("compiled_{case}");
         define(&compiled_name);
-        let compiled = calls(&compiled_name);
+        let mut compiled = calls(&compiled_name);
+        // The baseline tier compiles at the first entry and never tiers up in this mode, so
+        // every call after the first runs its machine code.
+        jit::install_mode(Mode::Baseline);
+        let baseline_name = format!("baseline_{case}");
+        define(&baseline_name);
+        compiled.extend(calls(&baseline_name));
         jit::install_mode(Mode::Off);
         for outcome in &reference[1..] {
             assert_eq!(

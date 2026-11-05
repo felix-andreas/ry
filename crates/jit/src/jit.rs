@@ -13,9 +13,17 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 mod analysis;
+mod assembler;
+mod baseline;
 mod codegen;
 mod native;
 pub use native::has_native;
+
+/// Whether the body of `code` has baseline machine code.
+pub fn has_baseline(code: Sexp) -> bool {
+    // SAFETY: a code object's constants always have the baseline slot.
+    unsafe { baseline::has_baseline(code) }
+}
 mod runtime;
 
 use {
@@ -48,6 +56,9 @@ pub enum Mode {
     Off,
     On,
     Force,
+    /// Every body gets baseline code at its first entry and nothing compiles further, which is
+    /// what the differential tests use to run everything through the baseline tier alone.
+    Baseline,
 }
 
 impl Mode {
@@ -56,6 +67,7 @@ impl Mode {
         match std::env::var("RY_JIT").as_deref() {
             Ok("off" | "0" | "false") => Mode::Off,
             Ok("force") => Mode::Force,
+            Ok("baseline") => Mode::Baseline,
             _ => Mode::On,
         }
     }
@@ -71,6 +83,9 @@ impl Mode {
 const ENTRY_THRESHOLD: i32 = 3000;
 /// Backward jumps a body takes before a loop compiles, in the default mode, for the same reason.
 const BACK_EDGE_THRESHOLD: i32 = 10_000;
+/// Entries or backward jumps after which a body gets baseline code. Baseline code costs a few
+/// microseconds to compile, about as much as interpreting a body a few dozen times.
+const BASELINE_THRESHOLD: i32 = 200;
 
 thread_local! {
     static MODE: Cell<Mode> = const { Cell::new(Mode::On) };
@@ -85,15 +100,16 @@ pub fn install() {
 }
 
 pub fn install_mode(mode: Mode) {
-    let (entries, back_edges) = match mode {
+    let (entries, back_edges, baseline) = match mode {
         Mode::Off => {
             bytecode::set_tier(None);
             return;
         }
-        Mode::On => (ENTRY_THRESHOLD, BACK_EDGE_THRESHOLD),
+        Mode::On => (ENTRY_THRESHOLD, BACK_EDGE_THRESHOLD, BASELINE_THRESHOLD),
         // Compiling on the second run rather than the first gives the compiled code the type
         // feedback of one interpreted run, so forced compilation exercises the specialized paths.
-        Mode::Force => (2, 1),
+        Mode::Force => (2, 1, 1),
+        Mode::Baseline => (i32::MAX, i32::MAX, 1),
     };
     MODE.with(|current| current.set(mode));
     bytecode::set_tier(Some(Tier {
@@ -101,6 +117,8 @@ pub fn install_mode(mode: Mode) {
         entry_threshold: entries,
         back_edge,
         back_edge_threshold: back_edges,
+        baseline: baseline::compile,
+        baseline_threshold: baseline,
         call: native::call,
     }));
 }
