@@ -587,15 +587,35 @@ the trained profile below, and the native code it reserves room for.
   pointers as the preorder position of the object in the body. The body itself comes from the
   database, as without an image.
 - **Stamp.** The file starts with a layout magic and the runtime build's identity; any other build
-  reads the image as absent and compiles at the second call as usual. A payload whose hash does not
-  match, checked when the first closure of its record is called, is an error that asks for a
-  reinstall, because the file is build output.
-- **Training.** `--ry-train=tests`, `--ry-train=examples` or `--ry-train=<script>` (`ry install
-  --train`) runs that workload in the same session before the image is written, and the image keeps
-  each code object's entry and back-edge counters, optimizing-tier state, inline-cache slot hints
-  and type feedback. A body whose training entries crossed the tier-up threshold enters the
-  optimizing tier at its first call in a new process. Machine code and inline caches are not saved:
-  the first is per process, the second holds heap addresses.
+  reads the image as absent and compiles at the second call as usual.
+- **Formals.** The compiler's output depends on the closure's formals as well as its body (which
+  names the frame can bind, which call updates its first parameter in place), and `formals<-` or
+  `as.function` makes a closure that shares a fetched body under other formals. Each noted closure
+  therefore keeps its formals, and only a closure with those same formals takes the code; any
+  other compiles its own.
+- **Damage.** The image only saves compiling, so a damaged one never stops a package from loading.
+  A file that cannot be read or parsed, a payload whose hash does not match (checked when the first
+  closure of its record is called), a record whose closures do not match the database's, or code
+  the decoder rejects each warn once (`cannot use the code image ..., so its functions compile as
+  they run; reinstall the package to repair it`). The image is then ignored for the rest of the
+  session, and its waiting code is dropped.
+- **Verified code.** Tier 0 reads instruction operands, registers, inline-cache slots and jump
+  targets without bounds checks, so decoded code passes a linear verifier (`verify` in
+  `crates/interp/src/bytecode.rs`) before it runs: every opcode is known, every operand is below its
+  table's size, every jump lands on an instruction start, the last instruction cannot fall through,
+  and the side tables (loops, feedback, hints, profile) have the lengths the code implies. The
+  payload hash is FNV-1a, which catches damage but not a crafted file, so the verifier is what keeps
+  a bad image from reading out of bounds. It checks tier 0's assumptions only: an instruction's
+  register dataflow is guarded at run time where that is cheap, and the optimizing tier trusts the
+  shape the compiler produces. Record instructions carry process-local layout ids, so code that
+  holds one is not written, and field and item shape caches are written empty. The decoder also
+  keeps only the object bits the encoder can write (the S4 bit) of each constant.
+- **Lifetime.** Waiting code holds its body, its formals and the mapped file. `lazyLoadDBflush`,
+  which `unloadNamespace` calls, drops all three for its database.
+- **Writing.** The image is written to `R/<package>.ryc.partial`, synced to disk, and renamed over
+  the old image, so a crash leaves the old image or the new one. It is never rewritten in place: a
+  process that maps the old file would see its pages change under it, or die with `SIGBUS` once
+  the file shrank. A failed write removes the staging file.
 - **Off switches.** `RY_CODE_IMAGE=0` ignores images when loading; `R CMD INSTALL
   --ry-no-code-image` writes none. A failure while writing an image warns and installs the package
   without one.

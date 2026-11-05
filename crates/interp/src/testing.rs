@@ -275,6 +275,267 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
     });
 }
 
+/// How [`check_code_image_load`] damages the image it loads from.
+const LOAD_MODES: usize = 6;
+
+/// A closure fetched from a lazy-load database through its image computes what the evaluator
+/// computes, whatever the image holds: a damaged file, a record whose closure count or entry does
+/// not match, or a closure that shares the fetched body under other formals all fall back to
+/// compiling, and code the decoder accepts from a mutated but rehashed payload runs without
+/// crashing.
+pub fn check_code_image_load(entropy: &mut impl Entropy) {
+    let body = if entropy.below(3) == 0 {
+        IMAGE_BODIES[entropy.below(IMAGE_BODIES.len())].to_owned()
+    } else {
+        program(entropy)
+    };
+    let arguments = ["3L", "-2.5", "NA", "TRUE", "0", "[3L]"];
+    let a = arguments[entropy.below(arguments.len())];
+    let b = arguments[entropy.below(arguments.len())];
+    let mode = entropy.below(LOAD_MODES);
+    let trained = entropy.below(2) == 0;
+    let mutations: Vec<(usize, u8)> = (0..1 + entropy.below(4))
+        .map(|_| (entropy.below(1 << 16), entropy.below(256) as u8))
+        .collect();
+    let directory = std::env::temp_dir().join(format!(
+        "ry-code-image-load-{}-{}",
+        std::process::id(),
+        entropy.next_u64()
+    ));
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed, and every object it reads is rooted by the
+        // global environment or the handle scope.
+        unsafe {
+            let (direct, _) = outcomes(&body, a, b);
+            let mark = crate::heap().handle_mark();
+            let global = values::global_env();
+            let reset = format!("a <- {a}\nb <- {b}\ns <- 7L\nk <- 0L\ni <- 0L");
+            let function = eval::find_var(
+                values::install("f").unwrap_or_else(|_| panic!("cannot install")),
+                global,
+            )
+            .unwrap_or_else(|_| panic!("`f` must be defined"));
+            let mut stream = b"X\n".to_vec();
+            for word in [2, 0x0004_0300, 0x0002_0300] {
+                stream.extend_from_slice(&i32::to_be_bytes(word));
+            }
+            // A closure is its flags, its environment, its formals and its body.
+            for word in [3 | 1 << 10, 253] {
+                stream.extend_from_slice(&i32::to_be_bytes(word));
+            }
+            let source = bytecode::source_body(function);
+            if !(xdr_item(&mut stream, function.car()) && xdr_item(&mut stream, source)) {
+                crate::heap().release_handles(mark);
+                return;
+            }
+            // The training run of an install: the record's closure runs before its code is
+            // encoded, so a trained image carries the run's feedback.
+            let (fetched, closures) = serialize::unserialize_with_closures(&stream, values::nil())
+                .unwrap_or_else(|_| panic!("`{body}`: a written closure must read back"));
+            crate::heap().root(fetched);
+            let define = |name: &str, value: Sexp| {
+                eval::define(
+                    values::install(name).unwrap_or_else(|_| panic!("cannot install")),
+                    value,
+                    global,
+                )
+                .unwrap_or_else(|_| panic!("cannot define `{name}`"));
+            };
+            define("g_train", fetched);
+            if trained {
+                for _ in 0..3 {
+                    run(&reset);
+                    run(&format!("g_train({a}, {b})"));
+                }
+            }
+            let pairs: Vec<(Sexp, Sexp)> = closures
+                .iter()
+                .map(|&closure| (closure, bytecode::source_body(closure)))
+                .collect();
+            let mut summary = code_image::Summary::default();
+            let mut payload = code_image::record_payload(&pairs, trained, &mut summary);
+            let mut offset = 0u64;
+            match mode {
+                // The record names more closures than the stream makes.
+                1 => {
+                    payload[0] = payload[0].wrapping_add(1);
+                }
+                // The record's one closure has no code in the image.
+                2 => payload = vec![1, 0],
+                // No entry for the record that is fetched.
+                3 => offset = 7,
+                // The payload is mutated and then rehashed, so only the decoder and the
+                // verifier stand between it and the interpreter.
+                4 => {
+                    for &(position, value) in &mutations {
+                        let at = 1 + position % payload.len().max(1);
+                        if let Some(byte) = payload.get_mut(at) {
+                            *byte ^= value | 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            let build = "fuzz-build";
+            let mut image = code_image::image_bytes(
+                build,
+                trained,
+                stream.len() as u64,
+                &[(offset, stream.len() as u32, code_image::hash(&stream))],
+                &[payload],
+            )
+            .unwrap_or_else(|_| panic!("a small image must write"));
+            // Raw damage: the file no longer matches its own hashes or framing.
+            if mode == 0 {
+                for &(position, value) in &mutations {
+                    let at = position % image.len().max(1);
+                    match image.get_mut(at) {
+                        Some(byte) if value % 4 != 0 => *byte ^= value,
+                        _ => image.truncate(at),
+                    }
+                }
+            }
+            std::fs::create_dir_all(&directory)
+                .unwrap_or_else(|failure| panic!("cannot create {}: {failure}", directory.display()));
+            let database = directory.join("fuzz.rdb");
+            let database = database.to_str().unwrap_or_else(|| panic!("a temporary path is text"));
+            std::fs::write(database, vec![0u8; stream.len()])
+                .unwrap_or_else(|failure| panic!("cannot write {database}: {failure}"));
+            std::fs::write(code_image::path(database), &image)
+                .unwrap_or_else(|failure| panic!("cannot write the image: {failure}"));
+            let previous = std::mem::replace(&mut crate::interp().code_image.build, build);
+            let show = std::mem::replace(&mut crate::interp().show_error_messages, false);
+            let loaded = (|| -> Result<Option<Sexp>, Unwind> {
+                if !code_image::wants(database)? {
+                    return Ok(None);
+                }
+                let record = code_image::Record::of(0, &stream);
+                let value = code_image::read_record(database, record, &stream, values::nil())?;
+                Ok(Some(value))
+            })();
+            if let Ok(Some(value)) = loaded {
+                crate::heap().root(value);
+                assert_eq!(value.kind(), SexpType::Closure, "`{body}`: a record reads back");
+                define("g_image", value);
+                // Another closure over the fetched body must not take the code compiled for the
+                // fetched closure's formals.
+                let template = lower::parse_text("function(a, b, extra) NULL", "<fuzz>")
+                    .and_then(|expressions| {
+                        crate::heap().root(expressions);
+                        eval::eval(expressions.element(0), global)
+                    })
+                    .unwrap_or_else(|_| panic!("cannot make a function"));
+                crate::heap().root(template);
+                let formals = template.car();
+                let other = eval::make_closure(formals, value.cdr(), values::nil(), global)
+                    .unwrap_or_else(|_| panic!("cannot make a closure"));
+                crate::heap().root(other);
+                assert_eq!(
+                    code_image::take_pending(other, value.cdr()).ok().flatten(),
+                    None,
+                    "`{body}`: a closure with other formals took the fetched closure's code"
+                );
+                for call in 0..3 {
+                    run(&reset);
+                    let outcome = run(&format!("g_image({a}, {b})"));
+                    if mode != 4 {
+                        assert_eq!(
+                            direct, outcome,
+                            "`{body}` with a = {a}, b = {b}, mode {mode}, call {}: a closure \
+                             fetched through its image must compute what the evaluator does \
+                             (trained: {trained})",
+                            call + 1
+                        );
+                    }
+                }
+            }
+            code_image::forget(database);
+            crate::interp().code_image.build = previous;
+            crate::interp().show_error_messages = show;
+            crate::truncate_frames(crate::interp(), 0);
+            crate::interp().foreign_calls.clear();
+            run("rm(g_image, g_train)");
+            if let Err(failure) = std::fs::remove_dir_all(&directory) {
+                panic!("cannot remove {}: {failure}", directory.display());
+            }
+            crate::heap().release_handles(mark);
+        }
+    });
+}
+
+/// Writes `object` to `out` in R's XDR serialization, for the plain values a function's formals
+/// and body hold. Returns `false`, leaving `out` partly written, for anything else.
+unsafe fn xdr_item(out: &mut Vec<u8>, object: Sexp) -> bool {
+    unsafe {
+        let word = |out: &mut Vec<u8>, value: i32| out.extend_from_slice(&value.to_be_bytes());
+        let string = |out: &mut Vec<u8>, charsxp: Sexp| {
+            if charsxp == values::na_string() {
+                word(out, 9);
+                word(out, -1);
+            } else {
+                let bytes = charsxp.bytes();
+                word(out, 9 | 1 << 3 << 12);
+                word(out, bytes.len() as i32);
+                out.extend_from_slice(bytes);
+            }
+        };
+        if object == values::nil() {
+            word(out, 254);
+            return true;
+        }
+        if object == values::global_env() {
+            word(out, 253);
+            return true;
+        }
+        if object == crate::heap().known().missing_arg {
+            word(out, 251);
+            return true;
+        }
+        let kind = object.kind();
+        if kind != SexpType::Symbol && object.attrib() != values::nil() {
+            return false;
+        }
+        match kind {
+            SexpType::Symbol => {
+                word(out, 1);
+                string(out, object.car());
+                true
+            }
+            SexpType::Pairlist | SexpType::Language => {
+                let code = if kind == SexpType::Pairlist { 2 } else { 6 };
+                let tagged = object.tag() != values::nil();
+                word(out, code | i32::from(tagged) << 10);
+                (!tagged || xdr_item(out, object.tag()))
+                    && xdr_item(out, object.car())
+                    && xdr_item(out, object.cdr())
+            }
+            SexpType::Integer | SexpType::Logical | SexpType::Real | SexpType::String => {
+                let code = match kind {
+                    SexpType::Logical => 10,
+                    SexpType::Integer => 13,
+                    SexpType::Real => 14,
+                    _ => 16,
+                };
+                word(out, code);
+                let count = values::length(object);
+                word(out, count as i32);
+                for index in 0..count {
+                    match kind {
+                        SexpType::Real => {
+                            let value = *(object.data() as *const f64).add(index);
+                            out.extend_from_slice(&value.to_bits().to_be_bytes());
+                        }
+                        SexpType::String => string(out, values::string_elt(object, index)),
+                        _ => word(out, *(object.data() as *const i32).add(index)),
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 /// The deparsed value of the last expression of `text` in the global environment, or `error`.
 unsafe fn run(text: &str) -> String {
     unsafe {

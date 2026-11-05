@@ -20,7 +20,8 @@ use {
         },
         lower,
         testing::{
-            check_bytecode_agreement, check_code_image_file, check_code_image_round_trip,
+            check_bytecode_agreement, check_code_image_file, check_code_image_load,
+            check_code_image_round_trip,
             check_lowering_input, check_render_drawing,
             check_unserialize_input, with_interpreter,
         },
@@ -178,4 +179,9 @@ fn render_skips_a_path_with_a_non_finite_point() {
     };
     let files = render_files(Format::Png, &drawing, [1.0, 1.0], 24.0, "", 75);
     assert!(files.is_ok_and(|files| files.len() == 1));
+}
+
+#[test]
+fn fuzz_code_image_load() {
+    for_each_seed(300, |seed| check_code_image_load(&mut SplitMix64(seed)));
 }

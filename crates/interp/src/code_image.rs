@@ -21,9 +21,12 @@
 //! never holds a second copy of the package's source.
 //!
 //! An install that trains the image (`R CMD INSTALL --ry-train=...`) first runs the package's
-//! tests, its examples or a given script, and then writes each code object with the type feedback,
-//! entry and back-edge counters and optimizing-tier state the run left, so a body that was hot in
-//! training is compiled by the optimizing tier at its first calls in a new process.
+//! tests, its examples or a given script, and then writes each code object with the type feedback
+//! and the entry and back-edge counters the run left, so a body that was hot in training is
+//! compiled by the optimizing tier at its first calls in a new process.
+//!
+//! The image only saves compiling, so a damaged one warns once and is ignored ([`give_up`]), and
+//! decoded code passes [`bytecode::verify`] before tier 0 runs it without bounds checks.
 //!
 //! The file layout, all integers little-endian:
 //!
@@ -104,10 +107,14 @@ struct Image {
 }
 
 /// Where the code of a fetched closure lies: `start..end` of the image's bytes, inside the
-/// payload of `entry`.
+/// payload of `entry`. The code was compiled for `formals`, the closure's formals as fetched, and
+/// the compiler's output depends on them (which names are local, what a call can change), so a
+/// closure that shares the body under other formals (`formals<-`, `as.function`) compiles its
+/// own. `formals` is preserved while the entry waits, like the body.
 struct Pending {
     image: Rc<Image>,
     database: Rc<str>,
+    formals: Sexp,
     entry: u32,
     start: u32,
     end: u32,
@@ -138,9 +145,38 @@ struct Recorded {
     closures: Sexp,
 }
 
-/// Forgets the image of `database`, which `lazyLoadDBflush` calls when the database changes.
+/// Forgets the image of `database` and the code waiting in it, which `lazyLoadDBflush` calls when
+/// the database changes or its namespace unloads.
 pub fn forget(database: &str) {
-    interp().code_image.images.remove(database);
+    let state = &mut interp().code_image;
+    state.images.remove(database);
+    drop_pending(state, database);
+}
+
+/// Drops the code waiting in the image of `database`, releasing what each entry preserved.
+fn drop_pending(state: &mut State, database: &str) {
+    let heap = crate::heap();
+    state.pending.retain(|&body, pending| {
+        if &*pending.database != database {
+            return true;
+        }
+        heap.release(body);
+        heap.release(pending.formals);
+        false
+    });
+}
+
+/// Stops using the image of `database` after it turned out damaged, with one warning: the image
+/// only saves compiling, so its package goes on loading and its functions compile as they run.
+unsafe fn give_up(database: &str, message: &str) -> R<()> {
+    let state = &mut interp().code_image;
+    state.images.insert(database.to_owned(), None);
+    drop_pending(state, database);
+    crate::conditions::warning(format!(
+        "cannot use the code image {} ({message}), so its functions compile as they run; \
+         reinstall the package to repair it",
+        path(database).display()
+    ))
 }
 
 /// A lazy-load record as the image identifies it: where it starts in its database, and the length
@@ -175,15 +211,22 @@ pub unsafe fn wants(database: &str) -> R<bool> {
     if state
         .recording
         .as_ref()
-        .is_some_and(|recording| database.starts_with(&recording.directory))
+        .is_some_and(|recording| Path::new(database).starts_with(&recording.directory))
     {
         return Ok(true);
     }
     if !state.images.contains_key(database) {
-        let image = open(database, state.build)?;
-        state.images.insert(database.to_owned(), image);
+        match open(database, state.build) {
+            Ok(image) => {
+                state.images.insert(database.to_owned(), image);
+            }
+            Err(message) => give_up(database, &message)?,
+        }
     }
-    Ok(matches!(state.images.get(database), Some(Some(_))))
+    Ok(matches!(
+        interp().code_image.images.get(database),
+        Some(Some(_))
+    ))
 }
 
 /// Reads one lazy-load record of `database` that [`wants`] accepted: `data` is the decompressed
@@ -195,7 +238,7 @@ pub unsafe fn wants(database: &str) -> R<bool> {
 pub unsafe fn read_record(database: &str, record: Record, data: &[u8], hook: Sexp) -> R<Sexp> {
     let state = &mut interp().code_image;
     if let Some(recording) = &state.recording
-        && database.starts_with(&recording.directory)
+        && Path::new(database).starts_with(&recording.directory)
     {
         let (value, closures) = serialize::unserialize_with_closures(data, hook)?;
         crate::heap().root(value);
@@ -207,12 +250,15 @@ pub unsafe fn read_record(database: &str, record: Record, data: &[u8], hook: Sex
     };
     let (value, closures) = serialize::unserialize_with_closures(data, hook)?;
     crate::heap().root(value);
-    note_pending(&image, entry, database, &closures).map_err(|message| corrupt(database, &message))?;
+    if let Err(message) = note_pending(&image, entry, database, &closures) {
+        give_up(database, &message)?;
+    }
     Ok(value)
 }
 
 /// The compiled code of `function`, whose body `body` was fetched from an image and has not
-/// compiled yet, decoded now and installed as its body. `None` when the body has no code waiting.
+/// compiled yet, decoded now and installed as its body. `None` when the body has no code waiting
+/// for these formals, or the image turned out damaged; the caller then compiles.
 ///
 /// # Safety
 /// Runs on the interpreter's thread; `body` is `function`'s body.
@@ -221,22 +267,30 @@ pub unsafe fn take_pending(function: Sexp, body: Sexp) -> R<Option<Sexp>> {
     if state.pending.is_empty() {
         return Ok(None);
     }
+    // Another closure with the same body keeps the entry for the closure it was written for.
+    if state
+        .pending
+        .get(&body)
+        .is_none_or(|pending| pending.formals != function.car())
+    {
+        return Ok(None);
+    }
     let Some(pending) = state.pending.remove(&body) else {
         return Ok(None);
     };
     let heap = crate::heap();
     heap.release(body);
-    let code = decode_pending(&pending, body)
-        .map_err(|message| corrupt(&pending.database, &message))?;
-    heap.set_cdr(function, code);
-    Ok(Some(code))
-}
-
-fn corrupt(database: &str, message: &str) -> Unwind {
-    error(format!(
-        "the code image {} is corrupt ({message}); reinstall the package",
-        path(database).display()
-    ))
+    heap.release(pending.formals);
+    match decode_pending(&pending, body) {
+        Ok(code) => {
+            heap.set_cdr(function, code);
+            Ok(Some(code))
+        }
+        Err(message) => {
+            give_up(&pending.database, &message)?;
+            Ok(None)
+        }
+    }
 }
 
 /// The image of `database` and the index of its entry for `record`, when it was written for
@@ -272,11 +326,9 @@ unsafe fn note_pending(
         _ => "interrupted".to_owned(),
     };
     if input.count().map_err(failed)? != closures.len() {
-        return Err("its closures do not match the database's".to_owned());
+        return Err("a record's closures do not match the database's".to_owned());
     }
-    let database: Rc<str> = Rc::from(database);
-    let state = &mut interp().code_image;
-    let heap = crate::heap();
+    let mut noted: Vec<(Sexp, Sexp, u32, u32)> = Vec::new();
     for &closure in closures {
         let size = input.count().map_err(failed)?;
         if size == 0 {
@@ -290,24 +342,34 @@ unsafe fn note_pending(
         input.position = end;
         let body = closure.cdr();
         if body.kind() != SexpType::Language {
-            return Err("it holds code for a closure whose body is not a call".to_owned());
+            return Err("a record holds code for a closure whose body is not a call".to_owned());
         }
         let absolute = |offset: usize| {
             u32::try_from(payload_start + offset).map_err(|_| "a payload lies past 4GB".to_owned())
         };
+        noted.push((body, closure.car(), absolute(start)?, absolute(end)?));
+    }
+    if input.position != payload.len() {
+        return Err("a record holds more than its closures".to_owned());
+    }
+    let database: Rc<str> = Rc::from(database);
+    let state = &mut interp().code_image;
+    let heap = crate::heap();
+    for (body, formals, start, end) in noted {
         let pending = Pending {
             image: Rc::clone(image),
             database: Rc::clone(&database),
+            formals,
             entry: entry as u32,
-            start: absolute(start)?,
-            end: absolute(end)?,
+            start,
+            end,
         };
-        if state.pending.insert(body, pending).is_none() {
-            heap.preserve(body);
+        heap.preserve(body);
+        heap.preserve(formals);
+        if let Some(previous) = state.pending.insert(body, pending) {
+            heap.release(body);
+            heap.release(previous.formals);
         }
-    }
-    if input.position != payload.len() {
-        return Err("it holds more than its closures".to_owned());
     }
     Ok(())
 }
@@ -358,37 +420,26 @@ unsafe fn decode_pending(pending: &Pending, body: Sexp) -> Result<Sexp, String> 
 }
 
 /// Opens the image of `database`. `None` when there is none, `RY_CODE_IMAGE=0` turns images off,
-/// or another build wrote it.
-fn open(database: &str, build: &str) -> R<Option<Rc<Image>>> {
+/// or another build wrote it; an error when it cannot be read or is damaged.
+fn open(database: &str, build: &str) -> Result<Option<Rc<Image>>, String> {
     if std::env::var_os("RY_CODE_IMAGE").is_some_and(|value| value == "0") {
         return Ok(None);
     }
-    let image_path = path(database);
-    let file = match ImageFile::open(&image_path, false) {
+    let file = match ImageFile::open(&path(database), false) {
         Ok(file) => file,
         Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(failure) => {
-            return Err(error(format!(
-                "cannot read {}: {failure}",
-                image_path.display()
-            )));
-        }
+        Err(failure) => return Err(failure.to_string()),
     };
     let database_length = std::fs::metadata(database)
-        .map_err(|failure| error(format!("cannot read {database}: {failure}")))?
+        .map_err(|failure| format!("cannot read {database}: {failure}"))?
         .len();
-    match parse(file.bytes(), build, database_length) {
-        Ok(Some(entries)) => Ok(Some(Rc::new(Image {
+    Ok(parse(file.bytes(), build, database_length)?.map(|entries| {
+        Rc::new(Image {
             verified: (0..entries.len().div_ceil(64)).map(|_| Cell::new(0)).collect(),
             file,
             entries,
-        }))),
-        Ok(None) => Ok(None),
-        Err(message) => Err(error(format!(
-            "the code image {} is corrupt ({message}); reinstall the package",
-            image_path.display()
-        ))),
-    }
+        })
+    }))
 }
 
 /// The record table of an image, or `None` when it was written by another build or for another
@@ -441,7 +492,7 @@ pub fn parse(bytes: &[u8], build: &str, database_length: u64) -> Result<Option<V
 }
 
 /// The FNV-1a hash of `bytes`, the same in every build.
-fn hash(bytes: &[u8]) -> u64 {
+pub fn hash(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for &byte in bytes {
         hash ^= u64::from(byte);
@@ -526,11 +577,12 @@ unsafe fn do_write(call: &Call<'_>) -> R<Sexp> {
     Ok(counts)
 }
 
+/// How many closures an install recorded and wrote, and how many it left out for each reason.
 #[derive(Default)]
-struct Summary {
-    closures: usize,
-    written: usize,
-    skipped: BTreeMap<&'static str, usize>,
+pub struct Summary {
+    pub closures: usize,
+    pub written: usize,
+    pub skipped: BTreeMap<&'static str, usize>,
 }
 
 unsafe fn write_image(
@@ -545,32 +597,15 @@ unsafe fn write_image(
         .len();
     let mut payloads = Vec::with_capacity(records.len());
     for recorded in records.values() {
-        let mut payload = Vec::new();
-        let count = length(recorded.closures) / 2;
-        write_varint(&mut payload, count as u64);
-        for index in 0..count {
-            let closure = recorded.closures.element(index * 2);
-            let body = recorded.closures.element(index * 2 + 1);
-            // A body that is a symbol or a constant evaluates directly and never compiles, so it
-            // is not counted as a closure the image could hold.
-            if body.kind() != SexpType::Language {
-                write_varint(&mut payload, 0);
-                continue;
-            }
-            summary.closures += 1;
-            match compiled_code(closure, body, trained) {
-                Ok(code) => {
-                    summary.written += 1;
-                    write_varint(&mut payload, code.len() as u64);
-                    payload.extend_from_slice(&code);
-                }
-                Err(Unencodable(reason)) => {
-                    *summary.skipped.entry(reason).or_default() += 1;
-                    write_varint(&mut payload, 0);
-                }
-            }
-        }
-        payloads.push(payload);
+        let closures: Vec<(Sexp, Sexp)> = (0..length(recorded.closures) / 2)
+            .map(|index| {
+                (
+                    recorded.closures.element(index * 2),
+                    recorded.closures.element(index * 2 + 1),
+                )
+            })
+            .collect();
+        payloads.push(record_payload(&closures, trained, summary));
     }
     let table: Vec<(u64, u32, u64)> = records
         .iter()
@@ -579,13 +614,63 @@ unsafe fn write_image(
     let bytes = image_bytes(build, trained, database_length, &table, &payloads)?;
     let target = path(database);
     let staged = target.with_extension("ryc.partial");
-    let failed = |failure: std::io::Error| {
-        error(format!("cannot write {}: {failure}", target.display()))
-    };
-    std::fs::write(&staged, &bytes).map_err(failed)?;
-    std::fs::rename(&staged, &target).map_err(failed)?;
+    // The image is written beside the target and renamed over it, never rewritten in place: a
+    // process that maps the old image keeps reading the old file, where writing into it would
+    // change the pages under that process or end it with SIGBUS once the file shrank. The data
+    // reaches the disk before the rename, so a crash leaves the old image or the new one.
+    let written = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&staged)?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&staged, &target)
+    })();
+    if let Err(failure) = written {
+        let message = format!("cannot write {}: {failure}", target.display());
+        return Err(match std::fs::remove_file(&staged) {
+            Err(cleanup) if cleanup.kind() != std::io::ErrorKind::NotFound => error(format!(
+                "{message}, and cannot remove {}: {cleanup}",
+                staged.display()
+            )),
+            _ => error(message),
+        });
+    }
     forget(database);
     Ok(())
+}
+
+/// The payload of one record: the encoded code of each closure the record made, given with the
+/// body it was read with, in the order the reader made them.
+///
+/// # Safety
+/// Runs on the interpreter's thread, with every closure and body rooted.
+pub unsafe fn record_payload(
+    closures: &[(Sexp, Sexp)],
+    trained: bool,
+    summary: &mut Summary,
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write_varint(&mut payload, closures.len() as u64);
+    for &(closure, body) in closures {
+        // A body that is a symbol or a constant evaluates directly and never compiles, so it is
+        // not counted as a closure the image could hold.
+        if body.kind() != SexpType::Language {
+            write_varint(&mut payload, 0);
+            continue;
+        }
+        summary.closures += 1;
+        match compiled_code(closure, body, trained) {
+            Ok(code) => {
+                summary.written += 1;
+                write_varint(&mut payload, code.len() as u64);
+                payload.extend_from_slice(&code);
+            }
+            Err(Unencodable(reason)) => {
+                *summary.skipped.entry(reason).or_default() += 1;
+                write_varint(&mut payload, 0);
+            }
+        }
+    }
+    payload
 }
 
 /// The bytes of an image for a database of `database_length` bytes: `records` holds each

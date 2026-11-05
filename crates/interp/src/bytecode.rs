@@ -3027,6 +3027,271 @@ const _: () = {
     assert!(OPS.len() <= OP_MASK as usize);
 };
 
+/// What an operand of an instruction is, as far as [`verify`] checks it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Operand {
+    Register,
+    /// The first of a run of registers, whose length the next operand gives.
+    Base,
+    /// The length of the run of registers the previous operand starts.
+    Count,
+    /// [`Operand::Count`] for a run that holds at least one register.
+    CountAtLeastOne,
+    /// Any constant.
+    Constant,
+    Symbol,
+    /// A call, which the handler takes apart.
+    Call,
+    /// A call followed by the constants [`Compiler::call_site`] puts after it.
+    CallSite,
+    /// A pairlist of formals, or `NULL`.
+    Formals,
+    /// A [`Op::Field`] or [`Op::Item`] site's shape cache, still empty.
+    Shape,
+    /// The constant index of an [`Op::Item`]: one string or number.
+    Index,
+    /// A list of symbols, at least as long as the run of registers after it.
+    Names,
+    /// A [`switch_table`].
+    Switch,
+    Cache,
+    Target,
+    Loop,
+    /// An operator of [`ARITHS`].
+    Operator,
+    /// A number the handler reads without indexing anything with it.
+    Immediate,
+}
+
+/// The operands of `op`, or `None` for an instruction a code image never holds: a record
+/// instruction names a record layout by the number this process interned it under, which
+/// means nothing in another process.
+fn operands(op: Op) -> Option<&'static [Operand]> {
+    use Operand::*;
+    Some(match op {
+        Op::Constant | Op::Ast => &[Register, Constant],
+        Op::GetVar => &[Register, Symbol, Cache],
+        Op::SetVar => &[Symbol, Register, Cache],
+        Op::GetFun => &[Register, Symbol, Cache, Call],
+        Op::BranchUnlessBuiltin | Op::BranchIfObject => &[Register, Target],
+        Op::CallBuiltin => &[Register, Register, Call, Base, Count],
+        Op::CallGeneric => &[Register, Register, CallSite],
+        Op::CallRebinding | Op::CallTailUpdate => &[Register, Register, Call, Symbol],
+        Op::Field => &[Register, Register, Symbol, Call, Shape],
+        Op::Item => &[Register, Register, Index, Shape, Target],
+        Op::MatchLiteral => &[Register, Constant, Target],
+        Op::MatchFail => &[Register, Constant],
+        Op::Move => &[Register, Register],
+        Op::BoundEval => &[Register, Constant, Names, Base, Count],
+        Op::MatchCondition => &[Register, Register, Constant, Constant],
+        Op::SwitchArm => &[Register, Register, Switch],
+        Op::Guard => &[Symbol, Constant, Cache, Immediate, Target],
+        Op::Jump | Op::Resume => &[Target],
+        Op::JumpUnless => &[Register, Constant, Target],
+        Op::Arithmetic => &[Operator, Register, Register, Register, Call, Constant],
+        Op::Return | Op::ForEnd => &[Register],
+        Op::ForInit => &[Loop, Register, Constant],
+        Op::ForStep => &[Loop, Register, Symbol, Target],
+        Op::Invisible | Op::Visible => &[],
+        Op::LogicLeft => &[Register, Register, Constant, Immediate, Target],
+        Op::LogicRight => &[Register, Register, Register, Constant, Immediate],
+        Op::Closure => &[Register, Formals, Constant, Constant],
+        Op::SubAssign => &[Register, Symbol, Register, Register, Call, Immediate],
+        Op::SubAssignMatrix => &[Register, Symbol, Register, Register, Register, Call],
+        Op::Replace => &[Register, Symbol, Symbol, Cache, Call, Base, CountAtLeastOne, Call],
+        Op::SetSrcref => &[Constant, Immediate],
+        Op::EndStatement => &[Register, Base, Base],
+        Op::BranchUnlessPrimitive => &[Register, Constant, Target],
+        Op::DispatchSubject => &[Register, Register, Call, Register],
+        Op::MatchShape | Op::MatchTag | Op::Slot | Op::Construct => return None,
+    })
+}
+
+/// Checks that `code`, a code object read from a file rather than made by the compiler, is one
+/// the interpreter can run without reading or writing outside its tables. The interpreter reads
+/// operands unchecked, so a code image's code must pass this before it runs: every word is a
+/// valid instruction or one of its operands, execution cannot run off the end, every register,
+/// constant, cache slot, loop and jump target an operand names exists, and every constant a
+/// handler takes apart has the type it expects. Code objects among the constants are checked
+/// where they are decoded.
+///
+/// # Safety
+/// `code` is a live object.
+pub unsafe fn verify(code: Sexp) -> Result<(), String> {
+    use Operand::*;
+    if code.kind() != SexpType::Bytecode
+        || code.car().kind() != SexpType::Integer
+        || code.cdr().kind() != SexpType::List
+        || code.tag().kind() != SexpType::List
+    {
+        return Err("not a code object".to_owned());
+    }
+    let words = values::ints(code.car());
+    let constants = code.cdr();
+    let constant_count = length(constants);
+    if constant_count < FIRST_CONSTANT {
+        return Err("a code object without its fixed constants".to_owned());
+    }
+    let table = |slot: usize, kind: SexpType, length_is: Option<usize>| {
+        let value = constants.element(slot);
+        value.kind() == kind && length_is.is_none_or(|expected| length(value) == expected)
+    };
+    let epochs = constants.element(EPOCHS);
+    if epochs.kind() != SexpType::Real {
+        return Err("a malformed inline cache table".to_owned());
+    }
+    let caches = length(epochs);
+    let registers = constants.element(REGISTERS);
+    if !table(HINTS, SexpType::Integer, Some(caches))
+        || length(code.tag()) != caches * 2
+        || !table(FEEDBACK, SexpType::Integer, Some(words.len()))
+        || !table(PROFILE, SexpType::Integer, Some(profile::LENGTH))
+        || !table(LOOPS, SexpType::Integer, None)
+        || length(constants.element(LOOPS)) % 4 != 0
+        || !table(REGISTERS, SexpType::Integer, Some(1))
+        || values::ints(registers)[0] < 0
+        || constants.element(TIER1) != nil()
+        || constants.element(MATCHES) != nil()
+    {
+        return Err("a code object whose tables disagree".to_owned());
+    }
+    let registers = values::ints(registers)[0] as usize;
+    let summary = constants.element(SUMMARY);
+    if summary != nil()
+        && (summary.kind() != SexpType::List
+            || length(summary) == 0
+            || summary.element(0).kind() != SexpType::Integer
+            || length(summary.element(0)) != 1
+            || !(0..caches as i64).contains(&i64::from(values::ints(summary.element(0))[0]))
+            || (1..length(summary)).any(|index| summary.element(index).kind() != SexpType::Symbol))
+    {
+        return Err("a malformed effect summary".to_owned());
+    }
+    let mut starts = vec![0u64; words.len().div_ceil(64)];
+    let mut pc = 0;
+    while pc < words.len() {
+        let op = op_of(words[pc] as u32).ok_or("an invalid instruction")?;
+        operands(op).ok_or("a record instruction")?;
+        starts[pc / 64] |= 1 << (pc % 64);
+        let next = pc + 1 + operand_count(op);
+        if next > words.len() {
+            return Err("an instruction runs past the end of the code".to_owned());
+        }
+        if next == words.len() && !matches!(op, Op::Return | Op::Jump | Op::Resume) {
+            return Err("execution runs past the end of the code".to_owned());
+        }
+        pc = next;
+    }
+    if words.is_empty() {
+        return Err("empty code".to_owned());
+    }
+    let is_start = |target: usize| {
+        target < words.len() && starts[target / 64] & (1 << (target % 64)) != 0
+    };
+    let loop_table = values::ints(constants.element(LOOPS));
+    for entry in loop_table.as_chunks::<4>().0 {
+        let [start, end, exit, step] = entry.map(|word| word as usize);
+        if start > end || end > words.len() || !is_start(exit) || !is_start(step) {
+            return Err("a malformed loop table".to_owned());
+        }
+    }
+    let loops = loop_table.len() / 4;
+    let constant = |index: usize| {
+        (FIRST_CONSTANT..constant_count)
+            .contains(&index)
+            .then(|| constants.element(index))
+            .ok_or("a constant index out of range")
+    };
+    let mut pc = 0;
+    while pc < words.len() {
+        let op = op_of(words[pc] as u32).ok_or("an invalid instruction")?;
+        let roles = operands(op).ok_or("a record instruction")?;
+        let operand = |index: usize| words[pc + 1 + index] as u32 as usize;
+        for (index, &role) in roles.iter().enumerate() {
+            let value = operand(index);
+            let valid = match role {
+                Register => value < registers,
+                Base => value <= registers,
+                Count | CountAtLeastOne => {
+                    value <= registers - operand(index - 1) && (role == Count || value >= 1)
+                }
+                Constant => constant(value).is_ok(),
+                Symbol => constant(value)?.kind() == SexpType::Symbol,
+                Call => constant(value)?.kind() == SexpType::Language,
+                CallSite => {
+                    let arguments = constant(value + 1)?;
+                    constant(value)?.kind() == SexpType::Language
+                        && (arguments == unbound()
+                            || matches!(arguments.kind(), SexpType::Nil | SexpType::Pairlist))
+                        && constant(value + 2).is_ok()
+                }
+                Formals => matches!(constant(value)?.kind(), SexpType::Nil | SexpType::Pairlist),
+                Shape => {
+                    let shape = constant(value)?;
+                    shape.kind() == SexpType::Integer
+                        && values::ints(shape) == [crate::records::NO_LAYOUT, 0]
+                }
+                Index => {
+                    let index = constant(value)?;
+                    matches!(
+                        index.kind(),
+                        SexpType::String | SexpType::Integer | SexpType::Real
+                    ) && length(index) == 1
+                }
+                Names => {
+                    let names = constant(value)?;
+                    names.kind() == SexpType::List
+                        && length(names) >= operand(index + 2)
+                        && (0..length(names))
+                            .all(|name| names.element(name).kind() == SexpType::Symbol)
+                }
+                Switch => valid_switch_table(constant(value)?),
+                Cache => value < caches,
+                Target => is_start(value),
+                Loop => value < loops,
+                Operator => value < ARITHS.len(),
+                Immediate => true,
+            };
+            if !valid {
+                return Err(format!("an invalid operand {index} of {op:?} at {pc}"));
+            }
+        }
+        if op == Op::EndStatement && operand(1) > operand(2) {
+            return Err(format!("an invalid register range at {pc}"));
+        }
+        pc += 1 + operand_count(op);
+    }
+    Ok(())
+}
+
+/// Whether `table` has the shape [`switch_table`] gives it, which [`switch_arm`] reads unchecked.
+unsafe fn valid_switch_table(table: Sexp) -> bool {
+    if table.kind() != SexpType::List || length(table) != SWITCH_CALL + 1 {
+        return false;
+    }
+    let names = table.element(SWITCH_NAMES);
+    let name_arms = table.element(SWITCH_NAME_ARMS);
+    let position_arms = table.element(SWITCH_POSITION_ARMS);
+    let numbers = table.element(SWITCH_NUMBERS);
+    if names.kind() != SexpType::String
+        || name_arms.kind() != SexpType::Integer
+        || length(name_arms) != length(names)
+        || position_arms.kind() != SexpType::Integer
+        || length(position_arms) == 0
+        || numbers.kind() != SexpType::List
+        || table.element(SWITCH_CALL).kind() != SexpType::Language
+    {
+        return false;
+    }
+    let arms = length(numbers) as i64;
+    // A name's arm indexes the numbers directly, while a negative position arm is an error
+    // `switch_arm` raises before indexing.
+    values::ints(name_arms).iter().all(|&arm| (0..arms).contains(&i64::from(arm)))
+        && values::ints(position_arms)
+            .iter()
+            .all(|&arm| (-1..arms).contains(&i64::from(arm)))
+}
+
 // The interpreter.
 
 /// One `for` loop's position in its sequence.
@@ -3945,7 +4210,12 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
     sequence.increment_refcount();
     state.record(instruction.at, sequence);
     instruction.output(1, sequence);
-    state.machine.loops[instruction.operand(0)] = LoopState {
+    // Promise code runs without loop states, so only code read from a file could name one here.
+    *state
+        .machine
+        .loops
+        .get_mut(instruction.operand(0))
+        .ok_or_else(|| error("compiled code names a loop it does not have"))? = LoopState {
         index: 0,
         count,
         cell: Some(sequence),
@@ -3957,11 +4227,20 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
 unsafe fn op_for_step(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let env = state.env;
     let variable = state.constant(instruction, 2);
-    let loop_state = &mut state.machine.loops[instruction.operand(0)];
+    let loop_state = state
+        .machine
+        .loops
+        .get_mut(instruction.operand(0))
+        .ok_or_else(|| error("compiled code names a loop it does not have"))?;
     if loop_state.index >= loop_state.count {
         return Ok(Flow::Goto(instruction.operand(3)));
     }
     let sequence = instruction.input(1);
+    // The compiler steps the register its `ForInit` filled, which keeps the index in bounds;
+    // code read from a file is only verified operand by operand.
+    if sequence.kind().is_vector() && loop_state.index >= sequence.length() as usize {
+        return Err(error("compiled code steps a loop over another sequence"));
+    }
     let index = loop_state.index;
     loop_state.index += 1;
     if !overwrite_loop_variable(sequence, index, variable, env) {
@@ -4038,7 +4317,12 @@ unsafe fn op_logic_left(state: &mut Activation<'_, '_>, instruction: Instruction
 unsafe fn op_logic_right(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let call = state.constant(instruction, 3);
     let is_and = instruction.operand(4) == 1;
-    let left = values::ints(instruction.input(1))[0];
+    let left = instruction.input(1);
+    // `LogicLeft` stored a logical scalar there, unless the code was read from a file and lies.
+    if left.kind() != SexpType::Logical || left.length() != 1 {
+        return Err(error("compiled code holds a malformed `&&` or `||`"));
+    }
+    let left = values::ints(left)[0];
     let right = eval::logical_operand_of(
         instruction.input(2),
         call,

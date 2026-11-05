@@ -1865,7 +1865,7 @@ impl Heap {
     /// Lookups cache nothing about a garbage environment, so the enclosure epochs stay.
     unsafe fn drop_enclosure(&mut self, env: Sexp) {
         let empty = self.known.empty_env;
-        self.store(env, env.enclosure(), empty);
+        self.release_field(env, env.enclosure());
         env.set_enclosure_unbarriered(empty);
     }
 
@@ -1873,13 +1873,23 @@ impl Heap {
     unsafe fn release_promise(&mut self, promise: Sexp) {
         let value = promise.car();
         if value != self.known.unbound {
-            self.store(promise, value, self.known.unbound);
+            self.release_field(promise, value);
             promise.set_car_unbarriered(self.known.unbound);
         }
         let env = promise.tag();
         if env != self.known.nil {
-            self.store(promise, env, self.known.nil);
+            self.release_field(promise, env);
             promise.set_tag_unbarriered(self.known.nil);
+        }
+    }
+
+    /// Gives up `parent`'s counted reference to `old`, which the caller replaces with an immortal
+    /// object. Storing an immortal object needs no write barrier, and must not take one: a
+    /// collection releases the frames it is about to sweep this way, and a dead old parent is
+    /// unmarked, which the barrier would take for a lost mark.
+    unsafe fn release_field(&mut self, parent: Sexp, old: Sexp) {
+        if parent.flags() & flag_bits::UNTRACKED == 0 && old.release_reference() {
+            self.note_zero(old);
         }
     }
 

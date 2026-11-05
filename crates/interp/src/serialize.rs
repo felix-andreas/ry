@@ -17,6 +17,7 @@ use {
         strings::Encoding,
     },
     rustc_hash::FxHashMap,
+    smallvec::SmallVec,
     std::io::Read,
 };
 
@@ -1583,6 +1584,7 @@ impl Encoder<'_> {
         if count < FIRST_CONSTANT {
             return Err(Unencodable("a code object without its fixed constants"));
         }
+        let shapes = shape_constants(words)?;
         self.value(constants.element(SOURCE), depth + 1)?;
         let caches = length(constants.element(EPOCHS));
         if caches > words.len().saturating_mul(4) {
@@ -1636,6 +1638,17 @@ impl Encoder<'_> {
         }
         write_varint(self.out, (count - FIRST_CONSTANT) as u64);
         for index in FIRST_CONSTANT..count {
+            if shapes.contains(&index) {
+                // A shape cache holds a record layout's number in this process, which means
+                // nothing in another, so it is written empty.
+                self.out.push(tag::INTEGER);
+                write_varint(self.out, 0);
+                self.out.push(0);
+                write_varint(self.out, 2);
+                write_signed(self.out, i64::from(crate::records::NO_LAYOUT));
+                write_signed(self.out, 0);
+                continue;
+            }
             self.value(constants.element(index), depth + 1)?;
         }
         Ok(())
@@ -1803,7 +1816,7 @@ impl Encoder<'_> {
 
     /// The general-purpose bits, the object bit and the attributes of `value`.
     unsafe fn header(&mut self, value: Sexp, depth: u32) -> Result<(), Unencodable> {
-        write_varint(self.out, u64::from(value.gp()));
+        write_varint(self.out, u64::from(value.gp() & CONSTANT_GP));
         let attributes = value.attrib();
         self.out
             .push(u8::from(value.is_object()) | u8::from(attributes != nil()) << 1);
@@ -1817,6 +1830,38 @@ impl Encoder<'_> {
         write_varint(self.out, bytes.len() as u64);
         self.out.extend_from_slice(bytes);
     }
+}
+
+/// The general-purpose bits of a constant an image keeps: only whether it is an S4 object.
+/// The others mark state of this process (a watched binding, a registered annotation check, an
+/// encoding the string cache derives), which a constant read from a file must not claim.
+const CONSTANT_GP: u16 = gp::S4_OBJECT;
+
+/// The constant indices of the shape caches in the instruction words `words`, or why the code
+/// cannot go into an image.
+fn shape_constants(words: &[i32]) -> Result<SmallVec<[usize; 4]>, Unencodable> {
+    use crate::bytecode::{Op, op_of, operand_count};
+    let mut shapes = SmallVec::new();
+    let mut pc = 0;
+    while pc < words.len() {
+        let op = op_of(words[pc] as u32).ok_or(Unencodable("an invalid instruction"))?;
+        let shape = match op {
+            Op::Field => Some(5),
+            Op::Item => Some(4),
+            // These name a record layout by the number this process interned it under.
+            Op::MatchShape | Op::MatchTag | Op::Slot | Op::Construct => {
+                return Err(Unencodable("a record instruction"));
+            }
+            _ => None,
+        };
+        if let Some(offset) = shape
+            && let Some(&index) = words.get(pc + offset)
+        {
+            shapes.push(index as usize);
+        }
+        pc += 1 + operand_count(op);
+    }
+    Ok(shapes)
 }
 
 /// The base closure bound to `name`, once something forced its lazy-load promise.
@@ -1928,6 +1973,8 @@ impl Decoder<'_, '_> {
         heap.mark_weak_pairs(inline_caches);
         let code = values::triple(SexpType::Bytecode, words, constants, inline_caches)?;
         heap.root(code);
+        crate::bytecode::verify(code)
+            .map_err(|message| error(format!("the code image holds invalid code: {message}")))?;
         Ok(code)
     }
 
@@ -2094,6 +2141,9 @@ impl Decoder<'_, '_> {
     unsafe fn header(&mut self, depth: u32) -> R<(u16, bool, Sexp)> {
         let levels = u16::try_from(self.input.varint()?)
             .map_err(|_| error("the code image holds an overlong number"))?;
+        if levels & !CONSTANT_GP != 0 {
+            return Err(error("the code image holds a malformed constant"));
+        }
         let flags = self.input.byte()?;
         let attributes = if flags & 2 != 0 {
             let attributes = self.value(depth + 1)?;

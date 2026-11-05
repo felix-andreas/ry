@@ -7818,11 +7818,30 @@ Each one trades a narrow class of missed errors for a class of false reports see
   therefore not a speedup; the image's value is the trained profile and the reserved native
   section.
 - **Stamp.** The runtime identity (`RY_RUNTIME_ID`, passed in `StartOptions::build`) and a layout
-  magic; any other build reads the image as absent. Payloads carry a hash; a mismatch is an error
-  telling the user to reinstall, because the file is build output and corruption is not expected;
-  it is checked at the first decode from each record.
+  magic; any other build reads the image as absent, quietly.
+- **Pending code is keyed by body and checked against formals.** The compiler's output depends on
+  formals (`local_symbols`, `effects::summarize`, `tail_updates`, the missing-subscript path), and
+  `formals<-`/`as.function` share the body, so each pending entry also preserves the fetched
+  closure's formals and `take_pending` hands code only to a closure with those formals. Keying by
+  closure would miss `environment<-` copies, which are safe to share.
+- **A damaged image only costs its speedup.** An unreadable or unparsable file, a payload hash
+  mismatch, a record whose closures do not match, or code the decoder rejects warns once
+  (`code_image::give_up`), marks the database as having no image, and drops its pending code, so
+  the package loads and compiles as it runs. An earlier shape raised an error that made the
+  package unloadable and was retried at every fetch.
+- **Decoded code is verified, not trusted.** Tier 0 indexes operands, registers, caches and jump
+  targets unchecked, and FNV-1a only detects accidents, so `bytecode::verify` checks every decoded
+  object linearly (opcodes, per-role operand bounds, instruction-start bitset for targets, no
+  fall-through at the end, side-table lengths, switch-table shape). Record ops carry process-local
+  layout ids and are refused by the encoder; Field/Item shape caches are written empty; constant
+  gp bits are masked to the S4 bit. `fuzz_code_image_load` runs mutated-but-rehashed payloads;
+  without the verifier it crashes within 20 seeds. Residual trust: register dataflow (guarded at
+  run time where cheap) and the JIT, which assumes compiler-shaped code.
+- **Lifetime and writing.** `lazyLoadDBflush` (called by `unloadNamespace`) drops the image and its
+  pending entries. Images are written to `.ryc.partial`, fsynced, renamed; never rewritten in place,
+  because a mapped file that shrinks raises SIGBUS in the process mapping it.
 - **Training.** A trained image keeps each code object's PROFILE counters, inline-cache hints and
-  FEEDBACK words. Persisted entry counts at or above the tier-up threshold make a hot body enter the
+  FEEDBACK words; TIER1 decodes as nil. Persisted entry counts at or above the tier-up threshold make a hot body enter the
   optimizing tier at its first call in a new process. TIER1 code and inline caches are not saved:
   the first is process-local machine code, the second holds heap pointers.
 - **Native code.** The image reserves an offset/length pair for install-time native code, written
