@@ -750,21 +750,30 @@ call on ry and about 106k on GNU R 4.3.3.
 | In-place specialization (quickening) with value profiles | CPython (PEP 659), JSC | planned | tier-0 instructions 23 to 44%; JIT-off scalar loops 0.35 to 0.41 times GNU R | |
 | Tail-call dispatch, one indirect jump per handler | LuaJIT, JSC | planned (needs `become`) | the shared indirect jump, about 28% of a scalar loop | |
 | Dense feedback storage, one slot per profiled instruction | V8 | planned | feedback is one `i32` per code word | |
+| One description of each instruction's semantics, shared by tier 0 and the baseline | Deegen (LuaJIT Remake) | planned | the baseline drifting from tier 0 | |
+| Lazy fused vectors for element-wise arithmetic, as ALTREP objects | Riposte, pqR | planned | intermediate vectors in untyped vector code | |
 | **4. Optimizing tiers** | | | | |
 | Per-argument-type native functions for scalar closures | Julia | built | recursive scalar functions | `crates/jit/src/native.rs` |
 | Baseline compiler from bytecode, no optimization | V8 Sparkplug | planned | warm code under the 3000-entry threshold | |
+| Lazy basic block versioning as the baseline's second stage | YJIT | planned | type checks left inside handlers in warm code | |
 | A lower Cranelift threshold once the baseline tier exists | HotSpot, .NET tiering | planned | tier 1 under 3% of the time on eight of nine workloads | |
 | Cross-closure inlining with deoptimization | Ř (PIR) | planned | calls from compiled code re-enter tier 0 | |
 | Escape analysis, scalar replacement, vector fusion | Graal, goose | planned | scalar and intermediate vector allocation | |
 | Per-signature numeric specialization of vector code | Julia | planned | | |
+| Effect-free `lapply`, `vapply`, `Map` and long element-wise operations across cores; reductions stay sequential | Bend | planned | wall time of independent per-element work | |
 | **5. Memory and start-up** | | | | |
 | A start-up image mapped read-only and shared | V8 snapshots, Bun | planned | stats-only start-up peak | |
 | Per-package images compiled at install time | Bun | planned | package load and warm-up | |
+| Profiles from a training run (the package's tests and examples) stored in the per-package image | HHVM Jump-Start, Project Leyden | planned | hot closures that never reach tier 1's thresholds | |
 | Images shared across worker processes | Bun | planned | resident memory per `parallel` worker | |
+| Concurrent tracing and Immix line reuse | LXR | planned, after collector pauses are measured | collector pauses, fragmentation | |
+| A stackless tier 0 | Bend | planned, with the tail-call handlers | Rust frame setup per R call | |
 | **Rejected** | | | | |
 | Copy-and-patch as a tier | CPython (PEP 744) | rejected | | |
 | Meta-tracing | PyPy | rejected | | |
 | A partial-evaluation framework (AST interpreters) | Truffle and Graal | rejected | | |
+| Generating the interpreter and baseline from LLVM IR | Deegen | rejected | | |
+| Freeing R objects when their count reaches zero | LXR | rejected | | |
 
 ### How the static types feed the JIT
 

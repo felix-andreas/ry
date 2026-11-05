@@ -98,6 +98,45 @@ sources:
   - id: hotspot
     resource: https://docs.oracle.com/en/java/javase/21/vm/java-hotspot-virtual-machine-performance-enhancements.html
     title: "Java SE 21 HotSpot VM guide: performance enhancements, tiered compilation"
+  - id: lbbv
+    resource: https://drops.dagstuhl.de/entities/document/10.4230/LIPIcs.ECOOP.2015.101
+    title: "Chevalier-Boisvert and Feeley: Simple and Effective Type Check Removal through Lazy Basic Block Versioning (ECOOP 2015)"
+  - id: yjit
+    resource: https://shopify.engineering/yjit-just-in-time-compiler-cruby
+    title: "Shopify Engineering: YJIT, building a new JIT compiler for CRuby (2021)"
+  - id: deegen
+    resource: https://arxiv.org/abs/2411.11469
+    title: "Xu and Kjolstad: Deegen, a JIT-Capable VM Generator for Dynamic Languages (2024)"
+  - id: jump-start
+    resource: https://research.facebook.com/publications/hhvm-jump-start-boosting-both-warmup-and-steady-state-performance-at-scale/
+    title: "Ottoni and Liu: HHVM Jump-Start, Boosting Both Warmup and Steady-State Performance at Scale (CGO 2021)"
+  - id: leyden
+    resource: https://openjdk.org/jeps/515
+    title: "JEP 515: Ahead-of-Time Method Profiling, and the Project Leyden page (https://openjdk.org/projects/leyden/)"
+  - id: hack
+    resource: https://hacklang.org/
+    title: "The Hack language home page"
+  - id: hhvm-jit
+    resource: https://research.facebook.com/publications/hhvm-jit-a-profile-guided-region-based-compiler-for-php-and-hack/
+    title: "Ottoni: HHVM JIT, a Profile-Guided, Region-Based Compiler for PHP and Hack (PLDI 2018)"
+  - id: static-python
+    resource: https://arxiv.org/abs/2206.13831
+    title: "Lu, Greenman, Meyer, Viehland, Panse and Krishnamurthi: Gradual Soundness, Lessons from Static Python (Programming 2023)"
+  - id: sorbet
+    resource: https://sorbet.org/docs/overview
+    title: "Sorbet documentation overview, and Open-sourcing the Sorbet Compiler (https://sorbet.org/blog/2021/07/30/open-sourcing-sorbet-compiler)"
+  - id: lxr
+    resource: https://doi.org/10.1145/3519939.3523440
+    title: "Zhao, Blackburn and McKinley: Low-Latency, High-Throughput Garbage Collection (PLDI 2022)"
+  - id: riposte
+    resource: https://github.com/jtalbot/riposte
+    title: "Talbot, DeVito and Hanrahan: Riposte, a Trace-Driven Compiler and Parallel VM for Vector Code in R (PACT 2012), and its repository"
+  - id: pqr
+    resource: https://github.com/radfordneal/pqR/blob/Release-2016-10-24/NEWS
+    title: "pqR NEWS: deferred evaluation, task merging and helper threads"
+  - id: beans
+    resource: https://arxiv.org/abs/1908.05647
+    title: "Ullrich and de Moura: Counting Immutable Beans, Reference Counting Optimized for Purely Functional Programming (IFL 2019), section 7.2"
   - id: okf
     resource: https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md
     title: Open Knowledge Format v0.2
@@ -139,6 +178,9 @@ refers to its steps.
 | Static multi-frame returns instead of an unwinder | goose | **Reject** | R's conditions and restarts are dynamic |
 | Compile to one C file, call C through `extern fn` or spliced effects | goose, Bend | **Reject** | ry hosts the existing C ABI; it does not emit C |
 | Even-split parallel forks with no work stealing | Bend | **Reject** | R code makes no balance promise |
+| Automatic parallelism of effect-free work in untyped R | Bend, pqR (helper threads) | **Adopt, scoped** (step 4) | `lapply`, `vapply`, `Map` over compiled effect-free closures that allocate nothing on the R heap, and element-wise ops on long vectors; reductions stay sequential |
+| Automatic parallelism in typed ry, with atomic counts only for values marked as shared | Bend, Lean 4[^beans] | **Adopt, planned** | `List.map`, `List.walk`, `Dict` and `Set` builders over functions the typed core proves effect-free |
+| A stackless interpreter, so recursion never uses the C stack | Bend | **Defer** | Tier 0 grows the native stack in segments; revisit with step 3's tail-call handlers |
 | Residency of data as a tracked fact | Vx | **Adopt the idea, not the syntax** | Table columns: Arrow buffer or R vector, plus a lint |
 | Content-hashed identifiers | Vx | **Reject** | Bytecode and runtime summaries are install-time build output, so no cache needs a key |
 | LLVM and MLIR as the JIT backend | Vx | **Reject** | Compile latency; Cranelift is the choice |
@@ -178,14 +220,12 @@ refers to its steps.
 | Environment elision, promise elision for strict effect-free arguments, contextual dispatch | Ř | **Adopt** (steps 2 and 4) | Several compiled versions of a closure per call context, chosen at the call |
 | Self-specializing AST nodes and partial evaluation | Truffle, Graal | **Reject as an architecture** | The specialization idea arrives as quickening (step 3) |
 | Counter-driven tier-up, call counting, background compilation, precompiled code replaced when hot | HotSpot[^hotspot], .NET[^dotnet-tiered] | **Adopt the policy** (step 4) | Tier thresholds, off-thread compiles, and install-time images that hot code outgrows, as .NET's ReadyToRun code is |
-| Lazy basic block versioning: compile a block per combination of value kinds at its entry, only when reached | YJIT | **Adopt, as the baseline's second stage** (step 4) | Baseline blocks versioned on register kinds, once plain handler calls are measured |
-| One description of each instruction generates the interpreter and the baseline JIT | Deegen (LuaJIT Remake) | **Adopt the principle** (steps 3 and 4); **reject the generator** | Tier 0's handlers are the semantics, and the baseline calls them |
-| Profiles from a training run shipped with precompiled code, so the JIT starts warm | HHVM Jump-Start, Project Leyden | **Adopt, planned** (step 5) | Per-package images carry profiles from the package's tests and examples, run at install time |
-| Types added to a large dynamic codebase, then used for speed | HHVM and Hack, Static Python, Sorbet | **Adopt as the strategy** | Typed ry: checked boundaries, per-file strict mode, compiled typed closures |
-| Reference counting with Immix and occasional concurrent tracing for cycles | LXR | **Defer**; freeing on count zero is rejected | ry's counts are R's sharing counts, which native code does not keep exact |
-| Automatic parallelism of effect-free work | Bend, pqR (helper threads) | **Adopt, scoped** (step 4) | `lapply`, `vapply`, `Map` over compiled effect-free closures, and element-wise ops on long vectors; reductions stay sequential |
-| A stackless interpreter, so recursion never uses the C stack | Bend | **Defer** | Tier 0 grows the native stack in segments; revisit with step 3's tail-call handlers |
-| Deferred, fused vector arithmetic | Riposte, pqR (task merging) | **Adopt, scoped** (step 3) | A lazy ALTREP vector for `x * y + z` on doubles, computed in one pass when read |
+| Lazy basic block versioning: compile a block per combination of value kinds at its entry, only when reached | YJIT[^lbbv] | **Adopt, as the baseline's second stage** (step 4) | Baseline blocks versioned on register kinds, once plain handler calls are measured |
+| One description of each instruction generates the interpreter and the baseline JIT | Deegen (LuaJIT Remake)[^deegen] | **Adopt the principle** (steps 3 and 4); **reject the generator** | Tier 0's handlers are the semantics, and the baseline calls them |
+| Profiles from a training run shipped with precompiled code, so the JIT starts warm | HHVM Jump-Start[^jump-start], Project Leyden[^leyden] | **Adopt, planned** (step 5) | Per-package images carry profiles from the package's tests and examples, run at install time |
+| Types added to a large dynamic codebase, then used for speed | HHVM and Hack[^hack], Static Python[^static-python], Sorbet[^sorbet] | **Adopt as the strategy** | Typed ry: checked boundaries, per-file strict mode, compiled typed closures |
+| Reference counting with Immix and occasional concurrent tracing for cycles | LXR[^lxr] | **Defer** (step 5); freeing on count zero is rejected | ry's counts are R's sharing counts, which native code does not keep exact |
+| Deferred, fused vector arithmetic | Riposte[^riposte], pqR (task merging)[^pqr] | **Adopt, scoped** (step 3) | A lazy ALTREP vector for `x * y + z` on doubles, computed in one pass when read |
 
 ## Roc
 
@@ -339,6 +379,60 @@ per-thread redex bags that neighbouring threads steal from.[^bend]
   can see needs no count. A vector that a compiled loop creates and consumes, and that never reaches
   an environment, an attribute or a native call, needs no count, and often no heap object at all.
   The JIT's scalar replacement and fusion are meant to handle that case.
+- **Automatic parallelism of effect-free work in untyped R, scoped** (step 4 of the
+  [roadmap](/development/design/r-runtime/#untyped-performance-roadmap)). Bend's README states the
+  promise as "Split the work in two, and Bend spreads the calls over every core it can find, then
+  joins them back", provided the calls are balanced.[^bend] R's closest shapes are `lapply`,
+  `vapply` and `Map` over a closure, and element-wise arithmetic on a long vector, where every
+  element is independent. ry can split them over a thread pool when four conditions hold, and the
+  conditions are what keep every result identical to GNU R's. The closure is compiled and
+  allocates nothing on the R heap, because the R heap and the interpreter stay single-threaded.
+  Its body is free of effects, so it neither warns nor draws random numbers, and the `.Random.seed`
+  stream advances exactly as in a sequential run. Each element's result goes to its own slot of a
+  preallocated result. And reductions (`sum`, `Reduce`, `cumsum`) stay sequential, because a
+  parallel sum reassociates floating-point additions and would not be bit-identical to GNU R;
+  element-wise arithmetic is bit-identical under any split, because each element's operations are
+  unchanged. A length threshold keeps short inputs on one thread. pqR's helper threads (see
+  "Riposte and pqR" below) are the R precedent.
+- **Automatic parallelism in typed ry** (planned). Typed ry's own values are immutable and acyclic
+  (`typed-runtime.md`, "Memory"), so `List.map`, `List.walk` and the `Dict` and `Set` builders over
+  an effect-free function can be split across cores with no race on the values themselves. Two
+  costs decide the design, and both have an answer.
+  - *Counts on shared values.* Typed counts are plain integers, because R evaluation is
+    single-threaded. Lean 4 tags every value single-threaded, multi-threaded or persistent, and
+    only a multi-threaded value pays for atomic count updates; values start single-threaded, and
+    before a task starts, `markMT` tags everything reachable from the task's closure and argument
+    as multi-threaded, while only one thread can still see it. The invariant that a multi-threaded
+    value reaches only multi-threaded or persistent values means `markMT` visits each value at most
+    once over a run. The paper reports that always-atomic counts cost noticeably even with one
+    thread running, and that the tags significantly improve performance.[^beans] ry adopts that scheme: one tag
+    bit in the count word, a branch on it in `dup` and `drop`, and a marking pass over the input
+    and the captures when a library function decides to split. Each worker allocates from its own
+    pools, so allocation stays a pop from a free stack.
+  - *The effect-free fact.* It does not exist yet. Purity in ry today is declared (`@pure`) and
+    trusted without checking the body, and `item_effect_free` in
+    `crates/semantics/src/top_level.rs` judges only what a top-level statement does at package
+    load; the typed core (`crates/typed`) computes no effect facts. A trusted declaration is not
+    enough for threads, because a wrong `@pure` on a function that reaches the R heap would become
+    a data race. The typed core can compute the fact itself for strict and locked code, where it
+    sees every callee: a body is effect-free when it calls only standard-library functions without
+    effects and functions with the same fact, and any call across the R boundary, any I/O and any
+    random draw makes it effectful. A failing element (an out-of-range index, say) does not stop
+    the others; the split reports the failure with the lowest index, which is the one a sequential
+    run reports, and with no effects the two runs cannot otherwise be told apart.
+
+**What ry defers.**
+
+- **A stackless runtime.** BendRT compiles calls to tail calls and heap continuations, so user code
+  never grows the C stack.[^bendrt] ry's tier 0 recurses on the native stack, but a closure call
+  grows it in segments (`stacker::maybe_grow` in `crates/interp/src/eval.rs`), so an R recursion is
+  stopped by the interpreter's call-depth limit, not by the C stack. With
+  `options(expressions = 500000)`, a 20,000-deep recursion stops GNU R 4.3 with "C stack usage ...
+  is too close to the limit" and stops ry with "evaluation nested too deeply". A stackless tier 0,
+  where an R-to-R call pushes a frame and continues in the same dispatch loop, would also save the
+  Rust frame setup of each call, so it is reconsidered with step 3's tail-call handlers. It is
+  deferred because `lapply` and native code that calls back into R re-enter the interpreter on the
+  native stack anyway.
 
 **What ry rejects.**
 
@@ -784,7 +878,143 @@ design).
 for R: the package ecosystem's native code. The self-specialization idea is the same as quickening,
 which ry adopts in step 3.
 
-@@NEW@@
+### YJIT
+
+**What it is.** YJIT is CRuby's JIT, built at Shopify on basic block versioning by Maxime
+Chevalier-Boisvert, who introduced the technique with Marc Feeley for JavaScript.[^yjit] Lazy basic
+block versioning compiles a basic block only when execution first reaches it, and compiles a
+separate version of the block for each combination of value types known at its entry, so a type
+test whose answer that version already knows disappears without any program analysis. The ECOOP
+2015 paper reports that it removes 71% of type tests on average, gives speedups of up to 50%, and
+does as well as or better than a classical flow-based type analysis on all its
+benchmarks.[^lbbv] Shopify reports YJIT about 20% faster than the CRuby interpreter on
+railsbench.[^yjit]
+
+**What ry adopts.** Block versioning as the second stage of the baseline tier (step 4 of the
+[roadmap](/development/design/r-runtime/#untyped-performance-roadmap)). The baseline starts in
+Sparkplug's shape, a call to tier 0's handler per instruction, because that is the cheapest tier
+that removes decoding and dispatch. Versioning then fits on top: tier 0's value-kind feedback says
+which register kinds a block sees, and a version of the block for "both operands are double
+scalars" calls the double handlers directly, with one check at the block's entry instead of one in
+every handler. The two are measured against each other, and versions are capped per block, as a
+polymorphic inline cache caps its entries.
+
+### Deegen and LuaJIT Remake
+
+**What it is.** Deegen (Xu and Kjolstad) generates a dynamic language's VM from one description:
+the semantics of each bytecode are written as a C++ function, compiled to LLVM IR with unmodified
+Clang, and turned into both an interpreter and a baseline JIT. The interpreter has one native
+function per bytecode with tail-call dispatch, pinned VM state, monomorphic inline caches and
+quickening when a cache is updated; the baseline JIT copies and patches stencils that Deegen
+builds from the same IR at build time.[^deegen] LuaJIT Remake, a Lua 5.1 VM built with it, reports
+its interpreter about 31% faster than LuaJIT's hand-written assembly interpreter on average over 44
+benchmarks, and its baseline JIT about 360% faster than PUC Lua.[^deegen]
+
+**What ry adopts.** The single source of truth (steps 3 and 4). Tier 0's handlers, written once in
+Rust, are the semantics of each instruction: step 3 turns them into tail-calling functions, and the
+step 4 baseline calls them, so no instruction is implemented twice. Deegen's interpreter result is
+also the evidence for step 3's bet, that compiler-generated handlers with tail calls and inline
+caches can beat an interpreter written in assembly.
+
+**What ry rejects.** The generator. Deegen needs LLVM IR analysis at build time, and its baseline is
+copy-and-patch, which ry rejects (CPython row in the table). A Rust handler called from baseline
+code gives the same single source with no IR tooling.
+
+### HHVM Jump-Start and Project Leyden
+
+**What it is.** HHVM Jump-Start (Ottoni and Liu, CGO 2021) shares the JIT's profile data across
+Facebook's web servers, so a restarted server does not profile from scratch; on the Facebook
+website it cut the capacity lost during warm-up by 54.9% and raised steady-state performance by
+5.4%.[^jump-start] Java's Project Leyden does the same through an ahead-of-time cache. JEP 483 (JDK
+24) caches loaded and linked classes, and JEP 515 (JDK 25) adds the method profiles collected in a
+training run, so the JIT compiles hot methods at start-up instead of waiting for profiles, while
+production runs keep profiling. The JEP's example program runs in 73 ms with profiles in the cache
+instead of 90 ms without.[^leyden]
+
+**What ry adopts.** Training-run profiles in the per-package image (step 5). `ry install` is planned
+to write each package's bytecode and call targets into a mapped image (Bun's compiler, above). It
+can also run the package's tests and examples once and store tier 0's feedback and call counts in
+that image, so a session that loads the package starts with warm profiles and compiles hot closures
+at their first calls. That targets the measured gap that tier 1 runs under 3% of the time, because
+most hot closures never reach its thresholds. As in Leyden, the shipped profile is only a start:
+guards stay, and live feedback replaces it. A training run executes package code, so it is bounded
+in time, and a package whose run fails is installed without profiles.
+
+### HHVM and Hack, Static Python, Sorbet
+
+**What they are.** Each added types to a large dynamic codebase and then used them for speed. Hack
+"reconciles the fast development cycle of a dynamically typed language with the discipline
+provided by static typing" and runs on HHVM, whose JIT the PLDI 2018 paper describes as
+profile-guided and region-based.[^hack][^hhvm-jit] Static Python, Instagram's gradually typed
+Python, mixes concrete types, which are fully sound and cheap at run time, with transient types,
+which are shallowly checked and easier to adopt; moving parts of Instagram's web server to it
+raised the maximum requests per second by 3.7%.[^static-python] Sorbet checks Ruby statically, and
+`sorbet-runtime` checks each `sig` when the method runs. Its experimental compiler turns files
+marked `# compiled: true` into native extensions through LLVM, using the types Sorbet
+inferred.[^sorbet]
+
+**What ry adopts.** They are prior art for ry's whole strategy, and they agree on its parts. Types
+arrive file by file (Sorbet's sigils and compiled marker, ry's strict mode). Values from untyped
+code are checked at the boundary (Sorbet's runtime sigs, Static Python's transient checks, ry's
+facts and guesses). And the speed comes from compiling typed code, not from trusting annotations in
+untyped code. Two lessons carry over. Static Python's measured gain is a few percent of server
+throughput, so types are ry's second lever and the untyped tiers must close the gap to GNU R on
+their own. And the HHVM JIT paper's abstract names profiling, not Hack's types, as its basis, which
+matches ry's plan for untyped code: profiles, with types as early profiles.
+
+### LXR
+
+**What it is.** LXR (Zhao, Blackburn and McKinley, PLDI 2022) is a collector for Java that reclaims
+most memory by reference counting in short stop-the-world pauses, over an Immix heap of blocks and
+lines, so most memory is freed without copying. Occasional concurrent tracing finds cyclic garbage,
+mature objects are copied only judiciously, and one write barrier serves the counts, the concurrent
+trace and the remembered sets. On 17 workloads in a moderate heap it beats OpenJDK's default G1 by
+4% in throughput, and Shenandoah by 43%.[^lxr]
+
+**How ry's heap compares.** ry's heap also combines counts and tracing, but with the roles
+reversed. Every R object carries a 16-bit saturating count (`refcount` in
+`crates/heap/src/object.rs`), maintained by the stores R's C API makes, and the count only answers
+R's sharing question (`MAYBE_SHARED`) for copy-on-modify; it never frees anything. Memory is
+reclaimed by a non-moving, generational tracing collector with sticky mark bits and a write
+barrier, over size-segregated pages (`crates/heap/src/heap.rs`). Typed ry's own values are the
+exception: they are freed by exact counts and never traced (`typed-runtime.md`, "Memory").
+
+**What ry defers.** Concurrent tracing and Immix's line-level reuse (step 5). Both pay off when
+collector pauses or fragmentation are measured problems, and neither is measured yet.
+
+**What ry rejects.** Freeing an R object when its count reaches zero. Native code holds objects in C
+locals and on the `PROTECT` stack without counting them, so a count of zero does not mean the
+object is dead.
+
+### Riposte and pqR
+
+**What they are.** Riposte (Talbot, DeVito and Hanrahan, PACT 2012) is a research VM for R whose
+vector trace recorder and JIT fuse vector operations, so `sum(x * y + z)` runs without temporaries
+(section 3 of the runtime design).[^riposte] pqR, Radford Neal's fork of R 2.15, has a deferred
+evaluation framework behind two features. Task merging turns an expression such as `exp(v + 1)` into
+one task that computes `exp(v[i] + 1)` for each element in a single loop, and helper threads compute
+tasks in parallel with the interpreter, with a pending value returned until a reader needs
+it.[^pqr]
+
+**What ry adopts.** Deferred, fused arithmetic at tier 0, through ALTREP (step 3). A builtin `+`,
+`-`, `*` or `/` on long double vectors can return an ALTREP vector that holds its operands and the
+operation instead of the result. A further element-wise operation on such a vector extends the
+expression, and the first read of the data (`DATAPTR` from native code, a subscript, a builtin that
+cannot fuse) computes the whole expression into one buffer in one pass. An ALTREP vector is a legal
+R vector to every consumer, native code included, so fusion reaches untyped code without the JIT.
+The scope keeps it exact:
+
+- Only double arithmetic fuses, because it never warns, so no warning can arrive late. Length checks
+  and the recycling warning happen eagerly, when the operation is called.
+- The fused loop performs each element's operations in the original order, with no fused
+  multiply-add, so results are bit-identical to GNU R's.
+- The deferred vector holds its operands with counts, so a later `x[i] <- v` copies `x` instead of
+  changing a deferred result.
+- Attributes are computed eagerly, and short vectors are computed at once, because a deferred node
+  costs more than their arithmetic.
+
+**What ry rejects.** pqR's approach as a fork of GNU R, for the reason in the runtime design.
+
 ## About this page's format
 
 This page is an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format)
@@ -823,3 +1053,16 @@ footnote also carries the source's link.
 [^truffle]: Würthinger et al.: One VM to Rule Them All (Onward! 2013), <https://doi.org/10.1145/2509578.2509581>
 [^hotspot]: Java SE 21 HotSpot VM guide: performance enhancements, tiered compilation, <https://docs.oracle.com/en/java/javase/21/vm/java-hotspot-virtual-machine-performance-enhancements.html>
 [^dotnet-tiered]: .NET runtime design document: tiered compilation, and the compilation configuration reference, <https://github.com/dotnet/runtime/blob/main/docs/design/features/tiered-compilation.md>, <https://learn.microsoft.com/en-us/dotnet/core/runtime-config/compilation>
+[^lbbv]: Chevalier-Boisvert and Feeley: Simple and Effective Type Check Removal through Lazy Basic Block Versioning (ECOOP 2015), <https://drops.dagstuhl.de/entities/document/10.4230/LIPIcs.ECOOP.2015.101>, <https://arxiv.org/abs/1411.0352>
+[^yjit]: Shopify Engineering: YJIT, building a new JIT compiler for CRuby (2021), <https://shopify.engineering/yjit-just-in-time-compiler-cruby>
+[^deegen]: Xu and Kjolstad: Deegen, a JIT-Capable VM Generator for Dynamic Languages (2024), <https://arxiv.org/abs/2411.11469>
+[^jump-start]: Ottoni and Liu: HHVM Jump-Start, Boosting Both Warmup and Steady-State Performance at Scale (CGO 2021), <https://research.facebook.com/publications/hhvm-jump-start-boosting-both-warmup-and-steady-state-performance-at-scale/>
+[^leyden]: JEP 515: Ahead-of-Time Method Profiling, and the Project Leyden page, <https://openjdk.org/jeps/515>, <https://openjdk.org/projects/leyden/>
+[^hack]: The Hack language home page, <https://hacklang.org/>
+[^hhvm-jit]: Ottoni: HHVM JIT, a Profile-Guided, Region-Based Compiler for PHP and Hack (PLDI 2018), <https://research.facebook.com/publications/hhvm-jit-a-profile-guided-region-based-compiler-for-php-and-hack/>
+[^static-python]: Lu, Greenman, Meyer, Viehland, Panse and Krishnamurthi: Gradual Soundness, Lessons from Static Python (Programming 2023), <https://arxiv.org/abs/2206.13831>
+[^sorbet]: Sorbet documentation overview, and Open-sourcing the Sorbet Compiler, <https://sorbet.org/docs/overview>, <https://sorbet.org/blog/2021/07/30/open-sourcing-sorbet-compiler>
+[^lxr]: Zhao, Blackburn and McKinley: Low-Latency, High-Throughput Garbage Collection (PLDI 2022), <https://doi.org/10.1145/3519939.3523440>
+[^riposte]: Talbot, DeVito and Hanrahan: Riposte, a Trace-Driven Compiler and Parallel VM for Vector Code in R (PACT 2012), and its repository, <https://github.com/jtalbot/riposte>
+[^pqr]: pqR NEWS: deferred evaluation, task merging and helper threads, <https://github.com/radfordneal/pqR/blob/Release-2016-10-24/NEWS>
+[^beans]: Ullrich and de Moura: Counting Immutable Beans, Reference Counting Optimized for Purely Functional Programming (IFL 2019), section 7.2, <https://arxiv.org/abs/1908.05647>

@@ -1087,6 +1087,12 @@ pub unsafe fn get_option(name: &str) -> Sexp {
 
 /// Sets option `name`, removing it for `NULL`, and returns the old value.
 pub unsafe fn set_option(name: &str, value: Sexp) -> R<Sexp> {
+    if name == "expressions" {
+        let depth = values::as_integer_scalar(value);
+        if depth > 0 {
+            interp().max_depth = depth.min(500_000) as u32;
+        }
+    }
     let heap = crate::heap();
     let symbol = values::install(name)?;
     let mut cell = options();
@@ -1116,12 +1122,6 @@ pub unsafe fn set_option(name: &str, value: Sexp) -> R<Sexp> {
             set_options(fresh)?;
         } else {
             heap.set_cdr(previous, fresh);
-        }
-    }
-    if name == "expressions" {
-        let depth = values::as_integer_scalar(value);
-        if depth > 0 {
-            interp().max_depth = depth.min(500_000) as u32;
         }
     }
     Ok(nil())
