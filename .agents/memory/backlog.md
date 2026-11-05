@@ -825,6 +825,12 @@ change that does not pay.
 
 ## Open: untyped R against GNU R
 
+- `missing()` costs about a whole closure call (2,626 instructions against GNU R's 2,590); it is a
+  special, so a fast path needs its own bytecode op. The unary builtin path and native entries
+  skip `call_builtin_checked`, so `--profile-summary` counters and Rprof do not see those calls.
+  The `Reduce` prologue never binds `ind` in its frame, which only an `f` that reads
+  `parent.frame()` can observe.
+
 Target: plain, untyped R at least 1.5 times faster than GNU R. A private 300K-line code base runs
 about 3% slower than on GNU R, and `just bench-real` (`tools/bench/real/`, results in
 `benchmarks.mdx`) reproduces the gap on production-shaped workloads. `ry run --profile-summary
