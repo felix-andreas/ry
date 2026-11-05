@@ -1069,6 +1069,12 @@ pub unsafe fn apply_closure(
     sys_parent: Sexp,
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
+    if function.has_gp(gp::NATIVE_ENTRY)
+        && supplied.is_none()
+        && let Some(value) = crate::base_fast_paths::native_entry(function, args)?
+    {
+        return Ok(value);
+    }
     if supplied.is_none()
         && crate::annotations::is_typed(function)
         && let Some(tier) = bytecode::tier()
@@ -1091,6 +1097,12 @@ pub unsafe fn apply_closure_owning(
     sys_parent: Sexp,
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
+    if function.has_gp(gp::NATIVE_ENTRY)
+        && supplied.is_none()
+        && let Some(value) = crate::base_fast_paths::native_entry(function, args)?
+    {
+        return Ok(value);
+    }
     if supplied.is_none()
         && crate::annotations::is_typed(function)
         && let Some(tier) = bytecode::tier()

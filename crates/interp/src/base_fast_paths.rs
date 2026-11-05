@@ -21,7 +21,7 @@ use {
         unwind::{R, Unwind, jump},
         values::{self, install, length, missing_arg, nil, symbols},
     },
-    heap::object::{NA_LOGICAL, Sexp, SexpType, gp},
+    heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp},
     smallvec::SmallVec,
 };
 
@@ -98,7 +98,306 @@ pub unsafe fn install_all(namespace: Sexp) -> R<()> {
             missed.join(", ")
         )));
     }
+    register_native_entries(namespace)
+}
+
+/// The native code for a whole call of a base closure: the result, or `None` when the closure
+/// is to run as usual. It sees the call's arguments as the closure would receive them.
+pub type NativeEntry = unsafe fn(&[Arg]) -> R<Option<Sexp>>;
+
+/// The base closures whose whole call runs natively when every argument it needs is already a
+/// value, with the [`stable_hash`] of their formals and body (GNU R 4.6.2). Each is a one-line
+/// body over primitives, so the frame, the promises and the lookups are most of its cost: in
+/// testthat-style code `identical`, `isTRUE`, `nrow`, `%in%` and `%||%` each take 1 to 2.5% of
+/// the run.
+const NATIVE_ENTRIES: &[(&str, u64, NativeEntry)] = &[
+    ("identical", 0x53ecb73e41a5f29e, native_identical),
+    ("isTRUE", 0x092932cb0d38b378, native_is_true),
+    ("isFALSE", 0x02a0aba295284434, native_is_false),
+    ("nrow", 0xaf2f11bd0294734b, native_nrow),
+    ("ncol", 0xcf3f0da3fff33d98, native_ncol),
+    ("match", 0x8dee99370571e93c, native_match),
+    ("%in%", 0x2fb6d82723e3191f, native_in),
+    ("%||%", 0x3f61ec71bc0d9992, native_or_else),
+];
+
+/// Marks the closures of [`NATIVE_ENTRIES`] whose code matches and records them in
+/// [`interp::Interp::native_entries`]. The mark lives in the closure and survives the start-up
+/// image, the registry does not, so an image start registers again.
+pub unsafe fn register_native_entries(namespace: Sexp) -> R<()> {
+    let print = std::env::var_os("RY_PRINT_FAST_PATH_HASHES").is_some();
+    let bundled =
+        crate::system::r_version().number() == crate::methods_core::BUNDLED_VERSION.trim();
+    let mut missed = Vec::new();
+    interp().native_entries.clear();
+    for &(name, expected, entry) in NATIVE_ENTRIES {
+        let function = eval::value_of(eval::find_var_in_frame(install(name)?, namespace)?)?;
+        if function.kind() != SexpType::Closure {
+            missed.push(name);
+            continue;
+        }
+        let mut hash = FNV_OFFSET;
+        stable_hash(function.car(), &mut hash);
+        stable_hash(crate::bytecode::closure_body(function), &mut hash);
+        if print {
+            eprintln!("{name} {hash:#018x}");
+        }
+        if hash != expected {
+            missed.push(name);
+            continue;
+        }
+        function.set_gp_bits(gp::NATIVE_ENTRY, true);
+        interp().native_entries.push((function, entry));
+    }
+    if bundled && !missed.is_empty() {
+        return Err(crate::unwind::error(format!(
+            "the native entries for {} do not match ry's bundled base R; update NATIVE_ENTRIES \
+             in base_fast_paths.rs (RY_PRINT_FAST_PATH_HASHES=1 prints the hashes)",
+            missed.join(", ")
+        )));
+    }
     Ok(())
+}
+
+/// Runs the call of `function`, a closure marked [`gp::NATIVE_ENTRY`], natively when its
+/// native code accepts the arguments. The closure's frame is never built, which is
+/// unobservable because the native code only reads arguments that are already values: a
+/// promise is read only when it is forced or when its code is a constant or a variable bound
+/// to a value, so nothing runs that could see the missing frame (`sys.calls()`, a handler, a
+/// traceback). A closure being debugged or traced runs as usual.
+pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
+    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
+        || args.iter().any(|arg| arg.tag != nil())
+    {
+        return Ok(None);
+    }
+    let Some(&(_, entry)) = interp()
+        .native_entries
+        .iter()
+        .find(|(candidate, _)| *candidate == function)
+    else {
+        return Ok(None);
+    };
+    let value = entry(args)?;
+    if value.is_some() {
+        interp().visible = true;
+    }
+    Ok(value)
+}
+
+/// The value an argument stands for when reading it runs no R code: a value, a forced promise's
+/// value, or the value of an unforced promise whose code is a constant or a variable bound to a
+/// value. Reading such a promise settles it, as forcing would.
+unsafe fn resolved(argument: Sexp) -> R<Option<Sexp>> {
+    if argument.kind() != SexpType::Promise {
+        return Ok((argument != missing_arg()).then_some(argument));
+    }
+    if argument.car() != values::unbound() {
+        return Ok(Some(argument.car()));
+    }
+    if argument.has_gp(gp::CHECKED_PROMISE) {
+        return Ok(None);
+    }
+    let code = argument.cdr();
+    let value = match code.kind() {
+        SexpType::Symbol if code != missing_arg() && code != symbols().dots => {
+            match crate::effects::eager_argument(code, argument.tag()) {
+                Some(value) if value.kind() != SexpType::Promise => value,
+                _ => return Ok(None),
+            }
+        }
+        SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode => {
+            return Ok(None);
+        }
+        _ => code,
+    };
+    eval::settle_promise(argument, value).map(Some)
+}
+
+/// The values of exactly `N` arguments, all [`resolved`].
+unsafe fn resolved_all<const N: usize>(args: &[Arg]) -> R<Option<[Sexp; N]>> {
+    if args.len() != N {
+        return Ok(None);
+    }
+    let mut values = [nil(); N];
+    for (slot, arg) in values.iter_mut().zip(args) {
+        match resolved(arg.value)? {
+            Some(value) => *slot = value,
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(values))
+}
+
+/// `identical(x, y)` with every flag at its default.
+unsafe fn native_identical(args: &[Arg]) -> R<Option<Sexp>> {
+    let Some([x, y]) = resolved_all::<2>(args)? else {
+        return Ok(None);
+    };
+    let same = sort::identical(x, y, &IdenticalFlags::default());
+    values::scalar_logical(same as i32).map(Some)
+}
+
+/// The one element of a logical scalar `x` that is not an object, whose `length()` and
+/// `is.na()` therefore do not dispatch; `None` for an object, which runs the R body.
+unsafe fn logical_scalar(x: Sexp) -> Option<Option<i32>> {
+    if x.is_object() || x.is_altrep() {
+        return None;
+    }
+    Some((x.kind() == SexpType::Logical && x.length() == 1).then(|| x.slice::<i32>()[0]))
+}
+
+/// `isTRUE(x)`: `is.logical(x) && length(x) == 1L && !is.na(x) && x`.
+unsafe fn native_is_true(args: &[Arg]) -> R<Option<Sexp>> {
+    let Some([x]) = resolved_all::<1>(args)? else {
+        return Ok(None);
+    };
+    let Some(element) = logical_scalar(x) else {
+        return Ok(None);
+    };
+    let truth = matches!(element, Some(value) if value != NA_LOGICAL && value != 0);
+    values::scalar_logical(truth as i32).map(Some)
+}
+
+/// `isFALSE(x)`: `is.logical(x) && length(x) == 1L && !is.na(x) && !x`.
+unsafe fn native_is_false(args: &[Arg]) -> R<Option<Sexp>> {
+    let Some([x]) = resolved_all::<1>(args)? else {
+        return Ok(None);
+    };
+    let Some(element) = logical_scalar(x) else {
+        return Ok(None);
+    };
+    values::scalar_logical((element == Some(0)) as i32).map(Some)
+}
+
+/// `dim(x)[position]` for an `x` that is not an object, so `dim()` does not dispatch: `NULL`
+/// without a `dim`, `NA` past its end.
+unsafe fn dimension(args: &[Arg], position: usize) -> R<Option<Sexp>> {
+    let Some([x]) = resolved_all::<1>(args)? else {
+        return Ok(None);
+    };
+    if x.is_object() {
+        return Ok(None);
+    }
+    let dim = values::get_attr(x, symbols().dim);
+    if dim == nil() {
+        return Ok(Some(nil()));
+    }
+    if dim.kind() != SexpType::Integer || dim.is_altrep() || values::has_attributes(dim) {
+        return Ok(None);
+    }
+    let extent = values::ints(dim).get(position).copied().unwrap_or(NA_INTEGER);
+    values::scalar_integer(extent).map(Some)
+}
+
+/// `nrow(x)`: `dim(x)[1L]`.
+unsafe fn native_nrow(args: &[Arg]) -> R<Option<Sexp>> {
+    dimension(args, 0)
+}
+
+/// `ncol(x)`: `dim(x)[2L]`.
+unsafe fn native_ncol(args: &[Arg]) -> R<Option<Sexp>> {
+    dimension(args, 1)
+}
+
+/// `match(x, table)` with the default `nomatch` and `incomparables`.
+unsafe fn native_match(args: &[Arg]) -> R<Option<Sexp>> {
+    let Some([x, table]) = resolved_all::<2>(args)? else {
+        return Ok(None);
+    };
+    match positions(x, table, NA_INTEGER)? {
+        Some(Position::Scalar(position)) => values::scalar_integer(position).map(Some),
+        Some(Position::Vector(positions)) => Ok(Some(positions)),
+        None => Ok(None),
+    }
+}
+
+/// `x %in% table`: `match(x, table, nomatch = 0L) > 0L`.
+unsafe fn native_in(args: &[Arg]) -> R<Option<Sexp>> {
+    let Some([x, table]) = resolved_all::<2>(args)? else {
+        return Ok(None);
+    };
+    match positions(x, table, 0)? {
+        Some(Position::Scalar(position)) => values::scalar_logical((position > 0) as i32).map(Some),
+        Some(Position::Vector(positions)) => {
+            let found = values::alloc(SexpType::Logical, length(positions))?;
+            for (flag, position) in found.slice_mut::<i32>().iter_mut().zip(values::ints(positions)) {
+                *flag = (*position > 0) as i32;
+            }
+            Ok(Some(found))
+        }
+        None => Ok(None),
+    }
+}
+
+/// What [`positions`] found.
+enum Position {
+    /// The position of a one-element `x`, found without allocating.
+    Scalar(i32),
+    /// The match kernel's integer vector.
+    Vector(Sexp),
+}
+
+/// `match(x, table, nomatch)` for `x` and `table` atomic vectors that are not objects, so
+/// `match` neither calls `mtfrm` nor raises its error. A one-element `x` of `table`'s type is
+/// looked up by a scan: an integer or logical by value (`NA` matches `NA`), a string by its
+/// interned pointer when it is ASCII or `NA`, because interning gives equal ASCII text one
+/// string whatever its declared encoding.
+unsafe fn positions(x: Sexp, table: Sexp, nomatch: i32) -> R<Option<Position>> {
+    let atomic = |value: Sexp| {
+        !value.is_object()
+            && matches!(
+                value.kind(),
+                SexpType::Logical
+                    | SexpType::Integer
+                    | SexpType::Real
+                    | SexpType::Complex
+                    | SexpType::String
+            )
+    };
+    if !atomic(x) || !atomic(table) {
+        return Ok(None);
+    }
+    if x.kind() == table.kind() && !x.is_altrep() && !table.is_altrep() && x.length() == 1 {
+        let found = match x.kind() {
+            SexpType::Integer | SexpType::Logical => {
+                let wanted = x.slice::<i32>()[0];
+                table.slice::<i32>().iter().position(|item| *item == wanted)
+            }
+            SexpType::String => {
+                let wanted = x.slice::<Sexp>()[0];
+                if wanted == values::na_string() || wanted.has_gp(gp::ASCII) {
+                    table.slice::<Sexp>().iter().position(|item| *item == wanted)
+                } else {
+                    return kernel_positions(x, table, nomatch);
+                }
+            }
+            _ => return kernel_positions(x, table, nomatch),
+        };
+        return Ok(Some(Position::Scalar(found.map_or(nomatch, |index| index as i32 + 1))));
+    }
+    kernel_positions(x, table, nomatch)
+}
+
+unsafe fn kernel_positions(x: Sexp, table: Sexp, nomatch: i32) -> R<Option<Position>> {
+    let nomatch = values::scalar_integer(nomatch)?;
+    crate::heap().root(nomatch);
+    let positions = kernel(sort::do_match, &[x, table, nomatch, nil()], nil())?;
+    Ok(Some(Position::Vector(positions)))
+}
+
+/// `x %||% y`: `if (is.null(x)) y else x`, which reads `y` only when `x` is `NULL`.
+unsafe fn native_or_else(args: &[Arg]) -> R<Option<Sexp>> {
+    let [x, y] = args else {
+        return Ok(None);
+    };
+    let Some(left) = resolved(x.value)? else {
+        return Ok(None);
+    };
+    if left != nil() {
+        return Ok(Some(left));
+    }
+    resolved(y.value)
 }
 
 /// The prologue's result when the R body is to run.
