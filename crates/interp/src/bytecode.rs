@@ -48,7 +48,7 @@ use {
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
     heap::{
-        Marker,
+        Heap, Marker,
         activity::{self, Activity, Counter},
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
     },
@@ -3123,37 +3123,27 @@ pub unsafe fn load_variable(code: Sexp, env: Sexp, pc: usize) -> R<(Sexp, bool)>
     Ok((value, local))
 }
 
-/// What every instruction of an activation reads, loaded once instead of once per instruction.
-/// None of these addresses changes while the activation runs: the code object is rooted and
-/// never patched, its vectors are never resized, and the register window was reserved on entry
-/// in a file that never reallocates. What they point at (registers, cache slots) does change.
-#[derive(Clone, Copy)]
-struct Decoded<'a> {
-    code: &'a [i32],
+/// What every instruction of an activation reads besides its code and registers, loaded once
+/// instead of once per instruction. None of these addresses changes while the activation runs:
+/// the code object is rooted and never patched, its vectors are never resized, and the register
+/// window was reserved on entry in a file that never reallocates. What they point at (registers,
+/// cache slots) does change.
+struct Activation<'m, 'a> {
+    machine: &'m mut Machine<'a>,
     constants: Sexp,
     cache: LookupCache,
-    registers: *mut Sexp,
-    /// The type feedback bytes, one per code word, or null while nothing will read them: no
+    /// The type feedback words, one per code word, or null while nothing will read them: no
     /// optimizing tier is installed, or the code is not yet warm (see [`warm`]).
     feedback: *mut i32,
+    env: Sexp,
+    mark: usize,
+    heap: *mut Heap,
 }
 
-impl Decoded<'_> {
-    unsafe fn of(machine: &Machine<'_>) -> Self {
-        let constants = machine.code.cdr();
-        let feedback = match interp().bytecode.tier {
-            Some(tier) if warm(constants, &tier) => {
-                values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
-            }
-            _ => std::ptr::null_mut(),
-        };
-        Decoded {
-            code: values::ints(machine.code.car()),
-            constants,
-            cache: LookupCache::of(machine.code),
-            registers: register_address(machine.base),
-            feedback,
-        }
+impl Activation<'_, '_> {
+    #[inline(always)]
+    unsafe fn constant(&self, instruction: Instruction, index: usize) -> Sexp {
+        self.constants.element(instruction.operand(index))
     }
 
     #[inline(always)]
@@ -3179,572 +3169,826 @@ unsafe fn warm(constants: Sexp, tier: &Tier) -> bool {
     profile[profile::TIER_STATE] >= 0 && profile[profile::ENTRIES] >= tier.entry_threshold / 2
 }
 
-/// `?` inside [`interpret`]'s dispatch loop: a failure leaves for the unwind handling.
-macro_rules! tri {
-    ($failed:lifetime, $expression:expr) => {
-        match $expression {
-            Ok(value) => value,
-            Err(unwind) => break $failed unwind,
+/// The instruction an op handler runs: its position in the code and the register window.
+#[derive(Clone, Copy)]
+struct Instruction {
+    code: *const i32,
+    at: usize,
+    registers: *mut Sexp,
+}
+
+impl Instruction {
+    #[inline(always)]
+    unsafe fn operand(self, index: usize) -> usize {
+        *self.code.add(self.at + 1 + index) as usize
+    }
+
+    #[inline(always)]
+    unsafe fn register(self, index: usize) -> Sexp {
+        *self.registers.add(index)
+    }
+
+    #[inline(always)]
+    unsafe fn set(self, index: usize, value: Sexp) {
+        *self.registers.add(index) = value;
+    }
+
+    /// The register operand `index` names.
+    #[inline(always)]
+    unsafe fn input(self, index: usize) -> Sexp {
+        self.register(self.operand(index))
+    }
+
+    /// Stores into the register operand `index` names.
+    #[inline(always)]
+    unsafe fn output(self, index: usize, value: Sexp) {
+        self.set(self.operand(index), value);
+    }
+}
+
+/// How interpretation goes on after an instruction.
+enum Flow {
+    /// With the instruction after it.
+    Next,
+    /// With the instruction at this position.
+    Goto(usize),
+    /// Nowhere: the activation returns this value.
+    Done(Sexp),
+}
+
+/// An op handler. Every instruction ends by tail-calling the handler of the next one, so the
+/// interpreter's state stays in argument registers from one instruction to the next instead of
+/// living in the stack frame of one function that holds every op, which spilled and reloaded it
+/// around each dispatch. A handler that calls out keeps its own frame only for that call.
+type Handler = unsafe fn(&mut Activation<'_, '_>, *const i32, usize, *mut Sexp) -> R<Sexp>;
+
+/// Interprets `machine`'s code from `pc` until it returns, or, when `SINGLE`, runs the one
+/// instruction at `pc`.
+#[inline(always)]
+unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) -> R<Sexp> {
+    let constants = machine.code.cdr();
+    let feedback = match interp().bytecode.tier {
+        Some(tier) if warm(constants, &tier) => {
+            values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
+        }
+        _ => std::ptr::null_mut(),
+    };
+    let code = values::ints(machine.code.car()).as_ptr();
+    let registers = register_address(machine.base);
+    let mut state = Activation {
+        constants,
+        cache: LookupCache::of(machine.code),
+        feedback,
+        env: machine.env,
+        mark: machine.mark,
+        heap: crate::heap(),
+        machine,
+    };
+    let handlers = if SINGLE { &STEP_HANDLERS } else { &RUN_HANDLERS };
+    if !SINGLE {
+        release(&state);
+    }
+    (*handlers.as_ptr().add(op_index(code, pc)))(&mut state, code, pc, registers)
+}
+
+/// The handler table position of the instruction at `pc`.
+#[inline(always)]
+unsafe fn op_index(code: *const i32, pc: usize) -> usize {
+    let word = *code.add(pc) as u32;
+    debug_assert!(op_of(word).is_some());
+    (word & OP_MASK) as usize
+}
+
+/// Between instructions every live value sits in a register, so what an instruction rooted is
+/// released at once. Otherwise an object only a finished call held would stay alive until the
+/// body returns, past a later `gc()` and the finalizer GNU R runs there. Only instructions that
+/// can root anything check.
+#[inline(always)]
+unsafe fn release(state: &Activation<'_, '_>) {
+    let heap = &mut *state.heap;
+    if heap.handle_mark() > state.mark {
+        heap.release_handles(state.mark);
+    }
+}
+
+/// Defines the handler of `$op` around `$body`, which runs the instruction and says how to go
+/// on. `$roots` says whether the instruction can root values, which the handler then releases
+/// before the next one runs. A failure goes to [`continue_after`], which resumes at a loop
+/// target of a `break` or `next` aimed at this activation and otherwise returns it.
+macro_rules! handlers {
+    ($($name:ident: $op:ident, $roots:literal, $body:ident;)*) => {
+        $(
+            unsafe fn $name<const SINGLE: bool>(
+                state: &mut Activation<'_, '_>,
+                code: *const i32,
+                at: usize,
+                registers: *mut Sexp,
+            ) -> R<Sexp> {
+                let instruction = Instruction { code, at, registers };
+                let pc = match $body(state, instruction) {
+                    Ok(Flow::Next) => at + 1 + operand_count(Op::$op),
+                    Ok(Flow::Goto(pc)) => pc,
+                    Ok(Flow::Done(value)) => return Ok(value),
+                    Err(unwind) => {
+                        if SINGLE {
+                            return Err(unwind);
+                        }
+                        continue_after(state.machine, at, unwind)?
+                    }
+                };
+                if SINGLE {
+                    return Ok(nil());
+                }
+                if $roots {
+                    release(state);
+                }
+                become (*RUN_HANDLERS.as_ptr().add(op_index(code, pc)))(state, code, pc, registers)
+            }
+        )*
+
+        const fn handler_table<const SINGLE: bool>() -> [Handler; OPS.len()] {
+            let mut table: [Handler; OPS.len()] = [jump::<SINGLE>; OPS.len()];
+            $(table[Op::$op as usize] = $name::<SINGLE>;)*
+            table
         }
     };
 }
 
-/// Interprets `machine`'s code from `pc` until it returns, or, when `SINGLE`, runs the one
-/// instruction at `pc`.
-//
-// One loop holds the whole dispatch: every instruction ends by jumping back to the loop head,
-// and a failing one breaks out to the unwind handling below it. As a separate step function
-// returning how to go on, each instruction paid for writing that result and matching it again.
-#[inline(always)]
-unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
-    let decoded = Decoded::of(machine);
-    let heap = crate::heap();
-    let mark = machine.mark;
-    let env = machine.env;
-    // Only `code` and `registers` are read by nearly every instruction. The rest are read
-    // through `decoded` where an instruction needs them, so the dispatch path does not reload
-    // them from the stack on every instruction.
-    let Decoded {
-        code, registers, ..
-    } = decoded;
-    let decoded = &decoded;
-    let set = |index: usize, value: Sexp| *registers.add(index) = value;
-    let register = |index: usize| *registers.add(index);
-    let mut at: usize;
-    let mut started = false;
-    loop {
-        let unwind = 'failed: {
-            loop {
-                if SINGLE {
-                    if started {
-                        return Ok(nil());
-                    }
-                    started = true;
-                } else if heap.handle_mark() > mark {
-                    // Between instructions every live value sits in a register, so what an
-                    // instruction rooted is released at once. Otherwise an object only a
-                    // finished call held would stay alive until the body returns, past a later
-                    // `gc()` and the finalizer GNU R runs there.
-                    heap.release_handles(mark);
-                }
-                at = pc;
-                let operand = |index: usize| *code.get_unchecked(at + 1 + index) as usize;
-                debug_assert!(at < code.len() && op_of(code[at] as u32).is_some());
-                let word = *code.get_unchecked(at) as u32;
-                // SAFETY: the compiler writes every opcode word with `op_word`.
-                let op = std::mem::transmute::<u32, Op>(word & OP_MASK);
-                let next = at + 1 + (word >> OP_BITS) as usize;
-                match op {
-                    Op::Constant => {
-                        set(operand(0), decoded.constants.element(operand(1)));
-                        interp().visible = true;
-                    }
-                    Op::GetVar => {
-                        // Visible before the lookup, so that forcing a promise to `invisible()` leaves the
-                        // value invisible, as `withCallingHandlers(expr)` relies on.
-                        interp().visible = true;
-                        let symbol = decoded.constants.element(operand(1));
-                        let held = machine.base..machine.base + operand(0);
-                        let value = tri!('failed, lookup_variable(symbol, env, decoded.cache, operand(2), held));
-                        decoded.record(at, value);
-                        set(operand(0), value);
-                    }
-                    Op::SetVar => {
-                        let symbol = decoded.constants.element(operand(0));
-                        let value = register(operand(1));
-                        let hint = &mut *decoded.cache.hints.add(operand(2));
-                        let cell = crate::heap().frame_cell_hinted(env, symbol, hint);
-                        tri!('failed, eval::assign_local(symbol, value, env, cell));
-                        interp().visible = false;
-                    }
-                    Op::GetFun => {
-                        let symbol = decoded.constants.element(operand(1));
-                        let call = decoded.constants.element(operand(3));
-                        let function = tri!('failed, lookup_function(symbol, env, decoded.cache, operand(2), call));
-                        set(operand(0), function);
-                    }
-                    Op::BranchUnlessBuiltin => {
-                        if register(operand(0)).kind() != SexpType::Builtin {
-                            pc = operand(1);
-                            continue;
-                        }
-                    }
-                    Op::CallBuiltin => {
-                        let function = register(operand(1));
-                        let call = decoded.constants.element(operand(2));
-                        let first = operand(3);
-                        let count = operand(4);
-                        let definition = tri!('failed, eval::builtin_def(function));
-                        let mut args = eval::Args::new();
-                        let mut cell = call.cdr();
-                        for index in 0..count {
-                            let value = register(first + index);
-                            // Only an empty argument is an error: a promise may well evaluate to the empty
-                            // symbol, as `X[[i]]` does for a formal without a default.
-                            if cell.car() == missing_arg() && !definition.keep_missing {
-                                return Err(error_in(
-                                    call,
-                                    format!("argument {} is empty", index + 1),
-                                ));
-                            }
-                            args.push(Arg {
-                                tag: cell.tag(),
-                                value,
-                            });
-                            cell = cell.cdr();
-                        }
-                        let value =
-                            tri!('failed, call_builtin(definition, call, function, &args, env));
-                        decoded.record(at, value);
-                        set(operand(0), value);
-                    }
-                    Op::CallGeneric => {
-                        let function = register(operand(1));
-                        let call = decoded.constants.element(operand(2));
-                        let value = if function.kind() == SexpType::Closure {
-                            let mut compiled = decoded.constants.element(operand(2) + 1);
-                            if compiled == unbound() {
-                                compiled = tri!('failed, compile_promise_arguments(machine.function, call.cdr()));
-                                crate::heap().set_element(
-                                    decoded.constants,
-                                    operand(2) + 1,
-                                    compiled,
-                                );
-                            }
-                            let arguments = if compiled == nil() {
-                                call.cdr()
-                            } else {
-                                compiled
-                            };
-                            let mut args = eval::Args::new();
-                            tri!('failed, eval::compiled_args_into(arguments, env, &mut args));
-                            tri!('failed, eval::apply_closure_owning(call, function, &args, env, None))
-                        } else {
-                            // A special reads its arguments as expressions, so they stay uncompiled.
-                            tri!('failed, eval::apply_call(call, function, call.cdr(), env))
-                        };
-                        decoded.record(at, value);
-                        set(operand(0), value);
-                    }
-                    Op::CallRebinding => {
-                        let function = register(operand(1));
-                        let call = decoded.constants.element(operand(2));
-                        let target = decoded.constants.element(operand(3));
-                        let value = tri!('failed, eval::rebind_call(call, function, target, env));
-                        decoded.record(at, value);
-                        set(operand(0), value);
-                    }
-                    Op::CallTailUpdate => {
-                        let function = register(operand(1));
-                        let call = decoded.constants.element(operand(2));
-                        let target = decoded.constants.element(operand(3));
-                        let value = tri!('failed, eval::tail_update(call, function, target, env));
-                        decoded.record(at, value);
-                        set(operand(0), value);
-                    }
-                    Op::Field => {
-                        let object = register(operand(1));
-                        let name = decoded.constants.element(operand(2));
-                        let call = decoded.constants.element(operand(3));
-                        let shape = decoded.constants.element(operand(4));
-                        let value = match tri!('failed, crate::records::cached_field(object, name, shape))
-                        {
-                            Some(value) => value,
-                            None => {
-                                tri!('failed, crate::subset::dollar_value(object, name.car(), call, env))
-                            }
-                        };
-                        record_feedback(decoded.constants, at, value);
-                        interp().visible = true;
-                        set(operand(0), value);
-                    }
-                    Op::Item => {
-                        let object = register(operand(1));
-                        let index = decoded.constants.element(operand(2));
-                        let shape = decoded.constants.element(operand(3));
-                        match tri!('failed, crate::records::cached_item(object, index, shape)) {
-                            Some(value) => {
-                                decoded.record(at, value);
-                                interp().visible = true;
-                                set(operand(0), value);
-                            }
-                            None => {
-                                pc = operand(4);
-                                continue;
-                            }
-                        }
-                    }
-                    Op::MatchShape => {
-                        if !crate::records::has_layout(register(operand(0)), operand(1) as u32) {
-                            pc = operand(2);
-                            continue;
-                        }
-                    }
-                    Op::MatchTag => {
-                        if crate::records::plain_tag(register(operand(0)))
-                            != Some(operand(1) as u32)
-                        {
-                            pc = operand(2);
-                            continue;
-                        }
-                    }
-                    Op::MatchLiteral => {
-                        let pattern = decoded.constants.element(operand(1));
-                        if !crate::records::literal_matches(pattern, register(operand(0))) {
-                            pc = operand(2);
-                            continue;
-                        }
-                    }
-                    Op::Slot => {
-                        let value = tri!('failed, crate::records::slot_value(register(operand(1)), operand(2)));
-                        decoded.record(at, value);
-                        set(operand(0), value);
-                    }
-                    Op::MatchFail => {
-                        let call = decoded.constants.element(operand(1));
-                        return Err(crate::records::no_arm_matches(register(operand(0)), call));
-                    }
-                    Op::Construct => {
-                        let slots =
-                            std::slice::from_raw_parts(registers.add(operand(2)), operand(3));
-                        let value =
-                            tri!('failed, crate::records::construct(operand(1) as u32, slots));
-                        interp().visible = true;
-                        set(operand(0), value);
-                    }
-                    Op::Move => set(operand(0), register(operand(1))),
-                    Op::SwitchArm => {
-                        let value = tri!('failed, switch_arm(register(operand(1)), decoded.constants.element(operand(2))));
-                        set(operand(0), value);
-                    }
-                    Op::BoundEval => {
-                        let expression = decoded.constants.element(operand(1));
-                        let names = decoded.constants.element(operand(2));
-                        let bound =
-                            std::slice::from_raw_parts(registers.add(operand(3)), operand(4));
-                        let value = tri!('failed, crate::records::eval_bound_registers(expression, names, bound, env));
-                        decoded.record(at, value);
-                        set(operand(0), value);
-                    }
-                    Op::MatchCondition => {
-                        let guard = decoded.constants.element(operand(2));
-                        let call = decoded.constants.element(operand(3));
-                        let holds = tri!('failed, crate::records::guard_holds(register(operand(1)), guard, call));
-                        set(
-                            operand(0),
-                            tri!('failed, values::scalar_logical(i32::from(holds))),
-                        );
-                    }
-                    Op::BranchUnlessPrimitive => {
-                        if register(operand(0)) != decoded.constants.element(operand(1)) {
-                            pc = operand(2);
-                            continue;
-                        }
-                    }
-                    Op::BranchIfObject => {
-                        if register(operand(0)).is_object() {
-                            pc = operand(1);
-                            continue;
-                        }
-                    }
-                    Op::DispatchSubject => {
-                        let function = register(operand(1));
-                        let call = decoded.constants.element(operand(2));
-                        let definition = tri!('failed, eval::builtin_def(function));
-                        let mut args = eval::Args::new();
-                        let value = match tri!('failed, dispatch::dispatch_evaluated_subject(
-                            definition,
-                            call,
-                            function,
-                            call.cdr(),
-                            register(operand(3)),
-                            env,
-                            &mut args,
-                        )) {
-                            Some(value) => value,
-                            None => {
-                                tri!('failed, call_builtin(definition, call, function, &args, env))
-                            }
-                        };
-                        decoded.record(at, value);
-                        set(operand(0), value);
-                    }
-                    Op::Ast => {
-                        let expression = decoded.constants.element(operand(1));
-                        let value = tri!('failed, eval::eval(expression, env));
-                        decoded.record(at, value);
-                        set(operand(0), value);
-                    }
-                    Op::Guard => {
-                        let symbol = decoded.constants.element(operand(0));
-                        let expected = decoded.constants.element(operand(1));
-                        // The usual guard is a call to a base function from a closure whose frame
-                        // cannot bind the name: the cell the cache resolved still holding the
-                        // expected function is the whole check. A cached cell never becomes
-                        // active (`makeActiveBinding` refuses a regular binding), and a binding
-                        // that appears in front of it moves the stamp.
-                        let enclosure = env.enclosure();
-                        if operand(3) == 0
-                            && !enclosure.has_gp(gp::FUNCTION_FRAME)
-                            && let Some(cell) = cached_cell(symbol, enclosure, decoded.cache, operand(2))
-                            && cell.cdr() == expected
-                        {
-                            pc = next;
-                            continue;
-                        }
-                        let found = if operand(3) == 0 {
-                            lookup_enclosing_function(symbol, env, decoded.cache, operand(2))
-                        } else {
-                            lookup_function(symbol, env, decoded.cache, operand(2), unbound())
-                        };
-                        if !matches!(found, Ok(function) if function == expected) {
-                            pc = operand(4);
-                            continue;
-                        }
-                    }
-                    Op::Resume => {
-                        pc = operand(0);
-                        continue;
-                    }
-                    Op::Jump => {
-                        let target = operand(0);
-                        pc = target;
-                        if target < at {
-                            tri!('failed, crate::unwind::poll_interrupt());
-                            if let Some(tier) = interp().bytecode.tier {
-                                match back_edge(machine, &tier, pc) {
-                                    BackEdge::Continue(resume) => pc = resume,
-                                    BackEdge::Finished(result) => return result,
-                                    BackEdge::Unwound { pc: resume, unwind } => {
-                                        at = resume;
-                                        break 'failed unwind;
-                                    }
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    Op::JumpUnless => {
-                        let call = decoded.constants.element(operand(1));
-                        if !tri!('failed, as_condition(register(operand(0)), call)) {
-                            pc = operand(2);
-                            continue;
-                        }
-                    }
-                    Op::Arithmetic => {
-                        let left = register(operand(2));
-                        let right = register(operand(3));
-                        let value = match tri!('failed, fast_arithmetic(ARITHS[operand(0)].0, left, right))
-                        {
-                            Some(value) => value,
-                            None => {
-                                let call = decoded.constants.element(operand(4));
-                                let function = decoded.constants.element(operand(5));
-                                let definition = tri!('failed, eval::builtin_def(function));
-                                let args = [
-                                    Arg {
-                                        tag: nil(),
-                                        value: left,
-                                    },
-                                    Arg {
-                                        tag: nil(),
-                                        value: right,
-                                    },
-                                ];
-                                tri!('failed, call_builtin(definition, call, function, &args, env))
-                            }
-                        };
-                        decoded.record(at, value);
-                        set(operand(1), value);
-                        interp().visible = true;
-                    }
-                    Op::Return => return Ok(register(operand(0))),
-                    Op::ForInit => {
-                        let call = decoded.constants.element(operand(2));
-                        let mut sequence = register(operand(1));
-                        if values::inherits(sequence, "factor") {
-                            sequence = tri!('failed, crate::coerce::factor_as_character(sequence));
-                        }
-                        let sequence = tri!('failed, values::materialize(sequence));
-                        let count = match sequence.kind() {
-                            SexpType::Nil => 0,
-                            SexpType::Pairlist | SexpType::Language => {
-                                values::pairlist_length(sequence)
-                            }
-                            kind if kind.is_vector() => sequence.length() as usize,
-                            _ => return Err(error_in(call, "invalid for() loop sequence")),
-                        };
-                        // The body must see the sequence as shared, so that modifying the variable it came
-                        // from copies it instead of changing the elements still to come.
-                        sequence.increment_refcount();
-                        decoded.record(at, sequence);
-                        set(operand(1), sequence);
-                        machine.loops[operand(0)] = LoopState {
-                            index: 0,
-                            count,
-                            cell: Some(sequence),
-                        };
-                    }
-                    Op::ForStep => {
-                        let state = &mut machine.loops[operand(0)];
-                        if state.index >= state.count {
-                            pc = operand(3);
-                            continue;
-                        }
-                        let sequence = register(operand(1));
-                        let variable = decoded.constants.element(operand(2));
-                        let index = state.index;
-                        state.index += 1;
-                        if !overwrite_loop_variable(sequence, index, variable, env) {
-                            let element = match sequence.kind() {
-                                SexpType::List | SexpType::Expression => sequence.element(index),
-                                SexpType::Pairlist | SexpType::Language => {
-                                    let cell = state.cell.unwrap_or(sequence);
-                                    state.cell = Some(cell.cdr());
-                                    cell.car()
-                                }
-                                _ => tri!('failed, crate::subset::vector_element(sequence, index)),
-                            };
-                            tri!('failed, eval::define(variable, element, env));
-                        }
-                    }
-                    Op::ForEnd => register(operand(0)).decrement_refcount(),
-                    Op::Invisible => interp().visible = false,
-                    Op::Visible => interp().visible = true,
-                    Op::SetSrcref => {
-                        interp().srcref = decoded.constants.element(operand(0));
-                        if operand(1) == 1 && interp().debugger.is_some() {
-                            tri!('failed, crate::debugger::statement());
-                        }
-                    }
-                    Op::EndStatement => {
-                        set(operand(0), nil());
-                        for register in operand(1)..operand(2) {
-                            set(register, nil());
-                        }
-                    }
-                    Op::LogicLeft => {
-                        let call = decoded.constants.element(operand(2));
-                        let is_and = operand(3) == 1;
-                        let left = tri!('failed, eval::logical_operand_of(
-                            register(operand(1)),
-                            call,
-                            if is_and { "&&" } else { "||" },
-                            "x",
-                        ));
-                        if (is_and && left == 0) || (!is_and && left == 1) {
-                            set(operand(0), tri!('failed, values::scalar_logical(left)));
-                            interp().visible = true;
-                            pc = operand(4);
-                            continue;
-                        }
-                        set(operand(1), tri!('failed, values::scalar_logical(left)));
-                    }
-                    Op::LogicRight => {
-                        let call = decoded.constants.element(operand(3));
-                        let is_and = operand(4) == 1;
-                        let left = values::ints(register(operand(1)))[0];
-                        let right = tri!('failed, eval::logical_operand_of(
-                            register(operand(2)),
-                            call,
-                            if is_and { "&&" } else { "||" },
-                            "y",
-                        ));
-                        set(
-                            operand(0),
-                            tri!('failed, values::scalar_logical(logic_result(is_and, left, right))),
-                        );
-                        interp().visible = true;
-                    }
-                    Op::Closure => {
-                        let formals = decoded.constants.element(operand(1));
-                        let body = decoded.constants.element(operand(2));
-                        let srcref = decoded.constants.element(operand(3));
-                        let closure = tri!('failed, eval::make_closure(formals, body, srcref, env));
-                        // Every closure this site creates shares one compiled body, as GNU R compiles inner
-                        // functions with their outer one. Compiling per closure object would leave a function
-                        // created anew on each call (a `vapply` callback, say) on the AST evaluator, or
-                        // recompile it every other call. The code depends on the formals and body only:
-                        // its inline caches and the optimizing tier both check the enclosure they were
-                        // filled for.
-                        if body.kind() != SexpType::Bytecode && worth_compiling(body) {
-                            // A body the compiler rejects (an error is its way of saying so, such as for a
-                            // `break` outside a loop) stays source, which the AST evaluator runs.
-                            if let Ok(Some(code)) = compile(body, closure) {
-                                crate::heap().set_element(decoded.constants, operand(2), code);
-                                crate::heap().set_cdr(closure, code);
-                            }
-                        }
-                        set(operand(0), closure);
-                        interp().visible = true;
-                    }
-                    Op::SubAssign => {
-                        let call = decoded.constants.element(operand(4));
-                        let value = register(operand(3));
-                        let variable = decoded.constants.element(operand(1));
-                        let kind = match operand(5) {
-                            0 => ElementKind::Single,
-                            1 => ElementKind::Double,
-                            _ => ElementKind::Dollar,
-                        };
-                        let done = match tri!('failed, subscript_value(env, register(operand(2)))) {
-                            Some(index) => {
-                                tri!('failed, assign_element_in_place(env, variable, index, value, kind))
-                            }
-                            None => false,
-                        };
-                        if !done {
-                            tri!('failed, eval::complex_assign(call, call.cdr().car(), value, env, false));
-                        }
-                        set(operand(0), value);
-                        interp().visible = false;
-                    }
-                    Op::SubAssignMatrix => {
-                        let call = decoded.constants.element(operand(5));
-                        let value = register(operand(4));
-                        let variable = decoded.constants.element(operand(1));
-                        let done = match (
-                            tri!('failed, subscript_value(env, register(operand(2)))),
-                            tri!('failed, subscript_value(env, register(operand(3)))),
-                        ) {
-                            (Some(row), Some(column)) => {
-                                tri!('failed, assign_matrix_element_in_place(env, variable, row, column, value))
-                            }
-                            _ => false,
-                        };
-                        if !done {
-                            tri!('failed, eval::complex_assign(call, call.cdr().car(), value, env, false));
-                        }
-                        set(operand(0), value);
-                        interp().visible = false;
-                    }
-                    Op::Replace => {
-                        let whole = decoded.constants.element(operand(7));
-                        let (first, count) = (operand(5), operand(6));
-                        let value = register(first + count - 1);
-                        let done = tri!('failed, replace_variable(
-                            env,
-                            decoded.constants.element(operand(1)),
-                            (decoded.constants.element(operand(2)), decoded.cache, operand(3)),
-                            decoded.constants.element(operand(4)),
-                            whole,
-                            std::slice::from_raw_parts_mut(registers.add(first), count),
-                        ));
-                        if !done {
-                            tri!('failed, eval::complex_assign(whole, whole.cdr().car(), value, env, false));
-                        }
-                        set(operand(0), value);
-                        interp().visible = false;
-                    }
-                }
-                pc = next;
+static RUN_HANDLERS: [Handler; OPS.len()] = handler_table::<false>();
+static STEP_HANDLERS: [Handler; OPS.len()] = handler_table::<true>();
+
+handlers! {
+    run_constant: Constant, false, op_constant;
+    run_get_var: GetVar, true, op_get_var;
+    run_set_var: SetVar, true, op_set_var;
+    run_get_fun: GetFun, true, op_get_fun;
+    run_branch_unless_builtin: BranchUnlessBuiltin, false, op_branch_unless_builtin;
+    run_call_builtin: CallBuiltin, true, op_call_builtin;
+    run_call_generic: CallGeneric, true, op_call_generic;
+    run_call_rebinding: CallRebinding, true, op_call_rebinding;
+    run_call_tail_update: CallTailUpdate, true, op_call_tail_update;
+    run_field: Field, true, op_field;
+    run_item: Item, true, op_item;
+    run_match_shape: MatchShape, false, op_match_shape;
+    run_match_tag: MatchTag, false, op_match_tag;
+    run_match_literal: MatchLiteral, true, op_match_literal;
+    run_slot: Slot, true, op_slot;
+    run_match_fail: MatchFail, true, op_match_fail;
+    run_construct: Construct, true, op_construct;
+    run_move: Move, false, op_move;
+    run_switch_arm: SwitchArm, true, op_switch_arm;
+    run_bound_eval: BoundEval, true, op_bound_eval;
+    run_match_condition: MatchCondition, true, op_match_condition;
+    run_branch_unless_primitive: BranchUnlessPrimitive, false, op_branch_unless_primitive;
+    run_branch_if_object: BranchIfObject, false, op_branch_if_object;
+    run_dispatch_subject: DispatchSubject, true, op_dispatch_subject;
+    run_ast: Ast, true, op_ast;
+    run_guard: Guard, true, op_guard;
+    run_resume: Resume, false, op_resume;
+    run_jump_unless: JumpUnless, true, op_jump_unless;
+    run_arithmetic: Arithmetic, true, op_arithmetic;
+    run_return: Return, false, op_return;
+    run_for_init: ForInit, true, op_for_init;
+    run_for_step: ForStep, true, op_for_step;
+    run_for_end: ForEnd, false, op_for_end;
+    run_invisible: Invisible, false, op_invisible;
+    run_visible: Visible, false, op_visible;
+    run_set_srcref: SetSrcref, true, op_set_srcref;
+    run_end_statement: EndStatement, false, op_end_statement;
+    run_logic_left: LogicLeft, true, op_logic_left;
+    run_logic_right: LogicRight, true, op_logic_right;
+    run_closure: Closure, true, op_closure;
+    run_sub_assign: SubAssign, true, op_sub_assign;
+    run_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
+    run_replace: Replace, true, op_replace;
+}
+
+/// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
+/// optimizing tier can take over at a back edge and hand back an unwind from a later position.
+/// It also fills the table slots of the ops listed in `handlers!` before they are overwritten.
+unsafe fn jump<const SINGLE: bool>(
+    state: &mut Activation<'_, '_>,
+    code: *const i32,
+    at: usize,
+    registers: *mut Sexp,
+) -> R<Sexp> {
+    let target = *code.add(at + 1) as usize;
+    let mut pc = target;
+    if target < at {
+        if let Err(unwind) = crate::unwind::poll_interrupt() {
+            if SINGLE {
+                return Err(unwind);
             }
-        };
-        if SINGLE {
-            return Err(unwind);
+            pc = continue_after(state.machine, at, unwind)?;
+        } else if let Some(tier) = interp().bytecode.tier {
+            match back_edge(state.machine, &tier, pc) {
+                BackEdge::Continue(resume) => pc = resume,
+                BackEdge::Finished(result) => return result,
+                BackEdge::Unwound { pc: resume, unwind } => {
+                    if SINGLE {
+                        return Err(unwind);
+                    }
+                    pc = continue_after(state.machine, resume, unwind)?;
+                }
+            }
         }
-        pc = continue_after(machine, at, unwind)?;
     }
+    if SINGLE {
+        return Ok(nil());
+    }
+    release(state);
+    become (*RUN_HANDLERS.as_ptr().add(op_index(code, pc)))(state, code, pc, registers)
+}
+
+#[inline(always)]
+unsafe fn op_constant(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    instruction.output(0, state.constant(instruction, 1));
+    interp().visible = true;
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_get_var(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    // Visible before the lookup, so that forcing a promise to `invisible()` leaves the value
+    // invisible, as `withCallingHandlers(expr)` relies on.
+    interp().visible = true;
+    let symbol = state.constant(instruction, 1);
+    let base = state.machine.base;
+    let held = base..base + instruction.operand(0);
+    let value = lookup_variable(symbol, state.env, state.cache, instruction.operand(2), held)?;
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_set_var(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let symbol = state.constant(instruction, 0);
+    let value = instruction.input(1);
+    let hint = &mut *state.cache.hints.add(instruction.operand(2));
+    let cell = (*state.heap).frame_cell_hinted(state.env, symbol, hint);
+    eval::assign_local(symbol, value, state.env, cell)?;
+    interp().visible = false;
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_get_fun(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let symbol = state.constant(instruction, 1);
+    let call = state.constant(instruction, 3);
+    let function = lookup_function(symbol, state.env, state.cache, instruction.operand(2), call)?;
+    instruction.output(0, function);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_branch_unless_builtin(
+    _state: &mut Activation<'_, '_>,
+    instruction: Instruction,
+) -> R<Flow> {
+    if instruction.input(0).kind() != SexpType::Builtin {
+        return Ok(Flow::Goto(instruction.operand(1)));
+    }
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let function = instruction.input(1);
+    let call = state.constant(instruction, 2);
+    let first = instruction.operand(3);
+    let count = instruction.operand(4);
+    let definition = eval::builtin_def(function)?;
+    let mut args = eval::Args::new();
+    let mut cell = call.cdr();
+    for index in 0..count {
+        let value = instruction.register(first + index);
+        // Only an empty argument is an error: a promise may well evaluate to the empty symbol,
+        // as `X[[i]]` does for a formal without a default.
+        if cell.car() == missing_arg() && !definition.keep_missing {
+            return Err(error_in(call, format!("argument {} is empty", index + 1)));
+        }
+        args.push(Arg {
+            tag: cell.tag(),
+            value,
+        });
+        cell = cell.cdr();
+    }
+    let value = call_builtin(definition, call, function, &args, state.env)?;
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let function = instruction.input(1);
+    let call = state.constant(instruction, 2);
+    let value = if function.kind() == SexpType::Closure {
+        let mut compiled = state.constants.element(instruction.operand(2) + 1);
+        if compiled == unbound() {
+            compiled = compile_promise_arguments(state.machine.function, call.cdr())?;
+            (*state.heap).set_element(state.constants, instruction.operand(2) + 1, compiled);
+        }
+        let arguments = if compiled == nil() {
+            call.cdr()
+        } else {
+            compiled
+        };
+        let mut args = eval::Args::new();
+        eval::compiled_args_into(arguments, state.env, &mut args)?;
+        eval::apply_closure_owning(call, function, &args, state.env, None)?
+    } else {
+        // A special reads its arguments as expressions, so they stay uncompiled.
+        eval::apply_call(call, function, call.cdr(), state.env)?
+    };
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_call_rebinding(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let function = instruction.input(1);
+    let call = state.constant(instruction, 2);
+    let target = state.constant(instruction, 3);
+    let value = eval::rebind_call(call, function, target, state.env)?;
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_call_tail_update(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let function = instruction.input(1);
+    let call = state.constant(instruction, 2);
+    let target = state.constant(instruction, 3);
+    let value = eval::tail_update(call, function, target, state.env)?;
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_field(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let object = instruction.input(1);
+    let name = state.constant(instruction, 2);
+    let call = state.constant(instruction, 3);
+    let shape = state.constant(instruction, 4);
+    let value = match crate::records::cached_field(object, name, shape)? {
+        Some(value) => value,
+        None => crate::subset::dollar_value(object, name.car(), call, state.env)?,
+    };
+    record_feedback(state.constants, instruction.at, value);
+    interp().visible = true;
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_item(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let object = instruction.input(1);
+    let index = state.constant(instruction, 2);
+    let shape = state.constant(instruction, 3);
+    match crate::records::cached_item(object, index, shape)? {
+        Some(value) => {
+            state.record(instruction.at, value);
+            interp().visible = true;
+            instruction.output(0, value);
+            Ok(Flow::Next)
+        }
+        None => Ok(Flow::Goto(instruction.operand(4))),
+    }
+}
+
+#[inline(always)]
+unsafe fn op_match_shape(_state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    if !crate::records::has_layout(instruction.input(0), instruction.operand(1) as u32) {
+        return Ok(Flow::Goto(instruction.operand(2)));
+    }
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_match_tag(_state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    if crate::records::plain_tag(instruction.input(0)) != Some(instruction.operand(1) as u32) {
+        return Ok(Flow::Goto(instruction.operand(2)));
+    }
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_match_literal(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let pattern = state.constant(instruction, 1);
+    if !crate::records::literal_matches(pattern, instruction.input(0)) {
+        return Ok(Flow::Goto(instruction.operand(2)));
+    }
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_slot(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let value = crate::records::slot_value(instruction.input(1), instruction.operand(2))?;
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_match_fail(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let call = state.constant(instruction, 1);
+    Err(crate::records::no_arm_matches(instruction.input(0), call))
+}
+
+#[inline(always)]
+unsafe fn op_construct(_state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let slots = std::slice::from_raw_parts(
+        instruction.registers.add(instruction.operand(2)),
+        instruction.operand(3),
+    );
+    let value = crate::records::construct(instruction.operand(1) as u32, slots)?;
+    interp().visible = true;
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_move(_state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    instruction.output(0, instruction.input(1));
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_switch_arm(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let value = switch_arm(instruction.input(1), state.constant(instruction, 2))?;
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_bound_eval(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let expression = state.constant(instruction, 1);
+    let names = state.constant(instruction, 2);
+    let bound = std::slice::from_raw_parts(
+        instruction.registers.add(instruction.operand(3)),
+        instruction.operand(4),
+    );
+    let value = crate::records::eval_bound_registers(expression, names, bound, state.env)?;
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_match_condition(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let guard = state.constant(instruction, 2);
+    let call = state.constant(instruction, 3);
+    let holds = crate::records::guard_holds(instruction.input(1), guard, call)?;
+    instruction.output(0, values::scalar_logical(i32::from(holds))?);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_branch_unless_primitive(
+    state: &mut Activation<'_, '_>,
+    instruction: Instruction,
+) -> R<Flow> {
+    if instruction.input(0) != state.constant(instruction, 1) {
+        return Ok(Flow::Goto(instruction.operand(2)));
+    }
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_branch_if_object(_state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    if instruction.input(0).is_object() {
+        return Ok(Flow::Goto(instruction.operand(1)));
+    }
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_dispatch_subject(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let function = instruction.input(1);
+    let call = state.constant(instruction, 2);
+    let definition = eval::builtin_def(function)?;
+    let mut args = eval::Args::new();
+    let value = match dispatch::dispatch_evaluated_subject(
+        definition,
+        call,
+        function,
+        call.cdr(),
+        instruction.input(3),
+        state.env,
+        &mut args,
+    )? {
+        Some(value) => value,
+        None => call_builtin(definition, call, function, &args, state.env)?,
+    };
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_ast(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let expression = state.constant(instruction, 1);
+    let value = eval::eval(expression, state.env)?;
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_guard(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let symbol = state.constant(instruction, 0);
+    let expected = state.constant(instruction, 1);
+    let slot = instruction.operand(2);
+    // The usual guard is a call to a base function from a closure whose frame cannot bind the
+    // name: the cell the cache resolved still holding the expected function is the whole check.
+    // A cached cell never becomes active (`makeActiveBinding` refuses a regular binding), and a
+    // binding that appears in front of it moves the stamp.
+    let enclosure = state.env.enclosure();
+    if instruction.operand(3) == 0
+        && !enclosure.has_gp(gp::FUNCTION_FRAME)
+        && let Some(cell) = cached_cell(symbol, enclosure, state.cache, slot)
+        && cell.cdr() == expected
+    {
+        return Ok(Flow::Next);
+    }
+    let found = if instruction.operand(3) == 0 {
+        lookup_enclosing_function(symbol, state.env, state.cache, slot)
+    } else {
+        lookup_function(symbol, state.env, state.cache, slot, unbound())
+    };
+    if !matches!(found, Ok(function) if function == expected) {
+        return Ok(Flow::Goto(instruction.operand(4)));
+    }
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_resume(_state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    Ok(Flow::Goto(instruction.operand(0)))
+}
+
+#[inline(always)]
+unsafe fn op_jump_unless(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let call = state.constant(instruction, 1);
+    if !as_condition(instruction.input(0), call)? {
+        return Ok(Flow::Goto(instruction.operand(2)));
+    }
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_arithmetic(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let left = instruction.input(2);
+    let right = instruction.input(3);
+    let value = match fast_arithmetic(ARITHS[instruction.operand(0)].0, left, right)? {
+        Some(value) => value,
+        None => {
+            let call = state.constant(instruction, 4);
+            let function = state.constant(instruction, 5);
+            let definition = eval::builtin_def(function)?;
+            let args = [
+                Arg {
+                    tag: nil(),
+                    value: left,
+                },
+                Arg {
+                    tag: nil(),
+                    value: right,
+                },
+            ];
+            call_builtin(definition, call, function, &args, state.env)?
+        }
+    };
+    state.record(instruction.at, value);
+    instruction.output(1, value);
+    interp().visible = true;
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_return(_state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    Ok(Flow::Done(instruction.input(0)))
+}
+
+#[inline(always)]
+unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let call = state.constant(instruction, 2);
+    let mut sequence = instruction.input(1);
+    if values::inherits(sequence, "factor") {
+        sequence = crate::coerce::factor_as_character(sequence)?;
+    }
+    let sequence = values::materialize(sequence)?;
+    let count = match sequence.kind() {
+        SexpType::Nil => 0,
+        SexpType::Pairlist | SexpType::Language => values::pairlist_length(sequence),
+        kind if kind.is_vector() => sequence.length() as usize,
+        _ => return Err(error_in(call, "invalid for() loop sequence")),
+    };
+    // The body must see the sequence as shared, so that modifying the variable it came from
+    // copies it instead of changing the elements still to come.
+    sequence.increment_refcount();
+    state.record(instruction.at, sequence);
+    instruction.output(1, sequence);
+    state.machine.loops[instruction.operand(0)] = LoopState {
+        index: 0,
+        count,
+        cell: Some(sequence),
+    };
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_for_step(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let env = state.env;
+    let variable = state.constant(instruction, 2);
+    let loop_state = &mut state.machine.loops[instruction.operand(0)];
+    if loop_state.index >= loop_state.count {
+        return Ok(Flow::Goto(instruction.operand(3)));
+    }
+    let sequence = instruction.input(1);
+    let index = loop_state.index;
+    loop_state.index += 1;
+    if !overwrite_loop_variable(sequence, index, variable, env) {
+        let element = match sequence.kind() {
+            SexpType::List | SexpType::Expression => sequence.element(index),
+            SexpType::Pairlist | SexpType::Language => {
+                let cell = loop_state.cell.unwrap_or(sequence);
+                loop_state.cell = Some(cell.cdr());
+                cell.car()
+            }
+            _ => crate::subset::vector_element(sequence, index)?,
+        };
+        eval::define(variable, element, env)?;
+    }
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_for_end(_state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    instruction.input(0).decrement_refcount();
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_invisible(_state: &mut Activation<'_, '_>, _instruction: Instruction) -> R<Flow> {
+    interp().visible = false;
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_visible(_state: &mut Activation<'_, '_>, _instruction: Instruction) -> R<Flow> {
+    interp().visible = true;
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_set_srcref(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    interp().srcref = state.constant(instruction, 0);
+    if instruction.operand(1) == 1 && interp().debugger.is_some() {
+        crate::debugger::statement()?;
+    }
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_end_statement(_state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    instruction.output(0, nil());
+    for register in instruction.operand(1)..instruction.operand(2) {
+        instruction.set(register, nil());
+    }
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_logic_left(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let call = state.constant(instruction, 2);
+    let is_and = instruction.operand(3) == 1;
+    let left = eval::logical_operand_of(
+        instruction.input(1),
+        call,
+        if is_and { "&&" } else { "||" },
+        "x",
+    )?;
+    if (is_and && left == 0) || (!is_and && left == 1) {
+        instruction.output(0, values::scalar_logical(left)?);
+        interp().visible = true;
+        return Ok(Flow::Goto(instruction.operand(4)));
+    }
+    instruction.output(1, values::scalar_logical(left)?);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_logic_right(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let call = state.constant(instruction, 3);
+    let is_and = instruction.operand(4) == 1;
+    let left = values::ints(instruction.input(1))[0];
+    let right = eval::logical_operand_of(
+        instruction.input(2),
+        call,
+        if is_and { "&&" } else { "||" },
+        "y",
+    )?;
+    instruction.output(0, values::scalar_logical(logic_result(is_and, left, right))?);
+    interp().visible = true;
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_closure(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let formals = state.constant(instruction, 1);
+    let body = state.constant(instruction, 2);
+    let srcref = state.constant(instruction, 3);
+    let closure = eval::make_closure(formals, body, srcref, state.env)?;
+    // Every closure this site creates shares one compiled body, as GNU R compiles inner
+    // functions with their outer one. Compiling per closure object would leave a function
+    // created anew on each call (a `vapply` callback, say) on the AST evaluator, or recompile it
+    // every other call. The code depends on the formals and body only: its inline caches and the
+    // optimizing tier both check the enclosure they were filled for.
+    if body.kind() != SexpType::Bytecode && worth_compiling(body) {
+        // A body the compiler rejects (an error is its way of saying so, such as for a `break`
+        // outside a loop) stays source, which the AST evaluator runs.
+        if let Ok(Some(code)) = compile(body, closure) {
+            (*state.heap).set_element(state.constants, instruction.operand(2), code);
+            (*state.heap).set_cdr(closure, code);
+        }
+    }
+    instruction.output(0, closure);
+    interp().visible = true;
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let env = state.env;
+    let call = state.constant(instruction, 4);
+    let value = instruction.input(3);
+    let variable = state.constant(instruction, 1);
+    let kind = match instruction.operand(5) {
+        0 => ElementKind::Single,
+        1 => ElementKind::Double,
+        _ => ElementKind::Dollar,
+    };
+    let done = match subscript_value(env, instruction.input(2))? {
+        Some(index) => assign_element_in_place(env, variable, index, value, kind)?,
+        None => false,
+    };
+    if !done {
+        eval::complex_assign(call, call.cdr().car(), value, env, false)?;
+    }
+    instruction.output(0, value);
+    interp().visible = false;
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_sub_assign_matrix(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let env = state.env;
+    let call = state.constant(instruction, 5);
+    let value = instruction.input(4);
+    let variable = state.constant(instruction, 1);
+    let done = match (
+        subscript_value(env, instruction.input(2))?,
+        subscript_value(env, instruction.input(3))?,
+    ) {
+        (Some(row), Some(column)) => {
+            assign_matrix_element_in_place(env, variable, row, column, value)?
+        }
+        _ => false,
+    };
+    if !done {
+        eval::complex_assign(call, call.cdr().car(), value, env, false)?;
+    }
+    instruction.output(0, value);
+    interp().visible = false;
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_replace(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let env = state.env;
+    let whole = state.constant(instruction, 7);
+    let (first, count) = (instruction.operand(5), instruction.operand(6));
+    let value = instruction.register(first + count - 1);
+    let done = replace_variable(
+        env,
+        state.constant(instruction, 1),
+        (state.constant(instruction, 2), state.cache, instruction.operand(3)),
+        state.constant(instruction, 4),
+        whole,
+        std::slice::from_raw_parts_mut(instruction.registers.add(first), count),
+    )?;
+    if !done {
+        eval::complex_assign(whole, whole.cdr().car(), value, env, false)?;
+    }
+    instruction.output(0, value);
+    interp().visible = false;
+    Ok(Flow::Next)
 }
 
 /// Where a backward jump leaves interpretation once the optimizing tier has counted it.
