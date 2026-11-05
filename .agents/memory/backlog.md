@@ -116,6 +116,9 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
   check that can still bail. The oracle cases `s4__native_first_union` and
   `s4__union_initialize_method` on the branch pin it. Main has a related bug: the native union
   and `setClass` skip a package's `initialize` method for `classRepresentation`, which GNU R calls.
+- `deparse()` of an S4 object whose class is not defined prints `new("Zzz")`, where GNU R
+  errors ("cannot get a slot ("slots") from an object of type "NULL"") because `getClassDef`
+  returns `NULL` (`s4_parts` in `crates/interp/src/deparse.rs`).
 - **What still falls back** (`RY_LOAD_VERBOSE=true ry load .` names each with its reason):
   classes with a basic-type or other-package superclass (`contains = "numeric"`, `"list"`,
   `"data.frame"`, an old class), a second superclass that has superclasses of its own, a class
