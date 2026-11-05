@@ -21,20 +21,6 @@ use {
         native,
         runtime::{self, Activation, Exit, offset, outcome, reason, representation},
     },
-    cranelift_codegen::{
-        ir::{
-            AbiParam, Block as Label, InstBuilder, MemFlagsData, SigRef, Signature, StackSlot,
-            StackSlotData, StackSlotKind, Type, Value,
-            condcodes::{FloatCC, IntCC},
-            immediates::Ieee64,
-            types::{F64, I8, I32, I64},
-        },
-        isa::CallConv,
-        settings::{self, Configurable},
-    },
-    cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable},
-    cranelift_jit::{JITBuilder, JITModule},
-    cranelift_module::{Module, default_libcall_names},
     heap::object::{
         INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, NA_REAL_BITS, RECORD_DATA_OFFSET,
         RECORD_LAYOUT_OFFSET, RECORD_UNBOXED_OFFSET, REFCOUNT_MAX, Sexp, SexpType, UNBOXED_SLOTS,
@@ -43,17 +29,16 @@ use {
     interp::{annotations, bytecode::Arith, values},
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
-    std::{cell::RefCell, sync::atomic::AtomicBool},
+    ssa::{
+        AbiParam, Block as Label, Builder, CallConv, FloatCC, Ieee64, IntCC, MemFlagsData, SigRef,
+        Signature, StackSlot, StackSlotData, StackSlotKind, Type, Value, Variable,
+        types::{F64, I8, I32, I64},
+    },
+    std::sync::atomic::AtomicBool,
 };
 
 /// The compiled entry point.
 pub type Entry = unsafe extern "C" fn(*mut Activation) -> *mut heap::object::Header;
-
-thread_local! {
-    /// One module for the session. Cranelift's JIT can only free all of its code at once, so
-    /// code for discarded compilations stays mapped until the process exits.
-    static MODULE: RefCell<Option<JITModule>> = const { RefCell::new(None) };
-}
 
 /// Header offsets, as `heap::object` lays objects out.
 pub(crate) const KIND: i32 = 0;
@@ -78,101 +63,26 @@ enum Subscript {
 /// Compiles `plan` and returns its entry point, its deoptimization exits and the size of its
 /// machine code in bytes.
 pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<(Entry, Box<[Exit]>, u32), Refusal> {
-    MODULE.with(|cell| {
-        let mut module_slot = cell.borrow_mut();
-        if module_slot.is_none() {
-            *module_slot = Some(new_module()?);
-        }
-        let module = module_slot.as_mut().ok_or(Refusal("no code module"))?;
-        let call_conv = module.isa().default_call_conv();
-        let frontend_config = module.isa().frontend_config();
-        let mut context = module.make_context();
-        context.func.signature = Signature::new(call_conv);
-        context.func.signature.params.push(AbiParam::new(I64));
-        context.func.signature.returns.push(AbiParam::new(I64));
-        let mut function_context = FunctionBuilderContext::new();
-        let exits = {
-            let builder = FunctionBuilder::new(&mut context.func, &mut function_context);
-            let mut translator = Translator::new(plan, code, builder, call_conv);
-            let exits = translator.translate()?;
-            translator.builder.seal_all_blocks();
-            translator.builder.finalize(frontend_config);
-            exits
-        };
-        if std::env::var_os("RY_JIT_DUMP").is_some() {
-            eprintln!("{}", context.func.display());
-        }
-        let id = module
-            .declare_anonymous_function(&context.func.signature)
-            .map_err(|_| Refusal("Cranelift rejected the function declaration"))?;
-        if let Err(failure) = module.define_function(id, &mut context) {
-            if std::env::var_os("RY_JIT_DUMP").is_some() {
-                eprintln!("{failure:?}");
-            }
-            return Err(Refusal("Cranelift rejected the function"));
-        }
-        let size = code_size(&context);
-        module.clear_context(&mut context);
-        module
-            .finalize_definitions()
-            .map_err(|_| Refusal("Cranelift could not finalize the code"))?;
-        let pointer = module.get_finalized_function(id);
-        // SAFETY: the function was built with exactly this signature.
-        Ok((
-            unsafe { std::mem::transmute::<*const u8, Entry>(pointer) },
-            exits,
-            size,
-        ))
-    })
-}
-
-/// The size in bytes of the machine code `context` holds after `define_function`.
-pub(crate) fn code_size(context: &cranelift_codegen::Context) -> u32 {
-    context
-        .compiled_code()
-        .map_or(0, |code| code.code_info().total_size)
-}
-
-/// Runs `f` with the session's code module, creating it on first use.
-pub(crate) fn with_module<T>(
-    f: impl FnOnce(&mut JITModule) -> Result<T, Refusal>,
-) -> Result<T, Refusal> {
-    MODULE.with(|cell| {
-        let mut module_slot = cell.borrow_mut();
-        if module_slot.is_none() {
-            *module_slot = Some(new_module()?);
-        }
-        f(module_slot.as_mut().ok_or(Refusal("no code module"))?)
-    })
-}
-
-fn new_module() -> Result<JITModule, Refusal> {
-    let mut flags = settings::builder();
-    let configure = |flags: &mut settings::Builder| -> Result<(), settings::SetError> {
-        flags.set("opt_level", "speed")?;
-        flags.set("use_colocated_libcalls", "false")?;
-        flags.set("is_pic", "false")?;
-        // The verifier rechecks every function's IR and costs as much as the rest of
-        // compilation, so only debug builds, where the tests run, pay for it.
-        flags.set(
-            "enable_verifier",
-            if cfg!(debug_assertions) {
-                "true"
-            } else {
-                "false"
-            },
-        )?;
-        Ok(())
-    };
-    configure(&mut flags).map_err(|_| Refusal("Cranelift rejected the settings"))?;
-    let isa = cranelift_native::builder()
-        .map_err(|_| Refusal("this host has no Cranelift backend"))?
-        .finish(settings::Flags::new(flags))
-        .map_err(|_| Refusal("Cranelift could not configure the host"))?;
-    Ok(JITModule::new(JITBuilder::with_isa(
-        isa,
-        default_libcall_names(),
-    )))
+    let mut signature = Signature::new(CallConv::Host);
+    signature.params.push(AbiParam::new(I64));
+    signature.returns.push(AbiParam::new(I64));
+    let mut translator = Translator::new(plan, code, Builder::new(signature), CallConv::Host);
+    // SAFETY: the plan was made for `code`, whose constants the translation reads.
+    let exits = unsafe { translator.translate() }?;
+    translator.builder.seal_all_blocks();
+    let function = translator.builder.finalize();
+    if std::env::var_os("RY_JIT_DUMP").is_some() {
+        eprintln!("{function}");
+    }
+    let (address, size) = ssa::with_module(|module| -> Result<_, Refusal> {
+        let id = module.declare(&function.signature)?;
+        let size = module.define(id, &function)?;
+        module.finalize()?;
+        Ok((module.address(id), size))
+    })?;
+    // SAFETY: the function was built with exactly this signature.
+    let entry = unsafe { std::mem::transmute::<*const u8, Entry>(address as *const u8) };
+    Ok((entry, exits, size))
 }
 
 /// A cold block that hands the activation back to the interpreter.
@@ -194,10 +104,10 @@ struct PendingEdge {
     target: usize,
 }
 
-struct Translator<'p, 'b> {
+struct Translator<'p> {
     plan: &'p Plan<'p>,
     code: Sexp,
-    builder: FunctionBuilder<'b>,
+    builder: Builder,
     call_conv: CallConv,
     signatures: FxHashMap<(Vec<Type>, Option<Type>), SigRef>,
     activation: Value,
@@ -232,13 +142,13 @@ fn flags() -> MemFlagsData {
     MemFlagsData::trusted()
 }
 
-impl<'p, 'b> Translator<'p, 'b> {
+impl<'p> Translator<'p> {
     fn new(
         plan: &'p Plan<'p>,
         code: Sexp,
-        mut builder: FunctionBuilder<'b>,
+        mut builder: Builder,
         call_conv: CallConv,
-    ) -> Translator<'p, 'b> {
+    ) -> Translator<'p> {
         let mut declare = |count: usize, ty: Type| {
             (0..count)
                 .map(|_| builder.declare_var(ty))
@@ -912,7 +822,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                             self.builder.append_block_param(join, I64);
                             self.builder
                                 .ins()
-                                .brif(fits, join, &[value.into()], expand, &[]);
+                                .brif(fits, join, &[value], expand, &[]);
                             self.builder.switch_to_block(expand);
                             let expanded = self
                                 .call(
@@ -927,7 +837,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                                 self.deopt(pc, before.id, None, position, reason::SPECULATION);
                             self.guard(fits, failed);
                             self.store_register(src, expanded);
-                            self.builder.ins().jump(join, &[expanded.into()]);
+                            self.builder.ins().jump(join, &[expanded]);
                             self.builder.switch_to_block(join);
                             self.builder.block_params(join)[0]
                         }
@@ -1123,11 +1033,11 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let zero = self.builder.ins().iconst(I32, 0);
                 self.builder
                     .ins()
-                    .brif(any, dispatching, &[], join, &[zero.into()]);
+                    .brif(any, dispatching, &[], join, &[zero]);
                 self.builder.switch_to_block(dispatching);
                 self.flush_all(before, failed);
                 let one = self.builder.ins().iconst(I32, 1);
-                self.builder.ins().jump(join, &[one.into()]);
+                self.builder.ins().jump(join, &[one]);
                 self.builder.switch_to_block(join);
                 self.builder.block_params(join)[0]
             }
@@ -2251,7 +2161,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                 match result {
                     Ty::Int | Ty::Lgl | Ty::Dbl => {
                         let upper = self.builder.ins().ushr_imm_u(raw, 32);
-                        let tagged = |prefix: u32, builder: &mut FunctionBuilder| {
+                        let tagged = |prefix: u32, builder: &mut Builder| {
                             builder
                                 .ins()
                                 .icmp_imm_s(IntCC::Equal, upper, i64::from(prefix))
@@ -2619,7 +2529,7 @@ impl<'p, 'b> Translator<'p, 'b> {
         self.builder.append_block_param(store, I64);
         self.builder
             .ins()
-            .brif(shared, copy, &[], store, &[vector.into()]);
+            .brif(shared, copy, &[], store, &[vector]);
         self.builder.switch_to_block(copy);
         let dirty = self
             .builder
@@ -2639,7 +2549,7 @@ impl<'p, 'b> Translator<'p, 'b> {
         self.guard(copied, failed);
         let dirty_status = self.builder.ins().iconst(I32, status::RUNTIME_DIRTY);
         self.builder.def_var(self.statuses[slot], dirty_status);
-        self.builder.ins().jump(store, &[fresh.into()]);
+        self.builder.ins().jump(store, &[fresh]);
         self.builder.switch_to_block(store);
         let vector = self.builder.block_params(store)[0];
         let store_real = self.builder.create_block();
@@ -3238,7 +3148,7 @@ impl<'p, 'b> Translator<'p, 'b> {
         self.builder.switch_to_block(deopt.label);
         self.builder.set_cold_block(deopt.label);
         let mut cell = 0;
-        let mut store = |builder: &mut FunctionBuilder<'b>, value: Value| {
+        let mut store = |builder: &mut Builder, value: Value| {
             builder.ins().stack_store(I64, value, scratch, 8 * cell);
             cell += 1;
         };
@@ -3294,7 +3204,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                 .store(flags(), count, self.loops, (16 * index + 8) as i32);
         }
         let number = iconst(&mut self.builder, number);
-        self.builder.ins().jump(shared, &[number.into()]);
+        self.builder.ins().jump(shared, &[number]);
     }
 
     /// Emits every deoptimization point and the one exit they share, which calls
@@ -3332,9 +3242,7 @@ impl<'p, 'b> Translator<'p, 'b> {
     }
 
     fn guard(&mut self, condition: Value, failed: Label) {
-        let next = self.builder.create_block();
-        self.builder.ins().brif(condition, next, &[], failed, &[]);
-        self.builder.switch_to_block(next);
+        self.builder.ins().guard(condition, failed, &[]);
     }
 
     fn next_pc(&self, position: usize) -> Result<usize, Refusal> {
@@ -3595,10 +3503,10 @@ impl<'p, 'b> Translator<'p, 'b> {
         self.builder.switch_to_block(from_integer);
         let unboxed = self.builder.ins().load(I32, flags(), value, DATA);
         let widened = self.integer_as_double(unboxed);
-        self.builder.ins().jump(done, &[widened.into()]);
+        self.builder.ins().jump(done, &[widened]);
         self.builder.switch_to_block(from_double);
         let unboxed = self.builder.ins().load(F64, flags(), value, DATA);
-        self.builder.ins().jump(done, &[unboxed.into()]);
+        self.builder.ins().jump(done, &[unboxed]);
         self.builder.switch_to_block(done);
         let double = self.builder.block_params(done)[0];
         (double, self.builder.ins().uextend(I32, integer))
@@ -3730,7 +3638,7 @@ fn converts(from: Ty, to: Ty) -> bool {
     from.in_variables() && to != Ty::Bottom && !to.in_variables()
 }
 
-fn iconst(builder: &mut FunctionBuilder<'_>, value: usize) -> Value {
+fn iconst(builder: &mut Builder, value: usize) -> Value {
     builder.ins().iconst(I64, value as i64)
 }
 

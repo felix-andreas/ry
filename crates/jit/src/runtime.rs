@@ -175,12 +175,11 @@ pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
     if !thorough && (checked || sibling) {
         // The epoch moves on any binding outside a function frame, which a test suite or a
         // package load makes all the time, so most moves concern names no speculation uses.
-        let proven = epoch == compiled.epoch.get()
-            || compiled
-                .speculations
-                .iter()
-                .zip(&compiled.stamps)
-                .all(|(speculation, stamp)| heap.lookup_stamp(speculation.symbol) == stamp.get());
+        let proven =
+            epoch == compiled.epoch.get()
+                || compiled.speculations.iter().zip(&compiled.stamps).all(
+                    |(speculation, stamp)| heap.lookup_stamp(speculation.symbol) == stamp.get(),
+                );
         if proven {
             compiled.epoch.set(epoch);
             // A sibling's lookups pass through its own frame and then the checked enclosure's
@@ -410,7 +409,9 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
                     park(activation, unwind);
                     outcome::FAILED
                 }
-                Ok(()) if validate != 0 && !still_valid(compiled(activation), machine.env, epoch) => {
+                Ok(())
+                    if validate != 0 && !still_valid(compiled(activation), machine.env, epoch) =>
+                {
                     outcome::INVALIDATED
                 }
                 Ok(()) => outcome::OK,

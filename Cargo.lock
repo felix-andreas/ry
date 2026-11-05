@@ -1968,16 +1968,13 @@ name = "jit"
 version = "0.4.2-beta"
 dependencies = [
  "bumpalo",
- "cranelift-codegen",
- "cranelift-frontend",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native",
  "hashbrown 0.17.1",
  "heap",
  "interp",
+ "libc",
  "rustc-hash",
  "smallvec",
+ "ssa",
  "syntax",
  "typed",
 ]
@@ -4254,6 +4251,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ssa"
+version = "0.4.2-beta"
+dependencies = [
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native",
+ "rustc-hash",
+ "smallvec",
+ "syntax",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4874,15 +4885,11 @@ checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 name = "typed"
 version = "0.4.2-beta"
 dependencies = [
- "cranelift-codegen",
- "cranelift-frontend",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native",
  "heap",
  "interp",
  "rustc-hash",
  "smallvec",
+ "ssa",
 ]
 
 [[package]]

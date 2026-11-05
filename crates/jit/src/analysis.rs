@@ -23,7 +23,6 @@
 //! can change it, so code outside the compiled body never sees the difference.
 
 pub use interp::effects::{Speculation, base_builtin, resolve_function};
-
 use {
     crate::native::{self, Native},
     bumpalo::Bump,
@@ -1097,6 +1096,12 @@ const UNUSED: usize = usize::MAX;
 /// Why a body is not compiled.
 #[derive(Clone, Copy, Debug)]
 pub struct Refusal(pub &'static str);
+
+impl From<ssa::Error> for Refusal {
+    fn from(error: ssa::Error) -> Self {
+        Refusal(error.0)
+    }
+}
 
 /// The refusal for a body that has not run far enough to have the type feedback it needs,
 /// which a later attempt may well get past.
