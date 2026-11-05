@@ -1,0 +1,89 @@
+[stdout]
+| [1] 1 2 3
+| $names
+| [1] "a"
+| 
+| $class
+| [1] "record" "list"  
+| 
+| $id
+| [1] 7
+| 
+| $names
+| [1] "a" "b"
+| 
+| $note
+| [1] "n"
+| 
+| $class
+| [1] "tagged"
+| 
+|      [,1] [,2] [,3]
+| [1,]    1    3    5
+| [2,]    2    4    6
+|   [,1] [,2]
+| a    1    3
+| b    2    4
+| p q 
+| 1 2 
+| [1] u v
+| Levels: u v
+| [1] "dims [product 2] do not match the length of object [3]"
+| [1] "attempt to set invalid 'class' attribute"
+| [1] "attempt to set invalid 'class' attribute"
+| [1] "adding class \"factor\" to an invalid object"
+| [1] 1 2 3
+| NULL
+| NULL
+| $flag
+| [1] TRUE
+| 
+| $a
+| [1] 3
+| 
+| $b
+| [1] 2
+| 
+| $a
+| [1] 2
+| 
+| $keep
+| [1] 1
+| 
+| [1] "attributes must be named"
+| class
+| extra
+| $class
+| [1] "c1"
+| 
+| $extra
+| [1] 2
+| 
+| $comment
+| [1] "hidden"
+| 
+| $tsp
+| [1] 1 2 1
+| 
+| $names
+| [1] "a"
+| 
+| $class
+| [1] "data.frame"
+| 
+| $row.names
+| [1] "r1" "r2"
+| 
+| [1] TRUE
+| [1] "missing value where TRUE/FALSE needed"
+| [1] "missing value where TRUE/FALSE needed"
+| [1] "attempt to set invalid 'class' attribute"
+| [1] "attempt to set invalid 'class' attribute"
+| NULL
+| [1] 1 2 3
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 1:3

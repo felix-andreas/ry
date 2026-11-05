@@ -3811,6 +3811,20 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
         return set_dimnames(object, value, call);
     }
     if symbol == symbols.class {
+        // GNU R's `classgets`: printing or dispatching on a class that is not character would
+        // read its elements as strings.
+        if value != nil() && value.kind() != SexpType::String {
+            return Err(error_in(call, "attempt to set invalid 'class' attribute"));
+        }
+        if value != nil() {
+            let factor = (0..length(value)).any(|index| value.element(index).bytes() == b"factor");
+            if factor && object.kind() != SexpType::Integer {
+                return Err(error_in(
+                    call,
+                    "adding class \"factor\" to an invalid object",
+                ));
+            }
+        }
         return crate::dispatch::set_class_attribute(object, value);
     }
     if symbol == symbols.row_names {
@@ -3845,7 +3859,7 @@ pub unsafe fn set_row_names(object: Sexp, value: Sexp) -> R<()> {
     values::set_attr(object, symbol, value)
 }
 
-unsafe fn do_attributes(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_attributes(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let mut items: Vec<(String, Sexp)> = Vec::new();
     // GNU R reports tag names only for a pairlist (`isList`): a call's tags are its argument
@@ -3880,7 +3894,7 @@ unsafe fn do_attributes(call: &Call<'_>) -> R<Sexp> {
     values::named_list(&pairs)
 }
 
-unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
     let attributes = call.arg(1);
     // Unlike `attr<-`, giving NULL attributes turns it into an empty list, as in GNU R.
     let object = match call.arg(0) {

@@ -30,6 +30,7 @@ pub mod annotations;
 mod approximate;
 pub mod arith;
 pub mod arrays;
+pub mod base_fast_paths;
 pub mod builtin_libraries;
 pub mod builtins;
 pub mod bytecode;

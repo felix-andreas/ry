@@ -645,7 +645,7 @@ enum Ties {
     Max,
 }
 
-unsafe fn do_unique(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_unique(call: &Call<'_>) -> R<Sexp> {
     let x = call.arg(0);
     if x == nil() {
         return Ok(nil());
@@ -691,7 +691,7 @@ unsafe fn do_any_duplicated(call: &Call<'_>) -> R<Sexp> {
 /// character when either is character or of a later type (lists and raw vectors included),
 /// otherwise the higher of the two numeric types. Factors match by their labels, and other
 /// classed objects by what `mtfrm()` makes of them.
-unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
     let x = match_operand(call.arg(0), call.env)?;
     let table = match_operand(call.arg(1), call.env)?;
     let nomatch = coerce_vector(call.arg(2), SexpType::Integer)?;

@@ -1,0 +1,15 @@
+# setdiff of plain vectors drops duplicates and names, and keeps the type of x.
+print(setdiff(c(3, 1, 2, 3, 1), c(2, 5)))
+print(setdiff(c(a = "x", b = "y", c = "x"), "z"))
+print(setdiff(c("a", "b"), c(b = "b")))
+print(setdiff(1:5, c(2, 4))); print(setdiff(c(1, 2), 1:2)); print(setdiff(c(TRUE, NA, FALSE), TRUE))
+print(setdiff(c(NA, 1, NaN, NA), NaN)); print(setdiff(c(1+2i, 3i), 3i))
+print(setdiff(NULL, 1)); print(setdiff(1:3, NULL)); print(setdiff(character(0), "a")); print(setdiff(c("a", "b"), character(0)))
+print(setdiff("1", 1)); print(setdiff(1, "1"))
+x <- c(k = 1, l = 2); y <- setdiff(x, 3); print(x); print(y)
+# Objects and matrices go through as.vector or their own methods.
+print(setdiff(factor(c("a", "b", "c")), "b"))
+print(setdiff(matrix(1:4, 2), 2:3))
+print(setdiff(list(1, "a", 2), list(2)))
+print(setdiff(c(x = 1L, y = 2L), c(1.0)))
+print(setdiff(structure(1:3, foo = "bar"), 2L))

@@ -213,6 +213,25 @@ pub unsafe fn call_with_srcref(frame: &crate::Frame) -> R<Sexp> {
     Ok(call)
 }
 
+/// The function and frame of the caller of the closure whose frame is `env`, as that closure
+/// sees them through `sys.function(sys.parent())` and `sys.frame(sys.parent())`; `None` when it
+/// was called from the top level.
+pub(crate) unsafe fn sys_parent_of(env: Sexp) -> R<Option<(Sexp, Sexp)>> {
+    let Some(own) = interp().frames.iter().rposition(|frame| frame.env == env) else {
+        return Ok(None);
+    };
+    let context = Some(own);
+    let parent = sys_parent_number(1, context);
+    if parent == 0 {
+        return Ok(None);
+    }
+    let parent = parent as i32;
+    Ok(Some((
+        sys_call_at(parent, context, true)?,
+        sys_frame_at(parent, context)?,
+    )))
+}
+
 /// `R_sysparent`: the frame number of the parent of frame `n` counted back from `context`.
 unsafe fn sys_parent_number(mut n: i64, context: Option<usize>) -> i64 {
     let frames = &interp().frames;

@@ -206,6 +206,7 @@ unsafe fn start_slowly(
         )));
     }
     source_file(&format!("{home}/library/base/R/base"), base_namespace())?;
+    crate::base_fast_paths::install_all(base_namespace())?;
     install_register_s3_methods()?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
     eval_text(".OptRequireMethods()", global_env())?;

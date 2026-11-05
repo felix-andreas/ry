@@ -1,0 +1,34 @@
+[stdout]
+| [1] 3 1
+| [1] "x" "y"
+| [1] "a"
+| [1] 1 3 5
+| numeric(0)
+| [1]    NA FALSE
+| [1] NA  1
+| [1] 1+2i
+| NULL
+| [1] 1 2 3
+| character(0)
+| [1] "a" "b"
+| character(0)
+| numeric(0)
+| k l 
+| 1 2 
+| [1] 1 2
+| [1] "a" "c"
+| [1] 1 4
+| [[1]]
+| [1] 1
+| 
+| [[2]]
+| [1] "a"
+| 
+| [1] 2
+| [1] 1 3
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| c(1L, 3L)
