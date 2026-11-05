@@ -7,7 +7,10 @@ use {
     crate::{
         Frame,
         annotations::Entry,
-        builtins::{Arg, BuiltinDef, Call, Generic, Kind, Visibility, builtin, internal, special},
+        builtins::{
+            Arg, BuiltinDef, Call, Generic, Kind, NativeArgs, Visibility, builtin, internal,
+            special,
+        },
         bytecode,
         coerce::{CoercionWarnings, real_to_int},
         conditions, deparse, dispatch, interp, moves, scope,
@@ -509,13 +512,8 @@ unsafe fn call_builtin_reusing(
     } else {
         activity::enter(Activity::Builtin, 0)
     };
-    if definition.arity >= 0
-        && matches!(
-            definition.kind,
-            Kind::Internal | Kind::InternalSpecial | Kind::Builtin
-        )
-        && args.len() != definition.arity as usize
-    {
+    let checks = definition.checks;
+    if checks.arity && args.len() != definition.arity as usize {
         let name = if matches!(definition.kind, Kind::Builtin) {
             format!("'{}'", definition.name)
         } else {
@@ -531,9 +529,7 @@ unsafe fn call_builtin_reusing(
             ),
         ));
     }
-    if matches!(definition.kind, Kind::Builtin | Kind::Special)
-        && args.iter().any(|arg| arg.tag != nil())
-    {
+    if checks.names && args.iter().any(|arg| arg.tag != nil()) {
         check_argument_names(definition, call, args)?;
     }
     if PROFILE_TICK.load(Ordering::Relaxed) {
@@ -546,10 +542,7 @@ unsafe fn call_builtin_reusing(
     let copied_target;
     let args = match args.first() {
         Some(target)
-            if definition.name.ends_with("<-")
-                && !matches!(definition.name, "<-" | "<<-")
-                && target.value.refcount() >= 1
-                && !is_assignment(call) =>
+            if checks.replacement && target.value.refcount() >= 1 && !is_assignment(call) =>
         {
             let mut copy = args.to_vec();
             copy[0].value = values::shallow_duplicate(target.value)?;
@@ -567,15 +560,16 @@ unsafe fn call_builtin_reusing(
         env,
         reusable,
     };
-    let result = if !definition.accepts_native
-        && (matches!(definition.kind, Kind::Builtin | Kind::Internal)
-            || definition.is_dispatch_or_eval())
-        && let Err(refused) = crate::records::check_native_args(
-            call,
-            args,
-            crate::numbers::takes_numbers(definition.name)
-                || crate::arrays::indexes_by_numbers(definition.name, args),
-        ) {
+    let skip_numbers = match checks.native {
+        NativeArgs::Accepted | NativeArgs::RefusedExceptNumbers => true,
+        NativeArgs::Refused => false,
+        NativeArgs::RefusedExceptArrayIndexes => {
+            args.first().is_some_and(|target| target.value.is_array())
+        }
+    };
+    let result = if checks.native != NativeArgs::Accepted
+        && let Err(refused) = crate::records::check_native_args(call, args, skip_numbers)
+    {
         Err(refused)
     } else {
         // An ALTREP method's error, parked by the element accessor the builtin went through,
@@ -2772,7 +2766,9 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     let state = interp();
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = state.frames[depth - 1].handlers.clone();
-    state.frame_closures.truncate(state.frames[depth - 1].closures);
+    state
+        .frame_closures
+        .truncate(state.frames[depth - 1].closures);
     crate::truncate_frames(state, depth - 1);
     state.restarts = restarts;
     result
@@ -3243,24 +3239,31 @@ pub unsafe fn assign_symbol(symbol: Sexp, value: Sexp, env: Sexp, superassign: b
     if superassign {
         set_var(symbol, value, env.enclosure())
     } else {
-        let heap = crate::heap();
-        if let Some(cell) = heap.frame_cell(env, symbol) {
-            if cell.has_gp(gp::ACTIVE_BINDING) {
-                let function = cell.cdr();
-                apply(
-                    nil(),
-                    function,
-                    &[Arg { tag: nil(), value }],
-                    values::global_env(),
-                )?;
-                return Ok(());
-            }
-            heap.set_binding_value(cell, value)?;
-            cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
-            return Ok(());
-        }
-        define(symbol, value, env)
+        assign_local(symbol, value, env, crate::heap().frame_cell(env, symbol))
     }
+}
+
+/// `symbol <- value` in `env`, whose own frame binds `symbol` to `cell`, or not at all.
+#[inline(always)]
+pub unsafe fn assign_local(symbol: Sexp, value: Sexp, env: Sexp, cell: Option<Sexp>) -> R<()> {
+    let heap = crate::heap();
+    let Some(cell) = cell else {
+        heap.define_unbound(env, symbol, value)?;
+        return Ok(());
+    };
+    if cell.has_gp(gp::ACTIVE_BINDING) {
+        let function = cell.cdr();
+        apply(
+            nil(),
+            function,
+            &[Arg { tag: nil(), value }],
+            values::global_env(),
+        )?;
+        return Ok(());
+    }
+    heap.set_binding_value(cell, value)?;
+    cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
+    Ok(())
 }
 
 /// `f(x, ...) <- value`: evaluates the getter chain down to the variable, then applies the

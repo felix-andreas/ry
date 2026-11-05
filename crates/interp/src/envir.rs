@@ -1265,10 +1265,7 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
         }
         "matprod" => {
             let mode = values::first_string(value).unwrap_or_default();
-            if !matches!(
-                &*mode,
-                "default" | "internal" | "blas" | "default.simd"
-            ) {
+            if !matches!(&*mode, "default" | "internal" | "blas" | "default.simd") {
                 return Err(error("invalid value for 'matprod'"));
             }
             Ok(value)

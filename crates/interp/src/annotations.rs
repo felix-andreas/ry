@@ -721,10 +721,7 @@ unsafe fn as_i64(mask: Mask, value: Sexp) -> R<Option<Sexp>> {
 /// `List.map` over no items builds it) where the annotation expects `I64` items, which
 /// [`as_i64`] then supplies.
 unsafe fn lacks_item_type(mask: Mask, value: Sexp) -> bool {
-    mask & I64 != 0
-        && mask & ARRAY != 0
-        && value.kind() == SexpType::Logical
-        && value.length() == 0
+    mask & I64 != 0 && mask & ARRAY != 0 && value.kind() == SexpType::Logical && value.length() == 0
 }
 
 unsafe fn failure(call: Sexp, message: String) -> crate::unwind::Unwind {

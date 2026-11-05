@@ -28,7 +28,7 @@ use {
     heap::object::{Sexp, SexpType, gp},
     interp::{
         annotations::{self, Declared, Entry},
-        bytecode::{self, ARITHS, Arith, FEEDBACK, OPS, Op, feedback, operand_count},
+        bytecode::{self, ARITHS, Arith, FEEDBACK, Op, feedback, operand_count},
         values,
     },
     rustc_hash::{FxBuildHasher, FxHashSet},
@@ -1273,9 +1273,7 @@ pub unsafe fn decode(arena: Arena<'_>, code: Sexp) -> Result<List<'_, Inst<'_>>,
     let mut insts = List::new_in(arena);
     let mut pc = 0;
     while pc < words.len() {
-        let op = *OPS
-            .get(words[pc] as usize)
-            .ok_or(Refusal("an unknown opcode"))?;
+        let op = bytecode::op_of(words[pc] as u32).ok_or(Refusal("an unknown opcode"))?;
         let count = operand_count(op);
         let operands = words
             .get(pc + 1..pc + 1 + count)

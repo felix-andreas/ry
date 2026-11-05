@@ -15,7 +15,11 @@
 //! The base environment and the base namespace have no `Frame`: their cells hang off the symbols
 //! themselves, so a lookup of a base function is one load from the interned symbol.
 
-use {crate::object::Sexp, rustc_hash::FxHashMap, smallvec::SmallVec};
+use {
+    crate::object::Sexp,
+    rustc_hash::{FxHashMap, FxHashSet},
+    smallvec::SmallVec,
+};
 
 /// Frames this small are scanned; larger ones keep a hash index beside the cells. Scanning a
 /// dozen cells is cheaper than building the index, which a call to a function with many
@@ -65,6 +69,10 @@ pub struct Frame {
     /// not bind the symbol (a call to `length` from a function body asks the function's frame
     /// first), and a clear bit answers those without scanning. Removal leaves the bit set.
     filter: u64,
+    /// Whether some symbol is bound twice, which only duplicate formals do. Hinted lookups are
+    /// off in such a frame, because a hint at the later duplicate would answer with the wrong
+    /// cell.
+    shadowed: bool,
 }
 
 /// The [`Frame::filter`] bit for `symbol`: a multiplicative hash of its address, since a
@@ -92,6 +100,7 @@ impl Frame {
         write(addr_of_mut!((*frame).formals), 0);
         write(addr_of_mut!((*frame).removed), 0);
         write(addr_of_mut!((*frame).filter), 0);
+        write(addr_of_mut!((*frame).shadowed), false);
         if bindings > INLINE_BINDINGS {
             (*frame).bindings.reserve_exact(bindings);
         }
@@ -122,19 +131,43 @@ impl Frame {
     /// The binding cell for `symbol`, if the frame binds it.
     #[inline]
     pub fn find(&self, symbol: Sexp) -> Option<Sexp> {
+        let position = self.find_position(symbol)?;
+        self.bindings.get(position).map(|binding| binding.cell)
+    }
+
+    /// [`Frame::find`] that tries position `*hint` first and leaves the binding's position in
+    /// it. Calls of one function bind their formals and locals in the same order, so a hint a
+    /// compiled lookup site kept from an earlier call answers with one comparison in the
+    /// frames of later calls. A removed slot holds no real symbol, and a frame that binds a
+    /// symbol twice ignores hints, so a stale hint never matches the wrong binding.
+    #[inline(always)]
+    pub fn find_hinted(&self, symbol: Sexp, hint: &mut u32) -> Option<Sexp> {
+        // Most probes miss, so the filter comes before the hint.
+        if self.filter & filter_bit(symbol) == 0 {
+            return None;
+        }
+        if let Some(binding) = self.bindings.get(*hint as usize)
+            && binding.symbol == symbol
+            && !self.shadowed
+        {
+            return Some(binding.cell);
+        }
+        let position = self.find_position(symbol)?;
+        *hint = position as u32;
+        self.bindings.get(position).map(|binding| binding.cell)
+    }
+
+    #[inline]
+    fn find_position(&self, symbol: Sexp) -> Option<usize> {
         if self.filter & filter_bit(symbol) == 0 {
             return None;
         }
         match &self.index {
-            Some(index) => self
-                .bindings
-                .get(*index.get(&symbol)? as usize)
-                .map(|binding| binding.cell),
+            Some(index) => Some(*index.get(&symbol)? as usize),
             None => self
                 .bindings
                 .iter()
-                .find(|binding| binding.symbol == symbol)
-                .map(|binding| binding.cell),
+                .position(|binding| binding.symbol == symbol),
         }
     }
 
@@ -217,6 +250,9 @@ impl Frame {
     /// symbol the frame already binds, and then the first cell keeps answering lookups, as the
     /// first match in GNU R's frame list does.
     pub(crate) fn insert(&mut self, symbol: Sexp, cell: Sexp) {
+        if self.filter & filter_bit(symbol) != 0 && self.find_position(symbol).is_some() {
+            self.shadowed = true;
+        }
         let position = self.bindings.len() as u32;
         self.bindings.push(Binding { symbol, cell });
         self.filter |= filter_bit(symbol);
@@ -355,8 +391,11 @@ impl Frame {
             })
             .collect();
         let mut filter = 0;
+        let mut seen = FxHashSet::default();
+        let mut shadowed = false;
         for binding in bindings.iter().filter(|binding| binding.symbol != REMOVED) {
             filter |= filter_bit(binding.symbol);
+            shadowed |= !seen.insert(binding.symbol);
         }
         let index = (bindings.len() > INDEX_THRESHOLD).then(|| {
             let mut index = FxHashMap::with_capacity_and_hasher(bindings.len(), Default::default());
@@ -381,6 +420,7 @@ impl Frame {
             formals: image.formals,
             removed: image.removed,
             filter,
+            shadowed,
         }
     }
 }

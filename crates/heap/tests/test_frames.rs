@@ -118,3 +118,50 @@ fn run(seed: u64) {
 fn fuzz_hashed_frames_follow_gnu_r_table() {
     for_each_seed(60, run);
 }
+
+/// A slot hint only speeds a lookup up: through random definitions, removals, duplicate
+/// bindings and hints that are stale or out of range, a hinted lookup finds exactly the cell a plain lookup finds.
+fn run_hinted(seed: u64) {
+    let mut rng = SplitMix64(seed);
+    let mut heap = Heap::new();
+    let names: Vec<String> = (0..1 + rng.below(40))
+        .map(|index| format!("h{index}"))
+        .collect();
+    unsafe {
+        let nil = heap.nil();
+        let env = heap.alloc_environment(nil).expect("environment");
+        heap.root(env);
+        if rng.chance(1, 3) {
+            heap.set_frame_hashed(env, [0, 1, 29][rng.below(3)]);
+        }
+        let symbols: Vec<Sexp> = names
+            .iter()
+            .map(|name| heap.install(name.as_bytes()).expect("install"))
+            .collect();
+        let mut hints = vec![0u32; symbols.len()];
+        for step in 0..300 {
+            let which = rng.below(symbols.len());
+            match rng.below(9) {
+                0..=3 => heap.define(env, symbols[which], nil).expect("define"),
+                4 | 5 => {
+                    heap.remove_binding(env, symbols[which]).expect("remove");
+                }
+                // A second cell for a bound symbol, as duplicate formals bind one.
+                6 => heap
+                    .define_unbound(env, symbols[which], nil)
+                    .expect("bind"),
+                _ => hints[which] = rng.below(64) as u32,
+            }
+            for (index, &symbol) in symbols.iter().enumerate() {
+                let plain = heap.frame_cell(env, symbol);
+                let hinted = heap.frame_cell_hinted(env, symbol, &mut hints[index]);
+                assert_eq!(hinted, plain, "seed {seed}, step {step}: {}", names[index]);
+            }
+        }
+    }
+}
+
+#[test]
+fn fuzz_hinted_lookups_match_plain_lookups() {
+    for_each_seed(60, run_hinted);
+}

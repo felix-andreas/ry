@@ -728,13 +728,7 @@ pub unsafe extern "C" fn dtrsl_(
     triangular_solve(Matrix::new(t, *ldt), *n as isize, b, *job, info);
 }
 
-pub unsafe fn triangular_solve(
-    t: Matrix,
-    n: isize,
-    b: *mut f64,
-    job: c_int,
-    info: *mut c_int,
-) {
+pub unsafe fn triangular_solve(t: Matrix, n: isize, b: *mut f64, job: c_int, info: *mut c_int) {
     for index in 1..=n {
         if t.get(index, index) == 0.0 {
             *info = index as c_int;

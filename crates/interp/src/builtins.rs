@@ -93,8 +93,69 @@ pub struct BuiltinDef {
     /// `x <- f(x, ...)` offers it through [`Call::reusable`]: set by
     /// [`BuiltinDef::reusing_first_argument`].
     pub reuses_first_argument: bool,
+    /// Derived from the fields above by [`register`].
+    pub checks: Checks,
     pub function: BuiltinFn,
     pub object: Option<Sexp>,
+}
+
+/// What a call checks before its builtin runs. The checks follow from the rest of the
+/// definition, and registration derives them once, so that a call compares no names: the
+/// comparisons were a fifth of the cost of calling a cheap builtin such as `length`.
+#[derive(Clone, Copy)]
+pub struct Checks {
+    /// The call must pass exactly `arity` arguments.
+    pub arity: bool,
+    /// Argument names must match the formals base R records for the primitive.
+    pub names: bool,
+    /// A replacement primitive such as `class<-`, whose target a direct call copies first.
+    pub replacement: bool,
+    pub native: NativeArgs,
+}
+
+/// Which ry values a builtin refuses as top-level arguments.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum NativeArgs {
+    Accepted,
+    Refused,
+    /// A single `I64` passes, as the arithmetic and comparison operators take it.
+    RefusedExceptNumbers,
+    /// A single `I64` passes when the first argument is an `Array`, which indexing takes it for.
+    RefusedExceptArrayIndexes,
+}
+
+impl Checks {
+    const UNDERIVED: Checks = Checks {
+        arity: false,
+        names: false,
+        replacement: false,
+        native: NativeArgs::Accepted,
+    };
+
+    fn of(definition: &BuiltinDef) -> Checks {
+        let name = definition.name;
+        Checks {
+            arity: definition.arity >= 0
+                && matches!(
+                    definition.kind,
+                    Kind::Internal | Kind::InternalSpecial | Kind::Builtin
+                ),
+            names: matches!(definition.kind, Kind::Builtin | Kind::Special),
+            replacement: name.ends_with("<-") && !matches!(name, "<-" | "<<-"),
+            native: if definition.accepts_native
+                || !(matches!(definition.kind, Kind::Builtin | Kind::Internal)
+                    || definition.is_dispatch_or_eval())
+            {
+                NativeArgs::Accepted
+            } else if crate::numbers::takes_numbers(name) {
+                NativeArgs::RefusedExceptNumbers
+            } else if crate::arrays::indexes_by_numbers(name) {
+                NativeArgs::RefusedExceptArrayIndexes
+            } else {
+                NativeArgs::Refused
+            },
+        }
+    }
 }
 
 /// A table entry. The constructors below keep the tables short.
@@ -108,6 +169,7 @@ pub const fn builtin(name: &'static str, arity: i32, function: BuiltinFn) -> Bui
         keep_missing: false,
         accepts_native: false,
         reuses_first_argument: false,
+        checks: Checks::UNDERIVED,
         function,
         object: None,
     }
@@ -209,6 +271,7 @@ impl BuiltinDef {
             keep_missing: self.keep_missing,
             accepts_native: self.accepts_native,
             reuses_first_argument: self.reuses_first_argument,
+            checks: self.checks,
             function: self.function,
             object: self.object,
         }
@@ -301,6 +364,7 @@ unsafe fn register_in(definitions: &[BuiltinDef], env: Sexp) {
             *existing = definition.copy();
             existing.accepts_native =
                 definition.accepts_native || ACCEPTS_NATIVE.contains(&definition.name);
+            existing.checks = Checks::of(existing);
             existing.object = object;
             continue;
         }
@@ -327,6 +391,7 @@ unsafe fn register_in(definitions: &[BuiltinDef], env: Sexp) {
         let mut entry = definition.copy();
         entry.accepts_native =
             definition.accepts_native || ACCEPTS_NATIVE.contains(&definition.name);
+        entry.checks = Checks::of(&entry);
         entry.object = Some(object);
         state.builtins.push(entry);
         state.builtin_index.insert(key, index);

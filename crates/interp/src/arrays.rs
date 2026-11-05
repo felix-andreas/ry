@@ -12,7 +12,7 @@
 
 use {
     crate::{
-        builtins::{Arg, BuiltinDef, Call, builtin},
+        builtins::{BuiltinDef, Call, builtin},
         coerce, numbers,
         unwind::{R, error_in},
         values::{self, alloc, length, missing_arg, nil, symbol_name},
@@ -541,14 +541,10 @@ unsafe fn writable(array: Sexp) -> R<Sexp> {
     }
 }
 
-/// Whether `value` can be stored in an Array of `kind` items: a single item of that kind, or
-/// (for `[<-`, which assigns several positions) an Array of them. An Array of ry values holds an
-/// Array as one item, so `[[<-` stores it whole.
-/// Whether `builtin` indexes a ry List (its first argument), where `I64` positions and
-/// `List<I64>` positions are native arguments the position rules read directly.
-pub unsafe fn indexes_by_numbers(builtin: &str, args: &[Arg]) -> bool {
+/// Whether `builtin` indexes a ry List when its first argument is an Array, where `I64`
+/// positions and `List<I64>` positions are native arguments the position rules read directly.
+pub fn indexes_by_numbers(builtin: &str) -> bool {
     matches!(builtin, "[" | "[[" | "[<-" | "[[<-")
-        && args.first().is_some_and(|target| target.value.is_array())
 }
 
 /// The fallback for a value an Array cannot hold. An R vector takes it, but a `List<I64>` has no
@@ -563,6 +559,9 @@ unsafe fn refuse_mixed(kind: Items, call: Sexp) -> R<Option<Sexp>> {
     Ok(None)
 }
 
+/// Whether `value` can be stored in an Array of `kind` items: a single item of that kind, or
+/// (for `[<-`, which assigns several positions) an Array of them. An Array of ry values holds an
+/// Array as one item, so `[[<-` stores it whole.
 unsafe fn fits(kind: Items, value: Sexp, single: bool) -> bool {
     if value.is_array() && !(single && kind == Items::RyValues) {
         return !single && items(value) == kind;

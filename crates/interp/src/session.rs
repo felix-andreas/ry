@@ -255,7 +255,10 @@ unsafe fn install_register_s3_methods() -> R<()> {
     // already, while a build from the source release defines GNU R's own function.
     let mut replacement_hash = FNV_OFFSET;
     stable_hash(replacement.car(), &mut replacement_hash);
-    stable_hash(crate::bytecode::closure_body(replacement), &mut replacement_hash);
+    stable_hash(
+        crate::bytecode::closure_body(replacement),
+        &mut replacement_hash,
+    );
     if hash == replacement_hash {
         return Ok(());
     }

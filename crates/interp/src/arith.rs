@@ -2824,7 +2824,9 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
             }
             let result = alloc(SexpType::Real, count)?;
             long_double::running_products(values::reals(widened), values::reals_mut(result));
-            if values::reals(result).last().is_some_and(|total| total.is_nan())
+            if values::reals(result)
+                .last()
+                .is_some_and(|total| total.is_nan())
                 && let Some(first) = values::reals(widened)
                     .iter()
                     .position(|&value| is_na_real(value))

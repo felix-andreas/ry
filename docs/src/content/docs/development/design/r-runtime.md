@@ -574,6 +574,26 @@ first called, unless its bytecode was built ahead of time. Each call site, varia
 arithmetic operation carries an inline cache and a small type profile: observed `SEXPTYPE`, length
 one or not, attributes or none, NA seen or not.
 
+Tier 0 gets its speed from facts fixed before the code runs, not from caches that have to be
+checked and refilled:
+
+- **Op words carry their operand count.** Each instruction word holds the opcode in its low 8 bits
+  and the operand count above them, so the next instruction's position is one shift and one add,
+  with no table lookup.
+- **One dispatch loop.** `interpret` in `crates/interp/src/bytecode.rs` keeps the frame, the code,
+  the registers and the heap in locals for the whole run, and an error leaves the loop through one
+  exit (the `tri!` macro) that hands it to the code's handler table. Single-stepping for the
+  debugger is the same loop, compiled with `SINGLE = true`.
+- **Slot hints.** Every call of one function binds its formals and locals in the same order, so a
+  `GetVar` or `SetVar` site remembers the position in the frame where it last found its symbol.
+  The frame's symbol filter is checked first, because most probes miss, and a hint that no longer
+  matches falls back to a search and is updated. A wrong hint costs a search, never a wrong answer.
+- **Lookups skip function frames.** A function lookup past the local frame walks only the frames
+  that can bind the symbol, using the same hints.
+- **Builtin checks are derived at registration.** Arity, names, replacement form and which
+  arguments a builtin accepts as native values are computed once per builtin (`Checks` in
+  `crates/interp/src/builtins.rs`), so a call does not re-derive them from the builtin's name.
+
 **Tier 1 is an optimizing compiler on Cranelift.** Hot functions and hot loops (through on-stack
 replacement) compile from bytecode to an SSA IR with R-specific operations, in the style of Ř's PIR.
 The IR represents environments, promises and boxed values explicitly, so they can be optimized away:

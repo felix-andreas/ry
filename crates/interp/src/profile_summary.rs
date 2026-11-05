@@ -14,8 +14,8 @@ use {
         values,
     },
     heap::{
-        object::{Header, Sexp, SexpType},
         activity::{self, Activity, Counter},
+        object::{Header, Sexp, SexpType},
     },
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
@@ -221,9 +221,8 @@ pub unsafe fn enter_closure(call: Sexp, function: Sexp) -> activity::FrameScope 
 /// Owner labels by environment address. Namespaces and the global environment live for the whole
 /// session, so an address names one owner; another top level (an environment `sys.source` used)
 /// can be freed and its address reused, which at worst merges two such owners under "other".
-static OWNER_LABELS: Mutex<FxHashMap<usize, u32>> = Mutex::new(FxHashMap::with_hasher(
-    rustc_hash::FxBuildHasher,
-));
+static OWNER_LABELS: Mutex<FxHashMap<usize, u32>> =
+    Mutex::new(FxHashMap::with_hasher(rustc_hash::FxBuildHasher));
 
 /// Marks the end of start-up: samples after this count toward the time split.
 pub fn mark_ready() {
@@ -678,14 +677,13 @@ fn report(
         .collect();
     for (title, inclusive) in [("self", false), ("inclusive", true)] {
         writeln!(out, "\n## Base R closures by {title} time (top 30)\n")?;
-        writeln!(
-            out,
-            "| closure | self | inclusive |\n| --- | ---: | ---: |"
-        )?;
+        writeln!(out, "| closure | self | inclusive |\n| --- | ---: | ---: |")?;
         let mut ranked = base_closures.clone();
         ranked.sort_by(|left, right| {
             let key = |time: &Attribution| if inclusive { time.inclusive } else { time.own };
-            key(&right.1).cmp(&key(&left.1)).then_with(|| left.0.cmp(&right.0))
+            key(&right.1)
+                .cmp(&key(&left.1))
+                .then_with(|| left.0.cmp(&right.0))
         });
         for (name, time) in ranked.iter().take(30) {
             writeln!(
