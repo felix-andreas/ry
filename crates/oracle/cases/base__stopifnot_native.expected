@@ -1,0 +1,33 @@
+[stdout]
+| $value
+| NULL
+| 
+| $visible
+| [1] FALSE
+| 
+| [1] "FALSE is not TRUE" "NULL"             
+| [1] "c(TRUE, NA) are not all TRUE" "NULL"                        
+| [1] "1 is not TRUE" "NULL"         
+| [1] "\"x\" is not TRUE" "NULL"             
+| [1] "1 and 2 are not equal:\n  Mean relative difference: 1"
+| [2] "NULL"                                                 
+| [1] "must be positive" "NULL"            
+| [1] "2 > 3 is not TRUE" "NULL"             
+| [1] "NULL are not all TRUE" "NULL"                 
+| NULL
+| [1] 4
+| [1] "x > 0 is not TRUE" "f(-1)"            
+| [1] "is.numeric(x) is not TRUE"
+| one
+| two
+| [1] "{ .... is not TRUE"
+| [1] "boom"
+| NULL
+| [1] "FALSE is not TRUE"
+| NULL
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

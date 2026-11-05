@@ -9,7 +9,7 @@ use {
         unwind::{R, error},
         values::{self, alloc, length, nil, symbols},
     },
-    heap::object::{NA_INTEGER, Rcomplex, Sexp, SexpType, gp, is_na_real},
+    heap::object::{NA_INTEGER, NA_LOGICAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
     std::{cell::RefCell, fmt::Write},
     unicode_width::UnicodeWidthChar,
 };
@@ -817,19 +817,38 @@ pub fn justify(items: Vec<String>, right: bool) -> Vec<String> {
 // The internals.
 
 /// `format(x, trim, digits, nsmall, width, justify, na.encode, scientific, decimal.mark)`.
-unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
     let vector = values::materialize(call.arg(0))?;
-    let trim = values::as_logical_scalar(call.arg(1)) == 1;
+    let trim = values::as_logical_scalar(call.arg(1));
+    if trim == NA_LOGICAL {
+        return Err(call.error("invalid 'trim' argument"));
+    }
+    let trim = trim == 1;
     let digits = call.arg(2);
-    let nsmall = values::as_integer_scalar(call.arg(3)).max(0) as usize;
+    let nsmall = values::as_integer_scalar(call.arg(3));
+    if nsmall == NA_INTEGER || !(0..=20).contains(&nsmall) {
+        return Err(call.error("invalid 'nsmall' argument"));
+    }
+    let nsmall = nsmall as usize;
     let width = call.arg(4);
     let justify_mode = values::as_integer_scalar(call.arg(5));
-    let na_encode = values::as_logical_scalar(call.arg(6)) != 0;
+    if justify_mode == NA_INTEGER || !(0..=3).contains(&justify_mode) {
+        return Err(call.error("invalid 'justify' argument"));
+    }
+    let na_encode = values::as_logical_scalar(call.arg(6));
+    if na_encode == NA_LOGICAL {
+        return Err(call.error("invalid 'na.encode' argument"));
+    }
+    let na_encode = na_encode != 0;
     let scientific = call.arg(7);
     let mut settings = if digits == nil() {
         Settings::current()
     } else {
-        Settings::with_digits(values::as_integer_scalar(digits).clamp(1, 22) as usize)
+        let digits = values::as_integer_scalar(digits);
+        if digits == NA_INTEGER || !(1..=22).contains(&digits) {
+            return Err(call.error(format!("invalid value {digits} for 'digits' argument")));
+        }
+        Settings::with_digits(digits as usize)
     };
     settings.nsmall = nsmall;
     if scientific != nil() {
@@ -848,7 +867,11 @@ unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
     let min_width = if width == nil() {
         0
     } else {
-        values::as_integer_scalar(width).max(0) as usize
+        let width = values::as_integer_scalar(width);
+        if width == NA_INTEGER {
+            return Err(call.error("invalid 'width' argument"));
+        }
+        width.max(0) as usize
     };
     let items: Vec<Option<String>> = match vector.kind() {
         SexpType::String => {
