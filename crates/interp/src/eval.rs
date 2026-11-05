@@ -478,6 +478,7 @@ pub fn builtin_index(definition: &BuiltinDef) -> usize {
         / size_of::<BuiltinDef>()
 }
 
+#[inline]
 pub unsafe fn builtin_def(function: Sexp) -> R<&'static BuiltinDef> {
     interp()
         .builtin(function.primitive_index())
@@ -1118,7 +1119,7 @@ pub unsafe fn bind_arguments(
         None
     } else {
         activity::count(Counter::FormalsMatchedByName);
-        Some(match_args(formals, args, call)?)
+        Some(match_args_cached(function, formals, args, call)?)
     };
     let env = frame_environment(function, formals)?;
     let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
@@ -1469,11 +1470,59 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
 /// positions. Returns one value per formal: the supplied value or promise, `R_MissingArg`, or
 /// for `...` a `DOTSXP` of what it collects.
 pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> {
-    let missing = missing_arg();
-    let dots_symbol = symbols().dots;
-    if let Some(matched) = match_positional_args(formals, args, missing, dots_symbol)? {
+    if let Some(matched) = match_positional_args(formals, args, missing_arg(), symbols().dots)? {
         return Ok(matched);
     }
+    let plan = match_plan(formals, args, call)?;
+    matched_from_plan(formals, args, &plan)
+}
+
+/// Which formal each argument binds to: an argument that `...` collects maps to the position of
+/// `...`. The plan depends only on the formals and the argument names, so a call site that
+/// passes the same names to the same function reuses it ([`match_args_cached`]).
+type Plan = SmallVec<[u32; 8]>;
+
+/// [`match_args`] for a call of the compiled closure `function`, reusing the plan of the last
+/// call of its body when it had the same formals and argument names. The cache holds one entry
+/// in the body's `MATCHES` constant: a list of the formals, the plan, and the argument tags.
+unsafe fn match_args_cached(function: Sexp, formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> {
+    let code = function.cdr();
+    if code.kind() != SexpType::Bytecode || !args.iter().any(is_named) {
+        return match_args(formals, args, call);
+    }
+    let constants = code.cdr();
+    let entry = constants.element(bytecode::MATCHES);
+    if entry != nil()
+        && entry.element(0) == formals
+        && length(entry) == args.len() + 2
+        && args
+            .iter()
+            .enumerate()
+            .all(|(index, arg)| entry.element(index + 2) == arg.tag)
+    {
+        let plan: Plan = entry.element(1).slice::<i32>().iter().map(|&formal| formal as u32).collect();
+        return matched_from_plan(formals, args, &plan);
+    }
+    let plan = match_plan(formals, args, call)?;
+    let stored: SmallVec<[i32; 8]> = plan.iter().map(|&formal| formal as i32).collect();
+    let stored = values::integer_vector(&stored)?;
+    let entry = alloc(SexpType::List, args.len() + 2)?;
+    let heap = crate::heap();
+    heap.set_element(entry, 0, formals);
+    heap.set_element(entry, 1, stored);
+    for (index, arg) in args.iter().enumerate() {
+        heap.set_element(entry, index + 2, arg.tag);
+    }
+    heap.set_element(constants, bytecode::MATCHES, entry);
+    matched_from_plan(formals, args, &plan)
+}
+
+fn is_named(arg: &Arg) -> bool {
+    unsafe { arg.tag.kind() == SexpType::Symbol && !arg.tag.car().bytes().is_empty() }
+}
+
+unsafe fn match_plan(formals: Sexp, args: &[Arg], call: Sexp) -> R<Plan> {
+    let dots_symbol = symbols().dots;
     // Every closure call matches its arguments, so the working state stays off the heap for the
     // usual handful of formals and arguments.
     let mut formal_symbols: SmallVec<[Sexp; 8]> = SmallVec::new();
@@ -1486,7 +1535,8 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
         cell = cell.cdr();
     }
     let count = formal_symbols.len();
-    let mut matched: SmallVec<[Option<Sexp>; 8]> = smallvec![None; count];
+    let mut matched: SmallVec<[bool; 8]> = smallvec![false; count];
+    let mut plan: Plan = smallvec![0; args.len()];
     let mut used: SmallVec<[bool; 8]> = smallvec![false; args.len()];
     let dots_position = formal_symbols
         .iter()
@@ -1512,7 +1562,7 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
             if let Some(name) = name
                 && *name == formal_name
             {
-                if matched[formal_index].is_some() {
+                if matched[formal_index] {
                     return Err(error_in(
                         call,
                         format!(
@@ -1521,7 +1571,8 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
                         ),
                     ));
                 }
-                matched[formal_index] = Some(args[arg_index].value);
+                matched[formal_index] = true;
+                plan[arg_index] = formal_index as u32;
                 used[arg_index] = true;
             }
         }
@@ -1530,7 +1581,7 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
     let partial_limit = dots_position.unwrap_or(count);
     let mut partial_owner: SmallVec<[Option<usize>; 8]> = smallvec![None; args.len()];
     for (formal_index, &formal) in formal_symbols.iter().enumerate().take(partial_limit) {
-        if matched[formal_index].is_some() {
+        if matched[formal_index] {
             continue;
         }
         let formal_name = formal.car().bytes();
@@ -1552,7 +1603,7 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
                         ),
                     ));
                 }
-                if matched[formal_index].is_some() {
+                if matched[formal_index] {
                     return Err(error_in(
                         call,
                         format!(
@@ -1561,23 +1612,23 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
                         ),
                     ));
                 }
-                matched[formal_index] = Some(args[arg_index].value);
+                matched[formal_index] = true;
+                plan[arg_index] = formal_index as u32;
                 used[arg_index] = true;
                 partial_owner[arg_index] = Some(formal_index);
             }
         }
     }
     // Positional matches up to `...`; everything left goes to `...`.
-    let mut dots_items: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
     let mut unused: SmallVec<[usize; 4]> = SmallVec::new();
     let mut formal_index = 0;
-    for (arg_index, arg) in args.iter().enumerate() {
+    for arg_index in 0..args.len() {
         if used[arg_index] {
             continue;
         }
         if arg_names[arg_index].is_some() {
-            if dots_position.is_some() {
-                dots_items.push((arg.tag, arg.value));
+            if let Some(position) = dots_position {
+                plan[arg_index] = position as u32;
             } else {
                 unused.push(arg_index);
             }
@@ -1585,15 +1636,16 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
         }
         while formal_index < count
             && formal_symbols[formal_index] != dots_symbol
-            && matched[formal_index].is_some()
+            && matched[formal_index]
         {
             formal_index += 1;
         }
         if formal_index < count && formal_symbols[formal_index] != dots_symbol {
-            matched[formal_index] = Some(arg.value);
+            matched[formal_index] = true;
+            plan[arg_index] = formal_index as u32;
             formal_index += 1;
-        } else if dots_position.is_some() {
-            dots_items.push((arg.tag, arg.value));
+        } else if let Some(position) = dots_position {
+            plan[arg_index] = position as u32;
         } else {
             unused.push(arg_index);
         }
@@ -1624,20 +1676,49 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
             ),
         ));
     }
-    let mut result: Matched = matched
-        .into_iter()
-        .map(|value| value.unwrap_or(missing))
-        .collect();
+    Ok(plan)
+}
+
+/// One value per formal from a plan: the argument mapped to it, the arguments mapped to `...`
+/// in order as a `DOTSXP`, or `R_MissingArg`.
+unsafe fn matched_from_plan(formals: Sexp, args: &[Arg], plan: &[u32]) -> R<Matched> {
+    let missing = missing_arg();
+    let dots_symbol = symbols().dots;
+    let mut result = Matched::new();
+    let mut dots_position = None;
+    let mut cell = formals;
+    while matches!(
+        cell.kind(),
+        SexpType::Pairlist | SexpType::Language | SexpType::Dots
+    ) {
+        if cell.tag() == dots_symbol {
+            dots_position = Some(result.len() as u32);
+        }
+        result.push(missing);
+        cell = cell.cdr();
+    }
+    for (arg, &formal) in args.iter().zip(plan) {
+        if Some(formal) != dots_position
+            && let Some(slot) = result.get_mut(formal as usize)
+        {
+            *slot = arg.value;
+        }
+    }
     if let Some(position) = dots_position {
-        result[position] = if dots_items.is_empty() {
-            missing
-        } else {
-            let mut list = nil();
-            for &(tag, value) in dots_items.iter().rev() {
-                list = triple(SexpType::Dots, value, list, tag)?;
-            }
-            list
-        };
+        let mut list = nil();
+        for (arg, _) in args
+            .iter()
+            .zip(plan)
+            .rev()
+            .filter(|(_, formal)| **formal == position)
+        {
+            list = triple(SexpType::Dots, arg.value, list, arg.tag)?;
+        }
+        if list != nil()
+            && let Some(slot) = result.get_mut(position as usize)
+        {
+            *slot = list;
+        }
     }
     Ok(result)
 }
@@ -1651,8 +1732,6 @@ unsafe fn match_positional_args(
     missing: Sexp,
     dots_symbol: Sexp,
 ) -> R<Option<Matched>> {
-    let is_named =
-        |arg: &Arg| arg.tag.kind() == SexpType::Symbol && !arg.tag.car().bytes().is_empty();
     if args.iter().any(is_named) {
         return Ok(None);
     }

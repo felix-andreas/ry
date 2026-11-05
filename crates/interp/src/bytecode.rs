@@ -21,8 +21,9 @@
 //!   the loop table (an integer vector of `start, end, exit, step` quadruples), the fifth the
 //!   number of registers the code uses, the sixth the profile counters (an integer vector, see
 //!   [`profile`]) the seventh the optimizing tier's compiled code, `NULL` until it exists, the eighth the
-//!   slot hints (an integer vector, one per lookup site), and the ninth the stored half of the
-//!   effect-free fact (see [`crate::effects`]).
+//!   slot hints (an integer vector, one per lookup site), the ninth the stored half of the
+//!   effect-free fact (see [`crate::effects`]), and the tenth the last argument-match plan of a
+//!   closure body (see `eval::match_args_cached`).
 //! - `tag`: the inline caches, a list with two slots per cache: the enclosure the lookup started
 //!   from and the binding cell it found. The list holds them weakly, because closures that share
 //!   a body share its code, and a strong cache would keep the last caller's environment alive.
@@ -282,7 +283,8 @@ pub const PROFILE: usize = 5;
 pub const TIER1: usize = 6;
 pub const HINTS: usize = 7;
 pub const SUMMARY: usize = 8;
-pub const FIRST_CONSTANT: usize = 9;
+pub const MATCHES: usize = 9;
+pub const FIRST_CONSTANT: usize = 10;
 
 /// The profile counters, positions in the `PROFILE` integer vector.
 pub mod profile {

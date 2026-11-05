@@ -7876,3 +7876,10 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **When a call binds eagerly** (`op_call_generic`): the compiler marked the call site eager (at least one symbol argument, and no argument can assign: symbols, constants, and nested calls of effect-free builtins), the callee is effect-free, and no calling handler is established. A symbol argument bound to a value or a forced promise passes the value; an unforced promise passes itself; a missing, unbound or active binding keeps its promise (`eager_argument`).
 - **Impact.** One computation of the fact for tier 0, the JIT and later the parallel apply family. The JIT's private walk is deleted.
 
+## Argument-match caches live in the callee's code, not at the call site
+
+- **Previous shape.** Every call that names an argument ran GNU R's three-pass matcher (`eval::match_args`): exact names, partial names, positions. `validation` and `objects` in `tools/bench/real` make 1.0 to 1.2 million such calls each.
+- **Chosen shape.** Matching produces a plan, one formal index per argument (`Plan` in `eval.rs`), and the result is built from the plan. The plan depends only on the formals and the argument tags, so the callee's compiled body keeps its last plan in the `MATCHES` constant with the formals and the tags it was made for, and a call with the same formals and identical tag symbols reuses it (`match_args_cached`). A failed match is never stored, so errors come from the full matcher.
+- **Why the callee and not the call site.** Calls that pass `...` (633k in `validation`) and S3 dispatch have no compiled call site whose tags are fixed. Keying on the callee covers them all, and the check (one pointer compare per argument) is cheap enough that a miss costs only the full match plus three small allocations. A body called with alternating name patterns thrashes the one entry; revisit with two entries if a profile shows it.
+- **Impact.** Matching inside `seq(1, 10, by = 2)` drops from about 3.6k to 1.0k instructions. Unpositional calls on uncompiled closures keep the full matcher.
+
