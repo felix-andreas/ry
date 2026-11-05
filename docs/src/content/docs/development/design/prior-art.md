@@ -1,7 +1,7 @@
 ---
 type: Reference
 title: Prior art from new language implementations
-description: "What Roc, Bend, goose, Vx and Bun's compiler, the production JITs of JavaScriptCore (Bun), LuaJIT and V8, and CPython, PyPy, Julia, Ř, Truffle, HotSpot and .NET do best, and which of their ideas ry's R runtime adopts or rejects"
+description: "What Roc, Bend, goose, Vx and Bun's compiler, the production JITs of JavaScriptCore (Bun), LuaJIT and V8, and Julia, Ř, Truffle, YJIT, Deegen, HHVM, Java's Project Leyden, Static Python, Sorbet, LXR, Riposte and pqR do best (with CPython, PyPy, HotSpot and .NET in the verdict table), and which of their ideas ry's R runtime adopts, defers or rejects"
 tags: [runtime, memory-management, compilation, jit, type-system, ffi]
 status: draft
 generated: { by: ry-research-agent/1, at: 2026-10-31T16:00:00Z }
@@ -105,8 +105,10 @@ sources:
 ---
 
 This page studies four recent language implementations, one new compiler, the production JITs of
-JavaScriptCore, LuaJIT and V8, and the execution engines of CPython, PyPy, Julia, Ř, Truffle,
-HotSpot and .NET for ideas that ry's R runtime can use, and decides which ones it takes. One
+JavaScriptCore, LuaJIT and V8, and a set of narrower reference points (Julia, Ř, Truffle, YJIT,
+Deegen, HHVM, Project Leyden, Static Python, Sorbet, LXR, Riposte and pqR, plus CPython, PyPy,
+HotSpot and .NET in the table only) for ideas that ry's R runtime can use, and decides which ones it
+takes. One
 constraint decides every verdict, and it comes from [the runtime design](/development/design/r-runtime/): R's C API must work unchanged. Any object a
 native package can reach is therefore a non-moving heap object with a reference count, reached
 through a raw `SEXP` pointer, rooted by `PROTECT`, possibly an ALTREP vector, and possibly written to
@@ -169,13 +171,21 @@ refers to its steps.
 | Baseline compiler reusing the interpreter's frame | V8 (Sparkplug) | **Adopt, planned** (step 4), preferred over copy-and-patch | Per instruction, a call to tier 0's handler with immediate operands and native jumps |
 | Accumulator bytecode | V8 (Ignition) | **Reject** | Tier 0 keeps named registers |
 | Sea-of-nodes optimizer, a fourth tier | V8, JavaScriptCore | **Reject** | Tier 1 is the top tier |
-| In-place instruction specialization (quickening), de-specialized on a miss | CPython (PEP 659) | **Adopt the idea** (step 3) | Tier 0 instructions rewrite themselves to a specialized form and back |
-| Copy-and-patch JIT | CPython (PEP 744) | **Reject** | The Sparkplug-style baseline is simpler for ry |
-| Meta-tracing of an interpreter written in RPython | PyPy | **Reject** | A tracing JIT, and ry's interpreter is Rust |
+| In-place instruction specialization (quickening), de-specialized on a miss | CPython (PEP 659)[^pep-659] | **Adopt the idea** (step 3) | Tier 0 instructions rewrite themselves to a specialized form and back; CPython is not the performance bar, JavaScriptCore is |
+| Copy-and-patch JIT | CPython (PEP 744)[^pep-744] | **Reject** | The PEP calls it experimental and build-time only, with modest gains; a baseline that calls tier 0's handlers is simpler for ry |
+| Meta-tracing of an interpreter written in RPython | PyPy[^pypy] | **Reject** | A tracing JIT (rejected under LuaJIT), and it needs the interpreter written in RPython |
 | Per-signature method specialization driven by type inference | Julia | **Adopt for numeric code** (steps 2 and 4) | Typed ry and ahead-of-time call facts select per-signature compiled copies |
 | Environment elision, promise elision for strict effect-free arguments, contextual dispatch | Ř | **Adopt** (steps 2 and 4) | Several compiled versions of a closure per call context, chosen at the call |
 | Self-specializing AST nodes and partial evaluation | Truffle, Graal | **Reject as an architecture** | The specialization idea arrives as quickening (step 3) |
-| Counter-driven tier-up, call counting, background compilation, precompiled code replaced when hot | HotSpot, .NET | **Adopt the policy** | Tier thresholds, off-thread compiles, and install-time images that hot code outgrows |
+| Counter-driven tier-up, call counting, background compilation, precompiled code replaced when hot | HotSpot[^hotspot], .NET[^dotnet-tiered] | **Adopt the policy** (step 4) | Tier thresholds, off-thread compiles, and install-time images that hot code outgrows, as .NET's ReadyToRun code is |
+| Lazy basic block versioning: compile a block per combination of value kinds at its entry, only when reached | YJIT | **Adopt, as the baseline's second stage** (step 4) | Baseline blocks versioned on register kinds, once plain handler calls are measured |
+| One description of each instruction generates the interpreter and the baseline JIT | Deegen (LuaJIT Remake) | **Adopt the principle** (steps 3 and 4); **reject the generator** | Tier 0's handlers are the semantics, and the baseline calls them |
+| Profiles from a training run shipped with precompiled code, so the JIT starts warm | HHVM Jump-Start, Project Leyden | **Adopt, planned** (step 5) | Per-package images carry profiles from the package's tests and examples, run at install time |
+| Types added to a large dynamic codebase, then used for speed | HHVM and Hack, Static Python, Sorbet | **Adopt as the strategy** | Typed ry: checked boundaries, per-file strict mode, compiled typed closures |
+| Reference counting with Immix and occasional concurrent tracing for cycles | LXR | **Defer**; freeing on count zero is rejected | ry's counts are R's sharing counts, which native code does not keep exact |
+| Automatic parallelism of effect-free work | Bend, pqR (helper threads) | **Adopt, scoped** (step 4) | `lapply`, `vapply`, `Map` over compiled effect-free closures, and element-wise ops on long vectors; reductions stay sequential |
+| A stackless interpreter, so recursion never uses the C stack | Bend | **Defer** | Tier 0 grows the native stack in segments; revisit with step 3's tail-call handlers |
+| Deferred, fused vector arithmetic | Riposte, pqR (task merging) | **Adopt, scoped** (step 3) | A lazy ALTREP vector for `x * y + z` on doubles, computed in one pass when read |
 
 ## Roc
 
@@ -607,7 +617,7 @@ predictor can learn. Each handler also gets the fast path for the common operand
 LLInt handlers do. ry builds on nightly Rust (`rust-toolchain.toml`), so `become` is available.
 **Adopt, planned** as step 3 of the
 [roadmap](/development/design/r-runtime/#untyped-performance-roadmap), together with quickening
-(CPython below). An earlier profile of a scalar loop with the JIT off (`s <- s + i * 2` and a
+(CPython, in the table). An earlier profile of a scalar loop with the JIT off (`s <- s + i * 2` and a
 comparison, 2e7 iterations) put the shared dispatch jump at about 28% of samples and the
 allocation of result scalars at about 8%. It predates the single dispatch loop, so the dispatch
 share needs remeasuring.
@@ -723,43 +733,11 @@ only once the function has run a few times.[^v8-lite]
 
 ## Other reference points
 
-These engines answer narrower questions than the three above: how an interpreter specializes
-itself, how a compiler for a dynamic language uses inferred types, what an optimizing R compiler
-removes, and when code moves between tiers.
-
-### CPython
-
-**What it is.** Since 3.11, CPython's interpreter is a specializing adaptive interpreter. A generic
-instruction that runs often enough is rewritten in place, in the bytecode, into a form specialized
-for the types and values it saw (quickening), such as an attribute load for one class layout. A
-specialized instruction checks its assumption, and when the check keeps failing the instruction
-de-specializes back to the adaptive form, which can specialize again later.[^pep-659] CPython 3.13
-adds a copy-and-patch JIT, which builds machine code by copying precompiled templates (stencils)
-and patching their holes. The PEP describes it as experimental, enabled only at build time, with
-modest gains so far.[^pep-744]
-
-**What ry adopts.** Quickening, for tier 0, as step 3 of the
-[roadmap](/development/design/r-runtime/#untyped-performance-roadmap): an `Add` that keeps seeing
-two doubles becomes an add of doubles with a type check, and reverts on a miss. It fits beside
-per-instruction handlers, because a specialized instruction is one more handler. CPython is not the
-performance bar, though; JavaScriptCore is, so ry takes this one idea and measures against Bun.
-
-**What ry rejects.** The copy-and-patch JIT. A Sparkplug-style baseline that calls the
-interpreter's handlers removes the same decoding and dispatch with no stencil build step, so it is
-the simpler tier for ry (V8 above). rcp, a copy-and-patch JIT for GNU R's bytecode, reports gains of
-1.15 to 1.91 times (section 3 of the runtime design), which is consistent with dispatch being a
-minority of R's cost.
-
-### PyPy
-
-**What it is.** PyPy's JIT is a meta-tracing JIT: the Python interpreter is written in RPython, a
-restricted subset of Python, with hints for the JIT, and the RPython toolchain traces the
-interpreter itself running a hot user loop, so one tracing JIT serves any language written in
-RPython.[^pypy]
-
-**What ry rejects.** Both halves. It is a tracing JIT, which ry rejects for the reasons given under
-LuaJIT (promises and S3 dispatch make R traces fragile), and it requires writing the interpreter in
-RPython, while ry's runtime is Rust and shares its object model with the C API.
+These engines answer narrower questions than the three above: how a compiler for a dynamic
+language uses inferred types, what an optimizing R compiler removes, what form a baseline tier
+takes, how a JIT can start warm, how other dynamic languages added types, how a counted heap can
+reclaim memory, and how R's vector code can avoid temporaries. CPython, PyPy, HotSpot and .NET
+have one row each in the table and no section here.
 
 ### Julia
 
@@ -806,18 +784,7 @@ design).
 for R: the package ecosystem's native code. The self-specialization idea is the same as quickening,
 which ry adopts in step 3.
 
-### HotSpot and .NET
-
-**What it is.** Both run methods in tiers and move them up by counters. HotSpot interprets first,
-compiles with C1 (fast, profiling) and then C2 (optimizing) for hot code.[^hotspot] .NET counts
-calls to a method before it moves up a tier, compiles the optimized version on a background thread
-while the old code keeps running, and treats ReadyToRun code, precompiled ahead of time, as a
-starting tier that hot methods are recompiled out of.[^dotnet-tiered]
-
-**What ry adopts.** The policy. Tier-up is driven by counters, call counting comes before tier-up,
-and compilation runs on a background thread while tier 0 keeps running. The install-time images
-from the Bun section play ReadyToRun's role: precompiled code that hot code outgrows and replaces.
-
+@@NEW@@
 ## About this page's format
 
 This page is an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format)
