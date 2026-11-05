@@ -43,7 +43,7 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
         conditions, dispatch,
         eval::{self, SwitchSelector, as_condition},
-        interp, moves,
+        Interp, interp, moves,
         unwind::{Jump, R, Unwind, error, error_in},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
@@ -3138,6 +3138,11 @@ struct Activation<'m, 'a> {
     env: Sexp,
     mark: usize,
     heap: *mut Heap,
+    interp: *mut Interp,
+    code: *const i32,
+    registers: *mut Sexp,
+    /// What the activation returns once a handler stops the chain by answering [`STOP`].
+    exit: R<Sexp>,
 }
 
 impl Activation<'_, '_> {
@@ -3220,7 +3225,7 @@ enum Flow {
 /// interpreter's state stays in argument registers from one instruction to the next instead of
 /// living in the stack frame of one function that holds every op, which spilled and reloaded it
 /// around each dispatch. A handler that calls out keeps its own frame only for that call.
-type Handler = unsafe fn(&mut Activation<'_, '_>, *const i32, usize, *mut Sexp) -> R<Sexp>;
+type Handler = unsafe fn(&mut Activation<'_, '_>, usize);
 
 /// Interprets `machine`'s code from `pc` until it returns, or, when `SINGLE`, runs the one
 /// instruction at `pc`.
@@ -3242,13 +3247,18 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
         env: machine.env,
         mark: machine.mark,
         heap: crate::heap(),
+        interp: interp(),
+        code,
+        registers,
+        exit: Ok(nil()),
         machine,
     };
     let handlers = if SINGLE { &STEP_HANDLERS } else { &RUN_HANDLERS };
     if !SINGLE {
         release(&state);
     }
-    (*handlers.as_ptr().add(op_index(code, pc)))(&mut state, code, pc, registers)
+    (*handlers.as_ptr().add(op_index(code, pc)))(&mut state, pc);
+    state.exit
 }
 
 /// The handler table position of the instruction at `pc`.
@@ -3271,38 +3281,29 @@ unsafe fn release(state: &Activation<'_, '_>) {
     }
 }
 
+/// The next pc a step answers when the activation is done; its result is in
+/// [`Activation::exit`].
+const STOP: usize = usize::MAX;
+
 /// Defines the handler of `$op` around `$body`, which runs the instruction and says how to go
 /// on. `$roots` says whether the instruction can root values, which the handler then releases
-/// before the next one runs. A failure goes to [`continue_after`], which resumes at a loop
-/// target of a `break` or `next` aimed at this activation and otherwise returns it.
+/// before the next one runs. A handler takes only the activation and the pc, and leaves the
+/// activation's result in [`Activation::exit`], so that few values stay live across the calls
+/// an instruction makes. A failure goes to [`failed`].
 macro_rules! handlers {
     ($($name:ident: $op:ident, $roots:literal, $body:ident;)*) => {
         $(
-            unsafe fn $name<const SINGLE: bool>(
-                state: &mut Activation<'_, '_>,
-                code: *const i32,
-                at: usize,
-                registers: *mut Sexp,
-            ) -> R<Sexp> {
-                let instruction = Instruction { code, at, registers };
-                let pc = match $body(state, instruction) {
-                    Ok(Flow::Next) => at + 1 + operand_count(Op::$op),
-                    Ok(Flow::Goto(pc)) => pc,
-                    Ok(Flow::Done(value)) => return Ok(value),
-                    Err(unwind) => {
-                        if SINGLE {
-                            return Err(unwind);
-                        }
-                        continue_after(state.machine, at, unwind)?
-                    }
-                };
-                if SINGLE {
-                    return Ok(nil());
+            unsafe fn $name<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
+                let instruction = Instruction { code: state.code, at, registers: state.registers };
+                let flow = $body(state, instruction);
+                let pc = advance::<SINGLE>(state, at, at + 1 + operand_count(Op::$op), flow);
+                if SINGLE || pc == STOP {
+                    return;
                 }
                 if $roots {
                     release(state);
                 }
-                become (*RUN_HANDLERS.as_ptr().add(op_index(code, pc)))(state, code, pc, registers)
+                become (*RUN_HANDLERS.as_ptr().add(op_index(state.code, pc)))(state, pc)
             }
         )*
 
@@ -3313,6 +3314,44 @@ macro_rules! handlers {
         }
     };
 }
+
+#[inline(always)]
+unsafe fn advance<const SINGLE: bool>(
+    state: &mut Activation<'_, '_>,
+    at: usize,
+    next: usize,
+    flow: R<Flow>,
+) -> usize {
+    match flow {
+        Ok(Flow::Next) => next,
+        Ok(Flow::Goto(pc)) => pc,
+        Ok(Flow::Done(value)) => {
+            state.exit = Ok(value);
+            STOP
+        }
+        Err(unwind) => failed::<SINGLE>(state, at, unwind),
+    }
+}
+
+/// Resumes after a failed instruction at a loop target of a `break` or `next` aimed at this
+/// activation (see [`continue_after`]), or stops with the failure.
+#[cold]
+#[inline(never)]
+unsafe fn failed<const SINGLE: bool>(
+    state: &mut Activation<'_, '_>,
+    at: usize,
+    unwind: Unwind,
+) -> usize {
+    let resumed = if SINGLE { Err(unwind) } else { continue_after(state.machine, at, unwind) };
+    match resumed {
+        Ok(pc) => pc,
+        Err(unwind) => {
+            state.exit = Err(unwind);
+            STOP
+        }
+    }
+}
+
 
 static RUN_HANDLERS: [Handler; OPS.len()] = handler_table::<false>();
 static STEP_HANDLERS: [Handler; OPS.len()] = handler_table::<true>();
@@ -3366,44 +3405,36 @@ handlers! {
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
 /// optimizing tier can take over at a back edge and hand back an unwind from a later position.
 /// It also fills the table slots of the ops listed in `handlers!` before they are overwritten.
-unsafe fn jump<const SINGLE: bool>(
-    state: &mut Activation<'_, '_>,
-    code: *const i32,
-    at: usize,
-    registers: *mut Sexp,
-) -> R<Sexp> {
-    let target = *code.add(at + 1) as usize;
+unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
+    let target = *state.code.add(at + 1) as usize;
     let mut pc = target;
     if target < at {
         if let Err(unwind) = crate::unwind::poll_interrupt() {
-            if SINGLE {
-                return Err(unwind);
-            }
-            pc = continue_after(state.machine, at, unwind)?;
-        } else if let Some(tier) = interp().bytecode.tier {
+            pc = failed::<SINGLE>(state, at, unwind);
+        } else if let Some(tier) = (*state.interp).bytecode.tier {
             match back_edge(state.machine, &tier, pc) {
                 BackEdge::Continue(resume) => pc = resume,
-                BackEdge::Finished(result) => return result,
+                BackEdge::Finished(result) => {
+                    state.exit = result;
+                    return;
+                }
                 BackEdge::Unwound { pc: resume, unwind } => {
-                    if SINGLE {
-                        return Err(unwind);
-                    }
-                    pc = continue_after(state.machine, resume, unwind)?;
+                    pc = failed::<SINGLE>(state, resume, unwind);
                 }
             }
         }
     }
-    if SINGLE {
-        return Ok(nil());
+    if SINGLE || pc == STOP {
+        return;
     }
     release(state);
-    become (*RUN_HANDLERS.as_ptr().add(op_index(code, pc)))(state, code, pc, registers)
+    become (*RUN_HANDLERS.as_ptr().add(op_index(state.code, pc)))(state, pc)
 }
 
 #[inline(always)]
 unsafe fn op_constant(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     instruction.output(0, state.constant(instruction, 1));
-    interp().visible = true;
+    (*state.interp).visible = true;
     Ok(Flow::Next)
 }
 
@@ -3411,7 +3442,7 @@ unsafe fn op_constant(state: &mut Activation<'_, '_>, instruction: Instruction) 
 unsafe fn op_get_var(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     // Visible before the lookup, so that forcing a promise to `invisible()` leaves the value
     // invisible, as `withCallingHandlers(expr)` relies on.
-    interp().visible = true;
+    (*state.interp).visible = true;
     let symbol = state.constant(instruction, 1);
     let base = state.machine.base;
     let held = base..base + instruction.operand(0);
@@ -3428,7 +3459,7 @@ unsafe fn op_set_var(state: &mut Activation<'_, '_>, instruction: Instruction) -
     let hint = &mut *state.cache.hints.add(instruction.operand(2));
     let cell = (*state.heap).frame_cell_hinted(state.env, symbol, hint);
     eval::assign_local(symbol, value, state.env, cell)?;
-    interp().visible = false;
+    (*state.interp).visible = false;
     Ok(Flow::Next)
 }
 
@@ -3540,7 +3571,7 @@ unsafe fn op_field(state: &mut Activation<'_, '_>, instruction: Instruction) -> 
         None => crate::subset::dollar_value(object, name.car(), call, state.env)?,
     };
     record_feedback(state.constants, instruction.at, value);
-    interp().visible = true;
+    (*state.interp).visible = true;
     instruction.output(0, value);
     Ok(Flow::Next)
 }
@@ -3553,7 +3584,7 @@ unsafe fn op_item(state: &mut Activation<'_, '_>, instruction: Instruction) -> R
     match crate::records::cached_item(object, index, shape)? {
         Some(value) => {
             state.record(instruction.at, value);
-            interp().visible = true;
+            (*state.interp).visible = true;
             instruction.output(0, value);
             Ok(Flow::Next)
         }
@@ -3601,13 +3632,13 @@ unsafe fn op_match_fail(state: &mut Activation<'_, '_>, instruction: Instruction
 }
 
 #[inline(always)]
-unsafe fn op_construct(_state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+unsafe fn op_construct(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let slots = std::slice::from_raw_parts(
         instruction.registers.add(instruction.operand(2)),
         instruction.operand(3),
     );
     let value = crate::records::construct(instruction.operand(1) as u32, slots)?;
-    interp().visible = true;
+    (*state.interp).visible = true;
     instruction.output(0, value);
     Ok(Flow::Next)
 }
@@ -3766,7 +3797,7 @@ unsafe fn op_arithmetic(state: &mut Activation<'_, '_>, instruction: Instruction
     };
     state.record(instruction.at, value);
     instruction.output(1, value);
-    interp().visible = true;
+    (*state.interp).visible = true;
     Ok(Flow::Next)
 }
 
@@ -3835,21 +3866,21 @@ unsafe fn op_for_end(_state: &mut Activation<'_, '_>, instruction: Instruction) 
 }
 
 #[inline(always)]
-unsafe fn op_invisible(_state: &mut Activation<'_, '_>, _instruction: Instruction) -> R<Flow> {
-    interp().visible = false;
+unsafe fn op_invisible(state: &mut Activation<'_, '_>, _instruction: Instruction) -> R<Flow> {
+    (*state.interp).visible = false;
     Ok(Flow::Next)
 }
 
 #[inline(always)]
-unsafe fn op_visible(_state: &mut Activation<'_, '_>, _instruction: Instruction) -> R<Flow> {
-    interp().visible = true;
+unsafe fn op_visible(state: &mut Activation<'_, '_>, _instruction: Instruction) -> R<Flow> {
+    (*state.interp).visible = true;
     Ok(Flow::Next)
 }
 
 #[inline(always)]
 unsafe fn op_set_srcref(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
-    interp().srcref = state.constant(instruction, 0);
-    if instruction.operand(1) == 1 && interp().debugger.is_some() {
+    (*state.interp).srcref = state.constant(instruction, 0);
+    if instruction.operand(1) == 1 && (*state.interp).debugger.is_some() {
         crate::debugger::statement()?;
     }
     Ok(Flow::Next)
@@ -3876,7 +3907,7 @@ unsafe fn op_logic_left(state: &mut Activation<'_, '_>, instruction: Instruction
     )?;
     if (is_and && left == 0) || (!is_and && left == 1) {
         instruction.output(0, values::scalar_logical(left)?);
-        interp().visible = true;
+        (*state.interp).visible = true;
         return Ok(Flow::Goto(instruction.operand(4)));
     }
     instruction.output(1, values::scalar_logical(left)?);
@@ -3895,7 +3926,7 @@ unsafe fn op_logic_right(state: &mut Activation<'_, '_>, instruction: Instructio
         "y",
     )?;
     instruction.output(0, values::scalar_logical(logic_result(is_and, left, right))?);
-    interp().visible = true;
+    (*state.interp).visible = true;
     Ok(Flow::Next)
 }
 
@@ -3919,7 +3950,7 @@ unsafe fn op_closure(state: &mut Activation<'_, '_>, instruction: Instruction) -
         }
     }
     instruction.output(0, closure);
-    interp().visible = true;
+    (*state.interp).visible = true;
     Ok(Flow::Next)
 }
 
@@ -3942,7 +3973,7 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
         eval::complex_assign(call, call.cdr().car(), value, env, false)?;
     }
     instruction.output(0, value);
-    interp().visible = false;
+    (*state.interp).visible = false;
     Ok(Flow::Next)
 }
 
@@ -3965,7 +3996,7 @@ unsafe fn op_sub_assign_matrix(state: &mut Activation<'_, '_>, instruction: Inst
         eval::complex_assign(call, call.cdr().car(), value, env, false)?;
     }
     instruction.output(0, value);
-    interp().visible = false;
+    (*state.interp).visible = false;
     Ok(Flow::Next)
 }
 
@@ -3987,7 +4018,7 @@ unsafe fn op_replace(state: &mut Activation<'_, '_>, instruction: Instruction) -
         eval::complex_assign(whole, whole.cdr().car(), value, env, false)?;
     }
     instruction.output(0, value);
-    interp().visible = false;
+    (*state.interp).visible = false;
     Ok(Flow::Next)
 }
 

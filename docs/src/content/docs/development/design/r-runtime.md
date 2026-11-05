@@ -738,7 +738,7 @@ a gap that size, so shrinking the op count and the cost per op (step 3) comes fo
 | Idea | Source engine | Status | Measured gap it targets | Code |
 | --- | --- | --- | --- | --- |
 | **1. Tier-0 call path** | | | | |
-| Op words carry their operand count; one dispatch loop with one error exit | JSC LLInt | built | dispatch, about 15 instructions per op | `interpret` in `crates/interp/src/bytecode.rs` |
+| Op words carry their operand count; one cold error exit | JSC LLInt | built | dispatch, about 15 instructions per op | `interpret`, `failed` in `crates/interp/src/bytecode.rs` |
 | Slot hints at lookup sites, behind the frame's symbol filter | JSC, V8 inline caches | built | variable lookup | `cached_cell`, `Frame::find_hinted` in `crates/heap/src/env.rs` |
 | Function lookups skip frames that cannot bind the symbol | ry | built | `lookup_function` | `lookup_function` in `bytecode.rs` |
 | Lookup stamps compared as their bits | V8 | built | 1.25k per `seq()` call | `LookupCache` in `bytecode.rs` |
@@ -760,7 +760,7 @@ a gap that size, so shrinking the op count and the cost per op (step 3) comes fo
 | Getter instructions for nested complex assignment (`names(x)[2] <-`, `x$a$b <-`) | GNU R bytecode | planned | the nested levels still build their calls in `complex_assign` | |
 | **3. LLInt- and LuaJIT-grade tier 0** | | | | |
 | In-place specialization (quickening) with value profiles | CPython (PEP 659), JSC | planned | tier-0 instructions 23 to 44%; JIT-off scalar loops 0.35 to 0.41 times GNU R | |
-| Tail-call dispatch, one indirect jump per handler | LuaJIT, JSC | planned (needs `become`) | the shared indirect jump, about 28% of a scalar loop | |
+| Tail-call dispatch, one indirect jump per handler | LuaJIT, JSC | built | the shared indirect jump; measured level with the match loop (121.4k against 120.8k per `seq()`), since handlers that call out still need a frame. The handler signature is `(activation, pc)` so that few values stay live across calls | `handlers!` in `bytecode.rs` |
 | Dense feedback storage, one slot per profiled instruction | V8 | planned | feedback is one `i32` per code word | |
 | One description of each instruction's semantics, shared by tier 0 and the baseline | Deegen (LuaJIT Remake) | planned | the baseline drifting from tier 0 | |
 | Lazy fused vectors for element-wise arithmetic, as ALTREP objects | Riposte, pqR | planned | intermediate vectors in untyped vector code | |
@@ -779,7 +779,7 @@ a gap that size, so shrinking the op count and the cost per op (step 3) comes fo
 | Profiles from a training run (the package's tests and examples) stored in the per-package image | HHVM Jump-Start, Project Leyden | planned | hot closures that never reach tier 1's thresholds | |
 | Images shared across worker processes | Bun | planned | resident memory per `parallel` worker | |
 | Concurrent tracing and Immix line reuse | LXR | planned, after collector pauses are measured | collector pauses, fragmentation | |
-| A stackless tier 0 | Bend | planned, with the tail-call handlers | Rust frame setup per R call | |
+| A stackless tier 0 | Bend | planned, on the tail-call handlers | Rust frame setup per R call | |
 | **Rejected** | | | | |
 | Copy-and-patch as a tier | CPython (PEP 744) | rejected | | |
 | Meta-tracing | PyPy | rejected | | |
