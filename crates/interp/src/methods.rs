@@ -18,10 +18,12 @@ use {
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
     heap::{
+        Marker,
         activity::{self, Activity, Counter},
         object::{Sexp, SexpType, gp},
     },
-    rustc_hash::FxHashSet,
+    rustc_hash::{FxHashMap, FxHashSet},
+    smallvec::SmallVec,
     std::rc::Rc,
 };
 
@@ -118,7 +120,7 @@ pub unsafe fn force_deferred_unit(key: &str, generic: Option<&[u8]>) -> R<()> {
 pub unsafe fn dispatch_generic(name: Sexp, env: Sexp, generic: Sexp) -> R<Sexp> {
     activity::count(Counter::S4Dispatches);
     let selecting = activity::enter(Activity::S4Dispatch, 0);
-    let generic_name = values::first_string(name).unwrap_or_default().into_owned();
+    let generic_name = || values::first_string(name).unwrap_or_default().into_owned();
     if generic.kind() != SexpType::Closure {
         let class = dispatch::class_of(generic)?;
         return Err(error(format!(
@@ -129,32 +131,25 @@ pub unsafe fn dispatch_generic(name: Sexp, env: Sexp, generic: Sexp) -> R<Sexp> 
     // A package loader may hold back methods for this generic, which must be in its tables
     // before it selects one.
     if !interp().globals.deferred_definitions.is_empty() {
-        force_deferred(generic_name.as_bytes(), Lookup::Generic)?;
+        force_deferred(generic_name().as_bytes(), Lookup::Generic)?;
     }
     let generic_env = generic.tag();
-    let table = all_methods_table(generic, generic_env)?;
-    let signature = signature_symbols(generic_env)?;
-    let mut classes = Vec::with_capacity(signature.len());
-    let mut label = String::new();
-    for (index, &symbol) in signature.iter().enumerate() {
-        let class = if symbol == symbols().dots {
-            dots_class(env)?
-        } else if bound_missing(symbol, env)? {
-            values::scalar_string("missing")?
-        } else {
-            let value = evaluate_argument(symbol, env, &generic_name)?;
-            dispatch_class(value)?
-        };
-        if index > 0 {
-            label.push('#');
+    let mut method = match site_signature(generic, generic_env) {
+        Some(signature) => {
+            let values = signature_values(&signature, env, &generic_name)?;
+            let classes = class_keys(&signature, &values)?;
+            match cached_method(generic, &classes) {
+                Some(method) => method,
+                None => select_method_for(generic, generic_env, &signature, &values, &classes)?,
+            }
         }
-        label.push_str(&values::first_string(class).unwrap_or_default());
-        classes.push(class);
-    }
-    let mut method = eval::value_of(eval::find_var_in_frame(values::install(&label)?, table)?)?;
-    if method == unbound() {
-        method = inherited_method(&classes, generic, table)?;
-    }
+        None => {
+            let signature = signature_symbols(generic_env)?;
+            let values = signature_values(&signature, env, &generic_name)?;
+            let classes = class_keys(&signature, &values)?;
+            select_method_for(generic, generic_env, &signature, &values, &classes)?
+        }
+    };
     if method.is_object() {
         method = load_method(method, name, env)?;
     }
@@ -171,6 +166,235 @@ pub unsafe fn dispatch_generic(name: Sexp, env: Sexp, generic: Sexp) -> R<Sexp> 
         // the marker tells the primitive to run its own code.
         SexpType::Builtin | SexpType::Special => dispatch::deferred_default_marker(),
         _ => Err(error("invalid object (non-function) used as method")),
+    }
+}
+
+/// The inline cache of S4 dispatch, one site per generic: the generic's signature and methods
+/// table as they were when the site was made, and up to [`S4_ENTRIES`] methods by the classes
+/// of the signature arguments.
+///
+/// A site is valid while the generic's `.SigArgs`, `.SigLength` and `.AllMTable` bindings hold
+/// the values it saw. An entry holds the methods table's binding of the method's label and the
+/// method it held, and is valid while that binding holds it: `setMethod` and `removeMethod`
+/// assign or remove that binding (a removed binding's cell holds the unbound marker), so a
+/// method defined, redefined or removed after the first call is seen. A method the table
+/// inherits gets no entry until `.InheritForDispatch` has stored it under the label.
+///
+/// The cache is a root ([`trace_s4_cache`]), so the generics, environments and cells it names
+/// are not freed and their addresses not reused while it holds them.
+#[derive(Default)]
+pub struct S4Cache {
+    sites: FxHashMap<Sexp, S4Site>,
+}
+
+const S4_ENTRIES: usize = 4;
+/// Generics remembered before the cache starts over.
+const MAX_S4_SITES: usize = 4096;
+
+struct S4Site {
+    env: Sexp,
+    /// The `.SigArgs`, `.SigLength` and `.AllMTable` bindings in the generic's environment and
+    /// the values they held.
+    bindings: [(Sexp, Sexp); 3],
+    signature: SmallVec<[Sexp; 2]>,
+    entries: SmallVec<[S4Entry; S4_ENTRIES]>,
+}
+
+struct S4Entry {
+    /// The first class of each signature argument, an interned string, or `"missing"`.
+    classes: SmallVec<[Sexp; 2]>,
+    cell: Sexp,
+    method: Sexp,
+}
+
+pub unsafe fn trace_s4_cache(cache: &S4Cache, marker: &mut Marker<'_>) {
+    for (&generic, site) in &cache.sites {
+        marker.mark(generic);
+        marker.mark(site.env);
+        for (cell, value) in site.bindings {
+            marker.mark(cell);
+            marker.mark(value);
+        }
+        for entry in &site.entries {
+            for &class in &entry.classes {
+                marker.mark(class);
+            }
+            marker.mark(entry.cell);
+            marker.mark(entry.method);
+        }
+    }
+}
+
+/// The signature arguments of `generic` from its site, when the site is still valid.
+unsafe fn site_signature(generic: Sexp, generic_env: Sexp) -> Option<SmallVec<[Sexp; 2]>> {
+    let site = interp().method_cache.s4.sites.get(&generic)?;
+    (site.env == generic_env
+        && site
+            .bindings
+            .iter()
+            .all(|&(cell, value)| cell.cdr() == value))
+    .then(|| site.signature.clone())
+}
+
+unsafe fn cached_method(generic: Sexp, classes: &[Sexp]) -> Option<Sexp> {
+    let site = interp().method_cache.s4.sites.get(&generic)?;
+    let entry = site
+        .entries
+        .iter()
+        .find(|entry| entry.classes.as_slice() == classes)?;
+    (entry.cell.cdr() == entry.method).then_some(entry.method)
+}
+
+/// The values of the signature arguments in the generic's frame `env`, the missing marker for
+/// one the call did not supply, and for `...` the class `.dotsClass` gives it.
+unsafe fn signature_values(
+    signature: &[Sexp],
+    env: Sexp,
+    generic_name: &dyn Fn() -> String,
+) -> R<SmallVec<[Sexp; 2]>> {
+    let mut values: SmallVec<[Sexp; 2]> = SmallVec::new();
+    for &symbol in signature {
+        let value = if symbol == symbols().dots {
+            dots_class(env)?
+        } else if bound_missing(symbol, env)? {
+            missing_arg()
+        } else {
+            evaluate_argument(symbol, env, generic_name)?
+        };
+        crate::heap().root(value);
+        values.push(value);
+    }
+    Ok(values)
+}
+
+/// The class each signature argument contributes to the method's label: its value's first
+/// class, `"missing"` for a missing argument, and for `...` the class `.dotsClass` gave.
+unsafe fn class_keys(signature: &[Sexp], argument_values: &[Sexp]) -> R<SmallVec<[Sexp; 2]>> {
+    let mut classes = SmallVec::new();
+    for (&symbol, &value) in signature.iter().zip(argument_values) {
+        let class = if value == missing_arg() {
+            symbols().missing.car()
+        } else if symbol == symbols().dots {
+            if value.kind() != SexpType::String || length(value) == 0 {
+                return Err(error("'.dotsClass' did not return a class"));
+            }
+            values::string_elt(value, 0)
+        } else {
+            values::string_elt(dispatch::class_of(value)?, 0)
+        };
+        classes.push(class);
+    }
+    Ok(classes)
+}
+
+/// Selects the method of `generic` for the signature arguments' `values` and classes, from its
+/// methods table or by inheritance, and refreshes the generic's site.
+unsafe fn select_method_for(
+    generic: Sexp,
+    generic_env: Sexp,
+    signature: &[Sexp],
+    argument_values: &[Sexp],
+    classes: &[Sexp],
+) -> R<Sexp> {
+    let table = all_methods_table(generic, generic_env)?;
+    let mut label: SmallVec<[u8; 64]> = SmallVec::new();
+    for (index, class) in classes.iter().enumerate() {
+        if index > 0 {
+            label.push(b'#');
+        }
+        label.extend_from_slice(class.bytes());
+    }
+    let label = values::install_bytes(&label)?;
+    let heap = crate::heap();
+    let cell = heap.frame_cell(table, label);
+    let method = match cell {
+        Some(cell) => eval::value_of(eval::cell_value(cell)?)?,
+        None => unbound(),
+    };
+    if method == unbound() {
+        let mut full_classes = Vec::with_capacity(argument_values.len());
+        for (&symbol, &value) in signature.iter().zip(argument_values) {
+            let class = if value == missing_arg() {
+                values::scalar_string("missing")?
+            } else if symbol == symbols().dots {
+                value
+            } else {
+                dispatch_class(value)?
+            };
+            heap.root(class);
+            full_classes.push(class);
+        }
+        return inherited_method(&full_classes, generic, table);
+    }
+    if let Some(cell) = cell
+        && !cell.has_gp(gp::ACTIVE_BINDING)
+        && cell.cdr() == method
+    {
+        remember_method(generic, generic_env, signature, classes, cell, method);
+    }
+    Ok(method)
+}
+
+unsafe fn remember_method(
+    generic: Sexp,
+    generic_env: Sexp,
+    signature: &[Sexp],
+    classes: &[Sexp],
+    cell: Sexp,
+    method: Sexp,
+) {
+    let heap = crate::heap();
+    let symbols = symbols();
+    let mut bindings = [(nil(), nil()); 3];
+    for (slot, symbol) in
+        bindings
+            .iter_mut()
+            .zip([symbols.sig_args, symbols.sig_length, symbols.all_mtable])
+    {
+        let Some(binding) = heap.frame_cell(generic_env, symbol) else {
+            return;
+        };
+        if binding.has_gp(gp::ACTIVE_BINDING) {
+            return;
+        }
+        *slot = (binding, binding.cdr());
+    }
+    // Classes that are not interned strings would never compare equal.
+    if !classes.iter().all(|class| class.has_gp(gp::CACHED)) {
+        return;
+    }
+    let cache = &mut interp().method_cache.s4;
+    if cache.sites.len() >= MAX_S4_SITES {
+        cache.sites.clear();
+    }
+    let site = cache.sites.entry(generic).or_insert_with(|| S4Site {
+        env: generic_env,
+        bindings,
+        signature: SmallVec::new(),
+        entries: SmallVec::new(),
+    });
+    if site.env != generic_env
+        || site.bindings != bindings
+        || site.signature.as_slice() != signature
+    {
+        site.env = generic_env;
+        site.bindings = bindings;
+        site.signature = signature.into();
+        site.entries.clear();
+    }
+    let entry = S4Entry {
+        classes: classes.into(),
+        cell,
+        method,
+    };
+    if let Some(stale) = site
+        .entries
+        .iter_mut()
+        .find(|stale| stale.classes.as_slice() == classes)
+    {
+        *stale = entry;
+    } else if site.entries.len() < S4_ENTRIES {
+        site.entries.push(entry);
     }
 }
 
@@ -332,14 +556,19 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
         }
         formal = formal.cdr();
     }
-    for name in [".defined", ".Method", ".target", ".Methods"] {
-        let symbol = values::install(name)?;
+    let symbols = symbols();
+    for symbol in [
+        symbols.dot_defined,
+        symbols.dot_method,
+        symbols.dot_target,
+        symbols.dot_method_symbol,
+    ] {
         let value = eval::find_var_in_frame(symbol, generic_env)?;
         if value != unbound() {
             eval::define(symbol, value, method_env)?;
         }
     }
-    let generic_symbol = values::install(".Generic")?;
+    let generic_symbol = symbols.dot_generic;
     let generic = eval::find_var(generic_symbol, generic_env)?;
     if generic == unbound() {
         return Err(error(
@@ -522,7 +751,19 @@ unsafe fn first_class(class: Sexp) -> R<Sexp> {
 /// Forces a signature argument. GNU R evaluates it under an error handler that reports which
 /// argument failed, and that handler's call, `h(simpleError(msg, call))`, is the call the error
 /// is reported against.
-unsafe fn evaluate_argument(symbol: Sexp, env: Sexp, generic_name: &str) -> R<Sexp> {
+unsafe fn evaluate_argument(symbol: Sexp, env: Sexp, generic_name: &dyn Fn() -> String) -> R<Sexp> {
+    // A value already at hand cannot fail, so it needs no handler.
+    if let Some(cell) = crate::heap().frame_cell(env, symbol)
+        && !cell.has_gp(gp::ACTIVE_BINDING)
+    {
+        let value = cell.cdr();
+        if value.kind() != SexpType::Promise {
+            return Ok(value);
+        }
+        if value.car() != unbound() {
+            return Ok(value.car());
+        }
+    }
     match try_eval(symbol, env)? {
         Ok(value) => Ok(value),
         Err(message) => {
@@ -534,8 +775,9 @@ unsafe fn evaluate_argument(symbol: Sexp, env: Sexp, generic_name: &str) -> R<Se
             Err(error_in(
                 handler_call,
                 format!(
-                    "error in evaluating the argument '{}' in selecting a method for function '{generic_name}': {message}",
-                    symbol_name(symbol)
+                    "error in evaluating the argument '{}' in selecting a method for function '{}': {message}",
+                    symbol_name(symbol),
+                    generic_name()
                 ),
             ))
         }
@@ -603,15 +845,17 @@ unsafe fn load_method(method: Sexp, name: Sexp, env: Sexp) -> R<Sexp> {
     let mut attribute = method.attrib();
     while attribute.kind() == SexpType::Pairlist {
         let tag = attribute.tag();
-        match &*symbol_name(tag) {
-            "target" => eval::define(values::install(".target")?, attribute.car(), env)?,
-            "defined" => eval::define(values::install(".defined")?, attribute.car(), env)?,
-            "generic" | "class" | "srcref" => {}
-            _ => extra = true,
+        let symbols = symbols();
+        if tag == symbols.target {
+            eval::define(symbols.dot_target, attribute.car(), env)?;
+        } else if tag == symbols.defined {
+            eval::define(symbols.dot_defined, attribute.car(), env)?;
+        } else if tag != symbols.generic && tag != symbols.class && tag != symbols.srcref {
+            extra = true;
         }
         attribute = attribute.cdr();
     }
-    eval::define(values::install(".Method")?, method, env)?;
+    eval::define(symbols().dot_method, method, env)?;
     if !extra || values::first_string(name).as_deref() == Some("loadMethod") {
         return Ok(method);
     }

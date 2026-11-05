@@ -1916,6 +1916,27 @@ change there would not move the epoch. xts `period.apply` with 33,335 periods we
 to 250k instructions per period (GNU R 204k) and from 1.51 s to about 1.3 s (GNU R 0.89 s; oracle
 case `dispatch__method_cache`).
 
+**S3 and S4 dispatch keep a polymorphic inline cache per call site.** S3 (`dispatch::resolve_s3`)
+keys a site by its call and holds up to four entries, each keyed by the generic, the group, the
+class vector (compared element-wise, interned strings) and the defining environment. An entry
+remembers every method name it probed (`candidates`) and the sum of their `Heap::lookup_stamp`s
+plus that of `.__S3MethodsTable__.`, so defining or removing any candidate outside a function
+frame, at any level of the inherits chain, misses. A hit also requires that no frame between the
+calling frame and its top environment binds a candidate (function frames move no stamp), the same
+top and search-path start, the same registered-methods table, and that the found cell still holds a
+function (a reassignment moves no stamp either). A hit hands back the dispatch strings (`.Generic`,
+`.Class`, `.Method`) built on the miss, held not mutable, so a hit allocates nothing. NextMethod
+reuses the frame's `.Generic` and `.Group` vectors and the interned `generic.class` names. S4
+(`methods::S4Cache`) keys a site by the generic closure: valid while its `.SigArgs`, `.SigLength`
+and `.AllMTable` bindings hold the values seen, with up to four entries by the signature
+arguments' first classes, each holding the table's binding cell for the label and the method it
+held; `setMethod` and `removeMethod` rewrite that binding, so the entry misses. Inherited methods
+are cached only once `.InheritForDispatch` stored them under the label. Both caches are GC roots and
+are cleared when full rather than evicted. Callgrind instructions per dispatch, JIT off, GNU R
+4.3.3 in brackets: `UseMethod` 8,750 to 7,688 (9,824); `UseMethod` plus `NextMethod` 23,144 to
+19,040 (19,030, parity); `standardGeneric` 14,263 to 8,688 (11,681). Oracle cases
+`dispatch__site_cache_invalidation` and `s4__method_cache_invalidation` pin the invalidation shapes. NextMethod passes `.Class` from the class whose method it found and always defines `.Group` (`""` without a group, one shared vector), as GNU R does (`dispatch__next_method_class_and_group`).
+
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the
 remembered set and the escaped set, and sweeps only the pages allocated into since the last
