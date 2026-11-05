@@ -4,7 +4,8 @@
 use {
     crate::{
         builtins::{
-            Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, present, special,
+            Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, is_native_value,
+            present, special,
         },
         coerce::{self, coerce_vector},
         conditions,
@@ -34,7 +35,25 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("c", -1, do_c).generic(Generic::Internal),
     internal("unlist", 3, do_unlist).generic(Generic::Internal),
     builtin("list", -1, do_list),
-    builtin("length", 1, do_length).generic(Generic::Internal),
+    builtin("length", 1, do_length)
+        .generic(Generic::Internal)
+        .unary(|value| unsafe {
+            let plain = match value.kind() {
+                SexpType::Nil => true,
+                SexpType::Char => false,
+                kind => {
+                    kind.is_vector()
+                        && !is_native_value(value)
+                        && !value.is_object()
+                        && !value.is_altrep()
+                }
+            };
+            if !plain || value.length() > i32::MAX as isize {
+                return Ok(None);
+            }
+            let count = if value == nil() { 0 } else { value.length() as i32 };
+            scalar_integer(count).map(Some)
+        }),
     builtin("length<-", 2, do_set_length).generic(Generic::Internal),
     internal("lengths", 2, do_lengths),
     builtin("names", 1, do_names).generic(Generic::Internal),

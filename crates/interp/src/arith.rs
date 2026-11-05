@@ -217,7 +217,18 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("!", 1, |call| unsafe {
         strict(call, OperatorClass::Logic, |call| do_not(call))
     })
-    .generic(Generic::Ops),
+    .generic(Generic::Ops)
+    .unary(|operand| unsafe {
+        if operand.kind() != SexpType::Logical
+            || operand.is_altrep()
+            || operand.length() != 1
+            || operand.attrib() != nil()
+        {
+            return Ok(None);
+        }
+        let value = operand.slice::<i32>()[0];
+        values::scalar_logical(if value == NA_LOGICAL { NA_LOGICAL } else { 1 - value }).map(Some)
+    }),
     builtin("abs", 1, |call| unsafe { math1(call, Math::Abs) }).generic(Generic::Math),
     builtin("sign", 1, |call| unsafe { math1(call, Math::Sign) }).generic(Generic::Math),
     builtin("sqrt", 1, |call| unsafe { math1(call, Math::Sqrt) }).generic(Generic::Math),
@@ -282,7 +293,26 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("all", -1, |call| unsafe { all_any(call, true) }).generic(Generic::Summary),
     builtin("any", -1, |call| unsafe { all_any(call, false) }).generic(Generic::Summary),
     internal("mean", 1, do_mean),
-    builtin("is.na", 1, |call| unsafe { na_test(call, NaTest::Na) }).generic(Generic::Internal),
+    builtin("is.na", 1, |call| unsafe { na_test(call, NaTest::Na) })
+        .generic(Generic::Internal)
+        .unary(|operand| unsafe {
+            if !matches!(
+                operand.kind(),
+                SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::String
+            ) || operand.is_altrep()
+                || operand.length() != 1
+                || operand.attrib() != nil()
+            {
+                return Ok(None);
+            }
+            let missing = match operand.kind() {
+                SexpType::Logical | SexpType::Integer => operand.slice::<i32>()[0] == NA_INTEGER,
+                SexpType::Real => operand.slice::<f64>()[0].is_nan(),
+                SexpType::String => operand.slice::<Sexp>()[0] == values::na_string(),
+                _ => return Ok(None),
+            };
+            values::scalar_logical(missing as i32).map(Some)
+        }),
     builtin("is.nan", 1, |call| unsafe { na_test(call, NaTest::NaN) }).generic(Generic::Internal),
     builtin("is.finite", 1, |call| unsafe {
         na_test(call, NaTest::Finite)
@@ -2139,8 +2169,7 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
         SexpType::Logical
         | SexpType::Integer
         | SexpType::Real
-        | SexpType::Complex
-        | SexpType::Nil => {
+        | SexpType::Complex => {
             let result = alloc(SexpType::Logical, count)?;
             for index in 0..count {
                 let value = logical_at(operand, index);
@@ -2161,8 +2190,9 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
             }
             Ok(result)
         }
-        // GNU R negates any empty vector, so `!character()` is `logical(0)`.
-        _ if count == 0 => alloc(SexpType::Logical, 0),
+        // GNU R negates any empty vector, so `!character()` is `logical(0)`, but `!NULL` is
+        // an error because NULL is not a vector there.
+        _ if count == 0 && operand != nil() => alloc(SexpType::Logical, 0),
         _ => Err(call.error("invalid argument type")),
     }
 }
@@ -3542,7 +3572,10 @@ unsafe fn na_test(call: &Call<'_>, test: NaTest) -> R<Sexp> {
                         operand.kind().name()
                     ),
                 )?;
-                return scalar_bool(false);
+                // GNU R answers FALSE once per element of `length(x)`, so an environment
+                // gives one FALSE per binding.
+                values::ints_mut(result).fill(0);
+                return Ok(result);
             }
             return Err(call.error(format!(
                 "default method not implemented for type '{}'",

@@ -3554,6 +3554,17 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
     let first = instruction.operand(3);
     let count = instruction.operand(4);
     let definition = eval::builtin_def(function)?;
+    if count == 1
+        && let Some(unary) = definition.unary
+        && call.cdr().tag() == nil()
+        && call.cdr().car() != missing_arg()
+        && let Some(value) = unary(instruction.register(first))?
+    {
+        (*state.interp).visible = true;
+        state.record(instruction.at, value);
+        instruction.output(0, value);
+        return Ok(Flow::Next);
+    }
     let mut args = eval::Args::new();
     let mut cell = call.cdr();
     for index in 0..count {
