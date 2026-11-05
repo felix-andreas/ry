@@ -114,7 +114,8 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
   `"data.frame"`, an old class), a second superclass that has superclasses of its own, a class
   under a union whose members are not all cached yet, a method that omits an argument its
   signature names, a generic whose body is not `standardGeneric("f")` (braced or not),
-  `setOldClass`, the first union of a session (dispatch caches not filled), a union of unions,
+  `setOldClass`, a first union of a session defined while first-unit definitions are pending
+  (they may add an `initialize` method), a union of unions,
   `setMethod("[")` whose formals need rematching, and `cacheMetaData` delegating classes whose
   cached definition differs, other packages' generics, group generics and primitives.
 - A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to

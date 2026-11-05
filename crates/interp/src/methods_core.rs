@@ -3202,7 +3202,7 @@ unsafe fn set_class_union(call: &Call<'_>) -> R<Sexp> {
         bail!(skip, "the union lists itself as a member");
     }
     if !definition_caches(name.bytes(), &member_names, false)?
-        || !initialize_cached(b"ClassUnionRepresentation")?
+        || !union_initialize_cached()?
     {
         bail!(
             skip,
@@ -4286,11 +4286,27 @@ unsafe fn is_method_definition(value: Sexp) -> bool {
 
 /// Whether the default `initialize` method is cached for objects of the class `label`, so that
 /// `new()` of that class leaves the dispatch tables as they are.
-unsafe fn initialize_cached(label: &[u8]) -> R<bool> {
+/// Whether `initialize`'s dispatch cache holds a method for `ClassUnionRepresentation`, after
+/// caching the inherited one when no union was defined yet. The R code's `new()` of the union's
+/// representation dispatches `initialize` on it, and that dispatch caches the same inherited
+/// method, so the first union of a session leaves the cache as the R code would.
+unsafe fn union_initialize_cached() -> R<bool> {
     let Some((_, all_table)) = generic_tables("initialize")? else {
         return Ok(false);
     };
-    Ok(quiet_value(values::install_bytes(label)?, all_table)?.is_some())
+    let label = values::scalar_string("ClassUnionRepresentation")?;
+    crate::heap().root(label);
+    if quiet_value(install_text(label.element(0))?, all_table)?.is_some() {
+        return Ok(true);
+    }
+    // Lazy definitions still to run may add an `initialize` method that dispatch would prefer.
+    if crate::methods::first_units_pending() {
+        return Ok(false);
+    }
+    let Some(generic) = methods_value("initialize")? else {
+        return Ok(false);
+    };
+    Ok(inherited_method(&[label], generic, all_table)?.is_some())
 }
 
 /// A class the new one extends, by name, with its definition.
