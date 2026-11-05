@@ -496,7 +496,35 @@ pub unsafe fn call_builtin(
 }
 
 /// [`call_builtin`], offering the builtin `reusable` to update in place (see [`Call::reusable`]).
+//
+// The common call (no profile being taken, the arity right, no names to check, no replacement
+// target to copy) runs straight through; anything else takes the out-of-line path, so this
+// frame stays small enough that entry and exit cost a handful of instructions.
+#[inline]
 unsafe fn call_builtin_reusing(
+    definition: &BuiltinDef,
+    call: Sexp,
+    op: Sexp,
+    args: &[Arg],
+    env: Sexp,
+    reusable: Option<Sexp>,
+) -> R<Sexp> {
+    let checks = definition.checks;
+    if activity::enabled()
+        || PROFILE_TICK.load(Ordering::Relaxed)
+        || (checks.arity && args.len() != definition.arity as usize)
+        || (checks.names && args.iter().any(|arg| arg.tag != nil()))
+        || (checks.replacement && args.first().is_some_and(|target| target.value.refcount() >= 1))
+    {
+        return call_builtin_checked(definition, call, op, args, env, reusable);
+    }
+    run_builtin(definition, call, op, args, env, reusable)
+}
+
+/// The builtin call [`call_builtin_reusing`] hands off: it publishes the activity, raises the
+/// arity and name errors, takes a profile sample, and copies a shared replacement target.
+#[inline(never)]
+unsafe fn call_builtin_checked(
     definition: &BuiltinDef,
     call: Sexp,
     op: Sexp,
@@ -551,8 +579,21 @@ unsafe fn call_builtin_reusing(
         }
         _ => args,
     };
-    let function = definition.function;
-    let visibility = definition.visibility;
+    run_builtin(definition, call, op, args, env, reusable)
+}
+
+/// Runs a builtin whose call passed the checks: refuses a native value it cannot take, runs it
+/// in its own handle scope, sets visibility, and signals an error it raised.
+#[inline(always)]
+unsafe fn run_builtin(
+    definition: &BuiltinDef,
+    call: Sexp,
+    op: Sexp,
+    args: &[Arg],
+    env: Sexp,
+    reusable: Option<Sexp>,
+) -> R<Sexp> {
+    let checks = definition.checks;
     let context = Call {
         call,
         op,
@@ -560,41 +601,52 @@ unsafe fn call_builtin_reusing(
         env,
         reusable,
     };
-    let skip_numbers = match checks.native {
-        NativeArgs::Accepted | NativeArgs::RefusedExceptNumbers => true,
-        NativeArgs::Refused => false,
-        NativeArgs::RefusedExceptArrayIndexes => {
-            args.first().is_some_and(|target| target.value.is_array())
-        }
-    };
-    let result = if checks.native != NativeArgs::Accepted
-        && let Err(refused) = crate::records::check_native_args(call, args, skip_numbers)
+    if checks.native != NativeArgs::Accepted
+        && args
+            .iter()
+            .any(|arg| matches!(arg.value.kind(), SexpType::Record | SexpType::I64))
     {
-        Err(refused)
-    } else {
-        // An ALTREP method's error, parked by the element accessor the builtin went through,
-        // is raised before the builtin's value goes anywhere, so `tryCatch` around the call
-        // sees it and no code acts on the placeholder the read returned.
-        scope(|| function(&context)).and_then(|value| crate::unwind::raise_parked().map(|()| value))
-    };
-    // A jump out of the builtin (`return(invisible(x))`) keeps the visibility of the value it
-    // carries.
-    if result.is_ok() {
-        match visibility {
-            Visibility::On => interp().visible = true,
-            Visibility::Off => interp().visible = false,
-            Visibility::Keep => {}
-        }
+        let skip_numbers = match checks.native {
+            NativeArgs::Accepted | NativeArgs::RefusedExceptNumbers => true,
+            NativeArgs::Refused => false,
+            NativeArgs::RefusedExceptArrayIndexes => {
+                args.first().is_some_and(|target| target.value.is_array())
+            }
+        };
+        crate::records::check_native_args(call, args, skip_numbers)?;
     }
-    match result {
-        Err(Unwind::Error(mut failure)) => {
+    // An ALTREP method's error, parked by the element accessor the builtin went through, is
+    // raised before the builtin's value goes anywhere, so `tryCatch` around the call sees it
+    // and no code acts on the placeholder the read returned.
+    match scope(|| (definition.function)(&context)) {
+        Ok(value) => {
+            if let Err(unwind) = crate::unwind::raise_parked() {
+                return Err(builtin_failure(definition, unwind));
+            }
+            match definition.visibility {
+                Visibility::On => interp().visible = true,
+                Visibility::Off => interp().visible = false,
+                Visibility::Keep => {}
+            }
+            Ok(value)
+        }
+        Err(unwind) => Err(builtin_failure(definition, unwind)),
+    }
+}
+
+/// The unwind a failing builtin raises: an error it returned is signalled, naming the
+/// primitive's call as `errorcall` does.
+#[cold]
+#[inline(never)]
+unsafe fn builtin_failure(definition: &BuiltinDef, unwind: Unwind) -> Unwind {
+    match unwind {
+        Unwind::Error(mut failure) => {
             if failure.call == unbound() && matches!(definition.kind, Kind::Builtin) {
-                // A primitive's own error names the primitive's call, as `errorcall` does.
                 failure.call = unbound();
             }
-            Err(conditions::signal_error(failure))
+            conditions::signal_error(failure)
         }
-        result => result,
+        unwind => unwind,
     }
 }
 
@@ -1911,7 +1963,29 @@ unsafe fn do_paren(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// The condition of `if` and `while`, with GNU R's messages.
+#[inline]
 pub unsafe fn as_condition(value: Sexp, call: Sexp) -> R<bool> {
+    if let Some(flag) = plain_flag(value) {
+        return Ok(flag != 0);
+    }
+    general_condition(value, call)
+}
+
+/// The element of a plain length-one logical vector that is not `NA`: the operand nearly every
+/// condition and `&&` operand is, read without a call.
+#[inline(always)]
+unsafe fn plain_flag(value: Sexp) -> Option<i32> {
+    if value.kind() == SexpType::Logical && !value.is_altrep() && value.length() == 1 {
+        let flag = *value.slice::<i32>().get_unchecked(0);
+        if flag != heap::object::NA_LOGICAL {
+            return Some(flag);
+        }
+    }
+    None
+}
+
+#[inline(never)]
+unsafe fn general_condition(value: Sexp, call: Sexp) -> R<bool> {
     if crate::records::is_native(value) {
         return Err(crate::records::boundary_error(value, nil(), call));
     }
@@ -2264,7 +2338,16 @@ unsafe fn logical_operand(value: Sexp, call: &Call<'_>, side: &str) -> R<i32> {
 
 /// An operand of `&&` or `||` (`operator`) as `TRUE`, `FALSE` or `NA`, with GNU R's errors for
 /// the `side` (`"x"` or `"y"`) that is not a logical scalar.
+#[inline]
 pub unsafe fn logical_operand_of(value: Sexp, call: Sexp, operator: &str, side: &str) -> R<i32> {
+    if let Some(flag) = plain_flag(value) {
+        return Ok(flag);
+    }
+    general_logical_operand(value, call, operator, side)
+}
+
+#[inline(never)]
+unsafe fn general_logical_operand(value: Sexp, call: Sexp, operator: &str, side: &str) -> R<i32> {
     if !matches!(
         value.kind(),
         SexpType::Logical

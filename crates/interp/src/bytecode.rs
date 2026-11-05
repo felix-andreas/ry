@@ -371,6 +371,7 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         rebinding: None,
         tail_updates: (Vec::new(), nil()),
         bound: None,
+        cold: Vec::new(),
     };
     let heap = crate::heap();
     let mut list = nil();
@@ -383,6 +384,7 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
             compiler.open_loops.clear();
             compiler.registers = 0;
             compiler.next_register = 0;
+            compiler.cold.clear();
             // An argument the compiler rejects still runs, as a promise of its expression.
             compiler.assemble(*value).unwrap_or(*value)
         } else {
@@ -566,6 +568,9 @@ pub enum Op {
     /// `call`, and binds the result to the variable. What [`replace_variable`] does not handle
     /// runs `whole` as `<-` would.
     Replace,
+    /// `target`: a guard fallback laid out after the body returning to it. Unlike a backward
+    /// `Jump`, it is never a loop's back edge.
+    Resume,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its last operand.
@@ -580,7 +585,7 @@ enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 43] = [
+pub const OPS: [Op; 44] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -624,6 +629,7 @@ pub const OPS: [Op; 43] = [
     Op::SwitchArm,
     Op::SubAssignMatrix,
     Op::Replace,
+    Op::Resume,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -735,6 +741,16 @@ struct Compiler {
     /// While a `match` guard compiles: its arm's bound names, which it reads from registers
     /// instead of the frame.
     bound: Option<Bound>,
+    /// Guard fallbacks laid out after the body's `Return` (see [`Compiler::cold_fallback`]).
+    cold: Vec<Cold>,
+}
+
+/// A guard fallback compiled out of line: the guards that fail to it, its instruction, and where
+/// it resumes in the body.
+struct Cold {
+    guards: SmallVec<[usize; 2]>,
+    words: SmallVec<[u32; 6]>,
+    resume: u32,
 }
 
 /// The names a `match` arm binds, held in registers `base..base + names.len()` for its guard,
@@ -784,6 +800,7 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         rebinding: None,
         bound: None,
         tail_updates: tail_updates(body, function),
+        cold: Vec::new(),
     };
     compiler.assemble(body).map(Some)
 }
@@ -1433,6 +1450,13 @@ impl Compiler {
         let result = self.allocate();
         self.expression(source, result)?;
         self.emit(Op::Return, &[result]);
+        for cold in std::mem::take(&mut self.cold) {
+            for guard in cold.guards {
+                self.patch(guard);
+            }
+            self.code.extend_from_slice(&cold.words);
+            self.emit(Op::Resume, &[cold.resume]);
+        }
         let compiler = &*self;
         let heap = crate::heap();
         let words = values::alloc(SexpType::Integer, compiler.code.len())?;
@@ -1577,6 +1601,31 @@ impl Compiler {
     unsafe fn fallback(&mut self, expression: Sexp, dst: u32) -> R<()> {
         let constant = self.constant(expression);
         self.evaluate(dst, constant);
+        Ok(())
+    }
+
+    /// Compiles what runs when one of `guards` fails: the general evaluation of `call` into
+    /// `dst`, after which execution continues here. Outside loops the fallback goes after the
+    /// body's `Return`, so the inline path runs straight on instead of jumping over it; inside a
+    /// loop it stays in place, where the loop's range covers it for `break` and `next`.
+    unsafe fn cold_fallback(&mut self, guards: &[usize], call: Sexp, dst: u32) -> R<()> {
+        if !self.open_loops.is_empty() {
+            let done = self.emit_patchable(Op::Jump, &[0]);
+            for &guard in guards {
+                self.patch(guard);
+            }
+            self.fallback(call, dst)?;
+            self.patch(done);
+            return Ok(());
+        }
+        let resume = self.here();
+        self.fallback(call, dst)?;
+        let words = self.code.drain(resume as usize..).collect();
+        self.cold.push(Cold {
+            guards: guards.iter().copied().collect(),
+            words,
+            resume,
+        });
         Ok(())
     }
 
@@ -1849,10 +1898,7 @@ impl Compiler {
             &[dst, variable, setter_symbol, cache, setter_call, base, count, whole],
         );
         self.release_to(mark);
-        let done = self.emit_patchable(Op::Jump, &[0]);
-        self.patch(guard);
-        self.fallback(call, dst)?;
-        self.patch(done);
+        self.cold_fallback(&[guard], call, dst)?;
         Ok(())
     }
 
@@ -1946,12 +1992,7 @@ impl Compiler {
             [] => self.evaluate(dst, call_constant),
         }
         self.release_to(mark);
-        let done = self.emit_patchable(Op::Jump, &[0]);
-        for guard in guards {
-            self.patch(guard);
-        }
-        self.fallback(call, dst)?;
-        self.patch(done);
+        self.cold_fallback(&guards, call, dst)?;
         Ok(())
     }
 
@@ -2073,10 +2114,7 @@ impl Compiler {
                 &[dst, function_register, call_constant, target],
             );
             self.release_to(mark);
-            let done = self.emit_patchable(Op::Jump, &[0]);
-            self.patch(guard);
-            self.fallback(call, dst)?;
-            self.patch(done);
+            self.cold_fallback(&[guard], call, dst)?;
             return Ok(());
         }
         let base = self.next_register;
@@ -2097,10 +2135,7 @@ impl Compiler {
             ],
         );
         self.release_to(mark);
-        let done = self.emit_patchable(Op::Jump, &[0]);
-        self.patch(guard);
-        self.fallback(call, dst)?;
-        self.patch(done);
+        self.cold_fallback(&[guard], call, dst)?;
         Ok(())
     }
 
@@ -2119,10 +2154,7 @@ impl Compiler {
         let probe = self.frame_may_bind(head) as u32;
         let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
         self.inline(call, primitive, dst, name, args)?;
-        let done = self.emit_patchable(Op::Jump, &[0]);
-        self.patch(guard);
-        self.fallback(call, dst)?;
-        self.patch(done);
+        self.cold_fallback(&[guard], call, dst)?;
         Ok(())
     }
 
@@ -2575,10 +2607,7 @@ impl Compiler {
             self.emit(Op::Construct, &[dst, layout, base, items.len() as u32]);
             self.release_to(mark);
         }
-        let done = self.emit_patchable(Op::Jump, &[0]);
-        self.patch(guard);
-        self.fallback(call, dst)?;
-        self.patch(done);
+        self.cold_fallback(&[guard], call, dst)?;
         Ok(())
     }
 
@@ -2657,10 +2686,7 @@ impl Compiler {
             self.patch(position);
         }
         self.release_to(mark);
-        let done = self.emit_patchable(Op::Jump, &[0]);
-        self.patch(guard);
-        self.fallback(call, dst)?;
-        self.patch(done);
+        self.cold_fallback(&[guard], call, dst)?;
         Ok(())
     }
 
@@ -2842,7 +2868,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::SwitchArm => 3,
         Op::Ast => 2,
         Op::Guard => 5,
-        Op::Jump => 1,
+        Op::Jump | Op::Resume => 1,
         Op::JumpUnless => 3,
         Op::Arithmetic => 6,
         Op::Return => 1,
@@ -3475,6 +3501,10 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, mut pc: usize
                             pc = operand(4);
                             continue;
                         }
+                    }
+                    Op::Resume => {
+                        pc = operand(0);
+                        continue;
                     }
                     Op::Jump => {
                         let target = operand(0);

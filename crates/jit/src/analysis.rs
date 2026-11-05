@@ -2203,7 +2203,7 @@ impl<'a> Builder<'a> {
                 }
                 Action::FallThrough
             }
-            Op::Jump => {
+            Op::Jump | Op::Resume => {
                 self.push_edge(operand(0), state);
                 return Ok(Action::Jump);
             }
@@ -3953,7 +3953,7 @@ pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
 
 pub fn jump_target(inst: &Inst) -> Option<usize> {
     match inst.op {
-        Op::Jump => Some(inst.operand(0)),
+        Op::Jump | Op::Resume => Some(inst.operand(0)),
         Op::JumpUnless => Some(inst.operand(2)),
         Op::BranchUnlessBuiltin | Op::BranchIfObject => Some(inst.operand(1)),
         Op::MatchShape | Op::MatchTag | Op::MatchLiteral => Some(inst.operand(2)),
@@ -3970,6 +3970,7 @@ fn ends_block(op: Op) -> bool {
     matches!(
         op,
         Op::Jump
+            | Op::Resume
             | Op::JumpUnless
             | Op::BranchUnlessBuiltin
             | Op::BranchUnlessPrimitive
@@ -3986,7 +3987,7 @@ fn ends_block(op: Op) -> bool {
 }
 
 fn falls_through(op: Op) -> bool {
-    !matches!(op, Op::Jump | Op::Return)
+    !matches!(op, Op::Jump | Op::Resume | Op::Return)
 }
 
 /// Updates `live` from after `inst` to before it.
@@ -4042,7 +4043,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
             kill(operand(0), live);
             gen_(operand(1), live);
         }
-        Op::Guard | Op::Jump | Op::Invisible | Op::Visible | Op::SetSrcref => {}
+        Op::Guard | Op::Jump | Op::Resume | Op::Invisible | Op::Visible | Op::SetSrcref => {}
         Op::EndStatement => {
             kill(operand(0), live);
             for register in operand(1)..operand(2) {
