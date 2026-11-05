@@ -302,7 +302,18 @@ pub mod profile {
     pub const BACK_EDGES: usize = 1;
     /// The optimizing tier's state for this code, which only that tier interprets.
     pub const TIER_STATE: usize = 2;
-    pub const LENGTH: usize = 3;
+    /// Nonzero while tier 0 records type feedback for this code: from the start for a body
+    /// with a loop, and once a body has optimized code or is halfway to the entry threshold.
+    /// Recording costs a type test and a store per value, and most bodies never get near a
+    /// threshold, so recording from the first entry made every call of cold package code slower
+    /// with the optimizing tier installed than without it. Half a threshold of activations still
+    /// sees every type a compile would specialize on. A loop is different: it can turn hot
+    /// inside a body's only activation, and compiling it needs the types of the instructions
+    /// that ran before it, which starting to record at the loop would miss. The decision is one
+    /// word, read at every activation, because deciding it there from the code's other
+    /// constants cost 25 instructions per call.
+    pub const RECORDING: usize = 3;
+    pub const LENGTH: usize = 4;
 }
 
 /// The body `function` was defined with, which a compiled closure keeps beside its code.
@@ -1496,6 +1507,7 @@ impl Compiler {
         heap.set_element(constants, FEEDBACK, feedback);
         let profile = values::alloc(SexpType::Integer, profile::LENGTH)?;
         values::ints_mut(profile).fill(0);
+        values::ints_mut(profile)[profile::RECORDING] = i32::from(!compiler.loops.is_empty());
         heap.set_element(constants, PROFILE, profile);
         heap.set_element(constants, TIER1, nil());
         heap.set_element(constants, BASELINE, nil());
@@ -3115,6 +3127,12 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
         mark,
         loops: &mut loops,
     };
+    if let Some(tier) = interp().bytecode.tier
+        && entries == tier.entry_threshold / 2
+        && profile[profile::TIER_STATE] >= 0
+    {
+        profile[profile::RECORDING] = 1;
+    }
     // Most bodies never compile, and asking the tier about every call of every body cost more
     // than the compiled code saved on a test suite.
     let entered = match interp().bytecode.tier {
@@ -3250,21 +3268,6 @@ impl Activation<'_, '_> {
     }
 }
 
-/// Whether tier 0 records type feedback for this code: always for a body with a loop, and for
-/// any other once it has optimized code or is halfway to the entry threshold. Recording costs a
-/// type test and a store per value, and most bodies never get near a threshold, so recording
-/// from the first entry made every call of cold package code slower with the optimizing tier
-/// installed than without it. Half a threshold of activations still sees every type a compile
-/// would specialize on. A loop is different: it can turn hot inside a body's only activation,
-/// and compiling it needs the types of the instructions that ran before it, once.
-unsafe fn warm(constants: Sexp, tier: &Tier) -> bool {
-    if constants.element(TIER1) != nil() || length(constants.element(LOOPS)) > 0 {
-        return true;
-    }
-    let profile = values::ints(constants.element(PROFILE));
-    profile[profile::TIER_STATE] >= 0 && profile[profile::ENTRIES] >= tier.entry_threshold / 2
-}
-
 /// The instruction an op handler runs: its position in the code and the register window.
 #[derive(Clone, Copy)]
 struct Instruction {
@@ -3323,11 +3326,12 @@ type Handler = unsafe fn(&mut Activation<'_, '_>, usize);
 #[inline(always)]
 unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) -> R<Sexp> {
     let constants = machine.code.cdr();
-    let feedback = match interp().bytecode.tier {
-        Some(tier) if warm(constants, &tier) => {
-            values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
-        }
-        _ => std::ptr::null_mut(),
+    let feedback = if interp().bytecode.tier.is_some()
+        && values::ints(constants.element(PROFILE))[profile::RECORDING] != 0
+    {
+        values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
+    } else {
+        std::ptr::null_mut()
     };
     let code = values::ints(machine.code.car()).as_ptr();
     let registers = register_address(machine.base);

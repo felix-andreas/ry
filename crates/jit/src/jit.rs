@@ -86,6 +86,15 @@ const BACK_EDGE_THRESHOLD: i32 = 10_000;
 /// Entries or backward jumps after which a body gets baseline code. Baseline code costs a few
 /// microseconds to compile, about as much as interpreting a body a few dozen times.
 const BASELINE_THRESHOLD: i32 = 200;
+/// Tier 1 compiles a body in time that grows with its length, about 10 us per instruction word,
+/// while a hot body's saving per entry depends on how much of it runs, not on how long it is.
+/// So in the default mode a body longer than this many words, on turning hot, waits for one more
+/// threshold of entries or backward jumps per this many words before it compiles, the way V8
+/// scales its tier-up budget by bytecode length. Base R's `rbind` body (9731 words, 200 ms to
+/// compile) then compiles only after about 120,000 calls; a 250-word body does not wait. The wait
+/// doubles with each compile the body already had, because a body that deoptimized and recompiled
+/// (base `Reduce`, called with a new callback type from each site) pays the whole compile again.
+const SIZE_WAIT_WORDS: usize = 250;
 
 thread_local! {
     static MODE: Cell<Mode> = const { Cell::new(Mode::On) };
@@ -111,6 +120,7 @@ pub fn install_mode(mode: Mode) {
         Mode::Force => (2, 1, 1),
         Mode::Baseline => (i32::MAX, i32::MAX, 1),
     };
+    let (entries, back_edges, baseline) = thresholds_override().unwrap_or((entries, back_edges, baseline));
     MODE.with(|current| current.set(mode));
     bytecode::set_tier(Some(Tier {
         enter,
@@ -121,6 +131,18 @@ pub fn install_mode(mode: Mode) {
         baseline_threshold: baseline,
         call: native::call,
     }));
+}
+
+/// `RY_JIT_THRESHOLDS=ENTRIES,BACK_EDGES,BASELINE` replaces the mode's thresholds, for sweeping
+/// them; `0` stands for never.
+fn thresholds_override() -> Option<(i32, i32, i32)> {
+    let text = std::env::var("RY_JIT_THRESHOLDS").ok()?;
+    let mut parts = text.split(',').map(|part| match part.trim().parse::<i32>() {
+        Ok(0) => Some(i32::MAX),
+        Ok(value) => Some(value),
+        Err(_) => None,
+    });
+    Some((parts.next()??, parts.next()??, parts.next()??))
 }
 
 unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
@@ -265,6 +287,29 @@ unsafe fn compiled_for<'a>(
             counters[profile::TIER_STATE] = -1;
             return None;
         }
+        if state & runtime::SIZE_WAITED == 0 && MODE.with(Cell::get) == Mode::On {
+            let rounds = (values::ints(machine.code.car()).len() / SIZE_WAIT_WORDS)
+                << runtime::compiles(state);
+            if rounds > 0 {
+                counters[profile::TIER_STATE] = state | runtime::SIZE_WAITED;
+                let wait = |threshold: i32| {
+                    i32::try_from(rounds)
+                        .unwrap_or(i32::MAX)
+                        .saturating_mul(threshold)
+                        .min(i32::MAX / 2)
+                };
+                // The counters climb back to the threshold before the tier is asked again;
+                // tier 0 records type feedback only above half the entry threshold, so it is
+                // still recorded before the compile.
+                if let Some(tier) = bytecode::tier() {
+                    counters[profile::ENTRIES] = counters[profile::ENTRIES]
+                        .min(tier.entry_threshold)
+                        .saturating_sub(wait(tier.entry_threshold));
+                    counters[profile::BACK_EDGES] = -wait(tier.back_edge_threshold);
+                }
+                return None;
+            }
+        }
         let patient = !in_loop && runtime::cold_refusals(state) < MAX_COLD_REFUSALS;
         let trigger = if in_loop {
             Trigger::HotLoop
@@ -321,7 +366,7 @@ pub(crate) unsafe fn describe(code: Sexp) -> String {
 
 /// What asked for a compilation, which decides how much the compiled code must save to pay
 /// for itself.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Trigger {
     /// A fully typed closure's first call, before anything shows the body is hot.
     FirstCall,
@@ -419,14 +464,20 @@ unsafe fn compile_in<'a>(
                 })
                 .collect();
             eprintln!(
-                "jit: compiled {} in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations{}; {} native, {} loops; tier 0 runs: {})",
+                "jit: compiled {} ({trigger:?}, {} words) in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations{}; {} native, {} inlined, {} loops; tier 0 runs: {})",
                 describe(machine.code),
+                values::ints(machine.code.car()).len(),
                 (planned + generated).as_micros(),
                 planned.as_micros(),
                 generated.as_micros(),
                 plan.speculations.len(),
                 if portable { ", portable" } else { "" },
                 plan.native_actions(),
+                plan
+                    .actions
+                    .iter()
+                    .filter(|action| matches!(action, analysis::Action::Inline { .. }))
+                    .count(),
                 plan.loop_headers.len(),
                 if steps.is_empty() {
                     "nothing".to_string()
@@ -505,6 +556,9 @@ unsafe fn compile_in<'a>(
         heap.release_handles(mark);
         let pointer = built.map_err(|_| Refusal("out of memory"))?;
         heap.set_element(machine.code.cdr(), TIER1, pointer);
+        // A deoptimized activation finishes in tier 0, and what it records is the profile the
+        // next compile reads.
+        values::ints_mut(machine.code.cdr().element(PROFILE))[profile::RECORDING] = 1;
         Ok(&*(pointer.external_address() as *const Compiled))
     }
 }

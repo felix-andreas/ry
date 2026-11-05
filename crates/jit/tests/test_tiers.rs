@@ -316,6 +316,20 @@ fn seeds_agree_across_tiers() {
             "(n = 8L)",
             true,
         ),
+        // Closures whose bodies are blocks inline: locals, a rebound formal, a free variable a
+        // local shadows without touching the outer binding, and a trailing `return()`.
+        (
+            "y <- 100\nscale <- function(x, k) { a <- x * k; b <- a + 1; return(b - 0.5) }\nbump <- function(x) { x <- x + 1L; x * 2L }\nfree <- function(x) { y <- y + x; y }\ns <- 0\nt <- 0L\nfor (i in 1:n) { s <- s + scale(i, 0.5) + free(i); t <- t + bump(i) }\nlist(s, t, y)",
+            "(n = 40L)",
+            false,
+        ),
+        // An inlined block whose local turns from integer to double fails its speculation in
+        // the middle of the block, and tier 0 reruns the whole call.
+        (
+            "step <- function(x) { a <- x + x; b <- a * 3L; b - x }\ns <- 0\nfor (i in 1:n) s <- s + step(if (i > 20L) i + 0.5 else i)\ns",
+            "(n = 40L)",
+            false,
+        ),
         // An inlined typed closure keeps its checks: a call reached only after the loop compiled
         // fails on its argument, or on its value, exactly as in tier 0.
         (

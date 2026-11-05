@@ -292,6 +292,11 @@ pub fn cold_refusals(state: i32) -> i32 {
 /// so calls no longer compile it and only a hot loop in it does.
 pub const LOOPS_ONLY: i32 = 1 << 16;
 
+/// A tier state flag: the body was long enough that it waited for extra entries or backward
+/// jumps before its next compile (see `jit::SIZE_WAIT_WORDS`), and it has waited. Invalidation
+/// clears it, so every recompile waits again.
+pub const SIZE_WAITED: i32 = 1 << 17;
+
 /// The entry count of a body that calls must not compile. Counting up from here never reaches
 /// the entry threshold, so tier 0 stops asking the tier about the body's calls, and stops
 /// recording type feedback for them unless the body has a loop that may still compile.
@@ -325,6 +330,8 @@ pub unsafe fn invalidate(code: Sexp) {
     counters[profile::BACK_EDGES] = 0;
     if compiles(state) >= MAX_COMPILES {
         counters[profile::TIER_STATE] = -1;
+    } else if state >= 0 {
+        counters[profile::TIER_STATE] = state & !SIZE_WAITED;
     }
 }
 
