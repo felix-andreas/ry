@@ -543,14 +543,15 @@ builtins in a systems language instead of in JavaScript. ry's equivalents are:
   sequence of calls to these, and no JIT can make a slow primitive fast.
 - **An optimizing JIT for the R code in between,** which is what the rest of this section is about.
 
-Where ry stands against that bar on untyped code: `just bench-real` times nine production-shaped
+Where ry stands against that bar on untyped code: `just bench-real` times ten production-shaped
 workloads (S3 objects, conditions, validation, strings, `lapply` pipelines, records, tables, xts
-and zoo, a scalar simulation), and ry runs them at 0.96 times GNU R's speed with the JIT and 0.95
-times without it (geometric means; the table is in `benchmarks.mdx`). Only the scalar simulation
-is clearly faster (1.66x). The rest is decided by tier 0 and the call path, because their hot
-closures run too few times to reach tier 1, which is why `prior-art.md` puts call setup, S3 lookup
-and allocation ahead of more JIT work. The workloads will be recalibrated against profile
-summaries from real code bases (`ry run --profile-summary`).
+and zoo, a scalar simulation, and a testthat suite of small `test_that()` blocks), and ry runs the
+first nine at 1.23 times GNU R's speed with the JIT and 1.27 times without it (geometric means of
+one wall-time run, which varies by about 10%). The rest is decided by tier 0, the call path and
+builtins, because their hot closures run a few hundred to a few thousand times, under tier 1's
+threshold. A user's profile of a package test suite agrees: builtins 33% of the time, tier 0 26%,
+call setup 22%, GC 8%, and compiled code under 1%, with every closure running inside testthat's
+calling handlers. The testthat workload stands in for that suite.
 
 ### Where bytecode comes from
 

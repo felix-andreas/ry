@@ -6651,6 +6651,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **One Makeconf reader.** `make_assignments` and `expand_make` live in `crates/rcmd/src/makeconf.rs`, which `interp` includes by path, as `repl` includes `gnu_r_home.rs`. `Toolchain::for_gnu_r_home` on Linux keeps the default compilers but takes `BLAS_LIBS` and `LAPACK_LIBS` from GNU R's `Makeconf` (`Toolchain::with_makeconf_libraries`), so compiled packages link the same libraries the interpreter loads.
 - **Impact.** No change where the sonames load. `La_library()` already reports the file the routines came from; `extSoftVersion()["BLAS"]` now does too. The candidate order is pinned by unit tests in `linalg.rs` and `rcmd.rs`.
 
+- **ry carries the last resort on Linux.** A release archive held only `libR`, so a system with neither library (NixOS without GNU R) had nothing left to load. `tools/base-r/lapack.sh` builds GNU R's reference `libRblas.so` and `libRlapack.so` beside the runtime; `repl`'s build script embeds them with it, and `rcmd::assemble` links them into the R home's `lib/`, where the existing last candidates find them. They define `xerbla_` in libRblas rather than in libR, so libR still does not interpose on a system BLAS's handler, and they link no Fortran runtime (`tools/base-r/fortran.c` supplies the one routine they need), because libgfortran's static archive is not position independent on Ubuntu and a system without LAPACK rarely has the shared one. The smoke test hides the system's libraries in a user and mount namespace and runs `solve()`.
+
 ## Reference Class and R6 method bodies resolve object members in naming
 
 - **Before.** A file that called `R6Class` accepted `self`, `private` and `super` anywhere in it
