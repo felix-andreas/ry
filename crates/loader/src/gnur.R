@@ -123,7 +123,7 @@
 
 # GNU R's methods package looks classes and generics up in C that offers no hook to run held
 # back definitions from, so they always run at load.
-.ry_may_defer_s4 <- function(state, deferred) FALSE
+.ry_s4_eager_reason <- function(state, deferred) "GNU R runs S4 definitions at load"
 
 # GNU R builds compiled code with its own toolchain, through pkgbuild as `devtools::load_all`
 # does.

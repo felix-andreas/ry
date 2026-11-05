@@ -12,7 +12,7 @@ use {
         hir::Symbol,
         item_naming, item_spans,
         metadata::{
-            Call, NamespaceSpec, call_parts, description_field, parse_description_depends,
+            Call, CallArgument, NamespaceSpec, call_parts, description_field, parse_description_depends,
             parse_namespace_spec, string_content,
         },
         parse,
@@ -834,7 +834,15 @@ fn registrations(node: &SyntaxNode) -> Vec<Registration> {
     else {
         return Vec::new();
     };
+    // The S4 functions match their arguments as R does. Other callees take a name, then the
+    // unnamed arguments in order.
+    let matched = s4_formals(&callee)
+        .map(|formals| (formals, match_arguments(&arguments, formals)));
     let argument = |position: usize, name: &str| -> Option<&SyntaxNode> {
+        if let Some((formals, matched)) = &matched {
+            let index = formals.iter().position(|formal| *formal == name)?;
+            return matched.as_ref()?.get(index).copied().flatten();
+        }
         arguments
             .iter()
             .find(|argument| argument.name.as_deref() == Some(name))
@@ -849,8 +857,11 @@ fn registrations(node: &SyntaxNode) -> Vec<Registration> {
     let string_argument =
         |position: usize, name: &str| argument(position, name).and_then(string_literal);
     let registration = match callee.as_str() {
-        "setClass" | "setRefClass" | "setClassUnion" => {
+        "setClass" | "setRefClass" => {
             string_argument(0, "Class").map(|class| Registration::S4Class { class })
+        }
+        "setClassUnion" => {
+            string_argument(0, "name").map(|class| Registration::S4Class { class })
         }
         "setGeneric" => {
             string_argument(0, "name").map(|generic| Registration::S4Generic { generic })
@@ -911,6 +922,108 @@ fn registrations(node: &SyntaxNode) -> Vec<Registration> {
     registration.into_iter().collect()
 }
 
+/// The formal arguments of the methods package's definition functions, up to the first `...`.
+/// `setReplaceMethod(f, ...)` passes its other arguments on to `setMethod()`, which matches them.
+fn s4_formals(callee: &str) -> Option<&'static [&'static str]> {
+    Some(match callee {
+        "setClass" => &[
+            "Class",
+            "representation",
+            "prototype",
+            "contains",
+            "validity",
+            "access",
+            "where",
+            "version",
+            "sealed",
+            "package",
+            "S3methods",
+            "slots",
+        ],
+        "setRefClass" => &["Class", "fields", "contains", "methods", "where", "inheritPackage"],
+        "setGeneric" => &[
+            "name",
+            "def",
+            "where",
+            "package",
+            "valueClass",
+            "useAsDefault",
+            "genericFunction",
+            "simpleInheritanceOnly",
+            "signature",
+        ],
+        "setMethod" | "setReplaceMethod" => &[
+            "f",
+            "signature",
+            "definition",
+            "where",
+            "valueClass",
+            "sealed",
+        ],
+        "setValidity" => &["Class", "method", "where"],
+        "setClassUnion" => &["name", "members", "where"],
+        "setAs" => &["from", "to", "def", "replace", "where"],
+        _ => return None,
+    })
+}
+
+/// R's argument matching for a call to a function with `formals`: exact names first, then
+/// unique partial names, then the unnamed arguments in order. `None` where R signals an error,
+/// for an argument that matches no formal or more than one, or a formal matched twice.
+fn match_arguments<'a>(
+    arguments: &'a [CallArgument],
+    formals: &[&str],
+) -> Option<Vec<Option<&'a SyntaxNode>>> {
+    let mut matched: Vec<Option<&SyntaxNode>> = vec![None; formals.len()];
+    let mut used = vec![false; arguments.len()];
+    for (index, argument) in arguments.iter().enumerate() {
+        let Some(name) = argument.name.as_deref() else {
+            continue;
+        };
+        if let Some(formal) = formals.iter().position(|formal| *formal == name) {
+            if matched[formal].is_some() {
+                return None;
+            }
+            matched[formal] = Some(&argument.value);
+            used[index] = true;
+        }
+    }
+    let exact: Vec<bool> = matched.iter().map(Option::is_some).collect();
+    for (index, argument) in arguments.iter().enumerate() {
+        let Some(name) = argument.name.as_deref() else {
+            continue;
+        };
+        if used[index] {
+            continue;
+        }
+        let mut candidates =
+            (0..formals.len()).filter(|&formal| !exact[formal] && formals[formal].starts_with(name));
+        let (Some(formal), None) = (candidates.next(), candidates.next()) else {
+            return None;
+        };
+        if matched[formal].is_some() {
+            return None;
+        }
+        matched[formal] = Some(&argument.value);
+        used[index] = true;
+    }
+    let free: Vec<usize> = (0..formals.len())
+        .filter(|&formal| matched[formal].is_none())
+        .collect();
+    let mut free = free.into_iter();
+    let positional: Vec<usize> = arguments
+        .iter()
+        .enumerate()
+        .filter(|(index, argument)| argument.name.is_none() && !used[*index])
+        .map(|(index, _)| index)
+        .collect();
+    for index in positional {
+        let formal = free.next()?;
+        matched[formal] = Some(&arguments[index].value);
+    }
+    Some(matched)
+}
+
 /// The [`S4Definition`] `node` is, if it has that shape.
 fn s4_definition(node: &SyntaxNode) -> Option<S4Definition> {
     let (call, generator) = match binding_definition(node) {
@@ -920,35 +1033,28 @@ fn s4_definition(node: &SyntaxNode) -> Option<S4Definition> {
     let Call {
         callee, arguments, ..
     } = call_parts(&call)?;
-    let argument = |position: usize, name: &str| -> Option<&SyntaxNode> {
-        arguments
-            .iter()
-            .find(|argument| argument.name.as_deref() == Some(name))
-            .or_else(|| {
-                arguments
-                    .iter()
-                    .filter(|argument| argument.name.is_none())
-                    .nth(position)
-            })
-            .map(|argument| &argument.value)
-    };
-    let string_argument =
-        |position: usize, name: &str| argument(position, name).and_then(string_literal);
     if generator && callee != "setClass" {
         return None;
     }
+    let formals = s4_formals(&callee)?;
+    let matched = match_arguments(&arguments, formals)?;
+    let argument = |name: &str| -> Option<&SyntaxNode> {
+        let index = formals.iter().position(|formal| *formal == name)?;
+        matched.get(index).copied().flatten()
+    };
+    let string_argument = |name: &str| argument(name).and_then(string_literal);
     match callee.as_str() {
         "setClass" => Some(S4Definition::Class {
-            class: string_argument(0, "Class")?,
+            class: string_argument("Class")?,
         }),
         "setGeneric" => {
-            let generic = string_argument(0, "name")?;
-            (argument(1, "def")?.kind() == SyntaxKind::FUNCTION_DEF)
+            let generic = string_argument("name")?;
+            (argument("def")?.kind() == SyntaxKind::FUNCTION_DEF)
                 .then_some(S4Definition::Generic { generic })
         }
         "setMethod" | "setReplaceMethod" => {
-            let generic = string_argument(0, "f")?;
-            let signature = argument(1, "signature")?;
+            let generic = string_argument("f")?;
+            let signature = argument("signature")?;
             let signature = match string_literal(signature) {
                 Some(class) => vec![(None, class)],
                 None => {
@@ -972,10 +1078,10 @@ fn s4_definition(node: &SyntaxNode) -> Option<S4Definition> {
             Some(S4Definition::Method { generic, signature })
         }
         "setValidity" => Some(S4Definition::Validity {
-            class: string_argument(0, "Class")?,
+            class: string_argument("Class")?,
         }),
         "setClassUnion" => {
-            let members = argument(1, "members")?;
+            let members = argument("members")?;
             let members = match string_literal(members) {
                 Some(member) => vec![member],
                 None => {
@@ -990,16 +1096,16 @@ fn s4_definition(node: &SyntaxNode) -> Option<S4Definition> {
                 }
             };
             Some(S4Definition::Union {
-                class: string_argument(0, "name")?,
+                class: string_argument("name")?,
                 members,
             })
         }
         "setAs" => {
-            argument(2, "def")?;
+            argument("def")?;
             Some(S4Definition::Coerce {
-                from: string_argument(0, "from")?,
-                to: string_argument(1, "to")?,
-                replace: argument(3, "replace").is_some(),
+                from: string_argument("from")?,
+                to: string_argument("to")?,
+                replace: argument("replace").is_some(),
             })
         }
         _ => None,
