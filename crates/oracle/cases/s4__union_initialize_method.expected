@@ -1,0 +1,17 @@
+[stdout]
+| [1] "none"
+| package initialize for classRepresentation 
+| package initialize for ClassUnionRepresentation 
+| package initialize for classRepresentation 
+| [1] "MethodWithNext"
+| attr(,"package")
+| [1] "methods"
+| package initialize for ClassUnionRepresentation 
+| package initialize for classRepresentation 
+| [1] "NULL"  "A"     ".NULL" "B"     "C"    
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("NULL", "A", ".NULL", "B", "C")
