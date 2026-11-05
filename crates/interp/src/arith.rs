@@ -221,6 +221,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     .unary(|operand| unsafe {
         if operand.kind() != SexpType::Logical
             || operand.is_altrep()
+            || operand.is_array()
             || operand.length() != 1
             || operand.attrib() != nil()
         {
@@ -300,6 +301,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
                 operand.kind(),
                 SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::String
             ) || operand.is_altrep()
+                || operand.is_array()
                 || operand.length() != 1
                 || operand.attrib() != nil()
             {

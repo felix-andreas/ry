@@ -147,6 +147,9 @@ pub unsafe fn register_native_entries(namespace: Sexp) -> R<()> {
             continue;
         }
         function.set_gp_bits(gp::NATIVE_ENTRY, true);
+        // The registry matches by identity, so the closure must outlive any reassignment of its
+        // binding: a collected closure's address could be reused by a copy that carries the mark.
+        crate::heap().preserve(function);
         interp().native_entries.push((function, entry));
     }
     if bundled && !missed.is_empty() {
