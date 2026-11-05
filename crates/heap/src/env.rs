@@ -280,6 +280,29 @@ impl Frame {
         }
     }
 
+    /// [`Frame::insert`] for a fresh function frame's formals, which [`Frame::write_empty`] made
+    /// with room for them: the frame has no index or table yet, and a formal list longer than
+    /// [`INDEX_THRESHOLD`] takes the general path. Only duplicate formals bind a symbol twice,
+    /// and they are rare, so the duplicate scan runs only when a symbol's filter bit is
+    /// already set.
+    pub(crate) fn insert_formals(&mut self, cells: &[Sexp], symbols: impl Iterator<Item = Sexp>) {
+        if self.index.is_some() || self.table.is_some() || cells.len() > INDEX_THRESHOLD {
+            for (symbol, &cell) in symbols.zip(cells) {
+                self.insert(symbol, cell);
+            }
+            return;
+        }
+        for (symbol, &cell) in symbols.zip(cells) {
+            let bit = filter_bit(symbol);
+            if self.filter & bit != 0 && self.bindings.iter().any(|binding| binding.symbol == symbol)
+            {
+                self.formals |= SHADOWED;
+            }
+            self.filter |= bit;
+            self.bindings.push(Binding { symbol, cell });
+        }
+    }
+
     /// Counts a binding of `symbol` held only for the length of one operation, as GNU R's
     /// complex assignment binds `*tmp*`, in the table that orders a hashed frame.
     pub(crate) fn count_transient(&mut self, symbol: Sexp) {

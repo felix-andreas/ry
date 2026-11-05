@@ -1466,6 +1466,26 @@ impl Heap {
         self.untracked.push(object);
     }
 
+    /// Stores the value a forced promise settled on and drops its environment, as `set_car`
+    /// and `set_tag` would with one barrier check: the environment is replaced by the immortal
+    /// `nil`, which needs no count or barrier.
+    pub unsafe fn settle_promise(&mut self, promise: Sexp, value: Sexp) {
+        if promise.flags() & flag_bits::UNTRACKED == 0 {
+            value.increment_refcount();
+            let old = promise.car();
+            if old.release_reference() {
+                self.note_zero(old);
+            }
+            let env = promise.tag();
+            if env.release_reference() {
+                self.note_zero(env);
+            }
+        }
+        self.write_barrier(promise, value);
+        promise.set_car_unbarriered(value);
+        promise.set_tag_unbarriered(self.known.nil);
+    }
+
     pub unsafe fn set_car(&mut self, cell: Sexp, value: Sexp) {
         self.store(cell, cell.car(), value);
         cell.set_car_unbarriered(value);
@@ -1706,8 +1726,8 @@ impl Heap {
     ) -> HeapResult<()> {
         debug_assert!(env.has_gp(gp::FUNCTION_FRAME));
         let nil = self.known.nil;
-        let frame = &mut *env.frame_ptr();
-        let mut first = true;
+        let mut cells: SmallVec<[Sexp; 12]> = SmallVec::with_capacity(bindings.len());
+        // `nil` is immortal, so the spare slot needs no count.
         for binding in bindings {
             let cell = self.allocate_uncollected(SexpType::Binding, TRIPLE_BYTES, 0)?;
             cell.set_car_unbarriered(binding.symbol);
@@ -1715,18 +1735,17 @@ impl Heap {
             cell.set_tag_unbarriered(nil);
             binding.symbol.increment_refcount();
             binding.value.increment_refcount();
-            nil.increment_refcount();
             if binding.missing {
                 cell.set_gp_bits(gp::BINDING_MISSING, true);
             }
-            frame.insert(binding.symbol, cell);
-            // A collection may have made `env` old since it was allocated, and the cells are
-            // all young, so the first cell's barrier check covers every one, including when a
-            // later allocation fails and leaves the cells before it in the frame.
-            if first {
-                self.write_barrier(env, cell);
-                first = false;
-            }
+            cells.push(cell);
+        }
+        // A collection may have made `env` old since it was allocated, and the cells are all
+        // young, so one barrier check covers every one. A failed allocation leaves no cell in
+        // the frame, and the cells made before it are garbage.
+        if let Some(&first) = cells.first() {
+            (*env.frame_ptr()).insert_formals(&cells, bindings.iter().map(|binding| binding.symbol));
+            self.write_barrier(env, first);
         }
         Ok(())
     }

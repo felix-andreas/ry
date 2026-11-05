@@ -306,6 +306,9 @@ pub struct Interp {
     /// Evaluation depth, for `expressions` and the C stack check.
     pub depth: u32,
     pub max_depth: u32,
+    /// The lowest address of the stack segment the interpreter runs on, or 0 before the first
+    /// closure call learns it (see `eval::on_large_stack`).
+    pub stack_floor: usize,
     /// Process start, for `proc.time`.
     pub started: std::time::Instant,
     /// `commandArgs()`.
@@ -442,6 +445,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         connections: connection_table,
         depth: 0,
         max_depth: 5000,
+        stack_floor: 0,
         started: std::time::Instant::now(),
         command_args: Vec::new(),
         interactive: false,

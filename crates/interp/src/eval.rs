@@ -382,9 +382,7 @@ pub unsafe fn settle_promise(promise: Sexp, mut value: Sexp) -> R<Sexp> {
     if promise.has_gp(gp::CHECKED_PROMISE) {
         value = crate::annotations::check_forced(promise, value)?;
     }
-    let heap = crate::heap();
-    heap.set_car(promise, value);
-    heap.set_tag(promise, nil());
+    crate::heap().settle_promise(promise, value);
     Ok(value)
 }
 
@@ -1300,7 +1298,7 @@ pub unsafe fn run_closure(
     }
     let result = signature.map(|signature| {
         let result = scope(|| {
-            stacker::maybe_grow(128 * 1024, 4 * 1024 * 1024, || {
+            on_large_stack(|| {
                 let body = function.cdr();
                 bytecode::run_body(function, body, env)
             })
@@ -1340,6 +1338,55 @@ pub unsafe fn run_closure(
     }
     state.frame_closures.truncate(closures);
     result
+}
+
+/// The stack a closure body may use before the interpreter moves to a fresh segment.
+const STACK_RED_ZONE: usize = 128 * 1024;
+const STACK_SEGMENT: usize = 4 * 1024 * 1024;
+
+/// Runs `body` with at least [`STACK_RED_ZONE`] of stack left, moving to a fresh segment when
+/// less is left, as `stacker::maybe_grow` does. Asking `stacker` reads thread-local state on
+/// every closure call, so the floor of the segment in use is kept in the interpreter and the
+/// stack pointer compared against it, and `stacker` runs only near the floor. A segment
+/// `stacker` allocates lies anywhere in memory, so its floor replaces the old one while the
+/// body runs on it.
+#[inline(always)]
+fn on_large_stack<T>(body: impl FnOnce() -> T) -> T {
+    let marker = 0u8;
+    let pointer = std::ptr::addr_of!(marker) as usize;
+    let floor = interp().stack_floor;
+    if floor != 0 && pointer.wrapping_sub(floor) > 2 * STACK_RED_ZONE {
+        return body();
+    }
+    on_large_stack_slow(body)
+}
+
+#[inline(never)]
+fn on_large_stack_slow<T>(body: impl FnOnce() -> T) -> T {
+    // An R error unwinds through here, so the floor of the caller's segment is restored by a
+    // guard: a stale floor from a freed segment would let the fast path skip the check.
+    struct RestoreFloor(usize);
+    impl Drop for RestoreFloor {
+        fn drop(&mut self) {
+            interp().stack_floor = self.0;
+        }
+    }
+    let floor = || {
+        let marker = 0u8;
+        let pointer = std::ptr::addr_of!(marker) as usize;
+        stacker::remaining_stack().map(|remaining| (pointer.saturating_sub(remaining), remaining))
+    };
+    let _restore = RestoreFloor(interp().stack_floor);
+    match floor() {
+        Some((floor, remaining)) if remaining >= STACK_RED_ZONE => {
+            interp().stack_floor = floor;
+            body()
+        }
+        _ => stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, || {
+            interp().stack_floor = floor().map_or(0, |(floor, _)| floor);
+            body()
+        }),
+    }
 }
 
 /// With object systems turned off, a call that defines a class (`setClass`, `setRefClass`,
