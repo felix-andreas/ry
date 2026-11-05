@@ -99,7 +99,7 @@ Context: 0.4.2-beta is published (Linux only; Linux is tier 1, macOS and Windows
 | session_0111kWqBqyKbio71yRiq3xcG (typed language) | WIP on feat/climb-speed-baseline | paused until after the release |
 | session_0111kWqCm1CEW7RN3igU6Tzk (top CRAN, draft #312) | top-100 run; future and ggplot2 loess gaps in backlog.md | done, unmerged |
 
-Scheduled tasks: session babysit trig_01LuX97P7ZbAg4TRxYu7c1tu (minute 11) is on; the goal reread trig_01AqDtgjMPTkniw7hzX4x4d1 and the dry-run reminder trig_01SHeL8HM3b3p3DHgS7MJF9c are paused to save budget.
+Scheduled tasks: the hourly check-in trig_01LuX97P7ZbAg4TRxYu7c1tu (minute 27) drives the step-2 mandate and disables itself when step 2 is done; the goal reread trig_01AqDtgjMPTkniw7hzX4x4d1 and the dry-run reminder trig_01SHeL8HM3b3p3DHgS7MJF9c stay paused.
 
 Later: a worker saw `f <- function(x) x + 1; f('a')` with `double` annotations pass `ry check` with no problem (annotation form not recorded; check whether it should be flagged); `/usr/lib/R/library` from /etc/R/Renviron missing from `.libPaths()`; about 20 stale remote branches (check test/top-cran-packages and perf/old-generations first; leave feat/runtime-stats and runtime-packages-round4 alone); the log_rank typed regression is unverified; CRAN itself is unreachable, but the user's CRAN clone https://rrepo.org works (client: github.com/scalerail-solutions/rpx).
 
