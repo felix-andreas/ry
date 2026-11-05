@@ -323,7 +323,8 @@ impl Frame {
 
     /// Drops the removed slots, keeping the live bindings in insertion order.
     fn compact(&mut self) {
-        let formals = self.bindings[..((self.formals & !SHADOWED) as usize).min(self.bindings.len())]
+        let formals = self.bindings
+            [..((self.formals & !SHADOWED) as usize).min(self.bindings.len())]
             .iter()
             .filter(|binding| binding.symbol != REMOVED)
             .count();

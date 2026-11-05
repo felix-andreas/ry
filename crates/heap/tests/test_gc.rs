@@ -1522,3 +1522,41 @@ fn heap_growth_follows_gnu_r_variables() {
         need + 640_000
     );
 }
+
+/// A namespace load tenures what the session keeps, so while one runs the small-object heap
+/// may fill twice as far before a minor collection escalates, and when it ends the limit is
+/// re-based on what it kept instead of the next collection retracing all of it.
+#[test]
+fn a_namespace_load_defers_major_collections_until_it_ends() {
+    let majors = |loading: bool| unsafe {
+        let mut heap = Heap::new();
+        let count: usize = 1_500_000;
+        let kept = heap
+            .alloc_vector(SexpType::List, count as isize)
+            .expect("alloc");
+        heap.add_global_root(kept);
+        if loading {
+            heap.enter_namespace_load();
+        }
+        for slot in 0..count {
+            let element = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            heap.set_element(kept, slot, element);
+        }
+        let during = heap.stats().major_collections;
+        if loading {
+            heap.leave_namespace_load();
+        }
+        // Garbage after the load: the re-based limit keeps it to minor collections.
+        for _ in 0..count {
+            heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        }
+        (during, heap.stats().major_collections)
+    };
+    let (during, after) = majors(false);
+    assert!(
+        during > 0,
+        "the plain run never escalated, so it tests nothing"
+    );
+    assert!(after >= during);
+    assert_eq!(majors(true), (0, 0));
+}

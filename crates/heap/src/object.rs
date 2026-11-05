@@ -349,6 +349,9 @@ pub mod gp {
     pub const CLOSURE_STEP: u16 = 1 << 14;
     /// A closure `trace()` flagged, GNU R's `RTRACE`.
     pub const CLOSURE_TRACE: u16 = 1 << 13;
+    /// Base R's `loadNamespace`, whose calls the collector treats as a namespace load
+    /// (`Heap::enter_namespace_load`).
+    pub const NAMESPACE_LOADER: u16 = 1 << 11;
 }
 
 pub(crate) mod gc_bits {

@@ -12,7 +12,7 @@ use {
         values::{self, base_env, base_namespace, global_env, length, nil},
         write_console,
     },
-    heap::object::{Sexp, SexpType},
+    heap::object::{Sexp, SexpType, gp},
     std::{cell::RefCell, rc::Rc},
 };
 
@@ -207,6 +207,7 @@ unsafe fn start_slowly(
     }
     source_file(&format!("{home}/library/base/R/base"), base_namespace())?;
     crate::base_fast_paths::install_all(base_namespace())?;
+    mark_namespace_loader()?;
     install_register_s3_methods()?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
     eval_text(".OptRequireMethods()", global_env())?;
@@ -225,6 +226,16 @@ unsafe fn start_slowly(
     conditions::print_warnings()?;
     crate::profile_summary::mark_ready();
     Ok(warned)
+}
+
+/// Flags base R's `loadNamespace` so the collector knows when a namespace load runs. A load
+/// allocates mostly what the session keeps, so collecting during it frees little.
+unsafe fn mark_namespace_loader() -> R<()> {
+    let loader = eval::find_fun(values::install("loadNamespace")?, base_namespace())?;
+    if loader.kind() == SexpType::Closure {
+        loader.set_gp_bits(gp::NAMESPACE_LOADER, true);
+    }
+    Ok(())
 }
 
 /// GNU R 4.6.2's `registerS3methods()`, as [`stable_hash`] of its formals and body. Setting
