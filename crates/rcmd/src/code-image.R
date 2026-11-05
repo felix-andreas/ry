@@ -21,11 +21,13 @@ for (name in ls(namespace, all.names = TRUE)) {
 # Runs each file in a fresh environment with its output discarded. A file that fails stops only
 # itself: training gathers feedback, it does not check the package.
 run_quietly <- function(files, chdir) {
-    sink(nullfile())
-    sink(nullfile(), type = "message")
+    discard <- file(nullfile(), open = "w")
+    sink(discard)
+    sink(discard, type = "message")
     on.exit({
         sink(type = "message")
         sink()
+        close(discard)
     })
     for (file in files) {
         environment <- new.env(parent = globalenv())

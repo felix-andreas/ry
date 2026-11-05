@@ -1,0 +1,54 @@
+# A user installs their package with a training run. The install writes the compiled code of
+# every closure beside the package's lazy-load database, so a new session runs the package's
+# functions compiled from their first call, and a function that ran hot in training enters the
+# optimizing tier at its first call.
+
+requires ry-runtime
+
+file pkg/DESCRIPTION
+| Package: tally
+| Version: 1.0.0
+| Title: Sums numbers
+| Description: A small package to compile at install.
+| License: MIT
+file pkg/NAMESPACE
+| export(tally, twice)
+file pkg/R/tally.R
+| tally <- function(values) {
+|     total <- 0
+|     for (value in values) total <- total + value
+|     total
+| }
+| twice <- function(x, label = "x") {
+|     helper <- function(y) y * 2
+|     paste(label, helper(x))
+| }
+file train.R
+| for (i in 1:3000) tally(1:50)
+
+run ry install pkg -l library --train train.R
+expect exit 0
+expect stdout "code image: closures=2 written=2"
+
+file use.R
+| library(tally, lib.loc = "library")
+| print(twice)
+| print(twice(4))
+| print(tally(1:10))
+
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "<bytecode>"
+expect stdout "[1] \"x 8\""
+expect stdout "[1] 55"
+
+env RY_JIT_LOG 1
+run ry run --runtime ry use.R
+expect exit 0
+expect stderr "jit: compiled { total <- 0"
+
+env RY_CODE_IMAGE 0
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout lacks "<bytecode>"
+expect stdout "[1] 55"
