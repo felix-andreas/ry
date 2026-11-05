@@ -7851,3 +7851,18 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Target shape.** One mid-level SSA IR. Typed facts enter it unguarded; untyped speculations, taken from training-run profiles or run-time feedback, carry guards and deoptimization exits. Install-time code for untyped R goes through the typed AOT pipeline in `typed-runtime.md` (the same `ry install` step and code file: position-independent, mapped read-only, a per-process table, build and interface stamps, written by rename; the same Cranelift backend; no code cache). The code file stores the deoptimization metadata and the bindings each function watches, so `unlockBinding` and `assignInNamespace` invalidate install-time code exactly as they invalidate JIT code. The run-time JIT stays for fallbacks and new profiles, which is why `prior-art.md` rejects compiling every fallback at build time.
 - **When.** The IRs merge in the first change that builds either the install-time images or the baseline tier.
 - **Impact.** One source of truth for the instruction semantics and the lowering (correctness), one pass pipeline instead of two (simplicity), and typed facts that remove guards from untyped code that calls typed code (performance). Analysis is unaffected: the IR is runtime build output, never a salsa input.
+
+## Single-thread first, parallel-ready architecture (user directive)
+
+- **Scope.** Performance work targets one thread. The parallel runtime (thread pool, atomic counts, parallel GC) is deferred, and the roadmap row for automatic parallelism is "deferred, architecture-ready".
+- **The effect-free fact.** One stored per-function body fact in the function summary says whether calling the function has effects. Untyped code gets it from bytecode at compile time and at install time; strict and locked typed code gets it statically. Promise elision for effect-free arguments reads it today, and the parallel apply family reads the same fact later. There is no second computation of it.
+- **Invariants that keep parallelism possible**, to hold while the call path and heap are redesigned:
+  - interpreter and allocation state live in an explicit context passed through calls, not in globals or scattered thread-locals;
+  - allocation goes through a per-context bump buffer;
+  - GC safepoints are polled at allocation and at loop back edges;
+  - the reference-count field leaves room for a "shared across threads" mark, so only marked objects switch to atomic counts (as in Lean 4);
+  - inline caches and type feedback change only through monotonic state transitions, so a concurrent reader always sees a valid state;
+  - the symbol and CHARSXP tables can be read concurrently;
+  - warnings, conditions and the RNG stream are collected per task and merge in a deterministic order.
+- **Package native code stays single-threaded by contract**, because packages assume R's C API is. A parallel task may run only ry-owned code: R-level code, builtins, and ry's own ports (nmath, fft, loess and the rest of base and stats).
+- **Known gaps against the invariants:** `interp()` and `heap()` are process globals today (`crates/interp/src/interp.rs`); tier 0 caches the `Interp` pointer per activation, which is the first step toward a passed context.
