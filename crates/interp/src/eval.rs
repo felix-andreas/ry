@@ -515,7 +515,10 @@ unsafe fn call_builtin_reusing(
         || PROFILE_TICK.load(Ordering::Relaxed)
         || (checks.arity && args.len() != definition.arity as usize)
         || (checks.names && args.iter().any(|arg| arg.tag != nil()))
-        || (checks.replacement && args.first().is_some_and(|target| target.value.refcount() >= 1))
+        || (checks.replacement
+            && args
+                .first()
+                .is_some_and(|target| target.value.refcount() >= 1))
     {
         return call_builtin_checked(definition, call, op, args, env, reusable);
     }
@@ -968,8 +971,7 @@ unsafe fn closure_args_into<const MODE: u8>(
             };
             let value = if let Some(value) = eager {
                 value
-            } else if expression == missing_arg() || (MODE != PROMISES && constant)
-            {
+            } else if expression == missing_arg() || (MODE != PROMISES && constant) {
                 expression
             } else if expression.kind() == SexpType::Bytecode {
                 compiled_promise(expression, env)?
@@ -1500,7 +1502,12 @@ unsafe fn match_args_cached(function: Sexp, formals: Sexp, args: &[Arg], call: S
             .enumerate()
             .all(|(index, arg)| entry.element(index + 2) == arg.tag)
     {
-        let plan: Plan = entry.element(1).slice::<i32>().iter().map(|&formal| formal as u32).collect();
+        let plan: Plan = entry
+            .element(1)
+            .slice::<i32>()
+            .iter()
+            .map(|&formal| formal as u32)
+            .collect();
         return matched_from_plan(formals, args, &plan);
     }
     let plan = match_plan(formals, args, call)?;

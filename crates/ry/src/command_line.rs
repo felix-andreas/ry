@@ -158,6 +158,11 @@ pub enum Command {
         /// Print R code that defines `load_all()` for a plain R session, then exit
         #[arg(long, default_value_t = false, conflicts_with_all = ["emit_plan", "expressions", "file"])]
         r_entry: bool,
+        /// Write a summary of where the load and the code after it spent their time to FILE
+        /// when the session ends. The summary holds no source code, identifiers or data, so it
+        /// is safe to share
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["emit_plan", "r_entry"])]
+        profile_summary: Option<PathBuf>,
     },
     /// Run a package's testthat tests against the package loaded from source, lazily
     ///
@@ -181,6 +186,11 @@ pub enum Command {
         /// `gnu-r` runs on GNU R instead of ry's runtime
         #[arg(long, value_enum, hide = true)]
         runtime: Option<Runtime>,
+        /// Write a summary of where the load and the tests spent their time to FILE when the
+        /// session ends. The summary holds no source code, identifiers or data, so it is safe to
+        /// share
+        #[arg(long, value_name = "FILE", conflicts_with = "watch")]
+        profile_summary: Option<PathBuf>,
     },
     /// Generate a package's documentation with roxygen2, as `devtools::document()` does
     ///
