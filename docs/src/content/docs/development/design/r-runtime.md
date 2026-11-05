@@ -723,7 +723,7 @@ that changes it. `prior-art.md` gives the reasoning behind each source engine's 
 
 The gaps come from `ry run --profile-summary` on the nine `just bench-real` workloads (JIT on: tier-0
 instructions 23 to 44% of the time, closure call setup 12 to 24%, builtins about 25%, S3 method
-lookup up to 17%) and from callgrind on `seq(1, 10, by = 2)`, which costs 135.0k instructions per
+lookup up to 17%) and from callgrind on `seq(1, 10, by = 2)`, which costs 121.4k instructions per
 call on ry (JIT off, down from 141.6k when this table started) and about 106k on GNU R 4.3.3. A
 plain closure call, `f(x, y = 2) x + y` called from a loop, costs 3,968 instructions on ry and
 4,602 on GNU R; timed as the median of 9 interleaved runs of 3 million calls, it takes 0.445 µs
@@ -734,6 +734,70 @@ and jumping) costs about 11k instructions per call, about 13 per op over about 8
 154 guards, 95 variable reads, 75 constants and 69 builtin calls. Of the rest, `pmin()` costs
 55.9k on ry against 43.5k on GNU R, mostly in the `vapply()` it calls. No single step-2 row closes
 a gap that size, so shrinking the op count and the cost per op (step 3) comes forward.
+
+**Target.** Untyped R with the JIT on runs at 10 times GNU R's speed on one thread, measured as the
+geometric mean over the `just bench-real` workloads and over the package corpus
+(`just bench-packages`). The milestones are 1.5x and then 3x. Today the workloads run at 0.9x
+(`results.json`) and the corpus at 1.06x (22 packages whose tests pass on both engines). Parallelism
+is deferred: the architecture keeps it possible (`decisions.md`, "Single-thread first"), but the
+target does not count on it.
+
+**Where the time goes.** `ry run --profile-summary` splits a run into the buckets below. R code is
+everything the evaluator does for R-level code: tier-0 instructions, closure call setup, lookups,
+S3 and S4 dispatch, condition handling and tier-1 code. Native code is split by owner: ry's own
+ports of base and recommended code (nmath, fft and the rest of `stats`) are ry's to speed up, while
+third-party CRAN C code is fixed on one thread, because packages assume R's C API is
+single-threaded. I/O is the file and connection builtins, and waiting is `Sys.sleep` and waits on
+child processes (`processx`). Shares are of one run with the JIT on.
+
+| Workload | R code | builtins | native, ry ports | native, CRAN | GC | I/O | waiting | start-up |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| conditions | 72% | 20% | 0% | 0% | 5% | 0% | 0% | 3% |
+| functional | 64% | 21% | 0% | 3% | 10% | 0% | 0% | 2% |
+| objects | 66% | 26% | 0% | 0% | 6% | 0% | 0% | 2% |
+| records | 55% | 31% | 0% | 0% | 11% | 0% | 0% | 3% |
+| simulation | 3% | 51% | 40% (`stats`) | 0% | 2% | 0% | 0% | 4% |
+| strings | 62% | 30% | 0% | 1% | 4% | 0% | 0% | 2% |
+| tables | 53% | 27% | 4% | 9% (`data.table`) | 2% | 0% | 0% | 5% |
+| timeseries | 59% | 24% | 0% | 13% (`xts`) | 3% | 0% | 0% | 1% |
+| validation | 71% | 24% | 0% | 0% | 3% | 0% | 0% | 2% |
+| **workload mean** | **56%** | **28%** | **5%** | **3%** | **5%** | **0%** | **0%** | **3%** |
+| **corpus mean** (26 packages) | **27%** | **18%** | **0%** | **2%** | **4%** | **27%** | **10%** | **12%** |
+
+The corpus differs in kind. Its I/O is mostly `unlink`: testthat removes a temporary directory
+around each test, and `rmdir` takes 1 to 4 ms on the measuring machine's ext4 volume, for GNU R as
+much as for ry (94 s over the corpus). Its waiting is `rlang` and `purrr` (about 90% each) and
+`foreach` (68%) waiting on child R processes. Start-up dominates the smallest suites (`abind` 74%,
+`zoo` 81%). The builtins that take the most time are `attributes`, `.Call`, `c`, `vapply`, `[[`,
+`forceAndCall`, `[<-` and `<-` on the workloads, and `as.POSIXlt`, `[[`, `c`, `[`,
+`lazyLoadDBfetch` and `match` on the corpus.
+
+**The arithmetic.** Speeding each bucket up by the factor below, with CRAN native code, I/O and
+waiting fixed, gives these geometric means over GNU R (Amdahl's law per workload, starting from
+today's ratio):
+
+| Plan | R code | builtins | ry ports | GC, start-up | workloads | corpus |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1.5x milestone | 2x | 1.5x | 1x | 1x | 1.43x | 1.31x |
+| corpus 1.5x | 3x | 2x | 1x | 2x | | 1.60x |
+| 3x milestone | 5x | 3x | 3x | 2x | 3.08x | 1.79x |
+| 10x target | 30x | 10x | 10x | 10x | 10.96x | 2.58x |
+| ceiling: only the fixed buckets left | | | | | `tables` 8.9x, `timeseries` 8.1x | 3.50x |
+
+So 10x on the workloads is reachable on one thread: R code needs about 30x (tier 1 for most of it,
+row (c) below) and builtins about 10x (row (a)). `tables` and `timeseries` stop near 9x and 8x
+because of `data.table`'s and `xts`'s C code, and the geometric mean carries them. On the corpus the
+single-thread ceiling on this machine is 3.5x, because I/O and child-process waits take 37% of its
+time and cost GNU R the same. Two things move that ceiling: child processes that run ry speed up
+with it (callr starts `R.home()`'s R; which engine the corpus's children run is unverified), and
+I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone needs one of them.
+
+| Target row | Status | What it needs |
+| --- | --- | --- |
+| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | planned | builtins from 28% (workloads) and 18% (corpus) to 10x faster; the top of the ranking above first |
+| (b) Automatic parallelism for effect-free apply-family calls and long element-wise operations, deterministic, with bit-identical reductions | deferred, architecture-ready | the effect-free fact per function and the invariants in `decisions.md`; package native code stays single-threaded |
+| (c) Tier-1 compilation of most R-level time | planned | R code from 56% (workloads) to 30x faster; tier 1 today runs under 3% of the time on eight of nine workloads |
+| (d) Native code shrinks only through ry-native replacements or parallelism | planned | ry's own ports (`stats`: 40% of `simulation`) are ry's to speed up; third-party C stays: `data.table` and `xts` on the workloads, `data.table` and `rlang` on the corpus |
 
 | Idea | Source engine | Status | Measured gap it targets | Code |
 | --- | --- | --- | --- | --- |
