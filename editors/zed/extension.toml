@@ -1,6 +1,6 @@
 id = "ry"
 name = "ry"
-version = "0.4.2"
+version = "0.4.3"
 schema_version = 1
 authors = ["Felix Andreas"]
 description = "A type checker and a fast runtime for R, written in Rust."

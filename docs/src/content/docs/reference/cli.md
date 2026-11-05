@@ -402,7 +402,7 @@ a `2`.
 `ry check`, `ry fmt` and `ry server` run no R. The other commands except `ry R` run on ry's runtime,
 which needs base R (the R code of the base and default packages):
 
-- **Built in.** The 0.4.2-beta Linux release and a build from source carry base R 4.6.2 inside `ry` and extracts it into
+- **Built in.** The 0.4.3-beta Linux release and a build from source carry base R 4.6.2 inside `ry` and extracts it into
   `~/.cache/ry/base/` on first use, once per release. `R.version`, `getRversion()` and `R.home()`
   then describe that copy. The 0.4.1-beta release does not have it and needs `R_HOME` or a GNU R on
   `PATH`.
