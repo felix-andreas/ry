@@ -552,6 +552,41 @@ fn a_dropped_large_vector_is_freed_at_the_next_large_allocation() {
     }
 }
 
+/// `gc()`'s "max used" is the most vector cells live at once. A vector that survived a collection
+/// and is then released apart from one must leave the live count, or a loop that makes and drops
+/// one such vector per iteration reports the sum of all of them.
+#[test]
+fn released_old_vectors_leave_the_peak_at_one_vector() {
+    let mut heap = Heap::new();
+    unsafe {
+        heap.collect(Collection::Major);
+        heap.reset_max_usage();
+        let baseline = heap.stats().live_vector_cells;
+        let list = heap.alloc_vector(SexpType::List, 1).expect("alloc");
+        heap.add_global_root(list);
+        let nil = heap.nil();
+        for round in 0..20 {
+            let mark = heap.handle_mark();
+            let vector = big_vector(&mut heap, round as f64);
+            heap.root(vector);
+            heap.set_element(list, 0, vector);
+            heap.release_handles(mark);
+            heap.collect(Collection::Minor);
+            heap.set_element(list, 0, nil);
+            // The next large allocation reconciles, which frees the dead old vector.
+            big_vector(&mut heap, -1.0);
+        }
+        heap.collect(Collection::Minor);
+        let one_vector = BIG as u64;
+        let peak = heap.stats().max_vector_cells - baseline;
+        assert!(heap.stats().vectors_released >= 19);
+        assert!(
+            peak < 3 * one_vector,
+            "max used is {peak} cells, but at most two vectors of {one_vector} cells were live"
+        );
+    }
+}
+
 #[test]
 fn a_dead_list_gives_up_its_large_elements() {
     let mut heap = Heap::new();
