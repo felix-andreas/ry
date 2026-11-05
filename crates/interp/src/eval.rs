@@ -17,7 +17,7 @@ use {
         unwind::{Jump, R, Unwind, error, error_in, jump},
         utils::{PROFILE_TICK, record_profile_sample},
         values::{
-            self, alloc, cons_tagged, length, missing_arg, new_env, nil, symbol_name, symbols,
+            self, alloc, cons_tagged, length, missing_arg, nil, symbol_name, symbols,
             triple, unbound,
         },
     },
@@ -3089,15 +3089,23 @@ unsafe fn do_make_lazy(call: &Call<'_>) -> R<Sexp> {
     let expression = call.arg(2);
     let eval_env = call.arg(3);
     let assign_env = call.arg(4);
-    let key_symbol = values::install("key")?;
+    // As in GNU R, each promise's code is a copy of `expression` with its first argument
+    // replaced by the variable's key, and every promise shares `eval_env`, so `PRCODE` reads
+    // `lazyLoadDBfetch(c(offset, length), datafile, compressed, envhook)`.
     for index in 0..length(names) {
-        let symbol = values::install(&values::string_at(names, index).unwrap_or_default())?;
-        let key = crate::subset::vector_element(keys, index)?;
-        let expression_copy = values::duplicate(expression)?;
-        let env = new_env(eval_env)?;
-        crate::heap().define(env, key_symbol, key)?;
-        let promise = make_promise(expression_copy, env)?;
-        define(symbol, promise, assign_env)?;
+        crate::scope(|| {
+            let symbol = values::install(&values::string_at(names, index).unwrap_or_default())?;
+            let key = eval(crate::subset::vector_element(keys, index)?, eval_env)?;
+            crate::heap().root(key);
+            let expression_copy = values::duplicate(expression)?;
+            let arguments = expression_copy.cdr();
+            if expression_copy.kind() != SexpType::Language || arguments.kind() != SexpType::Pairlist {
+                return Err(call.error("invalid lazy-load expression"));
+            }
+            crate::heap().set_car(arguments, key);
+            let promise = make_promise(expression_copy, eval_env)?;
+            define(symbol, promise, assign_env)
+        })?;
     }
     Ok(nil())
 }

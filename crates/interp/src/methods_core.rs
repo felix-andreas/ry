@@ -991,10 +991,6 @@ unsafe fn basic_classes<'a>() -> R<Vec<&'a [u8]>> {
         .collect())
 }
 
-/// The value bound to `symbol` in `frame` when getting it runs no code and cannot fail: a plain
-/// value, a forced promise, or a promise of a constant or of a variable bound to such a value,
-/// which is forced as the R code would force it. `None` for anything else, a missing argument
-/// included.
 /// Whether `value` is an unforced promise of `lazyLoadDBfetch()`, the binding a lazy-loaded
 /// namespace or its imports hold until first use.
 unsafe fn is_lazy_load_promise(value: Sexp) -> R<bool> {
@@ -1004,6 +1000,10 @@ unsafe fn is_lazy_load_promise(value: Sexp) -> R<bool> {
         && value.cdr().car() == install("lazyLoadDBfetch")?)
 }
 
+/// The value bound to `symbol` in `frame` when getting it runs no code and cannot fail: a plain
+/// value, a forced promise, or a promise of a constant or of a variable bound to such a value,
+/// which is forced as the R code would force it. `None` for anything else, a missing argument
+/// included.
 unsafe fn quiet_value(symbol: Sexp, frame: Sexp) -> R<Option<Sexp>> {
     match crate::heap().frame_cell(frame, symbol) {
         Some(cell) => quiet_binding(cell, 0),

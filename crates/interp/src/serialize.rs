@@ -8,7 +8,7 @@ use {
         connections::Rconnection,
         eval,
         unwind::{R, error},
-        values::{self, alloc, length, nil, symbols},
+        values::{self, alloc, length, nil, symbols, unbound},
     },
     flate2::{Decompress, FlushDecompress, Status, read::ZlibDecoder},
     heap::{
@@ -81,35 +81,53 @@ enum Input<'a> {
 }
 
 impl Reader<'_> {
+    /// The next `count` bytes. Records read from a lazy-load database or a raw vector are
+    /// slices, and reading them is most of what loading a package does, so that case is inlined
+    /// and a connection goes through [`Reader::take_connection`].
+    #[inline(always)]
     fn take(&mut self, count: usize) -> R<&[u8]> {
         match &mut self.input {
             Input::Slice { bytes, position } => {
-                let end = position
-                    .checked_add(count)
-                    .filter(|&end| end <= bytes.len())
-                    .ok_or_else(|| error("ReadItem: unexpected end of serialized data"))?;
-                let slice = &bytes[*position..end];
-                *position = end;
-                Ok(slice)
-            }
-            Input::Connection { con, buffer } => {
-                // The buffer grows a block at a time, so a corrupt length runs into the end of
-                // the input instead of allocating it all at once.
-                const BLOCK: usize = 1 << 20;
-                buffer.clear();
-                while buffer.len() < count {
-                    let start = buffer.len();
-                    let step = (count - start).min(BLOCK);
-                    buffer.resize(start + step, 0);
-                    // SAFETY: the connection stays open while the reader runs.
-                    if unsafe { crate::connections::read_all(*con, &mut buffer[start..])? } != step
-                    {
-                        return Err(error("error reading from connection"));
+                let start = *position;
+                match start.checked_add(count).and_then(|end| bytes.get(start..end)) {
+                    Some(slice) => {
+                        *position = start + count;
+                        Ok(slice)
                     }
+                    None => Err(error("ReadItem: unexpected end of serialized data")),
                 }
-                Ok(buffer)
+            }
+            Input::Connection { .. } => self.take_connection(count),
+        }
+    }
+
+    #[inline(always)]
+    fn take_array<const N: usize>(&mut self) -> R<[u8; N]> {
+        let bytes = self.take(N)?;
+        let mut array = [0u8; N];
+        array.copy_from_slice(bytes);
+        Ok(array)
+    }
+
+    #[inline(never)]
+    fn take_connection(&mut self, count: usize) -> R<&[u8]> {
+        let Input::Connection { con, buffer } = &mut self.input else {
+            return Err(error("ReadItem: unexpected end of serialized data"));
+        };
+        // The buffer grows a block at a time, so a corrupt length runs into the end of the
+        // input instead of allocating it all at once.
+        const BLOCK: usize = 1 << 20;
+        buffer.clear();
+        while buffer.len() < count {
+            let start = buffer.len();
+            let step = (count - start).min(BLOCK);
+            buffer.resize(start + step, 0);
+            // SAFETY: the connection stays open while the reader runs.
+            if unsafe { crate::connections::read_all(*con, &mut buffer[start..])? } != step {
+                return Err(error("error reading from connection"));
             }
         }
+        Ok(buffer)
     }
 
     fn next_byte(&mut self) -> R<Option<u8>> {
@@ -149,58 +167,52 @@ impl Reader<'_> {
         Ok(String::from_utf8_lossy(&word).into_owned())
     }
 
+    #[inline(always)]
     fn integer(&mut self) -> R<i32> {
         match self.format {
-            Format::Xdr => {
-                let bytes = self.take(4)?;
-                Ok(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-            }
-            Format::Binary => {
-                let bytes = self.take(4)?;
-                Ok(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-            }
-            Format::Ascii => {
-                let word = self.ascii_word()?;
-                if word == "NA" {
-                    return Ok(i32::MIN);
-                }
-                word.parse().map_err(|_| error("read error"))
-            }
+            Format::Xdr => Ok(i32::from_be_bytes(self.take_array()?)),
+            Format::Binary => Ok(i32::from_le_bytes(self.take_array()?)),
+            Format::Ascii => self.ascii_integer(),
         }
     }
 
+    #[inline(never)]
+    fn ascii_integer(&mut self) -> R<i32> {
+        let word = self.ascii_word()?;
+        if word == "NA" {
+            return Ok(i32::MIN);
+        }
+        word.parse().map_err(|_| error("read error"))
+    }
+
+    #[inline(always)]
     fn real(&mut self) -> R<f64> {
         match self.format {
-            Format::Xdr => {
-                let bytes = self.take(8)?;
-                let mut array = [0u8; 8];
-                array.copy_from_slice(bytes);
-                Ok(f64::from_be_bytes(array))
-            }
-            Format::Binary => {
-                let bytes = self.take(8)?;
-                let mut array = [0u8; 8];
-                array.copy_from_slice(bytes);
-                Ok(f64::from_le_bytes(array))
-            }
-            Format::Ascii => {
-                let word = self.ascii_word()?;
-                Ok(match word.as_str() {
-                    "NA" => values::na_real(),
-                    "NaN" => f64::NAN,
-                    "Inf" => f64::INFINITY,
-                    "-Inf" => f64::NEG_INFINITY,
-                    _ => word.parse().map_err(|_| error("read error"))?,
-                })
-            }
+            Format::Xdr => Ok(f64::from_be_bytes(self.take_array()?)),
+            Format::Binary => Ok(f64::from_le_bytes(self.take_array()?)),
+            Format::Ascii => self.ascii_real(),
         }
     }
 
-    fn string(&mut self, length: usize) -> R<Vec<u8>> {
+    #[inline(never)]
+    fn ascii_real(&mut self) -> R<f64> {
+        let word = self.ascii_word()?;
+        Ok(match word.as_str() {
+            "NA" => values::na_real(),
+            "NaN" => f64::NAN,
+            "Inf" => f64::INFINITY,
+            "-Inf" => f64::NEG_INFINITY,
+            _ => word.parse().map_err(|_| error("read error"))?,
+        })
+    }
+
+    /// The next `length` bytes of a string, unescaped in an ASCII stream. Binary streams lend
+    /// the bytes from the input, so reading a string copies it only into its `CHARSXP`.
+    fn string(&mut self, length: usize) -> R<std::borrow::Cow<'_, [u8]>> {
         if self.format == Format::Ascii {
-            return self.ascii_string(length);
+            return Ok(std::borrow::Cow::Owned(self.ascii_string(length)?));
         }
-        Ok(self.take(length)?.to_vec())
+        Ok(std::borrow::Cow::Borrowed(self.take(length)?))
     }
 
     /// An escaped ASCII string of `length` bytes. Reading stops at the last byte, so the
@@ -298,20 +310,39 @@ impl Reader<'_> {
 
     unsafe fn item(&mut self) -> R<Sexp> {
         let flags = self.integer()? as u32;
+        self.item_with(flags)
+    }
+
+    /// One cell of a pairlist, call or `...` list, without its cdr. The cell is not rooted: the
+    /// caller links it into a rooted list before anything else allocates.
+    unsafe fn cell(&mut self, kind: SexpType, flags: u32) -> R<Sexp> {
+        let attributes = if flags & HAS_ATTR != 0 { self.item()? } else { nil() };
+        let tag = if flags & HAS_TAG != 0 { self.item()? } else { nil() };
+        let car = self.item()?;
+        let heap = crate::heap();
+        let cell = heap.alloc_triple(kind, car, nil(), tag)?;
+        if attributes != nil() {
+            heap.set_attrib(cell, attributes);
+        }
+        cell.set_object(flags & IS_OBJECT != 0);
+        cell.set_gp((flags >> 12) as u16);
+        Ok(cell)
+    }
+
+    unsafe fn item_with(&mut self, flags: u32) -> R<Sexp> {
         let kind = flags & 0xFF;
         let levels = (flags >> 12) as u16;
         let is_object = flags & IS_OBJECT != 0;
         let has_attributes = flags & HAS_ATTR != 0;
         let has_tag = flags & HAS_TAG != 0;
-        let known = *crate::heap().known();
         match kind {
-            NILVALUE_SXP => return Ok(known.nil),
-            EMPTYENV_SXP => return Ok(known.empty_env),
-            BASEENV_SXP => return Ok(known.base_env),
-            GLOBALENV_SXP => return Ok(known.global_env),
-            UNBOUNDVALUE_SXP => return Ok(known.unbound),
-            MISSINGARG_SXP => return Ok(known.missing_arg),
-            BASENAMESPACE_SXP => return Ok(known.base_namespace),
+            NILVALUE_SXP => return Ok(crate::heap().known().nil),
+            EMPTYENV_SXP => return Ok(crate::heap().known().empty_env),
+            BASEENV_SXP => return Ok(crate::heap().known().base_env),
+            GLOBALENV_SXP => return Ok(crate::heap().known().global_env),
+            UNBOUNDVALUE_SXP => return Ok(crate::heap().known().unbound),
+            MISSINGARG_SXP => return Ok(crate::heap().known().missing_arg),
+            BASENAMESPACE_SXP => return Ok(crate::heap().known().base_namespace),
             REFSXP => {
                 let mut index = (flags >> 8) as usize;
                 if index == 0 {
@@ -376,7 +407,7 @@ impl Reader<'_> {
             }
             4 => {
                 let locked = self.integer()? != 0;
-                let env = values::new_env(known.empty_env)?;
+                let env = values::new_env(crate::heap().known().empty_env)?;
                 self.add_reference(env);
                 let enclosure = self.item()?;
                 let frame = self.item()?;
@@ -404,26 +435,16 @@ impl Reader<'_> {
                 }
                 return Ok(env);
             }
-            2 | 6 | 3 | 5 | 17 => {
+            3 | 5 => {
                 let attributes = if has_attributes { self.item()? } else { nil() };
                 let tag = if has_tag { self.item()? } else { nil() };
                 let car = self.item()?;
-                let cdr = self.item()?;
-                let object_kind = match kind {
-                    2 => SexpType::Pairlist,
-                    6 => SexpType::Language,
-                    3 => SexpType::Closure,
-                    5 => SexpType::Promise,
-                    _ => SexpType::Dots,
-                };
-                let (car, cdr) = if matches!(object_kind, SexpType::Closure | SexpType::Promise) {
-                    (car, bytecode_expression(cdr))
+                let cdr = bytecode_expression(self.item()?);
+                let object_kind = if kind == 3 {
+                    SexpType::Closure
                 } else {
-                    (car, cdr)
+                    SexpType::Promise
                 };
-                if matches!(object_kind, SexpType::Pairlist | SexpType::Language) {
-                    argument_cells(cdr)?;
-                }
                 let object = values::triple(object_kind, car, cdr, tag)?;
                 if attributes != nil() {
                     crate::heap().set_attrib(object, attributes);
@@ -431,6 +452,31 @@ impl Reader<'_> {
                 object.set_object(is_object);
                 object.set_gp(levels);
                 return Ok(object);
+            }
+            2 | 6 | 17 => {
+                let object_kind = match kind {
+                    2 => SexpType::Pairlist,
+                    6 => SexpType::Language,
+                    _ => SexpType::Dots,
+                };
+                let head = self.cell(object_kind, flags)?;
+                crate::heap().root(head);
+                // The rest of a list is read in a loop rather than by recursing on each cdr, so a
+                // long argument list or frame costs no stack. Each cell is linked into the rooted
+                // head as soon as it exists.
+                let mut last = head;
+                loop {
+                    let flags = self.integer()? as u32;
+                    if flags & 0xFF != 2 {
+                        let rest = self.item_with(flags)?;
+                        argument_cells(rest)?;
+                        crate::heap().set_cdr(last, rest);
+                        return Ok(head);
+                    }
+                    let cell = self.cell(SexpType::Pairlist, flags)?;
+                    crate::heap().set_cdr(last, cell);
+                    last = cell;
+                }
             }
             22 => {
                 let pointer =
@@ -451,8 +497,7 @@ impl Reader<'_> {
             }
             7 | 8 => {
                 let count = self.count()?;
-                let name = self.string(count)?;
-                let name = String::from_utf8_lossy(&name).into_owned();
+                let name = String::from_utf8_lossy(&self.string(count)?).into_owned();
                 let primitive = crate::builtins::primitive(&name)
                     .or_else(|| {
                         let symbol = values::install(&name).ok()?;
@@ -466,11 +511,10 @@ impl Reader<'_> {
             9 => {
                 let count = self.integer()?;
                 if count == -1 {
-                    return Ok(known.na_string);
+                    return Ok(crate::heap().known().na_string);
                 }
                 let count = usize::try_from(count)
                     .map_err(|_| error("negative length vectors are not allowed"))?;
-                let bytes = self.string(count)?;
                 let encoding = if levels & gp::UTF8 != 0 {
                     Encoding::Utf8
                 } else if levels & gp::LATIN1 != 0 {
@@ -480,7 +524,7 @@ impl Reader<'_> {
                 } else {
                     Encoding::Native
                 };
-                return values::mkchar_bytes(&bytes, encoding);
+                return values::mkchar_bytes(&self.string(count)?, encoding);
             }
             21 => {
                 let reps_count = self.integer()? as usize;
@@ -589,8 +633,8 @@ impl Reader<'_> {
                             u8::from_str_radix(&word, 16).unwrap_or(0);
                     }
                 } else {
-                    let bytes = self.take(count)?.to_vec();
-                    values::raws_mut(vector).copy_from_slice(&bytes);
+                    let bytes = self.take(count)?;
+                    values::raws_mut(vector).copy_from_slice(bytes);
                 }
                 vector
             }
@@ -1050,34 +1094,90 @@ fn inflate_into(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
 
 /// `lazyLoadDBfetch(key, file, compressed, hook)`.
 unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
-    let key = call.arg(0);
     let file = values::require_string(call.arg(1), "file")?;
-    let compressed = values::as_integer_scalar(call.arg(2));
-    let hook = call.arg(3);
-    let offset = crate::subset::numeric_element(key, 0) as usize;
-    let size = crate::subset::numeric_element(key, 1) as usize;
-    let cache = file_cache();
-    if !cache.contains_key(&file) {
-        let bytes = std::fs::read(&file)
-            .map_err(|failure| error(format!("cannot open file '{file}': {failure}")))?;
-        cache.insert(file.clone(), bytes);
-    }
-    let bytes = &cache[&file];
-    let record = bytes
-        .get(offset..offset + size)
-        .ok_or_else(|| error("lazy-load database is corrupt"))?;
-    // The record is decoded (or copied) out of the cached file before `unserialize` runs, because
-    // its refhook can fetch from another database and so insert into the cache.
-    let data = if compressed != 0 {
-        decompress_record(record, compressed)?
-    } else {
-        record.to_vec()
-    };
-    let value = unserialize(&data, hook)?;
+    let data = lazy_record(call.arg(0), &file, values::as_integer_scalar(call.arg(2)))?;
+    let value = unserialize(&data, call.arg(3))?;
     if value.kind() == SexpType::Promise {
         return eval::force_promise(value);
     }
     Ok(value)
+}
+
+/// The serialized stream of the record at `key` (offset and length) of the lazy-load database
+/// `file`. It is decoded (or copied) out of the cached file, because unserializing it can run a
+/// refhook that fetches from another database and so inserts into the cache.
+unsafe fn lazy_record(key: Sexp, file: &str, compressed: i32) -> R<Vec<u8>> {
+    let offset = crate::subset::numeric_element(key, 0) as usize;
+    let size = crate::subset::numeric_element(key, 1) as usize;
+    let cache = file_cache();
+    if !cache.contains_key(file) {
+        let bytes = std::fs::read(file)
+            .map_err(|failure| error(format!("cannot open file '{file}': {failure}")))?;
+        cache.insert(file.to_owned(), bytes);
+    }
+    let record = cache[file]
+        .get(offset..offset.saturating_add(size))
+        .ok_or_else(|| error("lazy-load database is corrupt"))?;
+    if compressed != 0 {
+        decompress_record(record, compressed)
+    } else {
+        Ok(record.to_vec())
+    }
+}
+
+/// The object a lazy-load promise (`lazyLoadDBfetch(key, datafile, compressed, envhook)` as
+/// `makeLazy` builds it) would fetch, described by its kind and header flags without reading
+/// it into the heap: `Some((kind, is_object, levels))`. `None` when `promise` is not such a
+/// promise, is forced, or names its database in a way that would need evaluating code.
+pub unsafe fn lazy_record_header(promise: Sexp) -> R<Option<(u32, bool, u16)>> {
+    if promise.kind() != SexpType::Promise || promise.car() != unbound() {
+        return Ok(None);
+    }
+    let code = promise.cdr();
+    if code.kind() != SexpType::Language || code.car() != values::install("lazyLoadDBfetch")? {
+        return Ok(None);
+    }
+    let arguments = values::pairlist_items(code.cdr());
+    let [(_, key), (_, file), (_, compressed), _] = arguments[..] else {
+        return Ok(None);
+    };
+    let env = promise.tag();
+    let plain = |argument: Sexp| -> R<Option<Sexp>> {
+        if argument.kind() != SexpType::Symbol {
+            return Ok(Some(argument));
+        }
+        let value = eval::find_var(argument, env)?;
+        Ok((value.kind() != SexpType::Promise && value != unbound()).then_some(value))
+    };
+    let (Some(file), Some(compressed)) = (plain(file)?, plain(compressed)?) else {
+        return Ok(None);
+    };
+    if !matches!(key.kind(), SexpType::Real | SexpType::Integer)
+        || length(key) != 2
+        || file.kind() != SexpType::String
+        || length(file) != 1
+    {
+        return Ok(None);
+    }
+    let file = values::require_string(file, "file")?;
+    let data = lazy_record(key, &file, values::as_integer_scalar(compressed))?;
+    let (format, skip) = match data.get(..2) {
+        Some(b"X\n") => (Format::Xdr, 2),
+        Some(b"B\n") => (Format::Binary, 2),
+        _ => return Ok(None),
+    };
+    let mut reader = Reader {
+        input: Input::Slice {
+            bytes: &data,
+            position: skip,
+        },
+        format,
+        references: Vec::new(),
+        hook: nil(),
+    };
+    read_header(&mut reader)?;
+    let flags = reader.integer()? as u32;
+    Ok(Some((flags & 0xFF, flags & IS_OBJECT != 0, (flags >> 12) as u16)))
 }
 
 unsafe fn do_unserialize_from_conn(call: &Call<'_>) -> R<Sexp> {

@@ -1519,13 +1519,27 @@ unsafe fn do_import_into_env(call: &Call<'_>) -> R<Sexp> {
 /// `methods::is(f, "genericFunction")`, called only for a value that is an object at all, since
 /// `is()` answers `FALSE` for every other one.
 unsafe fn do_local_s4_generics(call: &Call<'_>) -> R<Sexp> {
+    /// The serialization type code of a closure (`CLOSXP`).
+    const CLOSURE_RECORD: u32 = 3;
     let names = call.arg(0);
     let env = environment_arg(call.arg(1), "env")?;
     let is_generic = call.arg(2);
     let mut generic = Vec::with_capacity(length(names));
     for index in 0..length(names) {
         let symbol = values::install_charsxp(names.element(index))?;
-        let value = value_of(find_var(symbol, env)?)?;
+        let binding = find_var(symbol, env)?;
+        // A generic still in its lazy-load database whose record is a closure without a class
+        // or the S4 bit cannot be an S4 generic, so registering methods for it leaves it
+        // unfetched until something calls it.
+        if let Some((kind, is_object, levels)) = crate::serialize::lazy_record_header(binding)?
+            && kind == CLOSURE_RECORD
+            && !is_object
+            && levels & gp::S4_OBJECT == 0
+        {
+            generic.push(0);
+            continue;
+        }
+        let value = value_of(binding)?;
         if value == unbound() {
             return Err(call.error(format!("object '{}' not found", symbol_name(symbol))));
         }
