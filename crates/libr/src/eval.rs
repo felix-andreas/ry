@@ -1226,6 +1226,7 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
         user_profile: false,
         interactive: false,
         image: None,
+        build: env!("RY_RUNTIME_ID"),
     };
     match interp::session::start(options) {
         Ok(()) => 0,
@@ -1393,6 +1394,7 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
         user_profile: flags & RUN_FLAG_USER_PROFILE != 0,
         interactive: false,
         image: Some(IMAGE_HOST),
+        build: env!("RY_RUNTIME_ID"),
     };
     if let Err(unwind) = interp::session::start(options) {
         interp::session::report_toplevel(unwind);
@@ -1611,6 +1613,7 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         user_profile: true,
         interactive: true,
         image: Some(IMAGE_HOST),
+        build: env!("RY_RUNTIME_ID"),
     };
     if let Err(unwind) = interp::session::start(options) {
         interp::session::report_toplevel(unwind);

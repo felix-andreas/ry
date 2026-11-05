@@ -7827,10 +7827,72 @@ Each one trades a narrow class of missed errors for a class of false reports see
   stamped with the ry build; a different build ignores the stamp and compiles at first call. Base R
   is compiled into a section of the base image keyed by the runtime hash (`base-image.md`). `ry
   load` and scripts compile at first call, so that tier must be cheap. `r-runtime.md`, "Where
-  bytecode comes from", is the spec. Not implemented yet: the bytecode format changes with the
-  call-path redesign (`development/design/call-path.md`), so its on-disk form waits for that.
+  bytecode comes from", is the spec. Installed packages are implemented as code images
+  (below); the base image's code section is not.
 - **Impact.** One source of truth (the package's R code plus the install output derived from it),
-  no invalidation logic, and no hashing at load.
+  and no invalidation logic.
+
+## Code images: compiled code beside the lazy-load database
+
+- **Shape.** `R CMD INSTALL` writes `R/<pkg>.ryc` beside `R/<pkg>.rdb` (`crates/interp/src/code_image.rs`,
+  driver `crates/rcmd/src/code-image.R`). A fresh session records every fetch from the package's
+  databases (`ryCodeImageRecord`), loads the namespace, forces every binding, optionally trains
+  (`--ry-train=tests|examples|<script>`, `ry install --train`), and compiles and writes each recorded
+  closure (`ryCodeImageWrite`). A failure warns and leaves the package without an image.
+- **Identity without a second key.** A closure is named by its record's database offset plus the
+  order the stream reader creates closures (`serialize::unserialize_with_closures`), which depends
+  on the record bytes alone. The image stores each record's length and FNV-1a hash and the database
+  length, so a database rewritten by another install (GNU R's, or a different version) is ignored
+  record by record; the hash is computed only for databases that have an image.
+- **No second copy of the source.** A code object is encoded against its closure's body: every
+  language object the code points at is written as its preorder number in the body
+  (`serialize::walk_source`). Nested function bodies are compiled eagerly at install
+  (`bytecode::compile_nested_functions`) so their code is in the image too.
+- **Decoded where compiling would happen, not at the fetch.** A fetch notes where each closure's
+  code lies (`code_image::State::pending`, keyed by body, the body preserved so its address cannot
+  be reused) and `bytecode::run_body` decodes it at the call that would compile the body. Decoding
+  every fetched closure cost 2% more instructions on `library()` of twelve CRAN packages, because
+  a namespace fetches many closures it never calls (every registered S3 method); decoding at the
+  first call still cost more than it saved, because decoding costs about what compiling does
+  (about 65k instructions per closure) and many closures run once. Untrained tier-0 code is
+  therefore not a speedup; the image's value is the trained profile and the reserved native
+  section.
+- **Stamp.** The runtime identity (`RY_RUNTIME_ID`, passed in `StartOptions::build`) and a layout
+  magic; any other build reads the image as absent, quietly.
+- **Pending code is keyed by body and checked against formals.** The compiler's output depends on
+  formals (`local_symbols`, `effects::summarize`, `tail_updates`, the missing-subscript path), and
+  `formals<-`/`as.function` share the body, so each pending entry also preserves the fetched
+  closure's formals and `take_pending` hands code only to a closure with those formals. Keying by
+  closure would miss `environment<-` copies, which are safe to share.
+- **A damaged image only costs its speedup.** An unreadable or unparsable file, a payload hash
+  mismatch, a record whose closures do not match, or code the decoder rejects warns once
+  (`code_image::give_up`), marks the database as having no image, and drops its pending code, so
+  the package loads and compiles as it runs. An earlier shape raised an error that made the
+  package unloadable and was retried at every fetch.
+- **Decoded code is verified, not trusted.** Tier 0 indexes operands, registers, caches and jump
+  targets unchecked, and FNV-1a only detects accidents, so `bytecode::verify` checks every decoded
+  object linearly (opcodes, per-role operand bounds, instruction-start bitset for targets, no
+  fall-through at the end, side-table lengths, switch-table shape). Record ops carry process-local
+  layout ids and are refused by the encoder; Field/Item shape caches are written empty; constant
+  gp bits are masked to the S4 bit. `fuzz_code_image_load` runs mutated-but-rehashed payloads;
+  without the verifier it crashes within 20 seeds. Residual trust: register dataflow (guarded at
+  run time where cheap) and the JIT, which assumes compiler-shaped code.
+- **Lifetime and writing.** `lazyLoadDBflush` (called by `unloadNamespace`) drops the image and its
+  pending entries. Images are written to `.ryc.partial`, fsynced, renamed; never rewritten in place,
+  because a mapped file that shrinks raises SIGBUS in the process mapping it.
+- **Training.** A trained image keeps each code object's PROFILE counters, inline-cache hints and
+  FEEDBACK words; TIER1 decodes as nil. Persisted entry counts at or above the tier-up threshold make a hot body enter the
+  optimizing tier at its first call in a new process. TIER1 code and inline caches are not saved:
+  the first is process-local machine code, the second holds heap pointers.
+- **Native code.** The image reserves an offset/length pair for install-time native code, written
+  as zeros. Filling it waits for the shared SSA IR of `crates/jit` and `crates/typed`
+  (`backlog.md`, "Install-time native code").
+- `RY_CODE_IMAGE=0` ignores images at load; `--ry-no-code-image` skips writing one.
+- **Measured** (callgrind, whole process): `library()` of R6, magrittr, glue, rlang, lifecycle,
+  cli, vctrs, purrr, assertthat, zoo, jsonlite and digest is 1,201.9M instructions with images
+  and 1,200.7M without; a first-result script over rlang, purrr, vctrs, glue and cli 1,323.8M
+  against 1,321.9M. A trained image of a loop-heavy function saves its warm-up (12M of the 76M a
+  200-call workload adds to an empty run), a constant that does not grow with the run.
 
 ## Vectors grow in place into spare capacity
 

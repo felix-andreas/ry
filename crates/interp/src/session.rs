@@ -34,6 +34,9 @@ pub struct StartOptions {
     /// Lets a start that [`crate::image::applies`] to load the start-up image of its R home;
     /// `None` always starts the slow way.
     pub image: Option<crate::image::ImageHost>,
+    /// The runtime build's identity, which stamps the code images an install writes and picks
+    /// the ones a load reads (`crate::code_image`); empty turns code images off.
+    pub build: &'static str,
 }
 
 /// Starts the session. Errors here are fatal: base R did not load.
@@ -41,6 +44,7 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     crate::profile_summary::start_from_environment();
     interp().command_args = options.command_args;
     interp().interactive = options.interactive;
+    interp().code_image.build = options.build;
     prepare_process();
     let home = crate::system::r_home();
     let site_profile = options.site_profile.then(site_profile_path).flatten();

@@ -560,13 +560,75 @@ Bytecode is build output, never a cache, so nothing checks whether a stored copy
 - **Installed packages.** `ry install` and `R CMD INSTALL` compile every closure of the package and
   write the bytecode beside its lazy-load database, stamped with the ry build that wrote it. A
   different ry build ignores a stamp it did not write and compiles at first call instead, which is
-  always correct; reinstalling refreshes it.
+  always correct; reinstalling refreshes it. This is the code image, described below.
 - **Base R.** The base and recommended packages are compiled when the base image is built and live
   in a section of the image beside the heap arenas, keyed by the same runtime hash that keys the
   image (`base-image.md`).
 - **Code under development.** `ry load` and scripts compile each closure at its first call. That
   first tier must be cheap enough that compiling a session's working set costs less than reading a
   cache would, which is the bar `ry load`'s lazy loading sets.
+
+### Code images of installed packages
+
+`R CMD INSTALL` writes `R/<package>.ryc` beside `R/<package>.rdb` (`crates/interp/src/code_image.rs`).
+After the R code is installed, a fresh session loads the namespace, fetches every binding from the
+lazy-load database, and compiles each closure the fetches made, nested function bodies included.
+When a later session fetches the same record, it notes where each closure's code lies in the image,
+and the call that would compile the closure (its second, or its first when the body has a loop)
+decodes that code instead. Decoding costs about as much as compiling, so the image does not move
+compilation earlier: a namespace fetches many closures it never calls, such as every S3 method it
+registers, and calls many others only once. What the image adds is what compiling cannot produce,
+the trained profile below, and the native code it reserves room for.
+
+- **Identity.** A record is identified by its offset in the database, its length and an FNV-1a hash
+  of its stored bytes; a closure within the record by the order the stream reader creates closures.
+  An image written for other bytes (a reinstall by GNU R, another version) is ignored record by
+  record. Only databases that have an image pay for the hash.
+- **No copy of the source.** A code object points into its closure's body, so the image stores those
+  pointers as the preorder position of the object in the body. The body itself comes from the
+  database, as without an image.
+- **Stamp.** The file starts with a layout magic and the runtime build's identity; any other build
+  reads the image as absent and compiles at the second call as usual.
+- **Formals.** The compiler's output depends on the closure's formals as well as its body (which
+  names the frame can bind, which call updates its first parameter in place), and `formals<-` or
+  `as.function` makes a closure that shares a fetched body under other formals. Each noted closure
+  therefore keeps its formals, and only a closure with those same formals takes the code; any
+  other compiles its own.
+- **Damage.** The image only saves compiling, so a damaged one never stops a package from loading.
+  A file that cannot be read or parsed, a payload whose hash does not match (checked when the first
+  closure of its record is called), a record whose closures do not match the database's, or code
+  the decoder rejects each warn once (`cannot use the code image ..., so its functions compile as
+  they run; reinstall the package to repair it`). The image is then ignored for the rest of the
+  session, and its waiting code is dropped.
+- **Verified code.** Tier 0 reads instruction operands, registers, inline-cache slots and jump
+  targets without bounds checks, so decoded code passes a linear verifier (`verify` in
+  `crates/interp/src/bytecode.rs`) before it runs: every opcode is known, every operand is below its
+  table's size, every jump lands on an instruction start, the last instruction cannot fall through,
+  and the side tables (loops, feedback, hints, profile) have the lengths the code implies. The
+  payload hash is FNV-1a, which catches damage but not a crafted file, so the verifier is what keeps
+  a bad image from reading out of bounds. It checks tier 0's assumptions only: an instruction's
+  register dataflow is guarded at run time where that is cheap, and the optimizing tier trusts the
+  shape the compiler produces. Record instructions carry process-local layout ids, so code that
+  holds one is not written, and field and item shape caches are written empty. The decoder also
+  keeps only the object bits the encoder can write (the S4 bit) of each constant.
+- **Lifetime.** Waiting code holds its body, its formals and the mapped file. `lazyLoadDBflush`,
+  which `unloadNamespace` calls, drops all three for its database.
+- **Writing.** The image is written to `R/<package>.ryc.partial`, synced to disk, and renamed over
+  the old image, so a crash leaves the old image or the new one. It is never rewritten in place: a
+  process that maps the old file would see its pages change under it, or die with `SIGBUS` once
+  the file shrank. A failed write removes the staging file.
+- **Off switches.** `RY_CODE_IMAGE=0` ignores images when loading; `R CMD INSTALL
+  --ry-no-code-image` writes none. A failure while writing an image warns and installs the package
+  without one.
+- **Native code.** The file reserves an offset and length for install-time native code, both 0 today.
+  The end shape compiles untyped bodies through the same SSA IR and AOT pipeline the typed core uses
+  ("One SSA IR and one install-time pipeline" in `decisions.md`); it lands once tier 1 and the typed
+  core share that IR, and fills the reserved section with position-independent code mapped
+  read-only, as `typed-runtime.md` describes for the code file.
+
+The image is uncompressed and about six times the size of the compressed database (MASS: 706 KB
+against 120 KB). It is mapped, not read, so a session pays only for the pages of the records it
+fetches.
 
 ### Tiers
 

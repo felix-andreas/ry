@@ -308,6 +308,7 @@ pub(crate) unsafe fn install_all() {
         crate::system::BUILTINS,
         crate::lower::BUILTINS,
         crate::bytecode::BUILTINS,
+        crate::code_image::BUILTINS,
         crate::session::BUILTINS,
         crate::native::BUILTINS,
         crate::utils::BUILTINS,
