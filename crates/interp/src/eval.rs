@@ -2734,26 +2734,77 @@ unsafe fn do_nargs(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
     let count = values::as_integer_scalar(eval(call.arg(0), call.env)?).max(0) as usize;
     let function = eval(call.arg(1), call.env)?;
-    let rest = values::pairlist(
-        &call.args[2..]
-            .iter()
-            .map(|arg| (arg.tag, arg.value))
-            .collect::<Vec<_>>(),
-        SexpType::Pairlist,
-    )?;
+    let heap = crate::heap();
+    heap.root(function);
+    // The callee's arguments are the call's own cells after `n` and `FUN` whenever the special
+    // received them unchanged, which is every call written in source, so `Reduce` and the
+    // apply family pay no pairlist per call. GNU R conses the same tail into one new call.
+    let rest = match call_tail(call.call, &call.args[2..]) {
+        Some(rest) => rest,
+        None => values::pairlist(
+            &call.args[2..]
+                .iter()
+                .map(|arg| (arg.tag, arg.value))
+                .collect::<SmallVec<[(Sexp, Sexp); 8]>>(),
+            SexpType::Pairlist,
+        )?,
+    };
+    heap.root(rest);
     let inner_call = values::lcons(call.arg(1), rest)?;
+    heap.root(inner_call);
     match function.kind() {
         SexpType::Closure => {
-            let args = promise_args(rest, call.env)?;
+            let mut args = Args::new();
+            // As for a compiled call (see `op_call_generic`): a variable passes its value, or
+            // the caller's own promise for it, when no argument can assign and neither the
+            // callee nor a handler can look at the promise before it is forced.
+            if no_calls(rest)
+                && !crate::effects::calling_handler_established()
+                && crate::effects::effect_free(function)?
+            {
+                eager_args_into(rest, call.env, &mut args)?;
+            } else {
+                promise_args_into(rest, call.env, &mut args)?;
+            }
             for arg in args.iter().take(count) {
                 if arg.value.kind() == SexpType::Promise {
                     force_promise(arg.value)?;
                 }
             }
-            apply_closure(inner_call, function, &args, call.env, None)
+            apply_closure_owning(inner_call, function, &args, call.env, None)
         }
         _ => apply_call(inner_call, function, rest, call.env),
     }
+}
+
+/// Whether no argument expression in the pairlist `arguments` is a call.
+unsafe fn no_calls(mut arguments: Sexp) -> bool {
+    while arguments.kind() == SexpType::Pairlist {
+        if matches!(arguments.car().kind(), SexpType::Language | SexpType::Bytecode | SexpType::Promise) {
+            return false;
+        }
+        arguments = arguments.cdr();
+    }
+    true
+}
+
+/// The cells of `call` after its first two arguments, when they hold exactly `args`.
+unsafe fn call_tail(call: Sexp, args: &[Arg]) -> Option<Sexp> {
+    let mut cell = call.cdr();
+    for _ in 0..2 {
+        if cell.kind() != SexpType::Pairlist {
+            return None;
+        }
+        cell = cell.cdr();
+    }
+    let tail = cell;
+    for arg in args {
+        if cell.kind() != SexpType::Pairlist || cell.car() != arg.value || cell.tag() != arg.tag {
+            return None;
+        }
+        cell = cell.cdr();
+    }
+    (cell == nil()).then_some(tail)
 }
 
 /// `Tailcall(FUN, ...)`, R 4.4's request to call `FUN(...)` in place of the calling frame.
@@ -2864,9 +2915,46 @@ pub unsafe fn force_and_call_with(
     };
     crate::heap().root(function);
     if function.kind() != SexpType::Closure {
-        return apply_call(call, function, call.cdr(), env);
+        // A builtin `FUN`, or a special that evaluates its arguments, as `[[` in
+        // `vapply(rows, `[[`, 0, "fee")`, takes the known first value as it is instead of
+        // evaluating its expression again.
+        let arguments = call.cdr();
+        if let Some(value) = first
+            && matches!(function.kind(), SexpType::Builtin | SexpType::Special)
+            && arguments.kind() == SexpType::Pairlist
+            && arguments.car() != symbols().dots
+        {
+            let definition = builtin_def(function)?;
+            crate::heap().root(value);
+            let mut args = Args::new();
+            if function.kind() == SexpType::Special {
+                if !definition.is_dispatch_or_eval() {
+                    return apply_call(call, function, arguments, env);
+                }
+                return match dispatch::dispatch_evaluated_subject(
+                    definition, call, function, arguments, value, env, &mut args,
+                )? {
+                    Some(value) => Ok(value),
+                    None => call_builtin(definition, call, function, &args, env),
+                };
+            }
+            args.push(Arg {
+                tag: arguments.tag(),
+                value,
+            });
+            evaluate_args_into(arguments.cdr(), env, definition.keep_missing, call, &mut args)?;
+            if definition.generic != Generic::None
+                && let Some(value) =
+                    dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
+            {
+                return Ok(value);
+            }
+            return call_builtin(definition, call, function, &args, env);
+        }
+        return apply_call(call, function, arguments, env);
     }
-    let args = promise_args(call.cdr(), env)?;
+    let mut args = Args::new();
+    promise_args_into(call.cdr(), env, &mut args)?;
     let mut seeded = false;
     if let (Some(value), Some(arg)) = (first, args.first())
         && arg.value.kind() == SexpType::Promise
