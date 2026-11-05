@@ -33,6 +33,25 @@ The quality bar is four things.
   'lattice'`) and the `timeseries` workload of `just bench-real` fails.
 - `crates/jit/tests/test_tiers.rs` `run_time_binding_shadows_cached_global_function` fails for `gen`: a `g` bound in a generic's frame before `UseMethod` is not seen by `gen.default`, which calls the global `g`. The cause is outside the typed core: the test fails without it.
 
+## Open: the baseline tier and JIT on against JIT off
+
+The baseline tier, the merged SSA IR (`crates/ssa`), size-scaled tier-up and block-bodied closure
+inlining are on branch `perf/baseline-tier-ir` (draft PR #353), not merged. JIT on still runs
+about 1% more instructions than JIT off on `bench-real`. What is left:
+
+- Merge main into the branch, which brings in `BuiltinDef::unary` and the `base_fast_paths.rs`
+  natives, then re-measure with `testthat.R` included.
+- Inline the fast paths of `GetVar`, `SetVar` and arithmetic in baseline code, plus the trivial
+  predicates (`!`, `length`, `[[` with a scalar index, `is.null`, `missing`, scalar `is.na`,
+  `identical`, `is.character`, `is.logical`, `is.function`) through `BuiltinDef::unary` with a
+  fallback to the builtin call. `RY_JIT=on` leaves the baseline out until then, because a call per
+  instruction raises instruction-cache misses.
+- Calls from compiled code (baseline and tier 1) while calling handlers are established, instead
+  of falling back to tier 0, pinned in `crates/jit/tests/test_tiers.rs` with a body hot under
+  `withCallingHandlers`.
+- A deoptimization exit that materializes the callee's frame, so tier 1 can inline callees with
+  effects.
+
 ## Open: the typed core
 
 - **Records, tags, `Result`, `Str` builders and `Dict` results.** The typed benchmarks that still run in the interpreter refuse here: `log_rank` at a `Record` parameter, `expr_tree` at `.ry_tag`, `orders` at `.ry_record` and `.ry_tag`, `report` at `.ry_text`, `validate` at `Result.with_default` and a mapped function that is not local (`RY_TYPED_LOG=1` names each refusal). The design's pools (`typed-runtime.md`, "Representations") are not built.
