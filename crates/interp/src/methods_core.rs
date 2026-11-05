@@ -3201,14 +3201,18 @@ unsafe fn set_class_union(call: &Call<'_>) -> R<Sexp> {
     {
         bail!(skip, "the union lists itself as a member");
     }
-    if !definition_caches(name.bytes(), &member_names, false)?
-        || !union_initialize_cached()?
-    {
+    if !definition_caches(name.bytes(), &member_names, false)? {
         bail!(
             skip,
             "the dispatch caches are not filled yet, or a coerce method that `setIs()` would replace exists"
         );
     }
+    let Some(initialize) = union_initialize()? else {
+        bail!(
+            skip,
+            "`new()` of the union would run an `initialize` method other than the default, or one that lazy definitions may still add"
+        );
+    };
     let (Some(union_class), Some(extension_class)) = (
         cached_class(values::scalar_string("ClassUnionRepresentation")?)?,
         cached_class(values::scalar_string("SClassExtension")?)?,
@@ -3255,6 +3259,9 @@ unsafe fn set_class_union(call: &Call<'_>) -> R<Sexp> {
     }
 
     pending.commit(class_table)?;
+    if let UnionInitialize::Inherit { method, table } = initialize {
+        eval::define(install("ClassUnionRepresentation")?, method, table)?;
+    }
     let generator = class_generator(class_name, package, place)?;
     if trace_bails() {
         eprintln!(
@@ -4284,29 +4291,43 @@ unsafe fn is_method_definition(value: Sexp) -> bool {
         )
 }
 
-/// Whether the default `initialize` method is cached for objects of the class `label`, so that
-/// `new()` of that class leaves the dispatch tables as they are.
-/// Whether `initialize`'s dispatch cache holds a method for `ClassUnionRepresentation`, after
-/// caching the inherited one when no union was defined yet. The R code's `new()` of the union's
-/// representation dispatches `initialize` on it, and that dispatch caches the same inherited
-/// method, so the first union of a session leaves the cache as the R code would.
-unsafe fn union_initialize_cached() -> R<bool> {
+/// What `initialize`'s dispatch for `ClassUnionRepresentation` does when the R code's `new()` of
+/// the union's representation runs it.
+enum UnionInitialize {
+    /// The default method is cached already, so dispatch changes nothing.
+    Cached,
+    /// The default method is inherited, and dispatch caches this copy of it in `table`.
+    Inherit { method: Sexp, table: Sexp },
+}
+
+/// How the union's `new()` would dispatch `initialize`, or `None` when it would run a method
+/// other than the default one, or the lookup needs R. Only the default method leaves nothing
+/// for the native union to run, and a package may define `initialize` for
+/// `classRepresentation` or `ANY`, which dispatch would then call.
+unsafe fn union_initialize() -> R<Option<UnionInitialize>> {
     let Some((_, all_table)) = generic_tables("initialize")? else {
-        return Ok(false);
+        return Ok(None);
     };
     let label = values::scalar_string("ClassUnionRepresentation")?;
     crate::heap().root(label);
-    if quiet_value(install_text(label.element(0))?, all_table)?.is_some() {
-        return Ok(true);
+    if let Some(method) = quiet_value(install_text(label.element(0))?, all_table)? {
+        return Ok(is_default_initialize(method)?.then_some(UnionInitialize::Cached));
     }
     // Lazy definitions still to run may add an `initialize` method that dispatch would prefer.
     if crate::methods::first_units_pending() {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(generic) = methods_value("initialize")? else {
-        return Ok(false);
+        return Ok(None);
     };
-    Ok(inherited_method(&[label], generic, all_table)?.is_some())
+    let Some(method) = find_inherited_method(&[label], generic)? else {
+        return Ok(None);
+    };
+    crate::heap().root(method);
+    Ok(is_default_initialize(method)?.then_some(UnionInitialize::Inherit {
+        method,
+        table: all_table,
+    }))
 }
 
 /// A class the new one extends, by name, with its definition.
@@ -4595,6 +4616,18 @@ pub(crate) unsafe fn inherited_method(
     generic: Sexp,
     table: Sexp,
 ) -> R<Option<Sexp>> {
+    let Some(method) = find_inherited_method(classes, generic)? else {
+        return Ok(None);
+    };
+    let &[class] = classes else {
+        return Ok(None);
+    };
+    eval::define(install_text(class.element(0))?, method, table)?;
+    Ok(Some(method))
+}
+
+/// The method `inherited_method` caches for `classes`, without caching it.
+unsafe fn find_inherited_method(classes: &[Sexp], generic: Sexp) -> R<Option<Sexp>> {
     if !native_definitions() {
         return Ok(None);
     }
@@ -4699,7 +4732,6 @@ pub(crate) unsafe fn inherited_method(
     } else {
         return Ok(None);
     };
-    eval::define(install_text(class.element(0))?, method, table)?;
     Ok(Some(method))
 }
 
