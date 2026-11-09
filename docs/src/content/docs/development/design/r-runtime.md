@@ -807,6 +807,16 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   separate copies of tier 0's handlers. `RY_JIT=baseline` runs every body in it alone,
   `RY_JIT=force` installs it on the first entry, and the third field of
   `RY_JIT_THRESHOLDS=entries,back_edges,baseline` sets its threshold.
+- **Planned: baseline code in the code image.** This waits until the baseline beats tier 0,
+  because before that, writing it at install time only moves a loss to disk. The install would
+  emit each recorded closure's baseline code into the image's native section beside the native
+  functions. Baseline code would reach steps and stubs only through
+  `call [table + index * 8]`, never through an absolute or relative address. The steps' order then
+  becomes an ABI: each index names one tier-0 step or stub, and the table is filled when the
+  section is mapped. The image stamp would carry a hash of that index list, so a build whose step
+  set differs reads the baseline code as absent, as it does today for a build with another layout.
+  Because the code keeps tier 0's activation and calls the same steps, it needs no
+  deoptimization metadata and no relocations beyond the table base.
 - **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
   call still enters through tier 0's call path and allocates a frame and forced promises), result
   types for multi-index subscripts such as `m[i, ]`, and freeing the machine code of invalidated

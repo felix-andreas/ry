@@ -648,8 +648,9 @@ struct Section {
     functions: FxHashMap<(u32, u32), SmallVec<[Mapped; 2]>>,
 }
 
-/// A closure with native code: where its code lies, and per function, the [`check_epoch`]
-/// plus one at which its checks last passed (0 for never).
+/// A closure with native code: where its code lies, per function the [`check_epoch`] plus one
+/// at which its checks last passed (0 for never), and whether `RY_JIT_LOG` has reported a call
+/// that ran it.
 ///
 /// [`check_epoch`]: interp::code_image::check_epoch
 struct Attached {
@@ -657,6 +658,7 @@ struct Attached {
     entry: u32,
     ordinal: u32,
     checked: SmallVec<[Cell<u64>; 2]>,
+    reported: Cell<bool>,
 }
 
 thread_local! {
@@ -748,6 +750,7 @@ unsafe fn attach(section: u32, entry: u32, closures: &[Sexp]) {
                     entry,
                     ordinal: ordinal as u32,
                     checked: (0..count).map(|_| Cell::new(0)).collect(),
+                    reported: Cell::new(false),
                 },
             );
         });
@@ -761,6 +764,16 @@ unsafe fn call(function: Sexp, args: &[Arg]) -> Option<R<Sexp>> {
             .get(&function)
             .map(|found| (found.section, found.entry, found.ordinal))
     })?;
+    native::with_released_roots(|| call_attached(function, args, section, entry, ordinal))
+}
+
+unsafe fn call_attached(
+    function: Sexp,
+    args: &[Arg],
+    section: u32,
+    entry: u32,
+    ordinal: u32,
+) -> Option<R<Sexp>> {
     let (arguments, read) = native::gather(function, args)?;
     let (types, words) = native::argument_words(&arguments)?;
     let (index, result, entry_point) = SECTIONS.with_borrow(|sections| {
@@ -774,9 +787,20 @@ unsafe fn call(function: Sexp, args: &[Arg]) -> Option<R<Sexp>> {
     if !checks_hold(function, section, entry, ordinal, index) {
         return None;
     }
-    native::run(result, &read, |out| {
+    let value = native::run(result, &read, |out| {
         entry_point(runtime::jit_depth_budget(), words.as_ptr(), out)
-    })
+    })?;
+    if crate::logging() {
+        let first = ATTACHED.with_borrow(|attached| {
+            attached
+                .get(&function)
+                .is_some_and(|found| !found.reported.replace(true))
+        });
+        if first {
+            eprintln!("jit: ran install-time function {entry}:{ordinal} for {types:?}");
+        }
+    }
+    Some(value)
 }
 
 /// Whether every name function `index` of `function`'s native code looks up still finds what

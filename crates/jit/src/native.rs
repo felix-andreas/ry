@@ -3079,6 +3079,23 @@ impl Emitter {
 /// which is also what happens when the native function fails, since it has done nothing anyone
 /// can see by then.
 pub unsafe fn call(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<Sexp>> {
+    with_released_roots(|| call_typed(function, args))
+}
+
+/// Runs a native call attempt, then drops the roots it pushed. [`gather`] roots each argument
+/// value it computes, and without this they would live until the enclosing statement ends:
+/// for every declined call, and for each call of a builtin loop such as `vapply` over an
+/// unbraced closure. The call's value is returned unrooted, as [`run`] returns it.
+pub(crate) unsafe fn with_released_roots(
+    attempt: impl FnOnce() -> Option<R<Sexp>>,
+) -> Option<R<Sexp>> {
+    let mark = interp::heap().handle_mark();
+    let outcome = attempt();
+    interp::heap().release_handles(mark);
+    outcome
+}
+
+unsafe fn call_typed(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<Sexp>> {
     let (arguments, read) = gather(function, args)?;
     // A strict typed closure runs on the typed core's native values when it compiles there,
     // and on the scalar natives below when it does not.

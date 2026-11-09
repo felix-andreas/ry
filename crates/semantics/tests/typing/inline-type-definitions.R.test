@@ -132,7 +132,7 @@ f: fn() -> integer
 type UserId = integer
 id <- @UserId(5L)
 #++++
-id: I64
+id: UserId
 
 #---- constructor_checks_the_representation
 type UserId = integer
@@ -162,14 +162,14 @@ p: Point
 #---- constructor_of_an_unknown_type
 id <- @Missing(5L)
 #++++
-id: I64
+id: integer
 7..14 error[annotation] I do not know the type `Missing`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 
 #---- constructor_of_an_alias_is_an_error
 alias Count = integer
 n <- @Count(5L)
 #++++
-n: I64
+n: integer
 28..33 error[annotation] `@new` requires a nominal type declared with `@type`, but `Count` is an alias.
 
 #==== inline_coercions
@@ -225,7 +225,7 @@ alias Pair<U> = Tuple{U, U}
 type Celsius = integer
 x <- @Celsius(1L)
 #++++
-x: I64
+x: Celsius
 41..48 warning[annotation-mismatch] the inline definition of `Celsius` says `integer`, but the `#:` comment says `double`. ry uses the inline definition; make the two agree, or delete one
   = 18..24 the `#:` comment's type is here
 
