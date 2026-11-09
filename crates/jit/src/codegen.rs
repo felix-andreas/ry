@@ -21,12 +21,20 @@ use {
         native,
         runtime::{self, Activation, Exit, offset, outcome, reason, representation},
     },
-    heap::object::{
-        INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, NA_REAL_BITS, RECORD_DATA_OFFSET,
-        RECORD_LAYOUT_OFFSET, RECORD_UNBOXED_OFFSET, REFCOUNT_MAX, Sexp, SexpType, UNBOXED_SLOTS,
-        VECTOR_DATA_OFFSET,
+    heap::{
+        env::layout as frame,
+        object::{
+            ENVIRONMENT_ENCLOSURE_OFFSET, ENVIRONMENT_FRAME_OFFSET, INTEGER_PREFIX, LOGICAL_PREFIX,
+            NA_INTEGER, NA_REAL_BITS, RECORD_DATA_OFFSET, RECORD_LAYOUT_OFFSET,
+            RECORD_UNBOXED_OFFSET, REFCOUNT_MAX, Sexp, SexpType, UNBOXED_SLOTS, VECTOR_DATA_OFFSET,
+            gp, header_layout,
+        },
     },
-    interp::{annotations, bytecode::Arith, values},
+    interp::{
+        annotations,
+        bytecode::{Arith, Op, baseline_layout},
+        values,
+    },
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
     ssa::{
@@ -370,6 +378,11 @@ impl<'p> Translator<'p> {
                 for register in std::iter::once(register).chain(range.0..range.1) {
                     self.store_register(register, nil);
                 }
+            }
+            Action::Srcref(srcref) => {
+                let srcref = self.builder.ins().iconst(I64, srcref.as_ptr() as i64);
+                let at = baseline_layout::SRCREF as i32 - baseline_layout::VISIBLE as i32;
+                self.builder.ins().store(flags(), srcref, self.visible, at);
             }
             Action::Constant { dst, value, ty } => {
                 match ty {
@@ -2710,6 +2723,22 @@ impl<'p> Translator<'p> {
             self.builder.ins().jump(load, &[]);
         }
         self.builder.switch_to_block(load);
+        let merged = self.builder.create_block();
+        let merged_value = self.builder.append_block_param(merged, I64);
+        let merged_status = self.builder.append_block_param(merged, I32);
+        let inst = &self.plan.insts[position];
+        // Only this activation's own `GetVar` may probe: the probe reads the activation's
+        // environment and lookup hints, which belong to the outer body, and an inlined callee's
+        // loads reach here as other ops.
+        let probed = inst.op == Op::GetVar;
+        if probed {
+            let symbol = runtime_constant(self.code, inst.operand(1));
+            let lookup = inst.operand(2);
+            let slow = self.builder.create_block();
+            self.builder.set_cold_block(slow);
+            self.probe_variable(symbol, lookup, slow, merged);
+            self.builder.switch_to_block(slow);
+        }
         if forcing {
             self.flush_all(before, failed);
         }
@@ -2743,11 +2772,39 @@ impl<'p> Translator<'p> {
         if forcing {
             self.forget_slots();
         }
+        self.builder.ins().jump(merged, &[value, result]);
+        self.builder.switch_to_block(merged);
+        let value = merged_value;
+        if probed {
+            self.store_slot_cell(slot, value);
+            if let Some(dst) = dst {
+                self.store_register(dst, value);
+            }
+        }
         if !matches!(ty, Ty::Boxed | Ty::Bottom) {
             let fits = self.check(value, ty);
-            self.guard(fits, mismatch);
+            if probed {
+                // The inline probe records no feedback, so a value of another type is recorded
+                // here for the recompile after the deoptimization to see.
+                let fitting = self.builder.create_block();
+                let record = self.builder.create_block();
+                self.builder.set_cold_block(record);
+                self.builder.ins().brif(fits, fitting, &[], record, &[]);
+                self.builder.switch_to_block(record);
+                let pc_constant = iconst(&mut self.builder, pc);
+                self.call(
+                    runtime::jit_record as *const () as usize,
+                    &[I64, I64, I64],
+                    None,
+                    &[self.activation, pc_constant, value],
+                );
+                self.builder.ins().jump(mismatch, &[]);
+                self.builder.switch_to_block(fitting);
+            } else {
+                self.guard(fits, mismatch);
+            }
         }
-        self.builder.def_var(self.statuses[slot], result);
+        self.builder.def_var(self.statuses[slot], merged_status);
         match ty {
             Ty::Int | Ty::Lgl => {
                 let unboxed = self.unbox(value, ty);
@@ -2767,6 +2824,202 @@ impl<'p> Translator<'p> {
         self.builder.ins().jump(done, &[]);
         self.builder.switch_to_block(done);
         Ok(())
+    }
+
+    /// Finds `symbol`'s value inline, as tier 0's lookup does when the binding sits where
+    /// lookup slot `lookup` last found it, in the activation's frame or in an enclosing function
+    /// frame, and holds a value or a forced promise. That case runs no code and leaves the frame
+    /// as it was, so it needs no write-back, no feedback and no validity check, and it jumps to
+    /// `merged` with the value and its runtime status. Everything else branches to `slow`.
+    unsafe fn probe_variable(&mut self, symbol: Sexp, lookup: usize, slow: Label, merged: Label) {
+        let found = self.builder.create_block();
+        let cell = self.builder.append_block_param(found, I64);
+        let status = self.builder.append_block_param(found, I32);
+        let enclosing = self.builder.create_block();
+        let env = self
+            .builder
+            .ins()
+            .load(I64, flags(), self.activation, offset::ENV);
+        let hints = self
+            .builder
+            .ins()
+            .load(I64, flags(), self.activation, offset::HINTS);
+        let hint = self
+            .builder
+            .ins()
+            .load(I32, flags(), hints, (4 * lookup) as i32);
+        let hint = self.builder.ins().uextend(I64, hint);
+        let local = self.probe_frame(env, symbol, hint, enclosing, slow);
+        let local_status = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
+        self.builder.ins().jump(found, &[local, local_status]);
+
+        self.builder.switch_to_block(enclosing);
+        let enclosure =
+            self.builder
+                .ins()
+                .load(I64, flags(), env, ENVIRONMENT_ENCLOSURE_OFFSET as i32);
+        let bits = self
+            .builder
+            .ins()
+            .uload16(I32, flags(), enclosure, header_layout::GP as i32);
+        let bits = self.builder.ins().uextend(I64, bits);
+        let function_frame = self
+            .builder
+            .ins()
+            .band_imm_u(bits, i64::from(gp::FUNCTION_FRAME));
+        let function_frame = self
+            .builder
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, function_frame, 0);
+        let probe = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(function_frame, probe, &[], slow, &[]);
+        self.builder.switch_to_block(probe);
+        let outer = self.probe_frame(enclosure, symbol, hint, slow, slow);
+        let outer_status = self.builder.ins().iconst(I32, status::RUNTIME_ENCLOSING);
+        self.builder.ins().jump(found, &[outer, outer_status]);
+
+        self.builder.switch_to_block(found);
+        let bits = self
+            .builder
+            .ins()
+            .uload16(I32, flags(), cell, header_layout::GP as i32);
+        let bits = self.builder.ins().uextend(I64, bits);
+        let active = self
+            .builder
+            .ins()
+            .band_imm_u(bits, i64::from(gp::ACTIVE_BINDING));
+        let passive = self.builder.ins().icmp_imm_u(IntCC::Equal, active, 0);
+        let binding = self.builder.create_block();
+        self.builder.ins().brif(passive, binding, &[], slow, &[]);
+        self.builder.switch_to_block(binding);
+        let value = self
+            .builder
+            .ins()
+            .load(I64, flags(), cell, header_layout::SECOND as i32);
+        let unbound = values::unbound().as_ptr() as i64;
+        for marker in [values::missing_arg().as_ptr() as i64, unbound] {
+            let differs = self
+                .builder
+                .ins()
+                .icmp_imm_u(IntCC::NotEqual, value, marker);
+            let next = self.builder.create_block();
+            self.builder.ins().brif(differs, next, &[], slow, &[]);
+            self.builder.switch_to_block(next);
+        }
+        let kind = self
+            .builder
+            .ins()
+            .uload8(I32, flags(), value, header_layout::KIND as i32);
+        let kind = self.builder.ins().uextend(I64, kind);
+        let promise = self
+            .builder
+            .ins()
+            .icmp_imm_u(IntCC::Equal, kind, SexpType::Promise as i64);
+        let forced = self.builder.create_block();
+        let plain = self.builder.create_block();
+        self.builder.ins().brif(promise, forced, &[], plain, &[]);
+        self.builder.switch_to_block(plain);
+        self.builder.ins().jump(merged, &[value, status]);
+        self.builder.switch_to_block(forced);
+        let promised = self
+            .builder
+            .ins()
+            .load(I64, flags(), value, header_layout::FIRST as i32);
+        let evaluated = self
+            .builder
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, promised, unbound);
+        let done = self.builder.create_block();
+        self.builder.ins().brif(evaluated, done, &[], slow, &[]);
+        self.builder.switch_to_block(done);
+        self.builder.ins().jump(merged, &[promised, status]);
+    }
+
+    /// The binding cell of `symbol` in `env`'s own frame at position `hint`, as
+    /// `Frame::find_hinted` finds it when the hint matches. A frame whose symbol filter rejects
+    /// `symbol` branches to `miss`; a stale hint or a frame whose hints are off branches to
+    /// `slow`. The global and base frames keep their bindings on the symbols and an empty frame
+    /// here, so their filter rejects every symbol.
+    fn probe_frame(
+        &mut self,
+        env: Value,
+        symbol: Sexp,
+        hint: Value,
+        miss: Label,
+        slow: Label,
+    ) -> Value {
+        let at = |field: usize| (ENVIRONMENT_FRAME_OFFSET + field) as i32;
+        let filter = self
+            .builder
+            .ins()
+            .load(I64, flags(), env, at(frame::FILTER));
+        let bit = self
+            .builder
+            .ins()
+            .band_imm_u(filter, frame::filter_bit(symbol) as i64);
+        let present = self.builder.ins().icmp_imm_u(IntCC::NotEqual, bit, 0);
+        let filtered = self.builder.create_block();
+        self.builder.ins().brif(present, filtered, &[], miss, &[]);
+        self.builder.switch_to_block(filtered);
+        let formals = self
+            .builder
+            .ins()
+            .load(I32, flags(), env, at(frame::FORMALS));
+        let formals = self.builder.ins().uextend(I64, formals);
+        let shadowed = self
+            .builder
+            .ins()
+            .band_imm_u(formals, i64::from(frame::SHADOWED));
+        let hinted = self.builder.ins().icmp_imm_u(IntCC::Equal, shadowed, 0);
+        let length = self
+            .builder
+            .ins()
+            .load(I32, flags(), env, at(frame::LENGTH));
+        let length = self.builder.ins().uextend(I64, length);
+        let in_range = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, hint, length);
+        let usable = self.builder.ins().band(hinted, in_range);
+        let positioned = self.builder.create_block();
+        self.builder.ins().brif(usable, positioned, &[], slow, &[]);
+        self.builder.switch_to_block(positioned);
+        let capacity = self
+            .builder
+            .ins()
+            .load(I32, flags(), env, at(frame::CAPACITY));
+        let capacity = self.builder.ins().uextend(I64, capacity);
+        let spilled = self.builder.ins().icmp_imm_u(
+            IntCC::UnsignedGreaterThan,
+            capacity,
+            i64::from(frame::INLINE),
+        );
+        let inline = self
+            .builder
+            .ins()
+            .iadd_imm_s(env, at(frame::STORAGE) as i64);
+        // Reading the first inline slot as a pointer is harmless when the slots are inline:
+        // the select discards it.
+        let heap = self
+            .builder
+            .ins()
+            .load(I64, flags(), env, at(frame::STORAGE));
+        let storage = self.builder.ins().select(spilled, heap, inline);
+        let position = self.builder.ins().imul_imm_s(hint, frame::SLOT as i64);
+        let entry = self.builder.ins().iadd(storage, position);
+        let bound = self.builder.ins().load(I64, flags(), entry, 0);
+        let matches = self
+            .builder
+            .ins()
+            .icmp_imm_u(IntCC::Equal, bound, symbol.as_ptr() as i64);
+        let hit = self.builder.create_block();
+        self.builder.ins().brif(matches, hit, &[], slow, &[]);
+        self.builder.switch_to_block(hit);
+        self.builder
+            .ins()
+            .load(I64, flags(), entry, frame::SLOT_CELL as i32)
     }
 
     /// Loads a slot for an inlined call without forcing anything, handing the call back to

@@ -731,6 +731,8 @@ pub enum Action<'a> {
         register: usize,
         range: (usize, usize),
     },
+    /// Makes `srcref` the current srcref, for a statement no debugger stops at.
+    Srcref(Sexp),
     Constant {
         dst: usize,
         value: Sexp,
@@ -1148,6 +1150,7 @@ fn native(action: &Action<'_>) -> bool {
     matches!(
         action,
         Action::Inline { .. }
+            | Action::Srcref(_)
             | Action::Traverse { .. }
             | Action::Call { .. }
             | Action::NativeCall { .. }
@@ -1557,10 +1560,17 @@ impl<'a> Builder<'a> {
     /// before it has read anything, the type the closure's signature declares for that formal.
     fn load_ty(&self, pc: usize, slot: usize) -> Ty {
         if self.never_ran(pc) {
-            self.declared[slot]
-        } else {
-            self.feedback_at(pc)
+            return self.declared[slot];
         }
+        // A variable that has held both an integer and a double scalar, such as the argument
+        // of a closure shared by `make_scaler(2)` and `make_scaler(0.5)`, loads as `Num`, which
+        // its arithmetic reads unboxed, rather than as a boxed value every reader hands back to
+        // tier 0.
+        let bits = self.feedback.get(pc).map_or(0, |&bits| bits as u16);
+        if bits == feedback::INTEGER_SCALAR | feedback::DOUBLE_SCALAR {
+            return Ty::Num;
+        }
+        from_feedback(bits)
     }
 
     /// Splits the instructions into blocks and finds each block's successors and the loop
@@ -1815,18 +1825,15 @@ impl<'a> Builder<'a> {
                         ty,
                     };
                     // Code generation writes the variables back before the load and forgets them
-                    // after it, but only when the load really happens.
+                    // after it, but only when the load reaches the runtime: a load the inline
+                    // frame probe answers leaves the variables as they were.
                     let mut forced = state.clone();
                     forced.flushed();
                     forced.forget_slots();
                     forced.slots[slot] = loaded;
                     state.slots[slot] = loaded;
                     if forcing {
-                        if current.may_be(status::LOADED) {
-                            state.join(&forced);
-                        } else {
-                            *state = forced;
-                        }
+                        state.join(&forced);
                     }
                 }
                 state.registers[operand(0)] = state.slots[slot].ty;
@@ -2302,7 +2309,9 @@ impl<'a> Builder<'a> {
                     is_and: operand(4) == 1,
                 }
             }
-            // The interpreter's own step sets the current srcref; it touches no register.
+            Op::SetSrcref if operand(1) == 0 => Action::Srcref(self.constant(operand(0))),
+            // A statement a debugger may stop at runs the interpreter's own step, which asks the
+            // debugger; it touches no register.
             Op::SetSrcref => Action::Step {
                 effect: Effect::Pure,
                 objects: &[],
