@@ -422,12 +422,16 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
 }
 
 /// Moves the next chunk of accepted input into `buffer` and returns its length. A hook's code,
-/// the first `hook_bytes` of `pending`, goes in chunks of its own.
+/// the first `hook_bytes` of `pending`, goes in chunks of its own. Other input goes one line at
+/// a time, as a typed line would: an error makes R discard the rest of its buffer, so a chunk
+/// cut mid-line would leave the next chunk starting with a fragment of a line.
 pub fn take_chunk(pending: &mut VecDeque<u8>, hook_bytes: &mut usize, buffer: &mut [u8]) -> usize {
     let mut written = buffer.len().min(pending.len());
     if *hook_bytes > 0 {
         written = written.min(*hook_bytes);
         *hook_bytes -= written;
+    } else if let Some(newline) = pending.range(..written).position(|&byte| byte == b'\n') {
+        written = newline + 1;
     }
     for (slot, byte) in buffer.iter_mut().zip(pending.drain(..written)) {
         *slot = byte;

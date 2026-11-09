@@ -10,12 +10,9 @@ build = "build.rs"
 path = "src/repl.rs"
 
 [dependencies]
-# Pinned to reedline's own crossterm so the console and the editor share one
-# terminal reader. `use-dev-tty` swaps crossterm's mio reader, which waits on an
-# edge-triggered epoll but returns after one 1 KiB read, for a level-triggered
-# `poll`: under mio the rest of a paste sits unread until another key arrives or
-# a cursor-position query times out after two seconds.
-crossterm = { version = "0.28", features = ["use-dev-tty"] }
+# Pinned to reedline's own crossterm so the console and the editor share one terminal reader.
+# The workspace patches it (`patches/crossterm`) so the reader drains a paste in one go.
+crossterm = "0.28"
 dirs = "6"
 libloading = "0.8"
 nu-ansi-term.workspace = true

@@ -79,11 +79,11 @@ impl ReplSession {
         let (writer, inputs) = mpsc::channel::<Vec<u8>>();
         thread::spawn(move || {
             for input in inputs {
-                if pty_writer
+                if let Err(error) = pty_writer
                     .write_all(&input)
                     .and_then(|()| pty_writer.flush())
-                    .is_err()
                 {
+                    eprintln!("writing to the pty failed: {error}");
                     break;
                 }
             }
@@ -516,10 +516,11 @@ fn multiline_input_continues_and_defines() {
     session.quit();
 }
 
-/// A paste costs time linear in its length, as under GNU R: 2,000 lines take about ten times as
-/// long as 200, not a hundred times, and no line waits on the terminal. The editor asks for
+/// A paste costs time linear in its length, as under GNU R: 5,000 lines take about ten times as
+/// long as 500, not a hundred times, and no line waits on the terminal. The editor asks for
 /// bracketed paste, so a paste at its prompt arrives as one insertion; a terminal without it, or a
-/// paste while a command runs, sends the lines raw.
+/// paste while a command runs, sends the lines raw. `Sys.time()` is spelled like a standard
+/// library call but is plain R, so it must not switch the console to analyzing every command.
 #[test]
 fn a_paste_runs_in_linear_time() {
     let block = |count: usize| -> Vec<String> {
@@ -530,9 +531,11 @@ fn a_paste_runs_in_linear_time() {
     for runtime in runtimes() {
         let mut session = ReplSession::start_with(None, &[runtime_command(runtime)]);
         session.expect_prompt();
+        session.send("started <- Sys.time(); cat('clock', 'read', sep = '_')\r");
+        session.expect("clock_read");
         for (bracketed, name) in [(false, "raw"), (true, "bracketed")] {
-            let (small, _) = session.paste(&block(200), bracketed, &format!("{name}_small"));
-            let (large, silence) = session.paste(&block(2000), bracketed, &format!("{name}_large"));
+            let (small, _) = session.paste(&block(500), bracketed, &format!("{name}_small"));
+            let (large, silence) = session.paste(&block(5000), bracketed, &format!("{name}_large"));
             // A line that waits on the terminal stalls for crossterm's two-second timeout.
             assert!(
                 silence < Duration::from_secs(1),
@@ -540,10 +543,43 @@ fn a_paste_runs_in_linear_time() {
             );
             assert!(
                 large < small * 30,
-                "{runtime}, {name}: 200 lines took {small:?} but 2,000 took {large:?}"
+                "{runtime}, {name}: 500 lines took {small:?} but 5,000 took {large:?}"
             );
         }
         session.quit();
+    }
+}
+
+/// An error in a paste stops only its own line, as when the lines are typed: R discards the rest
+/// of its input buffer on an error, so the console hands it one line at a time and no later line
+/// runs from the middle.
+#[test]
+fn an_error_in_a_paste_stops_only_its_line() {
+    for runtime in runtimes() {
+        for bracketed in [false, true] {
+            let mut session = ReplSession::start_with(None, &[runtime_command(runtime)]);
+            session.expect_prompt();
+            let lines: Vec<String> = (0..300)
+                .map(|index| match index {
+                    5 => "stop('boom')".to_owned(),
+                    _ => format!("cat('E{index:03}', '\\n')"),
+                })
+                .collect();
+            session.paste(&lines, bracketed, "pasted");
+            for index in (0..300).filter(|&index| index != 5) {
+                assert!(
+                    session.seen.contains(&format!("E{index:03} ")),
+                    "{runtime}, bracketed {bracketed}: line {index} did not run:\n{}",
+                    session.seen
+                );
+            }
+            assert!(
+                session.seen.contains("boom") && !session.seen.contains("unexpected"),
+                "{runtime}, bracketed {bracketed}: {}",
+                session.seen
+            );
+            session.quit();
+        }
     }
 }
 

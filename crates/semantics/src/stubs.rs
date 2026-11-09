@@ -159,6 +159,21 @@ pub const STANDARD_LIBRARY: &str = "std";
 /// `Array`) are native values.
 pub const NATIVE_NAMESPACES: &[&str] = &["ry", STANDARD_LIBRARY];
 
+/// Whether a native namespace declares functions in `module`, as the standard library does in
+/// `List` for `List.map`. R's own dotted names, such as `Sys.time`, share the spelling but not a
+/// module.
+pub fn is_native_module(module: &str) -> bool {
+    SHIPPED_STUBS
+        .iter()
+        .filter(|(namespace, _)| NATIVE_NAMESPACES.contains(namespace))
+        .any(|(_, source)| {
+            source.lines().any(|line| {
+                line.strip_prefix(module)
+                    .is_some_and(|rest| rest.starts_with('.'))
+            })
+        })
+}
+
 /// Whether `[check] prelude` keeps the bare `name` out of scope: the standard library exports it
 /// and the prelude is off. The setting is read only for a standard library name, so turning the
 /// prelude off rechecks only the code that uses one.

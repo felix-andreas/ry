@@ -117,7 +117,8 @@ fn typeahead_lines_do_not_depend_on_how_the_text_arrived() {
 }
 
 /// R reads accepted input in chunks no larger than its buffer. The chunks rejoin into the input,
-/// and a hook's code always ends a chunk, so R never parses it together with the typed line.
+/// a hook's code always ends a chunk, so R never parses it together with the typed line, and
+/// other input goes at most one line per chunk.
 #[test]
 fn input_chunks_rejoin_and_keep_hook_code_apart() {
     for_each_seed(4000, |seed| {
@@ -133,7 +134,10 @@ fn input_chunks_rejoin_and_keep_hook_code_apart() {
                 pending.extend(&hook);
                 expected.extend(&hook);
             }
-            let line = vec![b'l'; rng.below(30)];
+            let mut line = vec![b'l'; rng.below(30)];
+            if rng.below(2) == 0 {
+                line.push(b'\n');
+            }
             pending.extend(&line);
             expected.extend(&line);
             while !pending.is_empty() && rng.below(2) == 0 {
@@ -144,6 +148,12 @@ fn input_chunks_rejoin_and_keep_hook_code_apart() {
                 if hook_before > 0 {
                     assert!(written <= hook_before, "a chunk ran past the hook's code");
                     assert_eq!(hook_bytes, hook_before - written);
+                } else {
+                    let chunk = &buffer[..written];
+                    assert!(
+                        !chunk[..written - 1].contains(&b'\n'),
+                        "a chunk held more than one line: {chunk:?}"
+                    );
                 }
                 read.extend(&buffer[..written]);
             }

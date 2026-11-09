@@ -18,7 +18,7 @@ use {
     semantics::{
         DocumentKind, Elaboration, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{Diagnostic, RelatedLocation, Severity},
-        stubs::install_shipped_stubs,
+        stubs::{install_shipped_stubs, is_native_module},
     },
     std::{
         fs,
@@ -119,7 +119,6 @@ impl Preflight {
     /// `input` spells as `?`.
     pub fn check_elaborations(&mut self, input: &str) -> Option<Vec<Elaboration>> {
         if !self.analyzed {
-            // Plain R without strict mode has nothing to report and no literal a ry type decides.
             if !input.contains("typing:")
                 && !has_ry_syntax(&syntax::parse(input).syntax_node(), input)
             {
@@ -517,12 +516,13 @@ fn has_ry_syntax(root: &SyntaxNode, source: &str) -> bool {
         })
 }
 
-/// Whether `name` is spelled like a standard library function, `Module.function`.
+/// Whether `name` is a function of ry's standard library or runtime package, `Module.function`.
 fn is_module_qualified(name: &str) -> bool {
     name.split_once('.').is_some_and(|(module, function)| {
         module.starts_with(|first: char| first.is_ascii_uppercase())
             && module.bytes().all(|byte| byte.is_ascii_alphanumeric())
             && function.starts_with(|first: char| first.is_ascii_lowercase() || first == '_')
+            && is_native_module(module)
     })
 }
 

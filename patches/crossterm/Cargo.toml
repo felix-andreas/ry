@@ -1,0 +1,133 @@
+# crossterm 0.28.1 with one fix in `src/event/source/unix/mio.rs`: the reader drains the
+# terminal before it returns an event. Upstream returns after the first parsed event, and because
+# mio's epoll is edge-triggered, the unread rest of a paste then waits for the next keystroke.
+# Drop this patch once upstream drains (still unfixed in 0.29.0).
+
+[package]
+publish = false
+edition = "2021"
+rust-version = "1.63.0"
+name = "crossterm"
+version = "0.28.1"
+authors = ["T. Post"]
+exclude = [
+    "target",
+    "Cargo.lock",
+]
+description = "A crossplatform terminal library for manipulating terminals."
+documentation = "https://docs.rs/crossterm/"
+keywords = [
+    "event",
+    "color",
+    "cli",
+    "input",
+    "terminal",
+]
+categories = [
+    "command-line-interface",
+    "command-line-utilities",
+]
+license = "MIT"
+repository = "https://github.com/crossterm-rs/crossterm"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lib]
+name = "crossterm"
+path = "src/lib.rs"
+
+[dependencies.bitflags]
+version = "2.3"
+
+[dependencies.futures-core]
+version = "0.3"
+optional = true
+default-features = false
+
+[dependencies.parking_lot]
+version = "0.12"
+
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+optional = true
+
+[features]
+bracketed-paste = []
+default = [
+    "bracketed-paste",
+    "windows",
+    "events",
+]
+event-stream = [
+    "dep:futures-core",
+    "events",
+]
+events = [
+    "dep:mio",
+    "dep:signal-hook",
+    "dep:signal-hook-mio",
+]
+serde = [
+    "dep:serde",
+    "bitflags/serde",
+]
+use-dev-tty = [
+    "filedescriptor",
+    "rustix/process",
+]
+windows = [
+    "dep:winapi",
+    "dep:crossterm_winapi",
+]
+
+[target."cfg(unix)".dependencies.filedescriptor]
+version = "0.8"
+optional = true
+
+[target."cfg(unix)".dependencies.libc]
+version = "0.2"
+optional = true
+default-features = false
+
+[target."cfg(unix)".dependencies.mio]
+version = "1.0"
+features = ["os-poll"]
+optional = true
+
+[target."cfg(unix)".dependencies.rustix]
+version = "0.38.34"
+features = [
+    "std",
+    "event",
+    "stdio",
+    "termios",
+]
+default-features = false
+
+[target."cfg(unix)".dependencies.signal-hook]
+version = "0.3.17"
+optional = true
+
+[target."cfg(unix)".dependencies.signal-hook-mio]
+version = "0.2.4"
+features = ["support-v1_0"]
+optional = true
+
+[target."cfg(windows)".dependencies.crossterm_winapi]
+version = "0.9.1"
+optional = true
+
+[target."cfg(windows)".dependencies.winapi]
+version = "0.3.9"
+features = [
+    "winuser",
+    "winerror",
+]
+optional = true
+
+[lints.rust]
+unexpected_cfgs = "allow"
+dead_code = "allow"
+unused_parens = "allow"
