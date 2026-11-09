@@ -124,6 +124,10 @@ impl State {
 /// out of C stack or `expressions` long before it runs out of registers.
 const REGISTER_FILE_CAPACITY: usize = 1 << 21;
 
+/// A threshold no counter is compared against. Counters saturate at `i32::MAX`, so a
+/// threshold of that value would otherwise fire once a counter saturates.
+pub const NEVER: i32 = i32::MAX;
+
 /// The optimizing tier's entry points.
 #[derive(Clone, Copy)]
 pub struct Tier {
@@ -3164,6 +3168,7 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
     if let Some(tier) = interp().bytecode.tier
         && entered.is_none()
         && entries == tier.baseline_threshold
+        && tier.baseline_threshold != NEVER
         && constants.element(BASELINE) == nil()
     {
         (tier.baseline)(&machine);
@@ -4335,6 +4340,7 @@ unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> B
         state.feedback = values::ints_mut(machine.code.cdr().element(FEEDBACK)).as_mut_ptr();
     }
     if profile[profile::BACK_EDGES] == tier.baseline_threshold
+        && tier.baseline_threshold != NEVER
         && machine.code.cdr().element(BASELINE) == nil()
     {
         (tier.baseline)(machine);

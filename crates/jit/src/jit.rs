@@ -116,7 +116,7 @@ pub fn install_mode(mode: Mode) {
         // at 200 entries, `validation` ran 1% fewer instructions with 8% more instruction-cache
         // misses and 5% more mispredicted branches, and more wall time. The default leaves it out
         // until it inlines the common instructions' fast paths.
-        Mode::On => (ENTRY_THRESHOLD, BACK_EDGE_THRESHOLD, i32::MAX),
+        Mode::On => (ENTRY_THRESHOLD, BACK_EDGE_THRESHOLD, bytecode::NEVER),
         // Compiling on the second run rather than the first gives the compiled code the type
         // feedback of one interpreted run, so forced compilation exercises the specialized paths.
         Mode::Force => (2, 1, 1),
@@ -143,7 +143,7 @@ fn thresholds_override() -> Option<(i32, i32, i32)> {
     let mut parts = text
         .split(',')
         .map(|part| match part.trim().parse::<i32>() {
-            Ok(0) => Some(i32::MAX),
+            Ok(0) => Some(bytecode::NEVER),
             Ok(value) => Some(value),
             Err(_) => None,
         });

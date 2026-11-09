@@ -48,6 +48,7 @@ const LENGTH: u8 = 16;
 const DATA: u8 = VECTOR_DATA_OFFSET as u8;
 const OBJECT_FLAG: u8 = 1 << 0;
 const ALTREP_FLAG: u8 = 1 << 1;
+const ARRAY_FLAG: u8 = 1 << 4;
 
 /// Compiles baseline code for the activation's body and stores it in the body's `BASELINE`
 /// constant, or stores the unbound marker there when the body does not compile, so it is not
@@ -446,7 +447,8 @@ fn inline_comparison(
     asm.constant(Reg::T3, nil().as_ptr() as u64);
     for operand in [Reg::T0, Reg::T1] {
         asm.load(Width::W8, Reg::T2, operand, header_layout::FLAGS as u32);
-        asm.test_constant(Reg::T2, u32::from(ALTREP_FLAG));
+        // A ry Array compares by its own rules and wraps the result, as in tier 0.
+        asm.test_constant(Reg::T2, u32::from(ALTREP_FLAG | ARRAY_FLAG));
         asm.branch(Condition::NotEqual, slow);
         asm.load(Width::W64, Reg::T2, operand, header_layout::ATTRIB as u32);
         asm.compare(Reg::T2, Reg::T3);
