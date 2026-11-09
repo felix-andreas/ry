@@ -163,7 +163,7 @@ unsafe fn binding_names(candidates: &[NativeCandidate]) -> FxHashMap<Sexp, Strin
     let mut names = FxHashMap::default();
     let mut seen = Vec::new();
     for candidate in candidates {
-        let env = candidate.closure.enclosure();
+        let env = candidate.closure.tag();
         if env.kind() != SexpType::Environment || seen.contains(&env) {
             continue;
         }
@@ -331,7 +331,7 @@ unsafe fn checks(
     native: &Native,
     identities: &FxHashMap<Sexp, (u32, u32)>,
 ) -> Result<Vec<Check>, &'static str> {
-    let env = closure.enclosure();
+    let env = closure.tag();
     let mut checks: Vec<Check> = Vec::new();
     for Speculation {
         symbol,
@@ -787,7 +787,7 @@ unsafe fn checks_hold(function: Sexp, section: u32, entry: u32, ordinal: u32, in
     if remembered {
         return true;
     }
-    let env = function.enclosure();
+    let env = function.tag();
     let Some(checks) = SECTIONS.with_borrow(|sections| {
         sections
             .get(section as usize)

@@ -784,7 +784,7 @@ unsafe fn write_image(
     for (entry, recorded) in records.values().enumerate() {
         for ordinal in 0..length(recorded.closures) / 2 {
             let closure = recorded.closures.element(ordinal * 2);
-            if closure.kind() == SexpType::Closure && closure.cdr().kind() == SexpType::Language {
+            if closure.kind() == SexpType::Closure {
                 candidates.push(NativeCandidate {
                     entry: entry as u32,
                     ordinal: ordinal as u32,
