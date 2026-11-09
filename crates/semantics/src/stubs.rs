@@ -159,19 +159,10 @@ pub const STANDARD_LIBRARY: &str = "std";
 /// `Array`) are native values.
 pub const NATIVE_NAMESPACES: &[&str] = &["ry", STANDARD_LIBRARY];
 
-/// Whether a native namespace declares functions in `module`, as the standard library does in
-/// `List` for `List.map`. R's own dotted names, such as `Sys.time`, share the spelling but not a
-/// module.
-pub fn is_native_module(module: &str) -> bool {
-    SHIPPED_STUBS
-        .iter()
-        .filter(|(namespace, _)| NATIVE_NAMESPACES.contains(namespace))
-        .any(|(_, source)| {
-            source.lines().any(|line| {
-                line.strip_prefix(module)
-                    .is_some_and(|rest| rest.starts_with('.'))
-            })
-        })
+/// Whether `name` is a function a native namespace declares, such as `List.map`. R's own
+/// dotted names (`Sys.time`) and S3 methods (`Ops.money`) share the spelling but are not.
+pub fn is_native_function(name: &str) -> bool {
+    NATIVE_FUNCTIONS.binary_search(&name).is_ok()
 }
 
 /// Whether `[check] prelude` keeps the bare `name` out of scope: the standard library exports it

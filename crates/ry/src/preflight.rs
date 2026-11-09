@@ -18,7 +18,7 @@ use {
     semantics::{
         DocumentKind, Elaboration, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{Diagnostic, RelatedLocation, Severity},
-        stubs::{install_shipped_stubs, is_native_module},
+        stubs::{install_shipped_stubs, is_native_function},
     },
     std::{
         fs,
@@ -510,20 +510,10 @@ fn has_ry_syntax(root: &SyntaxNode, source: &str) -> bool {
             NodeOrToken::Node(node) => node.kind() == SyntaxKind::ARRAY_EXPR,
             NodeOrToken::Token(token) => match token.kind() {
                 SyntaxKind::SUFFIXED_NUMBER => true,
-                SyntaxKind::IDENT => is_module_qualified(token.text()),
+                SyntaxKind::IDENT => is_native_function(token.text()),
                 _ => false,
             },
         })
-}
-
-/// Whether `name` is a function of ry's standard library or runtime package, `Module.function`.
-fn is_module_qualified(name: &str) -> bool {
-    name.split_once('.').is_some_and(|(module, function)| {
-        module.starts_with(|first: char| first.is_ascii_uppercase())
-            && module.bytes().all(|byte| byte.is_ascii_alphanumeric())
-            && function.starts_with(|first: char| first.is_ascii_lowercase() || first == '_')
-            && is_native_module(module)
-    })
 }
 
 /// GNU R reads the plain program an annotated one means.

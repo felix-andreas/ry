@@ -75,6 +75,32 @@ fn main() -> Result<(), Error> {
         writeln!(out, "    {namespace:?},").map_err(format_error)?;
     }
     out.push_str("];\n");
+    // `List.map`-style names the native namespaces declare at the start of a line, sorted for a
+    // binary search. R's own dotted names (`Sys.time`) and S3 methods (`Ops.money`) share the
+    // spelling, so a name counts only when it is declared exactly.
+    let mut native_functions = Vec::new();
+    for (namespace, path) in &stubs {
+        if !NATIVE_NAMESPACES.contains(&namespace.as_str()) {
+            continue;
+        }
+        for line in fs::read_to_string(path)?.lines() {
+            let name = line.split([' ', ':']).next().unwrap_or_default();
+            if name.split_once('.').is_some_and(|(module, function)| {
+                module.starts_with(|first: char| first.is_ascii_uppercase())
+                    && function
+                        .starts_with(|first: char| first.is_ascii_lowercase() || first == '_')
+            }) {
+                native_functions.push(name.to_owned());
+            }
+        }
+    }
+    native_functions.sort_unstable();
+    native_functions.dedup();
+    out.push_str("pub const NATIVE_FUNCTIONS: &[&str] = &[\n");
+    for name in native_functions {
+        writeln!(out, "    {name:?},").map_err(format_error)?;
+    }
+    out.push_str("];\n");
     let out_dir = PathBuf::from(env::var("OUT_DIR").map_err(env_error)?);
     fs::write(out_dir.join("shipped.rs"), out)
 }

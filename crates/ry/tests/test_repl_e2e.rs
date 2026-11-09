@@ -583,6 +583,38 @@ fn an_error_in_a_paste_stops_only_its_line() {
     }
 }
 
+/// Ctrl-C while a pasted line runs cancels the rest of the paste, as GNU R's flush of its
+/// input buffer does, so none of the later lines run.
+#[test]
+fn ctrl_c_cancels_the_rest_of_a_paste() {
+    for runtime in runtimes() {
+        for bracketed in [false, true] {
+            let mut session = ReplSession::start_with(None, &[runtime_command(runtime)]);
+            session.expect_prompt();
+            let mut text = "cat('SLEEP', 'ING', sep = '_'); Sys.sleep(5)\r".to_owned();
+            for index in 0..20 {
+                text.push_str(&format!("cat('P{index:02}', '\\n')\r"));
+            }
+            if bracketed {
+                text = format!("\x1b[200~{text}\x1b[201~\r");
+            }
+            session.send(&text);
+            session.expect("SLEEP_ING");
+            session.settle(Duration::from_millis(500));
+            session.send("\u{3}");
+            session.settle(Duration::from_millis(1000));
+            session.send("cat('AFTER', 'MARK', sep = '_')\r");
+            session.expect("AFTER_MARK");
+            assert!(
+                (0..20).all(|index| !session.seen.contains(&format!("P{index:02} "))),
+                "{runtime}, bracketed {bracketed}: a line after the interrupt ran:\n{}",
+                session.seen
+            );
+            session.quit();
+        }
+    }
+}
+
 #[test]
 fn errors_come_back_on_the_error_stream() {
     let Some(mut session) = start_session() else {

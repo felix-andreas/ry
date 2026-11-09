@@ -308,6 +308,14 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
         // from the console: `pending` holds the rest of a top-level script or paste, which runs
         // once they return, so it must not answer them.
         let at_top_level = console.ry_runtime || libr::at_top_level();
+        // Ctrl-C while a command ran flushed the terminal's input, so it cancels the input
+        // this console holds the same way, the rest of a paste included.
+        if !console.piped && take_interrupt(console.ry_runtime) {
+            console.pending.clear();
+            console.unit_bytes = 0;
+            console.typeahead.clear();
+            console.keys.clear();
+        }
         let mut answer: Option<Vec<u8>> = None;
         while if at_top_level {
             console.pending.is_empty()
@@ -326,8 +334,6 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                 false => unsafe { libr::prompt_text(prompt) },
             };
             if !console.piped {
-                // Ctrl-C while a command ran flushed the terminal's input, so it cancels the
-                // input this console holds the same way.
                 if take_interrupt(console.ry_runtime) {
                     console.typeahead.clear();
                     console.keys.clear();
