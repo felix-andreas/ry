@@ -45,7 +45,11 @@ the baseline runs 1 to 2% more instructions and more I1 misses than JIT off and 
 left, in order of expected gain:
 
 - One copy of each instruction handler: the baseline's step functions duplicate tier 0's
-  handlers, and on `testthat` they add more I1 misses than `execute_code` sheds.
+  handlers, and on `testthat` they add more I1 misses than `execute_code` sheds. Sharing one
+  `exec_*` body per op was tried and reverted: with every body inlined into tier 0 it still ran
+  13M more instructions (0.18%) on `testthat_full` with the JIT off, from code placement in
+  `execute_code` and `run_body`, and out-of-line bodies cost 64M. Re-land it only once that
+  placement measures neutral there (callgrind, bench profile, `RY_BENCH_REPEAT=2`).
 - Inline paths for scalar `+ - * /` (needs an inline allocation of a length-one vector), `Guard`
   (`step_guard` costs 227M instructions on `functional`), and the trivial predicates through
   `BuiltinDef::unary`.
