@@ -50,12 +50,10 @@ use {
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
     ssa::{
-        AbiParam, Builder, CallConv, MemFlagsData, ObjectModule, Signature, section, types::I64,
+        AbiParam, Builder, CallConv, MemFlagsData, ObjectModule, Signature, section,
+        types::I64,
     },
-    std::{
-        cell::{Cell, RefCell},
-        path::Path,
-    },
+    std::{cell::Cell, cell::RefCell, path::Path},
 };
 
 /// Gives `interp` the hooks it calls to compile, load and call install-time machine code.
@@ -75,14 +73,7 @@ const MAX_ATTEMPTS: usize = 24;
 /// The most parameters a closure may have to be guessed for.
 const MAX_GUESSED_PARAMETERS: usize = 4;
 /// The types a parameter without a declared type is guessed as, likeliest first.
-const GUESSES: [Ty; 6] = [
-    Ty::Dbl,
-    Ty::Int,
-    Ty::DblVec,
-    Ty::IntVec,
-    Ty::Lgl,
-    Ty::LglVec,
-];
+const GUESSES: [Ty; 6] = [Ty::Dbl, Ty::Int, Ty::DblVec, Ty::IntVec, Ty::Lgl, Ty::LglVec];
 
 /// A function name the code looks up, and what the lookup must find.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -413,9 +404,7 @@ fn define_entry(
     );
     let call = builder.ins().call(inner, &arguments);
     let &[status, value] = builder.inst_results(call) else {
-        return Err(crate::analysis::Refusal(
-            "a native call without a status and a value",
-        ));
+        return Err(crate::analysis::Refusal("a native call without a status and a value"));
     };
     builder.ins().store(MemFlagsData::trusted(), value, out, 0);
     builder.ins().return_(&[status]);
@@ -463,11 +452,7 @@ fn report(outcomes: &[Outcome]) {
             continue;
         }
         for specialization in &outcome.compiled {
-            let types: Vec<&str> = specialization
-                .params
-                .iter()
-                .map(|&ty| ty_name(ty))
-                .collect();
+            let types: Vec<&str> = specialization.params.iter().map(|&ty| ty_name(ty)).collect();
             let lookups: Vec<&str> = specialization
                 .checks
                 .iter()
@@ -779,10 +764,7 @@ unsafe fn call(function: Sexp, args: &[Arg]) -> Option<R<Sexp>> {
     let (arguments, read) = native::gather(function, args)?;
     let (types, words) = native::argument_words(&arguments)?;
     let (index, result, entry_point) = SECTIONS.with_borrow(|sections| {
-        let functions = sections
-            .get(section as usize)?
-            .functions
-            .get(&(entry, ordinal))?;
+        let functions = sections.get(section as usize)?.functions.get(&(entry, ordinal))?;
         functions
             .iter()
             .enumerate()
@@ -801,13 +783,7 @@ unsafe fn call(function: Sexp, args: &[Arg]) -> Option<R<Sexp>> {
 /// the code was compiled against. A pass is remembered until [`interp::code_image::check_epoch`]
 /// moves, once every binding it read and every frame a lookup walked is locked, since no binding
 /// can then appear in front of the one found.
-unsafe fn checks_hold(
-    function: Sexp,
-    section: u32,
-    entry: u32,
-    ordinal: u32,
-    index: usize,
-) -> bool {
+unsafe fn checks_hold(function: Sexp, section: u32, entry: u32, ordinal: u32, index: usize) -> bool {
     let stamp = interp::code_image::check_epoch() + 1;
     let remembered = ATTACHED.with_borrow(|attached| {
         attached
@@ -839,9 +815,8 @@ unsafe fn checks_hold(
             }) => {
                 all_locked &= locked && frames_locked;
                 let holds = match expected {
-                    Expected::Builtin(name) => {
-                        value.is_some_and(|value| base_builtin(value, *symbol) == Some(&**name))
-                    }
+                    Expected::Builtin(name) => value
+                        .is_some_and(|value| base_builtin(value, *symbol) == Some(&**name)),
                     Expected::Sibling {
                         entry: sibling_entry,
                         ordinal: sibling_ordinal,
@@ -936,14 +911,7 @@ mod tests {
         syntax::testing::{SplitMix64, for_each_seed},
     };
 
-    const TYPES: [Ty; 6] = [
-        Ty::Int,
-        Ty::Dbl,
-        Ty::Lgl,
-        Ty::IntVec,
-        Ty::DblVec,
-        Ty::LglVec,
-    ];
+    const TYPES: [Ty; 6] = [Ty::Int, Ty::Dbl, Ty::Lgl, Ty::IntVec, Ty::DblVec, Ty::LglVec];
 
     fn random_name(rng: &mut SplitMix64) -> Box<str> {
         let names = ["+", "f", "my var", "[[", "\u{e9}t\u{e9}", ""];

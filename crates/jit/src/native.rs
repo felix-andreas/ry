@@ -203,11 +203,7 @@ pub(crate) fn ahead_of_time<T>(
 /// functions.
 pub(crate) fn declare_ahead(name: &str, signature: &Signature) -> Result<ssa::FuncId, Refusal> {
     AHEAD_OBJECT
-        .with_borrow_mut(|object| {
-            object
-                .as_mut()
-                .map(|object| object.declare(name, signature))
-        })
+        .with_borrow_mut(|object| object.as_mut().map(|object| object.declare(name, signature)))
         .ok_or(Refusal("no install-time object is open"))?
         .map_err(Refusal::from)
 }
@@ -414,10 +410,7 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
             return Err(Refusal("records, whose layouts each process numbers anew"));
         }
         let own_signature = signature(params, guess, CallConv::Host);
-        let name = format!(
-            "native{}",
-            AHEAD_COUNT.with(|count| count.replace(count.get() + 1))
-        );
+        let name = format!("native{}", AHEAD_COUNT.with(|count| count.replace(count.get() + 1)));
         let id = declare_ahead(&name, &own_signature)?;
         let mut builder = Builder::new(own_signature.clone());
         let own = builder.import_function(id, own_signature);
@@ -2646,9 +2639,10 @@ impl Emitter {
                 let id = native
                     .object
                     .ok_or(Refusal("a call of code outside the install-time object"))?;
-                let reference = self
-                    .builder
-                    .import_function(id, signature(&native.params, native.result, self.call_conv));
+                let reference = self.builder.import_function(
+                    id,
+                    signature(&native.params, native.result, self.call_conv),
+                );
                 self.builder.ins().call(reference, &args)
             }
             Callee::Other(native) => {
@@ -2683,7 +2677,12 @@ impl Emitter {
 
     /// Where the handle stack stands.
     fn handle_mark(&mut self) -> Value {
-        self.helper(Helper::NativeMark, &[], I64, &[])
+        self.helper(
+            Helper::NativeMark,
+            &[],
+            I64,
+            &[],
+        )
     }
 
     /// Releases every handle rooted since `mark`, then roots `keep`.
@@ -2946,10 +2945,20 @@ impl Emitter {
                 if operation == Operation::Sqrt {
                     self.builder.ins().sqrt(value)
                 } else {
-                    self.helper(Helper::Log, &[F64], F64, &[value])
+                    self.helper(
+                        Helper::Log,
+                        &[F64],
+                        F64,
+                        &[value],
+                    )
                 }
             }
-            Operation::Exp => self.helper(Helper::Exp, &[F64], F64, &[value]),
+            Operation::Exp => self.helper(
+                Helper::Exp,
+                &[F64],
+                F64,
+                &[value],
+            ),
             Operation::Floor => self.builder.ins().floor(value),
             _ => self.builder.ins().ceil(value),
         }
@@ -3037,13 +3046,28 @@ impl Emitter {
             Operation::Subtract => self.builder.ins().fsub(x, y),
             Operation::Multiply => self.builder.ins().fmul(x, y),
             Operation::Divide => self.builder.ins().fdiv(x, y),
-            Operation::Power => self.helper(Helper::Power, &[F64, F64], F64, &[x, y]),
+            Operation::Power => self.helper(
+                Helper::Power,
+                &[F64, F64],
+                F64,
+                &[x, y],
+            ),
             _ => {
                 // Tier 0 raises the warning, so a modulus that loses accuracy fails over.
-                let loses = self.helper(Helper::ModulusLosesAccuracy, &[F64, F64], I32, &[x, y]);
+                let loses = self.helper(
+                    Helper::ModulusLosesAccuracy,
+                    &[F64, F64],
+                    I32,
+                    &[x, y],
+                );
                 let loses = self.builder.ins().icmp_imm_u(IntCC::NotEqual, loses, 0);
                 self.fail_if(loses);
-                self.helper(Helper::RealModulo, &[F64, F64], F64, &[x, y])
+                self.helper(
+                    Helper::RealModulo,
+                    &[F64, F64],
+                    F64,
+                    &[x, y],
+                )
             }
         }
     }
@@ -3068,12 +3092,7 @@ pub unsafe fn call(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<S
     let native = native_for(function, &types)?;
     let trampoline = trampoline(&native.params, native.result)?;
     run(native.result, &read, |out| {
-        trampoline(
-            native.address,
-            runtime::jit_depth_budget(),
-            words.as_ptr(),
-            out,
-        )
+        trampoline(native.address, runtime::jit_depth_budget(), words.as_ptr(), out)
     })
 }
 
@@ -3370,10 +3389,7 @@ unsafe fn combine(operands: &[Sexp]) -> R<Sexp> {
             _ => 2,
         })
         .unwrap_or(SexpType::Logical);
-    let length: usize = operands
-        .iter()
-        .map(|operand| operand.length() as usize)
-        .sum();
+    let length: usize = operands.iter().map(|operand| operand.length() as usize).sum();
     let result = values::alloc(kind, length)?;
     let mut at = 0;
     for &operand in operands {
