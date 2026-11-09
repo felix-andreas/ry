@@ -1357,6 +1357,137 @@ unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallF
     }))
 }
 
+/// The direct-call plan of the call `call` for closures with `function`'s formals and body:
+/// for each formal, the position of the argument that fills its slot or -1 when the site
+/// supplies none. `None` when such calls need [`bind_slots`] or a heap frame: the body has no slot table that names the formals, a formal is `...`, the call passes
+/// `...` or `..N`, its arguments do not match, or a formal the site leaves out has a default
+/// whose promise would capture the frame.
+pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<SmallVec<[i32; 8]>>> {
+    let body = function.cdr();
+    if body.kind() != SexpType::Bytecode
+        || function == interp().namespace_loader
+        || crate::annotations::is_typed(function)
+    {
+        return Ok(None);
+    }
+    let table = body.cdr().element(bytecode::SLOTS);
+    if table == nil() {
+        return Ok(None);
+    }
+    let names = table.element(1);
+    let formals = function.car();
+    let mut formal_count = 0;
+    let mut formal = formals;
+    while formal.kind() == SexpType::Pairlist {
+        if formal_count >= values::length(names)
+            || names.element(formal_count) != formal.tag()
+            || formal.tag() == symbols().dots
+        {
+            return Ok(None);
+        }
+        formal_count += 1;
+        formal = formal.cdr();
+    }
+    let missing_value = missing_arg();
+    let mut args = Args::new();
+    let mut cell = call.cdr();
+    while cell.kind() == SexpType::Pairlist {
+        let expression = cell.car();
+        if expression.kind() == SexpType::Symbol
+            && (expression == symbols().dots || dot_dot_index(expression).is_some())
+        {
+            return Ok(None);
+        }
+        args.push(Arg {
+            tag: cell.tag(),
+            value: expression,
+        });
+        cell = cell.cdr();
+    }
+    let Ok(plan) = match_plan(formals, &args, call) else {
+        return Ok(None);
+    };
+    let mut sources: SmallVec<[i32; 8]> = smallvec![-1; formal_count];
+    for (position, &target) in plan.iter().enumerate() {
+        if args[position].value != missing_value {
+            sources[target as usize] = position as i32;
+        }
+    }
+    let mut formal = formals;
+    for &source in &sources {
+        let default = formal.car();
+        if source < 0 && !(default == missing_value || default == nil() || default.kind().is_atomic())
+        {
+            return Ok(None);
+        }
+        formal = formal.cdr();
+    }
+    Ok(Some(sources))
+}
+
+/// Calls `function` in a slot frame from a site whose plan `sources` (the vector
+/// `bytecode::direct_plan` keeps, of [`direct_sources`]) matched `args` to its formals already: the arguments go straight into the slots, with no
+/// matching and none of [`apply_closure`]'s checks, which the plan settled for the closure's
+/// formals and body. What can change between calls (a debugger, a move, a body compiled to
+/// machine code since) sends the call down the generic path.
+pub unsafe fn call_direct(
+    call: Sexp,
+    function: Sexp,
+    sources: Sexp,
+    args: &[Arg],
+    sys_parent: Sexp,
+) -> R<Sexp> {
+    let constants = function.cdr().cdr();
+    let state = interp();
+    if constants.element(bytecode::TIER1) != nil()
+        || constants.element(bytecode::BASELINE) != nil()
+        || state.debugger.is_some()
+        || moves::tracking()
+        || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
+    {
+        return apply_closure(call, function, args, sys_parent, None);
+    }
+    let count = values::length(constants.element(bytecode::SLOTS).element(1));
+    let header = state.bytecode.registers.len();
+    let register_count = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
+    bytecode::reserve_registers(header + 1 + count + register_count)?;
+    let registers = bytecode::register_address(header);
+    let missing_value = missing_arg();
+    let mut missing = 0u64;
+    let mut formal = function.car();
+    // The plan's first entry counts the plans its site made.
+    let sources = values::ints(sources).get(1..).unwrap_or(&[]);
+    for (index, &source) in sources.iter().enumerate() {
+        let default = formal.car();
+        let value = match args.get(source as usize) {
+            Some(arg) if source >= 0 => arg.value,
+            _ if default != missing_value => {
+                missing |= 1 << index;
+                default
+            }
+            _ => missing_value,
+        };
+        value.increment_refcount();
+        *registers.add(1 + index) = value;
+        formal = formal.cdr();
+    }
+    let unbound = unbound();
+    for index in sources.len()..count {
+        *registers.add(1 + index) = unbound;
+    }
+    run_frame(
+        call,
+        function,
+        CallFrame::Slots {
+            header: header as u32,
+            missing,
+        },
+        sys_parent,
+        args,
+        Entry::Unchecked,
+    )
+}
+
 /// The environment of the frame at `index`, made from its slots first if it is a slot frame
 /// that has none yet. Everything that hands a frame's environment to R code or native code
 /// reads it here.
@@ -1655,7 +1786,6 @@ pub unsafe fn run_frame(
         };
         refuse_object_system(call, function, sys_parent)?;
     }
-    let restarts = state.restarts.clone();
     let start = state.frame_args.len() as u32;
     state.frame_args.extend_from_slice(args);
     state.frames.push(Frame {
@@ -1666,7 +1796,7 @@ pub unsafe fn run_frame(
         args: start,
         on_exit: Vec::new(),
         handlers: state.handlers.clone(),
-        restarts: restarts.clone(),
+        restarts: state.restarts.clone(),
         srcref: state.srcref,
         closures: state.frame_closures.len(),
         slots,
@@ -1759,12 +1889,15 @@ pub unsafe fn run_frame(
         result
     };
     let state = interp();
-    let env = state.frames[depth - 1].env;
+    crate::truncate_frames(state, depth);
+    let Some(frame) = state.frames.pop() else {
+        panic!("a closure call's frame was popped while the call ran");
+    };
+    state.frame_args.truncate(frame.args as usize);
+    let (env, closures) = (frame.env, frame.closures);
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
-    state.handlers = state.frames[depth - 1].handlers.clone();
-    let closures = state.frames[depth - 1].closures;
-    crate::truncate_frames(state, depth - 1);
-    state.restarts = restarts;
+    state.handlers = frame.handlers;
+    state.restarts = frame.restarts;
     state.srcref = caller_srcref;
     if let Ok(value) = result
         && env != nil()

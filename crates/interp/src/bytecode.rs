@@ -1750,7 +1750,9 @@ impl Compiler {
     /// are made from: the unbound marker when an argument is worth compiling, which
     /// [`Op::CallGeneric`] replaces with the compiled arguments the first time it calls a
     /// closure here, or `NULL` when none is. A third constant is `TRUE` when a call of an
-    /// effect-free closure may bind symbol arguments to their values (see [`eager_site`]).
+    /// effect-free closure may bind symbol arguments to their values (see [`eager_site`]). A
+    /// fourth holds the site's direct-call plan ([`direct_plan`]), unbound until the site first
+    /// calls a closure.
     unsafe fn call_site(&mut self, call: Sexp) -> R<u32> {
         let index = self.constant(call);
         let arguments = values::pairlist_items(call.cdr());
@@ -1770,6 +1772,7 @@ impl Compiler {
             nil()
         };
         self.constant(flag);
+        self.constant(unbound());
         Ok(index)
     }
 
@@ -3497,6 +3500,7 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
                         && (arguments == unbound()
                             || matches!(arguments.kind(), SexpType::Nil | SexpType::Pairlist))
                         && constant(value + 2).is_ok()
+                        && constant(value + 3).is_ok()
                 }
                 Formals => matches!(constant(value)?.kind(), SexpType::Nil | SexpType::Pairlist),
                 Shape => {
@@ -4591,11 +4595,11 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             && effects::effect_free(function)?;
         // From a slot frame, a call whose arguments need no promise over the frame leaves it
         // without an environment, and the callee finds its caller as the frame below its own.
-        if state.in_slots()
+        let sys_parent = if state.in_slots()
             && (slot_args_into(state, arguments, eager, &mut args)?
                 || slot_promises_into(state, arguments, eager, &mut args)?)
         {
-            eval::apply_closure_owning(call, function, &args, nil(), None)?
+            nil()
         } else {
             args.clear();
             let env = state.env()?;
@@ -4604,7 +4608,11 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             } else {
                 eval::compiled_args_into(arguments, env, &mut args)?;
             }
-            eval::apply_closure_owning(call, function, &args, env, None)?
+            env
+        };
+        match direct_plan(state, instruction, function, call)? {
+            Some(sources) => eval::call_direct(call, function, sources, &args, sys_parent)?,
+            None => eval::apply_closure_owning(call, function, &args, sys_parent, None)?,
         }
     } else if state.in_slots()
         && let Some(value) = slot_substitute(state, function, call)?
@@ -4617,6 +4625,63 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// How many different closures a call site may plan for before it stops planning and always
+/// takes the generic call path: a site that calls a new closure on every call would otherwise
+/// pay for matching and an allocation each time.
+const PLAN_MISSES: i32 = 8;
+
+/// The direct-call plan of a call site for `function` (see [`eval::call_direct`]): which
+/// argument fills each of its formals' slots, or `None` when calls of it here take the
+/// generic path. A plan holds for every closure with the same formals and body, so the
+/// closures one `function` expression makes on each run share it. The site keeps the plan as
+/// a list of the formals, the body, and an integer vector of how many plans the site has made
+/// followed by the sources, which [`eval::direct_sources`] leaves out when it finds none.
+unsafe fn direct_plan(
+    state: &Activation<'_, '_>,
+    instruction: Instruction,
+    function: Sexp,
+    call: Sexp,
+) -> R<Option<Sexp>> {
+    let index = instruction.operand(2) + 3;
+    let plan = state.constants.element(index);
+    let (formals, body) = (function.car(), function.cdr());
+    if plan == nil() || body.kind() != SexpType::Bytecode {
+        return Ok(None);
+    }
+    // Most sites run once, so a site plans on its second call of the same body: the first
+    // leaves the body as the mark.
+    if plan != body && plan.kind() != SexpType::List {
+        (*state.heap).set_element(state.constants, index, body);
+        return Ok(None);
+    }
+    let made = if plan == body {
+        0
+    } else if plan.element(0) == formals && plan.element(1) == body {
+        let sources = plan.element(2);
+        return Ok((length(sources) > 1).then_some(sources));
+    } else {
+        values::ints(plan.element(2))[0]
+    };
+    let heap = &mut *state.heap;
+    if made >= PLAN_MISSES {
+        heap.set_element(state.constants, index, nil());
+        return Ok(None);
+    }
+    let mut entries: SmallVec<[i32; 9]> = SmallVec::new();
+    entries.push(made + 1);
+    if let Some(sources) = eval::direct_sources(function, call)? {
+        entries.extend_from_slice(&sources);
+    }
+    let sources = values::integer_vector(&entries)?;
+    heap.root(sources);
+    let plan = values::alloc(SexpType::List, 3)?;
+    heap.set_element(plan, 0, formals);
+    heap.set_element(plan, 1, body);
+    heap.set_element(plan, 2, sources);
+    heap.set_element(state.constants, index, plan);
+    Ok((entries.len() > 1).then_some(sources))
 }
 
 /// The slot of `symbol` in a slot frame, found by name for instructions that carry no lookup
