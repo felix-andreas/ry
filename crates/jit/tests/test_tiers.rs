@@ -928,6 +928,62 @@ fn closures_from_one_site_share_code_but_not_lookups() {
     });
 }
 
+/// Compiled code loads a variable inline when it sits in the activation's frame or an enclosing
+/// function frame and holds a value or a forced promise, and hands every other load to the
+/// runtime. These calls cross each case: a forced argument, an enclosing binding whose type
+/// changes under the code (the inline load must deoptimize), an active binding, and an argument
+/// that is an integer in one closure and a double in another of the same code, which loads as
+/// `Num`.
+#[test]
+fn inline_variable_loads_agree_with_tier_zero() {
+    let calls = [
+        "g(1L)",
+        "g(2L)",
+        "g(1.5)",
+        "g(3L)",
+        "assign('k', 2.5, envir = environment(g))",
+        "g(1L)",
+        "g(2L)",
+        "assign('k', 'a', envir = environment(g))",
+        "g(1L)",
+        "makeActiveBinding('j', function() 4L, environment(g))",
+        "h <- local({ j <- 1L; function(x) { s <- 0; for (i in 1:3) s <- s + x * j; s } })",
+        "h(1L)",
+        "h(2L)",
+        "environment(h) <- environment(g)",
+        "h(1L)",
+        "h(2L)",
+        "p <- make(2)",
+        "q <- make(0.5)",
+        "p(1L)",
+        "q(1.5)",
+        "p(2L)",
+        "q(2.5)",
+        "typeof(p(3L))",
+        "q(NA_integer_)",
+        "p(NA)",
+        "typeof(q(4L))",
+    ];
+    let mut outcomes = Vec::new();
+    with_interpreter(|| unsafe {
+        for mode in [Mode::Off, Mode::Force] {
+            jit::install_mode(mode);
+            run("make <- function(k) function(x) { s <- 0; for (i in 1:3) s <- s + x * k; s }");
+            run("g <- make(2L)");
+            let mut results = vec![run("g(1L)")];
+            // A body the code generator rejects would run in tier 0 and agree trivially.
+            assert!(
+                mode == Mode::Off || has_compiled_code("g"),
+                "g did not compile, so nothing probed"
+            );
+            results.extend(calls.iter().map(|call| run(call)));
+            outcomes.push(results);
+        }
+        jit::install_mode(Mode::Off);
+    });
+    assert_eq!(outcomes[0], outcomes[1]);
+}
+
 #[test]
 fn formal_shadows_enclosing_function() {
     // `sum` names a base function, but the call must reach the function passed in its place.
@@ -2650,6 +2706,26 @@ fn typed_core_keeps_tier_zero_semantics_at_scope_and_na_edges() {
         (
             "function(b: logical) -> integer | NULL if (b) 1L",
             &["{ x <- FALSE; FUNCTION(x) }"],
+        ),
+        // An `if` whose branches are such `if`s has a value nothing may read either, even
+        // when its own branches agree.
+        (
+            "function(x: character) (if (x == \"a\") (if (x == \"b\") 1 else 0L) else (if (x == \"b\") 1 else 0L))",
+            &[
+                "{ a <- \"a\"; FUNCTION(a) }",
+                "{ a <- \"c\"; FUNCTION(a) }",
+            ],
+        ),
+        (
+            "function(b: logical) if (b) (if (b) 1 else 0L)",
+            &["{ x <- TRUE; FUNCTION(x) }", "{ x <- FALSE; FUNCTION(x) }"],
+        ),
+        (
+            "function(b: logical, c: logical) if (b) (if (c) 1 else 0L) else return(2L)",
+            &[
+                "{ x <- TRUE; y <- FALSE; FUNCTION(x, y) }",
+                "{ x <- FALSE; y <- FALSE; FUNCTION(x, y) }",
+            ],
         ),
         // A local function sees the names where it is defined, and the latest value of each.
         (

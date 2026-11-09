@@ -594,6 +594,8 @@ pub mod header_layout {
 
 /// Where an environment's frame starts in the object (`env::layout` has the frame's own fields).
 pub const ENVIRONMENT_FRAME_OFFSET: usize = std::mem::offset_of!(EnvironmentObject, frame);
+/// Where an environment's enclosure pointer sits in the object.
+pub const ENVIRONMENT_ENCLOSURE_OFFSET: usize = std::mem::offset_of!(EnvironmentObject, enclosure);
 
 const _: () = assert!(size_of::<Header>() == 16);
 const _: () = assert!(VECTOR_DATA_OFFSET == 32);
