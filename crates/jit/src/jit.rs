@@ -309,9 +309,9 @@ unsafe fn compiled_for<'a>(
                         .min(i32::MAX / 2)
                 };
                 // The counters climb back to the threshold before the tier is asked again.
-                // Recording stops for the wait and restarts when a counter passes half its
-                // threshold, so the compile still sees the feedback of the last half threshold
-                // without a large body recording through every round of its wait.
+                // Recording stops for the wait and restarts when a counter nears its threshold
+                // again, so the compile still sees fresh feedback without a large body
+                // recording through every round of its wait.
                 if let Some(tier) = bytecode::tier() {
                     counters[profile::ENTRIES] = counters[profile::ENTRIES]
                         .min(tier.entry_threshold)

@@ -377,12 +377,14 @@ pub mod profile {
     pub const TIER_STATE: usize = 2;
     /// Nonzero while tier 0 records type feedback for this code, which only happens with the
     /// optimizing tier installed and while the code has no optimized code: during the first
-    /// activation of a body with a loop, once a body is halfway to the entry or the back-edge
-    /// threshold, and after its optimized code was discarded until it compiles again.
-    /// Recording costs a type test and a store per value, and most bodies never get near a
-    /// threshold, so recording from the first entry made every call of cold package code slower
-    /// with the optimizing tier installed than without it. Half a threshold still sees every
-    /// type a compile would specialize on. A loop can turn hot inside a body's only activation,
+    /// activation of a body with a loop, over the last eighth of the entry threshold
+    /// ([`super::recording_start`]), from half the back-edge threshold, and after its optimized
+    /// code was discarded until it compiles again. Recording costs a type test and a store per
+    /// value, and most bodies never get near a threshold, so recording from the first entry
+    /// made every call of cold package code slower with the optimizing tier installed than
+    /// without it. Recording from half the entry threshold still cost a test suite 10M
+    /// instructions, in warm bodies that never reach it; a type the window misses costs one
+    /// deoptimization and a recompile. A loop can turn hot inside a body's only activation,
     /// so a loop that reaches half its threshold starts recording in the running activation, and
     /// the first activation records the instructions before the loop, which that would miss.
     /// Optimized code records nothing, and what tier 0 would record beside it is read only by a

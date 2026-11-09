@@ -340,8 +340,9 @@ pub unsafe fn invalidate(code: Sexp) {
     heap.set_element(constants, TIER1, values::nil());
     let counters = values::ints_mut(constants.element(PROFILE));
     let state = counters[profile::TIER_STATE];
-    // Halfway to the threshold, tier 0 records type feedback, so the activation that just
-    // deoptimized records the type that broke the speculation and the recompile sees it.
+    // Within the recording window before the threshold, tier 0 records type feedback, so the
+    // activation that just deoptimized records the type that broke the speculation and the
+    // recompile sees it.
     // A body that compiles only for its loop records through its loop, from half the back-edge
     // threshold, and its calls must never ask the tier again, so it keeps the entry count that
     // stops them asking.
