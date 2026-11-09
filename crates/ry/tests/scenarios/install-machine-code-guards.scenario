@@ -1,0 +1,104 @@
+# A user changes a package's functions at run time, in the ways R allows, after the install
+# compiled them to machine code. Each change makes the compiled callers run in the interpreter,
+# which sees the change: an environment unlocked from C and a binding added to it, a sibling
+# rebound to a promise, and a sibling flagged for the debugger.
+
+requires ry-runtime
+
+file pkg/DESCRIPTION
+| Package: guarded
+| Version: 1.0.0
+| Title: Guarded
+| Description: Compiled functions whose lookups change at run time.
+| License: MIT
+| KeepSource: yes
+file pkg/NAMESPACE
+| useDynLib(guarded, .registration = TRUE)
+| export(hypot, quad, unlock_env)
+file pkg/R/guarded.R
+| hypot <- function(x, y) sqrt(square(x) + square(y))
+| square <- function(x) {
+|     x * x
+| }
+| quad <- function(x) square(square(x))
+| unlock_env <- function(env) invisible(.Call(guarded_unlock, env))
+file pkg/src/unlock.c
+| #include <R.h>
+| #include <Rinternals.h>
+| #include <R_ext/Rdynload.h>
+|
+| /* Not in the API, but rlang and pkgload clear an environment's lock bit this way. */
+| extern int ENVFLAGS(SEXP);
+| extern void SET_ENVFLAGS(SEXP, int);
+|
+| SEXP guarded_unlock(SEXP env)
+| {
+|     SET_ENVFLAGS(env, ENVFLAGS(env) & ~(1 << 14));
+|     return R_NilValue;
+| }
+|
+| static const R_CallMethodDef calls[] = {
+|     {"guarded_unlock", (DL_FUNC) &guarded_unlock, 1},
+|     {NULL, NULL, 0}
+| };
+|
+| void R_init_guarded(DllInfo *info)
+| {
+|     R_registerRoutines(info, NULL, calls, NULL, NULL);
+|     R_useDynamicSymbols(info, FALSE);
+| }
+
+run ry install pkg -l library --explain
+expect exit 0
+expect stdout "quad(double) -> double: tests 1 argument on entry; looks up square, {, * once"
+
+env RY_JIT off
+
+# Unlocking the namespace from C lets a binding appear in front of base's `sqrt`.
+file unlock.R
+| library(guarded, lib.loc = "library")
+| a <- 3
+| b <- 4
+| print(hypot(a, b))
+| ns <- asNamespace("guarded")
+| unlock_env(ns)
+| assign("sqrt", function(x) -1, envir = ns)
+| print(hypot(a, b))
+
+run ry run --runtime ry unlock.R
+expect exit 0
+expect stdout "[1] 5"
+expect stdout "[1] -1"
+
+# A sibling rebound to a promise is not the closure its record makes once its binding is unlocked.
+file promise.R
+| library(guarded, lib.loc = "library")
+| x <- 3
+| print(quad(x))
+| ns <- asNamespace("guarded")
+| unlockBinding("square", ns)
+| delayedAssign("square", function(x) 0, assign.env = ns)
+| print(quad(x))
+
+run ry run --runtime ry promise.R
+expect exit 0
+expect stdout "[1] 81"
+expect stdout "[1] 0"
+
+# A sibling flagged for the debugger after its caller's lookups were checked stops in the
+# debugger when the caller calls it.
+file debugged.R
+| library(guarded, lib.loc = "library")
+| x <- 3
+| print(quad(x))
+| debug(guarded:::square)
+| print(quad(x))
+
+debug start debugged.R
+expect stopped "function breakpoint" at 5
+expect stack "square@5"
+debug continue
+expect stopped "function breakpoint" at 5
+debug continue
+expect exited 0
+expect debug-output "[1] 81"

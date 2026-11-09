@@ -189,7 +189,11 @@ pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
         .iter()
         .find(|(candidate, _)| *candidate == function)
     else {
-        return Ok(None);
+        // A closure with install-time machine code carries the same mark.
+        return match crate::code_image::native_hooks() {
+            Some(hooks) => (hooks.call)(function, args).transpose(),
+            None => Ok(None),
+        };
     };
     let value = entry(args)?;
     if value.is_some() {

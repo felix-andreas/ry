@@ -597,9 +597,11 @@ the trained profile below, and the native code it reserves room for.
 - **Damage.** The image only saves compiling, so a damaged one never stops a package from loading.
   A file that cannot be read or parsed, a payload whose hash does not match (checked when the first
   closure of its record is called), a record whose closures do not match the database's, or code
-  the decoder rejects each warn once (`cannot use the code image ..., so its functions compile as
-  they run; reinstall the package to repair it`). The image is then ignored for the rest of the
-  session, and its waiting code is dropped.
+  the decoder rejects each print one warning to the console (`cannot use the code image ..., so its
+  functions compile as they run; reinstall the package to repair it`). The warning is not
+  signalled as a condition, so neither a handler nor `options(warn = 2)` can turn the damage into
+  an error. The image is then ignored for the rest of the session, and its waiting code is
+  dropped.
 - **Verified code.** Tier 0 reads instruction operands, registers, inline-cache slots and jump
   targets without bounds checks, so decoded code passes a linear verifier (`verify` in
   `crates/interp/src/bytecode.rs`) before it runs: every opcode is known, every operand is below its
@@ -620,11 +622,23 @@ the trained profile below, and the native code it reserves room for.
 - **Off switches.** `RY_CODE_IMAGE=0` ignores images when loading; `R CMD INSTALL
   --ry-no-code-image` writes none. A failure while writing an image warns and installs the package
   without one.
-- **Native code.** The file reserves an offset and length for install-time native code, both 0 today.
-  The end shape compiles untyped bodies through the same SSA IR and AOT pipeline the typed core uses
-  ("One SSA IR and one install-time pipeline" in `decisions.md`); it lands once tier 1 and the typed
-  core share that IR, and fills the reserved section with position-independent code mapped
-  read-only, as `typed-runtime.md` describes for the code file.
+- **Native code.** The native section after the payloads holds install-time machine code
+  (`crates/jit/src/ahead.rs`). The install compiles each recorded closure with the native-function
+  compiler (`crates/jit/src/native.rs`) for up to four argument-type guesses, taken from its
+  annotations and constant defaults and otherwise from double, integer and logical scalars and
+  vectors. The code goes through `crates/ssa` and `cranelift-object`, and `ssa::section` links it
+  into position-independent code, with helper addresses in a link table filled when the section
+  is mapped. The section is mapped read-only and executable straight from the file when its
+  offset is page-aligned, so processes share the pages. A manifest in the section names each
+  function's record entry and ordinal, its argument types, and the names it looks up: a base
+  builtin, or a sibling closure that calls are compiled against directly. A call tests its
+  arguments' types on entry; when none match, or a lookup no longer finds what the code was
+  compiled against, it runs in tier 0, so the code needs no deoptimization metadata. A passed
+  check is kept until any binding is unlocked (`interp::code_image::unlocks`), once every binding
+  it read is locked. Records, whose layouts each process numbers anew, keep a function in the
+  interpreter. Two gaps remain. The checker's inferred types are not used yet, so the types are
+  guesses. And arguments are read only when they are values, constants or variables, as for the
+  JIT's native entry, so `f(-1)` runs in the interpreter.
 
 The image is uncompressed and about six times the size of the compressed database (MASS: 706 KB
 against 120 KB). It is mapped, not read, so a session pays only for the pages of the records it
@@ -941,7 +955,7 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | Card marking for remembered old objects | V8, HotSpot | planned | minor collections during a load cost about 24M instructions each, mostly re-marking namespace frames being filled | |
 | A buffered `unserializeFromConn` | GNU R | planned | it reads a few bytes per call: 93M instructions of the 11-package `library()` | |
 | Per-package code images written at install time, beside the lazy-load database | Bun | built, no speedup yet | package load and warm-up; decoding a closure costs about what compiling it does, so untrained images cost 1.3% more instructions on `library(survival)` | `crates/interp/src/code_image.rs` |
-| Install-time machine code from whole-program facts (checker types, closed namespace bindings, effect-free functions), values from outside tested once where they enter, no profiles; tier 0 keeps `eval` and non-standard evaluation, the JIT keeps hot loops; `ry check --explain` lists by-name and unproven operations | Bun (`--aot`) | planned, in parallel with the baseline tier | start-up and short runs, where Bun's compiled code wins 1.5x to 3.3x; measured on the testthat workload and package load time | |
+| Install-time machine code from whole-program facts (checker types, closed namespace bindings, effect-free functions), values from outside tested once where they enter, no profiles; tier 0 keeps `eval` and non-standard evaluation, the JIT keeps hot loops; `ry install --explain` lists what stayed in the interpreter and what each native function tests and looks up | Bun (`--aot`) | built for scalar numeric closures with guessed argument types; checker types and arguments that are calls are open (`backlog.md`, "Install-time native code: the gaps") | callgrind, images on against `RY_CODE_IMAGE=0`, JIT off: testthat workload 7.850G against 7.834G, `library()` of six packages 1.546G against 1.536G, because few of their functions are scalar numeric; a top-level loop of 300,000 calls to a package's scalar functions runs 4.78G against 7.22G instructions, and 4.78G against 7.27G with the JIT on | `crates/jit/src/ahead.rs`, `crates/ssa/src/section.rs` |
 | One SSA IR for tier 1 and the typed core: typed facts unguarded, untyped speculations guarded with deoptimization exits; install-time code through the typed AOT pipeline, with its deoptimization metadata and watched bindings in the code file | Ř (PIR), Graal | IR built; install-time code planned | two SSA forms and two lowerings to Cranelift | `crates/ssa` |
 | Profiles from a training run (the package's tests and examples) stored in the per-package image | HHVM Jump-Start, Project Leyden | built, no speedup yet: loops tier up within their first call anyway, and a training run on other types makes the JIT refuse to recompile | hot closures that never reach tier 1's thresholds | |
 | Images shared across worker processes | Bun | planned | resident memory per `parallel` worker | |

@@ -72,6 +72,9 @@ pub struct Native {
     /// Whether the code allocates records. It roots each one on the handle stack and releases
     /// them all when it returns, except the record it returns, which it leaves rooted.
     pub allocates: bool,
+    /// The function in the object of an install-time session, whose code has no address yet;
+    /// `address` is 0 then.
+    pub object: Option<ssa::FuncId>,
 }
 
 /// The machine signature of a native function with these argument and result types.
@@ -86,6 +89,83 @@ pub fn signature(params: &[Ty], result: Ty, call_conv: CallConv) -> Signature {
     signature
 }
 
+/// The runtime functions and data native code reaches by address. Code for this process embeds
+/// the address; code written ahead of time reads it from its link table under [`Helper::name`].
+#[derive(Clone, Copy)]
+enum Helper {
+    Log,
+    Exp,
+    Power,
+    IntegerModulo,
+    IntegerDivide,
+    ModulusLosesAccuracy,
+    RealModulo,
+    NativeMark,
+    NativeRelease,
+    NativeRecord,
+    InterruptRequested,
+}
+
+const HELPERS: [Helper; 11] = [
+    Helper::Log,
+    Helper::Exp,
+    Helper::Power,
+    Helper::IntegerModulo,
+    Helper::IntegerDivide,
+    Helper::ModulusLosesAccuracy,
+    Helper::RealModulo,
+    Helper::NativeMark,
+    Helper::NativeRelease,
+    Helper::NativeRecord,
+    Helper::InterruptRequested,
+];
+
+impl Helper {
+    fn name(self) -> &'static str {
+        match self {
+            Helper::Log => "jit_log",
+            Helper::Exp => "jit_exp",
+            Helper::Power => "jit_power",
+            Helper::IntegerModulo => "jit_integer_modulo",
+            Helper::IntegerDivide => "jit_integer_divide",
+            Helper::ModulusLosesAccuracy => "jit_modulus_loses_accuracy",
+            Helper::RealModulo => "jit_real_modulo",
+            Helper::NativeMark => "jit_native_mark",
+            Helper::NativeRelease => "jit_native_release",
+            Helper::NativeRecord => "jit_native_record",
+            Helper::InterruptRequested => "interrupt_requested",
+        }
+    }
+
+    fn address(self) -> usize {
+        match self {
+            Helper::Log => runtime::jit_log as *const () as usize,
+            Helper::Exp => runtime::jit_exp as *const () as usize,
+            Helper::Power => runtime::jit_power as *const () as usize,
+            Helper::IntegerModulo => runtime::jit_integer_modulo as *const () as usize,
+            Helper::IntegerDivide => runtime::jit_integer_divide as *const () as usize,
+            Helper::ModulusLosesAccuracy => {
+                runtime::jit_modulus_loses_accuracy as *const () as usize
+            }
+            Helper::RealModulo => runtime::jit_real_modulo as *const () as usize,
+            Helper::NativeMark => runtime::jit_native_mark as *const () as usize,
+            Helper::NativeRelease => runtime::jit_native_release as *const () as usize,
+            Helper::NativeRecord => runtime::jit_native_record as *const () as usize,
+            Helper::InterruptRequested => {
+                &interp::unwind::INTERRUPT_REQUESTED as *const AtomicBool as usize
+            }
+        }
+    }
+}
+
+/// The address behind a link table symbol of code written ahead of time.
+pub fn helper_address(name: &str) -> Option<usize> {
+    HELPERS
+        .iter()
+        .find(|helper| helper.name() == name)
+        .map(|helper| helper.address())
+}
+
 type Key = (Sexp, SmallVec<[Ty; 4]>);
 
 thread_local! {
@@ -96,6 +176,49 @@ thread_local! {
     static COMPILING: RefCell<FxHashSet<Key>> = RefCell::new(FxHashSet::default());
     /// How many native functions exist, which refusals in `NATIVES` do not count toward.
     static COMPILED: Cell<usize> = const { Cell::new(0) };
+    /// While an install compiles a package ahead of time, the object its native functions
+    /// compile into, and the native functions compiled or refused for it by closure and argument
+    /// types. Code for the object cannot call code for this process, nor the reverse, so the two
+    /// keep separate tables.
+    static AHEAD_OBJECT: RefCell<Option<ssa::ObjectModule>> = const { RefCell::new(None) };
+    static AHEAD_NATIVES: RefCell<Option<FxHashMap<Key, Option<&'static Native>>>> =
+        const { RefCell::new(None) };
+}
+
+/// Runs `body` with native functions compiling into `object` rather than this process, and
+/// returns the object with what `body` returned.
+pub(crate) fn ahead_of_time<T>(
+    object: ssa::ObjectModule,
+    body: impl FnOnce() -> T,
+) -> (Option<ssa::ObjectModule>, T) {
+    AHEAD_OBJECT.with_borrow_mut(|slot| *slot = Some(object));
+    AHEAD_NATIVES.with_borrow_mut(|slot| *slot = Some(FxHashMap::default()));
+    AHEAD_COUNT.with(|count| count.set(0));
+    let value = body();
+    AHEAD_NATIVES.with_borrow_mut(|slot| *slot = None);
+    (AHEAD_OBJECT.with_borrow_mut(Option::take), value)
+}
+
+/// Declares a function of the install-time object, for code the install adds beside the native
+/// functions.
+pub(crate) fn declare_ahead(name: &str, signature: &Signature) -> Result<ssa::FuncId, Refusal> {
+    AHEAD_OBJECT
+        .with_borrow_mut(|object| object.as_mut().map(|object| object.declare(name, signature)))
+        .ok_or(Refusal("no install-time object is open"))?
+        .map_err(Refusal::from)
+}
+
+/// Defines a function the install-time object declared.
+pub(crate) fn define_ahead(id: ssa::FuncId, function: &ssa::Function) -> Result<(), Refusal> {
+    AHEAD_OBJECT
+        .with_borrow_mut(|object| object.as_mut().map(|object| object.define(id, function)))
+        .ok_or(Refusal("no install-time object is open"))?
+        .map_err(Refusal::from)?;
+    Ok(())
+}
+
+fn compiling_ahead() -> bool {
+    AHEAD_NATIVES.with_borrow(Option::is_some)
 }
 
 /// How many native functions a session compiles at most, since each keeps its closure alive.
@@ -116,6 +239,9 @@ const MAX_INLINE_DEPTH: usize = 3;
 /// compiling it on first use. `None` when the closure is not a scalar function of them.
 pub unsafe fn native_for(function: Sexp, params: &[Ty]) -> Option<&'static Native> {
     let key: Key = (function, SmallVec::from_slice(params));
+    if compiling_ahead() {
+        return native_ahead(key);
+    }
     match NATIVES.with(|natives| natives.borrow().get(&key).copied()) {
         // A function the code calls was rebound since it compiled: compile it again.
         Some(Some(native)) if !still_resolves(native) => {}
@@ -150,6 +276,49 @@ pub unsafe fn native_for(function: Sexp, params: &[Ty]) -> Option<&'static Nativ
         natives.insert(key, compiled);
     });
     compiled
+}
+
+/// [`native_for`] while an install compiles ahead of time. Nothing is rooted: the install keeps
+/// its package's closures alive until the object is written.
+unsafe fn native_ahead(key: Key) -> Option<&'static Native> {
+    let found = AHEAD_NATIVES.with_borrow(|natives| {
+        natives
+            .as_ref()
+            .and_then(|natives| natives.get(&key).copied())
+    });
+    if let Some(found) = found {
+        return found;
+    }
+    if !COMPILING.with(|compiling| compiling.borrow_mut().insert(key.clone())) {
+        return None;
+    }
+    let compiled = compile(key.0, &key.1);
+    COMPILING.with(|compiling| compiling.borrow_mut().remove(&key));
+    let compiled = match compiled {
+        Ok(native) => Some(&*Box::leak(Box::new(native))),
+        Err(Refusal(why)) => {
+            AHEAD_REFUSAL.with(|refusal| refusal.set(Some(why)));
+            None
+        }
+    };
+    AHEAD_NATIVES.with_borrow_mut(|natives| {
+        if let Some(natives) = natives {
+            natives.insert(key, compiled);
+        }
+    });
+    compiled
+}
+
+thread_local! {
+    /// Why the latest install-time compilation refused, for the install's report.
+    static AHEAD_REFUSAL: Cell<Option<&'static str>> = const { Cell::new(None) };
+    /// How many functions the install-time object declared, which names the next.
+    static AHEAD_COUNT: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Why the latest install-time compilation refused.
+pub(crate) fn last_refusal() -> Option<&'static str> {
+    AHEAD_REFUSAL.with(Cell::take)
 }
 
 /// Whether `function` has a native function for some argument types.
@@ -234,6 +403,32 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
     }
     let speculations = second.speculations;
     let allocates = second.allocates;
+    if compiling_ahead() {
+        // A record's layout is numbered by the process that interns it, and the code would have
+        // to embed it.
+        if allocates || guess.is_record() || params.iter().any(|ty| ty.is_record()) {
+            return Err(Refusal("records, whose layouts each process numbers anew"));
+        }
+        let own_signature = signature(params, guess, CallConv::Host);
+        let name = format!("native{}", AHEAD_COUNT.with(|count| count.replace(count.get() + 1)));
+        let id = declare_ahead(&name, &own_signature)?;
+        let mut builder = Builder::new(own_signature.clone());
+        let own = builder.import_function(id, own_signature);
+        let mut walker = Walker::new(function, &parameters, Some(guess));
+        // SAFETY: the walk reads the closure's own body and constants.
+        let mut builder = unsafe { emit(builder, CallConv::Host, true, own, &mut walker, body) }?;
+        builder.seal_all_blocks();
+        let compiled = builder.finalize();
+        define_ahead(id, &compiled)?;
+        return Ok(Native {
+            address: 0,
+            params: SmallVec::from_slice(params),
+            result: guess,
+            speculations,
+            allocates,
+            object: Some(id),
+        });
+    }
     let started = std::time::Instant::now();
     let (address, size) = ssa::with_module(|module| -> Result<_, Refusal> {
         let own_signature = signature(params, guess, CallConv::Host);
@@ -243,7 +438,7 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
         let mut walker = Walker::new(function, &parameters, Some(guess));
         walker.allocates = allocates;
         // SAFETY: the walk reads the closure's own body and constants.
-        let mut builder = unsafe { emit(builder, CallConv::Host, own, &mut walker, body) }?;
+        let mut builder = unsafe { emit(builder, CallConv::Host, false, own, &mut walker, body) }?;
         builder.seal_all_blocks();
         let compiled = builder.finalize();
         if std::env::var_os("RY_JIT_DUMP").is_some() {
@@ -265,10 +460,11 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
         result: guess,
         speculations,
         allocates,
+        object: None,
     })
 }
 
-fn machine_type(ty: Ty) -> Type {
+pub(crate) fn machine_type(ty: Ty) -> Type {
     match ty {
         Ty::Dbl => F64,
         _ if ty.is_vector() || ty.is_record() => I64,
@@ -1319,6 +1515,9 @@ impl<'p> Walker<'p> {
         }
         let kind = Kind::Known(Ty::Rec(layout));
         if order.is_empty() {
+            if compiling_ahead() {
+                return Err(Refusal("records, whose layouts each process numbers anew"));
+            }
             let value = singleton(layout)?;
             let value = emitter
                 .as_mut()
@@ -1373,7 +1572,7 @@ impl<'p> Walker<'p> {
         let layout_id = emitter.builder.ins().iconst(I32, i64::from(layout));
         let count = emitter.builder.ins().iconst(I64, order.len() as i64);
         let record = emitter.helper(
-            runtime::jit_native_record as *const () as usize,
+            Helper::NativeRecord,
             &[I32, I64, I64],
             I64,
             &[layout_id, address, count],
@@ -2189,6 +2388,7 @@ unsafe fn inlinable(body: Sexp) -> bool {
 unsafe fn emit(
     builder: Builder,
     call_conv: CallConv,
+    relocatable: bool,
     own: FuncRef,
     walker: &mut Walker<'_>,
     body: Sexp,
@@ -2207,6 +2407,7 @@ unsafe fn emit(
     let mut emitter = Emitter {
         builder,
         call_conv,
+        relocatable,
         own,
         budget,
         failure,
@@ -2258,6 +2459,8 @@ enum Callee {
 struct Emitter {
     builder: Builder,
     call_conv: CallConv,
+    /// Whether the code is written ahead of time, so it holds no address of this process.
+    relocatable: bool,
     /// The function being compiled, for its recursive calls.
     own: FuncRef,
     /// How many calls may still nest below this one.
@@ -2276,8 +2479,7 @@ impl Emitter {
     /// Fails when the interrupt flag is raised, so the interpreter runs the call and its polls
     /// decide whether to deliver a pending interrupt.
     fn check_interrupt(&mut self) {
-        let flag = &interp::unwind::INTERRUPT_REQUESTED as *const AtomicBool as i64;
-        let address = self.builder.ins().iconst(I64, flag);
+        let address = self.address_of(Helper::InterruptRequested);
         let requested = self
             .builder
             .ins()
@@ -2433,6 +2635,16 @@ impl Emitter {
         args.extend_from_slice(arguments);
         let call = match callee {
             Callee::Own(reference) => self.builder.ins().call(reference, &args),
+            Callee::Other(native) if self.relocatable => {
+                let id = native
+                    .object
+                    .ok_or(Refusal("a call of code outside the install-time object"))?;
+                let reference = self.builder.import_function(
+                    id,
+                    signature(&native.params, native.result, self.call_conv),
+                );
+                self.builder.ins().call(reference, &args)
+            }
             Callee::Other(native) => {
                 let signature = self.builder.import_signature(signature(
                     &native.params,
@@ -2466,7 +2678,7 @@ impl Emitter {
     /// Where the handle stack stands.
     fn handle_mark(&mut self) -> Value {
         self.helper(
-            runtime::jit_native_mark as *const () as usize,
+            Helper::NativeMark,
             &[],
             I64,
             &[],
@@ -2480,10 +2692,7 @@ impl Emitter {
         signature.params.push(AbiParam::new(I64));
         signature.params.push(AbiParam::new(I64));
         let signature = self.builder.import_signature(signature);
-        let callee = self
-            .builder
-            .ins()
-            .iconst(I64, runtime::jit_native_release as *const () as i64);
+        let callee = self.address_of(Helper::NativeRelease);
         self.builder
             .ins()
             .call_indirect(signature, callee, &[mark, keep]);
@@ -2692,14 +2901,25 @@ impl Emitter {
         }
     }
 
-    fn helper(&mut self, address: usize, params: &[Type], result: Type, args: &[Value]) -> Value {
+    /// The address of `helper`: a constant in code for this process, and a link table slot in
+    /// code written ahead of time.
+    fn address_of(&mut self, helper: Helper) -> Value {
+        if self.relocatable {
+            let symbol = self.builder.import_symbol(helper.name());
+            self.builder.ins().symbol_addr(symbol)
+        } else {
+            self.builder.ins().iconst(I64, helper.address() as i64)
+        }
+    }
+
+    fn helper(&mut self, helper: Helper, params: &[Type], result: Type, args: &[Value]) -> Value {
         let mut signature = Signature::new(self.call_conv);
         signature
             .params
             .extend(params.iter().map(|&ty| AbiParam::new(ty)));
         signature.returns.push(AbiParam::new(result));
         let signature = self.builder.import_signature(signature);
-        let callee = self.builder.ins().iconst(I64, address as i64);
+        let callee = self.address_of(helper);
         let call = self.builder.ins().call_indirect(signature, callee, args);
         // The signature declares exactly one result.
         self.builder.inst_results(call)[0]
@@ -2726,7 +2946,7 @@ impl Emitter {
                     self.builder.ins().sqrt(value)
                 } else {
                     self.helper(
-                        runtime::jit_log as *const () as usize,
+                        Helper::Log,
                         &[F64],
                         F64,
                         &[value],
@@ -2734,7 +2954,7 @@ impl Emitter {
                 }
             }
             Operation::Exp => self.helper(
-                runtime::jit_exp as *const () as usize,
+                Helper::Exp,
                 &[F64],
                 F64,
                 &[value],
@@ -2793,9 +3013,9 @@ impl Emitter {
             match operation {
                 Operation::Modulo | Operation::IntegerDivide => {
                     let helper = if operation == Operation::Modulo {
-                        runtime::jit_integer_modulo as *const () as usize
+                        Helper::IntegerModulo
                     } else {
-                        runtime::jit_integer_divide as *const () as usize
+                        Helper::IntegerDivide
                     };
                     return self.helper(helper, &[I32, I32], I32, &[x, y]);
                 }
@@ -2827,7 +3047,7 @@ impl Emitter {
             Operation::Multiply => self.builder.ins().fmul(x, y),
             Operation::Divide => self.builder.ins().fdiv(x, y),
             Operation::Power => self.helper(
-                runtime::jit_power as *const () as usize,
+                Helper::Power,
                 &[F64, F64],
                 F64,
                 &[x, y],
@@ -2835,7 +3055,7 @@ impl Emitter {
             _ => {
                 // Tier 0 raises the warning, so a modulus that loses accuracy fails over.
                 let loses = self.helper(
-                    runtime::jit_modulus_loses_accuracy as *const () as usize,
+                    Helper::ModulusLosesAccuracy,
                     &[F64, F64],
                     I32,
                     &[x, y],
@@ -2843,7 +3063,7 @@ impl Emitter {
                 let loses = self.builder.ins().icmp_imm_u(IntCC::NotEqual, loses, 0);
                 self.fail_if(loses);
                 self.helper(
-                    runtime::jit_real_modulo as *const () as usize,
+                    Helper::RealModulo,
                     &[F64, F64],
                     F64,
                     &[x, y],
@@ -2859,6 +3079,30 @@ impl Emitter {
 /// which is also what happens when the native function fails, since it has done nothing anyone
 /// can see by then.
 pub unsafe fn call(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<Sexp>> {
+    let (arguments, read) = gather(function, args)?;
+    // A strict typed closure runs on the typed core's native values when it compiles there,
+    // and on the scalar natives below when it does not.
+    if let Some(value) = typed::call(function, &arguments) {
+        if value.is_ok() {
+            force_read(&read);
+        }
+        return Some(value);
+    }
+    let (types, words) = argument_words(&arguments)?;
+    let native = native_for(function, &types)?;
+    let trampoline = trampoline(&native.params, native.result)?;
+    run(native.result, &read, |out| {
+        trampoline(native.address, runtime::jit_depth_budget(), words.as_ptr(), out)
+    })
+}
+
+/// The arguments a native call passes, as values with no promise left: `None` unless every
+/// argument is positional and at hand without evaluating anything, and every formal past them
+/// has a constant scalar default. Also gives each promise read without forcing, with its value.
+pub(crate) unsafe fn gather(
+    function: Sexp,
+    args: &[interp::builtins::Arg],
+) -> Option<(SmallVec<[Sexp; 4]>, SmallVec<[(Sexp, Sexp); 4]>)> {
     use heap::object::gp;
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
         || interp::moves::tracking()
@@ -2904,37 +3148,40 @@ pub unsafe fn call(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<S
         arguments.push(default);
         formal = formal.cdr();
     }
-    // A strict typed closure runs on the typed core's native values when it compiles there,
-    // and on the scalar natives below when it does not.
-    if let Some(value) = typed::call(function, &arguments) {
-        if value.is_ok() {
-            force_read(&read);
-        }
-        return Some(value);
-    }
+    Some((arguments, read))
+}
+
+/// The native type of each argument and the 64-bit word a native function takes it as.
+pub(crate) unsafe fn argument_words(
+    arguments: &[Sexp],
+) -> Option<(SmallVec<[Ty; 4]>, SmallVec<[u64; 4]>)> {
     let mut types: SmallVec<[Ty; 4]> = SmallVec::new();
     let mut words: SmallVec<[u64; 4]> = SmallVec::new();
-    for &value in &arguments {
+    for &value in arguments {
         let (ty, word) = argument_word(value)?;
         types.push(ty);
         words.push(word);
     }
-    let native = native_for(function, &types)?;
-    let trampoline = trampoline(&native.params, native.result)?;
+    Some((types, words))
+}
+
+/// Runs a native function of result type `result` through `enter`, which stores the value's
+/// bits in its argument and returns the status, and boxes the value. `None` when the function
+/// failed, so the caller runs the call in the interpreter.
+pub(crate) unsafe fn run(
+    result: Ty,
+    read: &[(Sexp, Sexp)],
+    enter: impl FnOnce(&mut u64) -> i64,
+) -> Option<R<Sexp>> {
     let heap = interp::heap();
     let mark = heap.handle_mark();
     let mut out = 0u64;
-    let status = trampoline(
-        native.address,
-        runtime::jit_depth_budget(),
-        words.as_ptr(),
-        &mut out,
-    );
+    let status = enter(&mut out);
     if status != OK {
         heap.release_handles(mark);
         return None;
     }
-    let value = match native.result {
+    let value = match result {
         Ty::Int => values::scalar_integer(out as u32 as i32),
         Ty::Lgl => values::scalar_logical(out as u32 as i32),
         Ty::Dbl => values::scalar_real(f64::from_bits(out)),
@@ -2942,7 +3189,7 @@ pub unsafe fn call(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R<S
             .ok_or_else(|| interp::unwind::error("a native function returned no record")),
     };
     heap.release_handles(mark);
-    force_read(&read);
+    force_read(read);
     interp::interp().visible = true;
     Some(value)
 }
@@ -2983,23 +3230,186 @@ unsafe fn argument_value(value: Sexp) -> Option<Sexp> {
         return Some(symbol);
     }
     // A checked promise runs its annotation check when forced, which only tier 0 does.
-    if symbol.kind() != SexpType::Symbol
-        || value.tag() == values::nil()
-        || value.has_gp(heap::object::gp::CHECKED_PROMISE)
-    {
+    if value.tag() == values::nil() || value.has_gp(heap::object::gp::CHECKED_PROMISE) {
         return None;
     }
-    let cell = interp::eval::find_cell(symbol, value.tag())?;
-    if cell.has_gp(heap::object::gp::ACTIVE_BINDING) {
+    pure_value(symbol, value.tag(), 0)
+}
+
+/// How deeply [`pure_value`] reads into an argument expression.
+const MAX_PURE_DEPTH: usize = 8;
+
+/// The value `expression` has in `env` when evaluating it can run no R code, signal no
+/// condition and change nothing: a constant, a variable bound to a value or a forced promise,
+/// and `(`, unary and binary `+`, `-`, `*`, `/` of numbers without attributes, and `c()` of
+/// such numbers, each named by its base function. Evaluating such an argument before the call
+/// gives the value forcing its promise would give, since the native code it is passed to runs
+/// no R code in between. Integer arithmetic that overflows is left to tier 0, which warns.
+unsafe fn pure_value(expression: Sexp, env: Sexp, depth: usize) -> Option<Sexp> {
+    match expression.kind() {
+        SexpType::Integer | SexpType::Real | SexpType::Logical => {
+            return (expression.attrib() == values::nil()).then_some(expression);
+        }
+        SexpType::Symbol => {
+            let cell = interp::eval::find_cell(expression, env)?;
+            if cell.has_gp(heap::object::gp::ACTIVE_BINDING) {
+                return None;
+            }
+            let bound = cell.cdr();
+            return match bound.kind() {
+                SexpType::Promise if bound.car() != values::unbound() => Some(bound.car()),
+                SexpType::Promise => None,
+                _ if bound == values::missing_arg() || bound == values::unbound() => None,
+                _ => Some(bound),
+            };
+        }
+        SexpType::Language if depth < MAX_PURE_DEPTH => {}
+        _ => return None,
+    }
+    let head = expression.car();
+    if head.kind() != SexpType::Symbol {
         return None;
     }
-    let bound = cell.cdr();
-    match bound.kind() {
-        SexpType::Promise if bound.car() != values::unbound() => Some(bound.car()),
-        SexpType::Promise => None,
-        _ if bound == values::missing_arg() || bound == values::unbound() => None,
-        _ => Some(bound),
+    let items = values::pairlist_items(expression.cdr());
+    if items.iter().any(|&(tag, value)| {
+        tag != values::nil() || value == values::missing_arg() || value == values::symbols().dots
+    }) {
+        return None;
     }
+    let function = resolve_function(head, env)?.function;
+    let name = base_builtin(function, head)?;
+    let mut operands: SmallVec<[Sexp; 4]> = SmallVec::new();
+    for &(_, item) in &items {
+        let operand = pure_value(item, env, depth + 1)?;
+        if !matches!(
+            operand.kind(),
+            SexpType::Integer | SexpType::Real | SexpType::Logical
+        ) || operand.attrib() != values::nil()
+        {
+            return None;
+        }
+        operands.push(operand);
+    }
+    let value = match (name, operands.as_slice()) {
+        ("(", &[inner]) => return Some(inner),
+        ("c", [_, ..]) => combine(&operands).ok()?,
+        ("+" | "-", &[operand]) if operand.length() == 1 => {
+            let number = number_of(operand);
+            match (name, number) {
+                ("+", Number::Double(_)) | ("+", Number::Integer(_))
+                    if operand.kind() != SexpType::Logical =>
+                {
+                    return Some(operand);
+                }
+                (_, Number::Double(x)) if !x.is_nan() => {
+                    values::scalar_real(if name == "-" { -x } else { x })
+                }
+                (_, Number::Double(_)) => return None,
+                (_, Number::Integer(x)) => values::scalar_integer(match x {
+                    NA_INTEGER => NA_INTEGER,
+                    x if name == "-" => -x,
+                    x => x,
+                }),
+            }
+            .ok()?
+        }
+        ("+" | "-" | "*" | "/", &[left, right]) if left.length() == 1 && right.length() == 1 => {
+            match (number_of(left), number_of(right)) {
+                (Number::Integer(x), Number::Integer(y)) if name != "/" => {
+                    let result = if x == NA_INTEGER || y == NA_INTEGER {
+                        NA_INTEGER
+                    } else {
+                        let result = match name {
+                            "+" => x.checked_add(y),
+                            "-" => x.checked_sub(y),
+                            _ => x.checked_mul(y),
+                        };
+                        // R warns when integer arithmetic overflows, and NA_integer_ is
+                        // i32::MIN, which no exact result may be either.
+                        result.filter(|&result| result != NA_INTEGER)?
+                    };
+                    values::scalar_integer(result).ok()?
+                }
+                (x, y) => {
+                    let (x, y) = (x.double(), y.double());
+                    // Whether `NaN` meeting `NA` gives `NaN` or `NA` depends on the order the
+                    // compiled arithmetic takes its operands in, so tier 0 decides it.
+                    if x.is_nan() || y.is_nan() {
+                        return None;
+                    }
+                    values::scalar_real(match name {
+                        "+" => x + y,
+                        "-" => x - y,
+                        "*" => x * y,
+                        _ => x / y,
+                    })
+                    .ok()?
+                }
+            }
+        }
+        _ => return None,
+    };
+    // The value is new: rooted for the call, until the caller's handle scope ends.
+    interp::heap().root(value);
+    Some(value)
+}
+
+/// A number's value as R's arithmetic reads it: a logical counts as an integer.
+#[derive(Clone, Copy)]
+enum Number {
+    Integer(i32),
+    Double(f64),
+}
+
+impl Number {
+    fn double(self) -> f64 {
+        match self {
+            Number::Integer(NA_INTEGER) => f64::from_bits(NA_REAL_BITS),
+            Number::Integer(x) => f64::from(x),
+            Number::Double(x) => x,
+        }
+    }
+}
+
+unsafe fn number_of(value: Sexp) -> Number {
+    match value.kind() {
+        SexpType::Real => Number::Double(value.slice::<f64>()[0]),
+        _ => Number::Integer(value.slice::<i32>()[0]),
+    }
+}
+
+/// `c()` of numbers without attributes, in the widest type among them.
+unsafe fn combine(operands: &[Sexp]) -> R<Sexp> {
+    let kind = operands
+        .iter()
+        .map(|operand| operand.kind())
+        .max_by_key(|kind| match kind {
+            SexpType::Logical => 0,
+            SexpType::Integer => 1,
+            _ => 2,
+        })
+        .unwrap_or(SexpType::Logical);
+    let length: usize = operands.iter().map(|operand| operand.length() as usize).sum();
+    let result = values::alloc(kind, length)?;
+    let mut at = 0;
+    for &operand in operands {
+        let count = operand.length() as usize;
+        match kind {
+            SexpType::Real => {
+                let target = &mut result.slice_mut::<f64>()[at..at + count];
+                if operand.kind() == SexpType::Real {
+                    target.copy_from_slice(operand.slice::<f64>());
+                } else {
+                    for (slot, &x) in target.iter_mut().zip(operand.slice::<i32>()) {
+                        *slot = Number::Integer(x).double();
+                    }
+                }
+            }
+            _ => result.slice_mut::<i32>()[at..at + count].copy_from_slice(operand.slice::<i32>()),
+        }
+        at += count;
+    }
+    Ok(result)
 }
 
 /// The native type of an argument's value and the 64 bits a native function takes it as.

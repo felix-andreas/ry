@@ -45,7 +45,11 @@ the baseline runs 1 to 2% more instructions and more I1 misses than JIT off and 
 left, in order of expected gain:
 
 - One copy of each instruction handler: the baseline's step functions duplicate tier 0's
-  handlers, and on `testthat` they add more I1 misses than `execute_code` sheds.
+  handlers, and on `testthat` they add more I1 misses than `execute_code` sheds. Sharing one
+  `exec_*` body per op was tried and reverted: with every body inlined into tier 0 it still ran
+  13M more instructions (0.18%) on `testthat_full` with the JIT off, from code placement in
+  `execute_code` and `run_body`, and out-of-line bodies cost 64M. Re-land it only once that
+  placement measures neutral there (callgrind, bench profile, `RY_BENCH_REPEAT=2`).
 - Inline paths for scalar `+ - * /` (needs an inline allocation of a length-one vector), `Guard`
   (`step_guard` costs 227M instructions on `functional`), and the trivial predicates through
   `BuiltinDef::unary`.
@@ -2556,12 +2560,23 @@ The end-to-end guard rests on the corpus suites.
 
 What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pressing first.
 
-- **Install-time native code.** A code image (`crates/interp/src/code_image.rs`) reserves an
-  offset and length for native code and writes zeros. The end shape compiles every package closure
-  through the shared SSA IR and the typed AOT pipeline at install, position-independent and stamped
-  as `typed-runtime.md` describes, so a session maps it instead of tiering up. It waits for tier 1's
-  IR to merge with the typed core's in `crates/jit` and `crates/typed` (`r-runtime.md`, "Code
-  images of installed packages").
+- **Install-time native code: the gaps.** The image's native section is written
+  (`crates/jit/src/ahead.rs`), but it compiles only scalar numeric closures for guessed argument
+  types (annotations, constant defaults, then double, integer and logical shapes), not the
+  checker's inferred types, which the install cannot query yet. Records are refused because each
+  process numbers record layouts anew. Coverage on real packages is small (rlang 16 of 1,294
+  functions, cli 28 of 897, testthat 13 of 1,101): the refusals are about the value domain
+  (`...`, strings, lists, base functions native code lacks, calls of closures that are not
+  native), not about missing facts, so checker types and argument facts lift only a few dozen
+  functions per package. Baseline code for every body from its first entry measured 8.06G
+  against 7.96G instructions on the testthat workload, so install-time baseline code is no lever
+  until baseline code inlines fast paths.
+- **Typed natives read a logical `NA` as a double `NA` where tier 0 keeps it logical.**
+  `nf <- function(x: double, y: double) -> double x * 2 + y; nf(NaN, NA)` gives `NA` with
+  `RY_JIT=off` and `NaN` with the JIT on: tier 0 adds a logical `NA` operand as integer `NA`,
+  which makes the result `NA`, and native code receives it as `NA_real_` and lets the hardware
+  pick `NaN`. Either the annotation check should coerce the value in tier 0 too, or native entry
+  should refuse a logical argument for a double parameter.
 - **Decoding an image's code costs about as much as compiling it** (about 65k instructions per
   closure on CRAN packages), so an untrained image saves nothing measurable. The decoder reads
   every instruction word and feedback word as a varint and re-interns each symbol constant by
