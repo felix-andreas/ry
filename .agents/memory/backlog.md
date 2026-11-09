@@ -45,8 +45,8 @@ the baseline runs 1 to 2% more instructions and more I1 misses than JIT off and 
 left, in order of expected gain:
 
 - The baseline still runs 1 to 1.5% more instructions than JIT off, and JIT on 1.4 to 2.3% more
-  (`decisions.md`, "One handler body per op"). The hot inlined ops are the remaining duplicates;
-  fewer step calls (inline paths below) is the lever now.
+  (`decisions.md`, "One handler body per op"). Each op body has two copies, tier 0's and the
+  baseline step's; fewer step calls (inline paths below) is the lever now.
 - Inline paths for scalar `+ - * /` (needs an inline allocation of a length-one vector), `Guard`
   (`step_guard` costs 227M instructions on `functional`), and the trivial predicates through
   `BuiltinDef::unary`.
