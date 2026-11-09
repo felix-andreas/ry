@@ -42,6 +42,10 @@ pub struct Preflight {
     path: PathBuf,
     /// Accepted input so far, newline-terminated.
     session: String,
+    /// The session holds something analysis decides: strict mode from `ry.toml`, ry syntax, or a
+    /// `typing:` directive. Until then each command is tested alone, because re-parsing the
+    /// whole session per command makes a long paste quadratic.
+    analyzed: bool,
 }
 
 /// What the preflight decided about a piece of input.
@@ -80,6 +84,7 @@ impl Preflight {
         let file = SourceFile::new(&db, String::new(), DocumentKind::Script);
         ProjectFiles::new(&db, vec![file]);
         Preflight {
+            analyzed: config.check.strict,
             db,
             file,
             config,
@@ -113,6 +118,17 @@ impl Preflight {
     /// rewrites bytes `input` only stands for, such as a Latin-1 script whose invalid bytes
     /// `input` spells as `?`.
     pub fn check_elaborations(&mut self, input: &str) -> Option<Vec<Elaboration>> {
+        if !self.analyzed {
+            // Plain R without strict mode has nothing to report and no literal a ry type decides.
+            if !input.contains("typing:")
+                && !has_ry_syntax(&syntax::parse(input).syntax_node(), input)
+            {
+                self.session.push_str(input);
+                self.session.push('\n');
+                return Some(Vec::new());
+            }
+            self.analyzed = true;
+        }
         let start = self.session.len();
         let mut source = String::with_capacity(start + input.len() + 1);
         source.push_str(&self.session);

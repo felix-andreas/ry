@@ -33,8 +33,11 @@ struct ReplSession {
     _lock: std::sync::MutexGuard<'static, ()>,
     _pair: portable_pty::PtyPair,
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    chunks: mpsc::Receiver<Vec<u8>>,
-    writer: Box<dyn Write + Send>,
+    /// When each chunk arrived, so a test can see how evenly output streamed.
+    chunks: mpsc::Receiver<(Instant, Vec<u8>)>,
+    /// Input goes through a thread of its own: a write larger than the pty buffers would
+    /// otherwise block while the console blocks writing output nobody reads.
+    writer: mpsc::Sender<Vec<u8>>,
     seen: String,
     /// So a terminal query split over a read boundary is still recognized.
     raw_carry: Vec<u8>,
@@ -72,17 +75,32 @@ impl ReplSession {
         }
         let child = pair.slave.spawn_command(command).expect("spawn repl");
         let mut reader = pair.master.try_clone_reader().expect("pty reader");
-        let writer = pair.master.take_writer().expect("pty writer");
+        let mut pty_writer = pair.master.take_writer().expect("pty writer");
+        let (writer, inputs) = mpsc::channel::<Vec<u8>>();
+        thread::spawn(move || {
+            for input in inputs {
+                if pty_writer
+                    .write_all(&input)
+                    .and_then(|()| pty_writer.flush())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         // The pty read blocks with no timeout, so it gets its own thread and a silent
         // session fails instead of hanging.
-        let (sender, chunks) = mpsc::channel::<Vec<u8>>();
+        let (sender, chunks) = mpsc::channel::<(Instant, Vec<u8>)>();
         thread::spawn(move || {
             let mut buffer = [0u8; 4096];
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) | Err(_) => break,
                     Ok(read) => {
-                        if sender.send(buffer[..read].to_vec()).is_err() {
+                        if sender
+                            .send((Instant::now(), buffer[..read].to_vec()))
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -101,16 +119,20 @@ impl ReplSession {
     }
 
     fn send(&mut self, text: &str) {
-        self.writer.write_all(text.as_bytes()).expect("pty write");
-        self.writer.flush().expect("pty flush");
+        self.writer
+            .send(text.as_bytes().to_vec())
+            .expect("the pty writer is running");
     }
 
     /// Answers terminal queries: the editor asks for the cursor position before
     /// drawing its prompt and blocks until the reply comes.
     fn drain(&mut self, wait: Duration) {
-        let Ok(chunk) = self.chunks.recv_timeout(wait) else {
-            return;
-        };
+        self.drain_chunk(wait);
+    }
+
+    /// Like [`ReplSession::drain`], and returns when the chunk it read arrived.
+    fn drain_chunk(&mut self, wait: Duration) -> Option<Instant> {
+        let (arrived, chunk) = self.chunks.recv_timeout(wait).ok()?;
         self.raw_carry.extend_from_slice(&chunk);
         const CURSOR_QUERY: &[u8] = b"\x1b[6n";
         let queries = self
@@ -118,16 +140,14 @@ impl ReplSession {
             .windows(CURSOR_QUERY.len())
             .filter(|window| *window == CURSOR_QUERY)
             .count();
-        for _ in 0..queries {
-            self.writer.write_all(b"\x1b[1;1R").expect("query reply");
-        }
         if queries > 0 {
-            self.writer.flush().expect("query flush");
+            self.send(&"\x1b[1;1R".repeat(queries));
         }
         let keep = self.raw_carry.len().saturating_sub(CURSOR_QUERY.len() - 1);
         self.raw_carry.drain(..keep);
         self.seen
             .push_str(&strip_ansi(&String::from_utf8_lossy(&chunk)));
+        Some(arrived)
     }
 
     /// A bare sleep would leave the editor's terminal handshake unanswered, so
@@ -173,6 +193,39 @@ impl ReplSession {
             );
             self.drain(Duration::from_millis(100));
         }
+    }
+
+    /// Pastes `lines` the way a terminal does, each line ending in `\r`, and waits until a last
+    /// command printed `{marker}_done`. A `bracketed` paste comes wrapped in the markers a
+    /// terminal adds once the editor turns bracketed paste on, followed by Enter. Returns how
+    /// long the paste took to run and the longest silence in the console's output meanwhile.
+    fn paste(&mut self, lines: &[String], bracketed: bool, marker: &str) -> (Duration, Duration) {
+        let mut text = String::new();
+        for line in lines {
+            text.push_str(line);
+            text.push('\r');
+        }
+        text.push_str(&format!("cat('{marker}', 'done', sep = '_')\r"));
+        if bracketed {
+            text = format!("\x1b[200~{text}\x1b[201~\r");
+        }
+        let needle = format!("{marker}_done");
+        let start = Instant::now();
+        self.send(&text);
+        let (mut last, mut silence) = (start, Duration::ZERO);
+        let deadline = start + Duration::from_secs(120);
+        while !self.seen.contains(&needle) {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {needle:?}; output so far:\n{}",
+                self.seen
+            );
+            if let Some(arrived) = self.drain_chunk(Duration::from_millis(100)) {
+                silence = silence.max(arrived - last);
+                last = arrived;
+            }
+        }
+        (last - start, silence)
     }
 
     fn quit(mut self) {
@@ -461,6 +514,37 @@ fn multiline_input_continues_and_defines() {
     session.send("f(21)\r");
     session.expect("[1] 42");
     session.quit();
+}
+
+/// A paste costs time linear in its length, as under GNU R: 2,000 lines take about ten times as
+/// long as 200, not a hundred times, and no line waits on the terminal. The editor asks for
+/// bracketed paste, so a paste at its prompt arrives as one insertion; a terminal without it, or a
+/// paste while a command runs, sends the lines raw.
+#[test]
+fn a_paste_runs_in_linear_time() {
+    let block = |count: usize| -> Vec<String> {
+        (0..count)
+            .map(|index| format!("x{index} <- {index}"))
+            .collect()
+    };
+    for runtime in runtimes() {
+        let mut session = ReplSession::start_with(None, &[runtime_command(runtime)]);
+        session.expect_prompt();
+        for (bracketed, name) in [(false, "raw"), (true, "bracketed")] {
+            let (small, _) = session.paste(&block(200), bracketed, &format!("{name}_small"));
+            let (large, silence) = session.paste(&block(2000), bracketed, &format!("{name}_large"));
+            // A line that waits on the terminal stalls for crossterm's two-second timeout.
+            assert!(
+                silence < Duration::from_secs(1),
+                "{runtime}, {name}: the console went silent for {silence:?} during a paste"
+            );
+            assert!(
+                large < small * 30,
+                "{runtime}, {name}: 200 lines took {small:?} but 2,000 took {large:?}"
+            );
+        }
+        session.quit();
+    }
 }
 
 #[test]
@@ -1856,8 +1940,7 @@ fn console_input_functions_in_a_script_behave_as_in_rscript_on_both_runtimes() {
         );
         assert_eq!(status, Some(0), "{runtime}: {stderr}");
         assert_eq!(
-            stdout,
-            "[1] FALSE\nwho? \n[1] \"\"\n[1] \"menu() cannot be used non-interactively\"\n",
+            stdout, "[1] FALSE\nwho? \n[1] \"\"\n[1] \"menu() cannot be used non-interactively\"\n",
             "{runtime}: {stderr}"
         );
     }

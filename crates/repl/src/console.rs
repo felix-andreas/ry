@@ -124,6 +124,9 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
             DefaultHinter::default().with_style(Style::new().fg(Color::DarkGray)),
         ))
         .with_validator(Box::new(LexerValidator))
+        // A paste arrives as one insertion with one repaint, and runs on Enter as under
+        // GNU R's readline, instead of a repaint and a terminal round trip per pasted line.
+        .use_bracketed_paste(true)
         .with_edit_mode(edit_mode);
     let completer = options
         .completer

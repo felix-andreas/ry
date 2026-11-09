@@ -10,9 +10,12 @@ build = "build.rs"
 path = "src/repl.rs"
 
 [dependencies]
-# Terminal size only. Pinned to reedline's own crossterm so the console and
-# the width probe cannot disagree about the terminal they share.
-crossterm = "0.28"
+# Pinned to reedline's own crossterm so the console and the editor share one
+# terminal reader. `use-dev-tty` swaps crossterm's mio reader, which waits on an
+# edge-triggered epoll but returns after one 1 KiB read, for a level-triggered
+# `poll`: under mio the rest of a paste sits unread until another key arrives or
+# a cursor-position query times out after two seconds.
+crossterm = { version = "0.28", features = ["use-dev-tty"] }
 dirs = "6"
 libloading = "0.8"
 nu-ansi-term.workspace = true

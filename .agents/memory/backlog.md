@@ -66,6 +66,9 @@ left, in order of expected gain:
 - Console `scan()` prompts with the running item count (`1: `, `3: `); GNU R's counts records for a
   list `what`. `select.list(graphics = TRUE)` and `.External2(C_selectlist)` still raise the
   non-interactive error.
+- Once a console session holds ry syntax or strict mode, `Preflight::check_elaborations` re-parses
+  and re-analyzes the whole session for every command, so a long raw (unbracketed) paste of typed
+  code is quadratic. Plain R skips analysis; typed sessions need an incremental per-command check.
 
 ## Open: the typed core
 
