@@ -4103,10 +4103,6 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
     if !SINGLE {
         release(&state);
         if let Some(baseline) = baseline_code(constants) {
-            // Baseline code probes the environment's frame inline.
-            if let Err(unwind) = state.machine.reify() {
-                return Err(unwind);
-            }
             run_baseline(&mut state, baseline, pc);
             return state.exit;
         }
@@ -4181,6 +4177,9 @@ pub mod baseline_layout {
     pub const INTERP: usize = std::mem::offset_of!(Activation<'static, 'static>, interp);
     /// The pointer to the activation's header register, which holds its environment.
     pub const HEADER: usize = std::mem::offset_of!(Activation<'static, 'static>, header);
+    /// The pointer to the code's slot map, one `i32` frame slot (or -1) per lookup slot; null
+    /// when the code has no slot table.
+    pub const SLOT_MAP: usize = std::mem::offset_of!(Activation<'static, 'static>, slot_map);
     /// The pointer to the code's frame-slot hints, one `u32` per lookup slot.
     pub const HINTS: usize = std::mem::offset_of!(Activation<'static, 'static>, cache)
         + std::mem::offset_of!(super::LookupCache, hints);
