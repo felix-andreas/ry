@@ -35,6 +35,15 @@ The quality bar is four things.
 - testthat 3.3.2 fails to load under ry's runtime with "attempt to use zero-length variable name" ; 3.2.3 loads. ry raises that error for `new.env()[[""]]`; whether GNU R does too, and so whether that is the cause, is unverified (no GNU R on the measuring host).
 - `crates/jit/tests/test_tiers.rs` `run_time_binding_shadows_cached_global_function` fails for `gen`: a `g` bound in a generic's frame before `UseMethod` is not seen by `gen.default`, which calls the global `g`. The cause is outside the typed core: the test fails without it.
 
+## Open: console input in ry's runtime
+
+- `ry run -i file.R` runs the script before the console's reader is installed, so `readline()` and
+  `menu()` in that script see `interactive()` TRUE (set at start) but get an empty answer. Install
+  the reader before the startup script runs.
+- Console `scan()` prompts with the running item count (`1: `, `3: `); GNU R's counts records for a
+  list `what`. `select.list(graphics = TRUE)` and `.External2(C_selectlist)` still raise the
+  non-interactive error.
+
 ## Open: the typed core
 
 - **Records, tags, `Result`, `Str` builders and `Dict` results.** The typed benchmarks that still run in the interpreter refuse here: `log_rank` at a `Record` parameter, `expr_tree` at `.ry_tag`, `orders` at `.ry_record` and `.ry_tag`, `report` at `.ry_text`, `validate` at `Result.with_default` and a mapped function that is not local (`RY_TYPED_LOG=1` names each refusal). The design's pools (`typed-runtime.md`, "Representations") are not built.

@@ -1780,3 +1780,60 @@ fn browser_stops_at_a_prompt_an_editor_can_take_over() {
     assert!(stdout.contains("an editor attached"), "{stdout}");
     assert!(stdout.contains("still running"), "{stdout}");
 }
+
+#[test]
+fn console_input_functions_read_the_console_on_both_runtimes() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let input = "choice <- menu(c('foo', 'bar'))\nx\n5\n2\nprint(choice)\n\
+                 name <- readline('who? ')\nada\nprint(name)\n\
+                 f <- function() { invisible(readline('go ')); 7 }\nf()\n\n\
+                 print(utils::askYesNo('ok?'))\ny\n\
+                 print(select.list(c('a', 'b'), graphics = FALSE))\n1\n\
+                 print(scan(n = 2, quiet = TRUE))\n3 4\n\
+                 print(readLines(stdin(), n = 1))\nabc\n";
+    for runtime in runtimes() {
+        let (status, stdout, stderr) =
+            ry_with_input(directory.path(), &[runtime_command(runtime)], &[], input);
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        for expected in [
+            "Enter an item from the menu, or 0 to exit",
+            "[1] 2",
+            "[1] \"ada\"",
+            "[1] 7",
+            "[1] TRUE",
+            "[1] \"a\"",
+            "[1] 3 4",
+            "[1] \"abc\"",
+        ] {
+            assert!(
+                stdout.contains(expected),
+                "{runtime} lacks {expected:?}: {stdout}{stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn console_input_functions_in_a_script_behave_as_in_rscript_on_both_runtimes() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        directory.path().join("script.R"),
+        "print(interactive())\nname <- readline('who? ')\nprint(name)\n\
+         print(tryCatch(menu('a'), error = conditionMessage))\n",
+    )
+    .expect("write script");
+    for runtime in runtimes() {
+        let (status, stdout, stderr) = ry_with_input(
+            directory.path(),
+            &[runtime_command(runtime), "script.R"],
+            &[],
+            "ignored\n",
+        );
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        assert_eq!(
+            stdout,
+            "[1] FALSE\nwho? \n[1] \"\"\n[1] \"menu() cannot be used non-interactively\"\n",
+            "{runtime}: {stderr}"
+        );
+    }
+}
