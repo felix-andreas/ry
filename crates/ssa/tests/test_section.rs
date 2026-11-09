@@ -131,6 +131,45 @@ fn unknown_symbols_fail_at_link_and_load() {
 }
 
 #[test]
+fn damaged_code_never_runs() {
+    let code = build();
+    let resolve = |name: &str| match name {
+        "add_seven" => Some(add_seven as *const () as usize),
+        "flag" => Some(&FLAG as *const i64 as usize),
+        _ => None,
+    };
+    let directory = std::env::temp_dir().join(format!("ry-section-damage-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("temporary directory");
+    let bytes = section::encode(&code, 0);
+    let path = directory.join("image");
+    let mut damaged = bytes.clone();
+    if let Some(last) = damaged.last_mut() {
+        *last ^= 1;
+    }
+    std::fs::write(&path, &damaged).expect("write image");
+    // SAFETY: loading fails before any code runs.
+    let loaded = unsafe { section::load(&path, 0, &damaged, &resolve) };
+    assert!(loaded.is_err(), "a flipped byte of code must fail the hash");
+    // A file that changed or shrank after the section was read is not mapped: the intact bytes in
+    // hand are copied instead, and the code runs.
+    for file in [damaged.clone(), bytes[..bytes.len() / 2].to_vec()] {
+        std::fs::write(&path, &file).expect("write image");
+        // SAFETY: the resolver gives the addresses the code was built against.
+        let loaded = unsafe { section::load(&path, 0, &bytes, &resolve) }
+            .expect("load")
+            .expect("this processor runs x86-64-v2 code");
+        // SAFETY: `entry` was built with the signature `i64 -> i64`.
+        let entry = unsafe {
+            std::mem::transmute::<*const u8, extern "C" fn(i64) -> i64>(
+                loaded.functions["entry"] as *const u8,
+            )
+        };
+        assert_eq!(entry(21), 1049);
+    }
+    std::fs::remove_dir_all(&directory).expect("remove temporary directory");
+}
+
+#[test]
 fn fuzz_section_parser_never_panics() {
     let valid = section::encode(&build(), 0);
     for_each_seed(2000, |seed| {

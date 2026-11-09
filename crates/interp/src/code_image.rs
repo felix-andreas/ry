@@ -493,8 +493,8 @@ unsafe fn attach_native(image: &Image, entry: usize, database: &str, closures: &
                 Ok(None) => return Ok(()),
                 Err(message) => {
                     return crate::conditions::warning(format!(
-                        "cannot use the machine code in {} ({message}), so its functions run \
-                         in the interpreter; reinstall the package to repair it",
+                        "cannot use the code image {} ({message}), so its functions run without \
+                         its machine code; reinstall the package to repair it",
                         path(database).display()
                     ));
                 }

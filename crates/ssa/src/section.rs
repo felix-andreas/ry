@@ -16,6 +16,7 @@
 //! |---|---|
 //! | magic | `RYNATIVE` |
 //! | target | `u32`, [`TARGET_X86_64_V2`] |
+//! | hash | `u64`, the FNV-1a hash of every byte after this field, so damaged code never runs |
 //! | code offset | `u32`, where the code starts, counted from the section's start |
 //! | code length | `u32` |
 //! | symbol count | `u32`, then per symbol its name as a `u16` length and the bytes |
@@ -35,6 +36,9 @@ use {
 };
 
 const MAGIC: &[u8; 8] = b"RYNATIVE";
+
+/// Where the hashed bytes start: past the magic, the target and the hash itself.
+const HASHED_FROM: usize = 20;
 
 /// x86-64 code that needs the features of the x86-64-v2 level (SSE4.2, POPCNT, CMPXCHG16B),
 /// which every x86-64 processor made since about 2009 has.
@@ -203,6 +207,7 @@ pub fn encode(code: &Code, base: u64) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&TARGET_X86_64_V2.to_le_bytes());
+    out.extend_from_slice(&0u64.to_le_bytes());
     let code_offset_at = out.len();
     out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&(code.text.len() as u32).to_le_bytes());
@@ -228,13 +233,25 @@ pub fn encode(code: &Code, base: u64) -> Vec<u8> {
     let code_offset = out.len() as u32;
     out[code_offset_at..code_offset_at + 4].copy_from_slice(&code_offset.to_le_bytes());
     out.extend_from_slice(&code.text);
+    let hash = fnv1a(&out[HASHED_FROM..]);
+    out[HASHED_FROM - 8..HASHED_FROM].copy_from_slice(&hash.to_le_bytes());
     out
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
 }
 
 /// A section's header, read and checked against its bytes.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Header<'a> {
     pub target: u32,
+    pub hash: u64,
     pub code_offset: usize,
     pub code: &'a [u8],
     pub symbols: Vec<&'a str>,
@@ -253,6 +270,7 @@ pub fn parse(section: &[u8]) -> Result<Header<'_>, Error> {
         return Err(Error("the native section has no magic"));
     }
     let target = input.u32()?;
+    let hash = input.u64()?;
     let code_offset = input.u32()? as usize;
     let code_length = input.u32()? as usize;
     let symbol_count = input.u32()? as usize;
@@ -287,6 +305,7 @@ pub fn parse(section: &[u8]) -> Result<Header<'_>, Error> {
         .ok_or(Error("the code lies outside the section"))?;
     Ok(Header {
         target,
+        hash,
         code_offset,
         code,
         symbols,
@@ -315,6 +334,12 @@ impl<'a> Input<'a> {
     fn u32(&mut self) -> Result<u32, Error> {
         let bytes = self.take(4)?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn u64(&mut self) -> Result<u64, Error> {
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(self.take(8)?);
+        Ok(u64::from_le_bytes(bytes))
     }
 
     fn name(&mut self) -> Result<&'a str, Error> {
@@ -349,6 +374,9 @@ pub unsafe fn load(
     let header = parse(section)?;
     if !host_runs(header.target) {
         return Ok(None);
+    }
+    if section.get(HASHED_FROM..).map(fnv1a) != Some(header.hash) {
+        return Err(Error("the native section does not match its hash"));
     }
     let mut table = Vec::with_capacity(header.symbols.len());
     for symbol in &header.symbols {
@@ -402,8 +430,15 @@ unsafe fn map(path: &Path, file_offset: u64, code: &[u8], table: &[usize]) -> Re
         Error(message)
     };
     let code_bytes = code.len().div_ceil(page) * page;
-    let mapped_from_file = file_offset % page as u64 == 0
+    let mapped = file_offset % page as u64 == 0
         && std::fs::File::open(path).is_ok_and(|file| {
+            // A shorter file would fault on the first read past its end.
+            if file
+                .metadata()
+                .map_or(true, |metadata| metadata.len() < file_offset + code.len() as u64)
+            {
+                return false;
+            }
             // SAFETY: replaces the start of the reservation with a read-only private mapping of
             // the file's code. Image files are replaced by rename, never rewritten in place.
             let mapped = unsafe {
@@ -418,6 +453,12 @@ unsafe fn map(path: &Path, file_offset: u64, code: &[u8], table: &[usize]) -> Re
             };
             mapped == start
         });
+    // The file is opened again to map it, so it may have been replaced since `code` was read
+    // and hashed: a mapping that differs from those bytes is overwritten with them below, where
+    // the private mapping takes the writes as its own copy.
+    // SAFETY: the mapping made `code.len()` readable bytes at `start`.
+    let mapped_from_file = mapped
+        && unsafe { std::slice::from_raw_parts(start.cast::<u8>(), code.len()) } == code;
     if !mapped_from_file {
         // SAFETY: the reservation's first `code_bytes` bytes, made writable, filled and then
         // made executable.

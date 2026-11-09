@@ -620,11 +620,23 @@ the trained profile below, and the native code it reserves room for.
 - **Off switches.** `RY_CODE_IMAGE=0` ignores images when loading; `R CMD INSTALL
   --ry-no-code-image` writes none. A failure while writing an image warns and installs the package
   without one.
-- **Native code.** The file reserves an offset and length for install-time native code, both 0 today.
-  The end shape compiles untyped bodies through the same SSA IR and AOT pipeline the typed core uses
-  ("One SSA IR and one install-time pipeline" in `decisions.md`); it lands once tier 1 and the typed
-  core share that IR, and fills the reserved section with position-independent code mapped
-  read-only, as `typed-runtime.md` describes for the code file.
+- **Native code.** The native section after the payloads holds install-time machine code
+  (`crates/jit/src/ahead.rs`). The install compiles each recorded closure with the native-function
+  compiler (`crates/jit/src/native.rs`) for up to four argument-type guesses, taken from its
+  annotations and constant defaults and otherwise from double, integer and logical scalars and
+  vectors. The code goes through `crates/ssa` and `cranelift-object`, and `ssa::section` links it
+  into position-independent code, with helper addresses in a link table filled when the section
+  is mapped. The section is mapped read-only and executable straight from the file when its
+  offset is page-aligned, so processes share the pages. A manifest in the section names each
+  function's record entry and ordinal, its argument types, and the names it looks up: a base
+  builtin, or a sibling closure that calls are compiled against directly. A call tests its
+  arguments' types on entry; when none match, or a lookup no longer finds what the code was
+  compiled against, it runs in tier 0, so the code needs no deoptimization metadata. A passed
+  check is kept until any binding is unlocked (`interp::code_image::unlocks`), once every binding
+  it read is locked. Records, whose layouts each process numbers anew, keep a function in the
+  interpreter. Two gaps remain. The checker's inferred types are not used yet, so the types are
+  guesses. And arguments are read only when they are values, constants or variables, as for the
+  JIT's native entry, so `f(-1)` runs in the interpreter.
 
 The image is uncompressed and about six times the size of the compressed database (MASS: 706 KB
 against 120 KB). It is mapped, not read, so a session pays only for the pages of the records it
