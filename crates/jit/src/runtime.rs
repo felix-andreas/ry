@@ -319,6 +319,14 @@ pub const LOOPS_ONLY: i32 = 1 << 16;
 /// clears it, so every recompile waits again.
 pub const SIZE_WAITED: i32 = 1 << 17;
 
+/// The profile's tier state counts the body's refusals as too rarely called (`analysis::RARE`)
+/// in four bits from here, so each attempt can wait twice as long as the one before.
+pub const RARE_REFUSAL: i32 = 1 << 18;
+
+pub fn rare_refusals(state: i32) -> i32 {
+    (state / RARE_REFUSAL) & 0xf
+}
+
 /// The entry count of a body that calls must not compile. Counting up from here never reaches
 /// the entry threshold, so tier 0 stops asking the tier about the body's calls, and stops
 /// recording type feedback for them unless the body has a loop that may still compile.
@@ -340,21 +348,26 @@ pub unsafe fn invalidate(code: Sexp) {
     heap.set_element(constants, TIER1, values::nil());
     let counters = values::ints_mut(constants.element(PROFILE));
     let state = counters[profile::TIER_STATE];
-    // Halfway to the threshold, tier 0 keeps recording type feedback, so the activation that
-    // just deoptimized records the type that broke the speculation and the recompile sees it.
-    // A body that compiles only for its loop records through its loop anyway, and its calls
-    // must never ask the tier again, so it keeps the entry count that stops them asking.
-    counters[profile::ENTRIES] = if state >= 0 && state & LOOPS_ONLY != 0 {
+    // Within the recording window before the threshold, tier 0 records type feedback, so the
+    // activation that just deoptimized records the type that broke the speculation and the
+    // recompile sees it.
+    // A body that compiles only for its loop records through its loop, from half the back-edge
+    // threshold, and its calls must never ask the tier again, so it keeps the entry count that
+    // stops them asking.
+    let loops_only = state >= 0 && state & LOOPS_ONLY != 0;
+    counters[profile::ENTRIES] = if loops_only {
         NEVER_HOT
     } else {
-        bytecode::tier().map_or(0, |tier| tier.entry_threshold / 2)
+        bytecode::tier().map_or(0, |tier| bytecode::recording_start(tier.entry_threshold))
     };
     counters[profile::BACK_EDGES] = 0;
+    counters[profile::NEXT] = i32::MIN;
     if compiles(state) >= MAX_COMPILES {
         counters[profile::TIER_STATE] = -1;
         counters[profile::RECORDING] = 0;
     } else if state >= 0 {
         counters[profile::TIER_STATE] = state & !SIZE_WAITED;
+        counters[profile::RECORDING] = i32::from(!loops_only);
     }
 }
 

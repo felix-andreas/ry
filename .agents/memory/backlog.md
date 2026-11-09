@@ -73,13 +73,11 @@ left, in order of expected gain:
 
 ## Open: console input in ry's runtime
 
-- The console preflight's session holds every line of a bracketed paste before any of them runs, so a paste cut short by an error or Ctrl-C leaves later commands typed against bindings that never ran. The filter needs a signal that input was dropped, so it can roll the session back to what ran.
+- Ctrl-C during the script `ry run` queues before its console is not reported to the preflight, because the script goes to R as one unit: the console session keeps the bindings of the script's unrun rest.
+- `semantics::session::binder` answers a deferred read of a name without a `SessionBinder` untracked. `prepare` creates binders for the naming sets the checker reads deferred; a checker path asking about another expression (`callee_fallbacks` in `check.rs` is the candidate) would read a stale answer. A `debug_assert!` that a deferred read finds its binder would pin it.
 - Console `scan()` prompts with the running item count (`1: `, `3: `); GNU R's counts records for a
   list `what`. `select.list(graphics = TRUE)` and `.External2(C_selectlist)` still raise the
   non-interactive error.
-- Once a console session holds ry syntax or strict mode, `Preflight::check_elaborations` re-parses
-  and re-analyzes the whole session for every command, so a long raw (unbracketed) paste of typed
-  code is quadratic. Plain R skips analysis; typed sessions need an incremental per-command check.
 
 ## Open: the typed core
 

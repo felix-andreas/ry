@@ -3124,6 +3124,38 @@ or raised with only trivia left), which the parser knows and a range check canno
 at a trailing newline is reported on the last code character. ry's own console uses the same rule. Otherwise strict mode could refuse the last line of a definition whose
 first lines R had already read, leaving R mid-command.
 
+**The console preflight checks each command against the session's interface**
+(`semantics::session`, `crates/ry/src/preflight.rs`).
+
+- Previous shape: the session was one growing script file, re-parsed and re-analyzed whole for
+  every command, so a typed paste of n lines cost O(n²) (1,000 lines took 3.6 s). The session
+  text duplicated what had run, and a paste cut short by Ctrl-C stayed in it.
+- Target shape: each accepted command is a `SourceFile` of its own with `command: Some(index)`.
+  A log in a singleton salsa input, which grows by `commit` and shrinks from the end by
+  `truncate`, (`ConsoleSession`) records what each command
+  binds, declares and defines, its `# typing:` directive and whether it used ry syntax. Name
+  resolution, type definitions, the typing mode and "holds ry values" fall back to the log for
+  commands before the reader. Those reads are untracked on purpose: they only look at smaller
+  indices, and the log changes only past the reader or by dropping commands after it.
+- The exception is a read inside a function body, which sees the latest binder, as R's global
+  environment does. It goes through a `SessionBinder` salsa input per name, created when a
+  command first reads the name that way. `commit` sets it and returns the earlier commands that
+  read the name, and transitively those whose function bodies read a name such a reader binds,
+  because a caller's type follows its callee's. Strict mode rechecks the ones that passed a check
+  when they joined (input that joined unchecked may hold old errors); a strict error there
+  refuses the new command, and
+  `truncate` undoes the commit. Tracking immediate reads too would make each rebinding
+  invalidate a chain of earlier commands and bring the quadratic cost back.
+- The command files are not in `ProjectFiles`: a project-wide fold over them would cost
+  O(session) per command.
+- Rollback: an error never cuts a paste short (R gets one line per chunk), so only Ctrl-C drops
+  input. The console counts the dropped lines in `pending` and calls `InputFilter::discard`;
+  `ConsoleFilter` maps lines back to the command's bytes (identity for ry's runtime, whose
+  elaboration keeps lines; `syntax::erased_lines_end` for GNU R's erased program), and
+  `Preflight::retract` replaces the last command with the prefix that ran, unchecked.
+- Impact: a 5,000-line typed paste takes 1.4 s raw, linear; findings name the command they are
+  in, with lines counted from its start; a `# typing:` directive governs only later commands.
+
 ## Frames as runtime values
 
 - **A frame is an `EXTPTRSXP` that owns a `Box<table::Table>`, tagged with the symbol `ry.frame`
@@ -3239,9 +3271,12 @@ first lines R had already read, leaving R mid-command.
   promise helper, which made `function(a, b) a + b` slower compiled than in tier 0. Direct calls
   removed that cost, so the loop-only rule went with it. A body whose plan has no loop and no
   inlined call, direct call, arithmetic, comparison, intrinsic, element assignment or `&&`/`||`
-  (`Plan::runs_natively`) would only call the same helpers tier 0 does, so it is refused
+  (`Plan::runs_natively`; setting a srcref does not count, or every body parsed with
+  `keep.source` would qualify) would only call the same helpers tier 0 does, so it is refused
   (`analysis::NOTHING_NATIVE`, permanent) instead of costing a compile; most base R wrappers are
-  such bodies. `RY_JIT=force` still compiles them, so the tier tests cover them. Measured with
+  such bodies. A body none of whose instructions could plan as native work under any profile
+  (`analysis::shape`) is refused before it records or plans, as
+  `analysis::NEVER_NATIVE` (see "Bodies that could run nothing natively never record"). `RY_JIT=force` still compiles them, so the tier tests cover them. Measured with
   callgrind over the why-ry programs (whole process): about 170M instructions fewer per program,
   on top of the higher entry threshold's 280M.
 - **Function speculation is validated by the binding epoch, then by per-symbol stamps.**
@@ -8077,9 +8112,27 @@ Each one trades a narrow class of missed errors for a class of false reports see
 ## Tier 0 records feedback only for bodies halfway to a threshold
 
 - **Previous shape.** `warm()` decided at every activation whether tier 0 should record type feedback, from the code's other constants: about 25 instructions per call, 30 to 60M instructions on `objects`. Bodies with a loop recorded from their first entry.
-- **Chosen shape.** One profile word, `profile::RECORDING` (`crates/interp/src/bytecode.rs`). It is on during the first activation of a body with a loop, when a body reaches half the entry threshold, when its loop reaches half the back-edge threshold (inside the running activation), and while tier-1 code is installed, so a deoptimized activation records the profile the next compile reads.
+- **Chosen shape.** One profile word, `profile::RECORDING` (`crates/interp/src/bytecode.rs`). It is on during the first activation of a body with a loop, when a body enters the recording window before the entry threshold, and when its loop reaches half the back-edge threshold (inside the running activation). It is off whenever tier-1 code is installed (see "Tier 0 decides at scheduled entries and stops recording at tier-up").
 - **Why the first activation of a loop body records.** Starting only at half the back-edge threshold left the instructions before the loop without feedback, and the on-stack compile handed the loop's `SubAssign` back to tier 0: a scalar loop ran 0.40 s instead of 0.04 s. Recording in every activation of a loop body instead cost base `Reduce`, `Filter` and `Map` a type test and store per value on every call.
 - **Impact.** The tier machinery with nothing compiling (`RY_JIT_THRESHOLDS=0,0,0`) costs 0.0 to 0.9% more instructions than `RY_JIT=off` on the `bench-real` workloads (geomean 0.5%). Cachegrind on `functional` shows I1 misses up 3.5% and D1 misses up 1%, so the 4 to 5% wall gap single runs show is noise.
+
+## Bodies that could run nothing natively never record
+
+- **Previous shape.** A body whose plan ran nothing natively (`NOTHING_NATIVE`) recorded type feedback through the last eighth of the entry threshold, then paid a full plan, only to be refused.
+- **Chosen shape.** `analysis::shape` (with `Shape::may_run_natively`) reads the instruction words alone: a loop, an instruction kind the plan may lower to a native action, or a `CallBuiltin` whose call names a builtin with a native form (`[`, a `List.`/`Dict.`/`Set.` traversal, or a name `has_intrinsic` lists, which also gates `intrinsic_for`, so the two lists are one). Its `match` over `Op` has no catch-all, so a new opcode forces the decision. The new `Tier::worth_recording` hook runs it at the entry that opens the recording window, and `compile_in` runs it before planning, so a hot body that skipped the window (thresholds below 8) is refused without a plan too. The refusal (`NEVER_NATIVE`) is final, including at a fully typed body's first call. `RY_JIT=force` keeps such bodies.
+- **Known gap.** A builtin called through another name (`f <- length; f(x)`) is judged by the name in the call, so such a body is refused when its plan might have used an intrinsic. That costs only speed.
+
+## A loop-free hot body compiles only when its call rate repays the compile
+
+- **Previous shape.** Every body that reached 3000 entries compiled. A loop-free body saves a bounded amount per call, so one that turned hot slowly never repaid its compile: on testthat, `isTRUE` (188 words) compiled for about 11M instructions and then ran about 1400 more times, and JIT on cost 17.6M more than JIT off.
+- **Chosen shape.** At the entry threshold, `compile_in` asks `repays` before planning a loop-free body (`analysis::shape` reads the words once and counts the instructions the plan may run natively). Expected calls are the body's rate over its recording window, 375 calls per however many KiB the heap allocated meanwhile (`Heap::allocated_ever`, stamped into `profile::WINDOW` when the window opens), times a fixed horizon of 256 MiB. The body compiles when calls times 100 instructions per native instruction reach 2M plus 50k per word. A refusal (`RARE`) is not final: the count restarts and the next attempt measures the rate afresh. A recompile skips the check.
+- **Why allocation is the clock.** It is deterministic, costs nothing on the call path (a collection adds the young bytes to a total), and interpreted work allocates in proportion to what it does. A global call counter would cost every bytecode call an increment.
+- **Why a fixed horizon.** Taking the session's age as the horizon (Lindy) underestimated the functional workload's first callbacks 13-fold, below `isTRUE`'s estimate. The rate alone separates them: `isTRUE` runs once per 54 KiB, the slowest functional callback once per 3.8 KiB. The horizon sits between the two cases with a margin of about two either side (`x^2` needs 130 MiB, `isTRUE` 770 MiB), so it is the constant to revisit when a workload lands near the line.
+- **Rejected: never compile loop-free bodies at entry.** Every body the functional workload compiles is loop-free (`x * factor + offset`, `x %% 2 == 0`, ...), and they make JIT on 190M instructions cheaper than JIT off there. Delaying them to 10,000 entries cost 19M and to 30,000 entries 149M, so a flat threshold rise is out too.
+- **Impact** (callgrind, millions of instructions, JIT on/off): testthat 4810.6/4805.0 against 4821.0/4800.8 before this and the never-native refusal; functional 8376.6/8571.5 against 8381.5/8573.5.
+- **Backoff.** Each attempt records a fresh window of feedback, so a refused body waits the entry threshold times 2^n entries after its n-th refusal (`runtime::RARE_REFUSAL`, four bits of the tier state). Without it a rare body re-recorded every 3000 entries for the whole session.
+- **Back edges.** Every backward jump counts inline (`back_edge_due`: an increment and three comparisons) and calls the cold `back_edge` only at the counts it acts on (half the threshold, the baseline threshold, the threshold). The out-of-line call per jump cost testthat 1.3M.
+- **Remaining gap.** testthat_full at `RY_BENCH_REPEAT=2` runs 6962.2M with the JIT on against 6956.6M off. The 5.6M is feedback recording in the first windows (`run_get_var`, `run_call_builtin`, `run_call_generic`, about 1M each), which the native execution model replaces rather than tier-0 tuning.
 
 ## Tier 1 keeps the 3000-entry threshold
 
@@ -8179,3 +8232,17 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Ownership.** Frames, the calling convention and reification live in `crates/interp`; Cranelift codegen for unboxed scalars, direct native calls and deoptimization exits lives in `crates/jit`; vector kernels are a separate module behind a narrow interface.
 - **Known gap.** Tier-1 and baseline bodies take heap frames because their code reads variables through the environment. On the functional workload with the JIT on, that is about 600M instructions of `bind_arguments`, `define_formals`, `release_frame` and `clear_frame` that the same bodies avoid with the JIT off. Closing it is the frame-state map above: machine code reading and writing slots by index, and deoptimization materializing the environment through `reify`.
 
+## Tier 0 decides at scheduled entries and stops recording at tier-up
+
+- **Previous shape.** Every call of compiled bytecode tested each tier decision in `run`: the start and end of recording, the first-call compile, the entry-threshold compile, a body with tier-1 code, baseline code. That was about 30 instructions per call with nothing compiling (`RY_JIT_THRESHOLDS=0,0,0` ran 44M more instructions than `RY_JIT=off` on the testthat workload, 40M of it in `run` and `execute_code`). A body with tier-1 code also kept recording type feedback in tier 0, and `interpret` tested whether a tier was installed before reading `RECORDING`.
+- **Chosen shape.** Each decision happens at a known entry count, so the profile carries one more word, `profile::NEXT`: the count at which the next decision is due, or `i32::MIN` for "at the next entry". The hot path is one comparison, and `entry_event` (`#[inline(never)]`) makes the decisions and derives the next count from the counters as they are afterwards. Anything outside an entry that moves a counter or the tier state (the back-edge path, a compile, `runtime::invalidate`) sets `NEXT` to `i32::MIN`. Without a tier, code asks again every 4,096 calls, so a tier installed later still reaches it. `RECORDING` is set only with a tier installed, a compile turns it off, and a discard turns it back on for a body that can recompile; the type that broke a speculation is recorded by `jit_record` before the deoptimization either way. Code images keep the first four words, so their format is unchanged, and `NEXT` starts at `i32::MIN` on decode.
+- **Recording window.** Entry recording covers the last eighth of the entry threshold (`bytecode::recording_start`), not half of it: on the testthat workload 96 bodies started recording at half the threshold and 57 of them never reached it, so they recorded for the rest of the run. A body waiting to compile because of its size (`SIZE_WAITED`) stops recording until its counter re-enters the window. Loops still record from half the back-edge threshold.
+- **Impact** (callgrind, testthat workload, JIT on minus JIT off on the same build): 60.0M on main, 20.1M with this change; `RY_JIT_THRESHOLDS=0,0,0` minus off went from 29.3M to 2.2M. JIT off itself runs 7.7M fewer instructions, and `functional` with the JIT on 52M fewer. Most of the remaining gap is the plans and Cranelift work for one compile and 38 refusals.
+
+
+## Single-core speed first; per-process costs count once per worker
+
+- **Context.** The target users run their test suites in parallel across processes (one R process per worker) and are CPU bound, so all cores are already busy.
+- **Decision.** Single-core speed is the goal. Automatic parallelism (row (b) in `r-runtime.md`) is deferred: threads inside one worker would compete with the other workers for the same cores.
+- **Metrics.** The primary metric for every runtime track is the testthat workload (`tools/bench/real/testthat.R`) under callgrind. `just bench-real` comes second. Work on the native execution model also reports `just bench-real --public all` (awfy, shootout, rcp), because scalar loops are where FastR and Ř are ahead.
+- **Per-process costs.** Every cost paid per process is paid once per worker: JIT warm-up and compile time, package loading, resident memory and cache pressure. So package code should run from install-time compiled code (read-only pages shared between workers, no warm-up) rather than code compiled at run time, and per-worker resident memory is a metric that must not regress.

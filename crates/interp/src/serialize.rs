@@ -1753,12 +1753,12 @@ impl Encoder<'_> {
         self.value(constants.element(SUMMARY), depth + 1)?;
         self.value(constants.element(SLOTS), depth + 1)?;
         let trained = self.trained
-            && values::ints(constants.element(PROFILE))[..profile::LENGTH]
+            && values::ints(constants.element(PROFILE))[..profile::SERIALIZED]
                 .iter()
                 .any(|&counter| counter != 0);
         self.out.push(u8::from(trained));
         if trained {
-            for (index, &counter) in values::ints(constants.element(PROFILE))[..profile::LENGTH]
+            for (index, &counter) in values::ints(constants.element(PROFILE))[..profile::SERIALIZED]
                 .iter()
                 .enumerate()
             {
@@ -2047,7 +2047,7 @@ impl Decoder<'_, '_> {
     unsafe fn code(&mut self, depth: u32) -> R<Sexp> {
         use crate::bytecode::{
             EPOCHS, FEEDBACK, FIRST_CONSTANT, HINTS, LOOPS, PROFILE, REGISTERS, SLOTS, SOURCE,
-            SUMMARY, TIER1, profile,
+            SUMMARY, TIER1, profile, tier,
         };
         if depth > MAX_DEPTH {
             return Err(error("the code image nests too deeply"));
@@ -2092,11 +2092,15 @@ impl Decoder<'_, '_> {
         let counters = alloc(SexpType::Integer, profile::LENGTH)?;
         heap.root(counters);
         values::ints_mut(counters).fill(0);
+        values::ints_mut(counters)[profile::NEXT] = i32::MIN;
         match self.input.byte()? {
             0 => {}
             1 => {
-                for index in 0..profile::LENGTH {
+                for index in 0..profile::SERIALIZED {
                     values::ints_mut(counters)[index] = self.input.i32_value()?;
+                }
+                if tier().is_none() {
+                    values::ints_mut(counters)[profile::RECORDING] = 0;
                 }
                 for index in 0..caches {
                     values::ints_mut(hints)[index] = self.input.i32_value()?;

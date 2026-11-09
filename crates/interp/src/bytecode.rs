@@ -139,6 +139,10 @@ pub struct Tier {
     pub enter: unsafe fn(&mut Machine<'_>) -> Option<TierExit>,
     /// Entries after which a body without optimized code asks [`Tier::enter`] to compile it.
     pub entry_threshold: i32,
+    /// Called when a body without optimized code reaches the entry that starts its recording
+    /// window. Returns `false` to skip recording because the body will never compile, in which
+    /// case it also marks the body refused.
+    pub worth_recording: unsafe fn(&Machine<'_>) -> bool,
     /// Called on a backward jump to `target` once the code's back-edge counter crosses
     /// [`Tier::back_edge_threshold`]. Returns `None` to keep interpreting at `target`.
     pub back_edge: unsafe fn(&mut Machine<'_>, target: usize) -> Option<TierExit>,
@@ -217,8 +221,8 @@ pub fn set_tier(tier: Option<Tier>) {
     interp().bytecode.tier = tier;
 }
 
-pub fn tier() -> Option<Tier> {
-    interp().bytecode.tier
+pub fn tier() -> Option<&'static Tier> {
+    interp().bytecode.tier.as_ref()
 }
 
 /// The address of register `index` of the file. Valid while the window that holds it exists.
@@ -415,19 +419,35 @@ pub mod profile {
     pub const BACK_EDGES: usize = 1;
     /// The optimizing tier's state for this code, which only that tier interprets.
     pub const TIER_STATE: usize = 2;
-    /// Nonzero while tier 0 records type feedback for this code: during the first activation
-    /// of a body with a loop, once a body is halfway to the entry or the back-edge threshold,
-    /// and while it has optimized code. Recording costs a type test and a store per value, and
-    /// most bodies never get near a threshold, so recording from the first entry made every
-    /// call of cold package code slower with the optimizing tier installed than without it.
-    /// Half a threshold still sees every type a compile would specialize on. A loop can turn hot
-    /// inside a body's only activation, so a loop that reaches half its threshold starts
-    /// recording in the running activation, and the first activation records the instructions
-    /// before the loop, which that would miss. The decision is one word, read at every
-    /// activation, because deciding it there from the code's other constants cost 25
-    /// instructions per call.
+    /// Nonzero while tier 0 records type feedback for this code, which only happens with the
+    /// optimizing tier installed and while the code has no optimized code: during the first
+    /// activation of a body with a loop, over the last eighth of the entry threshold
+    /// ([`super::recording_start`]), from half the back-edge threshold, and after its optimized
+    /// code was discarded until it compiles again. Recording costs a type test and a store per
+    /// value, and most bodies never get near a threshold, so recording from the first entry
+    /// made every call of cold package code slower with the optimizing tier installed than
+    /// without it. Recording from half the entry threshold still cost a test suite 10M
+    /// instructions, in warm bodies that never reach it; a type the window misses costs one
+    /// deoptimization and a recompile. A loop can turn hot inside a body's only activation,
+    /// so a loop that reaches half its threshold starts recording in the running activation, and
+    /// the first activation records the instructions before the loop, which that would miss.
+    /// Optimized code records nothing, and what tier 0 would record beside it is read only by a
+    /// recompile, which follows a discard that turns recording back on.
     pub const RECORDING: usize = 3;
-    pub const LENGTH: usize = 4;
+    /// The entry count at which the next entry of this code asks [`super::entry_event`] what to
+    /// do, or `i32::MIN` to ask at the very next entry. Every tier decision at entry (recording,
+    /// the first-call compile, the entry-threshold compile, baseline code, running optimized
+    /// code) happens at a known count, so one comparison per call stands in for testing each
+    /// of them, which cost about 30 instructions per call of every body. Whatever changes a
+    /// count or a state those decisions read outside an entry sets this to `i32::MIN`.
+    pub const NEXT: usize = 4;
+    /// The session's allocation clock ([`heap::Heap::allocated_ever`], in KiB, wrapping) when the
+    /// recording window opened, which the optimizing tier reads to estimate how often the body
+    /// runs.
+    pub const WINDOW: usize = 5;
+    pub const LENGTH: usize = 6;
+    /// The counters a code image keeps. The next event is derived from them when it is read.
+    pub const SERIALIZED: usize = 4;
 }
 
 /// The body `function` was defined with, which a compiled closure keeps beside its code.
@@ -1669,7 +1689,9 @@ impl Compiler {
         heap.set_element(constants, FEEDBACK, feedback);
         let profile = values::alloc(SexpType::Integer, profile::LENGTH)?;
         values::ints_mut(profile).fill(0);
-        values::ints_mut(profile)[profile::RECORDING] = i32::from(!compiler.loops.is_empty());
+        values::ints_mut(profile)[profile::RECORDING] =
+            i32::from(!compiler.loops.is_empty() && interp().bytecode.tier.is_some());
+        values::ints_mut(profile)[profile::NEXT] = i32::MIN;
         heap.set_element(constants, PROFILE, profile);
         heap.set_element(constants, TIER1, nil());
         heap.set_element(constants, BASELINE, nil());
@@ -3749,36 +3771,11 @@ unsafe fn run_at(function: Sexp, code: Sexp, header: usize, base: usize) -> R<Se
         mark,
         loops: &mut loops,
     };
-    if let Some(tier) = interp().bytecode.tier {
-        if entries == tier.entry_threshold / 2 && profile[profile::TIER_STATE] >= 0 {
-            profile[profile::RECORDING] = 1;
-        } else if entries == 2
-            && entries < tier.entry_threshold / 2
-            && constants.element(TIER1) == nil()
-        {
-            profile[profile::RECORDING] = 0;
-        }
-    }
-    // Most bodies never compile, and asking the tier about every call of every body cost more
-    // than the compiled code saved on a test suite.
-    let entered = match interp().bytecode.tier {
-        Some(tier)
-            if constants.element(TIER1) != nil()
-                || ((entries == 1 || entries >= tier.entry_threshold)
-                    && profile[profile::TIER_STATE] >= 0) =>
-        {
-            (tier.enter)(&mut machine)
-        }
-        _ => None,
+    let entered = if entries >= profile[profile::NEXT] {
+        entry_event(&mut machine, entries)
+    } else {
+        None
     };
-    if let Some(tier) = interp().bytecode.tier
-        && entered.is_none()
-        && entries == tier.baseline_threshold
-        && tier.baseline_threshold != NEVER
-        && constants.element(BASELINE) == nil()
-    {
-        (tier.baseline)(&machine);
-    }
     let result = match entered {
         Some(TierExit::Finished(result)) => result,
         Some(TierExit::Resume { pc, pending }) => match pending {
@@ -3797,6 +3794,81 @@ unsafe fn run_at(function: Sexp, code: Sexp, header: usize, base: usize) -> R<Se
         Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
         other => other,
     }
+}
+
+/// The entry count at which a body without optimized code starts recording type feedback
+/// for a compile at `threshold` entries: the last eighth of the way, and at least the entry
+/// before a compile at the second entry.
+pub fn recording_start(threshold: i32) -> i32 {
+    threshold - (threshold / 8).max(threshold.min(1))
+}
+
+/// What the tiers do at an entry of `machine`'s code numbered `entries`, the decisions
+/// [`profile::NEXT`] schedules. Returns the optimizing tier's exit when it ran the activation.
+#[inline(never)]
+unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExit> {
+    let constants = machine.code.cdr();
+    let Some(tier) = tier() else {
+        let profile = values::ints_mut(constants.element(PROFILE));
+        profile[profile::RECORDING] = 0;
+        // Code that ran without a tier asks again now and then, so a tier installed later still
+        // reaches it, at one call in this many.
+        profile[profile::NEXT] = entries.saturating_add(1 << 12);
+        return None;
+    };
+    let profile = values::ints_mut(constants.element(PROFILE));
+    let optimized = constants.element(TIER1) != nil();
+    if !optimized {
+        if entries == recording_start(tier.entry_threshold) && profile[profile::TIER_STATE] >= 0 {
+            let worth = (tier.worth_recording)(machine);
+            values::ints_mut(constants.element(PROFILE))[profile::RECORDING] = i32::from(worth);
+        } else if entries == 2 && entries < recording_start(tier.entry_threshold) {
+            profile[profile::RECORDING] = 0;
+        }
+    }
+    // Most bodies never compile, and asking the tier about every call of every body cost more
+    // than the compiled code saved on a test suite.
+    let entered = if optimized
+        || ((entries == 1 || entries >= tier.entry_threshold) && profile[profile::TIER_STATE] >= 0)
+    {
+        (tier.enter)(machine)
+    } else {
+        None
+    };
+    if entered.is_none()
+        && entries == tier.baseline_threshold
+        && tier.baseline_threshold != NEVER
+        && constants.element(BASELINE) == nil()
+    {
+        (tier.baseline)(machine);
+    }
+    // The tier may have compiled, refused, or moved the counters, so the schedule is derived
+    // from what they hold now.
+    let profile = values::ints_mut(constants.element(PROFILE));
+    let entries = profile[profile::ENTRIES];
+    let state = profile[profile::TIER_STATE];
+    profile[profile::NEXT] = if constants.element(TIER1) != nil()
+        || (state >= 0 && entries >= tier.entry_threshold)
+    {
+        i32::MIN
+    } else {
+        let start = recording_start(tier.entry_threshold);
+        let baseline = (tier.baseline_threshold != NEVER && constants.element(BASELINE) == nil())
+            .then_some(tier.baseline_threshold);
+        [
+            (state >= 0).then_some(1),
+            (2 < start).then_some(2),
+            (state >= 0).then_some(start),
+            (state >= 0).then_some(tier.entry_threshold),
+            baseline,
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|&count| count > entries)
+        .min()
+        .unwrap_or(NEVER)
+    };
+    entered
 }
 
 unsafe fn execute_code(machine: &mut Machine<'_>, pc: usize) -> R<Sexp> {
@@ -3996,9 +4068,7 @@ type Handler = unsafe fn(&mut Activation<'_, '_>, usize);
 #[inline(always)]
 unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) -> R<Sexp> {
     let constants = machine.code.cdr();
-    let feedback = if interp().bytecode.tier.is_some()
-        && values::ints(constants.element(PROFILE))[profile::RECORDING] != 0
-    {
+    let feedback = if values::ints(constants.element(PROFILE))[profile::RECORDING] != 0 {
         values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
     } else {
         std::ptr::null_mut()
@@ -4317,8 +4387,10 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
     if target < at {
         if let Err(unwind) = crate::unwind::poll_interrupt() {
             pc = failed::<SINGLE>(state, at, unwind);
-        } else if let Some(tier) = (*state.interp).bytecode.tier {
-            match back_edge(state, &tier, pc) {
+        } else if let Some(tier) = &(*state.interp).bytecode.tier
+            && back_edge_due(state, tier)
+        {
+            match back_edge(state, tier, pc) {
                 BackEdge::Continue(resume) => pc = resume,
                 BackEdge::Finished(result) => {
                     state.exit = result;
@@ -4354,8 +4426,10 @@ unsafe extern "C" fn step_jump(state: *mut std::ffi::c_void, at: usize) -> usize
         if target < at {
             if let Err(unwind) = crate::unwind::poll_interrupt() {
                 pc = failed::<false>(state, at, unwind);
-            } else if let Some(tier) = (*state.interp).bytecode.tier {
-                match back_edge(state, &tier, pc) {
+            } else if let Some(tier) = &(*state.interp).bytecode.tier
+                && back_edge_due(state, tier)
+            {
+                match back_edge(state, tier, pc) {
                     BackEdge::Continue(resume) => pc = resume,
                     BackEdge::Finished(result) => {
                         state.exit = result;
@@ -5607,12 +5681,27 @@ enum BackEdge {
     Unwound { pc: usize, unwind: Unwind },
 }
 
+/// Counts a backward jump and answers whether it reaches a count [`back_edge`] acts on. Every
+/// backward jump of every loop pays this, so it is one increment and three comparisons, inlined
+/// into the jump; the rest waits in [`back_edge`] for the counts that need it.
+#[inline(always)]
+unsafe fn back_edge_due(state: &mut Activation<'_, '_>, tier: &Tier) -> bool {
+    let profile = values::ints_mut(state.constants.element(PROFILE));
+    let count = profile[profile::BACK_EDGES].saturating_add(1);
+    profile[profile::BACK_EDGES] = count;
+    count >= tier.back_edge_threshold
+        || count == tier.back_edge_threshold / 2
+        || count == tier.baseline_threshold
+}
+
 #[inline(never)]
+#[cold]
 unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> BackEdge {
     let machine = &mut *state.machine;
     let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
-    profile[profile::BACK_EDGES] = profile[profile::BACK_EDGES].saturating_add(1);
-    if profile[profile::BACK_EDGES] == tier.back_edge_threshold / 2 {
+    if profile[profile::BACK_EDGES] == tier.back_edge_threshold / 2
+        && machine.code.cdr().element(TIER1) == nil()
+    {
         profile[profile::RECORDING] = 1;
         state.feedback = values::ints_mut(machine.code.cdr().element(FEEDBACK)).as_mut_ptr();
     }
@@ -5627,7 +5716,10 @@ unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> B
         return BackEdge::Continue(pc);
     }
     profile[profile::BACK_EDGES] = 0;
-    match (tier.back_edge)(machine, pc) {
+    let exit = (tier.back_edge)(machine, pc);
+    // The tier may have compiled the body or moved its entry count.
+    values::ints_mut(machine.code.cdr().element(PROFILE))[profile::NEXT] = i32::MIN;
+    match exit {
         Some(TierExit::Finished(result)) => BackEdge::Finished(result),
         Some(TierExit::Resume {
             pc,
