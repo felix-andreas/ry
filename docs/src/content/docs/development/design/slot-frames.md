@@ -75,17 +75,46 @@ These are the reads that need the environment as an object. Each one reifies the
 | A closure created in the frame | `make_closure` in `eval.rs`; `Op::Closure`; `~` (the formula's environment) |
 | Reflection that returns the environment | `environment()`, `sys.frame(s)`, `parent.frame`, `as.environment(-1)`, `sys.function` with its environment, `eval`'s numeric `envir` |
 | Code that the compiler did not translate and that runs in the frame | `Op::Ast` (`<<-` targets, `...` forms), `BoundEval`, the debugger and `browser()` |
-| S3 and S4 dispatch reading the generic's frame | `UseMethod` and `NextMethod` (`dispatch.rs`), `exec_method` and `callNextMethod` (`methods.rs`) |
+| S3 and S4 dispatch reading the generic's frame | `UseMethod` and `NextMethod` (`dispatch.rs`); `standardGeneric`, which reads the signature arguments from the generic's frame and evaluates the method in a frame derived from it (`do_standard_generic` passes `call.env` to `dispatch_generic`), and `exec_method` and `callNextMethod` (`methods.rs`) |
 | Condition handlers and restarts that record a frame | `.addCondHands`, `.addRestart` (`conditions.rs`) |
-| The C API | `R_GetCurrentEnv`, `Rf_eval` and `R_tryEval` with a frame, `.External` and `.External2` (which pass the environment), `R_findVarLoc*`, `FRAME`, `ENCLOS` and every function that takes an `SEXP rho` from R |
+| The C API | `R_GetCurrentEnv`, `PRENV` on a promise over the frame, `.External` and `.External2` (which pass the environment) |
 
 A builtin that receives `call.env` and only reads a frame property (`missing`, `nargs`, `on.exit`,
 `sys.call`, `match.call`) gets the frame reference instead and does not reify.
 
-The C API is the riskiest row. Native code can reach a frame only through an `SEXP` that R code or
-another API call handed it, and every route that hands one out is in the table. So a reified
-environment is the only kind native code ever sees, and binding cells keep their stable addresses
-for `R_findVarLoc`.
+`parent.frame()` and `sys.frame()` called from a callee reify the caller's frame, not their own. That
+makes `match.arg` (which evaluates the caller's formals through `sys.frame(sys.parent())`) and
+`eval(expr, parent.frame())` the most common triggers in package code. The instrumented build counts
+them apart from other reflection, so the second step can tell whether they need a cheaper route.
+
+### Reads that must not reify
+
+These are hot in package code and work from the slots and the frame reference alone:
+
+- `substitute(x)` and `deparse(substitute(x))`, which read the promise's expression, not its
+  environment.
+- `missing(x)`, including on an argument forwarded from the caller, which follows the promise into
+  the caller's frame and reads its slot's missing bit.
+- `...length()`, `..1` and `...elt(n)`, which read the `...` slot.
+- `nargs()`, `sys.call()`, `match.call()` and `on.exit()`, which read the frame record.
+
+### The C API
+
+`crates/libr` exports no function that walks the context stack. `R_GlobalContext` and
+`R_ToplevelContext` point at one opaque zeroed block that reads as "at top level" (`native.c`), and
+`R_sysframe`, `R_sysfunction` and `Rf_sysparent` are not exported. The routes that hand native code a
+frame's environment are `R_GetCurrentEnv` (`eval.rs`, through `current_env`), `PRENV` on a promise,
+and the `rho` argument of `.External` and `.External2`; each reifies first. Every other function that
+takes an environment (`Rf_eval`, `R_tryEval`, `Rf_findVar`, `R_findVarLoc`, `R_getVar`,
+`R_existsVarInFrame`, `R_ParentEnv`, `FRAME`, `ENCLOS`) receives an `SEXP` that one of those routes or
+R code already handed out, so it only ever sees a reified environment, and binding cells keep their
+stable addresses for `R_findVarLoc`. `R_GetCurrentSrcref` reads the frame record and does not reify.
+
+### Identity
+
+Reification happens once per frame. The frame record keeps the environment it created, so a second
+`environment()`, `sys.frame()` of the same frame, and the environment a promise or closure captured
+are the identical `SEXP`, and `identical()` and `environmentName()` behave as for a heap frame.
 
 ## Promises over a slot frame
 
@@ -95,6 +124,13 @@ it during the call reads the slot. If the frame returns while such a promise is 
 referenced, the return reifies the frame and points the promise at the new environment. `PRENV`,
 `substitute` and native code see only reified environments, because reading a promise's
 environment reifies it. This step is planned after the first step's numbers are in.
+
+## Checking it
+
+Behind `syntax::testing::enable_invariants()`, reification cross-checks itself: it compares the
+environment built from the slots with what the heap-frame path would have bound for the same call
+(the same symbols, values and missing flags). A scenario in `crates/ry/tests/scenarios/` exercises
+each trigger above and each read that must not reify.
 
 ## Prior decision
 
