@@ -1644,7 +1644,12 @@ impl Heap {
 
     /// [`Heap::frame_cell`] through a lookup site's position hint (see [`Frame::find_hinted`]).
     #[inline(always)]
-    pub unsafe fn frame_cell_hinted(&self, env: Sexp, symbol: Sexp, hint: &mut u32) -> Option<Sexp> {
+    pub unsafe fn frame_cell_hinted(
+        &self,
+        env: Sexp,
+        symbol: Sexp,
+        hint: &mut u32,
+    ) -> Option<Sexp> {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return self.frame_cell(env, symbol);
         }
@@ -1744,7 +1749,8 @@ impl Heap {
         // young, so one barrier check covers every one. A failed allocation leaves no cell in
         // the frame, and the cells made before it are garbage.
         if let Some(&first) = cells.first() {
-            (*env.frame_ptr()).insert_formals(&cells, bindings.iter().map(|binding| binding.symbol));
+            (*env.frame_ptr())
+                .insert_formals(&cells, bindings.iter().map(|binding| binding.symbol));
             self.write_barrier(env, first);
         }
         Ok(())

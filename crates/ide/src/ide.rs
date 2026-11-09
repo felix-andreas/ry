@@ -2,6 +2,7 @@
 //! live in the server. Per-item query results carry item-relative ranges, while this API speaks
 //! file-absolute offsets (`semantics::item_node` anchors an item).
 
+pub use syntax::highlight::SemanticClass;
 use {
     bumpalo::Bump,
     semantics::{
@@ -48,8 +49,6 @@ use {
         kind::KEYWORDS,
     },
 };
-
-pub use syntax::highlight::SemanticClass;
 
 mod fields;
 mod refactor;

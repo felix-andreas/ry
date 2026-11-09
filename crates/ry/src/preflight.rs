@@ -14,39 +14,53 @@ use {
     },
     repl::{Filtered, InputFilter},
     rustc_hash::FxHashMap,
-    salsa::Setter,
     semantics::{
-        DocumentKind, Elaboration, ProjectFiles, RootDatabase, SourceFile,
+        Elaboration, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{Diagnostic, RelatedLocation, Severity},
-        is_ry_syntax,
+        is_ry_syntax, session,
         stubs::{install_shipped_stubs, is_native_function},
     },
     std::{
         fs,
         path::{Path, PathBuf},
-        sync::{LazyLock, Mutex, PoisonError},
+        sync::{Arc, LazyLock, Mutex, PoisonError},
         thread,
     },
     syntax::{
-        NodeOrToken, SyntaxKind, SyntaxNode, TextSize, erase_inline_annotations,
+        NodeOrToken, SyntaxKind, SyntaxNode, erase_inline_annotations, erased_lines_end,
         input_is_unfinished, is_inline_annotation,
     },
 };
 
-/// Analysis state for one run or one console session. A console session is checked as one
-/// growing script, so a command sees the definitions earlier commands made.
+/// Analysis state for one run or one console session. Each accepted command is a file of its
+/// own in the database's console session (see [`session`]), checked against the interface of
+/// the commands before it, so a command costs time in proportion to its own length.
 pub struct Preflight {
     db: RootDatabase,
-    file: SourceFile,
     config: Config,
-    /// Names the source in rendered findings.
-    path: PathBuf,
-    /// Accepted input so far, newline-terminated.
-    session: String,
+    /// Names the source of the next command in rendered findings.
+    path: Arc<Path>,
+    /// The path each session command was checked under, in session order.
+    command_paths: Vec<Arc<Path>>,
+    /// Accepted plain R typed before the session held anything analysis decides,
+    /// newline-terminated. It joins the session as one command once analysis starts, so a long
+    /// plain paste never pays for analysis.
+    plain: String,
+    plain_path: Option<Arc<Path>>,
     /// The session holds something analysis decides: strict mode from `ry.toml`, ry syntax, or a
-    /// `typing:` directive. Until then each command is tested alone, because re-parsing the
-    /// whole session per command makes a long paste quadratic.
+    /// `typing:` directive.
     analyzed: bool,
+    /// Where the last accepted input went, so that [`Preflight::retract`] can take back the part
+    /// of it that never ran.
+    last: Option<Last>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Last {
+    /// Appended to [`Preflight::plain`] at this offset.
+    Plain { start: usize },
+    /// The session's last command.
+    Command,
 }
 
 /// What the preflight decided about a piece of input.
@@ -82,15 +96,18 @@ impl Preflight {
             config.check.strict,
             config.check.prelude,
         );
-        let file = SourceFile::new(&db, String::new(), DocumentKind::Script);
-        ProjectFiles::new(&db, vec![file]);
+        // The commands are not project files: a project-wide fold over them would make every
+        // command cost time in proportion to the session.
+        ProjectFiles::new(&db, Vec::new());
         Preflight {
             analyzed: config.check.strict,
             db,
-            file,
             config,
-            path,
-            session: String::new(),
+            path: Arc::from(path),
+            command_paths: Vec::new(),
+            plain: String::new(),
+            plain_path: None,
+            last: None,
         }
     }
 
@@ -101,7 +118,7 @@ impl Preflight {
     /// Names the source in the findings of later checks, as when a console continues the
     /// session a script began.
     pub fn rename(&mut self, path: PathBuf) {
-        self.path = path;
+        self.path = Arc::from(path);
     }
 
     /// Checks `input` as the next part of the session and returns the program ry's runtime runs
@@ -119,85 +136,171 @@ impl Preflight {
     /// rewrites bytes `input` only stands for, such as a Latin-1 script whose invalid bytes
     /// `input` spells as `?`.
     pub fn check_elaborations(&mut self, input: &str) -> Option<Vec<Elaboration>> {
+        self.last = None;
         if !self.analyzed {
             if !has_ry_syntax(&syntax::parse(input).syntax_node(), input) {
-                self.session.push_str(input);
-                self.session.push('\n');
+                self.last = Some(Last::Plain {
+                    start: self.plain.len(),
+                });
+                self.plain.push_str(input);
+                self.plain.push('\n');
+                self.plain_path.get_or_insert_with(|| self.path.clone());
                 return Some(Vec::new());
             }
             self.analyzed = true;
         }
-        let start = self.session.len();
-        let mut source = String::with_capacity(start + input.len() + 1);
-        source.push_str(&self.session);
-        source.push_str(input);
-        source.push('\n');
-        self.file.set_text(&mut self.db).to(source.clone());
-        // Inference recurses per nested expression, which can outgrow the main thread's stack.
+        self.flush_plain();
+        let file = session::command_file(&self.db, format!("{input}\n"));
         let db = self.db.clone();
-        let (file, config, text) = (self.file, &self.config, source.as_str());
-        let (verdict, findings, elaborations) = thread::scope(|scope| {
-            let worker = thread::Builder::new()
-                .stack_size(crate::ANALYSIS_STACK_SIZE)
-                .spawn_scoped(scope, move || findings(&db, file, config, text));
-            match worker {
-                Ok(handle) => handle
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-                Err(error) => panic!("the preflight thread should spawn: {error}"),
-            }
+        let config = &self.config;
+        let (contributions, (verdict, reported, elaborations)) = on_analysis_stack(move || {
+            let contributions = session::prepare(&db, file);
+            (contributions, findings(&db, file, config))
         });
-        // Earlier commands' warnings were printed when they ran, but an error that blocks this
-        // one is printed wherever it is: redefining a name can break a function defined earlier.
-        let reported: Vec<Diagnostic> = findings
-            .into_iter()
-            .filter(|diagnostic| {
-                usize::from(diagnostic.range.start()) >= start
-                    || (verdict == Verdict::Refuse && is_strict_error(diagnostic))
-            })
-            .collect();
-        let resolve_note = |related: &RelatedLocation| {
-            (related.file == file).then(|| RelatedNote {
-                path: &self.path,
-                source: &source,
-                range: related.range,
-                message: related.message,
-            })
-        };
-        render_findings(
-            OutputFormat::Human,
-            MinSeverity::Warning,
-            &self.path,
-            &source,
-            &reported,
-            &resolve_note,
-        );
-        match verdict {
-            Verdict::Run => {
-                self.session = source;
-                Some(
-                    elaborations
+        let mut reports = vec![(file, reported)];
+        let mut refused = verdict == Verdict::Refuse;
+        if !refused {
+            let len = session::len(&self.db);
+            let readers = session::commit(&mut self.db, file, contributions);
+            self.command_paths.push(self.path.clone());
+            // A command that rebinds a name changes the functions earlier commands defined that
+            // read it, which can break them in strict mode.
+            if !readers.is_empty() {
+                let db = self.db.clone();
+                let config = &self.config;
+                let broken: Vec<(SourceFile, Vec<Diagnostic>)> = on_analysis_stack(move || {
+                    readers
                         .into_iter()
-                        .filter_map(|elaboration| {
-                            let range = elaboration
-                                .range()
-                                .checked_sub(TextSize::try_from(start).ok()?)?;
-                            Some(elaboration.at(range))
+                        .filter(|&reader| semantics::file_is_strict(&db, reader))
+                        .filter_map(|reader| {
+                            let errors: Vec<Diagnostic> = apply_suppressions(
+                                document_diagnostics(&db, reader, config),
+                                reader.text(&db),
+                            )
+                            .into_iter()
+                            .filter(is_strict_error)
+                            .collect();
+                            (!errors.is_empty()).then_some((reader, errors))
                         })
-                        .collect(),
-                )
+                        .collect()
+                });
+                if !broken.is_empty() {
+                    refused = true;
+                    reports.extend(broken);
+                    self.truncate(len);
+                }
             }
-            Verdict::Refuse => {
-                refuse(
-                    reported
-                        .iter()
-                        .filter(|diagnostic| is_strict_error(diagnostic))
-                        .count(),
-                );
-                None
+        }
+        let mut errors = 0;
+        let pending_path = self.path.clone();
+        for (shown, diagnostics) in &reports {
+            let shown_path = self.command_path(*shown).unwrap_or(&pending_path);
+            let resolve_note = |related: &RelatedLocation| {
+                let path = if related.file == file {
+                    &pending_path
+                } else {
+                    self.command_path(related.file)?
+                };
+                Some(RelatedNote {
+                    path,
+                    source: related.file.text(&self.db),
+                    range: related.range,
+                    message: related.message,
+                })
+            };
+            render_findings(
+                OutputFormat::Human,
+                MinSeverity::Warning,
+                shown_path,
+                shown.text(&self.db),
+                diagnostics,
+                &resolve_note,
+            );
+            errors += diagnostics
+                .iter()
+                .filter(|diagnostic| is_strict_error(diagnostic))
+                .count();
+        }
+        if refused {
+            refuse(errors);
+            return None;
+        }
+        self.last = Some(Last::Command);
+        Some(elaborations)
+    }
+
+    /// Takes back all of the last accepted input but its first `ran` bytes, which is all that
+    /// ran of it: an interrupt dropped the rest of a paste.
+    pub fn retract(&mut self, ran: usize) {
+        match self.last.take() {
+            None => {}
+            Some(Last::Plain { start }) => self.plain.truncate(start + ran),
+            Some(Last::Command) => {
+                let len = session::len(&self.db);
+                let Some(file) = session::command_files(&self.db).last().copied() else {
+                    return;
+                };
+                let text = file.text(&self.db);
+                let kept = text.get(..ran).unwrap_or(text).to_owned();
+                let path = self
+                    .command_paths
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| self.path.clone());
+                self.truncate(len - 1);
+                // What ran of the command defines what it defines, whether or not it checks.
+                if !kept.trim().is_empty() {
+                    self.push_unchecked(format!("{}\n", kept.trim_end_matches('\n')), path);
+                }
             }
         }
     }
+
+    /// Joins the plain input buffered before analysis started to the session, unchecked: it
+    /// already ran.
+    fn flush_plain(&mut self) {
+        if self.plain.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.plain);
+        let path = self.plain_path.take().unwrap_or_else(|| self.path.clone());
+        self.push_unchecked(text, path);
+    }
+
+    fn push_unchecked(&mut self, text: String, path: Arc<Path>) {
+        let file = session::command_file(&self.db, text);
+        let db = self.db.clone();
+        let contributions = on_analysis_stack(move || session::prepare(&db, file));
+        // The readers a command that already ran breaks are not this command's to refuse.
+        session::commit(&mut self.db, file, contributions);
+        self.command_paths.push(path);
+    }
+
+    fn truncate(&mut self, len: usize) {
+        session::truncate(&mut self.db, len);
+        self.command_paths.truncate(len);
+    }
+
+    fn command_path(&self, file: SourceFile) -> Option<&Path> {
+        let index = (*file.command(&self.db))?;
+        self.command_paths.get(index as usize).map(|path| &**path)
+    }
+}
+
+/// Runs `work` on a thread with the stack analysis needs: inference recurses per nested
+/// expression, which can outgrow the main thread's stack.
+fn on_analysis_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    thread::scope(|scope| {
+        let worker = thread::Builder::new()
+            .stack_size(crate::ANALYSIS_STACK_SIZE)
+            .spawn_scoped(scope, work);
+        match worker {
+            Ok(handle) => handle
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            Err(error) => panic!("the preflight thread should spawn: {error}"),
+        }
+    })
 }
 
 /// Enforces strict mode on the package `ry load` is about to load, on either runtime, because
@@ -236,32 +339,22 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
     // reload builds a database kept for edits instead, so every reload after it is incremental.
     let first = !checks.contains_key(&key);
     let previous = checks.remove(&key).flatten();
-    let check = thread::scope(|scope| {
-        let worker = thread::Builder::new()
-            .stack_size(crate::ANALYSIS_STACK_SIZE)
-            .spawn_scoped(scope, || {
-                if first {
-                    let analysis = analyze_project(
-                        root,
-                        root,
-                        config.clone(),
-                        std::slice::from_ref(&sources),
-                        CacheUse::ReadWrite,
-                        Purpose::Diagnostics,
-                    )?;
-                    let errors = strict_errors(&analysis);
-                    Ok::<_, CommandError>(Checked::Recorded(analysis, errors))
-                } else {
-                    let check = check_package_code(previous, root, config)?;
-                    let errors = strict_errors(&check.analysis);
-                    Ok(Checked::Kept(check, errors))
-                }
-            });
-        match worker {
-            Ok(handle) => handle
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-            Err(error) => panic!("the preflight thread should spawn: {error}"),
+    let check = on_analysis_stack(|| {
+        if first {
+            let analysis = analyze_project(
+                root,
+                root,
+                config.clone(),
+                std::slice::from_ref(&sources),
+                CacheUse::ReadWrite,
+                Purpose::Diagnostics,
+            )?;
+            let errors = strict_errors(&analysis);
+            Ok::<_, CommandError>(Checked::Recorded(analysis, errors))
+        } else {
+            let check = check_package_code(previous, root, config)?;
+            let errors = strict_errors(&check.analysis);
+            Ok(Checked::Kept(check, errors))
         }
     })?;
     let (analysis, errors) = match &check {
@@ -357,14 +450,9 @@ fn findings(
     db: &RootDatabase,
     file: SourceFile,
     config: &Config,
-    source: &str,
 ) -> (Verdict, Vec<Diagnostic>, Vec<Elaboration>) {
     let strict = semantics::file_is_strict(db, file);
-    // Plain R without strict mode has nothing to report and no literal a ry type decides, so it
-    // skips analysis entirely.
-    if !strict && !has_ry_syntax(&semantics::parse(db, file).syntax_node(), source) {
-        return (Verdict::Run, Vec::new(), Vec::new());
-    }
+    let source = file.text(db);
     let elaborations = semantics::file_elaborations(db, file);
     let diagnostics = apply_suppressions(document_diagnostics(db, file, config), source);
     let refuse = strict && diagnostics.iter().any(is_strict_error);
@@ -537,6 +625,8 @@ pub struct ConsoleFilter {
     erase: bool,
     /// The lines of an unfinished command, each newline-terminated.
     held: String,
+    /// The last command released to R, as checked, and the number of lines R was handed for it.
+    released: Option<(String, usize)>,
 }
 
 impl ConsoleFilter {
@@ -545,6 +635,7 @@ impl ConsoleFilter {
             preflight,
             erase,
             held: String::new(),
+            released: None,
         }
     }
 }
@@ -557,15 +648,38 @@ impl InputFilter for ConsoleFilter {
             return Filtered::Hold;
         }
         let command = std::mem::take(&mut self.held);
-        match self.preflight.check(&command) {
-            None => Filtered::Refuse,
-            Some(_) if self.erase => Filtered::Run(erase(&command)),
-            Some(program) => Filtered::Run(program),
-        }
+        self.released = None;
+        let program = match self.preflight.check(&command) {
+            None => return Filtered::Refuse,
+            Some(_) if self.erase => erase(&command),
+            Some(program) => program,
+        };
+        self.released = Some((command, program.matches('\n').count() + 1));
+        Filtered::Run(program)
     }
 
     fn interrupt(&mut self) {
         self.held.clear();
+    }
+
+    fn discard(&mut self, lines: usize) {
+        let Some((command, total)) = self.released.take() else {
+            return;
+        };
+        let ran = total.saturating_sub(lines);
+        // Elaboration only inserts text within a line, so the program's lines are the
+        // command's; erasing can drop or merge lines, which the erased program maps back.
+        let end = if self.erase {
+            usize::from(erased_lines_end(&syntax::parse(&command), ran))
+        } else if ran == 0 {
+            0
+        } else {
+            command
+                .match_indices('\n')
+                .nth(ran - 1)
+                .map_or(command.len(), |(at, _)| at + 1)
+        };
+        self.preflight.retract(end);
     }
 }
 

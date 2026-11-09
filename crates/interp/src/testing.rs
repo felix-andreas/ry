@@ -176,8 +176,8 @@ pub fn check_code_image_round_trip(entropy: &mut impl Entropy) {
                 let Some(bytes) = code_image::encode(code, source, trained) else {
                     continue;
                 };
-                let decoded = code_image::decode_untrusted(&bytes, source)
-                    .unwrap_or_else(|failure| {
+                let decoded =
+                    code_image::decode_untrusted(&bytes, source).unwrap_or_else(|failure| {
                         panic!("`{body}`: an encoded code object must decode: {failure:?}")
                     });
                 crate::heap().root(decoded);
@@ -231,7 +231,11 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
     for _ in 0..count {
         offset += 1 + entropy.below(1000) as u64;
         records.push((offset, entropy.below(5000) as u32, entropy.next_u64()));
-        payloads.push((0..entropy.below(40)).map(|_| entropy.below(256) as u8).collect::<Vec<u8>>());
+        payloads.push(
+            (0..entropy.below(40))
+                .map(|_| entropy.below(256) as u8)
+                .collect::<Vec<u8>>(),
+        );
     }
     let database_length = offset + entropy.below(100) as u64;
     let build = "fuzz-build";
@@ -240,8 +244,9 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
         .map(|_| (entropy.below(1 << 16), entropy.below(256) as u8))
         .collect();
     with_interpreter(|| {
-        let bytes = code_image::image_bytes(build, trained, database_length, &records, &payloads, None)
-            .unwrap_or_else(|_| panic!("a small image must write"));
+        let bytes =
+            code_image::image_bytes(build, trained, database_length, &records, &payloads, None)
+                .unwrap_or_else(|_| panic!("a small image must write"));
         let entries = code_image::parse(&bytes, build, database_length)
             .unwrap_or_else(|message| panic!("a written image must parse: {message}"))
             .unwrap_or_else(|| panic!("a written image must belong to its build"))
@@ -255,8 +260,14 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
                 Some(&payload[..])
             );
         }
-        assert_eq!(code_image::parse(&bytes, "another-build", database_length), Ok(None));
-        assert_eq!(code_image::parse(&bytes, build, database_length + 1), Ok(None));
+        assert_eq!(
+            code_image::parse(&bytes, "another-build", database_length),
+            Ok(None)
+        );
+        assert_eq!(
+            code_image::parse(&bytes, build, database_length + 1),
+            Ok(None)
+        );
         let mut mutated = bytes.clone();
         for &(position, value) in &mutations {
             let at = position % mutated.len().max(1);
@@ -401,10 +412,13 @@ pub fn check_code_image_load(entropy: &mut impl Entropy) {
                     }
                 }
             }
-            std::fs::create_dir_all(&directory)
-                .unwrap_or_else(|failure| panic!("cannot create {}: {failure}", directory.display()));
+            std::fs::create_dir_all(&directory).unwrap_or_else(|failure| {
+                panic!("cannot create {}: {failure}", directory.display())
+            });
             let database = directory.join("fuzz.rdb");
-            let database = database.to_str().unwrap_or_else(|| panic!("a temporary path is text"));
+            let database = database
+                .to_str()
+                .unwrap_or_else(|| panic!("a temporary path is text"));
             std::fs::write(database, vec![0u8; stream.len()])
                 .unwrap_or_else(|failure| panic!("cannot write {database}: {failure}"));
             std::fs::write(code_image::path(database), &image)
@@ -421,7 +435,11 @@ pub fn check_code_image_load(entropy: &mut impl Entropy) {
             })();
             if let Ok(Some(value)) = loaded {
                 crate::heap().root(value);
-                assert_eq!(value.kind(), SexpType::Closure, "`{body}`: a record reads back");
+                assert_eq!(
+                    value.kind(),
+                    SexpType::Closure,
+                    "`{body}`: a record reads back"
+                );
                 define("g_image", value);
                 // Another closure over the fetched body must not take the code compiled for the
                 // fetched closure's formals.
@@ -446,7 +464,8 @@ pub fn check_code_image_load(entropy: &mut impl Entropy) {
                     let outcome = run(&format!("g_image({a}, {b})"));
                     if mode != 4 {
                         assert_eq!(
-                            direct, outcome,
+                            direct,
+                            outcome,
                             "`{body}` with a = {a}, b = {b}, mode {mode}, call {}: a closure \
                              fetched through its image must compute what the evaluator does \
                              (trained: {trained})",

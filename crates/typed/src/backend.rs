@@ -1548,9 +1548,7 @@ impl Emitter<'_> {
         let alone = self.builder.ins().icmp_imm_s(IntCC::Equal, count, 1);
         let (copy, done) = (self.builder.create_block(), self.builder.create_block());
         self.builder.append_block_param(done, I64);
-        self.builder
-            .ins()
-            .brif(alone, done, &[pointer], copy, &[]);
+        self.builder.ins().brif(alone, done, &[pointer], copy, &[]);
         self.builder.switch_to_block(copy);
         let copied = self.call_words(
             address!(values::ry_list_unshare),

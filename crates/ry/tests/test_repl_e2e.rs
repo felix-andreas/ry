@@ -550,6 +550,31 @@ fn a_paste_runs_in_linear_time() {
     }
 }
 
+/// A typed paste is linear too: each command is checked against the interface of the commands
+/// before it, never by re-checking the session, so 2,000 annotated lines take about ten times
+/// as long as 200.
+#[test]
+fn a_typed_paste_runs_in_linear_time() {
+    let block = |count: usize| -> Vec<String> {
+        (0..count)
+            .map(|index| format!("x{index}: integer <- {index}L"))
+            .collect()
+    };
+    for runtime in runtimes() {
+        let mut session = ReplSession::start_with(None, &[runtime_command(runtime)]);
+        session.expect_prompt();
+        for (bracketed, name) in [(false, "raw"), (true, "bracketed")] {
+            let (small, _) = session.paste(&block(200), bracketed, &format!("{name}_small"));
+            let (large, _) = session.paste(&block(2000), bracketed, &format!("{name}_large"));
+            assert!(
+                large < small * 30,
+                "{runtime}, {name}: 200 typed lines took {small:?} but 2,000 took {large:?}"
+            );
+        }
+        session.quit();
+    }
+}
+
 /// An error in a paste stops only its own line, as when the lines are typed: R discards the rest
 /// of its input buffer on an error, so the console hands it one line at a time and no later line
 /// runs from the middle.
@@ -610,6 +635,37 @@ fn ctrl_c_cancels_the_rest_of_a_paste() {
                 "{runtime}, bracketed {bracketed}: a line after the interrupt ran:\n{}",
                 session.seen
             );
+            session.quit();
+        }
+    }
+}
+
+/// The lines Ctrl-C cancels never ran, so the strict check of later commands does not see
+/// what they bind, while what ran before the interrupt stays bound.
+#[test]
+fn ctrl_c_rolls_the_strict_session_back_to_what_ran() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(directory.path().join("ry.toml"), "[check]\nstrict = true\n").expect("write config");
+    for runtime in runtimes() {
+        for bracketed in [false, true] {
+            let mut session =
+                ReplSession::start_with(Some(directory.path()), &[runtime_command(runtime)]);
+            session.expect_prompt();
+            let mut text = "a: integer <- 1L; cat('SLEEP', 'ING', sep = '_'); Sys.sleep(5)\r\
+                            b: integer <- 2L\r"
+                .to_owned();
+            if bracketed {
+                text = format!("\x1b[200~{text}\x1b[201~\r");
+            }
+            session.send(&text);
+            session.expect("SLEEP_ING");
+            session.settle(Duration::from_millis(500));
+            session.send("\u{3}");
+            session.settle(Duration::from_millis(1000));
+            session.send("cat(a + 1L, 'RAN', sep = '_')\r");
+            session.expect("2_RAN");
+            session.send("c: integer <- b\r");
+            session.expect("strict mode found 1 error");
             session.quit();
         }
     }

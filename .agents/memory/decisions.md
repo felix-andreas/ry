@@ -3124,6 +3124,34 @@ or raised with only trivia left), which the parser knows and a range check canno
 at a trailing newline is reported on the last code character. ry's own console uses the same rule. Otherwise strict mode could refuse the last line of a definition whose
 first lines R had already read, leaving R mid-command.
 
+**The console preflight checks each command against the session's interface**
+(`semantics::session`, `crates/ry/src/preflight.rs`).
+
+- Previous shape: the session was one growing script file, re-parsed and re-analyzed whole for
+  every command, so a typed paste of n lines cost O(n²) (1,000 lines took 3.6 s). The session
+  text duplicated what had run, and a paste cut short by Ctrl-C stayed in it.
+- Target shape: each accepted command is a `SourceFile` of its own with `command: Some(index)`.
+  An append-only log in a singleton salsa input (`ConsoleSession`) records what each command
+  binds, declares and defines, its `# typing:` directive and whether it used ry syntax. Name
+  resolution, type definitions, the typing mode and "holds ry values" fall back to the log for
+  commands before the reader. Those reads are untracked on purpose: they only look at smaller
+  indices, and the log changes only past the reader or by dropping commands after it.
+- The exception is a read inside a function body, which sees the latest binder, as R's global
+  environment does. It goes through a `SessionBinder` salsa input per name, created when a
+  command first reads the name that way. `commit` sets it and returns the earlier commands that
+  read the name, which strict mode rechecks; a strict error there refuses the new command, and
+  `truncate` undoes the commit. Tracking immediate reads too would make each rebinding
+  invalidate a chain of earlier commands and bring the quadratic cost back.
+- The command files are not in `ProjectFiles`: a project-wide fold over them would cost
+  O(session) per command.
+- Rollback: an error never cuts a paste short (R gets one line per chunk), so only Ctrl-C drops
+  input. The console counts the dropped lines in `pending` and calls `InputFilter::discard`;
+  `ConsoleFilter` maps lines back to the command's bytes (identity for ry's runtime, whose
+  elaboration keeps lines; `syntax::erased_lines_end` for GNU R's erased program), and
+  `Preflight::retract` replaces the last command with the prefix that ran, unchecked.
+- Impact: a 5,000-line typed paste takes 1.4 s raw, linear; findings name the command they are
+  in, with lines counted from its start; a `# typing:` directive governs only later commands.
+
 ## Frames as runtime values
 
 - **A frame is an `EXTPTRSXP` that owns a `Box<table::Table>`, tagged with the symbol `ry.frame`

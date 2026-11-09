@@ -126,7 +126,8 @@ fn unknown_symbols_fail_at_link_and_load() {
     let code = build();
     let bytes = section::encode(&code, 0);
     // SAFETY: loading fails before any code runs.
-    let loaded = unsafe { section::load(std::path::Path::new("/nonexistent"), 0, &bytes, &|_| None) };
+    let loaded =
+        unsafe { section::load(std::path::Path::new("/nonexistent"), 0, &bytes, &|_| None) };
     assert!(loaded.is_err());
 }
 

@@ -102,7 +102,11 @@ fn host_runs(target: u32) -> bool {
 /// Links the relocatable ELF object `object`, whose text defines the functions `names`, into one
 /// block of code with its link table. Every symbol the code reads from the table must be `known`
 /// to the loader, and every function in `names` must be defined.
-pub fn link(object: &[u8], names: &[Box<str>], known: &dyn Fn(&str) -> bool) -> Result<Code, Error> {
+pub fn link(
+    object: &[u8],
+    names: &[Box<str>],
+    known: &dyn Fn(&str) -> bool,
+) -> Result<Code, Error> {
     let file = object::File::parse(object).map_err(|_| Error("the object does not parse"))?;
     let text = file
         .section_by_name(".text")
@@ -115,7 +119,9 @@ pub fn link(object: &[u8], names: &[Box<str>], known: &dyn Fn(&str) -> bool) -> 
     if file.sections().any(|section| {
         section.index() != text_index
             && section.relocations().next().is_some()
-            && section.name().is_ok_and(|name| !name.starts_with(".rela.eh") && name != ".eh_frame")
+            && section
+                .name()
+                .is_ok_and(|name| !name.starts_with(".rela.eh") && name != ".eh_frame")
     }) {
         return Err(Error("the object relocates more than its code"));
     }
@@ -152,7 +158,9 @@ pub fn link(object: &[u8], names: &[Box<str>], known: &dyn Fn(&str) -> bool) -> 
         }
         let target: i64 = match relocation.kind() {
             RelocationKind::GotRelative => {
-                let name = symbol.name().map_err(|_| Error("a symbol without a name"))?;
+                let name = symbol
+                    .name()
+                    .map_err(|_| Error("a symbol without a name"))?;
                 if !symbol.is_undefined() || !known(name) {
                     return Err(Error("the code reads a symbol the loader cannot resolve"));
                 }
@@ -382,7 +390,14 @@ pub unsafe fn load(
     for symbol in &header.symbols {
         table.push(resolve(symbol).ok_or(Error("the code reads a symbol this build lacks"))?);
     }
-    let base = unsafe { map(path, offset + header.code_offset as u64, header.code, &table)? };
+    let base = unsafe {
+        map(
+            path,
+            offset + header.code_offset as u64,
+            header.code,
+            &table,
+        )?
+    };
     let functions = header
         .functions
         .iter()
@@ -433,10 +448,9 @@ unsafe fn map(path: &Path, file_offset: u64, code: &[u8], table: &[usize]) -> Re
     let mapped = file_offset % page as u64 == 0
         && std::fs::File::open(path).is_ok_and(|file| {
             // A shorter file would fault on the first read past its end.
-            if file
-                .metadata()
-                .map_or(true, |metadata| metadata.len() < file_offset + code.len() as u64)
-            {
+            if file.metadata().map_or(true, |metadata| {
+                metadata.len() < file_offset + code.len() as u64
+            }) {
                 return false;
             }
             // SAFETY: replaces the start of the reservation with a read-only private mapping of
@@ -457,8 +471,8 @@ unsafe fn map(path: &Path, file_offset: u64, code: &[u8], table: &[usize]) -> Re
     // and hashed: a mapping that differs from those bytes is overwritten with them below, where
     // the private mapping takes the writes as its own copy.
     // SAFETY: the mapping made `code.len()` readable bytes at `start`.
-    let mapped_from_file = mapped
-        && unsafe { std::slice::from_raw_parts(start.cast::<u8>(), code.len()) } == code;
+    let mapped_from_file =
+        mapped && unsafe { std::slice::from_raw_parts(start.cast::<u8>(), code.len()) } == code;
     if !mapped_from_file {
         // SAFETY: the reservation's first `code_bytes` bytes, made writable, filled and then
         // made executable.
@@ -476,7 +490,12 @@ unsafe fn map(path: &Path, file_offset: u64, code: &[u8], table: &[usize]) -> Re
     unsafe {
         let table_address = start.cast::<u8>().add(table_start);
         let table_pointer = table_address.cast::<libc::c_void>();
-        if libc::mprotect(table_pointer, table_bytes, libc::PROT_READ | libc::PROT_WRITE) != 0 {
+        if libc::mprotect(
+            table_pointer,
+            table_bytes,
+            libc::PROT_READ | libc::PROT_WRITE,
+        ) != 0
+        {
             return Err(release("cannot make the link table writable"));
         }
         std::ptr::copy_nonoverlapping(table.as_ptr(), table_address.cast::<usize>(), table.len());

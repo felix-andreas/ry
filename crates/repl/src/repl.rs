@@ -54,6 +54,9 @@ pub trait InputFilter: Send {
     fn filter(&mut self, input: &str) -> Filtered;
     /// Ctrl-C at the console drops the input the filter holds.
     fn interrupt(&mut self) {}
+    /// Ctrl-C dropped the last `lines` lines of the last input this filter released to run,
+    /// unread.
+    fn discard(&mut self, _lines: usize) {}
 }
 
 /// What an [`InputFilter`] does with a piece of input.

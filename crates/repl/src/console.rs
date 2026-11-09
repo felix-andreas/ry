@@ -325,6 +325,18 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
         // Ctrl-C while a command ran flushed the terminal's input, so it cancels the input
         // this console holds the same way, the rest of a paste included.
         if !console.piped && take_interrupt(console.ry_runtime) {
+            // Past the hook's unit, `pending` holds the rest of the last input the filter
+            // released, so its lines are the ones that never ran.
+            let dropped = console
+                .pending
+                .range(console.unit_bytes.min(console.pending.len())..)
+                .filter(|&&byte| byte == b'\n')
+                .count();
+            if dropped > 0
+                && let Some(filter) = console.filter.as_mut()
+            {
+                filter.discard(dropped);
+            }
             console.pending.clear();
             console.unit_bytes = 0;
             console.typeahead.clear();

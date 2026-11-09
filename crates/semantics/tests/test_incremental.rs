@@ -3,14 +3,14 @@ use {
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile,
         SourcePaths,
-        diagnostics::{derive_from_syntax, file_diagnostics, top_level_diagnostics},
+        diagnostics::{Severity, derive_from_syntax, file_diagnostics, top_level_diagnostics},
         global_scheme,
         hir::Symbol,
         interface_group, item_naming, item_tree,
         lints::{LintConfig, lint_file},
         load_index::{PackageFile, PackageSources, package_index},
         metadata::{PackageMetadata, attached_union},
-        package_definitions,
+        package_definitions, session,
         stubs::install_shipped_stubs,
         testing::{ProbeDatabase, render_semantics},
         types::{Atomic, scalar, unknown},
@@ -1013,4 +1013,51 @@ fn an_edit_that_keeps_the_dollar_methods_rechecks_no_dollar_reader() {
         db.checked_since().contains(&"weights".to_owned()),
         "removing the last `$` method rechecks a reader of `$` on an atomic vector"
     );
+}
+
+/// The codes of a console command's errors.
+fn command_codes(db: &RootDatabase, file: SourceFile) -> Vec<&'static str> {
+    file_diagnostics(db, file)
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Error)
+        .map(|diagnostic| diagnostic.code)
+        .collect()
+}
+
+/// Pushes `text` as the session's next command and returns it with the earlier commands whose
+/// checks its bindings may change.
+fn run_command(db: &mut RootDatabase, text: &str) -> (SourceFile, Vec<SourceFile>) {
+    let file = session::command_file(db, text.to_owned());
+    let contributions = session::prepare(db, file);
+    (file, session::commit(db, file, contributions))
+}
+
+#[test]
+fn a_console_command_reads_the_interface_of_the_commands_before_it() {
+    let mut db = RootDatabase::default();
+    install_shipped_stubs(&db);
+    AnalysisSettings::new(&db, true, true, true);
+    ProjectFiles::new(&db, Vec::new());
+    let (_, readers) = run_command(&mut db, "x: integer <- 1L\n");
+    assert!(readers.is_empty());
+    let (reader, _) = run_command(&mut db, "f <- function() -> integer x + 1L\n");
+    assert_eq!(command_codes(&db, reader), Vec::<&str>::new());
+    let pending = session::command_file(&db, "y <- undefined_name\n".to_owned());
+    session::prepare(&db, pending);
+    assert!(
+        file_diagnostics(&db, pending)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "unresolved")
+    );
+
+    // Only a function body sees a later binder, so an immediate read is no reader of `x`.
+    let (_, readers) = run_command(&mut db, "z: integer <- x\n");
+    assert!(readers.is_empty());
+    let (_, readers) = run_command(&mut db, "x <- \"a\"\n");
+    assert_eq!(readers, [reader]);
+    assert_eq!(command_codes(&db, reader), ["type-mismatch"]);
+
+    session::truncate(&mut db, 3);
+    assert_eq!(session::len(&db), 3);
+    assert_eq!(command_codes(&db, reader), Vec::<&str>::new());
 }

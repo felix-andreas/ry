@@ -3225,7 +3225,16 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::Closure => &[Register, Formals, Constant, Constant],
         Op::SubAssign => &[Register, Symbol, Register, Register, Call, Immediate],
         Op::SubAssignMatrix => &[Register, Symbol, Register, Register, Register, Call],
-        Op::Replace => &[Register, Symbol, Symbol, Cache, Call, Base, CountAtLeastOne, Call],
+        Op::Replace => &[
+            Register,
+            Symbol,
+            Symbol,
+            Cache,
+            Call,
+            Base,
+            CountAtLeastOne,
+            Call,
+        ],
         Op::SetSrcref => &[Constant, Immediate],
         Op::EndStatement => &[Register, Base, Base],
         Op::BranchUnlessPrimitive => &[Register, Constant, Target],
@@ -3312,9 +3321,8 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
     if words.is_empty() {
         return Err("empty code".to_owned());
     }
-    let is_start = |target: usize| {
-        target < words.len() && starts[target / 64] & (1 << (target % 64)) != 0
-    };
+    let is_start =
+        |target: usize| target < words.len() && starts[target / 64] & (1 << (target % 64)) != 0;
     let loop_table = values::ints(constants.element(LOOPS));
     for entry in loop_table.as_chunks::<4>().0 {
         let [start, end, exit, step] = entry.map(|word| word as usize);
@@ -3413,7 +3421,9 @@ unsafe fn valid_switch_table(table: Sexp) -> bool {
     let arms = length(numbers) as i64;
     // A name's arm indexes the numbers directly, while a negative position arm is an error
     // `switch_arm` raises before indexing.
-    values::ints(name_arms).iter().all(|&arm| (0..arms).contains(&i64::from(arm)))
+    values::ints(name_arms)
+        .iter()
+        .all(|&arm| (0..arms).contains(&i64::from(arm)))
         && values::ints(position_arms)
             .iter()
             .all(|&arm| (-1..arms).contains(&i64::from(arm)))
@@ -5214,10 +5224,12 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
             Arith::Greater => comparison((!na).then_some(a > b)),
             Arith::LessEqual => comparison((!na).then_some(a <= b)),
             Arith::GreaterEqual => comparison((!na).then_some(a >= b)),
-            Arith::Modulo => Ok(Some(values::scalar_integer(crate::arith::integer_modulo(a, b))?)),
-            Arith::IntegerDivide => {
-                Ok(Some(values::scalar_integer(crate::arith::integer_divide(a, b))?))
-            }
+            Arith::Modulo => Ok(Some(values::scalar_integer(crate::arith::integer_modulo(
+                a, b,
+            ))?)),
+            Arith::IntegerDivide => Ok(Some(values::scalar_integer(
+                crate::arith::integer_divide(a, b),
+            )?)),
             _ => Ok(None),
         };
     }

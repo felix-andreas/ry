@@ -94,7 +94,10 @@ impl Reader<'_> {
         match &mut self.input {
             Input::Slice { bytes, position } => {
                 let start = *position;
-                match start.checked_add(count).and_then(|end| bytes.get(start..end)) {
+                match start
+                    .checked_add(count)
+                    .and_then(|end| bytes.get(start..end))
+                {
                     Some(slice) => {
                         *position = start + count;
                         Ok(slice)
@@ -321,8 +324,16 @@ impl Reader<'_> {
     /// One cell of a pairlist, call or `...` list, without its cdr. The cell is not rooted: the
     /// caller links it into a rooted list before anything else allocates.
     unsafe fn cell(&mut self, kind: SexpType, flags: u32) -> R<Sexp> {
-        let attributes = if flags & HAS_ATTR != 0 { self.item()? } else { nil() };
-        let tag = if flags & HAS_TAG != 0 { self.item()? } else { nil() };
+        let attributes = if flags & HAS_ATTR != 0 {
+            self.item()?
+        } else {
+            nil()
+        };
+        let tag = if flags & HAS_TAG != 0 {
+            self.item()?
+        } else {
+            nil()
+        };
         let car = self.item()?;
         let heap = crate::heap();
         let cell = heap.alloc_triple(kind, car, nil(), tag)?;
@@ -1066,7 +1077,9 @@ pub fn decompress_record(record: &[u8], kind: i32) -> R<Vec<u8>> {
         error(format!("lazy-load database is corrupt: {failure}"))
     };
     match method {
-        b'1' => inflate_into(payload, &mut output, usize::MAX).map_err(|failure| corrupt(&failure))?,
+        b'1' => {
+            inflate_into(payload, &mut output, usize::MAX).map_err(|failure| corrupt(&failure))?
+        }
         b'0' => output.extend_from_slice(payload),
         // A raw LZMA2 stream (GNU R writes no xz container), which `datasets` and packages built
         // with `--data-compress=xz` use.
@@ -1149,9 +1162,8 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
     let compressed = values::as_integer_scalar(call.arg(2));
     let hook = call.arg(3);
     let record = cached_record(key, &file)?;
-    let image_record = code_image::wants(&file)?.then(|| {
-        code_image::Record::of(crate::subset::numeric_element(key, 0) as u64, record)
-    });
+    let image_record = code_image::wants(&file)?
+        .then(|| code_image::Record::of(crate::subset::numeric_element(key, 0) as u64, record));
     // The record is decoded (or copied) out of the cached file before `unserialize` runs, because
     // its refhook can fetch from another database and so insert into the cache.
     let data = if compressed != 0 {
@@ -1242,7 +1254,11 @@ pub unsafe fn lazy_record_header(promise: Sexp) -> R<Option<(u32, bool, u16)>> {
     };
     read_header(&mut reader)?;
     let flags = reader.integer()? as u32;
-    Ok(Some((flags & 0xFF, flags & IS_OBJECT != 0, (flags >> 12) as u16)))
+    Ok(Some((
+        flags & 0xFF,
+        flags & IS_OBJECT != 0,
+        (flags >> 12) as u16,
+    )))
 }
 
 unsafe fn do_unserialize_from_conn(call: &Call<'_>) -> R<Sexp> {
@@ -1900,8 +1916,10 @@ impl Encoder<'_> {
             }
             SexpType::Complex => {
                 for element in values::complexes(value) {
-                    self.out.extend_from_slice(&element.r.to_bits().to_le_bytes());
-                    self.out.extend_from_slice(&element.i.to_bits().to_le_bytes());
+                    self.out
+                        .extend_from_slice(&element.r.to_bits().to_le_bytes());
+                    self.out
+                        .extend_from_slice(&element.i.to_bits().to_le_bytes());
                 }
             }
             SexpType::String => {
@@ -1948,8 +1966,7 @@ impl Encoder<'_> {
         }
         write_varint(self.out, cells.len() as u64);
         for &cell in &cells {
-            self.out
-                .push(u8::from(cell.kind() == SexpType::Language));
+            self.out.push(u8::from(cell.kind() == SexpType::Language));
             self.header(cell, depth)?;
             self.value(cell.tag(), depth + 1)?;
             self.value(cell.car(), depth + 1)?;
@@ -2157,13 +2174,17 @@ impl Decoder<'_, '_> {
                         let symbol = values::install(&name).ok()?;
                         crate::builtins::internal_function(symbol)
                     })
-                    .ok_or_else(|| error(format!("the code image names an unknown builtin '{name}'")));
+                    .ok_or_else(|| {
+                        error(format!("the code image names an unknown builtin '{name}'"))
+                    });
             }
             tag::BASE_FUNCTION => {
                 let count = self.input.count()?;
                 let name = String::from_utf8_lossy(self.input.take(count)?).into_owned();
                 return base_function(&name).ok_or_else(|| {
-                    error(format!("the code image names base function '{name}', which is unbound"))
+                    error(format!(
+                        "the code image names base function '{name}', which is unbound"
+                    ))
                 });
             }
             tag::CODE => return self.code(depth + 1),

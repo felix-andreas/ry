@@ -832,6 +832,13 @@ fn classify_non_local_read(
         || test_files.is_some_and(|files| crate::name_layer(db, files, symbol, true).binds())
         || context.super_globals.contains(&symbol)
         || crate::sourced_definition(db, file, symbol).is_some()
+        || crate::session::resolves(
+            db,
+            file,
+            symbol,
+            naming.deferred_non_locals.contains(expression)
+                || naming.extras().deferred_quiet_reads.contains(expression),
+        )
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)
     {
@@ -2138,7 +2145,7 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
 /// Names the file's items create in the global environment as a side effect (see
 /// `ItemNaming::super_globals`), so reads of them resolve.
 #[salsa::tracked(returns(ref))]
-fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<Symbol> {
+pub(crate) fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<Symbol> {
     let mut names = BTreeSet::new();
     for &item in item_tree(db, file) {
         if let Some(naming) = item_naming(db, item) {
@@ -2151,7 +2158,7 @@ fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<Symbol> {
 /// Names declared via top-level `globalVariables(...)`, the escape hatch for
 /// NSE. Only direct top-level calls with literal strings are recognized.
 #[salsa::tracked(returns(ref))]
-fn file_global_variable_declarations(db: &dyn Db, file: SourceFile) -> BTreeSet<String> {
+pub(crate) fn file_global_variable_declarations(db: &dyn Db, file: SourceFile) -> BTreeSet<String> {
     use crate::hir::LiteralKind;
     let mut declared = BTreeSet::new();
     // Every file of the project is asked, so the common answer must not cost a tree walk.

@@ -713,12 +713,12 @@ unsafe fn native_call(
     let (function, arity) = match name.kind() {
         SexpType::String if xlength(*name)? >= 1 => {
             let routine_name = utf8_text(crate::vectors::sexp_elt(*name, 0)?)?;
-            find_routine(&routine_name, package.as_deref(), kind).map_err(|unwind| {
-                match unwind {
+            find_routine(&routine_name, package.as_deref(), kind).map_err(
+                |unwind| match unwind {
                     Unwind::Error(error) => error_in(call, error.message),
                     other => other,
-                }
-            })?
+                },
+            )?
         }
         // A `NativeSymbolInfo` list carries the routine's address in its `address` element.
         SexpType::List if let Some(address) = native_symbol_address(*name)? => {
@@ -758,13 +758,19 @@ unsafe fn native_call(
             SexpType::String => utf8_text(crate::vectors::sexp_elt(*name, 0)?)?.into_owned(),
             SexpType::List => list_element(*name, "name")
                 .filter(|value| value.kind() == SexpType::String)
-                .and_then(|value| utf8_text(value.element(0)).ok().map(|text| text.into_owned()))
+                .and_then(|value| {
+                    utf8_text(value.element(0))
+                        .ok()
+                        .map(|text| text.into_owned())
+                })
                 .unwrap_or_default(),
             _ => String::new(),
         };
         Err(error_in(
             call,
-            format!("Incorrect number of arguments ({count}), expecting {arity} for '{routine_name}'"),
+            format!(
+                "Incorrect number of arguments ({count}), expecting {arity} for '{routine_name}'"
+            ),
         ))
     };
     match kind {

@@ -3240,7 +3240,11 @@ impl<'a> Builder<'a> {
                 return None;
             }
             let register = self.lower_expression(lowering, value, depth)?;
-            match lowering.scope.iter_mut().find(|(symbol, _)| *symbol == target) {
+            match lowering
+                .scope
+                .iter_mut()
+                .find(|(symbol, _)| *symbol == target)
+            {
                 Some(entry) => entry.1 = register,
                 None => lowering.scope.push((target, register)),
             }
@@ -3827,11 +3831,7 @@ fn vector_arithmetic(arith: Arith, a: Ty, b: Ty) -> Option<Ty> {
         | Arith::Greater
         | Arith::LessEqual
         | Arith::GreaterEqual => Ty::LglVec,
-        Arith::Add
-        | Arith::Subtract
-        | Arith::Multiply
-        | Arith::Modulo
-        | Arith::IntegerDivide
+        Arith::Add | Arith::Subtract | Arith::Multiply | Arith::Modulo | Arith::IntegerDivide
             if !doubles =>
         {
             Ty::IntVec
