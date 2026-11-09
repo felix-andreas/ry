@@ -224,8 +224,14 @@ pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
 /// unevaluated `arguments` when each is a constant or a variable bound to a value, so the call
 /// builds no promise at all. Reading such an argument runs no R code, so reading it now gives
 /// the value forcing its promise would give, and the native code reads only values; when it
-/// declines, nothing has changed and the caller builds the promises as usual.
-pub unsafe fn native_entry_by_value(function: Sexp, arguments: Sexp, env: Sexp) -> R<Option<Sexp>> {
+/// declines, nothing has changed and the caller builds the promises as usual. `lookup` gives a
+/// variable's value when reading it runs no R code ([`crate::effects::eager_argument`] in the
+/// caller's environment, or the slots of a caller that has none).
+pub unsafe fn native_entry_by_value(
+    function: Sexp,
+    arguments: Sexp,
+    lookup: impl Fn(Sexp) -> Option<Sexp>,
+) -> R<Option<Sexp>> {
     let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
@@ -238,7 +244,7 @@ pub unsafe fn native_entry_by_value(function: Sexp, arguments: Sexp, env: Sexp) 
                 if expression == missing_arg() || expression == symbols().dots {
                     return Ok(None);
                 }
-                match crate::effects::eager_argument(expression, env) {
+                match lookup(expression) {
                     Some(value) if value.kind() != SexpType::Promise => value,
                     _ => return Ok(None),
                 }
@@ -262,7 +268,9 @@ unsafe fn resolved(argument: Sexp) -> R<Option<Sexp>> {
     if argument.car() != values::unbound() {
         return Ok(Some(argument.car()));
     }
-    if argument.has_gp(gp::CHECKED_PROMISE) {
+    // A promise over a slot frame without an environment names a placeholder that binds
+    // nothing yet, so a lookup there would find the enclosure's variable instead.
+    if argument.has_gp(gp::CHECKED_PROMISE) || argument.tag().has_gp(gp::PENDING_FRAME) {
         return Ok(None);
     }
     let code = argument.cdr();

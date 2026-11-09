@@ -533,7 +533,9 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
         SexpType::Closure => {
             if function.has_gp(gp::NATIVE_ENTRY)
                 && let Some(value) =
-                    crate::base_fast_paths::native_entry_by_value(function, arguments, env)?
+                    crate::base_fast_paths::native_entry_by_value(function, arguments, |symbol| {
+                        crate::effects::eager_argument(symbol, env)
+                    })?
             {
                 return Ok(value);
             }

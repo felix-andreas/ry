@@ -4567,8 +4567,16 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             compiled
         };
         if function.has_gp(gp::NATIVE_ENTRY)
-            && let Some(value) =
-                crate::base_fast_paths::native_entry_by_value(function, arguments, state.env()?)?
+            && let Some(value) = if state.in_slots() {
+                crate::base_fast_paths::native_entry_by_value(function, arguments, |symbol| {
+                    slot_eager_argument(state, symbol)
+                })?
+            } else {
+                let env = state.env()?;
+                crate::base_fast_paths::native_entry_by_value(function, arguments, |symbol| {
+                    effects::eager_argument(symbol, env)
+                })?
+            }
         {
             state.record(instruction.at, value);
             instruction.output(0, value);
