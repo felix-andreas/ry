@@ -10,8 +10,8 @@ build = "build.rs"
 path = "src/repl.rs"
 
 [dependencies]
-# Terminal size only. Pinned to reedline's own crossterm so the console and
-# the width probe cannot disagree about the terminal they share.
+# Pinned to reedline's own crossterm so the console and the editor share one terminal reader.
+# The workspace patches it (`patches/crossterm`) so the reader drains a paste in one go.
 crossterm = "0.28"
 dirs = "6"
 libloading = "0.8"

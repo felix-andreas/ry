@@ -44,9 +44,12 @@ the baseline runs 1 to 2% more instructions and more I1 misses than JIT off and 
 (`decisions.md`, "Baseline code calls shared stubs for variable access and comparisons"). What is
 left, in order of expected gain:
 
-- The baseline still runs 1 to 1.5% more instructions than JIT off, and JIT on 1.4 to 2.3% more
-  (`decisions.md`, "One handler body per op"). The hot inlined ops are the remaining duplicates;
-  fewer step calls (inline paths below) is the lever now.
+- One copy of each instruction handler: the baseline's step functions duplicate tier 0's
+  handlers, and on `testthat` they add more I1 misses than `execute_code` sheds. Sharing one
+  `exec_*` body per op was tried and reverted: with every body inlined into tier 0 it still ran
+  13M more instructions (0.18%) on `testthat_full` with the JIT off, from code placement in
+  `execute_code` and `run_body`, and out-of-line bodies cost 64M. Re-land it only once that
+  placement measures neutral there (callgrind, bench profile, `RY_BENCH_REPEAT=2`).
 - Inline paths for scalar `+ - * /` (needs an inline allocation of a length-one vector), `Guard`
   (`step_guard` costs 227M instructions on `functional`), and the trivial predicates through
   `BuiltinDef::unary`.
@@ -64,9 +67,13 @@ left, in order of expected gain:
 
 ## Open: console input in ry's runtime
 
+- The console preflight's session holds every line of a bracketed paste before any of them runs, so a paste cut short by an error or Ctrl-C leaves later commands typed against bindings that never ran. The filter needs a signal that input was dropped, so it can roll the session back to what ran.
 - Console `scan()` prompts with the running item count (`1: `, `3: `); GNU R's counts records for a
   list `what`. `select.list(graphics = TRUE)` and `.External2(C_selectlist)` still raise the
   non-interactive error.
+- Once a console session holds ry syntax or strict mode, `Preflight::check_elaborations` re-parses
+  and re-analyzes the whole session for every command, so a long raw (unbracketed) paste of typed
+  code is quadratic. Plain R skips analysis; typed sessions need an incremental per-command check.
 
 ## Open: the typed core
 

@@ -1237,6 +1237,42 @@ fn argument_expression(rng: &mut SplitMix64, depth: usize) -> String {
 }
 
 #[test]
+fn break_and_next_route_through_nested_steps() {
+    // A stepped instruction can run a closure that tier 1 also compiled, which steps instructions
+    // of its own. A `break` or `next` forced inside the inner body must still resume the outer
+    // loop after the inner step returns, rather than the inner one or the step's caller. The
+    // `break` in `outer` also makes the optimizing tier hand back a resume at the loop's exit,
+    // the instruction right after the backward `Jump`, which baseline code must take as such.
+    let definitions = [
+        "inner <- function(n, v) { t <- 0; for (j in seq_len(n)) { if (j == 2) next; t <- t + j }; t + v }",
+        "outer <- function(m) { s <- 0; for (i in 1:m) { s <- s + inner(i, if (i == 4) break else if (i == 2) next else i) }; s }",
+        "through <- function(m) { s <- 0; for (i in 1:m) { s <- s + sum(vapply(seq_len(i), function(k) inner(k, k), 0)); if (i == 3) next; if (s > 40) break }; s }",
+    ];
+    let calls = [
+        "outer(6)",
+        "outer(6)",
+        "outer(3)",
+        "outer(1)",
+        "through(8)",
+        "through(8)",
+        "through(2)",
+        "outer(6)",
+    ];
+    let mut outcomes = Vec::new();
+    with_interpreter(|| unsafe {
+        for mode in [Mode::Off, Mode::Force] {
+            jit::install_mode(mode);
+            for definition in definitions {
+                run(definition);
+            }
+            outcomes.push(calls.iter().map(|call| run(call)).collect::<Vec<_>>());
+        }
+        jit::install_mode(Mode::Off);
+    });
+    assert_eq!(outcomes[0], outcomes[1]);
+}
+
+#[test]
 fn fuzz_typed_closures_agree_with_tier_zero() {
     with_interpreter(|| {
         let (mut runs, mut eager) = (0, 0);
@@ -2614,6 +2650,26 @@ fn typed_core_keeps_tier_zero_semantics_at_scope_and_na_edges() {
         (
             "function(b: logical) -> integer | NULL if (b) 1L",
             &["{ x <- FALSE; FUNCTION(x) }"],
+        ),
+        // An `if` whose branches are such `if`s has a value nothing may read either, even
+        // when its own branches agree.
+        (
+            "function(x: character) (if (x == \"a\") (if (x == \"b\") 1 else 0L) else (if (x == \"b\") 1 else 0L))",
+            &[
+                "{ a <- \"a\"; FUNCTION(a) }",
+                "{ a <- \"c\"; FUNCTION(a) }",
+            ],
+        ),
+        (
+            "function(b: logical) if (b) (if (b) 1 else 0L)",
+            &["{ x <- TRUE; FUNCTION(x) }", "{ x <- FALSE; FUNCTION(x) }"],
+        ),
+        (
+            "function(b: logical, c: logical) if (b) (if (c) 1 else 0L) else return(2L)",
+            &[
+                "{ x <- TRUE; y <- FALSE; FUNCTION(x, y) }",
+                "{ x <- FALSE; y <- FALSE; FUNCTION(x, y) }",
+            ],
         ),
         // A local function sees the names where it is defined, and the latest value of each.
         (

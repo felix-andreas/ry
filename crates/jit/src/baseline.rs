@@ -273,7 +273,12 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
                         asm.branch_accumulator_zero(Condition::NotEqual, other);
                         taken.push((other, target));
                     } else {
-                        // Fall-through has nowhere to go here, so any answer is a pc or a stop.
+                        // The op never falls through by itself, but a `break` caught after it
+                        // can resume at the next instruction, which the step answers as zero:
+                        // a backward `Jump` that the optimizing tier left at the loop's exit.
+                        if next < words.len() {
+                            asm.branch_accumulator_zero(Condition::Equal, labels[next]);
+                        }
                         asm.jump(dispatch);
                     }
                 }
