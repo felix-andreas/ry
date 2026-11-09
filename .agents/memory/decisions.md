@@ -3275,7 +3275,7 @@ first lines R had already read, leaving R mid-command.
   `keep.source` would qualify) would only call the same helpers tier 0 does, so it is refused
   (`analysis::NOTHING_NATIVE`, permanent) instead of costing a compile; most base R wrappers are
   such bodies. A body none of whose instructions could plan as native work under any profile
-  (`analysis::may_run_natively`) is refused before it records or plans, as
+  (`analysis::shape`) is refused before it records or plans, as
   `analysis::NEVER_NATIVE` (see "Bodies that could run nothing natively never record"). `RY_JIT=force` still compiles them, so the tier tests cover them. Measured with
   callgrind over the why-ry programs (whole process): about 170M instructions fewer per program,
   on top of the higher entry threshold's 280M.
@@ -8119,8 +8119,17 @@ Each one trades a narrow class of missed errors for a class of false reports see
 ## Bodies that could run nothing natively never record
 
 - **Previous shape.** A body whose plan ran nothing natively (`NOTHING_NATIVE`) recorded type feedback through the last eighth of the entry threshold, then paid a full plan, only to be refused.
-- **Chosen shape.** `analysis::may_run_natively` reads the instruction words alone: a loop, an instruction kind the plan may lower to a native action, or a `CallBuiltin` whose call names a builtin with a native form (`[`, a `List.`/`Dict.`/`Set.` traversal, or a name `has_intrinsic` lists, which also gates `intrinsic_for`, so the two lists are one). Its `match` over `Op` has no catch-all, so a new opcode forces the decision. The new `Tier::worth_recording` hook runs it at the entry that opens the recording window, and `compile_in` runs it before planning, so a hot body that skipped the window (thresholds below 8) is refused without a plan too. The refusal (`NEVER_NATIVE`) is final, including at a fully typed body's first call. `RY_JIT=force` keeps such bodies.
+- **Chosen shape.** `analysis::shape` (with `Shape::may_run_natively`) reads the instruction words alone: a loop, an instruction kind the plan may lower to a native action, or a `CallBuiltin` whose call names a builtin with a native form (`[`, a `List.`/`Dict.`/`Set.` traversal, or a name `has_intrinsic` lists, which also gates `intrinsic_for`, so the two lists are one). Its `match` over `Op` has no catch-all, so a new opcode forces the decision. The new `Tier::worth_recording` hook runs it at the entry that opens the recording window, and `compile_in` runs it before planning, so a hot body that skipped the window (thresholds below 8) is refused without a plan too. The refusal (`NEVER_NATIVE`) is final, including at a fully typed body's first call. `RY_JIT=force` keeps such bodies.
 - **Known gap.** A builtin called through another name (`f <- length; f(x)`) is judged by the name in the call, so such a body is refused when its plan might have used an intrinsic. That costs only speed.
+
+## A loop-free hot body compiles only when its call rate repays the compile
+
+- **Previous shape.** Every body that reached 3000 entries compiled. A loop-free body saves a bounded amount per call, so one that turned hot slowly never repaid its compile: on testthat, `isTRUE` (188 words) compiled for about 11M instructions and then ran about 1400 more times, and JIT on cost 17.6M more than JIT off.
+- **Chosen shape.** At the entry threshold, `compile_in` asks `repays` before planning a loop-free body (`analysis::shape` reads the words once and counts the instructions the plan may run natively). Expected calls are the body's rate over its recording window, 375 calls per however many KiB the heap allocated meanwhile (`Heap::allocated_ever`, stamped into `profile::WINDOW` when the window opens), times a fixed horizon of 256 MiB. The body compiles when calls times 100 instructions per native instruction reach 2M plus 50k per word. A refusal (`RARE`) is not final: the count restarts and the next attempt measures the rate afresh. A recompile skips the check.
+- **Why allocation is the clock.** It is deterministic, costs nothing on the call path (a collection adds the young bytes to a total), and interpreted work allocates in proportion to what it does. A global call counter would cost every bytecode call an increment.
+- **Why a fixed horizon.** Taking the session's age as the horizon (Lindy) underestimated the functional workload's first callbacks 13-fold, below `isTRUE`'s estimate. The rate alone separates them: `isTRUE` runs once per 54 KiB, the slowest functional callback once per 3.8 KiB. The horizon sits between the two cases with a margin of about two either side (`x^2` needs 130 MiB, `isTRUE` 770 MiB), so it is the constant to revisit when a workload lands near the line.
+- **Rejected: never compile loop-free bodies at entry.** Every body the functional workload compiles is loop-free (`x * factor + offset`, `x %% 2 == 0`, ...), and they make JIT on 190M instructions cheaper than JIT off there. Delaying them to 10,000 entries cost 19M and to 30,000 entries 149M, so a flat threshold rise is out too.
+- **Impact** (callgrind, millions of instructions, JIT on/off): testthat 4810.6/4805.0 against 4821.0/4800.8 before this and the never-native refusal; functional 8376.6/8571.5 against 8381.5/8573.5.
 
 ## Tier 1 keeps the 3000-entry threshold
 
