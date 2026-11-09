@@ -3182,6 +3182,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::JumpUnless => &[Register, Constant, Target],
         Op::Arithmetic => &[Operator, Register, Register, Register, Call, Constant],
         Op::Return | Op::ForEnd => &[Register],
+        Op::Missing => &[Register, Symbol],
         Op::ForInit => &[Loop, Register, Constant],
         Op::ForStep => &[Loop, Register, Symbol, Target],
         Op::Invisible | Op::Visible => &[],
