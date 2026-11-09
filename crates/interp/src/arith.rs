@@ -228,12 +228,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
             return Ok(None);
         }
         let value = operand.slice::<i32>()[0];
-        values::scalar_logical(if value == NA_LOGICAL {
-            NA_LOGICAL
-        } else {
-            1 - value
-        })
-        .map(Some)
+        values::scalar_logical(if value == NA_LOGICAL { NA_LOGICAL } else { 1 - value }).map(Some)
     }),
     builtin("abs", 1, |call| unsafe { math1(call, Math::Abs) }).generic(Generic::Math),
     builtin("sign", 1, |call| unsafe { math1(call, Math::Sign) }).generic(Generic::Math),
@@ -2177,7 +2172,10 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
             values::copy_most_attributes(operand, result, true)?;
             Ok(result)
         }
-        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex => {
+        SexpType::Logical
+        | SexpType::Integer
+        | SexpType::Real
+        | SexpType::Complex => {
             let result = alloc(SexpType::Logical, count)?;
             for index in 0..count {
                 let value = logical_at(operand, index);
