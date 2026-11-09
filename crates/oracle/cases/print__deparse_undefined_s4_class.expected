@@ -12,9 +12,13 @@
 | Formal class 'Zzz' [package ".GlobalEnv"] with 0 slots
 |  Named list()
 |   ..$ x: num 1
+| [1] "cannot get a slot (\"slots\") from an object of type \"NULL\""
+| [1] "cannot get a slot (\"slots\") from an object of type \"NULL\""
+| [1] "caught"
+| [1] "no slot of name \"y\" for this object of class \"Two\""
 [messages]
 [warnings]
 [errors]
 [value]
-NULL
-| NULL
+character
+| "no slot of name \"y\" for this object of class \"Two\""

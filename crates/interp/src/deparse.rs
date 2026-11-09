@@ -74,8 +74,8 @@ unsafe fn deparse_checked(
 }
 
 /// Deparses for `deparse`, `dput` and `dump`, warning as `warnIncomplete` asks. Only these
-/// raise a deparse error; the text an error message or `print` shows falls back to the plain
-/// value, because a message must never fail.
+/// and coercion ([`deparse_one_line_checked`]) raise a deparse error; the text an error message
+/// or `print` shows falls back to the plain value, because a message must never fail.
 unsafe fn deparse_warning(
     object: Sexp,
     cutoff: usize,
@@ -102,7 +102,20 @@ pub unsafe fn deparse_first_line(object: Sexp) -> String {
 
 /// A deparse joined into one line, as GNU R's `deparse1line` gives it to coercion.
 pub unsafe fn deparse_one_line(object: Sexp) -> String {
-    let lines = deparse_lines(object, 60, options::SIMPLE);
+    join_one_line(deparse_lines(object, 60, options::SIMPLE))
+}
+
+/// [`deparse_one_line`] for coercion (`as.character` of a list), which raises deparse's errors
+/// as GNU R's `deparse1line` does.
+pub unsafe fn deparse_one_line_checked(object: Sexp) -> R<String> {
+    let (lines, _, failure) = deparse_checked(object, 60, options::SIMPLE, true);
+    match failure {
+        Some(failure) => Err(failure),
+        None => Ok(join_one_line(lines)),
+    }
+}
+
+fn join_one_line(lines: Vec<String>) -> String {
     if lines.len() <= 1 {
         return lines.into_iter().next().unwrap_or_default();
     }
@@ -1584,8 +1597,9 @@ struct S4Parts {
 /// The class, slots and data part of an S4 object. The slot names come from the class
 /// definition's `slots`, as in GNU R: `slotNames()` would dispatch on the object, and for a
 /// class representation it names the slots of the class it describes. Without the methods
-/// package the object deparses as its plain value. A class the methods package does not know is
-/// GNU R's error, raised where it reads `slots` from the missing definition.
+/// package the object deparses as its plain value. Errors are GNU R's: a class the methods
+/// package does not know fails where it reads `slots` from the missing definition, and
+/// `getClassDef` or a slot read may fail on their own.
 ///
 /// The R calls made here may fail, and the failure's message deparses its call, which holds this
 /// same object. A deparse that starts while another one is reading S4 parts therefore takes the
@@ -1613,9 +1627,7 @@ unsafe fn s4_parts(object: Sexp, class: Sexp) -> R<Option<S4Parts>> {
         &[values::install("methods")?, values::install("getClassDef")?],
     )?;
     let definition_call = values::call(get_class_def, &[class])?;
-    let Ok(definition) = crate::eval::eval(definition_call, values::base_env()) else {
-        return Ok(None);
-    };
+    let definition = crate::eval::eval(definition_call, values::base_env())?;
     if definition == nil() {
         return Err(crate::unwind::error(
             "cannot get a slot (\"slots\") from an object of type \"NULL\"",
@@ -1635,9 +1647,7 @@ unsafe fn s4_parts(object: Sexp, class: Sexp) -> R<Option<S4Parts>> {
         };
         has_data_slot |= name == ".Data";
         let symbol = values::install(&name)?;
-        let Ok(value) = crate::subset::get_slot(object, symbol, nil()) else {
-            return Ok(None);
-        };
+        let value = crate::subset::get_slot(object, symbol, nil())?;
         crate::heap().root(value);
         slots.push((name, value));
     }
@@ -1645,12 +1655,12 @@ unsafe fn s4_parts(object: Sexp, class: Sexp) -> R<Option<S4Parts>> {
         None
     } else {
         let data = values::shallow_duplicate(object)?;
+        crate::heap().root(data);
         values::remove_attr(data, symbols.class);
         for (name, _) in &slots {
             values::remove_attr(data, values::install(name)?);
         }
         data.set_gp_bits(gp::S4_OBJECT, false);
-        crate::heap().root(data);
         Some(data)
     };
     Ok(Some(S4Parts {
