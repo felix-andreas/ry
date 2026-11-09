@@ -70,6 +70,10 @@ data-table = "off"            # a call that creates a data.table
 [format]
 indent-width = 2
 line-ending = "auto"     # keep the file's own; or "lf", "cr-lf"
+
+[console]
+highlight = true         # color the input of `ry run` and `ry R`'s console
+[console.colors]         # override a style, such as keyword = "bright-blue bold"
 ```
 
 The [diagnostic codes](/reference/diagnostic-codes) page explains each finding. `strict` turns on type errors
@@ -188,6 +192,47 @@ Patterns follow gitignore rules and are anchored at the directory holding `ry.to
 - `ry fmt` ignores the key.
 - `renv/`, `packrat/`, `revdep/`, `.Rproj.user/`, `.Rcheck/`, and whatever `.gitignore` lists are
   always skipped, because they hold dependencies and build output rather than your code.
+
+## `console`
+
+The console of `ry run` and `ry R` colors your input as you type, from the same syntax tree the
+language server colors. `highlight = false` turns that off, and so does a non-empty `NO_COLOR`
+environment variable. The cursor's bracket and its partner are shown reversed, and a closing
+bracket with no opener is red.
+
+The default colors use only the eight basic ANSI hues that read on both light and dark
+backgrounds, so your terminal's theme picks the exact shades. `[console.colors]` overrides a
+style by name:
+
+```toml
+[console.colors]
+keyword = "bright-blue bold"
+comment = "dim"
+string = "none"
+```
+
+| Name | Default | Colors |
+|---|---|---|
+| `keyword` | `magenta bold` | `if`, `function`, `in` |
+| `constant` | `magenta` | `TRUE`, `NULL`, `NA_integer_`, `Inf` |
+| `number` | `cyan` | `1L`, `0x1F`, `1e-3`, `2i` |
+| `string` | `green` | `"a"`, `r"(raw)"` |
+| `comment` | `dim italic` | `# note` |
+| `annotation` | `cyan italic` | `#:` comments and inline types such as `: integer` |
+| `operator` | `bold` | `<-`, `->`, `\|>`, `%in%`, `=` as assignment |
+| `function` | `blue` | the `f` of `f(x)`, and a name bound to a function |
+| `namespace` | `blue italic` | `stats::` and `base:::` |
+| `parameter` | `italic` | parameters, and named arguments such as the `n` of `f(n = 1)` |
+| `property` | `none` | record fields |
+| `tag` | `magenta` | `:Circle` |
+| `quoted-name` | `underline` | `` `my var` `` |
+| `error` | `red bold underline` | a closing bracket with no opener, an unreadable token |
+| `matching-bracket` | `reverse` | the bracket at the cursor and its partner |
+
+A style is a space-separated list of words: at most one color (`black`, `red`, `green`, `yellow`,
+`blue`, `magenta`, `cyan`, `white`, each also as `bright-red` and so on, or `default`), and any of
+`bold`, `dim`, `italic`, `underline` and `reverse`. `none` is the plain style. An unknown name or
+word is an error that names the line in `ry.toml`.
 
 ## Mistakes in `ry.toml`
 

@@ -1,6 +1,6 @@
 use {
     std::path::Path,
-    syntax::{parse, testing::run_fixture_suite},
+    syntax::{highlight::highlights, parse, testing::run_fixture_suite},
 };
 
 #[test]
@@ -64,4 +64,20 @@ fn erasure_of_inline_forms() {
             "{input:?}"
         );
     }
+}
+
+/// The highlight class of each token, and the brackets left unmatched, as the language server
+/// and the console color them.
+#[test]
+fn highlight_fixtures() {
+    let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/highlight");
+    run_fixture_suite(&suite, &|source| {
+        let root = parse(source).syntax_node();
+        let mut rendered = String::new();
+        for (range, class) in highlights(&root) {
+            let text = source.get(std::ops::Range::from(range)).unwrap_or_default();
+            rendered.push_str(&format!("{range:?} {text:?} {class:?}\n"));
+        }
+        rendered
+    });
 }

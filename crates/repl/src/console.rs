@@ -5,6 +5,7 @@
 use {
     crate::{
         ConsoleHooks, Filtered, InputFilter, Keybindings, ReplError, RunOptions, SessionCompleter,
+        highlight::SyntaxHighlighter,
         libr::{self, CallRoutine, RApi, Sexp},
     },
     crossterm::{
@@ -14,10 +15,10 @@ use {
     nu_ansi_term::{Color, Style},
     reedline::{
         ColumnarMenu, Completer, DefaultHinter, EditCommand, EditMode, Emacs, FileBackedHistory,
-        Highlighter, HistoryItem, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch,
-        PromptHistorySearchStatus, Reedline, ReedlineEvent, ReedlineMenu, Signal, StyledText,
-        Suggestion, ValidationResult, Validator, Vi, default_emacs_keybindings,
-        default_vi_insert_keybindings, default_vi_normal_keybindings,
+        HistoryItem, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch,
+        PromptHistorySearchStatus, Reedline, ReedlineEvent, ReedlineMenu, Signal, Suggestion,
+        ValidationResult, Validator, Vi, default_emacs_keybindings, default_vi_insert_keybindings,
+        default_vi_normal_keybindings,
     },
     std::{
         borrow::Cow,
@@ -34,10 +35,7 @@ use {
         },
         time::Duration,
     },
-    syntax::{
-        SyntaxKind::{self, *},
-        input_is_unfinished, lex, parse,
-    },
+    syntax::{input_is_unfinished, parse},
 };
 
 pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
@@ -118,11 +116,16 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
             Box::new(Vi::new(insert, default_vi_normal_keybindings()))
         }
     };
+    // Without a palette the hint is only dimmed, so `NO_COLOR` leaves no color on screen.
+    let hint = match options.palette {
+        Some(_) => Style::new().fg(Color::DarkGray),
+        None => Style::new().dimmed(),
+    };
     let mut editor = Reedline::create()
-        .with_highlighter(Box::new(LexerHighlighter))
-        .with_hinter(Box::new(
-            DefaultHinter::default().with_style(Style::new().fg(Color::DarkGray)),
-        ))
+        .with_highlighter(Box::new(SyntaxHighlighter {
+            palette: options.palette,
+        }))
+        .with_hinter(Box::new(DefaultHinter::default().with_style(hint)))
         .with_validator(Box::new(LexerValidator))
         // A paste arrives as one insertion with one repaint, and runs on Enter as under
         // GNU R's readline, instead of a repaint and a terminal round trip per pasted line.
@@ -892,41 +895,6 @@ impl Prompt for RPrompt {
 
     fn get_prompt_right_color(&self) -> reedline::Color {
         reedline::Color::Reset
-    }
-}
-
-struct LexerHighlighter;
-
-impl Highlighter for LexerHighlighter {
-    fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
-        let mut styled = StyledText::new();
-        let (tokens, _) = lex(line);
-        let mut offset = 0;
-        for token in tokens {
-            let end = offset + usize::from(token.len);
-            styled.push((token_style(token.kind), line[offset..end].to_string()));
-            offset = end;
-        }
-        if styled.buffer.is_empty() {
-            styled.push((Style::new(), String::new()));
-        }
-        styled
-    }
-}
-
-fn token_style(kind: SyntaxKind) -> Style {
-    match kind {
-        FUNCTION_KW | IF_KW | ELSE_KW | FOR_KW | WHILE_KW | REPEAT_KW | BREAK_KW | NEXT_KW
-        | IN_KW => Style::new().fg(Color::Blue).bold(),
-        TRUE_KW | FALSE_KW | NULL_KW | NA_KW | NA_INTEGER_KW | NA_REAL_KW | NA_COMPLEX_KW
-        | NA_CHARACTER_KW | INF_KW | NAN_KW => Style::new().fg(Color::Purple),
-        STRING | RAW_STRING | FSTRING_START | FSTRING_TEXT | FSTRING_END => {
-            Style::new().fg(Color::Green)
-        }
-        INTEGER | DOUBLE | COMPLEX | SUFFIXED_NUMBER => Style::new().fg(Color::Cyan),
-        COMMENT | ANNOTATION_MARKER => Style::new().fg(Color::DarkGray),
-        ERROR_TOKEN => Style::new().fg(Color::Red).underline(),
-        _ => Style::new(),
     }
 }
 
