@@ -2565,12 +2565,18 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   functions per package. Baseline code for every body from its first entry measured 8.06G
   against 7.96G instructions on the testthat workload, so install-time baseline code is no lever
   until baseline code inlines fast paths.
-- **Typed natives read a logical `NA` as a double `NA` where tier 0 keeps it logical.**
-  `nf <- function(x: double, y: double) -> double x * 2 + y; nf(NaN, NA)` gives `NA` with
-  `RY_JIT=off` and `NaN` with the JIT on: tier 0 adds a logical `NA` operand as integer `NA`,
-  which makes the result `NA`, and native code receives it as `NA_real_` and lets the hardware
-  pick `NaN`. Either the annotation check should coerce the value in tier 0 too, or native entry
-  should refuse a logical argument for a double parameter.
+- **The JIT's code generator picks `NaN` where tier 0 gives `NA` when an integer `NA` meets
+  `NaN`.** Tier 0's mixed double and integer kernel gives `NA` for `NaN + NA` and `NaN * NA`
+  but `NaN` for `NaN - NA` and `NaN / NA`, because the compiled kernel's operand order differs
+  per operator. Native code and the typed core fail over in that case; the baseline and
+  optimizing JIT do not (`FUZZ_SEED=2188 cargo test -p jit --test test_tiers
+  fuzz_jit_agrees_with_tier_zero -- --exact`). A deterministic rule in tier 0 itself (an integer
+  `NA` operand always gives `NA`, as GNU R's `R_INTEGER` widening usually does) would let every
+  tier match without a guard.
+- **A typed `if` gives `NULL` where tier 0 gives `0L`.** `f <- function(x: character) (if
+  (((x == "a")) > 0) (if (x == "b") 1 else 0L) else (if (x == "b") 1 else 0L)); f("a")`
+  (`FUZZ_SEED=2097 cargo test -p jit --test test_tiers
+  fuzz_typed_closures_agree_with_tier_zero -- --exact`).
 - **Decoding an image's code costs about as much as compiling it** (about 65k instructions per
   closure on CRAN packages), so an untrained image saves nothing measurable. The decoder reads
   every instruction word and feedback word as a varint and re-interns each symbol constant by
