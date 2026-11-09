@@ -785,13 +785,14 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   window or a slot's root cell, which the collector scans, so every object is a valid `SEXP` at every
   allocation and every helper call.
 - **Baseline code.** Below tier 1, a body can get baseline machine code
-  (`crates/jit/src/baseline.rs`): per instruction, a call to tier 0's step for it and direct
-  branches on the pc it answers, emitted by ry's own x86-64 and aarch64 assembler in a median of
-  28 µs. `GetVar` and `SetVar` of the activation's own frame and comparisons of two plain scalars
-  run inline. It keeps tier 0's activation, so it needs no deoptimization metadata. `RY_JIT=on`
-  leaves it out, because each body's own code (about 30 bytes per instruction) runs more
-  instruction-cache misses than tier 0's shared handlers; `RY_JIT=baseline` runs every body in it alone, `RY_JIT=force` installs it on the first
-  entry, and the third field of `RY_JIT_THRESHOLDS=entries,back_edges,baseline` sets its threshold.
+  (`crates/jit/src/baseline.rs`): per instruction, a call to tier 0's step for it and one test of
+  its answer, emitted by ry's own x86-64 and aarch64 assembler. `GetVar` and `SetVar` of the
+  activation's own frame and comparisons of two plain scalars call shared stubs that every body
+  uses. It keeps tier 0's activation, so it needs no deoptimization metadata. `RY_JIT=on` leaves
+  it out, because it runs more instruction-cache misses than tier 0 alone: the step functions are
+  separate copies of tier 0's handlers. `RY_JIT=baseline` runs every body in it alone,
+  `RY_JIT=force` installs it on the first entry, and the third field of
+  `RY_JIT_THRESHOLDS=entries,back_edges,baseline` sets its threshold.
 - **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
   call still enters through tier 0's call path and allocates a frame and forced promises), result
   types for multi-index subscripts such as `m[i, ]`, and freeing the machine code of invalidated
