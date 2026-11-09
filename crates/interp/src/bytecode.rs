@@ -3629,9 +3629,10 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<()> {
     let mut state = activation(machine);
     state.mark = crate::heap().handle_mark();
     let step = *BASELINE_STEPS.as_ptr().add(op_index(state.code, pc));
-    let outer = STEPPING.replace((&raw const state).cast());
-    let answer = step((&raw mut state).cast(), pc);
-    STEPPING.set(outer);
+    let answer = {
+        let _stepping = Stepping(STEPPING.replace((&raw const state).cast()));
+        step((&raw mut state).cast(), pc)
+    };
     if let Some(payload) = PARKED_PANIC.take() {
         std::panic::resume_unwind(payload);
     }
@@ -3806,6 +3807,15 @@ unsafe fn run_baseline(state: &mut Activation<'_, '_>, baseline: BaselineCode, p
     baseline((state as *mut Activation<'_, '_>).cast(), pc);
     if let Some(payload) = PARKED_PANIC.take() {
         std::panic::resume_unwind(payload);
+    }
+}
+
+/// Restores the [`STEPPING`] an enclosing `step_one` set, also when a panic unwinds through.
+struct Stepping(*const ());
+
+impl Drop for Stepping {
+    fn drop(&mut self) {
+        STEPPING.set(self.0);
     }
 }
 
