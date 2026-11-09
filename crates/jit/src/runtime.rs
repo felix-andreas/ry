@@ -349,7 +349,7 @@ pub unsafe fn invalidate(code: Sexp) {
     counters[profile::ENTRIES] = if loops_only {
         NEVER_HOT
     } else {
-        bytecode::tier().map_or(0, |tier| tier.entry_threshold / 2)
+        bytecode::tier().map_or(0, |tier| bytecode::recording_start(tier.entry_threshold))
     };
     counters[profile::BACK_EDGES] = 0;
     counters[profile::NEXT] = i32::MIN;

@@ -3566,6 +3566,13 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
     }
 }
 
+/// The entry count at which a body without optimized code starts recording type feedback
+/// for a compile at `threshold` entries: the last eighth of the way, and at least the entry
+/// before a compile at the second entry.
+pub fn recording_start(threshold: i32) -> i32 {
+    threshold - (threshold / 8).max(threshold.min(1))
+}
+
 /// What the tiers do at an entry of `machine`'s code numbered `entries`, the decisions
 /// [`profile::NEXT`] schedules. Returns the optimizing tier's exit when it ran the activation.
 #[inline(never)]
@@ -3582,9 +3589,9 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
     let profile = values::ints_mut(constants.element(PROFILE));
     let optimized = constants.element(TIER1) != nil();
     if !optimized {
-        if entries == tier.entry_threshold / 2 && profile[profile::TIER_STATE] >= 0 {
+        if entries == recording_start(tier.entry_threshold) && profile[profile::TIER_STATE] >= 0 {
             profile[profile::RECORDING] = 1;
-        } else if entries == 2 && entries < tier.entry_threshold / 2 {
+        } else if entries == 2 && entries < recording_start(tier.entry_threshold) {
             profile[profile::RECORDING] = 0;
         }
     }
@@ -3614,13 +3621,13 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
     {
         i32::MIN
     } else {
-        let half = tier.entry_threshold / 2;
+        let start = recording_start(tier.entry_threshold);
         let baseline = (tier.baseline_threshold != NEVER && constants.element(BASELINE) == nil())
             .then_some(tier.baseline_threshold);
         [
             (state >= 0).then_some(1),
-            (2 < half).then_some(2),
-            (state >= 0).then_some(half),
+            (2 < start).then_some(2),
+            (state >= 0).then_some(start),
             (state >= 0).then_some(tier.entry_threshold),
             baseline,
         ]
