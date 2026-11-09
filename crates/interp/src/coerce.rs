@@ -2,7 +2,7 @@
 
 use {
     crate::{
-        builtins::{BuiltinDef, Call, Generic, builtin, internal},
+        builtins::{BuiltinDef, Call, Generic, builtin, internal, is_native_value},
         conditions, deparse,
         unwind::{R, error},
         values::{
@@ -823,9 +823,21 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("is.vector", 2, do_is_vector),
     builtin("is.null", 1, |call| unsafe {
         scalar_bool(call.arg(0) == nil())
+    })
+    .unary(|value| unsafe {
+        if is_native_value(value) {
+            return Ok(None);
+        }
+        values::scalar_logical((value == nil()) as i32).map(Some)
     }),
     builtin("is.logical", 1, |call| unsafe {
         scalar_bool(call.arg(0).kind() == SexpType::Logical)
+    })
+    .unary(|value| unsafe {
+        if is_native_value(value) {
+            return Ok(None);
+        }
+        values::scalar_logical((value.kind() == SexpType::Logical) as i32).map(Some)
     }),
     // A factor is stored as integers, but GNU R does not count it as an integer vector.
     builtin("is.integer", 1, |call| unsafe {
@@ -840,6 +852,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     builtin("is.character", 1, |call| unsafe {
         scalar_bool(call.arg(0).kind() == SexpType::String)
+    })
+    .unary(|value| unsafe {
+        if is_native_value(value) {
+            return Ok(None);
+        }
+        values::scalar_logical((value.kind() == SexpType::String) as i32).map(Some)
     }),
     builtin("is.symbol", 1, |call| unsafe {
         scalar_bool(call.arg(0).kind() == SexpType::Symbol)
@@ -924,6 +942,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     builtin("is.function", 1, |call| unsafe {
         scalar_bool(values::is_function(call.arg(0)))
+    })
+    .unary(|value| unsafe {
+        if is_native_value(value) {
+            return Ok(None);
+        }
+        values::scalar_logical((values::is_function(value)) as i32).map(Some)
     }),
     builtin("is.primitive", 1, |call| unsafe {
         {

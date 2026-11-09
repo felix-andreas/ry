@@ -1,0 +1,261 @@
+[stdout]
+| [1] TRUE
+| [1] FALSE
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| argument evaluated once
+| [1] TRUE
+| [1] TRUE
+| [1] "argument \"y\" is missing, with no default"
+| [1] "in argument"
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] FALSE
+| [1] TRUE
+| [1] FALSE
+| [1] FALSE
+| [1] FALSE
+| [1] FALSE
+| [1] TRUE
+| [1] FALSE
+| [1] TRUE
+| [1] FALSE
+| [1] TRUE
+| [1] FALSE
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] 2
+| [1] 3
+| NULL
+| NULL
+| NULL
+| [1] 3
+| [1] NA
+| [1] 2
+| [1] 4
+| [1] 2
+| [1] 7
+| [1] 8
+| [1] 1
+| [1] 2
+| [1] NA
+| [1] 2
+| [1] 2
+| [1] NA
+| [1] 1
+| [1]  2 NA  3
+| [1] 2
+| [1] 2
+| [1] 2
+| [1] 2
+| [1] 2
+| [1] 2
+| [1] 2
+| [1] 1
+| [1] 2
+| [1] 2
+| [1] 2
+| [1] NA  1  2
+| [1] 2
+| [1] 2
+| [1] 1
+| integer(0)
+| [1] NA
+| integer(0)
+| [1] 5
+| [1] 1
+| [1] TRUE
+| [1] FALSE
+| [1] TRUE
+| [1]  TRUE FALSE FALSE
+| [1] FALSE  TRUE FALSE
+| [1] TRUE
+| logical(0)
+| [1] TRUE
+| [1] TRUE
+| [1] "'match' requires vector arguments"
+| [1] "isTRUE"
+| traced
+| [1] TRUE
+| [1] TRUE
+| List of 7
+|  $ : logi FALSE
+|  $ : int 1
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi TRUE
+|  $ : logi FALSE
+| List of 7
+|  $ : logi NA
+|  $ : int 1
+|  $ : logi FALSE
+|  $ : logi TRUE
+|  $ : logi FALSE
+|  $ : logi TRUE
+|  $ : logi FALSE
+| List of 7
+|  $ : Named logi FALSE
+|   ..- attr(*, "names")= chr "a"
+|  $ : int 1
+|  $ : logi FALSE
+|  $ : Named logi FALSE
+|   ..- attr(*, "names")= chr "a"
+|  $ : logi FALSE
+|  $ : logi TRUE
+|  $ : logi FALSE
+| List of 7
+|  $ : chr "invalid argument type"
+|  $ : int 0
+|  $ : logi TRUE
+|  $ : logi(0) 
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+| List of 7
+|  $ : chr "invalid argument type"
+|  $ : int 1
+|  $ : logi FALSE
+|  $ : logi TRUE
+|  $ : logi TRUE
+|  $ : logi FALSE
+|  $ : logi FALSE
+| List of 7
+|  $ : chr "invalid argument type"
+|  $ : int 1
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi TRUE
+|  $ : logi FALSE
+|  $ : logi FALSE
+| List of 7
+|  $ : logi NA
+|  $ : int 1
+|  $ : logi FALSE
+|  $ : logi TRUE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+| List of 7
+|  $ : logi NA
+|  $ : int 1
+|  $ : logi FALSE
+|  $ : logi TRUE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+| List of 7
+|  $ : logi [1:2] FALSE NA
+|  $ : int 2
+|  $ : logi FALSE
+|  $ : logi [1:2] FALSE TRUE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+| List of 7
+|  $ : chr "invalid argument type"
+|  $ : int 2
+|  $ : logi FALSE
+|  $ : logi [1:2] FALSE TRUE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+| List of 7
+|  $ : chr "invalid argument type"
+|  $ : int 1
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi TRUE
+| List of 7
+|  $ : chr "invalid argument type"
+|  $ : int 1
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi TRUE
+| List of 7
+|  $ : chr "invalid argument type"
+|  $ : int 12
+|  $ : logi FALSE
+|  $ : logi [1:12] FALSE FALSE FALSE FALSE FALSE FALSE ...
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+| List of 7
+|  $ : logi [1:10] FALSE FALSE FALSE FALSE FALSE FALSE ...
+|  $ : int 10
+|  $ : logi FALSE
+|  $ : logi [1:10] FALSE FALSE FALSE FALSE FALSE FALSE ...
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+| List of 7
+|  $ : logi [1:2] NA NA
+|  $ : int 2
+|  $ : logi FALSE
+|  $ : logi [1:2] FALSE TRUE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+| List of 7
+|  $ : 'flag' logi FALSE
+|  $ : int 1
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : logi TRUE
+|  $ : logi FALSE
+| List of 7
+|  $ : chr "negated flag"
+|  $ : int 99
+|  $ : logi FALSE
+|  $ : chr "flag is.na"
+|  $ : logi FALSE
+|  $ : logi TRUE
+|  $ : logi FALSE
+| List of 7
+|  $ : logi [1, 1] FALSE
+|  $ : int 1
+|  $ : logi FALSE
+|  $ : logi [1, 1] FALSE
+|  $ : logi FALSE
+|  $ : logi TRUE
+|  $ : logi FALSE
+| [1] "invalid argument type"
+| [1] FALSE
+| [1] TRUE
+|     a 
+| FALSE 
+| [1] TRUE
+| [1] FALSE  TRUE
+| [1]  TRUE FALSE
+| [1] TRUE
+|     x 
+| FALSE 
+| [1] FALSE
+[messages]
+- Tracing function "isTRUE" in package "base"
+- Untracing function "isTRUE" in package "base"
+[warnings]
+- is.na() applied to non-(list or vector) of type 'builtin' (in is.na(v))
+- is.na() applied to non-(list or vector) of type 'closure' (in is.na(v))
+- is.na() applied to non-(list or vector) of type 'environment' (in is.na(v))
+- ‘!’ not meaningful for factors (in Ops.factor(v))
+[errors]
+[value]
+logical
+| FALSE

@@ -4,7 +4,8 @@
 use {
     crate::{
         builtins::{
-            Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, present, special,
+            Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, is_native_value,
+            present, special,
         },
         coerce::{self, coerce_vector},
         conditions,
@@ -34,7 +35,25 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("c", -1, do_c).generic(Generic::Internal),
     internal("unlist", 3, do_unlist).generic(Generic::Internal),
     builtin("list", -1, do_list),
-    builtin("length", 1, do_length).generic(Generic::Internal),
+    builtin("length", 1, do_length)
+        .generic(Generic::Internal)
+        .unary(|value| unsafe {
+            let plain = match value.kind() {
+                SexpType::Nil => true,
+                SexpType::Char => false,
+                kind => {
+                    kind.is_vector()
+                        && !is_native_value(value)
+                        && !value.is_object()
+                        && !value.is_altrep()
+                }
+            };
+            if !plain || value.length() > i32::MAX as isize {
+                return Ok(None);
+            }
+            let count = if value == nil() { 0 } else { value.length() as i32 };
+            scalar_integer(count).map(Some)
+        }),
     builtin("length<-", 2, do_set_length).generic(Generic::Internal),
     internal("lengths", 2, do_lengths),
     builtin("names", 1, do_names).generic(Generic::Internal),
@@ -156,6 +175,14 @@ pub unsafe fn copy_element(from: Sexp, from_index: usize, to: Sexp, to_index: us
             let charsxp = coerce::element_as_charsxp(from, from_index)?;
             values::set_elt(to, to_index, charsxp);
         }
+        // The widening conversions `c()` and growing assignments make, which never warn, write
+        // the converted element directly.
+        SexpType::Real if matches!(from.kind(), SexpType::Integer | SexpType::Logical) => {
+            values::reals_mut(to)[to_index] = int_to_real(values::ints(from)[from_index]);
+        }
+        SexpType::Integer if from.kind() == SexpType::Logical => {
+            values::ints_mut(to)[to_index] = values::ints(from)[from_index];
+        }
         _ => {
             let single = vector_element(from, from_index)?;
             let converted = coerce_vector(single, to.kind())?;
@@ -163,6 +190,15 @@ pub unsafe fn copy_element(from: Sexp, from_index: usize, to: Sexp, to_index: us
         }
     }
     Ok(())
+}
+
+/// An integer or logical element as a double, NA staying NA.
+fn int_to_real(value: i32) -> f64 {
+    if value == NA_INTEGER {
+        NA_REAL
+    } else {
+        f64::from(value)
+    }
 }
 
 /// Sets `to[to_index]` to the type's NA (or `NULL` for lists).
@@ -2963,11 +2999,17 @@ pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -
 struct Flattener {
     kind: SexpType,
     values: Vec<(Sexp, usize)>,
-    /// `None` is an NA name, which GNU R keeps as NA unless a tag is prefixed to it.
-    names: Vec<Option<String>>,
+    names: Vec<LeafName>,
     any_names: bool,
     recursive: bool,
     use_names: bool,
+}
+
+/// A leaf's name: an existing string, NA and blank included, which most leaves keep as it is,
+/// or one composed from a tagged base, which is made into a string once the result is built.
+enum LeafName {
+    Char(Sexp),
+    Text(String),
 }
 
 /// The names GNU R gives the leaves under one tagged base: a leaf without a name of its own is
@@ -3010,13 +3052,16 @@ impl Flattener {
         if is_list && self.recursive && value.kind() != SexpType::Language {
             for index in 0..count {
                 let element = flattenable(value.element(index))?;
-                match own_name(element_names, index) {
-                    Some(name) if name.is_empty() => self.add_in(element, scope)?,
-                    name => {
+                let own = own_name(element_names, index);
+                match own {
+                    own if own != na_string() && values::is_blank(own) => {
+                        self.add_in(element, scope)?
+                    }
+                    own => {
                         // A named element starts a new base, so its leaves count afresh, but
                         // they still take their places in the enclosing base's numbering.
-                        let base_is_na = name.is_none() && scope.base.is_empty();
-                        let name = name.unwrap_or_else(|| "NA".to_owned());
+                        let base_is_na = own == na_string() && scope.base.is_empty();
+                        let name = char_str(own).into_owned();
                         let base = match scope.base.as_str() {
                             "" => name,
                             base => format!("{base}.{name}"),
@@ -3039,7 +3084,7 @@ impl Flattener {
             return Ok(());
         }
         if !value.kind().is_vector() {
-            let name = self.leaf_name(scope, Some(String::new()));
+            let name = self.leaf_name(scope, values::blank_string());
             self.values.push((value, usize::MAX));
             self.names.push(name);
             return Ok(());
@@ -3052,20 +3097,21 @@ impl Flattener {
         Ok(())
     }
 
-    fn leaf_name(&self, scope: &mut NameScope, own: Option<String>) -> Option<String> {
+    /// `own` is the leaf's own name: blank when it has none, and NA kept as NA unless a base
+    /// is prefixed to it.
+    unsafe fn leaf_name(&self, scope: &mut NameScope, own: Sexp) -> LeafName {
         scope.position += 1;
         if !self.use_names {
-            return Some(String::new());
+            return LeafName::Char(values::blank_string());
         }
         if scope.base.is_empty() {
-            return own;
+            return LeafName::Char(own);
         }
-        let own = own.unwrap_or_else(|| "NA".to_owned());
-        Some(if !own.is_empty() {
-            format!("{}.{own}", scope.base)
+        LeafName::Text(if own == na_string() || !values::is_blank(own) {
+            format!("{}.{}", scope.base, char_str(own))
         } else if scope.count == 1 {
             if scope.base_is_na {
-                return None;
+                return LeafName::Char(na_string());
             }
             scope.base.clone()
         } else {
@@ -3091,7 +3137,8 @@ impl Flattener {
             if count > 1 {
                 break;
             }
-            if own_name(names, index).is_some_and(|name| name.is_empty()) {
+            let own = own_name(names, index);
+            if own != na_string() && values::is_blank(own) {
                 count += self.unnamed_leaves(flattenable(value.element(index))?)?;
             }
         }
@@ -3131,7 +3178,16 @@ impl Flattener {
             }
         }
         if self.any_names && self.use_names && !self.values.is_empty() {
-            let names = values::string_vector_na(&self.names)?;
+            crate::heap().root(result);
+            let names = alloc(SexpType::String, self.names.len())?;
+            crate::heap().root(names);
+            for (position, name) in self.names.iter().enumerate() {
+                let charsxp = match name {
+                    LeafName::Char(charsxp) => *charsxp,
+                    LeafName::Text(text) => values::mkchar(text)?,
+                };
+                values::set_elt(names, position, charsxp);
+            }
             values::set_attr(result, symbols().names, names)?;
         }
         Ok(result)
@@ -3149,12 +3205,12 @@ unsafe fn flattenable(value: Sexp) -> R<Sexp> {
     }
 }
 
-/// The element's own name: empty when it has none, and `None` when it is NA.
-unsafe fn own_name(names: Sexp, index: usize) -> Option<String> {
+/// The element's own name: blank when it has none.
+unsafe fn own_name(names: Sexp, index: usize) -> Sexp {
     if names != nil() && index < length(names) {
-        values::string_at(names, index).map(|text| text.into_owned())
+        names.element(index)
     } else {
-        Some(String::new())
+        values::blank_string()
     }
 }
 
@@ -3243,8 +3299,18 @@ unsafe fn combine_unnamed_atomic(args: &[Arg], kind: SexpType) -> R<Option<Sexp>
             (SexpType::Real, SexpType::Real) => {
                 values::reals_mut(result)[target].copy_from_slice(values::reals(value))
             }
-            (SexpType::Integer, SexpType::Integer) | (SexpType::Logical, SexpType::Logical) => {
+            (SexpType::Integer, SexpType::Integer)
+            | (SexpType::Logical, SexpType::Logical)
+            | (SexpType::Logical, SexpType::Integer) => {
                 values::ints_mut(result)[target].copy_from_slice(values::ints(value))
+            }
+            (SexpType::Integer | SexpType::Logical, SexpType::Real) => {
+                for (slot, &element) in values::reals_mut(result)[target]
+                    .iter_mut()
+                    .zip(values::ints(value))
+                {
+                    *slot = int_to_real(element);
+                }
             }
             _ => {
                 for index in 0..count {
@@ -3260,9 +3326,9 @@ unsafe fn combine_unnamed_atomic(args: &[Arg], kind: SexpType) -> R<Option<Sexp>
 unsafe fn do_c(call: &Call<'_>) -> R<Sexp> {
     let mut recursive = false;
     let mut use_names = true;
-    let mut args = Vec::new();
+    let mut args: SmallVec<[Arg; 8]> = SmallVec::new();
     for arg in call.args {
-        if arg.tag != nil() && symbol_name(arg.tag) == "recursive" {
+        if arg.tag == symbols().recursive {
             recursive = values::as_logical_scalar(arg.value) == 1;
         } else if arg.tag == symbols().use_names {
             use_names = values::as_logical_scalar(arg.value) != 0;
@@ -3861,37 +3927,46 @@ pub unsafe fn set_row_names(object: Sexp, value: Sexp) -> R<()> {
 
 pub(crate) unsafe fn do_attributes(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
-    let mut items: Vec<(String, Sexp)> = Vec::new();
+    let names_symbol = symbols().names;
+    // Each attribute's name is its tag's print name, so the result shares those strings instead
+    // of building new ones.
+    let mut items: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
     // GNU R reports tag names only for a pairlist (`isList`): a call's tags are its argument
     // names, which `names()` exposes but `attributes()` does not.
     if object.kind() == SexpType::Pairlist {
         let names = values::pairlist_names(object)?;
         if names != nil() {
-            items.push(("names".into(), names));
+            crate::heap().root(names);
+            items.push((names_symbol.car(), names));
         }
     }
     let mut cell = object.attrib();
     while cell.kind() == SexpType::Pairlist {
-        if cell.tag() == symbols().names && object.kind() != SexpType::Environment {
-            items.push(("names".into(), get_attr(object, symbols().names)));
-        } else if cell.tag() != symbols().names {
-            let value = if cell.tag() == symbols().row_names {
-                expand_row_names(cell.car())?
-            } else {
-                cell.car()
-            };
-            items.push((symbol_name(cell.tag()).into_owned(), value));
+        if cell.tag() == names_symbol {
+            if object.kind() != SexpType::Environment {
+                items.push((names_symbol.car(), cell.car()));
+            }
+        } else if cell.tag() == symbols().row_names {
+            let expanded = expand_row_names(cell.car())?;
+            crate::heap().root(expanded);
+            items.push((cell.tag().car(), expanded));
+        } else {
+            items.push((cell.tag().car(), cell.car()));
         }
         cell = cell.cdr();
     }
     if items.is_empty() {
         return Ok(nil());
     }
-    let pairs: Vec<(&str, Sexp)> = items
-        .iter()
-        .map(|(name, value)| (name.as_str(), *value))
-        .collect();
-    values::named_list(&pairs)
+    let result = alloc(SexpType::List, items.len())?;
+    crate::heap().root(result);
+    let names = alloc(SexpType::String, items.len())?;
+    for (index, &(name, value)) in items.iter().enumerate() {
+        values::set_elt(result, index, value);
+        values::set_elt(names, index, name);
+    }
+    values::set_attr(result, names_symbol, names)?;
+    Ok(result)
 }
 
 pub(crate) unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
