@@ -2572,12 +2572,6 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   functions per package. Baseline code for every body from its first entry measured 8.06G
   against 7.96G instructions on the testthat workload, so install-time baseline code is no lever
   until baseline code inlines fast paths.
-- **A typed `if` gives `NULL` where tier 0 gives `0L`.** `f <- function(x: character) (if
-  (((x == "a")) > 0) (if (x == "b") 1 else 0L) else (if (x == "b") 1 else 0L)); f("a")`
-  (`FUZZ_SEED=2097 cargo test -p jit --test test_tiers
-  fuzz_typed_closures_agree_with_tier_zero -- --exact`). Seed 4962 is the same shape: the nested
-  `if` with an integer and a double branch, `if (x) 1L else 2.5`, gives `NULL` for `f(FALSE)`
-  where tier 0 gives `2.5`.
 - **Decoding an image's code costs about as much as compiling it** (about 65k instructions per
   closure on CRAN packages), so an untrained image saves nothing measurable. The decoder reads
   every instruction word and feedback word as a varint and re-interns each symbol constant by
