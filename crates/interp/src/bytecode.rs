@@ -240,7 +240,7 @@ pub fn reserve_registers(length: usize) -> R<()> {
     grow_registers(length)
 }
 
-#[cold]
+#[inline(never)]
 fn grow_registers(length: usize) -> R<()> {
     let registers = &mut interp().bytecode.registers;
     if length > registers.capacity() {
@@ -248,8 +248,15 @@ fn grow_registers(length: usize) -> R<()> {
             "evaluation nested too deeply: the register file is full",
         ));
     }
-    if length > registers.len() {
-        registers.resize(length, nil());
+    let start = registers.len();
+    if length > start {
+        // Every call grows the file past the registers the last call released, so this runs
+        // once per call: `fill` stores the `NULL`s as wide writes, where `resize` cloned them
+        // one at a time.
+        // SAFETY: the capacity covers `length`, and `Sexp` is a plain pointer the next line
+        // initializes before anything reads it.
+        unsafe { registers.set_len(length) };
+        registers[start..length].fill(nil());
     }
     Ok(())
 }

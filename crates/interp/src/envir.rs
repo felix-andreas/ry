@@ -258,7 +258,12 @@ unsafe fn sys_parent_number(mut n: i64, context: Option<usize>) -> i64 {
         return 0;
     }
     if parent == nil() {
-        return index as i64;
+        let caller = frames[index].caller;
+        return if caller == crate::NO_SLOTS {
+            index as i64
+        } else {
+            caller as i64 + 1
+        };
     }
     let mut count = 0;
     let mut found = n;

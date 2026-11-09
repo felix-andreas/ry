@@ -140,7 +140,7 @@ pub struct Frame {
     pub env: Sexp,
     /// The environment the call was evaluated in, which `parent.frame` returns, or `NULL` when
     /// the caller is a slot frame that had no environment when it made the call: the caller is
-    /// then the frame just below this one ([`eval::frame_sys_parent`]).
+    /// then the frame at [`Frame::caller`] ([`eval::frame_sys_parent`]).
     pub sys_parent: Sexp,
     /// For a slot frame, the register that holds its environment once it has one, followed by
     /// its slots (`docs/src/content/docs/development/design/slot-frames.md`); [`NO_SLOTS`] for

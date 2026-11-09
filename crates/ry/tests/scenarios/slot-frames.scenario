@@ -50,6 +50,11 @@ file frames.R
 | print(loop(100))
 | st <- function() stop("boom")
 | print(tryCatch(st(), error = function(e) conditionMessage(e)))
+| # A closure called while a promise runs on a slot frame's slots, from a call site that has
+| # made its direct-call plan (the third call), sees that slot frame as its parent.
+| pick <- function(type = c("gzip", "xz", "none")) match(match.arg(type), c("none", "gzip", "xz"))
+| for (t in c("gzip", "xz", "none", "xz")) cat(pick(t), "")
+| cat("\n")
 
 run ry run --runtime ry frames.R
 expect exit 0
@@ -71,3 +76,4 @@ expect stdout "[1] \"area\""
 expect stdout "[1] 9"
 expect stdout "[1] 5050"
 expect stdout "[1] \"boom\""
+expect stdout "2 3 1 3"
