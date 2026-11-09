@@ -501,16 +501,16 @@ completion (1): height
 s <- :Circle(totalRadius$0)
 totalRadius <- 2
 #++++
-hover 79..90: totalRadius: double
+hover 79..90: totalRadius: I64
 hover-definition: global 92..103
 definition 92..103
 references: 79..90, 92..103*
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 103..103 -> ": double"
+  edit 103..103 -> ": I64"
 completion (1): totalRadius
-hint @103: double
+hint @103: I64
 
 #---- completion_in_a_nominal_constructor_follows_its_definition
 type Money = Record{amount: double, currency: character}
