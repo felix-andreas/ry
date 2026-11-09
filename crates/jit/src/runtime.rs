@@ -166,7 +166,20 @@ impl Exit {
 /// `thorough` walks them anyway, for an activation whose frame may have bound a watched name
 /// before the name was watched. Portable code running for an enclosure other than the checked
 /// one or its siblings walks, and leaves the epoch and stamps to the checked enclosure.
+#[inline]
 pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
+    // Every entry asks, and almost every time nothing moved the epoch since the last proof.
+    if !thorough
+        && heap().binding_epoch() == compiled.epoch.get()
+        && (!compiled.portable || compiled.checked.get().weak_key() == frame.enclosure())
+    {
+        return true;
+    }
+    unsafe { prove(compiled, frame, thorough) }
+}
+
+#[inline(never)]
+unsafe fn prove(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
     let heap = heap();
     let epoch = heap.binding_epoch();
     let enclosure = frame.enclosure();

@@ -725,9 +725,10 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 - **Baseline code.** Below tier 1, a body can get baseline machine code
   (`crates/jit/src/baseline.rs`): per instruction, a call to tier 0's step for it and direct
   branches on the pc it answers, emitted by ry's own x86-64 and aarch64 assembler in a median of
-  28 µs. It keeps tier 0's activation, so it needs no deoptimization metadata. `RY_JIT=on` leaves
-  it out, because a call per instruction runs more instruction-cache misses than tier 0's shared
-  handlers; `RY_JIT=baseline` runs every body in it alone, `RY_JIT=force` installs it on the first
+  28 µs. `GetVar` and `SetVar` of the activation's own frame and comparisons of two plain scalars
+  run inline. It keeps tier 0's activation, so it needs no deoptimization metadata. `RY_JIT=on`
+  leaves it out, because each body's own code (about 30 bytes per instruction) runs more
+  instruction-cache misses than tier 0's shared handlers; `RY_JIT=baseline` runs every body in it alone, `RY_JIT=force` installs it on the first
   entry, and the third field of `RY_JIT_THRESHOLDS=entries,back_edges,baseline` sets its threshold.
 - **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
   call still enters through tier 0's call path and allocates a frame and forced promises), result
@@ -861,7 +862,7 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | Lazy fused vectors for element-wise arithmetic, as ALTREP objects | Riposte, pqR | planned | intermediate vectors in untyped vector code | |
 | **4. Optimizing tiers** | | | | |
 | Per-argument-type native functions for scalar closures | Julia | built | recursive scalar functions | `crates/jit/src/native.rs` |
-| Baseline compiler from bytecode, no optimization | V8 Sparkplug | built, opt-in (`RY_JIT=baseline`, `RY_JIT_THRESHOLDS`); `RY_JIT=on` leaves it out | warm code under the 3000-entry threshold. Compiles in a median of 28 µs per body (at most about 0.5 ms), but a call per instruction measures level with tier 0's tail-call handlers (a scalar loop 0.53 s against 0.47 to 0.51 s), so its speed waits for inline fast paths of variable access and arithmetic. `RY_JIT=baseline` runs it alone | `crates/jit/src/baseline.rs`, `assembler.rs` |
+| Baseline compiler from bytecode, no optimization | V8 Sparkplug | built, opt-in (`RY_JIT=baseline`, `RY_JIT_THRESHOLDS`); `RY_JIT=on` leaves it out | warm code under the 3000-entry threshold. Compiles in a median of 28 µs per body (at most about 0.5 ms), but a call per instruction measures level with tier 0's tail-call handlers (a scalar loop 0.53 s against 0.47 to 0.51 s), and with variable access and scalar comparisons inline it still loses on `bench-real` to the instruction-cache footprint of per-body code (9.7 MB over 972 bodies on `testthat`). `RY_JIT=baseline` runs it alone | `crates/jit/src/baseline.rs`, `assembler.rs` |
 | Lazy basic block versioning as the baseline's second stage | YJIT | planned | type checks left inside handlers in warm code | |
 | A lower Cranelift threshold once the baseline tier exists | HotSpot, .NET tiering | measured, kept at 3000 entries; large bodies wait in proportion to their size | tier 1 under 3% of the time on eight of nine workloads. Callgrind geomean against JIT off: 1000 entries 1.015, 2000 1.016, 3000 1.013, 6000 1.010, 10,000 1.010, so the threshold does not decide on against off | `SIZE_WAIT_WORDS` in `crates/jit/src/jit.rs` |
 | Cross-closure inlining with deoptimization | Ř (PIR) | partly built: effect-free closures, single-expression or block bodies, guarded on callee identity; a failed guard reruns the whole call in tier 0. Callees with effects, which need frame materialization, are planned | calls from compiled code re-enter tier 0 | `inline`, `lower_block` in `crates/jit/src/analysis.rs` |

@@ -620,9 +620,8 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         if bytecode::reserve_registers(cells + compiled.slots.len()).is_err() {
             return None;
         }
-        for slot in 0..compiled.slots.len() {
-            *bytecode::register_address(cells + slot) = values::nil();
-        }
+        std::slice::from_raw_parts_mut(bytecode::register_address(cells), compiled.slots.len())
+            .fill(values::nil());
         let mut loops = vec![0i64; 2 * compiled.loops];
         for (index, state) in machine.loops.iter().enumerate().take(compiled.loops) {
             loops[2 * index] = state.index as i64;
