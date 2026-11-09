@@ -72,8 +72,8 @@ describes it, and the open gaps are marked.
 - **Release.** A frame that was never reified drops its slots' references on return instead of
   `release_frame` and `clear_frame`.
 - **Not built.** Binding by a per-site plan (`bind_slots` matches by name through the shared match
-  cache), promises for non-literal defaults without an environment, and slot access from the JIT's
-  tiers.
+  cache), promises for non-literal defaults without an environment, promises for `...`, and slot
+  access from the JIT's tiers.
 
 ## Reification triggers
 
@@ -81,13 +81,14 @@ These are the reads that need the environment as an object. Each one reifies the
 
 | Trigger | Where |
 |---|---|
-| A promise made in the frame (argument promises, default promises, `delayedAssign`) | `make_promise`, `compiled_promise`, `formal_binding` in `eval.rs`; `NextMethod`'s promises in `dispatch.rs` |
+| A promise made in the frame that the slot-promise path does not cover (see below), default promises, `delayedAssign` | `make_promise`, `compiled_promise`, `formal_binding` in `eval.rs`; `NextMethod`'s promises in `dispatch.rs` |
 | A closure created in the frame | `make_closure` in `eval.rs`; `Op::Closure`; `~` (the formula's environment) |
 | Reflection that returns the environment | `environment()`, `sys.frame(s)`, `parent.frame`, `as.environment(-1)`, `sys.function` with its environment, `eval`'s numeric `envir` |
 | Code that the compiler did not translate and that runs in the frame | `Op::Ast` (`<<-` targets, `...` forms), `BoundEval`, the debugger and `browser()` |
 | S3 and S4 dispatch reading the generic's frame | `UseMethod` and `NextMethod` (`dispatch.rs`); `standardGeneric`, which reads the signature arguments from the generic's frame and evaluates the method in a frame derived from it (`do_standard_generic` passes `call.env` to `dispatch_generic`), and `exec_method` and `callNextMethod` (`methods.rs`) |
 | Condition handlers and restarts that record a frame | `.addCondHands`, `.addRestart` (`conditions.rs`) |
 | The C API | `R_GetCurrentEnv`, `PRENV` on a promise over the frame, `.External` and `.External2` (which pass the environment) |
+| A promise over the frame still unforced when the frame returns | `run_frame` in `eval.rs` |
 
 A builtin that receives `call.env` and only reads a frame property (`missing`, `nargs`, `on.exit`,
 `sys.call`, `match.call`) gets the frame reference instead and does not reify.
@@ -128,12 +129,33 @@ are the identical `SEXP`, and `identical()` and `environmentName()` behave as fo
 
 ## Promises over a slot frame
 
-The second step addresses the 33% of calls that only promises capture. A promise for a variable
-argument holds a reference to the slot frame (index and generation) instead of an environment. Forcing
-it during the call reads the slot. If the frame returns while such a promise is still unforced and
-referenced, the return reifies the frame and points the promise at the new environment. `PRENV`,
-`substitute` and native code see only reified environments, because reading a promise's
-environment reifies it. This step is planned after the first step's numbers are in.
+The second step is built (`slot_promise`, `force_slot_promise` and `resolved_env` in `eval.rs`,
+`slot_promises_into` in `bytecode.rs`). It covers the 33% of calls that only promises capture.
+
+- **Which calls.** A call from an unreified slot frame passes its arguments as promises over the
+  frame when every argument is a constant, the missing marker, a symbol, or code the compiler
+  compiled against the caller's slot table. A `...` argument, a `..N` symbol, a call that is not
+  compiled, or a compiled promise that reads a local the table does not number falls back to the
+  heap-frame path, which reifies the caller.
+- **The pending environment.** The first such promise allocates an empty environment for the frame
+  (`Frame.pending`), flagged `PENDING_FRAME`, and the promises name it as their environment. If the
+  frame reifies, `reify` fills that environment and clears the flag, so a promise forced later reads
+  the same object every other reader sees.
+- **Forcing.** Forcing a promise over a pending environment finds the owner frame (the frame whose
+  `pending` it is) and reads its slots: a symbol reads its slot and falls back to the enclosure when
+  the slot is unbound, and compiled code runs on the owner's registers with `Interp.slot_owner` set
+  to the owner, so `slot_owner_env` and `Call::frame_index` name the owner and not the frame forcing
+  it.
+- **Return.** `Frame.unforced` counts the frame's promises that have not been forced yet. A frame
+  that returns with any reifies first, so an escaped promise keeps reading the values the slots held
+  at return, as it would from a heap frame.
+- **Frame identity.** A callee whose caller is an unreified slot frame records the caller's index
+  (`Frame.caller`), which `envir::caller_index` and `frame_sys_parent` follow. A promise forced
+  further down the stack therefore still reports its own frame's caller.
+- **Readers of a promise's environment** go through `eval::promise_env`, which reifies the owner:
+  `PRENV` in the C API, serialization, `missing()` through a promise, and the table engine's
+  `eval` expansion. Identity checks against a promise's environment compare the pending
+  environment, which is the frame's environment once it reifies.
 
 ## Checking it
 

@@ -1648,11 +1648,10 @@ unsafe fn promise_of_missing(value: Sexp) -> R<bool> {
     if value.kind() != SexpType::Promise || value.car() != unbound() {
         return Ok(false);
     }
-    let environment = value.tag();
-    if environment.kind() != SexpType::Environment {
+    if value.tag().kind() != SexpType::Environment {
         return Ok(false);
     }
-    eval::argument_is_missing(value.cdr(), environment)
+    eval::argument_is_missing(value.cdr(), eval::promise_env(value)?)
 }
 
 unsafe fn internal_dispatch(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {

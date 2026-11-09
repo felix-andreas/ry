@@ -1031,7 +1031,7 @@ unsafe fn quiet_binding(cell: Sexp, depth: u32) -> R<Option<Sexp>> {
         SexpType::Symbol => {
             depth < 4
                 && code != symbols().dots
-                && match eval::find_cell(code, value.tag()) {
+                && match eval::find_cell(code, eval::promise_env(value)?) {
                     Some(inner) => quiet_binding(inner, depth + 1)?.is_some(),
                     None => false,
                 }
