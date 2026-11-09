@@ -372,7 +372,8 @@ new definition and is not checked.
 Before running anything, `ry run` and `ry R` check the script and their console checks each command, with the
 project's `ry.toml`. They print every `annotation-mismatch` and `inline-annotation` warning. In
 [strict mode](/tutorial/fully-typed#strict-mode) they also print every error and refuse to run code that
-has one: a script exits with status 1, and the console drops the command. Other findings are left
+has one: a script exits with status 1, and the console drops the command. A paste from a terminal
+with bracketed paste is one command, so an error anywhere in it drops all of it. Other findings are left
 to `ry check`, so they never change whether R code runs.
 
 ## Types

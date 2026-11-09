@@ -585,7 +585,8 @@ pub fn comment_annotation<'db>(
     annotations.get(index).map(|(_, annotation)| annotation)
 }
 
-fn is_ry_syntax(kind: SyntaxKind) -> bool {
+/// Whether a node of `kind` builds a ry value: a record, tuple, list, tag or `match`.
+pub fn is_ry_syntax(kind: SyntaxKind) -> bool {
     matches!(
         kind,
         SyntaxKind::RECORD_EXPR

@@ -18,7 +18,8 @@ use {
     semantics::{
         DocumentKind, Elaboration, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{Diagnostic, RelatedLocation, Severity},
-        stubs::install_shipped_stubs,
+        is_ry_syntax,
+        stubs::{install_shipped_stubs, is_native_function},
     },
     std::{
         fs,
@@ -42,6 +43,10 @@ pub struct Preflight {
     path: PathBuf,
     /// Accepted input so far, newline-terminated.
     session: String,
+    /// The session holds something analysis decides: strict mode from `ry.toml`, ry syntax, or a
+    /// `typing:` directive. Until then each command is tested alone, because re-parsing the
+    /// whole session per command makes a long paste quadratic.
+    analyzed: bool,
 }
 
 /// What the preflight decided about a piece of input.
@@ -80,6 +85,7 @@ impl Preflight {
         let file = SourceFile::new(&db, String::new(), DocumentKind::Script);
         ProjectFiles::new(&db, vec![file]);
         Preflight {
+            analyzed: config.check.strict,
             db,
             file,
             config,
@@ -113,6 +119,14 @@ impl Preflight {
     /// rewrites bytes `input` only stands for, such as a Latin-1 script whose invalid bytes
     /// `input` spells as `?`.
     pub fn check_elaborations(&mut self, input: &str) -> Option<Vec<Elaboration>> {
+        if !self.analyzed {
+            if !has_ry_syntax(&syntax::parse(input).syntax_node(), input) {
+                self.session.push_str(input);
+                self.session.push('\n');
+                return Some(Vec::new());
+            }
+            self.analyzed = true;
+        }
         let start = self.session.len();
         let mut source = String::with_capacity(start + input.len() + 1);
         source.push_str(&self.session);
@@ -484,30 +498,26 @@ fn has_inline_annotation(root: &SyntaxNode) -> bool {
     root.descendants().any(|node| is_inline_annotation(&node))
 }
 
-/// Whether `source` holds anything that can give a literal a ry type: an inline or comment
-/// annotation, a list literal, a suffixed number, or a standard library call such as
-/// `List.range(1, 10)`. Missing one of these leaves an `I64` literal an R double at run time, so
+/// Whether `source` holds anything analysis decides: an inline or comment annotation, a
+/// `# typing:` directive, a record, tuple, list, tag or `match`, a suffixed number, or a native
+/// function call such as `List.range(1, 10)`. Missing one of these leaves an `I64` literal an R double at run time, so
 /// the test errs toward analysis.
 fn has_ry_syntax(root: &SyntaxNode, source: &str) -> bool {
     source.contains("#:")
         || has_inline_annotation(root)
         || root.descendants_with_tokens().any(|element| match element {
-            NodeOrToken::Node(node) => node.kind() == SyntaxKind::ARRAY_EXPR,
+            NodeOrToken::Node(node) => is_ry_syntax(node.kind()),
             NodeOrToken::Token(token) => match token.kind() {
                 SyntaxKind::SUFFIXED_NUMBER => true,
-                SyntaxKind::IDENT => is_module_qualified(token.text()),
+                SyntaxKind::COMMENT => token
+                    .text()
+                    .trim_start_matches('#')
+                    .trim_start()
+                    .starts_with("typing:"),
+                SyntaxKind::IDENT => is_native_function(token.text()),
                 _ => false,
             },
         })
-}
-
-/// Whether `name` is spelled like a standard library function, `Module.function`.
-fn is_module_qualified(name: &str) -> bool {
-    name.split_once('.').is_some_and(|(module, function)| {
-        module.starts_with(|first: char| first.is_ascii_uppercase())
-            && module.bytes().all(|byte| byte.is_ascii_alphanumeric())
-            && function.starts_with(|first: char| first.is_ascii_lowercase() || first == '_')
-    })
 }
 
 /// GNU R reads the plain program an annotated one means.

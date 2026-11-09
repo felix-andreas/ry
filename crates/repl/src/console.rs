@@ -124,6 +124,9 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
             DefaultHinter::default().with_style(Style::new().fg(Color::DarkGray)),
         ))
         .with_validator(Box::new(LexerValidator))
+        // A paste arrives as one insertion with one repaint, and runs on Enter as under
+        // GNU R's readline, instead of a repaint and a terminal round trip per pasted line.
+        .use_bracketed_paste(true)
         .with_edit_mode(edit_mode);
     let completer = options
         .completer
@@ -185,11 +188,11 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
     }
     {
         *lock_console() = Some(Console {
+            unit_bytes: pending.len(),
             editor,
             pending,
             typeahead: Typeahead::default(),
             keys: KeyDecoder::default(),
-            hook_bytes: 0,
             batch: options.batch,
             completer,
             hooks: options.hooks,
@@ -234,10 +237,12 @@ struct Console {
     /// Decodes the bytes typed while the editor did not hold the terminal. It lives across
     /// reads, so a key or a CRLF split between two reads still decodes as one.
     keys: KeyDecoder,
-    /// How many bytes at the front of `pending` are a hook's code, which R must receive as a
-    /// chunk of its own: ry's runtime parses a chunk whole, so a syntax error in the typed line
-    /// would otherwise cancel the hook's code too, and shift the line's error position.
-    hook_bytes: usize,
+    /// How many bytes at the front of `pending` are one unit, a hook's code or the input and
+    /// script queued at start-up, which R receives in chunks of its own rather than line by line.
+    /// ry's runtime parses a chunk whole, so a syntax error in the typed line would otherwise
+    /// cancel the hook's code too and shift the line's error position, and a script read whole
+    /// leaves nothing queued for its `readline()` to take.
+    unit_bytes: usize,
     /// End the session (EOF) once `pending` is exhausted instead of prompting.
     batch: bool,
     completer: Option<SharedSessionCompleter>,
@@ -299,7 +304,24 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
         let Some(console) = slot.as_mut() else {
             return 0;
         };
-        while console.pending.is_empty() {
+        // Input for `readline()`, `menu()` or the browser must reach them untouched, and comes
+        // from the console: `pending` holds the rest of a top-level script or paste, which runs
+        // once they return, so it must not answer them.
+        let at_top_level = console.ry_runtime || libr::at_top_level();
+        // Ctrl-C while a command ran flushed the terminal's input, so it cancels the input
+        // this console holds the same way, the rest of a paste included.
+        if !console.piped && take_interrupt(console.ry_runtime) {
+            console.pending.clear();
+            console.unit_bytes = 0;
+            console.typeahead.clear();
+            console.keys.clear();
+        }
+        let mut answer: Option<Vec<u8>> = None;
+        while if at_top_level {
+            console.pending.is_empty()
+        } else {
+            answer.is_none()
+        } {
             if console.batch {
                 return 0;
             }
@@ -311,11 +333,7 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                 true => "+ ".to_owned(),
                 false => unsafe { libr::prompt_text(prompt) },
             };
-            // Input for `readline()`, `menu()` or the browser must reach them untouched.
-            let at_top_level = console.ry_runtime || libr::at_top_level();
             if !console.piped {
-                // Ctrl-C while a command ran flushed the terminal's input, so it cancels the
-                // input this console holds the same way.
                 if take_interrupt(console.ry_runtime) {
                     console.typeahead.clear();
                     console.keys.clear();
@@ -386,7 +404,7 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                         && let Some(hooks) = console.hooks.as_mut()
                         && let Some(code) = hooks.before_command()
                     {
-                        console.hook_bytes = code.len() + 1;
+                        console.unit_bytes = code.len() + 1;
                         console.pending.extend(code.into_bytes());
                         console.pending.push_back(b'\n');
                     }
@@ -396,8 +414,14 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                             .unwrap_or_else(PoisonError::into_inner)
                             .accept(&line);
                     }
-                    console.pending.extend(line.into_bytes());
-                    console.pending.push_back(b'\n');
+                    if at_top_level {
+                        console.pending.extend(line.into_bytes());
+                        console.pending.push_back(b'\n');
+                    } else {
+                        let mut bytes = line.into_bytes();
+                        bytes.push(b'\n');
+                        answer = Some(bytes);
+                    }
                 }
                 Ok(Signal::CtrlC) if console.held => {
                     console.held = false;
@@ -412,19 +436,31 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
         }
         // SAFETY: R's buffer holds `length` bytes, and `capacity` leaves room for the NUL.
         let chunk = unsafe { slice::from_raw_parts_mut(buffer, capacity) };
-        let written = take_chunk(&mut console.pending, &mut console.hook_bytes, chunk);
+        let written = match answer {
+            // R reads an answer as one line, so one longer than its buffer is cut short.
+            Some(answer) => {
+                let written = answer.len().min(chunk.len());
+                chunk[..written].copy_from_slice(&answer[..written]);
+                written
+            }
+            None => take_chunk(&mut console.pending, &mut console.unit_bytes, chunk),
+        };
         unsafe { *buffer.add(written) = 0 };
         1
     }
 }
 
-/// Moves the next chunk of accepted input into `buffer` and returns its length. A hook's code,
-/// the first `hook_bytes` of `pending`, goes in chunks of its own.
-pub fn take_chunk(pending: &mut VecDeque<u8>, hook_bytes: &mut usize, buffer: &mut [u8]) -> usize {
+/// Moves the next chunk of accepted input into `buffer` and returns its length. A unit, the
+/// first `unit_bytes` of `pending`, goes in chunks of its own. Other input goes one line at a
+/// time, as a typed line would: an error makes R discard the rest of its buffer, so a chunk cut
+/// mid-line would leave the next chunk starting with a fragment of a line.
+pub fn take_chunk(pending: &mut VecDeque<u8>, unit_bytes: &mut usize, buffer: &mut [u8]) -> usize {
     let mut written = buffer.len().min(pending.len());
-    if *hook_bytes > 0 {
-        written = written.min(*hook_bytes);
-        *hook_bytes -= written;
+    if *unit_bytes > 0 {
+        written = written.min(*unit_bytes);
+        *unit_bytes -= written;
+    } else if let Some(newline) = pending.range(..written).position(|&byte| byte == b'\n') {
+        written = newline + 1;
     }
     for (slot, byte) in buffer.iter_mut().zip(pending.drain(..written)) {
         *slot = byte;
