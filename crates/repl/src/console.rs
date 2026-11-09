@@ -326,7 +326,8 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
         // this console holds the same way, the rest of a paste included.
         if !console.piped && take_interrupt(console.ry_runtime) {
             // Past the hook's unit, `pending` holds the rest of the last input the filter
-            // released, so its lines are the ones that never ran.
+            // released, so its lines are the ones that never ran. A script queued at start-up
+            // is one unit too, and its interrupted rest is not reported.
             let dropped = console
                 .pending
                 .range(console.unit_bytes.min(console.pending.len())..)

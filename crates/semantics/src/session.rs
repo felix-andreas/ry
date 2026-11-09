@@ -18,7 +18,7 @@ use {
         hir::Symbol,
         item_naming, item_tree, types,
     },
-    rustc_hash::FxHashMap,
+    rustc_hash::{FxHashMap, FxHashSet},
     salsa::Setter,
     std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
@@ -88,7 +88,7 @@ pub fn command_file(db: &RootDatabase, text: String) -> SourceFile {
             0
         }
     };
-    let index = u32::try_from(index).expect("a session holds fewer than u32::MAX commands");
+    let index = command_index(index);
     SourceFile::builder(text, DocumentKind::Script)
         .command(Some(index))
         .new(db)
@@ -184,7 +184,9 @@ pub fn prepare(db: &dyn Db, file: SourceFile) -> Contributions {
 }
 
 /// Adds `file`, which [`command_file`] made last, to the session, and returns the earlier
-/// commands whose function bodies read a name it binds: their checks may change.
+/// commands whose checks may change: those whose function bodies read a name it binds, and,
+/// because a function's type follows from the functions it calls, those whose function bodies
+/// read a name such a command binds, transitively.
 pub fn commit(
     db: &mut RootDatabase,
     file: SourceFile,
@@ -195,15 +197,12 @@ pub fn commit(
     };
     let log = session.log(db).clone();
     let mut log = write(&log);
-    let index =
-        u32::try_from(log.commands.len()).expect("a session holds fewer than u32::MAX commands");
+    let index = command_index(log.commands.len());
     debug_assert_eq!(*file.command(db), Some(index));
-    let mut readers: Vec<u32> = Vec::new();
     let mut changed = Vec::new();
     for &name in &contributions.binds {
         let history = log.names.entry(name).or_default();
         history.binders.push(index);
-        readers.extend(&history.deferred_readers);
         if let Some(latest) = history.latest {
             changed.push(latest);
         }
@@ -224,12 +223,31 @@ pub fn commit(
     if contributions.ry_syntax && log.ry_values_from.is_none() {
         log.ry_values_from = Some(index);
     }
+    let mut queue = contributions.binds.clone();
     log.commands.push(Command {
         file,
         contributions,
     });
+    let mut visited: FxHashSet<Symbol> = FxHashSet::default();
+    let mut readers: Vec<u32> = Vec::new();
+    let mut found: FxHashSet<u32> = FxHashSet::default();
+    while let Some(name) = queue.pop() {
+        if !visited.insert(name) {
+            continue;
+        }
+        let Some(history) = log.names.get(&name) else {
+            continue;
+        };
+        for &reader in &history.deferred_readers {
+            if reader != index && found.insert(reader) {
+                readers.push(reader);
+                if let Some(command) = log.commands.get(reader as usize) {
+                    queue.extend(&command.contributions.binds);
+                }
+            }
+        }
+    }
     readers.sort_unstable();
-    readers.dedup();
     let readers = readers
         .into_iter()
         .filter_map(|reader| {
@@ -257,8 +275,7 @@ pub fn truncate(db: &mut RootDatabase, len: usize) {
         let Some(command) = log.commands.pop() else {
             break;
         };
-        let index = u32::try_from(log.commands.len())
-            .expect("a session holds fewer than u32::MAX commands");
+        let index = command_index(log.commands.len());
         let contributions = command.contributions;
         for name in &contributions.binds {
             if let Some(history) = log.names.get_mut(name) {
@@ -412,6 +429,11 @@ fn last_binder<'db>(db: &'db dyn Db, file: SourceFile, name: Symbol) -> Option<I
         .last()
         .filter(|&&(binder, _, _)| binder == name)
         .map(|&(_, _, item)| item)
+}
+
+/// A session never nears `u32::MAX` commands; the index saturates rather than panics.
+fn command_index(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or(u32::MAX)
 }
 
 fn read(log: &RwLock<Log>) -> RwLockReadGuard<'_, Log> {

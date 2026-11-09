@@ -73,6 +73,8 @@ left, in order of expected gain:
 
 ## Open: console input in ry's runtime
 
+- Ctrl-C during the script `ry run` queues before its console is not reported to the preflight, because the script goes to R as one unit: the console session keeps the bindings of the script's unrun rest.
+- `semantics::session::binder` answers a deferred read of a name without a `SessionBinder` untracked. `prepare` creates binders for the naming sets the checker reads deferred; a checker path asking about another expression (`callee_fallbacks` in `check.rs` is the candidate) would read a stale answer. A `debug_assert!` that a deferred read finds its binder would pin it.
 - Console `scan()` prompts with the running item count (`1: `, `3: `); GNU R's counts records for a
   list `what`. `select.list(graphics = TRUE)` and `.External2(C_selectlist)` still raise the
   non-interactive error.

@@ -40,8 +40,10 @@ pub struct Preflight {
     config: Config,
     /// Names the source of the next command in rendered findings.
     path: Arc<Path>,
-    /// The path each session command was checked under, in session order.
-    command_paths: Vec<Arc<Path>>,
+    /// The path each session command was checked under, in session order, and whether it was
+    /// checked at all: the plain input buffered before analysis and the part of an interrupted
+    /// paste that ran join the session unchecked, so they may hold strict errors already.
+    command_paths: Vec<(Arc<Path>, bool)>,
     /// Accepted plain R typed before the session held anything analysis decides,
     /// newline-terminated. It joins the session as one command once analysis starts, so a long
     /// plain paste never pays for analysis.
@@ -162,9 +164,17 @@ impl Preflight {
         if !refused {
             let len = session::len(&self.db);
             let readers = session::commit(&mut self.db, file, contributions);
-            self.command_paths.push(self.path.clone());
+            self.command_paths.push((self.path.clone(), true));
             // A command that rebinds a name changes the functions earlier commands defined that
             // read it, which can break them in strict mode.
+            let readers: Vec<SourceFile> = readers
+                .into_iter()
+                .filter(|&reader| {
+                    (*reader.command(&self.db))
+                        .and_then(|index| self.command_paths.get(index as usize))
+                        .is_some_and(|&(_, checked)| checked)
+                })
+                .collect();
             if !readers.is_empty() {
                 let db = self.db.clone();
                 let config = &self.config;
@@ -245,7 +255,7 @@ impl Preflight {
                 let path = self
                     .command_paths
                     .last()
-                    .cloned()
+                    .map(|(path, _)| path.clone())
                     .unwrap_or_else(|| self.path.clone());
                 self.truncate(len - 1);
                 // What ran of the command defines what it defines, whether or not it checks.
@@ -273,7 +283,7 @@ impl Preflight {
         let contributions = on_analysis_stack(move || session::prepare(&db, file));
         // The readers a command that already ran breaks are not this command's to refuse.
         session::commit(&mut self.db, file, contributions);
-        self.command_paths.push(path);
+        self.command_paths.push((path, false));
     }
 
     fn truncate(&mut self, len: usize) {
@@ -283,7 +293,9 @@ impl Preflight {
 
     fn command_path(&self, file: SourceFile) -> Option<&Path> {
         let index = (*file.command(&self.db))?;
-        self.command_paths.get(index as usize).map(|path| &**path)
+        self.command_paths
+            .get(index as usize)
+            .map(|(path, _)| &**path)
     }
 }
 

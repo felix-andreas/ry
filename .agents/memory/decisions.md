@@ -3131,7 +3131,8 @@ first lines R had already read, leaving R mid-command.
   every command, so a typed paste of n lines cost O(n²) (1,000 lines took 3.6 s). The session
   text duplicated what had run, and a paste cut short by Ctrl-C stayed in it.
 - Target shape: each accepted command is a `SourceFile` of its own with `command: Some(index)`.
-  An append-only log in a singleton salsa input (`ConsoleSession`) records what each command
+  A log in a singleton salsa input, which grows by `commit` and shrinks from the end by
+  `truncate`, (`ConsoleSession`) records what each command
   binds, declares and defines, its `# typing:` directive and whether it used ry syntax. Name
   resolution, type definitions, the typing mode and "holds ry values" fall back to the log for
   commands before the reader. Those reads are untracked on purpose: they only look at smaller
@@ -3139,7 +3140,10 @@ first lines R had already read, leaving R mid-command.
 - The exception is a read inside a function body, which sees the latest binder, as R's global
   environment does. It goes through a `SessionBinder` salsa input per name, created when a
   command first reads the name that way. `commit` sets it and returns the earlier commands that
-  read the name, which strict mode rechecks; a strict error there refuses the new command, and
+  read the name, and transitively those whose function bodies read a name such a reader binds,
+  because a caller's type follows its callee's. Strict mode rechecks the ones that passed a check
+  when they joined (input that joined unchecked may hold old errors); a strict error there
+  refuses the new command, and
   `truncate` undoes the commit. Tracking immediate reads too would make each rebinding
   invalidate a chain of earlier commands and bring the quadratic cost back.
 - The command files are not in `ProjectFiles`: a project-wide fold over them would cost

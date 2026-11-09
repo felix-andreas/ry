@@ -136,7 +136,7 @@ impl Parse {
 pub fn erase_inline_annotations(parse: &Parse) -> String {
     let root = parse.syntax_node();
     let mut out = String::with_capacity(usize::from(root.text_range().len()));
-    erase_with(parse, |text, _| {
+    erase_with(parse, |text, _, _| {
         out.push_str(text);
         true
     });
@@ -152,14 +152,14 @@ pub fn erased_lines_end(parse: &Parse, lines: usize) -> TextSize {
     if remaining == 0 {
         return end;
     }
-    erase_with(parse, |text, source| {
+    erase_with(parse, |text, source, verbatim| {
         let newlines = text.matches('\n').count();
         if newlines < remaining {
             remaining -= newlines;
             end = source.end();
             return true;
         }
-        end = match source.len() == TextSize::of(text) {
+        end = match verbatim {
             // Copied verbatim, so the line ends right after the `remaining`th newline.
             true => text
                 .match_indices('\n')
@@ -175,8 +175,9 @@ pub fn erased_lines_end(parse: &Parse, lines: usize) -> TextSize {
 }
 
 /// Walks the program [`erase_inline_annotations`] writes, handing `emit` each piece with the
-/// source range it stands for, until `emit` returns false.
-fn erase_with(parse: &Parse, mut emit: impl FnMut(&str, TextRange) -> bool) {
+/// source range it stands for and whether it is that source copied as written, until `emit`
+/// returns false.
+fn erase_with(parse: &Parse, mut emit: impl FnMut(&str, TextRange, bool) -> bool) {
     let root = parse.syntax_node();
     let mut preorder = root.preorder_with_tokens();
     while let Some(event) = preorder.next() {
@@ -184,18 +185,18 @@ fn erase_with(parse: &Parse, mut emit: impl FnMut(&str, TextRange) -> bool) {
             continue;
         };
         let more = match element {
-            NodeOrToken::Token(token) => emit(token.text(), token.text_range()),
+            NodeOrToken::Token(token) => emit(token.text(), token.text_range(), true),
             NodeOrToken::Node(node) if node.kind() == SyntaxKind::TYPE_DEFINITION => {
                 preorder.skip_subtree();
                 // A paired definition already has its comment spelling right above it.
                 match paired_comment_definition(&node) {
-                    Some(_) => emit("", node.text_range()),
-                    None => emit(&type_definition_comment(&node), node.text_range()),
+                    Some(_) => emit("", node.text_range(), false),
+                    None => emit(&type_definition_comment(&node), node.text_range(), false),
                 }
             }
             NodeOrToken::Node(node) if is_inline_annotation(&node) => {
                 preorder.skip_subtree();
-                emit("", node.text_range())
+                emit("", node.text_range(), false)
             }
             NodeOrToken::Node(_) => true,
         };

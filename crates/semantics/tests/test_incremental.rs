@@ -1053,11 +1053,13 @@ fn a_console_command_reads_the_interface_of_the_commands_before_it() {
     // Only a function body sees a later binder, so an immediate read is no reader of `x`.
     let (_, readers) = run_command(&mut db, "z: integer <- x\n");
     assert!(readers.is_empty());
+    // A function calling `f` changes type with it, so it is a reader too.
+    let (caller, _) = run_command(&mut db, "g <- function() -> integer f()\n");
     let (_, readers) = run_command(&mut db, "x <- \"a\"\n");
-    assert_eq!(readers, [reader]);
+    assert_eq!(readers, [reader, caller]);
     assert_eq!(command_codes(&db, reader), ["type-mismatch"]);
 
-    session::truncate(&mut db, 3);
-    assert_eq!(session::len(&db), 3);
+    session::truncate(&mut db, 4);
+    assert_eq!(session::len(&db), 4);
     assert_eq!(command_codes(&db, reader), Vec::<&str>::new());
 }
