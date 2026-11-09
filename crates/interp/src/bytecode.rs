@@ -188,8 +188,8 @@ pub fn set_tier(tier: Option<Tier>) {
     interp().bytecode.tier = tier;
 }
 
-pub fn tier() -> Option<Tier> {
-    interp().bytecode.tier
+pub fn tier() -> Option<&'static Tier> {
+    interp().bytecode.tier.as_ref()
 }
 
 /// The address of register `index` of the file. Valid while the window that holds it exists.
@@ -3584,7 +3584,7 @@ pub fn recording_start(threshold: i32) -> i32 {
 #[inline(never)]
 unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExit> {
     let constants = machine.code.cdr();
-    let Some(tier) = interp().bytecode.tier else {
+    let Some(tier) = tier() else {
         let profile = values::ints_mut(constants.element(PROFILE));
         profile[profile::RECORDING] = 0;
         // Code that ran without a tier asks again now and then, so a tier installed later still
@@ -4123,8 +4123,8 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
     if target < at {
         if let Err(unwind) = crate::unwind::poll_interrupt() {
             pc = failed::<SINGLE>(state, at, unwind);
-        } else if let Some(tier) = (*state.interp).bytecode.tier {
-            match back_edge(state, &tier, pc) {
+        } else if let Some(tier) = &(*state.interp).bytecode.tier {
+            match back_edge(state, tier, pc) {
                 BackEdge::Continue(resume) => pc = resume,
                 BackEdge::Finished(result) => {
                     state.exit = result;
@@ -4160,8 +4160,8 @@ unsafe extern "C" fn step_jump(state: *mut std::ffi::c_void, at: usize) -> usize
         if target < at {
             if let Err(unwind) = crate::unwind::poll_interrupt() {
                 pc = failed::<false>(state, at, unwind);
-            } else if let Some(tier) = (*state.interp).bytecode.tier {
-                match back_edge(state, &tier, pc) {
+            } else if let Some(tier) = &(*state.interp).bytecode.tier {
+                match back_edge(state, tier, pc) {
                     BackEdge::Continue(resume) => pc = resume,
                     BackEdge::Finished(result) => {
                         state.exit = result;
