@@ -386,12 +386,10 @@ unsafe fn do_parent_frame(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_environment(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(0);
     match function.kind() {
-        SexpType::Nil => {
-            match call.frame_index() {
-                Some(index) => crate::eval::frame_sys_parent(index),
-                None => Ok(global_env()),
-            }
-        }
+        SexpType::Nil => match call.frame_index() {
+            Some(index) => crate::eval::frame_sys_parent(index),
+            None => Ok(global_env()),
+        },
         SexpType::Closure => Ok(function.tag()),
         SexpType::Builtin | SexpType::Special => Ok(nil()),
         _ => {

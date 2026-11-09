@@ -50,8 +50,9 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
-        bytecode, interp,
+        bytecode,
         image::ImageFile,
+        interp,
         serialize::{
             self, CodeInput, SourceNumbers, Unencodable, decode_code, encode_code, walk_source,
             write_varint,
@@ -507,7 +508,9 @@ unsafe fn attach_native(image: &Image, entry: usize, database: &str, closures: &
             let section = usize::try_from(offset)
                 .ok()
                 .zip(usize::try_from(length).ok())
-                .and_then(|(start, length)| image.file.bytes().get(start..start.checked_add(length)?));
+                .and_then(|(start, length)| {
+                    image.file.bytes().get(start..start.checked_add(length)?)
+                });
             let loaded = match section {
                 Some(section) => (hooks.load)(&image.path, offset, section),
                 None => Err("the native section lies outside the file".to_owned()),
@@ -550,7 +553,10 @@ fn payload(image: &Image, entry: usize) -> Result<(usize, &[u8]), String> {
 unsafe fn decode_pending(pending: &Pending, body: Sexp) -> Result<Sexp, String> {
     let image = &*pending.image;
     let entry = pending.entry as usize;
-    let word = image.verified.get(entry / 64).ok_or("a record is missing")?;
+    let word = image
+        .verified
+        .get(entry / 64)
+        .ok_or("a record is missing")?;
     let bit = 1u64 << (entry % 64);
     if word.get() & bit == 0 {
         let (_, bytes) = payload(image, entry)?;
@@ -741,7 +747,9 @@ unsafe fn do_write(call: &Call<'_>) -> R<Sexp> {
     let explain = values::as_logical_scalar(call.arg(1)) == 1;
     let state = &mut interp().code_image;
     if state.build.is_empty() {
-        return Err(error("this runtime has no build identity to stamp images with"));
+        return Err(error(
+            "this runtime has no build identity to stamp images with",
+        ));
     }
     let Some(recording) = state.recording.take() else {
         return Err(error("no fetches were recorded"));
@@ -771,7 +779,11 @@ unsafe fn do_write(call: &Call<'_>) -> R<Sexp> {
         .collect();
     let counts = values::integer_vector(&counts)?;
     crate::heap().root(counts);
-    values::set_attr(counts, values::symbols().names, values::string_vector(&names)?)?;
+    values::set_attr(
+        counts,
+        values::symbols().names,
+        values::string_vector(&names)?,
+    )?;
     Ok(counts)
 }
 

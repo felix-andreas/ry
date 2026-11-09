@@ -51,7 +51,11 @@ pub const BUILTINS: &[BuiltinDef] = &[
             if !plain || value.length() > i32::MAX as isize {
                 return Ok(None);
             }
-            let count = if value == nil() { 0 } else { value.length() as i32 };
+            let count = if value == nil() {
+                0
+            } else {
+                value.length() as i32
+            };
             scalar_integer(count).map(Some)
         }),
     builtin("length<-", 2, do_set_length).generic(Generic::Internal),
@@ -1692,7 +1696,8 @@ unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
                 value: values::scalar_string_charsxp(symbol.car())?,
             },
         ];
-        if let Some(value) = crate::dispatch::dispatch_builtin("@", call.call, &args, call.env()?)? {
+        if let Some(value) = crate::dispatch::dispatch_builtin("@", call.call, &args, call.env()?)?
+        {
             return Ok(value);
         }
     }
@@ -1901,7 +1906,8 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
                 value,
             },
         ];
-        if let Some(result) = crate::dispatch::dispatch_builtin("@<-", call.call, &args, call.env()?)?
+        if let Some(result) =
+            crate::dispatch::dispatch_builtin("@<-", call.call, &args, call.env()?)?
         {
             return Ok(result);
         }
@@ -2934,7 +2940,8 @@ unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
                 value,
             },
         ];
-        if let Some(result) = crate::dispatch::dispatch_builtin("$<-", call.call, &args, call.env()?)?
+        if let Some(result) =
+            crate::dispatch::dispatch_builtin("$<-", call.call, &args, call.env()?)?
         {
             return Ok(result);
         }

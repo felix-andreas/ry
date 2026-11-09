@@ -550,7 +550,11 @@ unsafe fn slot_names(body: Sexp) -> Option<Vec<Sexp>> {
         return None;
     }
     let names = table.element(1);
-    Some((0..length(names)).map(|index| names.element(index)).collect())
+    Some(
+        (0..length(names))
+            .map(|index| names.element(index))
+            .collect(),
+    )
 }
 
 /// Whether a call's argument becomes a promise of compiled code: a call, not a symbol or a
@@ -983,10 +987,7 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
             formals.push(formal.tag());
             formal = formal.cdr();
         }
-        if formals.len() <= MAX_SLOT_FORMALS
-            && !formals.contains(&symbols().dots)
-            && !crate::base_fast_paths::has_prologue(body)
-        {
+        if formals.len() <= MAX_SLOT_FORMALS && !crate::base_fast_paths::has_prologue(body) {
             compiler.slot_formals = Some(formals);
         }
     }
@@ -1707,7 +1708,8 @@ impl Compiler {
         let mut table = vec![-1i32; self.caches as usize];
         let mut pc = 0;
         while pc < self.code.len() {
-            let op = op_of(self.code[pc]).ok_or_else(|| error("compiled an invalid instruction"))?;
+            let op =
+                op_of(self.code[pc]).ok_or_else(|| error("compiled an invalid instruction"))?;
             let symbol_and_cache = match op {
                 Op::GetVar | Op::GetFun => Some((self.code[pc + 2], self.code[pc + 3])),
                 Op::SetVar => Some((self.code[pc + 1], self.code[pc + 3])),
@@ -3358,7 +3360,16 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::Closure => &[Register, Formals, Constant, Constant],
         Op::SubAssign => &[Register, Symbol, Register, Register, Call, Immediate],
         Op::SubAssignMatrix => &[Register, Symbol, Register, Register, Register, Call],
-        Op::Replace => &[Register, Symbol, Symbol, Cache, Call, Base, CountAtLeastOne, Call],
+        Op::Replace => &[
+            Register,
+            Symbol,
+            Symbol,
+            Cache,
+            Call,
+            Base,
+            CountAtLeastOne,
+            Call,
+        ],
         Op::SetSrcref => &[Constant, Immediate],
         Op::EndStatement => &[Register, Base, Base],
         Op::BranchUnlessPrimitive => &[Register, Constant, Target],
@@ -3461,9 +3472,8 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
     if words.is_empty() {
         return Err("empty code".to_owned());
     }
-    let is_start = |target: usize| {
-        target < words.len() && starts[target / 64] & (1 << (target % 64)) != 0
-    };
+    let is_start =
+        |target: usize| target < words.len() && starts[target / 64] & (1 << (target % 64)) != 0;
     let loop_table = values::ints(constants.element(LOOPS));
     for entry in loop_table.as_chunks::<4>().0 {
         let [start, end, exit, step] = entry.map(|word| word as usize);
@@ -3563,7 +3573,9 @@ unsafe fn valid_switch_table(table: Sexp) -> bool {
     let arms = length(numbers) as i64;
     // A name's arm indexes the numbers directly, while a negative position arm is an error
     // `switch_arm` raises before indexing.
-    values::ints(name_arms).iter().all(|&arm| (0..arms).contains(&i64::from(arm)))
+    values::ints(name_arms)
+        .iter()
+        .all(|&arm| (0..arms).contains(&i64::from(arm)))
         && values::ints(position_arms)
             .iter()
             .all(|&arm| (-1..arms).contains(&i64::from(arm)))
@@ -4381,7 +4393,13 @@ unsafe fn op_get_var(state: &mut Activation<'_, '_>, instruction: Instruction) -
     let value = if state.in_slots() {
         slot_variable(state, symbol, instruction.operand(2), held)?
     } else {
-        lookup_variable(symbol, *state.header, state.cache, instruction.operand(2), held)?
+        lookup_variable(
+            symbol,
+            *state.header,
+            state.cache,
+            instruction.operand(2),
+            held,
+        )?
     };
     state.record(instruction.at, value);
     instruction.output(0, value);
@@ -4451,7 +4469,13 @@ unsafe fn slot_variable(
             return Ok(value);
         }
     }
-    lookup_outside(symbol, state.machine.function.tag(), state.cache, cache, held)
+    lookup_outside(
+        symbol,
+        state.machine.function.tag(),
+        state.cache,
+        cache,
+        held,
+    )
 }
 
 /// [`lookup_function`] in a slot frame: the slot's value when it is a function, and otherwise
@@ -4618,6 +4642,11 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         && let Some(value) = slot_substitute(state, function, call)?
     {
         value
+    } else if state.in_slots()
+        && function.kind() == SexpType::Builtin
+        && let Some(value) = slot_builtin_call(state, call, function)?
+    {
+        value
     } else {
         // A special reads its arguments as expressions, so they stay uncompiled.
         eval::apply_call(call, function, call.cdr(), state.env()?)?
@@ -4735,6 +4764,128 @@ unsafe fn slot_substitute(
     Ok(Some(result))
 }
 
+/// A builtin call from a slot frame whose arguments the slots answer: `...`, a constant, or a
+/// local whose slot holds a value or a promise. `list(...)` and `c(x, ...)` then leave the frame
+/// without an environment. `None` when an argument needs one, or when forcing an argument gave
+/// the frame its environment, in which case the generic path evaluates the arguments again from
+/// it (the promises it meets are forced already, so nothing runs twice).
+unsafe fn slot_builtin_call(
+    state: &Activation<'_, '_>,
+    call: Sexp,
+    function: Sexp,
+) -> R<Option<Sexp>> {
+    let dots = symbols().dots;
+    let missing = missing_arg();
+    let mut cell = call.cdr();
+    while cell.kind() == SexpType::Pairlist {
+        let expression = cell.car();
+        let fits = match expression.kind() {
+            _ if expression == missing => true,
+            SexpType::Symbol if expression == dots => slot_named(state, dots).is_some(),
+            SexpType::Symbol => {
+                eval::dot_dot_index(expression).is_none()
+                    && slot_named(state, expression).is_some_and(|slot| {
+                        let value = *slot;
+                        value != missing && value != unbound()
+                    })
+            }
+            SexpType::Language | SexpType::Promise | SexpType::Bytecode | SexpType::Dots => false,
+            _ => true,
+        };
+        if !fits {
+            return Ok(None);
+        }
+        cell = cell.cdr();
+    }
+    let definition = eval::builtin_def(function)?;
+    let mut args = eval::Args::new();
+    let collected = slot_builtin_args(state, call, definition.keep_missing, &mut args);
+    // As in `eval::evaluate_args`, each value counts as referenced only while the later
+    // arguments evaluate.
+    for arg in &args {
+        arg.value.decrement_refcount();
+    }
+    collected?;
+    if !state.in_slots() {
+        return Ok(None);
+    }
+    // Dispatch reads the caller's environment, which only an object argument can lead to.
+    let env = if definition.generic != Generic::None && args.iter().any(|arg| arg.value.is_object())
+    {
+        state.env()?
+    } else {
+        nil()
+    };
+    if definition.generic != Generic::None
+        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
+    {
+        return Ok(Some(value));
+    }
+    call_builtin(definition, call, function, &args, env).map(Some)
+}
+
+/// The values of [`slot_builtin_call`]'s arguments, each counted as referenced and rooted.
+unsafe fn slot_builtin_args(
+    state: &Activation<'_, '_>,
+    call: Sexp,
+    keep_missing: bool,
+    args: &mut eval::Args,
+) -> R<()> {
+    let dots = symbols().dots;
+    let missing = missing_arg();
+    let heap = crate::heap();
+    let mut push = |args: &mut eval::Args, tag: Sexp, item: Sexp| -> R<()> {
+        let value = if item == missing {
+            if !keep_missing {
+                return Err(error_in(
+                    call,
+                    format!("argument {} is empty", args.len() + 1),
+                ));
+            }
+            missing
+        } else {
+            eval::value_of(item)?
+        };
+        heap.root(value);
+        value.increment_refcount();
+        args.push(Arg { tag, value });
+        Ok(())
+    };
+    let mut cell = call.cdr();
+    while cell.kind() == SexpType::Pairlist {
+        let expression = cell.car();
+        if expression == dots {
+            activity::count(Counter::DotsCalls);
+            let Some(slot) = slot_named(state, dots) else {
+                panic!("a slot frame lost the `...` slot it was checked to have");
+            };
+            let mut item = *slot;
+            if item.kind() != SexpType::Dots && item != missing && item != unbound() {
+                return Err(error("'...' used in an incorrect context"));
+            }
+            while item.kind() == SexpType::Dots {
+                push(args, item.tag(), item.car())?;
+                if !state.in_slots() {
+                    return Ok(());
+                }
+                item = item.cdr();
+            }
+        } else if expression.kind() == SexpType::Symbol && expression != missing {
+            let Some(slot) = slot_named(state, expression) else {
+                panic!("a slot frame lost a slot it was checked to have");
+            };
+            push(args, cell.tag(), *slot)?;
+        } else {
+            push(args, cell.tag(), expression)?;
+        }
+        if !state.in_slots() {
+            return Ok(());
+        }
+        cell = cell.cdr();
+    }
+    Ok(())
+}
+
 /// The arguments of a closure call made from a slot frame that has no environment: constants as
 /// themselves and, for an `eager` call (see [`eval::eager_args_into`]), variables as their
 /// values. `false` when an argument needs a promise over the frame, and with it the frame's
@@ -4751,12 +4902,17 @@ unsafe fn slot_args_into(
         let expression = cell.car();
         let value = match expression.kind() {
             _ if expression == missing => expression,
-            SexpType::Symbol if eager && expression != symbols().dots => {
-                match slot_eager_argument(state, expression) {
-                    Some(value) => value,
-                    None => return Ok(false),
+            SexpType::Symbol if expression == symbols().dots => {
+                if !slot_dots_into(state, args) {
+                    return Ok(false);
                 }
+                cell = cell.cdr();
+                continue;
             }
+            SexpType::Symbol if eager => match slot_eager_argument(state, expression) {
+                Some(value) => value,
+                None => return Ok(false),
+            },
             SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode => {
                 return Ok(false);
             }
@@ -4772,9 +4928,10 @@ unsafe fn slot_args_into(
 }
 
 /// [`slot_args_into`] for a call whose arguments need promises: a name or compiled code
-/// becomes a promise over the frame's slots ([`eval::slot_promise`]). `false`, with `args`
-/// cleared, when an argument needs the frame's environment itself: `...`, code that was not
-/// compiled, or code that uses a local the frame keeps in no slot.
+/// becomes a promise over the frame's slots ([`eval::slot_promise`]), and `...` passes on what
+/// it collected. `false`, with `args` cleared, when an argument needs the frame's environment
+/// itself: `..N`, code that was not compiled, or code that uses a local the frame keeps in no
+/// slot.
 unsafe fn slot_promises_into(
     state: &Activation<'_, '_>,
     arguments: Sexp,
@@ -4786,9 +4943,10 @@ unsafe fn slot_promises_into(
     while cell.kind() == SexpType::Pairlist {
         let expression = cell.car();
         let fits = match expression.kind() {
-            SexpType::Symbol => {
-                expression != symbols().dots && eval::dot_dot_index(expression).is_none()
+            SexpType::Symbol if expression == symbols().dots => {
+                slot_named(state, expression).is_some_and(|slot| forwardable_dots(*slot))
             }
+            SexpType::Symbol => eval::dot_dot_index(expression).is_none(),
             SexpType::Bytecode => expression.cdr().element(SLOTS) != nil(),
             SexpType::Language | SexpType::Promise => false,
             _ => true,
@@ -4805,6 +4963,11 @@ unsafe fn slot_promises_into(
         let expression = cell.car();
         let value = match expression.kind() {
             _ if expression == missing => expression,
+            SexpType::Symbol if expression == symbols().dots => {
+                slot_dots_into(state, args);
+                cell = cell.cdr();
+                continue;
+            }
             SexpType::Symbol => match eager.then(|| slot_eager_argument(state, expression)) {
                 Some(Some(value)) => value,
                 _ => eval::slot_promise(owner, expression)?,
@@ -4819,6 +4982,34 @@ unsafe fn slot_promises_into(
         cell = cell.cdr();
     }
     Ok(true)
+}
+
+/// Whether a `...` slot holding `value` passes on as it is: the arguments it collected, or
+/// none. Anything else is the error a heap frame reports.
+unsafe fn forwardable_dots(value: Sexp) -> bool {
+    value.kind() == SexpType::Dots || value == missing_arg() || value == unbound()
+}
+
+/// Appends the arguments the slot frame's `...` collected, which are its caller's promises and
+/// values and pass on unchanged, so forwarding `...` never needs the frame's environment.
+/// `false`, appending nothing, when the frame has no `...` slot or it holds something else.
+unsafe fn slot_dots_into(state: &Activation<'_, '_>, args: &mut eval::Args) -> bool {
+    let Some(slot) = slot_named(state, symbols().dots) else {
+        return false;
+    };
+    let mut item = *slot;
+    if !forwardable_dots(item) {
+        return false;
+    }
+    activity::count(Counter::DotsCalls);
+    while item.kind() == SexpType::Dots {
+        args.push(Arg {
+            tag: item.tag(),
+            value: item.car(),
+        });
+        item = item.cdr();
+    }
+    true
 }
 
 /// [`effects::eager_argument`] in a slot frame: the slot's value when `symbol` has a bound
@@ -5050,10 +5241,13 @@ unsafe fn slot_missing(state: &Activation<'_, '_>, symbol: Sexp) -> R<bool> {
     if state.in_slots() && symbol != missing_arg() {
         let names = state.constants.element(SLOTS).element(1);
         let formals = length(state.machine.function.car());
-        if let Some(position) = (0..formals.min(length(names))).find(|&index| names.element(index) == symbol)
+        if let Some(position) =
+            (0..formals.min(length(names))).find(|&index| names.element(index) == symbol)
         {
             let owner = (*state.interp).slot_owner as usize;
-            let missing = (&(*state.interp).frames).get(owner).map_or(0, |frame| frame.missing);
+            let missing = (&(*state.interp).frames)
+                .get(owner)
+                .map_or(0, |frame| frame.missing);
             if missing & (1 << position) != 0 {
                 return Ok(true);
             }
@@ -5202,12 +5396,10 @@ unsafe fn op_for_step(state: &mut Activation<'_, '_>, instruction: Instruction) 
     loop_state.index += 1;
     let current = match slot {
         Some(slot) => Some(*slot),
-        None => {
-            crate::heap()
-                .frame_cell(env, variable)
-                .filter(|cell| !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED))
-                .map(|cell| cell.cdr())
-        }
+        None => crate::heap()
+            .frame_cell(env, variable)
+            .filter(|cell| !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED))
+            .map(|cell| cell.cdr()),
     };
     if current.is_some_and(|value| overwrite_loop_variable(sequence, index, value)) {
         return Ok(Flow::Next);
@@ -5791,7 +5983,8 @@ unsafe fn call_builtin(
         } else {
             env
         };
-        if let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, args, env)? {
+        if let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, args, env)?
+        {
             return Ok(value);
         }
     }
@@ -5853,10 +6046,12 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
             Arith::Greater => comparison((!na).then_some(a > b)),
             Arith::LessEqual => comparison((!na).then_some(a <= b)),
             Arith::GreaterEqual => comparison((!na).then_some(a >= b)),
-            Arith::Modulo => Ok(Some(values::scalar_integer(crate::arith::integer_modulo(a, b))?)),
-            Arith::IntegerDivide => {
-                Ok(Some(values::scalar_integer(crate::arith::integer_divide(a, b))?))
-            }
+            Arith::Modulo => Ok(Some(values::scalar_integer(crate::arith::integer_modulo(
+                a, b,
+            ))?)),
+            Arith::IntegerDivide => Ok(Some(values::scalar_integer(
+                crate::arith::integer_divide(a, b),
+            )?)),
             _ => Ok(None),
         };
     }

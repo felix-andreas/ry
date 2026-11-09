@@ -740,7 +740,14 @@ unsafe fn invoke(call: &Call<'_>, callback: Callback, arguments: &[Sexp]) -> R<S
             let form = values::pairlist(&items, SexpType::Language)?;
             crate::heap().root(form);
             let env = eval::bind_arguments(form, function, &arguments, None)?;
-            eval::run_closure(form, function, env, call.env()?, &arguments, Entry::Unchecked)
+            eval::run_closure(
+                form,
+                function,
+                env,
+                call.env()?,
+                &arguments,
+                Entry::Unchecked,
+            )
         }
         _ => {
             crate::moves::calling_back(callback.function)?;

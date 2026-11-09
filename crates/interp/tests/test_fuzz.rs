@@ -21,8 +21,7 @@ use {
         lower,
         testing::{
             check_bytecode_agreement, check_code_image_file, check_code_image_load,
-            check_code_image_round_trip,
-            check_lowering_input, check_render_drawing,
+            check_code_image_round_trip, check_lowering_input, check_render_drawing,
             check_unserialize_input, with_interpreter,
         },
         values,
@@ -127,7 +126,9 @@ fn fuzz_bytecode_agrees_with_the_ast_evaluator() {
 
 #[test]
 fn fuzz_code_image_round_trip() {
-    for_each_seed(150, |seed| check_code_image_round_trip(&mut SplitMix64(seed)));
+    for_each_seed(150, |seed| {
+        check_code_image_round_trip(&mut SplitMix64(seed))
+    });
 }
 
 #[test]

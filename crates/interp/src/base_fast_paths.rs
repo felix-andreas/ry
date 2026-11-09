@@ -118,7 +118,9 @@ pub unsafe fn has_prologue(body: Sexp) -> bool {
     let inner = first.cdr().car();
     inner.kind() == SexpType::Language
         && inner.car().kind() == SexpType::Symbol
-        && BUILTINS.iter().any(|def| def.name == crate::values::symbol_name(inner.car()))
+        && BUILTINS
+            .iter()
+            .any(|def| def.name == crate::values::symbol_name(inner.car()))
 }
 
 /// The native code for a whole call of a base closure: the result, or `None` when the closure

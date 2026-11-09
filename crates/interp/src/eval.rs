@@ -386,7 +386,11 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
 #[cold]
 #[inline(never)]
 unsafe fn force_slot_promise(promise: Sexp, env: Sexp) -> R<Sexp> {
-    let Some(owner) = interp().frames.iter().rposition(|frame| frame.pending == env) else {
+    let Some(owner) = interp()
+        .frames
+        .iter()
+        .rposition(|frame| frame.pending == env)
+    else {
         panic!("a promise names the pending environment of a frame that has returned");
     };
     let value = slot_promise_value(promise, owner)?;
@@ -457,7 +461,11 @@ pub unsafe fn resolved_env(env: Sexp) -> R<Sexp> {
     if !env.has_gp(gp::PENDING_FRAME) {
         return Ok(env);
     }
-    let Some(owner) = interp().frames.iter().rposition(|frame| frame.pending == env) else {
+    let Some(owner) = interp()
+        .frames
+        .iter()
+        .rposition(|frame| frame.pending == env)
+    else {
         panic!("a promise names the pending environment of a frame that has returned");
     };
     frame_env(owner)
@@ -1416,7 +1424,8 @@ pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<SmallVec<[i
     let mut formal = formals;
     for &source in &sources {
         let default = formal.car();
-        if source < 0 && !(default == missing_value || default == nil() || default.kind().is_atomic())
+        if source < 0
+            && !(default == missing_value || default == nil() || default.kind().is_atomic())
         {
             return Ok(None);
         }
@@ -1593,11 +1602,13 @@ unsafe fn check_reified(index: usize, env: Sexp, bindings: &[Formal]) {
     let heap = crate::heap();
     for binding in bindings {
         let Some(cell) = heap.frame_cell(env, binding.symbol) else {
-            panic!("frame {index}: a reified slot frame lost formal {:?}", values::symbol_name(binding.symbol));
+            panic!(
+                "frame {index}: a reified slot frame lost formal {:?}",
+                values::symbol_name(binding.symbol)
+            );
         };
         assert!(
-            cell.cdr() == binding.value
-                && cell.has_gp(gp::BINDING_MISSING) == binding.missing,
+            cell.cdr() == binding.value && cell.has_gp(gp::BINDING_MISSING) == binding.missing,
             "frame {index}: a reified slot frame binds formal {:?} differently",
             values::symbol_name(binding.symbol)
         );
@@ -3358,11 +3369,9 @@ unsafe fn do_invisible(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_nargs(call: &Call<'_>) -> R<Sexp> {
     let state = interp();
-    let count = call
-        .frame_index()
-        .map_or(NA_INTEGER, |index| {
-            crate::frame_args(state, index).len() as i32
-        });
+    let count = call.frame_index().map_or(NA_INTEGER, |index| {
+        crate::frame_args(state, index).len() as i32
+    });
     // Outside any closure, such as at top level, GNU R finds no call to count and answers NA.
     values::scalar_integer(count)
 }

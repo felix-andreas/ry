@@ -727,11 +727,7 @@ unsafe fn caller_call(call: &Call<'_>) -> Sexp {
 
 unsafe fn do_stop(call: &Call<'_>) -> R<Sexp> {
     let use_call = values::as_logical_scalar(call.arg(0)) != 0;
-    let condition_call = if use_call {
-        caller_call(call)
-    } else {
-        nil()
-    };
+    let condition_call = if use_call { caller_call(call) } else { nil() };
     let message = if length(call.arg(1)) > 0 {
         string_at(call.arg(1), 0)
             .map(|text| text.into_owned())
@@ -748,11 +744,7 @@ unsafe fn do_stop(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_warning(call: &Call<'_>) -> R<Sexp> {
     let use_call = values::as_logical_scalar(call.arg(0)) != 0;
     let immediate = values::as_logical_scalar(call.arg(1)) == 1;
-    let condition_call = if use_call {
-        caller_call(call)
-    } else {
-        nil()
-    };
+    let condition_call = if use_call { caller_call(call) } else { nil() };
     let message = if length(call.arg(3)) > 0 {
         string_at(call.arg(3), 0)
             .map(|text| text.into_owned())
