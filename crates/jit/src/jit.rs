@@ -574,9 +574,11 @@ unsafe fn compile_in<'a>(
         heap.release_handles(mark);
         let pointer = built.map_err(|_| Refusal("out of memory"))?;
         heap.set_element(machine.code.cdr(), TIER1, pointer);
-        // A deoptimized activation finishes in tier 0, and what it records is the profile the
-        // next compile reads.
-        values::ints_mut(machine.code.cdr().element(PROFILE))[profile::RECORDING] = 1;
+        // Optimized code records nothing, and tier 0 stops too: only a recompile reads the
+        // feedback, and discarding the code turns recording back on before that.
+        let counters = values::ints_mut(machine.code.cdr().element(PROFILE));
+        counters[profile::RECORDING] = 0;
+        counters[profile::NEXT] = i32::MIN;
         Ok(&*(pointer.external_address() as *const Compiled))
     }
 }
