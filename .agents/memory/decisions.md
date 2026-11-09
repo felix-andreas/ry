@@ -8211,3 +8211,10 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Recording window.** Entry recording covers the last eighth of the entry threshold (`bytecode::recording_start`), not half of it: on the testthat workload 96 bodies started recording at half the threshold and 57 of them never reached it, so they recorded for the rest of the run. A body waiting to compile because of its size (`SIZE_WAITED`) stops recording until its counter re-enters the window. Loops still record from half the back-edge threshold.
 - **Impact** (callgrind, testthat workload, JIT on minus JIT off on the same build): 60.0M on main, 20.1M with this change; `RY_JIT_THRESHOLDS=0,0,0` minus off went from 29.3M to 2.2M. JIT off itself runs 7.7M fewer instructions, and `functional` with the JIT on 52M fewer. Most of the remaining gap is the plans and Cranelift work for one compile and 38 refusals.
 
+
+## Single-core speed first; per-process costs count once per worker
+
+- **Context.** The target users run their test suites in parallel across processes (one R process per worker) and are CPU bound, so all cores are already busy.
+- **Decision.** Single-core speed is the goal. Automatic parallelism (row (b) in `r-runtime.md`) is deferred: threads inside one worker would compete with the other workers for the same cores.
+- **Metrics.** The primary metric for every runtime track is the testthat workload (`tools/bench/real/testthat.R`) under callgrind. `just bench-real` comes second. Work on the native execution model also reports `just bench-real --public all` (awfy, shootout, rcp), because scalar loops are where FastR and Ř are ahead.
+- **Per-process costs.** Every cost paid per process is paid once per worker: JIT warm-up and compile time, package loading, resident memory and cache pressure. So package code should run from install-time compiled code (read-only pages shared between workers, no warm-up) rather than code compiled at run time, and per-worker resident memory is a metric that must not regress.
