@@ -1115,6 +1115,92 @@ pub const COLD: &str = "the body has no type feedback yet";
 /// bodies ever get.
 pub const NOTHING_NATIVE: &str = "compiled code would run nothing natively";
 
+/// The refusal for a body without a loop none of whose instructions compiled code could ever
+/// run natively, whatever types the profile records. Unlike [`NOTHING_NATIVE`] it is final, and
+/// it is decided before the body records anything.
+pub const NEVER_NATIVE: &str = "no instruction of the body could run natively";
+
+/// Whether some profile could make [`Plan::runs_natively`] true for `code`, judged from the
+/// instructions alone: a loop, or an instruction the plan may turn into native work. A call of a
+/// builtin counts when it names one the plan has a native form for; a builtin reached through
+/// another name is missed, which costs only the compiled code, not correctness.
+pub unsafe fn may_run_natively(code: Sexp) -> bool {
+    let words = values::ints(code.car());
+    let constants = code.cdr();
+    if values::length(constants.element(bytecode::LOOPS)) > 0 {
+        return true;
+    }
+    let mut pc = 0;
+    while pc < words.len() {
+        let Some(op) = bytecode::op_of(words[pc] as u32) else {
+            return true;
+        };
+        let count = operand_count(op);
+        let Some(operands) = words.get(pc + 1..pc + 1 + count) else {
+            return true;
+        };
+        let operand = |index: usize| operands[index] as usize;
+        let native = match op {
+            Op::Arithmetic
+            | Op::LogicLeft
+            | Op::LogicRight
+            | Op::SubAssign
+            | Op::SubAssignMatrix
+            | Op::CallGeneric
+            | Op::CallRebinding
+            | Op::Field
+            | Op::Item
+            | Op::Slot
+            | Op::ForInit
+            | Op::ForStep
+            | Op::ForEnd => true,
+            Op::Jump => operand(0) <= pc,
+            Op::CallBuiltin => {
+                let function = constants.element(operand(2)).car();
+                function.kind() != SexpType::Symbol || {
+                    let name = values::symbol_name(function);
+                    name == "[" || Traversal::of(&name).is_some() || has_intrinsic(&name)
+                }
+            }
+            Op::Constant
+            | Op::GetVar
+            | Op::SetVar
+            | Op::GetFun
+            | Op::BranchUnlessBuiltin
+            | Op::BranchUnlessPrimitive
+            | Op::BranchIfObject
+            | Op::Ast
+            | Op::Guard
+            | Op::JumpUnless
+            | Op::Return
+            | Op::Invisible
+            | Op::Visible
+            | Op::Closure
+            | Op::DispatchSubject
+            | Op::EndStatement
+            | Op::CallTailUpdate
+            | Op::MatchShape
+            | Op::MatchTag
+            | Op::MatchLiteral
+            | Op::MatchFail
+            | Op::Construct
+            | Op::Move
+            | Op::BoundEval
+            | Op::MatchCondition
+            | Op::SwitchArm
+            | Op::Replace
+            | Op::Missing
+            | Op::SetSrcref
+            | Op::Resume => false,
+        };
+        if native {
+            return true;
+        }
+        pc += 1 + count;
+    }
+    false
+}
+
 impl Plan<'_> {
     /// Whether compiled code would do some of the body's work itself: a loop, or arithmetic,
     /// a comparison, an intrinsic, an element assignment, `&&` or `||`, or a call it inlines or
@@ -1150,7 +1236,6 @@ fn native(action: &Action<'_>) -> bool {
     matches!(
         action,
         Action::Inline { .. }
-            | Action::Srcref(_)
             | Action::Traverse { .. }
             | Action::Call { .. }
             | Action::NativeCall { .. }
@@ -3633,6 +3718,9 @@ pub(crate) unsafe fn constant_type(value: Sexp) -> Ty {
 
 /// The intrinsic for a call of builtin `name` with arguments of these types, and its result.
 fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
+    if !has_intrinsic(name) {
+        return None;
+    }
     let numeric = |ty: Ty| {
         if ty == Ty::Dbl {
             Numeric::Dbl
@@ -3735,6 +3823,36 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
         }
         _ => return None,
     })
+}
+
+/// Whether [`intrinsic_for`] has an intrinsic for builtin `name` given some argument types. It
+/// gates that function, so the two cannot disagree.
+fn has_intrinsic(name: &str) -> bool {
+    matches!(
+        name,
+        "Dict.len"
+            | "Set.len"
+            | "Dict.is_empty"
+            | "Set.is_empty"
+            | "Dict.contains"
+            | "Set.contains"
+            | "Dict.get"
+            | "["
+            | "[["
+            | "length"
+            | "List.len"
+            | "-"
+            | "!"
+            | "is.na"
+            | "sqrt"
+            | "exp"
+            | "log"
+            | "abs"
+            | "floor"
+            | "ceiling"
+            | "%%"
+            | "%/%"
+    )
 }
 
 /// The type a base builtin returns for plain arguments of these types, for a call that has not

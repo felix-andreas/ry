@@ -1001,6 +1001,42 @@ fn formal_shadows_enclosing_function() {
 }
 
 #[test]
+fn a_body_that_could_run_nothing_natively_never_records() {
+    // `is.null` has no native form, so whatever its profile, compiled code for `wrap` would hand
+    // its only call back to tier 0. It is refused when its recording window would open, and
+    // never records; `twice` does arithmetic, so it records and then compiles.
+    with_interpreter(|| unsafe {
+        use interp::bytecode::{PROFILE, profile};
+        jit::install_mode(Mode::On);
+        let threshold = interp::bytecode::tier().map_or(0, |tier| tier.entry_threshold);
+        let window = interp::bytecode::recording_start(threshold);
+        let profile_of = |name: &str| {
+            let function = values::install(name)
+                .and_then(|symbol| eval::eval(symbol, values::global_env()))
+                .unwrap_or_else(|_| panic!("{name} is not defined"));
+            let code = function.cdr();
+            assert_eq!(
+                code.kind(),
+                heap::object::SexpType::Bytecode,
+                "{name} has no byte code"
+            );
+            values::ints(code.cdr().element(PROFILE)).to_vec()
+        };
+        run("wrap <- function(x) is.null(x)\ntwice <- function(x) x * 2");
+        let ran = run(&format!("for (i in 1:{}) {{ wrap(i); twice(i) }}", window + 1));
+        assert_eq!(ran, "NULL");
+        let (wrap, twice) = (profile_of("wrap"), profile_of("twice"));
+        assert_eq!(wrap[profile::TIER_STATE], -1, "wrap was not refused: {wrap:?} {twice:?} {window}");
+        assert_eq!(wrap[profile::RECORDING], 0, "wrap records");
+        assert_eq!(twice[profile::RECORDING], 1, "twice does not record");
+        run(&format!("for (i in 1:{threshold}) {{ wrap(i); twice(i) }}"));
+        assert!(has_compiled_code("twice"), "twice did not compile");
+        assert!(!has_compiled_code("wrap"), "wrap compiled");
+        jit::install_mode(Mode::Off);
+    });
+}
+
+#[test]
 fn fully_typed_closure_compiles_at_its_first_call() {
     // The signature stands in for the profile, so a first call runs compiled code: a typed
     // scalar function runs as a native function from its first call, whose values fix the

@@ -139,6 +139,10 @@ pub struct Tier {
     pub enter: unsafe fn(&mut Machine<'_>) -> Option<TierExit>,
     /// Entries after which a body without optimized code asks [`Tier::enter`] to compile it.
     pub entry_threshold: i32,
+    /// Called when a body without optimized code reaches the entry that starts its recording
+    /// window. Returns `false` to skip recording because the body will never compile, in which
+    /// case it also marks the body refused.
+    pub worth_recording: unsafe fn(&Machine<'_>) -> bool,
     /// Called on a backward jump to `target` once the code's back-edge counter crosses
     /// [`Tier::back_edge_threshold`]. Returns `None` to keep interpreting at `target`.
     pub back_edge: unsafe fn(&mut Machine<'_>, target: usize) -> Option<TierExit>,
@@ -3592,7 +3596,8 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
     let optimized = constants.element(TIER1) != nil();
     if !optimized {
         if entries == recording_start(tier.entry_threshold) && profile[profile::TIER_STATE] >= 0 {
-            profile[profile::RECORDING] = 1;
+            let worth = (tier.worth_recording)(machine);
+            values::ints_mut(constants.element(PROFILE))[profile::RECORDING] = i32::from(worth);
         } else if entries == 2 && entries < recording_start(tier.entry_threshold) {
             profile[profile::RECORDING] = 0;
         }

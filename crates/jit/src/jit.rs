@@ -131,6 +131,7 @@ pub fn install_mode(mode: Mode) {
     bytecode::set_tier(Some(Tier {
         enter,
         entry_threshold: entries,
+        worth_recording,
         back_edge,
         back_edge_threshold: back_edges,
         baseline: baseline::compile,
@@ -166,6 +167,25 @@ unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
             compiled_for(machine, false, false)?
         };
         run(machine, compiled, 0)
+    }
+}
+
+/// Refuses a body for good, before it records, when no profile could give its compiled code
+/// anything to run natively. Forced compilation keeps such bodies, as [`compile_in`] does.
+unsafe fn worth_recording(machine: &Machine<'_>) -> bool {
+    unsafe {
+        if MODE.with(Cell::get) == Mode::Force || analysis::may_run_natively(machine.code) {
+            return true;
+        }
+        if logging() {
+            eprintln!(
+                "jit: not recording {}: {}",
+                describe(machine.code),
+                analysis::NEVER_NATIVE
+            );
+        }
+        values::ints_mut(machine.code.cdr().element(PROFILE))[profile::TIER_STATE] = -1;
+        false
     }
 }
 
@@ -424,6 +444,10 @@ unsafe fn compile_in<'a>(
 ) -> Result<&'a Compiled, Refusal> {
     unsafe {
         let enclosure = machine.env.enclosure();
+        let forced = MODE.with(Cell::get) == Mode::Force;
+        if !forced && !analysis::may_run_natively(machine.code) {
+            return Err(Refusal(analysis::NEVER_NATIVE));
+        }
         let started = Instant::now();
         let plan = analysis::plan(
             analysis::Arena(arena),
@@ -435,7 +459,7 @@ unsafe fn compile_in<'a>(
         let planned = started.elapsed();
         // Forced compilation keeps such bodies, so the differential tests cover the code that
         // glues tier 0's steps together.
-        if MODE.with(Cell::get) != Mode::Force {
+        if !forced {
             if !plan.runs_natively() {
                 return Err(Refusal(analysis::NOTHING_NATIVE));
             }
