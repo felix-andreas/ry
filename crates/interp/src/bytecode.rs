@@ -139,6 +139,10 @@ pub struct Tier {
     pub enter: unsafe fn(&mut Machine<'_>) -> Option<TierExit>,
     /// Entries after which a body without optimized code asks [`Tier::enter`] to compile it.
     pub entry_threshold: i32,
+    /// Called when a body without optimized code reaches the entry that starts its recording
+    /// window. Returns `false` to skip recording because the body will never compile, in which
+    /// case it also marks the body refused.
+    pub worth_recording: unsafe fn(&Machine<'_>) -> bool,
     /// Called on a backward jump to `target` once the code's back-edge counter crosses
     /// [`Tier::back_edge_threshold`]. Returns `None` to keep interpreting at `target`.
     pub back_edge: unsafe fn(&mut Machine<'_>, target: usize) -> Option<TierExit>,
@@ -184,8 +188,8 @@ pub fn set_tier(tier: Option<Tier>) {
     interp().bytecode.tier = tier;
 }
 
-pub fn tier() -> Option<Tier> {
-    interp().bytecode.tier
+pub fn tier() -> Option<&'static Tier> {
+    interp().bytecode.tier.as_ref()
 }
 
 /// The address of register `index` of the file. Valid while the window that holds it exists.
@@ -397,7 +401,11 @@ pub mod profile {
     /// of them, which cost about 30 instructions per call of every body. Whatever changes a
     /// count or a state those decisions read outside an entry sets this to `i32::MIN`.
     pub const NEXT: usize = 4;
-    pub const LENGTH: usize = 5;
+    /// The session's allocation clock ([`heap::Heap::allocated_ever`], in KiB, wrapping) when the
+    /// recording window opened, which the optimizing tier reads to estimate how often the body
+    /// runs.
+    pub const WINDOW: usize = 5;
+    pub const LENGTH: usize = 6;
     /// The counters a code image keeps. The next event is derived from them when it is read.
     pub const SERIALIZED: usize = 4;
 }
@@ -3580,7 +3588,7 @@ pub fn recording_start(threshold: i32) -> i32 {
 #[inline(never)]
 unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExit> {
     let constants = machine.code.cdr();
-    let Some(tier) = interp().bytecode.tier else {
+    let Some(tier) = tier() else {
         let profile = values::ints_mut(constants.element(PROFILE));
         profile[profile::RECORDING] = 0;
         // Code that ran without a tier asks again now and then, so a tier installed later still
@@ -3592,7 +3600,8 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
     let optimized = constants.element(TIER1) != nil();
     if !optimized {
         if entries == recording_start(tier.entry_threshold) && profile[profile::TIER_STATE] >= 0 {
-            profile[profile::RECORDING] = 1;
+            let worth = (tier.worth_recording)(machine);
+            values::ints_mut(constants.element(PROFILE))[profile::RECORDING] = i32::from(worth);
         } else if entries == 2 && entries < recording_start(tier.entry_threshold) {
             profile[profile::RECORDING] = 0;
         }
@@ -4118,8 +4127,8 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
     if target < at {
         if let Err(unwind) = crate::unwind::poll_interrupt() {
             pc = failed::<SINGLE>(state, at, unwind);
-        } else if let Some(tier) = (*state.interp).bytecode.tier {
-            match back_edge(state, &tier, pc) {
+        } else if let Some(tier) = &(*state.interp).bytecode.tier {
+            match back_edge(state, tier, pc) {
                 BackEdge::Continue(resume) => pc = resume,
                 BackEdge::Finished(result) => {
                     state.exit = result;
@@ -4155,8 +4164,8 @@ unsafe extern "C" fn step_jump(state: *mut std::ffi::c_void, at: usize) -> usize
         if target < at {
             if let Err(unwind) = crate::unwind::poll_interrupt() {
                 pc = failed::<false>(state, at, unwind);
-            } else if let Some(tier) = (*state.interp).bytecode.tier {
-                match back_edge(state, &tier, pc) {
+            } else if let Some(tier) = &(*state.interp).bytecode.tier {
+                match back_edge(state, tier, pc) {
                     BackEdge::Continue(resume) => pc = resume,
                     BackEdge::Finished(result) => {
                         state.exit = result;

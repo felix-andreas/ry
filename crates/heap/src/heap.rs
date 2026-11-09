@@ -139,6 +139,9 @@ pub struct Heap {
     /// Bytes of large vectors allocated since the last collection, kept apart from
     /// `young_bytes` because they have their own budget.
     young_large_bytes: usize,
+    /// Bytes allocated before the last collection, so that with the young bytes they count
+    /// every byte the session allocated: the clock [`Heap::allocated_ever`] reads.
+    retired_bytes: u64,
     /// Bytes of old small objects and of old large vectors, apart because the nursery's budget
     /// scales with the first alone.
     old_small_bytes: usize,
@@ -655,6 +658,7 @@ impl Heap {
             young_bytes: 0,
             small_trigger: 0,
             young_large_bytes: 0,
+            retired_bytes: 0,
             old_small_bytes: 0,
             old_large_bytes: 0,
             stats: GcStats::default(),
@@ -689,6 +693,12 @@ impl Heap {
     /// occupies now, which the two collection limits bound together.
     pub fn allocated_bytes(&self) -> usize {
         self.old_bytes() + self.young_bytes + self.young_large_bytes
+    }
+
+    /// Every byte allocated since the heap was created. Interpreted R allocates as it works, so
+    /// this serves as a deterministic clock of how much the session has done.
+    pub fn allocated_ever(&self) -> u64 {
+        self.retired_bytes + (self.young_bytes + self.young_large_bytes) as u64
     }
 
     fn old_bytes(&self) -> usize {
@@ -2928,6 +2938,7 @@ impl Heap {
             // tenured parents of the survivors it aged only to the younger old generation.
             Collection::Intermediate | Collection::Major => {}
         }
+        self.retired_bytes += (self.young_bytes + self.young_large_bytes) as u64;
         self.young_bytes = 0;
         self.young_large_bytes = 0;
         self.refresh_small_trigger();
@@ -3347,6 +3358,7 @@ impl Heap {
         for parent in self.remembered.drain(..) {
             parent.set_gc_bit(gc_bits::REMEMBERED, false);
         }
+        self.retired_bytes += (self.young_bytes + self.young_large_bytes) as u64;
         self.young_bytes = 0;
         self.young_large_bytes = 0;
         self.refresh_small_trigger();
