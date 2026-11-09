@@ -49,11 +49,6 @@ The quality bar is four things.
 - **Mutual recursion caches a refusal.** A typed closure that calls one still being compiled refuses, and the refusal is remembered, so mutually recursive typed functions always take the native path.
 - **Names a branch creates.** A name set in only one branch, or with different types in the two, is out of scope after the `if`, so reading it refuses; a loop body's names are out of scope after the loop. Local functions defined or rebound in a branch or loop refuse.
 
-## Open: the `perf/cheap-promises` branch, stopped before its pull request
-
-- The branch holds the call-setup trims, the namespace-load GC deferral and the faster lazy-load reader, with main merged in (`decisions.md`, "Cheap promises: measured, not redesigned"). Before main was merged in, the oracle passed 282 of 283; `system__os_version` fails on main too.
-- Left: rebuild and rerun the oracle on the merged branch; run `bench-real` against main (the measuring host has no GNU R, so stub `Rscript`, set `R_LIBS` to a library holding the workloads' packages, and build the baseline with `RY_EMBED_BASE=target/base-r`); open the pull request.
-
 ## Open: two Renviron readers
 
 - ry has two Renviron readers, the interpreter's startup one in `crates/interp/src/session.rs` and `rcmd::command_environment`. The interpreter's lets an already-set variable win, which differs from GNU R's `process_Renviron` (a file line always overrides). Merge them into one reader with GNU R's semantics.
