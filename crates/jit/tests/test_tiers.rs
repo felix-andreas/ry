@@ -1235,8 +1235,8 @@ fn fuzz_argument_expressions_agree_with_tier_zero() {
     // A native call evaluates a pure argument expression before the call instead of building
     // its promise. Random expressions over constants, variables, `NA`, integer overflow, a
     // classed value and a shadowed operator must give the same value, warnings and errors as
-    // tier 0. The JIT calls only a typed closure natively, so `nf` is typed, and each argument is
-    // multiplied by 1, still a pure expression, so that it reaches `nf` as a double.
+    // tier 0. The JIT calls only a typed closure natively, so `nf` is typed; an argument that
+    // evaluates to a logical or an integer reaches it as one, which is how `NA` meets `NaN`.
     with_interpreter(|| unsafe {
         run("nf <- function(x: double, y: double) -> double x * 2 + y
              big <- 2147483647L
@@ -1246,8 +1246,8 @@ fn fuzz_argument_expressions_agree_with_tier_zero() {
              Ops.tagged <- function(e1, e2) 99");
         for_each_seed(300, |seed| {
             let mut rng = SplitMix64(seed);
-            let first = format!("({}) * 1", argument_expression(&mut rng, 0));
-            let second = format!("({}) * 1", argument_expression(&mut rng, 0));
+            let first = argument_expression(&mut rng, 0);
+            let second = argument_expression(&mut rng, 0);
             let shadow = if rng.chance(1, 8) {
                 "`-` <- function(e1, e2) 42\n"
             } else {
