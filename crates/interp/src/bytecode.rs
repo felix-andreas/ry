@@ -3581,7 +3581,7 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
 
 unsafe fn execute_code(machine: &mut Machine<'_>, pc: usize) -> R<Sexp> {
     let _activity = activity::enter(Activity::Interpreter, 0);
-    interpret(machine, pc)
+    interpret::<false>(machine, pc)
 }
 
 /// Where interpretation continues after the instruction at `pc` unwound: the loop target of a
@@ -3621,20 +3621,8 @@ unsafe fn loop_target(loops: Sexp, pc: usize, is_break: bool) -> Option<usize> {
 
 /// Runs the one instruction at `pc` for the optimizing tier, which calls it for instructions it
 /// does not specialize. It must not be a jump, a branch, `Return` or a loop instruction.
-///
-/// It runs the same step baseline code calls, so the instructions the optimizing tier hands back
-/// share one copy of their handler with the baseline tier. The step releases what it rooted
-/// down to the handle mark at entry, which is where the caller's own scope would release it.
 pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<()> {
-    let mut state = activation(machine, true);
-    let answer = BASELINE_STEPS[op_index(state.code, pc)]((&raw mut state).cast(), pc);
-    if let Some(payload) = PARKED_PANIC.take() {
-        std::panic::resume_unwind(payload);
-    }
-    if answer == STOP {
-        return state.exit.map(|_| ());
-    }
-    Ok(())
+    interpret::<true>(machine, pc).map(|_| ())
 }
 
 /// What `GetVar` at `pc` reads, and whether the binding is in the activation's own frame.
@@ -3674,9 +3662,6 @@ struct Activation<'m, 'a> {
     registers: *mut Sexp,
     /// What the activation returns once a handler stops the chain by answering [`STOP`].
     exit: R<Sexp>,
-    /// Whether this activation runs one instruction for the optimizing tier, which takes a
-    /// failure back itself instead of resuming at a loop target of this activation.
-    single: bool,
 }
 
 impl Activation<'_, '_> {
@@ -3746,21 +3731,10 @@ enum Flow {
 /// around each dispatch. A handler that calls out keeps its own frame only for that call.
 type Handler = unsafe fn(&mut Activation<'_, '_>, usize);
 
-/// Interprets `machine`'s code from `pc` until it returns.
+/// Interprets `machine`'s code from `pc` until it returns, or, when `SINGLE`, runs the one
+/// instruction at `pc`.
 #[inline(always)]
-unsafe fn interpret(machine: &mut Machine<'_>, pc: usize) -> R<Sexp> {
-    let mut state = activation(machine, false);
-    release(&state);
-    if let Some(baseline) = baseline_code(state.constants) {
-        run_baseline(&mut state, baseline, pc);
-        return state.exit;
-    }
-    (*RUN_HANDLERS.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
-    state.exit
-}
-
-#[inline(always)]
-unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>, single: bool) -> Activation<'m, 'a> {
+unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) -> R<Sexp> {
     let constants = machine.code.cdr();
     let feedback = if interp().bytecode.tier.is_some()
         && values::ints(constants.element(PROFILE))[profile::RECORDING] != 0
@@ -3769,20 +3743,35 @@ unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>, single: bool) -> Acti
     } else {
         std::ptr::null_mut()
     };
-    Activation {
+    let code = values::ints(machine.code.car()).as_ptr();
+    let registers = register_address(machine.base);
+    let mut state = Activation {
         constants,
         cache: LookupCache::of(machine.code),
         feedback,
         env: machine.env,
-        mark: if single { crate::heap().handle_mark() } else { machine.mark },
+        mark: machine.mark,
         heap: crate::heap(),
         interp: interp(),
-        code: values::ints(machine.code.car()).as_ptr(),
-        registers: register_address(machine.base),
+        code,
+        registers,
         exit: Ok(nil()),
-        single,
         machine,
+    };
+    let handlers = if SINGLE {
+        &STEP_HANDLERS
+    } else {
+        &RUN_HANDLERS
+    };
+    if !SINGLE {
+        release(&state);
+        if let Some(baseline) = baseline_code(constants) {
+            run_baseline(&mut state, baseline, pc);
+            return state.exit;
+        }
     }
+    (*handlers.as_ptr().add(op_index(code, pc)))(&mut state, pc);
+    state.exit
 }
 
 /// The machine code the baseline tier compiled for these constants' code, if any.
@@ -3910,31 +3899,20 @@ const STOP: usize = usize::MAX;
 /// activation's result in [`Activation::exit`], so that few values stay live across the calls
 /// an instruction makes. A failure goes to [`failed`].
 macro_rules! handlers {
-    ($($name:ident, $exec:ident, $step:ident: $op:ident, $roots:literal, $body:ident, $placement:meta;)*) => {
+    ($($name:ident, $step:ident: $op:ident, $roots:literal, $body:ident;)*) => {
         $(
-            #[$placement]
-            unsafe fn $exec(state: &mut Activation<'_, '_>, at: usize) -> usize {
-                let instruction = Instruction { code: state.code, at, registers: state.registers };
-                let flow = $body(state, instruction);
-                let pc = advance(state, at, at + 1 + operand_count(Op::$op), flow);
-                if $roots && pc != STOP {
-                    release(state);
-                }
-                pc
-            }
-
             unsafe extern "C" fn $step(state: *mut std::ffi::c_void, at: usize) -> usize {
                 guarded(state, at, |state, at| {
-                    baseline_answer($exec(state, at), at + 1 + operand_count(Op::$op))
+                    let instruction =
+                        Instruction { code: state.code, at, registers: state.registers };
+                    let flow = $body(state, instruction);
+                    let next = at + 1 + operand_count(Op::$op);
+                    let pc = advance::<false>(state, at, next, flow);
+                    if $roots && pc != STOP {
+                        release(state);
+                    }
+                    baseline_answer(pc, next)
                 })
-            }
-
-            unsafe fn $name(state: &mut Activation<'_, '_>, at: usize) {
-                let pc = $exec(state, at);
-                if pc == STOP {
-                    return;
-                }
-                become (*RUN_HANDLERS.as_ptr().add(op_index(state.code, pc)))(state, pc)
             }
         )*
 
@@ -3945,16 +3923,31 @@ macro_rules! handlers {
             table
         };
 
-        static RUN_HANDLERS: [Handler; OPS.len()] = {
-            let mut table: [Handler; OPS.len()] = [jump; OPS.len()];
-            $(table[Op::$op as usize] = $name;)*
+        $(
+            unsafe fn $name<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
+                let instruction = Instruction { code: state.code, at, registers: state.registers };
+                let flow = $body(state, instruction);
+                let pc = advance::<SINGLE>(state, at, at + 1 + operand_count(Op::$op), flow);
+                if SINGLE || pc == STOP {
+                    return;
+                }
+                if $roots {
+                    release(state);
+                }
+                become (*RUN_HANDLERS.as_ptr().add(op_index(state.code, pc)))(state, pc)
+            }
+        )*
+
+        const fn handler_table<const SINGLE: bool>() -> [Handler; OPS.len()] {
+            let mut table: [Handler; OPS.len()] = [jump::<SINGLE>; OPS.len()];
+            $(table[Op::$op as usize] = $name::<SINGLE>;)*
             table
-        };
+        }
     };
 }
 
 #[inline(always)]
-unsafe fn advance(
+unsafe fn advance<const SINGLE: bool>(
     state: &mut Activation<'_, '_>,
     at: usize,
     next: usize,
@@ -3967,7 +3960,7 @@ unsafe fn advance(
             state.exit = Ok(value);
             STOP
         }
-        Err(unwind) => failed(state, at, unwind),
+        Err(unwind) => failed::<SINGLE>(state, at, unwind),
     }
 }
 
@@ -3975,12 +3968,12 @@ unsafe fn advance(
 /// activation (see [`continue_after`]), or stops with the failure.
 #[cold]
 #[inline(never)]
-unsafe fn failed(
+unsafe fn failed<const SINGLE: bool>(
     state: &mut Activation<'_, '_>,
     at: usize,
     unwind: Unwind,
 ) -> usize {
-    let resumed = if state.single {
+    let resumed = if SINGLE {
         Err(unwind)
     } else {
         continue_after(state.machine, at, unwind)
@@ -3994,63 +3987,65 @@ unsafe fn failed(
     }
 }
 
+static RUN_HANDLERS: [Handler; OPS.len()] = handler_table::<false>();
+static STEP_HANDLERS: [Handler; OPS.len()] = handler_table::<true>();
 
 handlers! {
-    run_constant, exec_constant, step_constant: Constant, false, op_constant, inline(always);
-    run_get_var, exec_get_var, step_get_var: GetVar, true, op_get_var, inline(always);
-    run_set_var, exec_set_var, step_set_var: SetVar, true, op_set_var, inline(always);
-    run_get_fun, exec_get_fun, step_get_fun: GetFun, true, op_get_fun, inline(never);
-    run_branch_unless_builtin, exec_branch_unless_builtin, step_branch_unless_builtin: BranchUnlessBuiltin, false, op_branch_unless_builtin, inline(always);
-    run_call_builtin, exec_call_builtin, step_call_builtin: CallBuiltin, true, op_call_builtin, inline(never);
-    run_call_generic, exec_call_generic, step_call_generic: CallGeneric, true, op_call_generic, inline(never);
-    run_call_rebinding, exec_call_rebinding, step_call_rebinding: CallRebinding, true, op_call_rebinding, inline(never);
-    run_call_tail_update, exec_call_tail_update, step_call_tail_update: CallTailUpdate, true, op_call_tail_update, inline(never);
-    run_field, exec_field, step_field: Field, true, op_field, inline(never);
-    run_item, exec_item, step_item: Item, true, op_item, inline(never);
-    run_match_shape, exec_match_shape, step_match_shape: MatchShape, false, op_match_shape, inline(never);
-    run_match_tag, exec_match_tag, step_match_tag: MatchTag, false, op_match_tag, inline(never);
-    run_match_literal, exec_match_literal, step_match_literal: MatchLiteral, true, op_match_literal, inline(never);
-    run_slot, exec_slot, step_slot: Slot, true, op_slot, inline(never);
-    run_match_fail, exec_match_fail, step_match_fail: MatchFail, true, op_match_fail, inline(never);
-    run_construct, exec_construct, step_construct: Construct, true, op_construct, inline(never);
-    run_move, exec_move, step_move: Move, false, op_move, inline(always);
-    run_switch_arm, exec_switch_arm, step_switch_arm: SwitchArm, true, op_switch_arm, inline(never);
-    run_bound_eval, exec_bound_eval, step_bound_eval: BoundEval, true, op_bound_eval, inline(never);
-    run_match_condition, exec_match_condition, step_match_condition: MatchCondition, true, op_match_condition, inline(never);
-    run_branch_unless_primitive, exec_branch_unless_primitive, step_branch_unless_primitive: BranchUnlessPrimitive, false, op_branch_unless_primitive, inline(always);
-    run_branch_if_object, exec_branch_if_object, step_branch_if_object: BranchIfObject, false, op_branch_if_object, inline(always);
-    run_dispatch_subject, exec_dispatch_subject, step_dispatch_subject: DispatchSubject, true, op_dispatch_subject, inline(never);
-    run_ast, exec_ast, step_ast: Ast, true, op_ast, inline(never);
-    run_guard, exec_guard, step_guard: Guard, true, op_guard, inline(never);
-    run_resume, exec_resume, step_resume: Resume, false, op_resume, inline(never);
-    run_jump_unless, exec_jump_unless, step_jump_unless: JumpUnless, true, op_jump_unless, inline(always);
-    run_arithmetic, exec_arithmetic, step_arithmetic: Arithmetic, true, op_arithmetic, inline(always);
-    run_return, exec_return, step_return: Return, false, op_return, inline(always);
-    run_for_init, exec_for_init, step_for_init: ForInit, true, op_for_init, inline(never);
-    run_for_step, exec_for_step, step_for_step: ForStep, true, op_for_step, inline(always);
-    run_for_end, exec_for_end, step_for_end: ForEnd, false, op_for_end, inline(always);
-    run_invisible, exec_invisible, step_invisible: Invisible, false, op_invisible, inline(always);
-    run_visible, exec_visible, step_visible: Visible, false, op_visible, inline(always);
-    run_set_srcref, exec_set_srcref, step_set_srcref: SetSrcref, true, op_set_srcref, inline(always);
-    run_end_statement, exec_end_statement, step_end_statement: EndStatement, false, op_end_statement, inline(always);
-    run_logic_left, exec_logic_left, step_logic_left: LogicLeft, true, op_logic_left, inline(always);
-    run_logic_right, exec_logic_right, step_logic_right: LogicRight, true, op_logic_right, inline(always);
-    run_closure, exec_closure, step_closure: Closure, true, op_closure, inline(never);
-    run_sub_assign, exec_sub_assign, step_sub_assign: SubAssign, true, op_sub_assign, inline(never);
-    run_sub_assign_matrix, exec_sub_assign_matrix, step_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix, inline(never);
-    run_replace, exec_replace, step_replace: Replace, true, op_replace, inline(never);
-    run_missing, exec_missing, step_missing: Missing, true, op_missing, inline(never);
+    run_constant, step_constant: Constant, false, op_constant;
+    run_get_var, step_get_var: GetVar, true, op_get_var;
+    run_set_var, step_set_var: SetVar, true, op_set_var;
+    run_get_fun, step_get_fun: GetFun, true, op_get_fun;
+    run_branch_unless_builtin, step_branch_unless_builtin: BranchUnlessBuiltin, false, op_branch_unless_builtin;
+    run_call_builtin, step_call_builtin: CallBuiltin, true, op_call_builtin;
+    run_call_generic, step_call_generic: CallGeneric, true, op_call_generic;
+    run_call_rebinding, step_call_rebinding: CallRebinding, true, op_call_rebinding;
+    run_call_tail_update, step_call_tail_update: CallTailUpdate, true, op_call_tail_update;
+    run_field, step_field: Field, true, op_field;
+    run_item, step_item: Item, true, op_item;
+    run_match_shape, step_match_shape: MatchShape, false, op_match_shape;
+    run_match_tag, step_match_tag: MatchTag, false, op_match_tag;
+    run_match_literal, step_match_literal: MatchLiteral, true, op_match_literal;
+    run_slot, step_slot: Slot, true, op_slot;
+    run_match_fail, step_match_fail: MatchFail, true, op_match_fail;
+    run_construct, step_construct: Construct, true, op_construct;
+    run_move, step_move: Move, false, op_move;
+    run_switch_arm, step_switch_arm: SwitchArm, true, op_switch_arm;
+    run_bound_eval, step_bound_eval: BoundEval, true, op_bound_eval;
+    run_match_condition, step_match_condition: MatchCondition, true, op_match_condition;
+    run_branch_unless_primitive, step_branch_unless_primitive: BranchUnlessPrimitive, false, op_branch_unless_primitive;
+    run_branch_if_object, step_branch_if_object: BranchIfObject, false, op_branch_if_object;
+    run_dispatch_subject, step_dispatch_subject: DispatchSubject, true, op_dispatch_subject;
+    run_ast, step_ast: Ast, true, op_ast;
+    run_guard, step_guard: Guard, true, op_guard;
+    run_resume, step_resume: Resume, false, op_resume;
+    run_jump_unless, step_jump_unless: JumpUnless, true, op_jump_unless;
+    run_arithmetic, step_arithmetic: Arithmetic, true, op_arithmetic;
+    run_return, step_return: Return, false, op_return;
+    run_for_init, step_for_init: ForInit, true, op_for_init;
+    run_for_step, step_for_step: ForStep, true, op_for_step;
+    run_for_end, step_for_end: ForEnd, false, op_for_end;
+    run_invisible, step_invisible: Invisible, false, op_invisible;
+    run_visible, step_visible: Visible, false, op_visible;
+    run_set_srcref, step_set_srcref: SetSrcref, true, op_set_srcref;
+    run_end_statement, step_end_statement: EndStatement, false, op_end_statement;
+    run_logic_left, step_logic_left: LogicLeft, true, op_logic_left;
+    run_logic_right, step_logic_right: LogicRight, true, op_logic_right;
+    run_closure, step_closure: Closure, true, op_closure;
+    run_sub_assign, step_sub_assign: SubAssign, true, op_sub_assign;
+    run_sub_assign_matrix, step_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
+    run_replace, step_replace: Replace, true, op_replace;
+    run_missing, step_missing: Missing, true, op_missing;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
 /// optimizing tier can take over at a back edge and hand back an unwind from a later position.
 /// It also fills the table slots of the ops listed in `handlers!` before they are overwritten.
-unsafe fn jump(state: &mut Activation<'_, '_>, at: usize) {
+unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
     let target = *state.code.add(at + 1) as usize;
     let mut pc = target;
     if target < at {
         if let Err(unwind) = crate::unwind::poll_interrupt() {
-            pc = failed(state, at, unwind);
+            pc = failed::<SINGLE>(state, at, unwind);
         } else if let Some(tier) = (*state.interp).bytecode.tier {
             match back_edge(state, &tier, pc) {
                 BackEdge::Continue(resume) => pc = resume,
@@ -4059,12 +4054,12 @@ unsafe fn jump(state: &mut Activation<'_, '_>, at: usize) {
                     return;
                 }
                 BackEdge::Unwound { pc: resume, unwind } => {
-                    pc = failed(state, resume, unwind);
+                    pc = failed::<SINGLE>(state, resume, unwind);
                 }
             }
         }
     }
-    if pc == STOP {
+    if SINGLE || pc == STOP {
         return;
     }
     release(state);
@@ -4087,7 +4082,7 @@ unsafe extern "C" fn step_jump(state: *mut std::ffi::c_void, at: usize) -> usize
         let mut pc = target;
         if target < at {
             if let Err(unwind) = crate::unwind::poll_interrupt() {
-                pc = failed(state, at, unwind);
+                pc = failed::<false>(state, at, unwind);
             } else if let Some(tier) = (*state.interp).bytecode.tier {
                 match back_edge(state, &tier, pc) {
                     BackEdge::Continue(resume) => pc = resume,
@@ -4096,7 +4091,7 @@ unsafe extern "C" fn step_jump(state: *mut std::ffi::c_void, at: usize) -> usize
                         return STOP;
                     }
                     BackEdge::Unwound { pc: resume, unwind } => {
-                        pc = failed(state, resume, unwind);
+                        pc = failed::<false>(state, resume, unwind);
                     }
                 }
             }
