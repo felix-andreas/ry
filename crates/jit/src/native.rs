@@ -3039,19 +3039,6 @@ impl Emitter {
                 _ => {}
             }
         }
-        // When an integer or logical `NA` meets a `NaN`, whether tier 0 gives `NA` or `NaN`
-        // depends on the operand order its compiled kernel picked for that operator (`NaN + NA`
-        // is `NA` but `NaN - NA` is `NaN`), which native code cannot reproduce, so it fails over.
-        if (a == Ty::Dbl) != (b == Ty::Dbl) {
-            let (integer, double) = if a == Ty::Dbl { (y, x) } else { (x, y) };
-            let missing = self
-                .builder
-                .ins()
-                .icmp_imm_s(IntCC::Equal, integer, NA_INTEGER as i64);
-            let not_a_number = self.builder.ins().fcmp(FloatCC::Unordered, double, double);
-            let both = self.builder.ins().band(missing, not_a_number);
-            self.fail_if(both);
-        }
         let x = self.as_double(a, x);
         let y = self.as_double(b, y);
         match operation {

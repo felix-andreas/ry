@@ -1,0 +1,46 @@
+[stdout]
+| [1] NaN NaN NaN NaN
+| [1] NA NA NA NA
+| [1] NaN NaN NaN NaN
+| [1] NA NA NA NA
+| [1] NaN NaN
+| [1] NA NA
+| [1] NaN NaN
+| [1] NA NA
+| [1] NaN NaN
+| [1] NA NA
+| [1] NaN NaN
+| [1] NA NA
+| [1] NaN NaN NaN NaN
+| [1] NA NA NA NA
+| [1] NaN NaN NaN NaN
+| [1] NA NA NA NA
+| [1] NaN NaN
+| [1] NA NA
+| [1] NaN NaN
+| [1] NA NA
+| [1] NaN NaN
+| [1] NA NA
+| [1] NaN NaN
+| [1] NA NA
+| [1] NaN NaN NaN NaN
+| [1] NA NA NA NA
+| [1] NaN NaN NaN NaN
+| [1] NA NA NA NA
+| [1] NaN NaN
+| [1] NA NA
+| [1] NaN NaN
+| [1] NA NA
+| [1] NaN NaN
+| [1] NA NA
+| [1] NaN NaN
+| [1] NA NA
+| [1] NaN NaN NaN NaN
+| [1] NaN NaN NaN NaN
+| [1] NaN NaN NaN NaN
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE

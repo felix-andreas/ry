@@ -5219,9 +5219,9 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
     let real = |value: f64| -> R<Option<Sexp>> { Ok(Some(values::scalar_real(value)?)) };
     let nan = a.is_nan() || b.is_nan();
     match operator {
-        Arith::Add => real(a + b),
+        Arith::Add => real(crate::arith::add(a, b)),
         Arith::Subtract => real(a - b),
-        Arith::Multiply => real(a * b),
+        Arith::Multiply => real(crate::arith::multiply(a, b)),
         Arith::Divide => real(a / b),
         // R_pow's special cases (1^y, x^0, NA handling) differ from powf; the builtin has them.
         Arith::Power => {
