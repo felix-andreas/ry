@@ -145,6 +145,9 @@ const IDLE_CURSOR: Cursor = Cursor {
 #[derive(Default)]
 pub(crate) struct Swept {
     pub freed: u64,
+    /// The freed objects by type code, counted only while the profile summary is on, because
+    /// reading each dead slot's header costs a load per object.
+    pub by_kind: Option<[u64; 32]>,
 }
 
 impl Space {
@@ -553,6 +556,14 @@ impl Space {
                     unsafe { drop_frame(object) };
                 }
                 self.finalizable[page][word] &= !dead;
+                if let Some(by_kind) = &mut swept.by_kind {
+                    for bit in set_bits(dead) {
+                        let kind = unsafe { *page_base.add((word * 64 + bit) * slot_size) };
+                        if let Some(count) = by_kind.get_mut(usize::from(kind & 31)) {
+                            *count += 1;
+                        }
+                    }
+                }
                 // Poisoning makes a use after free fail loudly, but costs a store per byte of
                 // every dead slot, so only debug builds pay for it. The kind byte stays
                 // meaningful: a freed slot reads as `FREESXP`.

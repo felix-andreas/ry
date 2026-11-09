@@ -1,0 +1,12 @@
+[stdout]
+| sum(c(1, 2), offset)
+| sum(c(3, 4), offset)
+| [1] 17
+| [1] 13
+| [1] 13
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 13

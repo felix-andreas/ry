@@ -126,7 +126,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("getAllConnections", 0, |_| unsafe { all_connections() }),
     internal("sink", 4, do_sink).invisible(),
     internal("sink.number", 1, do_sink_number),
-    internal("readline", 1, |_| unsafe { values::scalar_string("") }),
+    internal("readline", 1, do_readline),
     internal("cat", 6, do_cat).invisible(),
 ];
 
@@ -1489,6 +1489,46 @@ unsafe fn do_is_open(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `readLines(con, n, ok, warn, encoding, skipNul)`. `n < 0` reads every line.
+/// `readline(prompt)`: the console's next line, or in a script, as in GNU R, the prompt on a line
+/// of its own and an empty answer.
+unsafe fn do_readline(call: &Call<'_>) -> R<Sexp> {
+    let prompt = values::first_string(call.arg(0)).unwrap_or_default();
+    if !crate::console_server::interactive() {
+        crate::write_console(format!("{prompt}\n").as_bytes(), false);
+        return values::scalar_string("");
+    }
+    values::scalar_string(&crate::console_server::prompt(&prompt).unwrap_or_default())
+}
+
+/// Whether `stdin()` is the interactive console: no script is feeding it, and a console is
+/// reading.
+fn stdin_is_console() -> bool {
+    crate::session::read_script_input(&mut []).is_none() && crate::console_server::interactive()
+}
+
+/// The text `scan()` reads from the console when `file` is `stdin()`: lines asked for with a
+/// "N: " prompt, as GNU R's console `scan()`, until an empty line, the end of the input, or
+/// `max_items` items. `None` when `file` is any other connection, which `scan()` reads whole.
+pub unsafe fn console_scan_text(file: Sexp, max_items: i32) -> R<Option<Vec<u8>>> {
+    if resolve_con(file)?.0 != 0 || !stdin_is_console() {
+        return Ok(None);
+    }
+    let mut text = String::new();
+    let mut items = 0;
+    while max_items <= 0 || items < max_items {
+        let prompt = format!("{}: ", items + 1);
+        match unsafe { crate::console_server::prompt(&prompt) } {
+            Some(line) if !line.trim().is_empty() => {
+                items += line.split_whitespace().count() as i32;
+                text.push_str(&line);
+                text.push('\n');
+            }
+            _ => break,
+        }
+    }
+    Ok(Some(text.into_bytes()))
+}
+
 unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
     let con = resolve_con(call.arg(0))?.1;
     let n = match values::as_integer_scalar(call.arg(1)) {
@@ -4186,6 +4226,9 @@ unsafe fn device_read(con: Rconnection, buffer: &mut [u8]) -> R<usize> {
     match device(con)? {
         Device::Standard(Standard::Input) => match crate::session::read_script_input(buffer) {
             Some(count) => Ok(count),
+            None if crate::console_server::interactive() => {
+                Ok(crate::console_server::read_stdin(buffer))
+            }
             None => read_fully(&mut std::io::stdin().lock(), buffer).map_err(io_error),
         },
         Device::Standard(_) => Err(error("cannot read from this connection")),

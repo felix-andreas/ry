@@ -1,0 +1,27 @@
+[stdout]
+| [1] FALSE
+| [1] TRUE
+| [1] "derivedDefaultMethod"
+| attr(,"package")
+| [1] "methods"
+| [1] "ClassUnionRepresentation"
+| [1] "ANY"
+| [1] "ClassUnionRepresentation"
+| attr(,"package")
+| [1] "methods"
+| [1] TRUE
+| [1] "NULL"  "Base"  ".NULL"
+| [1] TRUE
+| [1] 1
+| [1] TRUE
+| [1] TRUE
+| [1] "numeric"            "character"          "integer"           
+| [4] "double"             "signature"          "className"         
+| [7] "ObjectsWithPackage" "factor"             "ordered"           
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("numeric", "character", "integer", "double", "signature", "className", 
+| "ObjectsWithPackage", "factor", "ordered")

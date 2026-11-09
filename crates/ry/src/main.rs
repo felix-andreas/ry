@@ -244,10 +244,11 @@ fn main() -> ExitCode {
     if let Command::Install {
         path,
         library,
+        train,
         runtime,
     } = &cli.command
     {
-        return run_install(path, library.as_deref(), *runtime);
+        return run_install(path, library.as_deref(), train.as_deref(), *runtime);
     }
 
     if let Command::DebugAdapter = &cli.command {
@@ -670,7 +671,12 @@ fn run_build(
 
 /// `ry install`: builds the package into a private directory without rebuilding its vignettes,
 /// as `devtools::install()` does, and installs the tarball with the home's `R CMD INSTALL`.
-fn run_install(path: &Path, library: Option<&Path>, runtime: Option<Runtime>) -> ExitCode {
+fn run_install(
+    path: &Path,
+    library: Option<&Path>,
+    train: Option<&str>,
+    runtime: Option<Runtime>,
+) -> ExitCode {
     let installed = load::package_root(path)
         .map_err(|error| error.to_string())
         .and_then(|root| {
@@ -685,6 +691,16 @@ fn run_install(path: &Path, library: Option<&Path>, runtime: Option<Runtime>) ->
                     fs::create_dir_all(library)
                         .map_err(|error| format!("cannot create {}: {error}", library.display()))?;
                     command.arg("-l").arg(library);
+                }
+                if let Some(train) = train {
+                    let workload = match train {
+                        "tests" | "examples" | "none" => train.to_owned(),
+                        script => std::path::absolute(script)
+                            .map_err(|error| format!("cannot resolve {script}: {error}"))?
+                            .display()
+                            .to_string(),
+                    };
+                    command.arg(format!("--ry-train={workload}"));
                 }
                 let status = command
                     .arg(&tarball)

@@ -102,6 +102,7 @@ impl Activity {
 #[repr(u8)]
 pub enum Counter {
     ClosureCalls,
+    NativeEntries,
     BuiltinCalls,
     PromisesCreated,
     PromisesForced,
@@ -119,8 +120,9 @@ pub enum Counter {
 }
 
 impl Counter {
-    pub const ALL: [Counter; 15] = [
+    pub const ALL: [Counter; 16] = [
         Counter::ClosureCalls,
+        Counter::NativeEntries,
         Counter::BuiltinCalls,
         Counter::PromisesCreated,
         Counter::PromisesForced,
@@ -140,6 +142,7 @@ impl Counter {
     pub fn describe(self) -> &'static str {
         match self {
             Counter::ClosureCalls => "closure calls",
+            Counter::NativeEntries => "closure calls run natively, without a frame",
             Counter::BuiltinCalls => "builtin calls (outside inline fast paths)",
             Counter::PromisesCreated => "promises created",
             Counter::PromisesForced => "promises forced",
@@ -163,7 +166,8 @@ pub const BUILTIN_SLOTS: usize = 4096;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static CURRENT: AtomicU32 = AtomicU32::new(0);
-static COUNTERS: [AtomicU64; Counter::ALL.len()] = [const { AtomicU64::new(0) }; Counter::ALL.len()];
+static COUNTERS: [AtomicU64; Counter::ALL.len()] =
+    [const { AtomicU64::new(0) }; Counter::ALL.len()];
 static BUILTINS: [AtomicU64; BUILTIN_SLOTS] = [const { AtomicU64::new(0) }; BUILTIN_SLOTS];
 static LABELS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static FRAME_OWNERS: [AtomicU32; FRAME_SLOTS] = [const { AtomicU32::new(0) }; FRAME_SLOTS];
@@ -251,7 +255,9 @@ pub fn counter(counter: Counter) -> u64 {
 }
 
 pub fn builtin_count(index: usize) -> u64 {
-    BUILTINS.get(index).map_or(0, |slot| slot.load(Ordering::Relaxed))
+    BUILTINS
+        .get(index)
+        .map_or(0, |slot| slot.load(Ordering::Relaxed))
 }
 
 /// A small id for `name`, such as a native library's package, to use as an activity's detail.

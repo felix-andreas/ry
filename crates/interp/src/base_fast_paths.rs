@@ -21,7 +21,10 @@ use {
         unwind::{R, Unwind, jump},
         values::{self, install, length, missing_arg, nil, symbols},
     },
-    heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp},
+    heap::{
+        activity::{self, Counter},
+        object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp},
+    },
     smallvec::SmallVec,
 };
 
@@ -109,7 +112,8 @@ pub type NativeEntry = unsafe fn(&[Arg]) -> R<Option<Sexp>>;
 /// value, with the [`stable_hash`] of their formals and body (GNU R 4.6.2). Each is a one-line
 /// body over primitives, so the frame, the promises and the lookups are most of its cost: in
 /// testthat-style code `identical`, `isTRUE`, `nrow`, `%in%` and `%||%` each take 1 to 2.5% of
-/// the run.
+/// the run, and `typeof`, `inherits`, `is.factor`, `is.vector` and `isNamespace` are among the
+/// closures called most often.
 const NATIVE_ENTRIES: &[(&str, u64, NativeEntry)] = &[
     ("identical", 0x53ecb73e41a5f29e, native_identical),
     ("isTRUE", 0x092932cb0d38b378, native_is_true),
@@ -119,6 +123,12 @@ const NATIVE_ENTRIES: &[(&str, u64, NativeEntry)] = &[
     ("match", 0x8dee99370571e93c, native_match),
     ("%in%", 0x2fb6d82723e3191f, native_in),
     ("%||%", 0x3f61ec71bc0d9992, native_or_else),
+    ("typeof", 0x6fcb4f267ff82404, native_typeof),
+    ("inherits", 0x5adef86a3b8a8d6a, native_inherits),
+    ("is.factor", 0x31be66479af8cf70, native_is_factor),
+    ("is.data.frame", 0x7c700cf6459e2410, native_is_data_frame),
+    ("is.vector", 0xf347f791e9374052, native_is_vector),
+    ("isNamespace", 0x9dbd26992b319771, native_is_namespace),
 ];
 
 /// Marks the closures of [`NATIVE_ENTRIES`] whose code matches and records them in
@@ -183,9 +193,42 @@ pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
     };
     let value = entry(args)?;
     if value.is_some() {
+        activity::count(Counter::NativeEntries);
         interp().visible = true;
     }
     Ok(value)
+}
+
+/// Runs the call of `function`, a closure marked [`gp::NATIVE_ENTRY`], natively from its
+/// unevaluated `arguments` when each is a constant or a variable bound to a value, so the call
+/// builds no promise at all. Reading such an argument runs no R code, so reading it now gives
+/// the value forcing its promise would give, and the native code reads only values; when it
+/// declines, nothing has changed and the caller builds the promises as usual.
+pub unsafe fn native_entry_by_value(function: Sexp, arguments: Sexp, env: Sexp) -> R<Option<Sexp>> {
+    let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
+    let mut cell = arguments;
+    while cell.kind() == SexpType::Pairlist {
+        if cell.tag() != nil() {
+            return Ok(None);
+        }
+        let expression = cell.car();
+        let value = match expression.kind() {
+            SexpType::Symbol => {
+                if expression == missing_arg() || expression == symbols().dots {
+                    return Ok(None);
+                }
+                match crate::effects::eager_argument(expression, env) {
+                    Some(value) if value.kind() != SexpType::Promise => value,
+                    _ => return Ok(None),
+                }
+            }
+            SexpType::Language | SexpType::Promise | SexpType::Bytecode => return Ok(None),
+            _ => expression,
+        };
+        args.push(Arg { tag: nil(), value });
+        cell = cell.cdr();
+    }
+    native_entry(function, &args)
 }
 
 /// The value an argument stands for when reading it runs no R code: a value, a forced promise's
@@ -289,7 +332,10 @@ unsafe fn dimension(args: &[Arg], position: usize) -> R<Option<Sexp>> {
     if dim.kind() != SexpType::Integer || dim.is_altrep() || values::has_attributes(dim) {
         return Ok(None);
     }
-    let extent = values::ints(dim).get(position).copied().unwrap_or(NA_INTEGER);
+    let extent = values::ints(dim)
+        .get(position)
+        .copied()
+        .unwrap_or(NA_INTEGER);
     values::scalar_integer(extent).map(Some)
 }
 
@@ -324,13 +370,107 @@ unsafe fn native_in(args: &[Arg]) -> R<Option<Sexp>> {
         Some(Position::Scalar(position)) => values::scalar_logical((position > 0) as i32).map(Some),
         Some(Position::Vector(positions)) => {
             let found = values::alloc(SexpType::Logical, length(positions))?;
-            for (flag, position) in found.slice_mut::<i32>().iter_mut().zip(values::ints(positions)) {
+            for (flag, position) in found
+                .slice_mut::<i32>()
+                .iter_mut()
+                .zip(values::ints(positions))
+            {
                 *flag = (*position > 0) as i32;
             }
             Ok(Some(found))
         }
         None => Ok(None),
     }
+}
+
+/// `typeof(x)`: `.Internal(typeof(x))`.
+unsafe fn native_typeof(args: &[Arg]) -> R<Option<Sexp>> {
+    let Some([x]) = resolved_all::<1>(args)? else {
+        return Ok(None);
+    };
+    values::scalar_string(crate::coerce::type_name(x)).map(Some)
+}
+
+/// `inherits(x, what, which)` for `what` a character vector and an `x` that is not an S4
+/// object, whose classes then come from its attributes without running R code.
+unsafe fn native_inherits(args: &[Arg]) -> R<Option<Sexp>> {
+    let (x, what, which) = match args.len() {
+        2 => match resolved_all::<2>(args)? {
+            Some([x, what]) => (x, what, None),
+            None => return Ok(None),
+        },
+        3 => match resolved_all::<3>(args)? {
+            Some([x, what, which]) => (x, what, Some(which)),
+            None => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    if x.has_gp(gp::S4_OBJECT) || what.kind() != SexpType::String {
+        return Ok(None);
+    }
+    let which = match which {
+        Some(which) => which,
+        None => {
+            let which = values::scalar_bool(false)?;
+            crate::heap().root(which);
+            which
+        }
+    };
+    kernel(crate::dispatch::do_inherits, &[x, what, which], nil()).map(Some)
+}
+
+/// `inherits(x, class)` for the closures whose whole body is that call, for an `x` that is not
+/// an S4 object, whose classes are then those of its `class` attribute: an implicit class is
+/// never `"factor"` or `"data.frame"`.
+unsafe fn has_class(args: &[Arg], class: &str) -> R<Option<Sexp>> {
+    let Some([x]) = resolved_all::<1>(args)? else {
+        return Ok(None);
+    };
+    if x.has_gp(gp::S4_OBJECT) {
+        return Ok(None);
+    }
+    values::scalar_bool(values::inherits(x, class)).map(Some)
+}
+
+/// `is.factor(x)`: `inherits(x, "factor")`.
+unsafe fn native_is_factor(args: &[Arg]) -> R<Option<Sexp>> {
+    has_class(args, "factor")
+}
+
+/// `is.data.frame(x)`: `inherits(x, "data.frame")`.
+unsafe fn native_is_data_frame(args: &[Arg]) -> R<Option<Sexp>> {
+    has_class(args, "data.frame")
+}
+
+/// `is.vector(x, mode)`: `.Internal(is.vector(x, mode))`, for a `mode` that is one string.
+unsafe fn native_is_vector(args: &[Arg]) -> R<Option<Sexp>> {
+    let (x, mode) = match args.len() {
+        1 => match resolved_all::<1>(args)? {
+            Some([x]) => {
+                let mode = values::scalar_string("any")?;
+                crate::heap().root(mode);
+                (x, mode)
+            }
+            None => return Ok(None),
+        },
+        2 => match resolved_all::<2>(args)? {
+            Some([x, mode]) => (x, mode),
+            None => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    if mode.kind() != SexpType::String || mode.length() != 1 || mode.is_object() {
+        return Ok(None);
+    }
+    kernel(crate::coerce::do_is_vector, &[x, mode], nil()).map(Some)
+}
+
+/// `isNamespace(ns)`: `.Internal(isNamespaceEnv(ns))`.
+unsafe fn native_is_namespace(args: &[Arg]) -> R<Option<Sexp>> {
+    let Some([ns]) = resolved_all::<1>(args)? else {
+        return Ok(None);
+    };
+    values::scalar_bool(crate::envir::is_namespace(ns)).map(Some)
 }
 
 /// What [`positions`] found.
@@ -370,14 +510,19 @@ unsafe fn positions(x: Sexp, table: Sexp, nomatch: i32) -> R<Option<Position>> {
             SexpType::String => {
                 let wanted = x.slice::<Sexp>()[0];
                 if wanted == values::na_string() || wanted.has_gp(gp::ASCII) {
-                    table.slice::<Sexp>().iter().position(|item| *item == wanted)
+                    table
+                        .slice::<Sexp>()
+                        .iter()
+                        .position(|item| *item == wanted)
                 } else {
                     return kernel_positions(x, table, nomatch);
                 }
             }
             _ => return kernel_positions(x, table, nomatch),
         };
-        return Ok(Some(Position::Scalar(found.map_or(nomatch, |index| index as i32 + 1))));
+        return Ok(Some(Position::Scalar(
+            found.map_or(nomatch, |index| index as i32 + 1),
+        )));
     }
     kernel_positions(x, table, nomatch)
 }
@@ -700,8 +845,16 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
     let heap = crate::heap();
     let init_symbol = install("init")?;
     let i_symbol = install("i")?;
-    eval::define(install("mis")?, values::scalar_logical(missing_init as i32)?, frame)?;
-    eval::define(install("len")?, values::scalar_integer(count as i32)?, frame)?;
+    eval::define(
+        install("mis")?,
+        values::scalar_logical(missing_init as i32)?,
+        frame,
+    )?;
+    eval::define(
+        install("len")?,
+        values::scalar_integer(count as i32)?,
+        frame,
+    )?;
     eval::define(install("f")?, function, frame)?;
     let element_call = values::call(symbols.bracket2, &[install("x")?, i_symbol])?;
     heap.root(element_call);
@@ -735,7 +888,11 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         crate::heap().root(element);
         let init = eval::find_var_in_frame(init_symbol, frame)?;
         let init = eval::value_of(init)?;
-        let values = if right { [element, init] } else { [init, element] };
+        let values = if right {
+            [element, init]
+        } else {
+            [init, element]
+        };
         let value = eval::call_with_values(inner_call, function, &values, frame)?;
         eval::define(init_symbol, value, frame)
     };
@@ -879,23 +1036,24 @@ unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
             return decline();
         }
     }
-    let existing = kernel(crate::subset::do_attributes, &[data], frame)?;
-    let existing_names = values::names(existing);
-    let mut combined: Vec<(String, Sexp)> = Vec::with_capacity(length(existing) + attributes.len());
-    for index in 0..length(existing) {
-        let name = values::string_at(existing_names, index).unwrap_or_default();
-        combined.push((name.into_owned(), existing.element(index)));
+    // `attributes(.Data) <- c(attributes(.Data), list(...))` clears the attributes and adds them
+    // back with `dim` first, so setting the new ones in place is the same unless that moves an
+    // existing `dim`. `attributes()` lists `names` first, so its position cannot be observed.
+    let symbols = symbols();
+    let mut before_dim = false;
+    let mut cell = data.attrib();
+    while cell != nil() {
+        if cell.tag() == symbols.dim && before_dim {
+            return decline();
+        }
+        before_dim |= cell.tag() != symbols.names;
+        cell = cell.cdr();
     }
+    let result = crate::subset::modifiable(data)?;
+    crate::heap().root(result);
     for &(tag, value) in &attributes {
-        combined.push((values::symbol_name(tag).into_owned(), value));
+        crate::subset::set_attribute_checked(result, tag, value, call.call)?;
     }
-    let pairs: Vec<(&str, Sexp)> = combined
-        .iter()
-        .map(|(name, value)| (name.as_str(), *value))
-        .collect();
-    let list = values::named_list(&pairs)?;
-    crate::heap().root(list);
-    let result = kernel(crate::subset::do_set_attributes, &[data, list], frame)?;
     finish(frame, result, true)
 }
 
