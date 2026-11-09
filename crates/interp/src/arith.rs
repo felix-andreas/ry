@@ -228,7 +228,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
             return Ok(None);
         }
         let value = operand.slice::<i32>()[0];
-        values::scalar_logical(if value == NA_LOGICAL { NA_LOGICAL } else { 1 - value }).map(Some)
+        values::scalar_logical(if value == NA_LOGICAL {
+            NA_LOGICAL
+        } else {
+            1 - value
+        })
+        .map(Some)
     }),
     builtin("abs", 1, |call| unsafe { math1(call, Math::Abs) }).generic(Generic::Math),
     builtin("sign", 1, |call| unsafe { math1(call, Math::Sign) }).generic(Generic::Math),
@@ -2201,10 +2206,7 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
             values::copy_most_attributes(operand, result, true)?;
             Ok(result)
         }
-        SexpType::Logical
-        | SexpType::Integer
-        | SexpType::Real
-        | SexpType::Complex => {
+        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex => {
             let result = alloc(SexpType::Logical, count)?;
             for index in 0..count {
                 let value = logical_at(operand, index);
@@ -3290,7 +3292,7 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
     let mut args = if items.iter().any(|arg| arg.value.kind() == SexpType::List) {
         vec![Arg {
             tag: nil(),
-            value: crate::subset::combine_args(&items, &[], true, false)?,
+            value: crate::combine::combine_args(&items, true, false)?,
         }]
     } else {
         items
@@ -3332,7 +3334,7 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
     };
     let minimum = summary(&inner, Summary::Min)?;
     let maximum = summary(&inner, Summary::Max)?;
-    crate::subset::combine(&[minimum, maximum])
+    crate::combine::combine(&[minimum, maximum])
 }
 
 unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {

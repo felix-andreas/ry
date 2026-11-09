@@ -412,15 +412,8 @@ unsafe fn native_inherits(args: &[Arg]) -> R<Option<Sexp>> {
     if x.has_gp(gp::S4_OBJECT) || what.kind() != SexpType::String {
         return Ok(None);
     }
-    let which = match which {
-        Some(which) => which,
-        None => {
-            let which = values::scalar_bool(false)?;
-            crate::heap().root(which);
-            which
-        }
-    };
-    kernel(crate::dispatch::do_inherits, &[x, what, which], nil()).map(Some)
+    let which = which.is_some_and(|which| values::as_logical_scalar(which) == 1);
+    crate::attribute_access::plain_inherits(x, what, which).map(Some)
 }
 
 /// `inherits(x, class)` for the closures whose whole body is that call, for an `x` that is not

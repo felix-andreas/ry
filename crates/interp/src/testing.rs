@@ -109,6 +109,27 @@ pub fn check_bytecode_agreement(entropy: &mut impl Entropy) {
     });
 }
 
+/// Generates a program that reads and writes attributes, names and elements and combines values
+/// with `c()`, and checks that the compiled closure, whose calls take the builtins' direct
+/// entries, agrees with the AST evaluator, whose calls take the full builtins.
+pub fn check_element_access_agreement(entropy: &mut impl Entropy) {
+    let body = element_program(entropy);
+    let a = ELEMENT_VALUES[entropy.below(ELEMENT_VALUES.len())];
+    let b = ELEMENT_INDICES[entropy.below(ELEMENT_INDICES.len())];
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        let (direct, compiled) = unsafe { outcomes(&body, a, b) };
+        for (call, outcome) in compiled.iter().enumerate() {
+            assert_eq!(
+                &direct,
+                outcome,
+                "call {}: `{body}` with a = {a}, b = {b}",
+                call + 1
+            );
+        }
+    });
+}
+
 unsafe fn outcomes(body: &str, a: &str, b: &str) -> (String, Vec<String>) {
     unsafe {
         // The direct run assigns its locals globally, which the closure would then read, so
@@ -176,8 +197,8 @@ pub fn check_code_image_round_trip(entropy: &mut impl Entropy) {
                 let Some(bytes) = code_image::encode(code, source, trained) else {
                     continue;
                 };
-                let decoded = code_image::decode_untrusted(&bytes, source)
-                    .unwrap_or_else(|failure| {
+                let decoded =
+                    code_image::decode_untrusted(&bytes, source).unwrap_or_else(|failure| {
                         panic!("`{body}`: an encoded code object must decode: {failure:?}")
                     });
                 crate::heap().root(decoded);
@@ -231,7 +252,11 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
     for _ in 0..count {
         offset += 1 + entropy.below(1000) as u64;
         records.push((offset, entropy.below(5000) as u32, entropy.next_u64()));
-        payloads.push((0..entropy.below(40)).map(|_| entropy.below(256) as u8).collect::<Vec<u8>>());
+        payloads.push(
+            (0..entropy.below(40))
+                .map(|_| entropy.below(256) as u8)
+                .collect::<Vec<u8>>(),
+        );
     }
     let database_length = offset + entropy.below(100) as u64;
     let build = "fuzz-build";
@@ -240,8 +265,9 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
         .map(|_| (entropy.below(1 << 16), entropy.below(256) as u8))
         .collect();
     with_interpreter(|| {
-        let bytes = code_image::image_bytes(build, trained, database_length, &records, &payloads, None)
-            .unwrap_or_else(|_| panic!("a small image must write"));
+        let bytes =
+            code_image::image_bytes(build, trained, database_length, &records, &payloads, None)
+                .unwrap_or_else(|_| panic!("a small image must write"));
         let entries = code_image::parse(&bytes, build, database_length)
             .unwrap_or_else(|message| panic!("a written image must parse: {message}"))
             .unwrap_or_else(|| panic!("a written image must belong to its build"))
@@ -255,8 +281,14 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
                 Some(&payload[..])
             );
         }
-        assert_eq!(code_image::parse(&bytes, "another-build", database_length), Ok(None));
-        assert_eq!(code_image::parse(&bytes, build, database_length + 1), Ok(None));
+        assert_eq!(
+            code_image::parse(&bytes, "another-build", database_length),
+            Ok(None)
+        );
+        assert_eq!(
+            code_image::parse(&bytes, build, database_length + 1),
+            Ok(None)
+        );
         let mut mutated = bytes.clone();
         for &(position, value) in &mutations {
             let at = position % mutated.len().max(1);
@@ -401,10 +433,13 @@ pub fn check_code_image_load(entropy: &mut impl Entropy) {
                     }
                 }
             }
-            std::fs::create_dir_all(&directory)
-                .unwrap_or_else(|failure| panic!("cannot create {}: {failure}", directory.display()));
+            std::fs::create_dir_all(&directory).unwrap_or_else(|failure| {
+                panic!("cannot create {}: {failure}", directory.display())
+            });
             let database = directory.join("fuzz.rdb");
-            let database = database.to_str().unwrap_or_else(|| panic!("a temporary path is text"));
+            let database = database
+                .to_str()
+                .unwrap_or_else(|| panic!("a temporary path is text"));
             std::fs::write(database, vec![0u8; stream.len()])
                 .unwrap_or_else(|failure| panic!("cannot write {database}: {failure}"));
             std::fs::write(code_image::path(database), &image)
@@ -421,7 +456,11 @@ pub fn check_code_image_load(entropy: &mut impl Entropy) {
             })();
             if let Ok(Some(value)) = loaded {
                 crate::heap().root(value);
-                assert_eq!(value.kind(), SexpType::Closure, "`{body}`: a record reads back");
+                assert_eq!(
+                    value.kind(),
+                    SexpType::Closure,
+                    "`{body}`: a record reads back"
+                );
                 define("g_image", value);
                 // Another closure over the fetched body must not take the code compiled for the
                 // fetched closure's formals.
@@ -446,7 +485,8 @@ pub fn check_code_image_load(entropy: &mut impl Entropy) {
                     let outcome = run(&format!("g_image({a}, {b})"));
                     if mode != 4 {
                         assert_eq!(
-                            direct, outcome,
+                            direct,
+                            outcome,
                             "`{body}` with a = {a}, b = {b}, mode {mode}, call {}: a closure \
                              fetched through its image must compute what the evaluator does \
                              (trained: {trained})",
@@ -592,6 +632,135 @@ fn program(entropy: &mut impl Entropy) -> String {
         _ => {}
     }
     statements.push(expression(entropy, 3));
+    statements.join("\n")
+}
+
+const ELEMENT_SUBJECTS: &[&str] = &[
+    "1:3",
+    "c(1.5, NA, 3)",
+    "c(a = 1L, b = 2L, a = 3L)",
+    "c(\"p\", NA, \"\")",
+    "c(TRUE, NA)",
+    "c(x = 1+2i)",
+    "list(1, \"x\", NULL)",
+    "list(a = 1, b = list(c = 2), 3)",
+    "list(a = NULL, ab = 2L)",
+    "NULL",
+    "as.raw(c(1, 255))",
+];
+
+const ELEMENT_INDICES: &[&str] = &[
+    "1L",
+    "2",
+    "2.7",
+    "0",
+    "-1",
+    "NA",
+    "5L",
+    "\"a\"",
+    "\"b\"",
+    "\"ab\"",
+    "\"\"",
+    "NA_character_",
+    "c(1, 2)",
+    "TRUE",
+    "3",
+];
+
+const ELEMENT_VALUES: &[&str] = &[
+    "1",
+    "\"s\"",
+    "NULL",
+    "list(1)",
+    "c(u = 2L)",
+    "NA",
+    "a",
+    "x",
+    "TRUE",
+    "3:1",
+];
+
+const ATTRIBUTE_NAMES: &[&str] = &[
+    "\"a\"",
+    "\"names\"",
+    "\"class\"",
+    "\"dim\"",
+    "\"row.names\"",
+    "\"ab\"",
+    "\"n\"",
+    "\"dimnames\"",
+];
+
+/// Starts from a subject `x`, applies a few random reads and writes, and ends with `x`, its
+/// attributes and the last value read.
+fn element_program(entropy: &mut impl Entropy) -> String {
+    fn pick<'a>(entropy: &mut impl Entropy, from: &[&'a str]) -> &'a str {
+        from[entropy.below(from.len())]
+    }
+    let mut statements = vec![
+        format!("x <- {}", pick(entropy, ELEMENT_SUBJECTS)),
+        "v <- NULL".to_owned(),
+    ];
+    for _ in 0..entropy.below(5) + 1 {
+        let statement = match entropy.below(11) {
+            0 => format!(
+                "attr(x, {}) <- {}",
+                pick(entropy, ATTRIBUTE_NAMES),
+                pick(entropy, ELEMENT_VALUES)
+            ),
+            1 => format!(
+                "names(x) <- {}",
+                pick(
+                    entropy,
+                    &[
+                        "NULL",
+                        "c(\"p\", \"q\", \"r\")",
+                        "\"p\"",
+                        "c(NA, \"q\")",
+                        "1:2",
+                        "b"
+                    ]
+                )
+            ),
+            2 => format!(
+                "x[[{}]] <- {}",
+                pick(entropy, ELEMENT_INDICES),
+                pick(entropy, ELEMENT_VALUES)
+            ),
+            3 => format!("x <- c(x, {})", pick(entropy, ELEMENT_VALUES)),
+            4 => format!("v <- x[[{}]]", pick(entropy, ELEMENT_INDICES)),
+            5 => format!("v <- .subset2(x, {})", pick(entropy, ELEMENT_INDICES)),
+            6 => format!(
+                "v <- attr(x, {}{})",
+                pick(entropy, ATTRIBUTE_NAMES),
+                pick(entropy, &["", ", exact = TRUE", ", TRUE", ", NA"])
+            ),
+            7 => format!(
+                "v <- c({}, {}, {})",
+                pick(
+                    entropy,
+                    &["a", "x", "p = 1", "q = x", "NULL", "list(z = 1)"]
+                ),
+                pick(entropy, ELEMENT_VALUES),
+                pick(
+                    entropy,
+                    &["b", "r = c(s = 1, 2)", "\"t\"", "NA_integer_", "3i"]
+                )
+            ),
+            8 => format!(
+                "v <- c(x, recursive = {})",
+                pick(entropy, &["TRUE", "FALSE"])
+            ),
+            9 => "v <- names(x)".to_owned(),
+            _ => format!(
+                "x[[{}]] <- x[[{}]]",
+                pick(entropy, ELEMENT_INDICES),
+                pick(entropy, ELEMENT_INDICES)
+            ),
+        };
+        statements.push(statement);
+    }
+    statements.push("list(x, attributes(x), v)".to_owned());
     statements.join("\n")
 }
 
