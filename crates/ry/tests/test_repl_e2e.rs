@@ -1814,6 +1814,31 @@ fn console_input_functions_read_the_console_on_both_runtimes() {
 }
 
 #[test]
+fn console_input_in_the_interactive_script_reads_the_console_on_both_runtimes() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        directory.path().join("ask.R"),
+        "print(interactive())\nname <- readline('who? ')\nprint(name)\nprint(menu(c('a', 'b')))\n",
+    )
+    .expect("write script");
+    for runtime in runtimes() {
+        let (status, stdout, stderr) = ry_with_input(
+            directory.path(),
+            &[runtime_command(runtime), "-i", "ask.R"],
+            &[],
+            "ada\n2\nprint(name)\n",
+        );
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        for expected in ["[1] TRUE", "[1] \"ada\"", "1: a", "[1] 2"] {
+            assert!(
+                stdout.contains(expected),
+                "{runtime} lacks {expected:?}: {stdout}{stderr}"
+            );
+        }
+    }
+}
+
+#[test]
 fn console_input_functions_in_a_script_behave_as_in_rscript_on_both_runtimes() {
     let directory = tempfile::tempdir().expect("temp dir");
     fs::write(

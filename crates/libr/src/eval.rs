@@ -1626,11 +1626,6 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         return 2;
     }
     install_interrupt_handler();
-    if let Some(startup) = &startup {
-        // `run_text` reports an error itself, and a failed startup load still leaves a console
-        // the user can fix the package from.
-        interp::session::run_text(startup, "<startup>");
-    }
     let mut buffer = vec![0u8; 64 * 1024];
     // The reader runs on the console's input thread, so the interpreter's thread answers an
     // editor's requests while the user types.
@@ -1667,6 +1662,13 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
     };
     interp::console_server::install_reader(Box::new(reader));
     interp::console_server::start();
+    // The reader is installed first so that `readline()` and `menu()` in the startup text read
+    // the terminal, as they do in GNU R's `R -i`.
+    if let Some(startup) = &startup {
+        // `run_text` reports an error itself, and a failed startup load still leaves a console
+        // the user can fix the package from.
+        interp::session::run_text(startup, "<startup>");
+    }
     interp::session::run_console(
         // SAFETY: the console reads on the interpreter's thread, at its top level.
         |prompt| unsafe { interp::console_server::read_line(prompt) },

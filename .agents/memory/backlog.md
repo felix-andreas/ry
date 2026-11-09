@@ -37,9 +37,6 @@ The quality bar is four things.
 
 ## Open: console input in ry's runtime
 
-- `ry run -i file.R` runs the script before the console's reader is installed, so `readline()` and
-  `menu()` in that script see `interactive()` TRUE (set at start) but get an empty answer. Install
-  the reader before the startup script runs.
 - Console `scan()` prompts with the running item count (`1: `, `3: `); GNU R's counts records for a
   list `what`. `select.list(graphics = TRUE)` and `.External2(C_selectlist)` still raise the
   non-interactive error.
