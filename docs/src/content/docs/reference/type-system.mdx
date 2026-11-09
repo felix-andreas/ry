@@ -376,6 +376,29 @@ has one: a script exits with status 1, and the console drops the command. A past
 with bracketed paste is one command, so an error anywhere in it drops all of it. Other findings are left
 to `ry check`, so they never change whether R code runs.
 
+Each console command is checked against the commands that ran before it. It sees the names they
+bound, the types they defined and the last `# typing:` directive among them, so a directive governs
+the commands after it. A function body reads a global when the function is called, so it sees the
+latest binding of the name. In strict mode, a command that rebinds a name in a way that breaks a
+function an earlier command defined is refused, with the error shown in that function's command:
+
+```r
+> x: integer <- 1L
+> f <- function() x + 1L
+> x <- "a"
+type-mismatch
+
+  x `+` is not defined on `Str`. It takes a number
+   --[<console>:1:17]
+ 1 | f <- function() x + 1L
+   |                 ^^^^^^
+
+  x strict mode found 1 error, so this code does not run
+```
+
+Line numbers in a console finding count from the start of its command. Ctrl-C while a paste runs
+cancels the rest of the paste, and the cancelled lines are checked as if they were never typed.
+
 ## Types
 
 ### Atomic names
