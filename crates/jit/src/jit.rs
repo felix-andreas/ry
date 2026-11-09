@@ -724,8 +724,7 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
     unsafe {
         // A loop entry resumes an activation whose frame may have bound a name before the
         // compiler started watching it, which no epoch change records.
-        let env = machine.reify().ok()?;
-        if !runtime::valid(compiled, env, entry_pc != 0) {
+        if !runtime::valid(compiled, machine, entry_pc != 0) {
             runtime::invalidate(machine.code);
             return None;
         }
@@ -745,8 +744,9 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             loops: loops.as_mut_ptr(),
             visible: &mut interp().visible,
             entry_pc: entry_pc as i64,
-            env,
+            header: bytecode::register_address(machine.header),
             hints: bytecode::lookup_hints(machine.code),
+            enclosure: machine.enclosure(),
             machine: machine as *mut Machine<'_> as *mut c_void,
             compiled,
             pending: None,

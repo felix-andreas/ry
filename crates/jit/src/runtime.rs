@@ -46,10 +46,14 @@ pub struct Activation {
     pub visible: *mut bool,
     /// Where execution starts: 0 for a call, or the loop header on-stack replacement enters.
     pub entry_pc: i64,
-    /// The activation's environment, whose frame compiled code probes for its variables.
-    pub env: Sexp,
+    /// The activation's header register, which holds its environment, or `NULL` while it runs
+    /// in a slot frame whose slots follow the header. Compiled code reads it on every probe,
+    /// because a callee can give the frame its environment while the activation runs.
+    pub header: *mut Sexp,
     /// The code's lookup-slot hints ([`bytecode::lookup_hints`]).
     pub hints: *mut u32,
+    /// Where lookups of names the frame does not bind start: its closure's environment.
+    pub enclosure: Sexp,
     pub machine: *mut c_void,
     pub compiled: *const Compiled,
     pub pending: Option<Unwind>,
@@ -63,11 +67,13 @@ pub mod offset {
     pub const LOOPS: i32 = 8;
     pub const VISIBLE: i32 = 16;
     pub const ENTRY_PC: i32 = 24;
-    pub const ENV: i32 = 32;
+    pub const HEADER: i32 = 32;
     pub const HINTS: i32 = 40;
+    pub const ENCLOSURE: i32 = 48;
 }
 
-const _: () = assert!(std::mem::offset_of!(Activation, env) == offset::ENV as usize);
+const _: () = assert!(std::mem::offset_of!(Activation, header) == offset::HEADER as usize);
+const _: () = assert!(std::mem::offset_of!(Activation, enclosure) == offset::ENCLOSURE as usize);
 const _: () = assert!(std::mem::offset_of!(Activation, hints) == offset::HINTS as usize);
 
 /// What compiled code returns when on-stack replacement declined to enter, because a value
@@ -169,29 +175,29 @@ impl Exit {
 }
 
 /// Whether every function lookup compiled code assumed still resolves the same way for an
-/// activation whose frame is `frame`. Every change that could alter such a lookup moves the
+/// activation `machine`. Every change that could alter such a lookup moves the
 /// binding epoch and the symbol's lookup stamp (see `gp::WATCHED`), so an unchanged epoch, or
 /// unchanged stamps of the speculated symbols, prove the lookups without walking them.
 /// `thorough` walks them anyway, for an activation whose frame may have bound a watched name
 /// before the name was watched. Portable code running for an enclosure other than the checked
 /// one or its siblings walks, and leaves the epoch and stamps to the checked enclosure.
 #[inline]
-pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
+pub unsafe fn valid(compiled: &Compiled, machine: &Machine<'_>, thorough: bool) -> bool {
     // Every entry asks, and almost every time nothing moved the epoch since the last proof.
     if !thorough
         && heap().binding_epoch() == compiled.epoch.get()
-        && (!compiled.portable || compiled.checked.get().weak_key() == frame.enclosure())
+        && (!compiled.portable || compiled.checked.get().weak_key() == machine.enclosure())
     {
         return true;
     }
-    unsafe { prove(compiled, frame, thorough) }
+    unsafe { prove(compiled, machine, thorough) }
 }
 
 #[inline(never)]
-unsafe fn prove(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
+unsafe fn prove(compiled: &Compiled, machine: &Machine<'_>, thorough: bool) -> bool {
     let heap = heap();
     let epoch = heap.binding_epoch();
-    let enclosure = frame.enclosure();
+    let enclosure = machine.enclosure();
     let checked = !compiled.portable || compiled.checked.get().weak_key() == enclosure;
     let sibling = !checked && sibling_of_checked(compiled, enclosure);
     if !thorough && (checked || sibling) {
@@ -221,9 +227,9 @@ unsafe fn prove(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
         // frame's run-time bindings: `assign` into `parent.frame()`, a default argument, or the
         // locals `UseMethod` copies in can each bind the name there.
         if rooted
-            && heap
-                .frame_cell(frame, speculation.symbol)
-                .is_some_and(|cell| may_be_function(cell.cdr()))
+            && machine
+                .local_binding(speculation.symbol)
+                .is_some_and(|value| may_be_function(value))
         {
             return false;
         }
@@ -247,8 +253,8 @@ unsafe fn prove(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
 /// speculations held before that code ran, and every binding that could change a function
 /// lookup moves the epoch, so an unmoved epoch proves them without reading them.
 #[inline]
-unsafe fn still_valid(compiled: &Compiled, frame: Sexp, epoch: u64) -> bool {
-    unsafe { heap().binding_epoch() == epoch || valid(compiled, frame, false) }
+unsafe fn still_valid(compiled: &Compiled, machine: &Machine<'_>, epoch: u64) -> bool {
+    unsafe { heap().binding_epoch() == epoch || valid(compiled, machine, false) }
 }
 
 /// Whether portable `compiled` runs for `enclosure`, which is not the checked enclosure but
@@ -453,7 +459,7 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
                     outcome::FAILED
                 }
                 Ok(())
-                    if validate != 0 && !still_valid(compiled(activation), machine.env(), epoch) =>
+                    if validate != 0 && !still_valid(compiled(activation), machine, epoch) =>
                 {
                     outcome::INVALIDATED
                 }
@@ -469,7 +475,7 @@ pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i6
         checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
             let epoch = heap().binding_epoch();
-            let loaded = scoped(|| bytecode::load_variable(machine.code, machine.env(), pc as usize));
+            let loaded = scoped(|| bytecode::load_variable(machine, pc as usize));
             finish_load(activation, slot, loaded, epoch)
         })
     }
@@ -494,6 +500,31 @@ pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -
             let symbol = compiled(activation).slots[slot as usize];
             let epoch = heap().binding_epoch();
             let loaded = scoped(|| {
+                if machine.env() == values::nil() {
+                    return match machine.slot_of(symbol).map(|slot| *slot) {
+                        Some(value) if value.kind() == SexpType::Promise => {
+                            let forced = if value.car() == values::unbound() {
+                                let forced = eval::force_promise(value)?;
+                                heap().root(forced);
+                                forced
+                            } else {
+                                value.car()
+                            };
+                            Ok((forced, true))
+                        }
+                        Some(value)
+                            if value != values::unbound() && value != values::missing_arg() =>
+                        {
+                            Ok((value, true))
+                        }
+                        Some(value) if value == values::missing_arg() => {
+                            let env = machine.reify()?;
+                            eval::eval_symbol(symbol, env).map(|value| (value, true))
+                        }
+                        _ => eval::eval_symbol(symbol, machine.enclosure())
+                            .map(|value| (value, false)),
+                    };
+                }
                 let local = heap().frame_cell(machine.env(), symbol).is_some();
                 eval::eval_symbol(symbol, machine.env()).map(|value| (value, local))
             });
@@ -518,7 +549,7 @@ unsafe fn finish_load(
                 *slot_cell(activation, slot) = value;
                 // Loading can force a promise, which runs arbitrary code.
                 if !compiled(activation).speculations.is_empty()
-                    && !still_valid(compiled(activation), machine(activation).env(), epoch)
+                    && !still_valid(compiled(activation), machine(activation), epoch)
                 {
                     return outcome::LOAD_INVALIDATED;
                 }
@@ -540,6 +571,21 @@ pub unsafe extern "C" fn jit_peek_slot(activation: *mut Activation, slot: i64) -
             let empty = heap.known().empty_env;
             let mut env = machine.env();
             let mut local = true;
+            if env == values::nil() {
+                if let Some(frame_slot) = machine.slot_of(symbol) {
+                    let mut value = *frame_slot;
+                    if value.kind() == SexpType::Promise {
+                        value = value.car();
+                    }
+                    if value == values::missing_arg() || value == values::unbound() {
+                        return outcome::LOAD_FAILED;
+                    }
+                    *slot_cell(activation, slot) = value;
+                    return 1;
+                }
+                env = machine.enclosure();
+                local = false;
+            }
             while env != empty {
                 if let Some(cell) = heap.frame_cell(env, symbol) {
                     if cell.has_gp(gp::ACTIVE_BINDING) {
@@ -663,7 +709,7 @@ pub unsafe extern "C" fn jit_call(
                 }
                 Ok(value) => {
                     *activation.registers.add(dst as usize) = value;
-                    if !still_valid(compiled(activation), machine.env(), epoch) {
+                    if !still_valid(compiled(activation), machine, epoch) {
                         outcome::INVALIDATED
                     } else {
                         outcome::OK
@@ -767,7 +813,7 @@ pub unsafe extern "C" fn jit_flush(
                     _ => *cell,
                 };
                 *cell = value;
-                eval::assign_symbol(symbol, value, machine.env(), false)?;
+                machine.assign(symbol, value)?;
                 if kind == representation::BOXED {
                     value.decrement_refcount();
                 }
