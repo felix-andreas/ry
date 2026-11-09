@@ -308,14 +308,16 @@ unsafe fn compiled_for<'a>(
                         .saturating_mul(threshold)
                         .min(i32::MAX / 2)
                 };
-                // The counters climb back to the threshold before the tier is asked again;
-                // tier 0 records type feedback only above half the entry threshold, so it is
-                // still recorded before the compile.
+                // The counters climb back to the threshold before the tier is asked again.
+                // Recording stops for the wait and restarts when a counter nears its threshold
+                // again, so the compile still sees fresh feedback without a large body
+                // recording through every round of its wait.
                 if let Some(tier) = bytecode::tier() {
                     counters[profile::ENTRIES] = counters[profile::ENTRIES]
                         .min(tier.entry_threshold)
                         .saturating_sub(wait(tier.entry_threshold));
                     counters[profile::BACK_EDGES] = -wait(tier.back_edge_threshold);
+                    counters[profile::RECORDING] = 0;
                 }
                 return None;
             }
@@ -574,9 +576,11 @@ unsafe fn compile_in<'a>(
         heap.release_handles(mark);
         let pointer = built.map_err(|_| Refusal("out of memory"))?;
         heap.set_element(machine.code.cdr(), TIER1, pointer);
-        // A deoptimized activation finishes in tier 0, and what it records is the profile the
-        // next compile reads.
-        values::ints_mut(machine.code.cdr().element(PROFILE))[profile::RECORDING] = 1;
+        // Optimized code records nothing, and tier 0 stops too: only a recompile reads the
+        // feedback, and discarding the code turns recording back on before that.
+        let counters = values::ints_mut(machine.code.cdr().element(PROFILE));
+        counters[profile::RECORDING] = 0;
+        counters[profile::NEXT] = i32::MIN;
         Ok(&*(pointer.external_address() as *const Compiled))
     }
 }
