@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds ry's base R tree from GNU R's pinned source release: downloads the tarball named in
 # VERSION, checks it against SHA256SUMS, applies patches/*.patch in order, and runs
-# `ry-rcmd build-base`, which builds the base packages on ry's own interpreter.
+# `ry-rcmd build-base`, which builds the base packages on ry's own interpreter. On Linux it also
+# builds GNU R's reference BLAS and LAPACK beside LIBR (lapack.sh).
 #
 # usage: tools/base-r/build.sh OUTPUT RY_RCMD LIBR
 #   R_SOURCE_TARBALL  use this tarball instead of downloading it (it is still checked)
@@ -41,6 +42,7 @@ for patch in "$here"/patches/*.patch; do
 	[ -e "$patch" ] || continue
 	patch -d "$source" -p1 --quiet < "$patch"
 done
+"$here/lapack.sh" "$source" "$libr"
 "$rcmd" build-base "$source" "$output" --include "$root/crates/libr/include" --libr "$libr" --sha256 "$checksum"
 
 # The recommended packages, as GNU R installs them, in dependency order. Those with Fortran code

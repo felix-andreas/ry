@@ -8,7 +8,7 @@ default-members = ["crates/ry"]
 iana-time-zone = { path = "patches/iana-time-zone" }
 
 [workspace.package]
-version = "0.4.2-beta"
+version = "0.4.3-beta"
 repository = "https://github.com/felix-andreas/ry"
 
 [workspace.dependencies]

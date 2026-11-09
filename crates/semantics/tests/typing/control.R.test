@@ -696,6 +696,18 @@ f <- function() {
 #++++
 f: fn() -> character
 
+#---- forward_capture_repass_after_a_hinted_lambda
+# The read of `y` before its write makes the body run twice. The first run's call to
+# `lapply` must not leave behind types that the second run reads.
+f <- function() {
+  lapply(a, function(x) x)
+  function(x) y
+  y <- 1
+}
+#++++
+f: fn() -> double
+178..179 warning[unresolved] I could not resolve `a` in this package, its imports, or builtins.
+
 #---- unresolved_reference_suggests_the_nearest_stub
 f <- function(x) lenght(x)
 #++++

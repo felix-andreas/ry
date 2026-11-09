@@ -2506,6 +2506,26 @@ Nothing loaded packages before; `development/design/r-runtime.md` section 6 and 
   backend needs no `DllInfo`, no RDS round trip and no source strings in R memory.
 - **Planning runs on its own thread** with `ANALYSIS_STACK_SIZE`, as every analysis entry point
   does, because the analysis recurses as deeply as the code nests.
+- **The first plan of a process is made cheap, not cached.** A process's first plan is a full load,
+  even when no file changed since the last process, so it pays `diff` over the whole package.
+  - **What was slow:** `deferred_s4` and `lazy_generics` scanned a `Vec` of generics or classes
+    once per S4 definition, and `lazy_generics` walked every definition once per generic. That
+    cost grows with generics × definitions, so an S4-heavy package paid most. The full-load path
+    also built reload-only state it never read: `flipped`, the eager LCS, `changed` and the
+    rerun fixpoint.
+  - **Target shape:** hash sets of the package's own classes and generics; one pass that groups
+    each generic's statements; per-file start offsets instead of a map of item positions; and a
+    full load skips the reload bookkeeping, since it reruns every statement anyway.
+  - **Why not a stamp-keyed plan:** persisting the full plan would add a second on-disk copy
+    derived from the index, which the index cache already keys by content. Once the diff is
+    linear, the plan is a small fraction of a load.
+  - **Impact:** on a 591-file, 65,000-line S4 package (`tools/loader-bench/s4_package.py`),
+    `ryLoaderPlan` drops from 38 ms to 14 ms, and the plan thread from 116M to 35M
+    instructions, with a byte-identical plan.
+  - **What remains, all linear in package size:** `diff` itself (about 7 ms there), reading
+    the sources' stamps (3 to 6 ms), and converting the plan to an R value (about a third of the plan thread). The
+    `prepare` thread also deserializes the cached index (18 ms for 1.7 MB of bincode) while R
+    starts. That runs in parallel unless the plan arrives first.
 - **Runtime fixes the load path needed, each pinned by an oracle case:** `readDCF`, `load()`/`save()`
   of XDR workspaces (`R/sysdata.rda`, gzip, bzip2 or xz through `gzfile()`), `readChar` on a connection, comparisons and `&`/`|` keeping
   only names, dim and dimnames, and two hot paths (`match()` on interned ASCII strings by pointer,
@@ -5922,6 +5942,12 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   when either side is a held-back class; `as()` reaches it through `.quickCoerceSelect`, which
   reads the label placeholder. A coercion between other packages' classes runs in place. Before,
   any `setAs` made the unit eager because `setAs` was not in `PURE_S4_READS`.
+- **S4 calls are matched as R matches arguments** (`match_arguments` and `s4_formals` in
+  `crates/semantics/src/load_index.rs`): exact names, then unique partial names, then positions,
+  against each definition function's formals. Reading arguments by name alone missed
+  `setAs(from =, to =, function(from) ...)` and `setClassUnion("U", mem = ...)`, which kept the
+  whole package eager. A load that keeps S4 in place reports the first definition that forces it
+  (`deferred_s4` returns `Err(reason)`, printed by `runtime.R` under `ry.load.verbose`).
 - **No `cacheMetaData` while held back** (`.ry_apply`). The sync after a load called
   `cacheMetaData`, which reads every `.__C__`/`.__T__` binding and so forced the unit. Each
   definition already caches what it defines as it runs, and `.ry_force_s4` ends with the same
@@ -6650,6 +6676,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Shape.** `library_candidates` (`crates/interp/src/linalg.rs`) tries, in order: the sonames, so `LD_LIBRARY_PATH` stays the user's override and a distribution's R gets the library it links; Accelerate on macOS; each library `BLAS_LIBS` (and for LAPACK, `LAPACK_LIBS` then `BLAS_LIBS`) names, in its `-L` directories and then by soname; and `R_HOME/lib/libRblas`/`libRlapack` last, because R's own libraries leave `xerbla_` to GNU R's `libR`. A candidate must define every routine of the table, so a BLAS tried for LAPACK is passed over. Opening LAPACK loads BLAS first, so a LAPACK whose BLAS sits in a directory of its own resolves the dependency by soname. A failure lists every place searched and the fix.
 - **One Makeconf reader.** `make_assignments` and `expand_make` live in `crates/rcmd/src/makeconf.rs`, which `interp` includes by path, as `repl` includes `gnu_r_home.rs`. `Toolchain::for_gnu_r_home` on Linux keeps the default compilers but takes `BLAS_LIBS` and `LAPACK_LIBS` from GNU R's `Makeconf` (`Toolchain::with_makeconf_libraries`), so compiled packages link the same libraries the interpreter loads.
 - **Impact.** No change where the sonames load. `La_library()` already reports the file the routines came from; `extSoftVersion()["BLAS"]` now does too. The candidate order is pinned by unit tests in `linalg.rs` and `rcmd.rs`.
+
+- **ry carries the last resort on Linux.** A release archive held only `libR`, so a system with neither library (NixOS without GNU R) had nothing left to load. `tools/base-r/lapack.sh` builds GNU R's reference `libRblas.so` and `libRlapack.so` beside the runtime; `repl`'s build script embeds them with it, and `rcmd::assemble` links them into the R home's `lib/`, where the existing last candidates find them. They define `xerbla_` in libRblas rather than in libR, so libR still does not interpose on a system BLAS's handler, and they link no Fortran runtime (`tools/base-r/fortran.c` supplies the one routine they need), because libgfortran's static archive is not position independent on Ubuntu and a system without LAPACK rarely has the shared one. The smoke test hides the system's libraries in a user and mount namespace and runs `solve()`.
 
 ## Reference Class and R6 method bodies resolve object members in naming
 
@@ -7568,7 +7596,13 @@ Each one trades a narrow class of missed errors for a class of false reports see
   direct superclasses go through `setIs`; `completeSubclasses` then records the new class in each
   ancestor only when `possibleExtends(new, ancestor)` is false, so a union that already lists the
   new class or any direct superclass among its subclasses is skipped (a later subclass of a union
-  member is not added to the union). The class cache and the namespace binding of a superclass
+  member is not added to the union). A class whose ancestor is a union member follows GNU R's
+  order exactly: ancestors are recorded first (a union already related to the class is skipped,
+  any other union re-caches its subclasses' `contains` right after, resorting them by distance and
+  dropping their `conflicts` attribute as R's sort does), and only then the direct superclasses,
+  where the first one is recorded on the definition read before those steps and later ones on a
+  fresh read (`record_subclasses`, `recache_subclasses`). Recaching bails when a union member is
+  not cached yet or has a non-numeric distance (`recachable`). The class cache and the namespace binding of a superclass
   may legitimately differ after `setClassUnion` (GNU R orders the extensions differently in each),
   and `getClassDef` reads the cache, so `local_class` takes the cached definition and only
   requires a binding to exist. `prototype()` objects reduce to the list `do.call("prototype",
@@ -7579,7 +7613,13 @@ Each one trades a narrow class of missed errors for a class of false reports see
   `rematchDefinition` gives: the generic's formals, `.local <- definition; .local(args)`, args
   after `...` and from the first `missing` signature position passed by name, and the method's
   defaults kept unless they are a symbol or missing (`.copyMethodDefaults` then `matchDefaults`).
-  A renamed single argument, an omitted argument, a different order or a method without `...` bail.
+  A method that only omits the generic's `...` gets the generic's formals in place, with its own
+  body and environment, as `conformMethod` and `rematchDefinition` leave it. An omitted argument
+  bails only when the signature names it (R then fills `missing` into the signature), and a renamed
+  argument becomes a `.local` wrapper. A different order, or added formals with no `...` in the
+  generic, bail.
+- **`setGeneric` accepts a braced body.** `function(x) { standardGeneric("f") }` gives a
+  `nonstandardGenericFunction`, as GNU R's `.NonstandardGenericTest` does; any other body bails.
 - **Every fallback says why.** `bail!(skip, "reason")` records the reason and line, and
   `report_fallback` prints them under `RY_LOAD_VERBOSE` for the four definition functions, so a
   slow load names the definitions to fix without a profiler (`reference/package-loading.md`).
@@ -7912,7 +7952,8 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **`match.arg` with `choices` missing** evaluates the caller's default only when it is a character constant or `c()` of character constants, and binds `choices` in the frame as the body does, so a declined call does not evaluate it twice.
 - **Bugs fixed on the way.** The `format` internal checks `trim`, `digits` (1 to 22), `nsmall` (0 to 20), `width`, `justify`, `na.encode`, `scientific` (length 1, logical or numeric) and `decimal.mark` (one string) in the order of GNU R's `do_format`, and reports them against the calling closure. It does not yet warn "NAs introduced by coercion" for a string `digits` or `width`. `attributes<-` and `attr<-` reject a non-character class, including an empty one, and a `"factor"` class on a non-integer object (GNU R's `classgets`); a numeric class used to be stored and crashed `print`.
 - **Defaulted, not missing.** A fast path that leaves an argument unforced checks that the cell holds the default the call bound (`gp::BINDING_MISSING`), not `missing()`: a wrapper that passes on its own missing formal makes `missing()` TRUE, but the R body forcing it raises an error.
-- **Known difference.** The prologue is visible: `body(match.arg)[[2]]` is `.Internal(ryMatchArg())`, and printing, `deparse()` or digesting these five functions differs from GNU R.
+- **Known difference.** The prologue is visible: `body(match.arg)[[2]]` is `.Internal(ryMatchArg())`, and printing, `deparse()` or digesting the patched functions differs from GNU R.
+- **`Reduce`** (`ryReduce`) covers `accumulate = FALSE` over a plain vector with a closure or builtin `f`, both directions, `init` given or not. It binds `mis`, `len`, `f`, `init` and `i` in Reduce's frame as the body does, and calls `f` through `eval::call_with_values`: forced promises of the body's own expressions `init` and `x[[i]]`, so `sys.call()` and `substitute()` inside `f` match. `right` and `accumulate` are forced in the body's order, which depends on whether `init` is missing.
 - **Measurement.** `validation` (bench-real harness, 3 processes): GNU R 4.3.3 0.660 s, ry 0.353 s with the JIT on and 0.373 s with it off (1.87x and 1.77x; it was 0.58 to 0.65x). Callgrind, JIT off, validation(1000) plus a warm-up run of 300, start-up included: 2.71G instructions before, 1.32G after (GNU R 3.16G). Per call: `format(2.5, nsmall = 3)` 4.7 µs (GNU R 13.9 µs, ry before 18 µs).
 - **Next candidates** from the same profile: `tryCatch` on the error path, `utils::modifyList` (needs an install hook when utils loads), `sprintf`, `vapply`.
 
@@ -7955,3 +7996,28 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Previous shape.** `analysis.rs` inlined a call of a closure whose body is one expression computing a scalar from scalars.
 - **Chosen shape.** A body `{ a <- e1; b <- e2; result }` inlines too (`lower_block`): every statement but the last assigns a symbol through base `<-` or `=`, each assignment rebinds the name in the inlined scope, and the last statement may be `return(value)`. Callee identity is guarded as before: a closure made in the same body by its type, a global one by the binding epoch.
 - **Deoptimization.** An inlined body has no effects, so a guard that fails inside it does not materialize the callee's frame: the whole call hands back to tier 0, which reruns it lazily from the start. Inlining a callee with effects would need frame materialization in the deoptimization exit, which is not built.
+
+## Builtin fast paths take names as CHARSXPs and evaluate nothing twice
+
+- **Previous shape.** `attributes()` built its names as Rust `String`s and interned each again through `mkChar`; `c()` read every element through `vector_element` and `coerce_vector`, and its flattener built every leaf name as a `String`. `forceAndCall` built an argument vector and a fresh pairlist per call. `lapply` and `vapply` with a builtin `FUN` (`vapply(rows, `[[`, 0, "fee")`) read the element natively for a closure only, and for a builtin evaluated `X[[i]]` again through the AST evaluator. The compiled `[[` read (`Op::Item`) served records only, and the in-place element assignment took numeric constant subscripts only, so `x[["fee"]] <- v` always went through `complex_assign`'s replacement calls.
+- **Chosen shape.**
+  - Names stay CHARSXPs end to end: `do_attributes` collects (print name, value) pairs on the stack; the `c()` flattener keeps a leaf name as `LeafName::Char` (the element's own CHARSXP) and builds a `String` only when it pastes a prefix (`subset.rs`).
+  - `c()` widens integer and logical runs into double and integer with a direct loop (`int_to_real`, NA to NA).
+  - `forceAndCall` reuses the call's cells after `n` and `FUN` when the special received them unchanged (`call_tail`), and passes variables eagerly to an effect-free closure when no argument is a call (`no_calls`), with the same conditions as a compiled call site.
+  - The apply family's known element reaches a builtin `FUN` directly, and a special that evaluates its arguments through `dispatch_evaluated_subject`, so `[[` methods still dispatch on the element.
+  - `cached_item` (`records.rs`) reads a classless list that is neither ALTREP nor an Array by position or by exact name; an out-of-range position falls back to `[[` for its error.
+  - A one-string constant is a side-effect-free subscript at the top level of an element assignment; the in-place assignment rejects `""` and `NA`, which match no name.
+- **Why not a per-builtin cache.** Every gain comes from not doing work (no interning, no pairlist, no second evaluation), so nothing has to be invalidated.
+- **Impact.** Instructions per call (JIT off, callgrind, GNU R 4.3.3 in parentheses): `attributes` on an xts object 4,183 to 1,786 (2,692); `c(1:3, 4.5)` 4,262 to 2,131 (2,731); `x[[2L]]` 1,150 to 698 (709); `x[["net"]] <- 3` 4,910 to 987 (2,011); `forceAndCall(2, f, x, y)` 5,520 to 4,232 (5,198); `Reduce(f, x)` over 100 elements 748.7k to 423.1k (688.8k). `crates/oracle/cases/builtins__fast_paths.R` pins the edge cases.
+- **Not yet done.** The closure call inside `vapply` and `lapply` still allocates `i` and a promise per element; `$<-` and `[[<-` with a new name still take `complex_assign`; `[<-` with a scalar costs 813 instructions against GNU R's 497, almost all of it tier-0 guards and frame lookups.
+
+## One-argument builtins and small base closures skip dispatch when their arguments are values
+
+- **Previous shape.** A compiled call to `!`, `length`, `is.null`, `is.na`, `is.character`, `is.logical` or `is.function` built an argument vector, went through `call_builtin`'s dispatch and `run_builtin`'s scope and visibility handling, and `!` allocated a fresh logical. A call to `identical`, `isTRUE`, `nrow`, `match`, `%in%` or `%||%` built a closure frame and promises and ran the R body, which calls `.Internal` or `length` again.
+- **Chosen shape.**
+  - `BuiltinDef::unary` (`builtins.rs`) is an optional `fn(Sexp) -> R<Option<Sexp>>`. `op_call_builtin` (`bytecode.rs`) calls it with the operand register when the call has exactly one positional, non-missing argument. It returns `None` for anything that is not plain (an object, ALTREP, attributes other than none, a ry native value), so S3 dispatch, names and the general error messages stay on the general path. Results are the shared immutable `TRUE`, `FALSE` and `NA` from `values::scalar_logical`, so modifying one copies it, as in GNU R.
+  - Native entries (`base_fast_paths.rs`, `NATIVE_ENTRIES`) are keyed by the closure's identity in `Interp::native_entries` and filtered by `gp::NATIVE_ENTRY`; both are rebuilt on an image start because the registry is not in the image. `apply_closure` asks the entry before it builds a frame. The entry declines (and the R body runs) when the closure is traced, debugged or stepped, when an argument is named, or when an argument is an unforced promise of a call; a promise of a variable or a constant is settled with the value it would have produced, so a later `substitute` or `missing` sees the same promise state.
+  - `match` and `%in%` scan in place for one element of the table's type (strings by pointer when the element is ASCII or `NA`) and otherwise call the `match` kernel directly.
+- **Why a field and not new tier-0 ops.** The JIT matches exhaustively on tier-0 ops, so a new op would change `crates/jit`. A field on the builtin keeps the compiled code unchanged and gives the baseline tier one function to call.
+- **Impact.** Per call (JIT off, callgrind, GNU R 4.3.3 in parentheses): `!x` 944 to 563 (750), `is.na(x)` 1,128 to 641 (1,490), `identical` 8,545 to 1,818 (3,149), `isTRUE` 6,087 to 1,114 (5,594), `match` 6,869 to 1,905 (2,963), `%in%` 11,327 to 1,745 (8,226). `crates/oracle/cases/builtins__native_entries.R` pins the edges.
+- **Not yet done.** `missing` is a special and still costs about twice GNU R's instructions.

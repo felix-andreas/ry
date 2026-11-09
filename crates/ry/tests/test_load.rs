@@ -541,11 +541,7 @@ fn held_back_s4_definitions_behave_as_if_run_eagerly() {
         }
         let (lazy, warm, eager) = (&printed[0], &printed[1], &printed[2]);
         assert_eq!(lazy.1, eager.1, "lazy:\n{}\neager:\n{}", lazy.0, eager.0);
-        assert_eq!(
-            warm.1, eager.1,
-            "warm:\n{}\neager:\n{}",
-            warm.0, eager.0
-        );
+        assert_eq!(warm.1, eager.1, "warm:\n{}\neager:\n{}", warm.0, eager.0);
         assert!(lazy.1.contains(expected), "{}", lazy.0);
         assert!(lazy.2.contains(lazy_summary), "{}", lazy.0);
         let statements = if uses_class { 8 } else { 7 };

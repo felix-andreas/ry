@@ -14,6 +14,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
         records::NativeKind,
     },
+    std::cell::Cell,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -308,12 +309,26 @@ impl Deparser {
             self.depth -= 1;
             return;
         }
-        if object.has_gp(gp::S4_OBJECT)
-            && let Some(parts) = s4_parts(object)
-        {
-            self.s4(parts);
-            self.depth -= 1;
-            return;
+        if object.has_gp(gp::S4_OBJECT) {
+            let class = get_attr(object, symbols().class);
+            if class.kind() != SexpType::String || length(class) == 0 {
+                // An S4 object without a class name, such as a class's prototype, has no
+                // `new()` call to recreate it.
+                if class == nil() && object.attrib() == nil() {
+                    self.print("getClass(\"S4\")@prototype");
+                } else {
+                    self.print("<S4 object of class ");
+                    self.deparse(class);
+                    self.print(">");
+                }
+                self.depth -= 1;
+                return;
+            }
+            if let Some(parts) = s4_parts(object, class) {
+                self.s4(parts);
+                self.depth -= 1;
+                return;
+            }
         }
         // An expression vector written from its source text shows none of its attributes.
         let attributes = self.opts & options::SHOW_ATTRIBUTES != 0
@@ -1549,26 +1564,43 @@ struct S4Parts {
     data: Option<Sexp>,
 }
 
-/// The class, slots and data part of an S4 object, read through the methods package, which
-/// owns class definitions. Without it, or for an object whose class it does not know, the
-/// object deparses as its plain value.
-unsafe fn s4_parts(object: Sexp) -> Option<S4Parts> {
-    let symbols = symbols();
-    let class = get_attr(object, symbols.class);
-    if class.kind() != SexpType::String || length(class) != 1 {
+/// The class, slots and data part of an S4 object. The slot names come from the class
+/// definition's `slots`, as in GNU R: `slotNames()` would dispatch on the object, and for a
+/// class representation it names the slots of the class it describes. Without the methods
+/// package, or for a class it does not know, the object deparses as its plain value.
+///
+/// The R calls made here may fail, and the failure's message deparses its call, which holds this
+/// same object. A deparse that starts while another one is reading S4 parts therefore takes the
+/// plain value, so a failing class can never recurse until the stack runs out.
+unsafe fn s4_parts(object: Sexp, class: Sexp) -> Option<S4Parts> {
+    thread_local! {
+        static READING: Cell<bool> = const { Cell::new(false) };
+    }
+    struct Reading;
+    impl Drop for Reading {
+        fn drop(&mut self) {
+            READING.set(false);
+        }
+    }
+    if READING.replace(true) {
         return None;
     }
+    let _reading = Reading;
+    let symbols = symbols();
     let class_name = values::string_at(class, 0)?.into_owned();
-    let methods_function = |name: &str| -> R<Sexp> {
-        values::call(
-            symbols.double_colon,
-            &[values::install("methods")?, values::install(name)?],
-        )
-    };
-    let quoted = values::call(symbols.quote, &[object]).ok()?;
-    let slot_names_call = values::call(methods_function("slotNames").ok()?, &[quoted]).ok()?;
-    let slot_names = crate::eval::eval(slot_names_call, values::base_namespace()).ok()?;
-    if slot_names.kind() != SexpType::String {
+    let get_class_def = values::call(
+        symbols.double_colon,
+        &[
+            values::install("methods").ok()?,
+            values::install("getClassDef").ok()?,
+        ],
+    )
+    .ok()?;
+    let definition_call = values::call(get_class_def, &[class]).ok()?;
+    let definition = crate::eval::eval(definition_call, values::base_env()).ok()?;
+    crate::heap().root(definition);
+    let slot_names = values::names(get_attr(definition, values::install("slots").ok()?));
+    if slot_names != nil() && slot_names.kind() != SexpType::String {
         return None;
     }
     crate::heap().root(slot_names);
@@ -1577,9 +1609,8 @@ unsafe fn s4_parts(object: Sexp) -> Option<S4Parts> {
     for index in 0..length(slot_names) {
         let name = values::string_at(slot_names, index)?.into_owned();
         has_data_slot |= name == ".Data";
-        let name_value = values::scalar_string(&name).ok()?;
-        let slot_call = values::call(methods_function("slot").ok()?, &[quoted, name_value]).ok()?;
-        let value = crate::eval::eval(slot_call, values::base_namespace()).ok()?;
+        let symbol = values::install(&name).ok()?;
+        let value = crate::subset::get_slot(object, symbol, nil()).ok()?;
         crate::heap().root(value);
         slots.push((name, value));
     }

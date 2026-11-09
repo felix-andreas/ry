@@ -44,8 +44,8 @@ pub mod debugger;
 pub mod deparse;
 pub mod dispatch;
 pub mod distributions;
-pub mod envir;
 pub mod effects;
+pub mod envir;
 pub mod eval;
 #[cfg(unix)]
 mod fft;
@@ -111,6 +111,7 @@ pub mod viewer;
 pub use crate::unwind::{Jump, RError};
 use {
     crate::{
+        base_fast_paths::NativeEntry,
         builtins::{Arg, BuiltinDef, Kind},
         conditions::{HandlerStack, RestartStack},
         unwind::{R, Unwind},
@@ -120,6 +121,7 @@ use {
         object::{Sexp, SexpType},
     },
     rustc_hash::FxHashMap,
+    smallvec::SmallVec,
     std::{cell::UnsafeCell, rc::Rc},
 };
 
@@ -276,6 +278,9 @@ pub struct Interp {
     /// assignment, so a builtin replacement function reports its errors and warnings against
     /// `x[i] <- v`, not `` `[<-`(*tmp*, i, v) `` or the enclosing function's call.
     pub assignment_call: Option<(Sexp, Sexp, usize)>,
+    /// The base closures whose calls run natively, each with its native code
+    /// (`base_fast_paths::native_entry`).
+    pub native_entries: SmallVec<[(Sexp, NativeEntry); 8]>,
     /// The `*tmp*` of each complex assignment running, innermost last: the environment it runs
     /// in and the variable's value. GNU R binds `*tmp*` in that environment for the duration;
     /// ry answers a lookup that finds no binding from here instead, so an assignment neither
@@ -427,6 +432,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         visible: true,
         returned_values: Vec::new(),
         assignment_call: None,
+        native_entries: SmallVec::new(),
         tmp_values: Vec::new(),
         loops: Vec::new(),
         warnings: Vec::new(),

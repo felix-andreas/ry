@@ -1,0 +1,189 @@
+[stdout]
+| [1] "g"
+| [1] "g2"
+| [1] "g3"
+| [1] "g4"
+| [1] "g5"
+| [1] "in method for ‘g5’ with signature ‘object=\"A\",x=\"numeric\"’: formal arguments (x = \"numeric\") omitted in the method definition cannot be in the signature"
+| g A 
+| {
+|     .local <- function (object, x) 
+|     paste("A", x)
+|     .local(object, x, ...)
+| }
+| $object
+| 
+| 
+| $x
+| 
+| 
+| $...
+| 
+| 
+| [1] "target"  "defined" "generic" "class"  
+| g B 
+| paste("B", ...length())
+| $object
+| 
+| 
+| $x
+| 
+| 
+| $...
+| 
+| 
+| [1] "target"  "defined" "generic" "class"  
+| g2 A 
+| {
+|     .local <- function (object, y, ...) 
+|     paste("A2", missing(y))
+|     .local(object, ...)
+| }
+| $object
+| 
+| 
+| $x
+| 
+| 
+| $...
+| 
+| 
+| [1] "target"  "defined" "generic" "class"  
+| g2 B 
+| {
+|     .local <- function (object, y = 5, ..., z) 
+|     paste("B2", y)
+|     .local(object, ...)
+| }
+| $object
+| 
+| 
+| $x
+| 
+| 
+| $...
+| 
+| 
+| [1] "target"  "defined" "generic" "class"  
+| g3 A 
+| {
+|     .local <- function (object, x) 
+|     x
+|     .local(object, x, ...)
+| }
+| $object
+| 
+| 
+| $x
+| [1] 1
+| 
+| $...
+| 
+| 
+| $na.rm
+| [1] FALSE
+| 
+| [1] "target"  "defined" "generic" "class"  
+| g3 B 
+| na.rm
+| $object
+| 
+| 
+| $x
+| [1] 1
+| 
+| $...
+| 
+| 
+| $na.rm
+| [1] FALSE
+| 
+| [1] "target"  "defined" "generic" "class"  
+| g4 A 
+| {
+|     .local <- function (object) 
+|     "A4"
+|     .local(object)
+| }
+| $object
+| 
+| 
+| $x
+| 
+| 
+| [1] "target"  "defined" "generic" "class"  
+| g5 B 
+| [1] "B5"
+| $object
+| 
+| 
+| $x
+| 
+| 
+| $y
+| 
+| 
+| $...
+| 
+| 
+| [1] "target"  "defined" "generic" "class"  
+| [1] "A"       "missing"
+| c(missing(y))
+|    object         x 
+|       "A" "missing" 
+| [1] "B"
+| [1] "B5"
+| object      x 
+|    "B"  "ANY" 
+| [1] "A 3"
+| [1] "B 2"
+| [1] "unused argument (4)"
+| [1] "A2 TRUE"
+| [1] "A2 TRUE"
+| [1] "B2 5"
+| [1] "B2 5"
+| [1] 1
+| [1] 4
+| [1] FALSE
+| [1] TRUE
+| [1] "A4"
+| [1] "B4"
+| [1] "A4"
+| [1] TRUE
+| [1] FALSE
+| [1] "B5"
+| [1] TRUE
+| [1] "h"
+| [1] "h2"
+| [1] "nonstandardGenericFunction"
+| attr(,"package")
+| [1] "methods"
+| {
+|     standardGeneric("h")
+| }
+| [1] "hA"
+| [1] "h2B"
+| [1] TRUE
+| [1] FALSE
+| [1] "generic"    "package"    "group"      "valueClass" "signature" 
+| [6] "default"    "skeleton"   "class"     
+| Function: h (package s4conform)
+| object="A"
+| 
+| A connection with                      
+| description "stdout"  
+| class       "terminal"
+| mode        "w"       
+| text        "text"    
+| opened      "opened"  
+| can read    "no"      
+| can write   "yes"     
+[messages]
+- An object of class “signature”
+- An object of class “signature”
+- Note: method with signature ‘A#missing’ chosen for function ‘g5’,\n target signature ‘B#missing’.\n "B#ANY" would also be valid
+[warnings]
+[errors]
+[value]
+integer
+| structure(1L, class = c("terminal", "connection"))

@@ -40,17 +40,34 @@
 # generic such as `Arith`, which its members dispatch to without any lookup the interpreter
 # sees, or a method whose signature is longer than its generic's method tables, which adding
 # it would rebuild.
-.ry_may_defer_s4 <- function(state, deferred) {
-  isTRUE(getOption("ry.load.lazy_s4", TRUE)) && isNamespaceLoaded("methods") &&
-    !any(vapply(deferred$generics, exists, NA, envir = state$ns, mode = "function")) &&
-    all(vapply(deferred$foreign_methods, function(method) {
-      generic <- get0(method$generic, envir = state$ns, mode = "function")
-      kind <- .ry_foreign_generic_kind(generic)
-      # A method for one of the package's own plain functions makes a generic of a binding the
-      # load itself makes, which a placeholder would replace.
-      !is.na(kind) && (kind != "standard" || !is.na(.ry_s4_label(generic, method$signature))) &&
-        (kind != "implicit" || !identical(topenv(environment(generic)), state$ns))
-    }, NA))
+.ry_s4_eager_reason <- function(state, deferred) {
+  if (!isTRUE(getOption("ry.load.lazy_s4", TRUE))) {
+    return("`options(ry.load.lazy_s4 = FALSE)` turns deferral off")
+  }
+  if (!isNamespaceLoaded("methods")) {
+    return("the methods package is not loaded")
+  }
+  for (generic in deferred$generics) {
+    if (exists(generic, envir = state$ns, mode = "function")) {
+      return(sprintf("the generic `%s` already exists as a function the package sees", generic))
+    }
+  }
+  for (method in deferred$foreign_methods) {
+    generic <- get0(method$generic, envir = state$ns, mode = "function")
+    kind <- .ry_foreign_generic_kind(generic)
+    if (is.na(kind)) {
+      return(sprintf("a method for `%s`, which is a group generic or not a function", method$generic))
+    }
+    if (kind == "standard" && is.na(.ry_s4_label(generic, method$signature))) {
+      return(sprintf("a method for `%s` whose signature the loader cannot label", method$generic))
+    }
+    # A method for one of the package's own plain functions makes a generic of a binding the
+    # load itself makes, which a placeholder would replace.
+    if (kind == "implicit" && identical(topenv(environment(generic)), state$ns)) {
+      return(sprintf("a method for the package's own function `%s`", method$generic))
+    }
+  }
+  NULL
 }
 
 # How a method for another package's function `definition` is reached: through a generic that
