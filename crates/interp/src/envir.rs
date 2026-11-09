@@ -2077,7 +2077,10 @@ unsafe fn dots_of(env: Sexp) -> R<Sexp> {
 }
 
 unsafe fn do_dots_length(call: &Call<'_>) -> R<Sexp> {
-    let dots = dots_of(call.env()?)?;
+    let dots = match call.slot_dots() {
+        Some(dots) => dots,
+        None => dots_of(call.env()?)?,
+    };
     let count = if dots.kind() == SexpType::Dots {
         values::pairlist_length(dots)
     } else {
@@ -2091,14 +2094,30 @@ unsafe fn do_dots_elt(call: &Call<'_>) -> R<Sexp> {
     if index < 1 {
         return Err(call.error("indexing '...' with non-positive index"));
     }
-    let symbol = values::install(&format!("..{index}"))?;
     // Forcing the element's promise decides the visibility, as evaluating `..n` would.
     interp().visible = true;
+    if let Some(dots) = call.slot_dots() {
+        let mut item = dots;
+        for _ in 1..index {
+            if item.kind() != SexpType::Dots {
+                break;
+            }
+            item = item.cdr();
+        }
+        // A missing or absent element takes the environment path, which reports it.
+        if item.kind() == SexpType::Dots && item.car() != missing_arg() {
+            return eval::value_of(item.car());
+        }
+    }
+    let symbol = values::install(&format!("..{index}"))?;
     eval::eval_symbol(symbol, call.env()?)
 }
 
 unsafe fn do_dots_names(call: &Call<'_>) -> R<Sexp> {
-    let dots = dots_of(call.env()?)?;
+    let dots = match call.slot_dots() {
+        Some(dots) => dots,
+        None => dots_of(call.env()?)?,
+    };
     if dots.kind() != SexpType::Dots {
         return Ok(nil());
     }

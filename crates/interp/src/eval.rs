@@ -1509,6 +1509,25 @@ pub unsafe fn frame_env(index: usize) -> R<Sexp> {
     reify(index)
 }
 
+/// The `...` slot of the frame at `index`, when it is a slot frame without an environment and
+/// has a `...` formal.
+pub unsafe fn slot_dots(index: usize) -> Option<Sexp> {
+    let frame = interp().frames.get(index)?;
+    if frame.env != nil() || frame.slots == crate::NO_SLOTS {
+        return None;
+    }
+    let mut formal = frame.function.car();
+    let mut position = 0;
+    while formal.kind() == SexpType::Pairlist {
+        if formal.tag() == symbols().dots {
+            return Some(*bytecode::register_address(frame.slots as usize + 1 + position));
+        }
+        position += 1;
+        formal = formal.cdr();
+    }
+    None
+}
+
 /// The environment of the slot frame whose slots the running byte code reads, which a `NULL`
 /// environment it hands out stands for (see [`crate::builtins::Call::env`]).
 pub unsafe fn slot_owner_env() -> R<Sexp> {

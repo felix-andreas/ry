@@ -89,6 +89,16 @@ impl Call<'_> {
         crate::eval::frame_env(self.frame as usize)
     }
 
+    /// What the calling slot frame's `...` slot holds, when the call was made from a slot frame
+    /// that has no environment and a `...` formal; `None` otherwise, and then the caller's
+    /// environment answers.
+    pub unsafe fn slot_dots(&self) -> Option<Sexp> {
+        if self.rho != nil() || self.frame == crate::NO_SLOTS {
+            return None;
+        }
+        crate::eval::slot_dots(self.frame as usize)
+    }
+
     /// The position in the frame stack of the closure frame the call was made from, without
     /// giving a slot frame its environment; `None` when it was made from no closure frame.
     pub unsafe fn frame_index(&self) -> Option<usize> {

@@ -46,7 +46,7 @@ describes it, and the open gaps are marked.
 - **Which calls get a slot frame.** The compiler gives a body a slot table (`SLOTS` in its
   constants) when `local_symbols` succeeds, which means the body has no `assign`, `eval`, `local`,
   `environment`, `sys.function`, `on.exit`, `Recall` or similar (`collect_bindings` in
-  `crates/interp/src/bytecode.rs`), it has no `...` formal and at most 64 formals, and it does not
+  `crates/interp/src/bytecode.rs`), it has at most 64 formals, and it does not
   open with a base fast-path prologue (`base_fast_paths::has_prologue`), which reads its frame as an
   environment. At the call, `bind_slots` also refuses a closure with tier-1 or baseline machine code
   (which reads variables through the environment), a closure under the debugger or a type signature,
@@ -57,7 +57,8 @@ describes it, and the open gaps are marked.
   environment once it has one, and `R_NilValue` before. A slot holds a value and counts one
   reference, as a binding cell does, so copy-on-modify is unchanged. An unassigned local holds the
   unbound marker, and the frame record keeps one missing bit per formal (`Frame.missing`, a `u64`).
-  The slots are GC roots because the whole register file is.
+  The slots are GC roots because the whole register file is. A `...` formal's slot holds the
+  `DOTSXP` the call collected, or the empty argument when it collected nothing.
 - **Reads and writes.** `GetVar`/`SetVar` on a numbered symbol read and write the slot while the
   header is nil, and the environment after. Builtins that only read a frame property take the
   frame's index (`Call::frame_index`) instead of its environment.
@@ -71,9 +72,20 @@ describes it, and the open gaps are marked.
   both reify on demand.
 - **Release.** A frame that was never reified drops its slots' references on return instead of
   `release_frame` and `clear_frame`.
-- **Not built.** Binding by a per-site plan (`bind_slots` matches by name through the shared match
-  cache), promises for non-literal defaults without an environment, promises for `...`, and slot
-  access from the JIT's tiers.
+- **Direct calls.** A call site keeps a plan for the closure it calls (`direct_plan` in
+  `bytecode.rs`): which argument fills each formal's slot. The site marks the body on its first
+  call, builds the plan on the second, and from then on `eval::call_direct` writes the arguments
+  into the slots without matching. A site stops planning after eight different bodies. The plan
+  is refused when matching could depend on more than the argument names: a `...` formal, a `...`
+  or `..N` argument, or a left-out formal whose default is not a literal. Those calls bind through
+  `bind_slots`. `call_direct` checks per call what can change after planning (machine code for the
+  body, the debugger, move tracking), and takes the generic path when any holds.
+- **Forwarding `...`.** A call that passes `...` appends the promises the frame's `...` slot holds,
+  to a closure (`slot_dots_into`) or, forced, to a builtin (`slot_builtin_call`, when every other
+  argument is a constant or a slotted local), so `f(x, ...)`, `list(...)` and `c(x, ...)` leave the
+  frame without an environment.
+- **Not built.** Promises for non-literal defaults over the slots, and slot access from the JIT's
+  tiers ([the native execution model](/development/design/r-runtime/#the-native-execution-model)).
 
 ## Reification triggers
 
@@ -134,8 +146,8 @@ The second step is built (`slot_promise`, `force_slot_promise` and `resolved_env
 
 - **Which calls.** A call from an unreified slot frame passes its arguments as promises over the
   frame when every argument is a constant, the missing marker, a symbol, or code the compiler
-  compiled against the caller's slot table. A `...` argument, a `..N` symbol, a call that is not
-  compiled, or a compiled promise that reads a local the table does not number falls back to the
+  compiled against the caller's slot table, and `...` passes on what the frame collected. A
+  `..N` symbol, a call that is not compiled, or a compiled promise that reads a local the table does not number falls back to the
   heap-frame path, which reifies the caller.
 - **The pending environment.** The first such promise allocates an empty environment for the frame
   (`Frame.pending`), flagged `PENDING_FRAME`, and the promises name it as their environment. If the

@@ -1981,7 +1981,6 @@ impl Compiler {
                         [(tag, symbol)]
                             if *tag == nil()
                                 && symbol.kind() == SexpType::Symbol
-                                && *symbol != symbols().dots
                                 && *symbol != missing_arg()
                                 && eval::dot_dot_index(*symbol).is_none()
                                 && self.bound.is_none() =>
