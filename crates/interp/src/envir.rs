@@ -1773,8 +1773,11 @@ impl ElementCalls {
             && !list.is_object()
             && !list.is_array()
             && !matches!(list.kind(), SexpType::I64 | SexpType::Record)
+            // `vector_element` would materialize a numeric ALTREP vector, such as a compact
+            // `1:n`, which `X[[i]]` reads one element at a time.
+            && (!list.is_altrep() || matches!(list.kind(), SexpType::String | SexpType::List))
         {
-            Some(values::materialize(list)?)
+            Some(list)
         } else {
             None
         };

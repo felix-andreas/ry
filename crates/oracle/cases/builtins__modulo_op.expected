@@ -90,9 +90,10 @@
 | [1] 102703
 | [1] 102703
 | [1] 102703
+| [1] 519
 [messages]
 [warnings]
 [errors]
 [value]
-integer
-| 102703L
+double
+| 519

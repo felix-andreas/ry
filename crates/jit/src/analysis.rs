@@ -2433,10 +2433,17 @@ impl<'a> Builder<'a> {
                     state.registers[inst.operand(3)],
                 );
                 let scalar = |ty: Ty| ty.is_numeric_scalar() || ty == Ty::Num;
+                // `%%` and `%/%` compile only through an intrinsic, which takes no `Num` operand;
+                // otherwise they run the tier-0 handler, which reads boxed operands.
+                let remainder = matches!(
+                    ARITHS[inst.operand(0)].0,
+                    Arith::Modulo | Arith::IntegerDivide
+                );
                 // An integer flag would make `+`, `-` and `*` integer arithmetic unless the other
                 // operand is a double; every other operator converts to double anyway.
                 scalar(a)
                     && scalar(b)
+                    && !(remainder && (a == Ty::Num || b == Ty::Num))
                     && (!matches!(
                         ARITHS[inst.operand(0)].0,
                         Arith::Add

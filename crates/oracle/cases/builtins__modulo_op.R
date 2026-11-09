@@ -16,3 +16,7 @@ str(f(structure(7L, class = "money"), 3L))
 str(f(c(a = 7L), 3L)); str(f(1:6, 4L))
 loop <- function(n) { s <- 0L; for (i in seq_len(n)) s <- s + i %% 7L + i %/% 5L; s }
 print(loop(1000L)); print(loop(1000L)); print(loop(1000L))
+# A loop variable that holds an integer and then a double is a mixed number to the JIT.
+mixed <- function(n) { k <- 1L; s <- 0; for (i in seq_len(n)) { s <- s + 2.5 %% k + 7 %/% k; k <- k + 0.5 }; s }
+for (round in 1:20) value <- mixed(200L)
+print(value)
