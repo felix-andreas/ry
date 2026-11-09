@@ -1,0 +1,24 @@
+[stdout]
+| [1] TRUE
+| An object of class "Zzz"
+| <S4 Type Object>
+| attr(,"x")
+| [1] 1
+| [1] "cannot get a slot (\"slots\") from an object of type \"NULL\""
+| [1] "cannot get a slot (\"slots\") from an object of type \"NULL\""
+| z <-
+| [1] "cannot get a slot (\"slots\") from an object of type \"NULL\""
+| cannot get a slot ("slots") from an object of type "NULL" 
+| Formal class 'Zzz' [package ".GlobalEnv"] with 0 slots
+|  Named list()
+|   ..$ x: num 1
+| [1] "cannot get a slot (\"slots\") from an object of type \"NULL\""
+| [1] "cannot get a slot (\"slots\") from an object of type \"NULL\""
+| [1] "caught"
+| [1] "no slot of name \"y\" for this object of class \"Two\""
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "no slot of name \"y\" for this object of class \"Two\""
