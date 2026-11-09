@@ -46,6 +46,10 @@ pub struct Activation {
     pub visible: *mut bool,
     /// Where execution starts: 0 for a call, or the loop header on-stack replacement enters.
     pub entry_pc: i64,
+    /// The activation's environment, whose frame compiled code probes for its variables.
+    pub env: Sexp,
+    /// The code's lookup-slot hints ([`bytecode::lookup_hints`]).
+    pub hints: *mut u32,
     pub machine: *mut c_void,
     pub compiled: *const Compiled,
     pub pending: Option<Unwind>,
@@ -59,7 +63,12 @@ pub mod offset {
     pub const LOOPS: i32 = 8;
     pub const VISIBLE: i32 = 16;
     pub const ENTRY_PC: i32 = 24;
+    pub const ENV: i32 = 32;
+    pub const HINTS: i32 = 40;
 }
+
+const _: () = assert!(std::mem::offset_of!(Activation, env) == offset::ENV as usize);
+const _: () = assert!(std::mem::offset_of!(Activation, hints) == offset::HINTS as usize);
 
 /// What compiled code returns when on-stack replacement declined to enter, because a value
 /// tier 0 left in a register is not of the type the compiled loop expects.
@@ -343,6 +352,7 @@ pub unsafe fn invalidate(code: Sexp) {
     counters[profile::BACK_EDGES] = 0;
     if compiles(state) >= MAX_COMPILES {
         counters[profile::TIER_STATE] = -1;
+        counters[profile::RECORDING] = 0;
     } else if state >= 0 {
         counters[profile::TIER_STATE] = state & !SIZE_WAITED;
     }
@@ -449,6 +459,17 @@ pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i6
             let loaded = scoped(|| bytecode::load_variable(machine.code, machine.env, pc as usize));
             finish_load(activation, slot, loaded, epoch)
         })
+    }
+}
+
+/// Records the type of a value compiled code loaded inline and found to be of a type it did not
+/// speculate on, so that the recompile after the deoptimization sees it. The inline load skips
+/// recording otherwise, because a value of the speculated type adds nothing to the profile.
+pub unsafe extern "C" fn jit_record(activation: *mut Activation, pc: i64, value: *mut Header) {
+    unsafe {
+        if let Some(value) = Sexp::from_raw(value) {
+            bytecode::record_value(machine(&*activation).code, pc as usize, value);
+        }
     }
 }
 

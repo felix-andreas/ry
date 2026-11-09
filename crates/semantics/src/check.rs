@@ -3244,6 +3244,9 @@ impl<'db> Checker<'db, '_> {
                 });
                 let computed =
                     declares_function.is_none() && !self.expression_annotations.contains_key(&id);
+                // An annotated value (`@UserId(5L)`) is typed by its annotation, so it is
+                // never one of the bare literals below.
+                let value_annotated = self.expression_annotations.contains_key(&value);
                 let value_ty = match declares_function {
                     Some(declared) => {
                         for (name, constraint) in &declared.binders {
@@ -3265,7 +3268,9 @@ impl<'db> Checker<'db, '_> {
                             self.table.level += 1;
                         }
                         let literal = number_literal(self.module, value).filter(|_| {
-                            binds_name && !self.expression_annotations.contains_key(&id)
+                            binds_name
+                                && !value_annotated
+                                && !self.expression_annotations.contains_key(&id)
                         });
                         let value_ty = match literal {
                             Some(literal) => {
@@ -3287,6 +3292,7 @@ impl<'db> Checker<'db, '_> {
                                 ExpressionKind::Literal(
                                     kind @ (LiteralKind::String(_) | LiteralKind::Logical(_)),
                                 ) if binds_name
+                                    && !value_annotated
                                     && !self.expression_annotations.contains_key(&id) =>
                                 {
                                     let constraint = match kind {
@@ -3313,6 +3319,7 @@ impl<'db> Checker<'db, '_> {
                                 // value is a literal, are one literal, so at a top-level
                                 // binding in a typed file they are a ry value too.
                                 _ if binds_name
+                                    && !value_annotated
                                     && !self.expression_annotations.contains_key(&id)
                                     && self.binds_ry_value()
                                     && let Some(scalar) =

@@ -54,8 +54,14 @@ left, in order of expected gain:
   (`step_guard` costs 227M instructions on `functional`), and the trivial predicates through
   `BuiltinDef::unary`.
 - Tier-1 handoffs: compiled code hands arithmetic it did not specialize back to tier 0 through
-  `jit_step` (158,500 times in one `functional` body), and loads go through `jit_load` and
-  `load_variable` instead of an inline frame probe like the baseline's `probe_frame`.
+  `jit_step` (158,500 times in one `functional` body). Loads probe the frame inline
+  (`decisions.md`, "Tier 1 probes the frame inline for a variable load").
+- JIT on above JIT off on `testthat_full`: 7.134G against 7.047G (callgrind, bench profile,
+  `RY_BENCH_REPEAT=2`). Of the 87M, compiled code and compiling are under 10M; tier 0's own
+  functions run more with the JIT on (`run` +30M, `execute_code` +12M, `run_get_var` +8M,
+  `run_call_builtin` +8M, `run_call_generic` +5M). The likely cause is tier 0's type-feedback
+  recording and entry and back-edge counting (unconfirmed; compare against
+  `RY_JIT_THRESHOLDS=0,0,0`).
 - Calls from compiled code (baseline and tier 1) while calling handlers are established, instead
   of falling back to tier 0, pinned in `crates/jit/tests/test_tiers.rs` with a body hot under
   `withCallingHandlers`.
@@ -2572,12 +2578,6 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   functions per package. Baseline code for every body from its first entry measured 8.06G
   against 7.96G instructions on the testthat workload, so install-time baseline code is no lever
   until baseline code inlines fast paths.
-- **Typed natives read a logical `NA` as a double `NA` where tier 0 keeps it logical.**
-  `nf <- function(x: double, y: double) -> double x * 2 + y; nf(NaN, NA)` gives `NA` with
-  `RY_JIT=off` and `NaN` with the JIT on: tier 0 adds a logical `NA` operand as integer `NA`,
-  which makes the result `NA`, and native code receives it as `NA_real_` and lets the hardware
-  pick `NaN`. Either the annotation check should coerce the value in tier 0 too, or native entry
-  should refuse a logical argument for a double parameter.
 - **Decoding an image's code costs about as much as compiling it** (about 65k instructions per
   closure on CRAN packages), so an untrained image saves nothing measurable. The decoder reads
   every instruction word and feedback word as a varint and re-interns each symbol constant by

@@ -8,7 +8,7 @@ hover-documentation: Applies `f` to every element.
 hover-documentation:
 hover-documentation: ```r dput
 hover-documentation: List.map([1, 2, 3], function(x) x * 2)
-hover-documentation: #> [2, 4, 6]
+hover-documentation: #> [2i64, 4i64, 6i64]
 hover-documentation: ```
 definition: stub source std at `List.map`
 references: none
@@ -126,7 +126,7 @@ hover-documentation: Applies `f` to every element.
 hover-documentation:
 hover-documentation: ```r dput
 hover-documentation: List.map([1, 2, 3], function(x) x * 2)
-hover-documentation: #> [2, 4, 6]
+hover-documentation: #> [2i64, 4i64, 6i64]
 hover-documentation: ```
 definition: stub source std at `List.map`
 references: none
@@ -174,7 +174,7 @@ hover-documentation: Applies `f` to every element.
 hover-documentation:
 hover-documentation: ```r dput
 hover-documentation: List.map([1, 2, 3], function(x) x * 2)
-hover-documentation: #> [2, 4, 6]
+hover-documentation: #> [2i64, 4i64, 6i64]
 hover-documentation: ```
 definition: stub source std at `List.map`
 references: none

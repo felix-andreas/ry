@@ -521,6 +521,10 @@ fn run_console(
         }
         None => String::new(),
     };
+    let console_config = &preflight.config().console;
+    // NO_COLOR (no-color.org) turns color off when it is set to anything but the empty string.
+    let no_color = env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+    let palette = (console_config.highlight && !no_color).then(|| console_config.colors.0.clone());
     let flags = runtime_flags(preflight.config());
     let keybindings = match keybindings {
         Keybindings::Emacs => repl::Keybindings::Emacs,
@@ -544,6 +548,7 @@ fn run_console(
                     filter: Some(filter),
                     completer,
                     package,
+                    palette,
                     ..repl::RunOptions::default()
                 },
                 flags,
@@ -563,6 +568,7 @@ fn run_console(
                 completer,
                 hooks: Some(Box::new(load::ReloadWatcher)),
                 filter: Some(filter),
+                palette,
                 ..repl::RunOptions::default()
             }))
         }

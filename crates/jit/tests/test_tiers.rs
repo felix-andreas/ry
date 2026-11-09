@@ -928,6 +928,62 @@ fn closures_from_one_site_share_code_but_not_lookups() {
     });
 }
 
+/// Compiled code loads a variable inline when it sits in the activation's frame or an enclosing
+/// function frame and holds a value or a forced promise, and hands every other load to the
+/// runtime. These calls cross each case: a forced argument, an enclosing binding whose type
+/// changes under the code (the inline load must deoptimize), an active binding, and an argument
+/// that is an integer in one closure and a double in another of the same code, which loads as
+/// `Num`.
+#[test]
+fn inline_variable_loads_agree_with_tier_zero() {
+    let calls = [
+        "g(1L)",
+        "g(2L)",
+        "g(1.5)",
+        "g(3L)",
+        "assign('k', 2.5, envir = environment(g))",
+        "g(1L)",
+        "g(2L)",
+        "assign('k', 'a', envir = environment(g))",
+        "g(1L)",
+        "makeActiveBinding('j', function() 4L, environment(g))",
+        "h <- local({ j <- 1L; function(x) { s <- 0; for (i in 1:3) s <- s + x * j; s } })",
+        "h(1L)",
+        "h(2L)",
+        "environment(h) <- environment(g)",
+        "h(1L)",
+        "h(2L)",
+        "p <- make(2)",
+        "q <- make(0.5)",
+        "p(1L)",
+        "q(1.5)",
+        "p(2L)",
+        "q(2.5)",
+        "typeof(p(3L))",
+        "q(NA_integer_)",
+        "p(NA)",
+        "typeof(q(4L))",
+    ];
+    let mut outcomes = Vec::new();
+    with_interpreter(|| unsafe {
+        for mode in [Mode::Off, Mode::Force] {
+            jit::install_mode(mode);
+            run("make <- function(k) function(x) { s <- 0; for (i in 1:3) s <- s + x * k; s }");
+            run("g <- make(2L)");
+            let mut results = vec![run("g(1L)")];
+            // A body the code generator rejects would run in tier 0 and agree trivially.
+            assert!(
+                mode == Mode::Off || has_compiled_code("g"),
+                "g did not compile, so nothing probed"
+            );
+            results.extend(calls.iter().map(|call| run(call)));
+            outcomes.push(results);
+        }
+        jit::install_mode(Mode::Off);
+    });
+    assert_eq!(outcomes[0], outcomes[1]);
+}
+
 #[test]
 fn formal_shadows_enclosing_function() {
     // `sum` names a base function, but the call must reach the function passed in its place.
@@ -1179,8 +1235,8 @@ fn fuzz_argument_expressions_agree_with_tier_zero() {
     // A native call evaluates a pure argument expression before the call instead of building
     // its promise. Random expressions over constants, variables, `NA`, integer overflow, a
     // classed value and a shadowed operator must give the same value, warnings and errors as
-    // tier 0. The JIT calls only a typed closure natively, so `nf` is typed, and each argument is
-    // multiplied by 1, still a pure expression, so that it reaches `nf` as a double.
+    // tier 0. The JIT calls only a typed closure natively, so `nf` is typed; an argument that
+    // evaluates to a logical or an integer reaches it as one, which is how `NA` meets `NaN`.
     with_interpreter(|| unsafe {
         run("nf <- function(x: double, y: double) -> double x * 2 + y
              big <- 2147483647L
@@ -1190,8 +1246,8 @@ fn fuzz_argument_expressions_agree_with_tier_zero() {
              Ops.tagged <- function(e1, e2) 99");
         for_each_seed(300, |seed| {
             let mut rng = SplitMix64(seed);
-            let first = format!("({}) * 1", argument_expression(&mut rng, 0));
-            let second = format!("({}) * 1", argument_expression(&mut rng, 0));
+            let first = argument_expression(&mut rng, 0);
+            let second = argument_expression(&mut rng, 0);
             let shadow = if rng.chance(1, 8) {
                 "`-` <- function(e1, e2) 42\n"
             } else {

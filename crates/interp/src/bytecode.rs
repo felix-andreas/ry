@@ -3625,6 +3625,17 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<()> {
     interpret::<true>(machine, pc).map(|_| ())
 }
 
+/// The frame-position hints of `code`'s lookup slots, one `u32` per slot, which compiled code
+/// reads to probe a frame without a search. The vector is never resized.
+pub unsafe fn lookup_hints(code: Sexp) -> *mut u32 {
+    LookupCache::of(code).hints
+}
+
+/// Records `value`'s kind as type feedback for the instruction at `pc`.
+pub unsafe fn record_value(code: Sexp, pc: usize, value: Sexp) {
+    record_feedback(code.cdr(), pc, value);
+}
+
 /// What `GetVar` at `pc` reads, and whether the binding is in the activation's own frame.
 pub unsafe fn load_variable(code: Sexp, env: Sexp, pc: usize) -> R<(Sexp, bool)> {
     let words = values::ints(code.car());
@@ -5214,9 +5225,9 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
     let real = |value: f64| -> R<Option<Sexp>> { Ok(Some(values::scalar_real(value)?)) };
     let nan = a.is_nan() || b.is_nan();
     match operator {
-        Arith::Add => real(a + b),
+        Arith::Add => real(crate::arith::add(a, b)),
         Arith::Subtract => real(a - b),
-        Arith::Multiply => real(a * b),
+        Arith::Multiply => real(crate::arith::multiply(a, b)),
         Arith::Divide => real(a / b),
         // R_pow's special cases (1^y, x^0, NA handling) differ from powf; the builtin has them.
         Arith::Power => {
