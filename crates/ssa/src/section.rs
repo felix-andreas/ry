@@ -20,6 +20,7 @@
 //! | code length | `u32` |
 //! | symbol count | `u32`, then per symbol its name as a `u16` length and the bytes |
 //! | function count | `u32`, then per function its name as a `u16` length and the bytes, and the `u32` offset of its entry in the code |
+//! | metadata | `u32` length and the bytes: what the front end that compiled the code says about it |
 //! | padding | zeros up to the code offset, which the writer places at a multiple of [`FILE_ALIGNMENT`] in the file |
 //! | code | the machine code |
 
@@ -51,13 +52,14 @@ const TABLE_ALIGNMENT: usize = 64 * 1024;
 /// The most symbols or functions one section may hold.
 const MAX_NAMES: usize = 1 << 20;
 
-/// Linked machine code: the bytes, the symbol behind each link table slot, and each function's
-/// name and entry offset.
+/// Linked machine code: the bytes, the symbol behind each link table slot, each function's
+/// name and entry offset, and the front end's metadata, which the section carries opaquely.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Code {
     pub text: Vec<u8>,
     pub symbols: Vec<Box<str>>,
     pub functions: Vec<(Box<str>, u32)>,
+    pub metadata: Vec<u8>,
 }
 
 /// The ISA builder for code written ahead of time on this host. Only Linux on x86-64 has a
@@ -191,6 +193,7 @@ pub fn link(object: &[u8], names: &[Box<str>], known: &dyn Fn(&str) -> bool) -> 
         text: code,
         symbols,
         functions,
+        metadata: Vec::new(),
     })
 }
 
@@ -217,6 +220,8 @@ pub fn encode(code: &Code, base: u64) -> Vec<u8> {
         names(&mut out, name);
         out.extend_from_slice(&offset.to_le_bytes());
     }
+    out.extend_from_slice(&(code.metadata.len() as u32).to_le_bytes());
+    out.extend_from_slice(&code.metadata);
     let absolute = base + out.len() as u64;
     let padded = absolute.div_ceil(FILE_ALIGNMENT) * FILE_ALIGNMENT;
     out.resize(out.len() + (padded - absolute) as usize, 0);
@@ -234,6 +239,7 @@ pub struct Header<'a> {
     pub code: &'a [u8],
     pub symbols: Vec<&'a str>,
     pub functions: Vec<(&'a str, u32)>,
+    pub metadata: &'a [u8],
 }
 
 /// Reads the header of `section`. Every offset and length is checked, so any bytes give a header
@@ -270,6 +276,8 @@ pub fn parse(section: &[u8]) -> Result<Header<'_>, Error> {
         }
         functions.push((name, offset));
     }
+    let metadata_length = input.u32()? as usize;
+    let metadata = input.take(metadata_length)?;
     if code_offset < input.position {
         return Err(Error("the code overlaps the header"));
     }
@@ -283,6 +291,7 @@ pub fn parse(section: &[u8]) -> Result<Header<'_>, Error> {
         code,
         symbols,
         functions,
+        metadata,
     })
 }
 
@@ -320,6 +329,7 @@ impl<'a> Input<'a> {
 #[derive(Debug, Default)]
 pub struct Loaded {
     pub functions: FxHashMap<Box<str>, usize>,
+    pub metadata: Vec<u8>,
 }
 
 /// Maps the code of `section`, which starts at byte `offset` of the file `path`, and fills its
@@ -350,7 +360,10 @@ pub unsafe fn load(
         .iter()
         .map(|&(name, entry)| (Box::from(name), base + entry as usize))
         .collect();
-    Ok(Some(Loaded { functions }))
+    Ok(Some(Loaded {
+        functions,
+        metadata: header.metadata.to_vec(),
+    }))
 }
 
 /// Maps `code`, found at `file_offset` of `path`, executable and read-only, with the link table

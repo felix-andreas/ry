@@ -65,9 +65,11 @@ fn build() -> Code {
         .define(entry, &builder.finalize())
         .expect("define entry");
 
-    module
+    let mut code = module
         .finish(&|name| matches!(name, "add_seven" | "flag"))
-        .expect("link")
+        .expect("link");
+    code.metadata = b"front end".to_vec();
+    code
 }
 
 #[test]
@@ -92,6 +94,7 @@ fn linked_code_runs_from_a_file_at_any_offset() {
         let loaded = unsafe { section::load(&path, base, &bytes, &resolve) }
             .expect("load")
             .expect("this processor runs x86-64-v2 code");
+        assert_eq!(loaded.metadata, b"front end");
         for name in ["twice", "entry"] {
             let address = loaded.functions[name];
             // SAFETY: both functions were built with the signature `i64 -> i64`.
