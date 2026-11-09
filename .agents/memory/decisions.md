@@ -7592,6 +7592,17 @@ Each one trades a narrow class of missed errors for a class of false reports see
   `completeExtends` resolves a class reached twice with `.resolveSuperclasses`' first consistent
   candidate (`resolved_superclasses` in `crates/interp/src/methods_core.rs`). `.S3Extends` is not
   ported, so a union member whose indirect extensions it would rewrite bails.
+- **The first union of a session fills `initialize`'s dispatch cache itself.** The R code's
+  `new("ClassUnionRepresentation", ...)` dispatches `initialize` and caches the inherited default
+  method (target `ClassUnionRepresentation`, defined `ANY`) in the generic's all-methods table, so
+  a native union must leave that entry too. Before the first union no entry exists, so the native
+  path caches the inherited method the way dispatch would (`union_initialize` in
+  `crates/interp/src/methods_core.rs`), unless first-unit definitions are still pending: those may
+  add an `initialize` method that dispatch would prefer, and that case still runs the R code. The
+  native path accepts only the default `initialize` (`is_default_initialize`), for the union and
+  for `classRepresentation`, `SClassExtension` and `classPrototypeDef` (`definition_caches`): a
+  package may define `initialize` for any of them, and GNU R's `new()` of the definition calls it,
+  so a cached package method sends `setClass` and `setClassUnion` to the R code.
 - **`setClass` does `setIs`'s subclass bookkeeping natively, by GNU R's quirks.** Only the
   direct superclasses go through `setIs`; `completeSubclasses` then records the new class in each
   ancestor only when `possibleExtends(new, ancestor)` is false, so a union that already lists the
