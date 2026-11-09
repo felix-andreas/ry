@@ -4,7 +4,9 @@
 //!   lowers back to an identical expression;
 //! - the tier-0 bytecode agrees with the AST evaluator on random arithmetic, comparison, logic,
 //!   branch and loop programs, including NA, integer overflow and errors;
-//! - reading a corrupted serialized stream fails with an R error, never a panic.
+//! - reading a corrupted serialized stream fails with an R error, never a panic;
+//! - a compiled closure's code survives the code image's encoding, and a corrupted image or code
+//!   object fails with an error, never a panic.
 //!
 //! The contracts live in `interp::testing`, shared with the coverage-guided `fuzz/` targets.
 //!
@@ -18,7 +20,9 @@ use {
         },
         lower,
         testing::{
-            check_bytecode_agreement, check_lowering_input, check_render_drawing,
+            check_bytecode_agreement, check_code_image_file, check_code_image_load,
+            check_code_image_round_trip,
+            check_lowering_input, check_render_drawing,
             check_unserialize_input, with_interpreter,
         },
         values,
@@ -121,6 +125,16 @@ fn fuzz_bytecode_agrees_with_the_ast_evaluator() {
     for_each_seed(300, |seed| check_bytecode_agreement(&mut SplitMix64(seed)));
 }
 
+#[test]
+fn fuzz_code_image_round_trip() {
+    for_each_seed(150, |seed| check_code_image_round_trip(&mut SplitMix64(seed)));
+}
+
+#[test]
+fn fuzz_code_image_file() {
+    for_each_seed(400, |seed| check_code_image_file(&mut SplitMix64(seed)));
+}
+
 /// Random drawings, with nested and dangling definitions and degenerate geometry, render to
 /// every format without panicking, identically twice, and as files a reader can parse.
 #[test]
@@ -165,4 +179,9 @@ fn render_skips_a_path_with_a_non_finite_point() {
     };
     let files = render_files(Format::Png, &drawing, [1.0, 1.0], 24.0, "", 75);
     assert!(files.is_ok_and(|files| files.len() == 1));
+}
+
+#[test]
+fn fuzz_code_image_load() {
+    for_each_seed(300, |seed| check_code_image_load(&mut SplitMix64(seed)));
 }
