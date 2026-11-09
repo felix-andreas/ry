@@ -5,10 +5,11 @@ use {
     crate::{
         builtins::{
             Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, is_native_value,
-            present, special,
+            special,
         },
         coerce::{self, coerce_vector},
         conditions,
+        element_access::direct_subset2,
         eval::{self, value_of},
         unwind::{R, Unwind, error, error_in, errorcall},
         values::{
@@ -23,7 +24,9 @@ use {
 
 pub const BUILTINS: &[BuiltinDef] = &[
     special("[", -1, do_subset).dispatch_or_eval(),
-    special("[[", -1, do_subset2).dispatch_or_eval(),
+    special("[[", -1, do_subset2)
+        .dispatch_or_eval()
+        .direct(direct_subset2),
     special("$", 2, do_dollar),
     special("@", 2, do_at),
     special("[<-", -1, do_subassign).dispatch_or_eval(),
@@ -31,9 +34,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     special("$<-", 3, do_dollar_assign),
     special("@<-", 3, do_at_assign),
     builtin(".subset", -1, do_subset).keep_missing(),
-    builtin(".subset2", -1, do_subset2).keep_missing(),
-    builtin("c", -1, do_c).generic(Generic::Internal),
-    internal("unlist", 3, do_unlist).generic(Generic::Internal),
+    builtin(".subset2", -1, do_subset2)
+        .keep_missing()
+        .direct(direct_subset2),
     builtin("list", -1, do_list),
     builtin("length", 1, do_length)
         .generic(Generic::Internal)
@@ -60,16 +63,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
         }),
     builtin("length<-", 2, do_set_length).generic(Generic::Internal),
     internal("lengths", 2, do_lengths),
-    builtin("names", 1, do_names).generic(Generic::Internal),
-    builtin("names<-", 2, do_set_names).generic(Generic::Internal),
-    builtin("dim", 1, do_dim).generic(Generic::Internal),
     builtin("dim<-", 2, do_set_dim).generic(Generic::Internal),
     builtin("dimnames", 1, do_dimnames).generic(Generic::Internal),
     builtin("dimnames<-", 2, do_set_dimnames).generic(Generic::Internal),
     builtin("levels<-", 2, do_set_levels).generic(Generic::Internal),
-    builtin("attr", -1, do_attr),
-    builtin("attr<-", 3, do_set_attr),
-    builtin("attributes", 1, do_attributes),
     builtin("attributes<-", 2, do_set_attributes),
     internal("matrix", 7, do_matrix),
     internal("array", 3, do_array),
@@ -197,7 +194,7 @@ pub unsafe fn copy_element(from: Sexp, from_index: usize, to: Sexp, to_index: us
 }
 
 /// An integer or logical element as a double, NA staying NA.
-fn int_to_real(value: i32) -> f64 {
+pub(crate) fn int_to_real(value: i32) -> f64 {
     if value == NA_INTEGER {
         NA_REAL
     } else {
@@ -3000,389 +2997,6 @@ pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -
     }
 }
 
-// c() and unlist().
-
-/// The pieces `c()` and `unlist()` flatten, with their names.
-struct Flattener {
-    kind: SexpType,
-    values: Vec<(Sexp, usize)>,
-    names: Vec<LeafName>,
-    any_names: bool,
-    recursive: bool,
-    use_names: bool,
-}
-
-/// A leaf's name: an existing string, NA and blank included, which most leaves keep as it is,
-/// or one composed from a tagged base, which is made into a string once the result is built.
-enum LeafName {
-    Char(Sexp),
-    Text(String),
-}
-
-/// The names GNU R gives the leaves under one tagged base: a leaf without a name of its own is
-/// the base alone when it is the only such leaf, and otherwise the base followed by its position
-/// among all the leaves under that base.
-struct NameScope {
-    base: String,
-    /// The base is an NA name, which a lone unnamed leaf keeps as NA.
-    base_is_na: bool,
-    count: usize,
-    position: usize,
-}
-
-impl Flattener {
-    unsafe fn add(&mut self, value: Sexp, tag: &str, tag_is_na: bool) -> R<()> {
-        let value = flattenable(value)?;
-        let mut scope = NameScope {
-            base: tag.to_owned(),
-            base_is_na: tag_is_na,
-            count: if tag.is_empty() {
-                0
-            } else {
-                self.unnamed_leaves(value)?
-            },
-            position: 0,
-        };
-        self.add_in(value, &mut scope)
-    }
-
-    unsafe fn add_in(&mut self, value: Sexp, scope: &mut NameScope) -> R<()> {
-        let count = length(value);
-        let element_names = values::names(value);
-        if !scope.base.is_empty() || element_names != nil() {
-            self.any_names = true;
-        }
-        let is_list = matches!(
-            value.kind(),
-            SexpType::List | SexpType::Expression | SexpType::Language
-        );
-        if is_list && self.recursive && value.kind() != SexpType::Language {
-            for index in 0..count {
-                let element = flattenable(value.element(index))?;
-                let own = own_name(element_names, index);
-                match own {
-                    own if own != na_string() && values::is_blank(own) => {
-                        self.add_in(element, scope)?
-                    }
-                    own => {
-                        // A named element starts a new base, so its leaves count afresh, but
-                        // they still take their places in the enclosing base's numbering.
-                        let base_is_na = own == na_string() && scope.base.is_empty();
-                        let name = char_str(own).into_owned();
-                        let base = match scope.base.as_str() {
-                            "" => name,
-                            base => format!("{base}.{name}"),
-                        };
-                        let count = self.unnamed_leaves(element)?;
-                        let mut inner = NameScope {
-                            base,
-                            base_is_na,
-                            count,
-                            position: 0,
-                        };
-                        self.add_in(element, &mut inner)?;
-                        scope.position += inner.position;
-                    }
-                }
-            }
-            return Ok(());
-        }
-        if value == nil() {
-            return Ok(());
-        }
-        if !value.kind().is_vector() {
-            let name = self.leaf_name(scope, values::blank_string());
-            self.values.push((value, usize::MAX));
-            self.names.push(name);
-            return Ok(());
-        }
-        for index in 0..count {
-            let name = self.leaf_name(scope, own_name(element_names, index));
-            self.values.push((value, index));
-            self.names.push(name);
-        }
-        Ok(())
-    }
-
-    /// `own` is the leaf's own name: blank when it has none, and NA kept as NA unless a base
-    /// is prefixed to it.
-    unsafe fn leaf_name(&self, scope: &mut NameScope, own: Sexp) -> LeafName {
-        scope.position += 1;
-        if !self.use_names {
-            return LeafName::Char(values::blank_string());
-        }
-        if scope.base.is_empty() {
-            return LeafName::Char(own);
-        }
-        LeafName::Text(if own == na_string() || !values::is_blank(own) {
-            format!("{}.{}", scope.base, char_str(own))
-        } else if scope.count == 1 {
-            if scope.base_is_na {
-                return LeafName::Char(na_string());
-            }
-            scope.base.clone()
-        } else {
-            format!("{}{}", scope.base, scope.position)
-        })
-    }
-
-    /// GNU R's `namesCount`: every element of an atomic vector or of a list that is not
-    /// recursed into, and the leaves of unnamed list elements, stopping once past one.
-    unsafe fn unnamed_leaves(&self, value: Sexp) -> R<usize> {
-        let recursed =
-            matches!(value.kind(), SexpType::List | SexpType::Expression) && self.recursive;
-        if !recursed {
-            return Ok(if value.kind().is_vector() || value == nil() {
-                length(value)
-            } else {
-                1
-            });
-        }
-        let names = values::names(value);
-        let mut count = 0;
-        for index in 0..length(value) {
-            if count > 1 {
-                break;
-            }
-            let own = own_name(names, index);
-            if own != na_string() && values::is_blank(own) {
-                count += self.unnamed_leaves(flattenable(value.element(index))?)?;
-            }
-        }
-        Ok(count)
-    }
-
-    unsafe fn kind_of(&mut self, value: Sexp) -> R<()> {
-        let value = values::materialize(value)?;
-        let kind = match value.kind() {
-            SexpType::Nil => return Ok(()),
-            SexpType::List | SexpType::Pairlist if self.recursive => {
-                let list = if value.kind() == SexpType::Pairlist {
-                    values::pairlist_to_list(value)?
-                } else {
-                    value
-                };
-                for index in 0..length(list) {
-                    self.kind_of(list.element(index))?;
-                }
-                return Ok(());
-            }
-            SexpType::Expression => SexpType::Expression,
-            kind if kind.is_atomic() => kind,
-            _ => SexpType::List,
-        };
-        self.kind = coerce::higher_type(self.kind, kind);
-        Ok(())
-    }
-
-    unsafe fn build(self) -> R<Sexp> {
-        let result = alloc(self.kind, self.values.len())?;
-        for (position, &(value, index)) in self.values.iter().enumerate() {
-            if index == usize::MAX {
-                values::set_elt(result, position, value);
-            } else {
-                copy_element(value, index, result, position)?;
-            }
-        }
-        if self.any_names && self.use_names && !self.values.is_empty() {
-            crate::heap().root(result);
-            let names = alloc(SexpType::String, self.names.len())?;
-            crate::heap().root(names);
-            for (position, name) in self.names.iter().enumerate() {
-                let charsxp = match name {
-                    LeafName::Char(charsxp) => *charsxp,
-                    LeafName::Text(text) => values::mkchar(text)?,
-                };
-                values::set_elt(names, position, charsxp);
-            }
-            values::set_attr(result, symbols().names, names)?;
-        }
-        Ok(result)
-    }
-}
-
-/// `c()` of already evaluated values, without names.
-/// A pairlist combines like the list of its elements.
-unsafe fn flattenable(value: Sexp) -> R<Sexp> {
-    let value = values::materialize(value)?;
-    if value.kind() == SexpType::Pairlist {
-        values::pairlist_to_list(value)
-    } else {
-        Ok(value)
-    }
-}
-
-/// The element's own name: blank when it has none.
-unsafe fn own_name(names: Sexp, index: usize) -> Sexp {
-    if names != nil() && index < length(names) {
-        names.element(index)
-    } else {
-        values::blank_string()
-    }
-}
-
-pub unsafe fn combine(items: &[Sexp]) -> R<Sexp> {
-    let args: Vec<Arg> = items
-        .iter()
-        .map(|&value| Arg { tag: nil(), value })
-        .collect();
-    combine_args(&args, &[], false, true)
-}
-
-/// `na_tags` marks the arguments whose tag stands for an NA name; it may be shorter than `args`.
-pub unsafe fn combine_args(
-    args: &[Arg],
-    na_tags: &[bool],
-    recursive: bool,
-    use_names: bool,
-) -> R<Sexp> {
-    let mut flattener = Flattener {
-        kind: SexpType::Nil,
-        values: Vec::new(),
-        names: Vec::new(),
-        any_names: false,
-        recursive,
-        use_names,
-    };
-    for arg in args {
-        flattener.kind_of(arg.value)?;
-    }
-    if flattener.kind == SexpType::Nil {
-        return Ok(nil());
-    }
-    if matches!(flattener.kind, SexpType::List | SexpType::Expression) {
-        flattener.recursive = recursive;
-    } else if let Some(result) = combine_unnamed_atomic(args, flattener.kind)? {
-        return Ok(result);
-    }
-    for (index, arg) in args.iter().enumerate() {
-        let tag_is_na = na_tags.get(index).copied().unwrap_or(false);
-        let tag = if arg.tag == nil() {
-            String::new()
-        } else {
-            symbol_name(arg.tag).into_owned()
-        };
-        if matches!(flattener.kind, SexpType::List | SexpType::Expression)
-            && !recursive
-            && !matches!(
-                arg.value.kind(),
-                SexpType::List | SexpType::Expression | SexpType::Pairlist
-            )
-            && arg.value.kind().is_atomic()
-        {
-            // Atomic vectors are split into elements of the list.
-            flattener.add(arg.value, &tag, tag_is_na)?;
-            continue;
-        }
-        flattener.add(arg.value, &tag, tag_is_na)?;
-    }
-    flattener.build()
-}
-
-/// `c()` of untagged atomic vectors without names into an atomic `kind`, copied slice by slice.
-/// It is most calls to `c()`, and the general path records every element and its name first.
-/// `None` means some argument carries a name, which the general path handles.
-unsafe fn combine_unnamed_atomic(args: &[Arg], kind: SexpType) -> R<Option<Sexp>> {
-    let mut total = 0;
-    for arg in args {
-        if arg.tag != nil()
-            || !(arg.value == nil() || arg.value.kind().is_atomic())
-            || values::names(arg.value) != nil()
-        {
-            return Ok(None);
-        }
-        total += length(arg.value);
-    }
-    let result = alloc(kind, total)?;
-    let mut position = 0;
-    for arg in args {
-        if arg.value == nil() {
-            continue;
-        }
-        let value = values::materialize(arg.value)?;
-        let count = length(value);
-        let target = position..position + count;
-        match (value.kind(), kind) {
-            (SexpType::Real, SexpType::Real) => {
-                values::reals_mut(result)[target].copy_from_slice(values::reals(value))
-            }
-            (SexpType::Integer, SexpType::Integer)
-            | (SexpType::Logical, SexpType::Logical)
-            | (SexpType::Logical, SexpType::Integer) => {
-                values::ints_mut(result)[target].copy_from_slice(values::ints(value))
-            }
-            (SexpType::Integer | SexpType::Logical, SexpType::Real) => {
-                for (slot, &element) in values::reals_mut(result)[target]
-                    .iter_mut()
-                    .zip(values::ints(value))
-                {
-                    *slot = int_to_real(element);
-                }
-            }
-            _ => {
-                for index in 0..count {
-                    copy_element(value, index, result, position + index)?;
-                }
-            }
-        }
-        position += count;
-    }
-    Ok(Some(result))
-}
-
-unsafe fn do_c(call: &Call<'_>) -> R<Sexp> {
-    let mut recursive = false;
-    let mut use_names = true;
-    let mut args: SmallVec<[Arg; 8]> = SmallVec::new();
-    for arg in call.args {
-        if arg.tag == symbols().recursive {
-            recursive = values::as_logical_scalar(arg.value) == 1;
-        } else if arg.tag == symbols().use_names {
-            use_names = values::as_logical_scalar(arg.value) != 0;
-        } else {
-            args.push(*arg);
-        }
-    }
-    combine_args(&args, &[], recursive, use_names)
-}
-
-unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let recursive = values::as_logical_scalar(call.arg(1)) != 0;
-    let use_names = values::as_logical_scalar(call.arg(2)) != 0;
-    if !matches!(
-        object.kind(),
-        SexpType::List | SexpType::Pairlist | SexpType::Expression
-    ) {
-        return Ok(object);
-    }
-    let list = if object.kind() == SexpType::Pairlist {
-        values::pairlist_to_list(object)?
-    } else {
-        object
-    };
-    let names = values::names(list);
-    let args: Vec<Arg> = (0..length(list))
-        .map(|index| {
-            let tag = if names != nil() && !values::is_blank(names.element(index)) {
-                crate::heap()
-                    .install_char(names.element(index))
-                    .unwrap_or(nil())
-            } else {
-                nil()
-            };
-            Arg {
-                tag,
-                value: list.element(index),
-            }
-        })
-        .collect();
-    let na_tags: Vec<bool> = (0..length(list))
-        .map(|index| names != nil() && names.element(index) == values::na_string())
-        .collect();
-    combine_args(&args, &na_tags, recursive, use_names)
-}
-
 unsafe fn do_list(call: &Call<'_>) -> R<Sexp> {
     let result = alloc(SexpType::List, call.len())?;
     let mut any_names = false;
@@ -3501,54 +3115,6 @@ unsafe fn do_lengths(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-unsafe fn do_names(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    if object.kind() == SexpType::Environment {
-        // GNU R: `names(env)` is `ls(env, all.names = TRUE, sorted = FALSE)`.
-        return crate::envir::env_names(object, true, false);
-    }
-    Ok(values::names(object))
-}
-
-unsafe fn do_set_names(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let names = call.arg(1);
-    if object == nil() {
-        if names == nil() {
-            return Ok(nil());
-        }
-        return Err(call.error("attempt to set an attribute on NULL"));
-    }
-    if names == nil() && get_attr(object, symbols().names) == nil() {
-        return Ok(object);
-    }
-    if object.kind() == SexpType::Object {
-        let class = get_attr(object, symbols().class);
-        let class = if class == nil() {
-            "S4".to_string()
-        } else {
-            char_str(class.element(0)).to_string()
-        };
-        return Err(call.error(format!(
-            "invalid to use names()<- on an S4 object of class '{class}'"
-        )));
-    }
-    let object = modifiable(object)?;
-    // GNU R's `names<-` turns any value but a plain character vector into text with a
-    // dispatched `as.character(value)`, so a Date names by its formatted dates. The value goes
-    // into the call as it is, which evaluates a symbol or a call there, as in GNU R.
-    let names = if names != nil() && !(names.kind() == SexpType::String && names.attrib() == nil())
-    {
-        crate::heap().root(object);
-        let function = values::install("as.character")?;
-        eval::eval(values::call(function, &[names])?, call.env()?)?
-    } else {
-        names
-    };
-    set_names(object, names)?;
-    Ok(object)
-}
-
 /// GNU R's `namesgets`, behind `attr<-`, `attributes<-` and the C API: names are converted to
 /// character without dispatch, keeping the value's own attributes as `coerceVector` does, and
 /// padded with `NA` to the object's length.
@@ -3640,10 +3206,6 @@ pub unsafe fn set_names(object: Sexp, names: Sexp) -> R<()> {
         return Ok(());
     }
     values::set_attr(object, symbols().names, padded)
-}
-
-unsafe fn do_dim(call: &Call<'_>) -> R<Sexp> {
-    Ok(get_attr(call.arg(0), symbols().dim))
 }
 
 unsafe fn do_set_dim(call: &Call<'_>) -> R<Sexp> {
@@ -3780,77 +3342,6 @@ unsafe fn do_set_levels(call: &Call<'_>) -> R<Sexp> {
 
 // Attributes.
 
-unsafe fn do_attr(call: &Call<'_>) -> R<Sexp> {
-    let (matched, _) = call.match_args(&["x", "which", "exact"])?;
-    let object = present(matched[0]).unwrap_or(nil());
-    let which = present(matched[1])
-        .ok_or_else(|| call.error("exactly one attribute 'which' must be given"))?;
-    let exact = present(matched[2]).is_some_and(|exact| values::as_logical_scalar(exact) == 1);
-    if which.kind() != SexpType::String || length(which) != 1 {
-        return Err(call.error("exactly one attribute 'which' must be given"));
-    }
-    let name = which.element(0);
-    if name.bytes() == b"names" {
-        return Ok(values::names(object));
-    }
-    let symbol = crate::heap().install_char(name)?;
-    let value = get_attr(object, symbol);
-    if value != nil() || exact {
-        if symbol == symbols().row_names {
-            return expand_row_names(value);
-        }
-        return Ok(value);
-    }
-    // Partial matching on attribute names.
-    let mut found = nil();
-    let mut cell = object.attrib();
-    let mut matches = 0;
-    while cell.kind() == SexpType::Pairlist {
-        if cell.tag().car().bytes().starts_with(name.bytes()) {
-            found = cell.car();
-            matches += 1;
-        }
-        cell = cell.cdr();
-    }
-    Ok(if matches == 1 { found } else { nil() })
-}
-
-/// Compact row names (`c(NA, -n)`) read back as `1:n`.
-unsafe fn expand_row_names(value: Sexp) -> R<Sexp> {
-    if value.kind() == SexpType::Integer
-        && length(value) == 2
-        && values::ints(value)[0] == NA_INTEGER
-    {
-        let count = values::ints(value)[1].unsigned_abs() as usize;
-        let result = alloc(SexpType::Integer, count)?;
-        for (index, slot) in values::ints_mut(result).iter_mut().enumerate() {
-            *slot = index as i32 + 1;
-        }
-        return Ok(result);
-    }
-    Ok(value)
-}
-
-unsafe fn do_set_attr(call: &Call<'_>) -> R<Sexp> {
-    let (matched, _) = call.match_args(&["x", "which", "value"])?;
-    let object = present(matched[0]).unwrap_or(nil());
-    let which = present(matched[1]).unwrap_or(nil());
-    let value = present(matched[2]).unwrap_or(nil());
-    if which.kind() != SexpType::String || length(which) != 1 {
-        return Err(call.error("'name' must be non-null character string"));
-    }
-    if object == nil() {
-        if value == nil() {
-            return Ok(nil());
-        }
-        return Err(call.error("attempt to set an attribute on NULL"));
-    }
-    let object = modifiable(object)?;
-    let symbol = crate::heap().install_char(which.element(0))?;
-    set_attribute_checked(object, symbol, value, call.call)?;
-    Ok(object)
-}
-
 /// Sets an attribute with the checks GNU R's `setAttrib` makes for names, dims, dimnames and
 /// class.
 pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, call: Sexp) -> R<()> {
@@ -3931,50 +3422,6 @@ pub unsafe fn set_row_names(object: Sexp, value: Sexp) -> R<()> {
         }
     }
     values::set_attr(object, symbol, value)
-}
-
-pub(crate) unsafe fn do_attributes(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let names_symbol = symbols().names;
-    // Each attribute's name is its tag's print name, so the result shares those strings instead
-    // of building new ones.
-    let mut items: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
-    // GNU R reports tag names only for a pairlist (`isList`): a call's tags are its argument
-    // names, which `names()` exposes but `attributes()` does not.
-    if object.kind() == SexpType::Pairlist {
-        let names = values::pairlist_names(object)?;
-        if names != nil() {
-            crate::heap().root(names);
-            items.push((names_symbol.car(), names));
-        }
-    }
-    let mut cell = object.attrib();
-    while cell.kind() == SexpType::Pairlist {
-        if cell.tag() == names_symbol {
-            if object.kind() != SexpType::Environment {
-                items.push((names_symbol.car(), cell.car()));
-            }
-        } else if cell.tag() == symbols().row_names {
-            let expanded = expand_row_names(cell.car())?;
-            crate::heap().root(expanded);
-            items.push((cell.tag().car(), expanded));
-        } else {
-            items.push((cell.tag().car(), cell.car()));
-        }
-        cell = cell.cdr();
-    }
-    if items.is_empty() {
-        return Ok(nil());
-    }
-    let result = alloc(SexpType::List, items.len())?;
-    crate::heap().root(result);
-    let names = alloc(SexpType::String, items.len())?;
-    for (index, &(name, value)) in items.iter().enumerate() {
-        values::set_elt(result, index, value);
-        values::set_elt(names, index, name);
-    }
-    values::set_attr(result, names_symbol, names)?;
-    Ok(result)
 }
 
 pub(crate) unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {

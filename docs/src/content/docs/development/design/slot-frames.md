@@ -74,11 +74,11 @@ describes it, and the open gaps are marked.
   `release_frame` and `clear_frame`.
 - **Direct calls.** A call site keeps a plan for the closure it calls (`direct_plan` in
   `bytecode.rs`): which argument fills each formal's slot. The site marks the body on its first
-  call, builds the plan on the second, and from then on `eval::call_direct` writes the arguments
+  call, builds the plan on the second, and from then on `eval::call_with_plan` writes the arguments
   into the slots without matching. A site stops planning after eight different bodies. The plan
   is refused when matching could depend on more than the argument names: a `...` formal, a `...`
   or `..N` argument, or a left-out formal whose default is not a literal. Those calls bind through
-  `bind_slots`. `call_direct` checks per call what can change after planning (machine code for the
+  `bind_slots`. `call_with_plan` checks per call what can change after planning (machine code for the
   body, the debugger, move tracking), and takes the generic path when any holds.
 - **Forwarding `...`.** A call that passes `...` appends the promises the frame's `...` slot holds,
   to a closure (`slot_dots_into`) or, forced, to a builtin (`slot_builtin_call`, when every other

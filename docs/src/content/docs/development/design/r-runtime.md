@@ -926,7 +926,7 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | Lookup stamps compared as their bits | V8 | built | 1.25k per `seq()` call | `LookupCache` in `bytecode.rs` |
 | Hash index only for frames over 32 bindings | ry | built | 3k per `seq()` call (`Frame::insert`) | `INDEX_THRESHOLD` in `env.rs` |
 | Builtin checks derived at registration | GNU R `PRIMARITY` | built | builtin call overhead | `Checks` in `crates/interp/src/builtins.rs` |
-| A call plan per call site: arguments written straight into the callee's slots | JSC `CodeBlock`, V8 | built | `run_closure`'s matching and binding; a call from a loop costs 2,330 instructions, down from 3,065 on heap frames | `direct_plan` in `bytecode.rs`, `call_direct` in `eval.rs` |
+| A call plan per call site: arguments written straight into the callee's slots | JSC `CodeBlock`, V8 | built | `run_closure`'s matching and binding; a call from a loop costs 2,330 instructions, down from 3,065 on heap frames | `direct_plan` in `bytecode.rs`, `call_with_plan` in `eval.rs` |
 | **2. Call facts ahead of time** | | | | |
 | Version-stamped bindings: a function guard is one compare | JSC watchpoints, V8 property cells | built | 154 guards per `seq()` call; 141.6k to 139.7k instructions per call | the `Op::Guard` arm and `cached_cell` in `bytecode.rs` |
 | Frames cleared in place, without copying the cell list | ry | built | `clear_frame`; 139.7k to 136.6k per `seq()` call, with the two rows below | `Heap::clear_frame` in `crates/heap/src/heap.rs` |
@@ -1012,7 +1012,7 @@ tier is running it, and switching tiers moves no values.
 call of a body there marks the site, and the second builds the plan: for each formal of the
 callee, the position of the argument that fills its slot, or -1 when the site supplies none.
 Later calls of the same formals and body skip argument matching and write the arguments straight
-into the callee's slots (`eval::call_direct`); a site that has seen eight different bodies stops
+into the callee's slots (`eval::call_with_plan`); a site that has seen eight different bodies stops
 planning. A plan exists only when matching cannot depend on the values: the callee has no `...`
 formal, the site passes no `...` or `..N`, and every formal the site leaves out has a literal
 default. Everything else binds through the matcher (`bind_slots`, with its per-body match cache),
@@ -1075,6 +1075,44 @@ then runs the body on a slot window, calling siblings directly and everything el
 0's call path. A failed entry guard runs the call in tier 0. A failed guard inside the body
 deoptimizes through the frame-state map, which the image stores beside the code. Tier 0 keeps
 `eval` and non-standard evaluation.
+
+### Builtin fast paths
+
+Row (a) of the roadmap goes builtin by builtin, starting from the top of the Amdahl ranking:
+attribute access, `c`, `[[` and `[[<-`, then `[` and `[<-`, the apply family and `.Call`. Each
+builtin gets one implementation in its end shape, in its own module, which the full call and the
+fast entry both use, so there is no second copy of the semantics to drift.
+
+- **Direct entries.** A builtin may register a `direct` function that takes its argument values
+  in formal order and returns `None` to decline. Compiled code calls it when no argument is
+  tagged or empty, before it builds an argument vector, runs the call checks or opens a handle
+  scope. A replacement called from a complex assignment (`attr(x, "a") <- v`) uses it too, with
+  the trailing `value` argument. The entry declines whatever the full call treats differently:
+  an object that dispatches, ALTREP, a ry native value, and any argument the full call reports an
+  error for.
+- **Strings by identity.** Attribute names, class names and list names are interned `CHARSXP`s,
+  and interned ASCII strings are equal exactly when they are the same object. A lookup compares
+  pointers and reads bytes only when a string is not ASCII or a partial match is asked for.
+- **No intermediate structures.** `c()` and `unlist()` follow GNU R's two passes: the first
+  finds the result type, the length and whether any name exists, and the second writes elements
+  and names straight into the result. When every argument is an atomic vector without
+  attributes, no name can arise, so `c()` skips the naming walk entirely.
+
+Instructions per call at tier 0, measured with callgrind net of the loop:
+
+| Call | Before | After | GNU R 4.3 |
+| --- | ---: | ---: | ---: |
+| `attr(x, "a")` | 1006 | 590 | 1814 |
+| `attr(x, "a") <- v` | 3174 | 992 | 2520 |
+| `names(x) <- v` | 1668 | 1191 | 1520 |
+| `inherits(x, "c")` | 1266 | 795 | 1469 |
+| `c(a, 4.5)` | 1782 | 863 | 1877 |
+| `c(a, a, a)` | 2315 | 1351 | 2050 |
+| `c(list(1, 2), list(3))` | 3425 | 3032 | 2700 |
+| `x[[i]]`, double vector | 1155 | 925 | 223 |
+
+The remaining cost of `x[[i]]` is call machinery shared by every compiled call (the function
+lookup and its guard, two frame lookups, the scalar result's allocation), not `[[` itself.
 
 ### How the static types feed the JIT
 

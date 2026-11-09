@@ -3294,7 +3294,7 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
     let mut args = if items.iter().any(|arg| arg.value.kind() == SexpType::List) {
         vec![Arg {
             tag: nil(),
-            value: crate::subset::combine_args(&items, &[], true, false)?,
+            value: crate::combine::combine_args(&items, true, false)?,
         }]
     } else {
         items
@@ -3337,7 +3337,7 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
     };
     let minimum = summary(&inner, Summary::Min)?;
     let maximum = summary(&inner, Summary::Max)?;
-    crate::subset::combine(&[minimum, maximum])
+    crate::combine::combine(&[minimum, maximum])
 }
 
 unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {

@@ -4631,6 +4631,17 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
         instruction.output(0, value);
         return Ok(Flow::Next);
     }
+    if definition.direct.is_some()
+        && !definition.checks.replacement
+        && positional_arguments(call.cdr())
+    {
+        let values = std::slice::from_raw_parts(instruction.registers.add(first), count);
+        if let Some(value) = eval::call_direct(definition, values)? {
+            state.record(instruction.at, value);
+            instruction.output(0, value);
+            return Ok(Flow::Next);
+        }
+    }
     let mut args = eval::Args::new();
     let mut cell = call.cdr();
     for index in 0..count {
@@ -4650,6 +4661,19 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// Whether every argument cell of a call is untagged and not empty, as a
+/// [`BuiltinDef::direct`] entry requires.
+#[inline]
+unsafe fn positional_arguments(mut cell: Sexp) -> bool {
+    while cell != nil() {
+        if cell.tag() != nil() || cell.car() == missing_arg() {
+            return false;
+        }
+        cell = cell.cdr();
+    }
+    true
 }
 
 #[inline(always)]
@@ -4708,7 +4732,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             env
         };
         match direct_plan(state, instruction, function, call)? {
-            Some(sources) => eval::call_direct(call, function, sources, &args, sys_parent)?,
+            Some(sources) => eval::call_with_plan(call, function, sources, &args, sys_parent)?,
             None => eval::apply_closure_owning(call, function, &args, sys_parent, None)?,
         }
     } else if state.in_slots()
@@ -4734,7 +4758,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
 /// pay for matching and an allocation each time.
 const PLAN_MISSES: i32 = 8;
 
-/// The direct-call plan of a call site for `function` (see [`eval::call_direct`]): which
+/// The direct-call plan of a call site for `function` (see [`eval::call_with_plan`]): which
 /// argument fills each of its formals' slots, or `None` when calls of it here take the
 /// generic path. A plan holds for every closure with the same formals and body, so the
 /// closures one `function` expression makes on each run share it. The site keeps the plan as
@@ -5926,8 +5950,16 @@ unsafe fn replace_variable(
     heap.count_transient_binding(env, symbols().tmp);
     let state = interp();
     state.tmp_values.push((env, target));
-    let result = match builtin {
-        Some(definition) => {
+    let direct = match builtin {
+        Some(definition) if definition.direct.is_some() && replacement_arguments(setter_call) => {
+            eval::call_direct(definition, args)
+        }
+        _ => Ok(None),
+    };
+    let result = match (direct, builtin) {
+        (Ok(Some(value)), _) => Ok(value),
+        (Err(unwind), _) => Err(unwind),
+        (Ok(None), Some(definition)) => {
             let mut arguments = eval::Args::new();
             let mut item = setter_call.cdr();
             for &value in args.iter() {
@@ -5944,11 +5976,26 @@ unsafe fn replace_variable(
             interp().assignment_call = outer;
             result
         }
-        None => replace_with_closure(function, setter, whole, target, args[1], env),
+        (Ok(None), None) => replace_with_closure(function, setter, whole, target, args[1], env),
     };
     interp().tmp_values.pop();
     eval::assign_local(variable, result?, env, Some(cell))?;
     Ok(true)
+}
+
+/// Whether a replacement call's arguments are untagged but for the trailing `value`, the shape
+/// `complex_assign` builds and a [`BuiltinDef::direct`] entry takes in formal order.
+unsafe fn replacement_arguments(setter_call: Sexp) -> bool {
+    let mut cell = setter_call.cdr();
+    while cell != nil() {
+        let last = cell.cdr() == nil();
+        let expected = if last { symbols().value } else { nil() };
+        if cell.tag() != expected || cell.car() == missing_arg() {
+            return false;
+        }
+        cell = cell.cdr();
+    }
+    true
 }
 
 /// Calls the replacement closure `function` as `` `f<-`(`*tmp*`, value = <promise>) ``, with

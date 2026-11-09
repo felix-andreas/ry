@@ -596,6 +596,30 @@ pub unsafe fn call_builtin(
     call_builtin_reusing(definition, call, op, args, env, None)
 }
 
+/// The builtin's [`BuiltinDef::direct`] result for `args`, in formal order, or `None` for the
+/// full call. The entry is skipped while a profile or activity trace is being taken, so that
+/// samples and counts name the builtin as the full call does.
+#[inline]
+pub unsafe fn call_direct(definition: &BuiltinDef, args: &[Sexp]) -> R<Option<Sexp>> {
+    let Some(direct) = definition.direct else {
+        return Ok(None);
+    };
+    if activity::enabled() || PROFILE_TICK.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    let value = scope(|| direct(args))
+        .and_then(|value| crate::unwind::raise_parked().map(|()| value))
+        .map_err(|unwind| builtin_failure(definition, unwind))?;
+    if value.is_some() {
+        match definition.visibility {
+            Visibility::On => interp().visible = true,
+            Visibility::Off => interp().visible = false,
+            Visibility::Keep => {}
+        }
+    }
+    Ok(value)
+}
+
 /// [`call_builtin`], offering the builtin `reusable` to update in place (see [`Call::reusable`]).
 //
 // The common call (no profile being taken, the arity right, no names to check, no replacement
@@ -1439,7 +1463,7 @@ pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<SmallVec<[i
 /// matching and none of [`apply_closure`]'s checks, which the plan settled for the closure's
 /// formals and body. What can change between calls (a debugger, a move, a body compiled to
 /// machine code since) sends the call down the generic path.
-pub unsafe fn call_direct(
+pub unsafe fn call_with_plan(
     call: Sexp,
     function: Sexp,
     sources: Sexp,

@@ -113,6 +113,27 @@ pub fn check_bytecode_agreement(entropy: &mut impl Entropy) {
     });
 }
 
+/// Generates a program that reads and writes attributes, names and elements and combines values
+/// with `c()`, and checks that the compiled closure, whose calls take the builtins' direct
+/// entries, agrees with the AST evaluator, whose calls take the full builtins.
+pub fn check_element_access_agreement(entropy: &mut impl Entropy) {
+    let body = element_program(entropy);
+    let a = ELEMENT_VALUES[entropy.below(ELEMENT_VALUES.len())];
+    let b = ELEMENT_INDICES[entropy.below(ELEMENT_INDICES.len())];
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        let (direct, compiled) = unsafe { outcomes(&body, a, b) };
+        for (call, outcome) in compiled.iter().enumerate() {
+            assert_eq!(
+                &direct,
+                outcome,
+                "call {}: `{body}` with a = {a}, b = {b}",
+                call + 1
+            );
+        }
+    });
+}
+
 unsafe fn outcomes(body: &str, a: &str, b: &str) -> (String, Vec<String>) {
     unsafe {
         // The direct run assigns its locals globally, which the closure would then read, so
@@ -628,6 +649,135 @@ fn program(entropy: &mut impl Entropy) -> String {
         _ => {}
     }
     statements.push(expression(entropy, 3));
+    statements.join("\n")
+}
+
+const ELEMENT_SUBJECTS: &[&str] = &[
+    "1:3",
+    "c(1.5, NA, 3)",
+    "c(a = 1L, b = 2L, a = 3L)",
+    "c(\"p\", NA, \"\")",
+    "c(TRUE, NA)",
+    "c(x = 1+2i)",
+    "list(1, \"x\", NULL)",
+    "list(a = 1, b = list(c = 2), 3)",
+    "list(a = NULL, ab = 2L)",
+    "NULL",
+    "as.raw(c(1, 255))",
+];
+
+const ELEMENT_INDICES: &[&str] = &[
+    "1L",
+    "2",
+    "2.7",
+    "0",
+    "-1",
+    "NA",
+    "5L",
+    "\"a\"",
+    "\"b\"",
+    "\"ab\"",
+    "\"\"",
+    "NA_character_",
+    "c(1, 2)",
+    "TRUE",
+    "3",
+];
+
+const ELEMENT_VALUES: &[&str] = &[
+    "1",
+    "\"s\"",
+    "NULL",
+    "list(1)",
+    "c(u = 2L)",
+    "NA",
+    "a",
+    "x",
+    "TRUE",
+    "3:1",
+];
+
+const ATTRIBUTE_NAMES: &[&str] = &[
+    "\"a\"",
+    "\"names\"",
+    "\"class\"",
+    "\"dim\"",
+    "\"row.names\"",
+    "\"ab\"",
+    "\"n\"",
+    "\"dimnames\"",
+];
+
+/// Starts from a subject `x`, applies a few random reads and writes, and ends with `x`, its
+/// attributes and the last value read.
+fn element_program(entropy: &mut impl Entropy) -> String {
+    fn pick<'a>(entropy: &mut impl Entropy, from: &[&'a str]) -> &'a str {
+        from[entropy.below(from.len())]
+    }
+    let mut statements = vec![
+        format!("x <- {}", pick(entropy, ELEMENT_SUBJECTS)),
+        "v <- NULL".to_owned(),
+    ];
+    for _ in 0..entropy.below(5) + 1 {
+        let statement = match entropy.below(11) {
+            0 => format!(
+                "attr(x, {}) <- {}",
+                pick(entropy, ATTRIBUTE_NAMES),
+                pick(entropy, ELEMENT_VALUES)
+            ),
+            1 => format!(
+                "names(x) <- {}",
+                pick(
+                    entropy,
+                    &[
+                        "NULL",
+                        "c(\"p\", \"q\", \"r\")",
+                        "\"p\"",
+                        "c(NA, \"q\")",
+                        "1:2",
+                        "b"
+                    ]
+                )
+            ),
+            2 => format!(
+                "x[[{}]] <- {}",
+                pick(entropy, ELEMENT_INDICES),
+                pick(entropy, ELEMENT_VALUES)
+            ),
+            3 => format!("x <- c(x, {})", pick(entropy, ELEMENT_VALUES)),
+            4 => format!("v <- x[[{}]]", pick(entropy, ELEMENT_INDICES)),
+            5 => format!("v <- .subset2(x, {})", pick(entropy, ELEMENT_INDICES)),
+            6 => format!(
+                "v <- attr(x, {}{})",
+                pick(entropy, ATTRIBUTE_NAMES),
+                pick(entropy, &["", ", exact = TRUE", ", TRUE", ", NA"])
+            ),
+            7 => format!(
+                "v <- c({}, {}, {})",
+                pick(
+                    entropy,
+                    &["a", "x", "p = 1", "q = x", "NULL", "list(z = 1)"]
+                ),
+                pick(entropy, ELEMENT_VALUES),
+                pick(
+                    entropy,
+                    &["b", "r = c(s = 1, 2)", "\"t\"", "NA_integer_", "3i"]
+                )
+            ),
+            8 => format!(
+                "v <- c(x, recursive = {})",
+                pick(entropy, &["TRUE", "FALSE"])
+            ),
+            9 => "v <- names(x)".to_owned(),
+            _ => format!(
+                "x[[{}]] <- x[[{}]]",
+                pick(entropy, ELEMENT_INDICES),
+                pick(entropy, ELEMENT_INDICES)
+            ),
+        };
+        statements.push(statement);
+    }
+    statements.push("list(x, attributes(x), v)".to_owned());
     statements.join("\n")
 }
 
