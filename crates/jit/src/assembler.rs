@@ -43,11 +43,68 @@ impl Arch {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Label(u32);
 
-/// Comparison outcomes a branch can test.
+/// Comparison outcomes a branch can test. `Below` and `Above` compare unsigned, and they are
+/// also how an ordered [`Assembler::compare_doubles`] reads; `Less` and `Greater` compare signed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Condition {
     Equal,
     NotEqual,
+    Below,
+    AboveOrEqual,
+    Above,
+    BelowOrEqual,
+    Less,
+    GreaterOrEqual,
+    Greater,
+    LessOrEqual,
+    /// A [`Assembler::compare_doubles`] with a NaN operand.
+    Unordered,
+}
+
+/// The registers the inline paths compute in. `Activation` and `Window` are the pinned
+/// registers of the table above; the temporaries are caller-saved, so a step call clobbers them,
+/// and they never hold anything across one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reg {
+    Activation,
+    Window,
+    T0,
+    T1,
+    T2,
+    T3,
+}
+
+impl Reg {
+    fn x64(self) -> u8 {
+        match self {
+            Reg::Activation => 3,
+            Reg::Window => 12,
+            Reg::T0 => 2,
+            Reg::T1 => 6,
+            Reg::T2 => 7,
+            Reg::T3 => 8,
+        }
+    }
+
+    fn a64(self) -> u32 {
+        match self {
+            Reg::Activation => 19,
+            Reg::Window => 20,
+            Reg::T0 => 10,
+            Reg::T1 => 11,
+            Reg::T2 => 12,
+            Reg::T3 => 13,
+        }
+    }
+}
+
+/// The width of a memory access. Loads zero-extend.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Width {
+    W8,
+    W16,
+    W32,
+    W64,
 }
 
 #[derive(Clone, Copy)]
@@ -426,6 +483,245 @@ impl Assembler {
         }
     }
 
+    /// `to = [base + offset]`, zero-extended from `width`.
+    pub fn load(&mut self, width: Width, to: Reg, base: Reg, offset: u32) {
+        match self.arch {
+            Arch::X64 => {
+                let (wide, opcode): (bool, &[u8]) = match width {
+                    Width::W8 => (false, &[0x0F, 0xB6]),
+                    Width::W16 => (false, &[0x0F, 0xB7]),
+                    Width::W32 => (false, &[0x8B]),
+                    Width::W64 => (true, &[0x8B]),
+                };
+                self.x64_rex(wide, to.x64(), base.x64());
+                self.bytes(opcode);
+                self.x64_memory(to.x64(), base.x64(), offset);
+            }
+            Arch::A64 => {
+                let (opcode, scale) = a64_access(width, true);
+                self.a64_memory(opcode, scale, to.a64(), base.a64(), offset);
+            }
+        }
+    }
+
+    /// `[base + offset] = from`, its low `width` bits. Bytes are not stored this way.
+    pub fn store(&mut self, width: Width, from: Reg, base: Reg, offset: u32) {
+        match self.arch {
+            Arch::X64 => {
+                let wide = match width {
+                    Width::W16 => {
+                        self.code.push(0x66);
+                        false
+                    }
+                    Width::W8 | Width::W32 => false,
+                    Width::W64 => true,
+                };
+                debug_assert!(
+                    width != Width::W8,
+                    "a byte store needs a REX prefix for every register"
+                );
+                self.x64_rex(wide, from.x64(), base.x64());
+                self.code.push(0x89);
+                self.x64_memory(from.x64(), base.x64(), offset);
+            }
+            Arch::A64 => {
+                let (opcode, scale) = a64_access(width, false);
+                self.a64_memory(opcode, scale, from.a64(), base.a64(), offset);
+            }
+        }
+    }
+
+    /// `to = base + offset`.
+    pub fn address(&mut self, to: Reg, base: Reg, offset: u32) {
+        debug_assert!(to != base);
+        match self.arch {
+            Arch::X64 => {
+                self.x64_rex(true, to.x64(), base.x64());
+                self.code.push(0x8D);
+                self.x64_memory(to.x64(), base.x64(), offset);
+            }
+            Arch::A64 => self.a64_address(to.a64(), base.a64(), offset),
+        }
+    }
+
+    /// `to = value`.
+    pub fn constant(&mut self, to: Reg, value: u64) {
+        match self.arch {
+            Arch::X64 => {
+                let register = to.x64();
+                self.x64_rex(true, 0, register);
+                self.code.push(0xB8 + (register & 7));
+                self.u64(value);
+            }
+            Arch::A64 => self.a64_constant(to.a64(), value),
+        }
+    }
+
+    /// Sets the flags from `left - right`, for [`Assembler::branch`].
+    pub fn compare(&mut self, left: Reg, right: Reg) {
+        match self.arch {
+            Arch::X64 => self.x64_register_op(0x39, right.x64(), left.x64()),
+            // cmp left, right
+            Arch::A64 => self.word(0xEB00_001F | (right.a64() << 16) | (left.a64() << 5)),
+        }
+    }
+
+    /// Sets the flags from `left - value`, for a `value` below 2^31.
+    pub fn compare_constant(&mut self, left: Reg, value: u32) {
+        debug_assert!(value < 1 << 31);
+        match self.arch {
+            Arch::X64 => {
+                self.x64_register_op(0x81, 7, left.x64());
+                self.u32(value);
+            }
+            Arch::A64 => {
+                if value < 4096 {
+                    self.word(0xF100_001F | (value << 10) | (left.a64() << 5));
+                } else {
+                    self.a64_constant32(17, value);
+                    self.word(0xEB00_001F | (17 << 16) | (left.a64() << 5));
+                }
+            }
+        }
+    }
+
+    /// Sets the flags from `left - right` on their low 32 bits, for the signed conditions.
+    pub fn compare32(&mut self, left: Reg, right: Reg) {
+        match self.arch {
+            Arch::X64 => {
+                self.x64_rex(false, right.x64(), left.x64());
+                self.code.push(0x39);
+                self.code
+                    .push(0xC0 | ((right.x64() & 7) << 3) | (left.x64() & 7));
+            }
+            // cmp wleft, wright
+            Arch::A64 => self.word(0x6B00_001F | (right.a64() << 16) | (left.a64() << 5)),
+        }
+    }
+
+    /// Loads the double at `[base + offset]` into the first (`second` false) or second float
+    /// register, which nothing else uses and calls clobber.
+    pub fn load_double(&mut self, second: bool, base: Reg, offset: u32) {
+        let register = u8::from(second);
+        match self.arch {
+            Arch::X64 => {
+                // movsd xmm, [base + offset]
+                self.code.push(0xF2);
+                self.x64_rex(false, register, base.x64());
+                self.bytes(&[0x0F, 0x10]);
+                self.x64_memory(register, base.x64(), offset);
+            }
+            Arch::A64 => self.a64_memory(0xFD40_0000, 8, u32::from(register), base.a64(), offset),
+        }
+    }
+
+    /// Compares the two float registers, the first minus the second. An ordered result reads
+    /// through [`Condition::Below`], [`Condition::Above`] and their kin, and a NaN operand
+    /// through [`Condition::Unordered`], which callers test first.
+    pub fn compare_doubles(&mut self) {
+        match self.arch {
+            // ucomisd xmm0, xmm1
+            Arch::X64 => self.bytes(&[0x66, 0x0F, 0x2E, 0xC1]),
+            // fcmp d0, d1
+            Arch::A64 => self.word(0x1E60_2000 | (1 << 16)),
+        }
+    }
+
+    /// Sets the zero flag from `left & right`, for [`Condition::Equal`] (no common bit) or
+    /// [`Condition::NotEqual`].
+    pub fn test(&mut self, left: Reg, right: Reg) {
+        match self.arch {
+            Arch::X64 => self.x64_register_op(0x85, right.x64(), left.x64()),
+            // tst left, right
+            Arch::A64 => self.word(0xEA00_001F | (right.a64() << 16) | (left.a64() << 5)),
+        }
+    }
+
+    /// Sets the zero flag from `left & mask`, for a `left` that is zero-extended from 32 bits.
+    pub fn test_constant(&mut self, left: Reg, mask: u32) {
+        match self.arch {
+            Arch::X64 => {
+                // test left, imm32 (sign-extended, which matters only above bit 31)
+                self.x64_register_op(0xF7, 0, left.x64());
+                self.u32(mask);
+            }
+            Arch::A64 => {
+                self.a64_constant32(17, mask);
+                self.word(0xEA00_001F | (17 << 16) | (left.a64() << 5));
+            }
+        }
+    }
+
+    /// Branches to `label` on the flags the last compare or test set.
+    pub fn branch(&mut self, condition: Condition, label: Label) {
+        match self.arch {
+            Arch::X64 => self.x64_jcc(condition, label),
+            Arch::A64 => self.a64_branch_if(condition, label),
+        }
+    }
+
+    /// `register <<= amount`.
+    pub fn shift_left(&mut self, register: Reg, amount: u8) {
+        debug_assert!(amount > 0 && amount < 64);
+        match self.arch {
+            Arch::X64 => {
+                self.x64_register_op(0xC1, 4, register.x64());
+                self.code.push(amount);
+            }
+            Arch::A64 => {
+                let amount = u32::from(amount);
+                let r = register.a64();
+                // lsl r, r, #amount (ubfm r, r, #(64 - amount), #(63 - amount))
+                self.word(
+                    0xD340_0000 | ((64 - amount) << 16) | ((63 - amount) << 10) | (r << 5) | r,
+                );
+            }
+        }
+    }
+
+    /// `to += from`.
+    pub fn add(&mut self, to: Reg, from: Reg) {
+        match self.arch {
+            Arch::X64 => self.x64_register_op(0x01, from.x64(), to.x64()),
+            Arch::A64 => {
+                let to = to.a64();
+                self.word(0x8B00_0000 | (from.a64() << 16) | (to << 5) | to);
+            }
+        }
+    }
+
+    /// `register += value`, for a `value` of magnitude below 4096.
+    pub fn add_constant(&mut self, register: Reg, value: i32) {
+        debug_assert!(value.unsigned_abs() < 4096);
+        match self.arch {
+            Arch::X64 => {
+                self.x64_register_op(0x81, 0, register.x64());
+                self.u32(value as u32);
+            }
+            Arch::A64 => {
+                let r = register.a64();
+                let base = if value < 0 { 0xD100_0000 } else { 0x9100_0000 };
+                self.word(base | (value.unsigned_abs() << 10) | (r << 5) | r);
+            }
+        }
+    }
+
+    /// `register &= mask`, for a `register` that is zero-extended from 32 bits.
+    pub fn and_constant(&mut self, register: Reg, mask: u32) {
+        debug_assert!(mask < 1 << 31);
+        match self.arch {
+            Arch::X64 => {
+                self.x64_register_op(0x81, 4, register.x64());
+                self.u32(mask);
+            }
+            Arch::A64 => {
+                let r = register.a64();
+                self.a64_constant32(17, mask);
+                self.word(0x8A00_0000 | (17 << 16) | (r << 5) | r);
+            }
+        }
+    }
+
     /// Resolves every label and appends the jump table: one 32-bit offset per pc, relative to
     /// the table, of the label `targets` gives for it.
     pub fn finish(mut self, targets: &[Label]) -> Result<Finished, TooFar> {
@@ -520,6 +816,15 @@ impl Assembler {
         let opcode = match condition {
             Condition::Equal => 0x84,
             Condition::NotEqual => 0x85,
+            Condition::Below => 0x82,
+            Condition::AboveOrEqual => 0x83,
+            Condition::Above => 0x87,
+            Condition::BelowOrEqual => 0x86,
+            Condition::Less => 0x8C,
+            Condition::GreaterOrEqual => 0x8D,
+            Condition::Greater => 0x8F,
+            Condition::LessOrEqual => 0x8E,
+            Condition::Unordered => 0x8A,
         };
         self.bytes(&[0x0F, opcode]);
         self.rel32(label);
@@ -536,10 +841,20 @@ impl Assembler {
     /// A conditional branch with the range of an unconditional one: the inverted condition
     /// skips a `B` to the label.
     fn a64_branch_if(&mut self, condition: Condition, label: Label) {
+        // Each condition code and its negation differ in the low bit.
         let inverted = match condition {
-            Condition::Equal => 1,
-            Condition::NotEqual => 0,
-        };
+            Condition::Equal => 0,
+            Condition::NotEqual => 1,
+            Condition::AboveOrEqual => 2,
+            Condition::Below => 3,
+            Condition::Above => 8,
+            Condition::BelowOrEqual => 9,
+            Condition::Unordered => 6,
+            Condition::GreaterOrEqual => 10,
+            Condition::Less => 11,
+            Condition::Greater => 12,
+            Condition::LessOrEqual => 13,
+        } ^ 1;
         // b.<inverted> +8
         self.word(0x5400_0000 | (2 << 5) | inverted);
         self.a64_branch(label);
@@ -597,6 +912,41 @@ impl Assembler {
         }
     }
 
+    /// A REX prefix for an operation on `reg` and `base`, when one is needed.
+    fn x64_rex(&mut self, wide: bool, reg: u8, base: u8) {
+        let rex = 0x40 | (u8::from(wide) << 3) | ((reg >> 3) << 2) | (base >> 3);
+        if rex != 0x40 {
+            self.code.push(rex);
+        }
+    }
+
+    /// The ModRM (and SIB) bytes and 32-bit displacement of `[base + offset]`.
+    fn x64_memory(&mut self, reg: u8, base: u8, offset: u32) {
+        self.code.push(0x80 | ((reg & 7) << 3) | (base & 7));
+        if base & 7 == 4 {
+            self.code.push(0x24);
+        }
+        self.u32(offset);
+    }
+
+    /// A 64-bit operation `opcode` between registers: `reg` is the ModRM reg field (a register
+    /// or an opcode extension) and `rm` the register operand.
+    fn x64_register_op(&mut self, opcode: u8, reg: u8, rm: u8) {
+        self.x64_rex(true, reg, rm);
+        self.code.push(opcode);
+        self.code.push(0xC0 | ((reg & 7) << 3) | (rm & 7));
+    }
+
+    /// A load or store `opcode` (unsigned-offset form) of `register` at `[base + offset]`.
+    fn a64_memory(&mut self, opcode: u32, scale: u32, register: u32, base: u32, offset: u32) {
+        if offset % scale == 0 && offset / scale < 4096 {
+            self.word(opcode | ((offset / scale) << 10) | (base << 5) | register);
+        } else {
+            self.a64_address(17, base, offset);
+            self.word(opcode | (17 << 5) | register);
+        }
+    }
+
     fn bytes(&mut self, bytes: &[u8]) {
         self.code.extend_from_slice(bytes);
     }
@@ -612,4 +962,15 @@ impl Assembler {
     fn word(&mut self, word: u32) {
         self.u32(word);
     }
+}
+
+/// The unsigned-offset load or store opcode for `width`, and the offset's scale.
+fn a64_access(width: Width, load: bool) -> (u32, u32) {
+    let (opcode, scale) = match width {
+        Width::W8 => (0x3900_0000, 1),
+        Width::W16 => (0x7900_0000, 2),
+        Width::W32 => (0xB900_0000, 4),
+        Width::W64 => (0xF900_0000, 8),
+    };
+    (if load { opcode | 0x0040_0000 } else { opcode }, scale)
 }

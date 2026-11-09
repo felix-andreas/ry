@@ -3420,6 +3420,13 @@ pub mod baseline_layout {
     pub const REGISTERS: usize = std::mem::offset_of!(Activation<'static, 'static>, registers);
     /// The activation's `Interp` pointer.
     pub const INTERP: usize = std::mem::offset_of!(Activation<'static, 'static>, interp);
+    /// The activation's environment.
+    pub const ENV: usize = std::mem::offset_of!(Activation<'static, 'static>, env);
+    /// The pointer to the code's frame-slot hints, one `u32` per lookup slot.
+    pub const HINTS: usize = std::mem::offset_of!(Activation<'static, 'static>, cache)
+        + std::mem::offset_of!(super::LookupCache, hints);
+    /// The feedback pointer, null while nothing records type feedback.
+    pub const FEEDBACK: usize = std::mem::offset_of!(Activation<'static, 'static>, feedback);
     /// The visibility flag inside `Interp`.
     pub const VISIBLE: usize = std::mem::offset_of!(crate::Interp, visible);
     /// The current srcref inside `Interp`.

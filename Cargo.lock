@@ -4252,7 +4252,7 @@ dependencies = [
 
 [[package]]
 name = "ssa"
-version = "0.4.2-beta"
+version = "0.4.3-beta"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",

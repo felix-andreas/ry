@@ -16,14 +16,20 @@
 
 use {
     crate::{
-        assembler::{Arch, Assembler, Condition, Label},
+        assembler::{Arch, Assembler, Condition, Label, Reg, Width},
         logging,
     },
-    heap::object::{SexpType, VECTOR_DATA_OFFSET},
+    heap::{
+        env::layout as frame,
+        object::{ENVIRONMENT_FRAME_OFFSET, Sexp, SexpType, VECTOR_DATA_OFFSET, gp, header_layout},
+    },
     interp::{
-        bytecode::{self, BASELINE, BASELINE_STEPS, Machine, Op, baseline_layout, operand_count},
+        bytecode::{
+            self, ARITHS, Arith, BASELINE, BASELINE_STEPS, Machine, Op, baseline_layout,
+            operand_count,
+        },
         heap,
-        values::{self, nil, unbound},
+        values::{self, missing_arg, nil, unbound},
     },
     std::{cell::RefCell, ffi::c_void, time::Instant},
 };
@@ -113,6 +119,8 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
         asm.jump(dispatch);
         let visible = baseline_layout::VISIBLE as u32;
         let nil_address = nil().as_ptr() as u64;
+        // Slow paths of inline instructions, placed after the body so the fast paths stay dense.
+        let mut cold: Vec<(Label, Op, usize, usize)> = Vec::new();
         let mut pc = 0;
         while pc < words.len() {
             let op = bytecode::op_of(words[pc] as u32).ok_or("an unknown opcode")?;
@@ -134,6 +142,44 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
                     let value = constants.element(operand(1));
                     asm.store_register_constant(operand(0) as u32, value.as_ptr() as u64);
                     asm.store_interp_byte(visible, 1);
+                }
+                Op::GetVar => {
+                    let slow = asm.label();
+                    inline_get_var(
+                        &mut asm,
+                        operand(0) as u32,
+                        constants.element(operand(1)),
+                        operand(2) as u32,
+                        visible,
+                        slow,
+                    );
+                    cold.push((slow, op, pc, next));
+                }
+                Op::SetVar => {
+                    let slow = asm.label();
+                    inline_set_var(
+                        &mut asm,
+                        constants.element(operand(0)),
+                        operand(1) as u32,
+                        operand(2) as u32,
+                        visible,
+                        slow,
+                    );
+                    cold.push((slow, op, pc, next));
+                }
+                Op::Arithmetic if comparison_condition(ARITHS[operand(0)].0).is_some() => {
+                    let slow = asm.label();
+                    let operator = ARITHS[operand(0)].0;
+                    inline_comparison(
+                        &mut asm,
+                        operator,
+                        operand(1) as u32,
+                        operand(2) as u32,
+                        operand(3) as u32,
+                        visible,
+                        slow,
+                    );
+                    cold.push((slow, op, pc, next));
                 }
                 Op::Visible => asm.store_interp_byte(visible, 1),
                 Op::Invisible => asm.store_interp_byte(visible, 0),
@@ -219,6 +265,12 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
             }
             pc = next;
         }
+        for (slow, op, pc, next) in cold {
+            asm.bind(slow);
+            asm.call_step(op as usize, pc as u32);
+            asm.branch_accumulator(Condition::Equal, next as u32, labels[next]);
+            asm.jump(dispatch);
+        }
         // Falling off the end of the code cannot happen: every body ends in `Return`.
         asm.bind(dispatch);
         asm.branch_if_stop(exit);
@@ -232,6 +284,257 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
             .map(|finished| finished.bytes)
             .map_err(|_| "the code is too large for its branches")
     }
+}
+
+/// `GetVar` for a variable the activation's own frame binds to a plain value or a forced
+/// promise, which is what most lookups in a function body find. Everything else (a binding in
+/// an enclosing frame, an active binding, a promise still to force, a body recording type
+/// feedback) branches to `slow`, which runs the step.
+fn inline_get_var(
+    asm: &mut Assembler,
+    to: u32,
+    symbol: Sexp,
+    slot: u32,
+    visible: u32,
+    slow: Label,
+) {
+    asm.load(
+        Width::W64,
+        Reg::T0,
+        Reg::Activation,
+        baseline_layout::FEEDBACK as u32,
+    );
+    asm.test(Reg::T0, Reg::T0);
+    asm.branch(Condition::NotEqual, slow);
+    // Visible before the lookup, as in tier 0; the slow path sets it again.
+    asm.store_interp_byte(visible, 1);
+    probe_frame(asm, symbol, slot, slow);
+    asm.load(Width::W16, Reg::T2, Reg::T3, header_layout::GP as u32);
+    asm.test_constant(Reg::T2, u32::from(gp::ACTIVE_BINDING));
+    asm.branch(Condition::NotEqual, slow);
+    asm.load(Width::W64, Reg::T2, Reg::T3, header_layout::SECOND as u32);
+    asm.constant(Reg::T1, missing_arg().as_ptr() as u64);
+    asm.compare(Reg::T2, Reg::T1);
+    asm.branch(Condition::Equal, slow);
+    asm.constant(Reg::T0, unbound().as_ptr() as u64);
+    asm.compare(Reg::T2, Reg::T0);
+    asm.branch(Condition::Equal, slow);
+    let plain = asm.label();
+    let done = asm.label();
+    asm.load(Width::W8, Reg::T1, Reg::T2, header_layout::KIND as u32);
+    asm.compare_constant(Reg::T1, SexpType::Promise as u32);
+    asm.branch(Condition::NotEqual, plain);
+    asm.load(Width::W64, Reg::T1, Reg::T2, header_layout::FIRST as u32);
+    asm.compare(Reg::T1, Reg::T0);
+    asm.branch(Condition::Equal, slow);
+    asm.store(Width::W64, Reg::T1, Reg::Window, to * 8);
+    asm.jump(done);
+    asm.bind(plain);
+    asm.store(Width::W64, Reg::T2, Reg::Window, to * 8);
+    asm.bind(done);
+}
+
+/// `SetVar` of a variable the activation's own frame binds to an ordinary cell: the store,
+/// its reference counts and the binding flags, as `Heap::set_binding_value` does them. A new
+/// binding, an active, locked or watched one, a store the write barrier must see, and one that
+/// drops the old value's last counted reference branch to `slow`, which runs the step.
+fn inline_set_var(
+    asm: &mut Assembler,
+    symbol: Sexp,
+    from: u32,
+    slot: u32,
+    visible: u32,
+    slow: Label,
+) {
+    probe_frame(asm, symbol, slot, slow);
+    asm.load(Width::W16, Reg::T2, Reg::T3, header_layout::GP as u32);
+    asm.test_constant(
+        Reg::T2,
+        u32::from(gp::ACTIVE_BINDING | gp::BINDING_LOCKED | gp::WATCHED),
+    );
+    asm.branch(Condition::NotEqual, slow);
+    asm.load(Width::W8, Reg::T2, Reg::T3, header_layout::GC as u32);
+    asm.and_constant(
+        Reg::T2,
+        u32::from(header_layout::GC_OLD | header_layout::GC_REMEMBERED),
+    );
+    asm.compare_constant(Reg::T2, u32::from(header_layout::GC_OLD));
+    asm.branch(Condition::Equal, slow);
+    asm.load(Width::W64, Reg::T1, Reg::Window, from * 8);
+    asm.load(Width::W64, Reg::T0, Reg::T3, header_layout::SECOND as u32);
+    let counted = asm.label();
+    asm.load(Width::W8, Reg::T2, Reg::T3, header_layout::FLAGS as u32);
+    asm.test_constant(Reg::T2, u32::from(header_layout::FLAG_UNTRACKED));
+    asm.branch(Condition::NotEqual, counted);
+    let refcount = header_layout::REFCOUNT as u32;
+    let saturated = u32::from(heap::object::REFCOUNT_MAX);
+    // The old value's last reference going away needs the heap's zero list: leave before
+    // anything changed.
+    asm.load(Width::W16, Reg::T2, Reg::T0, refcount);
+    asm.compare_constant(Reg::T2, 1);
+    asm.branch(Condition::Equal, slow);
+    let incremented = asm.label();
+    asm.load(Width::W16, Reg::T2, Reg::T1, refcount);
+    asm.compare_constant(Reg::T2, saturated);
+    asm.branch(Condition::Equal, incremented);
+    asm.add_constant(Reg::T2, 1);
+    asm.store(Width::W16, Reg::T2, Reg::T1, refcount);
+    asm.bind(incremented);
+    // Reloaded, because the new value can be the old one.
+    asm.load(Width::W16, Reg::T2, Reg::T0, refcount);
+    asm.compare_constant(Reg::T2, saturated);
+    asm.branch(Condition::Equal, counted);
+    asm.compare_constant(Reg::T2, 0);
+    asm.branch(Condition::Equal, counted);
+    asm.add_constant(Reg::T2, -1);
+    asm.store(Width::W16, Reg::T2, Reg::T0, refcount);
+    asm.bind(counted);
+    asm.store(Width::W64, Reg::T1, Reg::T3, header_layout::SECOND as u32);
+    asm.load(Width::W16, Reg::T2, Reg::T3, header_layout::GP as u32);
+    asm.and_constant(
+        Reg::T2,
+        u32::from(!(gp::BINDING_MISSING | gp::BINDING_ABSENT)),
+    );
+    asm.store(Width::W16, Reg::T2, Reg::T3, header_layout::GP as u32);
+    asm.store_interp_byte(visible, 0);
+}
+
+/// The branch conditions of a comparison operator: on two integers (signed) and on two
+/// ordered doubles.
+fn comparison_condition(operator: Arith) -> Option<(Condition, Condition)> {
+    Some(match operator {
+        Arith::Equal => (Condition::Equal, Condition::Equal),
+        Arith::NotEqual => (Condition::NotEqual, Condition::NotEqual),
+        Arith::Less => (Condition::Less, Condition::Below),
+        Arith::Greater => (Condition::Greater, Condition::Above),
+        Arith::LessEqual => (Condition::LessOrEqual, Condition::BelowOrEqual),
+        Arith::GreaterEqual => (Condition::GreaterOrEqual, Condition::AboveOrEqual),
+        _ => return None,
+    })
+}
+
+/// A comparison of two attribute-free scalars of the same kind, both integers or both doubles,
+/// neither `NA` nor NaN: the result is one of the shared `TRUE` and `FALSE` values, so it
+/// allocates nothing. Every other operand, and a body recording type feedback, branches to
+/// `slow`, which runs the step.
+fn inline_comparison(
+    asm: &mut Assembler,
+    operator: Arith,
+    to: u32,
+    left: u32,
+    right: u32,
+    visible: u32,
+    slow: Label,
+) {
+    let Some((integers, doubles)) = comparison_condition(operator) else {
+        return asm.jump(slow);
+    };
+    asm.load(
+        Width::W64,
+        Reg::T0,
+        Reg::Activation,
+        baseline_layout::FEEDBACK as u32,
+    );
+    asm.test(Reg::T0, Reg::T0);
+    asm.branch(Condition::NotEqual, slow);
+    asm.load(Width::W64, Reg::T0, Reg::Window, left * 8);
+    asm.load(Width::W64, Reg::T1, Reg::Window, right * 8);
+    asm.load(Width::W8, Reg::T2, Reg::T0, header_layout::KIND as u32);
+    asm.load(Width::W8, Reg::T3, Reg::T1, header_layout::KIND as u32);
+    asm.compare(Reg::T2, Reg::T3);
+    asm.branch(Condition::NotEqual, slow);
+    asm.constant(Reg::T3, nil().as_ptr() as u64);
+    for operand in [Reg::T0, Reg::T1] {
+        asm.load(Width::W8, Reg::T2, operand, header_layout::FLAGS as u32);
+        asm.test_constant(Reg::T2, u32::from(ALTREP_FLAG));
+        asm.branch(Condition::NotEqual, slow);
+        asm.load(Width::W64, Reg::T2, operand, header_layout::ATTRIB as u32);
+        asm.compare(Reg::T2, Reg::T3);
+        asm.branch(Condition::NotEqual, slow);
+        asm.load(Width::W64, Reg::T2, operand, u32::from(LENGTH));
+        asm.compare_constant(Reg::T2, 1);
+        asm.branch(Condition::NotEqual, slow);
+    }
+    let truth = asm.label();
+    let done = asm.label();
+    let double = asm.label();
+    asm.load(Width::W8, Reg::T2, Reg::T0, header_layout::KIND as u32);
+    asm.compare_constant(Reg::T2, SexpType::Real as u32);
+    asm.branch(Condition::Equal, double);
+    asm.compare_constant(Reg::T2, SexpType::Integer as u32);
+    asm.branch(Condition::NotEqual, slow);
+    asm.load(Width::W32, Reg::T2, Reg::T0, u32::from(DATA));
+    asm.load(Width::W32, Reg::T3, Reg::T1, u32::from(DATA));
+    asm.constant(Reg::T0, heap::object::NA_INTEGER as u32 as u64);
+    asm.compare32(Reg::T2, Reg::T0);
+    asm.branch(Condition::Equal, slow);
+    asm.compare32(Reg::T3, Reg::T0);
+    asm.branch(Condition::Equal, slow);
+    asm.compare32(Reg::T2, Reg::T3);
+    asm.branch(integers, truth);
+    let falsity = asm.label();
+    asm.jump(falsity);
+    asm.bind(double);
+    asm.load_double(false, Reg::T0, u32::from(DATA));
+    asm.load_double(true, Reg::T1, u32::from(DATA));
+    asm.compare_doubles();
+    asm.branch(Condition::Unordered, slow);
+    asm.branch(doubles, truth);
+    let known = heap().known();
+    asm.bind(falsity);
+    asm.store_register_constant(to, known.false_value.as_ptr() as u64);
+    asm.jump(done);
+    asm.bind(truth);
+    asm.store_register_constant(to, known.true_value.as_ptr() as u64);
+    asm.bind(done);
+    asm.store_interp_byte(visible, 1);
+}
+
+/// Finds `symbol`'s binding cell in the activation's own frame at the position lookup `slot`
+/// last found it, leaving it in `T3`, as `Frame::find_hinted` does on a hint that matches. A
+/// frame without the symbol, a stale hint and a frame whose hints are off branch to `slow`.
+/// Global and base frames keep their bindings on the symbols and an empty frame here, so their
+/// filter rejects every symbol.
+fn probe_frame(asm: &mut Assembler, symbol: Sexp, slot: u32, slow: Label) {
+    const _: () = assert!(frame::SLOT == 16);
+    let at = |field: usize| (ENVIRONMENT_FRAME_OFFSET + field) as u32;
+    asm.load(
+        Width::W64,
+        Reg::T0,
+        Reg::Activation,
+        baseline_layout::ENV as u32,
+    );
+    asm.load(Width::W64, Reg::T1, Reg::T0, at(frame::FILTER));
+    asm.constant(Reg::T2, frame::filter_bit(symbol));
+    asm.test(Reg::T1, Reg::T2);
+    asm.branch(Condition::Equal, slow);
+    asm.load(Width::W32, Reg::T1, Reg::T0, at(frame::FORMALS));
+    asm.test_constant(Reg::T1, frame::SHADOWED);
+    asm.branch(Condition::NotEqual, slow);
+    asm.load(
+        Width::W64,
+        Reg::T2,
+        Reg::Activation,
+        baseline_layout::HINTS as u32,
+    );
+    asm.load(Width::W32, Reg::T1, Reg::T2, slot * 4);
+    asm.load(Width::W32, Reg::T2, Reg::T0, at(frame::LENGTH));
+    asm.compare(Reg::T1, Reg::T2);
+    asm.branch(Condition::AboveOrEqual, slow);
+    asm.address(Reg::T3, Reg::T0, at(frame::STORAGE));
+    let inline = asm.label();
+    asm.load(Width::W32, Reg::T2, Reg::T0, at(frame::CAPACITY));
+    asm.compare_constant(Reg::T2, frame::INLINE);
+    asm.branch(Condition::BelowOrEqual, inline);
+    asm.load(Width::W64, Reg::T3, Reg::T3, 0);
+    asm.bind(inline);
+    asm.shift_left(Reg::T1, 4);
+    asm.add(Reg::T3, Reg::T1);
+    asm.load(Width::W64, Reg::T2, Reg::T3, 0);
+    asm.constant(Reg::T1, symbol.as_ptr() as u64);
+    asm.compare(Reg::T2, Reg::T1);
+    asm.branch(Condition::NotEqual, slow);
+    asm.load(Width::W64, Reg::T3, Reg::T3, frame::SLOT_CELL as u32);
 }
 
 /// Where an instruction that is not handled inline can branch to besides the next instruction.
