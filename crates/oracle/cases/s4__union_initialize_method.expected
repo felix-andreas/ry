@@ -1,0 +1,25 @@
+[stdout]
+| [1] "none"
+| package initialize for classRepresentation 
+| package initialize for ClassUnionRepresentation 
+| package initialize for classRepresentation 
+| [1] "MethodWithNext"
+| attr(,"package")
+| [1] "methods"
+| package initialize for ClassUnionRepresentation 
+| package initialize for classRepresentation 
+| [1] "NULL"  "A"     ".NULL" "B"     "C"    
+| package initialize for classRepresentation 
+| package initialize for SClassExtension 
+| package initialize for classRepresentation 
+| package initialize for SClassExtension 
+| package initialize for SClassExtension 
+| package initialize for classRepresentation 
+| package initialize for SClassExtension 
+| [1] "A"  "U2"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("A", "U2")

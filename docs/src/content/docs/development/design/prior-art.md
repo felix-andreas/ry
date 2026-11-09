@@ -189,7 +189,7 @@ refers to its steps.
 | Whole-program value tracking | Bun | **Adopt per namespace** | The typed core of a locked namespace or strict file; untyped code keeps profiles |
 | Closed bindings per locked namespace: the bindings are closed though their values are not | Bun | **Adopt** (step 2) | Direct calls to sibling namespace functions and imports, invalidated by `unlockBinding` and `assignInNamespace` |
 | Freezing built-ins instead of deoptimizing | Bun | **Adopt for ry's standard library only** | R bindings get invalidation on `unlockBinding`, because mocking rebinds them |
-| Ahead-of-time compilation, applied to untyped code at install time | Bun | **Adopt, planned; measure warm-up and start-up before building machine code** | `ry install` writes each package's bytecode, argument-match plans and resolved namespace call targets into a read-only file mapped at load |
+| Ahead-of-time machine code from whole-program facts, no profiles, values tested once where they enter | Bun (`--aot`) | **Adopt as a hybrid, planned** | `ry install` compiles from checker, closed-namespace and effect-free facts into the code image's native section; tier 0 keeps `eval` and NSE, the JIT keeps hot loops |
 | Machine code mapped read-only from the file and shared between processes | Bun | **Adopt** | Typed code files in installed packages and executables |
 | Mapped images shared across worker processes | Bun | **Adopt, planned** (step 5) | callr, parallel and doParallel workers map the same package images; measured as resident memory per worker |
 | A report of code compiled to a slow path, worst first, with fixes | Bun | **Adopt** | `ry check --explain` |
@@ -566,6 +566,22 @@ run fast without trusting values that arrive from untyped code.
 - **The test matrix.** Each test runs under `bun run`, compiled, and compiled with every annotation
   erased, and all three must match in output and exit status. Programs are also compiled with every
   guess forced to fail, and a mode checks every fact the executable relies on at run time.[^bun-aot]
+- **No profiles and no deoptimization.** Hotness is estimated from loops and the call graph, a failed
+  check takes a slow path instead of discarding code, and `eval`, `new Function` and `node:vm` run in
+  JavaScriptCore's interpreter on the same objects.[^bun-aot-pr]
+
+**What it measured.** The pull request that added it reports these numbers:[^bun-aot-pr]
+
+| Program | Under Bun's JIT | Compiled ahead of time |
+| --- | ---: | ---: |
+| TypeScript 6 compiler on a 370,839-line project | 14.00 s, 29.2 s CPU, 2,581 MB peak | 4.25 s, 5.3 s CPU, 963 MB peak |
+| A CLI, time to its first prompt | 318 ms, 5,530M instructions | 141 ms, 1,117M instructions |
+| Web servers, requests in the first second | 1x | 1.03x to 1.93x |
+| The same servers once warm | 1x | Hono, `Bun.serve` and `node:http` within 3%; Express, Elysia, Fastify and Koa 7% to 23% slower |
+| 1,814 untyped idioms, instructions per iteration | 1x | median 0.94x in a small program and 1.44x in a large one, where 1,229 idioms are slower |
+
+So ahead-of-time code wins start-up, short runs and memory by a wide margin, and loses to the JIT on
+long-running untyped code, where run-time feedback knows more than whole-program analysis can prove.
 
 **What ry adopts.** All six, fitted to R (`typed-runtime.md` holds the design), and two more
 that apply Bun's closed-world reasoning to untyped packages:
@@ -593,10 +609,17 @@ that apply Bun's closed-world reasoning to untyped packages:
   `ry build --exe`, which writes a standalone executable as `bun compile` does. Worker processes
   started by callr, parallel and doParallel load the same packages, so mapping each package's image
   read-only lets them share it (planned as step 5, measured as resident memory per worker).
-- **Ahead-of-time compilation, applied to untyped code at install time** (planned). `ry install`
-  writes each package's bytecode, argument-match plans and resolved namespace call targets into a
-  read-only file that the loader maps, one image per package, which extends the start-up image.
-  Warm-up and start-up are measured with these images before any machine code is written into them.
+- **Ahead-of-time machine code at install time, as one tier of a hybrid** (planned). `ry install`
+  compiles each package to machine code from facts it can prove without running anything: ry's
+  checker and inferred types, the closed bindings of the locked namespace, and the effect-free fact
+  per function. A value from outside the package (an argument from user code, a result of `.Call`)
+  is tested once where it enters, and a failed test takes the tier-0 path for that call. The code
+  goes through the one SSA IR and `cranelift-object` into the native section of the package's code
+  image, mapped read-only so the test processes of one CI machine share it. Tier 0 keeps `eval` and
+  non-standard evaluation, and the JIT keeps hot loops, because Bun's numbers show ahead-of-time
+  code losing to a JIT once warm. `ry check --explain` lists the operations that compiled to a
+  by-name lookup or an unproven test. It is measured on the testthat workload and on package load
+  time.
 - **`ry check --explain`** for the slow-path report. With no profile, it ranks by loop depth.
 - **The test matrix** for typed differential tests and the typed fuzzer.
 
@@ -1024,6 +1047,7 @@ source with a footnote keyed to a `sources` entry. The docs site does not render
 footnote also carries the source's link.
 
 [^bun-aot]: Bun documentation: the ahead-of-time compiler, and its internals page, <https://bun.sh/docs/compiler/aot>, <https://bun.sh/docs/compiler/internals>
+[^bun-aot-pr]: Bun pull request 45631, "Compile TypeScript to machine code ahead of time: `bun build --compile --aot`", <https://github.com/oven-sh/bun/pull/45631>
 [^okf]: Open Knowledge Format v0.2, <https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md>
 [^roc]: Roc repository: docs/langref, design.md, design/lambda-set-specialization.md, <https://github.com/roc-lang/roc>
 [^perceus]: Reinking, Xie, de Moura and Leijen: Perceus, Garbage Free Reference Counting with Reuse, <https://www.microsoft.com/en-us/research/wp-content/uploads/2020/11/perceus-tr-v4.pdf>

@@ -7,7 +7,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
         format, records, standard_library, strings,
-        unwind::R,
+        unwind::{R, Unwind},
         values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
     },
     heap::{
@@ -57,28 +57,35 @@ pub unsafe fn deparse_lines_with(
 }
 
 /// Deparses, and also reports whether the text cannot reparse to the object because it holds
-/// an environment, pointer, or other value with no source form.
+/// an environment, pointer, or other value with no source form, and the first error that
+/// `deparse` itself raises (an S4 object whose class is not defined).
 unsafe fn deparse_checked(
     object: Sexp,
     cutoff: usize,
     opts: u32,
     backtick: bool,
-) -> (Vec<String>, bool) {
+) -> (Vec<String>, bool, Option<Unwind>) {
     let mut deparser = Deparser::new(cutoff, opts);
     deparser.backtick = backtick;
     deparser.deparse(object);
     let incomplete = deparser.incomplete;
-    (deparser.finish(), incomplete)
+    let failure = deparser.failure.take();
+    (deparser.finish(), incomplete, failure)
 }
 
-/// Deparses for `deparse`, `dput` and `dump`, warning as `warnIncomplete` asks.
+/// Deparses for `deparse`, `dput` and `dump`, warning as `warnIncomplete` asks. Only these
+/// and coercion ([`deparse_one_line_checked`]) raise a deparse error; the text an error message
+/// or `print` shows falls back to the plain value, because a message must never fail.
 unsafe fn deparse_warning(
     object: Sexp,
     cutoff: usize,
     opts: u32,
     backtick: bool,
 ) -> R<Vec<String>> {
-    let (lines, incomplete) = deparse_checked(object, cutoff, opts, backtick);
+    let (lines, incomplete, failure) = deparse_checked(object, cutoff, opts, backtick);
+    if let Some(failure) = failure {
+        return Err(failure);
+    }
     if incomplete && opts & options::WARN_INCOMPLETE != 0 {
         crate::conditions::warning("deparse may be incomplete")?;
     }
@@ -95,7 +102,20 @@ pub unsafe fn deparse_first_line(object: Sexp) -> String {
 
 /// A deparse joined into one line, as GNU R's `deparse1line` gives it to coercion.
 pub unsafe fn deparse_one_line(object: Sexp) -> String {
-    let lines = deparse_lines(object, 60, options::SIMPLE);
+    join_one_line(deparse_lines(object, 60, options::SIMPLE))
+}
+
+/// [`deparse_one_line`] for coercion (`as.character` of a list), which raises deparse's errors
+/// as GNU R's `deparse1line` does.
+pub unsafe fn deparse_one_line_checked(object: Sexp) -> R<String> {
+    let (lines, _, failure) = deparse_checked(object, 60, options::SIMPLE, true);
+    match failure {
+        Some(failure) => Err(failure),
+        None => Ok(join_one_line(lines)),
+    }
+}
+
+fn join_one_line(lines: Vec<String>) -> String {
     if lines.len() <= 1 {
         return lines.into_iter().next().unwrap_or_default();
     }
@@ -237,6 +257,9 @@ struct Deparser {
     /// low-precedence unary operator) would swallow the rest of the expression on reparsing.
     left_of: Option<u8>,
     incomplete: bool,
+    /// The first error GNU R's deparser would raise. Deparsing goes on with the plain value, so
+    /// callers that cannot fail still get text.
+    failure: Option<Unwind>,
 }
 
 impl Deparser {
@@ -255,6 +278,7 @@ impl Deparser {
             depth: 0,
             left_of: None,
             incomplete: false,
+            failure: None,
         }
     }
 
@@ -324,10 +348,16 @@ impl Deparser {
                 self.depth -= 1;
                 return;
             }
-            if let Some(parts) = s4_parts(object, class) {
-                self.s4(parts);
-                self.depth -= 1;
-                return;
+            match s4_parts(object, class) {
+                Ok(Some(parts)) => {
+                    self.s4(parts);
+                    self.depth -= 1;
+                    return;
+                }
+                Ok(None) => {}
+                Err(failure) => {
+                    self.failure.get_or_insert(failure);
+                }
             }
         }
         // An expression vector written from its source text shows none of its attributes.
@@ -1567,12 +1597,14 @@ struct S4Parts {
 /// The class, slots and data part of an S4 object. The slot names come from the class
 /// definition's `slots`, as in GNU R: `slotNames()` would dispatch on the object, and for a
 /// class representation it names the slots of the class it describes. Without the methods
-/// package, or for a class it does not know, the object deparses as its plain value.
+/// package the object deparses as its plain value. Errors are GNU R's: a class the methods
+/// package does not know fails where it reads `slots` from the missing definition, and
+/// `getClassDef` or a slot read may fail on their own.
 ///
 /// The R calls made here may fail, and the failure's message deparses its call, which holds this
 /// same object. A deparse that starts while another one is reading S4 parts therefore takes the
 /// plain value, so a failing class can never recurse until the stack runs out.
-unsafe fn s4_parts(object: Sexp, class: Sexp) -> Option<S4Parts> {
+unsafe fn s4_parts(object: Sexp, class: Sexp) -> R<Option<S4Parts>> {
     thread_local! {
         static READING: Cell<bool> = const { Cell::new(false) };
     }
@@ -1583,54 +1615,59 @@ unsafe fn s4_parts(object: Sexp, class: Sexp) -> Option<S4Parts> {
         }
     }
     if READING.replace(true) {
-        return None;
+        return Ok(None);
     }
     let _reading = Reading;
     let symbols = symbols();
-    let class_name = values::string_at(class, 0)?.into_owned();
+    let Some(class_name) = values::string_at(class, 0).map(|name| name.into_owned()) else {
+        return Ok(None);
+    };
     let get_class_def = values::call(
         symbols.double_colon,
-        &[
-            values::install("methods").ok()?,
-            values::install("getClassDef").ok()?,
-        ],
-    )
-    .ok()?;
-    let definition_call = values::call(get_class_def, &[class]).ok()?;
-    let definition = crate::eval::eval(definition_call, values::base_env()).ok()?;
+        &[values::install("methods")?, values::install("getClassDef")?],
+    )?;
+    let definition_call = values::call(get_class_def, &[class])?;
+    let definition = crate::eval::eval(definition_call, values::base_env())?;
+    if definition == nil() {
+        return Err(crate::unwind::error(
+            "cannot get a slot (\"slots\") from an object of type \"NULL\"",
+        ));
+    }
     crate::heap().root(definition);
-    let slot_names = values::names(get_attr(definition, values::install("slots").ok()?));
+    let slot_names = values::names(get_attr(definition, values::install("slots")?));
     if slot_names != nil() && slot_names.kind() != SexpType::String {
-        return None;
+        return Ok(None);
     }
     crate::heap().root(slot_names);
     let mut slots = Vec::new();
     let mut has_data_slot = false;
     for index in 0..length(slot_names) {
-        let name = values::string_at(slot_names, index)?.into_owned();
+        let Some(name) = values::string_at(slot_names, index).map(|name| name.into_owned()) else {
+            return Ok(None);
+        };
         has_data_slot |= name == ".Data";
-        let symbol = values::install(&name).ok()?;
-        let value = crate::subset::get_slot(object, symbol, nil()).ok()?;
+        let symbol = values::install(&name)?;
+        let value = crate::subset::get_slot(object, symbol, nil())?;
         crate::heap().root(value);
         slots.push((name, value));
     }
     let data = if has_data_slot || object.kind() == SexpType::Object {
         None
     } else {
-        let data = values::shallow_duplicate(object).ok()?;
+        let data = values::shallow_duplicate(object)?;
+        crate::heap().root(data);
         values::remove_attr(data, symbols.class);
         for (name, _) in &slots {
-            values::remove_attr(data, values::install(name).ok()?);
+            values::remove_attr(data, values::install(name)?);
         }
         data.set_gp_bits(gp::S4_OBJECT, false);
-        crate::heap().root(data);
         Some(data)
     };
-    Some(S4Parts {
+    Ok(Some(S4Parts {
         class: class_name,
         slots,
         data,
-    })
+    }))
 }
 
 unsafe fn has_shown_attributes(object: Sexp, nice_names: bool) -> bool {
@@ -1842,7 +1879,16 @@ unsafe fn do_dump(call: &Call<'_>) -> R<Sexp> {
         }
         text.push_str(&quote_name(&name));
         text.push_str(" <-\n");
-        for line in deparse_warning(value, 60, opts, true)? {
+        // GNU R writes each name before deparsing its value, so a value that fails to deparse
+        // leaves everything up to its name in the file.
+        let lines = match deparse_warning(value, 60, opts, true) {
+            Ok(lines) => lines,
+            Err(failure) => {
+                crate::connections::write_text(file, &text)?;
+                return Err(failure);
+            }
+        };
+        for line in lines {
             text.push_str(&line);
             text.push('\n');
         }

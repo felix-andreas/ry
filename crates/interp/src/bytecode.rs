@@ -1,6 +1,7 @@
 //! The tier-0 bytecode interpreter.
 //!
-//! A closure body compiles to bytecode on its second call. The code replaces the body as a
+//! A closure body compiles to bytecode on its second call, or takes its code from its package's
+//! code image then. The code replaces the body as a
 //! `BCODESXP`, as GNU R stores compiled closures, so it lives and dies with the closure and
 //! everything that reads a body as source (`body()`, `deparse`, `identical`, serialization)
 //! goes through [`closure_body`], which returns the expression.
@@ -245,6 +246,11 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
         return eval::eval(body, env);
     }
     state.calls.remove(&body);
+    // A package's code image replaces compiling, at the same call, rather than running code from
+    // the first call: decoding costs about as much as compiling, and many closures run only once.
+    if let Some(code) = crate::code_image::take_pending(function, body)? {
+        return run(function, code, env);
+    }
     // A body the compiler rejects (an error is its way of saying so, such as for a `break`
     // outside a loop) still runs correctly on the AST evaluator.
     match compile(body, function) {
@@ -272,6 +278,9 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Sexp> {
     if body.kind() == SexpType::Bytecode {
         return Ok(body);
     }
+    if let Some(code) = crate::code_image::take_pending(function, body)? {
+        return Ok(code);
+    }
     match compile(body, function)? {
         Some(code) => {
             crate::heap().set_cdr(function, code);
@@ -279,6 +288,57 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Sexp> {
         }
         None => Ok(body),
     }
+}
+
+/// Compiles, ahead of their first call, the functions `code` defines with `function(...)`
+/// expressions, as [`Op::Closure`] would at the first run of each, and the functions those
+/// define in turn. `env` stands in for the frame such a function closes over, which compiling
+/// reads only to resolve names it then guards at run time, so any frame below the enclosure gives
+/// correct code. Installing a package calls this, so that a package's nested functions (R6
+/// methods, callbacks) are written with its top-level ones.
+///
+/// # Safety
+/// `code` is a live code object made by this module.
+pub unsafe fn compile_nested_functions(code: Sexp, env: Sexp) -> R<()> {
+    let words = values::ints(code.car()).to_vec();
+    let constants = code.cdr();
+    let mut pc = 0;
+    while pc < words.len() {
+        let word = words[pc] as u32;
+        let Some(op) = op_of(word) else {
+            return Err(error("compiled code holds an invalid instruction"));
+        };
+        let operand = |index: usize| words.get(pc + 1 + index).map(|&word| word as usize);
+        if op == Op::Closure
+            && let (Some(formals), Some(body), Some(srcref)) = (operand(1), operand(2), operand(3))
+            && body < length(constants)
+        {
+            let source = constants.element(body);
+            let nested = if source.kind() == SexpType::Bytecode {
+                Some(source)
+            } else if worth_compiling(source) {
+                let closure = eval::make_closure(
+                    constants.element(formals),
+                    source,
+                    constants.element(srcref),
+                    env,
+                )?;
+                crate::heap().root(closure);
+                let compiled = compile(source, closure).ok().flatten();
+                if let Some(compiled) = compiled {
+                    crate::heap().set_element(constants, body, compiled);
+                }
+                compiled
+            } else {
+                None
+            };
+            if let Some(nested) = nested {
+                compile_nested_functions(nested, env)?;
+            }
+        }
+        pc += 1 + operand_count(op);
+    }
+    Ok(())
 }
 
 pub unsafe fn is_compiled(function: Sexp) -> bool {
@@ -609,6 +669,9 @@ pub enum Op {
     /// `target`: a guard fallback laid out after the body returning to it. Unlike a backward
     /// `Jump`, it is never a loop's back edge.
     Resume,
+    /// `dst symbol`: `missing(symbol)` for a plain symbol, read from the frame without building
+    /// the special's call.
+    Missing,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its last operand.
@@ -623,7 +686,7 @@ enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 44] = [
+pub const OPS: [Op; 45] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -668,6 +731,7 @@ pub const OPS: [Op; 44] = [
     Op::SubAssignMatrix,
     Op::Replace,
     Op::Resume,
+    Op::Missing,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -684,9 +748,11 @@ pub enum Arith {
     Greater,
     LessEqual,
     GreaterEqual,
+    Modulo,
+    IntegerDivide,
 }
 
-pub const ARITHS: [(Arith, &str); 11] = [
+pub const ARITHS: [(Arith, &str); 13] = [
     (Arith::Add, "+"),
     (Arith::Subtract, "-"),
     (Arith::Multiply, "*"),
@@ -698,6 +764,8 @@ pub const ARITHS: [(Arith, &str); 11] = [
     (Arith::Greater, ">"),
     (Arith::LessEqual, "<="),
     (Arith::GreaterEqual, ">="),
+    (Arith::Modulo, "%%"),
+    (Arith::IntegerDivide, "%/%"),
 ];
 
 /// Type feedback: the kinds of value an instruction produced, one bit per kind. A scalar is a
@@ -1773,6 +1841,21 @@ impl Compiler {
                 ".ry_match" if supported_match(&args)? => {
                     return self.compiled_match(call, head, primitive, dst, &args);
                 }
+                "missing" => {
+                    return match args.as_slice() {
+                        [(tag, symbol)]
+                            if *tag == nil()
+                                && symbol.kind() == SexpType::Symbol
+                                && *symbol != symbols().dots
+                                && *symbol != missing_arg()
+                                && eval::dot_dot_index(*symbol).is_none()
+                                && self.bound.is_none() =>
+                        {
+                            self.missing(call, head, primitive, dst, *symbol)
+                        }
+                        _ => self.general_call(call, head, dst),
+                    };
+                }
                 _ => {}
             }
             // Dispatch on an evaluated subject evaluates the other arguments in the frame.
@@ -2014,8 +2097,8 @@ impl Compiler {
 
     /// Whether evaluating the subscript `index` cannot change a variable of the frame, so the
     /// compiled assignment may evaluate it before reading the target: a variable of the frame (a
-    /// formal's promise runs in the caller's frame), a numeric constant, a name, or base
-    /// arithmetic on variables and numbers.
+    /// formal's promise runs in the caller's frame), a numeric constant, a name, base arithmetic
+    /// on variables and numbers, or base `$` and `[[` reading one of those.
     unsafe fn side_effect_free_index(&self, index: Sexp, depth: u32) -> bool {
         match index.kind() {
             SexpType::Symbol => {
@@ -2036,6 +2119,24 @@ impl Compiler {
             SexpType::Language if depth < 8 && index.car().kind() == SexpType::Symbol => {
                 let operator = symbol_name(index.car());
                 let arguments = values::pairlist_items(index.cdr());
+                let name = |value: Sexp| {
+                    value.kind() == SexpType::String
+                        && length(value) == 1
+                        && !values::has_attributes(value)
+                };
+                if let ("$" | "[[", [(nil_tag, object), (key_tag, key)]) =
+                    (&*operator, arguments.as_slice())
+                {
+                    let key_free = match &*operator {
+                        "$" => key.kind() == SexpType::Symbol && *key != symbols().dots,
+                        _ => name(*key) || self.side_effect_free_index(*key, depth + 1),
+                    };
+                    return *nil_tag == nil()
+                        && *key_tag == nil()
+                        && key_free
+                        && !self.frame_may_bind(index.car())
+                        && self.side_effect_free_index(*object, depth + 1);
+                }
                 ARITHS[..5].iter().any(|(_, name)| *name == &*operator)
                     && (1..=2).contains(&arguments.len())
                     && !self.frame_may_bind(index.car())
@@ -2139,6 +2240,7 @@ impl Compiler {
                 | ".ry_tag"
                 | ".ry_match"
                 | "switch"
+                | "missing"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -2268,6 +2370,26 @@ impl Compiler {
         self.inline(call, primitive, dst, name, args)?;
         self.cold_fallback(&[guard], call, dst)?;
         Ok(())
+    }
+
+    /// `missing(symbol)`, guarded by `missing`: [`Op::Missing`] reads the frame's binding of
+    /// `symbol`, which is what the special does once it has matched its one argument.
+    unsafe fn missing(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        dst: u32,
+        symbol: Sexp,
+    ) -> R<()> {
+        let name = self.constant(head);
+        let expected = self.constant(primitive);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
+        let symbol = self.constant(symbol);
+        self.emit(Op::Missing, &[dst, symbol]);
+        self.cold_fallback(&[guard], call, dst)
     }
 
     unsafe fn inline(
@@ -2981,6 +3103,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::Ast => 2,
         Op::Guard => 5,
         Op::Jump | Op::Resume => 1,
+        Op::Missing => 2,
         Op::JumpUnless => 3,
         Op::Arithmetic => 6,
         Op::Return => 1,
@@ -3029,6 +3152,272 @@ const _: () = {
     }
     assert!(OPS.len() <= OP_MASK as usize);
 };
+
+/// What an operand of an instruction is, as far as [`verify`] checks it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Operand {
+    Register,
+    /// The first of a run of registers, whose length the next operand gives.
+    Base,
+    /// The length of the run of registers the previous operand starts.
+    Count,
+    /// [`Operand::Count`] for a run that holds at least one register.
+    CountAtLeastOne,
+    /// Any constant.
+    Constant,
+    Symbol,
+    /// A call, which the handler takes apart.
+    Call,
+    /// A call followed by the constants [`Compiler::call_site`] puts after it.
+    CallSite,
+    /// A pairlist of formals, or `NULL`.
+    Formals,
+    /// A [`Op::Field`] or [`Op::Item`] site's shape cache, still empty.
+    Shape,
+    /// The constant index of an [`Op::Item`]: one string or number.
+    Index,
+    /// A list of symbols, at least as long as the run of registers after it.
+    Names,
+    /// A [`switch_table`].
+    Switch,
+    Cache,
+    Target,
+    Loop,
+    /// An operator of [`ARITHS`].
+    Operator,
+    /// A number the handler reads without indexing anything with it.
+    Immediate,
+}
+
+/// The operands of `op`, or `None` for an instruction a code image never holds: a record
+/// instruction names a record layout by the number this process interned it under, which
+/// means nothing in another process.
+fn operands(op: Op) -> Option<&'static [Operand]> {
+    use Operand::*;
+    Some(match op {
+        Op::Constant | Op::Ast => &[Register, Constant],
+        Op::GetVar => &[Register, Symbol, Cache],
+        Op::SetVar => &[Symbol, Register, Cache],
+        Op::GetFun => &[Register, Symbol, Cache, Call],
+        Op::BranchUnlessBuiltin | Op::BranchIfObject => &[Register, Target],
+        Op::CallBuiltin => &[Register, Register, Call, Base, Count],
+        Op::CallGeneric => &[Register, Register, CallSite],
+        Op::CallRebinding | Op::CallTailUpdate => &[Register, Register, Call, Symbol],
+        Op::Field => &[Register, Register, Symbol, Call, Shape],
+        Op::Item => &[Register, Register, Index, Shape, Target],
+        Op::MatchLiteral => &[Register, Constant, Target],
+        Op::MatchFail => &[Register, Constant],
+        Op::Move => &[Register, Register],
+        Op::BoundEval => &[Register, Constant, Names, Base, Count],
+        Op::MatchCondition => &[Register, Register, Constant, Constant],
+        Op::SwitchArm => &[Register, Register, Switch],
+        Op::Guard => &[Symbol, Constant, Cache, Immediate, Target],
+        Op::Jump | Op::Resume => &[Target],
+        Op::JumpUnless => &[Register, Constant, Target],
+        Op::Arithmetic => &[Operator, Register, Register, Register, Call, Constant],
+        Op::Return | Op::ForEnd => &[Register],
+        Op::Missing => &[Register, Symbol],
+        Op::ForInit => &[Loop, Register, Constant],
+        Op::ForStep => &[Loop, Register, Symbol, Target],
+        Op::Invisible | Op::Visible => &[],
+        Op::LogicLeft => &[Register, Register, Constant, Immediate, Target],
+        Op::LogicRight => &[Register, Register, Register, Constant, Immediate],
+        Op::Closure => &[Register, Formals, Constant, Constant],
+        Op::SubAssign => &[Register, Symbol, Register, Register, Call, Immediate],
+        Op::SubAssignMatrix => &[Register, Symbol, Register, Register, Register, Call],
+        Op::Replace => &[Register, Symbol, Symbol, Cache, Call, Base, CountAtLeastOne, Call],
+        Op::SetSrcref => &[Constant, Immediate],
+        Op::EndStatement => &[Register, Base, Base],
+        Op::BranchUnlessPrimitive => &[Register, Constant, Target],
+        Op::DispatchSubject => &[Register, Register, Call, Register],
+        Op::MatchShape | Op::MatchTag | Op::Slot | Op::Construct => return None,
+    })
+}
+
+/// Checks that `code`, a code object read from a file rather than made by the compiler, is one
+/// the interpreter can run without reading or writing outside its tables. The interpreter reads
+/// operands unchecked, so a code image's code must pass this before it runs: every word is a
+/// valid instruction or one of its operands, execution cannot run off the end, every register,
+/// constant, cache slot, loop and jump target an operand names exists, and every constant a
+/// handler takes apart has the type it expects. Code objects among the constants are checked
+/// where they are decoded.
+///
+/// # Safety
+/// `code` is a live object.
+pub unsafe fn verify(code: Sexp) -> Result<(), String> {
+    use Operand::*;
+    if code.kind() != SexpType::Bytecode
+        || code.car().kind() != SexpType::Integer
+        || code.cdr().kind() != SexpType::List
+        || code.tag().kind() != SexpType::List
+    {
+        return Err("not a code object".to_owned());
+    }
+    let words = values::ints(code.car());
+    let constants = code.cdr();
+    let constant_count = length(constants);
+    if constant_count < FIRST_CONSTANT {
+        return Err("a code object without its fixed constants".to_owned());
+    }
+    let table = |slot: usize, kind: SexpType, length_is: Option<usize>| {
+        let value = constants.element(slot);
+        value.kind() == kind && length_is.is_none_or(|expected| length(value) == expected)
+    };
+    let epochs = constants.element(EPOCHS);
+    if epochs.kind() != SexpType::Real {
+        return Err("a malformed inline cache table".to_owned());
+    }
+    let caches = length(epochs);
+    let registers = constants.element(REGISTERS);
+    if !table(HINTS, SexpType::Integer, Some(caches))
+        || length(code.tag()) != caches * 2
+        || !table(FEEDBACK, SexpType::Integer, Some(words.len()))
+        || !table(PROFILE, SexpType::Integer, Some(profile::LENGTH))
+        || !table(LOOPS, SexpType::Integer, None)
+        || length(constants.element(LOOPS)) % 4 != 0
+        || !table(REGISTERS, SexpType::Integer, Some(1))
+        || values::ints(registers)[0] < 0
+        || constants.element(TIER1) != nil()
+        || constants.element(MATCHES) != nil()
+    {
+        return Err("a code object whose tables disagree".to_owned());
+    }
+    let registers = values::ints(registers)[0] as usize;
+    let summary = constants.element(SUMMARY);
+    if summary != nil()
+        && (summary.kind() != SexpType::List
+            || length(summary) == 0
+            || summary.element(0).kind() != SexpType::Integer
+            || length(summary.element(0)) != 1
+            || !(0..caches as i64).contains(&i64::from(values::ints(summary.element(0))[0]))
+            || (1..length(summary)).any(|index| summary.element(index).kind() != SexpType::Symbol))
+    {
+        return Err("a malformed effect summary".to_owned());
+    }
+    let mut starts = vec![0u64; words.len().div_ceil(64)];
+    let mut pc = 0;
+    while pc < words.len() {
+        let op = op_of(words[pc] as u32).ok_or("an invalid instruction")?;
+        operands(op).ok_or("a record instruction")?;
+        starts[pc / 64] |= 1 << (pc % 64);
+        let next = pc + 1 + operand_count(op);
+        if next > words.len() {
+            return Err("an instruction runs past the end of the code".to_owned());
+        }
+        if next == words.len() && !matches!(op, Op::Return | Op::Jump | Op::Resume) {
+            return Err("execution runs past the end of the code".to_owned());
+        }
+        pc = next;
+    }
+    if words.is_empty() {
+        return Err("empty code".to_owned());
+    }
+    let is_start = |target: usize| {
+        target < words.len() && starts[target / 64] & (1 << (target % 64)) != 0
+    };
+    let loop_table = values::ints(constants.element(LOOPS));
+    for entry in loop_table.as_chunks::<4>().0 {
+        let [start, end, exit, step] = entry.map(|word| word as usize);
+        if start > end || end > words.len() || !is_start(exit) || !is_start(step) {
+            return Err("a malformed loop table".to_owned());
+        }
+    }
+    let loops = loop_table.len() / 4;
+    let constant = |index: usize| {
+        (FIRST_CONSTANT..constant_count)
+            .contains(&index)
+            .then(|| constants.element(index))
+            .ok_or("a constant index out of range")
+    };
+    let mut pc = 0;
+    while pc < words.len() {
+        let op = op_of(words[pc] as u32).ok_or("an invalid instruction")?;
+        let roles = operands(op).ok_or("a record instruction")?;
+        let operand = |index: usize| words[pc + 1 + index] as u32 as usize;
+        for (index, &role) in roles.iter().enumerate() {
+            let value = operand(index);
+            let valid = match role {
+                Register => value < registers,
+                Base => value <= registers,
+                Count | CountAtLeastOne => {
+                    value <= registers - operand(index - 1) && (role == Count || value >= 1)
+                }
+                Constant => constant(value).is_ok(),
+                Symbol => constant(value)?.kind() == SexpType::Symbol,
+                Call => constant(value)?.kind() == SexpType::Language,
+                CallSite => {
+                    let arguments = constant(value + 1)?;
+                    constant(value)?.kind() == SexpType::Language
+                        && (arguments == unbound()
+                            || matches!(arguments.kind(), SexpType::Nil | SexpType::Pairlist))
+                        && constant(value + 2).is_ok()
+                }
+                Formals => matches!(constant(value)?.kind(), SexpType::Nil | SexpType::Pairlist),
+                Shape => {
+                    let shape = constant(value)?;
+                    shape.kind() == SexpType::Integer
+                        && values::ints(shape) == [crate::records::NO_LAYOUT, 0]
+                }
+                Index => {
+                    let index = constant(value)?;
+                    matches!(
+                        index.kind(),
+                        SexpType::String | SexpType::Integer | SexpType::Real
+                    ) && length(index) == 1
+                }
+                Names => {
+                    let names = constant(value)?;
+                    names.kind() == SexpType::List
+                        && length(names) >= operand(index + 2)
+                        && (0..length(names))
+                            .all(|name| names.element(name).kind() == SexpType::Symbol)
+                }
+                Switch => valid_switch_table(constant(value)?),
+                Cache => value < caches,
+                Target => is_start(value),
+                Loop => value < loops,
+                Operator => value < ARITHS.len(),
+                Immediate => true,
+            };
+            if !valid {
+                return Err(format!("an invalid operand {index} of {op:?} at {pc}"));
+            }
+        }
+        if op == Op::EndStatement && operand(1) > operand(2) {
+            return Err(format!("an invalid register range at {pc}"));
+        }
+        pc += 1 + operand_count(op);
+    }
+    Ok(())
+}
+
+/// Whether `table` has the shape [`switch_table`] gives it, which [`switch_arm`] reads unchecked.
+unsafe fn valid_switch_table(table: Sexp) -> bool {
+    if table.kind() != SexpType::List || length(table) != SWITCH_CALL + 1 {
+        return false;
+    }
+    let names = table.element(SWITCH_NAMES);
+    let name_arms = table.element(SWITCH_NAME_ARMS);
+    let position_arms = table.element(SWITCH_POSITION_ARMS);
+    let numbers = table.element(SWITCH_NUMBERS);
+    if names.kind() != SexpType::String
+        || name_arms.kind() != SexpType::Integer
+        || length(name_arms) != length(names)
+        || position_arms.kind() != SexpType::Integer
+        || length(position_arms) == 0
+        || numbers.kind() != SexpType::List
+        || table.element(SWITCH_CALL).kind() != SexpType::Language
+    {
+        return false;
+    }
+    let arms = length(numbers) as i64;
+    // A name's arm indexes the numbers directly, while a negative position arm is an error
+    // `switch_arm` raises before indexing.
+    values::ints(name_arms).iter().all(|&arm| (0..arms).contains(&i64::from(arm)))
+        && values::ints(position_arms)
+            .iter()
+            .all(|&arm| (-1..arms).contains(&i64::from(arm)))
+}
 
 // The interpreter.
 
@@ -3629,6 +4018,7 @@ handlers! {
     run_sub_assign, step_sub_assign: SubAssign, true, op_sub_assign;
     run_sub_assign_matrix, step_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
     run_replace, step_replace: Replace, true, op_replace;
+    run_missing, step_missing: Missing, true, op_missing;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -3803,6 +4193,14 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         } else {
             compiled
         };
+        if function.has_gp(gp::NATIVE_ENTRY)
+            && let Some(value) =
+                crate::base_fast_paths::native_entry_by_value(function, arguments, state.env)?
+        {
+            state.record(instruction.at, value);
+            instruction.output(0, value);
+            return Ok(Flow::Next);
+        }
         let mut args = eval::Args::new();
         // Binding a variable's value instead of a promise for it is invisible when the callee
         // cannot assign anything before forcing it, nor look at the promise (`substitute`,
@@ -4022,6 +4420,16 @@ unsafe fn op_ast(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<
 }
 
 #[inline(always)]
+unsafe fn op_missing(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let symbol = state.constant(instruction, 1);
+    let value = values::scalar_bool(eval::is_missing(symbol, state.env)?)?;
+    state.record(instruction.at, value);
+    (*state.interp).visible = true;
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
 unsafe fn op_guard(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let symbol = state.constant(instruction, 0);
     let expected = state.constant(instruction, 1);
@@ -4116,7 +4524,12 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
     sequence.increment_refcount();
     state.record(instruction.at, sequence);
     instruction.output(1, sequence);
-    state.machine.loops[instruction.operand(0)] = LoopState {
+    // Promise code runs without loop states, so only code read from a file could name one here.
+    *state
+        .machine
+        .loops
+        .get_mut(instruction.operand(0))
+        .ok_or_else(|| error("compiled code names a loop it does not have"))? = LoopState {
         index: 0,
         count,
         cell: Some(sequence),
@@ -4128,11 +4541,20 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
 unsafe fn op_for_step(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let env = state.env;
     let variable = state.constant(instruction, 2);
-    let loop_state = &mut state.machine.loops[instruction.operand(0)];
+    let loop_state = state
+        .machine
+        .loops
+        .get_mut(instruction.operand(0))
+        .ok_or_else(|| error("compiled code names a loop it does not have"))?;
     if loop_state.index >= loop_state.count {
         return Ok(Flow::Goto(instruction.operand(3)));
     }
     let sequence = instruction.input(1);
+    // The compiler steps the register its `ForInit` filled, which keeps the index in bounds;
+    // code read from a file is only verified operand by operand.
+    if sequence.kind().is_vector() && loop_state.index >= sequence.length() as usize {
+        return Err(error("compiled code steps a loop over another sequence"));
+    }
     let index = loop_state.index;
     loop_state.index += 1;
     if !overwrite_loop_variable(sequence, index, variable, env) {
@@ -4209,7 +4631,12 @@ unsafe fn op_logic_left(state: &mut Activation<'_, '_>, instruction: Instruction
 unsafe fn op_logic_right(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let call = state.constant(instruction, 3);
     let is_and = instruction.operand(4) == 1;
-    let left = values::ints(instruction.input(1))[0];
+    let left = instruction.input(1);
+    // `LogicLeft` stored a logical scalar there, unless the code was read from a file and lies.
+    if left.kind() != SexpType::Logical || left.length() != 1 {
+        return Err(error("compiled code holds a malformed `&&` or `||`"));
+    }
+    let left = values::ints(left)[0];
     let right = eval::logical_operand_of(
         instruction.input(2),
         call,
@@ -4760,6 +5187,10 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
             Arith::Greater => comparison((!na).then_some(a > b)),
             Arith::LessEqual => comparison((!na).then_some(a <= b)),
             Arith::GreaterEqual => comparison((!na).then_some(a >= b)),
+            Arith::Modulo => Ok(Some(values::scalar_integer(crate::arith::integer_modulo(a, b))?)),
+            Arith::IntegerDivide => {
+                Ok(Some(values::scalar_integer(crate::arith::integer_divide(a, b))?))
+            }
             _ => Ok(None),
         };
     }
@@ -4785,6 +5216,12 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
         Arith::Greater => comparison((!nan).then_some(a > b)),
         Arith::LessEqual => comparison((!nan).then_some(a <= b)),
         Arith::GreaterEqual => comparison((!nan).then_some(a >= b)),
+        // The builtin warns when the remainder loses all accuracy.
+        Arith::Modulo if !crate::arith::modulus_loses_accuracy(a, b) => {
+            real(crate::arith::real_modulo(a, b))
+        }
+        Arith::Modulo => Ok(None),
+        Arith::IntegerDivide => real(crate::arith::real_integer_divide(a, b)),
     }
 }
 

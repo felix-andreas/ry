@@ -34,6 +34,7 @@ pub mod base_fast_paths;
 pub mod builtin_libraries;
 pub mod builtins;
 pub mod bytecode;
+pub mod code_image;
 pub mod coerce;
 pub mod conditions;
 pub mod connections;
@@ -281,6 +282,10 @@ pub struct Interp {
     /// The base closures whose calls run natively, each with its native code
     /// (`base_fast_paths::native_entry`).
     pub native_entries: SmallVec<[(Sexp, NativeEntry); 8]>,
+    /// Base R's `loadNamespace`, whose calls the collector treats as a namespace load
+    /// (`Heap::enter_namespace_load`), or nil before base is loaded. Matched by identity and
+    /// preserved, so a collected closure's address cannot be reused by another function.
+    pub namespace_loader: Sexp,
     /// The `*tmp*` of each complex assignment running, innermost last: the environment it runs
     /// in and the variable's value. GNU R binds `*tmp*` in that environment for the duration;
     /// ry answers a lookup that finds no binding from here instead, so an assignment neither
@@ -311,6 +316,12 @@ pub struct Interp {
     /// Evaluation depth, for `expressions` and the C stack check.
     pub depth: u32,
     pub max_depth: u32,
+    /// The lowest address of the stack segment the interpreter runs on, or 0 before the first
+    /// closure call learns it (see `eval::on_large_stack`).
+    pub stack_floor: usize,
+    /// An address at or above every interpreter frame on that segment, or 0 with the floor; a
+    /// stack pointer above it runs on a segment some other code switched to.
+    pub stack_ceiling: usize,
     /// Process start, for `proc.time`.
     pub started: std::time::Instant,
     /// `commandArgs()`.
@@ -346,6 +357,8 @@ pub struct Interp {
     pub forks: fork::Forks,
     /// The environment of `package:ry` (see [`crate::standard_library::builtins_env`]).
     pub builtins_env: Option<Sexp>,
+    /// The compiled code images of installed packages ([`code_image`]).
+    pub code_image: code_image::State,
 }
 
 struct InterpState {
@@ -433,6 +446,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         returned_values: Vec::new(),
         assignment_call: None,
         native_entries: SmallVec::new(),
+        namespace_loader: heap.known().nil,
         tmp_values: Vec::new(),
         loops: Vec::new(),
         warnings: Vec::new(),
@@ -448,6 +462,8 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         connections: connection_table,
         depth: 0,
         max_depth: 5000,
+        stack_floor: 0,
+        stack_ceiling: 0,
         started: std::time::Instant::now(),
         command_args: Vec::new(),
         interactive: false,
@@ -464,6 +480,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         #[cfg(unix)]
         forks: fork::Forks::default(),
         builtins_env: None,
+        code_image: code_image::State::default(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();

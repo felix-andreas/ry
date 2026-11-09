@@ -34,6 +34,9 @@ pub struct StartOptions {
     /// Lets a start that [`crate::image::applies`] to load the start-up image of its R home;
     /// `None` always starts the slow way.
     pub image: Option<crate::image::ImageHost>,
+    /// The runtime build's identity, which stamps the code images an install writes and picks
+    /// the ones a load reads (`crate::code_image`); empty turns code images off.
+    pub build: &'static str,
 }
 
 /// Starts the session. Errors here are fatal: base R did not load.
@@ -41,6 +44,7 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     crate::profile_summary::start_from_environment();
     interp().command_args = options.command_args;
     interp().interactive = options.interactive;
+    interp().code_image.build = options.build;
     prepare_process();
     let home = crate::system::r_home();
     let site_profile = options.site_profile.then(site_profile_path).flatten();
@@ -106,6 +110,7 @@ unsafe fn prepare_process() {
 /// R's start-up gives them.
 unsafe fn start_from_image(home: &str) -> R<()> {
     crate::base_fast_paths::register_native_entries(base_namespace())?;
+    mark_namespace_loader()?;
     crate::envir::clear_options()?;
     define_process_variables()?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
@@ -208,6 +213,7 @@ unsafe fn start_slowly(
     }
     source_file(&format!("{home}/library/base/R/base"), base_namespace())?;
     crate::base_fast_paths::install_all(base_namespace())?;
+    mark_namespace_loader()?;
     install_register_s3_methods()?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
     eval_text(".OptRequireMethods()", global_env())?;
@@ -226,6 +232,17 @@ unsafe fn start_slowly(
     conditions::print_warnings()?;
     crate::profile_summary::mark_ready();
     Ok(warned)
+}
+
+/// Records base R's `loadNamespace` so the collector knows when a namespace load runs. A load
+/// allocates mostly what the session keeps, so collecting during it frees little.
+unsafe fn mark_namespace_loader() -> R<()> {
+    let loader = eval::find_fun(values::install("loadNamespace")?, base_namespace())?;
+    if loader.kind() == SexpType::Closure {
+        crate::heap().preserve(loader);
+        interp().namespace_loader = loader;
+    }
+    Ok(())
 }
 
 /// GNU R 4.6.2's `registerS3methods()`, as [`stable_hash`] of its formals and body. Setting

@@ -734,6 +734,21 @@ fn report(
     writeln!(out, "| minor collections | {} |", stats.minor_collections)?;
     writeln!(out, "| major collections | {} |", stats.major_collections)?;
     writeln!(out, "| objects freed | {} |", stats.objects_freed)?;
+    let mut kinds: Vec<(u64, &str)> = (0..32u32)
+        .filter_map(|code| {
+            let count = *stats.freed_by_kind.get(code as usize)?;
+            let name = if code == 26 {
+                "binding cell"
+            } else {
+                SexpType::from_code(code)?.name()
+            };
+            (count > 0).then_some((count, name))
+        })
+        .collect();
+    kinds.sort_by(|a, b| b.cmp(a));
+    for (count, name) in kinds {
+        writeln!(out, "| objects freed: {name} | {count} |")?;
+    }
     writeln!(out, "| most objects live | {} |", stats.max_live_objects)?;
     writeln!(
         out,

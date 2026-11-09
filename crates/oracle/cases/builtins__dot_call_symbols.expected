@@ -1,0 +1,22 @@
+[stdout]
+| [1] "9b1edae5dbb937b1"
+| [1] "CallRoutine"      "NativeSymbolInfo"
+| [1] "9b1edae5dbb937b1"
+| [1] "Incorrect number of arguments (2), expecting 1 for 'crc64'"
+| [1] "Incorrect number of arguments (0), expecting 1 for 'crc64'"
+| [1] "first argument must be a string (of length 1) or native symbol reference"
+| [1] "'.NAME' is missing"
+|      [,1] [,2] [,3]
+| [1,]   -2    0    2
+| [2,]    0    0    0
+| [3,]    2    0   -2
+| [1] "Incorrect number of arguments (0), expecting 1 for 'DoubleCentre'"
+| [1] "2a2f0e859495caed"
+| [1] "6d85746c3f7235d9"
+| [1] "deab38d23cd56ab6"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
