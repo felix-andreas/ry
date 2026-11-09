@@ -213,6 +213,7 @@ unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
                     && reason != analysis::BRIEF
                 {
                     counters[profile::TIER_STATE] = -1;
+                    counters[profile::RECORDING] = 0;
                 }
                 None
             }
@@ -293,6 +294,7 @@ unsafe fn compiled_for<'a>(
         }
         if runtime::compiles(state) >= MAX_COMPILES {
             counters[profile::TIER_STATE] = -1;
+            counters[profile::RECORDING] = 0;
             return None;
         }
         if state & runtime::SIZE_WAITED == 0 && MODE.with(Cell::get) == Mode::On {
@@ -336,9 +338,14 @@ unsafe fn compiled_for<'a>(
                 if logging() {
                     eprintln!("jit: not compiling {}: {reason}", describe(machine.code));
                 }
+                // A body the tier gave up on, or that now compiles only for its loop, stops
+                // recording at entry: nothing reads that feedback, and refused bodies are often
+                // the hot ones, so recording on every call of them was most of what the tier
+                // cost a test suite. A loop starts recording again halfway to its threshold.
                 if reason == analysis::MOSTLY_TIER0 {
                     counters[profile::TIER_STATE] = state | runtime::LOOPS_ONLY;
                     counters[profile::ENTRIES] = runtime::NEVER_HOT;
+                    counters[profile::RECORDING] = 0;
                 } else if reason == analysis::COLD {
                     // The next attempt waits for as many entries or backward jumps as this one did,
                     // so the body runs long enough to record the types it is missing.
@@ -347,6 +354,7 @@ unsafe fn compiled_for<'a>(
                     counters[profile::BACK_EDGES] = 0;
                 } else {
                     counters[profile::TIER_STATE] = -1;
+                    counters[profile::RECORDING] = 0;
                 }
                 None
             }
@@ -635,6 +643,8 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             loops: loops.as_mut_ptr(),
             visible: &mut interp().visible,
             entry_pc: entry_pc as i64,
+            env: machine.env,
+            hints: bytecode::lookup_hints(machine.code),
             machine: machine as *mut Machine<'_> as *mut c_void,
             compiled,
             pending: None,

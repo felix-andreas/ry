@@ -928,6 +928,43 @@ fn closures_from_one_site_share_code_but_not_lookups() {
     });
 }
 
+/// Compiled code loads a variable inline when it sits in the activation's frame or an enclosing
+/// function frame and holds a value or a forced promise, and hands every other load to the
+/// runtime. These calls cross each case: a forced argument, an enclosing binding whose type
+/// changes under the code (the inline load must deoptimize), and an active binding.
+#[test]
+fn inline_variable_loads_agree_with_tier_zero() {
+    let calls = [
+        "g(1L)",
+        "g(2L)",
+        "g(1.5)",
+        "g(3L)",
+        "assign('k', 2.5, envir = environment(g))",
+        "g(1L)",
+        "g(2L)",
+        "assign('k', 'a', envir = environment(g))",
+        "g(1L)",
+        "makeActiveBinding('j', function() 4L, environment(g))",
+        "h <- local({ j <- 1L; function(x) { s <- 0; for (i in 1:3) s <- s + x * j; s } })",
+        "h(1L)",
+        "h(2L)",
+        "environment(h) <- environment(g)",
+        "h(1L)",
+        "h(2L)",
+    ];
+    let mut outcomes = Vec::new();
+    with_interpreter(|| unsafe {
+        for mode in [Mode::Off, Mode::Force] {
+            jit::install_mode(mode);
+            run("make <- function(k) function(x) { s <- 0; for (i in 1:3) s <- s + x * k; s }");
+            run("g <- make(2L)");
+            outcomes.push(calls.iter().map(|call| run(call)).collect::<Vec<_>>());
+        }
+        jit::install_mode(Mode::Off);
+    });
+    assert_eq!(outcomes[0], outcomes[1]);
+}
+
 #[test]
 fn formal_shadows_enclosing_function() {
     // `sum` names a base function, but the call must reach the function passed in its place.
