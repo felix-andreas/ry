@@ -17,8 +17,8 @@ use {
         unwind::{Jump, R, Unwind, error, error_in, jump},
         utils::{PROFILE_TICK, record_profile_sample},
         values::{
-            self, alloc, cons_tagged, length, missing_arg, nil, symbol_name, symbols,
-            triple, unbound,
+            self, alloc, cons_tagged, length, missing_arg, nil, symbol_name, symbols, triple,
+            unbound,
         },
     },
     heap::{
@@ -445,6 +445,12 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
             call_builtin(definition, call, function, &args, env)
         }
         SexpType::Closure => {
+            if function.has_gp(gp::NATIVE_ENTRY)
+                && let Some(value) =
+                    crate::base_fast_paths::native_entry_by_value(function, arguments, env)?
+            {
+                return Ok(value);
+            }
             let mut args = Args::new();
             promise_args_into(arguments, env, &mut args)?;
             apply_closure_owning(call, function, &args, env, None)
@@ -2853,7 +2859,10 @@ unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
 /// Whether no argument expression in the pairlist `arguments` is a call.
 unsafe fn no_calls(mut arguments: Sexp) -> bool {
     while arguments.kind() == SexpType::Pairlist {
-        if matches!(arguments.car().kind(), SexpType::Language | SexpType::Bytecode | SexpType::Promise) {
+        if matches!(
+            arguments.car().kind(),
+            SexpType::Language | SexpType::Bytecode | SexpType::Promise
+        ) {
             return false;
         }
         arguments = arguments.cdr();
@@ -3043,7 +3052,13 @@ pub unsafe fn force_and_call_with(
                 tag: arguments.tag(),
                 value,
             });
-            evaluate_args_into(arguments.cdr(), env, definition.keep_missing, call, &mut args)?;
+            evaluate_args_into(
+                arguments.cdr(),
+                env,
+                definition.keep_missing,
+                call,
+                &mut args,
+            )?;
             if definition.generic != Generic::None
                 && let Some(value) =
                     dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
@@ -3229,7 +3244,9 @@ unsafe fn do_make_lazy(call: &Call<'_>) -> R<Sexp> {
             crate::heap().root(key);
             let expression_copy = values::duplicate(expression)?;
             let arguments = expression_copy.cdr();
-            if expression_copy.kind() != SexpType::Language || arguments.kind() != SexpType::Pairlist {
+            if expression_copy.kind() != SexpType::Language
+                || arguments.kind() != SexpType::Pairlist
+            {
                 return Err(call.error("invalid lazy-load expression"));
             }
             crate::heap().set_car(arguments, key);

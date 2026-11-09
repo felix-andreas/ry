@@ -3622,6 +3622,14 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         } else {
             compiled
         };
+        if function.has_gp(gp::NATIVE_ENTRY)
+            && let Some(value) =
+                crate::base_fast_paths::native_entry_by_value(function, arguments, state.env)?
+        {
+            state.record(instruction.at, value);
+            instruction.output(0, value);
+            return Ok(Flow::Next);
+        }
         let mut args = eval::Args::new();
         // Binding a variable's value instead of a promise for it is invisible when the callee
         // cannot assign anything before forcing it, nor look at the promise (`substitute`,

@@ -2253,7 +2253,7 @@ unsafe fn do_unclass(call: &Call<'_>) -> R<Sexp> {
     Ok(copy)
 }
 
-unsafe fn do_inherits(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_inherits(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let what = call.arg(1);
     let which = values::as_logical_scalar(call.arg(2)) == 1;
