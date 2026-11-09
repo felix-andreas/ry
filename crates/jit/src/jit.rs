@@ -308,14 +308,16 @@ unsafe fn compiled_for<'a>(
                         .saturating_mul(threshold)
                         .min(i32::MAX / 2)
                 };
-                // The counters climb back to the threshold before the tier is asked again;
-                // tier 0 records type feedback only above half the entry threshold, so it is
-                // still recorded before the compile.
+                // The counters climb back to the threshold before the tier is asked again.
+                // Recording stops for the wait and restarts when a counter passes half its
+                // threshold, so the compile still sees the feedback of the last half threshold
+                // without a large body recording through every round of its wait.
                 if let Some(tier) = bytecode::tier() {
                     counters[profile::ENTRIES] = counters[profile::ENTRIES]
                         .min(tier.entry_threshold)
                         .saturating_sub(wait(tier.entry_threshold));
                     counters[profile::BACK_EDGES] = -wait(tier.back_edge_threshold);
+                    counters[profile::RECORDING] = 0;
                 }
                 return None;
             }
