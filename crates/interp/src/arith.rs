@@ -1421,16 +1421,19 @@ pub fn real_op(op: Op, a: f64, b: f64) -> f64 {
 /// `a + b` where a `NaN` first operand's payload wins, as with x86's `addsd`, which is what GNU R
 /// gives: `NaN + NA` is `NaN` and `NA + NaN` is `NA`. Plain `+` lets the compiler swap the
 /// operands of a commutative operation, and LLVM treats any `NaN` result's payload as free, so it
-/// also folds `a + a` back into `a + b`. Building the result from `a`'s bits keeps the payload.
+/// also folds `a + a` back into `a + b`. Building the result from `a`'s bits keeps the payload,
+/// and computing the sum before the test leaves a select, which vectorizes, instead of a branch.
 #[inline(always)]
 pub fn add(a: f64, b: f64) -> f64 {
-    if a.is_nan() { quiet(a) } else { a + b }
+    let sum = a + b;
+    if a.is_nan() { quiet(a) } else { sum }
 }
 
 /// `a * b` where a `NaN` first operand's payload wins, as for [`add`].
 #[inline(always)]
 pub fn multiply(a: f64, b: f64) -> f64 {
-    if a.is_nan() { quiet(a) } else { a * b }
+    let product = a * b;
+    if a.is_nan() { quiet(a) } else { product }
 }
 
 /// `a` with the quiet bit set, which is what the hardware returns for a `NaN` operand. R's `NA` is
