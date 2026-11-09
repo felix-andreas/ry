@@ -191,7 +191,16 @@ pub fn register_address(index: usize) -> *mut Sexp {
 }
 
 /// Grows the register file to `length` registers, filling new ones with `NULL`.
+#[inline]
 pub fn reserve_registers(length: usize) -> R<()> {
+    if length <= interp().bytecode.registers.len() {
+        return Ok(());
+    }
+    grow_registers(length)
+}
+
+#[cold]
+fn grow_registers(length: usize) -> R<()> {
     let registers = &mut interp().bytecode.registers;
     if length > registers.capacity() {
         return Err(error(
