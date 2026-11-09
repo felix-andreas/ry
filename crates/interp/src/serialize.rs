@@ -1609,7 +1609,19 @@ impl Encoder<'_> {
                 .any(|&counter| counter != 0);
         self.out.push(u8::from(trained));
         if trained {
-            for &counter in &values::ints(constants.element(PROFILE))[..profile::LENGTH] {
+            for (index, &counter) in values::ints(constants.element(PROFILE))[..profile::LENGTH]
+                .iter()
+                .enumerate()
+            {
+                // The tier state counts the compilations and cold refusals of this process's
+                // optimized code, which the image does not carry, so a new process starts that
+                // count afresh. A negative state is the tier's final refusal, a verdict about the
+                // code that holds in any process, so it is kept.
+                let counter = if index == profile::TIER_STATE {
+                    counter.min(0)
+                } else {
+                    counter
+                };
                 write_signed(self.out, i64::from(counter));
             }
             let hints = values::ints(constants.element(HINTS));
