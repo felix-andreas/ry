@@ -17,8 +17,8 @@ use {
         unwind::{Jump, R, Unwind, error, error_in, jump},
         utils::{PROFILE_TICK, record_profile_sample},
         values::{
-            self, alloc, cons_tagged, length, missing_arg, new_env, nil, symbol_name, symbols,
-            triple, unbound,
+            self, alloc, cons_tagged, length, missing_arg, nil, symbol_name, symbols, triple,
+            unbound,
         },
     },
     heap::{
@@ -382,9 +382,7 @@ pub unsafe fn settle_promise(promise: Sexp, mut value: Sexp) -> R<Sexp> {
     if promise.has_gp(gp::CHECKED_PROMISE) {
         value = crate::annotations::check_forced(promise, value)?;
     }
-    let heap = crate::heap();
-    heap.set_car(promise, value);
-    heap.set_tag(promise, nil());
+    crate::heap().settle_promise(promise, value);
     Ok(value)
 }
 
@@ -1308,15 +1306,28 @@ pub unsafe fn run_closure(
         Entry::Unchecked => crate::annotations::enter(call, function, env, depth),
         Entry::Checked(signature) => Ok(signature),
     };
+    // Ends the namespace load however the call exits, a panic included, so a load that never
+    // returns cannot keep major collections deferred.
+    struct NamespaceLoad;
+    impl Drop for NamespaceLoad {
+        fn drop(&mut self) {
+            crate::heap().leave_namespace_load();
+        }
+    }
+    let _namespace_load = (function == state.namespace_loader).then(|| {
+        crate::heap().enter_namespace_load();
+        NamespaceLoad
+    });
     let result = signature.map(|signature| {
         let result = scope(|| {
-            stacker::maybe_grow(128 * 1024, 4 * 1024 * 1024, || {
+            on_large_stack(|| {
                 let body = function.cdr();
                 bytecode::run_body(function, body, env)
             })
         });
         (signature, result)
     });
+    drop(_namespace_load);
     let (signature, result) = match result {
         Ok(pair) => pair,
         Err(unwind) => (None, Err(unwind)),
@@ -1347,6 +1358,67 @@ pub unsafe fn run_closure(
     }
     state.frame_closures.truncate(closures);
     result
+}
+
+/// The stack a closure body may use before the interpreter moves to a fresh segment.
+const STACK_RED_ZONE: usize = 128 * 1024;
+const STACK_SEGMENT: usize = 4 * 1024 * 1024;
+
+/// Runs `body` with at least [`STACK_RED_ZONE`] of stack left, moving to a fresh segment when
+/// less is left, as `stacker::maybe_grow` does. Asking `stacker` reads thread-local state on
+/// every closure call, so the interpreter keeps the floor of the segment in use and a ceiling
+/// at or above every frame the interpreter runs on it, and `stacker` runs only near the floor
+/// or off that range. A segment lies anywhere in memory, and other code switches segments too
+/// (`libr`'s and `rdb`'s readers run R hooks on their own), so a stack pointer outside
+/// `[floor, ceiling]` means a segment the interpreter has not measured.
+#[inline(always)]
+fn on_large_stack<T>(body: impl FnOnce() -> T) -> T {
+    let marker = 0u8;
+    let pointer = std::ptr::addr_of!(marker) as usize;
+    let state = interp();
+    if pointer <= state.stack_ceiling
+        && pointer.saturating_sub(state.stack_floor) > 2 * STACK_RED_ZONE
+    {
+        return body();
+    }
+    on_large_stack_slow(body)
+}
+
+#[inline(never)]
+fn on_large_stack_slow<T>(body: impl FnOnce() -> T) -> T {
+    // An R error unwinds through here, so the caller's segment bounds are restored by a guard:
+    // stale bounds from a freed segment would let the fast path skip the check.
+    struct RestoreBounds(usize, usize);
+    impl Drop for RestoreBounds {
+        fn drop(&mut self) {
+            let state = interp();
+            state.stack_floor = self.0;
+            state.stack_ceiling = self.1;
+        }
+    }
+    let bounds = || {
+        let marker = 0u8;
+        let pointer = std::ptr::addr_of!(marker) as usize;
+        stacker::remaining_stack()
+            .map(|remaining| (pointer.saturating_sub(remaining), pointer, remaining))
+    };
+    let state = interp();
+    let _restore = RestoreBounds(state.stack_floor, state.stack_ceiling);
+    match bounds() {
+        Some((floor, ceiling, remaining)) if remaining >= STACK_RED_ZONE => {
+            let state = interp();
+            state.stack_floor = floor;
+            state.stack_ceiling = ceiling;
+            body()
+        }
+        _ => stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, || {
+            let (floor, ceiling) = bounds().map_or((0, 0), |(floor, ceiling, _)| (floor, ceiling));
+            let state = interp();
+            state.stack_floor = floor;
+            state.stack_ceiling = ceiling;
+            body()
+        }),
+    }
 }
 
 /// With object systems turned off, a call that defines a class (`setClass`, `setRefClass`,
@@ -2799,7 +2871,10 @@ unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
 /// Whether no argument expression in the pairlist `arguments` is a call.
 unsafe fn no_calls(mut arguments: Sexp) -> bool {
     while arguments.kind() == SexpType::Pairlist {
-        if matches!(arguments.car().kind(), SexpType::Language | SexpType::Bytecode | SexpType::Promise) {
+        if matches!(
+            arguments.car().kind(),
+            SexpType::Language | SexpType::Bytecode | SexpType::Promise
+        ) {
             return false;
         }
         arguments = arguments.cdr();
@@ -2989,7 +3064,13 @@ pub unsafe fn force_and_call_with(
                 tag: arguments.tag(),
                 value,
             });
-            evaluate_args_into(arguments.cdr(), env, definition.keep_missing, call, &mut args)?;
+            evaluate_args_into(
+                arguments.cdr(),
+                env,
+                definition.keep_missing,
+                call,
+                &mut args,
+            )?;
             if definition.generic != Generic::None
                 && let Some(value) =
                     dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
@@ -3165,15 +3246,25 @@ unsafe fn do_make_lazy(call: &Call<'_>) -> R<Sexp> {
     let expression = call.arg(2);
     let eval_env = call.arg(3);
     let assign_env = call.arg(4);
-    let key_symbol = values::install("key")?;
+    // As in GNU R, each promise's code is a copy of `expression` with its first argument
+    // replaced by the variable's key, and every promise shares `eval_env`, so `PRCODE` reads
+    // `lazyLoadDBfetch(c(offset, length), datafile, compressed, envhook)`.
     for index in 0..length(names) {
-        let symbol = values::install(&values::string_at(names, index).unwrap_or_default())?;
-        let key = crate::subset::vector_element(keys, index)?;
-        let expression_copy = values::duplicate(expression)?;
-        let env = new_env(eval_env)?;
-        crate::heap().define(env, key_symbol, key)?;
-        let promise = make_promise(expression_copy, env)?;
-        define(symbol, promise, assign_env)?;
+        crate::scope(|| {
+            let symbol = values::install(&values::string_at(names, index).unwrap_or_default())?;
+            let key = eval(crate::subset::vector_element(keys, index)?, eval_env)?;
+            crate::heap().root(key);
+            let expression_copy = values::duplicate(expression)?;
+            let arguments = expression_copy.cdr();
+            if expression_copy.kind() != SexpType::Language
+                || arguments.kind() != SexpType::Pairlist
+            {
+                return Err(call.error("invalid lazy-load expression"));
+            }
+            crate::heap().set_car(arguments, key);
+            let promise = make_promise(expression_copy, eval_env)?;
+            define(symbol, promise, assign_env)
+        })?;
     }
     Ok(nil())
 }

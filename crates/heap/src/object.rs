@@ -353,6 +353,15 @@ pub mod gp {
     pub const CLOSURE_STEP: u16 = 1 << 14;
     /// A closure `trace()` flagged, GNU R's `RTRACE`.
     pub const CLOSURE_TRACE: u16 = 1 << 13;
+    /// Every bit a closure can carry. Each means something different, so no two may share a
+    /// position.
+    pub const CLOSURE_BITS: [u16; 5] = [
+        S4_OBJECT,
+        NATIVE_ENTRY,
+        CLOSURE_TRACE,
+        CLOSURE_STEP,
+        CLOSURE_DEBUG,
+    ];
 }
 
 pub(crate) mod gc_bits {
