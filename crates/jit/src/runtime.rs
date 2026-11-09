@@ -440,7 +440,7 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
                     outcome::FAILED
                 }
                 Ok(())
-                    if validate != 0 && !still_valid(compiled(activation), machine.env, epoch) =>
+                    if validate != 0 && !still_valid(compiled(activation), machine.env(), epoch) =>
                 {
                     outcome::INVALIDATED
                 }
@@ -456,7 +456,7 @@ pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i6
         checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
             let epoch = heap().binding_epoch();
-            let loaded = scoped(|| bytecode::load_variable(machine.code, machine.env, pc as usize));
+            let loaded = scoped(|| bytecode::load_variable(machine.code, machine.env(), pc as usize));
             finish_load(activation, slot, loaded, epoch)
         })
     }
@@ -481,8 +481,8 @@ pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -
             let symbol = compiled(activation).slots[slot as usize];
             let epoch = heap().binding_epoch();
             let loaded = scoped(|| {
-                let local = heap().frame_cell(machine.env, symbol).is_some();
-                eval::eval_symbol(symbol, machine.env).map(|value| (value, local))
+                let local = heap().frame_cell(machine.env(), symbol).is_some();
+                eval::eval_symbol(symbol, machine.env()).map(|value| (value, local))
             });
             finish_load(activation, slot, loaded, epoch)
         })
@@ -505,7 +505,7 @@ unsafe fn finish_load(
                 *slot_cell(activation, slot) = value;
                 // Loading can force a promise, which runs arbitrary code.
                 if !compiled(activation).speculations.is_empty()
-                    && !still_valid(compiled(activation), machine(activation).env, epoch)
+                    && !still_valid(compiled(activation), machine(activation).env(), epoch)
                 {
                     return outcome::LOAD_INVALIDATED;
                 }
@@ -525,7 +525,7 @@ pub unsafe extern "C" fn jit_peek_slot(activation: *mut Activation, slot: i64) -
             let symbol = compiled(activation).slots[slot as usize];
             let heap = heap();
             let empty = heap.known().empty_env;
-            let mut env = machine.env;
+            let mut env = machine.env();
             let mut local = true;
             while env != empty {
                 if let Some(cell) = heap.frame_cell(env, symbol) {
@@ -572,7 +572,7 @@ pub unsafe extern "C" fn jit_closure_matches(
             };
             let matches = value.kind() == SexpType::Closure
                 && value.car() == formals
-                && value.tag() == machine(activation).env
+                && value.tag() == machine(activation).env()
                 && bytecode::closure_body(value) == body;
             matches as i32
         })
@@ -641,7 +641,7 @@ pub unsafe extern "C" fn jit_call(
                     Some(signature) => Entry::Checked(Some(signature)),
                 };
                 let env = eval::bind_arguments(call, function, &args, None)?;
-                eval::run_closure(call, function, env, machine.env, &args, entry)
+                eval::run_closure(call, function, env, machine.env(), &args, entry)
             });
             match result {
                 Err(unwind) => {
@@ -650,7 +650,7 @@ pub unsafe extern "C" fn jit_call(
                 }
                 Ok(value) => {
                     *activation.registers.add(dst as usize) = value;
-                    if !still_valid(compiled(activation), machine.env, epoch) {
+                    if !still_valid(compiled(activation), machine.env(), epoch) {
                         outcome::INVALIDATED
                     } else {
                         outcome::OK
@@ -754,7 +754,7 @@ pub unsafe extern "C" fn jit_flush(
                     _ => *cell,
                 };
                 *cell = value;
-                eval::assign_symbol(symbol, value, machine.env, false)?;
+                eval::assign_symbol(symbol, value, machine.env(), false)?;
                 if kind == representation::BOXED {
                     value.decrement_refcount();
                 }

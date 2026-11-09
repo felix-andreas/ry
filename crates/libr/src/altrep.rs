@@ -1945,7 +1945,7 @@ unsafe fn do_wrap_meta(call: &Call<'_>) -> ApiResult<Sexp> {
     if !matches!(no_na, 0 | 1) {
         return Err(call.error("no_na must be 0 or +1"));
     }
-    if top_env(call.env) == base_namespace() {
+    if top_env(call.env()?) == base_namespace() {
         return Ok(object);
     }
     wrap(object, sorted, no_na)

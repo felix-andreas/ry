@@ -78,8 +78,12 @@ pub fn check_unserialize_input(bytes: &[u8]) {
 
 /// Generates a program over `a` and `b` and checks that the tier-0 bytecode agrees with the AST
 /// evaluator on it: the program's value evaluated directly must equal its value as a closure body
-/// on each of the first three calls, the second and later of which run compiled bytecode.
+/// on each of the first three calls, the second and later of which run compiled bytecode. The
+/// compiled body runs in a slot frame, so it also runs once more with the frame given its
+/// environment before the body and once after it, with invariants on, so each reification is
+/// checked against the bindings the heap-frame path would have made.
 pub fn check_bytecode_agreement(entropy: &mut impl Entropy) {
+    syntax::testing::enable_invariants();
     let body = program(entropy);
     let arguments = [
         "3L",
@@ -117,12 +121,23 @@ unsafe fn outcomes(body: &str, a: &str, b: &str) -> (String, Vec<String>) {
         run(&reset);
         let direct = run(&format!("local_value <- {{ {body} }}\nlocal_value"));
         run(&format!("f <- function(a, b) {{ {body} }}"));
-        let compiled = (0..3)
+        // `caller()` hands out its caller's environment, which makes a slot frame reify.
+        run("parent <- function(n) .Internal(parent.frame(n))");
+        run("caller <- function() parent(1L)");
+        run(&format!("before <- function(a, b) {{ caller(); {body} }}"));
+        run(&format!("after <- function(a, b) {{ result <- {{ {body} }}; caller(); result }}"));
+        let mut compiled: Vec<String> = (0..3)
             .map(|_| {
                 run(&reset);
                 run(&format!("f({a}, {b})"))
             })
             .collect();
+        for function in ["before", "after"] {
+            for _ in 0..2 {
+                run(&reset);
+                compiled.push(run(&format!("{function}({a}, {b})")));
+            }
+        }
         (direct, compiled)
     }
 }

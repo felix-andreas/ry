@@ -606,7 +606,12 @@ unsafe fn run_builtin(
         call,
         op,
         args,
-        env,
+        rho: env,
+        frame: if env == nil() {
+            interp().frames.len().wrapping_sub(1) as u32
+        } else {
+            crate::NO_SLOTS
+        },
         reusable,
     };
     if checks.native != NativeArgs::Accepted
@@ -1088,6 +1093,11 @@ pub unsafe fn apply_closure(
     {
         return value;
     }
+    if supplied.is_none()
+        && let Some(frame) = bind_slots(call, function, args)?
+    {
+        return run_frame(call, function, frame, sys_parent, args, Entry::Unchecked);
+    }
     let env = bind_arguments(call, function, args, supplied)?;
     run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
 }
@@ -1115,6 +1125,11 @@ pub unsafe fn apply_closure_owning(
         && let Some(value) = (tier.call)(function, args)
     {
         return value;
+    }
+    if supplied.is_none()
+        && let Some(frame) = bind_slots(call, function, args)?
+    {
+        return run_frame(call, function, frame, sys_parent, args, Entry::Unchecked);
     }
     let env = bind_arguments(call, function, args, supplied)?;
     run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
@@ -1163,6 +1178,215 @@ pub unsafe fn bind_arguments(
         }
     }
     Ok(env)
+}
+
+/// The frame a closure call runs in: an environment, or a slot frame
+/// (`docs/src/content/docs/development/design/slot-frames.md`) whose header register is
+/// `header`, with `missing` its formals' missing bits.
+#[derive(Clone, Copy)]
+pub enum CallFrame {
+    Env(Sexp),
+    Slots { header: u32, missing: u64 },
+}
+
+/// Binds `args` to `function`'s formals in a slot frame pushed onto the register file, or
+/// returns `None` when the call needs an environment from the start: the body is not compiled
+/// with a slot table, a debugger, a move or a type signature watches the frame, or a missing
+/// formal's default is not a literal (its promise would capture the frame).
+unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallFrame>> {
+    let body = function.cdr();
+    if body.kind() != SexpType::Bytecode {
+        return Ok(None);
+    }
+    let constants = body.cdr();
+    let table = constants.element(bytecode::SLOTS);
+    let state = interp();
+    // Machine code reads variables through the frame's environment, so a body that has some
+    // would give a slot frame its environment on entry: it gets one from the start instead.
+    if table == nil()
+        || constants.element(bytecode::TIER1) != nil()
+        || constants.element(bytecode::BASELINE) != nil()
+        || state.debugger.is_some()
+        || moves::tracking()
+        || function == state.namespace_loader
+        || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
+        || crate::annotations::is_typed(function)
+    {
+        return Ok(None);
+    }
+    let _activity = activity::enter(Activity::CallSetup, 0);
+    let names = table.element(1);
+    let count = values::length(names);
+    let formals = function.car();
+    let actuals = if positional(formals, args) {
+        None
+    } else {
+        activity::count(Counter::FormalsMatchedByName);
+        Some(match_args_cached(function, formals, args, call)?)
+    };
+    let missing_value = missing_arg();
+    let mut bound: SmallVec<[Sexp; 12]> = SmallVec::new();
+    let mut missing = 0u64;
+    let mut formal = formals;
+    while formal.kind() == SexpType::Pairlist {
+        let index = bound.len();
+        // A closure whose formals were replaced keeps the body's code, whose table names the
+        // formals it was compiled with.
+        if index >= count || names.element(index) != formal.tag() {
+            return Ok(None);
+        }
+        let actual = match &actuals {
+            Some(actuals) => actuals.get(index).copied().unwrap_or(missing_value),
+            None => args.get(index).map_or(missing_value, |arg| arg.value),
+        };
+        let default = formal.car();
+        if actual == missing_value && default != missing_value {
+            if !(default.kind().is_atomic() || default == nil()) {
+                return Ok(None);
+            }
+            missing |= 1 << index;
+            bound.push(default);
+        } else {
+            bound.push(actual);
+        }
+        formal = formal.cdr();
+    }
+    let header = state.bytecode.registers.len();
+    bytecode::reserve_registers(header + 1 + count)?;
+    let registers = bytecode::register_address(header);
+    for (index, &value) in bound.iter().enumerate() {
+        value.increment_refcount();
+        *registers.add(1 + index) = value;
+    }
+    for index in bound.len()..count {
+        *registers.add(1 + index) = unbound();
+    }
+    Ok(Some(CallFrame::Slots {
+        header: header as u32,
+        missing,
+    }))
+}
+
+/// The environment of the frame at `index`, made from its slots first if it is a slot frame
+/// that has none yet. Everything that hands a frame's environment to R code or native code
+/// reads it here.
+#[inline]
+pub unsafe fn frame_env(index: usize) -> R<Sexp> {
+    let frame = &interp().frames[index];
+    if frame.env != nil() || frame.slots == crate::NO_SLOTS {
+        return Ok(frame.env);
+    }
+    reify(index)
+}
+
+/// The environment of the innermost frame, which is the slot frame a builtin's `NULL`
+/// environment stands for (see [`crate::builtins::Call::env`]).
+pub unsafe fn top_frame_env() -> R<Sexp> {
+    let count = interp().frames.len();
+    if count == 0 {
+        panic!("a builtin call from a slot frame ran with no frame");
+    }
+    frame_env(count - 1)
+}
+
+/// `parent.frame()` of the frame at `index`: the environment its call was made from.
+pub unsafe fn frame_sys_parent(index: usize) -> R<Sexp> {
+    let sys_parent = interp().frames[index].sys_parent;
+    if sys_parent != nil() || index == 0 {
+        return Ok(sys_parent);
+    }
+    frame_env(index - 1)
+}
+
+/// The environment of the slot frame whose header register is `header`, which must be live.
+pub unsafe fn slot_frame_env(header: usize) -> R<Sexp> {
+    let frames = &interp().frames;
+    let Some(index) = frames
+        .iter()
+        .rposition(|frame| frame.slots as usize == header)
+    else {
+        panic!("a slot frame's activation outlived its frame");
+    };
+    frame_env(index)
+}
+
+/// Gives the slot frame at `index` its environment: one binding cell per bound slot, formals
+/// first and with their missing flags, exactly as [`bind_arguments`] and the assignments since
+/// would have bound them. The environment is the frame's from then on, so the slots give up
+/// their references and nothing reads them again.
+#[cold]
+#[inline(never)]
+unsafe fn reify(index: usize) -> R<Sexp> {
+    let frame = &interp().frames[index];
+    let (function, header, missing) = (frame.function, frame.slots as usize, frame.missing);
+    let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
+    let count = values::length(names);
+    let formals = function.car();
+    let env = frame_environment(function, formals)?;
+    let registers = bytecode::register_address(header);
+    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
+    let mut formal = formals;
+    while formal.kind() == SexpType::Pairlist {
+        let index = bindings.len();
+        bindings.push(Formal {
+            symbol: formal.tag(),
+            value: *registers.add(1 + index),
+            missing: missing & (1 << index) != 0,
+        });
+        formal = formal.cdr();
+    }
+    let heap = crate::heap();
+    heap.define_formals_uncollected(env, &bindings)?;
+    heap.mark_frame_formals(env);
+    for slot in bindings.len()..count {
+        let value = *registers.add(1 + slot);
+        if value != unbound() {
+            heap.define(env, names.element(slot), value)?;
+        }
+    }
+    let nil = nil();
+    for slot in 0..count {
+        (*registers.add(1 + slot)).decrement_refcount();
+        *registers.add(1 + slot) = nil;
+    }
+    env.set_gp_bits(gp::COMPILED_FRAME, true);
+    *registers = env;
+    interp().frames[index].env = env;
+    activity::count(Counter::FramesReified);
+    if syntax::testing::invariants_enabled() {
+        check_reified(index, env, &bindings);
+    }
+    Ok(env)
+}
+
+/// The cross-check behind `syntax::testing::enable_invariants()`: the environment made from a
+/// slot frame binds each formal as the heap-frame path would have, to the same value with the
+/// same missing flag, and binds nothing it should not.
+unsafe fn check_reified(index: usize, env: Sexp, bindings: &[Formal]) {
+    let heap = crate::heap();
+    for binding in bindings {
+        let Some(cell) = heap.frame_cell(env, binding.symbol) else {
+            panic!("frame {index}: a reified slot frame lost formal {:?}", values::symbol_name(binding.symbol));
+        };
+        assert!(
+            cell.cdr() == binding.value
+                && cell.has_gp(gp::BINDING_MISSING) == binding.missing,
+            "frame {index}: a reified slot frame binds formal {:?} differently",
+            values::symbol_name(binding.symbol)
+        );
+    }
+    let function = interp().frames[index].function;
+    let locals = bytecode::local_symbols(bytecode::source_of_body(function.cdr()), function.car());
+    let Some(locals) = locals else {
+        panic!("frame {index}: a slot frame whose body has no known local symbols");
+    };
+    for symbol in crate::envir::env_symbols(env, true, false) {
+        assert!(
+            locals.contains(&symbol),
+            "frame {index}: a reified slot frame binds {:?}, which its body cannot bind",
+            values::symbol_name(symbol)
+        );
+    }
 }
 
 /// A fresh, rooted function frame for a call of `function`, after one collection check that
@@ -1269,10 +1493,51 @@ pub unsafe fn run_closure(
     args: &[Arg],
     entry: Entry,
 ) -> R<Sexp> {
+    run_frame(call, function, CallFrame::Env(env), sys_parent, args, entry)
+}
+
+/// Runs a closure body in `frame`, whose arguments are already bound. `sys_parent` is the
+/// environment the call was made from, or `NULL` when the caller is the frame below this one
+/// and has no environment yet. A slot frame's registers are released however the call ends.
+pub unsafe fn run_frame(
+    call: Sexp,
+    function: Sexp,
+    frame: CallFrame,
+    sys_parent: Sexp,
+    args: &[Arg],
+    entry: Entry,
+) -> R<Sexp> {
+    let (env, slots, missing) = match frame {
+        CallFrame::Env(env) => (env, crate::NO_SLOTS, 0),
+        CallFrame::Slots { header, missing } => (nil(), header, missing),
+    };
+    // A slot frame that never made its environment gives up its slots' references, and the
+    // register file drops the window, on every way out.
+    struct SlotWindow(u32);
+    impl Drop for SlotWindow {
+        fn drop(&mut self) {
+            if self.0 == crate::NO_SLOTS {
+                return;
+            }
+            let header = self.0 as usize;
+            unsafe {
+                let registers = &mut interp().bytecode.registers;
+                if *registers.get_unchecked(header) == nil()
+                    && let Some(slots) = registers.get_mut(header + 1..)
+                {
+                    crate::heap().release_slots(slots);
+                }
+                registers.truncate(header);
+            }
+        }
+    }
+    let _window = SlotWindow(slots);
     let _activity = activity::enter(Activity::CallSetup, 0);
     activity::count(Counter::ClosureCalls);
     let _frame = crate::profile_summary::enter_closure(call, function);
-    moves::entering_closure(function, env)?;
+    if slots == crate::NO_SLOTS {
+        moves::entering_closure(function, env)?;
+    }
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
         return Err(error_in(
@@ -1281,6 +1546,11 @@ pub unsafe fn run_closure(
         ));
     }
     if !state.object_systems {
+        let sys_parent = if sys_parent == nil() && !state.frames.is_empty() {
+            frame_env(state.frames.len() - 1)?
+        } else {
+            sys_parent
+        };
         refuse_object_system(call, function, sys_parent)?;
     }
     let restarts = state.restarts.clone();
@@ -1297,6 +1567,8 @@ pub unsafe fn run_closure(
         restarts: restarts.clone(),
         srcref: state.srcref,
         closures: state.frame_closures.len(),
+        slots,
+        missing,
     });
     if PROFILE_TICK.load(Ordering::Relaxed) {
         record_profile_sample(None)?;
@@ -1309,6 +1581,8 @@ pub unsafe fn run_closure(
         crate::debugger::debugged_call(depth);
     }
     let signature = match entry {
+        // A slot frame's closure is never typed (`bind_slots`).
+        Entry::Unchecked if slots != crate::NO_SLOTS => Ok(None),
         Entry::Unchecked => crate::annotations::enter(call, function, env, depth),
         Entry::Checked(signature) => Ok(signature),
     };
@@ -1327,6 +1601,9 @@ pub unsafe fn run_closure(
     let result = signature.map(|signature| {
         let result = scope(|| {
             on_large_stack(|| {
+                if slots != crate::NO_SLOTS {
+                    return bytecode::run_slots(function, slots as usize);
+                }
                 let body = function.cdr();
                 bytecode::run_body(function, body, env)
             })
@@ -1338,7 +1615,14 @@ pub unsafe fn run_closure(
         Ok(pair) => pair,
         Err(unwind) => (None, Err(unwind)),
     };
-    let result = stray_loop_jump(call, env, catch_return(env, result));
+    // A slot frame may have made its environment while the body ran; until it does, nothing
+    // can name the frame as a `return` or loop target.
+    let env = interp().frames[depth - 1].env;
+    let result = if env == nil() {
+        result
+    } else {
+        stray_loop_jump(call, env, catch_return(env, result))
+    };
     let result = match (signature, result) {
         (Some(signature), Ok(value)) => crate::annotations::check_return(call, signature, value),
         (_, result) => result,
@@ -1350,15 +1634,19 @@ pub unsafe fn run_closure(
     let result = if state.frames[depth - 1].on_exit.is_empty() {
         result
     } else {
-        catch_return(env, run_on_exit(depth, result))
+        let result = run_on_exit(depth, result);
+        catch_return(interp().frames[depth - 1].env, result)
     };
+    let env = state.frames[depth - 1].env;
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = state.frames[depth - 1].handlers.clone();
     let closures = state.frames[depth - 1].closures;
     crate::truncate_frames(state, depth - 1);
     state.restarts = restarts;
     state.srcref = caller_srcref;
-    if let Ok(value) = result {
+    if let Ok(value) = result
+        && env != nil()
+    {
         let created = state.frame_closures.get(closures..).unwrap_or(&[]);
         crate::heap().release_frame(env, value, created);
     }
@@ -1507,7 +1795,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         return result;
     }
     let expressions = std::mem::take(&mut frame.on_exit);
-    let env = frame.env;
+    let env = frame_env(depth - 1)?;
     let visible = interp().visible;
     let mark = crate::heap().handle_mark();
     for &expression in &expressions {
@@ -1916,7 +2204,7 @@ unsafe fn symbol_is_missing(symbol: Sexp, env: Sexp, defaults_count: bool) -> R<
     value_is_missing(cell.cdr())
 }
 
-unsafe fn value_is_missing(value: Sexp) -> R<bool> {
+pub(crate) unsafe fn value_is_missing(value: Sexp) -> R<bool> {
     if value == missing_arg() {
         return Ok(true);
     }
@@ -2115,8 +2403,8 @@ unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
             interp().srcref = statement_srcref(srcrefs, index + 1);
         }
         let result = match interp().debugger.is_some() {
-            true => crate::debugger::statement().and_then(|()| eval(arg.value, call.env)),
-            false => eval(arg.value, call.env),
+            true => crate::debugger::statement().and_then(|()| eval(arg.value, call.env()?)),
+            false => eval(arg.value, call.env()?),
         };
         interp().srcref = saved;
         crate::heap().release_handles(mark);
@@ -2152,10 +2440,10 @@ pub unsafe fn statement_srcref(srcrefs: Sexp, index: usize) -> Sexp {
 unsafe fn do_paren(call: &Call<'_>) -> R<Sexp> {
     call.check_arity(1)?;
     if call.arg(0) != symbols().dots {
-        return eval(call.arg(0), call.env);
+        return eval(call.arg(0), call.env()?);
     }
     // `(...)` is a builtin call in GNU R, so the dots expand into its single argument.
-    let args = evaluate_args(call.call.cdr(), call.env, false, call.call)?;
+    let args = evaluate_args(call.call.cdr(), call.env()?, false, call.call)?;
     let expanded = Call {
         args: &args,
         ..*call
@@ -2227,7 +2515,7 @@ unsafe fn general_condition(value: Sexp, call: Sexp) -> R<bool> {
 }
 
 unsafe fn do_if(call: &Call<'_>) -> R<Sexp> {
-    let condition = eval(call.arg(0), call.env)?;
+    let condition = eval(call.arg(0), call.env()?)?;
     if crate::records::is_native(condition) {
         return Err(crate::records::boundary_error(
             condition,
@@ -2236,9 +2524,9 @@ unsafe fn do_if(call: &Call<'_>) -> R<Sexp> {
         ));
     }
     if as_condition(condition, call.call)? {
-        eval(call.arg(1), call.env)
+        eval(call.arg(1), call.env()?)
     } else if call.len() > 2 {
-        eval(call.arg(2), call.env)
+        eval(call.arg(2), call.env()?)
     } else {
         interp().visible = false;
         Ok(nil())
@@ -2262,7 +2550,7 @@ unsafe fn loop_body(body: Sexp, env: Sexp) -> R<bool> {
 }
 
 unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env;
+    let env = call.env()?;
     let variable = call.arg(0);
     if variable.kind() != SexpType::Symbol {
         return Err(call.error("invalid for() loop sequence"));
@@ -2331,7 +2619,7 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_while(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env;
+    let env = call.env()?;
     loop {
         let condition = scope(|| eval(call.arg(0), env))?;
         if !as_condition(condition, call.call)? {
@@ -2345,7 +2633,7 @@ unsafe fn do_while(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_repeat(call: &Call<'_>) -> R<Sexp> {
-    while loop_body(call.arg(0), call.env)? {}
+    while loop_body(call.arg(0), call.env()?)? {}
     Ok(nil())
 }
 
@@ -2368,7 +2656,7 @@ pub struct LoopContext {
 unsafe fn in_loop(call: &Call<'_>, run: unsafe fn(&Call<'_>) -> R<Sexp>) -> R<Sexp> {
     let body = call.args.last().map_or(nil(), |arg| arg.value);
     let context = LoopContext {
-        env: call.env,
+        env: call.env()?,
         depth: interp().frames.len(),
         body,
     };
@@ -2446,13 +2734,13 @@ unsafe fn skips_loop_context(expression: Sexp, jumps_allowed: bool) -> bool {
 }
 
 unsafe fn do_break(call: &Call<'_>) -> R<Sexp> {
-    reachable_loop(call.env)?;
-    Err(jump(Jump::Break { env: call.env }))
+    reachable_loop(call.env()?)?;
+    Err(jump(Jump::Break { env: call.env()? }))
 }
 
 unsafe fn do_next(call: &Call<'_>) -> R<Sexp> {
-    reachable_loop(call.env)?;
-    Err(jump(Jump::Next { env: call.env }))
+    reachable_loop(call.env()?)?;
+    Err(jump(Jump::Next { env: call.env()? }))
 }
 
 /// GNU R raises a `break` or `next` without a loop for its environment as an error at once, so
@@ -2482,22 +2770,22 @@ unsafe fn reachable_loop(env: Sexp) -> R<()> {
 unsafe fn do_return(call: &Call<'_>) -> R<Sexp> {
     let value = match call.args {
         [] => nil(),
-        [arg] => eval(arg.value, call.env)?,
+        [arg] => eval(arg.value, call.env()?)?,
         _ => return Err(call.error("multi-argument returns are not permitted")),
     };
     // GNU R looks for the function context before jumping, so a `return` with no function to
     // return from is an ordinary error that `tryCatch` can catch.
-    if !interp().frames.iter().any(|frame| frame.env == call.env) {
+    if call.frame_index().is_none() {
         return Err(error("no function to return from, jumping to top level"));
     }
     Err(jump(Jump::Return {
-        env: call.env,
+        env: call.env()?,
         value,
     }))
 }
 
 unsafe fn do_function(call: &Call<'_>) -> R<Sexp> {
-    make_closure(call.arg(0), call.arg(1), call.arg(2), call.env)
+    make_closure(call.arg(0), call.arg(1), call.arg(2), call.env()?)
 }
 
 /// A closure of `formals` and `body` in `env`. A `function` call parsed with source references
@@ -2586,7 +2874,7 @@ unsafe fn general_logical_operand(value: Sexp, call: Sexp, operator: &str, side:
 }
 
 unsafe fn logical_operator(call: &Call<'_>, is_and: bool) -> R<Sexp> {
-    let left = eval(call.arg(0), call.env)?;
+    let left = eval(call.arg(0), call.env()?)?;
     let left = logical_operand(left, call, "x")?;
     let na = heap::object::NA_LOGICAL;
     if is_and && left == 0 {
@@ -2595,7 +2883,7 @@ unsafe fn logical_operator(call: &Call<'_>, is_and: bool) -> R<Sexp> {
     if !is_and && left == 1 {
         return values::scalar_logical(1);
     }
-    let right = eval(call.arg(1), call.env)?;
+    let right = eval(call.arg(1), call.env()?)?;
     let right = logical_operand(right, call, "y")?;
     let result = if is_and {
         if right == 0 {
@@ -2619,12 +2907,12 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
     let Some(first) = call.args.first() else {
         return Err(call.error("'EXPR' is missing"));
     };
-    let selector = eval(first.value, call.env)?;
+    let selector = eval(first.value, call.env()?)?;
     // `switch(x, ...)` forwards the caller's alternatives, so `...` expands to its promises.
     let mut alternatives: Vec<Arg> = Vec::with_capacity(call.args.len() - 1);
     for arg in &call.args[1..] {
         if arg.value == symbols().dots && arg.tag == nil() {
-            let dots = find_var(symbols().dots, call.env)?;
+            let dots = find_var(symbols().dots, call.env()?)?;
             if dots.kind() == SexpType::Dots {
                 crate::heap().root(dots);
                 for (tag, value) in values::pairlist_items(dots) {
@@ -2649,7 +2937,7 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
                 if arg.value == missing {
                     return Err(error("empty alternative in numeric switch"));
                 }
-                return eval(arg.value, call.env);
+                return eval(arg.value, call.env()?);
             }
             interp().visible = false;
             return Ok(nil());
@@ -2676,7 +2964,7 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
             // NULL when every later one is empty.
             for later in &alternatives[position..] {
                 if later.value != missing {
-                    return eval(later.value, call.env);
+                    return eval(later.value, call.env()?);
                 }
             }
             interp().visible = false;
@@ -2685,7 +2973,7 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
     }
     match defaults.first() {
         Some(default) if default.value == missing => Err(error(SWITCH_EMPTY_DEFAULT)),
-        Some(default) => eval(default.value, call.env),
+        Some(default) => eval(default.value, call.env()?),
         None => {
             interp().visible = false;
             Ok(nil())
@@ -2752,25 +3040,24 @@ unsafe fn do_missing(call: &Call<'_>) -> R<Sexp> {
     if symbol.kind() != SexpType::Symbol {
         return Err(call.error("invalid use of 'missing'"));
     }
-    values::scalar_bool(is_missing(symbol, call.env)?)
+    values::scalar_bool(is_missing(symbol, call.env()?)?)
 }
 
 unsafe fn do_on_exit(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["expr", "add", "after"])?;
     let expression = crate::builtins::present(matched[0]).unwrap_or(nil());
     let add = match crate::builtins::present(matched[1]) {
-        Some(value) => values::as_logical_scalar(eval(value, call.env)?) == 1,
+        Some(value) => values::as_logical_scalar(eval(value, call.env()?)?) == 1,
         None => false,
     };
     let after = match crate::builtins::present(matched[2]) {
-        Some(value) => values::as_logical_scalar(eval(value, call.env)?) != 0,
+        Some(value) => values::as_logical_scalar(eval(value, call.env()?)?) != 0,
         None => true,
     };
-    let env = call.env;
-    let state = interp();
-    let Some(frame) = state.frames.iter_mut().rev().find(|frame| frame.env == env) else {
+    let Some(index) = call.frame_index() else {
         return Ok(nil());
     };
+    let frame = &mut interp().frames[index];
     if !add {
         frame.on_exit.clear();
     }
@@ -2797,17 +3084,17 @@ unsafe fn do_internal(call: &Call<'_>) -> R<Sexp> {
     };
     let definition = builtin_def(function)?;
     let args = if function.kind() == SexpType::Builtin {
-        evaluate_args(inner.cdr(), call.env, definition.keep_missing, inner)?
+        evaluate_args(inner.cdr(), call.env()?, definition.keep_missing, inner)?
     } else {
         unevaluated_args(inner.cdr())
     };
     if definition.generic != Generic::None
         && let Some(value) =
-            dispatch::try_builtin_dispatch(definition, inner, function, &args, call.env)?
+            dispatch::try_builtin_dispatch(definition, inner, function, &args, call.env()?)?
     {
         return Ok(value);
     }
-    call_builtin(definition, inner, function, &args, call.env)
+    call_builtin(definition, inner, function, &args, call.env()?)
 }
 
 unsafe fn do_invisible(call: &Call<'_>) -> R<Sexp> {
@@ -2815,12 +3102,9 @@ unsafe fn do_invisible(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_nargs(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env;
     let state = interp();
-    let count = state
-        .frames
-        .iter()
-        .rposition(|frame| frame.env == env)
+    let count = call
+        .frame_index()
         .map_or(NA_INTEGER, |index| {
             crate::frame_args(state, index).len() as i32
         });
@@ -2829,8 +3113,8 @@ unsafe fn do_nargs(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
-    let count = values::as_integer_scalar(eval(call.arg(0), call.env)?).max(0) as usize;
-    let function = eval(call.arg(1), call.env)?;
+    let count = values::as_integer_scalar(eval(call.arg(0), call.env()?)?).max(0) as usize;
+    let function = eval(call.arg(1), call.env()?)?;
     let heap = crate::heap();
     heap.root(function);
     // The callee's arguments are the call's own cells after `n` and `FUN` whenever the special
@@ -2859,18 +3143,18 @@ unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
                 && !crate::effects::calling_handler_established()
                 && crate::effects::effect_free(function)?
             {
-                eager_args_into(rest, call.env, &mut args)?;
+                eager_args_into(rest, call.env()?, &mut args)?;
             } else {
-                promise_args_into(rest, call.env, &mut args)?;
+                promise_args_into(rest, call.env()?, &mut args)?;
             }
             for arg in args.iter().take(count) {
                 if arg.value.kind() == SexpType::Promise {
                     force_promise(arg.value)?;
                 }
             }
-            apply_closure_owning(inner_call, function, &args, call.env, None)
+            apply_closure_owning(inner_call, function, &args, call.env()?, None)
         }
-        _ => apply_call(inner_call, function, rest, call.env),
+        _ => apply_call(inner_call, function, rest, call.env()?),
     }
 }
 
@@ -2930,7 +3214,7 @@ unsafe fn do_tailcall(call: &Call<'_>) -> R<Sexp> {
             .collect::<Vec<_>>(),
         SexpType::Pairlist,
     )?;
-    eval(values::lcons(function, rest)?, call.env)
+    eval(values::lcons(function, rest)?, call.env()?)
 }
 
 /// `Exec(expr, envir)`: evaluates the call `expr` in `envir`, by default the caller's frame,
@@ -2955,7 +3239,7 @@ unsafe fn do_exec(call: &Call<'_>) -> R<Sexp> {
     let Some(expr) = expr.filter(|expr| *expr != values::missing_arg()) else {
         return Err(error("argument \"expr\" is missing, with no default"));
     };
-    let mut expr = eval(expr, call.env)?;
+    let mut expr = eval(expr, call.env()?)?;
     if expr.kind() == SexpType::Expression && length(expr) == 1 {
         expr = values::list_elt(expr, 0);
     }
@@ -2963,8 +3247,8 @@ unsafe fn do_exec(call: &Call<'_>) -> R<Sexp> {
         return Err(error("\"expr\" must be a call expression"));
     }
     let env = match envir.filter(|envir| *envir != values::missing_arg()) {
-        Some(envir) => eval(envir, call.env)?,
-        None => call.env,
+        Some(envir) => eval(envir, call.env()?)?,
+        None => call.env()?,
     };
     eval(expr, env)
 }
@@ -3142,7 +3426,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         }
         SexpType::Integer | SexpType::Real => {
             let which = values::as_integer_scalar(env);
-            env = crate::envir::sys_frame(which, call.env)?;
+            env = crate::envir::sys_frame(which, call.env()?)?;
         }
         _ => {
             return Err(call.error(
@@ -3160,13 +3444,15 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         call: caller,
         function: call.op,
         env,
-        sys_parent: call.env,
+        sys_parent: call.env()?,
         args: state.frame_args.len() as u32,
         on_exit: Vec::new(),
         handlers: handlers.clone(),
         restarts: restarts.clone(),
         srcref: state.srcref,
         closures: state.frame_closures.len(),
+        slots: crate::NO_SLOTS,
+        missing: 0,
     });
     let depth = state.frames.len();
     let result = scope(|| match expression.kind() {
@@ -3196,23 +3482,16 @@ unsafe fn do_with_visible(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env;
+    let env = call.env()?;
     let state = interp();
-    let Some(frame) = state.frames.iter().rev().find(|frame| frame.env == env) else {
+    let Some(own) = state.frames.iter().rposition(|frame| frame.env == env) else {
         return Err(call.error("'Recall' called from outside a closure"));
     };
-    let sys_parent = frame.sys_parent;
-    let caller = state
-        .frames
-        .iter()
-        .rev()
-        .find(|candidate| candidate.env == sys_parent);
-    let function = match caller {
-        Some(caller) => caller.function,
-        None => return Err(call.error("'Recall' called from outside a closure")),
+    let Some(caller) = crate::envir::caller_index(own) else {
+        return Err(call.error("'Recall' called from outside a closure"));
     };
-    let caller_call = caller.map_or(nil(), |caller| caller.call);
-    apply(caller_call, function, call.args, sys_parent)
+    let (caller_call, function) = (state.frames[caller].call, state.frames[caller].function);
+    apply(caller_call, function, call.args, frame_sys_parent(own)?)
 }
 
 unsafe fn do_primitive(call: &Call<'_>) -> R<Sexp> {
@@ -3228,7 +3507,7 @@ unsafe fn do_tilde(call: &Call<'_>) -> R<Sexp> {
         let class = values::scalar_string("formula")?;
         values::set_attr(formula, symbols().class, class)?;
         let environment = symbols().dot_environment;
-        values::set_attr(formula, environment, call.env)?;
+        values::set_attr(formula, environment, call.env()?)?;
     }
     Ok(formula)
 }
@@ -3279,8 +3558,8 @@ unsafe fn do_substitute(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["expr", "env"])?;
     let expression = crate::builtins::present(matched[0]).unwrap_or(missing_arg());
     let env = match crate::builtins::present(matched[1]) {
-        Some(env) => eval(env, call.env)?,
-        None => call.env,
+        Some(env) => eval(env, call.env()?)?,
+        None => call.env()?,
     };
     let env = match env.kind() {
         SexpType::Environment => env,
@@ -3401,18 +3680,18 @@ unsafe fn do_assign(call: &Call<'_>) -> R<Sexp> {
     match target.kind() {
         SexpType::Symbol => {
             let value = match superassign {
-                false => rebind(target, call.arg(1), call.env)?,
-                true => eval(call.arg(1), call.env)?,
+                false => rebind(target, call.arg(1), call.env()?)?,
+                true => eval(call.arg(1), call.env()?)?,
             };
-            assign_symbol(target, value, call.env, superassign)?;
+            assign_symbol(target, value, call.env()?, superassign)?;
             Ok(value)
         }
         SexpType::Language => {
             let value = match superassign {
-                false => rebind(target, call.arg(1), call.env)?,
-                true => eval(call.arg(1), call.env)?,
+                false => rebind(target, call.arg(1), call.env()?)?,
+                true => eval(call.arg(1), call.env()?)?,
             };
-            complex_assign(call.call, target, value, call.env, superassign)?;
+            complex_assign(call.call, target, value, call.env()?, superassign)?;
             Ok(value)
         }
         _ => Err(call.error("invalid (do_set) left-hand side to assignment")),

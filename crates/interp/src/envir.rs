@@ -135,16 +135,25 @@ unsafe fn environment_arg(value: Sexp, what: &str) -> R<Sexp> {
 }
 
 /// The frame of the closure whose environment is `env`, as a stack index.
-unsafe fn frame_of(env: Sexp) -> Option<usize> {
+pub(crate) unsafe fn frame_of(env: Sexp) -> Option<usize> {
     interp().frames.iter().rposition(|frame| frame.env == env)
 }
 
 /// GNU R's `cptr` for the `sys.*` functions: the frame the `sys.*` closure was called from.
 /// `None` stands for the top level.
-unsafe fn sys_context(env: Sexp) -> Option<usize> {
+unsafe fn sys_context(call: &Call<'_>) -> Option<usize> {
+    caller_index(call.frame_index()?)
+}
+
+/// The frame the call of frame `own` was made from, `None` for the top level. A `NULL`
+/// `sys_parent` stands for an unreified slot frame, which is always the frame just below:
+/// nothing can evaluate in a slot frame from a deeper frame until it has an environment.
+pub(crate) unsafe fn caller_index(own: usize) -> Option<usize> {
     let frames = &interp().frames;
-    let own = frames.iter().rposition(|frame| frame.env == env)?;
     let target = frames[own].sys_parent;
+    if target == nil() {
+        return own.checked_sub(1);
+    }
     (0..=own).rev().find(|&index| frames[index].env == target)
 }
 
@@ -166,7 +175,7 @@ unsafe fn sys_frame_at(n: i32, context: Option<usize>) -> R<Sexp> {
         return Err(error("not that many frames on the stack"));
     }
     match context {
-        Some(index) if back <= index as i64 => Ok(interp().frames[index - back as usize].env),
+        Some(index) if back <= index as i64 => crate::eval::frame_env(index - back as usize),
         _ if back == depth => Ok(global_env()),
         _ => Err(error("not that many frames on the stack")),
     }
@@ -246,6 +255,9 @@ unsafe fn sys_parent_number(mut n: i64, context: Option<usize>) -> i64 {
     if parent == global_env() {
         return 0;
     }
+    if parent == nil() {
+        return index as i64;
+    }
     let mut count = 0;
     let mut found = n;
     for position in (0..=index).rev() {
@@ -270,7 +282,7 @@ enum SysKind {
 }
 
 unsafe fn do_sys(call: &Call<'_>, kind: SysKind) -> R<Sexp> {
-    let context = sys_context(call.env);
+    let context = sys_context(call);
     let n = if call.is_empty() {
         0
     } else {
@@ -352,32 +364,31 @@ unsafe fn do_parent_frame(call: &Call<'_>) -> R<Sexp> {
     if n == NA_INTEGER || n < 1 {
         return Err(error("invalid 'n' value"));
     }
-    let frames = &interp().frames;
-    let Some(own) = frames.iter().rposition(|frame| frame.env == call.env) else {
+    let Some(mut index) = call.frame_index() else {
         return Ok(global_env());
     };
-    let mut target = frames[own].sys_parent;
-    for index in (0..=own).rev() {
-        if frames[index].env == target {
-            if n == 1 {
-                return Ok(frames[index].sys_parent);
-            }
-            n -= 1;
-            target = frames[index].sys_parent;
+    // Each step moves to the frame the current one was called from, as GNU R's `parent.frame`
+    // does through `sys_parent`; handing out that frame's environment reifies it.
+    loop {
+        let Some(caller) = caller_index(index) else {
+            return Ok(global_env());
+        };
+        if n == 1 {
+            return crate::eval::frame_sys_parent(caller);
         }
+        n -= 1;
+        index = caller;
     }
-    Ok(global_env())
 }
 
 unsafe fn do_environment(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(0);
     match function.kind() {
         SexpType::Nil => {
-            let frames = &interp().frames;
-            Ok(frames
-                .iter()
-                .rposition(|frame| frame.env == call.env)
-                .map_or(global_env(), |index| frames[index].sys_parent))
+            match call.frame_index() {
+                Some(index) => crate::eval::frame_sys_parent(index),
+                None => Ok(global_env()),
+            }
         }
         SexpType::Closure => Ok(function.tag()),
         SexpType::Builtin | SexpType::Special => Ok(nil()),
@@ -470,7 +481,7 @@ unsafe fn do_topenv(call: &Call<'_>) -> R<Sexp> {
     let env = if env.kind() == SexpType::Environment {
         env
     } else {
-        call.env
+        call.env()?
     };
     Ok(top_env(env, target))
 }
@@ -692,7 +703,7 @@ unsafe fn do_mget(call: &Call<'_>) -> R<Sexp> {
                     let fallback = if_not_found.element(index % length(if_not_found));
                     if values::is_function(fallback) {
                         let argument = scalar_string(&name)?;
-                        eval::apply(nil(), fallback, &eval::value_args(&[argument]), call.env)?
+                        eval::apply(nil(), fallback, &eval::value_args(&[argument]), call.env()?)?
                     } else {
                         fallback
                     }
@@ -962,10 +973,10 @@ pub unsafe fn as_environment(value: Sexp) -> R<Sexp> {
             let path = search_path();
             if position == -1 {
                 // The calling environment.
-                return Ok(interp()
-                    .frames
-                    .last()
-                    .map_or(global_env(), |frame| frame.sys_parent));
+                return match interp().frames.len() {
+                    0 => Ok(global_env()),
+                    count => crate::eval::frame_sys_parent(count - 1),
+                };
             }
             if position < 1 || position as usize > path.len() {
                 return Err(error("invalid 'pos' argument"));
@@ -1556,7 +1567,7 @@ unsafe fn do_local_s4_generics(call: &Call<'_>) -> R<Sexp> {
                 nil(),
                 is_generic,
                 &eval::value_args(&[value]),
-                call.env,
+                call.env()?,
             )?);
         answered.insert(symbol, i32::from(is_s4_generic));
         generic.push(i32::from(is_s4_generic));
@@ -1588,7 +1599,7 @@ unsafe fn do_register_s3_methods(call: &Call<'_>) -> R<Sexp> {
             .ok_or_else(|| error(format!("no '{name}' helper")))
     };
     let run = |function: Sexp, arguments: &[Sexp]| {
-        eval::apply(nil(), function, &eval::value_args(arguments), call.env)
+        eval::apply(nil(), function, &eval::value_args(arguments), call.env()?)
     };
     let (namespace, missing, generic, default, new_table, existing, home) = (
         helper("namespace")?,
@@ -1751,7 +1762,7 @@ unsafe fn call_function(function: Sexp, args: &[Arg], env: Sexp, call_expression
 /// `lapply(X, FUN)`: GNU R evaluates `FUN(X[[i]], ...)` in the closure's frame, so the call
 /// each iteration reports is exactly that.
 unsafe fn do_lapply(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env;
+    let env = call.env()?;
     let list = eval::eval_symbol(values::install("X")?, env)?;
     let count = length(list);
     let result = alloc(SexpType::List, count)?;
@@ -1856,7 +1867,7 @@ unsafe fn atomic_elements(list: Sexp) -> Option<eval::KnownFirst> {
 }
 
 unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env;
+    let env = call.env()?;
     let symbols = symbols();
     let list = call.arg(0);
     let template = call.arg(2);
@@ -1935,7 +1946,7 @@ unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
     // A classed argument may define its own `length` and `[[` methods, which mapply honours.
     let lengths: Vec<usize> = lists
         .iter()
-        .map(|&list| crate::subset::dispatch_length(list, call.env))
+        .map(|&list| crate::subset::dispatch_length(list, call.env()?))
         .collect::<R<_>>()?;
     let subset2 = crate::builtins::primitive("[[").ok_or_else(|| call.error("no [[ primitive"))?;
     let longest = if lengths.contains(&0) {
@@ -1956,7 +1967,7 @@ unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
                         nil(),
                         subset2,
                         &eval::value_args(&[list, position_value]),
-                        call.env,
+                        call.env()?,
                     )?
                 } else {
                     crate::subset::list_or_vector_element(list, index % lengths[position])?
@@ -1984,7 +1995,7 @@ unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
                     });
                 }
             }
-            call_function(function, &args, call.env, nil())
+            call_function(function, &args, call.env()?, nil())
         })?;
         values::set_elt(result, index, value);
     }
@@ -1997,7 +2008,7 @@ unsafe fn do_rapply(call: &Call<'_>) -> R<Sexp> {
     let classes = call.arg(2);
     let deflt = call.arg(3);
     let how = values::require_string(call.arg(4), "how")?;
-    rapply_one(object, function, classes, deflt, &how, call.env)
+    rapply_one(object, function, classes, deflt, &how, call.env()?)
 }
 
 unsafe fn rapply_one(
@@ -2048,7 +2059,7 @@ unsafe fn do_eapply(call: &Call<'_>) -> R<Sexp> {
     let result = alloc(SexpType::List, bound.len())?;
     for (index, &symbol) in bound.iter().enumerate() {
         let value = value_of(find_var_in_frame(symbol, env)?)?;
-        let value = call_function(function, &eval::value_args(&[value]), call.env, nil())?;
+        let value = call_function(function, &eval::value_args(&[value]), call.env()?, nil())?;
         values::set_elt(result, index, value);
     }
     values::set_attr(result, symbols().names, symbol_names(&bound)?)?;
@@ -2066,7 +2077,7 @@ unsafe fn dots_of(env: Sexp) -> R<Sexp> {
 }
 
 unsafe fn do_dots_length(call: &Call<'_>) -> R<Sexp> {
-    let dots = dots_of(call.env)?;
+    let dots = dots_of(call.env()?)?;
     let count = if dots.kind() == SexpType::Dots {
         values::pairlist_length(dots)
     } else {
@@ -2083,11 +2094,11 @@ unsafe fn do_dots_elt(call: &Call<'_>) -> R<Sexp> {
     let symbol = values::install(&format!("..{index}"))?;
     // Forcing the element's promise decides the visibility, as evaluating `..n` would.
     interp().visible = true;
-    eval::eval_symbol(symbol, call.env)
+    eval::eval_symbol(symbol, call.env()?)
 }
 
 unsafe fn do_dots_names(call: &Call<'_>) -> R<Sexp> {
-    let dots = dots_of(call.env)?;
+    let dots = dots_of(call.env()?)?;
     if dots.kind() != SexpType::Dots {
         return Ok(nil());
     }
@@ -2163,7 +2174,7 @@ unsafe fn do_args(call: &Call<'_>) -> R<Sexp> {
     let mut function = call.arg(0);
     if function.kind() == SexpType::String && length(function) == 1 {
         let symbol = values::install_charsxp(function.element(0))?;
-        function = eval::find_fun(symbol, call.env)?;
+        function = eval::find_fun(symbol, call.env()?)?;
     }
     match function.kind() {
         SexpType::Closure => {
@@ -2209,7 +2220,7 @@ unsafe fn do_match_call(call: &Call<'_>) -> R<Sexp> {
     if definition == nil() {
         let head = target.car();
         if head.kind() == SexpType::Symbol {
-            definition = eval::find_fun(head, call.env)?;
+            definition = eval::find_fun(head, call.env()?)?;
         }
     }
     if definition.kind() != SexpType::Closure {

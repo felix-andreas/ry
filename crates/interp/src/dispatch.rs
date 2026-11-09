@@ -853,7 +853,7 @@ unsafe fn renamed_call(call: Sexp, name: Sexp) -> R<Sexp> {
 unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     activity::count(Counter::S3Dispatches);
     let dispatching = activity::enter(Activity::S3Dispatch, 0);
-    let env = call.env;
+    let env = call.env()?;
     let state = interp();
     let Some(position) = state.frames.iter().rposition(|frame| frame.env == env) else {
         return Err(call.error("UseMethod called from outside a function"));
@@ -866,10 +866,13 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("'generic' argument must be a character string"));
     }
     let generic_symbol = values::install_charsxp(generic.element(0))?;
-    let (frame_call, function, sys_parent) = {
+    let (frame_call, function) = {
         let frame: &Frame = &interp().frames[position];
-        (frame.call, frame.function, frame.sys_parent)
+        (frame.call, frame.function)
     };
+    // Methods are looked up from the generic's caller and see it as their `parent.frame()`,
+    // so a generic called from a slot frame gives that frame its environment.
+    let sys_parent = eval::frame_sys_parent(position)?;
     let promargs: eval::Args = crate::frame_args(interp(), position).into();
     let object = if call.len() >= 2 {
         eval::eval(call.arg(1), env)?
@@ -1052,25 +1055,22 @@ unsafe fn apply_method(
 unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     activity::count(Counter::S3Dispatches);
     let dispatching = activity::enter(Activity::S3Dispatch, 0);
-    let env = call.env;
+    let env = call.env()?;
     let state = interp();
     // The NextMethod closure's frame is `env`; the method frame is the one it was called from.
     // Errors name the `NextMethod(...)` closure call, as GNU R's do.
     let Some(own) = state.frames.iter().rposition(|frame| frame.env == env) else {
         return Err(error("'NextMethod' called from outside a function"));
     };
-    let method_env = state.frames[own].sys_parent;
-    let Some(position) = state
-        .frames
-        .iter()
-        .rposition(|frame| frame.env == method_env)
-    else {
+    let Some(position) = crate::envir::caller_index(own) else {
         return Err(error("'NextMethod' called from outside a function"));
     };
-    let (frame_call, function, sys_parent) = {
+    let (frame_call, function) = {
         let frame = &interp().frames[position];
-        (frame.call, frame.function, frame.sys_parent)
+        (frame.call, frame.function)
     };
+    let method_env = eval::frame_env(position)?;
+    let sys_parent = eval::frame_sys_parent(position)?;
     let promargs: eval::Args = crate::frame_args(interp(), position).into();
     if frame_call.car().kind() != SexpType::Symbol {
         return Err(error("'NextMethod' called from an anonymous function"));
@@ -1692,6 +1692,8 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
         restarts: restarts.clone(),
         srcref: state.srcref,
         closures: state.frame_closures.len(),
+        slots: crate::NO_SLOTS,
+        missing: 0,
     });
     let depth = state.frames.len();
     let result = apply_method(new_call, found.method, promised, env, &found.vars, true);
@@ -2057,7 +2059,7 @@ pub unsafe fn do_standard_generic(call: &Call<'_>) -> R<Sexp> {
             call.error("argument to 'standardGeneric' must be a non-empty character string")
         );
     }
-    let env = call.env;
+    let env = call.env()?;
     let generic = this_generic(name)?;
     if generic == nil() {
         return Err(call.error(format!(

@@ -1011,7 +1011,8 @@ unsafe fn item_by_item(
             call: call.call,
             op: call.op,
             args: &args,
-            env: call.env,
+            rho: call.rho,
+            frame: call.frame,
             reusable: None,
         };
         let result = compute(&item_call)?;
@@ -2941,7 +2942,8 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
                 call: call.call,
                 op: call.op,
                 args: &args,
-                env: call.env,
+                rho: call.rho,
+                frame: call.frame,
                 reusable: None,
             };
             return cumulative(&inner, kind);
@@ -3327,7 +3329,8 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
         call: call.call,
         op: call.op,
         args: &args,
-        env: call.env,
+        rho: call.rho,
+        frame: call.frame,
         reusable: None,
     };
     let minimum = summary(&inner, Summary::Min)?;
@@ -3828,7 +3831,7 @@ unsafe fn sequence(kind: SexpType, count: usize, first: f64, increment: f64) -> 
 unsafe fn do_seq_along(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let count = if object.is_object() {
-        crate::subset::dispatch_length(object, call.env)?
+        crate::subset::dispatch_length(object, call.env()?)?
     } else {
         length(object)
     };
@@ -3885,7 +3888,8 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             call: call.call,
             op: call.op,
             args: &[Arg { tag: nil(), value }],
-            env: call.env,
+            rho: call.rho,
+            frame: call.frame,
             reusable: None,
         });
     }
@@ -4000,7 +4004,7 @@ unsafe fn rep_classed(call: &Call<'_>, count: &str, tagged: bool) -> R<Option<Se
     for index in 0..length(classes) {
         let class = values::string_at(classes, index).unwrap_or_default();
         let name = values::install(&format!("rep.{class}"))?;
-        if crate::dispatch::lookup_method(name, call.env, values::base_namespace())?.is_some() {
+        if crate::dispatch::lookup_method(name, call.env()?, values::base_namespace())?.is_some() {
             has_method = true;
             break;
         }
@@ -4016,7 +4020,7 @@ unsafe fn rep_classed(call: &Call<'_>, count: &str, tagged: bool) -> R<Option<Se
     if tagged {
         crate::heap().set_tag(expression.cdr().cdr(), values::install(count)?);
     }
-    crate::eval::eval(expression, call.env).map(Some)
+    crate::eval::eval(expression, call.env()?).map(Some)
 }
 
 /// The internal code keeps a factor a factor, and drops every other attribute.

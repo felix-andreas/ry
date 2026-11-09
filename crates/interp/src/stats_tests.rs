@@ -48,7 +48,7 @@ unsafe fn stats_function(call: &NativeCall<'_>, name: &str, arguments: &[&[f64]]
         items.push(values::real_vector(argument)?);
     }
     let expression = values::call(values::install(name)?, &items)?;
-    real_values(eval::eval(expression, call.env)?)
+    real_values(eval::eval(expression, call.env()?)?)
 }
 
 /// `SWilk(x)`: Shapiro and Wilk's W for the sorted sample `x` and its p-value, by Royston's

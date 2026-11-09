@@ -2302,7 +2302,7 @@ unsafe fn do_maphash(call: &NativeCall<'_>) -> R<Sexp> {
             },
             Arg { tag: nil(), value },
         ];
-        crate::eval::apply(nil(), function, &args, call.env)?;
+        crate::eval::apply(nil(), function, &args, call.env()?)?;
     }
     Ok(nil())
 }

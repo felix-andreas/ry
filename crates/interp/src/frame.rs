@@ -574,7 +574,7 @@ unsafe fn table_from_list(list: Sexp, call: Sexp) -> R<Table> {
 // Constructors and IO.
 
 unsafe fn do_frame_new(call: &Call<'_>) -> R<Sexp> {
-    let pieces = argument_pieces(call.args, call.env)?;
+    let pieces = argument_pieces(call.args, call.env()?)?;
     let mut columns = Vec::with_capacity(pieces.len());
     for (position, piece) in pieces.iter().enumerate() {
         let value = piece.value()?;

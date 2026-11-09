@@ -740,11 +740,11 @@ unsafe fn invoke(call: &Call<'_>, callback: Callback, arguments: &[Sexp]) -> R<S
             let form = values::pairlist(&items, SexpType::Language)?;
             crate::heap().root(form);
             let env = eval::bind_arguments(form, function, &arguments, None)?;
-            eval::run_closure(form, function, env, call.env, &arguments, Entry::Unchecked)
+            eval::run_closure(form, function, env, call.env()?, &arguments, Entry::Unchecked)
         }
         _ => {
             crate::moves::calling_back(callback.function)?;
-            eval::apply(nil(), callback.function, &arguments, call.env)
+            eval::apply(nil(), callback.function, &arguments, call.env()?)
         }
     }
 }
@@ -763,7 +763,8 @@ unsafe fn call_leaf(
         call: function,
         op: function,
         args: arguments,
-        env: call.env,
+        rho: call.rho,
+        frame: call.frame,
         reusable: None,
     };
     match scope(|| leaf(&context)).and_then(|value| unwind::raise_parked().map(|()| value)) {

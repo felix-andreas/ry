@@ -571,12 +571,15 @@ fn assemble_stubs(arch: Arch) -> Result<(Vec<u8>, Vec<usize>), &'static str> {
 fn probe_frame(asm: &mut Assembler, slow: Label) {
     const _: () = assert!(frame::SLOT == 16);
     let at = |field: usize| (ENVIRONMENT_FRAME_OFFSET + field) as u32;
+    // The header register holds the activation's environment, which a baseline activation
+    // always has: the interpreter gives a slot frame one before it enters baseline code.
     asm.load(
         Width::W64,
         Reg::T0,
         Reg::Activation,
-        baseline_layout::ENV as u32,
+        baseline_layout::HEADER as u32,
     );
+    asm.load(Width::W64, Reg::T0, Reg::T0, 0);
     asm.load(Width::W64, Reg::T1, Reg::T0, at(frame::FILTER));
     asm.test(Reg::T1, Reg::T5);
     asm.branch(Condition::Equal, slow);

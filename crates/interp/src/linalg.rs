@@ -56,7 +56,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
                 })
                 .collect();
             if let Some(value) =
-                crate::dispatch::s4_dispatch(call.op, call.call, &positional, call.env)?
+                crate::dispatch::s4_dispatch(call.op, call.call, &positional, call.env()?)?
             {
                 return Ok(value);
             }

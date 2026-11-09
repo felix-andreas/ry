@@ -252,7 +252,7 @@ unsafe fn compiled_for<'a>(
             let address = tier1.external_address() as *const Compiled;
             if !address.is_null() && (*address).portable {
                 let compiled = &*address;
-                let enclosure = machine.env.enclosure();
+                let enclosure = machine.enclosure();
                 if compiled.checked.get().weak_key() != enclosure
                     && !runtime::sibling_of_checked(compiled, enclosure)
                 {
@@ -275,7 +275,7 @@ unsafe fn compiled_for<'a>(
                 let compiled = &*(tier1.external_address() as *const Compiled);
                 // Closures made by one `function` expression share their body but not their
                 // enclosure, which the compiled lookups are specialized to.
-                return (compiled.enclosure == machine.env.enclosure()).then_some(compiled);
+                return (compiled.enclosure == machine.enclosure()).then_some(compiled);
             }
             // The enclosure the code was compiled for died, and no activation can still run the
             // code, because a running one keeps its enclosure reachable. The address is cleared
@@ -421,7 +421,7 @@ unsafe fn compile_in<'a>(
     trigger: Trigger,
 ) -> Result<&'a Compiled, Refusal> {
     unsafe {
-        let enclosure = machine.env.enclosure();
+        let enclosure = machine.enclosure();
         let started = Instant::now();
         let plan = analysis::plan(
             analysis::Arena(arena),
@@ -626,7 +626,8 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
     unsafe {
         // A loop entry resumes an activation whose frame may have bound a name before the
         // compiler started watching it, which no epoch change records.
-        if !runtime::valid(compiled, machine.env, entry_pc != 0) {
+        let env = machine.reify().ok()?;
+        if !runtime::valid(compiled, env, entry_pc != 0) {
             runtime::invalidate(machine.code);
             return None;
         }
@@ -646,7 +647,7 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             loops: loops.as_mut_ptr(),
             visible: &mut interp().visible,
             entry_pc: entry_pc as i64,
-            env: machine.env,
+            env,
             hints: bytecode::lookup_hints(machine.code),
             machine: machine as *mut Machine<'_> as *mut c_void,
             compiled,

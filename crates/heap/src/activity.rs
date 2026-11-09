@@ -117,10 +117,11 @@ pub enum Counter {
     JitDeoptimizations,
     JitEntries,
     LookupMisses,
+    FramesReified,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 16] = [
+    pub const ALL: [Counter; 17] = [
         Counter::ClosureCalls,
         Counter::NativeEntries,
         Counter::BuiltinCalls,
@@ -137,6 +138,7 @@ impl Counter {
         Counter::JitDeoptimizations,
         Counter::JitEntries,
         Counter::LookupMisses,
+        Counter::FramesReified,
     ];
 
     pub fn describe(self) -> &'static str {
@@ -157,6 +159,7 @@ impl Counter {
             Counter::JitDeoptimizations => "JIT deoptimizations",
             Counter::JitEntries => "entries into compiled code",
             Counter::LookupMisses => "lookups past the inline caches",
+            Counter::FramesReified => "slot frames turned into environments",
         }
     }
 }

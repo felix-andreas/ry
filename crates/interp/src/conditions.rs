@@ -717,9 +717,9 @@ unsafe fn do_default_warn(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// The call `stop()` and `warning()` report: the caller of the closure that called them.
-unsafe fn caller_call(env: Sexp) -> Sexp {
+unsafe fn caller_call(call: &Call<'_>) -> Sexp {
     let frames = &interp().frames;
-    match frames.iter().rposition(|frame| frame.env == env) {
+    match call.frame_index() {
         Some(position) if position >= 1 => frames[position - 1].call,
         _ => nil(),
     }
@@ -728,7 +728,7 @@ unsafe fn caller_call(env: Sexp) -> Sexp {
 unsafe fn do_stop(call: &Call<'_>) -> R<Sexp> {
     let use_call = values::as_logical_scalar(call.arg(0)) != 0;
     let condition_call = if use_call {
-        caller_call(call.env)
+        caller_call(call)
     } else {
         nil()
     };
@@ -749,7 +749,7 @@ unsafe fn do_warning(call: &Call<'_>) -> R<Sexp> {
     let use_call = values::as_logical_scalar(call.arg(0)) != 0;
     let immediate = values::as_logical_scalar(call.arg(1)) == 1;
     let condition_call = if use_call {
-        caller_call(call.env)
+        caller_call(call)
     } else {
         nil()
     };

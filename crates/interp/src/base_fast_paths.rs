@@ -104,6 +104,23 @@ pub unsafe fn install_all(namespace: Sexp) -> R<()> {
     register_native_entries(namespace)
 }
 
+/// Whether `body` opens with a fast-path prologue. The prologue reads and finishes the closure's
+/// frame as an environment, so these closures never get a slot frame: a slot frame would be
+/// reified on every call.
+pub unsafe fn has_prologue(body: Sexp) -> bool {
+    if body.kind() != SexpType::Language || body.cdr().kind() != SexpType::Pairlist {
+        return false;
+    }
+    let first = body.cdr().car();
+    if first.kind() != SexpType::Language || first.car() != symbols().dot_internal {
+        return false;
+    }
+    let inner = first.cdr().car();
+    inner.kind() == SexpType::Language
+        && inner.car().kind() == SexpType::Symbol
+        && BUILTINS.iter().any(|def| def.name == crate::values::symbol_name(inner.car()))
+}
+
 /// The native code for a whole call of a base closure: the result, or `None` when the closure
 /// is to run as usual. It sees the call's arguments as the closure would receive them.
 pub type NativeEntry = unsafe fn(&[Arg]) -> R<Option<Sexp>>;
@@ -623,7 +640,8 @@ unsafe fn kernel(function: BuiltinFn, args: &[Sexp], env: Sexp) -> R<Sexp> {
         call: nil(),
         op: nil(),
         args: &args,
-        env,
+        rho: env,
+        frame: crate::NO_SLOTS,
         reusable: None,
     };
     let value = function(&call)?;
@@ -653,7 +671,7 @@ unsafe fn is_ascii(text: Sexp) -> bool {
 /// choices themselves. With `choices` missing it evaluates the caller's default for `arg` in
 /// the caller's frame, as the R body does through `sys.function(sys.parent())`.
 unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = call.env()?;
     if !is_default(frame, "several.ok")? {
         return decline();
     }
@@ -769,7 +787,7 @@ unsafe fn default_choices(frame: Sexp) -> R<Option<Sexp>> {
 /// `stopifnot(...)` when every expression is all `TRUE`. The first that is not leaves the R body
 /// to build the error from its call.
 unsafe fn do_stopifnot(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = call.env()?;
     if is_supplied(frame, "exprs")? || is_supplied(frame, "exprObject")? {
         return decline();
     }
@@ -796,7 +814,7 @@ unsafe fn do_stopifnot(call: &Call<'_>) -> R<Sexp> {
 /// directly and passes both arguments as forced promises of the same expressions, so `f` sees
 /// the same call, the same `substitute()` results and the same frame variables `init` and `i`.
 unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = call.env()?;
     let missing_init = !is_supplied(frame, "init")?;
     let Some(x) = argument(frame, "x")? else {
         return decline();
@@ -941,7 +959,7 @@ unsafe fn flag(frame: Sexp, name: &str) -> R<Option<bool>> {
 
 /// `setdiff(x, y)` of plain vectors: `unique(x)` without names, less the elements `y` has.
 unsafe fn do_setdiff(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = call.env()?;
     let Some(x) = argument(frame, "x")? else {
         return decline();
     };
@@ -1001,7 +1019,7 @@ fn sets_unchecked(name: &[u8]) -> bool {
 /// `structure(.Data, ...)` when every attribute is named and is either a plain one or a `class`
 /// that is a character vector without `"factor"`.
 unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = call.env()?;
     let Some(data) = argument(frame, ".Data")? else {
         return decline();
     };
@@ -1065,7 +1083,7 @@ unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
 /// `zero.print` and `drop0trailing` left at its default, where `prettyNum()` returns what the
 /// `format` internal made unchanged.
 unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = call.env()?;
     for name in [
         "justify",
         "big.mark",

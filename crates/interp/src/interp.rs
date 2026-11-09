@@ -131,10 +131,20 @@ pub struct Frame {
     /// The call as written, which `sys.call` returns.
     pub call: Sexp,
     pub function: Sexp,
-    /// The environment the closure body runs in.
+    /// The environment the closure body runs in. A slot frame (see [`Frame::slots`]) has none
+    /// until something asks for it, and holds `NULL` until then: read it through
+    /// [`eval::frame_env`], which makes it, wherever the environment is handed on.
     pub env: Sexp,
-    /// The environment the call was evaluated in, which `parent.frame` returns.
+    /// The environment the call was evaluated in, which `parent.frame` returns, or `NULL` when
+    /// the caller is a slot frame that had no environment when it made the call: the caller is
+    /// then the frame just below this one ([`eval::frame_sys_parent`]).
     pub sys_parent: Sexp,
+    /// For a slot frame, the register that holds its environment once it has one, followed by
+    /// its slots (`docs/src/content/docs/development/design/slot-frames.md`); [`NO_SLOTS`] for
+    /// a frame that has an environment from the start.
+    pub slots: u32,
+    /// For a slot frame, bit `i` is set while formal `i` is missing (`missing()`).
+    pub missing: u64,
     /// Where the call's arguments (values or promises, with the tags the call gave them) start
     /// in [`Interp::frame_args`]; they run up to the next frame's start. `sys.function`'s
     /// pairlist of them is built only when dispatch asks for it, so a call allocates none.
@@ -149,6 +159,9 @@ pub struct Frame {
     /// Where this call's entries in [`Interp::frame_closures`] start.
     pub closures: usize,
 }
+
+/// [`Frame::slots`] of a frame that keeps its variables in an environment.
+pub const NO_SLOTS: u32 = u32::MAX;
 
 /// The arguments of the frame at `index` (zero-based), as the call passed them.
 pub fn frame_args(state: &Interp, index: usize) -> &[Arg] {

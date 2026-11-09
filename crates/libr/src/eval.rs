@@ -184,11 +184,12 @@ impl Evaluator for Interpreter {
         interp::print::print_value_top(value, env)
     }
 
-    unsafe fn current_env(&self) -> Sexp {
-        interp::interp()
-            .frames
-            .last()
-            .map_or(runtime().heap.known().global_env, |frame| frame.env)
+    unsafe fn current_env(&self) -> ApiResult<Sexp> {
+        // Handing the environment to native code reifies a slot frame.
+        match interp::interp().frames.len() {
+            0 => Ok(runtime().heap.known().global_env),
+            count => Ok(interp::eval::frame_env(count - 1)?),
+        }
     }
 
     unsafe fn current_srcref(&self, skip: c_int) -> ApiResult<Sexp> {
@@ -253,7 +254,7 @@ pub trait Evaluator: Sync {
 
     /// The environment of the innermost closure call on the stack, or the global environment
     /// at top level, as `R_GetCurrentEnv` reports it.
-    unsafe fn current_env(&self) -> Sexp;
+    unsafe fn current_env(&self) -> ApiResult<Sexp>;
 
     /// The source reference of a call on the stack, as `R_GetCurrentSrcref(skip)` reports it:
     /// with `skip >= 0`, `skip` frames above the innermost; with `skip < 0`, the `-skip`th frame
@@ -797,7 +798,7 @@ unsafe fn native_call(
             if external2 {
                 call_native(
                     function,
-                    &[call, builtin_call.op, list, builtin_call.env],
+                    &[call, builtin_call.op, list, builtin_call.env()?],
                     ".External2",
                 )
             } else {
@@ -1821,10 +1822,10 @@ pub unsafe fn call_namespaced(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_GetCurrentEnv() -> Sexp {
     enter(|| {
-        Ok(match evaluator() {
+        match evaluator() {
             Some(evaluator) => evaluator.current_env(),
-            None => runtime().heap.known().global_env,
-        })
+            None => Ok(runtime().heap.known().global_env),
+        }
     })
 }
 

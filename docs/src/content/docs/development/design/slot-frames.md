@@ -40,30 +40,40 @@ and reify it only when the promise outlives the call.
 
 ## The shape
 
-- **Slots.** The compiler numbers every symbol a body binds when `local_symbols` succeeds, which
-  means the body has no `assign`, `eval`, `local`, `sys.function` or similar (`collect_bindings` in
-  `crates/interp/src/bytecode.rs`). Formals come first, in order. The activation reserves that
-  many slots after its registers, and `GetSlot`/`SetSlot` replace `GetVar`/`SetVar` for them. A
-  body whose symbols cannot be numbered keeps today's heap frame from the start.
-- **Values, counts and flags.** A slot holds the value and counts one reference, exactly as a
-  binding cell does, so copy-on-modify is unchanged. A per-frame bitset holds what a cell keeps in
-  its flags: missing, and assigned since the call began (which `missing()` needs).
-- **Binding by plan.** Each call site and callee pair keeps a matching plan in the site's cache. A
-  positional call copies argument `i` into slot `i`, and a named call applies the plan's
-  permutation. Defaults that are not literals become promises only when the slot is read while
-  missing.
-- **Reification.** On the first trigger below, the frame gets an environment object. One binding
-  cell is created per bound slot, the slot then holds that cell instead of a value, and a mode bit
-  on the activation switches `GetSlot`/`SetSlot` to read and write through the cell. From then on
-  the environment is the source of truth, as today, and nothing is copied back.
-- **Frame identity.** `Frame.env` becomes a lazily filled field. Everything that today compares
-  environments to find a frame (`return`, `break`, `parent.frame`, `sys.parent`, `on.exit`,
-  condition targets) compares a frame index and generation instead, and reifies only when it hands an
-  environment to R code. `Frame.sys_parent` becomes a reference to the calling frame for the same
-  reason. Otherwise every call would reify its caller.
-- **Release.** A frame that was never reified drops its slots' references on return, which
-  replaces `release_frame` and `clear_frame` for those calls. A reified frame is released as
-  today.
+The first step is built (`bind_slots` and `reify` in `crates/interp/src/eval.rs`). This section
+describes it, and the open gaps are marked.
+
+- **Which calls get a slot frame.** The compiler gives a body a slot table (`SLOTS` in its
+  constants) when `local_symbols` succeeds, which means the body has no `assign`, `eval`, `local`,
+  `environment`, `sys.function`, `on.exit`, `Recall` or similar (`collect_bindings` in
+  `crates/interp/src/bytecode.rs`), it has no `...` formal and at most 64 formals, and it does not
+  open with a base fast-path prologue (`base_fast_paths::has_prologue`), which reads its frame as an
+  environment. At the call, `bind_slots` also refuses a closure with tier-1 or baseline machine code
+  (which reads variables through the environment), a closure under the debugger or a type signature,
+  and a call where a missing formal has a default that is not a literal. Those calls bind a heap
+  frame as before.
+- **Layout.** The activation reserves `1 + n` registers above its own: a header register, then one
+  slot per symbol the table numbers, formals first in order. The header holds the frame's
+  environment once it has one, and `R_NilValue` before. A slot holds a value and counts one
+  reference, as a binding cell does, so copy-on-modify is unchanged. An unassigned local holds the
+  unbound marker, and the frame record keeps one missing bit per formal (`Frame.missing`, a `u64`).
+  The slots are GC roots because the whole register file is.
+- **Reads and writes.** `GetVar`/`SetVar` on a numbered symbol read and write the slot while the
+  header is nil, and the environment after. Builtins that only read a frame property take the
+  frame's index (`Call::frame_index`) instead of its environment.
+- **Reification.** `reify` builds the environment from the slots exactly as `bind_arguments` and
+  the assignments since would have: formals first with their missing flags, then each bound local.
+  The slots then drop their references, the header and `Frame.env` point at the environment, and
+  from then on the environment is the source of truth. Nothing is copied back.
+- **Frame identity.** `Frame.env` is filled lazily, and `Frame.sys_parent` is nil while the caller
+  is an unreified slot frame, which then is the frame just below (`envir::caller_index`).
+  `frame_env(index)` and `frame_sys_parent(index)` are the only ways to get either as an `SEXP`, and
+  both reify on demand.
+- **Release.** A frame that was never reified drops its slots' references on return instead of
+  `release_frame` and `clear_frame`.
+- **Not built.** Binding by a per-site plan (`bind_slots` matches by name through the shared match
+  cache), promises for non-literal defaults without an environment, and slot access from the JIT's
+  tiers.
 
 ## Reification triggers
 

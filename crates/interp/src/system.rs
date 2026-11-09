@@ -4430,7 +4430,7 @@ unsafe fn debugged_function(call: &Call<'_>) -> R<Sexp> {
     let mut function = call.arg(0);
     if function.kind() == SexpType::String && length(function) == 1 {
         let name = values::as_string_scalar(function)?.unwrap_or_default();
-        function = crate::eval::find_fun(values::install(&name)?, call.env)?;
+        function = crate::eval::find_fun(values::install(&name)?, call.env()?)?;
     }
     match function.kind() {
         SexpType::Closure | SexpType::Builtin | SexpType::Special => Ok(function),

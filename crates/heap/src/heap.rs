@@ -1875,6 +1875,35 @@ impl Heap {
         self.drop_enclosure(env);
     }
 
+    /// Stores `value` into a slot of a closure call's slot frame, which counts one reference to
+    /// what it holds, as a binding cell does. Slots live in the interpreter's register file, a
+    /// root, so the store needs no write barrier.
+    #[inline(always)]
+    pub unsafe fn store_slot(&mut self, slot: &mut Sexp, value: Sexp) {
+        value.increment_refcount();
+        if slot.release_reference() {
+            self.note_zero(*slot);
+        }
+        *slot = value;
+    }
+
+    /// Gives up the references a returning call's slot frame holds, as [`Heap::clear_frame`]
+    /// does for a frame's bindings: an argument's promise that only its slot holds gives up its
+    /// value and environment too.
+    pub unsafe fn release_slots(&mut self, slots: &mut [Sexp]) {
+        let nil = self.known.nil;
+        for slot in slots {
+            let value = *slot;
+            if value.kind() == SexpType::Promise && value.refcount() == 1 {
+                self.release_promise(value);
+            }
+            if value.release_reference() {
+                self.note_zero(value);
+            }
+            *slot = nil;
+        }
+    }
+
     /// Releases the frames that waited for a reconcile ([`Heap::release_frame`]), in the order
     /// their calls returned, so a callee's frame gives up its promises before its caller's frame
     /// is counted. The roots are flagged [`gc_bits::HELD`]; `frames_held` are the frames a root

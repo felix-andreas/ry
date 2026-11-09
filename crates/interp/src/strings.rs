@@ -133,7 +133,7 @@ unsafe fn paste(
         // Every element of a column is read, so a deferred column converts in one batch.
         columns.push(values::materialize(as_character(
             list.element(index),
-            call.env,
+            call.env()?,
         )?)?);
     }
     let lengths: Vec<usize> = columns.iter().map(|&column| length(column)).collect();
@@ -702,7 +702,7 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
         {
             let argument = &mut arguments[conversion.argument];
             if argument.text.is_none() && argument.value.is_object() {
-                let text = as_character(argument.value, call.env)?;
+                let text = as_character(argument.value, call.env()?)?;
                 argument.text = Some(text);
                 argument.length = length(text);
             }
@@ -729,7 +729,7 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
                         conversion,
                         &mut arguments,
                         row,
-                        call.env,
+                        call.env()?,
                     )?);
                 }
             }

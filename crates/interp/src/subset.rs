@@ -1574,9 +1574,9 @@ unsafe fn do_dollar(call: &Call<'_>) -> R<Sexp> {
             call.len()
         )));
     }
-    let object = eval::eval(call.arg(0), call.env)?;
+    let object = eval::eval(call.arg(0), call.env()?)?;
     let name = name_argument(call.arg(1))?;
-    dollar_value(object, name, call.call, call.env)
+    dollar_value(object, name, call.call, call.env()?)
 }
 
 /// `object$name` once the subject is evaluated: an object dispatches with the name as a string.
@@ -1678,7 +1678,7 @@ unsafe fn slot_symbol(value: Sexp) -> R<Sexp> {
 /// `object@name`. Only S4 objects have slots: on any other object `@` reads `.Data` (the
 /// object itself) or dispatches an S3 `@` method, and otherwise is an error.
 unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
-    let object = eval::eval(call.arg(0), call.env)?;
+    let object = eval::eval(call.arg(0), call.env()?)?;
     let symbol = slot_symbol(call.arg(1))?;
     // Since R 4.3 `@` is an internal generic for S3 objects, which is how S7 reads properties.
     if object.is_object() && !object.has_gp(gp::S4_OBJECT) {
@@ -1692,7 +1692,7 @@ unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
                 value: values::scalar_string_charsxp(symbol.car())?,
             },
         ];
-        if let Some(value) = crate::dispatch::dispatch_builtin("@", call.call, &args, call.env)? {
+        if let Some(value) = crate::dispatch::dispatch_builtin("@", call.call, &args, call.env()?)? {
             return Ok(value);
         }
     }
@@ -1883,9 +1883,9 @@ unsafe fn interp_methods_function(name: &str) -> R<Option<Sexp>> {
 }
 
 unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
-    let object = eval::eval(call.arg(0), call.env)?;
+    let object = eval::eval(call.arg(0), call.env()?)?;
     let symbol = slot_symbol(call.arg(1))?;
-    let value = eval::eval(call.arg(2), call.env)?;
+    let value = eval::eval(call.arg(2), call.env()?)?;
     if object.is_object() && !object.has_gp(gp::S4_OBJECT) {
         let args = [
             Arg {
@@ -1901,7 +1901,7 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
                 value,
             },
         ];
-        if let Some(result) = crate::dispatch::dispatch_builtin("@<-", call.call, &args, call.env)?
+        if let Some(result) = crate::dispatch::dispatch_builtin("@<-", call.call, &args, call.env()?)?
         {
             return Ok(result);
         }
@@ -2915,9 +2915,9 @@ unsafe fn missing_subscript(call: Sexp, fields: &[(&str, Sexp)]) -> Unwind {
 }
 
 unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
-    let object = eval::eval(call.arg(0), call.env)?;
+    let object = eval::eval(call.arg(0), call.env()?)?;
     let name = name_argument(call.arg(1))?;
-    let value = eval::eval(call.arg(2), call.env)?;
+    let value = eval::eval(call.arg(2), call.env()?)?;
     if object.is_object() {
         let name_string = values::scalar_string_charsxp(name)?;
         let args = [
@@ -2934,7 +2934,7 @@ unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
                 value,
             },
         ];
-        if let Some(result) = crate::dispatch::dispatch_builtin("$<-", call.call, &args, call.env)?
+        if let Some(result) = crate::dispatch::dispatch_builtin("$<-", call.call, &args, call.env()?)?
         {
             return Ok(result);
         }
@@ -3471,7 +3471,7 @@ unsafe fn do_lengths(call: &Call<'_>) -> R<Sexp> {
             // A classed element answers with its own `length` method, S4 ones included
             // (Matrix's sparse vectors).
             SexpType::List | SexpType::Expression => {
-                dispatch_length(object.element(index), call.env)?
+                dispatch_length(object.element(index), call.env()?)?
             }
             _ => 1,
         };
@@ -3534,7 +3534,7 @@ unsafe fn do_set_names(call: &Call<'_>) -> R<Sexp> {
     {
         crate::heap().root(object);
         let function = values::install("as.character")?;
-        eval::eval(values::call(function, &[names])?, call.env)?
+        eval::eval(values::call(function, &[names])?, call.env()?)?
     } else {
         names
     };
@@ -3864,7 +3864,8 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
             call,
             op: function,
             args: &args,
-            env: values::global_env(),
+            rho: values::global_env(),
+            frame: crate::NO_SLOTS,
             reusable: None,
         };
         let result = do_set_dim(&context)?;
@@ -4438,14 +4439,14 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
         return Err(call.error("argument \"deparse.level\" is missing"));
     };
     let level_missing =
-        level.value.kind() == SexpType::Symbol && eval::is_missing(level.value, call.env)?;
-    let level_value = eval::eval(level.value, call.env)?;
+        level.value.kind() == SexpType::Symbol && eval::is_missing(level.value, call.env()?)?;
+    let level_value = eval::eval(level.value, call.env()?)?;
     let deparse_level = values::as_integer_scalar(level_value);
     let mut items: Vec<Arg> = Vec::with_capacity(rest.len());
     let mut expressions: Vec<Sexp> = Vec::with_capacity(rest.len());
     for arg in rest {
         if arg.value == symbols().dots {
-            let dots = eval::find_var(symbols().dots, call.env)?;
+            let dots = eval::find_var(symbols().dots, call.env()?)?;
             let mut cell = dots;
             while matches!(cell.kind(), SexpType::Dots | SexpType::Pairlist) {
                 let item = cell.car();
@@ -4463,7 +4464,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
         } else {
             items.push(Arg {
                 tag: arg.tag,
-                value: eval::eval(arg.value, call.env)?,
+                value: eval::eval(arg.value, call.env()?)?,
             });
             expressions.push(arg.value);
         }
@@ -4481,7 +4482,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             let symbol =
                 values::install(&format!("{generic}.{}", char_str(classes.element(index))))?;
             if let Some(method) =
-                crate::dispatch::lookup_method(symbol, call.env, values::base_namespace())?
+                crate::dispatch::lookup_method(symbol, call.env()?, values::base_namespace())?
             {
                 // The method sees promises, so `data.frame` inside `cbind.data.frame` names a
                 // column after its argument expression.
@@ -4498,7 +4499,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                         value: eval::forced_promise(expression, item.value)?,
                     });
                 }
-                return eval::apply(call.call, method, &arguments, call.env);
+                return eval::apply(call.call, method, &arguments, call.env()?);
             }
         }
     }
@@ -4525,7 +4526,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                         value: eval::forced_promise(expression, item.value)?,
                     });
                 }
-                return eval::apply(call.call, function, &arguments, call.env);
+                return eval::apply(call.call, function, &arguments, call.env()?);
             }
         }
     }
@@ -4565,9 +4566,8 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     let mut warned = false;
     // The warning names the `rbind` or `cbind` closure call, not the internal.
     let frames = &crate::interp().frames;
-    let closure_call = frames
-        .iter()
-        .rposition(|frame| frame.env == call.env)
+    let closure_call = call
+        .frame_index()
         .map_or(call.call, |position| frames[position].call);
     for (arg, &position) in items.iter().zip(&positions) {
         match values::dims(arg.value).filter(|dims| dims.len() == 2) {

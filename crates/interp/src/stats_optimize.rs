@@ -138,7 +138,7 @@ unsafe fn scalar_objective(
     crate::scope(|| {
         let argument = values::scalar_real(x)?;
         let expression = values::call(function, &[argument])?;
-        let value = eval::eval(expression, call.env)?;
+        let value = eval::eval(expression, call.env()?)?;
         match value.kind() {
             SexpType::Integer | SexpType::Logical if length(value) == 1 => {
                 let entry = values::ints(value)[0];
@@ -401,7 +401,7 @@ impl Problem<'_> {
                 values::set_attr(argument, symbols().names, names)?;
             }
             let expression = values::call(function, &[argument])?;
-            let value = eval::eval(expression, call.env)?;
+            let value = eval::eval(expression, call.env()?)?;
             if length(value) != 1 {
                 return Err(call.error(format!(
                     "objective function in optim evaluates to length {} not 1",
@@ -432,7 +432,7 @@ impl Problem<'_> {
                     values::set_attr(argument, symbols().names, names)?;
                 }
                 let expression = values::call(gradient, &[argument])?;
-                let value = eval::eval(expression, call.env)?;
+                let value = eval::eval(expression, call.env()?)?;
                 if length(value) != n {
                     return Err(call.error(format!(
                         "gradient in optim evaluated to length {} not {n}",
@@ -1415,7 +1415,7 @@ unsafe fn candidate_from_r(problem: &Problem<'_>, point: &[f64]) -> R<Vec<f64>> 
             values::set_attr(argument, symbols().names, names)?;
         }
         let expression = values::call(gradient, &[argument])?;
-        let value = eval::eval(expression, call.env)?;
+        let value = eval::eval(expression, call.env()?)?;
         if length(value) != n {
             return Err(call.error(format!(
                 "candidate point in 'optim' evaluated to length {} not {n}",

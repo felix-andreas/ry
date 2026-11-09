@@ -67,10 +67,36 @@ pub struct Call<'a> {
     /// The primitive object being called.
     pub op: Sexp,
     pub args: &'a [Arg],
-    pub env: Sexp,
+    /// The environment the call was made from, or `NULL` when it was made from the slot frame
+    /// at `frame`, which has no environment yet. Read it through [`Call::env`] to hand the
+    /// environment on, or [`Call::frame_index`] to read the calling frame's record.
+    pub rho: Sexp,
+    /// The calling frame's position in the frame stack when `rho` is `NULL`.
+    pub frame: u32,
     /// The first argument when the binding this call's result is assigned to holds its only
     /// reference, as in `d <- Dict.insert(d, k, v)`: the builtin may then update it in place.
     pub reusable: Option<Sexp>,
+}
+
+impl Call<'_> {
+    /// The environment the call was made from, made from the calling slot frame's slots first
+    /// if it has none (`docs/src/content/docs/development/design/slot-frames.md`).
+    #[inline]
+    pub unsafe fn env(&self) -> R<Sexp> {
+        if self.rho != nil() || self.frame == crate::NO_SLOTS {
+            return Ok(self.rho);
+        }
+        crate::eval::frame_env(self.frame as usize)
+    }
+
+    /// The position in the frame stack of the closure frame the call was made from, without
+    /// giving a slot frame its environment; `None` when it was made from no closure frame.
+    pub unsafe fn frame_index(&self) -> Option<usize> {
+        if self.rho == nil() {
+            return (self.frame != crate::NO_SLOTS).then_some(self.frame as usize);
+        }
+        crate::envir::frame_of(self.rho)
+    }
 }
 
 pub type BuiltinFn = unsafe fn(&Call<'_>) -> R<Sexp>;

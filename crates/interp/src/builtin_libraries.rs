@@ -32,13 +32,17 @@ pub struct NativeCall<'a> {
     /// graphics device replays its display list.
     pub call: Sexp,
     pub args: &'a [Arg],
-    pub env: Sexp,
     /// The foreign call itself, whose primitive and arguments a graphics routine records on
     /// the display list.
     pub foreign: &'a Call<'a>,
 }
 
 impl NativeCall<'_> {
+    /// The environment the foreign call was made from.
+    pub unsafe fn env(&self) -> R<Sexp> {
+        self.foreign.env()
+    }
+
     pub fn arg(&self, index: usize) -> Sexp {
         self.args.get(index).map_or_else(nil, |arg| arg.value)
     }
@@ -184,7 +188,7 @@ pub unsafe fn symbol_info(name: &str, package: Option<&str>) -> R<Option<Sexp>> 
 /// Runs a foreign call whose `.NAME` is a routine of a builtin library. `None` means `.NAME`
 /// is something else, which the caller resolves as native code.
 pub unsafe fn try_call(foreign: &Call<'_>) -> R<Option<Sexp>> {
-    let (call, args, env) = (foreign.call, foreign.args, foreign.env);
+    let (call, args) = (foreign.call, foreign.args);
     let Some((first, rest)) = args.split_first() else {
         return Ok(None);
     };
@@ -238,7 +242,6 @@ pub unsafe fn try_call(foreign: &Call<'_>) -> R<Option<Sexp>> {
     let native = NativeCall {
         call,
         args: &routine_args,
-        env,
         foreign,
     };
     if routine.3 >= 0 && routine.3 as usize != routine_args.len() {
