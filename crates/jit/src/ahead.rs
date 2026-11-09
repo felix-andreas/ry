@@ -12,7 +12,8 @@
 //! Every function the code calls by name is a check the code needs: a base builtin such as `+`
 //! must still be that builtin, and a sibling must still be the closure the code was compiled
 //! from. A call checks them once its namespace is locked, and the result holds until a binding
-//! is unlocked anywhere ([`interp::code_image::unlocks`]), because a locked binding cannot
+//! is unlocked anywhere or a closure is flagged for debugging ([`interp::code_image::check_epoch`]),
+//! because a locked binding cannot
 //! change and unlocking is the only way to change one (`unlockBinding`, `assignInNamespace`).
 //! A sibling still waiting in its lazy-load promise passes: the image matched its database
 //! record by record, so the promise can only make that closure.
@@ -352,8 +353,13 @@ unsafe fn checks(
         } else {
             return Err("a call of a function from outside the package");
         };
+        let name = values::symbol_name(*symbol);
+        // The manifest stores a name's length in 16 bits.
+        if name.len() > usize::from(u16::MAX) {
+            return Err("a name longer than 65,535 bytes");
+        }
         let check = Check {
-            symbol: values::symbol_name(*symbol).as_ref().into(),
+            symbol: name.as_ref().into(),
             expected,
         };
         if !checks.contains(&check) {
@@ -642,10 +648,10 @@ struct Section {
     functions: FxHashMap<(u32, u32), SmallVec<[Mapped; 2]>>,
 }
 
-/// A closure with native code: where its code lies, and per function, the [`unlocks`] count
+/// A closure with native code: where its code lies, and per function, the [`check_epoch`]
 /// plus one at which its checks last passed (0 for never).
 ///
-/// [`unlocks`]: interp::code_image::unlocks
+/// [`check_epoch`]: interp::code_image::check_epoch
 struct Attached {
     section: u32,
     entry: u32,
@@ -774,10 +780,11 @@ unsafe fn call(function: Sexp, args: &[Arg]) -> Option<R<Sexp>> {
 }
 
 /// Whether every name function `index` of `function`'s native code looks up still finds what
-/// the code was compiled against. A pass is remembered while no binding is unlocked, once every
-/// binding it read is locked.
+/// the code was compiled against. A pass is remembered until [`interp::code_image::check_epoch`]
+/// moves, once every binding it read and every frame a lookup walked is locked, since no binding
+/// can then appear in front of the one found.
 unsafe fn checks_hold(function: Sexp, section: u32, entry: u32, ordinal: u32, index: usize) -> bool {
-    let stamp = interp::code_image::unlocks() + 1;
+    let stamp = interp::code_image::check_epoch() + 1;
     let remembered = ATTACHED.with_borrow(|attached| {
         attached
             .get(&function)
@@ -797,15 +804,16 @@ unsafe fn checks_hold(function: Sexp, section: u32, entry: u32, ordinal: u32, in
     }) else {
         return false;
     };
-    let mut all_locked = env.has_gp(gp::FRAME_LOCKED);
+    let mut all_locked = true;
     for (symbol, expected) in &checks {
         match lookup(env, *symbol) {
             Some(Found {
                 value,
                 locked,
                 in_first_frame,
+                frames_locked,
             }) => {
-                all_locked &= locked;
+                all_locked &= locked && frames_locked;
                 let holds = match expected {
                     Expected::Builtin(name) => value
                         .is_some_and(|value| base_builtin(value, *symbol) == Some(&**name)),
@@ -816,15 +824,22 @@ unsafe fn checks_hold(function: Sexp, section: u32, entry: u32, ordinal: u32, in
                         in_first_frame
                             && match value {
                                 // A promise the namespace still waits on makes the closure its
-                                // record holds, which is the sibling.
-                                None => true,
-                                Some(value) => ATTACHED.with_borrow(|attached| {
-                                    attached.get(&value).is_some_and(|found| {
-                                        found.section == section
-                                            && found.entry == *sibling_entry
-                                            && found.ordinal == *sibling_ordinal
+                                // record holds, which is the sibling, but only while the binding
+                                // is locked: an unlocked one may hold a promise of anything.
+                                None => locked,
+                                // Native code calls the sibling directly, so a sibling flagged
+                                // for the debugger or a trace must be called through R.
+                                Some(value) => {
+                                    !value.has_gp(
+                                        gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE,
+                                    ) && ATTACHED.with_borrow(|attached| {
+                                        attached.get(&value).is_some_and(|found| {
+                                            found.section == section
+                                                && found.entry == *sibling_entry
+                                                && found.ordinal == *sibling_ordinal
+                                        })
                                     })
-                                }),
+                                }
                             }
                     }
                 };
@@ -849,11 +864,13 @@ unsafe fn checks_hold(function: Sexp, section: u32, entry: u32, ordinal: u32, in
 }
 
 /// What a lookup found: the value (`None` for a promise not forced yet), whether its binding is
-/// locked, and whether it is bound in the environment the lookup started from.
+/// locked, whether it is bound in the environment the lookup started from, and whether every
+/// frame the lookup walked, the one it found the binding in included, is locked.
 struct Found {
     value: Option<Sexp>,
     locked: bool,
     in_first_frame: bool,
+    frames_locked: bool,
 }
 
 /// The binding a variable lookup of `symbol` from `start` finds, without forcing or calling
@@ -862,7 +879,9 @@ unsafe fn lookup(start: Sexp, symbol: Sexp) -> Option<Found> {
     let heap = interp::heap();
     let empty = heap.known().empty_env;
     let mut env = start;
+    let mut frames_locked = true;
     while env != empty {
+        frames_locked &= env.has_gp(gp::FRAME_LOCKED);
         if let Some(cell) = heap.frame_cell(env, symbol) {
             if cell.has_gp(gp::ACTIVE_BINDING) {
                 return None;
@@ -877,6 +896,7 @@ unsafe fn lookup(start: Sexp, symbol: Sexp) -> Option<Found> {
                 value,
                 locked: cell.has_gp(gp::BINDING_LOCKED),
                 in_first_frame: env == start,
+                frames_locked,
             });
         }
         env = env.enclosure();

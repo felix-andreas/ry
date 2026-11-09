@@ -875,7 +875,7 @@ unsafe fn do_lock_binding(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_unlock_binding(call: &Call<'_>) -> R<Sexp> {
     binding_cell(call)?.set_gp_bits(gp::BINDING_LOCKED, false);
-    crate::code_image::binding_unlocked();
+    crate::code_image::invalidate_checks();
     Ok(nil())
 }
 

@@ -61,7 +61,7 @@ use {
     },
     heap::{
         image::{Reader, Writer},
-        object::{Sexp, SexpType},
+        object::{Sexp, SexpType, gp},
     },
     rustc_hash::FxHashMap,
     std::{
@@ -122,18 +122,38 @@ pub fn native_hooks() -> Option<&'static NativeHooks> {
 }
 
 thread_local! {
-    static UNLOCKS: Cell<u64> = const { Cell::new(0) };
+    static CHECK_EPOCH: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Notes that a binding was unlocked, which may let it change: native code checked against the
-/// bindings it calls checks them again.
-pub fn binding_unlocked() {
-    UNLOCKS.with(|count| count.set(count.get() + 1));
+/// Notes a change that can make a name native code looks up find something else, or make a
+/// closure it calls directly need the interpreter: a binding or an environment unlocked, or a
+/// closure flagged for debugging or tracing. Native code checks its names again after it.
+pub fn invalidate_checks() {
+    CHECK_EPOCH.with(|count| count.set(count.get() + 1));
 }
 
-/// How many bindings were ever unlocked: a check of locked bindings holds while this stays.
-pub fn unlocks() -> u64 {
-    UNLOCKS.with(Cell::get)
+/// How many times [`invalidate_checks`] ran: a check that passed holds while this stays.
+pub fn check_epoch() -> u64 {
+    CHECK_EPOCH.with(Cell::get)
+}
+
+/// Sets `object`'s general-purpose bits for C code (`SET_ENVFLAGS`, `SETLEVELS`), which can
+/// unlock an environment or flag a closure for debugging without going through R.
+///
+/// # Safety
+///
+/// `object` must be a live object.
+pub unsafe fn set_flags_from_c(object: Sexp, bits: u16) {
+    let before = object.gp();
+    object.set_gp(bits);
+    let unlocked = object.kind() == SexpType::Environment
+        && before & gp::FRAME_LOCKED != 0
+        && bits & gp::FRAME_LOCKED == 0;
+    let debug = gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE;
+    let flagged = object.kind() == SexpType::Closure && bits & debug & !before != 0;
+    if unlocked || flagged {
+        invalidate_checks();
+    }
 }
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -259,15 +279,22 @@ fn drop_pending(state: &mut State, database: &str) {
 
 /// Stops using the image of `database` after it turned out damaged, with one warning: the image
 /// only saves compiling, so its package goes on loading and its functions compile as they run.
-unsafe fn give_up(database: &str, message: &str) -> R<()> {
+unsafe fn give_up(database: &str, message: &str) {
     let state = &mut interp().code_image;
     state.images.insert(database.to_owned(), None);
     drop_pending(state, database);
-    crate::conditions::warning(format!(
+    report_damage(&format!(
         "cannot use the code image {} ({message}), so its functions compile as they run; \
          reinstall the package to repair it",
         path(database).display()
-    ))
+    ));
+}
+
+/// Prints a warning about a damaged image to the console. It describes a file on disk, not the
+/// program, so it is not signalled as a condition: a handler or `options(warn = 2)` turning it
+/// into an error would make a lazy-load fetch fail over a cache that only saves compiling.
+fn report_damage(message: &str) {
+    crate::write_console(format!("Warning: {message}\n").as_bytes(), true);
 }
 
 /// A lazy-load record as the image identifies it: where it starts in its database, and the length
@@ -311,7 +338,7 @@ pub unsafe fn wants(database: &str) -> R<bool> {
             Ok(image) => {
                 state.images.insert(database.to_owned(), image);
             }
-            Err(message) => give_up(database, &message)?,
+            Err(message) => give_up(database, &message),
         }
     }
     Ok(matches!(
@@ -342,7 +369,7 @@ pub unsafe fn read_record(database: &str, record: Record, data: &[u8], hook: Sex
     let (value, closures) = serialize::unserialize_with_closures(data, hook)?;
     crate::heap().root(value);
     if let Err(message) = note_pending(&image, entry, database, &closures) {
-        give_up(database, &message)?;
+        give_up(database, &message);
     }
     attach_native(&image, entry, database, &closures)?;
     Ok(value)
@@ -379,7 +406,7 @@ pub unsafe fn take_pending(function: Sexp, body: Sexp) -> R<Option<Sexp>> {
             Ok(Some(code))
         }
         Err(message) => {
-            give_up(&pending.database, &message)?;
+            give_up(&pending.database, &message);
             Ok(None)
         }
     }
@@ -492,11 +519,12 @@ unsafe fn attach_native(image: &Image, entry: usize, database: &str, closures: &
                 }
                 Ok(None) => return Ok(()),
                 Err(message) => {
-                    return crate::conditions::warning(format!(
+                    report_damage(&format!(
                         "cannot use the code image {} ({message}), so its functions run without \
                          its machine code; reinstall the package to repair it",
                         path(database).display()
                     ));
+                    return Ok(());
                 }
             }
         }

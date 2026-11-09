@@ -597,9 +597,11 @@ the trained profile below, and the native code it reserves room for.
 - **Damage.** The image only saves compiling, so a damaged one never stops a package from loading.
   A file that cannot be read or parsed, a payload whose hash does not match (checked when the first
   closure of its record is called), a record whose closures do not match the database's, or code
-  the decoder rejects each warn once (`cannot use the code image ..., so its functions compile as
-  they run; reinstall the package to repair it`). The image is then ignored for the rest of the
-  session, and its waiting code is dropped.
+  the decoder rejects each print one warning to the console (`cannot use the code image ..., so its
+  functions compile as they run; reinstall the package to repair it`). The warning is not
+  signalled as a condition, so neither a handler nor `options(warn = 2)` can turn the damage into
+  an error. The image is then ignored for the rest of the session, and its waiting code is
+  dropped.
 - **Verified code.** Tier 0 reads instruction operands, registers, inline-cache slots and jump
   targets without bounds checks, so decoded code passes a linear verifier (`verify` in
   `crates/interp/src/bytecode.rs`) before it runs: every opcode is known, every operand is below its

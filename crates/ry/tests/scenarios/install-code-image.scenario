@@ -117,6 +117,18 @@ expect stdout "[1] 55"
 expect stdout "[1] 1 0 3"
 expect stderr "cannot use the code image"
 
+# The warning is printed, not signalled, so even `options(warn = 2)` cannot turn the damage into
+# an error.
+file strict.R
+| options(warn = 2)
+| library(tally, lib.loc = "library")
+| print(tally(1:10))
+| print(twice(4))
+run ry run --runtime ry strict.R
+expect exit 0
+expect stdout "[1] 55"
+expect stderr "cannot use the code image"
+
 run ry run --runtime ry truncate.R
 expect exit 0
 run ry run --runtime ry use.R
