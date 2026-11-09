@@ -5850,29 +5850,20 @@ unsafe fn lookup_function_outside(
     eval::find_called_fun(symbol, env, call)
 }
 
-/// [`lookup_function`] for a symbol the frame cannot bind: the frame is not probed.
+/// [`lookup_function`] for a symbol the frame cannot bind, walking from the frame's `enclosure`
+/// so the frame itself is neither needed nor probed. The cache is filled under the same first
+/// environment that is not a function frame as the guard's fast path reads it under.
 #[inline(always)]
 unsafe fn lookup_enclosing_function(
     symbol: Sexp,
-    start: Sexp,
+    enclosure: Sexp,
     cache: LookupCache,
     slot: usize,
 ) -> R<Sexp> {
-    if let Ok(enclosure) = outside_function_frames(symbol, start, &mut *cache.hints.add(slot))
-        && let Some(cell) = cached_cell(symbol, enclosure, cache, slot)
-        && !cell.has_gp(gp::ACTIVE_BINDING)
-    {
-        let mut value = cell.cdr();
-        if value.kind() == SexpType::Promise && value.car() != unbound() {
-            value = value.car();
-        }
-        if values::is_function(value) {
-            return Ok(value);
-        }
+    match outside_function_frames(symbol, enclosure, &mut *cache.hints.add(slot)) {
+        Ok(outside) => lookup_function_outside(symbol, enclosure, outside, cache, slot, unbound()),
+        Err(_) => eval::find_called_fun(symbol, enclosure, unbound()),
     }
-    // The frame cannot bind `symbol`, so the lookup from its enclosure finds what the lookup
-    // from the frame would.
-    lookup_function(symbol, start, cache, slot, unbound())
 }
 
 /// The first environment from `env` outward that is not a function frame, or the cell of the
