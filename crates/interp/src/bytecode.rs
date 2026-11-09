@@ -4127,7 +4127,9 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
     if target < at {
         if let Err(unwind) = crate::unwind::poll_interrupt() {
             pc = failed::<SINGLE>(state, at, unwind);
-        } else if let Some(tier) = &(*state.interp).bytecode.tier {
+        } else if let Some(tier) = &(*state.interp).bytecode.tier
+            && back_edge_due(state, tier)
+        {
             match back_edge(state, tier, pc) {
                 BackEdge::Continue(resume) => pc = resume,
                 BackEdge::Finished(result) => {
@@ -4164,7 +4166,9 @@ unsafe extern "C" fn step_jump(state: *mut std::ffi::c_void, at: usize) -> usize
         if target < at {
             if let Err(unwind) = crate::unwind::poll_interrupt() {
                 pc = failed::<false>(state, at, unwind);
-            } else if let Some(tier) = &(*state.interp).bytecode.tier {
+            } else if let Some(tier) = &(*state.interp).bytecode.tier
+                && back_edge_due(state, tier)
+            {
                 match back_edge(state, tier, pc) {
                     BackEdge::Continue(resume) => pc = resume,
                     BackEdge::Finished(result) => {
@@ -4854,11 +4858,24 @@ enum BackEdge {
     Unwound { pc: usize, unwind: Unwind },
 }
 
+/// Counts a backward jump and answers whether it reaches a count [`back_edge`] acts on. Every
+/// backward jump of every loop pays this, so it is one increment and three comparisons, inlined
+/// into the jump; the rest waits in [`back_edge`] for the counts that need it.
+#[inline(always)]
+unsafe fn back_edge_due(state: &mut Activation<'_, '_>, tier: &Tier) -> bool {
+    let profile = values::ints_mut(state.constants.element(PROFILE));
+    let count = profile[profile::BACK_EDGES].saturating_add(1);
+    profile[profile::BACK_EDGES] = count;
+    count >= tier.back_edge_threshold
+        || count == tier.back_edge_threshold / 2
+        || count == tier.baseline_threshold
+}
+
 #[inline(never)]
+#[cold]
 unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> BackEdge {
     let machine = &mut *state.machine;
     let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
-    profile[profile::BACK_EDGES] = profile[profile::BACK_EDGES].saturating_add(1);
     if profile[profile::BACK_EDGES] == tier.back_edge_threshold / 2
         && machine.code.cdr().element(TIER1) == nil()
     {

@@ -425,10 +425,18 @@ unsafe fn compiled_for<'a>(
                     // again, which a counter already past that point would never do.
                     counters[profile::BACK_EDGES] = 0;
                 } else if reason == analysis::RARE {
-                    // The window reopens on the way back to the threshold, so the next attempt
-                    // measures the rate afresh.
-                    counters[profile::ENTRIES] = 0;
+                    // Each attempt records a window of feedback, so a body that keeps turning out
+                    // rare waits twice as many entries each time, the way doubling bounds the
+                    // cost of waiting against the cost of attempts. The window reopens on the way
+                    // back to the threshold, so the next attempt measures the rate afresh.
+                    let refusals = runtime::rare_refusals(state);
+                    let threshold = bytecode::tier().map_or(0, |tier| tier.entry_threshold);
+                    let wait = threshold.saturating_mul(1 << refusals.min(12));
+                    counters[profile::ENTRIES] = threshold.saturating_sub(wait);
                     counters[profile::RECORDING] = 0;
+                    if refusals < 0xf {
+                        counters[profile::TIER_STATE] = state + runtime::RARE_REFUSAL;
+                    }
                 } else if reason == analysis::COLD {
                     // The next attempt waits for as many entries or backward jumps as this one did,
                     // so the body runs long enough to record the types it is missing.

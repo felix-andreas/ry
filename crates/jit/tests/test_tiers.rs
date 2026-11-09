@@ -1040,7 +1040,8 @@ fn a_body_that_could_run_nothing_natively_never_records() {
 fn a_hot_body_that_runs_rarely_waits_to_compile() {
     // `rare` reaches the entry threshold, but each call comes with 160 KiB of other allocation,
     // so its expected calls cannot repay a compile: it is refused, not for good, and its count
-    // starts over. Called back to back, the same body then compiles.
+    // starts over. A second refusal doubles the wait. Called back to back, the same body then
+    // compiles.
     with_interpreter(|| unsafe {
         use interp::bytecode::{PROFILE, profile};
         jit::install_mode(Mode::On);
@@ -1060,7 +1061,17 @@ fn a_hot_body_that_runs_rarely_waits_to_compile() {
         assert!(!has_compiled_code("rare"), "rare compiled: {counters:?}");
         assert!(counters[profile::TIER_STATE] >= 0, "rare was refused for good: {counters:?}");
         assert!(counters[profile::ENTRIES] < 10, "rare's count went on: {counters:?}");
-        run(&format!("for (i in 1:{threshold}) rare(i)"));
+        run(&format!(
+            "for (i in 1:{}) {{ big <- (1:20000) * 1.5; rare(i) }}",
+            threshold + 1
+        ));
+        let counters = profile_of();
+        assert!(!has_compiled_code("rare"), "rare compiled: {counters:?}");
+        assert!(
+            counters[profile::ENTRIES] < 10 - threshold,
+            "a second refusal did not double rare's wait: {counters:?}"
+        );
+        run(&format!("for (i in 1:{}) rare(i)", 2 * threshold));
         assert!(has_compiled_code("rare"), "rare did not compile: {:?}", profile_of());
         jit::install_mode(Mode::Off);
     });
