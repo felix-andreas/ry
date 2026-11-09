@@ -23,7 +23,6 @@
 //! can change it, so code outside the compiled body never sees the difference.
 
 pub use interp::effects::{Speculation, base_builtin, resolve_function};
-
 use {
     crate::native::{self, Native},
     bumpalo::Bump,
@@ -1097,6 +1096,12 @@ const UNUSED: usize = usize::MAX;
 /// Why a body is not compiled.
 #[derive(Clone, Copy, Debug)]
 pub struct Refusal(pub &'static str);
+
+impl From<ssa::Error> for Refusal {
+    fn from(error: ssa::Error) -> Self {
+        Refusal(error.0)
+    }
+}
 
 /// The refusal for a body that has not run far enough to have the type feedback it needs,
 /// which a later attempt may well get past.
@@ -2980,13 +2985,14 @@ impl<'a> Builder<'a> {
             .map(|(symbol, _)| *symbol)
             .zip(scope)
             .collect();
-        let outer_closed = std::mem::replace(&mut lowering.closed, closed);
-        let result = self.lower_expression(lowering, body, depth);
+        // The body may rebind a formal, so the argument types are read before it runs.
         let arguments: SmallVec<[Option<SexpType>; 4]> = lowering
             .scope
             .iter()
             .map(|&(_, register)| lowering.state.registers[register].storage())
             .collect();
+        let outer_closed = std::mem::replace(&mut lowering.closed, closed);
+        let result = self.lower_expression(lowering, body, depth);
         lowering.scope = outer;
         lowering.closed = outer_closed;
         let result = result?;
@@ -3097,6 +3103,9 @@ impl<'a> Builder<'a> {
                     );
                 }
                 let name = base_builtin(function, head)?;
+                if name == "{" {
+                    return self.lower_block(lowering, &args, depth);
+                }
                 let registers = args
                     .iter()
                     .map(|&arg| self.lower_expression(lowering, arg, depth))
@@ -3106,7 +3115,7 @@ impl<'a> Builder<'a> {
                     .map(|&register| lowering.state.registers[register])
                     .collect();
                 match (name, registers.as_slice()) {
-                    ("(" | "{", [inner]) => Some(*inner),
+                    ("(", [inner]) => Some(*inner),
                     ("if", [condition, then, otherwise]) if types[0] == Ty::Lgl => {
                         self.select(lowering, *condition, *then, *otherwise)
                     }
@@ -3189,6 +3198,72 @@ impl<'a> Builder<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Lowers the statements of a `{` block in an inlined call. An assignment to a name binds
+    /// the name in the inlined scope, because the frame it would write is the callee's own,
+    /// which no code outside the inlined body can see before the call returns; later statements
+    /// read the binding. The block's value is its last statement's, which must not be an
+    /// assignment (its value is invisible) and may be `return(value)`.
+    unsafe fn lower_block(
+        &mut self,
+        lowering: &mut Lowering<'a>,
+        statements: &[Sexp],
+        depth: usize,
+    ) -> Option<usize> {
+        let symbols = values::symbols();
+        let (last, init) = statements.split_last()?;
+        for &statement in init {
+            let assignment = statement.kind() == SexpType::Language
+                && (statement.car() == symbols.assign || statement.car() == symbols.assign_eq);
+            if !assignment {
+                // Any other statement before the last only matters for its effect, and an
+                // inlined body has none.
+                return None;
+            }
+            let [target, value] = values::pairlist_items(statement.cdr())[..] else {
+                return None;
+            };
+            let (target, value) = (target.1, value.1);
+            if target.kind() != SexpType::Symbol
+                || !self.resolves_to_base(lowering, statement.car())
+            {
+                return None;
+            }
+            let register = self.lower_expression(lowering, value, depth)?;
+            match lowering.scope.iter_mut().find(|(symbol, _)| *symbol == target) {
+                Some(entry) => entry.1 = register,
+                None => lowering.scope.push((target, register)),
+            }
+        }
+        let mut last = *last;
+        if last.kind() == SexpType::Language
+            && last.car() == symbols.return_
+            && self.resolves_to_base(lowering, symbols.return_)
+        {
+            let [(tag, value)] = values::pairlist_items(last.cdr())[..] else {
+                return None;
+            };
+            if tag != values::nil() {
+                return None;
+            }
+            last = value;
+        }
+        if last.kind() == SexpType::Language
+            && (last.car() == symbols.assign || last.car() == symbols.assign_eq)
+        {
+            return None;
+        }
+        self.lower_expression(lowering, last, depth)
+    }
+
+    /// Whether `symbol` in inlined code calls the base function of that name, as `<-` and
+    /// `return` must for a block to mean what it says.
+    unsafe fn resolves_to_base(&mut self, lowering: &Lowering<'a>, symbol: Sexp) -> bool {
+        !lowering.scope.iter().any(|(name, _)| *name == symbol)
+            && self
+                .resolve_head(lowering, symbol)
+                .is_some_and(|function| base_builtin(function, symbol).is_some())
     }
 
     /// Makes sure `symbol`'s slot is loaded in inlined code, peeking at it when it may not be,

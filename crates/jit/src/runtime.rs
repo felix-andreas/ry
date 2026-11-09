@@ -166,7 +166,20 @@ impl Exit {
 /// `thorough` walks them anyway, for an activation whose frame may have bound a watched name
 /// before the name was watched. Portable code running for an enclosure other than the checked
 /// one or its siblings walks, and leaves the epoch and stamps to the checked enclosure.
+#[inline]
 pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
+    // Every entry asks, and almost every time nothing moved the epoch since the last proof.
+    if !thorough
+        && heap().binding_epoch() == compiled.epoch.get()
+        && (!compiled.portable || compiled.checked.get().weak_key() == frame.enclosure())
+    {
+        return true;
+    }
+    unsafe { prove(compiled, frame, thorough) }
+}
+
+#[inline(never)]
+unsafe fn prove(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
     let heap = heap();
     let epoch = heap.binding_epoch();
     let enclosure = frame.enclosure();
@@ -175,12 +188,11 @@ pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
     if !thorough && (checked || sibling) {
         // The epoch moves on any binding outside a function frame, which a test suite or a
         // package load makes all the time, so most moves concern names no speculation uses.
-        let proven = epoch == compiled.epoch.get()
-            || compiled
-                .speculations
-                .iter()
-                .zip(&compiled.stamps)
-                .all(|(speculation, stamp)| heap.lookup_stamp(speculation.symbol) == stamp.get());
+        let proven =
+            epoch == compiled.epoch.get()
+                || compiled.speculations.iter().zip(&compiled.stamps).all(
+                    |(speculation, stamp)| heap.lookup_stamp(speculation.symbol) == stamp.get(),
+                );
         if proven {
             compiled.epoch.set(epoch);
             // A sibling's lookups pass through its own frame and then the checked enclosure's
@@ -293,6 +305,11 @@ pub fn cold_refusals(state: i32) -> i32 {
 /// so calls no longer compile it and only a hot loop in it does.
 pub const LOOPS_ONLY: i32 = 1 << 16;
 
+/// A tier state flag: the body was long enough that it waited for extra entries or backward
+/// jumps before its next compile (see `jit::SIZE_WAIT_WORDS`), and it has waited. Invalidation
+/// clears it, so every recompile waits again.
+pub const SIZE_WAITED: i32 = 1 << 17;
+
 /// The entry count of a body that calls must not compile. Counting up from here never reaches
 /// the entry threshold, so tier 0 stops asking the tier about the body's calls, and stops
 /// recording type feedback for them unless the body has a loop that may still compile.
@@ -326,6 +343,8 @@ pub unsafe fn invalidate(code: Sexp) {
     counters[profile::BACK_EDGES] = 0;
     if compiles(state) >= MAX_COMPILES {
         counters[profile::TIER_STATE] = -1;
+    } else if state >= 0 {
+        counters[profile::TIER_STATE] = state & !SIZE_WAITED;
     }
 }
 
@@ -410,7 +429,9 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
                     park(activation, unwind);
                     outcome::FAILED
                 }
-                Ok(()) if validate != 0 && !still_valid(compiled(activation), machine.env, epoch) => {
+                Ok(())
+                    if validate != 0 && !still_valid(compiled(activation), machine.env, epoch) =>
+                {
                     outcome::INVALIDATED
                 }
                 Ok(()) => outcome::OK,

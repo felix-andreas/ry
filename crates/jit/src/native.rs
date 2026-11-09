@@ -29,18 +29,6 @@ use {
         analysis::{Refusal, Speculation, Ty, base_builtin, constant_type, resolve_function},
         codegen, runtime,
     },
-    cranelift_codegen::{
-        ir::{
-            AbiParam, FuncRef, InstBuilder, MemFlagsData, Signature, StackSlotData, StackSlotKind,
-            Type, Value,
-            condcodes::{FloatCC, IntCC},
-            immediates::Ieee64,
-            types::{F64, I32, I64},
-        },
-        isa::CallConv,
-    },
-    cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable},
-    cranelift_module::Module,
     heap::{
         object::{
             INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, NA_REAL_BITS, RECORD_DATA_OFFSET,
@@ -51,6 +39,11 @@ use {
     interp::{annotations, bytecode, records, values},
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
+    ssa::{
+        AbiParam, Block, Builder, CallConv, FloatCC, FuncRef, Ieee64, IntCC, MemFlagsData,
+        Signature, StackSlotData, StackSlotKind, Type, Value, Variable,
+        types::{F64, I8, I32, I64},
+    },
     std::{
         cell::{Cell, RefCell},
         sync::atomic::AtomicBool,
@@ -242,36 +235,23 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
     let speculations = second.speculations;
     let allocates = second.allocates;
     let started = std::time::Instant::now();
-    let (address, size) = codegen::with_module(|module| {
-        let call_conv = module.isa().default_call_conv();
-        let id = module
-            .declare_anonymous_function(&signature(params, guess, call_conv))
-            .map_err(|_| Refusal("Cranelift rejected the function declaration"))?;
-        let mut context = module.make_context();
-        context.func.signature = signature(params, guess, call_conv);
-        let own = module.declare_func_in_func(id, &mut context.func);
-        let frontend_config = module.isa().frontend_config();
-        let mut function_context = FunctionBuilderContext::new();
-        {
-            let builder = FunctionBuilder::new(&mut context.func, &mut function_context);
-            let mut walker = Walker::new(function, &parameters, Some(guess));
-            walker.allocates = allocates;
-            let mut builder = emit(builder, call_conv, own, &mut walker, body)?;
-            builder.seal_all_blocks();
-            builder.finalize(frontend_config);
-        }
+    let (address, size) = ssa::with_module(|module| -> Result<_, Refusal> {
+        let own_signature = signature(params, guess, CallConv::Host);
+        let id = module.declare(&own_signature)?;
+        let mut builder = Builder::new(own_signature.clone());
+        let own = builder.import_function(id, own_signature);
+        let mut walker = Walker::new(function, &parameters, Some(guess));
+        walker.allocates = allocates;
+        // SAFETY: the walk reads the closure's own body and constants.
+        let mut builder = unsafe { emit(builder, CallConv::Host, own, &mut walker, body) }?;
+        builder.seal_all_blocks();
+        let compiled = builder.finalize();
         if std::env::var_os("RY_JIT_DUMP").is_some() {
-            eprintln!("{}", context.func.display());
+            eprintln!("{compiled}");
         }
-        module
-            .define_function(id, &mut context)
-            .map_err(|_| Refusal("Cranelift rejected the function"))?;
-        let size = codegen::code_size(&context);
-        module.clear_context(&mut context);
-        module
-            .finalize_definitions()
-            .map_err(|_| Refusal("Cranelift could not finalize the code"))?;
-        Ok((module.get_finalized_function(id) as usize, size))
+        let size = module.define(id, &compiled)?;
+        module.finalize()?;
+        Ok((module.address(id), size))
     })?;
     if crate::logging() {
         eprintln!(
@@ -699,7 +679,7 @@ struct Val {
     value: Option<Value>,
 }
 
-type Emitting<'e, 'f> = Option<&'e mut Emitter<'f>>;
+type Emitting<'e> = Option<&'e mut Emitter>;
 
 impl<'p> Walker<'p> {
     fn new(function: Sexp, parameters: &'p [(Sexp, Ty)], own_result: Option<Ty>) -> Walker<'p> {
@@ -726,7 +706,7 @@ impl<'p> Walker<'p> {
     }
 
     /// The type of the function's value: the body's joined with every `return`.
-    unsafe fn walk(&mut self, emitter: Emitting<'_, '_>, body: Sexp) -> Result<Val, Refusal> {
+    unsafe fn walk(&mut self, emitter: Emitting<'_>, body: Sexp) -> Result<Val, Refusal> {
         let mut emitter = emitter;
         let value = self.expression(&mut emitter, body)?;
         Ok(Val {
@@ -737,7 +717,7 @@ impl<'p> Walker<'p> {
 
     unsafe fn expression(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         expression: Sexp,
     ) -> Result<Val, Refusal> {
         self.nesting += 1;
@@ -751,7 +731,7 @@ impl<'p> Walker<'p> {
 
     unsafe fn expression_unbounded(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         expression: Sexp,
     ) -> Result<Val, Refusal> {
         let statement = std::mem::take(&mut self.statement);
@@ -848,7 +828,7 @@ impl<'p> Walker<'p> {
     /// function.
     unsafe fn call(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         callee: Sexp,
         args: &[Sexp],
     ) -> Result<Val, Refusal> {
@@ -934,7 +914,7 @@ impl<'p> Walker<'p> {
     /// form, so this only saves the call and lets the caller's code see the callee's.
     unsafe fn inline(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         callee: Sexp,
         native: &Native,
         body: Sexp,
@@ -985,7 +965,7 @@ impl<'p> Walker<'p> {
 
     unsafe fn builtin(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         operation: Operation,
         args: &[Sexp],
         statement: bool,
@@ -1249,7 +1229,7 @@ impl<'p> Walker<'p> {
     /// A record construction, a `match`, or `record$field`.
     unsafe fn record_form(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         form: RecordForm,
         items: &[(Sexp, Sexp)],
     ) -> Result<Val, Refusal> {
@@ -1298,7 +1278,7 @@ impl<'p> Walker<'p> {
     /// A record, tuple or tag built from its items, evaluated in source order.
     unsafe fn construct(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         form: RecordForm,
         items: &[(Sexp, Sexp)],
     ) -> Result<Val, Refusal> {
@@ -1409,7 +1389,7 @@ impl<'p> Walker<'p> {
     /// `record[[index]]` with a constant index: a position into a tuple or a name into a record.
     unsafe fn record_item(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         record: Val,
         index: Sexp,
     ) -> Result<Val, Refusal> {
@@ -1449,7 +1429,7 @@ impl<'p> Walker<'p> {
     /// Slot `index` of a record of `layout`, typed from the slot's profile and checked.
     unsafe fn read_field(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         record: Option<Value>,
         layout: u32,
         index: usize,
@@ -1480,7 +1460,7 @@ impl<'p> Walker<'p> {
     /// `match (subject) { pattern => body ... }` over a record, tuple or tag.
     unsafe fn match_arms(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         items: &[(Sexp, Sexp)],
     ) -> Result<Val, Refusal> {
         if self.lazy > 0 {
@@ -1583,7 +1563,7 @@ impl<'p> Walker<'p> {
     /// One `match` arm whose pattern holds: its bindings, then its body.
     unsafe fn arm(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         pattern: &Pattern,
         subject: Val,
         body: &Sexp,
@@ -1607,7 +1587,7 @@ impl<'p> Walker<'p> {
 
     unsafe fn block(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         statements: &[Sexp],
     ) -> Result<Val, Refusal> {
         let mut last = Val {
@@ -1627,7 +1607,7 @@ impl<'p> Walker<'p> {
 
     unsafe fn assign(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         target: Sexp,
         value: Sexp,
     ) -> Result<Val, Refusal> {
@@ -1651,7 +1631,7 @@ impl<'p> Walker<'p> {
     /// does.
     unsafe fn bind(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         target: Sexp,
         ty: Ty,
         machine: Option<Value>,
@@ -1691,7 +1671,7 @@ impl<'p> Walker<'p> {
     /// `if (condition) yes else no`, or without `no` as a statement whose value nobody reads.
     unsafe fn branch(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         condition: Sexp,
         yes: Sexp,
         no: Option<Sexp>,
@@ -1753,7 +1733,7 @@ impl<'p> Walker<'p> {
     /// `for (variable in sequence) body`, as a statement.
     unsafe fn for_loop(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         variable: Sexp,
         sequence: Sexp,
         body: Sexp,
@@ -1861,7 +1841,7 @@ impl<'p> Walker<'p> {
     /// record in a local from before the loop, that local's current record must survive, so
     /// every record local still in scope is rooted again above the mark; the handle stack
     /// then stays the same size across iterations.
-    fn release_iteration(&self, emitter: &mut Emitter<'_>, mark: Value, carries: bool) {
+    fn release_iteration(&self, emitter: &mut Emitter, mark: Value, carries: bool) {
         if !carries {
             emitter.release_handles(mark, None);
             return;
@@ -1885,7 +1865,7 @@ impl<'p> Walker<'p> {
     /// `while (condition) body`, or `repeat body` without a condition, as a statement.
     unsafe fn loop_body(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         condition: Option<Sexp>,
         body: Sexp,
     ) -> Result<Val, Refusal> {
@@ -1933,7 +1913,7 @@ impl<'p> Walker<'p> {
     /// One iteration of a `while` or `repeat` loop: whether a condition may end the loop.
     unsafe fn loop_iteration(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         condition: Option<Sexp>,
         body: Sexp,
     ) -> Result<bool, Refusal> {
@@ -1970,7 +1950,7 @@ impl<'p> Walker<'p> {
     /// evaluating them never completes.
     unsafe fn sequence(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         expression: Sexp,
     ) -> Result<Option<Sequence>, Refusal> {
         let generator = if expression.kind() == SexpType::Language
@@ -2103,7 +2083,7 @@ impl<'p> Walker<'p> {
     /// right one in a way native code does not reproduce, makes the function fail.
     unsafe fn short_circuit(
         &mut self,
-        emitter: &mut Emitting<'_, '_>,
+        emitter: &mut Emitting<'_>,
         and: bool,
         left: Sexp,
         right: Sexp,
@@ -2125,12 +2105,12 @@ impl<'p> Walker<'p> {
                     emitter
                         .builder
                         .ins()
-                        .brif(truth, right_label, &[], join, &[decided.into()]);
+                        .brif(truth, right_label, &[], join, &[decided]);
                 } else {
                     emitter
                         .builder
                         .ins()
-                        .brif(truth, join, &[decided.into()], right_label, &[]);
+                        .brif(truth, join, &[decided], right_label, &[]);
                 }
                 emitter.builder.switch_to_block(right_label);
                 Some(join)
@@ -2153,7 +2133,7 @@ impl<'p> Walker<'p> {
                     }
                     (Kind::Known(ty), Some(value)) => {
                         let logical = emitter.logical(ty, value);
-                        emitter.builder.ins().jump(join, &[logical.into()]);
+                        emitter.builder.ins().jump(join, &[logical]);
                     }
                     _ => return Err(Refusal("an operand without a value")),
                 }
@@ -2206,13 +2186,13 @@ unsafe fn inlinable(body: Sexp) -> bool {
 }
 
 /// Emits the body of a native function into `builder`.
-unsafe fn emit<'f>(
-    builder: FunctionBuilder<'f>,
+unsafe fn emit(
+    builder: Builder,
     call_conv: CallConv,
     own: FuncRef,
     walker: &mut Walker<'_>,
     body: Sexp,
-) -> Result<FunctionBuilder<'f>, Refusal> {
+) -> Result<Builder, Refusal> {
     let mut builder = builder;
     let entry = builder.create_block();
     builder.append_block_params_for_function_params(entry);
@@ -2275,24 +2255,24 @@ enum Callee {
     Other(&'static Native),
 }
 
-struct Emitter<'f> {
-    builder: FunctionBuilder<'f>,
+struct Emitter {
+    builder: Builder,
     call_conv: CallConv,
     /// The function being compiled, for its recursive calls.
     own: FuncRef,
     /// How many calls may still nest below this one.
     budget: Value,
     /// The block that returns [`FAILED`].
-    failure: cranelift_codegen::ir::Block,
+    failure: Block,
     /// The enclosing loops' blocks for `next` and `break`, innermost last.
-    loops: Vec<(cranelift_codegen::ir::Block, cranelift_codegen::ir::Block)>,
+    loops: Vec<(Block, Block)>,
     /// Where the handle stack stood on entry, for a function that allocates.
     mark: Option<Value>,
     /// Whether the function returns a record, which stays rooted when it returns.
     returns_record: bool,
 }
 
-impl Emitter<'_> {
+impl Emitter {
     /// Fails when the interrupt flag is raised, so the interpreter runs the call and its polls
     /// decide whether to deliver a pending interrupt.
     fn check_interrupt(&mut self) {
@@ -2528,9 +2508,7 @@ impl Emitter<'_> {
             let bit = self.builder.ins().band_imm_u(mask, 1i64 << index);
             self.builder.ins().icmp_imm_s(IntCC::NotEqual, bit, 0)
         } else {
-            self.builder
-                .ins()
-                .iconst(cranelift_codegen::ir::types::I8, 0)
+            self.builder.ins().iconst(I8, 0)
         };
         if ty == Ty::Obj {
             self.fail_if(unboxed);
@@ -2588,12 +2566,7 @@ impl Emitter<'_> {
     }
 
     /// Ends a branch of an `if` by jumping to `join`, carrying its value when it is `used`.
-    fn close_branch(
-        &mut self,
-        join: cranelift_codegen::ir::Block,
-        branch: Val,
-        used: bool,
-    ) -> Result<(), Refusal> {
+    fn close_branch(&mut self, join: Block, branch: Val, used: bool) -> Result<(), Refusal> {
         if branch.kind == Kind::Never {
             // The branch returned: the block it ends in is unreachable.
             self.builder.ins().jump(self.failure, &[]);
@@ -2605,10 +2578,10 @@ impl Emitter<'_> {
         }
         let value = branch.value.ok_or(Refusal("a branch without a value"))?;
         if self.builder.block_params(join).is_empty() {
-            let ty = self.builder.func.dfg.value_type(value);
+            let ty = self.builder.value_type(value);
             self.builder.append_block_param(join, ty);
         }
-        self.builder.ins().jump(join, &[value.into()]);
+        self.builder.ins().jump(join, &[value]);
         Ok(())
     }
 
@@ -3062,53 +3035,39 @@ unsafe fn trampoline(params: &[Ty], result: Ty) -> Option<Trampoline> {
     if let Some(found) = TRAMPOLINES.with_borrow(|trampolines| trampolines.get(&key).copied()) {
         return Some(found);
     }
-    let compiled = codegen::with_module(|module| {
-        let call_conv = module.isa().default_call_conv();
-        let mut outer = Signature::new(call_conv);
+    let compiled = ssa::with_module(|module| -> Result<usize, Refusal> {
+        let mut outer = Signature::new(CallConv::Host);
         outer.params.extend([AbiParam::new(I64); 4]);
         outer.returns.push(AbiParam::new(I64));
-        let id = module
-            .declare_anonymous_function(&outer)
-            .map_err(|_| Refusal("Cranelift rejected the trampoline declaration"))?;
-        let mut context = module.make_context();
-        context.func.signature = outer;
-        let mut function_context = FunctionBuilderContext::new();
-        {
-            let mut builder = FunctionBuilder::new(&mut context.func, &mut function_context);
-            let entry = builder.create_block();
-            builder.append_block_params_for_function_params(entry);
-            builder.switch_to_block(entry);
-            let &[address, budget, words, out] = builder.block_params(entry) else {
-                return Err(Refusal("a trampoline without its parameters"));
-            };
-            let mut arguments: SmallVec<[Value; 5]> = SmallVec::new();
-            arguments.push(budget);
-            for (index, &ty) in params.iter().enumerate() {
-                arguments.push(builder.ins().load(
-                    machine_type(ty),
-                    MemFlagsData::trusted(),
-                    words,
-                    8 * index as i32,
-                ));
-            }
-            let inner = builder.import_signature(signature(params, result, call_conv));
-            let call = builder.ins().call_indirect(inner, address, &arguments);
-            let &[status, value] = builder.inst_results(call) else {
-                return Err(Refusal("a native call without a status and a value"));
-            };
-            builder.ins().store(MemFlagsData::trusted(), value, out, 0);
-            builder.ins().return_(&[status]);
-            builder.seal_all_blocks();
-            builder.finalize(module.isa().frontend_config());
+        let id = module.declare(&outer)?;
+        let mut builder = Builder::new(outer);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let &[address, budget, words, out] = builder.block_params(entry) else {
+            return Err(Refusal("a trampoline without its parameters"));
+        };
+        let mut arguments: SmallVec<[Value; 5]> = SmallVec::new();
+        arguments.push(budget);
+        for (index, &ty) in params.iter().enumerate() {
+            arguments.push(builder.ins().load(
+                machine_type(ty),
+                MemFlagsData::trusted(),
+                words,
+                8 * index as i32,
+            ));
         }
-        module
-            .define_function(id, &mut context)
-            .map_err(|_| Refusal("Cranelift rejected the trampoline"))?;
-        module.clear_context(&mut context);
-        module
-            .finalize_definitions()
-            .map_err(|_| Refusal("Cranelift could not finalize the trampoline"))?;
-        Ok(module.get_finalized_function(id) as usize)
+        let inner = builder.import_signature(signature(params, result, CallConv::Host));
+        let call = builder.ins().call_indirect(inner, address, &arguments);
+        let &[status, value] = builder.inst_results(call) else {
+            return Err(Refusal("a native call without a status and a value"));
+        };
+        builder.ins().store(MemFlagsData::trusted(), value, out, 0);
+        builder.ins().return_(&[status]);
+        builder.seal_all_blocks();
+        module.define(id, &builder.finalize())?;
+        module.finalize()?;
+        Ok(module.address(id))
     });
     let address = match compiled {
         Ok(address) => address,

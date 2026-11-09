@@ -316,6 +316,20 @@ fn seeds_agree_across_tiers() {
             "(n = 8L)",
             true,
         ),
+        // Closures whose bodies are blocks inline: locals, a rebound formal, a free variable a
+        // local shadows without touching the outer binding, and a trailing `return()`.
+        (
+            "y <- 100\nscale <- function(x, k) { a <- x * k; b <- a + 1; return(b - 0.5) }\nbump <- function(x) { x <- x + 1L; x * 2L }\nfree <- function(x) { y <- y + x; y }\ns <- 0\nt <- 0L\nfor (i in 1:n) { s <- s + scale(i, 0.5) + free(i); t <- t + bump(i) }\nlist(s, t, y)",
+            "(n = 40L)",
+            false,
+        ),
+        // An inlined block whose local turns from integer to double fails its speculation in
+        // the middle of the block, and tier 0 reruns the whole call.
+        (
+            "step <- function(x) { a <- x + x; b <- a * 3L; b - x }\ns <- 0\nfor (i in 1:n) s <- s + step(if (i > 20L) i + 0.5 else i)\ns",
+            "(n = 40L)",
+            false,
+        ),
         // An inlined typed closure keeps its checks: a call reached only after the loop compiled
         // fails on its argument, or on its value, exactly as in tier 0.
         (
@@ -1291,9 +1305,9 @@ unsafe fn has_compiled_code(name: &str) -> bool {
     }
 }
 
-/// The outcome of four calls of a closure with `body` under tier 0, and of four calls of a
-/// fresh closure with the same body under the forced JIT. Each closure is new, so the JIT's run
-/// starts from its own profile and compiles from the second call on.
+/// The outcome of four calls of a closure with `body` under tier 0, then of four calls of a
+/// fresh closure with the same body under the forced JIT and four under the baseline tier alone.
+/// Each closure is new, so each run starts from its own profile.
 unsafe fn outcomes(case: usize, body: &str, call: &str) -> (String, Vec<String>) {
     unsafe {
         let formals = "a = 1L, b = 2, v = c(1, 2), n = 5L, k = total * 2L, d = (s <- 100)";
@@ -1310,7 +1324,13 @@ unsafe fn outcomes(case: usize, body: &str, call: &str) -> (String, Vec<String>)
         jit::install_mode(Mode::Force);
         let compiled_name = format!("compiled_{case}");
         define(&compiled_name);
-        let compiled = calls(&compiled_name);
+        let mut compiled = calls(&compiled_name);
+        // The baseline tier compiles at the first entry and never tiers up in this mode, so
+        // every call after the first runs its machine code.
+        jit::install_mode(Mode::Baseline);
+        let baseline_name = format!("baseline_{case}");
+        define(&baseline_name);
+        compiled.extend(calls(&baseline_name));
         jit::install_mode(Mode::Off);
         for outcome in &reference[1..] {
             assert_eq!(

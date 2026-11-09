@@ -23,8 +23,9 @@
 //!   number of registers the code uses, the sixth the profile counters (an integer vector, see
 //!   [`profile`]) the seventh the optimizing tier's compiled code, `NULL` until it exists, the eighth the
 //!   slot hints (an integer vector, one per lookup site), the ninth the stored half of the
-//!   effect-free fact (see [`crate::effects`]), and the tenth the last argument-match plan of a
-//!   closure body (see `eval::match_args_cached`).
+//!   effect-free fact (see [`crate::effects`]), the tenth the last argument-match plan of a
+//!   closure body (see `eval::match_args_cached`), and the eleventh the baseline tier's machine
+//!   code (an external pointer whose address is a [`BaselineCode`]), `NULL` until it exists.
 //! - `tag`: the inline caches, a list with two slots per cache: the enclosure the lookup started
 //!   from and the binding cell it found. The list holds them weakly, because closures that share
 //!   a body share its code, and a strong cache would keep the last caller's environment alive.
@@ -124,6 +125,10 @@ impl State {
 /// out of C stack or `expressions` long before it runs out of registers.
 const REGISTER_FILE_CAPACITY: usize = 1 << 21;
 
+/// A threshold no counter is compared against. Counters saturate at `i32::MAX`, so a
+/// threshold of that value would otherwise fire once a counter saturates.
+pub const NEVER: i32 = i32::MAX;
+
 /// The optimizing tier's entry points.
 #[derive(Clone, Copy)]
 pub struct Tier {
@@ -138,6 +143,11 @@ pub struct Tier {
     /// [`Tier::back_edge_threshold`]. Returns `None` to keep interpreting at `target`.
     pub back_edge: unsafe fn(&mut Machine<'_>, target: usize) -> Option<TierExit>,
     pub back_edge_threshold: i32,
+    /// Called once a body without baseline code reaches [`Tier::baseline_threshold`] entries or
+    /// backward jumps. It stores the body's [`BaselineCode`] in its `BASELINE` constant, or
+    /// leaves the constant `NULL` when the body does not compile.
+    pub baseline: unsafe fn(&Machine<'_>),
+    pub baseline_threshold: i32,
     /// Called before a typed closure gets a frame, with its arguments matched by position or by
     /// exact name. Returns `None` to let the call proceed as usual, or the value a native
     /// function computed without a frame, promises or annotation checks.
@@ -185,7 +195,16 @@ pub fn register_address(index: usize) -> *mut Sexp {
 }
 
 /// Grows the register file to `length` registers, filling new ones with `NULL`.
+#[inline]
 pub fn reserve_registers(length: usize) -> R<()> {
+    if length <= interp().bytecode.registers.len() {
+        return Ok(());
+    }
+    grow_registers(length)
+}
+
+#[cold]
+fn grow_registers(length: usize) -> R<()> {
     let registers = &mut interp().bytecode.registers;
     if length > registers.capacity() {
         return Err(error(
@@ -345,7 +364,8 @@ pub const TIER1: usize = 6;
 pub const HINTS: usize = 7;
 pub const SUMMARY: usize = 8;
 pub const MATCHES: usize = 9;
-pub const FIRST_CONSTANT: usize = 10;
+pub const BASELINE: usize = 10;
+pub const FIRST_CONSTANT: usize = 11;
 
 /// The profile counters, positions in the `PROFILE` integer vector.
 pub mod profile {
@@ -355,7 +375,19 @@ pub mod profile {
     pub const BACK_EDGES: usize = 1;
     /// The optimizing tier's state for this code, which only that tier interprets.
     pub const TIER_STATE: usize = 2;
-    pub const LENGTH: usize = 3;
+    /// Nonzero while tier 0 records type feedback for this code: during the first activation
+    /// of a body with a loop, once a body is halfway to the entry or the back-edge threshold,
+    /// and while it has optimized code. Recording costs a type test and a store per value, and
+    /// most bodies never get near a threshold, so recording from the first entry made every
+    /// call of cold package code slower with the optimizing tier installed than without it.
+    /// Half a threshold still sees every type a compile would specialize on. A loop can turn hot
+    /// inside a body's only activation, so a loop that reaches half its threshold starts
+    /// recording in the running activation, and the first activation records the instructions
+    /// before the loop, which that would miss. The decision is one word, read at every
+    /// activation, because deciding it there from the code's other constants cost 25
+    /// instructions per call.
+    pub const RECORDING: usize = 3;
+    pub const LENGTH: usize = 4;
 }
 
 /// The body `function` was defined with, which a compiled closure keeps beside its code.
@@ -1557,8 +1589,10 @@ impl Compiler {
         heap.set_element(constants, FEEDBACK, feedback);
         let profile = values::alloc(SexpType::Integer, profile::LENGTH)?;
         values::ints_mut(profile).fill(0);
+        values::ints_mut(profile)[profile::RECORDING] = i32::from(!compiler.loops.is_empty());
         heap.set_element(constants, PROFILE, profile);
         heap.set_element(constants, TIER1, nil());
+        heap.set_element(constants, BASELINE, nil());
         heap.set_element(constants, SUMMARY, compiler.summary);
         let loops = values::alloc(SexpType::Integer, compiler.loops.len() * 4)?;
         for (index, entry) in compiler.loops.iter().enumerate() {
@@ -3498,6 +3532,16 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
         mark,
         loops: &mut loops,
     };
+    if let Some(tier) = interp().bytecode.tier {
+        if entries == tier.entry_threshold / 2 && profile[profile::TIER_STATE] >= 0 {
+            profile[profile::RECORDING] = 1;
+        } else if entries == 2
+            && entries < tier.entry_threshold / 2
+            && constants.element(TIER1) == nil()
+        {
+            profile[profile::RECORDING] = 0;
+        }
+    }
     // Most bodies never compile, and asking the tier about every call of every body cost more
     // than the compiled code saved on a test suite.
     let entered = match interp().bytecode.tier {
@@ -3510,6 +3554,14 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
         }
         _ => None,
     };
+    if let Some(tier) = interp().bytecode.tier
+        && entered.is_none()
+        && entries == tier.baseline_threshold
+        && tier.baseline_threshold != NEVER
+        && constants.element(BASELINE) == nil()
+    {
+        (tier.baseline)(&machine);
+    }
     let result = match entered {
         Some(TierExit::Finished(result)) => result,
         Some(TierExit::Resume { pc, pending }) => match pending {
@@ -3626,21 +3678,6 @@ impl Activation<'_, '_> {
     }
 }
 
-/// Whether tier 0 records type feedback for this code: always for a body with a loop, and for
-/// any other once it has optimized code or is halfway to the entry threshold. Recording costs a
-/// type test and a store per value, and most bodies never get near a threshold, so recording
-/// from the first entry made every call of cold package code slower with the optimizing tier
-/// installed than without it. Half a threshold of activations still sees every type a compile
-/// would specialize on. A loop is different: it can turn hot inside a body's only activation,
-/// and compiling it needs the types of the instructions that ran before it, once.
-unsafe fn warm(constants: Sexp, tier: &Tier) -> bool {
-    if constants.element(TIER1) != nil() || length(constants.element(LOOPS)) > 0 {
-        return true;
-    }
-    let profile = values::ints(constants.element(PROFILE));
-    profile[profile::TIER_STATE] >= 0 && profile[profile::ENTRIES] >= tier.entry_threshold / 2
-}
-
 /// The instruction an op handler runs: its position in the code and the register window.
 #[derive(Clone, Copy)]
 struct Instruction {
@@ -3699,11 +3736,12 @@ type Handler = unsafe fn(&mut Activation<'_, '_>, usize);
 #[inline(always)]
 unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) -> R<Sexp> {
     let constants = machine.code.cdr();
-    let feedback = match interp().bytecode.tier {
-        Some(tier) if warm(constants, &tier) => {
-            values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
-        }
-        _ => std::ptr::null_mut(),
+    let feedback = if interp().bytecode.tier.is_some()
+        && values::ints(constants.element(PROFILE))[profile::RECORDING] != 0
+    {
+        values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
+    } else {
+        std::ptr::null_mut()
     };
     let code = values::ints(machine.code.car()).as_ptr();
     let registers = register_address(machine.base);
@@ -3727,9 +3765,93 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
     };
     if !SINGLE {
         release(&state);
+        if let Some(baseline) = baseline_code(constants) {
+            run_baseline(&mut state, baseline, pc);
+            return state.exit;
+        }
     }
     (*handlers.as_ptr().add(op_index(code, pc)))(&mut state, pc);
     state.exit
+}
+
+/// The machine code the baseline tier compiled for these constants' code, if any.
+#[inline(always)]
+unsafe fn baseline_code(constants: Sexp) -> Option<BaselineCode> {
+    let holder = constants.element(BASELINE);
+    if holder.kind() != SexpType::ExternalPtr {
+        return None;
+    }
+    let address = holder.external_address();
+    // SAFETY: the baseline tier stores only addresses of functions with this signature.
+    (!address.is_null())
+        .then(|| std::mem::transmute::<*mut std::ffi::c_void, BaselineCode>(address))
+}
+
+/// Runs baseline machine code for the activation from `pc` until the activation returns. A
+/// panic inside an instruction is parked while the machine code returns (unwinding through it
+/// is undefined) and resumed here.
+#[inline(never)]
+unsafe fn run_baseline(state: &mut Activation<'_, '_>, baseline: BaselineCode, pc: usize) {
+    baseline((state as *mut Activation<'_, '_>).cast(), pc);
+    if let Some(payload) = PARKED_PANIC.take() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+thread_local! {
+    /// A panic raised inside a baseline step, carried past the machine code that called it.
+    static PARKED_PANIC: std::cell::Cell<Option<Box<dyn std::any::Any + Send>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The baseline tier's machine code for one body: called with the activation and the pc to
+/// start at, it runs instructions until one answers [`STOP`], leaving the result where the
+/// interpreter's handler chain leaves it.
+pub type BaselineCode = unsafe extern "C" fn(*mut std::ffi::c_void, usize);
+
+/// One instruction run for baseline machine code: it takes the activation and the
+/// instruction's pc and answers the pc to continue at, or [`STOP`].
+pub type BaselineStep = unsafe extern "C" fn(*mut std::ffi::c_void, usize) -> usize;
+
+/// The pc a [`BaselineStep`] answers when the activation is done.
+pub const BASELINE_STOP: usize = STOP;
+
+/// Where baseline machine code finds what it reads directly instead of calling a step.
+pub mod baseline_layout {
+    use super::Activation;
+    /// The activation's register window pointer.
+    pub const REGISTERS: usize = std::mem::offset_of!(Activation<'static, 'static>, registers);
+    /// The activation's `Interp` pointer.
+    pub const INTERP: usize = std::mem::offset_of!(Activation<'static, 'static>, interp);
+    /// The activation's environment.
+    pub const ENV: usize = std::mem::offset_of!(Activation<'static, 'static>, env);
+    /// The pointer to the code's frame-slot hints, one `u32` per lookup slot.
+    pub const HINTS: usize = std::mem::offset_of!(Activation<'static, 'static>, cache)
+        + std::mem::offset_of!(super::LookupCache, hints);
+    /// The feedback pointer, null while nothing records type feedback.
+    pub const FEEDBACK: usize = std::mem::offset_of!(Activation<'static, 'static>, feedback);
+    /// The visibility flag inside `Interp`.
+    pub const VISIBLE: usize = std::mem::offset_of!(crate::Interp, visible);
+    /// The current srcref inside `Interp`.
+    pub const SRCREF: usize = std::mem::offset_of!(crate::Interp, srcref);
+}
+
+/// Runs one step for baseline code, parking a panic instead of unwinding into machine code.
+#[inline(always)]
+unsafe fn guarded(
+    state: *mut std::ffi::c_void,
+    at: usize,
+    step: impl FnOnce(&mut Activation<'_, '_>, usize) -> usize,
+) -> usize {
+    let state = &mut *state.cast::<Activation<'_, '_>>();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step(&mut *state, at))) {
+        Ok(pc) => pc,
+        Err(payload) => {
+            PARKED_PANIC.set(Some(payload));
+            state.exit = Ok(nil());
+            STOP
+        }
+    }
 }
 
 /// The handler table position of the instruction at `pc`.
@@ -3762,7 +3884,29 @@ const STOP: usize = usize::MAX;
 /// activation's result in [`Activation::exit`], so that few values stay live across the calls
 /// an instruction makes. A failure goes to [`failed`].
 macro_rules! handlers {
-    ($($name:ident: $op:ident, $roots:literal, $body:ident;)*) => {
+    ($($name:ident, $step:ident: $op:ident, $roots:literal, $body:ident;)*) => {
+        $(
+            unsafe extern "C" fn $step(state: *mut std::ffi::c_void, at: usize) -> usize {
+                guarded(state, at, |state, at| {
+                    let instruction =
+                        Instruction { code: state.code, at, registers: state.registers };
+                    let flow = $body(state, instruction);
+                    let pc = advance::<false>(state, at, at + 1 + operand_count(Op::$op), flow);
+                    if $roots && pc != STOP {
+                        release(state);
+                    }
+                    pc
+                })
+            }
+        )*
+
+        /// The step each op runs as in baseline machine code, indexed like [`OPS`].
+        pub static BASELINE_STEPS: [BaselineStep; OPS.len()] = {
+            let mut table: [BaselineStep; OPS.len()] = [step_jump; OPS.len()];
+            $(table[Op::$op as usize] = $step;)*
+            table
+        };
+
         $(
             unsafe fn $name<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
                 let instruction = Instruction { code: state.code, at, registers: state.registers };
@@ -3831,50 +3975,50 @@ static RUN_HANDLERS: [Handler; OPS.len()] = handler_table::<false>();
 static STEP_HANDLERS: [Handler; OPS.len()] = handler_table::<true>();
 
 handlers! {
-    run_constant: Constant, false, op_constant;
-    run_get_var: GetVar, true, op_get_var;
-    run_set_var: SetVar, true, op_set_var;
-    run_get_fun: GetFun, true, op_get_fun;
-    run_branch_unless_builtin: BranchUnlessBuiltin, false, op_branch_unless_builtin;
-    run_call_builtin: CallBuiltin, true, op_call_builtin;
-    run_call_generic: CallGeneric, true, op_call_generic;
-    run_call_rebinding: CallRebinding, true, op_call_rebinding;
-    run_call_tail_update: CallTailUpdate, true, op_call_tail_update;
-    run_field: Field, true, op_field;
-    run_item: Item, true, op_item;
-    run_match_shape: MatchShape, false, op_match_shape;
-    run_match_tag: MatchTag, false, op_match_tag;
-    run_match_literal: MatchLiteral, true, op_match_literal;
-    run_slot: Slot, true, op_slot;
-    run_match_fail: MatchFail, true, op_match_fail;
-    run_construct: Construct, true, op_construct;
-    run_move: Move, false, op_move;
-    run_switch_arm: SwitchArm, true, op_switch_arm;
-    run_bound_eval: BoundEval, true, op_bound_eval;
-    run_match_condition: MatchCondition, true, op_match_condition;
-    run_branch_unless_primitive: BranchUnlessPrimitive, false, op_branch_unless_primitive;
-    run_branch_if_object: BranchIfObject, false, op_branch_if_object;
-    run_dispatch_subject: DispatchSubject, true, op_dispatch_subject;
-    run_ast: Ast, true, op_ast;
-    run_guard: Guard, true, op_guard;
-    run_resume: Resume, false, op_resume;
-    run_jump_unless: JumpUnless, true, op_jump_unless;
-    run_arithmetic: Arithmetic, true, op_arithmetic;
-    run_return: Return, false, op_return;
-    run_for_init: ForInit, true, op_for_init;
-    run_for_step: ForStep, true, op_for_step;
-    run_for_end: ForEnd, false, op_for_end;
-    run_invisible: Invisible, false, op_invisible;
-    run_visible: Visible, false, op_visible;
-    run_set_srcref: SetSrcref, true, op_set_srcref;
-    run_end_statement: EndStatement, false, op_end_statement;
-    run_logic_left: LogicLeft, true, op_logic_left;
-    run_logic_right: LogicRight, true, op_logic_right;
-    run_closure: Closure, true, op_closure;
-    run_sub_assign: SubAssign, true, op_sub_assign;
-    run_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
-    run_replace: Replace, true, op_replace;
-    run_missing: Missing, true, op_missing;
+    run_constant, step_constant: Constant, false, op_constant;
+    run_get_var, step_get_var: GetVar, true, op_get_var;
+    run_set_var, step_set_var: SetVar, true, op_set_var;
+    run_get_fun, step_get_fun: GetFun, true, op_get_fun;
+    run_branch_unless_builtin, step_branch_unless_builtin: BranchUnlessBuiltin, false, op_branch_unless_builtin;
+    run_call_builtin, step_call_builtin: CallBuiltin, true, op_call_builtin;
+    run_call_generic, step_call_generic: CallGeneric, true, op_call_generic;
+    run_call_rebinding, step_call_rebinding: CallRebinding, true, op_call_rebinding;
+    run_call_tail_update, step_call_tail_update: CallTailUpdate, true, op_call_tail_update;
+    run_field, step_field: Field, true, op_field;
+    run_item, step_item: Item, true, op_item;
+    run_match_shape, step_match_shape: MatchShape, false, op_match_shape;
+    run_match_tag, step_match_tag: MatchTag, false, op_match_tag;
+    run_match_literal, step_match_literal: MatchLiteral, true, op_match_literal;
+    run_slot, step_slot: Slot, true, op_slot;
+    run_match_fail, step_match_fail: MatchFail, true, op_match_fail;
+    run_construct, step_construct: Construct, true, op_construct;
+    run_move, step_move: Move, false, op_move;
+    run_switch_arm, step_switch_arm: SwitchArm, true, op_switch_arm;
+    run_bound_eval, step_bound_eval: BoundEval, true, op_bound_eval;
+    run_match_condition, step_match_condition: MatchCondition, true, op_match_condition;
+    run_branch_unless_primitive, step_branch_unless_primitive: BranchUnlessPrimitive, false, op_branch_unless_primitive;
+    run_branch_if_object, step_branch_if_object: BranchIfObject, false, op_branch_if_object;
+    run_dispatch_subject, step_dispatch_subject: DispatchSubject, true, op_dispatch_subject;
+    run_ast, step_ast: Ast, true, op_ast;
+    run_guard, step_guard: Guard, true, op_guard;
+    run_resume, step_resume: Resume, false, op_resume;
+    run_jump_unless, step_jump_unless: JumpUnless, true, op_jump_unless;
+    run_arithmetic, step_arithmetic: Arithmetic, true, op_arithmetic;
+    run_return, step_return: Return, false, op_return;
+    run_for_init, step_for_init: ForInit, true, op_for_init;
+    run_for_step, step_for_step: ForStep, true, op_for_step;
+    run_for_end, step_for_end: ForEnd, false, op_for_end;
+    run_invisible, step_invisible: Invisible, false, op_invisible;
+    run_visible, step_visible: Visible, false, op_visible;
+    run_set_srcref, step_set_srcref: SetSrcref, true, op_set_srcref;
+    run_end_statement, step_end_statement: EndStatement, false, op_end_statement;
+    run_logic_left, step_logic_left: LogicLeft, true, op_logic_left;
+    run_logic_right, step_logic_right: LogicRight, true, op_logic_right;
+    run_closure, step_closure: Closure, true, op_closure;
+    run_sub_assign, step_sub_assign: SubAssign, true, op_sub_assign;
+    run_sub_assign_matrix, step_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
+    run_replace, step_replace: Replace, true, op_replace;
+    run_missing, step_missing: Missing, true, op_missing;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -3887,7 +4031,7 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
         if let Err(unwind) = crate::unwind::poll_interrupt() {
             pc = failed::<SINGLE>(state, at, unwind);
         } else if let Some(tier) = (*state.interp).bytecode.tier {
-            match back_edge(state.machine, &tier, pc) {
+            match back_edge(state, &tier, pc) {
                 BackEdge::Continue(resume) => pc = resume,
                 BackEdge::Finished(result) => {
                     state.exit = result;
@@ -3903,7 +4047,44 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
         return;
     }
     release(state);
+    // A body whose baseline code appeared while this activation looped in tier 0 moves over
+    // at the back edge, so its loop does not finish in the slower tier.
+    if target < at
+        && let Some(baseline) = baseline_code(state.constants)
+    {
+        run_baseline(state, baseline, pc);
+        return;
+    }
     become (*RUN_HANDLERS.as_ptr().add(op_index(state.code, pc)))(state, pc)
+}
+
+/// `Jump` for baseline code, which jumps forward by itself and calls this only for a backward
+/// jump: it polls for an interrupt and counts the back edge for the optimizing tier.
+unsafe extern "C" fn step_jump(state: *mut std::ffi::c_void, at: usize) -> usize {
+    guarded(state, at, |state, at| {
+        let target = *state.code.add(at + 1) as usize;
+        let mut pc = target;
+        if target < at {
+            if let Err(unwind) = crate::unwind::poll_interrupt() {
+                pc = failed::<false>(state, at, unwind);
+            } else if let Some(tier) = (*state.interp).bytecode.tier {
+                match back_edge(state, &tier, pc) {
+                    BackEdge::Continue(resume) => pc = resume,
+                    BackEdge::Finished(result) => {
+                        state.exit = result;
+                        return STOP;
+                    }
+                    BackEdge::Unwound { pc: resume, unwind } => {
+                        pc = failed::<false>(state, resume, unwind);
+                    }
+                }
+            }
+        }
+        if pc != STOP {
+            release(state);
+        }
+        pc
+    })
 }
 
 #[inline(always)]
@@ -4577,9 +4758,21 @@ enum BackEdge {
 }
 
 #[inline(never)]
-unsafe fn back_edge(machine: &mut Machine<'_>, tier: &Tier, pc: usize) -> BackEdge {
+unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> BackEdge {
+    let machine = &mut *state.machine;
     let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
     profile[profile::BACK_EDGES] = profile[profile::BACK_EDGES].saturating_add(1);
+    if profile[profile::BACK_EDGES] == tier.back_edge_threshold / 2 {
+        profile[profile::RECORDING] = 1;
+        state.feedback = values::ints_mut(machine.code.cdr().element(FEEDBACK)).as_mut_ptr();
+    }
+    if profile[profile::BACK_EDGES] == tier.baseline_threshold
+        && tier.baseline_threshold != NEVER
+        && machine.code.cdr().element(BASELINE) == nil()
+    {
+        (tier.baseline)(machine);
+    }
+    let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
     if profile[profile::BACK_EDGES] < tier.back_edge_threshold {
         return BackEdge::Continue(pc);
     }

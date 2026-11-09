@@ -18,7 +18,11 @@
 use {
     crate::object::Sexp,
     rustc_hash::{FxHashMap, FxHashSet},
-    smallvec::SmallVec,
+    std::{
+        alloc::{Layout, alloc, dealloc, handle_alloc_error},
+        mem::MaybeUninit,
+        ops::{Deref, DerefMut},
+    },
 };
 
 /// Frames this small are scanned; larger ones keep a hash index beside the cells. A scan is
@@ -33,6 +37,7 @@ const INLINE_BINDINGS: usize = 8;
 
 /// A binding cell and its symbol, which is the cell's own first field.
 #[derive(Clone, Copy)]
+#[repr(C)]
 struct Binding {
     symbol: Sexp,
     cell: Sexp,
@@ -59,7 +64,7 @@ const EMPTY_CHAIN: u32 = u32::MAX;
 pub struct Frame {
     /// Inline, because most frames are a call's few arguments and locals, and a closure call
     /// should not pay for a second allocation beside the frame's own.
-    bindings: SmallVec<[Binding; INLINE_BINDINGS]>,
+    bindings: Bindings,
     /// Boxed, because only large frames have one and the inline map would push every
     /// environment into a larger size class.
     index: Option<Box<FxHashMap<Sexp, u32>>>,
@@ -86,6 +91,173 @@ fn filter_bit(symbol: Sexp) -> u64 {
     1 << ((symbol.as_ptr() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 58)
 }
 
+/// Where machine code finds a frame's fields: the baseline tier probes a lookup site's hinted
+/// slot inline (`crates/jit/src/baseline.rs`), so these offsets are part of its contract.
+pub mod layout {
+    use super::{Binding, Bindings, Frame};
+    /// The `u64` symbol filter ([`super::filter_bit`]).
+    pub const FILTER: usize = std::mem::offset_of!(Frame, filter);
+    /// The `u32` formal count, whose top bit ([`SHADOWED`]) turns hints off.
+    pub const FORMALS: usize = std::mem::offset_of!(Frame, formals);
+    pub const SHADOWED: u32 = super::SHADOWED;
+    /// The `u32` slot count.
+    pub const LENGTH: usize =
+        std::mem::offset_of!(Frame, bindings) + std::mem::offset_of!(Bindings, length);
+    /// The `u32` capacity: [`INLINE`] while the slots are inline at [`STORAGE`], otherwise
+    /// [`STORAGE`] holds a pointer to them.
+    pub const CAPACITY: usize =
+        std::mem::offset_of!(Frame, bindings) + std::mem::offset_of!(Bindings, capacity);
+    pub const STORAGE: usize =
+        std::mem::offset_of!(Frame, bindings) + std::mem::offset_of!(Bindings, storage);
+    pub const INLINE: u32 = super::INLINE_BINDINGS as u32;
+    /// A slot is a symbol and its cell, each a pointer.
+    pub const SLOT: usize = size_of::<Binding>();
+    pub const SLOT_CELL: usize = std::mem::offset_of!(Binding, cell);
+
+    /// The [`FILTER`] bit of `symbol`.
+    pub fn filter_bit(symbol: crate::object::Sexp) -> u64 {
+        super::filter_bit(symbol)
+    }
+}
+
+/// A frame's slots: inline up to [`INLINE_BINDINGS`], on the heap past that. Its own type
+/// rather than a `SmallVec`, because machine code reads it at fixed offsets ([`layout`]).
+struct Bindings {
+    length: u32,
+    capacity: u32,
+    storage: Storage,
+}
+
+union Storage {
+    inline: [MaybeUninit<Binding>; INLINE_BINDINGS],
+    heap: *mut Binding,
+}
+
+impl Bindings {
+    const fn new() -> Bindings {
+        Bindings {
+            length: 0,
+            capacity: INLINE_BINDINGS as u32,
+            storage: Storage {
+                inline: [MaybeUninit::uninit(); INLINE_BINDINGS],
+            },
+        }
+    }
+
+    fn spilled(&self) -> bool {
+        self.capacity as usize > INLINE_BINDINGS
+    }
+
+    fn data(&self) -> *const Binding {
+        // SAFETY: the capacity says which union field is live.
+        unsafe {
+            if self.spilled() {
+                self.storage.heap
+            } else {
+                self.storage.inline.as_ptr().cast()
+            }
+        }
+    }
+
+    fn data_mut(&mut self) -> *mut Binding {
+        // SAFETY: as in `data`.
+        unsafe {
+            if self.spilled() {
+                self.storage.heap
+            } else {
+                self.storage.inline.as_mut_ptr().cast()
+            }
+        }
+    }
+
+    fn push(&mut self, binding: Binding) {
+        if self.length == self.capacity {
+            self.grow(self.capacity as usize * 2);
+        }
+        // SAFETY: the slot at `length` is within the capacity.
+        unsafe { self.data_mut().add(self.length as usize).write(binding) };
+        self.length += 1;
+    }
+
+    /// Makes room for `additional` more slots, exactly.
+    fn reserve_exact(&mut self, additional: usize) {
+        let needed = self.length as usize + additional;
+        if needed > self.capacity as usize {
+            self.grow(needed);
+        }
+    }
+
+    fn grow(&mut self, capacity: usize) {
+        let capacity = u32::try_from(capacity).expect("a frame has fewer than 2^32 bindings");
+        let layout = Layout::array::<Binding>(capacity as usize).expect("a frame fits in memory");
+        // SAFETY: the layout is non-zero, since a grown frame holds more than the inline count.
+        unsafe {
+            let data = alloc(layout).cast::<Binding>();
+            if data.is_null() {
+                handle_alloc_error(layout);
+            }
+            std::ptr::copy_nonoverlapping(self.data(), data, self.length as usize);
+            self.release();
+            self.storage.heap = data;
+        }
+        self.capacity = capacity;
+    }
+
+    /// Frees the heap slots, if any.
+    fn release(&mut self) {
+        if self.spilled() {
+            let layout = Layout::array::<Binding>(self.capacity as usize)
+                .expect("a frame's layout was valid when it grew");
+            // SAFETY: the slots were allocated with this layout in `grow`.
+            unsafe { dealloc(self.storage.heap.cast(), layout) };
+        }
+    }
+
+    fn retain(&mut self, keep: impl Fn(&Binding) -> bool) {
+        let data = self.data_mut();
+        let mut kept = 0;
+        for position in 0..self.length as usize {
+            // SAFETY: both positions are below the length, and `kept <= position`.
+            unsafe {
+                let binding = *data.add(position);
+                if keep(&binding) {
+                    *data.add(kept) = binding;
+                    kept += 1;
+                }
+            }
+        }
+        self.length = kept as u32;
+    }
+}
+
+impl Default for Bindings {
+    fn default() -> Bindings {
+        Bindings::new()
+    }
+}
+
+impl Drop for Bindings {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl Deref for Bindings {
+    type Target = [Binding];
+
+    fn deref(&self) -> &[Binding] {
+        // SAFETY: the first `length` slots are initialized.
+        unsafe { std::slice::from_raw_parts(self.data(), self.length as usize) }
+    }
+}
+
+impl DerefMut for Bindings {
+    fn deref_mut(&mut self) -> &mut [Binding] {
+        // SAFETY: as in `deref`.
+        unsafe { std::slice::from_raw_parts_mut(self.data_mut(), self.length as usize) }
+    }
+}
+
 impl Frame {
     /// Initializes an empty frame at `frame` with room for `bindings` bindings.
     ///
@@ -98,7 +270,7 @@ impl Frame {
     #[inline(always)]
     pub unsafe fn write_empty(frame: *mut Frame, bindings: usize) {
         use std::ptr::{addr_of_mut, write};
-        write(addr_of_mut!((*frame).bindings), SmallVec::new());
+        write(addr_of_mut!((*frame).bindings), Bindings::new());
         write(addr_of_mut!((*frame).index), None);
         write(addr_of_mut!((*frame).table), None);
         write(addr_of_mut!((*frame).formals), 0);
@@ -410,17 +582,17 @@ impl Frame {
 
     /// The frame an image stored, with a removed slot's cell set to `nil`.
     pub(crate) fn from_image(image: FrameImage, nil: Sexp) -> Frame {
-        let bindings: SmallVec<[Binding; INLINE_BINDINGS]> = image
-            .slots
-            .iter()
-            .map(|slot| match *slot {
+        let mut bindings = Bindings::new();
+        bindings.reserve_exact(image.slots.len());
+        for slot in &image.slots {
+            bindings.push(match *slot {
                 Some((symbol, cell)) => Binding { symbol, cell },
                 None => Binding {
                     symbol: REMOVED,
                     cell: nil,
                 },
-            })
-            .collect();
+            });
+        }
         let mut filter = 0;
         let mut seen = FxHashSet::default();
         let mut shadowed = false;

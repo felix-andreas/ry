@@ -35,6 +35,32 @@ The quality bar is four things.
 - testthat 3.3.2 fails to load under ry's runtime with "attempt to use zero-length variable name" ; 3.2.3 loads. ry raises that error for `new.env()[[""]]`; whether GNU R does too, and so whether that is the cause, is unverified (no GNU R on the measuring host).
 - `crates/jit/tests/test_tiers.rs` `run_time_binding_shadows_cached_global_function` fails for `gen`: a `g` bound in a generic's frame before `UseMethod` is not seen by `gen.default`, which calls the global `g`. The cause is outside the typed core: the test fails without it.
 
+## Open: the baseline tier and JIT on against JIT off
+
+The baseline tier, the merged SSA IR (`crates/ssa`), size-scaled tier-up, block-bodied closure
+inlining and inline `GetVar`, `SetVar` and scalar comparisons in baseline code are on branch
+`perf/baseline-tier-ir` (PR #353). JIT on runs about 1% more instructions than JIT off on
+`bench-real` and is not faster in wall time; the baseline is about 4% slower than JIT off and stays
+opt-in (`decisions.md`, "Baseline code inlines variable access and scalar comparisons"). What is
+left, in order of expected gain:
+
+- Shrink baseline code: rel8 branches, 8-bit compare immediates, and a step convention that
+  answers 0 for fall-through.
+- Inline paths for scalar `+ - * /` (needs an inline allocation of a length-one vector), `Guard`
+  (`step_guard` costs 227M instructions on `functional`), and the trivial predicates through
+  `BuiltinDef::unary`.
+- Tier-1 handoffs: compiled code hands arithmetic it did not specialize back to tier 0 through
+  `jit_step` (158,500 times in one `functional` body), and loads go through `jit_load` and
+  `load_variable` instead of an inline frame probe like the baseline's `probe_frame`.
+- Calls from compiled code (baseline and tier 1) while calling handlers are established, instead
+  of falling back to tier 0, pinned in `crates/jit/tests/test_tiers.rs` with a body hot under
+  `withCallingHandlers`.
+- A deoptimization exit that materializes the callee's frame, so tier 1 can inline callees with
+  effects. Runtime work (closure calls, argument matching, allocation, collection) dominates
+  `bench-real` with the JIT off, so this and unboxing are the larger levers.
+- `conditions` deoptimizes 3000 times (an error parked in a helper) at one `stop()` call site,
+  once per call.
+
 ## Open: console input in ry's runtime
 
 - Console `scan()` prompts with the running item count (`1: `, `3: `); GNU R's counts records for a

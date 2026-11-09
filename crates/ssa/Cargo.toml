@@ -1,0 +1,22 @@
+[package]
+name = "ssa"
+description = "ry's one mid-level SSA IR, shared by the optimizing tier and the typed core, and its lowering to machine code"
+edition = "2024"
+version.workspace = true
+license = "GPL-2.0-or-later"
+publish = false
+
+[lib]
+path = "src/ssa.rs"
+
+[dependencies]
+rustc-hash.workspace = true
+smallvec = "1.15"
+cranelift-codegen = "0.136"
+cranelift-frontend = "0.136"
+cranelift-jit = "0.136"
+cranelift-module = "0.136"
+cranelift-native = "0.136"
+
+[dev-dependencies]
+syntax = { path = "../syntax" }

@@ -167,7 +167,7 @@ refers to its steps.
 | Escape analysis, inspired by Bend's share inference | Bend | **Adopt, scoped** | Temporaries in compiled code that native code never sees |
 | Call-site specialization of known closures, inspired by lambda sets | Roc | **Adopt, scoped** | `lapply`, `vapply`, `Map`, `Reduce` in compiled code |
 | One IR feeding several backends | Roc | **Adopt** | Bytecode feeds the interpreter, the baseline tier and the Cranelift tier |
-| A fast dev backend beside an optimizing one | Roc | **Adopt, planned** (step 4) | The Sparkplug-style baseline tier |
+| A fast dev backend beside an optimizing one | Roc | **Adopt, built** (step 4) | The Sparkplug-style baseline tier, with its own x86-64 and aarch64 assembler |
 | Static dispatch only | Roc | **Reject** | S3, S4 and R6 are dynamic; ry speculates on the class instead |
 | A top level that cannot perform effects | Roc | **Adopt, planned for strict mode** | A strict library file's top level holds only definitions and pure constants |
 | Purity inference: effectful types use `=>`, effectful names end in `!` | Roc | **Reject** | Freedom from effects stays a runtime body fact the JIT reads, outside the type |
@@ -210,7 +210,7 @@ refers to its steps.
 | Trace compilation | LuaJIT | **Reject** | Promises and dispatch make traces fragile; Cranelift is a method JIT |
 | Dense feedback slots, allocated lazily | V8 | **Adopt** (lazy half built) | Feedback only for value-producing instructions |
 | Fast mid tier on feedback | V8 (Maglev) | **Adopt, scoped** | Tier 1, compiled off the main thread, with lower thresholds |
-| Baseline compiler reusing the interpreter's frame | V8 (Sparkplug) | **Adopt, planned** (step 4), preferred over copy-and-patch | Per instruction, a call to tier 0's handler with immediate operands and native jumps |
+| Baseline compiler reusing the interpreter's frame | V8 (Sparkplug) | **Adopt, built** (step 4), preferred over copy-and-patch; not on by default | Per instruction, a call to tier 0's handler with immediate operands and native jumps (`crates/jit/src/baseline.rs`). Against tail-call tier-0 handlers that alone measures level, so the baseline pays off only once it inlines the fast paths of variable access and arithmetic |
 | Accumulator bytecode | V8 (Ignition) | **Reject** | Tier 0 keeps named registers |
 | Sea-of-nodes optimizer, a fourth tier | V8, JavaScriptCore | **Reject** | Tier 1 is the top tier |
 | In-place instruction specialization (quickening), de-specialized on a miss | CPython (PEP 659)[^pep-659] | **Adopt the idea** (step 3) | Tier 0 instructions rewrite themselves to a specialized form and back; CPython is not the performance bar, JavaScriptCore is |
@@ -299,9 +299,9 @@ into the host through the C ABI.
   higher-order functions, which ry implements itself. `purrr::map` runs its loop in purrr's own C
   code, so the JIT cannot specialize it.
 - **One IR for every tier.** ry's bytecode feeds the tier 0 interpreter, and tier 1 compiles from
-  the same bytecode (through its own SSA form) to Cranelift, as Roc's backends share their
-  lower-level IR. Roc's fast dev backend corresponds to the planned Sparkplug-style baseline tier
-  (see V8 below).
+  the same bytecode through the mid-level SSA IR of `crates/ssa`, which the typed core shares, as
+  Roc's backends share their lower-level IR. Roc's fast dev backend corresponds to the
+  Sparkplug-style baseline tier (see V8 below).
 
 **What ry rejects.**
 

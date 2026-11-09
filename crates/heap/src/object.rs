@@ -572,6 +572,29 @@ pub const RECORD_UNBOXED_OFFSET: usize = std::mem::offset_of!(RecordObject, unbo
 /// Where a vector's elements start. Sixteen-byte aligned, so every element type is aligned.
 pub const VECTOR_DATA_OFFSET: usize = size_of::<VectorObject>();
 
+/// What machine code reads and writes in an object header directly: the baseline tier's inline
+/// variable loads and stores (`crates/jit/src/baseline.rs`) depend on these.
+pub mod header_layout {
+    use super::Header;
+    pub const KIND: usize = std::mem::offset_of!(Header, kind);
+    pub const GC: usize = std::mem::offset_of!(Header, gc);
+    pub const FLAGS: usize = std::mem::offset_of!(Header, flags);
+    /// A `u16`.
+    pub const GP: usize = std::mem::offset_of!(Header, gp);
+    /// A `u16`, saturated at [`super::REFCOUNT_MAX`].
+    pub const REFCOUNT: usize = std::mem::offset_of!(Header, refcount);
+    pub const ATTRIB: usize = std::mem::offset_of!(Header, attrib);
+    /// A triple's first field (`CAR`, a promise's value) and second (`CDR`, a binding's value).
+    pub const FIRST: usize = 16;
+    pub const SECOND: usize = 24;
+    pub const GC_OLD: u8 = super::gc_bits::OLD;
+    pub const GC_REMEMBERED: u8 = super::gc_bits::REMEMBERED;
+    pub const FLAG_UNTRACKED: u8 = super::flag_bits::UNTRACKED;
+}
+
+/// Where an environment's frame starts in the object (`env::layout` has the frame's own fields).
+pub const ENVIRONMENT_FRAME_OFFSET: usize = std::mem::offset_of!(EnvironmentObject, frame);
+
 const _: () = assert!(size_of::<Header>() == 16);
 const _: () = assert!(VECTOR_DATA_OFFSET == 32);
 // libR's `Rinternals.h` reads these offsets inline, so packages compiled against it depend on them.
