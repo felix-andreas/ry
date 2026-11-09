@@ -2557,10 +2557,20 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 - **Install-time native code: the gaps.** The image's native section is written
   (`crates/jit/src/ahead.rs`), but it compiles only scalar numeric closures for guessed argument
   types (annotations, constant defaults, then double, integer and logical shapes), not the
-  checker's inferred types, which the install cannot query yet. Arguments that are calls
-  (`f(-1)`, `f(c(1, 2))`) run in tier 0 because `native::gather` reads only values, constants and
-  variables; forcing them ahead of the call needs the effect-free fact per argument. Records are
-  refused because each process numbers record layouts anew.
+  checker's inferred types, which the install cannot query yet. Records are refused because each
+  process numbers record layouts anew. Coverage on real packages is small (rlang 16 of 1,294
+  functions, cli 28 of 897, testthat 13 of 1,101): the refusals are about the value domain
+  (`...`, strings, lists, base functions native code lacks, calls of closures that are not
+  native), not about missing facts, so checker types and argument facts lift only a few dozen
+  functions per package. Baseline code for every body from its first entry measured 8.06G
+  against 7.96G instructions on the testthat workload, so install-time baseline code is no lever
+  until baseline code inlines fast paths.
+- **Typed natives read a logical `NA` as a double `NA` where tier 0 keeps it logical.**
+  `nf <- function(x: double, y: double) -> double x * 2 + y; nf(NaN, NA)` gives `NA` with
+  `RY_JIT=off` and `NaN` with the JIT on: tier 0 adds a logical `NA` operand as integer `NA`,
+  which makes the result `NA`, and native code receives it as `NA_real_` and lets the hardware
+  pick `NaN`. Either the annotation check should coerce the value in tier 0 too, or native entry
+  should refuse a logical argument for a double parameter.
 - **Decoding an image's code costs about as much as compiling it** (about 65k instructions per
   closure on CRAN packages), so an untrained image saves nothing measurable. The decoder reads
   every instruction word and feedback word as a varint and re-interns each symbol constant by
