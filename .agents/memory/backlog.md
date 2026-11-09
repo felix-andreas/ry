@@ -2538,6 +2538,17 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   help (`decisions.md`, "Installed packages load through native fast paths"), so the lever is a
   faster record reader and fewer forced fetches (S3 registration forcing every method), not
   another image.
+- **A training run with other types than real use makes a trained image slower.** The JIT
+  compiles at the first call from the trained feedback, deoptimizes on the new type, then refuses
+  the recompile ("a for loop over something other than a plain vector") for the merged feedback,
+  so the body stays in tier 0 for the session: a loop trained on `1:50` and run on doubles took
+  72 ms against 45 ms without the image. The same refusal happens without an image when a session
+  calls with integers first, so the fix is in the JIT (recompile for the widened type after a
+  deoptimization), not in the image.
+- **An untrained image costs instructions on load.** `library(survival)` plus one `survfit` call is
+  2,091.9M instructions with the recommended packages' images and 2,064.4M with
+  `RY_CODE_IMAGE=0` (callgrind, whole process), so cheaper decoding (above) matters before
+  images pay off without training.
 - **Code images are about six times the size of the lazy-load database** (MASS: 706 KB `.ryc`
   against a 120 KB compressed `.rdb`), because instruction words, constants and feedback are
   stored uncompressed. Compress payloads, or pack the instruction stream, if install size matters.
