@@ -2431,9 +2431,20 @@ impl Lowering<'_> {
         } else {
             Item::Int
         };
+        let vectors = ta.items().is_some() || tb.items().is_some();
+        // When an integer or logical `NA` meets a `NaN`, whether the interpreter gives `NA` or
+        // `NaN` depends on the operand order its compiled kernel picked for that operator
+        // (`NaN + NA` is `NA` but `NaN - NA` is `NaN`), so a `NaN` next to an R integer fails
+        // over to it.
+        if !vectors && matches!(op, Arith::Add | Arith::Sub | Arith::Mul | Arith::Div) {
+            match (ta, tb) {
+                (Type::Dbl, Type::Int | Type::Lgl) => self.fail_if_nan(a),
+                (Type::Int | Type::Lgl, Type::Dbl) => self.fail_if_nan(b),
+                _ => {}
+            }
+        }
         let a = self.operand(a, item)?;
         let b = self.operand(b, item)?;
-        let vectors = ta.items().is_some() || tb.items().is_some();
         if vectors {
             Ok(self
                 .builder
