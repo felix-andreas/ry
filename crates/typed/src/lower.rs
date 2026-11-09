@@ -732,6 +732,10 @@ impl Lowering<'_> {
             (None, None) => None,
             (Some(value), None) | (None, Some(value)) => {
                 let result = self.builder.local(self.builder.ty(value));
+                // A branch whose value nothing may read passes that on to the `if`'s value.
+                if self.unusable.contains(&value) {
+                    self.unusable.push(result);
+                }
                 let end = if then_value.is_some() {
                     then_end
                 } else {
@@ -742,7 +746,10 @@ impl Lowering<'_> {
                 Some(result)
             }
             (Some(a), Some(b)) => {
-                if self.builder.ty(a) == self.builder.ty(b) {
+                // Two nested `if`s whose own branches disagree both hold a placeholder `NULL`,
+                // so equal types alone do not make the joined value readable.
+                let readable = !self.unusable.contains(&a) && !self.unusable.contains(&b);
+                if readable && self.builder.ty(a) == self.builder.ty(b) {
                     let result = self.builder.local(self.builder.ty(a));
                     self.builder.switch_to(then_end);
                     self.builder.push(Some(result), Op::Copy(a));
