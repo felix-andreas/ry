@@ -340,6 +340,7 @@ ry build                  # write ../<package>_<version>.tar.gz
 ry build -o dist          # write it into dist/ instead
 ry install                # install into the first library on .libPaths()
 ry install -l ~/rlib      # install into ~/rlib
+ry install --train tests  # train the package's code image on its tests
 ```
 
 `ry build` writes the source tarball of the package at `PATH` (default: the one containing the
@@ -359,8 +360,17 @@ instead.
 ry's `R CMD INSTALL` and `R CMD SHLIB` run `make` with one job per processor unless `MAKEFLAGS`
 is set to a value. A package
 whose `Makevars` builds correctly only with one job fails in parallel, so a failed parallel build
-runs again with one job, reusing the objects already built. Installed R code is not byte-compiled,
-because ry compiles closures when they run.
+runs again with one job, reusing the objects already built.
+
+An install on ry's runtime also writes the package's code image, `R/<package>.ryc` beside its
+lazy-load database: the compiled code of every closure, which a later session takes instead of
+compiling the closure itself. `--train tests`, `--train examples` or `--train SCRIPT` (`R CMD
+INSTALL --ry-train=...`) first runs the package's tests, its help-page examples or a script, and
+the image then keeps the profile of that run, so a function that ran hot there is handed to the
+optimizing tier as soon as a new session compiles it. `R CMD INSTALL --ry-no-code-image` writes no
+image, and `RY_CODE_IMAGE=0` makes a session ignore images. An image written by another ry build,
+or for other package sources, is ignored, and a damaged one warns once and is ignored; reinstall
+the package to write a fresh one.
 
 ## debug-adapter
 
