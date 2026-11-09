@@ -1,7 +1,7 @@
 # A user installs their package with a training run. The install writes the compiled code of
 # every closure beside the package's lazy-load database, so a new session takes each function's
-# code from the image instead of compiling it, and a function that ran hot in training enters
-# the optimizing tier at its first call. Without the image the same function first has to grow
+# code from the image instead of compiling it, and a function with a loop that ran hot in
+# training enters the optimizing tier at its first call. Without the image the same function first has to grow
 # hot again.
 
 requires ry-runtime

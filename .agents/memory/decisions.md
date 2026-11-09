@@ -7882,7 +7882,10 @@ Each one trades a narrow class of missed errors for a class of false reports see
   because a mapped file that shrinks raises SIGBUS in the process mapping it.
 - **Training.** A trained image keeps each code object's PROFILE counters, inline-cache hints and
   FEEDBACK words; TIER1 decodes as nil. Persisted entry counts at or above the tier-up threshold make a hot body enter the
-  optimizing tier at its first call in a new process. TIER1 code and inline caches are not saved:
+  optimizing tier at the call that takes its code from the image (the first when the body has a
+  loop, otherwise the second). The tier state's counts of compilations and cold refusals belong
+  to the training process's optimized code, so they are written as 0; a final refusal (a
+  negative state) is kept. TIER1 code and inline caches are not saved:
   the first is process-local machine code, the second holds heap pointers.
 - **Native code.** The image reserves an offset/length pair for install-time native code, written
   as zeros. Filling it waits for the shared SSA IR of `crates/jit` and `crates/typed`
