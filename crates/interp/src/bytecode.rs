@@ -187,8 +187,7 @@ pub struct Machine<'a> {
 }
 
 impl Machine<'_> {
-    /// The activation's environment, or `NULL` while its slot frame has none. Compiled code
-    /// runs only in an activation with an environment ([`Machine::reify`]).
+    /// The activation's environment, or `NULL` while its slot frame has none.
     #[inline(always)]
     pub unsafe fn env(&self) -> Sexp {
         *register_address(self.header)
@@ -213,6 +212,52 @@ impl Machine<'_> {
             return env.enclosure();
         }
         self.function.tag()
+    }
+
+    /// The frame slot that holds `symbol`, while the activation runs in a slot frame without an
+    /// environment. `None` with an environment, which is then the source of truth, and for a
+    /// symbol the slot table does not number, which the frame cannot bind.
+    pub unsafe fn slot_of(&self, symbol: Sexp) -> Option<*mut Sexp> {
+        if self.env() != nil() {
+            return None;
+        }
+        let slots = self.code.cdr().element(SLOTS);
+        if slots == nil() {
+            return None;
+        }
+        let names = slots.element(1);
+        (0..length(names))
+            .find(|&index| names.element(index) == symbol)
+            .map(|position| register_address(self.header + 1 + position))
+    }
+
+    /// What the activation's own frame binds `symbol` to, without forcing or reifying: a slot's
+    /// content or a binding cell's value. `None` when the frame does not bind it.
+    pub unsafe fn local_binding(&self, symbol: Sexp) -> Option<Sexp> {
+        let env = self.env();
+        if env != nil() {
+            return crate::heap().frame_cell(env, symbol).map(|cell| cell.cdr());
+        }
+        self.slot_of(symbol)
+            .map(|slot| *slot)
+            .filter(|&value| value != unbound())
+    }
+
+    /// Binds `symbol` to `value` in the activation's own frame, as `SetVar` does: into its slot
+    /// in a slot frame, clearing a formal's missing bit, and otherwise into the environment.
+    pub unsafe fn assign(&self, symbol: Sexp, value: Sexp) -> R<()> {
+        if let Some(slot) = self.slot_of(symbol) {
+            crate::heap().store_slot(&mut *slot, value);
+            let formal = slot.offset_from(register_address(self.header)) as usize - 1;
+            if formal < 64
+                && let Some(frame) = interp().frames.last_mut()
+            {
+                frame.missing &= !(1 << formal);
+            }
+            return Ok(());
+        }
+        let env = self.reify()?;
+        eval::assign_symbol(symbol, value, env, false)
     }
 }
 
@@ -3936,18 +3981,45 @@ pub unsafe fn record_value(code: Sexp, pc: usize, value: Sexp) {
 }
 
 /// What `GetVar` at `pc` reads, and whether the binding is in the activation's own frame.
-pub unsafe fn load_variable(code: Sexp, env: Sexp, pc: usize) -> R<(Sexp, bool)> {
+pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)> {
+    let code = machine.code;
     let words = values::ints(code.car());
     let constants = code.cdr();
     let symbol = constants.element(words[pc + 2] as usize);
-    let local = crate::heap().frame_cell(env, symbol).is_some();
-    let value = lookup_variable(
-        symbol,
-        env,
-        LookupCache::of(code),
-        words[pc + 3] as usize,
-        0..0,
-    )?;
+    let cache = words[pc + 3] as usize;
+    let in_slots = machine.env() == nil();
+    let (value, local) = match machine.slot_of(symbol) {
+        None if in_slots => {
+            let start = machine.function.tag();
+            (lookup_outside(symbol, start, LookupCache::of(code), cache, 0..0)?, false)
+        }
+        Some(slot) => {
+            let value = *slot;
+            if value.kind() == SexpType::Promise {
+                let forced = if value.car() == unbound() {
+                    let forced = eval::force_promise(value)?;
+                    crate::heap().root(forced);
+                    forced
+                } else {
+                    value.car()
+                };
+                (forced, true)
+            } else if value == missing_arg() {
+                let env = machine.reify()?;
+                (lookup_variable(symbol, env, LookupCache::of(code), cache, 0..0)?, true)
+            } else if value != unbound() {
+                (value, true)
+            } else {
+                let start = machine.function.tag();
+                (lookup_outside(symbol, start, LookupCache::of(code), cache, 0..0)?, false)
+            }
+        }
+        None => {
+            let env = machine.env();
+            let local = crate::heap().frame_cell(env, symbol).is_some();
+            (lookup_variable(symbol, env, LookupCache::of(code), cache, 0..0)?, local)
+        }
+    };
     record_feedback(constants, pc, value);
     Ok((value, local))
 }

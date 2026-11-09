@@ -32,7 +32,7 @@ use {
     },
     interp::{
         annotations,
-        bytecode::{Arith, Op, baseline_layout},
+        bytecode::{self, Arith, Op, baseline_layout},
         values,
     },
     rustc_hash::FxHashMap,
@@ -2826,20 +2826,61 @@ impl<'p> Translator<'p> {
         Ok(())
     }
 
-    /// Finds `symbol`'s value inline, as tier 0's lookup does when the binding sits where
-    /// lookup slot `lookup` last found it, in the activation's frame or in an enclosing function
-    /// frame, and holds a value or a forced promise. That case runs no code and leaves the frame
-    /// as it was, so it needs no write-back, no feedback and no validity check, and it jumps to
-    /// `merged` with the value and its runtime status. Everything else branches to `slow`.
+    /// Finds `symbol`'s value inline, as tier 0's lookup does when the variable sits in the
+    /// activation's slot frame, or where lookup slot `lookup` last found its binding in the
+    /// activation's environment or in an enclosing function frame, and holds a value or a
+    /// forced promise. That case runs no code and leaves the frame as it was, so it needs no
+    /// write-back, no feedback and no validity check, and it jumps to `merged` with the value
+    /// and its runtime status. Everything else branches to `slow`.
     unsafe fn probe_variable(&mut self, symbol: Sexp, lookup: usize, slow: Label, merged: Label) {
         let found = self.builder.create_block();
         let cell = self.builder.append_block_param(found, I64);
         let status = self.builder.append_block_param(found, I32);
+        let checked = self.builder.create_block();
+        let checked_value = self.builder.append_block_param(checked, I64);
+        let checked_status = self.builder.append_block_param(checked, I32);
         let enclosing = self.builder.create_block();
-        let env = self
+        let enclosure = self.builder.append_block_param(enclosing, I64);
+        let framed = self.builder.create_block();
+        let slotted = self.builder.create_block();
+        // A callee can give the slot frame its environment while the activation runs, so every
+        // probe reads the header register again.
+        let header = self
             .builder
             .ins()
-            .load(I64, flags(), self.activation, offset::ENV);
+            .load(I64, flags(), self.activation, offset::HEADER);
+        let env = self.builder.ins().load(I64, flags(), header, 0);
+        let nil = values::nil().as_ptr() as i64;
+        let in_slots = self.builder.ins().icmp_imm_u(IntCC::Equal, env, nil);
+        self.builder.ins().brif(in_slots, slotted, &[], framed, &[]);
+
+        self.builder.switch_to_block(slotted);
+        // The slot table is fixed with the code, so the slot is a constant. A symbol the table
+        // does not number is free in the body, and its lookup starts at the closure's
+        // environment.
+        let slots = self.code.cdr().element(bytecode::SLOTS);
+        let slot = (slots != values::nil())
+            .then(|| values::ints(slots.element(0)).get(lookup).copied())
+            .flatten()
+            .unwrap_or(-1);
+        if slot >= 0 {
+            let value = self.builder.ins().load(
+                I64,
+                flags(),
+                header,
+                (8 * (1 + slot as usize)) as i32,
+            );
+            let local_status = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
+            self.builder.ins().jump(checked, &[value, local_status]);
+        } else {
+            let enclosure = self
+                .builder
+                .ins()
+                .load(I64, flags(), self.activation, offset::ENCLOSURE);
+            self.builder.ins().jump(enclosing, &[enclosure]);
+        }
+
+        self.builder.switch_to_block(framed);
         let hints = self
             .builder
             .ins()
@@ -2849,15 +2890,18 @@ impl<'p> Translator<'p> {
             .ins()
             .load(I32, flags(), hints, (4 * lookup) as i32);
         let hint = self.builder.ins().uextend(I64, hint);
-        let local = self.probe_frame(env, symbol, hint, enclosing, slow);
+        let local_miss = self.builder.create_block();
+        let local = self.probe_frame(env, symbol, hint, local_miss, slow);
         let local_status = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
         self.builder.ins().jump(found, &[local, local_status]);
-
-        self.builder.switch_to_block(enclosing);
-        let enclosure =
+        self.builder.switch_to_block(local_miss);
+        let parent =
             self.builder
                 .ins()
                 .load(I64, flags(), env, ENVIRONMENT_ENCLOSURE_OFFSET as i32);
+        self.builder.ins().jump(enclosing, &[parent]);
+
+        self.builder.switch_to_block(enclosing);
         let bits = self
             .builder
             .ins()
@@ -2876,6 +2920,15 @@ impl<'p> Translator<'p> {
             .ins()
             .brif(function_frame, probe, &[], slow, &[]);
         self.builder.switch_to_block(probe);
+        let hints = self
+            .builder
+            .ins()
+            .load(I64, flags(), self.activation, offset::HINTS);
+        let hint = self
+            .builder
+            .ins()
+            .load(I32, flags(), hints, (4 * lookup) as i32);
+        let hint = self.builder.ins().uextend(I64, hint);
         let outer = self.probe_frame(enclosure, symbol, hint, slow, slow);
         let outer_status = self.builder.ins().iconst(I32, status::RUNTIME_ENCLOSING);
         self.builder.ins().jump(found, &[outer, outer_status]);
@@ -2898,6 +2951,10 @@ impl<'p> Translator<'p> {
             .builder
             .ins()
             .load(I64, flags(), cell, header_layout::SECOND as i32);
+        self.builder.ins().jump(checked, &[value, status]);
+
+        self.builder.switch_to_block(checked);
+        let (value, status) = (checked_value, checked_status);
         let unbound = values::unbound().as_ptr() as i64;
         for marker in [values::missing_arg().as_ptr() as i64, unbound] {
             let differs = self
