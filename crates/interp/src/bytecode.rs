@@ -3626,9 +3626,12 @@ unsafe fn loop_target(loops: Sexp, pc: usize, is_break: bool) -> Option<usize> {
 /// share one copy of their handler with the baseline tier. The step releases what it rooted
 /// down to the handle mark at entry, which is where the caller's own scope would release it.
 pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<()> {
-    let mut state = activation(machine, true);
+    let mut state = activation(machine);
+    state.mark = crate::heap().handle_mark();
     let step = *BASELINE_STEPS.as_ptr().add(op_index(state.code, pc));
+    let outer = STEPPING.replace((&raw const state).cast());
     let answer = step((&raw mut state).cast(), pc);
+    STEPPING.set(outer);
     if let Some(payload) = PARKED_PANIC.take() {
         std::panic::resume_unwind(payload);
     }
@@ -3675,9 +3678,6 @@ struct Activation<'m, 'a> {
     registers: *mut Sexp,
     /// What the activation returns once a handler stops the chain by answering [`STOP`].
     exit: R<Sexp>,
-    /// Whether this activation runs one instruction for the optimizing tier, which takes a
-    /// failure back itself instead of resuming at a loop target of this activation.
-    single: bool,
 }
 
 impl Activation<'_, '_> {
@@ -3750,7 +3750,7 @@ type Handler = unsafe fn(&mut Activation<'_, '_>, usize);
 /// Interprets `machine`'s code from `pc` until it returns.
 #[inline(always)]
 unsafe fn interpret(machine: &mut Machine<'_>, pc: usize) -> R<Sexp> {
-    let mut state = activation(machine, false);
+    let mut state = activation(machine);
     release(&state);
     if let Some(baseline) = baseline_code(state.constants) {
         run_baseline(&mut state, baseline, pc);
@@ -3761,7 +3761,7 @@ unsafe fn interpret(machine: &mut Machine<'_>, pc: usize) -> R<Sexp> {
 }
 
 #[inline(always)]
-unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>, single: bool) -> Activation<'m, 'a> {
+unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>) -> Activation<'m, 'a> {
     let constants = machine.code.cdr();
     let feedback = if interp().bytecode.tier.is_some()
         && values::ints(constants.element(PROFILE))[profile::RECORDING] != 0
@@ -3775,13 +3775,12 @@ unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>, single: bool) -> Acti
         cache: LookupCache::of(machine.code),
         feedback,
         env: machine.env,
-        mark: if single { crate::heap().handle_mark() } else { machine.mark },
+        mark: machine.mark,
         heap: crate::heap(),
         interp: interp(),
         code: values::ints(machine.code.car()).as_ptr(),
         registers: register_address(machine.base),
         exit: Ok(nil()),
-        single,
         machine,
     }
 }
@@ -3811,6 +3810,9 @@ unsafe fn run_baseline(state: &mut Activation<'_, '_>, baseline: BaselineCode, p
 }
 
 thread_local! {
+    /// The activation [`step_one`] is running, if any. Activations nested inside its step have
+    /// other addresses, so they resume at their own loop targets as usual.
+    static STEPPING: std::cell::Cell<*const ()> = const { std::cell::Cell::new(std::ptr::null()) };
     /// A panic raised inside a baseline step, carried past the machine code that called it.
     static PARKED_PANIC: std::cell::Cell<Option<Box<dyn std::any::Any + Send>>> =
         const { std::cell::Cell::new(None) };
@@ -3981,7 +3983,10 @@ unsafe fn failed(
     at: usize,
     unwind: Unwind,
 ) -> usize {
-    let resumed = if state.single {
+    // The activation `step_one` runs for the optimizing tier takes a failure back to that tier
+    // instead of resuming at a loop target. It is recognized by address rather than by a field,
+    // so that tier 0's activations, built on every call, carry nothing for it.
+    let resumed = if std::ptr::eq(STEPPING.get(), (&raw const *state).cast()) {
         Err(unwind)
     } else {
         continue_after(state.machine, at, unwind)
