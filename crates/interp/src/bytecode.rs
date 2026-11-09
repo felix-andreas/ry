@@ -2003,8 +2003,8 @@ impl Compiler {
 
     /// Whether evaluating the subscript `index` cannot change a variable of the frame, so the
     /// compiled assignment may evaluate it before reading the target: a variable of the frame (a
-    /// formal's promise runs in the caller's frame), a numeric constant, a name, or base
-    /// arithmetic on variables and numbers.
+    /// formal's promise runs in the caller's frame), a numeric constant, a name, base arithmetic
+    /// on variables and numbers, or base `$` and `[[` reading one of those.
     unsafe fn side_effect_free_index(&self, index: Sexp, depth: u32) -> bool {
         match index.kind() {
             SexpType::Symbol => {
@@ -2025,6 +2025,24 @@ impl Compiler {
             SexpType::Language if depth < 8 && index.car().kind() == SexpType::Symbol => {
                 let operator = symbol_name(index.car());
                 let arguments = values::pairlist_items(index.cdr());
+                let name = |value: Sexp| {
+                    value.kind() == SexpType::String
+                        && length(value) == 1
+                        && !values::has_attributes(value)
+                };
+                if let ("$" | "[[", [(nil_tag, object), (key_tag, key)]) =
+                    (&*operator, arguments.as_slice())
+                {
+                    let key_free = match &*operator {
+                        "$" => key.kind() == SexpType::Symbol && *key != symbols().dots,
+                        _ => name(*key) || self.side_effect_free_index(*key, depth + 1),
+                    };
+                    return *nil_tag == nil()
+                        && *key_tag == nil()
+                        && key_free
+                        && !self.frame_may_bind(index.car())
+                        && self.side_effect_free_index(*object, depth + 1);
+                }
                 ARITHS[..5].iter().any(|(_, name)| *name == &*operator)
                     && (1..=2).contains(&arguments.len())
                     && !self.frame_may_bind(index.car())
