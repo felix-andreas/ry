@@ -3329,6 +3329,7 @@ impl Pending {
             match crate::heap().frame_cell(env, symbol) {
                 Some(cell) if cell.has_gp(gp::BINDING_LOCKED) => {
                     cell.set_gp_bits(gp::BINDING_LOCKED, false);
+                    crate::code_image::invalidate_checks();
                     let written = crate::heap().set_binding_value(cell, definition);
                     cell.set_gp_bits(gp::BINDING_LOCKED, true);
                     written.map_err(|error| crate::unwind::error(error.to_string()))?;

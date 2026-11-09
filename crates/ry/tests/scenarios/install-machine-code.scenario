@@ -1,0 +1,80 @@
+# A user installs a package of small numeric functions. The install compiles them to machine code
+# for the argument types they are likely to get and writes it into the package's code image, so a
+# new session calls that code without warming up, even with the JIT off. `--explain` shows which
+# functions stayed in the interpreter and why, and what each native function tests and looks up.
+
+requires ry-runtime
+
+file pkg/DESCRIPTION
+| Package: arith
+| Version: 1.0.0
+| Title: Arithmetic
+| Description: Small numeric functions to compile at install.
+| License: MIT
+file pkg/NAMESPACE
+| export(hypot, clamp, total, label)
+file pkg/R/arith.R
+| hypot <- function(x, y) sqrt(square(x) + square(y))
+| square <- function(x) x * x
+| clamp <- function(x, low = 0, high = 1) if (x < low) low else if (x > high) high else x
+| total <- function(values) {
+|     s <- 0
+|     for (v in values) s <- s + v
+|     s
+| }
+| label <- function(x) paste("value", x)
+
+run ry install pkg -l library --explain
+expect exit 0
+expect stdout "interpreter     1  label: an expression that is not a scalar computation"
+expect stdout "hypot(double, double) -> double: tests 2 arguments on entry; looks up sqrt, +, square, * once"
+expect stdout "code image: closures=5 written=5 native="
+
+file use.R
+| library(arith, lib.loc = "library")
+| a <- 3
+| b <- 4
+| print(hypot(a, b))
+| n <- 3L
+| print(hypot(n, n))
+| x <- 2
+| print(clamp(x, 0, 1))
+| v <- c(1.5, 2.5)
+| print(total(v))
+| print(label(1))
+| s <- "a"
+| print(tryCatch(hypot(s, b), error = conditionMessage))
+
+env RY_JIT off
+env RY_JIT_LOG 1
+run ry run --runtime ry use.R
+expect exit 0
+expect stderr "install-time functions from library/arith/R/arith.ryc"
+expect stdout "[1] 5"
+expect stdout "[1] 4.242641"
+expect stdout "[1] 1"
+expect stdout "[1] 4"
+expect stdout "[1] \"value 1\""
+expect stdout "[1] \"non-numeric argument to binary operator\""
+
+# Replacing a sibling the code calls directly makes the callers run in the interpreter, which
+# calls the replacement.
+file replace.R
+| library(arith, lib.loc = "library")
+| a <- 3
+| b <- 4
+| print(hypot(a, b))
+| assignInNamespace("square", function(x) 0, "arith")
+| print(hypot(a, b))
+
+run ry run --runtime ry replace.R
+expect exit 0
+expect stdout "[1] 5"
+expect stdout "[1] 0"
+
+# Without the image the same calls give the same values.
+env RY_CODE_IMAGE 0
+run ry run --runtime ry use.R
+expect exit 0
+expect stderr lacks "install-time functions"
+expect stdout "[1] 4.242641"

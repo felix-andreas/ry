@@ -2553,12 +2553,13 @@ The end-to-end guard rests on the corpus suites.
 
 What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pressing first.
 
-- **Install-time native code.** A code image (`crates/interp/src/code_image.rs`) reserves an
-  offset and length for native code and writes zeros. The end shape compiles every package closure
-  through the shared SSA IR and the typed AOT pipeline at install, position-independent and stamped
-  as `typed-runtime.md` describes, so a session maps it instead of tiering up. It waits for tier 1's
-  IR to merge with the typed core's in `crates/jit` and `crates/typed` (`r-runtime.md`, "Code
-  images of installed packages").
+- **Install-time native code: the gaps.** The image's native section is written
+  (`crates/jit/src/ahead.rs`), but it compiles only scalar numeric closures for guessed argument
+  types (annotations, constant defaults, then double, integer and logical shapes), not the
+  checker's inferred types, which the install cannot query yet. Arguments that are calls
+  (`f(-1)`, `f(c(1, 2))`) run in tier 0 because `native::gather` reads only values, constants and
+  variables; forcing them ahead of the call needs the effect-free fact per argument. Records are
+  refused because each process numbers record layouts anew.
 - **Decoding an image's code costs about as much as compiling it** (about 65k instructions per
   closure on CRAN packages), so an untrained image saves nothing measurable. The decoder reads
   every instruction word and feedback word as a varint and re-interns each symbol constant by

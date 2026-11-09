@@ -17,6 +17,9 @@ cranelift-frontend = "0.136"
 cranelift-jit = "0.136"
 cranelift-module = "0.136"
 cranelift-native = "0.136"
+cranelift-object = "0.136"
+object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
+libc = "0.2"
 
 [dev-dependencies]
 syntax = { path = "../syntax" }

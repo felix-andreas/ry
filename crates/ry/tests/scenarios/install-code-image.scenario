@@ -87,8 +87,10 @@ expect stdout "[1] 1 0 3"
 expect stdout "[1] \"new 1\""
 
 # A damaged image costs only its speedup: the package loads with one warning and its functions
-# compile as they run. A flipped byte in a payload fails the payload's hash at the first call
-# that takes code from it; a truncated file fails when the image is opened.
+# compile as they run. The file ends with the package's machine code, so a flipped last byte fails
+# that code's hash when the first function is fetched; a flipped byte in a payload would fail the
+# payload's hash at the first call that takes code from it. A truncated file fails when the image
+# is opened.
 file save.R
 | file.copy("library/tally/R/tally.ryc", "good.ryc", overwrite = TRUE)
 file flip.R
@@ -113,6 +115,18 @@ run ry run --runtime ry use.R
 expect exit 0
 expect stdout "[1] 55"
 expect stdout "[1] 1 0 3"
+expect stderr "cannot use the code image"
+
+# The warning is printed, not signalled, so even `options(warn = 2)` cannot turn the damage into
+# an error.
+file strict.R
+| options(warn = 2)
+| library(tally, lib.loc = "library")
+| print(tally(1:10))
+| print(twice(4))
+run ry run --runtime ry strict.R
+expect exit 0
+expect stdout "[1] 55"
 expect stderr "cannot use the code image"
 
 run ry run --runtime ry truncate.R

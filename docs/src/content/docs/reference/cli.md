@@ -341,6 +341,7 @@ ry build -o dist          # write it into dist/ instead
 ry install                # install into the first library on .libPaths()
 ry install -l ~/rlib      # install into ~/rlib
 ry install --train tests  # train the package's code image on its tests
+ry install --explain      # also report what the install compiled to machine code
 ```
 
 `ry build` writes the source tarball of the package at `PATH` (default: the one containing the
@@ -371,6 +372,33 @@ optimizing tier as soon as a new session compiles it. `R CMD INSTALL --ry-no-cod
 image, and `RY_CODE_IMAGE=0` makes a session ignore images. An image written by another ry build,
 or for other package sources, is ignored, and a damaged one warns once and is ignored; reinstall
 the package to write a fresh one.
+
+The image also holds machine code for the package's numeric functions, compiled at install for
+the argument types they are likely to get: the types their annotations or constant defaults
+declare, and otherwise double, integer and logical scalars and vectors. A call whose arguments
+have one of those types runs the machine code, without the JIT and without warming up; any other
+call runs in the interpreter. Calls between the package's functions are direct calls in the
+machine code. The functions it calls by name, such as `+` or a sibling, are checked when it first
+runs, and checked again after any binding is unlocked (`unlockBinding`, `assignInNamespace`), so a
+replaced function is always the one that runs. Machine code is written for x86-64 Linux, and
+other systems ignore it.
+
+`--explain` (`R CMD INSTALL --ry-explain`) prints what the install compiled. The functions left
+in the interpreter come first, largest first, each with what kept it there; then every
+specialization of a native function with its argument types, which it tests when called, and the
+names it looks up once (excerpt):
+
+```text
+machine code: 4 of 5 functions, by size (calls and operators in the body)
+  interpreter     1  label: an expression that is not a scalar computation
+  native          5  total(double[]) -> double: tests 1 argument on entry; looks up {, <-, for, + once
+  native          5  total(integer[]) -> double: tests 1 argument on entry; looks up {, <-, for, + once
+  ...
+  native          4  hypot(double, double) -> double: tests 2 arguments on entry; looks up sqrt, +, square, * once
+```
+
+An argument that is a call, such as `f(-1)` or `f(c(1, 2))`, reaches the function unevaluated, and
+such a call runs in the interpreter; an argument that is a constant or a variable does not.
 
 ## debug-adapter
 

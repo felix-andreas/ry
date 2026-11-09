@@ -240,11 +240,12 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
         .map(|_| (entropy.below(1 << 16), entropy.below(256) as u8))
         .collect();
     with_interpreter(|| {
-        let bytes = code_image::image_bytes(build, trained, database_length, &records, &payloads)
+        let bytes = code_image::image_bytes(build, trained, database_length, &records, &payloads, None)
             .unwrap_or_else(|_| panic!("a small image must write"));
         let entries = code_image::parse(&bytes, build, database_length)
             .unwrap_or_else(|message| panic!("a written image must parse: {message}"))
-            .unwrap_or_else(|| panic!("a written image must belong to its build"));
+            .unwrap_or_else(|| panic!("a written image must belong to its build"))
+            .entries;
         assert_eq!(entries.len(), records.len());
         for ((entry, record), payload) in entries.iter().zip(&records).zip(&payloads) {
             assert_eq!((entry.offset, entry.length, entry.hash), *record);
@@ -264,8 +265,12 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
                 _ => mutated.truncate(at),
             }
         }
-        if let Ok(Some(entries)) = code_image::parse(&mutated, build, database_length) {
-            for entry in entries {
+        if let Ok(Some(parsed)) = code_image::parse(&mutated, build, database_length) {
+            assert!(
+                parsed.native_offset + parsed.native_length <= mutated.len() as u64,
+                "a parsed image must not name a native section outside the file"
+            );
+            for entry in parsed.entries {
                 assert!(
                     entry.payload_offset + u64::from(entry.payload_length) <= mutated.len() as u64,
                     "a parsed image must not name a payload outside the file"
@@ -383,6 +388,7 @@ pub fn check_code_image_load(entropy: &mut impl Entropy) {
                 stream.len() as u64,
                 &[(offset, stream.len() as u32, code_image::hash(&stream))],
                 &[payload],
+                None,
             )
             .unwrap_or_else(|_| panic!("a small image must write"));
             // Raw damage: the file no longer matches its own hashes or framing.
