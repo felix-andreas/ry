@@ -515,9 +515,9 @@ unsafe fn record_fetch(database: &str, record: Record, closures: &[Sexp]) -> R<(
         heap.set_element(list, index * 2, closure);
         heap.set_element(list, index * 2 + 1, closure.cdr());
     }
-    heap.add_global_root(list);
     let length = u32::try_from(record.length)
         .map_err(|_| error(format!("a record of {database} is larger than 4GB")))?;
+    heap.preserve(list);
     records.insert(
         record.offset,
         Recorded {
@@ -535,11 +535,22 @@ unsafe fn do_record(call: &Call<'_>) -> R<Sexp> {
     let directory = values::require_string(call.arg(0), "directory")?;
     let directory = std::path::absolute(&directory)
         .map_err(|failure| error(format!("cannot resolve {directory}: {failure}")))?;
-    interp().code_image.recording = Some(Recording {
+    let previous = interp().code_image.recording.replace(Recording {
         directory: directory.display().to_string(),
         records: BTreeMap::new(),
     });
+    if let Some(previous) = previous {
+        release_recording(&previous);
+    }
     Ok(nil())
+}
+
+/// Releases the closures `recording` preserved.
+fn release_recording(recording: &Recording) {
+    let heap = crate::heap();
+    for recorded in recording.records.values().flat_map(BTreeMap::values) {
+        heap.release(recorded.closures);
+    }
 }
 
 /// `ryCodeImageWrite(trained)`: compiles every recorded closure and writes each database's
@@ -548,17 +559,22 @@ unsafe fn do_record(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_write(call: &Call<'_>) -> R<Sexp> {
     let trained = values::as_logical_scalar(call.arg(0)) == 1;
     let state = &mut interp().code_image;
-    let Some(recording) = state.recording.take() else {
-        return Err(error("no fetches were recorded"));
-    };
     if state.build.is_empty() {
         return Err(error("this runtime has no build identity to stamp images with"));
     }
+    let Some(recording) = state.recording.take() else {
+        return Err(error("no fetches were recorded"));
+    };
     let build = state.build;
     let mut summary = Summary::default();
-    for (database, records) in &recording.records {
-        write_image(database, records, build, trained, &mut summary)?;
-    }
+    let written = recording
+        .records
+        .iter()
+        .try_for_each(|(database, records)| {
+            write_image(database, records, build, trained, &mut summary)
+        });
+    release_recording(&recording);
+    written?;
     let mut items = vec![
         ("closures", summary.closures),
         ("written", summary.written),
