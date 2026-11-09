@@ -1350,17 +1350,10 @@ pub extern "C" fn jit_real_integer_divide(a: f64, b: f64) -> f64 {
 
 /// `%%` on integers: `NA` for an `NA` operand or a zero divisor, else the sign of the divisor.
 pub extern "C" fn jit_integer_modulo(a: i32, b: i32) -> i32 {
-    if a == NA_INTEGER || b == NA_INTEGER || b == 0 {
-        return NA_INTEGER;
-    }
-    let remainder = a.rem_euclid(b);
-    remainder + if b < 0 && remainder != 0 { b } else { 0 }
+    arith::integer_modulo(a, b)
 }
 
 /// `%/%` on integers.
 pub extern "C" fn jit_integer_divide(a: i32, b: i32) -> i32 {
-    if a == NA_INTEGER || b == NA_INTEGER || b == 0 {
-        return NA_INTEGER;
-    }
-    (a as f64 / b as f64).floor() as i32
+    arith::integer_divide(a, b)
 }

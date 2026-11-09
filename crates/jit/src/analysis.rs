@@ -2439,7 +2439,11 @@ impl<'a> Builder<'a> {
                     && scalar(b)
                     && (!matches!(
                         ARITHS[inst.operand(0)].0,
-                        Arith::Add | Arith::Subtract | Arith::Multiply
+                        Arith::Add
+                            | Arith::Subtract
+                            | Arith::Multiply
+                            | Arith::Modulo
+                            | Arith::IntegerDivide
                     ) || a == Ty::Dbl
                         || b == Ty::Dbl)
             }
@@ -3101,7 +3105,8 @@ impl<'a> Builder<'a> {
                     }
                     (operator, [left, right])
                         if let Some(&(arith, _)) =
-                            ARITHS.iter().find(|(_, symbol)| *symbol == operator) =>
+                            ARITHS.iter().find(|(_, symbol)| *symbol == operator)
+                            && !remainder_operator(arith) =>
                     {
                         let (a, b) = (types[0], types[1]);
                         let dst = lowering.temporary()?;
@@ -3271,8 +3276,20 @@ impl<'a> Builder<'a> {
         let (dst, left, right) = (operand(1), operand(2), operand(3));
         let (a, b) = (state.registers[left], state.registers[right]);
         state.visible = Some(true);
+        if remainder_operator(arith)
+            && let Some((intrinsic, result)) = intrinsic_for(ARITHS[operand(0)].1, &[a, b])
+        {
+            state.registers[dst] = result;
+            state.visible = Some(true);
+            return Ok(Action::Intrinsic {
+                intrinsic,
+                dst,
+                args: self.slice([left, right]),
+                result,
+            });
+        }
         let scalar = |ty: Ty| ty.is_numeric_scalar() || ty == Ty::Num;
-        if scalar(a) && scalar(b) {
+        if scalar(a) && scalar(b) && !remainder_operator(arith) {
             let integers = !matches!(a, Ty::Dbl | Ty::Num) && !matches!(b, Ty::Dbl | Ty::Num);
             let comparison = matches!(
                 arith,
@@ -3698,6 +3715,12 @@ fn builtin_result(name: &str, types: &[Ty]) -> Option<Ty> {
     })
 }
 
+/// Whether `arith` is `%%` or `%/%`, which compiled code computes as the intrinsic their
+/// builtin calls lower to, with GNU R's rounding and its loss-of-accuracy warning.
+fn remainder_operator(arith: Arith) -> bool {
+    matches!(arith, Arith::Modulo | Arith::IntegerDivide)
+}
+
 /// The type of an element-wise operation that has not run yet on plain operands, at least one of
 /// them a vector: plain operands carry no attributes, so neither does the result.
 fn vector_arithmetic(arith: Arith, a: Ty, b: Ty) -> Option<Ty> {
@@ -3713,7 +3736,15 @@ fn vector_arithmetic(arith: Arith, a: Ty, b: Ty) -> Option<Ty> {
         | Arith::Greater
         | Arith::LessEqual
         | Arith::GreaterEqual => Ty::LglVec,
-        Arith::Add | Arith::Subtract | Arith::Multiply if !doubles => Ty::IntVec,
+        Arith::Add
+        | Arith::Subtract
+        | Arith::Multiply
+        | Arith::Modulo
+        | Arith::IntegerDivide
+            if !doubles =>
+        {
+            Ty::IntVec
+        }
         _ => Ty::DblVec,
     })
 }

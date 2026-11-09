@@ -656,9 +656,11 @@ pub enum Arith {
     Greater,
     LessEqual,
     GreaterEqual,
+    Modulo,
+    IntegerDivide,
 }
 
-pub const ARITHS: [(Arith, &str); 11] = [
+pub const ARITHS: [(Arith, &str); 13] = [
     (Arith::Add, "+"),
     (Arith::Subtract, "-"),
     (Arith::Multiply, "*"),
@@ -670,6 +672,8 @@ pub const ARITHS: [(Arith, &str); 11] = [
     (Arith::Greater, ">"),
     (Arith::LessEqual, "<="),
     (Arith::GreaterEqual, ">="),
+    (Arith::Modulo, "%%"),
+    (Arith::IntegerDivide, "%/%"),
 ];
 
 /// Type feedback: the kinds of value an instruction produced, one bit per kind. A scalar is a
@@ -4619,6 +4623,10 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
             Arith::Greater => comparison((!na).then_some(a > b)),
             Arith::LessEqual => comparison((!na).then_some(a <= b)),
             Arith::GreaterEqual => comparison((!na).then_some(a >= b)),
+            Arith::Modulo => Ok(Some(values::scalar_integer(crate::arith::integer_modulo(a, b))?)),
+            Arith::IntegerDivide => {
+                Ok(Some(values::scalar_integer(crate::arith::integer_divide(a, b))?))
+            }
             _ => Ok(None),
         };
     }
@@ -4644,6 +4652,12 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
         Arith::Greater => comparison((!nan).then_some(a > b)),
         Arith::LessEqual => comparison((!nan).then_some(a <= b)),
         Arith::GreaterEqual => comparison((!nan).then_some(a >= b)),
+        // The builtin warns when the remainder loses all accuracy.
+        Arith::Modulo if !crate::arith::modulus_loses_accuracy(a, b) => {
+            real(crate::arith::real_modulo(a, b))
+        }
+        Arith::Modulo => Ok(None),
+        Arith::IntegerDivide => real(crate::arith::real_integer_divide(a, b)),
     }
 }
 

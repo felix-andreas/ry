@@ -1,0 +1,98 @@
+[stdout]
+| List of 2
+|  $ : int 1
+|  $ : int 2
+| List of 2
+|  $ : int 2
+|  $ : int -3
+| List of 2
+|  $ : int -2
+|  $ : int -3
+| List of 2
+|  $ : int -1
+|  $ : int 2
+| List of 2
+|  $ : int 0
+|  $ : int 2
+| List of 2
+|  $ : int 0
+|  $ : int -2
+| List of 2
+|  $ : int NA
+|  $ : int NA
+| List of 2
+|  $ : int NA
+|  $ : int NA
+| List of 2
+|  $ : int NA
+|  $ : int NA
+| List of 2
+|  $ : num 1.5
+|  $ : num 2
+| List of 2
+|  $ : num 0.5
+|  $ : num -3
+| List of 2
+|  $ : num -0.5
+|  $ : num -3
+| List of 2
+|  $ : num NaN
+|  $ : num Inf
+| List of 2
+|  $ : num NaN
+|  $ : num -Inf
+| List of 2
+|  $ : num NaN
+|  $ : num NaN
+| List of 2
+|  $ : num NA
+|  $ : num NA
+| List of 2
+|  $ : num NaN
+|  $ : num NaN
+| List of 2
+|  $ : num NaN
+|  $ : num Inf
+| List of 2
+|  $ : num 2
+|  $ : num 0
+| List of 2
+|  $ : num Inf
+|  $ : num -1
+| List of 2
+|  $ : num 5
+|  $ : num 1.43e+16
+| List of 2
+|  $ : num 0.1
+|  $ : num 2
+| List of 2
+|  $ : num 2
+|  $ : num 2
+| List of 2
+|  $ : int 1
+|  $ : int 0
+| warning: probable complete loss of accuracy in modulus 
+| [1] 0
+| List of 2
+|  $ : 'money' int 1
+|  $ : 'money' int 2
+| List of 2
+|  $ : chr "dispatched"
+|  $ : chr "dispatched"
+| List of 2
+|  $ : Named int 1
+|   ..- attr(*, "names")= chr "a"
+|  $ : Named int 2
+|   ..- attr(*, "names")= chr "a"
+| List of 2
+|  $ : int [1:6] 1 2 3 0 1 2
+|  $ : int [1:6] 0 0 0 1 1 1
+| [1] 102703
+| [1] 102703
+| [1] 102703
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 102703L
