@@ -145,6 +145,17 @@ pub struct Frame {
     pub slots: u32,
     /// For a slot frame, bit `i` is set while formal `i` is missing (`missing()`).
     pub missing: u64,
+    /// The position of the frame the call was made from when [`Frame::sys_parent`] is `NULL`.
+    /// Promise code runs in its caller's slots while deeper frames are live, so the caller is
+    /// not always the frame just below.
+    pub caller: u32,
+    /// For a slot frame that passed promises over its slots, the environment those promises
+    /// name: it has no bindings and carries [`heap::object::gp::PENDING_FRAME`] until the frame reifies into
+    /// it, so a forced promise finds the frame by it and runs on the slots.
+    pub pending: Sexp,
+    /// How many promises over [`Frame::pending`] may still be unforced. When none are left as
+    /// the frame returns, the environment is never made.
+    pub unforced: u32,
     /// Where the call's arguments (values or promises, with the tags the call gave them) start
     /// in [`Interp::frame_args`]; they run up to the next frame's start. `sys.function`'s
     /// pairlist of them is built only when dispatch asks for it, so a call allocates none.
@@ -254,6 +265,9 @@ pub enum TaskCallbackRoutine {
 
 pub struct Interp {
     pub frames: Vec<Frame>,
+    /// The position of the slot frame whose slots the running byte code reads, which a `NULL`
+    /// environment handed out by that code stands for; [`NO_SLOTS`] outside slot frames.
+    pub slot_owner: u32,
     /// The arguments of every frame, back to back in frame order (see [`Frame::args`]).
     pub frame_args: Vec<Arg>,
     /// The closures each running call created in its own frame, at most
@@ -443,6 +457,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     let connection_table = connections::Table::new(hooks.connection_vfprintf);
     state.interp = Some(Interp {
         frames: Vec::new(),
+        slot_owner: NO_SLOTS,
         frame_args: Vec::new(),
         frame_closures: Vec::new(),
         foreign_calls: Vec::new(),
@@ -601,6 +616,7 @@ impl RootSource for InterpRoots {
                     frame.env,
                     frame.sys_parent,
                     frame.srcref,
+                    frame.pending,
                 ] {
                     marker.mark(object);
                 }

@@ -361,10 +361,13 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     heap.root(promise);
     promise.set_gp_bits(PROMISE_SEEN, true);
     let code = promise.attrib();
-    let result = if code.kind() == SexpType::Bytecode {
-        bytecode::run_promise(code, promise.tag())
+    let env = promise.tag();
+    let result = if env.has_gp(gp::PENDING_FRAME) {
+        force_slot_promise(promise, env)
+    } else if code.kind() == SexpType::Bytecode {
+        bytecode::run_promise(code, env)
     } else {
-        eval(promise.cdr(), promise.tag())
+        eval(promise.cdr(), env)
     };
     promise.set_gp_bits(PROMISE_SEEN, false);
     let settled = result.and_then(|value| settle_promise(promise, value));
@@ -375,6 +378,89 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
         heap.root(*value);
     }
     settled
+}
+
+/// Forces a promise over the slots of the live slot frame whose pending environment is `env`:
+/// compiled code runs on the slots, a name reads its slot, and anything else, or a name whose
+/// slot holds an empty argument, gets the frame's environment and evaluates there.
+#[cold]
+#[inline(never)]
+unsafe fn force_slot_promise(promise: Sexp, env: Sexp) -> R<Sexp> {
+    let Some(owner) = interp().frames.iter().rposition(|frame| frame.pending == env) else {
+        panic!("a promise names the pending environment of a frame that has returned");
+    };
+    let value = slot_promise_value(promise, owner)?;
+    // A promise whose forcing failed stays unforced, so only a value settles the count.
+    let frame = &mut interp().frames[owner];
+    frame.unforced = frame.unforced.saturating_sub(1);
+    Ok(value)
+}
+
+unsafe fn slot_promise_value(promise: Sexp, owner: usize) -> R<Sexp> {
+    let frame = &interp().frames[owner];
+    let (function, header) = (frame.function, frame.slots as usize);
+    let code = promise.attrib();
+    if code.kind() == SexpType::Bytecode {
+        return bytecode::run_promise_on_slots(code, function, owner, header);
+    }
+    let expression = promise.cdr();
+    if expression.kind() == SexpType::Symbol {
+        let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
+        match (0..values::length(names)).find(|&index| names.element(index) == expression) {
+            None => return eval(expression, function.tag()),
+            Some(slot) => {
+                let value = *bytecode::register_address(header + 1 + slot);
+                if value == unbound() {
+                    return eval(expression, function.tag());
+                }
+                if value.kind() == SexpType::Promise {
+                    return force_promise(value);
+                }
+                if value != missing_arg() {
+                    return Ok(value);
+                }
+            }
+        }
+    }
+    eval(expression, frame_env(owner)?)
+}
+
+/// A promise of `expression`, compiled code or a name, over the slots of the slot frame at
+/// `owner`. It names the frame's pending environment, which is made bare on the first such
+/// promise and gets its bindings only if the frame reifies.
+pub unsafe fn slot_promise(owner: usize, expression: Sexp) -> R<Sexp> {
+    let mut env = interp().frames[owner].pending;
+    if env == nil() {
+        let function = interp().frames[owner].function;
+        env = frame_environment(function, function.car())?;
+        env.set_gp_bits(gp::PENDING_FRAME, true);
+        interp().frames[owner].pending = env;
+    }
+    let promise = if expression.kind() == SexpType::Bytecode {
+        compiled_promise(expression, env)?
+    } else {
+        make_promise(expression, env)?
+    };
+    interp().frames[owner].unforced += 1;
+    Ok(promise)
+}
+
+/// The environment of an unforced `promise`, made first when it is a slot frame's pending one.
+/// Anything that reads a promise's environment other than to force it reads it here.
+pub unsafe fn promise_env(promise: Sexp) -> R<Sexp> {
+    resolved_env(promise.tag())
+}
+
+/// `env`, made first when it is a slot frame's pending environment, which a promise's
+/// environment may be (see [`promise_env`]).
+pub unsafe fn resolved_env(env: Sexp) -> R<Sexp> {
+    if !env.has_gp(gp::PENDING_FRAME) {
+        return Ok(env);
+    }
+    let Some(owner) = interp().frames.iter().rposition(|frame| frame.pending == env) else {
+        panic!("a promise names the pending environment of a frame that has returned");
+    };
+    frame_env(owner)
 }
 
 /// Stores `value` as the value of the unforced `promise`, as forcing it to that value does.
@@ -608,7 +694,7 @@ unsafe fn run_builtin(
         args,
         rho: env,
         frame: if env == nil() {
-            interp().frames.len().wrapping_sub(1) as u32
+            interp().slot_owner
         } else {
             crate::NO_SLOTS
         },
@@ -1252,7 +1338,9 @@ unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallF
         formal = formal.cdr();
     }
     let header = state.bytecode.registers.len();
-    bytecode::reserve_registers(header + 1 + count)?;
+    // The body's own registers follow the slots, so one reservation covers the whole window.
+    let register_count = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
+    bytecode::reserve_registers(header + 1 + count + register_count)?;
     let registers = bytecode::register_address(header);
     for (index, &value) in bound.iter().enumerate() {
         value.increment_refcount();
@@ -1279,23 +1367,23 @@ pub unsafe fn frame_env(index: usize) -> R<Sexp> {
     reify(index)
 }
 
-/// The environment of the innermost frame, which is the slot frame a builtin's `NULL`
-/// environment stands for (see [`crate::builtins::Call::env`]).
-pub unsafe fn top_frame_env() -> R<Sexp> {
-    let count = interp().frames.len();
-    if count == 0 {
-        panic!("a builtin call from a slot frame ran with no frame");
+/// The environment of the slot frame whose slots the running byte code reads, which a `NULL`
+/// environment it hands out stands for (see [`crate::builtins::Call::env`]).
+pub unsafe fn slot_owner_env() -> R<Sexp> {
+    let owner = interp().slot_owner;
+    if owner == crate::NO_SLOTS {
+        panic!("byte code handed out a slot frame's environment outside any slot frame");
     }
-    frame_env(count - 1)
+    frame_env(owner as usize)
 }
 
 /// `parent.frame()` of the frame at `index`: the environment its call was made from.
 pub unsafe fn frame_sys_parent(index: usize) -> R<Sexp> {
-    let sys_parent = interp().frames[index].sys_parent;
-    if sys_parent != nil() || index == 0 {
-        return Ok(sys_parent);
+    let frame = &interp().frames[index];
+    if frame.sys_parent != nil() || frame.caller == crate::NO_SLOTS {
+        return Ok(frame.sys_parent);
     }
-    frame_env(index - 1)
+    frame_env(frame.caller as usize)
 }
 
 /// The environment of the slot frame whose header register is `header`, which must be live.
@@ -1322,7 +1410,13 @@ unsafe fn reify(index: usize) -> R<Sexp> {
     let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
     let count = values::length(names);
     let formals = function.car();
-    let env = frame_environment(function, formals)?;
+    let pending = frame.pending;
+    let env = if pending == nil() {
+        frame_environment(function, formals)?
+    } else {
+        pending.set_gp_bits(gp::PENDING_FRAME, false);
+        pending
+    };
     let registers = bytecode::register_address(header);
     let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
     let mut formal = formals;
@@ -1545,9 +1639,15 @@ pub unsafe fn run_frame(
             "evaluation nested too deeply: infinite recursion / options(expressions=)?",
         ));
     }
+    // A `NULL` `sys_parent` comes from byte code running on a slot frame's slots, the caller.
+    let caller = if sys_parent == nil() {
+        state.slot_owner
+    } else {
+        crate::NO_SLOTS
+    };
     if !state.object_systems {
-        let sys_parent = if sys_parent == nil() && !state.frames.is_empty() {
-            frame_env(state.frames.len() - 1)?
+        let sys_parent = if caller != crate::NO_SLOTS {
+            frame_env(caller as usize)?
         } else {
             sys_parent
         };
@@ -1569,6 +1669,9 @@ pub unsafe fn run_frame(
         closures: state.frame_closures.len(),
         slots,
         missing,
+        caller,
+        pending: nil(),
+        unforced: 0,
     });
     if PROFILE_TICK.load(Ordering::Relaxed) {
         record_profile_sample(None)?;
@@ -1602,7 +1705,12 @@ pub unsafe fn run_frame(
         let result = scope(|| {
             on_large_stack(|| {
                 if slots != crate::NO_SLOTS {
-                    return bytecode::run_slots(function, slots as usize);
+                    let state = interp();
+                    let owner = state.slot_owner;
+                    state.slot_owner = (depth - 1) as u32;
+                    let result = bytecode::run_slots(function, slots as usize);
+                    interp().slot_owner = owner;
+                    return result;
                 }
                 let body = function.cdr();
                 bytecode::run_body(function, body, env)
@@ -1637,6 +1745,18 @@ pub unsafe fn run_frame(
         let result = run_on_exit(depth, result);
         catch_return(interp().frames[depth - 1].env, result)
     };
+    // Promises over the slots that may still be forced need the environment once the slots are
+    // gone.
+    let frame = &state.frames[depth - 1];
+    let result = if frame.env == nil() && frame.pending != nil() && frame.unforced > 0 {
+        match reify(depth - 1) {
+            Ok(_) => result,
+            Err(unwind) => Err(unwind),
+        }
+    } else {
+        result
+    };
+    let state = interp();
     let env = state.frames[depth - 1].env;
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = state.frames[depth - 1].handlers.clone();
@@ -2214,7 +2334,7 @@ pub(crate) unsafe fn value_is_missing(value: Sexp) -> R<bool> {
         && value.tag().kind() == SexpType::Environment
     {
         let code = value.cdr();
-        let caller = value.tag();
+        let caller = promise_env(value)?;
         // A promise for `..1` asks about the caller's `...`, the binding that holds it.
         let bound = if dot_dot_index(code).is_some() {
             symbols().dots
@@ -3453,6 +3573,9 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         closures: state.frame_closures.len(),
         slots: crate::NO_SLOTS,
         missing: 0,
+        caller: crate::NO_SLOTS,
+        pending: nil(),
+        unforced: 0,
     });
     let depth = state.frames.len();
     let result = scope(|| match expression.kind() {

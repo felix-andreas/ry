@@ -1200,7 +1200,7 @@ pub unsafe fn lazy_record_header(promise: Sexp) -> R<Option<(u32, bool, u16)>> {
     let [(_, key), (_, file), (_, compressed), _] = arguments[..] else {
         return Ok(None);
     };
-    let env = promise.tag();
+    let env = eval::promise_env(promise)?;
     let plain = |argument: Sexp| -> R<Option<Sexp>> {
         if argument.kind() != SexpType::Symbol {
             return Ok(Some(argument));

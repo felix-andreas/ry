@@ -146,13 +146,15 @@ unsafe fn sys_context(call: &Call<'_>) -> Option<usize> {
 }
 
 /// The frame the call of frame `own` was made from, `None` for the top level. A `NULL`
-/// `sys_parent` stands for an unreified slot frame, which is always the frame just below:
-/// nothing can evaluate in a slot frame from a deeper frame until it has an environment.
+/// `sys_parent` stands for a slot frame that had no environment when it made the call, whose
+/// position the frame records: promise code running on a slot frame's slots calls from below
+/// deeper frames.
 pub(crate) unsafe fn caller_index(own: usize) -> Option<usize> {
     let frames = &interp().frames;
     let target = frames[own].sys_parent;
     if target == nil() {
-        return own.checked_sub(1);
+        let caller = frames[own].caller;
+        return (caller != crate::NO_SLOTS).then_some(caller as usize);
     }
     (0..=own).rev().find(|&index| frames[index].env == target)
 }

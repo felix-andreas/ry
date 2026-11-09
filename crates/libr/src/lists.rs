@@ -442,9 +442,19 @@ closure_reader!(R_ClosureFormals, SexpType::Closure, car);
 closure_reader!(R_ClosureEnv, SexpType::Closure, tag);
 closure_reader!(PRVALUE, SexpType::Promise, car);
 closure_reader!(PRCODE, SexpType::Promise, cdr);
-closure_reader!(PRENV, SexpType::Promise, tag);
 closure_reader!(R_PromiseExpr, SexpType::Promise, cdr);
 closure_reader!(PREXPR, SexpType::Promise, cdr);
+
+/// A promise passed out of a call that keeps its locals in slots names a placeholder
+/// environment until the call's frame reifies, so native code gets the frame it stands for.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn PRENV(object: Sexp) -> Sexp {
+    enter(|| {
+        let promise = checked_kind(object, SexpType::Promise, "PRENV")?;
+        Ok(Reachable(interp::eval::promise_env(promise)?))
+    })
+    .0
+}
 
 macro_rules! promise_writer {
     ($name:ident, $setter:ident) => {

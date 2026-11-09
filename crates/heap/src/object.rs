@@ -333,6 +333,9 @@ pub mod gp {
     /// that do not count as references, which code running on the environment from elsewhere
     /// must respect before it updates a value in place.
     pub const COMPILED_FRAME: u16 = 1 << 9;
+    /// The environment a slot frame's promises name before the frame has made it: it has no
+    /// bindings yet, and forcing such a promise runs on the frame's slots instead.
+    pub const PENDING_FRAME: u16 = 1 << 7;
     /// A binding cell, or a symbol, that a compiled function lookup depends on. Rebinding the
     /// cell, or binding the symbol in a function frame, moves the heap's binding epoch and the
     /// symbol's lookup stamp, so compiled code revalidates a lookup only when both moved.

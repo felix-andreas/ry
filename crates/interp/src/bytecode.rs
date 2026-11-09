@@ -508,7 +508,10 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         rebinding: None,
         tail_updates: (Vec::new(), nil()),
         summary: nil(),
-        slot_formals: None,
+        // Promise code runs on the slots of the frame that made it, so it shares that frame's
+        // slot table instead of building its own.
+        slot_formals: slot_names(function.cdr()),
+        slots_fixed: true,
         bound: None,
         cold: Vec::new(),
     };
@@ -535,6 +538,19 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         heap.root(list);
     }
     Ok(list)
+}
+
+/// The slot table names of `body`, when it is compiled with one.
+unsafe fn slot_names(body: Sexp) -> Option<Vec<Sexp>> {
+    if body.kind() != SexpType::Bytecode {
+        return None;
+    }
+    let table = body.cdr().element(SLOTS);
+    if table == nil() {
+        return None;
+    }
+    let names = table.element(1);
+    Some((0..length(names)).map(|index| names.element(index)).collect())
 }
 
 /// Whether a call's argument becomes a promise of compiled code: a call, not a symbol or a
@@ -895,6 +911,9 @@ struct Compiler {
     /// The formals in order, when the body's calls keep their variables in slots: the body's
     /// local symbols are known and the formals have no `...`.
     slot_formals: Option<Vec<Sexp>>,
+    /// Whether [`Compiler::slot_formals`] is a whole slot table that the code must fit, as for
+    /// promise code, rather than the formals the table starts with.
+    slots_fixed: bool,
 }
 
 /// A guard fallback compiled out of line: the guards that fail to it, its instruction, and where
@@ -955,6 +974,7 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         cold: Vec::new(),
         summary: nil(),
         slot_formals: None,
+        slots_fixed: false,
     };
     if compiler.local_symbols.is_some() {
         let mut formals = Vec::new();
@@ -1698,6 +1718,9 @@ impl Compiler {
                 if locals.contains(&symbol) {
                     let slot = match names.iter().position(|&name| name == symbol) {
                         Some(slot) => slot,
+                        // The frame keeps this local in no slot, so the code needs its
+                        // environment.
+                        None if self.slots_fixed => return Ok(nil()),
                         None => {
                             names.push(symbol);
                             names.len() - 1
@@ -3629,11 +3652,49 @@ pub unsafe fn run_promise(code: Sexp, env: Sexp) -> R<Sexp> {
     }
 }
 
+/// Runs a promise's `code`, compiled against the slot table of `function`'s body, on the slots
+/// of the live slot frame at position `owner`, whose header register is `header`. The code may
+/// give the frame its environment, after which it reads and writes that as the body does.
+pub unsafe fn run_promise_on_slots(
+    code: Sexp,
+    function: Sexp,
+    owner: usize,
+    header: usize,
+) -> R<Sexp> {
+    let heap = crate::heap();
+    heap.root(code);
+    let mark = heap.handle_mark();
+    let register_count = values::ints(code.cdr().element(REGISTERS))[0] as usize;
+    let base = interp().bytecode.registers.len();
+    reserve_registers(base + register_count)?;
+    let state = interp();
+    let previous_owner = state.slot_owner;
+    state.slot_owner = owner as u32;
+    let srcref = state.srcref;
+    let mut machine = Machine {
+        function,
+        code,
+        header,
+        base,
+        mark,
+        loops: &mut [],
+    };
+    let result = execute_code(&mut machine, 0);
+    let state = interp();
+    state.srcref = srcref;
+    state.slot_owner = previous_owner;
+    state.bytecode.registers.truncate(base);
+    match result {
+        Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
+        other => other,
+    }
+}
+
 unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
     let header = interp().bytecode.registers.len();
     reserve_registers(header + 1)?;
     *register_address(header) = env;
-    let result = run_at(function, code, header);
+    let result = run_at(function, code, header, header + 1);
     interp().bytecode.registers.truncate(header);
     result
 }
@@ -3642,18 +3703,18 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
 /// `header` and whose slots follow it. The caller truncates the register file to the header.
 pub unsafe fn run_slots(function: Sexp, header: usize) -> R<Sexp> {
     let code = function.cdr();
-    run_at(function, code, header)
+    let slots = length(code.cdr().element(SLOTS).element(1));
+    run_at(function, code, header, header + 1 + slots)
 }
 
-/// Runs `code` in the activation whose header register is `header`, with its registers after
-/// the header and the slots that follow it, which is the end of the register file.
-unsafe fn run_at(function: Sexp, code: Sexp, header: usize) -> R<Sexp> {
+/// Runs `code` in the activation whose header register is `header` and whose own registers
+/// start at `base`, after the header and any slots.
+unsafe fn run_at(function: Sexp, code: Sexp, header: usize, base: usize) -> R<Sexp> {
     let heap = crate::heap();
     heap.root(code);
     let mark = heap.handle_mark();
     let constants = code.cdr();
     let register_count = values::ints(constants.element(REGISTERS))[0] as usize;
-    let base = interp().bytecode.registers.len();
     reserve_registers(base + register_count)?;
     let profile = values::ints_mut(constants.element(PROFILE));
     let entries = profile[profile::ENTRIES].saturating_add(1);
@@ -4522,7 +4583,10 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             && effects::effect_free(function)?;
         // From a slot frame, a call whose arguments need no promise over the frame leaves it
         // without an environment, and the callee finds its caller as the frame below its own.
-        if state.in_slots() && slot_args_into(state, arguments, eager, &mut args)? {
+        if state.in_slots()
+            && (slot_args_into(state, arguments, eager, &mut args)?
+                || slot_promises_into(state, arguments, eager, &mut args)?)
+        {
             eval::apply_closure_owning(call, function, &args, nil(), None)?
         } else {
             args.clear();
@@ -4623,6 +4687,56 @@ unsafe fn slot_args_into(
             SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode => {
                 return Ok(false);
             }
+            _ => expression,
+        };
+        args.push(Arg {
+            tag: cell.tag(),
+            value,
+        });
+        cell = cell.cdr();
+    }
+    Ok(true)
+}
+
+/// [`slot_args_into`] for a call whose arguments need promises: a name or compiled code
+/// becomes a promise over the frame's slots ([`eval::slot_promise`]). `false`, with `args`
+/// cleared, when an argument needs the frame's environment itself: `...`, code that was not
+/// compiled, or code that uses a local the frame keeps in no slot.
+unsafe fn slot_promises_into(
+    state: &Activation<'_, '_>,
+    arguments: Sexp,
+    eager: bool,
+    args: &mut eval::Args,
+) -> R<bool> {
+    args.clear();
+    let mut cell = arguments;
+    while cell.kind() == SexpType::Pairlist {
+        let expression = cell.car();
+        let fits = match expression.kind() {
+            SexpType::Symbol => {
+                expression != symbols().dots && eval::dot_dot_index(expression).is_none()
+            }
+            SexpType::Bytecode => expression.cdr().element(SLOTS) != nil(),
+            SexpType::Language | SexpType::Promise => false,
+            _ => true,
+        };
+        if !fits {
+            return Ok(false);
+        }
+        cell = cell.cdr();
+    }
+    let owner = (*state.interp).slot_owner as usize;
+    let missing = missing_arg();
+    let mut cell = arguments;
+    while cell.kind() == SexpType::Pairlist {
+        let expression = cell.car();
+        let value = match expression.kind() {
+            _ if expression == missing => expression,
+            SexpType::Symbol => match eager.then(|| slot_eager_argument(state, expression)) {
+                Some(Some(value)) => value,
+                _ => eval::slot_promise(owner, expression)?,
+            },
+            SexpType::Bytecode => eval::slot_promise(owner, expression)?,
             _ => expression,
         };
         args.push(Arg {
@@ -4865,7 +4979,8 @@ unsafe fn slot_missing(state: &Activation<'_, '_>, symbol: Sexp) -> R<bool> {
         let formals = length(state.machine.function.car());
         if let Some(position) = (0..formals.min(length(names))).find(|&index| names.element(index) == symbol)
         {
-            let missing = (*state.interp).frames.last().map_or(0, |frame| frame.missing);
+            let owner = (*state.interp).slot_owner as usize;
+            let missing = (&(*state.interp).frames).get(owner).map_or(0, |frame| frame.missing);
             if missing & (1 << position) != 0 {
                 return Ok(true);
             }
@@ -5599,7 +5714,7 @@ unsafe fn call_builtin(
         // Dispatch hands the frame to a method, so an unreified slot frame (a `NULL` `env`)
         // gets its environment, but only when an argument is an object to dispatch on.
         let env = if env == nil() && args.iter().any(|arg| arg.value.is_object()) {
-            eval::top_frame_env()?
+            eval::slot_owner_env()?
         } else {
             env
         };
