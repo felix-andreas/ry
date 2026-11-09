@@ -1197,8 +1197,9 @@ fn fuzz_argument_expressions_agree_with_tier_zero() {
             } else {
                 ""
             };
-            let body =
-                format!("{{ {shadow}s <- 0\nfor (k in 1:30) s <- s + nf({first}, {second})\ns }}");
+            let body = format!(
+                "{{ {shadow}s <- 0\nfor (k in 1:30) s <- s + nf({first}, {second})\ns }}"
+            );
             let text = format!("(function() {body})()");
             jit::install_mode(Mode::Off);
             let reference = run(&text);
@@ -1217,18 +1218,7 @@ fn fuzz_argument_expressions_agree_with_tier_zero() {
 /// that must be left to the promise.
 fn argument_expression(rng: &mut SplitMix64, depth: usize) -> String {
     let leaves = [
-        "1",
-        "-2.5",
-        "3L",
-        "NA",
-        "NA_integer_",
-        "TRUE",
-        "w",
-        "i",
-        "big",
-        "cls",
-        "NaN",
-        "1e308",
+        "1", "-2.5", "3L", "NA", "NA_integer_", "TRUE", "w", "i", "big", "cls", "NaN", "1e308",
     ];
     if depth > 3 || rng.chance(1, 3) {
         return leaves[rng.below(leaves.len())].to_owned();
