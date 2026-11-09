@@ -46,8 +46,6 @@ pub type Reader = Box<dyn FnMut(&str) -> Option<String> + Send>;
 
 /// The reader until the input thread takes it, or for good when there is no socket to serve.
 static READER: Mutex<Option<Reader>> = Mutex::new(None);
-/// Whether an interactive console installed a reader, which is what lets `browser()` stop.
-static INTERACTIVE: AtomicBool = AtomicBool::new(false);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -56,12 +54,49 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Makes `reader` the console's source of input. Called once, before the console's first prompt.
 pub fn install_reader(reader: Reader) {
     *lock(&READER) = Some(reader);
-    INTERACTIVE.store(true, Ordering::Relaxed);
+    crate::interp().interactive = true;
 }
 
-/// Whether input comes from an interactive console, so `browser()` has a prompt to stop at.
+/// Whether input comes from an interactive console, so `browser()`, `menu()` and `readline()`
+/// have a prompt to read at. This is `interactive()`, minus the moments an editor's request
+/// runs R code at the idle prompt.
 pub fn interactive() -> bool {
-    INTERACTIVE.load(Ordering::Relaxed) && !SERVING_REQUEST.load(Ordering::Relaxed)
+    crate::interp().interactive && !SERVING_REQUEST.load(Ordering::Relaxed)
+}
+
+/// Reads one line for `readline()`, `menu()` and the other console-input routines, mid-command.
+/// The line has no trailing newline; `None` is the end of the input.
+///
+/// # Safety
+/// Called on the interpreter's thread.
+pub unsafe fn prompt(prompt: &str) -> Option<String> {
+    // SAFETY: the caller is on the interpreter's thread.
+    unsafe { platform::read_line(prompt) }.map(|mut line| {
+        while line.ends_with(['\n', '\r']) {
+            line.pop();
+        }
+        line
+    })
+}
+
+/// Fills `buffer` from the console for `stdin()` reads inside a command, one line at a time
+/// with no prompt, and returns how many bytes it holds (zero at the end of the input).
+///
+/// # Safety
+/// Called on the interpreter's thread.
+pub unsafe fn read_stdin(buffer: &mut [u8]) -> usize {
+    static PENDING: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
+    if lock(&PENDING).is_empty()
+        && let Some(line) = unsafe { prompt("") }
+    {
+        lock(&PENDING).extend(line.bytes().chain(std::iter::once(b'\n')));
+    }
+    let mut pending = lock(&PENDING);
+    let count = pending.len().min(buffer.len());
+    for slot in &mut buffer[..count] {
+        *slot = pending.pop_front().unwrap_or_default();
+    }
+    count
 }
 
 /// Set while R code runs for an editor's request at the idle prompt. A `browser()` there has no

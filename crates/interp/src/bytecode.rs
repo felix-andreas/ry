@@ -665,6 +665,9 @@ pub enum Op {
     /// `target`: a guard fallback laid out after the body returning to it. Unlike a backward
     /// `Jump`, it is never a loop's back edge.
     Resume,
+    /// `dst symbol`: `missing(symbol)` for a plain symbol, read from the frame without building
+    /// the special's call.
+    Missing,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its last operand.
@@ -679,7 +682,7 @@ enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 44] = [
+pub const OPS: [Op; 45] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -724,6 +727,7 @@ pub const OPS: [Op; 44] = [
     Op::SubAssignMatrix,
     Op::Replace,
     Op::Resume,
+    Op::Missing,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -740,9 +744,11 @@ pub enum Arith {
     Greater,
     LessEqual,
     GreaterEqual,
+    Modulo,
+    IntegerDivide,
 }
 
-pub const ARITHS: [(Arith, &str); 11] = [
+pub const ARITHS: [(Arith, &str); 13] = [
     (Arith::Add, "+"),
     (Arith::Subtract, "-"),
     (Arith::Multiply, "*"),
@@ -754,6 +760,8 @@ pub const ARITHS: [(Arith, &str); 11] = [
     (Arith::Greater, ">"),
     (Arith::LessEqual, "<="),
     (Arith::GreaterEqual, ">="),
+    (Arith::Modulo, "%%"),
+    (Arith::IntegerDivide, "%/%"),
 ];
 
 /// Type feedback: the kinds of value an instruction produced, one bit per kind. A scalar is a
@@ -1829,6 +1837,21 @@ impl Compiler {
                 ".ry_match" if supported_match(&args)? => {
                     return self.compiled_match(call, head, primitive, dst, &args);
                 }
+                "missing" => {
+                    return match args.as_slice() {
+                        [(tag, symbol)]
+                            if *tag == nil()
+                                && symbol.kind() == SexpType::Symbol
+                                && *symbol != symbols().dots
+                                && *symbol != missing_arg()
+                                && eval::dot_dot_index(*symbol).is_none()
+                                && self.bound.is_none() =>
+                        {
+                            self.missing(call, head, primitive, dst, *symbol)
+                        }
+                        _ => self.general_call(call, head, dst),
+                    };
+                }
                 _ => {}
             }
             // Dispatch on an evaluated subject evaluates the other arguments in the frame.
@@ -2070,8 +2093,8 @@ impl Compiler {
 
     /// Whether evaluating the subscript `index` cannot change a variable of the frame, so the
     /// compiled assignment may evaluate it before reading the target: a variable of the frame (a
-    /// formal's promise runs in the caller's frame), a numeric constant, a name, or base
-    /// arithmetic on variables and numbers.
+    /// formal's promise runs in the caller's frame), a numeric constant, a name, base arithmetic
+    /// on variables and numbers, or base `$` and `[[` reading one of those.
     unsafe fn side_effect_free_index(&self, index: Sexp, depth: u32) -> bool {
         match index.kind() {
             SexpType::Symbol => {
@@ -2092,6 +2115,24 @@ impl Compiler {
             SexpType::Language if depth < 8 && index.car().kind() == SexpType::Symbol => {
                 let operator = symbol_name(index.car());
                 let arguments = values::pairlist_items(index.cdr());
+                let name = |value: Sexp| {
+                    value.kind() == SexpType::String
+                        && length(value) == 1
+                        && !values::has_attributes(value)
+                };
+                if let ("$" | "[[", [(nil_tag, object), (key_tag, key)]) =
+                    (&*operator, arguments.as_slice())
+                {
+                    let key_free = match &*operator {
+                        "$" => key.kind() == SexpType::Symbol && *key != symbols().dots,
+                        _ => name(*key) || self.side_effect_free_index(*key, depth + 1),
+                    };
+                    return *nil_tag == nil()
+                        && *key_tag == nil()
+                        && key_free
+                        && !self.frame_may_bind(index.car())
+                        && self.side_effect_free_index(*object, depth + 1);
+                }
                 ARITHS[..5].iter().any(|(_, name)| *name == &*operator)
                     && (1..=2).contains(&arguments.len())
                     && !self.frame_may_bind(index.car())
@@ -2195,6 +2236,7 @@ impl Compiler {
                 | ".ry_tag"
                 | ".ry_match"
                 | "switch"
+                | "missing"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -2324,6 +2366,26 @@ impl Compiler {
         self.inline(call, primitive, dst, name, args)?;
         self.cold_fallback(&[guard], call, dst)?;
         Ok(())
+    }
+
+    /// `missing(symbol)`, guarded by `missing`: [`Op::Missing`] reads the frame's binding of
+    /// `symbol`, which is what the special does once it has matched its one argument.
+    unsafe fn missing(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        dst: u32,
+        symbol: Sexp,
+    ) -> R<()> {
+        let name = self.constant(head);
+        let expected = self.constant(primitive);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
+        let symbol = self.constant(symbol);
+        self.emit(Op::Missing, &[dst, symbol]);
+        self.cold_fallback(&[guard], call, dst)
     }
 
     unsafe fn inline(
@@ -3037,6 +3099,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::Ast => 2,
         Op::Guard => 5,
         Op::Jump | Op::Resume => 1,
+        Op::Missing => 2,
         Op::JumpUnless => 3,
         Op::Arithmetic => 6,
         Op::Return => 1,
@@ -3149,6 +3212,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::JumpUnless => &[Register, Constant, Target],
         Op::Arithmetic => &[Operator, Register, Register, Register, Call, Constant],
         Op::Return | Op::ForEnd => &[Register],
+        Op::Missing => &[Register, Symbol],
         Op::ForInit => &[Loop, Register, Constant],
         Op::ForStep => &[Loop, Register, Symbol, Target],
         Op::Invisible | Op::Visible => &[],
@@ -3949,6 +4013,7 @@ handlers! {
     run_sub_assign, step_sub_assign: SubAssign, true, op_sub_assign;
     run_sub_assign_matrix, step_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
     run_replace, step_replace: Replace, true, op_replace;
+    run_missing, step_missing: Missing, true, op_missing;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -4123,6 +4188,14 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         } else {
             compiled
         };
+        if function.has_gp(gp::NATIVE_ENTRY)
+            && let Some(value) =
+                crate::base_fast_paths::native_entry_by_value(function, arguments, state.env)?
+        {
+            state.record(instruction.at, value);
+            instruction.output(0, value);
+            return Ok(Flow::Next);
+        }
         let mut args = eval::Args::new();
         // Binding a variable's value instead of a promise for it is invisible when the callee
         // cannot assign anything before forcing it, nor look at the promise (`substitute`,
@@ -4337,6 +4410,16 @@ unsafe fn op_ast(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<
     let expression = state.constant(instruction, 1);
     let value = eval::eval(expression, state.env)?;
     state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_missing(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let symbol = state.constant(instruction, 1);
+    let value = values::scalar_bool(eval::is_missing(symbol, state.env)?)?;
+    state.record(instruction.at, value);
+    (*state.interp).visible = true;
     instruction.output(0, value);
     Ok(Flow::Next)
 }
@@ -5098,6 +5181,10 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
             Arith::Greater => comparison((!na).then_some(a > b)),
             Arith::LessEqual => comparison((!na).then_some(a <= b)),
             Arith::GreaterEqual => comparison((!na).then_some(a >= b)),
+            Arith::Modulo => Ok(Some(values::scalar_integer(crate::arith::integer_modulo(a, b))?)),
+            Arith::IntegerDivide => {
+                Ok(Some(values::scalar_integer(crate::arith::integer_divide(a, b))?))
+            }
             _ => Ok(None),
         };
     }
@@ -5123,6 +5210,12 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
         Arith::Greater => comparison((!nan).then_some(a > b)),
         Arith::LessEqual => comparison((!nan).then_some(a <= b)),
         Arith::GreaterEqual => comparison((!nan).then_some(a >= b)),
+        // The builtin warns when the remainder loses all accuracy.
+        Arith::Modulo if !crate::arith::modulus_loses_accuracy(a, b) => {
+            real(crate::arith::real_modulo(a, b))
+        }
+        Arith::Modulo => Ok(None),
+        Arith::IntegerDivide => real(crate::arith::real_integer_divide(a, b)),
     }
 }
 

@@ -164,6 +164,8 @@ pub struct Heap {
     /// young and the old generation's bytes after it. Measuring pause distributions over a whole test suite needs every pause, which
     /// `gc.time()`'s totals cannot give.
     pause_log: Option<std::fs::File>,
+    /// How many namespace loads are running ([`Heap::enter_namespace_load`]).
+    namespace_loads: u32,
 }
 
 /// A returned call's frame that waits for a reconcile to be released ([`Heap::release_frame`]).
@@ -431,6 +433,9 @@ pub struct GcStats {
     pub intermediate_collections: u64,
     pub major_collections: u64,
     pub objects_freed: u64,
+    /// The small objects collections freed, by type code, counted only while the profile
+    /// summary is on (see [`crate::activity::enabled`]).
+    pub freed_by_kind: [u64; 32],
     /// Large vectors freed by reconciling the zero-count table, apart from a collection.
     pub vectors_released: u64,
     pub live_objects: u64,
@@ -656,6 +661,7 @@ impl Heap {
             inhibit: 1,
             stress_counter: 0,
             pause_log: open_pause_log(),
+            namespace_loads: 0,
             // Overwritten below, before anything reads it.
             known: WellKnown::placeholder(),
         };
@@ -765,6 +771,32 @@ impl Heap {
     pub fn update_policy(&mut self, change: impl FnOnce(&mut GcPolicy)) {
         change(&mut self.policy);
         self.refresh_small_trigger();
+    }
+
+    /// Marks the start of a namespace load (`loadNamespace`). Loads nest, because a namespace
+    /// loads its imports first.
+    pub fn enter_namespace_load(&mut self) {
+        self.namespace_loads += 1;
+    }
+
+    /// Marks the end of a namespace load. When the outermost one ends, the small objects it
+    /// left are taken as live, as a major collection would have found them: the old ones and
+    /// the young ones, which the next minor collection promotes. The node limit grows to hold
+    /// them by the rule a major collection applies. Garbage the load tenured is counted live
+    /// until the next major collection, which shrinks the limit again.
+    pub fn leave_namespace_load(&mut self) {
+        self.namespace_loads = self.namespace_loads.saturating_sub(1);
+        if self.namespace_loads > 0 {
+            return;
+        }
+        let kept = self.old_small_bytes + self.young_bytes;
+        let policy = &mut self.policy;
+        if kept + policy.min_node_limit / 5 > policy.node_limit {
+            policy.node_limit =
+                policy
+                    .growth
+                    .next_limit(policy.node_limit, kept, policy.min_node_limit, false);
+        }
     }
 
     /// Recomputes [`Heap::small_trigger`] from the policy and the old generation's size.
@@ -1434,6 +1466,26 @@ impl Heap {
         self.untracked.push(object);
     }
 
+    /// Stores the value a forced promise settled on and drops its environment, as `set_car`
+    /// and `set_tag` would with one barrier check: the environment is replaced by the immortal
+    /// `nil`, which needs no count or barrier.
+    pub unsafe fn settle_promise(&mut self, promise: Sexp, value: Sexp) {
+        if promise.flags() & flag_bits::UNTRACKED == 0 {
+            value.increment_refcount();
+            let old = promise.car();
+            if old.release_reference() {
+                self.note_zero(old);
+            }
+            let env = promise.tag();
+            if env.release_reference() {
+                self.note_zero(env);
+            }
+        }
+        self.write_barrier(promise, value);
+        promise.set_car_unbarriered(value);
+        promise.set_tag_unbarriered(self.known.nil);
+    }
+
     pub unsafe fn set_car(&mut self, cell: Sexp, value: Sexp) {
         self.store(cell, cell.car(), value);
         cell.set_car_unbarriered(value);
@@ -1674,8 +1726,8 @@ impl Heap {
     ) -> HeapResult<()> {
         debug_assert!(env.has_gp(gp::FUNCTION_FRAME));
         let nil = self.known.nil;
-        let frame = &mut *env.frame_ptr();
-        let mut first = true;
+        let mut cells: SmallVec<[Sexp; 12]> = SmallVec::with_capacity(bindings.len());
+        // `nil` is immortal, so the spare slot needs no count.
         for binding in bindings {
             let cell = self.allocate_uncollected(SexpType::Binding, TRIPLE_BYTES, 0)?;
             cell.set_car_unbarriered(binding.symbol);
@@ -1683,18 +1735,17 @@ impl Heap {
             cell.set_tag_unbarriered(nil);
             binding.symbol.increment_refcount();
             binding.value.increment_refcount();
-            nil.increment_refcount();
             if binding.missing {
                 cell.set_gp_bits(gp::BINDING_MISSING, true);
             }
-            frame.insert(binding.symbol, cell);
-            // A collection may have made `env` old since it was allocated, and the cells are
-            // all young, so the first cell's barrier check covers every one, including when a
-            // later allocation fails and leaves the cells before it in the frame.
-            if first {
-                self.write_barrier(env, cell);
-                first = false;
-            }
+            cells.push(cell);
+        }
+        // A collection may have made `env` old since it was allocated, and the cells are all
+        // young, so one barrier check covers every one. A failed allocation leaves no cell in
+        // the frame, and the cells made before it are garbage.
+        if let Some(&first) = cells.first() {
+            (*env.frame_ptr()).insert_formals(&cells, bindings.iter().map(|binding| binding.symbol));
+            self.write_barrier(env, first);
         }
         Ok(())
     }
@@ -2344,7 +2395,16 @@ impl Heap {
             let policy = &self.policy;
             let vectors_full =
                 self.old_large_bytes + request + policy.min_heap_limit / 5 > policy.heap_limit;
-            let nodes_full = self.old_small_bytes + policy.min_node_limit / 5 > policy.node_limit;
+            // A namespace load tenures objects the session keeps (its functions, their code and
+            // the lazy-load promises of everything else), so a deeper collection during one
+            // retraces them and frees almost nothing. The node limit counts double until the
+            // load ends, when it is re-based on what the load kept.
+            let node_limit = if self.namespace_loads > 0 {
+                policy.node_limit.saturating_mul(2)
+            } else {
+                policy.node_limit
+            };
+            let nodes_full = self.old_small_bytes + policy.min_node_limit / 5 > node_limit;
             if !vectors_full && !nodes_full {
                 break;
             }
@@ -3296,7 +3356,10 @@ impl Heap {
     }
 
     unsafe fn sweep_young(&mut self) {
-        let mut swept = Swept::default();
+        let mut swept = Swept {
+            by_kind: crate::activity::enabled().then_some([0; 32]),
+            ..Swept::default()
+        };
         let change = self.space.sweep_young(&mut swept);
         self.old_small_bytes = self.old_small_bytes.saturating_add_signed(change);
         let young_large = std::mem::take(&mut self.young_large);
@@ -3311,11 +3374,15 @@ impl Heap {
         self.young_large = young_large;
         self.young_large.clear();
         self.stats.objects_freed += swept.freed;
+        self.count_freed_kinds(&swept);
         self.refresh_live_stats();
     }
 
     unsafe fn sweep_all(&mut self) {
-        let mut swept = Swept::default();
+        let mut swept = Swept {
+            by_kind: crate::activity::enabled().then_some([0; 32]),
+            ..Swept::default()
+        };
         self.old_small_bytes = self.space.sweep_all(&mut swept);
         let mut old_large_bytes = 0;
         let large: Vec<Sexp> = self.large.iter().copied().collect();
@@ -3330,7 +3397,16 @@ impl Heap {
         self.young_large.clear();
         self.old_large_bytes = old_large_bytes;
         self.stats.objects_freed += swept.freed;
+        self.count_freed_kinds(&swept);
         self.refresh_live_stats();
+    }
+
+    fn count_freed_kinds(&mut self, swept: &Swept) {
+        if let Some(by_kind) = &swept.by_kind {
+            for (total, count) in self.stats.freed_by_kind.iter_mut().zip(by_kind) {
+                *total += count;
+            }
+        }
     }
 
     fn refresh_live_stats(&mut self) {

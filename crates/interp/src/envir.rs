@@ -1520,13 +1520,34 @@ unsafe fn do_import_into_env(call: &Call<'_>) -> R<Sexp> {
 /// `methods::is(f, "genericFunction")`, called only for a value that is an object at all, since
 /// `is()` answers `FALSE` for every other one.
 unsafe fn do_local_s4_generics(call: &Call<'_>) -> R<Sexp> {
+    /// The serialization type code of a closure (`CLOSXP`).
+    const CLOSURE_RECORD: u32 = 3;
     let names = call.arg(0);
     let env = environment_arg(call.arg(1), "env")?;
     let is_generic = call.arg(2);
     let mut generic = Vec::with_capacity(length(names));
+    // A generic appears once per method registered for it, and its answer is the same each time.
+    let mut answered = rustc_hash::FxHashMap::<Sexp, i32>::default();
     for index in 0..length(names) {
         let symbol = values::install_charsxp(names.element(index))?;
-        let value = value_of(find_var(symbol, env)?)?;
+        if let Some(&answer) = answered.get(&symbol) {
+            generic.push(answer);
+            continue;
+        }
+        let binding = find_var(symbol, env)?;
+        // A generic still in its lazy-load database whose record is a closure without a class
+        // or the S4 bit cannot be an S4 generic, so registering methods for it leaves it
+        // unfetched until something calls it.
+        if let Some((kind, is_object, levels)) = crate::serialize::lazy_record_header(binding)?
+            && kind == CLOSURE_RECORD
+            && !is_object
+            && levels & gp::S4_OBJECT == 0
+        {
+            answered.insert(symbol, 0);
+            generic.push(0);
+            continue;
+        }
+        let value = value_of(binding)?;
         if value == unbound() {
             return Err(call.error(format!("object '{}' not found", symbol_name(symbol))));
         }
@@ -1537,6 +1558,7 @@ unsafe fn do_local_s4_generics(call: &Call<'_>) -> R<Sexp> {
                 &eval::value_args(&[value]),
                 call.env,
             )?);
+        answered.insert(symbol, i32::from(is_s4_generic));
         generic.push(i32::from(is_s4_generic));
     }
     values::logical_vector(&generic)
@@ -1730,52 +1752,96 @@ unsafe fn call_function(function: Sexp, args: &[Arg], env: Sexp, call_expression
 /// each iteration reports is exactly that.
 unsafe fn do_lapply(call: &Call<'_>) -> R<Sexp> {
     let env = call.env;
-    let symbols = symbols();
-    let x_symbol = values::install("X")?;
-    let fun_symbol = values::install("FUN")?;
-    let i_symbol = values::install("i")?;
-    let list = eval::eval_symbol(x_symbol, env)?;
+    let list = eval::eval_symbol(values::install("X")?, env)?;
     let count = length(list);
     let result = alloc(SexpType::List, count)?;
-    // `FUN(X[[i]], ...)`, with `i` bound afresh each time.
-    let element = values::call(symbols.bracket2, &[x_symbol, i_symbol])?;
-    let fun_call = values::call(fun_symbol, &[element, symbols.dots])?;
-    let mut known = atomic_elements(list);
+    let mut calls = ElementCalls::new(list, env)?;
     for index in 0..count {
-        let value = crate::scope(|| {
-            let i = values::scalar_integer(index as i32 + 1)?;
-            define(i_symbol, i, env)?;
-            eval::force_and_call_with(
-                fun_call,
-                1,
-                env,
-                plain_element(list, i, element)?,
-                known.as_mut(),
-            )
-        })?;
+        let value = calls.call(index)?;
         values::set_elt(result, index, value);
     }
     let names = values::names(list);
     if names != nil() {
-        values::set_attr(result, symbols.names, names)?;
+        values::set_attr(result, symbols().names, names)?;
     }
     Ok(result)
 }
 
-/// `X[[i]]` without evaluating the call when `X` is a vector with no class, where `[[` cannot
-/// dispatch and base's `[[` is the one `lapply` finds, so the result is the same.
-unsafe fn plain_element(list: Sexp, i: Sexp, element: Sexp) -> R<Option<Sexp>> {
-    if !list.kind().is_vector() || list.is_object() {
-        return Ok(None);
-    }
-    let value = crate::subset::subset2(list, &[i], Some(true), element)?;
-    // An empty argument taken from a call, as in `lapply(as.list(quote(f(a, ))), FUN)`, reaches
-    // `FUN` as a promise whose value is the empty symbol, which `FUN` can inspect; bound
-    // directly, it would make `FUN`'s argument missing.
-    Ok((value != values::missing_arg()).then_some(value))
+/// The calls `FUN(X[[i]], ...)` that `lapply` and `vapply` make in the frame `env`, one per
+/// element of `X`.
+struct ElementCalls {
+    env: Sexp,
+    index_symbol: Sexp,
+    /// The integer `i` is bound to, which GNU R updates in place for each element.
+    index: Sexp,
+    /// `index`'s reference count once bound. A higher count means `FUN` kept it, and a lower
+    /// one that `FUN` rebound `i`, which may leave `index` unreachable; either way the next
+    /// element binds a fresh integer.
+    bound_refcount: u16,
+    /// `X` itself when `X[[i]]` reads element `i` directly: a vector with no class, where `[[`
+    /// cannot dispatch and base's `[[` is the one `lapply` finds, so the result is the same.
+    plain: Option<Sexp>,
+    fun_call: Sexp,
+    known: Option<eval::KnownFirst>,
 }
 
-/// What every element [`plain_element`] takes from `list` is known to share: its storage type,
+impl ElementCalls {
+    unsafe fn new(list: Sexp, env: Sexp) -> R<ElementCalls> {
+        let symbols = symbols();
+        let index_symbol = values::install("i")?;
+        let element = values::call(symbols.bracket2, &[values::install("X")?, index_symbol])?;
+        let fun_call = values::call(values::install("FUN")?, &[element, symbols.dots])?;
+        crate::heap().root(fun_call);
+        let plain = if list.kind().is_vector()
+            && !list.is_object()
+            && !list.is_array()
+            && !matches!(list.kind(), SexpType::I64 | SexpType::Record)
+            // `vector_element` would materialize a numeric ALTREP vector, such as a compact
+            // `1:n`, which `X[[i]]` reads one element at a time.
+            && (!list.is_altrep() || matches!(list.kind(), SexpType::String | SexpType::List))
+        {
+            Some(list)
+        } else {
+            None
+        };
+        let index = values::scalar_integer(0)?;
+        define(index_symbol, index, env)?;
+        Ok(ElementCalls {
+            env,
+            index_symbol,
+            index,
+            bound_refcount: index.refcount(),
+            plain,
+            fun_call,
+            known: atomic_elements(list),
+        })
+    }
+
+    unsafe fn call(&mut self, position: usize) -> R<Sexp> {
+        crate::scope(|| {
+            if self.index.refcount() != self.bound_refcount {
+                self.index = values::scalar_integer(0)?;
+                define(self.index_symbol, self.index, self.env)?;
+                self.bound_refcount = self.index.refcount();
+            }
+            self.index.slice_mut::<i32>()[0] = position as i32 + 1;
+            let first = match self.plain {
+                Some(list) => {
+                    let value = crate::subset::vector_element(list, position)?;
+                    // An empty argument taken from a call, as in
+                    // `lapply(as.list(quote(f(a, ))), FUN)`, reaches `FUN` as a promise whose
+                    // value is the empty symbol, which `FUN` can inspect; bound directly, it
+                    // would make `FUN`'s argument missing.
+                    (value != values::missing_arg()).then_some(value)
+                }
+                None => None,
+            };
+            eval::force_and_call_with(self.fun_call, 1, self.env, first, self.known.as_mut())
+        })
+    }
+}
+
+/// What every element [`ElementCalls`] reads directly from from `list` is known to share: its storage type,
 /// when `list` is an atomic vector.
 unsafe fn atomic_elements(list: Sexp) -> Option<eval::KnownFirst> {
     match list.kind() {
@@ -1795,32 +1861,18 @@ unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
     let list = call.arg(0);
     let template = call.arg(2);
     let use_names = values::as_logical_scalar(call.arg(3)) == 1;
-    let x_symbol = values::install("X")?;
-    let fun_symbol = values::install("FUN")?;
-    let i_symbol = values::install("i")?;
     let count = length(list);
     let template_length = length(template);
     let kind = template.kind();
     if !kind.is_vector() {
         return Err(call.error("'FUN.VALUE' must be a vector"));
     }
-    let element = values::call(symbols.bracket2, &[x_symbol, i_symbol])?;
-    let fun_call = values::call(fun_symbol, &[element, symbols.dots])?;
     let result = alloc(kind, count * template_length)?;
-    let mut row_names = nil();
-    let mut known = atomic_elements(list);
+    // `FUN.VALUE`'s names name the rows; without them, the first result's names do.
+    let mut row_names = values::names(template);
+    let mut calls = ElementCalls::new(list, env)?;
     for index in 0..count {
-        let value = crate::scope(|| {
-            let i = values::scalar_integer(index as i32 + 1)?;
-            define(i_symbol, i, env)?;
-            eval::force_and_call_with(
-                fun_call,
-                1,
-                env,
-                plain_element(list, i, element)?,
-                known.as_mut(),
-            )
-        })?;
+        let value = calls.call(index)?;
         if length(value) != template_length {
             return Err(error(format!(
                 "values must be length {template_length},\n but FUN(X[[{}]]) result is length {}",
@@ -1846,7 +1898,7 @@ unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
         } else {
             value
         };
-        if index == 0 && template_length > 1 {
+        if index == 0 && template_length > 1 && row_names == nil() {
             row_names = values::names(value);
         }
         for offset in 0..template_length {

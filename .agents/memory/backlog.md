@@ -31,6 +31,8 @@ The quality bar is four things.
   suspect.
 - ry's own base R has no recommended packages, so `zoo` cannot load (`there is no package called
   'lattice'`) and the `timeseries` workload of `just bench-real` fails.
+- Deep recursion aborts the process: `options(expressions = 500000); f <- function(n) if (n == 0) 0 else 1 + f(n - 1); tryCatch(f(1e6), error = identity)` overflows the native stack instead of raising R's "evaluation nested too deeply" or "C stack usage" error. `on_large_stack` in `eval.rs` grows the stack in segments; find which frames recurse outside it.
+- testthat 3.3.2 fails to load under ry's runtime with "attempt to use zero-length variable name" ; 3.2.3 loads. ry raises that error for `new.env()[[""]]`; whether GNU R does too, and so whether that is the cause, is unverified (no GNU R on the measuring host).
 - `crates/jit/tests/test_tiers.rs` `run_time_binding_shadows_cached_global_function` fails for `gen`: a `g` bound in a generic's frame before `UseMethod` is not seen by `gen.default`, which calls the global `g`. The cause is outside the typed core: the test fails without it.
 
 ## Open: the baseline tier and JIT on against JIT off
@@ -58,6 +60,12 @@ left, in order of expected gain:
   `bench-real` with the JIT off, so this and unboxing are the larger levers.
 - `conditions` deoptimizes 3000 times (an error parked in a helper) at one `stop()` call site,
   once per call.
+
+## Open: console input in ry's runtime
+
+- Console `scan()` prompts with the running item count (`1: `, `3: `); GNU R's counts records for a
+  list `what`. `select.list(graphics = TRUE)` and `.External2(C_selectlist)` still raise the
+  non-interactive error.
 
 ## Open: the typed core
 
@@ -100,6 +108,8 @@ left, in order of expected gain:
 
 - **Quoted byte strings with a quote character.** GNU R prints a quoted `"bytes"` string that contains `"` with a stray trailing `\0` (`"q\"\\xff\0"`), an artifact of its escape buffer. ry prints it without the `\0`; this is deliberate.
 - **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 104.5k instructions against GNU R's 70.6k. Measure GNU R marginally (a run of N2 calls minus a run of N1, both above zero): GNU R byte-compiles a closure on its first calls, so subtracting an empty baseline charges that compilation to the loop and roughly doubles small per-item costs. ry's cost is spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions.md`, the promise paragraph under the object model), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. The untyped stdlib templates (`tools/bench/templates`) show the same gap: the ledger fold costs about 15.8k instructions per fill on ry against about 6.1k on GNU R (both marginal), and readings generation about 7.4k per reading against 4.5k, now that compiled `out[[i]] <- v` updates a local vector in place (`assign_element_in_place`) instead of running `complex_assign`. `apply(m, 1, f)` on a 4-column matrix costs about 13.8k instructions per row against GNU R's 16.8k, after the `m[, j]` column fast path; the kernels session measured it at 1.9x GNU R's time before that, and xts `period.apply` (about 33k closure calls through `[.xts` and `mean.default`) at 1.3x, which is still to be re-measured. In the ledger fold, `frame_cell` runs about 25 times per fill for about 14 variable and 7 function lookups, because `lookup_variable` searches the local frame before consulting its cache; the per-instruction dispatch lines (opcode fetch, operand decoding, the handle-mark check) cost about as much as the work. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
+
+- **`install.packages()` with several packages installs nothing.** On ry, `install.packages(c("a", "b"), lib = ...)` returns without installing any of them and without an error; one package per call works, so the benchmark library was installed one package at a time in dependency order.
 
 - **Old runtimes and R homes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB) and builds a new `ry/home/<hash>/`, and nothing removes the previous release's directories: a home is pruned only when a newer home is built for the same runtime and front end (`rcmd::cached_home`). Prune runtime and home directories that no `ry` on the machine can name, without removing one a running session still maps.
 
@@ -167,6 +177,8 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **`gc()`'s "max used" is sampled only at collections**, so it reads below the process peak (575 MB against an 833 MB VmHWM for a loop that makes and drops large vectors; GNU R reports 1,054 MB because it counts at allocation). Updating the peak on each large-vector allocation would match GNU R's meaning (`crates/heap/src/heap.rs`, `crates/heap/tests/test_gc.rs` `released_old_vectors_leave_the_peak_at_one_vector`).
 - **`for` over a compact `1:n` expands it.** Both tiers materialize the sequence (40 MB for ten million elements) before the loop; GNU R iterates the compact form. Iterating start and step directly removes the allocation, the page faults and `loop_sum`'s peak.
 - **Builder peaks still above GNU R's by more than 10%** (fresh process per case, 2e7 doubles, peak over the inputs in MB, ry against GNU R 4.3.3): `x * 2 + 1` 305/153 (GNU R writes the result into an unshared temporary operand; ry cannot take a reference count of 0 as proof yet, because bytecode registers and JIT slots hold uncounted references, `eval::reuse_permitted`), `seq(1, n, by = 1)` 381/305, `vapply(l, function(v) v + 1, numeric(1))` over a 1e6 list 112/58, `unlist` 20/4. `resolve()` in `crates/interp/src/subset.rs` still builds a `Vec<usize>` per general subscript.
+- **Minor collections during a package load cost about 24M instructions each**, most of it re-marking every child of a remembered old object (namespace frames being filled). Card marking would re-mark only the dirty part. `library()` of 11 packages runs 5 of them, 118M of 1,133M instructions.
+- **`unserializeFromConn` reads its connection a few bytes per call**: 93M instructions of the same `library()`, mostly `readRDS` of package metadata. Read the connection into one buffer and decode from the slice, as `lazyLoadDBfetch` does.
 - **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `development/robustness.md`).
 - **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
 
@@ -842,11 +854,19 @@ change that does not pay.
 
 ## Open: untyped R against GNU R
 
-- `missing()` costs about a whole closure call (2,626 instructions against GNU R's 2,590); it is a
-  special, so a fast path needs its own bytecode op. The unary builtin path and native entries
-  skip `call_builtin_checked`, so `--profile-summary` counters and Rprof do not see those calls.
-  The `Reduce` prologue never binds `ind` in its frame, which only an `f` that reads
-  `parent.frame()` can observe.
+- `.Call` into a package routine costs about 1.5x GNU R per call (`truelength()` x300k: 0.21 s
+  against 0.14 s). What remains is the boundary itself: `call_native`'s native scope, rooting and
+  `ry_call_native` in `crates/libr/src/boundary.rs`.
+- Divergences found while pinning fast paths: `.row_names_info(structure(data.frame(u = 1:3),
+  note = "hi"))` is 3 on GNU R and -3 on ry, because ry's `attributes<-` keeps row names compact;
+  `.Call("crc64", "x", PACKAGE = "utils")` errors on GNU R (utils registers its routines with
+  symbol lookup off) but runs on ry.
+- Bench environment: a multi-package `install.packages()` call under ry installs nothing without
+  an error, `ry R CMD INSTALL` fails with "cannot read CMD", and the testthat workload fails on
+  both engines with testthat 3.3.2 ("attempt to use zero-length variable name").
+- The unary builtin path and native entries skip `call_builtin_checked`, so `--profile-summary`
+  counters and Rprof do not see those calls. The `Reduce` prologue never binds `ind` in its frame,
+  which only an `f` that reads `parent.frame()` can observe.
 
 Target: plain, untyped R at least 1.5 times faster than GNU R. A private 300K-line code base runs
 about 3% slower than on GNU R, and `just bench-real` (`tools/bench/real/`, results in

@@ -2127,7 +2127,8 @@ impl<'a> Builder<'a> {
                 &[],
                 Effect::PureUnlessObserved,
             ),
-            Op::Ast => self.opaque_step(
+            // `missing` reads the frame's bindings, so the variables must be written back first.
+            Op::Ast | Op::Missing => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
                 &[],
@@ -2437,13 +2438,24 @@ impl<'a> Builder<'a> {
                     state.registers[inst.operand(3)],
                 );
                 let scalar = |ty: Ty| ty.is_numeric_scalar() || ty == Ty::Num;
+                // `%%` and `%/%` compile only through an intrinsic, which takes no `Num` operand;
+                // otherwise they run the tier-0 handler, which reads boxed operands.
+                let remainder = matches!(
+                    ARITHS[inst.operand(0)].0,
+                    Arith::Modulo | Arith::IntegerDivide
+                );
                 // An integer flag would make `+`, `-` and `*` integer arithmetic unless the other
                 // operand is a double; every other operator converts to double anyway.
                 scalar(a)
                     && scalar(b)
+                    && !(remainder && (a == Ty::Num || b == Ty::Num))
                     && (!matches!(
                         ARITHS[inst.operand(0)].0,
-                        Arith::Add | Arith::Subtract | Arith::Multiply
+                        Arith::Add
+                            | Arith::Subtract
+                            | Arith::Multiply
+                            | Arith::Modulo
+                            | Arith::IntegerDivide
                     ) || a == Ty::Dbl
                         || b == Ty::Dbl)
             }
@@ -3109,7 +3121,8 @@ impl<'a> Builder<'a> {
                     }
                     (operator, [left, right])
                         if let Some(&(arith, _)) =
-                            ARITHS.iter().find(|(_, symbol)| *symbol == operator) =>
+                            ARITHS.iter().find(|(_, symbol)| *symbol == operator)
+                            && !remainder_operator(arith) =>
                     {
                         let (a, b) = (types[0], types[1]);
                         let dst = lowering.temporary()?;
@@ -3345,8 +3358,20 @@ impl<'a> Builder<'a> {
         let (dst, left, right) = (operand(1), operand(2), operand(3));
         let (a, b) = (state.registers[left], state.registers[right]);
         state.visible = Some(true);
+        if remainder_operator(arith)
+            && let Some((intrinsic, result)) = intrinsic_for(ARITHS[operand(0)].1, &[a, b])
+        {
+            state.registers[dst] = result;
+            state.visible = Some(true);
+            return Ok(Action::Intrinsic {
+                intrinsic,
+                dst,
+                args: self.slice([left, right]),
+                result,
+            });
+        }
         let scalar = |ty: Ty| ty.is_numeric_scalar() || ty == Ty::Num;
-        if scalar(a) && scalar(b) {
+        if scalar(a) && scalar(b) && !remainder_operator(arith) {
             let integers = !matches!(a, Ty::Dbl | Ty::Num) && !matches!(b, Ty::Dbl | Ty::Num);
             let comparison = matches!(
                 arith,
@@ -3772,6 +3797,12 @@ fn builtin_result(name: &str, types: &[Ty]) -> Option<Ty> {
     })
 }
 
+/// Whether `arith` is `%%` or `%/%`, which compiled code computes as the intrinsic their
+/// builtin calls lower to, with GNU R's rounding and its loss-of-accuracy warning.
+fn remainder_operator(arith: Arith) -> bool {
+    matches!(arith, Arith::Modulo | Arith::IntegerDivide)
+}
+
 /// The type of an element-wise operation that has not run yet on plain operands, at least one of
 /// them a vector: plain operands carry no attributes, so neither does the result.
 fn vector_arithmetic(arith: Arith, a: Ty, b: Ty) -> Option<Ty> {
@@ -3787,7 +3818,15 @@ fn vector_arithmetic(arith: Arith, a: Ty, b: Ty) -> Option<Ty> {
         | Arith::Greater
         | Arith::LessEqual
         | Arith::GreaterEqual => Ty::LglVec,
-        Arith::Add | Arith::Subtract | Arith::Multiply if !doubles => Ty::IntVec,
+        Arith::Add
+        | Arith::Subtract
+        | Arith::Multiply
+        | Arith::Modulo
+        | Arith::IntegerDivide
+            if !doubles =>
+        {
+            Ty::IntVec
+        }
         _ => Ty::DblVec,
     })
 }
@@ -3871,7 +3910,9 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
     let kill = |register: usize, live: &mut [u64]| set_bit(live, register, false);
     let gen_ = |register: usize, live: &mut [u64]| set_bit(live, register, true);
     match inst.op {
-        Op::Constant | Op::GetVar | Op::GetFun | Op::Ast | Op::Closure => kill(operand(0), live),
+        Op::Constant | Op::GetVar | Op::GetFun | Op::Ast | Op::Closure | Op::Missing => {
+            kill(operand(0), live)
+        }
         Op::SetVar => gen_(operand(1), live),
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             gen_(operand(0), live)
