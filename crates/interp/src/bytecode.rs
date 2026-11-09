@@ -401,7 +401,11 @@ pub mod profile {
     /// of them, which cost about 30 instructions per call of every body. Whatever changes a
     /// count or a state those decisions read outside an entry sets this to `i32::MIN`.
     pub const NEXT: usize = 4;
-    pub const LENGTH: usize = 5;
+    /// The session's allocation clock ([`heap::Heap::allocated_ever`], in KiB, wrapping) when the
+    /// recording window opened, which the optimizing tier reads to estimate how often the body
+    /// runs.
+    pub const WINDOW: usize = 5;
+    pub const LENGTH: usize = 6;
     /// The counters a code image keeps. The next event is derived from them when it is read.
     pub const SERIALIZED: usize = 4;
 }

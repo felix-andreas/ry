@@ -1037,6 +1037,36 @@ fn a_body_that_could_run_nothing_natively_never_records() {
 }
 
 #[test]
+fn a_hot_body_that_runs_rarely_waits_to_compile() {
+    // `rare` reaches the entry threshold, but each call comes with 160 KiB of other allocation,
+    // so its expected calls cannot repay a compile: it is refused, not for good, and its count
+    // starts over. Called back to back, the same body then compiles.
+    with_interpreter(|| unsafe {
+        use interp::bytecode::{PROFILE, profile};
+        jit::install_mode(Mode::On);
+        let threshold = interp::bytecode::tier().map_or(0, |tier| tier.entry_threshold);
+        let profile_of = || {
+            let function = values::install("rare")
+                .and_then(|symbol| eval::eval(symbol, values::global_env()))
+                .unwrap_or_else(|_| panic!("rare is not defined"));
+            values::ints(function.cdr().cdr().element(PROFILE)).to_vec()
+        };
+        run("rare <- function(x) x * 3");
+        run(&format!(
+            "for (i in 1:{}) {{ big <- (1:20000) * 1.5; rare(i) }}",
+            threshold + 1
+        ));
+        let counters = profile_of();
+        assert!(!has_compiled_code("rare"), "rare compiled: {counters:?}");
+        assert!(counters[profile::TIER_STATE] >= 0, "rare was refused for good: {counters:?}");
+        assert!(counters[profile::ENTRIES] < 10, "rare's count went on: {counters:?}");
+        run(&format!("for (i in 1:{threshold}) rare(i)"));
+        assert!(has_compiled_code("rare"), "rare did not compile: {:?}", profile_of());
+        jit::install_mode(Mode::Off);
+    });
+}
+
+#[test]
 fn fully_typed_closure_compiles_at_its_first_call() {
     // The signature stands in for the profile, so a first call runs compiled code: a typed
     // scalar function runs as a native function from its first call, whose values fix the

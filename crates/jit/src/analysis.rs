@@ -1120,27 +1120,52 @@ pub const NOTHING_NATIVE: &str = "compiled code would run nothing natively";
 /// it is decided before the body records anything.
 pub const NEVER_NATIVE: &str = "no instruction of the body could run natively";
 
-/// Whether some profile could make [`Plan::runs_natively`] true for `code`, judged from the
-/// instructions alone: a loop, or an instruction the plan may turn into native work. A call of a
-/// builtin counts when it names one the plan has a native form for; a builtin reached through
-/// another name is missed, which costs only the compiled code, not correctness.
-pub unsafe fn may_run_natively(code: Sexp) -> bool {
+/// The refusal for a loop-free body that turned hot but runs too rarely for compiled code to
+/// repay its compilation. Like [`COLD`] it is not final: the body asks again after another
+/// threshold of entries, with its call rate measured afresh.
+pub const RARE: &str = "the body runs too rarely to repay compiling it";
+
+/// What the instructions of a body allow compiled code to do, whatever its profile records.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Shape {
+    /// The body loops, or holds bytecode the scan cannot read, which counts as a loop because
+    /// nothing bounds what it runs.
+    pub loops: bool,
+    /// The instructions the plan may turn into native work. A call of a builtin counts when it
+    /// names one the plan has a native form for; a builtin reached through another name is
+    /// missed, which costs only the compiled code, not correctness.
+    pub native: usize,
+}
+
+impl Shape {
+    /// Whether some profile could make [`Plan::runs_natively`] true.
+    pub fn may_run_natively(self) -> bool {
+        self.loops || self.native > 0
+    }
+}
+
+pub unsafe fn shape(code: Sexp) -> Shape {
     let words = values::ints(code.car());
     let constants = code.cdr();
+    let unbounded = Shape {
+        loops: true,
+        native: 0,
+    };
     if values::length(constants.element(bytecode::LOOPS)) > 0 {
-        return true;
+        return unbounded;
     }
+    let mut native = 0;
     let mut pc = 0;
     while pc < words.len() {
         let Some(op) = bytecode::op_of(words[pc] as u32) else {
-            return true;
+            return unbounded;
         };
         let count = operand_count(op);
         let Some(operands) = words.get(pc + 1..pc + 1 + count) else {
-            return true;
+            return unbounded;
         };
         let operand = |index: usize| operands[index] as usize;
-        let native = match op {
+        let counts = match op {
             Op::Arithmetic
             | Op::LogicLeft
             | Op::LogicRight
@@ -1154,7 +1179,8 @@ pub unsafe fn may_run_natively(code: Sexp) -> bool {
             | Op::ForInit
             | Op::ForStep
             | Op::ForEnd => true,
-            Op::Jump => operand(0) <= pc,
+            Op::Jump if operand(0) <= pc => return unbounded,
+            Op::Jump => false,
             Op::CallBuiltin => {
                 let function = constants.element(operand(2)).car();
                 function.kind() != SexpType::Symbol || {
@@ -1193,12 +1219,13 @@ pub unsafe fn may_run_natively(code: Sexp) -> bool {
             | Op::SetSrcref
             | Op::Resume => false,
         };
-        if native {
-            return true;
-        }
+        native += usize::from(counts);
         pc += 1 + count;
     }
-    false
+    Shape {
+        loops: false,
+        native,
+    }
 }
 
 impl Plan<'_> {
