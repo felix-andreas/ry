@@ -931,7 +931,9 @@ fn closures_from_one_site_share_code_but_not_lookups() {
 /// Compiled code loads a variable inline when it sits in the activation's frame or an enclosing
 /// function frame and holds a value or a forced promise, and hands every other load to the
 /// runtime. These calls cross each case: a forced argument, an enclosing binding whose type
-/// changes under the code (the inline load must deoptimize), and an active binding.
+/// changes under the code (the inline load must deoptimize), an active binding, and an argument
+/// that is an integer in one closure and a double in another of the same code, which loads as
+/// `Num`.
 #[test]
 fn inline_variable_loads_agree_with_tier_zero() {
     let calls = [
@@ -951,6 +953,16 @@ fn inline_variable_loads_agree_with_tier_zero() {
         "environment(h) <- environment(g)",
         "h(1L)",
         "h(2L)",
+        "p <- make(2)",
+        "q <- make(0.5)",
+        "p(1L)",
+        "q(1.5)",
+        "p(2L)",
+        "q(2.5)",
+        "typeof(p(3L))",
+        "q(NA_integer_)",
+        "p(NA)",
+        "typeof(q(4L))",
     ];
     let mut outcomes = Vec::new();
     with_interpreter(|| unsafe {

@@ -1560,10 +1560,17 @@ impl<'a> Builder<'a> {
     /// before it has read anything, the type the closure's signature declares for that formal.
     fn load_ty(&self, pc: usize, slot: usize) -> Ty {
         if self.never_ran(pc) {
-            self.declared[slot]
-        } else {
-            self.feedback_at(pc)
+            return self.declared[slot];
         }
+        // A variable that has held both an integer and a double scalar, such as the argument
+        // of a closure shared by `make_scaler(2)` and `make_scaler(0.5)`, loads as `Num`, which
+        // its arithmetic reads unboxed, rather than as a boxed value every reader hands back to
+        // tier 0.
+        let bits = self.feedback.get(pc).map_or(0, |&bits| bits as u16);
+        if bits == feedback::INTEGER_SCALAR | feedback::DOUBLE_SCALAR {
+            return Ty::Num;
+        }
+        from_feedback(bits)
     }
 
     /// Splits the instructions into blocks and finds each block's successors and the loop
