@@ -29,7 +29,9 @@ const R_PACKAGES: &[&str] = &[
 ];
 
 /// ry's runtime package and its standard library load last, in this order, and like R's packages
-/// they are always present.
+/// they are always present. Their functions are written for ry's records, tuples and tags, so
+/// passing a ry value to them is not the boundary error it is for an R function, and the types
+/// they declare (`Dict`, `Set`, `Array`) are native values. `shipped.rs` carries this list.
 const NATIVE_NAMESPACES: &[&str] = &["ry", "std"];
 
 fn main() -> Result<(), Error> {
@@ -101,6 +103,11 @@ fn main() -> Result<(), Error> {
         writeln!(out, "    {name:?},").map_err(format_error)?;
     }
     out.push_str("];\n");
+    writeln!(
+        out,
+        "pub const NATIVE_NAMESPACES: &[&str] = &{NATIVE_NAMESPACES:?};"
+    )
+    .map_err(format_error)?;
     let out_dir = PathBuf::from(env::var("OUT_DIR").map_err(env_error)?);
     fs::write(out_dir.join("shipped.rs"), out)
 }

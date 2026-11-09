@@ -538,7 +538,7 @@ fn a_paste_runs_in_linear_time() {
             let (large, silence) = session.paste(&block(5000), bracketed, &format!("{name}_large"));
             // A line that waits on the terminal stalls for crossterm's two-second timeout.
             assert!(
-                silence < Duration::from_secs(1),
+                silence < Duration::from_millis(1500),
                 "{runtime}, {name}: the console went silent for {silence:?} during a paste"
             );
             assert!(

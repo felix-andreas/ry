@@ -18,6 +18,7 @@ use {
     semantics::{
         DocumentKind, Elaboration, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{Diagnostic, RelatedLocation, Severity},
+        is_ry_syntax,
         stubs::{install_shipped_stubs, is_native_function},
     },
     std::{
@@ -119,9 +120,7 @@ impl Preflight {
     /// `input` spells as `?`.
     pub fn check_elaborations(&mut self, input: &str) -> Option<Vec<Elaboration>> {
         if !self.analyzed {
-            if !input.contains("typing:")
-                && !has_ry_syntax(&syntax::parse(input).syntax_node(), input)
-            {
+            if !has_ry_syntax(&syntax::parse(input).syntax_node(), input) {
                 self.session.push_str(input);
                 self.session.push('\n');
                 return Some(Vec::new());
@@ -499,17 +498,22 @@ fn has_inline_annotation(root: &SyntaxNode) -> bool {
     root.descendants().any(|node| is_inline_annotation(&node))
 }
 
-/// Whether `source` holds anything that can give a literal a ry type: an inline or comment
-/// annotation, a list literal, a suffixed number, or a standard library call such as
-/// `List.range(1, 10)`. Missing one of these leaves an `I64` literal an R double at run time, so
+/// Whether `source` holds anything analysis decides: an inline or comment annotation, a
+/// `# typing:` directive, a record, tuple, list, tag or `match`, a suffixed number, or a native
+/// function call such as `List.range(1, 10)`. Missing one of these leaves an `I64` literal an R double at run time, so
 /// the test errs toward analysis.
 fn has_ry_syntax(root: &SyntaxNode, source: &str) -> bool {
     source.contains("#:")
         || has_inline_annotation(root)
         || root.descendants_with_tokens().any(|element| match element {
-            NodeOrToken::Node(node) => node.kind() == SyntaxKind::ARRAY_EXPR,
+            NodeOrToken::Node(node) => is_ry_syntax(node.kind()),
             NodeOrToken::Token(token) => match token.kind() {
                 SyntaxKind::SUFFIXED_NUMBER => true,
+                SyntaxKind::COMMENT => token
+                    .text()
+                    .trim_start_matches('#')
+                    .trim_start()
+                    .starts_with("typing:"),
                 SyntaxKind::IDENT => is_native_function(token.text()),
                 _ => false,
             },

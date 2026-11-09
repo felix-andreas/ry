@@ -67,6 +67,7 @@ left, in order of expected gain:
 
 ## Open: console input in ry's runtime
 
+- The console preflight's session holds every line of a bracketed paste before any of them runs, so a paste cut short by an error or Ctrl-C leaves later commands typed against bindings that never ran. The filter needs a signal that input was dropped, so it can roll the session back to what ran.
 - Console `scan()` prompts with the running item count (`1: `, `3: `); GNU R's counts records for a
   list `what`. `select.list(graphics = TRUE)` and `.External2(C_selectlist)` still raise the
   non-interactive error.

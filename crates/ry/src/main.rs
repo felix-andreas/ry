@@ -249,7 +249,13 @@ fn main() -> ExitCode {
         runtime,
     } = &cli.command
     {
-        return run_install(path, library.as_deref(), train.as_deref(), *explain, *runtime);
+        return run_install(
+            path,
+            library.as_deref(),
+            train.as_deref(),
+            *explain,
+            *runtime,
+        );
     }
 
     if let Command::DebugAdapter = &cli.command {
