@@ -149,14 +149,27 @@ fn main() -> ExitCode {
     if let Command::Run {
         profile_summary: Some(path),
         ..
+    }
+    | Command::Load {
+        profile_summary: Some(path),
+        ..
+    }
+    | Command::Test {
+        profile_summary: Some(path),
+        ..
     } = &cli.command
     {
         // The runtime reads the variable when its session starts, which may be in a child
         // process; the absolute path keeps it right if the script changes directory.
         let path = std::path::absolute(path).unwrap_or_else(|_| path.clone());
         // The summary is written when the session ends, so an unwritable path fails up front
-        // rather than after the whole run.
-        if let Err(failure) = std::fs::File::create(&path) {
+        // rather than after the whole run. Opening without truncating keeps an earlier summary
+        // when the run fails before it writes a new one.
+        if let Err(failure) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&path)
+        {
             eprintln!(
                 "error: cannot write the profile summary to '{}': {failure}",
                 path.display()
@@ -197,6 +210,7 @@ fn main() -> ExitCode {
         reporter,
         watch,
         runtime,
+        ..
     } = &cli.command
     {
         return run_test(

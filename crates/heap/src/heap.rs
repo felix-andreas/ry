@@ -2629,6 +2629,14 @@ impl Heap {
             }
         } else {
             self.old_large_bytes = self.old_large_bytes.saturating_sub(self.size_of(object));
+            // A marked vector's cells are in the live count, and a minor collection adds to that
+            // count rather than recounting it, so cells left there would pile up across a loop
+            // and inflate `gc()`'s "max used" far past the real peak.
+            let cells = crate::space::vector_cells(object);
+            self.stats.live_vector_cells = self.stats.live_vector_cells.saturating_sub(cells);
+            if object.gc_bits() & gc_bits::TENURED != 0 {
+                self.tenured_vector_cells = self.tenured_vector_cells.saturating_sub(cells);
+            }
         }
         self.free_large(object);
         self.stats.vectors_released += 1;

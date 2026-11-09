@@ -450,8 +450,13 @@ View <- function(x, title) {
     .ry_bind_lazily(state, plan, keep)
   }
   .ry_phase("bind lazily")
-  if (plan$full && !is.null(plan$deferred_s4) && .ry_may_defer_s4(state, plan$deferred_s4)) {
-    .ry_defer_s4(state, plan$deferred_s4)
+  if (plan$full) {
+    reason <- if (is.null(plan$deferred_s4)) plan$s4_eager_reason else .ry_s4_eager_reason(state, plan$deferred_s4)
+    if (is.null(reason)) {
+      if (!is.null(plan$deferred_s4)) .ry_defer_s4(state, plan$deferred_s4)
+    } else if (.ry_verbose()) {
+      message("  S4 definitions run at load: ", reason)
+    }
   }
   if (length(plan$run_path)) {
     previous <- options(topLevelEnvironment = ns)

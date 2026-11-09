@@ -165,26 +165,29 @@ impl Exit {
 /// unchanged stamps of the speculated symbols, prove the lookups without walking them.
 /// `thorough` walks them anyway, for an activation whose frame may have bound a watched name
 /// before the name was watched. Portable code running for an enclosure other than the checked
-/// one always walks, and leaves the epoch and stamps to the checked enclosure.
+/// one or its siblings walks, and leaves the epoch and stamps to the checked enclosure.
 pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
     let heap = heap();
     let epoch = heap.binding_epoch();
     let enclosure = frame.enclosure();
     let checked = !compiled.portable || compiled.checked.get().weak_key() == enclosure;
-    if !thorough && checked {
-        if epoch == compiled.epoch.get() {
-            return true;
-        }
+    let sibling = !checked && sibling_of_checked(compiled, enclosure);
+    if !thorough && (checked || sibling) {
         // The epoch moves on any binding outside a function frame, which a test suite or a
         // package load makes all the time, so most moves concern names no speculation uses.
-        let unchanged = compiled
-            .speculations
-            .iter()
-            .zip(&compiled.stamps)
-            .all(|(speculation, stamp)| heap.lookup_stamp(speculation.symbol) == stamp.get());
-        if unchanged {
+        let proven = epoch == compiled.epoch.get()
+            || compiled
+                .speculations
+                .iter()
+                .zip(&compiled.stamps)
+                .all(|(speculation, stamp)| heap.lookup_stamp(speculation.symbol) == stamp.get());
+        if proven {
             compiled.epoch.set(epoch);
-            return true;
+            // A sibling's lookups pass through its own frame and then the checked enclosure's
+            // parents, which the epoch and stamps proved, so only that frame is left to check.
+            if !sibling || !binds_rooted_function(compiled, enclosure) {
+                return true;
+            }
         }
     }
     for ((speculation, stamp), &rooted) in compiled
@@ -217,6 +220,41 @@ pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
         compiled.epoch.set(epoch);
     }
     true
+}
+
+/// [`valid`] after running code that started at binding epoch `epoch`. The activation's
+/// speculations held before that code ran, and every binding that could change a function
+/// lookup moves the epoch, so an unmoved epoch proves them without reading them.
+#[inline]
+unsafe fn still_valid(compiled: &Compiled, frame: Sexp, epoch: u64) -> bool {
+    unsafe { heap().binding_epoch() == epoch || valid(compiled, frame, false) }
+}
+
+/// Whether portable `compiled` runs for `enclosure`, which is not the checked enclosure but
+/// shares its parent. The closures one function expression makes on each call of its parent
+/// (`make_scaler <- function(k) function(x) x * k`) are siblings in this sense, so they share
+/// the checked enclosure's proof instead of each walking every speculation.
+pub unsafe fn sibling_of_checked(compiled: &Compiled, enclosure: Sexp) -> bool {
+    unsafe {
+        let key = compiled.checked.get().weak_key();
+        key != values::nil() && key.enclosure() == enclosure.enclosure()
+    }
+}
+
+/// Whether `env`'s own frame binds a name some rooted speculation looks up to something a
+/// function lookup could stop at.
+unsafe fn binds_rooted_function(compiled: &Compiled, env: Sexp) -> bool {
+    let heap = heap();
+    compiled
+        .speculations
+        .iter()
+        .zip(&compiled.rooted)
+        .any(|(speculation, &rooted)| {
+            rooted
+                && heap
+                    .frame_cell(env, speculation.symbol)
+                    .is_some_and(|cell| unsafe { may_be_function(cell.cdr()) })
+        })
 }
 
 /// Whether a lookup of a function could stop at a binding holding `value`, which R skips only
@@ -267,6 +305,9 @@ pub unsafe fn invalidate(code: Sexp) {
     let tier1 = constants.element(TIER1);
     if tier1 == values::nil() {
         return;
+    }
+    if crate::logging() {
+        eprintln!("jit: invalidated {}", crate::describe(code));
     }
     let heap = heap();
     heap.add_global_root(tier1);
@@ -363,12 +404,13 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
     unsafe {
         checked(activation, outcome::FAILED, |activation| {
             let machine = machine(activation);
+            let epoch = heap().binding_epoch();
             match scoped(|| bytecode::step_one(machine, pc as usize)) {
                 Err(unwind) => {
                     park(activation, unwind);
                     outcome::FAILED
                 }
-                Ok(()) if validate != 0 && !valid(compiled(activation), machine.env, false) => {
+                Ok(()) if validate != 0 && !still_valid(compiled(activation), machine.env, epoch) => {
                     outcome::INVALIDATED
                 }
                 Ok(()) => outcome::OK,
@@ -382,8 +424,9 @@ pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i6
     unsafe {
         checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
+            let epoch = heap().binding_epoch();
             let loaded = scoped(|| bytecode::load_variable(machine.code, machine.env, pc as usize));
-            finish_load(activation, slot, loaded)
+            finish_load(activation, slot, loaded, epoch)
         })
     }
 }
@@ -394,16 +437,22 @@ pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -
         checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
             let symbol = compiled(activation).slots[slot as usize];
+            let epoch = heap().binding_epoch();
             let loaded = scoped(|| {
                 let local = heap().frame_cell(machine.env, symbol).is_some();
                 eval::eval_symbol(symbol, machine.env).map(|value| (value, local))
             });
-            finish_load(activation, slot, loaded)
+            finish_load(activation, slot, loaded, epoch)
         })
     }
 }
 
-unsafe fn finish_load(activation: &mut Activation, slot: i64, loaded: R<(Sexp, bool)>) -> i32 {
+unsafe fn finish_load(
+    activation: &mut Activation,
+    slot: i64,
+    loaded: R<(Sexp, bool)>,
+    epoch: u64,
+) -> i32 {
     unsafe {
         match loaded {
             Err(unwind) => {
@@ -414,7 +463,7 @@ unsafe fn finish_load(activation: &mut Activation, slot: i64, loaded: R<(Sexp, b
                 *slot_cell(activation, slot) = value;
                 // Loading can force a promise, which runs arbitrary code.
                 if !compiled(activation).speculations.is_empty()
-                    && !valid(compiled(activation), machine(activation).env, false)
+                    && !still_valid(compiled(activation), machine(activation).env, epoch)
                 {
                     return outcome::LOAD_INVALIDATED;
                 }
@@ -511,6 +560,7 @@ pub unsafe extern "C" fn jit_call(
             };
             let machine = machine(activation);
             let arguments = std::slice::from_raw_parts(arguments, 2 * count as usize);
+            let epoch = heap().binding_epoch();
             let result = scoped(|| -> R<Sexp> {
                 let heap = heap();
                 let mut args: SmallVec<[Arg; 4]> = SmallVec::with_capacity(count as usize);
@@ -558,7 +608,7 @@ pub unsafe extern "C" fn jit_call(
                 }
                 Ok(value) => {
                     *activation.registers.add(dst as usize) = value;
-                    if !valid(compiled(activation), machine.env, false) {
+                    if !still_valid(compiled(activation), machine.env, epoch) {
                         outcome::INVALIDATED
                     } else {
                         outcome::OK

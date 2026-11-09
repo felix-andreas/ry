@@ -153,6 +153,9 @@ fn render_plan(plan: &Plan, texts: &[(String, Option<String>)]) -> String {
             code.path, code.line
         ));
     }
+    if let Some(reason) = &plan.s4_eager_reason {
+        output.push_str(&format!("S4 runs at load: {reason}\n"));
+    }
     if let Some(deferred) = &plan.deferred_s4 {
         output.push_str(&format!("placeholders {}\n", deferred.names.join(" ")));
         let mut foreign: Vec<&str> = deferred

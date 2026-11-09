@@ -1458,14 +1458,24 @@ unsafe fn set_generic(call: &Call<'_>) -> R<Sexp> {
     let Some(def) = forced_arg(frame, "def")? else {
         bail!(skip, "`def` is missing");
     };
-    if def.kind() != SexpType::Closure
-        || !is_standard_generic_call(crate::bytecode::closure_body(def), name_text.bytes())?
+    if def.kind() != SexpType::Closure {
+        bail!(skip, "`def` is not a function");
+    }
+    // A body that calls `standardGeneric("name")` inside braces is what `setGeneric()` calls
+    // nonstandard: the generic keeps the body and is a `nonstandardGenericFunction`.
+    let body = crate::bytecode::closure_body(def);
+    let generic_class = if is_standard_generic_call(body, name_text.bytes())? {
+        "standardGeneric"
+    } else if let Some([(_, inner)]) = call_args::<1>(body, "{")?
+        && is_standard_generic_call(inner, name_text.bytes())?
     {
+        "nonstandardGenericFunction"
+    } else {
         bail!(
             skip,
-            "`def` is not a function whose body is exactly `standardGeneric(\"name\")`"
+            "the body of `def` is neither `standardGeneric(\"name\")` nor that call in braces"
         );
-    }
+    };
     let Some(package) = package_name(place)? else {
         bail!(skip, "the package name of `where` needs a search");
     };
@@ -1516,7 +1526,14 @@ unsafe fn set_generic(call: &Call<'_>) -> R<Sexp> {
         bail!(skip, "the only formal argument of `def` is `...`");
     }
 
-    let generic = make_generic(name_text, def, package, &formal_names, &signature)?;
+    let generic = make_generic(
+        name_text,
+        def,
+        package,
+        &formal_names,
+        &signature,
+        generic_class,
+    )?;
     eval::define(name_symbol, generic, place)?;
     eval::define(name_symbol, generic, generics)?;
     let table = hashed_env(generic.tag())?;
@@ -1532,6 +1549,7 @@ unsafe fn make_generic(
     package: Sexp,
     formal_names: &[Sexp],
     signature: &[Sexp],
+    class: &str,
 ) -> R<Sexp> {
     let heap = crate::heap();
     let package_symbol = symbols().package;
@@ -1562,7 +1580,7 @@ unsafe fn make_generic(
         ("signature", signature_names),
         ("default", s4_null()?),
         ("skeleton", skeleton),
-        ("class", methods_class("standardGeneric")?),
+        ("class", methods_class(class)?),
     ];
     for (attribute, value) in attributes {
         values::set_attr(generic, install(attribute)?, value)?;
@@ -1667,6 +1685,7 @@ unsafe fn implicit_generic(
         base_package,
         &formal_names,
         &signature,
+        "standardGeneric",
     )?;
     heap.root(generic);
 
@@ -2067,10 +2086,11 @@ unsafe fn set_method(call: &Call<'_>) -> R<Sexp> {
 /// The closure `setMethod()` makes of a method definition, before `asMethodDefinition()`.
 /// Formals that match the generic's by name keep the method as it is, except that
 /// `matchDefaults()` gives an argument without a default the generic's default. Other formals go
-/// through `conformMethod()` and `rematchDefinition()`: the method becomes `.local` inside a
-/// closure on the generic's formals, which calls it with the arguments both share. `None` leaves
-/// the R code to warn about a renamed argument, expand the signature for an omitted one, or
-/// signal its error.
+/// through `conformMethod()` and `rematchDefinition()`: a method that only leaves out arguments
+/// but keeps `...` takes the generic's formals, and any other becomes `.local` inside a closure on
+/// the generic's formals, which calls it with the arguments both share. `None` leaves the R code
+/// to warn about the renamed argument of a one-argument generic, expand the signature for an
+/// omitted argument the signature names, or signal its error.
 unsafe fn conform_definition(definition: Sexp, generic: Sexp, signature: Sexp) -> R<Option<Sexp>> {
     let method_formals = definition.car();
     let generic_formals = generic.car();
@@ -2113,15 +2133,28 @@ unsafe fn conform_definition(definition: Sexp, generic: Sexp, signature: Sexp) -
             .position(|method_name| method_name == name)
     };
 
-    // `conformMethod()`: an omitted argument changes the signature, and an order the generic
-    // does not share is an error.
+    // `conformMethod()`: an omitted argument the signature names changes the signature or is an
+    // error, and an order the generic does not share is an error.
+    let signature_arguments = slot(generic, symbols().signature)?;
+    if signature_arguments.kind() != SexpType::String
+        || length(signature_arguments) < length(signature)
+    {
+        return Ok(None);
+    }
+    let in_signature = |name: Sexp| {
+        (0..length(signature))
+            .any(|index| signature_arguments.element(index).bytes() == name.car().bytes())
+    };
     let mut last = None;
     for name in &generic_names {
         if *name == dots && !keeps_dots {
             continue;
         }
         let Some(position) = position_in_method(name) else {
-            return Ok(None);
+            if in_signature(*name) {
+                return Ok(None);
+            }
+            continue;
         };
         if last.is_some_and(|last| position < last) {
             return Ok(None);
@@ -2133,14 +2166,26 @@ unsafe fn conform_definition(definition: Sexp, generic: Sexp, signature: Sexp) -
     let added = method_names
         .iter()
         .any(|name| !generic_names.contains(name));
-    if !added {
-        // The method keeps the generic's arguments in order and adds none, but drops some (such as
-        // `...`), which `rematchDefinition()` handles with a `.local` the fast path does not build.
+    if !added && keeps_dots {
+        // `formals(definition) <- formals(generic)`, which makes a plain closure.
+        let mut formals = Vec::with_capacity(generic_names.len());
+        let mut cell = generic_formals;
+        while cell.kind() == SexpType::Pairlist {
+            formals.push((cell.tag(), cell.car()));
+            cell = cell.cdr();
+        }
+        return values::triple(
+            SexpType::Closure,
+            tagged_pairlist(&formals)?,
+            definition.cdr(),
+            definition.tag(),
+        )
+        .map(Some);
+    }
+    let dots_position = generic_names.iter().position(|name| *name == dots);
+    if added && dots_position.is_none() {
         return Ok(None);
     }
-    let Some(dots_position) = generic_names.iter().position(|name| *name == dots) else {
-        return Ok(None);
-    };
     let used: Vec<bool> = generic_names
         .iter()
         .map(|name| method_names.contains(name))
@@ -2152,9 +2197,12 @@ unsafe fn conform_definition(definition: Sexp, generic: Sexp, signature: Sexp) -
         .map(|(&name, _)| name)
         .collect();
     let mut call_names: Option<Vec<Sexp>> = None;
-    let trailing = generic_names.len() - dots_position - 1;
+    let trailing = match dots_position {
+        Some(position) if keeps_dots || added => generic_names.len() - position - 1,
+        _ => 0,
+    };
     if trailing > 0 {
-        let generic_tail = &generic_names[dots_position + 1..];
+        let generic_tail = &generic_names[generic_names.len() - trailing..];
         if method_names.len() < trailing
             || method_names[method_names.len() - trailing..] != *generic_tail
         {
@@ -2171,7 +2219,9 @@ unsafe fn conform_definition(definition: Sexp, generic: Sexp, signature: Sexp) -
         (0..length(signature)).find(|&index| signature.element(index).bytes() == b"missing");
     if let Some(missing) = missing {
         let by_name: Vec<Sexp> = (0..generic_names.len())
-            .filter(|&index| used[index] && missing <= index && index < dots_position)
+            .filter(|&index| {
+                used[index] && missing <= index && index < dots_position.unwrap_or(generic_names.len())
+            })
             .map(|index| generic_names[index])
             .collect();
         if !by_name.is_empty() {
@@ -2731,10 +2781,11 @@ unsafe fn set_class(call: &Call<'_>) -> R<Sexp> {
         if element(slot(known.definition, symbols().subclasses)?, name.bytes()).is_some() {
             bail!(skip, "a superclass already lists this class as a subclass");
         }
-        // Recording a subclass in a union makes `setIs()` recache the union's other members,
-        // which re-sorts their extensions, drops `conflicts` and rebuilds replace methods.
-        if is_class_union(known.definition)? == Some(true) {
-            bail!(skip, "the class extends a class union");
+        if is_class_union(known.definition)? == Some(true) && !recachable(known.definition)? {
+            bail!(
+                skip,
+                "a member of a class union the class extends is not defined yet, or is at a distance that is not a number"
+            );
         }
     }
 
@@ -2986,24 +3037,38 @@ unsafe fn set_class(call: &Call<'_>) -> R<Sexp> {
         };
         rebuilt.push(subclasses);
     }
-    for (known, subclasses) in supers.iter().zip(&rebuilt) {
-        record_subclasses(known, subclasses, place, class_table)?;
-    }
+    // `setClass()` calls `setIs()` for each direct superclass in turn. For the first, its
+    // `completeSubclasses()` first calls `setIs()` for each ancestor, and only then assigns the
+    // definition of the first superclass it read before them. Assigning a class union's definition
+    // makes `.recacheSubclasses()` give each of the union's subclasses the union's extension for
+    // it, in the class cache only, so the order decides which of those changes last.
     for (known, &extension) in ancestors.iter().zip(&through_subclasses) {
         // `completeSubclasses()` adds the class to an ancestor only when `possibleExtends()`
         // finds no relation yet, and for a class union that is any of the class and its direct
         // superclasses among the union's subclasses.
         let existing = slot(known.definition, symbols().subclasses)?;
-        if is_class_union(known.definition)? == Some(true)
-            && std::iter::once(name)
+        if is_class_union(known.definition)? == Some(true) {
+            if std::iter::once(name)
                 .chain(super_names.iter().copied())
                 .any(|class| element(existing, class.bytes()).is_some())
-        {
-            continue;
+            {
+                continue;
+            }
+            let mut subclasses = list_entries(existing);
+            subclasses.push((name, extension));
+            record_subclasses(known, &subclasses, true, place, class_table)?;
+            recache_subclasses(known.name, &subclasses, name, class_table)?;
+        } else {
+            let mut subclasses = list_entries(existing);
+            subclasses.push((name, extension));
+            record_subclasses(known, &subclasses, true, place, class_table)?;
         }
-        let mut subclasses = list_entries(existing);
-        subclasses.push((name, extension));
-        record_subclasses(known, &subclasses, place, class_table)?;
+    }
+    for (index, (known, subclasses)) in supers.iter().zip(&rebuilt).enumerate() {
+        record_subclasses(known, subclasses, index > 0, place, class_table)?;
+        if is_class_union(known.definition)? == Some(true) {
+            recache_subclasses(known.name, subclasses, name, class_table)?;
+        }
     }
     eval::define(meta, definition, place)?;
     eval::define(install_text(name)?, definition, class_table)?;
@@ -4016,8 +4081,14 @@ unsafe fn recached(definition: Sexp, superclass: Sexp, extension: Sexp) -> R<Rec
         }
         distances.push(distance);
     }
+    // Subsetting to sort keeps only the names, so a `conflicts` attribute goes too.
+    let only_names = {
+        let attributes = slot(definition, symbols().contains)?.attrib();
+        attributes == nil()
+            || (attributes.tag() == symbols().names && attributes.cdr() == nil())
+    };
     if distances.is_sorted() {
-        if unchanged {
+        if unchanged && only_names {
             return Ok(Recache::Unchanged);
         }
     } else {
@@ -4831,15 +4902,81 @@ unsafe fn combine_extensions(
 unsafe fn record_subclasses(
     known: &Super,
     subclasses: &[(Sexp, Sexp)],
+    fresh: bool,
     place: Sexp,
     class_table: Sexp,
 ) -> R<()> {
-    let definition = values::shallow_duplicate(known.definition)?;
+    // A `fresh` step reads the definition again, which a class union's recache may have
+    // replaced since `known` was read; the first superclass's step keeps the one it read first.
+    let current = if fresh {
+        cached_class(values::scalar_string_charsxp(known.name)?)?
+    } else {
+        None
+    };
+    let definition = values::shallow_duplicate(current.unwrap_or(known.definition))?;
     crate::heap().root(definition);
     crate::subset::assign_slot(definition, symbols().subclasses, named_list(subclasses)?)?;
     eval::define(class_meta_symbol(known.name.bytes())?, definition, place)?;
     eval::define(install_text(known.name)?, definition, class_table)?;
     cache_extends(known.name, slot(definition, symbols().contains)?)
+}
+
+/// Whether `.recacheSubclasses()` for the class union `definition` takes only shapes
+/// [`recache_subclasses`] builds: every subclass is in the class cache, and every distance it
+/// sorts by is a number.
+unsafe fn recachable(definition: Sexp) -> R<bool> {
+    let numeric = |extension: Sexp| -> R<bool> {
+        Ok(!values::as_real_scalar(slot(extension, symbols().distance)?).is_nan())
+    };
+    for (member, extension) in list_entries(slot(definition, symbols().subclasses)?) {
+        let Some(member_definition) = cached_class(values::scalar_string_charsxp(member)?)? else {
+            return Ok(false);
+        };
+        if !numeric(extension)? {
+            return Ok(false);
+        }
+        for (_, member_extension) in list_entries(slot(member_definition, symbols().contains)?) {
+            if !numeric(member_extension)? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// `.recacheSubclasses(union)` once `setIs()` has recorded the class `name` among the union's
+/// `subclasses`: every other subclass's cached definition gets the union's extension for it,
+/// re-sorted by distance. [`recachable`] has checked the shapes.
+unsafe fn recache_subclasses(
+    union: Sexp,
+    subclasses: &[(Sexp, Sexp)],
+    name: Sexp,
+    class_table: Sexp,
+) -> R<()> {
+    for &(member, extension) in subclasses {
+        if member.bytes() == name.bytes() {
+            continue;
+        }
+        let Some(definition) = cached_class(values::scalar_string_charsxp(member)?)? else {
+            return Err(crate::unwind::error(format!(
+                "the cached definition of class \"{}\" disappeared while recaching a class union",
+                String::from_utf8_lossy(member.bytes())
+            )));
+        };
+        match recached(definition, union, extension)? {
+            Recache::Unchanged => {}
+            Recache::Changed(updated) => {
+                eval::define(install_text(member)?, updated, class_table)?;
+                cache_extends(member, slot(updated, symbols().contains)?)?;
+            }
+            Recache::Unsupported => {
+                return Err(crate::unwind::error(
+                    "a distance became a non-number while recaching a class union".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `.cache_class(name, extends(definition))`: the class and the names of what it extends.

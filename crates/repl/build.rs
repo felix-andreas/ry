@@ -2,8 +2,10 @@
 //! with the `libr` build script, which stamps the library itself.
 //!
 //! With `RY_EMBED_RUNTIME` naming a built runtime (`libR.so`, `libR.dylib` or `R.dll`), it also
-//! embeds that library, compressed, and on Windows the import library `libR.dll.a` beside it, so
-//! the `ry` that links this crate runs without any file beside it (`repl::ry_runtime_library`).
+//! embeds that library, compressed, with the files beside it that belong to it: on Windows the
+//! import library `libR.dll.a`, and on Linux GNU R's reference `libRblas.so` and `libRlapack.so`.
+//! The `ry` that links this crate then runs without any file beside it
+//! (`repl::ry_runtime_library`).
 //!
 //! With `RY_EMBED_BASE` naming ry's built base R tree (`rcmd::base`), it embeds that tree as one
 //! zstd-compressed archive, which `repl::bundled_base` extracts on first use.
@@ -149,9 +151,13 @@ fn embed_runtime(out_dir: &Path) {
                 1
             };
             let mut files = vec![library.clone()];
-            let import_library = library.with_file_name("libR.dll.a");
-            if import_library.is_file() {
-                files.push(import_library);
+            // GNU R's reference BLAS and LAPACK (`tools/base-r/lapack.sh`), which ry's R home
+            // offers when the system has none, travel with the runtime they link against.
+            for name in ["libR.dll.a", "libRblas.so", "libRlapack.so"] {
+                let beside = library.with_file_name(name);
+                if beside.is_file() {
+                    files.push(beside);
+                }
             }
             let mut key: u64 = 0xcbf2_9ce4_8422_2325;
             let mut entries = String::new();

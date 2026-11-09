@@ -185,10 +185,30 @@ like `R --no-echo`, except that it keeps going after an error.
 ### Profile summary
 
 `ry run --profile-summary FILE script.R` runs the script and, when it ends, writes a Markdown
-summary of where the time went to FILE. Setting `RY_PROFILE_SUMMARY=FILE` does the same for any
-session of ry's runtime. Only the process that reads the variable is profiled: time spent in child
-processes (`callr`, `parallel`'s workers) does not count. The summary is meant to be shared from a private code
-base: it holds no source code, no names from your code and no data. It lists:
+summary of where the time went to FILE. `ry load --profile-summary FILE -e CODE` profiles a package
+load and the code after it, and `ry test --profile-summary FILE` a test run, the same way. Setting
+`RY_PROFILE_SUMMARY=FILE` does the same for any session of ry's runtime. Only the process that
+reads that variable is profiled: time spent in child processes (`callr`, `parallel`'s workers)
+does not count.
+
+To profile child processes too, set `RY_PROFILE_SUMMARY_DIR=DIR`. Every session of ry's runtime
+that starts with the variable set writes its own summary to `DIR/ry-profile-<start>-<pid>.md` when
+it ends, and child processes inherit the variable, so a CI job that runs several test processes,
+each with its own workers, leaves one summary per process:
+
+```sh
+RY_PROFILE_SUMMARY_DIR=profiles ry load -e 'testthat::test_dir("tests/testthat")'
+```
+
+A process forked from a session (`parallel::mclapply`) writes no summary. The directory is created
+if it does not exist, and a relative path is taken from the directory the session started in. When
+both variables are set, the process that reads `RY_PROFILE_SUMMARY` writes to that file, and its
+child processes write to the directory.
+
+Only ry's runtime profiles: under `--runtime gnu-r` the flag and both variables have no effect.
+
+The summary is meant to be shared from a private code base: it holds no source code, no names from
+your code and no data. It lists:
 
 - the time split after start-up: tier-0 bytecode, the AST evaluator, closure call setup, variable
   lookups past the inline caches, builtins, S3 and S4 method lookup, native code, condition
@@ -382,7 +402,7 @@ a `2`.
 `ry check`, `ry fmt` and `ry server` run no R. The other commands except `ry R` run on ry's runtime,
 which needs base R (the R code of the base and default packages):
 
-- **Built in.** The 0.4.2-beta Linux release and a build from source carry base R 4.6.2 inside `ry` and extracts it into
+- **Built in.** The 0.4.3-beta Linux release and a build from source carry base R 4.6.2 inside `ry` and extracts it into
   `~/.cache/ry/base/` on first use, once per release. `R.version`, `getRversion()` and `R.home()`
   then describe that copy. The 0.4.1-beta release does not have it and needs `R_HOME` or a GNU R on
   `PATH`.
@@ -405,8 +425,10 @@ on Windows it must be R 4.2 or newer.
 
 Linear algebra (`solve`, `qr`, `chol`, `svd` and the rest) loads the system's BLAS and LAPACK on
 first use: `libblas.so.3` and `liblapack.so.3` on Linux, Accelerate on macOS. With `R_HOME` set, ry
-also looks in the directories GNU R's `etc/Makeconf` records (which is how it finds them on NixOS),
-then for GNU R's own `lib/libRblas.so` and `lib/libRlapack.so`. If none loads, the error lists every
+also looks in the directories GNU R's `etc/Makeconf` records (which is how it finds GNU R's on
+NixOS). Last, it loads `lib/libRblas.so` and `lib/libRlapack.so` from the R home: GNU R's own, or on
+Linux the reference BLAS and LAPACK that ry carries beside its runtime, built from GNU R's sources,
+so linear algebra works on a system that has neither library. If none loads, the error lists every
 place it searched. On Windows, linear algebra needs `R_HOME`, for GNU R's `Rblas.dll` and
 `Rlapack.dll`. Compiled package code links the same libraries: on Linux, where the toolchain would link
 `-lblas -llapack`, ry's `Makeconf` names the versioned files instead (`-l:libblas.so.3` and

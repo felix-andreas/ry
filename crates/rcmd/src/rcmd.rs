@@ -376,6 +376,19 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
     if fs::hard_link(sources.libr, &libr).is_err() {
         fs::copy(sources.libr, &libr).map_err(io_error(&libr))?;
     }
+    // GNU R's reference BLAS and LAPACK, built beside the runtime (`tools/base-r/lapack.sh`), are
+    // where linear algebra falls back to when the system has neither, as in GNU R's own home.
+    for name in ["libRblas.so", "libRlapack.so"] {
+        let built = sources.libr.with_file_name(name);
+        if cfg!(windows) || !built.is_file() {
+            continue;
+        }
+        let installed = root.join("lib").join(name);
+        remove_file_if_present(&installed)?;
+        if fs::hard_link(&built, &installed).is_err() {
+            fs::copy(&built, &installed).map_err(io_error(&installed))?;
+        }
+    }
     // A Windows linker resolves `-lR` through the import library the build wrote next to R.dll.
     let import_library = sources.libr.with_file_name("libR.dll.a");
     if cfg!(windows) && import_library.exists() {
