@@ -40,7 +40,7 @@ use {
     ssa::{
         AbiParam, Block as Label, Builder, CallConv, FloatCC, Ieee64, IntCC, MemFlagsData, SigRef,
         Signature, StackSlot, StackSlotData, StackSlotKind, Type, Value, Variable,
-        types::{F64, I8, I16, I32, I64},
+        types::{F64, I8, I32, I64},
     },
     std::sync::atomic::AtomicBool,
 };
@@ -2727,6 +2727,9 @@ impl<'p> Translator<'p> {
         let merged_value = self.builder.append_block_param(merged, I64);
         let merged_status = self.builder.append_block_param(merged, I32);
         let inst = &self.plan.insts[position];
+        // Only this activation's own `GetVar` may probe: the probe reads the activation's
+        // environment and lookup hints, which belong to the outer body, and an inlined callee's
+        // loads reach here as other ops.
         let probed = inst.op == Op::GetVar;
         if probed {
             let symbol = runtime_constant(self.code, inst.operand(1));
@@ -2858,7 +2861,7 @@ impl<'p> Translator<'p> {
         let bits = self
             .builder
             .ins()
-            .uload16(I16, flags(), enclosure, header_layout::GP as i32);
+            .uload16(I32, flags(), enclosure, header_layout::GP as i32);
         let bits = self.builder.ins().uextend(I64, bits);
         let function_frame = self
             .builder
@@ -2881,7 +2884,7 @@ impl<'p> Translator<'p> {
         let bits = self
             .builder
             .ins()
-            .uload16(I16, flags(), cell, header_layout::GP as i32);
+            .uload16(I32, flags(), cell, header_layout::GP as i32);
         let bits = self.builder.ins().uextend(I64, bits);
         let active = self
             .builder
@@ -2908,7 +2911,7 @@ impl<'p> Translator<'p> {
         let kind = self
             .builder
             .ins()
-            .uload8(I8, flags(), value, header_layout::KIND as i32);
+            .uload8(I32, flags(), value, header_layout::KIND as i32);
         let kind = self.builder.ins().uextend(I64, kind);
         let promise = self
             .builder

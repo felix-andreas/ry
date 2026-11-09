@@ -346,6 +346,9 @@ unsafe fn compiled_for<'a>(
                     counters[profile::TIER_STATE] = state | runtime::LOOPS_ONLY;
                     counters[profile::ENTRIES] = runtime::NEVER_HOT;
                     counters[profile::RECORDING] = 0;
+                    // The loop restarts recording when its counter reaches half the threshold
+                    // again, which a counter already past that point would never do.
+                    counters[profile::BACK_EDGES] = 0;
                 } else if reason == analysis::COLD {
                     // The next attempt waits for as many entries or backward jumps as this one did,
                     // so the body runs long enough to record the types it is missing.

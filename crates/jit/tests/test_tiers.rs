@@ -970,7 +970,14 @@ fn inline_variable_loads_agree_with_tier_zero() {
             jit::install_mode(mode);
             run("make <- function(k) function(x) { s <- 0; for (i in 1:3) s <- s + x * k; s }");
             run("g <- make(2L)");
-            outcomes.push(calls.iter().map(|call| run(call)).collect::<Vec<_>>());
+            let mut results = vec![run("g(1L)")];
+            // A body the code generator rejects would run in tier 0 and agree trivially.
+            assert!(
+                mode == Mode::Off || has_compiled_code("g"),
+                "g did not compile, so nothing probed"
+            );
+            results.extend(calls.iter().map(|call| run(call)));
+            outcomes.push(results);
         }
         jit::install_mode(Mode::Off);
     });
