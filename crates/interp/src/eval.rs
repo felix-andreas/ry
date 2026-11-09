@@ -1297,11 +1297,11 @@ unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallF
     let constants = body.cdr();
     let table = constants.element(bytecode::SLOTS);
     let state = interp();
-    // Machine code reads variables through the frame's environment, so a body that has some
+    // Tier-1 code reads variables through the frame's environment, so a body that has some
     // would give a slot frame its environment on entry: it gets one from the start instead.
+    // Baseline code reads the slots.
     if table == nil()
         || constants.element(bytecode::TIER1) != nil()
-        || constants.element(bytecode::BASELINE) != nil()
         || state.debugger.is_some()
         || moves::tracking()
         || function == state.namespace_loader
@@ -1449,7 +1449,6 @@ pub unsafe fn call_direct(
     let constants = function.cdr().cdr();
     let state = interp();
     if constants.element(bytecode::TIER1) != nil()
-        || constants.element(bytecode::BASELINE) != nil()
         || state.debugger.is_some()
         || moves::tracking()
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
