@@ -3230,23 +3230,178 @@ unsafe fn argument_value(value: Sexp) -> Option<Sexp> {
         return Some(symbol);
     }
     // A checked promise runs its annotation check when forced, which only tier 0 does.
-    if symbol.kind() != SexpType::Symbol
-        || value.tag() == values::nil()
-        || value.has_gp(heap::object::gp::CHECKED_PROMISE)
-    {
+    if value.tag() == values::nil() || value.has_gp(heap::object::gp::CHECKED_PROMISE) {
         return None;
     }
-    let cell = interp::eval::find_cell(symbol, value.tag())?;
-    if cell.has_gp(heap::object::gp::ACTIVE_BINDING) {
+    pure_value(symbol, value.tag(), 0)
+}
+
+/// How deeply [`pure_value`] reads into an argument expression.
+const MAX_PURE_DEPTH: usize = 8;
+
+/// The value `expression` has in `env` when evaluating it can run no R code, signal no
+/// condition and change nothing: a constant, a variable bound to a value or a forced promise,
+/// and `(`, unary and binary `+`, `-`, `*`, `/` of numbers without attributes, and `c()` of
+/// such numbers, each named by its base function. Evaluating such an argument before the call
+/// gives the value forcing its promise would give, since the native code it is passed to runs
+/// no R code in between. Integer arithmetic that overflows is left to tier 0, which warns.
+unsafe fn pure_value(expression: Sexp, env: Sexp, depth: usize) -> Option<Sexp> {
+    match expression.kind() {
+        SexpType::Integer | SexpType::Real | SexpType::Logical => {
+            return (expression.attrib() == values::nil()).then_some(expression);
+        }
+        SexpType::Symbol => {
+            let cell = interp::eval::find_cell(expression, env)?;
+            if cell.has_gp(heap::object::gp::ACTIVE_BINDING) {
+                return None;
+            }
+            let bound = cell.cdr();
+            return match bound.kind() {
+                SexpType::Promise if bound.car() != values::unbound() => Some(bound.car()),
+                SexpType::Promise => None,
+                _ if bound == values::missing_arg() || bound == values::unbound() => None,
+                _ => Some(bound),
+            };
+        }
+        SexpType::Language if depth < MAX_PURE_DEPTH => {}
+        _ => return None,
+    }
+    let head = expression.car();
+    if head.kind() != SexpType::Symbol {
         return None;
     }
-    let bound = cell.cdr();
-    match bound.kind() {
-        SexpType::Promise if bound.car() != values::unbound() => Some(bound.car()),
-        SexpType::Promise => None,
-        _ if bound == values::missing_arg() || bound == values::unbound() => None,
-        _ => Some(bound),
+    let items = values::pairlist_items(expression.cdr());
+    if items.iter().any(|&(tag, value)| {
+        tag != values::nil() || value == values::missing_arg() || value == values::symbols().dots
+    }) {
+        return None;
     }
+    let function = resolve_function(head, env)?.function;
+    let name = base_builtin(function, head)?;
+    let mut operands: SmallVec<[Sexp; 4]> = SmallVec::new();
+    for &(_, item) in &items {
+        let operand = pure_value(item, env, depth + 1)?;
+        if !matches!(
+            operand.kind(),
+            SexpType::Integer | SexpType::Real | SexpType::Logical
+        ) || operand.attrib() != values::nil()
+        {
+            return None;
+        }
+        operands.push(operand);
+    }
+    let value = match (name, operands.as_slice()) {
+        ("(", &[inner]) => return Some(inner),
+        ("c", [_, ..]) => combine(&operands).ok()?,
+        ("+" | "-", &[operand]) if operand.length() == 1 => {
+            let number = number_of(operand);
+            match (name, number) {
+                ("+", Number::Double(_)) | ("+", Number::Integer(_))
+                    if operand.kind() != SexpType::Logical =>
+                {
+                    return Some(operand);
+                }
+                (_, Number::Double(x)) => values::scalar_real(if name == "-" { -x } else { x }),
+                (_, Number::Integer(x)) => values::scalar_integer(match x {
+                    NA_INTEGER => NA_INTEGER,
+                    x if name == "-" => -x,
+                    x => x,
+                }),
+            }
+            .ok()?
+        }
+        ("+" | "-" | "*" | "/", &[left, right]) if left.length() == 1 && right.length() == 1 => {
+            match (number_of(left), number_of(right)) {
+                (Number::Integer(x), Number::Integer(y)) if name != "/" => {
+                    let result = if x == NA_INTEGER || y == NA_INTEGER {
+                        NA_INTEGER
+                    } else {
+                        let result = match name {
+                            "+" => x.checked_add(y),
+                            "-" => x.checked_sub(y),
+                            _ => x.checked_mul(y),
+                        };
+                        // R warns when integer arithmetic overflows, and NA_integer_ is
+                        // i32::MIN, which no exact result may be either.
+                        result.filter(|&result| result != NA_INTEGER)?
+                    };
+                    values::scalar_integer(result).ok()?
+                }
+                (x, y) => {
+                    let (x, y) = (x.double(), y.double());
+                    values::scalar_real(match name {
+                        "+" => x + y,
+                        "-" => x - y,
+                        "*" => x * y,
+                        _ => x / y,
+                    })
+                    .ok()?
+                }
+            }
+        }
+        _ => return None,
+    };
+    // The value is new: rooted for the call, until the caller's handle scope ends.
+    interp::heap().root(value);
+    Some(value)
+}
+
+/// A number's value as R's arithmetic reads it: a logical counts as an integer.
+#[derive(Clone, Copy)]
+enum Number {
+    Integer(i32),
+    Double(f64),
+}
+
+impl Number {
+    fn double(self) -> f64 {
+        match self {
+            Number::Integer(NA_INTEGER) => f64::from_bits(NA_REAL_BITS),
+            Number::Integer(x) => f64::from(x),
+            Number::Double(x) => x,
+        }
+    }
+}
+
+unsafe fn number_of(value: Sexp) -> Number {
+    match value.kind() {
+        SexpType::Real => Number::Double(value.slice::<f64>()[0]),
+        _ => Number::Integer(value.slice::<i32>()[0]),
+    }
+}
+
+/// `c()` of numbers without attributes, in the widest type among them.
+unsafe fn combine(operands: &[Sexp]) -> R<Sexp> {
+    let kind = operands
+        .iter()
+        .map(|operand| operand.kind())
+        .max_by_key(|kind| match kind {
+            SexpType::Logical => 0,
+            SexpType::Integer => 1,
+            _ => 2,
+        })
+        .unwrap_or(SexpType::Logical);
+    let length: usize = operands.iter().map(|operand| operand.length() as usize).sum();
+    let result = values::alloc(kind, length)?;
+    let mut at = 0;
+    for &operand in operands {
+        let count = operand.length() as usize;
+        match kind {
+            SexpType::Real => {
+                let target = &mut result.slice_mut::<f64>()[at..at + count];
+                if operand.kind() == SexpType::Real {
+                    target.copy_from_slice(operand.slice::<f64>());
+                } else {
+                    for (slot, &x) in target.iter_mut().zip(operand.slice::<i32>()) {
+                        *slot = Number::Integer(x).double();
+                    }
+                }
+            }
+            _ => result.slice_mut::<i32>()[at..at + count].copy_from_slice(operand.slice::<i32>()),
+        }
+        at += count;
+    }
+    Ok(result)
 }
 
 /// The native type of an argument's value and the 64 bits a native function takes it as.
