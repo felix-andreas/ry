@@ -384,13 +384,16 @@ replaced function is always the one that runs. Machine code is written for x86-6
 other systems ignore it.
 
 `--explain` (`R CMD INSTALL --ry-explain`) prints what the install compiled. The functions left
-in the interpreter come first, largest first, each with what kept it there; then every native
-function with its argument types, which it tests when called, and the names it looks up once:
+in the interpreter come first, largest first, each with what kept it there; then every
+specialization of a native function with its argument types, which it tests when called, and the
+names it looks up once (excerpt):
 
 ```text
 machine code: 4 of 5 functions, by size (calls and operators in the body)
   interpreter     1  label: an expression that is not a scalar computation
   native          5  total(double[]) -> double: tests 1 argument on entry; looks up {, <-, for, + once
+  native          5  total(integer[]) -> double: tests 1 argument on entry; looks up {, <-, for, + once
+  ...
   native          4  hypot(double, double) -> double: tests 2 arguments on entry; looks up sqrt, +, square, * once
 ```
 
