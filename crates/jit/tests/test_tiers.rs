@@ -1240,7 +1240,9 @@ fn argument_expression(rng: &mut SplitMix64, depth: usize) -> String {
 fn break_and_next_route_through_nested_steps() {
     // A stepped instruction can run a closure that tier 1 also compiled, which steps instructions
     // of its own. A `break` or `next` forced inside the inner body must still resume the outer
-    // loop after the inner step returns, so each step has to restore its caller's marker.
+    // loop after the inner step returns, rather than the inner one or the step's caller. The
+    // `break` in `outer` also makes the optimizing tier hand back a resume at the loop's exit,
+    // the instruction right after the backward `Jump`, which baseline code must take as such.
     let definitions = [
         "inner <- function(n, v) { t <- 0; for (j in seq_len(n)) { if (j == 2) next; t <- t + j }; t + v }",
         "outer <- function(m) { s <- 0; for (i in 1:m) { s <- s + inner(i, if (i == 4) break else if (i == 2) next else i) }; s }",
@@ -1270,7 +1272,6 @@ fn break_and_next_route_through_nested_steps() {
     assert_eq!(outcomes[0], outcomes[1]);
 }
 
-            run("shadowed <- function(x: F64
 #[test]
 fn fuzz_typed_closures_agree_with_tier_zero() {
     with_interpreter(|| {
