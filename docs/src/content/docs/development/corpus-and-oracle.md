@@ -188,6 +188,10 @@ compared with. That makes `compare` the check for a new R release:
 ORACLE_R=/opt/R/4.6.1/bin/R just oracle compare --engine ry
 ```
 
+Without `ORACLE_R`, the `ry` engine runs on its default base R, unless the GNU R on `PATH` is a
+different release: then it takes that R's home too, so a version-gated behavior never shows up as
+a difference.
+
 ry follows the version of the base R it loads. Each behavior GNU R changed between 4.3 and 4.6 is
 gated on that version in `crates/interp` (`system::r_at_least`), so ry with `R_HOME` set to GNU R
 4.3.3 behaves as 4.3.3 does, and ry on its bundled base behaves as 4.6.2 does.

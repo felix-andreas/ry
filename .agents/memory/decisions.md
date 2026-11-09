@@ -7592,6 +7592,17 @@ Each one trades a narrow class of missed errors for a class of false reports see
   `completeExtends` resolves a class reached twice with `.resolveSuperclasses`' first consistent
   candidate (`resolved_superclasses` in `crates/interp/src/methods_core.rs`). `.S3Extends` is not
   ported, so a union member whose indirect extensions it would rewrite bails.
+- **The first union of a session fills `initialize`'s dispatch cache itself.** The R code's
+  `new("ClassUnionRepresentation", ...)` dispatches `initialize` and caches the inherited default
+  method (target `ClassUnionRepresentation`, defined `ANY`) in the generic's all-methods table, so
+  a native union must leave that entry too. Before the first union no entry exists, so the native
+  path caches the inherited method the way dispatch would (`union_initialize` in
+  `crates/interp/src/methods_core.rs`), unless first-unit definitions are still pending: those may
+  add an `initialize` method that dispatch would prefer, and that case still runs the R code. The
+  native path accepts only the default `initialize` (`is_default_initialize`), for the union and
+  for `classRepresentation`, `SClassExtension` and `classPrototypeDef` (`definition_caches`): a
+  package may define `initialize` for any of them, and GNU R's `new()` of the definition calls it,
+  so a cached package method sends `setClass` and `setClassUnion` to the R code.
 - **`setClass` does `setIs`'s subclass bookkeeping natively, by GNU R's quirks.** Only the
   direct superclasses go through `setIs`; `completeSubclasses` then records the new class in each
   ancestor only when `possibleExtends(new, ancestor)` is false, so a union that already lists the
@@ -7827,10 +7838,75 @@ Each one trades a narrow class of missed errors for a class of false reports see
   stamped with the ry build; a different build ignores the stamp and compiles at first call. Base R
   is compiled into a section of the base image keyed by the runtime hash (`base-image.md`). `ry
   load` and scripts compile at first call, so that tier must be cheap. `r-runtime.md`, "Where
-  bytecode comes from", is the spec. Not implemented yet: the bytecode format changes with the
-  call-path redesign (`development/design/call-path.md`), so its on-disk form waits for that.
+  bytecode comes from", is the spec. Installed packages are implemented as code images
+  (below); the base image's code section is not.
 - **Impact.** One source of truth (the package's R code plus the install output derived from it),
-  no invalidation logic, and no hashing at load.
+  and no invalidation logic.
+
+## Code images: compiled code beside the lazy-load database
+
+- **Shape.** `R CMD INSTALL` writes `R/<pkg>.ryc` beside `R/<pkg>.rdb` (`crates/interp/src/code_image.rs`,
+  driver `crates/rcmd/src/code-image.R`). A fresh session records every fetch from the package's
+  databases (`ryCodeImageRecord`), loads the namespace, forces every binding, optionally trains
+  (`--ry-train=tests|examples|<script>`, `ry install --train`), and compiles and writes each recorded
+  closure (`ryCodeImageWrite`). A failure warns and leaves the package without an image.
+- **Identity without a second key.** A closure is named by its record's database offset plus the
+  order the stream reader creates closures (`serialize::unserialize_with_closures`), which depends
+  on the record bytes alone. The image stores each record's length and FNV-1a hash and the database
+  length, so a database rewritten by another install (GNU R's, or a different version) is ignored
+  record by record; the hash is computed only for databases that have an image.
+- **No second copy of the source.** A code object is encoded against its closure's body: every
+  language object the code points at is written as its preorder number in the body
+  (`serialize::walk_source`). Nested function bodies are compiled eagerly at install
+  (`bytecode::compile_nested_functions`) so their code is in the image too.
+- **Decoded where compiling would happen, not at the fetch.** A fetch notes where each closure's
+  code lies (`code_image::State::pending`, keyed by body, the body preserved so its address cannot
+  be reused) and `bytecode::run_body` decodes it at the call that would compile the body. Decoding
+  every fetched closure cost 2% more instructions on `library()` of twelve CRAN packages, because
+  a namespace fetches many closures it never calls (every registered S3 method); decoding at the
+  first call still cost more than it saved, because decoding costs about what compiling does
+  (about 65k instructions per closure) and many closures run once. Untrained tier-0 code is
+  therefore not a speedup; the image's value is the trained profile and the reserved native
+  section.
+- **Stamp.** The runtime identity (`RY_RUNTIME_ID`, passed in `StartOptions::build`) and a layout
+  magic; any other build reads the image as absent, quietly.
+- **Pending code is keyed by body and checked against formals.** The compiler's output depends on
+  formals (`local_symbols`, `effects::summarize`, `tail_updates`, the missing-subscript path), and
+  `formals<-`/`as.function` share the body, so each pending entry also preserves the fetched
+  closure's formals and `take_pending` hands code only to a closure with those formals. Keying by
+  closure would miss `environment<-` copies, which are safe to share.
+- **A damaged image only costs its speedup.** An unreadable or unparsable file, a payload hash
+  mismatch, a record whose closures do not match, or code the decoder rejects warns once
+  (`code_image::give_up`), marks the database as having no image, and drops its pending code, so
+  the package loads and compiles as it runs. An earlier shape raised an error that made the
+  package unloadable and was retried at every fetch.
+- **Decoded code is verified, not trusted.** Tier 0 indexes operands, registers, caches and jump
+  targets unchecked, and FNV-1a only detects accidents, so `bytecode::verify` checks every decoded
+  object linearly (opcodes, per-role operand bounds, instruction-start bitset for targets, no
+  fall-through at the end, side-table lengths, switch-table shape). Record ops carry process-local
+  layout ids and are refused by the encoder; Field/Item shape caches are written empty; constant
+  gp bits are masked to the S4 bit. `fuzz_code_image_load` runs mutated-but-rehashed payloads;
+  without the verifier it crashes within 20 seeds. Residual trust: register dataflow (guarded at
+  run time where cheap) and the JIT, which assumes compiler-shaped code.
+- **Lifetime and writing.** `lazyLoadDBflush` (called by `unloadNamespace`) drops the image and its
+  pending entries. Images are written to `.ryc.partial`, fsynced, renamed; never rewritten in place,
+  because a mapped file that shrinks raises SIGBUS in the process mapping it.
+- **Training.** A trained image keeps each code object's PROFILE counters, inline-cache hints and
+  FEEDBACK words; TIER1 decodes as nil. Persisted entry counts at or above the tier-up threshold make a hot body enter the
+  optimizing tier at the call that takes its code from the image (the first when the body has a
+  loop, otherwise the second). The tier state's counts of compilations and cold refusals belong
+  to the training process's optimized code, so they are written as 0; a final refusal (a
+  negative state) is kept. TIER1 code and inline caches are not saved:
+  the first is process-local machine code, the second holds heap pointers.
+- **Native code.** The image reserves an offset/length pair for install-time native code, written
+  as zeros. Filling it waits for the shared SSA IR of `crates/jit` and `crates/typed`
+  (`backlog.md`, "Install-time native code").
+- `RY_CODE_IMAGE=0` ignores images at load; `--ry-no-code-image` skips writing one.
+- **Measured** (callgrind, whole process): `library()` of R6, magrittr, glue, rlang, lifecycle,
+  cli, vctrs, purrr, assertthat, zoo, jsonlite and digest is 1,201.9M instructions with images
+  and 1,200.7M without; a first-result script over rlang, purrr, vctrs, glue and cli 1,323.8M
+  against 1,321.9M. A trained image of a loop-heavy function saves its warm-up (12M of the 76M a
+  200-call workload adds to an empty run), a constant that does not grow with the run.
 
 ## Vectors grow in place into spare capacity
 
@@ -7988,3 +8064,37 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Why a field and not new tier-0 ops.** The JIT matches exhaustively on tier-0 ops, so a new op would change `crates/jit`. A field on the builtin keeps the compiled code unchanged and gives the baseline tier one function to call.
 - **Impact.** Per call (JIT off, callgrind, GNU R 4.3.3 in parentheses): `!x` 944 to 563 (750), `is.na(x)` 1,128 to 641 (1,490), `identical` 8,545 to 1,818 (3,149), `isTRUE` 6,087 to 1,114 (5,594), `match` 6,869 to 1,905 (2,963), `%in%` 11,327 to 1,745 (8,226). `crates/oracle/cases/builtins__native_entries.R` pins the edges.
 - **Not yet done.** `missing` is a special and still costs about twice GNU R's instructions.
+
+## Cheap promises: measured, not redesigned; call setup and package loads trimmed instead
+
+- **Question.** Closure calls create about 1.2 promises each (testthat workload: 1.23M calls, 1.51M promises), and a user's profile put call setup at a quarter of the time. Three designs were weighed for cheaper promises: creating them lazily, holding them inline in the frame slot, or a per-call arena.
+- **Measured.** Callgrind on the testthat workload, minus the cost of loading it, gives about 8,100 instructions per closure call with a flat profile: `frame_environment` 325, `run_closure` itself 322, `bind_arguments` 276, defining formals 270, clearing and releasing the frame 250, `force_promise` 113, settling a promise 87. Allocating a promise is a bump allocation in the nursery, and promises are 1.4 of the 7.4 objects freed per call; binding cells (2.8) and environments (1.0) are more. None of the three designs removes more than the allocation itself (a few dozen instructions), while each changes what `PRCODE`, `PRENV`, `substitute`, `delayedAssign` identity and the C API see. So promises keep their shape.
+- **Built instead.**
+  - Formals are bound in one pass: all cells allocated, inserted with one filter and duplicate scan (`Frame::insert_formals`), and one write barrier (`Heap::define_formals_uncollected`).
+  - Settling a forced promise does its reference counting and write barrier once (`Heap::settle_promise`).
+  - The stack check keeps the floor of the current stack segment and a ceiling above every interpreter frame on it in the interpreter (`interp().stack_floor`, `stack_ceiling`) and compares the stack pointer against both, so a segment other code switched to (`libr`'s and `rdb`'s readers call R hooks on their own `stacker` segments) takes the slow path, so `stacker`'s thread-local lookup runs only near the floor (`on_large_stack` in `eval.rs`). A guard restores the caller's floor when an R error unwinds, because a stale floor from a freed segment would let the fast path skip the check.
+  - Together these measure small: 8,174 to 8,140 instructions per closure call on the testthat workload (callgrind, load subtracted), because the cost they remove was already spread thin.
+- **Namespace loads defer major collections.** `run_closure` recognises `loadNamespace` by identity (`Interp::namespace_loader`, preserved, recorded by `session::mark_namespace_loader` on every start, the image start included), not by a gp bit: closure gp bits are scarce, and one shared with `NATIVE_ENTRY` once made every declined native-entry call count as a load (`gp::CLOSURE_BITS` and `closure_gp_bits_do_not_overlap` in `crates/heap/tests/test_frames.rs` guard against a repeat). A drop guard ends the load on any exit. While any call of it runs, `escalate_if_full` doubles the small-object limit instead of escalating, because almost everything a load allocates survives it. When the outermost load returns, the limit is rebased on the old and young bytes kept, so the next ordinary collection does not immediately escalate. Load of testthat, xts, data.table and a 40,744-object package: 2 major collections to 0, GC from 15.7% to about 5% of the time. Pinned by `a_namespace_load_defers_major_collections_until_it_ends` in `crates/heap/tests/test_gc.rs`.
+- **Lazy-load records.** The record reader inlines its slice path for integers, reals and strings, borrows string bytes instead of copying them, and reads a pairlist's cells in a loop. `makeLazy` builds GNU R's promise (the key spliced into a copy of the expression, one shared evaluation environment) instead of a new environment per binding. `registerS3methods` asks whether each local generic is an S4 generic; a generic still in its database whose record header says a closure without a class or S4 bit is answered without fetching it (`serialize::lazy_record_header`, which inflates only the first 64 bytes), and each generic is answered once per call. `library()` of 11 packages: 914 records fetched to 651, 1,197.8M instructions to 1,133.0M.
+- **Left open.** Minor collections during a load cost about 24M instructions each, most of it re-marking the children of remembered old objects (namespace frames being filled); card marking would bound that. `unserializeFromConn` (`readRDS` of package metadata) reads the connection a few bytes at a time and costs 93M of the same load.
+
+## Install-time machine code from whole-program facts, beside the JIT
+
+- **Previous shape.** Install-time images (`code_image.rs`) carry tier-0 code and training-run profiles, and the plan was to write speculative machine code from those profiles into the reserved native section. Untrained images measured no speedup (decoding costs about what compiling does), and trained profiles did not help either, because loops tier up within their first call.
+- **Chosen shape.** A hybrid after Bun's `--aot` (`prior-art.md`, "Bun's compiler"). `ry install` compiles machine code from facts that need no run: the checker's types, the closed bindings of the locked namespace, and the effect-free fact per function. A value from outside the package is tested once where it enters, and a failed test runs that call in tier 0, so there is no deoptimization metadata for this code. Code goes through the one SSA IR (`crates/ssa`) and `cranelift-object` into the image's native section, mapped read-only and shared between processes. Tier 0 keeps `eval` and non-standard evaluation, and the run-time JIT keeps hot loops, where profiles beat whole-program facts: Bun's own measurements put ahead-of-time code 7% to 23% behind its JIT on warm servers and at a 1.44x median slowdown on untyped idioms in a large program. `ry check --explain` reports by-name lookups and unproven tests.
+- **Order.** It runs in parallel with making the baseline tier beat tier 0, because both share the IR. It is measured on the testthat workload and package load time.
+- **Impact.** Start-up and short runs (package CI, the testthat workload) get compiled code without a warm-up, and code pages are shared by the processes of one CI machine. Training profiles become optional input rather than the source of speculation.
+
+## Promises per call: native base closures take arguments by value; the rest of the promises are observable
+
+- **Question.** Cut promises and allocations per closure call on the testthat workload (`tools/bench/real/testthat.R`, three repeats): 1,575,315 promises in 1,251,213 framed calls (1.26), 9.50M objects freed.
+- **Where the promises come from** (an instrumented build, since removed): symbol arguments whose binding in the caller is a plain value 421k, a forced promise 267k, an unforced promise 423k (a formal passed on); language arguments 154k; compiled arguments 307k; non-literal defaults 171k. The receivers are mostly small base and rlang predicates (`match`, `typeof`, `identical`, `inherits`, `%in%`, `is_call`, `isNamespace`, `is.factor`, `is.vector`). The effect-free eager path (`effects.rs`, `eager_args_into`) applied to almost none of them: the callee is rarely provably effect-free, and testthat always has a calling handler established.
+- **Built.** A call of a closure registered in `base_fast_paths::NATIVE_ENTRIES` first tries `native_entry_by_value` on the unevaluated arguments (`op_call_generic` in `bytecode.rs`, the closure branch of `eval::apply_call`). It proceeds only when every argument is untagged and is a constant or a variable bound to a value or a forced promise (`effects::eager_argument`, no active binding). Reading those runs no R code, so it gives the value forcing would; when the native code declines, nothing has changed and the promises are built as before, so `substitute`, `missing`, `sys.call` and `match.call` see exactly what GNU R shows. New native entries: `typeof`, `inherits` (not S4, `what` a character vector), `is.factor`, `is.data.frame`, `is.vector` (one-string `mode`) and `isNamespace`, each pinned by hash.
+- **Counting.** Native-entry calls never build a frame and are counted apart (`Counter::NativeEntries`, "closure calls run natively, without a frame"), so promises per R-level call is promises over framed plus native calls.
+- **Measured** (same workload): promises 1,575,315 to 1,453,304; framed calls 1,251,213 to 1,182,756 plus 97,990 native (about 30k native before, since the R-level call count is fixed), so 1.23 to 1.13 promises per R-level call; objects freed 9.50M to 9.18M (7.42 to 7.17 per R-level call); callgrind 7.930G to 7.821G instructions.
+- **Rejected, because GNU R code can observe it.**
+  - Forcing an unforced caller promise before the call (strictness): an error or a handler inside the forced code would see `sys.calls()` without the callee's frame, and rlang traces record exactly that.
+  - Passing the caller's own promise for a formal passed on: `substitute` in the callee would show the caller's expression.
+  - Binding values in the frame of a closure that merely forwards its formals to a builtin: a calling handler for a warning that builtin raises can `substitute` the formal through `sys.frame()`.
+  - Pools for frames and argument lists: binding cells need stable addresses for compiled code's watches, and a dead frame can still be held by uncounted references (handles, the C protect stack), so reuse needs the collector's proof anyway (see "Cheap promises").
+- **Left.** The remaining per-call allocations are binding cells (2.7 per framed call), the promises above and environments; cutting cells needs frames whose slots compiled code can watch without a separate cell object.

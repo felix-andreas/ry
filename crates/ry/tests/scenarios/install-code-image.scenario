@@ -1,0 +1,156 @@
+# A user installs their package with a training run. The install writes the compiled code of
+# every closure beside the package's lazy-load database, so a new session takes each function's
+# code from the image instead of compiling it, and a function with a loop that ran hot in
+# training enters the optimizing tier at its first call. Without the image the same function first has to grow
+# hot again.
+
+requires ry-runtime
+
+file pkg/DESCRIPTION
+| Package: tally
+| Version: 1.0.0
+| Title: Sums numbers
+| Description: A small package to compile at install.
+| License: MIT
+file pkg/NAMESPACE
+| export(tally, twice, zero)
+file pkg/R/tally.R
+| tally <- function(values) {
+|     total <- 0
+|     for (value in values) total <- total + value
+|     total
+| }
+| twice <- function(x, label = "x") {
+|     helper <- function(y) y * 2
+|     paste(label, helper(x))
+| }
+| zero <- function(x) {
+|     x[i] <- 0
+|     x
+| }
+file train.R
+| for (i in 1:3000) tally(1:50)
+
+run ry install pkg -l library --train train.R
+expect exit 0
+expect stdout "code image: closures=3 written=3"
+
+file use.R
+| library(tally, lib.loc = "library")
+| print(twice(4))
+| print(twice(4))
+| print(tally(1:10))
+| i <- 2
+| print(zero(1:3))
+| print(zero(1:3))
+| print(twice)
+
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "<bytecode>"
+expect stdout "[1] \"x 8\""
+expect stdout "[1] 55"
+
+env RY_JIT_LOG 1
+run ry run --runtime ry use.R
+expect exit 0
+expect stderr "jit: compiled { total <- 0"
+
+env RY_CODE_IMAGE 0
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 55"
+expect stderr lacks "jit: compiled { total <- 0"
+
+# A closure that shares a fetched body under other formals compiles for its own formals rather
+# than taking the code compiled for the fetched closure: here a parameter named `[<-` replaces the
+# base function in `x[i] <- 0`, which the fetched closure's code assumes no frame of it binds.
+env RY_CODE_IMAGE 1
+file formals.R
+| library(tally, lib.loc = "library")
+| i <- 2
+| g <- zero
+| formals(g) <- alist(x = , `[<-` = function(x, i, value) "replaced")
+| print(g(1:3))
+| print(g(1:3))
+| print(zero(1:3))
+| print(zero(1:3))
+| f <- twice
+| body(f) <- quote(paste("new", x))
+| print(f(1))
+| print(f(1))
+
+run ry run --runtime ry formals.R
+expect exit 0
+expect stdout "[1] \"replaced\""
+expect stdout "[1] 1 0 3"
+expect stdout "[1] \"new 1\""
+
+# A damaged image costs only its speedup: the package loads with one warning and its functions
+# compile as they run. A flipped byte in a payload fails the payload's hash at the first call
+# that takes code from it; a truncated file fails when the image is opened.
+file save.R
+| file.copy("library/tally/R/tally.ryc", "good.ryc", overwrite = TRUE)
+file flip.R
+| bytes <- readBin("good.ryc", "raw", file.size("good.ryc"))
+| last <- length(bytes)
+| bytes[last] <- as.raw(bitwXor(as.integer(bytes[last]), 1L))
+| writeBin(bytes, "library/tally/R/tally.ryc")
+file truncate.R
+| bytes <- readBin("good.ryc", "raw", file.size("good.ryc"))
+| writeBin(bytes[1:40], "library/tally/R/tally.ryc")
+file build.R
+| bytes <- readBin("good.ryc", "raw", file.size("good.ryc"))
+| bytes[18] <- as.raw(bitwXor(as.integer(bytes[18]), 1L))
+| writeBin(bytes, "library/tally/R/tally.ryc")
+
+run ry run --runtime ry save.R
+expect exit 0
+
+run ry run --runtime ry flip.R
+expect exit 0
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 55"
+expect stdout "[1] 1 0 3"
+expect stderr "cannot use the code image"
+
+run ry run --runtime ry truncate.R
+expect exit 0
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 55"
+expect stdout "[1] 1 0 3"
+expect stderr "cannot use the code image"
+
+# An image another build wrote is not damaged, only not this build's, so it is ignored quietly.
+run ry run --runtime ry build.R
+expect exit 0
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 55"
+expect stderr lacks "cannot use the code image"
+expect stderr lacks "jit: compiled { total <- 0"
+
+# Reinstalling with changed sources writes a new image for the new database.
+file pkg/R/tally.R
+| tally <- function(values) {
+|     total <- 100
+|     for (value in values) total <- total + value
+|     total
+| }
+| twice <- function(x, label = "x") {
+|     helper <- function(y) y * 2
+|     paste(label, helper(x))
+| }
+| zero <- function(x) {
+|     x[i] <- 0
+|     x
+| }
+run ry install pkg -l library
+expect exit 0
+expect stdout "code image: closures=3 written=3"
+run ry run --runtime ry use.R
+expect exit 0
+expect stdout "[1] 155"
+expect stderr lacks "cannot use the code image"

@@ -1,0 +1,29 @@
+[stdout]
+| [1] 2
+| [1] 3
+| [[1]]
+| v
+| 
+| [[2]]
+| [1] 5
+| 
+| forcing q 
+| forcing p 
+| [1] 3
+| [1] TRUE
+| [1] FALSE
+| evaluating shared
+| [1] 20
+| [1] 20
+| dotted(first = 1, b = 2, 3)
+| [1] "b" "" 
+| [1] TRUE
+| forcing never 
+| [1] "first"
+| [1] 42
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 42L

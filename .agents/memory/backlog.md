@@ -31,7 +31,15 @@ The quality bar is four things.
   suspect.
 - ry's own base R has no recommended packages, so `zoo` cannot load (`there is no package called
   'lattice'`) and the `timeseries` workload of `just bench-real` fails.
+- Deep recursion aborts the process: `options(expressions = 500000); f <- function(n) if (n == 0) 0 else 1 + f(n - 1); tryCatch(f(1e6), error = identity)` overflows the native stack instead of raising R's "evaluation nested too deeply" or "C stack usage" error. `on_large_stack` in `eval.rs` grows the stack in segments; find which frames recurse outside it.
+- testthat 3.3.2 fails to load under ry's runtime with "attempt to use zero-length variable name" ; 3.2.3 loads. ry raises that error for `new.env()[[""]]`; whether GNU R does too, and so whether that is the cause, is unverified (no GNU R on the measuring host).
 - `crates/jit/tests/test_tiers.rs` `run_time_binding_shadows_cached_global_function` fails for `gen`: a `g` bound in a generic's frame before `UseMethod` is not seen by `gen.default`, which calls the global `g`. The cause is outside the typed core: the test fails without it.
+
+## Open: console input in ry's runtime
+
+- Console `scan()` prompts with the running item count (`1: `, `3: `); GNU R's counts records for a
+  list `what`. `select.list(graphics = TRUE)` and `.External2(C_selectlist)` still raise the
+  non-interactive error.
 
 ## Open: the typed core
 
@@ -75,6 +83,8 @@ The quality bar is four things.
 - **Quoted byte strings with a quote character.** GNU R prints a quoted `"bytes"` string that contains `"` with a stray trailing `\0` (`"q\"\\xff\0"`), an artifact of its escape buffer. ry prints it without the `\0`; this is deliberate.
 - **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 104.5k instructions against GNU R's 70.6k. Measure GNU R marginally (a run of N2 calls minus a run of N1, both above zero): GNU R byte-compiles a closure on its first calls, so subtracting an empty baseline charges that compilation to the loop and roughly doubles small per-item costs. ry's cost is spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions.md`, the promise paragraph under the object model), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. The untyped stdlib templates (`tools/bench/templates`) show the same gap: the ledger fold costs about 15.8k instructions per fill on ry against about 6.1k on GNU R (both marginal), and readings generation about 7.4k per reading against 4.5k, now that compiled `out[[i]] <- v` updates a local vector in place (`assign_element_in_place`) instead of running `complex_assign`. `apply(m, 1, f)` on a 4-column matrix costs about 13.8k instructions per row against GNU R's 16.8k, after the `m[, j]` column fast path; the kernels session measured it at 1.9x GNU R's time before that, and xts `period.apply` (about 33k closure calls through `[.xts` and `mean.default`) at 1.3x, which is still to be re-measured. In the ledger fold, `frame_cell` runs about 25 times per fill for about 14 variable and 7 function lookups, because `lookup_variable` searches the local frame before consulting its cache; the per-instruction dispatch lines (opcode fetch, operand decoding, the handle-mark check) cost about as much as the work. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
 
+- **`install.packages()` with several packages installs nothing.** On ry, `install.packages(c("a", "b"), lib = ...)` returns without installing any of them and without an error; one package per call works, so the benchmark library was installed one package at a time in dependency order.
+
 - **Old runtimes and R homes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB) and builds a new `ry/home/<hash>/`, and nothing removes the previous release's directories: a home is pruned only when a newer home is built for the same runtime and front end (`rcmd::cached_home`). Prune runtime and home directories that no `ry` on the machine can name, without removing one a running session still maps.
 
 ## Open: the CRAN package corpus
@@ -109,22 +119,13 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **Next: a native class table with dense ids** (`decisions.md`, "Per-generic units came before
   the class table"). Unit 0 is about 416M instructions, and `setClass` is 29% of it, spread over
   class-definition lookups, `tryNew` and the extension objects `setIs` builds. The R-level metadata becomes views produced from the table.
-- **WIP: the first union of a session, natively** (branch `native-first-union`, draft PR #350,
-  not built or reviewed in its latest form). The first `setClassUnion` falls back because
-  `initialize`'s dispatch cache has no `ClassUnionRepresentation` entry yet; the branch caches the
-  inherited method itself, but only when it is the default `initialize`, and only after every
-  check that can still bail. The oracle cases `s4__native_first_union` and
-  `s4__union_initialize_method` on the branch pin it. Main has a related bug: the native union
-  and `setClass` skip a package's `initialize` method for `classRepresentation`, which GNU R calls.
-- `deparse()` of an S4 object whose class is not defined prints `new("Zzz")`, where GNU R
-  errors ("cannot get a slot ("slots") from an object of type "NULL"") because `getClassDef`
-  returns `NULL` (`s4_parts` in `crates/interp/src/deparse.rs`).
 - **What still falls back** (`RY_LOAD_VERBOSE=true ry load .` names each with its reason):
   classes with a basic-type or other-package superclass (`contains = "numeric"`, `"list"`,
   `"data.frame"`, an old class), a second superclass that has superclasses of its own, a class
   under a union whose members are not all cached yet, a method that omits an argument its
   signature names, a generic whose body is not `standardGeneric("f")` (braced or not),
-  `setOldClass`, the first union of a session (dispatch caches not filled), a union of unions,
+  `setOldClass`, a first union of a session defined while first-unit definitions are pending
+  (they may add an `initialize` method), a union of unions,
   `setMethod("[")` whose formals need rematching, and `cacheMetaData` delegating classes whose
   cached definition differs, other packages' generics, group generics and primitives.
 - A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
@@ -150,6 +151,8 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **`gc()`'s "max used" is sampled only at collections**, so it reads below the process peak (575 MB against an 833 MB VmHWM for a loop that makes and drops large vectors; GNU R reports 1,054 MB because it counts at allocation). Updating the peak on each large-vector allocation would match GNU R's meaning (`crates/heap/src/heap.rs`, `crates/heap/tests/test_gc.rs` `released_old_vectors_leave_the_peak_at_one_vector`).
 - **`for` over a compact `1:n` expands it.** Both tiers materialize the sequence (40 MB for ten million elements) before the loop; GNU R iterates the compact form. Iterating start and step directly removes the allocation, the page faults and `loop_sum`'s peak.
 - **Builder peaks still above GNU R's by more than 10%** (fresh process per case, 2e7 doubles, peak over the inputs in MB, ry against GNU R 4.3.3): `x * 2 + 1` 305/153 (GNU R writes the result into an unshared temporary operand; ry cannot take a reference count of 0 as proof yet, because bytecode registers and JIT slots hold uncounted references, `eval::reuse_permitted`), `seq(1, n, by = 1)` 381/305, `vapply(l, function(v) v + 1, numeric(1))` over a 1e6 list 112/58, `unlist` 20/4. `resolve()` in `crates/interp/src/subset.rs` still builds a `Vec<usize>` per general subscript.
+- **Minor collections during a package load cost about 24M instructions each**, most of it re-marking every child of a remembered old object (namespace frames being filled). Card marking would re-mark only the dirty part. `library()` of 11 packages runs 5 of them, 118M of 1,133M instructions.
+- **`unserializeFromConn` reads its connection a few bytes per call**: 93M instructions of the same `library()`, mostly `readRDS` of package metadata. Read the connection into one buffer and decode from the slice, as `lazyLoadDBfetch` does.
 - **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `development/robustness.md`).
 - **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
 
@@ -2524,6 +2527,45 @@ The end-to-end guard rests on the corpus suites.
 
 What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pressing first.
 
+- **Install-time native code.** A code image (`crates/interp/src/code_image.rs`) reserves an
+  offset and length for native code and writes zeros. The end shape compiles every package closure
+  through the shared SSA IR and the typed AOT pipeline at install, position-independent and stamped
+  as `typed-runtime.md` describes, so a session maps it instead of tiering up. It waits for tier 1's
+  IR to merge with the typed core's in `crates/jit` and `crates/typed` (`r-runtime.md`, "Code
+  images of installed packages").
+- **Decoding an image's code costs about as much as compiling it** (about 65k instructions per
+  closure on CRAN packages), so an untrained image saves nothing measurable. The decoder reads
+  every instruction word and feedback word as a varint and re-interns each symbol constant by
+  name. Storing words as fixed-width little-endian runs that copy in bulk, and symbols as their
+  preorder position in the body, should make decoding a fraction of compiling; measure with
+  callgrind on `library()` plus a first call of the twelve packages in `decisions.md`, "Code
+  images".
+- **Where `library()` time goes, and what code images cannot remove.** On `library()` of twelve
+  CRAN packages (1,200.7M instructions for the whole process without images), compiling is 74.5M
+  (6.2%), and images remove only 4.0M of it, because most compiling during a load is base-package
+  code and code `.onLoad` runs once. Lazy-load fetches are 313M (26%), almost all of it
+  `serialize::unserialize` (278M) decoding the records the namespace forces. Collection is 118M
+  (9.8%). Fetches and collection are the load cost. An eager namespace image was measured not to
+  help (`decisions.md`, "Installed packages load through native fast paths"), so the lever is a
+  faster record reader and fewer forced fetches (S3 registration forcing every method), not
+  another image.
+- **A training run with other types than real use makes a trained image slower.** The JIT
+  compiles at the first call from the trained feedback, deoptimizes on the new type, then refuses
+  the recompile ("a for loop over something other than a plain vector") for the merged feedback,
+  so the body stays in tier 0 for the session: a loop trained on `1:50` and run on doubles took
+  72 ms against 45 ms without the image. The same refusal happens without an image when a session
+  calls with integers first, so the fix is in the JIT (recompile for the widened type after a
+  deoptimization), not in the image.
+- **An untrained image costs instructions on load.** `library(survival)` plus one `survfit` call is
+  2,091.9M instructions with the recommended packages' images and 2,064.4M with
+  `RY_CODE_IMAGE=0` (callgrind, whole process), so cheaper decoding (above) matters before
+  images pay off without training.
+- **Code images are about six times the size of the lazy-load database** (MASS: 706 KB `.ryc`
+  against a 120 KB compressed `.rdb`), because instruction words, constants and feedback are
+  stored uncompressed. Compress payloads, or pack the instruction stream, if install size matters.
+- **The base packages have no code image.** GNU R's build makes `stats`, `utils` and the other
+  base packages' lazy-load databases without `R CMD INSTALL`, so their closures compile at first
+  call; the recommended packages, which `tools/base-r/build.sh` installs, do get images.
 - **Inline annotation checks have known holes** (typing reference, "Inline annotations at run time").
   A promise that escapes its frame unforced (returned inside a closure, or stored) is never checked,
   because the pending check is dropped at exit. A function without parameters whose body is a
@@ -2786,6 +2828,7 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
 
+- **Code images of installed packages.** `R CMD INSTALL` writes each closure's tier-0 code and, with `--ry-train`, its trained profile beside the lazy-load database. `decisions.md`, "Code images: compiled code beside the lazy-load database".
 - **Console attach and the data viewer.** `ry run` serves the debugger, a paged data viewer and live values over a Unix socket; VS Code attaches, opens `View()`, and hover/completion read the console. `decisions.md`, "A running console is a debug adapter".
 - **R Markdown and Quarto in the editor.** Chunks of a `.Rmd`/`.qmd`/`.Rnw` are one script for diagnostics, hover, completion and goto, and `ry fmt` formats each chunk. `decisions.md`, "Literate documents keep their offsets".
 - **Arrays.** `[1, 2, 3]` parses, formats, types as `Array<T>` and runs as a flagged R vector with strict operators and indexing. `decisions.md`, "An Array is a flagged R vector".

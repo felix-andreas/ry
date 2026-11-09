@@ -991,10 +991,6 @@ unsafe fn basic_classes<'a>() -> R<Vec<&'a [u8]>> {
         .collect())
 }
 
-/// The value bound to `symbol` in `frame` when getting it runs no code and cannot fail: a plain
-/// value, a forced promise, or a promise of a constant or of a variable bound to such a value,
-/// which is forced as the R code would force it. `None` for anything else, a missing argument
-/// included.
 /// Whether `value` is an unforced promise of `lazyLoadDBfetch()`, the binding a lazy-loaded
 /// namespace or its imports hold until first use.
 unsafe fn is_lazy_load_promise(value: Sexp) -> R<bool> {
@@ -1004,6 +1000,10 @@ unsafe fn is_lazy_load_promise(value: Sexp) -> R<bool> {
         && value.cdr().car() == install("lazyLoadDBfetch")?)
 }
 
+/// The value bound to `symbol` in `frame` when getting it runs no code and cannot fail: a plain
+/// value, a forced promise, or a promise of a constant or of a variable bound to such a value,
+/// which is forced as the R code would force it. `None` for anything else, a missing argument
+/// included.
 unsafe fn quiet_value(symbol: Sexp, frame: Sexp) -> R<Option<Sexp>> {
     match crate::heap().frame_cell(frame, symbol) {
         Some(cell) => quiet_binding(cell, 0),
@@ -2220,7 +2220,9 @@ unsafe fn conform_definition(definition: Sexp, generic: Sexp, signature: Sexp) -
     if let Some(missing) = missing {
         let by_name: Vec<Sexp> = (0..generic_names.len())
             .filter(|&index| {
-                used[index] && missing <= index && index < dots_position.unwrap_or(generic_names.len())
+                used[index]
+                    && missing <= index
+                    && index < dots_position.unwrap_or(generic_names.len())
             })
             .map(|index| generic_names[index])
             .collect();
@@ -3201,14 +3203,18 @@ unsafe fn set_class_union(call: &Call<'_>) -> R<Sexp> {
     {
         bail!(skip, "the union lists itself as a member");
     }
-    if !definition_caches(name.bytes(), &member_names, false)?
-        || !initialize_cached(b"ClassUnionRepresentation")?
-    {
+    if !definition_caches(name.bytes(), &member_names, false)? {
         bail!(
             skip,
             "the dispatch caches are not filled yet, or a coerce method that `setIs()` would replace exists"
         );
     }
+    let Some(initialize) = union_initialize()? else {
+        bail!(
+            skip,
+            "`new()` of the union would run an `initialize` method other than the default, or one that lazy definitions may still add"
+        );
+    };
     let (Some(union_class), Some(extension_class)) = (
         cached_class(values::scalar_string("ClassUnionRepresentation")?)?,
         cached_class(values::scalar_string("SClassExtension")?)?,
@@ -3255,6 +3261,9 @@ unsafe fn set_class_union(call: &Call<'_>) -> R<Sexp> {
     }
 
     pending.commit(class_table)?;
+    if let UnionInitialize::Inherit { method, table } = initialize {
+        eval::define(install("ClassUnionRepresentation")?, method, table)?;
+    }
     let generator = class_generator(class_name, package, place)?;
     if trace_bails() {
         eprintln!(
@@ -4084,8 +4093,7 @@ unsafe fn recached(definition: Sexp, superclass: Sexp, extension: Sexp) -> R<Rec
     // Subsetting to sort keeps only the names, so a `conflicts` attribute goes too.
     let only_names = {
         let attributes = slot(definition, symbols().contains)?.attrib();
-        attributes == nil()
-            || (attributes.tag() == symbols().names && attributes.cdr() == nil())
+        attributes == nil() || (attributes.tag() == symbols().names && attributes.cdr() == nil())
     };
     if distances.is_sorted() {
         if unchanged && only_names {
@@ -4284,13 +4292,45 @@ unsafe fn is_method_definition(value: Sexp) -> bool {
         )
 }
 
-/// Whether the default `initialize` method is cached for objects of the class `label`, so that
-/// `new()` of that class leaves the dispatch tables as they are.
-unsafe fn initialize_cached(label: &[u8]) -> R<bool> {
+/// What `initialize`'s dispatch for `ClassUnionRepresentation` does when the R code's `new()` of
+/// the union's representation runs it.
+enum UnionInitialize {
+    /// The default method is cached already, so dispatch changes nothing.
+    Cached,
+    /// The default method is inherited, and dispatch caches this copy of it in `table`.
+    Inherit { method: Sexp, table: Sexp },
+}
+
+/// How the union's `new()` would dispatch `initialize`, or `None` when it would run a method
+/// other than the default one, or the lookup needs R. Only the default method leaves nothing
+/// for the native union to run, and a package may define `initialize` for
+/// `classRepresentation` or `ANY`, which dispatch would then call.
+unsafe fn union_initialize() -> R<Option<UnionInitialize>> {
     let Some((_, all_table)) = generic_tables("initialize")? else {
-        return Ok(false);
+        return Ok(None);
     };
-    Ok(quiet_value(values::install_bytes(label)?, all_table)?.is_some())
+    let label = values::scalar_string("ClassUnionRepresentation")?;
+    crate::heap().root(label);
+    if let Some(method) = quiet_value(install_text(label.element(0))?, all_table)? {
+        return Ok(is_default_initialize(method)?.then_some(UnionInitialize::Cached));
+    }
+    // Lazy definitions still to run may add an `initialize` method that dispatch would prefer.
+    if crate::methods::first_units_pending() {
+        return Ok(None);
+    }
+    let Some(generic) = methods_value("initialize")? else {
+        return Ok(None);
+    };
+    let Some(method) = find_inherited_method(&[label], generic)? else {
+        return Ok(None);
+    };
+    crate::heap().root(method);
+    Ok(
+        is_default_initialize(method)?.then_some(UnionInitialize::Inherit {
+            method,
+            table: all_table,
+        }),
+    )
 }
 
 /// A class the new one extends, by name, with its definition.
@@ -4464,7 +4504,12 @@ unsafe fn definition_caches(name: &[u8], lineage: &[Sexp], prototype: bool) -> R
             return Ok(false);
         };
         for label in labels {
-            if quiet_value(values::install_bytes(label)?, all_table)?.is_none() {
+            let Some(method) = quiet_value(values::install_bytes(label)?, all_table)? else {
+                return Ok(false);
+            };
+            // A package may define `initialize` for `classRepresentation` or
+            // `SClassExtension`, and the R code's `new()` of the definition would call it.
+            if generic_name == "initialize" && !is_default_initialize(method)? {
                 return Ok(false);
             }
         }
@@ -4579,6 +4624,18 @@ pub(crate) unsafe fn inherited_method(
     generic: Sexp,
     table: Sexp,
 ) -> R<Option<Sexp>> {
+    let Some(method) = find_inherited_method(classes, generic)? else {
+        return Ok(None);
+    };
+    let &[class] = classes else {
+        return Ok(None);
+    };
+    eval::define(install_text(class.element(0))?, method, table)?;
+    Ok(Some(method))
+}
+
+/// The method `inherited_method` caches for `classes`, without caching it.
+unsafe fn find_inherited_method(classes: &[Sexp], generic: Sexp) -> R<Option<Sexp>> {
     if !native_definitions() {
         return Ok(None);
     }
@@ -4683,7 +4740,6 @@ pub(crate) unsafe fn inherited_method(
     } else {
         return Ok(None);
     };
-    eval::define(install_text(class.element(0))?, method, table)?;
     Ok(Some(method))
 }
 

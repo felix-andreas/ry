@@ -560,13 +560,75 @@ Bytecode is build output, never a cache, so nothing checks whether a stored copy
 - **Installed packages.** `ry install` and `R CMD INSTALL` compile every closure of the package and
   write the bytecode beside its lazy-load database, stamped with the ry build that wrote it. A
   different ry build ignores a stamp it did not write and compiles at first call instead, which is
-  always correct; reinstalling refreshes it.
+  always correct; reinstalling refreshes it. This is the code image, described below.
 - **Base R.** The base and recommended packages are compiled when the base image is built and live
   in a section of the image beside the heap arenas, keyed by the same runtime hash that keys the
   image (`base-image.md`).
 - **Code under development.** `ry load` and scripts compile each closure at its first call. That
   first tier must be cheap enough that compiling a session's working set costs less than reading a
   cache would, which is the bar `ry load`'s lazy loading sets.
+
+### Code images of installed packages
+
+`R CMD INSTALL` writes `R/<package>.ryc` beside `R/<package>.rdb` (`crates/interp/src/code_image.rs`).
+After the R code is installed, a fresh session loads the namespace, fetches every binding from the
+lazy-load database, and compiles each closure the fetches made, nested function bodies included.
+When a later session fetches the same record, it notes where each closure's code lies in the image,
+and the call that would compile the closure (its second, or its first when the body has a loop)
+decodes that code instead. Decoding costs about as much as compiling, so the image does not move
+compilation earlier: a namespace fetches many closures it never calls, such as every S3 method it
+registers, and calls many others only once. What the image adds is what compiling cannot produce,
+the trained profile below, and the native code it reserves room for.
+
+- **Identity.** A record is identified by its offset in the database, its length and an FNV-1a hash
+  of its stored bytes; a closure within the record by the order the stream reader creates closures.
+  An image written for other bytes (a reinstall by GNU R, another version) is ignored record by
+  record. Only databases that have an image pay for the hash.
+- **No copy of the source.** A code object points into its closure's body, so the image stores those
+  pointers as the preorder position of the object in the body. The body itself comes from the
+  database, as without an image.
+- **Stamp.** The file starts with a layout magic and the runtime build's identity; any other build
+  reads the image as absent and compiles at the second call as usual.
+- **Formals.** The compiler's output depends on the closure's formals as well as its body (which
+  names the frame can bind, which call updates its first parameter in place), and `formals<-` or
+  `as.function` makes a closure that shares a fetched body under other formals. Each noted closure
+  therefore keeps its formals, and only a closure with those same formals takes the code; any
+  other compiles its own.
+- **Damage.** The image only saves compiling, so a damaged one never stops a package from loading.
+  A file that cannot be read or parsed, a payload whose hash does not match (checked when the first
+  closure of its record is called), a record whose closures do not match the database's, or code
+  the decoder rejects each warn once (`cannot use the code image ..., so its functions compile as
+  they run; reinstall the package to repair it`). The image is then ignored for the rest of the
+  session, and its waiting code is dropped.
+- **Verified code.** Tier 0 reads instruction operands, registers, inline-cache slots and jump
+  targets without bounds checks, so decoded code passes a linear verifier (`verify` in
+  `crates/interp/src/bytecode.rs`) before it runs: every opcode is known, every operand is below its
+  table's size, every jump lands on an instruction start, the last instruction cannot fall through,
+  and the side tables (loops, feedback, hints, profile) have the lengths the code implies. The
+  payload hash is FNV-1a, which catches damage but not a crafted file, so the verifier is what keeps
+  a bad image from reading out of bounds. It checks tier 0's assumptions only: an instruction's
+  register dataflow is guarded at run time where that is cheap, and the optimizing tier trusts the
+  shape the compiler produces. Record instructions carry process-local layout ids, so code that
+  holds one is not written, and field and item shape caches are written empty. The decoder also
+  keeps only the object bits the encoder can write (the S4 bit) of each constant.
+- **Lifetime.** Waiting code holds its body, its formals and the mapped file. `lazyLoadDBflush`,
+  which `unloadNamespace` calls, drops all three for its database.
+- **Writing.** The image is written to `R/<package>.ryc.partial`, synced to disk, and renamed over
+  the old image, so a crash leaves the old image or the new one. It is never rewritten in place: a
+  process that maps the old file would see its pages change under it, or die with `SIGBUS` once
+  the file shrank. A failed write removes the staging file.
+- **Off switches.** `RY_CODE_IMAGE=0` ignores images when loading; `R CMD INSTALL
+  --ry-no-code-image` writes none. A failure while writing an image warns and installs the package
+  without one.
+- **Native code.** The file reserves an offset and length for install-time native code, both 0 today.
+  The end shape compiles untyped bodies through the same SSA IR and AOT pipeline the typed core uses
+  ("One SSA IR and one install-time pipeline" in `decisions.md`); it lands once tier 1 and the typed
+  core share that IR, and fills the reserved section with position-independent code mapped
+  read-only, as `typed-runtime.md` describes for the code file.
+
+The image is uncompressed and about six times the size of the compressed database (MASS: 706 KB
+against 120 KB). It is mapped, not read, so a session pays only for the pages of the records it
+fetches.
 
 ### Tiers
 
@@ -825,6 +887,8 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | Untyped closures skip the signature lookup; `on.exit` handling only when an exit expression exists | ry | built | part of the 3.1k above | `signature_of` in `crates/interp/src/annotations.rs`, `run_closure` in `eval.rs` |
 | Frames as slot arrays, environment reified on demand | Ř, V8 | rejected for now, measured | binding cells cost about 420 of a closure call's 3,968 instructions (defining formals 100, `Frame::insert` 114, clearing 97, lookups 110); values held inline would save 100 to 150 of them, about 3%, while about 180 call sites read cells and reifying a frame would need allocation behind shared references. A closure call already costs less than on GNU R | |
 | Promise elision for strict, effect-free arguments | Ř | done in tier 0 (`crates/interp/src/effects.rs`) | `closure_args_into` 3.8% of a call microbenchmark | `f(i, 1)` 3,968 to 3,411 instructions per call; `seq()` unchanged, its helpers are not effect-free |
+| Cheaper promises: created lazily, held inline in the frame slot, or allocated from a per-call arena | Ř, GNU R | rejected, measured | a closure call on the testthat workload costs about 8,100 instructions with 1.2 promises; allocating a promise is a nursery bump, and promises are 1.4 of the 7.4 objects freed per call. None of the three designs saves more than that allocation, and each changes what `PRCODE`, `PRENV`, `substitute` and `delayedAssign` see | |
+| Formals bound in one pass; a forced promise settled with one barrier; the stack check against a cached floor | ry | built | defining formals 270, settling 87 and `stacker`'s thread-local lookup per call; 8,174 to 8,140 instructions per closure call on the testthat workload | `Frame::insert_formals` in `crates/heap/src/env.rs`, `Heap::settle_promise`, `on_large_stack` in `eval.rs` |
 | The promargs pairlist built only when asked for | GNU R | planned | `args_pairlist` 2.7% of a call microbenchmark | |
 | Argument-match caches, one entry per closure body | V8, JSC | done (`eval::match_args_cached`) | `match_args` 2.8k, `bind_arguments` 2.8k per `seq()` call | matching in `seq()` 3.6k to 1.0k instructions; 1.0 to 1.2 million named calls per `bench-real` workload |
 | Polymorphic inline caches for S3 and S4, keyed on the class vector | Self, V8 | built | S3 method lookup up to 17% (`timeseries`); instructions per dispatch: `UseMethod` 8.75k to 7.69k (GNU R 9.82k), with `NextMethod` 23.14k to 19.04k (GNU R 19.03k), `standardGeneric` 14.26k to 8.69k (GNU R 11.68k) | `resolve_s3`, `site_hit` in `crates/interp/src/dispatch.rs`; `S4Cache`, `dispatch_generic` in `crates/interp/src/methods.rs` |
@@ -852,9 +916,14 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | Effect-free `lapply`, `vapply`, `Map` and long element-wise operations across cores; reductions stay sequential | Bend | planned | wall time of independent per-element work | |
 | **5. Memory and start-up** | | | | |
 | A start-up image mapped read-only and shared | V8 snapshots, Bun | planned | stats-only start-up peak | |
-| Per-package images compiled at install time | Bun | planned | package load and warm-up | |
+| No major collection while a namespace loads; the limit is rebased when the outermost load returns | ry | built | 2 major collections to 0 loading testthat, xts, data.table and a 40,744-object package; GC 15.7% to about 5% of the load | `enter_namespace_load` in `crates/heap/src/heap.rs` |
+| Lazy-load records read with borrowed strings, bulk vectors and iterative pairlists; `makeLazy` with GNU R's shared environment; S4-generic checks answered from a record's header | GNU R | built | `library()` of 11 packages: 1,197.8M to 1,133.0M instructions, 914 records fetched to 651 | `crates/interp/src/serialize.rs`, `do_local_s4_generics` in `envir.rs` |
+| Card marking for remembered old objects | V8, HotSpot | planned | minor collections during a load cost about 24M instructions each, mostly re-marking namespace frames being filled | |
+| A buffered `unserializeFromConn` | GNU R | planned | it reads a few bytes per call: 93M instructions of the 11-package `library()` | |
+| Per-package code images written at install time, beside the lazy-load database | Bun | built, no speedup yet | package load and warm-up; decoding a closure costs about what compiling it does, so untrained images cost 1.3% more instructions on `library(survival)` | `crates/interp/src/code_image.rs` |
+| Install-time machine code from whole-program facts (checker types, closed namespace bindings, effect-free functions), values from outside tested once where they enter, no profiles; tier 0 keeps `eval` and non-standard evaluation, the JIT keeps hot loops; `ry check --explain` lists by-name and unproven operations | Bun (`--aot`) | planned, in parallel with the baseline tier | start-up and short runs, where Bun's compiled code wins 1.5x to 3.3x; measured on the testthat workload and package load time | |
 | One SSA IR for tier 1 and the typed core: typed facts unguarded, untyped speculations guarded with deoptimization exits; install-time code through the typed AOT pipeline, with its deoptimization metadata and watched bindings in the code file | Ř (PIR), Graal | planned, with the first of the install-time images and the baseline tier | two SSA forms and two lowerings to Cranelift | `crates/jit`, `crates/typed` |
-| Profiles from a training run (the package's tests and examples) stored in the per-package image | HHVM Jump-Start, Project Leyden | planned | hot closures that never reach tier 1's thresholds | |
+| Profiles from a training run (the package's tests and examples) stored in the per-package image | HHVM Jump-Start, Project Leyden | built, no speedup yet: loops tier up within their first call anyway, and a training run on other types makes the JIT refuse to recompile | hot closures that never reach tier 1's thresholds | |
 | Images shared across worker processes | Bun | planned | resident memory per `parallel` worker | |
 | Concurrent tracing and Immix line reuse | LXR | planned, after collector pauses are measured | collector pauses, fragmentation | |
 | A stackless tier 0 | Bend | planned, on the tail-call handlers | Rust frame setup per R call | |

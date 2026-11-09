@@ -44,6 +44,8 @@ testthat_suite <- function(blocks) {
   # A package's DESCRIPTION sets the edition; without one testthat searches for it on every block.
   local_edition(3L)
   reporter <- ListReporter$new()
+  # testthat 3.3 indexes its running tests by file, and outside test_file() nothing names one.
+  reporter$start_file("testthat.R")
   with_reporter(reporter, {
     for (block in seq_len(blocks)) {
       records <- make_records(12L, block)

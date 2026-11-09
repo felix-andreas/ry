@@ -210,3 +210,19 @@ debug = false
 [profile.release.package.polars-utils]
 opt-level = 1
 debug = false
+
+[[bin]]
+name = "interp_code_image"
+path = "fuzz_targets/interp_code_image.rs"
+required-features = ["runtime"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "interp_code_image_file"
+path = "fuzz_targets/interp_code_image_file.rs"
+required-features = ["runtime"]
+test = false
+doc = false
+bench = false
