@@ -62,16 +62,21 @@ pub enum Condition {
 }
 
 /// The registers the inline paths compute in. `Activation` and `Window` are the pinned
-/// registers of the table above; the temporaries are caller-saved, so a step call clobbers them,
-/// and they never hold anything across one.
+/// registers of the table above; the temporaries and the accumulator are caller-saved, so a step
+/// call clobbers them, and they never hold anything across one. `T4` to `T6` carry the
+/// arguments of a shared stub, which may clobber every temporary.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reg {
     Activation,
     Window,
+    Accumulator,
     T0,
     T1,
     T2,
     T3,
+    T4,
+    T5,
+    T6,
 }
 
 impl Reg {
@@ -79,10 +84,14 @@ impl Reg {
         match self {
             Reg::Activation => 3,
             Reg::Window => 12,
+            Reg::Accumulator => 0,
             Reg::T0 => 2,
             Reg::T1 => 6,
             Reg::T2 => 7,
             Reg::T3 => 8,
+            Reg::T4 => 9,
+            Reg::T5 => 10,
+            Reg::T6 => 11,
         }
     }
 
@@ -90,10 +99,14 @@ impl Reg {
         match self {
             Reg::Activation => 19,
             Reg::Window => 20,
+            Reg::Accumulator => 0,
             Reg::T0 => 10,
             Reg::T1 => 11,
             Reg::T2 => 12,
             Reg::T3 => 13,
+            Reg::T4 => 14,
+            Reg::T5 => 15,
+            Reg::T6 => 3,
         }
     }
 }
@@ -153,6 +166,11 @@ impl Assembler {
 
     pub fn bind(&mut self, label: Label) {
         self.labels[label.0 as usize] = self.code.len() as u32;
+    }
+
+    /// The offset of the next instruction from the start of the code.
+    pub fn offset(&self) -> usize {
+        self.code.len()
     }
 
     /// Saves the pinned registers and loads them from the activation, which arrives as the
@@ -231,8 +249,8 @@ impl Assembler {
                 // mov rdi, rbx; mov esi, pc; call [r13 + offset]
                 self.bytes(&[0x48, 0x89, 0xDF, 0xBE]);
                 self.u32(pc);
-                self.bytes(&[0x41, 0xFF, 0x95]);
-                self.u32(offset);
+                self.bytes(&[0x41, 0xFF]);
+                self.x64_memory(2, 13, offset);
             }
             Arch::A64 => {
                 self.a64_mov(0, 19);
@@ -244,13 +262,52 @@ impl Assembler {
         }
     }
 
+    /// Calls entry `index` of the step table without arguments, for a shared stub, which
+    /// leaves its answer in the accumulator.
+    pub fn call_table(&mut self, index: usize) {
+        let offset = (index * 8) as u32;
+        match self.arch {
+            Arch::X64 => {
+                // call [r13 + offset]
+                self.bytes(&[0x41, 0xFF]);
+                self.x64_memory(2, 13, offset);
+            }
+            Arch::A64 => {
+                self.a64_load(16, 21, offset);
+                // blr x16
+                self.word(0xD63F_0000 | (16 << 5));
+            }
+        }
+    }
+
+    /// Returns from a shared stub, which is a leaf: it calls nothing and keeps no frame.
+    pub fn ret(&mut self) {
+        match self.arch {
+            Arch::X64 => self.code.push(0xC3),
+            Arch::A64 => self.word(0xD65F_03C0),
+        }
+    }
+
+    /// `to = from`.
+    pub fn move_register(&mut self, to: Reg, from: Reg) {
+        match self.arch {
+            Arch::X64 => self.x64_register_op(0x89, from.x64(), to.x64()),
+            Arch::A64 => self.a64_mov(to.a64(), from.a64()),
+        }
+    }
+
     /// Branches to `label` when the accumulator compares to `value` as `condition` says.
     pub fn branch_accumulator(&mut self, condition: Condition, value: u32, label: Label) {
         match self.arch {
             Arch::X64 => {
-                // cmp rax, imm32 (sign-extended, so a pc stays below 2^31)
-                self.bytes(&[0x48, 0x3D]);
-                self.u32(value);
+                if value < 0x80 {
+                    // cmp rax, imm8
+                    self.bytes(&[0x48, 0x83, 0xF8, value as u8]);
+                } else {
+                    // cmp rax, imm32 (sign-extended, so a pc stays below 2^31)
+                    self.bytes(&[0x48, 0x3D]);
+                    self.u32(value);
+                }
                 self.x64_jcc(condition, label);
             }
             Arch::A64 => {
@@ -264,6 +321,32 @@ impl Assembler {
                 }
                 self.a64_branch_if(condition, label);
             }
+        }
+    }
+
+    /// Branches to `label` when the accumulator is zero (`Equal`) or not (`NotEqual`).
+    pub fn branch_accumulator_zero(&mut self, condition: Condition, label: Label) {
+        match self.arch {
+            Arch::X64 => {
+                // test rax, rax
+                self.bytes(&[0x48, 0x85, 0xC0]);
+                self.x64_jcc(condition, label);
+            }
+            Arch::A64 => {
+                // cmp x0, #0
+                self.word(0xF100_001F);
+                self.a64_branch_if(condition, label);
+            }
+        }
+    }
+
+    /// Subtracts one from the accumulator.
+    pub fn decrement_accumulator(&mut self) {
+        match self.arch {
+            // dec rax
+            Arch::X64 => self.bytes(&[0x48, 0xFF, 0xC8]),
+            // sub x0, x0, #1
+            Arch::A64 => self.word(0xD100_0400),
         }
     }
 
@@ -302,6 +385,10 @@ impl Assembler {
     pub fn jump(&mut self, label: Label) {
         match self.arch {
             Arch::X64 => {
+                if let Some(relative) = self.x64_short(label, 2) {
+                    self.bytes(&[0xEB, relative as u8]);
+                    return;
+                }
                 self.code.push(0xE9);
                 self.rel32(label);
             }
@@ -335,8 +422,8 @@ impl Assembler {
                 // mov rax, value; mov [r15 + offset], rax
                 self.bytes(&[0x48, 0xB8]);
                 self.u64(value);
-                self.bytes(&[0x49, 0x89, 0x87]);
-                self.u32(offset);
+                self.bytes(&[0x49, 0x89]);
+                self.x64_memory(0, 15, offset);
             }
             Arch::A64 => {
                 self.a64_constant(16, value);
@@ -351,8 +438,8 @@ impl Assembler {
         match self.arch {
             Arch::X64 => {
                 // mov byte [r15 + offset], value
-                self.bytes(&[0x41, 0xC6, 0x87]);
-                self.u32(offset);
+                self.bytes(&[0x41, 0xC6]);
+                self.x64_memory(0, 15, offset);
                 self.code.push(value);
             }
             Arch::A64 => {
@@ -549,9 +636,16 @@ impl Assembler {
         match self.arch {
             Arch::X64 => {
                 let register = to.x64();
-                self.x64_rex(true, 0, register);
-                self.code.push(0xB8 + (register & 7));
-                self.u64(value);
+                if let Ok(value) = u32::try_from(value) {
+                    // mov r32, imm32, which zero-extends
+                    self.x64_rex(false, 0, register);
+                    self.code.push(0xB8 + (register & 7));
+                    self.u32(value);
+                } else {
+                    self.x64_rex(true, 0, register);
+                    self.code.push(0xB8 + (register & 7));
+                    self.u64(value);
+                }
             }
             Arch::A64 => self.a64_constant(to.a64(), value),
         }
@@ -786,8 +880,8 @@ impl Assembler {
         match self.arch {
             Arch::X64 => {
                 // mov rax, [r12 + offset]
-                self.bytes(&[0x49, 0x8B, 0x84, 0x24]);
-                self.u32(offset);
+                self.bytes(&[0x49, 0x8B]);
+                self.x64_memory(0, 12, offset);
             }
             Arch::A64 => self.a64_load(16, 20, offset),
         }
@@ -798,8 +892,8 @@ impl Assembler {
         match self.arch {
             Arch::X64 => {
                 // mov [r12 + offset], rax
-                self.bytes(&[0x49, 0x89, 0x84, 0x24]);
-                self.u32(offset);
+                self.bytes(&[0x49, 0x89]);
+                self.x64_memory(0, 12, offset);
             }
             Arch::A64 => {
                 if offset / 8 < 4096 {
@@ -826,8 +920,22 @@ impl Assembler {
             Condition::LessOrEqual => 0x8E,
             Condition::Unordered => 0x8A,
         };
+        if let Some(relative) = self.x64_short(label, 2) {
+            self.bytes(&[opcode - 0x10, relative as u8]);
+            return;
+        }
         self.bytes(&[0x0F, opcode]);
         self.rel32(label);
+    }
+
+    /// The 8-bit displacement of a `length`-byte branch from here to `label`, when the label is
+    /// already bound (a backward branch) and close enough.
+    fn x64_short(&self, label: Label, length: i64) -> Option<i8> {
+        let at = self.labels[label.0 as usize];
+        if at == UNBOUND {
+            return None;
+        }
+        i8::try_from(i64::from(at) - (self.code.len() as i64 + length)).ok()
     }
 
     fn rel32(&mut self, label: Label) {
@@ -920,13 +1028,20 @@ impl Assembler {
         }
     }
 
-    /// The ModRM (and SIB) bytes and 32-bit displacement of `[base + offset]`.
+    /// The ModRM (and SIB) bytes and displacement of `[base + offset]`, with an 8-bit
+    /// displacement when the offset fits one.
     fn x64_memory(&mut self, reg: u8, base: u8, offset: u32) {
-        self.code.push(0x80 | ((reg & 7) << 3) | (base & 7));
+        let short = offset < 0x80;
+        let mode = if short { 0x40 } else { 0x80 };
+        self.code.push(mode | ((reg & 7) << 3) | (base & 7));
         if base & 7 == 4 {
             self.code.push(0x24);
         }
-        self.u32(offset);
+        if short {
+            self.code.push(offset as u8);
+        } else {
+            self.u32(offset);
+        }
     }
 
     /// A 64-bit operation `opcode` between registers: `reg` is the ModRM reg field (a register

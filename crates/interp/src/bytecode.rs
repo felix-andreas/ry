@@ -3416,11 +3416,26 @@ thread_local! {
 pub type BaselineCode = unsafe extern "C" fn(*mut std::ffi::c_void, usize);
 
 /// One instruction run for baseline machine code: it takes the activation and the
-/// instruction's pc and answers the pc to continue at, or [`STOP`].
+/// instruction's pc and answers where to continue, encoded by [`baseline_answer`].
 pub type BaselineStep = unsafe extern "C" fn(*mut std::ffi::c_void, usize) -> usize;
 
-/// The pc a [`BaselineStep`] answers when the activation is done.
+/// What a [`BaselineStep`] answers when the activation is done.
 pub const BASELINE_STOP: usize = STOP;
+
+/// Encodes the pc a step continues at for baseline code: 0 for the next instruction, the pc
+/// plus one for any other, and [`STOP`] as itself. Almost every instruction falls through, and
+/// a zero answer lets the code after each call be one test and one branch instead of a compare
+/// against the next pc, which keeps the per-instruction code short.
+#[inline(always)]
+pub fn baseline_answer(pc: usize, next: usize) -> usize {
+    if pc == next {
+        0
+    } else if pc == STOP {
+        STOP
+    } else {
+        pc + 1
+    }
+}
 
 /// Where baseline machine code finds what it reads directly instead of calling a step.
 pub mod baseline_layout {
@@ -3497,11 +3512,12 @@ macro_rules! handlers {
                     let instruction =
                         Instruction { code: state.code, at, registers: state.registers };
                     let flow = $body(state, instruction);
-                    let pc = advance::<false>(state, at, at + 1 + operand_count(Op::$op), flow);
+                    let next = at + 1 + operand_count(Op::$op);
+                    let pc = advance::<false>(state, at, next, flow);
                     if $roots && pc != STOP {
                         release(state);
                     }
-                    pc
+                    baseline_answer(pc, next)
                 })
             }
         )*
@@ -3688,7 +3704,7 @@ unsafe extern "C" fn step_jump(state: *mut std::ffi::c_void, at: usize) -> usize
         if pc != STOP {
             release(state);
         }
-        pc
+        baseline_answer(pc, at + 1 + operand_count(Op::Jump))
     })
 }
 
