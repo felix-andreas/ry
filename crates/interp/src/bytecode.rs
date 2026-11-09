@@ -3247,7 +3247,16 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::Closure => &[Register, Formals, Constant, Constant],
         Op::SubAssign => &[Register, Symbol, Register, Register, Call, Immediate],
         Op::SubAssignMatrix => &[Register, Symbol, Register, Register, Register, Call],
-        Op::Replace => &[Register, Symbol, Symbol, Cache, Call, Base, CountAtLeastOne, Call],
+        Op::Replace => &[
+            Register,
+            Symbol,
+            Symbol,
+            Cache,
+            Call,
+            Base,
+            CountAtLeastOne,
+            Call,
+        ],
         Op::SetSrcref => &[Constant, Immediate],
         Op::EndStatement => &[Register, Base, Base],
         Op::BranchUnlessPrimitive => &[Register, Constant, Target],
@@ -3334,9 +3343,8 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
     if words.is_empty() {
         return Err("empty code".to_owned());
     }
-    let is_start = |target: usize| {
-        target < words.len() && starts[target / 64] & (1 << (target % 64)) != 0
-    };
+    let is_start =
+        |target: usize| target < words.len() && starts[target / 64] & (1 << (target % 64)) != 0;
     let loop_table = values::ints(constants.element(LOOPS));
     for entry in loop_table.as_chunks::<4>().0 {
         let [start, end, exit, step] = entry.map(|word| word as usize);
@@ -3435,7 +3443,9 @@ unsafe fn valid_switch_table(table: Sexp) -> bool {
     let arms = length(numbers) as i64;
     // A name's arm indexes the numbers directly, while a negative position arm is an error
     // `switch_arm` raises before indexing.
-    values::ints(name_arms).iter().all(|&arm| (0..arms).contains(&i64::from(arm)))
+    values::ints(name_arms)
+        .iter()
+        .all(|&arm| (0..arms).contains(&i64::from(arm)))
         && values::ints(position_arms)
             .iter()
             .all(|&arm| (-1..arms).contains(&i64::from(arm)))
@@ -4258,6 +4268,17 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
         instruction.output(0, value);
         return Ok(Flow::Next);
     }
+    if definition.direct.is_some()
+        && !definition.checks.replacement
+        && positional_arguments(call.cdr())
+    {
+        let values = std::slice::from_raw_parts(instruction.registers.add(first), count);
+        if let Some(value) = eval::call_direct(definition, values)? {
+            state.record(instruction.at, value);
+            instruction.output(0, value);
+            return Ok(Flow::Next);
+        }
+    }
     let mut args = eval::Args::new();
     let mut cell = call.cdr();
     for index in 0..count {
@@ -4277,6 +4298,19 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// Whether every argument cell of a call is untagged and not empty, as a
+/// [`BuiltinDef::direct`] entry requires.
+#[inline]
+unsafe fn positional_arguments(mut cell: Sexp) -> bool {
+    while cell != nil() {
+        if cell.tag() != nil() || cell.car() == missing_arg() {
+            return false;
+        }
+        cell = cell.cdr();
+    }
+    true
 }
 
 #[inline(always)]
@@ -5103,8 +5137,16 @@ unsafe fn replace_variable(
     heap.count_transient_binding(env, symbols().tmp);
     let state = interp();
     state.tmp_values.push((env, target));
-    let result = match builtin {
-        Some(definition) => {
+    let direct = match builtin {
+        Some(definition) if definition.direct.is_some() && replacement_arguments(setter_call) => {
+            eval::call_direct(definition, args)
+        }
+        _ => Ok(None),
+    };
+    let result = match (direct, builtin) {
+        (Ok(Some(value)), _) => Ok(value),
+        (Err(unwind), _) => Err(unwind),
+        (Ok(None), Some(definition)) => {
             let mut arguments = eval::Args::new();
             let mut item = setter_call.cdr();
             for &value in args.iter() {
@@ -5121,11 +5163,26 @@ unsafe fn replace_variable(
             interp().assignment_call = outer;
             result
         }
-        None => replace_with_closure(function, setter, whole, target, args[1], env),
+        (Ok(None), None) => replace_with_closure(function, setter, whole, target, args[1], env),
     };
     interp().tmp_values.pop();
     eval::assign_local(variable, result?, env, Some(cell))?;
     Ok(true)
+}
+
+/// Whether a replacement call's arguments are untagged but for the trailing `value`, the shape
+/// `complex_assign` builds and a [`BuiltinDef::direct`] entry takes in formal order.
+unsafe fn replacement_arguments(setter_call: Sexp) -> bool {
+    let mut cell = setter_call.cdr();
+    while cell != nil() {
+        let last = cell.cdr() == nil();
+        let expected = if last { symbols().value } else { nil() };
+        if cell.tag() != expected || cell.car() == missing_arg() {
+            return false;
+        }
+        cell = cell.cdr();
+    }
+    true
 }
 
 /// Calls the replacement closure `function` as `` `f<-`(`*tmp*`, value = <promise>) ``, with
@@ -5306,10 +5363,12 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
             Arith::Greater => comparison((!na).then_some(a > b)),
             Arith::LessEqual => comparison((!na).then_some(a <= b)),
             Arith::GreaterEqual => comparison((!na).then_some(a >= b)),
-            Arith::Modulo => Ok(Some(values::scalar_integer(crate::arith::integer_modulo(a, b))?)),
-            Arith::IntegerDivide => {
-                Ok(Some(values::scalar_integer(crate::arith::integer_divide(a, b))?))
-            }
+            Arith::Modulo => Ok(Some(values::scalar_integer(crate::arith::integer_modulo(
+                a, b,
+            ))?)),
+            Arith::IntegerDivide => Ok(Some(values::scalar_integer(
+                crate::arith::integer_divide(a, b),
+            )?)),
             _ => Ok(None),
         };
     }

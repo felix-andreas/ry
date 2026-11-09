@@ -3,7 +3,9 @@
 //! - lowering never panics on mutated R source, and a lowered expression deparses to text that
 //!   lowers back to an identical expression;
 //! - the tier-0 bytecode agrees with the AST evaluator on random arithmetic, comparison, logic,
-//!   branch and loop programs, including NA, integer overflow and errors;
+//!   branch and loop programs, including NA, integer overflow and errors, and on random reads and
+//!   writes of attributes, names and elements and `c()` calls, whose compiled calls take the
+//!   builtins' direct entries;
 //! - reading a corrupted serialized stream fails with an R error, never a panic;
 //! - a compiled closure's code survives the code image's encoding, and a corrupted image or code
 //!   object fails with an error, never a panic.
@@ -21,9 +23,8 @@ use {
         lower,
         testing::{
             check_bytecode_agreement, check_code_image_file, check_code_image_load,
-            check_code_image_round_trip,
-            check_lowering_input, check_render_drawing,
-            check_unserialize_input, with_interpreter,
+            check_code_image_round_trip, check_element_access_agreement, check_lowering_input,
+            check_render_drawing, check_unserialize_input, with_interpreter,
         },
         values,
     },
@@ -126,8 +127,17 @@ fn fuzz_bytecode_agrees_with_the_ast_evaluator() {
 }
 
 #[test]
+fn fuzz_element_access_agrees_with_the_ast_evaluator() {
+    for_each_seed(300, |seed| {
+        check_element_access_agreement(&mut SplitMix64(seed))
+    });
+}
+
+#[test]
 fn fuzz_code_image_round_trip() {
-    for_each_seed(150, |seed| check_code_image_round_trip(&mut SplitMix64(seed)));
+    for_each_seed(150, |seed| {
+        check_code_image_round_trip(&mut SplitMix64(seed))
+    });
 }
 
 #[test]

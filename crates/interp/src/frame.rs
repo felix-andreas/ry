@@ -3075,7 +3075,7 @@ unsafe fn grouped_fallback(
     let mut keys_table = Table::new(keys).map_err(|failure| table_error(call, failure))?;
     let mut result = selected(&mut keys_table, keys_repeat, call)?;
     for (name, items) in names.iter().zip(pieces) {
-        let combined = crate::subset::combine(&items)?;
+        let combined = crate::combine::combine(&items)?;
         heap().root(combined);
         let column = to_column(name, combined, result.height(), call)?;
         result
