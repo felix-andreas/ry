@@ -19,7 +19,8 @@ use {
     },
     cranelift_frontend::{FunctionBuilder, FunctionBuilderContext},
     cranelift_jit::{JITBuilder, JITModule},
-    cranelift_module::{Module as _, default_libcall_names},
+    cranelift_module::{Linkage, Module as _, default_libcall_names},
+    cranelift_object::{ObjectBuilder, ObjectModule as ClifObjectModule},
     smallvec::SmallVec,
     std::cell::RefCell,
 };
@@ -101,6 +102,9 @@ impl Module {
         if dump {
             eprintln!("{function}");
         }
+        if !function.symbols.is_empty() {
+            return Err(Error("code for this process addresses nothing by name"));
+        }
         self.jit.clear_context(&mut self.context);
         self.context.func.signature = self.signature(&function.signature);
         lower(
@@ -145,6 +149,104 @@ impl Module {
             CallConv::Tail => ClifCallConv::Tail,
         };
         clif_signature(signature, call_conv)
+    }
+}
+
+/// Where code written ahead of time is compiled: a relocatable object for the host's
+/// architecture at a fixed baseline of CPU features, linked into a [`section::Code`] that the
+/// loader maps from a file. Code built here never calls by absolute address: it calls the
+/// module's own functions relative to itself and takes every outside address from its link
+/// table, which [`Builder::import_symbol`] names.
+///
+/// [`section::Code`]: crate::section::Code
+/// [`Builder::import_symbol`]: crate::Builder::import_symbol
+pub struct ObjectModule {
+    object: ClifObjectModule,
+    context: Context,
+    builder_context: FunctionBuilderContext,
+    names: Vec<Box<str>>,
+}
+
+impl ObjectModule {
+    pub fn new() -> Result<Self, Error> {
+        let mut flags = settings::builder();
+        let configure = |flags: &mut settings::Builder| -> Result<(), settings::SetError> {
+            flags.set("opt_level", "speed")?;
+            flags.set("is_pic", "true")?;
+            flags.set(
+                "enable_verifier",
+                if cfg!(debug_assertions) {
+                    "true"
+                } else {
+                    "false"
+                },
+            )?;
+            Ok(())
+        };
+        configure(&mut flags).map_err(|_| Error("Cranelift rejected the settings"))?;
+        let isa = crate::section::isa_builder()?
+            .finish(settings::Flags::new(flags))
+            .map_err(|_| Error("Cranelift could not configure the target"))?;
+        let builder = ObjectBuilder::new(isa, "ry", default_libcall_names())
+            .map_err(|_| Error("Cranelift could not start an object"))?;
+        let object = ClifObjectModule::new(builder);
+        let context = object.make_context();
+        Ok(Self {
+            object,
+            context,
+            builder_context: FunctionBuilderContext::new(),
+            names: Vec::new(),
+        })
+    }
+
+    /// Declares a function the section exports under `name`, so bodies can call it before it is
+    /// defined.
+    pub fn declare(&mut self, name: &str, signature: &Signature) -> Result<FuncId, Error> {
+        let call_conv = match signature.call_conv {
+            CallConv::Host => self.object.isa().default_call_conv(),
+            CallConv::Tail => ClifCallConv::Tail,
+        };
+        let id = self
+            .object
+            .declare_function(name, Linkage::Export, &clif_signature(signature, call_conv))
+            .map_err(|_| Error("Cranelift rejected the function declaration"))?;
+        self.names.push(name.into());
+        Ok(id)
+    }
+
+    /// Compiles `function` as the body of `id` and returns the size of its machine code.
+    pub fn define(&mut self, id: FuncId, function: &Function) -> Result<u32, Error> {
+        self.object.clear_context(&mut self.context);
+        let call_conv = match function.signature.call_conv {
+            CallConv::Host => self.object.isa().default_call_conv(),
+            CallConv::Tail => ClifCallConv::Tail,
+        };
+        self.context.func.signature = clif_signature(&function.signature, call_conv);
+        lower(
+            function,
+            &mut self.object,
+            &mut self.context.func,
+            &mut self.builder_context,
+        )?;
+        let defined = self.object.define_function(id, &mut self.context);
+        let size = self
+            .context
+            .compiled_code()
+            .map_or(0, |code| code.code_info().total_size);
+        self.object.clear_context(&mut self.context);
+        defined.map_err(|_| Error("Cranelift rejected the function"))?;
+        Ok(size)
+    }
+
+    /// Links every defined function into one block of code and its link table. `known` says
+    /// whether the loader will be able to resolve a symbol.
+    pub fn finish(self, known: &dyn Fn(&str) -> bool) -> Result<crate::section::Code, Error> {
+        let names = self.names;
+        let product = self.object.finish();
+        let bytes = product
+            .emit()
+            .map_err(|_| Error("Cranelift could not write the object"))?;
+        crate::section::link(&bytes, &names, known)
     }
 }
 
@@ -227,17 +329,24 @@ fn float_cc(condition: FloatCC) -> ClifFloatCC {
 /// before the blocks it dominates use it, and blocks the entry cannot reach are dropped.
 fn lower(
     function: &Function,
-    jit: &mut JITModule,
+    module: &mut impl cranelift_module::Module,
     lowered: &mut clif::Function,
     builder_context: &mut FunctionBuilderContext,
 ) -> Result<(), Error> {
     let functions: Vec<clif::FuncRef> = function
         .functions
         .iter()
-        .map(|&(id, _)| jit.declare_func_in_func(id, lowered))
+        .map(|&(id, _)| module.declare_func_in_func(id, lowered))
         .collect();
-    let host = jit.isa().default_call_conv();
-    let config = jit.isa().frontend_config();
+    let mut symbols: Vec<clif::GlobalValue> = Vec::with_capacity(function.symbols.len());
+    for name in &function.symbols {
+        let data = module
+            .declare_data(name, Linkage::Import, false, false)
+            .map_err(|_| Error("Cranelift rejected a symbol"))?;
+        symbols.push(module.declare_data_in_func(data, lowered));
+    }
+    let host = module.isa().default_call_conv();
+    let config = module.isa().frontend_config();
     let mut builder = FunctionBuilder::new(lowered, builder_context);
     let signatures: Vec<clif::SigRef> = function
         .signatures
@@ -308,7 +417,7 @@ fn lower(
             let Some(&op) = function.ops.get(inst.index()) else {
                 continue;
             };
-            lowering.inst(inst, op, &functions, &signatures, &slots)?;
+            lowering.inst(inst, op, &functions, &signatures, &slots, &symbols)?;
         }
     }
     lowering.builder.seal_all_blocks();
@@ -391,6 +500,7 @@ impl Lowering<'_, '_> {
         functions: &[clif::FuncRef],
         signatures: &[clif::SigRef],
         slots: &[clif::StackSlot],
+        symbols: &[clif::GlobalValue],
     ) -> Result<(), Error> {
         let slot = |slot: super::StackSlot| {
             slots
@@ -496,6 +606,13 @@ impl Lowering<'_, '_> {
                         .store(flags(memory), value, address, offset);
                 }
                 return Ok(());
+            }
+            Op::SymbolAddr(symbol) => {
+                let symbol = symbols
+                    .get(symbol.index())
+                    .copied()
+                    .ok_or(Error("an unknown symbol"))?;
+                self.builder.ins().symbol_value(clif::types::I64, symbol)
             }
             Op::StackAddr(ty, stack, offset) => {
                 self.builder
