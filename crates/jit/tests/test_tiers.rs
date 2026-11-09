@@ -2651,6 +2651,26 @@ fn typed_core_keeps_tier_zero_semantics_at_scope_and_na_edges() {
             "function(b: logical) -> integer | NULL if (b) 1L",
             &["{ x <- FALSE; FUNCTION(x) }"],
         ),
+        // An `if` whose branches are such `if`s has a value nothing may read either, even
+        // when its own branches agree.
+        (
+            "function(x: character) (if (x == \"a\") (if (x == \"b\") 1 else 0L) else (if (x == \"b\") 1 else 0L))",
+            &[
+                "{ a <- \"a\"; FUNCTION(a) }",
+                "{ a <- \"c\"; FUNCTION(a) }",
+            ],
+        ),
+        (
+            "function(b: logical) if (b) (if (b) 1 else 0L)",
+            &["{ x <- TRUE; FUNCTION(x) }", "{ x <- FALSE; FUNCTION(x) }"],
+        ),
+        (
+            "function(b: logical, c: logical) if (b) (if (c) 1 else 0L) else return(2L)",
+            &[
+                "{ x <- TRUE; y <- FALSE; FUNCTION(x, y) }",
+                "{ x <- FALSE; y <- FALSE; FUNCTION(x, y) }",
+            ],
+        ),
         // A local function sees the names where it is defined, and the latest value of each.
         (
             "function(n: integer) -> integer { y <- 1L; g <- function(k: integer) -> integer k + y; \
