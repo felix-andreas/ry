@@ -828,11 +828,19 @@ change that does not pay.
 
 ## Open: untyped R against GNU R
 
-- `missing()` costs about a whole closure call (2,626 instructions against GNU R's 2,590); it is a
-  special, so a fast path needs its own bytecode op. The unary builtin path and native entries
-  skip `call_builtin_checked`, so `--profile-summary` counters and Rprof do not see those calls.
-  The `Reduce` prologue never binds `ind` in its frame, which only an `f` that reads
-  `parent.frame()` can observe.
+- `.Call` into a package routine costs about 1.5x GNU R per call (`truelength()` x300k: 0.21 s
+  against 0.14 s). What remains is the boundary itself: `call_native`'s native scope, rooting and
+  `ry_call_native` in `crates/libr/src/boundary.rs`.
+- Divergences found while pinning fast paths: `.row_names_info(structure(data.frame(u = 1:3),
+  note = "hi"))` is 3 on GNU R and -3 on ry, because ry's `attributes<-` keeps row names compact;
+  `.Call("crc64", "x", PACKAGE = "utils")` errors on GNU R (utils registers its routines with
+  symbol lookup off) but runs on ry.
+- Bench environment: a multi-package `install.packages()` call under ry installs nothing without
+  an error, `ry R CMD INSTALL` fails with "cannot read CMD", and the testthat workload fails on
+  both engines with testthat 3.3.2 ("attempt to use zero-length variable name").
+- The unary builtin path and native entries skip `call_builtin_checked`, so `--profile-summary`
+  counters and Rprof do not see those calls. The `Reduce` prologue never binds `ind` in its frame,
+  which only an `f` that reads `parent.frame()` can observe.
 
 Target: plain, untyped R at least 1.5 times faster than GNU R. A private 300K-line code base runs
 about 3% slower than on GNU R, and `just bench-real` (`tools/bench/real/`, results in

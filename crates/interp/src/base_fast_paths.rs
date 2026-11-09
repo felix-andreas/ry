@@ -1036,23 +1036,24 @@ unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
             return decline();
         }
     }
-    let existing = kernel(crate::subset::do_attributes, &[data], frame)?;
-    let existing_names = values::names(existing);
-    let mut combined: Vec<(String, Sexp)> = Vec::with_capacity(length(existing) + attributes.len());
-    for index in 0..length(existing) {
-        let name = values::string_at(existing_names, index).unwrap_or_default();
-        combined.push((name.into_owned(), existing.element(index)));
+    // `attributes(.Data) <- c(attributes(.Data), list(...))` clears the attributes and adds them
+    // back with `dim` first, so setting the new ones in place is the same unless that moves an
+    // existing `dim`. `attributes()` lists `names` first, so its position cannot be observed.
+    let symbols = symbols();
+    let mut before_dim = false;
+    let mut cell = data.attrib();
+    while cell != nil() {
+        if cell.tag() == symbols.dim && before_dim {
+            return decline();
+        }
+        before_dim |= cell.tag() != symbols.names;
+        cell = cell.cdr();
     }
+    let result = crate::subset::modifiable(data)?;
+    crate::heap().root(result);
     for &(tag, value) in &attributes {
-        combined.push((values::symbol_name(tag).into_owned(), value));
+        crate::subset::set_attribute_checked(result, tag, value, call.call)?;
     }
-    let pairs: Vec<(&str, Sexp)> = combined
-        .iter()
-        .map(|(name, value)| (name.as_str(), *value))
-        .collect();
-    let list = values::named_list(&pairs)?;
-    crate::heap().root(list);
-    let result = kernel(crate::subset::do_set_attributes, &[data, list], frame)?;
     finish(frame, result, true)
 }
 
