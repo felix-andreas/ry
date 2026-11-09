@@ -37,15 +37,15 @@ The quality bar is four things.
 
 ## Open: the baseline tier and JIT on against JIT off
 
-The baseline tier, the merged SSA IR (`crates/ssa`), size-scaled tier-up, block-bodied closure
-inlining and inline `GetVar`, `SetVar` and scalar comparisons in baseline code are on branch
-`perf/baseline-tier-ir` (PR #353). JIT on runs about 1% more instructions than JIT off on
-`bench-real` and is not faster in wall time; the baseline is about 4% slower than JIT off and stays
-opt-in (`decisions.md`, "Baseline code inlines variable access and scalar comparisons"). What is
+The baseline tier, the merged SSA IR (`crates/ssa`), size-scaled tier-up and block-bodied closure
+inlining are on main; shared baseline stubs and short encodings are on `perf/baseline-compact`.
+JIT on runs about 1% more instructions than JIT off on `bench-real` and is not faster in wall time;
+the baseline runs 1 to 2% more instructions and more I1 misses than JIT off and stays opt-in
+(`decisions.md`, "Baseline code calls shared stubs for variable access and comparisons"). What is
 left, in order of expected gain:
 
-- Shrink baseline code: rel8 branches, 8-bit compare immediates, and a step convention that
-  answers 0 for fall-through.
+- One copy of each instruction handler: the baseline's step functions duplicate tier 0's
+  handlers, and on `testthat` they add more I1 misses than `execute_code` sheds.
 - Inline paths for scalar `+ - * /` (needs an inline allocation of a length-one vector), `Guard`
   (`step_guard` costs 227M instructions on `functional`), and the trivial predicates through
   `BuiltinDef::unary`.
