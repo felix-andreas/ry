@@ -12,7 +12,7 @@ use {
         values::{self, base_env, base_namespace, global_env, length, nil},
         write_console,
     },
-    heap::object::{Sexp, SexpType, gp},
+    heap::object::{Sexp, SexpType},
     std::{cell::RefCell, rc::Rc},
 };
 
@@ -106,6 +106,7 @@ unsafe fn prepare_process() {
 /// R's start-up gives them.
 unsafe fn start_from_image(home: &str) -> R<()> {
     crate::base_fast_paths::register_native_entries(base_namespace())?;
+    mark_namespace_loader()?;
     crate::envir::clear_options()?;
     define_process_variables()?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
@@ -229,12 +230,13 @@ unsafe fn start_slowly(
     Ok(warned)
 }
 
-/// Flags base R's `loadNamespace` so the collector knows when a namespace load runs. A load
+/// Records base R's `loadNamespace` so the collector knows when a namespace load runs. A load
 /// allocates mostly what the session keeps, so collecting during it frees little.
 unsafe fn mark_namespace_loader() -> R<()> {
     let loader = eval::find_fun(values::install("loadNamespace")?, base_namespace())?;
     if loader.kind() == SexpType::Closure {
-        loader.set_gp_bits(gp::NAMESPACE_LOADER, true);
+        crate::heap().preserve(loader);
+        interp().namespace_loader = loader;
     }
     Ok(())
 }

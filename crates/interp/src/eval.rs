@@ -1312,10 +1312,18 @@ pub unsafe fn run_closure(
         Entry::Unchecked => crate::annotations::enter(call, function, env, depth),
         Entry::Checked(signature) => Ok(signature),
     };
-    let loads_namespace = function.has_gp(gp::NAMESPACE_LOADER);
-    if loads_namespace {
-        crate::heap().enter_namespace_load();
+    // Ends the namespace load however the call exits, a panic included, so a load that never
+    // returns cannot keep major collections deferred.
+    struct NamespaceLoad;
+    impl Drop for NamespaceLoad {
+        fn drop(&mut self) {
+            crate::heap().leave_namespace_load();
+        }
     }
+    let _namespace_load = (function == state.namespace_loader).then(|| {
+        crate::heap().enter_namespace_load();
+        NamespaceLoad
+    });
     let result = signature.map(|signature| {
         let result = scope(|| {
             on_large_stack(|| {
@@ -1325,9 +1333,7 @@ pub unsafe fn run_closure(
         });
         (signature, result)
     });
-    if loads_namespace {
-        crate::heap().leave_namespace_load();
-    }
+    drop(_namespace_load);
     let (signature, result) = match result {
         Ok(pair) => pair,
         Err(unwind) => (None, Err(unwind)),
@@ -1366,16 +1372,19 @@ const STACK_SEGMENT: usize = 4 * 1024 * 1024;
 
 /// Runs `body` with at least [`STACK_RED_ZONE`] of stack left, moving to a fresh segment when
 /// less is left, as `stacker::maybe_grow` does. Asking `stacker` reads thread-local state on
-/// every closure call, so the floor of the segment in use is kept in the interpreter and the
-/// stack pointer compared against it, and `stacker` runs only near the floor. A segment
-/// `stacker` allocates lies anywhere in memory, so its floor replaces the old one while the
-/// body runs on it.
+/// every closure call, so the interpreter keeps the floor of the segment in use and a ceiling
+/// at or above every frame the interpreter runs on it, and `stacker` runs only near the floor
+/// or off that range. A segment lies anywhere in memory, and other code switches segments too
+/// (`libr`'s and `rdb`'s readers run R hooks on their own), so a stack pointer outside
+/// `[floor, ceiling]` means a segment the interpreter has not measured.
 #[inline(always)]
 fn on_large_stack<T>(body: impl FnOnce() -> T) -> T {
     let marker = 0u8;
     let pointer = std::ptr::addr_of!(marker) as usize;
-    let floor = interp().stack_floor;
-    if floor != 0 && pointer.wrapping_sub(floor) > 2 * STACK_RED_ZONE {
+    let state = interp();
+    if pointer <= state.stack_ceiling
+        && pointer.saturating_sub(state.stack_floor) > 2 * STACK_RED_ZONE
+    {
         return body();
     }
     on_large_stack_slow(body)
@@ -1383,27 +1392,36 @@ fn on_large_stack<T>(body: impl FnOnce() -> T) -> T {
 
 #[inline(never)]
 fn on_large_stack_slow<T>(body: impl FnOnce() -> T) -> T {
-    // An R error unwinds through here, so the floor of the caller's segment is restored by a
-    // guard: a stale floor from a freed segment would let the fast path skip the check.
-    struct RestoreFloor(usize);
-    impl Drop for RestoreFloor {
+    // An R error unwinds through here, so the caller's segment bounds are restored by a guard:
+    // stale bounds from a freed segment would let the fast path skip the check.
+    struct RestoreBounds(usize, usize);
+    impl Drop for RestoreBounds {
         fn drop(&mut self) {
-            interp().stack_floor = self.0;
+            let state = interp();
+            state.stack_floor = self.0;
+            state.stack_ceiling = self.1;
         }
     }
-    let floor = || {
+    let bounds = || {
         let marker = 0u8;
         let pointer = std::ptr::addr_of!(marker) as usize;
-        stacker::remaining_stack().map(|remaining| (pointer.saturating_sub(remaining), remaining))
+        stacker::remaining_stack()
+            .map(|remaining| (pointer.saturating_sub(remaining), pointer, remaining))
     };
-    let _restore = RestoreFloor(interp().stack_floor);
-    match floor() {
-        Some((floor, remaining)) if remaining >= STACK_RED_ZONE => {
-            interp().stack_floor = floor;
+    let state = interp();
+    let _restore = RestoreBounds(state.stack_floor, state.stack_ceiling);
+    match bounds() {
+        Some((floor, ceiling, remaining)) if remaining >= STACK_RED_ZONE => {
+            let state = interp();
+            state.stack_floor = floor;
+            state.stack_ceiling = ceiling;
             body()
         }
         _ => stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, || {
-            interp().stack_floor = floor().map_or(0, |(floor, _)| floor);
+            let (floor, ceiling) = bounds().map_or((0, 0), |(floor, ceiling, _)| (floor, ceiling));
+            let state = interp();
+            state.stack_floor = floor;
+            state.stack_ceiling = ceiling;
             body()
         }),
     }

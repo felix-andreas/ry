@@ -281,12 +281,15 @@ impl Frame {
     }
 
     /// [`Frame::insert`] for a fresh function frame's formals, which [`Frame::write_empty`] made
-    /// with room for them: the frame has no index or table yet, and a formal list longer than
-    /// [`INDEX_THRESHOLD`] takes the general path. Only duplicate formals bind a symbol twice,
-    /// and they are rare, so the duplicate scan runs only when a symbol's filter bit is
-    /// already set.
+    /// with room for them: the frame has no index or table yet, and a frame that would grow past
+    /// [`INDEX_THRESHOLD`] bindings takes the general path, which builds the index. Only
+    /// duplicate formals bind a symbol twice, and they are rare, so the duplicate scan runs only
+    /// when a symbol's filter bit is already set.
     pub(crate) fn insert_formals(&mut self, cells: &[Sexp], symbols: impl Iterator<Item = Sexp>) {
-        if self.index.is_some() || self.table.is_some() || cells.len() > INDEX_THRESHOLD {
+        if self.index.is_some()
+            || self.table.is_some()
+            || self.bindings.len() + cells.len() > INDEX_THRESHOLD
+        {
             for (symbol, &cell) in symbols.zip(cells) {
                 self.insert(symbol, cell);
             }
@@ -294,7 +297,8 @@ impl Frame {
         }
         for (symbol, &cell) in symbols.zip(cells) {
             let bit = filter_bit(symbol);
-            if self.filter & bit != 0 && self.bindings.iter().any(|binding| binding.symbol == symbol)
+            if self.filter & bit != 0
+                && self.bindings.iter().any(|binding| binding.symbol == symbol)
             {
                 self.formals |= SHADOWED;
             }
@@ -346,7 +350,8 @@ impl Frame {
 
     /// Drops the removed slots, keeping the live bindings in insertion order.
     fn compact(&mut self) {
-        let formals = self.bindings[..((self.formals & !SHADOWED) as usize).min(self.bindings.len())]
+        let formals = self.bindings
+            [..((self.formals & !SHADOWED) as usize).min(self.bindings.len())]
             .iter()
             .filter(|binding| binding.symbol != REMOVED)
             .count();
