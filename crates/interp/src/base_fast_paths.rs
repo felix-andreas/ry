@@ -289,7 +289,10 @@ unsafe fn dimension(args: &[Arg], position: usize) -> R<Option<Sexp>> {
     if dim.kind() != SexpType::Integer || dim.is_altrep() || values::has_attributes(dim) {
         return Ok(None);
     }
-    let extent = values::ints(dim).get(position).copied().unwrap_or(NA_INTEGER);
+    let extent = values::ints(dim)
+        .get(position)
+        .copied()
+        .unwrap_or(NA_INTEGER);
     values::scalar_integer(extent).map(Some)
 }
 
@@ -324,7 +327,11 @@ unsafe fn native_in(args: &[Arg]) -> R<Option<Sexp>> {
         Some(Position::Scalar(position)) => values::scalar_logical((position > 0) as i32).map(Some),
         Some(Position::Vector(positions)) => {
             let found = values::alloc(SexpType::Logical, length(positions))?;
-            for (flag, position) in found.slice_mut::<i32>().iter_mut().zip(values::ints(positions)) {
+            for (flag, position) in found
+                .slice_mut::<i32>()
+                .iter_mut()
+                .zip(values::ints(positions))
+            {
                 *flag = (*position > 0) as i32;
             }
             Ok(Some(found))
@@ -370,14 +377,19 @@ unsafe fn positions(x: Sexp, table: Sexp, nomatch: i32) -> R<Option<Position>> {
             SexpType::String => {
                 let wanted = x.slice::<Sexp>()[0];
                 if wanted == values::na_string() || wanted.has_gp(gp::ASCII) {
-                    table.slice::<Sexp>().iter().position(|item| *item == wanted)
+                    table
+                        .slice::<Sexp>()
+                        .iter()
+                        .position(|item| *item == wanted)
                 } else {
                     return kernel_positions(x, table, nomatch);
                 }
             }
             _ => return kernel_positions(x, table, nomatch),
         };
-        return Ok(Some(Position::Scalar(found.map_or(nomatch, |index| index as i32 + 1))));
+        return Ok(Some(Position::Scalar(
+            found.map_or(nomatch, |index| index as i32 + 1),
+        )));
     }
     kernel_positions(x, table, nomatch)
 }
@@ -700,8 +712,16 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
     let heap = crate::heap();
     let init_symbol = install("init")?;
     let i_symbol = install("i")?;
-    eval::define(install("mis")?, values::scalar_logical(missing_init as i32)?, frame)?;
-    eval::define(install("len")?, values::scalar_integer(count as i32)?, frame)?;
+    eval::define(
+        install("mis")?,
+        values::scalar_logical(missing_init as i32)?,
+        frame,
+    )?;
+    eval::define(
+        install("len")?,
+        values::scalar_integer(count as i32)?,
+        frame,
+    )?;
     eval::define(install("f")?, function, frame)?;
     let element_call = values::call(symbols.bracket2, &[install("x")?, i_symbol])?;
     heap.root(element_call);
@@ -735,7 +755,11 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         crate::heap().root(element);
         let init = eval::find_var_in_frame(init_symbol, frame)?;
         let init = eval::value_of(init)?;
-        let values = if right { [element, init] } else { [init, element] };
+        let values = if right {
+            [element, init]
+        } else {
+            [init, element]
+        };
         let value = eval::call_with_values(inner_call, function, &values, frame)?;
         eval::define(init_symbol, value, frame)
     };

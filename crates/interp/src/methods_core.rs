@@ -2220,7 +2220,9 @@ unsafe fn conform_definition(definition: Sexp, generic: Sexp, signature: Sexp) -
     if let Some(missing) = missing {
         let by_name: Vec<Sexp> = (0..generic_names.len())
             .filter(|&index| {
-                used[index] && missing <= index && index < dots_position.unwrap_or(generic_names.len())
+                used[index]
+                    && missing <= index
+                    && index < dots_position.unwrap_or(generic_names.len())
             })
             .map(|index| generic_names[index])
             .collect();
@@ -4091,8 +4093,7 @@ unsafe fn recached(definition: Sexp, superclass: Sexp, extension: Sexp) -> R<Rec
     // Subsetting to sort keeps only the names, so a `conflicts` attribute goes too.
     let only_names = {
         let attributes = slot(definition, symbols().contains)?.attrib();
-        attributes == nil()
-            || (attributes.tag() == symbols().names && attributes.cdr() == nil())
+        attributes == nil() || (attributes.tag() == symbols().names && attributes.cdr() == nil())
     };
     if distances.is_sorted() {
         if unchanged && only_names {
@@ -4324,10 +4325,12 @@ unsafe fn union_initialize() -> R<Option<UnionInitialize>> {
         return Ok(None);
     };
     crate::heap().root(method);
-    Ok(is_default_initialize(method)?.then_some(UnionInitialize::Inherit {
-        method,
-        table: all_table,
-    }))
+    Ok(
+        is_default_initialize(method)?.then_some(UnionInitialize::Inherit {
+            method,
+            table: all_table,
+        }),
+    )
 }
 
 /// A class the new one extends, by name, with its definition.
@@ -4501,7 +4504,12 @@ unsafe fn definition_caches(name: &[u8], lineage: &[Sexp], prototype: bool) -> R
             return Ok(false);
         };
         for label in labels {
-            if quiet_value(values::install_bytes(label)?, all_table)?.is_none() {
+            let Some(method) = quiet_value(values::install_bytes(label)?, all_table)? else {
+                return Ok(false);
+            };
+            // A package may define `initialize` for `classRepresentation` or
+            // `SClassExtension`, and the R code's `new()` of the definition would call it.
+            if generic_name == "initialize" && !is_default_initialize(method)? {
                 return Ok(false);
             }
         }

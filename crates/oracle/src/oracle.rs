@@ -18,7 +18,10 @@ use {
         io::Read,
         path::{Path, PathBuf},
         process::{Command, Stdio},
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            OnceLock,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::{Duration, Instant},
     },
 };
@@ -177,8 +180,8 @@ impl ProcessEngine {
 
     /// ry's own runtime, `ry run --runtime ry`. The binary is `$ORACLE_RY`, or the workspace's
     /// debug build.
-    /// It loads base R from the same installation as the GNU R engine ([`gnu_r_home`]), so one
-    /// `ORACLE_R` selects the R version both sides run.
+    /// It loads base R from the GNU R engine's installation when [`gnu_r_home`] says so, so
+    /// both sides run the same R release.
     pub fn ry() -> Self {
         ProcessEngine {
             name: "ry".to_string(),
@@ -438,16 +441,58 @@ pub(crate) fn gnu_r_program() -> String {
     std::env::var("ORACLE_R").unwrap_or_else(|_| "R".to_string())
 }
 
-/// The R home of `ORACLE_R`, as its `R RHOME` prints it, when `ORACLE_R` is set. Without it,
-/// ry finds base R the way it does for a user (`R_HOME`, then the usual places).
+/// The R home ry's runtime loads base R from when it is compared with GNU R: the home of
+/// `ORACLE_R` when that is set, and otherwise the home of the GNU R on `PATH` when it is a
+/// different release from the base R ry bundles. ry emulates the release it loads base R from,
+/// so comparing two releases would report every behavior GNU R changed between them as a
+/// failure. `None` keeps ry on its bundled base R, which is what a user runs.
 pub fn gnu_r_home() -> Option<String> {
-    std::env::var_os("ORACLE_R")?;
-    let output = Command::new(gnu_r_program()).arg("RHOME").output().ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .filter(|home| !home.is_empty())
+    static HOME: OnceLock<Option<String>> = OnceLock::new();
+    HOME.get_or_init(|| {
+        if std::env::var_os("ORACLE_R").is_none() {
+            let gnu_r = gnu_r_version()?;
+            if ry_bundled_version().is_none_or(|bundled| bundled == gnu_r) {
+                return None;
+            }
+        }
+        let output = Command::new(gnu_r_program()).arg("RHOME").output().ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .filter(|home| !home.is_empty())
+    })
+    .clone()
+}
+
+/// The release of GNU R, such as `4.3.3`, from the first line `R --version` prints.
+fn gnu_r_version() -> Option<String> {
+    let output = Command::new(gnu_r_program())
+        .arg("--version")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().next()?;
+    line.strip_prefix("R version ")?
+        .split_whitespace()
+        .next()
+        .map(str::to_owned)
+}
+
+/// The release of the base R the `ry` binary bundles, as `getRversion()` reports it with no
+/// `R_HOME` set.
+fn ry_bundled_version() -> Option<String> {
+    let scratch = Scratch::new(Path::new("version.R")).ok()?;
+    let script = scratch.path().join("version.R");
+    std::fs::write(&script, "cat(format(getRversion()))").ok()?;
+    let output = Command::new(ry_program())
+        .args(["run", "--runtime", "ry"])
+        .arg(&script)
+        .env_remove("R_HOME")
+        .output()
+        .ok()?;
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (output.status.success() && !version.is_empty()).then_some(version)
 }
 
 pub fn gnu_r_available() -> bool {

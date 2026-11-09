@@ -9,9 +9,17 @@
 | package initialize for ClassUnionRepresentation 
 | package initialize for classRepresentation 
 | [1] "NULL"  "A"     ".NULL" "B"     "C"    
+| package initialize for classRepresentation 
+| package initialize for SClassExtension 
+| package initialize for classRepresentation 
+| package initialize for SClassExtension 
+| package initialize for SClassExtension 
+| package initialize for classRepresentation 
+| package initialize for SClassExtension 
+| [1] "A"  "U2"
 [messages]
 [warnings]
 [errors]
 [value]
 character
-| c("NULL", "A", ".NULL", "B", "C")
+| c("A", "U2")

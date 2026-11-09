@@ -32,3 +32,13 @@ setClassUnion("U1", c("numeric", "character"), where = ns)
 entry()
 setClassUnion("U2", c("A", "NULL"), where = ns)
 names(getClass("U2", where = ns)@subclasses)
+# Once the dispatch caches hold the package methods, a plain class and a class that extends
+# another still call them.
+setClass("D", representation(y = "numeric"), where = ns)
+setMethod("initialize", "SClassExtension", function(.Object, ...) {
+  cat("package initialize for", class(.Object), "\n")
+  callNextMethod()
+}, where = ns)
+setClass("E", contains = "A", where = ns)
+setClass("F", contains = "A", where = ns)
+names(getClass("F", where = ns)@contains)

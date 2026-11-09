@@ -2799,7 +2799,10 @@ unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
 /// Whether no argument expression in the pairlist `arguments` is a call.
 unsafe fn no_calls(mut arguments: Sexp) -> bool {
     while arguments.kind() == SexpType::Pairlist {
-        if matches!(arguments.car().kind(), SexpType::Language | SexpType::Bytecode | SexpType::Promise) {
+        if matches!(
+            arguments.car().kind(),
+            SexpType::Language | SexpType::Bytecode | SexpType::Promise
+        ) {
             return false;
         }
         arguments = arguments.cdr();
@@ -2989,7 +2992,13 @@ pub unsafe fn force_and_call_with(
                 tag: arguments.tag(),
                 value,
             });
-            evaluate_args_into(arguments.cdr(), env, definition.keep_missing, call, &mut args)?;
+            evaluate_args_into(
+                arguments.cdr(),
+                env,
+                definition.keep_missing,
+                call,
+                &mut args,
+            )?;
             if definition.generic != Generic::None
                 && let Some(value) =
                     dispatch::try_builtin_dispatch(definition, call, function, &args, env)?

@@ -51,7 +51,11 @@ pub const BUILTINS: &[BuiltinDef] = &[
             if !plain || value.length() > i32::MAX as isize {
                 return Ok(None);
             }
-            let count = if value == nil() { 0 } else { value.length() as i32 };
+            let count = if value == nil() {
+                0
+            } else {
+                value.length() as i32
+            };
             scalar_integer(count).map(Some)
         }),
     builtin("length<-", 2, do_set_length).generic(Generic::Internal),

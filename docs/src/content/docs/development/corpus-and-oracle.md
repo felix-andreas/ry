@@ -182,7 +182,9 @@ in `/usr/local/bin` to keep the system R as the default.
 `ORACLE_R` covers `verify`, `record` and `compare`. `ORACLE_RSCRIPT` covers `packages` and `bench`.
 When `ORACLE_R` is set, the `ry` engine of `compare` also runs with `R_HOME` set to that R's home,
 so ry's runtime loads the same base library and emulates the same version as the GNU R it is
-compared with. That makes `compare` the check for a new R release:
+compared with. Without `ORACLE_R`, the `ry` engine runs on its bundled base R, unless the GNU R on
+`PATH` is a different release: then it takes that R's home too, so a version-gated behavior never
+shows up as a difference. That makes `compare` the check for a new R release:
 
 ```sh
 ORACLE_R=/opt/R/4.6.1/bin/R just oracle compare --engine ry
