@@ -1420,16 +1420,24 @@ pub fn real_op(op: Op, a: f64, b: f64) -> f64 {
 
 /// `a + b` where a `NaN` first operand's payload wins, as with x86's `addsd`, which is what GNU R
 /// gives: `NaN + NA` is `NaN` and `NA + NaN` is `NA`. Plain `+` lets the compiler swap the
-/// operands of a commutative operation, and with them which payload survives.
+/// operands of a commutative operation, and LLVM treats any `NaN` result's payload as free, so it
+/// also folds `a + a` back into `a + b`. Building the result from `a`'s bits keeps the payload.
 #[inline(always)]
 pub fn add(a: f64, b: f64) -> f64 {
-    if a.is_nan() { a + a } else { a + b }
+    if a.is_nan() { quiet(a) } else { a + b }
 }
 
 /// `a * b` where a `NaN` first operand's payload wins, as for [`add`].
 #[inline(always)]
 pub fn multiply(a: f64, b: f64) -> f64 {
-    if a.is_nan() { a * a } else { a * b }
+    if a.is_nan() { quiet(a) } else { a * b }
+}
+
+/// `a` with the quiet bit set, which is what the hardware returns for a `NaN` operand. R's `NA` is
+/// a signalling `NaN` whose low word marks it, and setting the quiet bit leaves that mark intact.
+#[inline(always)]
+fn quiet(a: f64) -> f64 {
+    f64::from_bits(a.to_bits() | 0x0008_0000_0000_0000)
 }
 
 /// R 4.6's `R_pow` multiplies out a cube or a fourth power of a base in [-11, 11] instead of
