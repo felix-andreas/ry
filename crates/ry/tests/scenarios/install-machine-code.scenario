@@ -57,6 +57,23 @@ expect stdout "[1] 4"
 expect stdout "[1] \"value 1\""
 expect stdout "[1] \"non-numeric argument to binary operator\""
 
+# Arguments that are pure expressions over numbers are evaluated at the call, so these calls run
+# the native code; integer overflow still warns as in the interpreter.
+file args.R
+| library(arith, lib.loc = "library")
+| y <- 2L
+| print(hypot(-3, y + 2L))
+| print(clamp(c(0.5) * 3, -1, 2))
+| big <- 2147483647L
+| print(hypot(big + 1L, 0))
+
+run ry run --runtime ry args.R
+expect exit 0
+expect stdout "[1] 5"
+expect stdout "[1] 1.5"
+expect stdout "[1] NA"
+expect stderr "NAs produced by integer overflow"
+
 # Replacing a sibling the code calls directly makes the callers run in the interpreter, which
 # calls the replacement.
 file replace.R

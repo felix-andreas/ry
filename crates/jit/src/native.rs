@@ -3301,7 +3301,10 @@ unsafe fn pure_value(expression: Sexp, env: Sexp, depth: usize) -> Option<Sexp> 
                 {
                     return Some(operand);
                 }
-                (_, Number::Double(x)) => values::scalar_real(if name == "-" { -x } else { x }),
+                (_, Number::Double(x)) if !x.is_nan() => {
+                    values::scalar_real(if name == "-" { -x } else { x })
+                }
+                (_, Number::Double(_)) => return None,
                 (_, Number::Integer(x)) => values::scalar_integer(match x {
                     NA_INTEGER => NA_INTEGER,
                     x if name == "-" => -x,
@@ -3329,6 +3332,11 @@ unsafe fn pure_value(expression: Sexp, env: Sexp, depth: usize) -> Option<Sexp> 
                 }
                 (x, y) => {
                     let (x, y) = (x.double(), y.double());
+                    // Whether `NaN` meeting `NA` gives `NaN` or `NA` depends on the order the
+                    // compiled arithmetic takes its operands in, so tier 0 decides it.
+                    if x.is_nan() || y.is_nan() {
+                        return None;
+                    }
                     values::scalar_real(match name {
                         "+" => x + y,
                         "-" => x - y,
