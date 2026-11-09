@@ -1197,9 +1197,8 @@ fn fuzz_argument_expressions_agree_with_tier_zero() {
             } else {
                 ""
             };
-            let body = format!(
-                "{{ {shadow}s <- 0\nfor (k in 1:30) s <- s + nf({first}, {second})\ns }}"
-            );
+            let body =
+                format!("{{ {shadow}s <- 0\nfor (k in 1:30) s <- s + nf({first}, {second})\ns }}");
             let text = format!("(function() {body})()");
             jit::install_mode(Mode::Off);
             let reference = run(&text);
@@ -1218,7 +1217,18 @@ fn fuzz_argument_expressions_agree_with_tier_zero() {
 /// that must be left to the promise.
 fn argument_expression(rng: &mut SplitMix64, depth: usize) -> String {
     let leaves = [
-        "1", "-2.5", "3L", "NA", "NA_integer_", "TRUE", "w", "i", "big", "cls", "NaN", "1e308",
+        "1",
+        "-2.5",
+        "3L",
+        "NA",
+        "NA_integer_",
+        "TRUE",
+        "w",
+        "i",
+        "big",
+        "cls",
+        "NaN",
+        "1e308",
     ];
     if depth > 3 || rng.chance(1, 3) {
         return leaves[rng.below(leaves.len())].to_owned();
@@ -1240,7 +1250,9 @@ fn argument_expression(rng: &mut SplitMix64, depth: usize) -> String {
 fn break_and_next_route_through_nested_steps() {
     // A stepped instruction can run a closure that tier 1 also compiled, which steps instructions
     // of its own. A `break` or `next` forced inside the inner body must still resume the outer
-    // loop after the inner step returns, so each step has to restore its caller's marker.
+    // loop after the inner step returns, so each step has to restore its caller's marker. The
+    // `break` in `outer` also makes the optimizing tier hand back a resume at the loop's exit,
+    // the instruction right after the backward `Jump`, which baseline code must take as such.
     let definitions = [
         "inner <- function(n, v) { t <- 0; for (j in seq_len(n)) { if (j == 2) next; t <- t + j }; t + v }",
         "outer <- function(m) { s <- 0; for (i in 1:m) { s <- s + inner(i, if (i == 4) break else if (i == 2) next else i) }; s }",
@@ -1270,7 +1282,6 @@ fn break_and_next_route_through_nested_steps() {
     assert_eq!(outcomes[0], outcomes[1]);
 }
 
-            run("shadowed <- function(x: F64
 #[test]
 fn fuzz_typed_closures_agree_with_tier_zero() {
     with_interpreter(|| {
