@@ -3,6 +3,7 @@
 //! nodes.
 
 pub mod ast;
+pub mod highlight;
 pub mod kind;
 pub mod literate;
 pub mod native_values;

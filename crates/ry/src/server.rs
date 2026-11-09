@@ -38,7 +38,6 @@ use {
     ide::{
         CompletionItem, CompletionKind, DefinitionTarget, DocumentSymbol, DocumentSymbolKind,
         FoldKind, HoverDefinition, NavigationTarget, SemanticClass, SignatureData, StubTarget,
-        classify_type_token,
     },
     salsa::{Durability, Setter},
     semantics::{
@@ -81,6 +80,7 @@ use {
     },
     syntax::{
         SyntaxElement, SyntaxKind, SyntaxNode, TextRange, TextSize, TokenAtOffset,
+        highlight::classify_type_token,
         is_syntactic_name,
         literate::{is_literate_extension, r_regions, r_source_of_literate},
     },
