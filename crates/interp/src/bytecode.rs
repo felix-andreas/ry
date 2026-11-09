@@ -577,6 +577,9 @@ pub enum Op {
     /// `target`: a guard fallback laid out after the body returning to it. Unlike a backward
     /// `Jump`, it is never a loop's back edge.
     Resume,
+    /// `dst symbol`: `missing(symbol)` for a plain symbol, read from the frame without building
+    /// the special's call.
+    Missing,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its last operand.
@@ -591,7 +594,7 @@ enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 44] = [
+pub const OPS: [Op; 45] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -636,6 +639,7 @@ pub const OPS: [Op; 44] = [
     Op::SubAssignMatrix,
     Op::Replace,
     Op::Resume,
+    Op::Missing,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1739,6 +1743,21 @@ impl Compiler {
                 ".ry_match" if supported_match(&args)? => {
                     return self.compiled_match(call, head, primitive, dst, &args);
                 }
+                "missing" => {
+                    return match args.as_slice() {
+                        [(tag, symbol)]
+                            if *tag == nil()
+                                && symbol.kind() == SexpType::Symbol
+                                && *symbol != symbols().dots
+                                && *symbol != missing_arg()
+                                && eval::dot_dot_index(*symbol).is_none()
+                                && self.bound.is_none() =>
+                        {
+                            self.missing(call, head, primitive, dst, *symbol)
+                        }
+                        _ => self.general_call(call, head, dst),
+                    };
+                }
                 _ => {}
             }
             // Dispatch on an evaluated subject evaluates the other arguments in the frame.
@@ -2105,6 +2124,7 @@ impl Compiler {
                 | ".ry_tag"
                 | ".ry_match"
                 | "switch"
+                | "missing"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -2234,6 +2254,26 @@ impl Compiler {
         self.inline(call, primitive, dst, name, args)?;
         self.cold_fallback(&[guard], call, dst)?;
         Ok(())
+    }
+
+    /// `missing(symbol)`, guarded by `missing`: [`Op::Missing`] reads the frame's binding of
+    /// `symbol`, which is what the special does once it has matched its one argument.
+    unsafe fn missing(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        dst: u32,
+        symbol: Sexp,
+    ) -> R<()> {
+        let name = self.constant(head);
+        let expected = self.constant(primitive);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
+        let symbol = self.constant(symbol);
+        self.emit(Op::Missing, &[dst, symbol]);
+        self.cold_fallback(&[guard], call, dst)
     }
 
     unsafe fn inline(
@@ -2947,6 +2987,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::Ast => 2,
         Op::Guard => 5,
         Op::Jump | Op::Resume => 1,
+        Op::Missing => 2,
         Op::JumpUnless => 3,
         Op::Arithmetic => 6,
         Op::Return => 1,
@@ -3485,6 +3526,7 @@ handlers! {
     run_sub_assign: SubAssign, true, op_sub_assign;
     run_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
     run_replace: Replace, true, op_replace;
+    run_missing: Missing, true, op_missing;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -3836,6 +3878,16 @@ unsafe fn op_ast(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<
     let expression = state.constant(instruction, 1);
     let value = eval::eval(expression, state.env)?;
     state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_missing(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let symbol = state.constant(instruction, 1);
+    let value = values::scalar_bool(eval::is_missing(symbol, state.env)?)?;
+    state.record(instruction.at, value);
+    (*state.interp).visible = true;
     instruction.output(0, value);
     Ok(Flow::Next)
 }
