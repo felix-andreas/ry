@@ -5,19 +5,19 @@ description: Install the ry binary and set up your editor
 
 ## The binary
 
-The latest release is [0.4.2-beta](https://github.com/felix-andreas/ry/releases/tag/0.4.2-beta),
+The latest release is [0.4.3-beta](https://github.com/felix-andreas/ry/releases/tag/0.4.3-beta),
 which has Linux binaries only. macOS and Windows users install
 [0.4.1-beta](https://github.com/felix-andreas/ry/releases/tag/0.4.1-beta) for now.
 Each archive holds a single `ry` binary:
 
 | Platform | Release | Archive |
 | --- | --- | --- |
-| Linux x86_64, glibc 2.35 or newer | 0.4.2-beta | `ry-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux x86_64, glibc 2.35 or newer | 0.4.3-beta | `ry-x86_64-unknown-linux-gnu.tar.gz` |
 | macOS on Apple silicon | 0.4.1-beta | `ry-aarch64-apple-darwin.tar.gz` |
 | Windows x86_64 | 0.4.1-beta | `ry-x86_64-pc-windows-gnullvm.zip` |
 
 ```bash
-curl -fsSL https://github.com/felix-andreas/ry/releases/download/0.4.2-beta/ry-x86_64-unknown-linux-gnu.tar.gz | tar xz
+curl -fsSL https://github.com/felix-andreas/ry/releases/download/0.4.3-beta/ry-x86_64-unknown-linux-gnu.tar.gz | tar xz
 sudo mv ry /usr/local/bin/
 ry --version
 ```
@@ -44,7 +44,7 @@ snapshots for early feedback, so use a numbered release for anything else.
 
 | ry | Base R comes from |
 | --- | --- |
-| 0.4.2-beta on Linux, built from source | a copy of base R 4.6.2 inside `ry`; no GNU R needed |
+| 0.4.3-beta on Linux, built from source | a copy of base R 4.6.2 inside `ry`; no GNU R needed |
 | 0.4.1-beta | a GNU R installation, 4.3 or newer, built as a shared library |
 
 `ry R` runs your code on GNU R itself, so it always needs a GNU R installation.
@@ -62,7 +62,7 @@ runtime.
 | Any LSP client | Run `ry server` as the language server for R files. |
 
 The extension in VS Code, Positron and VSCodium bundles ry 0.3.2-beta, which has no runtime. Set its
-`ry.path` setting to a 0.4.2-beta binary to use `ry run`, the debugger and the console. The language
+`ry.path` setting to a 0.4.3-beta binary to use `ry run`, the debugger and the console. The language
 server reads the project's `ry.toml`, so the editor and `ry check` report the same findings.
 [Editor settings](/reference/configuration#editor-settings) lists the extension's options.
 

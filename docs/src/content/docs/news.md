@@ -3,6 +3,87 @@ title: News
 description: Release announcements and project news
 ---
 
+## ry 0.4.3-beta, Linux only
+
+*Released in November 2026 as a pre-release.*
+
+Version 0.4.3-beta makes calls, S3 and S4 dispatch and the hottest builtins cheaper, fixes the S4
+and `ry check` problems that test users reported, and brings more numerical routines to bit
+identity with GNU R. It ships Linux x86_64 binaries only: macOS and Windows users stay on
+[0.4.1-beta](https://github.com/felix-andreas/ry/releases/tag/0.4.1-beta) until a later release
+fixes those builds ([Installation](/installation)).
+
+Every figure below was reported by the change that introduced it (instructions are callgrind
+counts per call). None was re-measured for these notes.
+
+### Highlights
+
+- **Faster closure calls.** Guards carry version stamps, calls to a known callee are tail
+  dispatched, a callee without side effects skips its promises, and each call site caches its
+  argument matching. A closure call takes 3,411 instructions, against 3,968 before and 4,602 in
+  GNU R.
+- **S3 and S4 dispatch cache per call site.** An S3 dispatch takes 7,688 instructions (GNU R
+  9,824) and an S4 dispatch 8,688 (GNU R 11,681).
+- **Native prologues for hot base closures.** The validation workload runs 1.94 times as fast as
+  GNU R.
+- **Builtin fast paths.** Instructions per call, before and after, with GNU R for comparison:
+
+  | Call | Before | After | GNU R |
+  | --- | --- | --- | --- |
+  | `identical(a, b)` | 8,545 | 1,818 | 3,149 |
+  | `x %in% y` | 11,327 | 1,745 | 8,226 |
+  | `isTRUE(x)` | 6,087 | 1,114 | 5,594 |
+  | `!x` | 944 | 563 | 750 |
+  | `x[["net"]] <- 3` | 4,910 | 987 | 2,011 |
+
+- **The JIT is cheaper to keep on.** Proofs are shared across sibling enclosures, nothing is
+  revalidated while no binding has moved, and `pkg::f(...)` calls are compiled.
+
+### Measured against 0.4.2-beta
+
+On the `bench-real` workloads (10 real-world programs, geometric mean of the speed relative to GNU R,
+`--repeat 3`), 0.4.3-beta runs 1.22 times as fast as GNU R with the JIT on and 1.28 times with it
+off. 0.4.2-beta measured 0.90 times with the JIT on. The new testthat workload
+(`tools/bench/real/testthat.R`) runs 1.12 times as fast with the JIT on and 1.23 times with it off.
+
+### Also in this release
+
+- **S4 definitions run natively in more shapes.** A class under a class-union member is defined
+  natively: 200 such classes take 20 ms, against 831 ms on the R path and 1,017 ms in GNU R.
+  Methods that omit or rename generic arguments, and generics with a braced body, are native too.
+  `setAs()` and `setClassUnion(member = )` are matched in the load index, so both are held back
+  until first use. S4 subclass bookkeeping and `.local` methods run natively.
+- **`deparse(getClass("A"))` matches GNU R**, and a segfault when deparsing an S4 object is fixed.
+- **`ry check` no longer crashes** on a forward capture after a hinted lambda.
+- **`solve()` works without a system LAPACK**, because the Linux archive ships GNU R's reference
+  `libRblas.so` and `libRlapack.so`.
+- **`gc()` reports a max-used figure close to the real peak.** A reproducer that reported 4,198 MB
+  now reports 575 MB, against an 831 MB process peak. GNU R counts the peak at allocation, while
+  ry samples it at collections.
+- **Profile summaries for packages.** `ry load --profile-summary FILE` and `ry test
+  --profile-summary FILE` write the summary `ry run` writes. `RY_PROFILE_SUMMARY_DIR=DIR` makes every
+  process write `DIR/ry-profile-<start>-<pid>.md`, and child processes inherit it
+  ([CLI reference](/reference/cli)).
+- **Load plans are linear in the S4 definitions.** The first plan of a 591-file S4 package drops
+  from 38 ms to 14 ms.
+- **More numerics match GNU R bit for bit:** `pgamma`, `qgamma`, `pbeta`, `qbeta`, the quantile
+  search of `qbinom`, `qpois` and `qnbinom`, `dnbinom`, `loess`, `smooth.spline`, `lowess`, `fft`,
+  and the long double accumulation and matrix-product modes. `options(ry.blas = "host")` or
+  `RY_BLAS=host` sends `%*%`, `crossprod` and `tcrossprod` through the installed BLAS, so the bits
+  follow the machine's BLAS.
+- **A pinned corpus of real package test suites** from a CRAN mirror supports package
+  compatibility work. It exposed a segfault when `[[` fell back after an S4 generic found no
+  method, and `options(expressions = )` having no effect; both are fixed.
+
+### Known limitations
+
+- **No macOS or Windows binaries.** 0.4.3-beta has a Linux x86_64 archive only.
+- **The JIT on is still slower than off on 8 of the 10 `bench-real` workloads**, because the cost
+  of the first compile is not yet amortized.
+- **`ry R` still needs GNU R**, because it runs your code on GNU R itself.
+- **Linear algebra on Windows needs GNU R.** Windows has no system LAPACK, so `solve()` and its
+  relatives need `R_HOME` naming a GNU R installation.
+
 ## ry 0.4.2-beta, Linux only
 
 *Released in November 2026 as a pre-release.*
