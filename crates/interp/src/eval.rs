@@ -445,6 +445,12 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
             call_builtin(definition, call, function, &args, env)
         }
         SexpType::Closure => {
+            if function.has_gp(gp::NATIVE_ENTRY)
+                && let Some(value) =
+                    crate::base_fast_paths::native_entry_by_value(function, arguments, env)?
+            {
+                return Ok(value);
+            }
             let mut args = Args::new();
             promise_args_into(arguments, env, &mut args)?;
             apply_closure_owning(call, function, &args, env, None)

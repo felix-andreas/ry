@@ -1120,7 +1120,7 @@ unsafe fn do_set_storage_mode(call: &Call<'_>) -> R<Sexp> {
     coerce_vector(object, kind)
 }
 
-unsafe fn do_is_vector(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_is_vector(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let mode = values::require_string(call.arg(1), "mode")?;
     let kind = object.kind();
