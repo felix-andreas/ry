@@ -124,13 +124,13 @@ fn input_chunks_rejoin_and_keep_hook_code_apart() {
     for_each_seed(4000, |seed| {
         let mut rng = SplitMix64(seed);
         let mut pending = VecDeque::new();
-        let mut hook_bytes = 0;
+        let mut unit_bytes = 0;
         let mut expected: Vec<u8> = Vec::new();
         let mut read: Vec<u8> = Vec::new();
         for _ in 0..rng.below(12) {
-            if rng.below(3) == 0 && hook_bytes == 0 && pending.is_empty() {
+            if rng.below(3) == 0 && unit_bytes == 0 && pending.is_empty() {
                 let hook = vec![b'h'; 1 + rng.below(20)];
-                hook_bytes = hook.len();
+                unit_bytes = hook.len();
                 pending.extend(&hook);
                 expected.extend(&hook);
             }
@@ -142,12 +142,12 @@ fn input_chunks_rejoin_and_keep_hook_code_apart() {
             expected.extend(&line);
             while !pending.is_empty() && rng.below(2) == 0 {
                 let mut buffer = vec![0u8; 1 + rng.below(16)];
-                let hook_before = hook_bytes;
-                let written = take_chunk(&mut pending, &mut hook_bytes, &mut buffer);
+                let hook_before = unit_bytes;
+                let written = take_chunk(&mut pending, &mut unit_bytes, &mut buffer);
                 assert!(written > 0 && written <= buffer.len());
                 if hook_before > 0 {
                     assert!(written <= hook_before, "a chunk ran past the hook's code");
-                    assert_eq!(hook_bytes, hook_before - written);
+                    assert_eq!(unit_bytes, hook_before - written);
                 } else {
                     let chunk = &buffer[..written];
                     assert!(
@@ -160,11 +160,11 @@ fn input_chunks_rejoin_and_keep_hook_code_apart() {
         }
         while !pending.is_empty() {
             let mut buffer = vec![0u8; 1 + rng.below(16)];
-            let written = take_chunk(&mut pending, &mut hook_bytes, &mut buffer);
+            let written = take_chunk(&mut pending, &mut unit_bytes, &mut buffer);
             read.extend(&buffer[..written]);
         }
         assert_eq!(read, expected);
-        assert_eq!(hook_bytes, 0);
+        assert_eq!(unit_bytes, 0);
     });
 }
 
