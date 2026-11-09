@@ -116,16 +116,29 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
             Box::new(Vi::new(insert, default_vi_normal_keybindings()))
         }
     };
-    // Without a palette the hint is only dimmed, so `NO_COLOR` leaves no color on screen.
-    let hint = match options.palette {
-        Some(_) => Style::new().fg(Color::DarkGray),
-        None => Style::new().dimmed(),
+    // Without a palette the hint, the history search and the completion menu use attributes
+    // only, so `NO_COLOR` leaves no color on screen.
+    let colored = options.palette.is_some();
+    let hint = match colored {
+        true => Style::new().fg(Color::DarkGray),
+        false => Style::new().dimmed(),
     };
+    let mut menu = ColumnarMenu::default().with_name("completion_menu");
+    if !colored {
+        let plain = Style::new();
+        menu = menu
+            .with_text_style(plain)
+            .with_selected_text_style(plain.reverse())
+            .with_description_text_style(plain.dimmed())
+            .with_match_text_style(plain.underline())
+            .with_selected_match_text_style(plain.reverse().underline());
+    }
     let mut editor = Reedline::create()
         .with_highlighter(Box::new(SyntaxHighlighter {
             palette: options.palette,
         }))
         .with_hinter(Box::new(DefaultHinter::default().with_style(hint)))
+        .with_ansi_colors(colored)
         .with_validator(Box::new(LexerValidator))
         // A paste arrives as one insertion with one repaint, and runs on Enter as under
         // GNU R's readline, instead of a repaint and a terminal round trip per pasted line.
@@ -137,9 +150,7 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
     if let Some(shared) = &completer {
         editor = editor
             .with_completer(Box::new(EditorCompleter(shared.clone())))
-            .with_menu(ReedlineMenu::EngineCompleter(Box::new(
-                ColumnarMenu::default().with_name("completion_menu"),
-            )));
+            .with_menu(ReedlineMenu::EngineCompleter(Box::new(menu)));
     }
     if let Some(history) = history_file()
         && let Ok(history) = FileBackedHistory::with_file(1000, history)

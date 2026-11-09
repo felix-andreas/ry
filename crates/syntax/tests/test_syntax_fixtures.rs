@@ -74,7 +74,7 @@ fn highlight_fixtures() {
     run_fixture_suite(&suite, &|source| {
         let root = parse(source).syntax_node();
         let mut rendered = String::new();
-        for (range, class) in highlights(&root) {
+        for (range, class) in highlights(&root).spans {
             let text = source.get(std::ops::Range::from(range)).unwrap_or_default();
             rendered.push_str(&format!("{range:?} {text:?} {class:?}\n"));
         }

@@ -197,7 +197,8 @@ Patterns follow gitignore rules and are anchored at the directory holding `ry.to
 
 The console of `ry run` and `ry R` colors your input as you type, from the same syntax tree the
 language server colors. `highlight = false` turns that off, and so does a non-empty `NO_COLOR`
-environment variable. The cursor's bracket and its partner are shown reversed, and a closing
+environment variable, which also leaves the completion menu and hints without color. The bracket
+at the cursor, or the one just before it, is shown reversed with its partner, and a closing
 bracket with no opener is red.
 
 The default colors use only the eight basic ANSI hues that read on both light and dark
@@ -220,10 +221,10 @@ string = "none"
 | `comment` | `dim italic` | `# note` |
 | `annotation` | `cyan italic` | `#:` comments and inline types such as `: integer` |
 | `operator` | `bold` | `<-`, `->`, `\|>`, `%in%`, `=` as assignment |
-| `function` | `blue` | the `f` of `f(x)`, and a name bound to a function |
+| `function` | `blue` | the `f` of `f(x)` or `x$f()`, and a name bound to a function |
 | `namespace` | `blue italic` | `stats::` and `base:::` |
 | `parameter` | `italic` | parameters, and named arguments such as the `n` of `f(n = 1)` |
-| `property` | `none` | record fields |
+| `property` | `none` | record fields, `x$field` and `x@slot` |
 | `tag` | `magenta` | `:Circle` |
 | `quoted-name` | `underline` | `` `my var` `` |
 | `error` | `red bold underline` | a closing bracket with no opener, an unreadable token |

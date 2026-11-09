@@ -56,5 +56,6 @@ fn the_bracket_pair_at_the_cursor_is_marked() {
     assert_eq!(marked("f(g(x))", 5), vec![3, 5]);
     assert_eq!(marked("f(g(x))", 7), vec![1, 6]);
     assert_eq!(marked("x[[1]]", 1), vec![1, 4]);
+    assert_eq!(marked("x[[1]]", 5), vec![1, 4]);
     assert_eq!(marked("f(x", 1), Vec::<usize>::new());
 }

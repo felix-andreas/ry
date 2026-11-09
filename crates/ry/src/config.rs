@@ -7,6 +7,7 @@ use {
         Diagnostic, GraphicalReportHandler, GraphicalTheme, LabeledSpan, NamedSource, SourceCode,
         SourceSpan,
     },
+    repl::highlight::{Palette, Style, parse_style},
     semantics::lints::{LintConfig, LintLevel, NameStyle, lint_levels_mut},
     serde::{
         Deserialize,
@@ -74,7 +75,22 @@ pub struct CheckConfig {
     pub exclude: Vec<String>,
 }
 
-/// The console's editor, read by `ry repl` and `ry run`.
+impl Default for CheckConfig {
+    fn default() -> CheckConfig {
+        CheckConfig {
+            unused: true,
+            maybe_undefined: false,
+            typing: false,
+            strict: false,
+            inline_annotations: true,
+            object_systems: true,
+            prelude: true,
+            exclude: Vec::new(),
+        }
+    }
+}
+
+/// The console's editor, read by the consoles of `ry run` and `ry R`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct ConsoleConfig {
@@ -96,7 +112,7 @@ impl Default for ConsoleConfig {
 /// `[console.colors]`, checked as it loads, so a misspelled class or color is an error with
 /// its place in the file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ConsoleColors(pub repl::highlight::Palette);
+pub struct ConsoleColors(pub Palette);
 
 impl<'de> Deserialize<'de> for ConsoleColors {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<ConsoleColors, D::Error> {
@@ -106,17 +122,17 @@ impl<'de> Deserialize<'de> for ConsoleColors {
         impl<'de> Deserialize<'de> for ColorName {
             fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<ColorName, D::Error> {
                 let name = String::deserialize(deserializer)?;
-                repl::highlight::Palette::default()
-                    .set(&name, repl::highlight::ConsoleStyle::new())
+                Palette::default()
+                    .set(&name, Style::new())
                     .map_err(de::Error::custom)?;
                 Ok(ColorName(name))
             }
         }
-        struct ColorStyle(repl::highlight::ConsoleStyle);
+        struct ColorStyle(Style);
         impl<'de> Deserialize<'de> for ColorStyle {
             fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<ColorStyle, D::Error> {
                 let spec = String::deserialize(deserializer)?;
-                repl::highlight::parse_style(&spec)
+                parse_style(&spec)
                     .map(ColorStyle)
                     .map_err(de::Error::custom)
             }
@@ -124,14 +140,14 @@ impl<'de> Deserialize<'de> for ConsoleColors {
         struct ColorsVisitor;
         impl<'de> de::Visitor<'de> for ColorsVisitor {
             type Value = ConsoleColors;
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> std::fmt::Result {
                 formatter.write_str("a table of console color styles")
             }
             fn visit_map<A: de::MapAccess<'de>>(
                 self,
                 mut map: A,
             ) -> Result<ConsoleColors, A::Error> {
-                let mut palette = repl::highlight::Palette::default();
+                let mut palette = Palette::default();
                 while let Some((ColorName(name), ColorStyle(style))) = map.next_entry()? {
                     palette.set(&name, style).map_err(de::Error::custom)?;
                 }
@@ -139,21 +155,6 @@ impl<'de> Deserialize<'de> for ConsoleColors {
             }
         }
         deserializer.deserialize_map(ColorsVisitor)
-    }
-}
-
-impl Default for CheckConfig {
-    fn default() -> CheckConfig {
-        CheckConfig {
-            unused: true,
-            maybe_undefined: false,
-            typing: false,
-            strict: false,
-            inline_annotations: true,
-            object_systems: true,
-            prelude: true,
-            exclude: Vec::new(),
-        }
     }
 }
 
@@ -835,8 +836,8 @@ mod tests {
             keyword = "bright-blue bold"
         "#});
         assert!(config.console.highlight);
-        let mut expected = repl::highlight::Palette::default();
-        let style = repl::highlight::parse_style("bright-blue bold");
+        let mut expected = Palette::default();
+        let style = parse_style("bright-blue bold");
         assert_eq!(
             style.and_then(|style| expected.set("keyword", style)),
             Ok(())

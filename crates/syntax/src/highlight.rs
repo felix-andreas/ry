@@ -2,7 +2,7 @@
 //! console's colors share these classifiers, so a name reads the same in both.
 
 use crate::{
-    SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, ast::BinaryExpr,
+    NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, WalkEvent, ast::BinaryExpr,
     is_inline_annotation, kind::SyntaxKind::*,
 };
 
@@ -66,29 +66,15 @@ pub enum Highlight {
     Error,
 }
 
-/// Every token of `root` that has a class, in text order.
-pub fn highlights(root: &SyntaxNode) -> Vec<(TextRange, Highlight)> {
-    let mut spans = Vec::new();
-    for token in root
-        .descendants_with_tokens()
-        .filter_map(SyntaxElement::into_token)
-    {
-        if token.text_range().is_empty() {
-            continue;
-        }
-        if let Some(highlight) = highlight_token(&token) {
-            spans.push((token.text_range(), highlight));
-        }
-    }
-    for range in brackets(root).unmatched {
-        if let Err(index) = spans.binary_search_by_key(&range.start(), |(span, _)| span.start()) {
-            spans.insert(index, (range, Highlight::Error));
-        }
-    }
-    spans
+/// The classified tokens of a tree and its brackets, from one walk over it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Highlights {
+    /// Every token that has a class, in text order and without overlaps.
+    pub spans: Vec<(TextRange, Highlight)>,
+    pub brackets: Brackets,
 }
 
-/// The bracket pairs of `root`, and the closing brackets that close nothing.
+/// The bracket pairs of a tree, and the closing brackets that close nothing.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Brackets {
     /// Each pair as its opening and closing bracket, in the order the pairs close.
@@ -96,14 +82,69 @@ pub struct Brackets {
     pub unmatched: Vec<TextRange>,
 }
 
+/// Classifies every token of `root` in one preorder walk, which keeps the cost linear in the
+/// tree's size however deeply it nests: whether a token sits in an annotation is a depth count
+/// kept on the way down, not a climb through its ancestors.
+pub fn highlights(root: &SyntaxNode) -> Highlights {
+    let mut spans = Vec::new();
+    let mut bracket_tokens = Vec::new();
+    let mut annotation_depth = 0usize;
+    for event in root.preorder_with_tokens() {
+        match event {
+            WalkEvent::Enter(NodeOrToken::Node(node)) => {
+                if is_annotation_node(&node) {
+                    annotation_depth += 1;
+                }
+            }
+            WalkEvent::Leave(NodeOrToken::Node(node)) => {
+                if is_annotation_node(&node) {
+                    annotation_depth = annotation_depth.saturating_sub(1);
+                }
+            }
+            WalkEvent::Enter(NodeOrToken::Token(token)) => {
+                // Whitespace stays plain even inside an annotation, so an underlined or
+                // reversed annotation style does not paint the gaps between its words.
+                if token.text_range().is_empty() || matches!(token.kind(), WHITESPACE | NEWLINE) {
+                    continue;
+                }
+                if is_bracket(token.kind()) && annotation_depth == 0 {
+                    bracket_tokens.push(token.clone());
+                }
+                let highlight = if annotation_depth > 0 || token.kind() == ANNOTATION_MARKER {
+                    Some(Highlight::Annotation)
+                } else {
+                    highlight_token(&token)
+                };
+                if let Some(highlight) = highlight {
+                    spans.push((token.text_range(), highlight));
+                }
+            }
+            WalkEvent::Leave(NodeOrToken::Token(_)) => {}
+        }
+    }
+    let brackets = pair_brackets(&bracket_tokens);
+    // Both lists are sorted, so one merge keeps the pass linear. A closer that already has a
+    // class keeps it.
+    let mut merged = Vec::with_capacity(spans.len() + brackets.unmatched.len());
+    let mut unmatched = brackets.unmatched.iter().peekable();
+    for span in spans {
+        while let Some(range) = unmatched.next_if(|range| range.start() <= span.0.start()) {
+            if range.start() < span.0.start() {
+                merged.push((*range, Highlight::Error));
+            }
+        }
+        merged.push(span);
+    }
+    merged.extend(unmatched.map(|range| (*range, Highlight::Error)));
+    Highlights {
+        spans: merged,
+        brackets,
+    }
+}
+
 /// Pairs `(` `)`, `{` `}`, `[` `]` and `[[` `]]`, the last closing on two `]` tokens. A closer
 /// that does not match the innermost opener closes nothing, and the opener stays open.
-pub fn brackets(root: &SyntaxNode) -> Brackets {
-    let tokens: Vec<SyntaxToken> = root
-        .descendants_with_tokens()
-        .filter_map(SyntaxElement::into_token)
-        .filter(|token| is_bracket(token.kind()))
-        .collect();
+fn pair_brackets(tokens: &[SyntaxToken]) -> Brackets {
     let mut result = Brackets::default();
     let mut open: Vec<&SyntaxToken> = Vec::new();
     let mut index = 0;
@@ -145,6 +186,10 @@ pub fn brackets(root: &SyntaxNode) -> Brackets {
     result
 }
 
+fn is_annotation_node(node: &SyntaxNode) -> bool {
+    node.kind() == ANNOTATION || is_inline_annotation(node)
+}
+
 fn is_bracket(kind: SyntaxKind) -> bool {
     matches!(
         kind,
@@ -153,12 +198,6 @@ fn is_bracket(kind: SyntaxKind) -> bool {
 }
 
 fn highlight_token(token: &SyntaxToken) -> Option<Highlight> {
-    let in_annotation = token
-        .parent_ancestors()
-        .any(|node| node.kind() == ANNOTATION || is_inline_annotation(&node));
-    if in_annotation || token.kind() == ANNOTATION_MARKER {
-        return Some(Highlight::Annotation);
-    }
     let semantic = classify_ry_token(token).or_else(|| classify_r_name(token));
     if let Some(class) = semantic {
         return Some(match class {
@@ -186,7 +225,10 @@ fn highlight_token(token: &SyntaxToken) -> Option<Highlight> {
         COMMENT => Highlight::Comment,
         LESS_MINUS | LESS2_MINUS | MINUS_GREATER | MINUS_GREATER2 | COLON_EQ | PIPE_GREATER
         | SPECIAL => Highlight::Operator,
-        EQ if token.parent().is_some_and(|parent| parent.kind() == BINARY_EXPR) => {
+        EQ if token
+            .parent()
+            .is_some_and(|parent| parent.kind() == BINARY_EXPR) =>
+        {
             Highlight::Operator
         }
         COLON2 | COLON3 => Highlight::Namespace,

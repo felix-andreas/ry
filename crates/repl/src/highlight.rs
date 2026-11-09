@@ -1,13 +1,14 @@
 //! The console's syntax highlighting: the classes of `syntax::highlight`, colored from a palette
 //! of the 16 ANSI colors so the terminal's own theme decides the shades.
 
-pub use nu_ansi_term::Style as ConsoleStyle;
+pub use nu_ansi_term::Style;
 use {
-    nu_ansi_term::{Color, Style},
+    nu_ansi_term::Color,
     reedline::{Highlighter, StyledText},
+    std::ops::Range,
     syntax::{
         TextRange, TextSize,
-        highlight::{Highlight, brackets, highlights},
+        highlight::{Brackets, Highlight, highlights},
         parse,
     },
 };
@@ -19,7 +20,7 @@ pub struct Palette {
 }
 
 /// The names `[console.colors]` sets a style by, in [`Palette`] order. The last is the bracket
-/// pair at the cursor; the rest follow [`Highlight`].
+/// pair at the cursor; [`key_index`] places each [`Highlight`].
 pub const KEYS: [&str; 15] = [
     "keyword",
     "constant",
@@ -39,6 +40,8 @@ pub const KEYS: [&str; 15] = [
 ];
 
 const MATCHING_BRACKET: usize = KEYS.len() - 1;
+
+const _: () = assert!(key_index(Highlight::Error) + 1 == MATCHING_BRACKET);
 
 impl Default for Palette {
     /// Only hues that read on light and dark backgrounds alike: no yellow, white or black, and no
@@ -83,9 +86,8 @@ impl Palette {
     }
 
     fn style(&self, highlight: Highlight) -> Style {
-        // `KEYS` lists the classes in `Highlight`'s order.
         self.styles
-            .get(highlight as usize)
+            .get(key_index(highlight))
             .copied()
             .unwrap_or_default()
     }
@@ -95,6 +97,27 @@ impl Palette {
             .get(MATCHING_BRACKET)
             .copied()
             .unwrap_or_default()
+    }
+}
+
+/// The position in [`KEYS`] of a class's name. The match is exhaustive, so a new class does
+/// not compile until it has a key.
+const fn key_index(highlight: Highlight) -> usize {
+    match highlight {
+        Highlight::Keyword => 0,
+        Highlight::Constant => 1,
+        Highlight::Number => 2,
+        Highlight::String => 3,
+        Highlight::Comment => 4,
+        Highlight::Annotation => 5,
+        Highlight::Operator => 6,
+        Highlight::Function => 7,
+        Highlight::Namespace => 8,
+        Highlight::Parameter => 9,
+        Highlight::Property => 10,
+        Highlight::Tag => 11,
+        Highlight::QuotedName => 12,
+        Highlight::Error => 13,
     }
 }
 
@@ -187,17 +210,15 @@ impl Highlighter for SyntaxHighlighter {
 }
 
 /// `line` cut into consecutive byte ranges, each with its style.
-pub fn styled_spans(
-    line: &str,
-    cursor: usize,
-    palette: &Palette,
-) -> Vec<(std::ops::Range<usize>, Style)> {
+pub fn styled_spans(line: &str, cursor: usize, palette: &Palette) -> Vec<(Range<usize>, Style)> {
     let root = parse(line).syntax_node();
-    let mut spans: Vec<(TextRange, Style)> = highlights(&root)
+    let highlights = highlights(&root);
+    let mut spans: Vec<(TextRange, Style)> = highlights
+        .spans
         .into_iter()
         .map(|(range, highlight)| (range, palette.style(highlight)))
         .collect();
-    if let Some(pair) = bracket_pair_at(&root, cursor) {
+    if let Some(pair) = bracket_pair_at(&highlights.brackets, cursor) {
         for range in pair {
             spans.retain(|(span, _)| span.intersect(range).is_none_or(|common| common.is_empty()));
             let index = spans.partition_point(|(span, _)| span.start() < range.start());
@@ -225,10 +246,11 @@ pub fn styled_spans(
 
 /// The bracket under the cursor and its partner, or else the bracket just before the cursor and
 /// its partner, as a closer just typed.
-fn bracket_pair_at(root: &syntax::SyntaxNode, cursor: usize) -> Option<[TextRange; 2]> {
+fn bracket_pair_at(brackets: &Brackets, cursor: usize) -> Option<[TextRange; 2]> {
     let cursor = TextSize::try_from(cursor).ok()?;
-    let pairs = brackets(root).pairs;
-    let under = |range: TextRange| range.start() == cursor;
+    let pairs = &brackets.pairs;
+    // `contains` so that either `]` of a `]]` closer counts as under the cursor.
+    let under = |range: TextRange| range.contains(cursor);
     let before = |range: TextRange| range.end() == cursor;
     pairs
         .iter()

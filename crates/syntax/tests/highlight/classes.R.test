@@ -88,12 +88,9 @@ g <- function(a, b = 1) a + b
 f <- function(x) x
 #++++
 0..2 "#:" Annotation
-2..3 " " Annotation
 3..4 "@" Annotation
 4..9 "param" Annotation
-9..10 " " Annotation
 10..11 "x" Annotation
-11..12 " " Annotation
 12..13 "{" Annotation
 13..20 "integer" Annotation
 20..21 "}" Annotation
@@ -106,7 +103,6 @@ f <- function(x) x
 count: integer <- 0L
 #++++
 5..6 ":" Annotation
-6..7 " " Annotation
 7..14 "integer" Annotation
 15..17 "<-" Operator
 18..20 "0L" Number
@@ -141,3 +137,20 @@ f(x))
 x[[1]]
 #++++
 3..4 "1" Number
+
+#---- members
+x$f(1) + x$field + x@slot
+#++++
+2..3 "f" Function
+4..5 "1" Number
+11..16 "field" Property
+21..25 "slot" Property
+
+#---- stray_closers_among_classified_tokens
+) f(1) ] "s" }
+#++++
+0..1 ")" Error
+4..5 "1" Number
+7..8 "]" Error
+9..12 "\"s\"" String
+13..14 "}" Error
