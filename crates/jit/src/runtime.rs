@@ -319,6 +319,14 @@ pub const LOOPS_ONLY: i32 = 1 << 16;
 /// clears it, so every recompile waits again.
 pub const SIZE_WAITED: i32 = 1 << 17;
 
+/// The profile's tier state counts the body's refusals as too rarely called (`analysis::RARE`)
+/// in four bits from here, so each attempt can wait twice as long as the one before.
+pub const RARE_REFUSAL: i32 = 1 << 18;
+
+pub fn rare_refusals(state: i32) -> i32 {
+    (state / RARE_REFUSAL) & 0xf
+}
+
 /// The entry count of a body that calls must not compile. Counting up from here never reaches
 /// the entry threshold, so tier 0 stops asking the tier about the body's calls, and stops
 /// recording type feedback for them unless the body has a loop that may still compile.
