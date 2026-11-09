@@ -159,7 +159,7 @@ pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
             } else if element.kind() == SexpType::Symbol {
                 Ok(element.car())
             } else {
-                values::mkchar(&deparse::deparse_one_line(element))
+                values::mkchar(&deparse::deparse_one_line_checked(element)?)
             }
         }
         _ => Err(error(format!(
@@ -297,7 +297,7 @@ unsafe fn coerce_pairlist(list: Sexp, kind: SexpType, warnings: &mut CoercionWar
                 } else if value.kind().is_atomic() && length(*value) == 1 {
                     element_as_charsxp(*value, 0)?
                 } else {
-                    values::mkchar(&deparse::deparse_one_line(*value))?
+                    values::mkchar(&deparse::deparse_one_line_checked(*value)?)?
                 };
                 values::set_elt(result, index, charsxp);
             }

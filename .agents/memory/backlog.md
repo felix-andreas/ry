@@ -128,22 +128,13 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **Next: a native class table with dense ids** (`decisions.md`, "Per-generic units came before
   the class table"). Unit 0 is about 416M instructions, and `setClass` is 29% of it, spread over
   class-definition lookups, `tryNew` and the extension objects `setIs` builds. The R-level metadata becomes views produced from the table.
-- **WIP: the first union of a session, natively** (branch `native-first-union`, draft PR #350,
-  not built or reviewed in its latest form). The first `setClassUnion` falls back because
-  `initialize`'s dispatch cache has no `ClassUnionRepresentation` entry yet; the branch caches the
-  inherited method itself, but only when it is the default `initialize`, and only after every
-  check that can still bail. The oracle cases `s4__native_first_union` and
-  `s4__union_initialize_method` on the branch pin it. Main has a related bug: the native union
-  and `setClass` skip a package's `initialize` method for `classRepresentation`, which GNU R calls.
-- `deparse()` of an S4 object whose class is not defined prints `new("Zzz")`, where GNU R
-  errors ("cannot get a slot ("slots") from an object of type "NULL"") because `getClassDef`
-  returns `NULL` (`s4_parts` in `crates/interp/src/deparse.rs`).
 - **What still falls back** (`RY_LOAD_VERBOSE=true ry load .` names each with its reason):
   classes with a basic-type or other-package superclass (`contains = "numeric"`, `"list"`,
   `"data.frame"`, an old class), a second superclass that has superclasses of its own, a class
   under a union whose members are not all cached yet, a method that omits an argument its
   signature names, a generic whose body is not `standardGeneric("f")` (braced or not),
-  `setOldClass`, the first union of a session (dispatch caches not filled), a union of unions,
+  `setOldClass`, a first union of a session defined while first-unit definitions are pending
+  (they may add an `initialize` method), a union of unions,
   `setMethod("[")` whose formals need rematching, and `cacheMetaData` delegating classes whose
   cached definition differs, other packages' generics, group generics and primitives.
 - A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
@@ -2535,6 +2526,45 @@ The end-to-end guard rests on the corpus suites.
 
 What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pressing first.
 
+- **Install-time native code.** A code image (`crates/interp/src/code_image.rs`) reserves an
+  offset and length for native code and writes zeros. The end shape compiles every package closure
+  through the shared SSA IR and the typed AOT pipeline at install, position-independent and stamped
+  as `typed-runtime.md` describes, so a session maps it instead of tiering up. It waits for tier 1's
+  IR to merge with the typed core's in `crates/jit` and `crates/typed` (`r-runtime.md`, "Code
+  images of installed packages").
+- **Decoding an image's code costs about as much as compiling it** (about 65k instructions per
+  closure on CRAN packages), so an untrained image saves nothing measurable. The decoder reads
+  every instruction word and feedback word as a varint and re-interns each symbol constant by
+  name. Storing words as fixed-width little-endian runs that copy in bulk, and symbols as their
+  preorder position in the body, should make decoding a fraction of compiling; measure with
+  callgrind on `library()` plus a first call of the twelve packages in `decisions.md`, "Code
+  images".
+- **Where `library()` time goes, and what code images cannot remove.** On `library()` of twelve
+  CRAN packages (1,200.7M instructions for the whole process without images), compiling is 74.5M
+  (6.2%), and images remove only 4.0M of it, because most compiling during a load is base-package
+  code and code `.onLoad` runs once. Lazy-load fetches are 313M (26%), almost all of it
+  `serialize::unserialize` (278M) decoding the records the namespace forces. Collection is 118M
+  (9.8%). Fetches and collection are the load cost. An eager namespace image was measured not to
+  help (`decisions.md`, "Installed packages load through native fast paths"), so the lever is a
+  faster record reader and fewer forced fetches (S3 registration forcing every method), not
+  another image.
+- **A training run with other types than real use makes a trained image slower.** The JIT
+  compiles at the first call from the trained feedback, deoptimizes on the new type, then refuses
+  the recompile ("a for loop over something other than a plain vector") for the merged feedback,
+  so the body stays in tier 0 for the session: a loop trained on `1:50` and run on doubles took
+  72 ms against 45 ms without the image. The same refusal happens without an image when a session
+  calls with integers first, so the fix is in the JIT (recompile for the widened type after a
+  deoptimization), not in the image.
+- **An untrained image costs instructions on load.** `library(survival)` plus one `survfit` call is
+  2,091.9M instructions with the recommended packages' images and 2,064.4M with
+  `RY_CODE_IMAGE=0` (callgrind, whole process), so cheaper decoding (above) matters before
+  images pay off without training.
+- **Code images are about six times the size of the lazy-load database** (MASS: 706 KB `.ryc`
+  against a 120 KB compressed `.rdb`), because instruction words, constants and feedback are
+  stored uncompressed. Compress payloads, or pack the instruction stream, if install size matters.
+- **The base packages have no code image.** GNU R's build makes `stats`, `utils` and the other
+  base packages' lazy-load databases without `R CMD INSTALL`, so their closures compile at first
+  call; the recommended packages, which `tools/base-r/build.sh` installs, do get images.
 - **Inline annotation checks have known holes** (typing reference, "Inline annotations at run time").
   A promise that escapes its frame unforced (returned inside a closure, or stored) is never checked,
   because the pending check is dropped at exit. A function without parameters whose body is a
@@ -2797,6 +2827,7 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
 
+- **Code images of installed packages.** `R CMD INSTALL` writes each closure's tier-0 code and, with `--ry-train`, its trained profile beside the lazy-load database. `decisions.md`, "Code images: compiled code beside the lazy-load database".
 - **Console attach and the data viewer.** `ry run` serves the debugger, a paged data viewer and live values over a Unix socket; VS Code attaches, opens `View()`, and hover/completion read the console. `decisions.md`, "A running console is a debug adapter".
 - **R Markdown and Quarto in the editor.** Chunks of a `.Rmd`/`.qmd`/`.Rnw` are one script for diagnostics, hover, completion and goto, and `ry fmt` formats each chunk. `decisions.md`, "Literate documents keep their offsets".
 - **Arrays.** `[1, 2, 3]` parses, formats, types as `Array<T>` and runs as a flagged R vector with strict operators and indexing. `decisions.md`, "An Array is a flagged R vector".
