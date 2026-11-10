@@ -2211,11 +2211,13 @@ pub enum Reify {
 
 /// The reasons that observe a frame's environment: they evaluate code in it, hand it out as a
 /// value, or read or write its bindings by name. Every other reason is a mechanism a slot
-/// frame could serve without one.
-pub const OBSERVING_REASONS: [&str; 16] = [
+/// frame could serve without one. `.External2` hands its routine the calling environment, and
+/// the routines packages call through it (rlang's `ffi_enquo`, `ffi_eval` and the like) read
+/// bindings there.
+pub const OBSERVING_REASONS: [&str; 17] = [
     "eval", "evalq", "environment", "environment()", "sys.frame", "sys.frames", "parent.frame",
     "pos = -1", "assign", "get", "get0", "exists", "mget", "native code", "as.environment",
-    "environment outliving the frame",
+    "environment outliving the frame", ".External2",
 ];
 
 /// The `...` slot of the frame at `index`, when it is a slot frame without an environment and
@@ -4921,17 +4923,15 @@ unsafe fn do_with_visible(call: &Call<'_>) -> R<Sexp> {
     values::named_list(&[("value", value), ("visible", flag)])
 }
 
+/// `Recall(...)`: calls the function that called `Recall` again, with that call's call and its
+/// caller as the new frame's parent, as GNU R does. Neither frame needs an environment, so a
+/// slot frame hands out its pending one.
 unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env()?;
-    let state = interp();
-    let Some(own) = state.frames.iter().rposition(|frame| frame.owns(env)) else {
-        return Err(call.error("'Recall' called from outside a closure"));
-    };
-    let Some(caller) = crate::envir::caller_index(own) else {
-        return Err(call.error("'Recall' called from outside a closure"));
-    };
-    let (caller_call, function) = (state.frames[caller].call, state.frames[caller].function);
-    apply(caller_call, function, call.args, frame_sys_parent(own, Reify::Site("caller call"))?)
+    let outside = || call.error("'Recall' called from outside a closure");
+    let own = call.frame_index().ok_or_else(outside)?;
+    let caller = crate::envir::caller_index(own).ok_or_else(outside)?;
+    let (caller_call, function) = (interp().frames[caller].call, interp().frames[caller].function);
+    apply(caller_call, function, call.args, frame_sys_parent_pending(caller)?)
 }
 
 unsafe fn do_primitive(call: &Call<'_>) -> R<Sexp> {

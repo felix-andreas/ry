@@ -46,7 +46,7 @@ describes it, and the open gaps are marked.
 - **Which calls get a slot frame.** The compiler gives a body a slot table (`SLOTS` in its
   constants) when `local_symbols` succeeds (`collect_bindings` in `crates/interp/src/bytecode.rs`).
   It fails for a body that may bind a name its own text does not show or hand its frame to code
-  that may: a bare `environment()`, `sys.frames()`, `attach`, `source` or `Recall`, an `eval`,
+  that may: a bare `environment()`, `sys.frames()`, `attach` or `source`, an `eval`,
   `evalq`, `assign`, `delayedAssign` or `rm` without an explicit environment, an assignment to a
   string target, or a read of an S3 dispatch variable (`.Generic`, `.Class`, `.Method`, `.Group`,
   `.GenericCallEnv`, `.GenericDefEnv`). The same calls with an explicit environment, `local`,
@@ -383,7 +383,7 @@ builtin that asked, or a named site such as `"function definition"` or `"method 
 | Class | Meaning |
 |---|---|
 | direct | the frame never reified and was passed no promise |
-| a reify cause | the frame reified for that reason; `eval::OBSERVING_REASONS` marks the causes where code observed the environment itself (`eval`, `environment()`, `sys.frame`, `parent.frame`, `assign`, `get`, native code, `environment outliving the frame`) |
+| a reify cause | the frame reified for that reason; `eval::OBSERVING_REASONS` marks the causes where code observed the environment itself (`eval`, `environment()`, `sys.frame`, `parent.frame`, `assign`, `get`, native code, `.External2`, `environment outliving the frame`) |
 | `promise argument: variable`, `call`, `other` | the frame stayed unreified but was passed a real promise of that kind |
 | `frame with an environment` | the callee has no slot table and always gets a heap frame |
 
