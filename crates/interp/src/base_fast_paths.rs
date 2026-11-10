@@ -174,7 +174,7 @@ const NATIVE_ENTRIES: &[(&str, u64, NativeEntry)] = &[
     ("is.vector", 0xf347f791e9374052, native_is_vector),
     ("isNamespace", 0x9dbd26992b319771, native_is_namespace),
     ("Sys.unsetenv", 0x3bf70db0fa5a60ee, native_sys_unsetenv),
-    ("getOption", 0xc9a334d664d4af4b, native_get_option),
+    ("getOption", 0x2778de423545af25, native_get_option),
 ];
 
 /// Marks the closures of [`NATIVE_ENTRIES`] whose code matches and records them in
