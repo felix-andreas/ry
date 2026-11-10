@@ -207,9 +207,15 @@ fn run_checked(seed: u64, steps: usize, stress: bool, verify_reconcile: bool) {
                     model.roots.push(model.nodes.len() - 1);
                 }
                 3 | 4 if !live.is_empty() => {
-                    let children: Vec<usize> = (0..rng.below(5))
-                        .map(|_| live[rng.below(live.len())])
-                        .collect();
+                    // A list past the small-object classes keeps cards, which the stores of
+                    // step 6 then dirty at random positions.
+                    let length = if rng.chance(1, 16) {
+                        260 + rng.below(600)
+                    } else {
+                        rng.below(5)
+                    };
+                    let children: Vec<usize> =
+                        (0..length).map(|_| live[rng.below(live.len())]).collect();
                     let sexp = heap
                         .alloc_vector(SexpType::List, children.len() as isize)
                         .expect("alloc");
@@ -761,6 +767,144 @@ fn a_tenured_object_keeps_the_younger_old_objects_stored_into_it() {
         heap.collect(Collection::Major);
         assert_eq!(tenured.element(1).slice::<i32>(), &[2]);
         assert_eq!(heap.stats().intermediate_collections, 1);
+    }
+}
+
+#[test]
+fn a_large_list_keeps_young_objects_stored_into_any_card() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        let list = heap.alloc_vector(SexpType::List, 100_000).expect("alloc");
+        heap.root(list);
+        heap.collect(Collection::Major);
+        heap.collect(Collection::Major);
+        let positions = [0, 127, 128, 50_000, 99_999];
+        for round in 0..3 {
+            for &position in &positions {
+                let young = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+                *young.slice_mut::<i32>().first_mut().expect("one element") =
+                    (position + round) as i32;
+                heap.set_element(list, position, young);
+            }
+            let source = heap.alloc_vector(SexpType::List, 300).expect("alloc");
+            heap.root(source);
+            for index in 0..300 {
+                let young = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+                *young.slice_mut::<i32>().first_mut().expect("one element") = index as i32;
+                heap.set_element(source, index, young);
+            }
+            heap.copy_elements(list, 70_000, source, 0, 300);
+            heap.collect(Collection::Minor);
+            heap.collect(Collection::Minor);
+            heap.collect(if round == 1 {
+                Collection::Major
+            } else {
+                Collection::Intermediate
+            });
+            for &position in &positions {
+                assert_eq!(
+                    list.element(position).slice::<i32>(),
+                    &[(position + round) as i32]
+                );
+            }
+            assert_eq!(list.element(70_299).slice::<i32>(), &[299]);
+        }
+    }
+}
+
+#[test]
+fn a_frame_filled_across_minor_collections_keeps_every_young_binding() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        let global = heap.known().global_env;
+        let env = heap.alloc_environment(global).expect("alloc");
+        heap.root(env);
+        let symbol = |heap: &mut Heap, index: usize| {
+            heap.install(format!("f{index}").as_bytes())
+                .expect("install")
+        };
+        let define = |heap: &mut Heap, index: usize, value: i32| {
+            let name = symbol(heap, index);
+            let young = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            *young.slice_mut::<i32>().first_mut().expect("one element") = value;
+            heap.define(env, name, young).expect("define");
+        };
+        for index in 0..40 {
+            define(&mut heap, index, index as i32);
+        }
+        heap.collect(Collection::Major);
+        heap.collect(Collection::Major);
+        // Each round appends young bindings to the tenured frame and redefines an old one, and a
+        // minor collection rescans only the slots appended since the last.
+        for round in 0..4 {
+            for index in 40 + round * 30..70 + round * 30 {
+                define(&mut heap, index, index as i32);
+            }
+            heap.collect(Collection::Minor);
+            define(&mut heap, round, 1000 + round as i32);
+            heap.collect(Collection::Minor);
+        }
+        // Removing most bindings compacts the remembered frame, which moves young cells into
+        // slots a minor collection had already scanned.
+        for index in (0..160).filter(|index| index % 3 != 0) {
+            let name = symbol(&mut heap, index);
+            assert_eq!(heap.remove_binding(env, name), Ok(true));
+        }
+        for index in 160..200 {
+            define(&mut heap, index, index as i32);
+        }
+        heap.collect(Collection::Minor);
+        heap.collect(Collection::Minor);
+        heap.collect(Collection::Intermediate);
+        heap.collect(Collection::Minor);
+        for index in (0..200).filter(|index| *index >= 160 || index % 3 == 0) {
+            let name = symbol(&mut heap, index);
+            let expected = if index < 4 {
+                1000 + index as i32
+            } else {
+                index as i32
+            };
+            assert_eq!(
+                heap.frame_cell(env, name)
+                    .expect("bound")
+                    .cdr()
+                    .slice::<i32>(),
+                &[expected]
+            );
+        }
+    }
+}
+
+#[test]
+fn moved_elements_keep_their_counts_and_survive_in_the_new_vector() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        let from = heap.alloc_vector(SexpType::List, 400).expect("alloc");
+        heap.root(from);
+        heap.collect(Collection::Major);
+        heap.collect(Collection::Major);
+        for index in 0..400 {
+            let young = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            *young.slice_mut::<i32>().first_mut().expect("one element") = index as i32;
+            heap.set_element(from, index, young);
+        }
+        let counts: Vec<_> = (0..400)
+            .map(|index| from.element(index).refcount())
+            .collect();
+        let to = heap.alloc_vector(SexpType::List, 500).expect("alloc");
+        heap.root(to);
+        heap.move_elements(to, from);
+        assert_eq!(from.length(), 0);
+        heap.collect(Collection::Minor);
+        heap.collect(Collection::Intermediate);
+        heap.collect(Collection::Major);
+        for index in 0..400 {
+            assert_eq!(to.element(index).slice::<i32>(), &[index as i32]);
+            assert_eq!(to.element(index).refcount(), counts[index]);
+        }
     }
 }
 

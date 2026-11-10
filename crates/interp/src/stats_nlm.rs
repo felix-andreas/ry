@@ -1729,7 +1729,7 @@ impl Objective<'_> {
         crate::scope(|| {
             let argument = values::real_vector(x)?;
             let expression = values::call(self.function, &[argument])?;
-            let result = eval::eval(expression, self.call.env)?;
+            let result = eval::eval(expression, self.call.env()?)?;
             let supplied = |name: &str, size: usize| -> R<bool> {
                 let found = values::get_attr(result, values::install(name)?);
                 if found == values::nil() {
@@ -1781,7 +1781,7 @@ impl Objective<'_> {
         crate::scope(|| {
             let argument = values::real_vector(x)?;
             let expression = values::call(self.function, &[argument])?;
-            let result = eval::eval(expression, self.call.env)?;
+            let result = eval::eval(expression, self.call.env()?)?;
             let value = match result.kind() {
                 SexpType::Integer if length(result) == 1 => {
                     let entry = values::ints(result)[0];

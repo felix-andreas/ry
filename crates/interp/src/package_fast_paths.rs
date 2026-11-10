@@ -9,7 +9,7 @@
 
 use {
     crate::{
-        base_fast_paths::{argument, decline, finish, install_prologue, kernel},
+        base_fast_paths::{ClosureFrame, argument, decline, finish, install_prologue, kernel},
         builtins::{BuiltinDef, Call, internal},
         envir::{self, frame_of, get_option, sys_parent_number, top_env},
         eval, interp,
@@ -141,7 +141,7 @@ unsafe fn do_package_fast_paths(call: &Call<'_>) -> R<Sexp> {
 /// call whose function is an unforced promise, or one the R body would fail on), so that the R
 /// body runs and does what it does.
 unsafe fn do_trace_back(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = call.env()?;
     let namespace = frame.enclosure();
     if get_option("rlang:::visible_bottom") != nil() {
         return decline();
@@ -151,7 +151,7 @@ unsafe fn do_trace_back(call: &Call<'_>) -> R<Sexp> {
     };
     let depth = own + 1;
     let caller = sys_parent_number(1, Some(own)).max(0) as usize;
-    let Some(bottom) = argument(frame, symbols().bottom)? else {
+    let Some(bottom) = argument(ClosureFrame::Env(frame), symbols().bottom)? else {
         return decline();
     };
     let count = if bottom == nil() {
@@ -159,7 +159,7 @@ unsafe fn do_trace_back(call: &Call<'_>) -> R<Sexp> {
     } else if bottom.kind() == SexpType::Environment {
         match interp().frames[..depth]
             .iter()
-            .position(|entry| entry.env == bottom)
+            .position(|entry| entry.owns(bottom))
         {
             Some(index) => index + 1,
             None if bottom == global_env() => 0,
@@ -201,7 +201,7 @@ unsafe fn do_trace_back(call: &Call<'_>) -> R<Sexp> {
         contexts.push(context);
     }
 
-    let top = match argument(frame, symbols().top)? {
+    let top = match argument(ClosureFrame::Env(frame), symbols().top)? {
         Some(value) if value != nil() => value,
         _ => get_option("rlang_trace_top_env"),
     };
@@ -213,7 +213,7 @@ unsafe fn do_trace_back(call: &Call<'_>) -> R<Sexp> {
     } else {
         interp().frames[..count]
             .iter()
-            .rposition(|entry| entry.env == top)
+            .rposition(|entry| entry.owns(top))
             .map_or(0, |index| index + 1)
     };
 
@@ -277,7 +277,7 @@ unsafe fn do_trace_back(call: &Call<'_>) -> R<Sexp> {
     values::set_attr(trace, symbols().version, values::scalar_integer(2)?)?;
     let class = values::string_vector(&["rlang_trace", "rlib_trace", "tbl", "data.frame"])?;
     values::set_attr(trace, symbols().class, class)?;
-    finish(frame, trace, true)
+    finish(ClosureFrame::Env(frame), trace, true)
 }
 
 /// A frame's entry in the `namespace` and `scope` columns; `None` is `NA`. The namespace is a
@@ -616,7 +616,7 @@ unsafe fn type_sum(value: Sexp, namespace: Sexp) -> R<Sexp> {
 /// `lhs`, which replaces the first element of `rhs` with that name by the first element of `lhs`
 /// with it, or appends it.
 unsafe fn do_withr_list_combine(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = ClosureFrame::of(call);
     let (Some(rhs), Some(lhs)) = (
         argument(frame, symbols().rhs)?,
         argument(frame, symbols().lhs)?,
@@ -680,7 +680,7 @@ unsafe fn do_withr_list_combine(call: &Call<'_>) -> R<Sexp> {
 /// withr's `as_envvars(envs)` of a named character vector or plain list: `NULL` elements become
 /// `NA` and, of elements with the same name, only the last is kept.
 unsafe fn do_withr_as_envvars(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = ClosureFrame::of(call);
     let Some(envs) = argument(frame, symbols().envs)? else {
         return decline();
     };
@@ -693,7 +693,7 @@ unsafe fn do_withr_as_envvars(call: &Call<'_>) -> R<Sexp> {
 /// withr's `get_envvar(envs, action)`: the current values of the variables `envs` names, `NA`
 /// for those unset, named by the variables.
 unsafe fn do_withr_get_envvar(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = ClosureFrame::of(call);
     let Some(envs) = argument(frame, symbols().envs)? else {
         return decline();
     };
@@ -712,7 +712,7 @@ unsafe fn do_withr_get_envvar(call: &Call<'_>) -> R<Sexp> {
 /// unsets each it gives `NA`, returning the old values invisibly as `get_envvar()` does. The
 /// prefix and suffix actions, and values other than single strings, keep the R body.
 unsafe fn do_withr_set_envvar(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = ClosureFrame::of(call);
     let Some(envs) = argument(frame, symbols().envs)? else {
         return decline();
     };
@@ -788,7 +788,7 @@ unsafe fn do_withr_set_envvar(call: &Call<'_>) -> R<Sexp> {
 /// withr's `get_options(new_options)`: `options()` of the names of `new_options`, which gives the
 /// current value of each.
 unsafe fn do_withr_get_options(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = ClosureFrame::of(call);
     let Some(new_options) = argument(frame, symbols().new_options)? else {
         return decline();
     };
@@ -814,7 +814,7 @@ unsafe fn do_withr_get_options(call: &Call<'_>) -> R<Sexp> {
 /// withr's `set_options(new_options)` of a plain list whose elements are all named and set
 /// without a condition: `options()` with each element as a named argument.
 unsafe fn do_withr_set_options(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = ClosureFrame::of(call);
     let Some(new_options) = argument(frame, symbols().new_options)? else {
         return decline();
     };
@@ -828,7 +828,7 @@ unsafe fn do_withr_set_options(call: &Call<'_>) -> R<Sexp> {
 /// withr's `reset_options(old_options)`, which is `options(old_options)`, for the same lists
 /// `set_options()` takes natively.
 unsafe fn do_withr_reset_options(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = ClosureFrame::of(call);
     let Some(old_options) = argument(frame, symbols().old_options)? else {
         return decline();
     };
@@ -846,7 +846,7 @@ unsafe fn do_withr_reset_options(call: &Call<'_>) -> R<Sexp> {
 /// When the session's temporary directory is missing, the R body's `dir.create(recursive =
 /// TRUE)` would create it again, so the R body runs.
 unsafe fn do_withr_reset_gettext_cache(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = ClosureFrame::of(call);
     let Ok(temp) = crate::system::session_temp_dir() else {
         return decline();
     };
@@ -940,7 +940,7 @@ unsafe fn envvars(envs: Sexp) -> R<Option<Sexp>> {
 }
 
 /// `Sys.getenv(names, names = TRUE, unset = NA)` for a non-empty character vector `names`.
-unsafe fn current_envvars(names: Sexp, frame: Sexp) -> R<Sexp> {
+unsafe fn current_envvars(names: Sexp, frame: ClosureFrame) -> R<Sexp> {
     let unset = values::scalar_string_charsxp(na_string())?;
     crate::heap().root(unset);
     let old = kernel(crate::system::do_sys_getenv, &[names, unset], frame)?;

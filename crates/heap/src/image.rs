@@ -28,7 +28,7 @@ use {
     crate::{
         Heap, HeapError,
         env::{Frame, FrameImage, TableImage},
-        object::{Sexp, SexpType, Shape, flag_bits, gc_bits, gp, object_size},
+        object::{Sexp, SexpType, Shape, flag_bits, gc_bits, gp, holds_handles, object_size},
         strings,
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -715,6 +715,9 @@ impl Heap {
                     // Every element is stored by the contents pass; until then they must be
                     // valid handles.
                     std::slice::from_raw_parts_mut(object.data() as *mut Sexp, capacity).fill(nil);
+                    if object.is_carded() {
+                        object.clear_cards();
+                    }
                 } else {
                     let element = kind.element_size().unwrap_or(0);
                     let data = input.blob()?;
@@ -829,13 +832,6 @@ unsafe fn children(object: Sexp, nil: Sexp) -> smallvec::SmallVec<[Sexp; 4]> {
     }
     children.retain(|child| *child != nil);
     children
-}
-
-fn holds_handles(kind: SexpType) -> bool {
-    matches!(
-        kind,
-        SexpType::String | SexpType::List | SexpType::Expression
-    )
 }
 
 /// Whether the loader writes an object's header and references. Fixed objects that cannot

@@ -35,8 +35,9 @@ use {
         env::Frame,
         large::{MAPPED_BYTES, MappedPool},
         object::{
-            EnvironmentObject, NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject,
-            TripleObject, VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, object_size, slot_for,
+            CARD_CLEAN, CARD_ELEMENTS, CARD_UNTENURED, CARD_YOUNG, EnvironmentObject, LARGE_CLASS,
+            NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject, TripleObject,
+            VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, holds_handles, object_size, slot_for,
         },
         records::{Layouts, slot_kind},
         space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept},
@@ -55,6 +56,39 @@ use {
         time::{Duration, Instant},
     },
 };
+
+/// What reading the bindings of a slot frame's pending environment (`gp::PENDING_FRAME`) runs
+/// first. A slot frame keeps its variables in registers, and the environment it hands to
+/// promises and closures it makes stays bare until something needs its bindings; the
+/// interpreter installs a resolver that gives the environment the frame's bindings in place.
+/// Routing every bindings read through [`bindings`] means no reader can see the bare frame.
+static PENDING_RESOLVER: std::sync::OnceLock<unsafe fn(Sexp)> = std::sync::OnceLock::new();
+
+/// Installs the interpreter's resolver for pending environments ([`PENDING_RESOLVER`]).
+pub fn set_pending_resolver(resolver: unsafe fn(Sexp)) {
+    if PENDING_RESOLVER.set(resolver).is_err() {
+        // Installed already, by an earlier interpreter in this process.
+    }
+}
+
+/// `env`'s own frame of bindings, given its bindings first when it is a slot frame's pending
+/// environment. Everything but the collector reads bindings through here.
+#[inline(always)]
+unsafe fn bindings(env: Sexp) -> *mut Frame {
+    if env.has_gp(gp::PENDING_FRAME) {
+        resolve_pending(env);
+    }
+    env.frame_ptr()
+}
+
+#[cold]
+#[inline(never)]
+unsafe fn resolve_pending(env: Sexp) {
+    let Some(resolver) = PENDING_RESOLVER.get() else {
+        panic!("a pending environment was read without an interpreter to resolve it");
+    };
+    resolver(env);
+}
 
 /// The longest vector R allows, `R_XLEN_T_MAX`.
 pub const MAX_VECTOR_LENGTH: isize = 4_503_599_627_370_496;
@@ -250,6 +284,28 @@ struct RootStack {
 /// frame stack or a JIT's stack maps.
 pub trait RootSource {
     fn trace(&self, marker: &mut Marker<'_>);
+
+    /// Drops what the source holds weakly and the collection found dead. Runs after marking,
+    /// before anything is freed, so a dead object's address cannot yet be reused.
+    fn clear_dead(&self, _liveness: &Liveness<'_>) {}
+}
+
+/// What a finished mark found live, for [`RootSource::clear_dead`].
+pub struct Liveness<'a> {
+    space: &'a Space,
+    major: bool,
+}
+
+impl Liveness<'_> {
+    /// Whether `object` survives this collection.
+    pub unsafe fn is_live(&self, object: Sexp) -> bool {
+        self.space.is_marked(object)
+    }
+
+    /// Whether this collection traced the whole heap.
+    pub fn is_major(&self) -> bool {
+        self.major
+    }
 }
 
 pub struct Marker<'a> {
@@ -601,8 +657,6 @@ impl std::error::Error for HeapError {}
 
 pub type HeapResult<T> = Result<T, HeapError>;
 
-const LARGE_CLASS: u8 = u8::MAX;
-
 impl Heap {
     pub fn new() -> Heap {
         Heap::with_policy(GcPolicy::default())
@@ -936,7 +990,56 @@ impl Heap {
         }
     }
 
+    /// A vector of `length` elements, as [`Heap::alloc_vector_general`] makes it. A small vector
+    /// of a common kind takes an inline path: its size class comes from a shift, the budget
+    /// check and slot bump are those of every small object, and only its data is initialized,
+    /// because the header and length words are written whole.
+    #[inline]
     pub unsafe fn alloc_vector(&mut self, kind: SexpType, length: isize) -> HeapResult<Sexp> {
+        let shift = small_vector_shift(kind);
+        // A negative length casts to a huge one and takes the general path, which refuses it.
+        if shift == NOT_SMALL_VECTOR || length as usize > SMALL_VECTOR_DATA_BYTES >> shift {
+            return self.alloc_vector_general(kind, length);
+        }
+        let data_bytes = (length as usize) << shift;
+        let size = (VECTOR_DATA_OFFSET + data_bytes + 15) & !15;
+        let class = SIZE_CLASS_BY_WORDS[size / 8] as usize;
+        let young = self.young_bytes + size;
+        if young > self.small_trigger {
+            return self.alloc_vector_general(kind, length);
+        }
+        let Some(memory) = self.space.allocate(class) else {
+            return Err(HeapError::CannotAllocate { bytes: size });
+        };
+        self.young_bytes = young;
+        let object = Sexp::from_non_null(memory.cast());
+        object.init_header(kind, class as u8, 0, self.known.nil);
+        object.set_length_and_capacity(length, length);
+        let data = object.data().cast::<u64>();
+        if holds_handles(kind) {
+            let fill = if kind == SexpType::String {
+                self.known.blank_string
+            } else {
+                self.known.nil
+            };
+            for index in 0..length as usize {
+                data.cast::<Sexp>().add(index).write(fill);
+            }
+        } else if length > 0 {
+            // Every nonempty vector's slot has at least 16 data bytes, so a scalar is zeroed by
+            // two stores instead of a `memset` call.
+            data.write(0);
+            data.add(1).write(0);
+            if size > VECTOR_DATA_OFFSET + 16 {
+                std::ptr::write_bytes(data.add(2).cast::<u8>(), 0, size - VECTOR_DATA_OFFSET - 16);
+            }
+        }
+        self.report_allocation(kind, length as usize);
+        Ok(object)
+    }
+
+    #[inline(never)]
+    unsafe fn alloc_vector_general(&mut self, kind: SexpType, length: isize) -> HeapResult<Sexp> {
         if !kind.is_vector() {
             return Err(HeapError::InvalidVectorType { kind, length });
         }
@@ -948,16 +1051,16 @@ impl Heap {
         }
         let size = object_size(kind, length as usize).ok_or(HeapError::TooLong)?;
         // Vectors of handles are filled below, so only the header needs zeroing first.
-        let zeroed = if matches!(
-            kind,
-            SexpType::String | SexpType::List | SexpType::Expression
-        ) {
+        let zeroed = if holds_handles(kind) {
             VECTOR_DATA_OFFSET
         } else {
             size
         };
         let object = self.allocate_with(kind, size, &[], zeroed)?;
         object.set_length_and_capacity(length, length);
+        if object.is_carded() {
+            object.clear_cards();
+        }
         match kind {
             SexpType::String => {
                 let blank = self.known.blank_string;
@@ -1477,6 +1580,37 @@ impl Heap {
     unsafe fn write_barrier_slow(&mut self, parent: Sexp, child: Sexp) {
         debug_assert!(self.space.is_marked(parent), "an old object lost its mark");
         if younger(parent, child) {
+            self.remember(parent);
+        }
+    }
+
+    /// The barrier of a store into element `index` of a handle vector. A large one keeps
+    /// recording stores in its cards while it is remembered, so its stores reach the slow path
+    /// whenever it is old.
+    #[inline(always)]
+    unsafe fn element_barrier(&mut self, vector: Sexp, index: usize, child: Sexp) {
+        let bits = vector.gc_bits();
+        if bits & gc_bits::OLD != 0
+            && (bits & gc_bits::REMEMBERED == 0 || vector.size_class() == LARGE_CLASS)
+        {
+            self.element_barrier_slow(vector, index, child);
+        }
+    }
+
+    #[inline(never)]
+    unsafe fn element_barrier_slow(&mut self, vector: Sexp, index: usize, child: Sexp) {
+        if !younger(vector, child) {
+            return;
+        }
+        if vector.is_carded() {
+            dirty_card(vector, index, child);
+        }
+        self.remember(vector);
+    }
+
+    #[inline]
+    unsafe fn remember(&mut self, parent: Sexp) {
+        if parent.gc_bits() & gc_bits::REMEMBERED == 0 {
             parent.set_gc_bit(gc_bits::REMEMBERED, true);
             self.remembered.push(parent);
         }
@@ -1484,13 +1618,18 @@ impl Heap {
 
     #[inline(always)]
     unsafe fn store(&mut self, parent: Sexp, old: Sexp, new: Sexp) {
+        self.count_store(parent, old, new);
+        self.write_barrier(parent, new);
+    }
+
+    #[inline(always)]
+    unsafe fn count_store(&mut self, parent: Sexp, old: Sexp, new: Sexp) {
         if parent.flags() & flag_bits::UNTRACKED == 0 {
             new.increment_refcount();
             if old.release_reference() {
                 self.note_zero(old);
             }
         }
-        self.write_barrier(parent, new);
     }
 
     /// Stops a cons-like object's fields from counting as references to what they hold.
@@ -1568,12 +1707,51 @@ impl Heap {
             }
             to.set_element_unbarriered(to_start + offset, value);
         }
-        if count == 0 || to.gc_bits() & (gc_bits::OLD | gc_bits::REMEMBERED) != gc_bits::OLD {
+        self.range_barrier(to, to_start, count);
+    }
+
+    /// Moves every element of `from` to the start of `to` and leaves `from` empty. The references
+    /// `from` held pass to `to` uncounted, so growing a list by copying it costs one store per
+    /// element instead of counting each element into the copy and, when the collector sweeps
+    /// the original, back out of it.
+    ///
+    /// # Safety
+    /// `to` and `from` are distinct, non-ALTREP vectors of one handle kind, `to` has room for
+    /// `from`'s elements in slots that hold `nil`, and nothing reads `from` afterwards.
+    pub unsafe fn move_elements(&mut self, to: Sexp, from: Sexp) {
+        let count = from.length() as usize;
+        if (to.flags() ^ from.flags()) & flag_bits::UNTRACKED != 0 {
+            self.copy_elements(to, 0, from, 0, count);
             return;
         }
-        if (0..count).any(|offset| younger(to, to.stored_element(to_start + offset))) {
-            to.set_gc_bit(gc_bits::REMEMBERED, true);
-            self.remembered.push(to);
+        std::ptr::copy_nonoverlapping(from.data() as *const Sexp, to.data() as *mut Sexp, count);
+        from.set_length(0);
+        self.range_barrier(to, 0, count);
+    }
+
+    /// The write barrier for `count` elements stored into `to` from `to_start` without one.
+    unsafe fn range_barrier(&mut self, to: Sexp, to_start: usize, count: usize) {
+        let bits = to.gc_bits();
+        if count == 0
+            || bits & gc_bits::OLD == 0
+            || (bits & gc_bits::REMEMBERED != 0 && !to.is_carded())
+        {
+            return;
+        }
+        if to.is_carded() {
+            let mut any = false;
+            for index in to_start..to_start + count {
+                let child = to.stored_element(index);
+                if younger(to, child) {
+                    dirty_card(to, index, child);
+                    any = true;
+                }
+            }
+            if any {
+                self.remember(to);
+            }
+        } else if (0..count).any(|offset| younger(to, to.stored_element(to_start + offset))) {
+            self.remember(to);
         }
     }
 
@@ -1584,7 +1762,8 @@ impl Heap {
         {
             return (elements.write)(vector, index, value);
         }
-        self.store(vector, vector.stored_element(index), value);
+        self.count_store(vector, vector.stored_element(index), value);
+        self.element_barrier(vector, index, value);
         vector.set_element_unbarriered(index, value);
     }
 
@@ -1659,9 +1838,11 @@ impl Heap {
         let mut escaped = std::mem::take(&mut self.escaped);
         for vector in escaped.drain(..) {
             vector.set_gc_bit(gc_bits::ESCAPED, false);
-            if vector.gc_bits() & (gc_bits::OLD | gc_bits::REMEMBERED) == gc_bits::OLD {
-                vector.set_gc_bit(gc_bits::REMEMBERED, true);
-                self.remembered.push(vector);
+            if vector.gc_bits() & gc_bits::OLD != 0 {
+                if vector.is_carded() {
+                    std::ptr::write_bytes(vector.cards(), CARD_YOUNG, vector.card_count());
+                }
+                self.remember(vector);
             }
         }
         self.escaped = escaped;
@@ -1682,7 +1863,7 @@ impl Heap {
         if env == self.known.empty_env {
             return None;
         }
-        (*env.frame_ptr()).find(symbol)
+        (*bindings(env)).find(symbol)
     }
 
     /// [`Heap::frame_cell`] through a lookup site's position hint (see [`Frame::find_hinted`]).
@@ -1696,7 +1877,7 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return self.frame_cell(env, symbol);
         }
-        (*env.frame_ptr()).find_hinted(symbol, hint)
+        (*bindings(env)).find_hinted(symbol, hint)
     }
 
     /// The binding cells of `env`'s own frame. The global frame's bindings live on the symbols,
@@ -1704,7 +1885,7 @@ impl Heap {
     pub unsafe fn local_cells(&self, env: Sexp) -> impl Iterator<Item = Sexp> + '_ {
         let frame = (!self.is_symbol_frame(env) && env != self.known.empty_env)
             // SAFETY: an environment other than these owns its frame for as long as it lives.
-            .then(|| unsafe { &*env.frame_ptr() });
+            .then(|| unsafe { &*bindings(env) });
         frame.into_iter().flat_map(Frame::cells)
     }
 
@@ -1744,7 +1925,7 @@ impl Heap {
             symbol.set_cdr_unbarriered(cell);
         } else {
             self.write_barrier(env, cell);
-            (*env.frame_ptr()).insert(symbol, cell);
+            (*bindings(env)).insert(symbol, cell);
         }
         Ok(())
     }
@@ -1924,6 +2105,35 @@ impl Heap {
         self.drop_enclosure(env);
     }
 
+    /// Stores `value` into a slot of a closure call's slot frame, which counts one reference to
+    /// what it holds, as a binding cell does. Slots live in the interpreter's register file, a
+    /// root, so the store needs no write barrier.
+    #[inline(always)]
+    pub unsafe fn store_slot(&mut self, slot: &mut Sexp, value: Sexp) {
+        value.increment_refcount();
+        if slot.release_reference() {
+            self.note_zero(*slot);
+        }
+        *slot = value;
+    }
+
+    /// Gives up the references a returning call's slot frame holds, as [`Heap::clear_frame`]
+    /// does for a frame's bindings: an argument's promise that only its slot holds gives up its
+    /// value and environment too.
+    pub unsafe fn release_slots(&mut self, slots: &mut [Sexp]) {
+        let nil = self.known.nil;
+        for slot in slots {
+            let value = *slot;
+            if value.kind() == SexpType::Promise && value.refcount() == 1 {
+                self.release_promise(value);
+            }
+            if value.release_reference() {
+                self.note_zero(value);
+            }
+            *slot = nil;
+        }
+    }
+
     /// Releases the frames that waited for a reconcile ([`Heap::release_frame`]), in the order
     /// their calls returned, so a callee's frame gives up its promises before its caller's frame
     /// is counted. The roots are flagged [`gc_bits::HELD`]; `frames_held` are the frames a root
@@ -2013,7 +2223,7 @@ impl Heap {
         if env == self.known.empty_env {
             return Ok(false);
         }
-        let Some(cell) = (*env.frame_ptr()).remove(symbol) else {
+        let Some(cell) = (*bindings(env)).remove(symbol) else {
             return Ok(false);
         };
         self.clear_removed_cell(cell);
@@ -2077,7 +2287,7 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return self.frame_symbols(env);
         }
-        (*env.frame_ptr()).symbols().collect()
+        (*bindings(env)).symbols().collect()
     }
 
     /// The symbols bound in `env`'s own frame, in the order GNU R lists them.
@@ -2093,7 +2303,7 @@ impl Heap {
         if env == self.known.empty_env {
             return Vec::new();
         }
-        (*env.frame_ptr())
+        (*bindings(env))
             .listed_cells()
             .iter()
             .map(|cell| cell.car())
@@ -2104,7 +2314,7 @@ impl Heap {
     /// decides the order the frame is listed in.
     pub unsafe fn set_frame_hashed(&mut self, env: Sexp, size: i32) {
         if !self.is_symbol_frame(env) && env != self.known.empty_env {
-            (*env.frame_ptr()).set_hashed(size);
+            (*bindings(env)).set_hashed(size);
         }
     }
 
@@ -2114,7 +2324,7 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return None;
         }
-        unsafe { (*env.frame_ptr()).hash_profile() }
+        unsafe { (*bindings(env)).hash_profile() }
     }
 
     /// Counts a binding of `symbol` that `env` holds only for the length of one operation, as
@@ -2125,7 +2335,7 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return;
         }
-        unsafe { (*env.frame_ptr()).count_transient(symbol) }
+        unsafe { (*bindings(env)).count_transient(symbol) }
     }
 
     /// Marks the bindings of a closure frame made so far as its formals.
@@ -2173,6 +2383,11 @@ impl Heap {
     /// Keeps `object` alive for the rest of the heap's life.
     pub fn add_global_root(&mut self, object: Sexp) {
         self.roots.globals.push(object);
+    }
+
+    /// Whether `R_PreserveObject` holds `object`.
+    pub fn is_preserved(&self, object: Sexp) -> bool {
+        self.roots.precious.contains_key(&object)
     }
 
     /// `R_PreserveObject`. Preserving twice needs two releases.
@@ -2659,13 +2874,12 @@ impl Heap {
         while let Some(object) = dying.pop() {
             let attributes = object.attrib();
             object.set_attrib_unbarriered(nil);
-            let mut children: SmallVec<[Sexp; 16]> = SmallVec::new();
-            children.push(attributes);
-            for index in 0..object.length() as usize {
-                children.push(object.stored_element(index));
+            let elements = (0..object.length() as usize).map(|index| {
+                let child = object.stored_element(index);
                 object.set_element_unbarriered(index, nil);
-            }
-            for child in children {
+                child
+            });
+            for child in std::iter::once(attributes).chain(elements) {
                 if !child.release_reference() {
                     continue;
                 }
@@ -2825,14 +3039,28 @@ impl Heap {
             // younger objects are exactly the remembered and escaped ones, so tracing starts
             // from them too. The others are unmarked now, and traced if anything reaches them.
             // Tracing remembers again each tenured parent still left pointing at a younger child.
-            for index in 0..self.remembered.len() {
-                let parent = self.remembered[index];
+            // A carded parent is rescanned only where its cards are dirty, and those cards are
+            // derived again from what the rescan finds still younger.
+            for parent in std::mem::take(&mut self.remembered) {
                 parent.set_gc_bit(gc_bits::REMEMBERED, false);
-                if parent.gc_bits() & gc_bits::TENURED != 0 {
+                if parent.gc_bits() & gc_bits::TENURED == 0 {
+                    if parent.is_carded() {
+                        parent.clear_cards();
+                    }
+                } else if parent.is_carded() {
+                    self.tracing_tenured = true;
+                    self.younger_child = false;
+                    self.mark(parent.attrib());
+                    let attrib_younger = self.younger_child;
+                    let cards_younger = self.scan_cards(parent, Collection::Intermediate);
+                    self.tracing_tenured = false;
+                    if attrib_younger || cards_younger {
+                        self.remember(parent);
+                    }
+                } else {
                     self.mark_stack.push(parent);
                 }
             }
-            self.remembered.clear();
             for index in 0..self.escaped.len() {
                 let parent = self.escaped[index];
                 if parent.gc_bits() & gc_bits::TENURED != 0 {
@@ -2844,7 +3072,22 @@ impl Heap {
             // Old objects are already marked, so their young children are pushed directly.
             for index in 0..self.remembered.len() {
                 let parent = self.remembered[index];
-                self.mark_stack.push(parent);
+                if parent.is_carded() {
+                    self.mark(parent.attrib());
+                    self.scan_cards(parent, Collection::Minor);
+                } else if parent.kind() == SexpType::Environment {
+                    // A frame being filled (a namespace during a load) is remembered on every
+                    // definition, and only the cells appended since its last scan can be young.
+                    self.mark(parent.attrib());
+                    self.mark(parent.enclosure());
+                    let frame = &mut *parent.frame_ptr();
+                    for cell in frame.unscanned_cells() {
+                        self.mark(cell);
+                    }
+                    frame.mark_scanned();
+                } else {
+                    self.mark_stack.push(parent);
+                }
             }
             // An escaped character vector can only have come to hold CHARSXPs, which point at
             // nothing, so marking every young CHARSXP covers whatever native code stored into it
@@ -2876,6 +3119,13 @@ impl Heap {
         self.drain();
         self.process_weak_refs();
         self.clear_dead_weak_pairs();
+        let liveness = Liveness {
+            space: &self.space,
+            major: kind == Collection::Major,
+        };
+        for (_, source) in &self.sources {
+            source.clear_dead(&liveness);
+        }
         // Before the sweep, while a mark still means "survives". A returned frame the sweep frees
         // gives up its bindings first: sweeping decrements nothing, and those bindings may be the
         // only counted references left to its caller's frame, which also waits to be released.
@@ -3131,6 +3381,27 @@ impl Heap {
             Shape::Vector => {
                 if object.flags() & flag_bits::WEAK_PAIRS != 0 {
                     self.weak_pairs.push(object);
+                } else if self.tracing_tenured && object.is_carded() {
+                    // A deeper collection derives each card of a tenured vector from scratch:
+                    // dirty exactly where an element is younger than the vector.
+                    let attrib_younger = self.younger_child;
+                    let length = object.length() as usize;
+                    let cards = object.cards();
+                    let mut any = false;
+                    for card in 0..object.card_count() {
+                        self.younger_child = false;
+                        let start = card * CARD_ELEMENTS;
+                        for index in start..(start + CARD_ELEMENTS).min(length) {
+                            self.mark(object.stored_element(index));
+                        }
+                        *cards.add(card) = if self.younger_child {
+                            CARD_UNTENURED
+                        } else {
+                            CARD_CLEAN
+                        };
+                        any |= self.younger_child;
+                    }
+                    self.younger_child = attrib_younger || any;
                 } else if object.kind() == SexpType::String {
                     // A character vector usually repeats a few strings, like a column of
                     // categories, and marking one again only finds it marked. A small table of
@@ -3177,6 +3448,45 @@ impl Heap {
             // Weak references are traced by `process_weak_refs`.
             Shape::WeakRef | Shape::Primitive => {}
         }
+    }
+
+    /// Marks the elements in the dirty cards of a remembered carded vector that `kind` of
+    /// collection must read, and says whether any of them is still younger than the vector.
+    ///
+    /// A minor collection reads the young cards only. Their children survive it in the younger
+    /// old generation, so a tenured vector's card turns untenured and an untenured vector's turns
+    /// clean. An intermediate collection reads every dirty card of a tenured vector and derives
+    /// it again: untenured where a child is still younger than the vector, clean elsewhere.
+    unsafe fn scan_cards(&mut self, vector: Sexp, kind: Collection) -> bool {
+        let (threshold, after_minor) = match kind {
+            Collection::Minor if vector.gc_bits() & gc_bits::TENURED != 0 => {
+                (CARD_YOUNG, CARD_UNTENURED)
+            }
+            Collection::Minor => (CARD_YOUNG, CARD_CLEAN),
+            Collection::Intermediate | Collection::Major => (CARD_UNTENURED, CARD_CLEAN),
+        };
+        let length = vector.length() as usize;
+        let cards = vector.cards();
+        let mut any = false;
+        for card in 0..vector.card_count() {
+            if *cards.add(card) < threshold {
+                continue;
+            }
+            self.younger_child = false;
+            let start = card * CARD_ELEMENTS;
+            for index in start..(start + CARD_ELEMENTS).min(length) {
+                self.mark(vector.stored_element(index));
+            }
+            *cards.add(card) = match kind {
+                Collection::Minor => after_minor,
+                Collection::Intermediate | Collection::Major if self.younger_child => {
+                    CARD_UNTENURED
+                }
+                Collection::Intermediate | Collection::Major => CARD_CLEAN,
+            };
+            any |= self.younger_child;
+        }
+        any
     }
 
     /// Ephemeron semantics: a weak reference's value and finalizer are reachable only while its
@@ -3284,9 +3594,53 @@ impl Heap {
                     },
                 );
             }
-            if !self.space.is_marked(parent)
-                || parent.gc_bits() & (gc_bits::REMEMBERED | gc_bits::ESCAPED) != 0
+            if !self.space.is_marked(parent) || parent.gc_bits() & gc_bits::ESCAPED != 0 {
+                return;
+            }
+            // A remembered carded vector may hold younger children only in its dirty cards, and
+            // one that is not remembered has none dirty.
+            let remembered = parent.gc_bits() & gc_bits::REMEMBERED != 0;
+            if parent.is_carded() {
+                let dirty = |card: usize| *parent.cards().add(card) != 0;
+                if !remembered && (0..parent.card_count()).any(dirty) {
+                    panic!(
+                        "a {:?} of length {} has dirty cards but is not remembered",
+                        parent.kind(),
+                        parent.length()
+                    );
+                }
+                for index in 0..parent.length() as usize {
+                    let card = *parent.cards().add(index / CARD_ELEMENTS);
+                    let child = parent.stored_element(index);
+                    let allowed = match card {
+                        CARD_CLEAN => self.space.is_marked(child) && !younger(parent, child),
+                        CARD_UNTENURED => self.space.is_marked(child),
+                        _ => true,
+                    };
+                    if !allowed {
+                        panic!(
+                            "card barrier violated: {:?} of length {} holds a younger {:?} at \
+                             element {index} in a card marked {card}",
+                            parent.kind(),
+                            parent.length(),
+                            child.kind(),
+                        );
+                    }
+                }
+            }
+            // A minor collection skips a remembered frame's scanned slots, so their cells must be
+            // old already.
+            if parent.kind() == SexpType::Environment
+                && let Some(cell) = (*parent.frame_ptr())
+                    .scanned_cells()
+                    .find(|&cell| !self.space.is_marked(cell))
             {
+                panic!(
+                    "frame barrier violated: a {:?} cell in the scanned slots of an environment is young",
+                    cell.kind()
+                );
+            }
+            if remembered {
                 return;
             }
             let mut children = vec![parent.attrib()];
@@ -3370,6 +3724,9 @@ impl Heap {
         }
         for parent in self.remembered.drain(..) {
             parent.set_gc_bit(gc_bits::REMEMBERED, false);
+            if parent.is_carded() {
+                parent.clear_cards();
+            }
         }
     }
 
@@ -3396,6 +3753,9 @@ impl Heap {
         self.sweep_young();
         for parent in self.remembered.drain(..) {
             parent.set_gc_bit(gc_bits::REMEMBERED, false);
+            if parent.is_carded() {
+                parent.clear_cards();
+            }
         }
         self.retired_bytes += (self.young_bytes + self.young_large_bytes) as u64;
         self.young_bytes = 0;
@@ -3616,6 +3976,21 @@ impl WellKnown {
             self.false_value,
             self.logical_na_value,
         ]
+    }
+}
+
+/// Records in its card that element `index` of a carded vector holds `child`, which is younger
+/// than the vector.
+#[inline]
+unsafe fn dirty_card(vector: Sexp, index: usize, child: Sexp) {
+    let card = vector.cards().add(index / CARD_ELEMENTS);
+    let level = if child.gc_bits() & gc_bits::OLD == 0 {
+        CARD_YOUNG
+    } else {
+        CARD_UNTENURED
+    };
+    if *card < level {
+        *card = level;
     }
 }
 
@@ -3953,5 +4328,26 @@ unsafe fn slot_kind_of(slot: Slot) -> u8 {
                 slot_kind::OTHER
             }
         },
+    }
+}
+
+/// The data bytes up to which [`Heap::alloc_vector`] takes its inline path.
+const SMALL_VECTOR_DATA_BYTES: usize = 512;
+const NOT_SMALL_VECTOR: u32 = u32::MAX;
+
+/// The log2 of `kind`'s element size, for the vector kinds [`Heap::alloc_vector`] allocates
+/// inline. A `CHARSXP` is not among them, because its size counts a terminating byte.
+#[inline(always)]
+const fn small_vector_shift(kind: SexpType) -> u32 {
+    match kind {
+        SexpType::Raw => 0,
+        SexpType::Logical | SexpType::Integer => 2,
+        SexpType::Real
+        | SexpType::I64
+        | SexpType::String
+        | SexpType::List
+        | SexpType::Expression => 3,
+        SexpType::Complex => 4,
+        _ => NOT_SMALL_VECTOR,
     }
 }

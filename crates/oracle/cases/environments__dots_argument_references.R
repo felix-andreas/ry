@@ -1,0 +1,63 @@
+# A callee with a `...` formal takes its call's arguments straight into its slots too: the
+# arguments `...` collects become references to the caller's variables and code, held in the
+# callee's `...`. Each function below exercises one rule those references keep: `...` counts,
+# names and substitutes as a list of promises would, `..1`, `...elt` and `...length` read it,
+# an argument forces once however often `list(...)` reads it, a closure that keeps `...` reads
+# the caller's variable when it is called, an unused argument is never forced, forwarding
+# `...` to another closure, a method or `match.call` keeps the promises, and a frame that gets
+# an environment keeps them too. Each runs a few times so its call site settles on its plan.
+count <- function(...) length(list(...))
+first <- function(...) ..1
+named <- function(...) names(list(...))
+labels <- function(...) sapply(substitute(list(...))[-1], deparse)
+pass <- function(...) count(...)
+keep <- function(...) function() list(...)
+once <- function(...) { a <- list(...); b <- list(...); length(a) + length(b) }
+lazy <- function(x, ...) x
+mixed <- function(a, ..., z = 3) c(a, length(list(...)), z)
+nth <- function(...) ...elt(2)
+len <- function(...) ...length()
+gen <- function(x, ...) UseMethod("gen")
+gen.default <- function(x, ...) list(...)
+mc <- function(...) match.call()
+env_dots <- function(...) { e <- environment(); get("...", envir = e); list(...) }
+side <- function() {
+  n <- 0
+  bump <- function() { n <<- n + 1; n }
+  r <- once(bump())
+  c(r, n)
+}
+held <- function() { yy <- 1; g <- keep(yy); yy <- 2; g()[[1]] }
+for (k in 1:3) {
+  v <- k
+  cat(count(v, 2, k + 1), first(v, 9), named(a = v, 2), labels(v, k + 1), pass(v, v),
+    side(), held(), lazy(1, stop("no")), mixed(1, v, v, z = 4), nth(v, k * 5), len(v, 1, 2),
+    length(gen(1, v, 2)), deparse(mc(v, b = 2)), length(env_dots(v, 2)), "\n")
+}
+f <- function() { yy <- 7; count(yy, yy + 1) + first(yy) }
+for (k in 1:3) cat(f(), "\n")
+# Calls that pass `...` on match their arguments on every call, since what `...` holds decides
+# which argument fills which formal.
+pick <- function(a, b = 10, ...) c(a, b, length(list(...)))
+fwd <- function(...) pick(...)
+fwd_first <- function(x, ...) pick(x, ...)
+chain <- function(...) fwd(...)
+side_chain <- function() {
+  n <- 0
+  bump <- function() { n <<- n + 1; n }
+  r <- chain(bump(), bump())
+  c(r, n)
+}
+over <- function(...) vapply(1:2, function(i, ...) i + sum(...), numeric(1), ...)
+unused <- function(...) tryCatch(pick2(...), error = function(e) conditionMessage(e))
+pick2 <- function(a) a
+miss <- function(...) is_missing(...)
+is_missing <- function(a) missing(a)
+env_fwd <- function(...) { environment(); pick(...) }
+lazy_fwd <- function(...) lazy(...)
+for (k in 1:3) {
+  v <- k
+  cat(fwd(v), fwd(v, 2), fwd(b = v, a = 1), fwd(v, 2, 3, 4), fwd_first(v, b = v * 2),
+    side_chain(), over(v, 1), unused(1, 2), miss(), miss(v), env_fwd(v, 5), chain(v, k),
+    lazy_fwd(v, stop("no")), "\n")
+}

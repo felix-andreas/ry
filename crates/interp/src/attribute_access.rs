@@ -74,30 +74,32 @@ pub(crate) unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
 /// a pairlist's names are not stored as an attribute. The value is `getAttrib`'s, which expands
 /// compact row names and reads a pairlist's or a one-dimensional array's names.
 pub unsafe fn attribute(object: Sexp, which: Sexp, exact: bool) -> R<Sexp> {
+    let wanted = which.bytes();
+    // One pass finds both kinds of match. Only a strictly longer tag can be a partial match,
+    // because an equal-length prefix is a full match, so tags of the wanted length (every tag,
+    // in a vector used as a map from fixed-width keys) cost one pointer compare and no memcmp.
+    let mut partial = None;
+    let mut ambiguous = false;
     let mut cell = object.attrib();
     while cell.kind() == SexpType::Pairlist {
-        if same_text(cell.tag().car(), which) {
+        let text = cell.tag().car();
+        if same_text(text, which) {
             return attribute_value(object, cell.tag(), cell.car());
+        }
+        if !exact {
+            let tag_text = text.bytes();
+            if tag_text.len() > wanted.len() && tag_text.starts_with(wanted) {
+                ambiguous |= partial.is_some();
+                partial = Some((cell.tag(), cell.car()));
+            }
         }
         cell = cell.cdr();
     }
-    let wanted = which.bytes();
     if wanted == b"names" {
         return Ok(values::names(object));
     }
-    if exact {
+    if exact || ambiguous {
         return Ok(nil());
-    }
-    let mut partial = None;
-    let mut cell = object.attrib();
-    while cell.kind() == SexpType::Pairlist {
-        if cell.tag().car().bytes().starts_with(wanted) {
-            if partial.is_some() {
-                return Ok(nil());
-            }
-            partial = Some((cell.tag(), cell.car()));
-        }
-        cell = cell.cdr();
     }
     if b"names".starts_with(wanted) {
         match partial {
@@ -341,7 +343,7 @@ unsafe fn do_set_names(call: &Call<'_>) -> R<Sexp> {
     {
         crate::heap().root(object);
         let function = values::install("as.character")?;
-        eval::eval(values::call(function, &[names])?, call.env)?
+        eval::eval(values::call(function, &[names])?, call.env()?)?
     } else {
         names
     };

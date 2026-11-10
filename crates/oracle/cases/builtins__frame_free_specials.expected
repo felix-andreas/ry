@@ -1,0 +1,20 @@
+[stdout]
+| g(1) TRUE FALSE mine list(v, v + 1) 
+| g(1) TRUE FALSE mine list(v, v + 1) 
+| g(1) TRUE FALSE mine list(v, v + 1) 
+| g(1) TRUE FALSE mine list(v, v + 1) 
+| {
+|     e <- quote(g(x))
+|     e[[2]] <- 1
+|     e
+| }
+| TRUE FALSE TRUE 2 1 
+| TRUE FALSE TRUE 2 1 
+| TRUE FALSE TRUE 2 1 
+| TRUE FALSE TRUE 2 1 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

@@ -649,7 +649,7 @@ unsafe fn do_undefer(call: &Call<'_>) -> R<Sexp> {
 /// the promise was made in.
 unsafe fn do_force(call: &Call<'_>) -> R<Sexp> {
     let function = lower_handle_code(call.arg(0), position_of_value(call.arg(1))?)?;
-    eval(function, call.env)
+    eval(function, call.env()?)
 }
 
 /// The handle of the pending plan's file `path`, made on first use.

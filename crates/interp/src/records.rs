@@ -189,7 +189,7 @@ unsafe fn do_tag(call: &Call<'_>) -> R<Sexp> {
 /// `try result`: the payload of an `:Ok`, or a `return` of the whole `:Err` from the function
 /// whose body evaluates it. A payload of several items comes back as a tuple of them.
 unsafe fn do_try(call: &Call<'_>) -> R<Sexp> {
-    let value = eval::eval(call.arg(0), call.env)?;
+    let value = eval::eval(call.arg(0), call.env()?)?;
     let tag = (value.kind() == SexpType::Record)
         .then(|| layout(value))
         .and_then(|layout| layout.tag.map(|tag| tag_name(tag)));
@@ -205,13 +205,13 @@ unsafe fn do_try(call: &Call<'_>) -> R<Sexp> {
             }
         },
         Some("Err") => {
-            if !interp().frames.iter().any(|frame| frame.env == call.env) {
+            if call.frame_index().is_none() {
                 return Err(call.error(
                     "`try` returns an `:Err` early from the function around it, but it is not inside a function",
                 ));
             }
             Err(jump(Jump::Return {
-                env: call.env,
+                env: call.env()?,
                 value,
             }))
         }
@@ -233,7 +233,7 @@ unsafe fn do_text(call: &Call<'_>) -> R<Sexp> {
         return scalar_string(&deparse::deparse_one_line(value));
     }
     let as_character = values::install("as.character")?;
-    eval::eval(values::call(as_character, &[value])?, call.env)
+    eval::eval(values::call(as_character, &[value])?, call.env()?)
 }
 
 /// `(..base, name = value, ...)`: a copy of the record `base` with the named fields replaced.
@@ -678,7 +678,7 @@ unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
     let Some((scrutinee, arms)) = call.args.split_first() else {
         return Err(call.error("`match` needs a value to match"));
     };
-    let value = eval::eval(scrutinee.value, call.env)?;
+    let value = eval::eval(scrutinee.value, call.env()?)?;
     let arrow = values::install("=>")?;
     let mut bindings = Vec::new();
     for arm in arms {
@@ -704,15 +704,15 @@ unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
             continue;
         }
         if let Some(guard) = guard
-            && !guard_condition(guard, &bindings, call.env, call.call)?
+            && !guard_condition(guard, &bindings, call.env()?, call.call)?
         {
             continue;
         }
         for &(name, bound) in &bindings {
-            eval::define(name, bound, call.env)?;
+            eval::define(name, bound, call.env()?)?;
         }
         interp().visible = true;
-        return eval::eval(body, call.env);
+        return eval::eval(body, call.env()?);
     }
     Err(no_arm_matches(value, call.call))
 }
@@ -1223,7 +1223,7 @@ unsafe fn do_all_equal(call: &Call<'_>) -> R<Sexp> {
     let current = call.arg(1);
     let extra: Vec<Arg> = call.args.iter().skip(2).copied().collect();
     let mut messages = Vec::new();
-    compare(target, current, &extra, call.env, "", &mut messages)?;
+    compare(target, current, &extra, call.env()?, "", &mut messages)?;
     if messages.is_empty() {
         values::scalar_bool(true)
     } else {

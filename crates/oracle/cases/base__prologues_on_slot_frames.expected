@@ -1,0 +1,58 @@
+[stdout]
+| [1] "argument \"x\" is missing, with no default"
+| [1] 2 3
+| [1] 2 4
+| NULL
+| [1] "FALSE is not TRUE"
+| [1] 1 2 3
+| attr(,"note")
+| [1] "n"
+|  Named int [1:2] 1 2
+|  - attr(*, "names")= chr [1:2] "a" "b"
+|  int [1:2] 1 2
+| [1] "9.424778"
+| [1] "none"
+| [1] TRUE
+| [1] "x"
+| [1] "missing"
+| [1] "1.00"
+| [1] "argument \"x\" is missing, with no default"
+| [1] 2 3
+| [1] 2 4
+| NULL
+| [1] "FALSE is not TRUE"
+| [1] 1 2 3
+| attr(,"note")
+| [1] "n"
+|  Named int [1:2] 1 2
+|  - attr(*, "names")= chr [1:2] "a" "b"
+|  int [1:2] 1 2
+| [1] "9.424778"
+| [1] "none"
+| [1] TRUE
+| [1] "x"
+| [1] "missing"
+| [1] "1.00"
+| [1] "argument \"x\" is missing, with no default"
+| [1] 2 3
+| [1] 2 4
+| NULL
+| [1] "FALSE is not TRUE"
+| [1] 1 2 3
+| attr(,"note")
+| [1] "n"
+|  Named int [1:2] 1 2
+|  - attr(*, "names")= chr [1:2] "a" "b"
+|  int [1:2] 1 2
+| [1] "9.424778"
+| [1] "none"
+| [1] TRUE
+| [1] "x"
+| [1] "missing"
+| [1] "1.00"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

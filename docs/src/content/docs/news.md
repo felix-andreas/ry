@@ -32,6 +32,24 @@ from 2.27x to 2.78x on rcp and from 1.53x to 2.04x on shootout (`tools/bench/rea
 --public all --repeat 3`). Complex division and non-integer powers follow C99, so special values
 such as `(Inf+1i) / 0` match GNU R.
 
+### Cheaper minor collections and package metadata reads
+
+Large lists and character vectors record stores in cards, so a minor collection rescans only the
+parts that changed, and growing a list with `[[<-` moves its elements instead of copying them.
+rcp's list-for drops from 1.54 s to 0.73 s and list-while from 1.20 s to 0.73 s, which takes both
+past GNU R (1.63x and 1.58x), and the rcp geometric mean rises from 2.64x to 2.80x.
+`unserialize()` and `readRDS()` on a connection read from its buffer, which takes a third off
+their cost during `library(testthat)`.
+
+### Faster `attr()` lookups, large matrix products and small vector allocation
+
+`attr(x, which)` finds a full or partial match in one pass over the attributes, which takes
+shootout's knucleotide_brute_2 from 1.38x to 2.08x of GNU R. `%*%` computes four result columns
+per pass over its left operand, with each entry summed in the same order as before, so results
+are unchanged and spectralnorm_math rises from 1.27x to 1.44x.
+Small vectors are allocated inline at the call site, which takes 2.2% off the instructions of
+the testthat workload.
+
 ## ry 0.4.3-beta, Linux only
 
 *Released in November 2026 as a pre-release.*

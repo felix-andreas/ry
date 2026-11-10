@@ -124,7 +124,8 @@ climb *args:
     python3 -I tools/climb/run.py {{ args }}
 
 # Times the representative workload mix (tools/bench/real) on GNU R and on ry with the JIT on and off,
-# e.g. `just bench-real --repeat 5`, `just bench-real --suites .bench` (adds the generated packages' tests),
+# e.g. `just bench-real --repeat 9`, `just bench-real --baseline ../main/target/release/ry` (a second ry in the same rounds),
+# `just bench-real --suites .bench` (adds the generated packages' tests),
 # `just bench-real --public all` (adds the vendored public programs in tools/bench/real/suites)
 # or `just bench-real --write` (stores tools/bench/real/results.json, the record behind the table in benchmarks.mdx).
 bench-real *args:
@@ -320,10 +321,16 @@ package version target="":
     	*apple*) library=libR.dylib executable=ry ;;
     	*) library=libR.so executable=ry ;;
     esac
-    # The runtime and base R are built first, because `ry` embeds both (crates/repl/build.rs).
-    just base-r release "$target"
-    base="$(cd "${CARGO_TARGET_DIR:-target}/$target/base-r" && pwd)"
-    RY_EMBED_RUNTIME="$(cd "$build" && pwd)/$library" RY_EMBED_BASE="$base" cargo build --release --locked --target "$target" -p ry-lang
+    # The runtime and base R are built first, because `ry` embeds both (crates/repl/build.rs). On
+    # x86_64 Linux the build is profile-guided and libR is laid out by BOLT (tools/layout/optimize.sh,
+    # decisions.md "The Linux release build is profile-guided"); RY_LAYOUT=off builds it plainly.
+    if [ "$target" = x86_64-unknown-linux-gnu ] && [ "${RY_LAYOUT:-}" != off ]; then
+    	tools/layout/optimize.sh "$target"
+    else
+    	just base-r release "$target"
+    	base="$(cd "${CARGO_TARGET_DIR:-target}/$target/base-r" && pwd)"
+    	RY_EMBED_RUNTIME="$(cd "$build" && pwd)/$library" RY_EMBED_BASE="$base" cargo build --release --locked --target "$target" -p ry-lang
+    fi
     case "$target" in
     	*windows*)
     		# The archive carries no toolchain runtime, so the binaries may import only Windows and

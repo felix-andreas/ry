@@ -219,7 +219,10 @@ your code and no data. It lists:
   recommended packages and the common CRAN dependencies ry benchmarks against is printed as
   `private-` and a hash of its name;
 - event counts: closure calls, promises created and forced, S3 and S4 dispatches, conditions
-  signalled, JIT compilations and deoptimizations, collections and the peak memory in use.
+  signalled, JIT compilations and deoptimizations, collections and the peak memory in use;
+- calls to closures of package namespaces other than base, and how many of them skipped the
+  generic call protocol: the call ran natively or in a slot frame that never made its
+  environment, and no argument was a promise.
 
 The time split comes from sampling what the runtime is doing once a millisecond, so a share below
 about 1% of a short run is noise. Collecting it slows a run by up to about 7% (1% on the fastest
