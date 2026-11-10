@@ -1573,45 +1573,53 @@ unsafe fn do_signal_condition(call: &Call<'_>) -> R<Sexp> {
     {
         return decline();
     }
+    let (Some(message), Some(condition_call)) = (
+        list_field(condition, b"message"),
+        list_field(condition, b"call"),
+    ) else {
+        return decline();
+    };
     // `conditionMessage(cond)` and `conditionCall(cond)` dispatch on the class, and the base
     // methods read the fields with `$`, which dispatches too: only base's `condition` methods
     // may apply.
     let base = values::base_namespace();
+    let mut method_name: SmallVec<[u8; 64]> = SmallVec::new();
     for index in 0..length(class) {
         let name = class.element(index).bytes();
         if name == b"condition" {
             break;
         }
-        let Ok(name) = std::str::from_utf8(name) else {
-            return decline();
-        };
-        for generic in ["conditionMessage", "conditionCall", "$"] {
-            let method = install(&format!("{generic}.{name}"))?;
+        for generic in [&b"conditionMessage"[..], b"conditionCall", b"$"] {
+            method_name.clear();
+            method_name.extend_from_slice(generic);
+            method_name.push(b'.');
+            method_name.extend_from_slice(name);
+            let method = values::install_bytes(&method_name)?;
             if crate::dispatch::lookup_method(method, frame, base)?.is_some() {
                 return decline();
             }
         }
     }
-    let Some(message) = list_field(condition, b"message") else {
-        return decline();
-    };
-    let Some(condition_call) = list_field(condition, b"call") else {
-        return decline();
-    };
     eval::define(symbols().msg, message, frame)?;
     eval::define(symbols().call, condition_call, frame)?;
     let value = crate::conditions::signal_condition(condition, condition_call)?;
     finish(ClosureFrame::Env(frame), value, true)
 }
 
-/// The element of the list `list` named exactly `name`, as `list$name` finds it; `None` when no
-/// name matches exactly, where `$` would try partial matching.
+/// `list$name` for a list without a `$` method: the element named exactly `name`, or `NULL`
+/// when no name begins with `name`. `None` when only a partial match could find it, which the R
+/// body resolves (and may warn about under `warnPartialMatchDollar`).
 unsafe fn list_field(list: Sexp, name: &[u8]) -> Option<Sexp> {
     let names = values::get_attr(list, symbols().names);
     if names.kind() != SexpType::String {
+        return Some(nil());
+    }
+    let count = length(names).min(length(list));
+    if let Some(index) = (0..count).find(|&index| names.element(index).bytes() == name) {
+        return Some(list.element(index));
+    }
+    if (0..count).any(|index| names.element(index).bytes().starts_with(name)) {
         return None;
     }
-    (0..length(names).min(length(list)))
-        .find(|&index| names.element(index).bytes() == name)
-        .map(|index| list.element(index))
+    Some(nil())
 }

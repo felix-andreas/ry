@@ -23,6 +23,9 @@
 | NULL
 | [1] TRUE
 | NULL
+| [1] "ok"
+| [1] TRUE
+| NULL
 | [1] "inner custom"    "outer condition" "exiting custom" 
 | [1] "caught"
 | inner sees other 

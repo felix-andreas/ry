@@ -43,6 +43,13 @@ empty <- structure(class = c("empty", "condition"), list())
 withCallingHandlers(signalCondition(empty), condition = function(c) {
     print(is.null(get("msg", frame_of("signalCondition"))))
 })
+# A condition with no `call` field, as testthat's expectations are: `c$call` is NULL.
+no_call <- structure(class = c("expectation_success", "expectation", "condition"), list(message = "ok", srcref = NULL))
+withCallingHandlers(signalCondition(no_call), expectation = function(c) {
+    frame <- frame_of("signalCondition")
+    print(get("msg", frame))
+    print(is.null(get("call", frame)))
+})
 # Handler order: the innermost first, an exiting handler ends the walk, and a handler that changes
 # the class of the condition it holds does not change which handlers run.
 order <- character()
