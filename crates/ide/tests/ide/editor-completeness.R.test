@@ -33,14 +33,12 @@ hint @5: DataFrame{region: character[], units: integer[]}
 sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
 x <- sales |> DataFrame.select(Expr.col("$0"))
 #++++
-hover 97..99: character
+hover 102..104: character
 definition: none
 references: none
 rename: none
-signature: fn(x: character, [as.factor]: logical) -> Expr (active)
-parameters: [x: character] | [as.factor]: logical
-signature: fn(x: Any, [as.factor]: logical) -> Any
-parameters: [x: Any] | [as.factor]: logical
+signature: fn(name: character) -> Expr
+parameters: [name: character]
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
 completion (2): region, units
@@ -58,7 +56,7 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
-completion (19): DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height, DataFrame.join, DataFrame.join_asof, DataFrame.lazy
+completion (22): DataFrame.columns, DataFrame.copy, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height, DataFrame.join, DataFrame.join_asof
 hint @5: DataFrame{region: character[], units: integer[]}
 
 #---- df_column_hover_after_dollar
@@ -184,7 +182,7 @@ action: Add inferred type annotations for the whole file
   edit 24..24 -> ": T"
   edit 32..32 -> ": U"
   edit 38..38 -> " -> T"
-completion (83): second = , se.contrast, sealClass, search, searchpaths, seek, seek.connection, segments
+completion (81): second = , se.contrast, sealClass, search, searchpaths, seek, seek.connection, segments
 hint @18<T, U>
 hint @24: T
 hint @32: U
@@ -308,7 +306,7 @@ action: Add inferred type annotation for `frame`
   edit 5..5 -> ": data.frame"
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": data.frame"
-completion (128+): frame, format.data.frame, xtfrm.data.frame, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head
+completion (128+): frame, format.data.frame, xtfrm.data.frame, DataFrame, DataFrame.columns, DataFrame.copy, DataFrame.filter, DataFrame.group_by
 hint @5: data.frame
 
 #---- base_matrix_hover
@@ -343,7 +341,7 @@ action: Add inferred type annotations for the whole file
   edit 24..24 -> ": T"
   edit 32..32 -> ": T"
   edit 37..37 -> " -> T"
-completion (72): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+completion (73): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
 hint @17<T: numeric>
 hint @24: T
 hint @32: T
@@ -369,7 +367,7 @@ action: Add inferred type annotations for the whole file
   edit 24..24 -> ": T"
   edit 32..32 -> ": T"
   edit 37..37 -> " -> T"
-completion (72): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+completion (73): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
 hint @17<T: numeric>
 hint @24: T
 hint @32: T
@@ -393,7 +391,7 @@ action: Add inferred type annotation for `doubled`
 action: Add inferred type annotations for the whole file
   edit 7..7 -> ": double"
   edit 39..39 -> ": double"
-completion (72): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+completion (73): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
 hint @7: double
 hint @39: double
 
@@ -443,7 +441,7 @@ action: Add inferred type annotations for the whole file
   edit 71..71 -> "<T>"
   edit 78..78 -> ": T"
   edit 79..79 -> " -> T"
-completion (72): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+completion (73): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
 hint @17<T: numeric>
 hint @24: T
 hint @32: T
@@ -1006,7 +1004,7 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": logical[]"
-completion (34): expiry, exists, example, existsFunction, existsMethod, exp, expand.grid, expand.model.frame
+completion (36): expiry, exists, example, existsFunction, existsMethod, exp, expand.grid, expand.model.frame
 hint @5: logical[]
 
 #---- completion_of_a_call_ranks_locals_with_the_globals
@@ -1023,5 +1021,5 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": logical[]"
-completion (34): exists, expiry, example, existsFunction, existsMethod, exp, expand.grid, expand.model.frame
+completion (36): exists, expiry, example, existsFunction, existsMethod, exp, expand.grid, expand.model.frame
 hint @5: logical[]

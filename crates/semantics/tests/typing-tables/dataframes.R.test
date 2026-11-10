@@ -87,7 +87,7 @@ regions: DataFrame{region: character[], price: double[], zone: character[]}
 wider: DataFrame{region: character[], units: integer[], price: double[], revenue: double[]}
 joined: DataFrame{region: character[], units: integer[], price: double[], revenue: double[], price_right: double[], zone: character[]}
 totals: DataFrame{zone: character[], revenue: double[], top: double[]}
-289..295 warning[unused] `totals` is assigned but never used.
+304..310 warning[unused] `totals` is assigned but never used.
 
 #---- a_lazy_scan_carries_the_schema_to_collect
 #~~~~ data/sales.csv
@@ -119,11 +119,11 @@ text: Unknown
 factors: DataFrame{region: factor, units: integer[]}
 level: Unknown
 46..50 warning[unused] `typo` is assigned but never used.
-84..90 error[type-mismatch] the frame `sales` has no column `unit`. Did you mean `units`?
-98..102 warning[unused] `text` is assigned but never used.
-147..160 error[type-mismatch] `+` needs numbers, but the column `region` is `character[]`
-241..246 warning[unused] `level` is assigned but never used.
-278..291 error[type-mismatch] `*` needs numbers, but the column `region` is `factor`
+89..95 error[type-mismatch] the frame `sales` has no column `unit`. Did you mean `units`?
+103..107 warning[unused] `text` is assigned but never used.
+152..170 error[type-mismatch] `+` needs numbers, but the column `region` is `character[]`
+251..256 warning[unused] `level` is assigned but never used.
+288..306 error[type-mismatch] `*` needs numbers, but the column `region` is `factor`
 
 #==== strict_columns
 #---- strict_mode_reports_a_query_on_unknown_columns
@@ -141,7 +141,7 @@ sales: DataFrame
 kept: DataFrame
 first: DataFrame
 90..94 warning[unused] `kept` is assigned but never used.
-232..237 warning[unused] `first` is assigned but never used.
+242..247 warning[unused] `first` is assigned but never used.
 98..103 error[strict] strict mode: the columns of `sales` are unknown, so the column names and types this query uses are not checked. Give `sales` a type that lists its columns, as in `sales: DataFrame{units: TYPE}`
 
 #---- strict_mode_reports_a_chain_whose_first_steps_name_no_column
@@ -196,4 +196,4 @@ annotated: DataFrame{region: character[], units: integer[]}
 kept: DataFrame{region: character[], units: integer[]}
 read: DataFrame{region: character[]}
 146..150 warning[unused] `kept` is assigned but never used.
-203..207 warning[unused] `read` is assigned but never used.
+208..212 warning[unused] `read` is assigned but never used.

@@ -106,14 +106,12 @@ hint @5: DataFrame{team: character[], amount: double[]}
 sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 picked <- DataFrame.select(sales, Expr.col("am$0"))
 #++++
-hover 95..99: character
+hover 100..104: character
 definition: none
 references: none
 rename: none
-signature: fn(x: character, [as.factor]: logical) -> Expr (active)
-parameters: [x: character] | [as.factor]: logical
-signature: fn(x: Any, [as.factor]: logical) -> Any
-parameters: [x: Any] | [as.factor]: logical
+signature: fn(name: character) -> Expr
+parameters: [name: character]
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 completion (1): amount
@@ -143,14 +141,12 @@ hint @64: GroupBy{team: character[]; amount: double[]}
 sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
 doubled <- sales |> DataFrame.with_columns(Expr.col("amo$0unt") * 2)
 #++++
-hover 104..112: amount: double[]
+hover 109..117: amount: double[]
 definition: none
 references: none
 rename: none
-signature: fn(x: character, [as.factor]: logical) -> Expr (active)
-parameters: [x: character] | [as.factor]: logical
-signature: fn(x: Any, [as.factor]: logical) -> Any
-parameters: [x: Any] | [as.factor]: logical
+signature: fn(name: character) -> Expr
+parameters: [name: character]
 action: Add inferred type annotation for `doubled`
   edit 64..64 -> ": DataFrame{team: character[], amount: double[]}"
 action: Add inferred type annotations for the whole file
@@ -261,14 +257,12 @@ us,5,2
 sales <- DataFrame.read_csv("data/sales.csv")
 kept <- sales |> DataFrame.filter(Expr.col("$0") > 1L)
 #++++
-hover 84..86: character
+hover 89..91: character
 definition: none
 references: none
 rename: none
-signature: fn(x: character, [as.factor]: logical) -> Expr (active)
-parameters: [x: character] | [as.factor]: logical
-signature: fn(x: Any, [as.factor]: logical) -> Any
-parameters: [x: Any] | [as.factor]: logical
+signature: fn(name: character) -> Expr
+parameters: [name: character]
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{region: character[], units: integer[], price: double[]}"
 completion (3): price, region, units
@@ -285,14 +279,12 @@ top <- DataFrame.read_csv("data/sales.csv") |>
   DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price")) |>
   DataFrame.select(Expr.col("reve$0nue"))
 #++++
-hover 178..187: revenue: double[]
+hover 198..207: revenue: double[]
 definition: none
 references: none
 rename: none
-signature: fn(x: character, [as.factor]: logical) -> Expr (active)
-parameters: [x: character] | [as.factor]: logical
-signature: fn(x: Any, [as.factor]: logical) -> Any
-parameters: [x: Any] | [as.factor]: logical
+signature: fn(name: character) -> Expr
+parameters: [name: character]
 action: Add inferred type annotation for `top`
   edit 3..3 -> ": DataFrame{revenue: double[]}"
 action: Add inferred type annotations for the whole file
@@ -310,14 +302,12 @@ totals <- DataFrame.read_csv("data/sales.csv") |>
   DataFrame.group_by("region") |>
   GroupBy.agg(total = Expr.col("$0") |> Expr.sum())
 #++++
-hover 110..112: character
+hover 115..117: character
 definition: none
 references: none
 rename: none
-signature: fn(x: character, [as.factor]: logical) -> Expr (active)
-parameters: [x: character] | [as.factor]: logical
-signature: fn(x: Any, [as.factor]: logical) -> Any
-parameters: [x: Any] | [as.factor]: logical
+signature: fn(name: character) -> Expr
+parameters: [name: character]
 completion (3): price, region, units
 
 #---- col_completes_the_suffixed_columns_after_a_join
@@ -333,14 +323,12 @@ regions <- DataFrame.read_csv("data/regions.csv")
 joined <- DataFrame.join(sales, regions, on = "region") |>
   DataFrame.select(Expr.col("pri$0"))
 #++++
-hover 178..183: character
+hover 183..188: character
 definition: none
 references: none
 rename: none
-signature: fn(x: character, [as.factor]: logical) -> Expr (active)
-parameters: [x: character] | [as.factor]: logical
-signature: fn(x: Any, [as.factor]: logical) -> Any
-parameters: [x: Any] | [as.factor]: logical
+signature: fn(name: character) -> Expr
+parameters: [name: character]
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{region: character[], units: integer[], price: double[]}"
   edit 53..53 -> ": DataFrame{region: character[], price: double[], zone: character[]}"
@@ -358,14 +346,12 @@ eu,3
 sales <- DataFrame.read_csv("data/sales.csv", strings_as_factors = TRUE)
 kept <- sales |> DataFrame.filter(Expr.col("reg$0ion") == "eu")
 #++++
-hover 111..119: region: factor
+hover 116..124: region: factor
 definition: none
 references: none
 rename: none
-signature: fn(x: character, [as.factor]: logical) -> Expr (active)
-parameters: [x: character] | [as.factor]: logical
-signature: fn(x: Any, [as.factor]: logical) -> Any
-parameters: [x: Any] | [as.factor]: logical
+signature: fn(name: character) -> Expr
+parameters: [name: character]
 action: Add inferred type annotation for `kept`
   edit 77..77 -> ": DataFrame{region: factor, units: integer[]}"
 action: Add inferred type annotations for the whole file
@@ -380,28 +366,24 @@ hint @77: DataFrame{region: factor, units: integer[]}
 sales <- DataFrame.read_csv("elsewhere.csv")
 kept <- sales |> DataFrame.filter(Expr.col("u$0") > 1L)
 #++++
-hover 135..138: character
+hover 140..143: character
 definition: none
 references: none
 rename: none
-signature: fn(x: character, [as.factor]: logical) -> Expr (active)
-parameters: [x: character] | [as.factor]: logical
-signature: fn(x: Any, [as.factor]: logical) -> Any
-parameters: [x: Any] | [as.factor]: logical
+signature: fn(name: character) -> Expr
+parameters: [name: character]
 completion (1): units
 
 #---- col_completes_the_columns_of_a_named_frame_type
 type Sales = DataFrame{region: character[], units: integer[]}
 busy <- function(sales: Sales) -> DataFrame sales |> DataFrame.filter(Expr.col("u$0") > 1L)
 #++++
-hover 136..139: character
+hover 141..144: character
 definition: none
 references: none
 rename: none
-signature: fn(x: character, [as.factor]: logical) -> Expr (active)
-parameters: [x: character] | [as.factor]: logical
-signature: fn(x: Any, [as.factor]: logical) -> Any
-parameters: [x: Any] | [as.factor]: logical
+signature: fn(name: character) -> Expr
+parameters: [name: character]
 completion (1): units
 
 #---- col_completes_the_columns_of_a_lazy_scan
@@ -412,12 +394,10 @@ eu,3
 plan <- LazyFrame.scan_csv("data/sales.csv") |>
   LazyFrame.filter(Expr.col("$0") > 1L)
 #++++
-hover 71..73: character
+hover 76..78: character
 definition: none
 references: none
 rename: none
-signature: fn(x: character, [as.factor]: logical) -> Expr (active)
-parameters: [x: character] | [as.factor]: logical
-signature: fn(x: Any, [as.factor]: logical) -> Any
-parameters: [x: Any] | [as.factor]: logical
+signature: fn(name: character) -> Expr
+parameters: [name: character]
 completion (2): region, units

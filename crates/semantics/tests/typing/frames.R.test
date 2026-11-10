@@ -1268,7 +1268,7 @@ picked <- DataFrame.select(sales, "regoin", Expr.col("unit") * 2)
 sales: DataFrame{region: character[], units: integer[]}
 picked: Unknown
 96..104 error[type-mismatch] the frame `sales` has no column `regoin`. Did you mean `region`?
-110..116 error[type-mismatch] the frame `sales` has no column `unit`. Did you mean `units`?
+115..121 error[type-mismatch] the frame `sales` has no column `unit`. Did you mean `units`?
 
 #---- agg_needs_an_aggregation
 sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
@@ -1276,7 +1276,7 @@ totals <- sales |> DataFrame.group_by("region") |> GroupBy.agg(Expr.col("units")
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 totals: Unknown
-125..137 error[type-mismatch] `units` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`
+125..142 error[type-mismatch] `units` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`
 
 #---- a_join_key_must_exist_on_both_sides
 left <- DataFrame(id = 1:3)
@@ -1304,7 +1304,7 @@ bad <- x |> DataFrame.group_by("g") |> GroupBy.agg(Expr.col("v") |> Expr.head(2L
 #++++
 x: DataFrame{g: character[], v: double[]}
 bad: Unknown
-104..133 error[type-mismatch] `Expr.head` gives several values of `v` per group, so `agg` accepts it only as a whole item. Compute the column first, as in `(Expr.col("v") + 1) |> Expr.head(2L)`
+104..138 error[type-mismatch] `Expr.head` gives several values of `v` per group, so `agg` accepts it only as a whole item. Compute the column first, as in `(Expr.col("v") + 1) |> Expr.head(2L)`
 
 #---- a_key_missing_from_both_sides_is_reported_once
 left <- DataFrame(id = 1:3)
@@ -1322,7 +1322,7 @@ shares <- sales |> DataFrame.with_columns(total = Expr.over(Expr.sum(Expr.col("u
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 shares: Unknown
-146..154 error[type-mismatch] the frame `sales` has no column `regoin`. Did you mean `region`?
+151..159 error[type-mismatch] the frame `sales` has no column `regoin`. Did you mean `region`?
 
 #---- a_date_column_does_not_multiply
 visits <- DataFrame(day = as.Date("2024-01-01") + 0:1)
@@ -1330,7 +1330,7 @@ twice <- visits |> DataFrame.with_columns(x = Expr.col("day") * 2)
 #++++
 visits: DataFrame{day: Date}
 twice: Unknown
-101..115 error[type-mismatch] `*` is not defined between `Date` and `double`. A date adds or subtracts a number of days, subtracting two dates gives the days between them, and dates compare only with dates
+101..120 error[type-mismatch] `*` is not defined between `Date` and `double`. A date adds or subtracts a number of days, subtracting two dates gives the days between them, and dates compare only with dates
 
 #==== dataframe_expression_types
 #---- arithmetic_on_a_string_column_is_reported
@@ -1341,8 +1341,8 @@ negated <- sales |> DataFrame.select(-Expr.col("region"))
 sales: DataFrame{region: character[], units: integer[]}
 wider: Unknown
 negated: Unknown
-107..120 error[type-mismatch] `*` needs numbers, but the column `region` is `character[]`
-164..177 error[type-mismatch] `-` needs numbers, but the column `region` is `character[]`
+107..125 error[type-mismatch] `*` needs numbers, but the column `region` is `character[]`
+169..187 error[type-mismatch] `-` needs numbers, but the column `region` is `character[]`
 
 #---- a_negated_string_column_is_reported_once
 sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))
@@ -1350,7 +1350,7 @@ wider <- sales |> DataFrame.with_columns(y = -Expr.col("region") * 2)
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 wider: Unknown
-108..121 error[type-mismatch] `-` needs numbers, but the column `region` is `character[]`
+108..126 error[type-mismatch] `-` needs numbers, but the column `region` is `character[]`
 
 #---- a_number_compared_with_a_string_column_is_reported
 sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))
@@ -1360,8 +1360,8 @@ same <- sales |> DataFrame.filter(Expr.col("units") == Expr.col("region"))
 sales: DataFrame{region: character[], units: integer[]}
 kept: Unknown
 same: Unknown
-96..114 error[type-mismatch] `>` compares `character[]` with `integer`, text with a number, which almost always means the wrong column
-150..179 error[type-mismatch] `==` compares `integer[]` with `character[]`, text with a number, which almost always means the wrong column
+96..119 error[type-mismatch] `>` compares `character[]` with `integer`, text with a number, which almost always means the wrong column
+155..194 error[type-mismatch] `==` compares `integer[]` with `character[]`, text with a number, which almost always means the wrong column
 
 #---- a_numeric_aggregation_of_strings_is_reported
 sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))
@@ -1371,9 +1371,9 @@ paired <- sales |> DataFrame.select(Expr.col("units") |> Expr.cor(Expr.col("regi
 sales: DataFrame{region: character[], units: integer[]}
 totals: Unknown
 paired: Unknown
-124..137 error[type-mismatch] `Expr.sum` needs numbers, but the column `region` is `character[]`
-157..170 error[type-mismatch] `Expr.mean` needs numbers, but the column `region` is `character[]`
-248..261 error[type-mismatch] `Expr.cor` needs numbers, but the column `region` is `character[]`
+124..142 error[type-mismatch] `Expr.sum` needs numbers, but the column `region` is `character[]`
+162..180 error[type-mismatch] `Expr.mean` needs numbers, but the column `region` is `character[]`
+263..281 error[type-mismatch] `Expr.cor` needs numbers, but the column `region` is `character[]`
 
 #---- a_string_literal_in_arithmetic_is_reported
 sales <- DataFrame(units = c(1L, 2L))
@@ -1381,7 +1381,7 @@ wider <- sales |> DataFrame.with_columns(y = Expr.col("units") * "2")
 #++++
 sales: DataFrame{units: integer[]}
 wider: Unknown
-98..101 error[type-mismatch] `*` needs numbers, but this operand is `character`
+103..106 error[type-mismatch] `*` needs numbers, but this operand is `character`
 
 #---- logical_operators_and_if_else_tests_check_their_operands
 sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))
@@ -1391,8 +1391,8 @@ labels <- sales |> DataFrame.select(Expr.if_else(Expr.col("units"), "big", "smal
 sales: DataFrame{region: character[], units: integer[]}
 both: Unknown
 labels: Unknown
-116..129 error[type-mismatch] `&` needs logical values or numbers, but the column `region` is `character[]`
-180..192 error[type-mismatch] `Expr.if_else` needs a `logical` test, but the column `units` is `integer[]`
+121..139 error[type-mismatch] `&` needs logical values or numbers, but the column `region` is `character[]`
+190..207 error[type-mismatch] `Expr.if_else` needs a `logical` test, but the column `units` is `integer[]`
 
 #---- a_factor_column_compares_with_labels_but_takes_no_arithmetic
 f <- DataFrame(g = factor(c("a", "b")), v = c(1, 2))
@@ -1400,7 +1400,7 @@ picked <- f |> DataFrame.select(Expr.col("g") == "a", shifted = Expr.col("g") + 
 #++++
 f: DataFrame{g: factor, v: double[]}
 picked: Unknown
-112..120 error[type-mismatch] `+` needs numbers, but the column `g` is `factor`
+117..130 error[type-mismatch] `+` needs numbers, but the column `g` is `factor`
 
 #---- well_typed_expressions_are_silent
 sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L), price = c(1.5, 2), ok = c(TRUE, FALSE))
