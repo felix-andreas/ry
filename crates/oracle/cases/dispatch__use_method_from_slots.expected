@@ -1,0 +1,38 @@
+[stdout]
+| a TRUE 0 extra
+| b a FALSE 2 z
+| default g.default(lazy(5), 1, 2) 2
+| h character only y
+| h character named
+| d numeric 4 5
+| hidden
+| n default
+| fell through
+| k.a TRUE k default
+| k.b TRUE 8
+| local k.a
+| 5
+| 60
+| [1] "chr a !"
+| [1] "default 1"
+| [1] "chr 1 b"
+| [1] "no"
+| [1] 3
+| [1] 5 1 3
+| [1] TRUE
+| [1] FALSE
+| [1] 7
+| [1] "a number"
+| [1] "a string"
+| [1] "default"
+| [1] FALSE
+| [1] "two"
+| forced num
+| [1] 1
+| [1] "duplicate 'switch' defaults: '\"a\"' and '\"b\"'"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "duplicate 'switch' defaults: '\"a\"' and '\"b\"'"

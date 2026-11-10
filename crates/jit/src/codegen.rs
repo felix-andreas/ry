@@ -16,7 +16,7 @@ use {
     crate::{
         analysis::{
             self, Action, Argument, Effect, Fold, Intrinsic, Numeric, Plan, Refusal, StateId,
-            StateRef, Ty, jump_target, status,
+            StateRef, Store, Ty, jump_target, status,
         },
         native,
         runtime::{self, Activation, Exit, offset, outcome, reason, representation},
@@ -32,7 +32,7 @@ use {
     },
     interp::{
         annotations,
-        bytecode::{Arith, Op, baseline_layout},
+        bytecode::{self, Arith, Op, baseline_layout},
         values,
     },
     rustc_hash::FxHashMap,
@@ -129,6 +129,10 @@ struct Translator<'p> {
     statuses: Vec<Variable>,
     loop_indexes: Vec<Variable>,
     loop_counts: Vec<Variable>,
+    /// The first element and increment of each loop's compact sequence, as in
+    /// [`runtime::LOOP_WORDS`]; an increment of 0 reads the sequence's storage.
+    loop_firsts: Vec<Variable>,
+    loop_steps: Vec<Variable>,
     labels: Vec<Option<Label>>,
     deopts: Vec<Deopt>,
     edges: Vec<PendingEdge>,
@@ -169,6 +173,8 @@ impl<'p> Translator<'p> {
         let statuses = declare(plan.slots.len(), I32);
         let loop_indexes = declare(plan.loops, I64);
         let loop_counts = declare(plan.loops, I64);
+        let loop_firsts = declare(plan.loops, F64);
+        let loop_steps = declare(plan.loops, F64);
         let placeholder = Value::from_u32(0);
         Translator {
             plan,
@@ -187,6 +193,8 @@ impl<'p> Translator<'p> {
             statuses,
             loop_indexes,
             loop_counts,
+            loop_firsts,
+            loop_steps,
             labels: Vec::new(),
             deopts: Vec::new(),
             edges: Vec::new(),
@@ -226,7 +234,13 @@ impl<'p> Translator<'p> {
         {
             self.builder.def_var(*variable, zero32);
         }
-        for variable in self.doubles.iter().chain(&self.slot_doubles) {
+        for variable in self
+            .doubles
+            .iter()
+            .chain(&self.slot_doubles)
+            .chain(&self.loop_firsts)
+            .chain(&self.loop_steps)
+        {
             self.builder.def_var(*variable, zero_double);
         }
         for variable in self.loop_indexes.iter().chain(&self.loop_counts) {
@@ -305,17 +319,27 @@ impl<'p> Translator<'p> {
         declined: Label,
     ) -> Result<(), Refusal> {
         for index in 0..self.plan.loops {
-            let loop_index = self
-                .builder
-                .ins()
-                .load(I64, flags(), self.loops, (16 * index) as i32);
-            let count = self
-                .builder
-                .ins()
-                .load(I64, flags(), self.loops, (16 * index + 8) as i32);
+            let words = (8 * runtime::LOOP_WORDS * index) as i32;
+            let loop_index = self.builder.ins().load(I64, flags(), self.loops, words);
+            let count = self.builder.ins().load(I64, flags(), self.loops, words + 8);
+            let first = self.builder.ins().load(F64, flags(), self.loops, words + 16);
+            let step = self.builder.ins().load(F64, flags(), self.loops, words + 24);
             self.builder.def_var(self.loop_indexes[index], loop_index);
             self.builder.def_var(self.loop_counts[index], count);
+            self.builder.def_var(self.loop_firsts[index], first);
+            self.builder.def_var(self.loop_steps[index], step);
         }
+        // A loop's sequence register holds a compact sequence, which no vector type's check
+        // accepts, exactly when tier 0 gave the loop an increment.
+        let sequences: Vec<(usize, usize)> = self
+            .plan
+            .actions
+            .iter()
+            .filter_map(|action| match *action {
+                Action::ForInit { index, src, .. } => Some((src, index)),
+                _ => None,
+            })
+            .collect();
         let entry = self.plan.state(
             self.plan.blocks[header]
                 .entry
@@ -326,7 +350,12 @@ impl<'p> Translator<'p> {
                 continue;
             }
             let value = self.load_register(register);
-            let fits = self.check(value, ty);
+            let mut fits = self.check(value, ty);
+            if let Some(&(_, index)) = sequences.iter().find(|&&(src, _)| src == register) {
+                let step = self.builder.use_var(self.loop_steps[index]);
+                let compact = self.compact_sequence_fits(value, ty, step);
+                fits = self.builder.ins().bor(fits, compact);
+            }
             let next = self.builder.create_block();
             self.builder.ins().brif(fits, next, &[], declined, &[]);
             self.builder.switch_to_block(next);
@@ -817,48 +846,67 @@ impl<'p> Translator<'p> {
             }
             Action::ForInit { index, src, refine } => {
                 let ty = before.registers[src];
-                let sequence = if ty.is_unboxed() {
+                let zero = self.builder.ins().f64const(0.0);
+                self.builder.def_var(self.loop_firsts[index], zero);
+                self.builder.def_var(self.loop_steps[index], zero);
+                let (sequence, count) = if ty.is_unboxed() {
                     let unboxed = self.use_register(src, ty);
                     let boxed = self.box_value(ty, unboxed);
                     self.store_register(src, boxed);
-                    boxed
+                    (boxed, self.builder.ins().load(I64, flags(), boxed, LENGTH))
                 } else {
                     let value = self.load_register(src);
                     match refine {
                         Some(expected) => {
                             // A compact sequence such as `1:n` is ALTREP, which the check
-                            // rejects, so it is expanded here, as tier 0 expands it, instead of
-                            // leaving compiled code on every call of a loop over `1:n`.
+                            // rejects, so the helper prepares it as tier 0 does: it keeps a
+                            // compact sequence and stores its first element and increment in
+                            // the loop's words, and expands any other ALTREP vector.
                             let fits = self.check(value, expected);
-                            let expand = self.builder.create_block();
+                            let prepare = self.builder.create_block();
                             let join = self.builder.create_block();
-                            self.builder.append_block_param(join, I64);
-                            self.builder.ins().brif(fits, join, &[value], expand, &[]);
-                            self.builder.switch_to_block(expand);
-                            let expanded = self
+                            for ty in [I64, I64, F64, F64] {
+                                self.builder.append_block_param(join, ty);
+                            }
+                            let ordinary = self.builder.create_block();
+                            self.builder.ins().brif(fits, ordinary, &[], prepare, &[]);
+                            self.builder.switch_to_block(ordinary);
+                            let length = self.builder.ins().load(I64, flags(), value, LENGTH);
+                            self.builder.ins().jump(join, &[value, length, zero, zero]);
+                            self.builder.switch_to_block(prepare);
+                            let loop_index = self.builder.ins().iconst(I64, index as i64);
+                            let prepared = self
                                 .call(
-                                    runtime::jit_expand_sequence as *const () as usize,
-                                    &[I64, I64],
+                                    runtime::jit_loop_sequence as *const () as usize,
+                                    &[I64, I64, I64],
                                     Some(I64),
-                                    &[self.activation, value],
+                                    &[self.activation, value, loop_index],
                                 )
                                 .ok_or(Refusal("a helper without a result"))?;
-                            let fits = self.check(expanded, expected);
+                            let words = (8 * runtime::LOOP_WORDS * index) as i32;
+                            let length = self.builder.ins().load(I64, flags(), self.loops, words + 8);
+                            let first = self.builder.ins().load(F64, flags(), self.loops, words + 16);
+                            let step = self.builder.ins().load(F64, flags(), self.loops, words + 24);
+                            let fits = self.check(prepared, expected);
+                            let compact = self.compact_sequence_fits(prepared, expected, step);
+                            let fits = self.builder.ins().bor(fits, compact);
                             let failed =
                                 self.deopt(pc, before.id, None, position, reason::SPECULATION);
                             self.guard(fits, failed);
-                            self.store_register(src, expanded);
-                            self.builder.ins().jump(join, &[expanded]);
+                            self.store_register(src, prepared);
+                            self.builder.ins().jump(join, &[prepared, length, first, step]);
                             self.builder.switch_to_block(join);
-                            self.builder.block_params(join)[0]
+                            let params = self.builder.block_params(join).to_vec();
+                            self.builder.def_var(self.loop_firsts[index], params[2]);
+                            self.builder.def_var(self.loop_steps[index], params[3]);
+                            (params[0], params[1])
                         }
-                        None => value,
+                        None => (value, self.builder.ins().load(I64, flags(), value, LENGTH)),
                     }
                 };
                 // The body must see the sequence as shared, as in the interpreter, so that
                 // modifying the variable it came from copies it.
                 self.increment(sequence);
-                let count = self.builder.ins().load(I64, flags(), sequence, LENGTH);
                 let zero = self.builder.ins().iconst(I64, 0);
                 self.builder.def_var(self.loop_counts[index], count);
                 self.builder.def_var(self.loop_indexes[index], zero);
@@ -888,9 +936,40 @@ impl<'p> Translator<'p> {
                 let next_index = self.builder.ins().iadd_imm_s(current, 1);
                 self.builder.def_var(self.loop_indexes[index], next_index);
                 match before.registers[src] {
-                    Ty::IntVec | Ty::LglVec | Ty::DblVec => {
+                    Ty::IntVec | Ty::DblVec => {
+                        // A compact sequence computes its element from the first element and
+                        // the increment; any other vector loads it from its storage.
                         let load_ty = if width == 4 { I32 } else { F64 };
+                        let step = self.builder.use_var(self.loop_steps[index]);
+                        let compact = {
+                            let zero = self.builder.ins().f64const(0.0);
+                            self.builder.ins().fcmp(FloatCC::NotEqual, step, zero)
+                        };
+                        let computed = self.builder.create_block();
+                        let stored = self.builder.create_block();
+                        let join = self.builder.create_block();
+                        self.builder.append_block_param(join, load_ty);
+                        self.builder.ins().brif(compact, computed, &[], stored, &[]);
+                        self.builder.switch_to_block(computed);
+                        let first = self.builder.use_var(self.loop_firsts[index]);
+                        let position = self.builder.ins().fcvt_from_sint(F64, current);
+                        let offset = self.builder.ins().fmul(position, step);
+                        let number = self.builder.ins().fadd(first, offset);
+                        let element = if load_ty == I32 {
+                            self.builder.ins().fcvt_to_sint_sat(I32, number)
+                        } else {
+                            number
+                        };
+                        self.builder.ins().jump(join, &[element]);
+                        self.builder.switch_to_block(stored);
                         let element = self.builder.ins().load(load_ty, flags(), address, DATA);
+                        self.builder.ins().jump(join, &[element]);
+                        self.builder.switch_to_block(join);
+                        let element = self.builder.block_params(join)[0];
+                        self.assign_slot(&before, slot, element_ty, element);
+                    }
+                    Ty::LglVec => {
+                        let element = self.builder.ins().load(I32, flags(), address, DATA);
                         self.assign_slot(&before, slot, element_ty, element);
                     }
                     Ty::List => {
@@ -975,6 +1054,7 @@ impl<'p> Translator<'p> {
                 slot,
                 index,
                 value,
+                store,
             } => {
                 self.sub_assign(
                     position,
@@ -983,6 +1063,7 @@ impl<'p> Translator<'p> {
                     slot,
                     Subscript::Vector(index),
                     value,
+                    store,
                 )?;
                 self.set_visible(&before, false);
             }
@@ -994,7 +1075,8 @@ impl<'p> Translator<'p> {
                 value,
             } => {
                 let subscript = Subscript::Matrix(row, column);
-                self.sub_assign(position, &before, dst, slot, subscript, value)?;
+                let store = Store::Checked;
+                self.sub_assign(position, &before, dst, slot, subscript, value, store)?;
                 self.set_visible(&before, false);
             }
         }
@@ -2402,10 +2484,16 @@ impl<'p> Translator<'p> {
         slot: usize,
         subscript: Subscript,
         value: usize,
+        store: Store,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
-        let target = before.slots[slot].ty;
         let value_ty = before.registers[value];
+        let checked = store == Store::Checked;
+        let target = if checked {
+            Ty::Boxed
+        } else {
+            before.slots[slot].ty
+        };
         let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
         let mismatch = self.deopt(pc, before.id, None, position, reason::SPECULATION);
         // An unloaded variable is loaded first: a loop that calls a function every iteration
@@ -2449,6 +2537,11 @@ impl<'p> Translator<'p> {
         }
         let vector = self.load_slot_cell(slot);
         let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
+        if let (Store::List, Subscript::Vector(index)) = (store, subscript) {
+            return self.store_list_element(
+                position, before, dst, slot, vector, length, index, value, failed,
+            );
+        }
         // The zero-based element position and whether the store may happen in place, and for
         // a matrix whether it holds doubles, which an integer or logical value converts to.
         let (element_offset, in_range, real) = match subscript {
@@ -2462,6 +2555,10 @@ impl<'p> Translator<'p> {
                 // An Array cannot hold a missing value, so storing one is tier 0's to do: it
                 // turns the Array into an R vector.
                 let in_range = match target {
+                    Ty::Boxed => {
+                        let accepted = self.accepts_scalar(vector, value_ty);
+                        self.builder.ins().band(in_range, accepted)
+                    }
                     Ty::DblArr => {
                         let element = self.use_register(value, Ty::Dbl);
                         let present = self.builder.ins().fcmp(FloatCC::Ordered, element, element);
@@ -2478,8 +2575,15 @@ impl<'p> Translator<'p> {
                     }
                     _ => in_range,
                 };
-                let real = matches!(target, Ty::DblVec | Ty::DblArr);
-                let real = self.builder.ins().iconst(I8, i64::from(real));
+                let real = if checked {
+                    let kind = self.builder.ins().uload8(I32, flags(), vector, KIND);
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, kind, SexpType::Real as i64)
+                } else {
+                    let real = matches!(target, Ty::DblVec | Ty::DblArr);
+                    self.builder.ins().iconst(I8, i64::from(real))
+                };
                 let offset = self.builder.ins().iadd_imm_s(position_value, -1);
                 (offset, in_range, real)
             }
@@ -2491,29 +2595,12 @@ impl<'p> Translator<'p> {
                     column,
                     before.registers[column],
                 )?;
-                // A double goes only into a double matrix, an integer also into an integer one,
-                // and a logical into any of the three; anything else changes the matrix's type.
                 let kind = self.builder.ins().uload8(I32, flags(), vector, KIND);
                 let real = self
                     .builder
                     .ins()
                     .icmp_imm_s(IntCC::Equal, kind, SexpType::Real as i64);
-                let integer =
-                    self.builder
-                        .ins()
-                        .icmp_imm_s(IntCC::Equal, kind, SexpType::Integer as i64);
-                let logical =
-                    self.builder
-                        .ins()
-                        .icmp_imm_s(IntCC::Equal, kind, SexpType::Logical as i64);
-                let accepted = match value_ty {
-                    Ty::Dbl => real,
-                    Ty::Int => self.builder.ins().bor(real, integer),
-                    _ => {
-                        let either = self.builder.ins().bor(real, integer);
-                        self.builder.ins().bor(either, logical)
-                    }
-                };
+                let accepted = self.kind_accepts(kind, value_ty);
                 let in_range = self.builder.ins().band(in_range, accepted);
                 (offset, in_range, real)
             }
@@ -2584,10 +2671,31 @@ impl<'p> Translator<'p> {
             self.builder.ins().jump(join, &[]);
         }
 
-        // Out of range: write the frame back, since tier 0 may read any variable while it grows
-        // or rejects the vector, and forget the variable it rebinds.
         self.builder.switch_to_block(slow);
-        self.builder.set_cold_block(slow);
+        self.sub_assign_in_tier0(position, before, slot, failed)?;
+        self.builder.ins().jump(join, &[]);
+
+        self.builder.switch_to_block(join);
+        if value_ty.is_unboxed() {
+            let copy = self.use_register(value, value_ty);
+            self.def_register(dst, value_ty, copy);
+        }
+        Ok(())
+    }
+
+    /// The slow path of a store compiled code declines, such as one out of range: writes the
+    /// frame back, since tier 0 may read any variable while it grows or rejects the vector, has
+    /// tier 0 run the assignment, and forgets the variable it rebinds.
+    unsafe fn sub_assign_in_tier0(
+        &mut self,
+        position: usize,
+        before: &StateRef<'p>,
+        slot: usize,
+        failed: Label,
+    ) -> Result<(), Refusal> {
+        let pc = self.plan.insts[position].pc;
+        let block = self.builder.current_block().ok_or(Refusal("no current block"))?;
+        self.builder.set_cold_block(block);
         self.flush_all(before, failed);
         self.box_reads(position, before);
         let zero = self.builder.ins().iconst(I32, 0);
@@ -2599,14 +2707,121 @@ impl<'p> Translator<'p> {
         self.guard(ok, failed);
         let unloaded = self.builder.ins().iconst(I32, 0);
         self.builder.def_var(self.statuses[slot], unloaded);
+        Ok(())
+    }
+
+    /// `x[[index]] <- value` on the list `vector`: a position up to one past the end goes to
+    /// [`runtime::jit_store_list_element`], which stores in place or appends within the list's
+    /// capacity, and tier 0 runs whatever that helper declines.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn store_list_element(
+        &mut self,
+        position: usize,
+        before: &StateRef<'p>,
+        dst: usize,
+        slot: usize,
+        vector: Value,
+        length: Value,
+        index: usize,
+        value: usize,
+        failed: Label,
+    ) -> Result<(), Refusal> {
+        let value_ty = before.registers[value];
+        let bound = self.builder.ins().iadd_imm_s(length, 1);
+        let (index_value, in_range) =
+            self.subscript_position(before.registers[index], index, bound, false);
+        // A variable of an enclosing frame is copied into this frame first, which tier 0 does.
+        let status = self.builder.use_var(self.statuses[slot]);
+        let local = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::NotEqual, status, status::RUNTIME_ENCLOSING);
+        let attempt = self.builder.ins().band(in_range, local);
+        let fast = self.builder.create_block();
+        let slow = self.builder.create_block();
+        let join = self.builder.create_block();
+        self.builder.ins().brif(attempt, fast, &[], slow, &[]);
+
+        self.builder.switch_to_block(fast);
+        let element = if value_ty.is_unboxed() {
+            let unboxed = self.use_register(value, value_ty);
+            let boxed = self.box_value(value_ty, unboxed);
+            let allocated = self.builder.ins().icmp_imm_s(IntCC::NotEqual, boxed, 0);
+            self.guard(allocated, failed);
+            boxed
+        } else {
+            self.load_register(value)
+        };
+        let stored = self
+            .call(
+                runtime::jit_store_list_element as *const () as usize,
+                &[I64, I64, I64],
+                Some(I32),
+                &[vector, index_value, element],
+            )
+            .ok_or(Refusal("a helper without a result"))?;
+        let stored = self.builder.ins().icmp_imm_s(IntCC::NotEqual, stored, 0);
+        self.builder.ins().brif(stored, join, &[], slow, &[]);
+
+        self.builder.switch_to_block(slow);
+        self.sub_assign_in_tier0(position, before, slot, failed)?;
         self.builder.ins().jump(join, &[]);
 
         self.builder.switch_to_block(join);
         if value_ty.is_unboxed() {
             let copy = self.use_register(value, value_ty);
             self.def_register(dst, value_ty, copy);
+        } else {
+            let object = self.load_register(value);
+            self.store_register(dst, object);
         }
         Ok(())
+    }
+
+    /// Whether `vector` is a plain logical, integer or double vector, without attributes, that
+    /// takes a scalar of type `value_ty` without changing its type.
+    fn accepts_scalar(&mut self, vector: Value, value_ty: Ty) -> Value {
+        let kind = self.builder.ins().uload8(I32, flags(), vector, KIND);
+        let accepted = self.kind_accepts(kind, value_ty);
+        let attributes = self.builder.ins().load(I64, flags(), vector, ATTRIB);
+        let plain = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, attributes, self.nil);
+        let bits = self.builder.ins().uload8(I32, flags(), vector, FLAGS);
+        let bits = self
+            .builder
+            .ins()
+            .band_imm_u(bits, ALTREP_FLAG | ARRAY_FLAG);
+        let ordinary = self.builder.ins().icmp_imm_s(IntCC::Equal, bits, 0);
+        let accepted = self.builder.ins().band(accepted, plain);
+        self.builder.ins().band(accepted, ordinary)
+    }
+
+    /// Whether a vector of `kind` takes a scalar of type `value_ty` without changing its type: a
+    /// double goes only into a double vector, an integer also into an integer one, and a logical
+    /// into any of the three.
+    fn kind_accepts(&mut self, kind: Value, value_ty: Ty) -> Value {
+        let real = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, SexpType::Real as i64);
+        let integer = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, SexpType::Integer as i64);
+        let logical = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, SexpType::Logical as i64);
+        match value_ty {
+            Ty::Dbl => real,
+            Ty::Int => self.builder.ins().bor(real, integer),
+            _ => {
+                let either = self.builder.ins().bor(real, integer);
+                self.builder.ins().bor(either, logical)
+            }
+        }
     }
 
     /// The one-based position the subscript in register `index` names and whether it is in
@@ -2822,20 +3037,59 @@ impl<'p> Translator<'p> {
         Ok(())
     }
 
-    /// Finds `symbol`'s value inline, as tier 0's lookup does when the binding sits where
-    /// lookup slot `lookup` last found it, in the activation's frame or in an enclosing function
-    /// frame, and holds a value or a forced promise. That case runs no code and leaves the frame
-    /// as it was, so it needs no write-back, no feedback and no validity check, and it jumps to
-    /// `merged` with the value and its runtime status. Everything else branches to `slow`.
+    /// Finds `symbol`'s value inline, as tier 0's lookup does when the variable sits in the
+    /// activation's slot frame, or where lookup slot `lookup` last found its binding in the
+    /// activation's environment or in an enclosing function frame, and holds a value or a
+    /// forced promise. That case runs no code and leaves the frame as it was, so it needs no
+    /// write-back, no feedback and no validity check, and it jumps to `merged` with the value
+    /// and its runtime status. Everything else branches to `slow`.
     unsafe fn probe_variable(&mut self, symbol: Sexp, lookup: usize, slow: Label, merged: Label) {
         let found = self.builder.create_block();
         let cell = self.builder.append_block_param(found, I64);
         let status = self.builder.append_block_param(found, I32);
+        let checked = self.builder.create_block();
+        let checked_value = self.builder.append_block_param(checked, I64);
+        let checked_status = self.builder.append_block_param(checked, I32);
         let enclosing = self.builder.create_block();
-        let env = self
+        let enclosure = self.builder.append_block_param(enclosing, I64);
+        let framed = self.builder.create_block();
+        let slotted = self.builder.create_block();
+        // A callee can give the slot frame its environment while the activation runs, so every
+        // probe reads the header register again.
+        let header = self
             .builder
             .ins()
-            .load(I64, flags(), self.activation, offset::ENV);
+            .load(I64, flags(), self.activation, offset::HEADER);
+        let env = self.builder.ins().load(I64, flags(), header, 0);
+        let nil = values::nil().as_ptr() as i64;
+        let in_slots = self.builder.ins().icmp_imm_u(IntCC::Equal, env, nil);
+        self.builder.ins().brif(in_slots, slotted, &[], framed, &[]);
+
+        self.builder.switch_to_block(slotted);
+        // The slot table is fixed with the code, so the slot is a constant. A symbol the table
+        // does not number is free in the body, and its lookup starts at the closure's
+        // environment.
+        let slots = self.code.cdr().element(bytecode::SLOTS);
+        let slot = (slots != values::nil())
+            .then(|| values::ints(slots.element(0)).get(lookup).copied())
+            .flatten()
+            .unwrap_or(-1);
+        if slot >= 0 {
+            let value =
+                self.builder
+                    .ins()
+                    .load(I64, flags(), header, (8 * (1 + slot as usize)) as i32);
+            let local_status = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
+            self.builder.ins().jump(checked, &[value, local_status]);
+        } else {
+            let enclosure =
+                self.builder
+                    .ins()
+                    .load(I64, flags(), self.activation, offset::ENCLOSURE);
+            self.builder.ins().jump(enclosing, &[enclosure]);
+        }
+
+        self.builder.switch_to_block(framed);
         let hints = self
             .builder
             .ins()
@@ -2845,15 +3099,18 @@ impl<'p> Translator<'p> {
             .ins()
             .load(I32, flags(), hints, (4 * lookup) as i32);
         let hint = self.builder.ins().uextend(I64, hint);
-        let local = self.probe_frame(env, symbol, hint, enclosing, slow);
+        let local_miss = self.builder.create_block();
+        let local = self.probe_frame(env, symbol, hint, local_miss, slow);
         let local_status = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
         self.builder.ins().jump(found, &[local, local_status]);
-
-        self.builder.switch_to_block(enclosing);
-        let enclosure =
+        self.builder.switch_to_block(local_miss);
+        let parent =
             self.builder
                 .ins()
                 .load(I64, flags(), env, ENVIRONMENT_ENCLOSURE_OFFSET as i32);
+        self.builder.ins().jump(enclosing, &[parent]);
+
+        self.builder.switch_to_block(enclosing);
         let bits = self
             .builder
             .ins()
@@ -2872,6 +3129,15 @@ impl<'p> Translator<'p> {
             .ins()
             .brif(function_frame, probe, &[], slow, &[]);
         self.builder.switch_to_block(probe);
+        let hints = self
+            .builder
+            .ins()
+            .load(I64, flags(), self.activation, offset::HINTS);
+        let hint = self
+            .builder
+            .ins()
+            .load(I32, flags(), hints, (4 * lookup) as i32);
+        let hint = self.builder.ins().uextend(I64, hint);
         let outer = self.probe_frame(enclosure, symbol, hint, slow, slow);
         let outer_status = self.builder.ins().iconst(I32, status::RUNTIME_ENCLOSING);
         self.builder.ins().jump(found, &[outer, outer_status]);
@@ -2894,6 +3160,10 @@ impl<'p> Translator<'p> {
             .builder
             .ins()
             .load(I64, flags(), cell, header_layout::SECOND as i32);
+        self.builder.ins().jump(checked, &[value, status]);
+
+        self.builder.switch_to_block(checked);
+        let (value, status) = (checked_value, checked_status);
         let unbound = values::unbound().as_ptr() as i64;
         for marker in [values::missing_arg().as_ptr() as i64, unbound] {
             let differs = self
@@ -3443,14 +3713,19 @@ impl<'p> Translator<'p> {
             }
         }
         for index in 0..self.plan.loops {
-            let value = self.builder.use_var(self.loop_indexes[index]);
-            let count = self.builder.use_var(self.loop_counts[index]);
-            self.builder
-                .ins()
-                .store(flags(), value, self.loops, (16 * index) as i32);
-            self.builder
-                .ins()
-                .store(flags(), count, self.loops, (16 * index + 8) as i32);
+            let words = (8 * runtime::LOOP_WORDS * index) as i32;
+            let state = [
+                self.loop_indexes[index],
+                self.loop_counts[index],
+                self.loop_firsts[index],
+                self.loop_steps[index],
+            ];
+            for (word, variable) in state.into_iter().enumerate() {
+                let value = self.builder.use_var(variable);
+                self.builder
+                    .ins()
+                    .store(flags(), value, self.loops, words + 8 * word as i32);
+            }
         }
         let number = iconst(&mut self.builder, number);
         self.builder.ins().jump(shared, &[number]);
@@ -3712,6 +3987,25 @@ impl<'p> Translator<'p> {
             fits = self.builder.ins().band(fits, single);
         }
         fits
+    }
+
+    /// Whether `value` is a loop's compact sequence of the kind `ty` expects: tier 0 or the
+    /// sequence helper gave the loop a nonzero `step` only for one, and a compact sequence has no
+    /// attributes, since it is copied before it is changed.
+    fn compact_sequence_fits(&mut self, value: Value, ty: Ty, step: Value) -> Value {
+        let kind = match ty {
+            Ty::IntVec => SexpType::Integer,
+            Ty::DblVec => SexpType::Real,
+            _ => return self.builder.ins().iconst(I8, 0),
+        };
+        let zero = self.builder.ins().f64const(0.0);
+        let compact = self.builder.ins().fcmp(FloatCC::NotEqual, step, zero);
+        let actual = self.builder.ins().uload8(I32, flags(), value, KIND);
+        let fits = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, actual, kind as i64);
+        self.builder.ins().band(fits, compact)
     }
 
     /// Whether a double position at least one is within `length`. R truncates the position,

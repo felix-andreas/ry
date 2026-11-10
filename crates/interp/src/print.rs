@@ -1021,7 +1021,7 @@ unsafe fn print_attributes(value: Sexp, options: &PrintOptions, tag: &mut String
 unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     let args = call.arg(1);
-    let mut options = PrintOptions::defaults(call.env);
+    let mut options = PrintOptions::defaults(call.env()?);
     let missings = call.arg(2);
     let mut call_args = Vec::new();
     for (position, (tag, argument)) in values::pairlist_items(args).into_iter().enumerate() {
@@ -1100,7 +1100,7 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
 /// `print.function(x, useSource, ...)`.
 unsafe fn do_print_function(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(0);
-    let mut options = PrintOptions::defaults(call.env);
+    let mut options = PrintOptions::defaults(call.env()?);
     options.use_source = values::as_logical_scalar(call.arg(1)) != 0;
     match function.kind() {
         SexpType::Closure => print_closure(function, &options)?,

@@ -574,7 +574,7 @@ unsafe fn table_from_list(list: Sexp, call: Sexp) -> R<Table> {
 // Constructors and IO.
 
 unsafe fn do_frame_new(call: &Call<'_>) -> R<Sexp> {
-    let pieces = argument_pieces(call.args, call.env)?;
+    let pieces = argument_pieces(call.args, call.env()?)?;
     let mut columns = Vec::with_capacity(pieces.len());
     for (position, piece) in pieces.iter().enumerate() {
         let value = piece.value()?;
@@ -1265,7 +1265,7 @@ impl Piece {
     /// on the unexpanded `j`, so it evaluates `eval(quote(1:2))` to `1:2`, where the lowering
     /// would read the numbers as column positions.
     pub(crate) unsafe fn expand_eval(&mut self, lowering: &Lowering) -> R<()> {
-        let Some((expression, env)) = self.unevaluated() else {
+        let Some((expression, env)) = self.unevaluated()? else {
             return Ok(());
         };
         if expression.kind() != SexpType::Language
@@ -1296,12 +1296,12 @@ impl Piece {
 
     /// The expression [`Piece::value`] would evaluate and its environment, when it has not been
     /// evaluated yet.
-    fn unevaluated(&self) -> Option<(Sexp, Sexp)> {
-        match self.source {
+    unsafe fn unevaluated(&self) -> R<Option<(Sexp, Sexp)>> {
+        Ok(match self.source {
             Source::Expression(expression, env) => Some((expression, env)),
-            Source::Promise(promise) => Some(unsafe { (promise.cdr(), promise.tag()) }),
+            Source::Promise(promise) => Some((promise.cdr(), eval::promise_env(promise)?)),
             _ => None,
-        }
+        })
     }
 }
 
@@ -1658,7 +1658,7 @@ impl Lowering<'_> {
 
     unsafe fn value(&self, piece: &Piece) -> R<Sexp> {
         if self.strict
-            && let Some((expression, env)) = piece.unevaluated()
+            && let Some((expression, env)) = piece.unevaluated()?
             && !is_pure(expression, env)?
         {
             return Err(error_in(

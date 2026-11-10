@@ -58,6 +58,12 @@ interpreter with a Cranelift JIT fed by ry's static types, lazy package loading 
 index, a table type on Polars, and the order to build it in. The C API, the object model, the
 interpreter and the table engine are built; the JIT is not.
 
+### [Slot frames](/development/design/slot-frames/)
+
+Closure calls that keep formals and locals in the register window and create an environment only
+when a promise, a closure, reflection, dispatch or the C API needs one. It includes the measured share
+of calls that never need an environment, the reification triggers and the release path.
+
 ### [Prior art from new language implementations](/development/design/prior-art/)
 
 What Roc, Bend, goose and Vx do best in memory management, compilation, typing and C interop, and

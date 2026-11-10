@@ -343,7 +343,7 @@ unsafe fn do_set_names(call: &Call<'_>) -> R<Sexp> {
     {
         crate::heap().root(object);
         let function = values::install("as.character")?;
-        eval::eval(values::call(function, &[names])?, call.env)?
+        eval::eval(values::call(function, &[names])?, call.env()?)?
     } else {
         names
     };

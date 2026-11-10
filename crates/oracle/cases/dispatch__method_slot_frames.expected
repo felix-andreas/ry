@@ -1,0 +1,13 @@
+[stdout]
+| b a default 1
+| c p c
+| d TRUE 2
+| e p
+| g 5 a default 5
+| + 5
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

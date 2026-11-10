@@ -1,0 +1,42 @@
+# A call from a slot frame passes its arguments as promises over the caller's slots instead of
+# building the caller's environment. Each line checks one way such a promise is used: forced
+# late after the caller reassigns the variable, escaping into a closure, passed on as missing,
+# substituted, forced into an error, and asking for the caller's frame while it is forced.
+
+requires ry-runtime
+
+file promises.R
+| late <- function(w) function() w
+| reassign <- function(n) { q <- n; fn <- late(q); q <- 99; fn() }
+| print(reassign(1))
+| held <- function(v) { force(v); function() v }
+| early <- function(n) { q <- n; fn <- held(q); q <- 99; fn() }
+| print(early(1))
+| inner <- function(x, y) c(missing(x), missing(y))
+| outer <- function(a, b) inner(a, b)
+| print(outer(1))
+| sub <- function(e) deparse(substitute(e))
+| via <- function(u) sub(u + 1)
+| print(via(5))
+| boom <- function(x) x
+| raise <- function(a) boom(stop("forced"))
+| print(tryCatch(raise(1), error = function(e) conditionMessage(e)))
+| here <- function() parent.frame()
+| ask <- function(x) x
+| frame <- function() { e <- environment(); identical(ask(here()), e) }
+| print(frame())
+| twice <- function(x) c(x, x)
+| count <- function(n) { k <- 0; bump <- function() { k <<- k + 1; n }; twice(bump()); k }
+| print(count(4))
+| keep <- function(a) { b <- a * 2; ff <- function(x) x; ff(b); sort(ls(environment())) }
+| print(keep(1))
+
+run ry run --runtime ry promises.R
+expect exit 0
+expect stdout "[1] 99"
+expect stdout "[1] 1"
+expect stdout "[1] FALSE  TRUE"
+expect stdout "[1] \"u + 1\""
+expect stdout "[1] \"forced\""
+expect stdout "[1] TRUE"
+expect stdout "[1] \"a\"  \"b\"  \"ff\""

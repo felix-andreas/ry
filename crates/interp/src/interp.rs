@@ -125,7 +125,7 @@ use {
         unwind::{R, Unwind},
     },
     heap::{
-        Heap, Marker, RootSource,
+        Heap, Liveness, Marker, RootSource,
         object::{Sexp, SexpType},
     },
     rustc_hash::FxHashMap,
@@ -138,10 +138,41 @@ pub struct Frame {
     /// The call as written, which `sys.call` returns.
     pub call: Sexp,
     pub function: Sexp,
-    /// The environment the closure body runs in.
+    /// The environment the closure body runs in. A slot frame (see [`Frame::slots`]) has none
+    /// until something asks for it, and holds `NULL` until then: read it through
+    /// [`eval::frame_env`], which makes it, wherever the environment is handed on.
     pub env: Sexp,
-    /// The environment the call was evaluated in, which `parent.frame` returns.
+    /// The environment the call was evaluated in, which `parent.frame` returns, or `NULL` when
+    /// the caller is a slot frame that had no environment when it made the call: the caller is
+    /// then the frame at [`Frame::caller`] ([`eval::frame_sys_parent`]).
     pub sys_parent: Sexp,
+    /// For a slot frame, the register that holds its environment once it has one, followed by
+    /// its slots (`docs/src/content/docs/development/design/slot-frames.md`); [`NO_SLOTS`] for
+    /// a frame that has an environment from the start.
+    pub slots: u32,
+    /// For a slot frame, bit `i` is set while formal `i` is missing (`missing()`).
+    pub missing: u64,
+    /// The position of the frame the call was made from when [`Frame::sys_parent`] is `NULL`.
+    /// Promise code runs in its caller's slots while deeper frames are live, so the caller is
+    /// not always the frame just below.
+    pub caller: u32,
+    /// For a slot frame that passed promises over its slots, the environment those promises
+    /// name: it has no bindings and carries [`heap::object::gp::PENDING_FRAME`] until the frame reifies into
+    /// it, so a forced promise finds the frame by it and runs on the slots.
+    pub pending: Sexp,
+    /// How many promises over [`Frame::pending`] may still be unforced, plus the closures made
+    /// over it ([`Interp::pending_closures`]). When none of them can outlive the frame as it
+    /// returns, the environment is never made.
+    pub unforced: u32,
+    /// Whether `parent.frame` handed out [`Frame::pending`] in place of the environment, so a
+    /// read of its bindings counts as code observing the frame.
+    pub pending_shared: bool,
+    /// A builtin wrapper run by [`eval::run_wrapper`]: its slots hold the values of arguments
+    /// that the generic path would have bound as promises, so a reify wraps them.
+    pub inlined: bool,
+    /// The [`heap::activity::label`] of what gave the slot frame its environment, while a
+    /// profile summary is collected; [`NOT_REIFIED`] otherwise.
+    pub reified_by: u32,
     /// Where the call's arguments (values or promises, with the tags the call gave them) start
     /// in [`Interp::frame_args`]; they run up to the next frame's start. `sys.function`'s
     /// pairlist of them is built only when dispatch asks for it, so a call allocates none.
@@ -153,9 +184,27 @@ pub struct Frame {
     /// The srcref current when the call was made (`R_Srcref`), which `sys.call` and `traceback`
     /// attach to the call, and which is current again once the call returns.
     pub srcref: Sexp,
+    /// Where this call's entries in [`Interp::method_vars`] start; they run up to the next
+    /// frame's start.
+    pub method_vars: u32,
     /// Where this call's entries in [`Interp::frame_closures`] start.
     pub closures: usize,
 }
+
+impl Frame {
+    /// Whether `env` is this frame's environment, or the pending environment that stands for
+    /// it while a slot frame has none: `parent.frame` hands that one out, and it becomes the
+    /// environment itself if the frame reifies.
+    pub unsafe fn owns(&self, env: Sexp) -> bool {
+        self.env == env || (self.pending == env && env.kind() == SexpType::Environment)
+    }
+}
+
+/// [`Frame::slots`] of a frame that keeps its variables in an environment.
+pub const NO_SLOTS: u32 = u32::MAX;
+
+/// [`Frame::reified_by`] of a frame no reason was recorded for.
+pub const NOT_REIFIED: u32 = u32::MAX;
 
 /// The arguments of the frame at `index` (zero-based), as the call passed them.
 pub fn frame_args(state: &Interp, index: usize) -> &[Arg] {
@@ -172,10 +221,35 @@ pub fn frame_args(state: &Interp, index: usize) -> &[Arg] {
         .unwrap_or(&[])
 }
 
+/// The S3 dispatch variables (`.Generic` and its kin) of the method slot frame at `index`,
+/// which its environment binds once it has one.
+pub fn method_vars(state: &Interp, index: usize) -> &[(Sexp, Sexp)] {
+    let Some(frame) = state.frames.get(index) else {
+        return &[];
+    };
+    let end = state
+        .frames
+        .get(index + 1)
+        .map_or(state.method_vars.len(), |next| next.method_vars as usize);
+    state
+        .method_vars
+        .get(frame.method_vars as usize..end)
+        .unwrap_or(&[])
+}
+
 /// Keeps the first `depth` frames and drops the rest with their arguments.
 pub fn truncate_frames(state: &mut Interp, depth: usize) {
     if let Some(frame) = state.frames.get(depth) {
         state.frame_args.truncate(frame.args as usize);
+        state.method_vars.truncate(frame.method_vars as usize);
+    }
+    if depth == 0 {
+        state.references_used = 0;
+    }
+    if !state.pending_closures.is_empty() {
+        state
+            .pending_closures
+            .retain(|&(owner, _)| (owner as usize) < depth);
     }
     state.frames.truncate(depth);
 }
@@ -198,6 +272,9 @@ pub struct Hooks {
     /// double kind, a length, a first element and an increment of 1 or -1, or `None` when the
     /// host has no compact sequences.
     pub compact_sequence: unsafe fn(SexpType, usize, f64, f64) -> R<Option<Sexp>>,
+    /// The first element and the increment of a compact sequence, or `None` for any other
+    /// value, so that a `for` loop steps through `1:n` without expanding it.
+    pub compact_sequence_steps: unsafe fn(Sexp) -> Option<(f64, f64)>,
     /// An ALTREP vector's read-only data pointer, from its class's `Dataptr` method, or `None`
     /// when the class has none. A class may expand into storage it keeps, as compact sequences
     /// do, so repeated reads do not copy the vector each time.
@@ -253,12 +330,30 @@ pub enum TaskCallbackRoutine {
 
 pub struct Interp {
     pub frames: Vec<Frame>,
+    /// The position of the slot frame whose slots the running byte code reads, which a `NULL`
+    /// environment handed out by that code stands for; [`NO_SLOTS`] outside slot frames.
+    pub slot_owner: u32,
     /// The arguments of every frame, back to back in frame order (see [`Frame::args`]).
     pub frame_args: Vec<Arg>,
+    /// The dispatch variables of every method slot frame, back to back in frame order (see
+    /// [`Frame::method_vars`]).
+    pub method_vars: Vec<(Sexp, Sexp)>,
+    /// The argument references calls have made and may reuse ([`eval::argument_reference`]):
+    /// the first [`Interp::references_used`] are live, the rest wait for the next call.
+    pub references: Vec<Sexp>,
+    /// Each reference's frame target, the integer vector a reference to a slot frame's variable
+    /// keeps as its attribute. A reference to compiled code in an environment keeps the code
+    /// there instead until it is released ([`eval::release_references`]).
+    pub reference_targets: Vec<Sexp>,
+    pub references_used: u32,
     /// The closures each running call created in its own frame, at most
     /// [`FRAME_CLOSURES`] each, which the heap needs to release the frame when the call returns
     /// (`Heap::release_frame`).
     pub frame_closures: Vec<Sexp>,
+    /// The closures slot frames made over their pending environments, each with the index of
+    /// its frame, at most [`FRAME_CLOSURES`] per frame. A frame that returns without its
+    /// environment checks that none outlives it (`eval::finish_frame`).
+    pub pending_closures: Vec<(u32, Sexp)>,
     /// The foreign calls (`.Call`, `.External`, `.C`, `.Fortran`) in progress, each with the
     /// number of frames below it. GNU R gives them a builtin context, which tracebacks list and
     /// `sys.calls()` does not, so they live beside the frames rather than among them.
@@ -367,6 +462,9 @@ pub struct Interp {
     /// The evaluator polls left before the next one that delivers a pending user interrupt
     /// (see [`crate::unwind::poll_interrupt`]).
     pub interrupt_countdown: u32,
+    /// Closure calls the session has made, wrapping: the JIT's measure of how much work ran
+    /// between two calls of a body, which does not change when a call allocates less.
+    pub calls_ever: u32,
     /// The processes `parallel::mcfork` forked, and the pipe to the master in a forked child.
     #[cfg(unix)]
     pub forks: fork::Forks,
@@ -393,10 +491,8 @@ static STATE: Global<InterpState> = Global(UnsafeCell::new(InterpState {
     interp: None,
 }));
 
-/// The heap the interpreter runs on.
-///
-/// # Panics
-/// Panics if [`install`] has not run, which is a host bug.
+/// The heap the interpreter runs on. Calling it before [`install`] is a host bug, which
+/// faults on the null pointer.
 #[allow(clippy::mut_from_ref)]
 #[inline]
 pub fn heap() -> &'static mut Heap {
@@ -404,7 +500,9 @@ pub fn heap() -> &'static mut Heap {
     // life of the process, because the host keeps its heap in static storage.
     unsafe {
         let state = &*STATE.0.get();
-        assert!(!state.heap.is_null(), "the interpreter is not installed");
+        // Every `nil()` reads the heap, so a release check here costs about 3% of all
+        // instructions in package code.
+        debug_assert!(!state.heap.is_null(), "the interpreter is not installed");
         &mut *state.heap
     }
 }
@@ -439,14 +537,21 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         return;
     }
     state.heap = heap_pointer;
+    heap::set_pending_resolver(crate::eval::resolve_pending_read);
     let heap = &mut *heap_pointer;
     heap.inhibit_collection();
     let symbols = values::Symbols::install(heap);
     let connection_table = connections::Table::new(hooks.connection_vfprintf);
     state.interp = Some(Interp {
         frames: Vec::new(),
+        slot_owner: NO_SLOTS,
         frame_args: Vec::new(),
+        method_vars: Vec::new(),
+        references: Vec::new(),
+        reference_targets: Vec::new(),
+        references_used: 0,
         frame_closures: Vec::new(),
+        pending_closures: Vec::new(),
         foreign_calls: Vec::new(),
         handlers: None,
         restarts: None,
@@ -493,6 +598,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         prelude: true,
         parked_unwind: None,
         interrupt_countdown: crate::unwind::INTERRUPT_CHECK_INTERVAL,
+        calls_ever: 0,
         #[cfg(unix)]
         forks: fork::Forks::default(),
         builtins_env: None,
@@ -518,6 +624,7 @@ pub fn default_hooks() -> Hooks {
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         compact_sequence: |_, _, _, _| Ok(None),
+        compact_sequence_steps: |_| None,
         altrep_dataptr: |_| Ok(None),
         altrep_int_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
         altrep_real_elt: |_, _| Err(unwind::error("ALTREP objects need the libR host")),
@@ -606,6 +713,7 @@ impl RootSource for InterpRoots {
                     frame.env,
                     frame.sys_parent,
                     frame.srcref,
+                    frame.pending,
                 ] {
                     marker.mark(object);
                 }
@@ -619,7 +727,19 @@ impl RootSource for InterpRoots {
                 marker.mark(arg.tag);
                 marker.mark(arg.value);
             }
+            for &(_, value) in &interp.method_vars {
+                marker.mark(value);
+            }
+            for &reference in &interp.references {
+                marker.mark(reference);
+            }
+            for &target in &interp.reference_targets {
+                marker.mark(target);
+            }
             for &closure in &interp.frame_closures {
+                marker.mark(closure);
+            }
+            for &(_, closure) in &interp.pending_closures {
                 marker.mark(closure);
             }
             for &(call, _) in &interp.foreign_calls {
@@ -659,6 +779,11 @@ impl RootSource for InterpRoots {
             interp.moves.trace(marker);
             interp.library_tags.trace(marker);
         }
+    }
+
+    fn clear_dead(&self, liveness: &Liveness<'_>) {
+        // SAFETY: as for `trace`.
+        unsafe { interp().bytecode.call_plans.clear_dead(liveness) }
     }
 }
 

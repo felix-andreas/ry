@@ -46,10 +46,14 @@ pub struct Activation {
     pub visible: *mut bool,
     /// Where execution starts: 0 for a call, or the loop header on-stack replacement enters.
     pub entry_pc: i64,
-    /// The activation's environment, whose frame compiled code probes for its variables.
-    pub env: Sexp,
+    /// The activation's header register, which holds its environment, or `NULL` while it runs
+    /// in a slot frame whose slots follow the header. Compiled code reads it on every probe,
+    /// because a callee can give the frame its environment while the activation runs.
+    pub header: *mut Sexp,
     /// The code's lookup-slot hints ([`bytecode::lookup_hints`]).
     pub hints: *mut u32,
+    /// Where lookups of names the frame does not bind start: its closure's environment.
+    pub enclosure: Sexp,
     pub machine: *mut c_void,
     pub compiled: *const Compiled,
     pub pending: Option<Unwind>,
@@ -63,11 +67,13 @@ pub mod offset {
     pub const LOOPS: i32 = 8;
     pub const VISIBLE: i32 = 16;
     pub const ENTRY_PC: i32 = 24;
-    pub const ENV: i32 = 32;
+    pub const HEADER: i32 = 32;
     pub const HINTS: i32 = 40;
+    pub const ENCLOSURE: i32 = 48;
 }
 
-const _: () = assert!(std::mem::offset_of!(Activation, env) == offset::ENV as usize);
+const _: () = assert!(std::mem::offset_of!(Activation, header) == offset::HEADER as usize);
+const _: () = assert!(std::mem::offset_of!(Activation, enclosure) == offset::ENCLOSURE as usize);
 const _: () = assert!(std::mem::offset_of!(Activation, hints) == offset::HINTS as usize);
 
 /// What compiled code returns when on-stack replacement declined to enter, because a value
@@ -169,29 +175,29 @@ impl Exit {
 }
 
 /// Whether every function lookup compiled code assumed still resolves the same way for an
-/// activation whose frame is `frame`. Every change that could alter such a lookup moves the
+/// activation `machine`. Every change that could alter such a lookup moves the
 /// binding epoch and the symbol's lookup stamp (see `gp::WATCHED`), so an unchanged epoch, or
 /// unchanged stamps of the speculated symbols, prove the lookups without walking them.
 /// `thorough` walks them anyway, for an activation whose frame may have bound a watched name
 /// before the name was watched. Portable code running for an enclosure other than the checked
 /// one or its siblings walks, and leaves the epoch and stamps to the checked enclosure.
 #[inline]
-pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
+pub unsafe fn valid(compiled: &Compiled, machine: &Machine<'_>, thorough: bool) -> bool {
     // Every entry asks, and almost every time nothing moved the epoch since the last proof.
     if !thorough
         && heap().binding_epoch() == compiled.epoch.get()
-        && (!compiled.portable || compiled.checked.get().weak_key() == frame.enclosure())
+        && (!compiled.portable || compiled.checked.get().weak_key() == machine.enclosure())
     {
         return true;
     }
-    unsafe { prove(compiled, frame, thorough) }
+    unsafe { prove(compiled, machine, thorough) }
 }
 
 #[inline(never)]
-unsafe fn prove(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
+unsafe fn prove(compiled: &Compiled, machine: &Machine<'_>, thorough: bool) -> bool {
     let heap = heap();
     let epoch = heap.binding_epoch();
-    let enclosure = frame.enclosure();
+    let enclosure = machine.enclosure();
     let checked = !compiled.portable || compiled.checked.get().weak_key() == enclosure;
     let sibling = !checked && sibling_of_checked(compiled, enclosure);
     if !thorough && (checked || sibling) {
@@ -221,9 +227,9 @@ unsafe fn prove(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
         // frame's run-time bindings: `assign` into `parent.frame()`, a default argument, or the
         // locals `UseMethod` copies in can each bind the name there.
         if rooted
-            && heap
-                .frame_cell(frame, speculation.symbol)
-                .is_some_and(|cell| may_be_function(cell.cdr()))
+            && machine
+                .local_binding(speculation.symbol)
+                .is_some_and(|value| may_be_function(value))
         {
             return false;
         }
@@ -247,8 +253,8 @@ unsafe fn prove(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
 /// speculations held before that code ran, and every binding that could change a function
 /// lookup moves the epoch, so an unmoved epoch proves them without reading them.
 #[inline]
-unsafe fn still_valid(compiled: &Compiled, frame: Sexp, epoch: u64) -> bool {
-    unsafe { heap().binding_epoch() == epoch || valid(compiled, frame, false) }
+unsafe fn still_valid(compiled: &Compiled, machine: &Machine<'_>, epoch: u64) -> bool {
+    unsafe { heap().binding_epoch() == epoch || valid(compiled, machine, false) }
 }
 
 /// Whether portable `compiled` runs for `enclosure`, which is not the checked enclosure but
@@ -452,9 +458,7 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
                     park(activation, unwind);
                     outcome::FAILED
                 }
-                Ok(())
-                    if validate != 0 && !still_valid(compiled(activation), machine.env, epoch) =>
-                {
+                Ok(()) if validate != 0 && !still_valid(compiled(activation), machine, epoch) => {
                     outcome::INVALIDATED
                 }
                 Ok(()) => outcome::OK,
@@ -469,7 +473,7 @@ pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i6
         checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
             let epoch = heap().binding_epoch();
-            let loaded = scoped(|| bytecode::load_variable(machine.code, machine.env, pc as usize));
+            let loaded = scoped(|| bytecode::load_variable(machine, pc as usize));
             finish_load(activation, slot, loaded, epoch)
         })
     }
@@ -494,8 +498,33 @@ pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -
             let symbol = compiled(activation).slots[slot as usize];
             let epoch = heap().binding_epoch();
             let loaded = scoped(|| {
-                let local = heap().frame_cell(machine.env, symbol).is_some();
-                eval::eval_symbol(symbol, machine.env).map(|value| (value, local))
+                if machine.env() == values::nil() {
+                    return match machine.slot_of(symbol).map(|slot| *slot) {
+                        Some(value) if value.kind() == SexpType::Promise => {
+                            let forced = if value.car() == values::unbound() {
+                                let forced = eval::force_promise(value)?;
+                                heap().root(forced);
+                                forced
+                            } else {
+                                value.car()
+                            };
+                            Ok((forced, true))
+                        }
+                        Some(value)
+                            if value != values::unbound() && value != values::missing_arg() =>
+                        {
+                            Ok((value, true))
+                        }
+                        Some(value) if value == values::missing_arg() => {
+                            let env = machine.reify(eval::Reify::Site("missing argument lookup"))?;
+                            eval::eval_symbol(symbol, env).map(|value| (value, true))
+                        }
+                        _ => eval::eval_symbol(symbol, machine.enclosure())
+                            .map(|value| (value, false)),
+                    };
+                }
+                let local = heap().frame_cell(machine.env(), symbol).is_some();
+                eval::eval_symbol(symbol, machine.env()).map(|value| (value, local))
             });
             finish_load(activation, slot, loaded, epoch)
         })
@@ -518,7 +547,7 @@ unsafe fn finish_load(
                 *slot_cell(activation, slot) = value;
                 // Loading can force a promise, which runs arbitrary code.
                 if !compiled(activation).speculations.is_empty()
-                    && !still_valid(compiled(activation), machine(activation).env, epoch)
+                    && !still_valid(compiled(activation), machine(activation), epoch)
                 {
                     return outcome::LOAD_INVALIDATED;
                 }
@@ -538,8 +567,23 @@ pub unsafe extern "C" fn jit_peek_slot(activation: *mut Activation, slot: i64) -
             let symbol = compiled(activation).slots[slot as usize];
             let heap = heap();
             let empty = heap.known().empty_env;
-            let mut env = machine.env;
+            let mut env = machine.env();
             let mut local = true;
+            if env == values::nil() {
+                if let Some(frame_slot) = machine.slot_of(symbol) {
+                    let mut value = *frame_slot;
+                    if value.kind() == SexpType::Promise {
+                        value = value.car();
+                    }
+                    if value == values::missing_arg() || value == values::unbound() {
+                        return outcome::LOAD_FAILED;
+                    }
+                    *slot_cell(activation, slot) = value;
+                    return 1;
+                }
+                env = machine.enclosure();
+                local = false;
+            }
             while env != empty {
                 if let Some(cell) = heap.frame_cell(env, symbol) {
                     if cell.has_gp(gp::ACTIVE_BINDING) {
@@ -585,7 +629,7 @@ pub unsafe extern "C" fn jit_closure_matches(
             };
             let matches = value.kind() == SexpType::Closure
                 && value.car() == formals
-                && value.tag() == machine(activation).env
+                && value.tag() == machine(activation).env()
                 && bytecode::closure_body(value) == body;
             matches as i32
         })
@@ -653,8 +697,20 @@ pub unsafe extern "C" fn jit_call(
                     Some(signature) if signature == values::nil() => Entry::Checked(None),
                     Some(signature) => Entry::Checked(Some(signature)),
                 };
+                // `NULL` from a slot frame names the frame below the callee's as its caller.
+                if let Some(frame) = eval::bind_slots(call, function, &args)? {
+                    return eval::run_frame(
+                        call,
+                        function,
+                        frame,
+                        machine.env(),
+                        &args,
+                        entry,
+                        &[],
+                    );
+                }
                 let env = eval::bind_arguments(call, function, &args, None)?;
-                eval::run_closure(call, function, env, machine.env, &args, entry)
+                eval::run_closure(call, function, env, machine.env(), &args, entry)
             });
             match result {
                 Err(unwind) => {
@@ -663,7 +719,7 @@ pub unsafe extern "C" fn jit_call(
                 }
                 Ok(value) => {
                     *activation.registers.add(dst as usize) = value;
-                    if !still_valid(compiled(activation), machine.env, epoch) {
+                    if !still_valid(compiled(activation), machine, epoch) {
                         outcome::INVALIDATED
                     } else {
                         outcome::OK
@@ -767,7 +823,7 @@ pub unsafe extern "C" fn jit_flush(
                     _ => *cell,
                 };
                 *cell = value;
-                eval::assign_symbol(symbol, value, machine.env, false)?;
+                machine.assign(symbol, value)?;
                 if kind == representation::BOXED {
                     value.decrement_refcount();
                 }
@@ -802,10 +858,14 @@ pub unsafe extern "C" fn jit_deopt(activation: *mut Activation, pc: i64, why: i3
                 invalidate(machine.code);
             }
             for index in 0..compiled.loops {
-                let index_value = *activation.loops.add(2 * index);
-                let count = *activation.loops.add(2 * index + 1);
+                let words = activation.loops.add(LOOP_WORDS * index);
                 if let Some(state) = machine.loops.get_mut(index) {
-                    *state = LoopState::vector(index_value.max(0) as usize, count.max(0) as usize);
+                    *state = LoopState::vector(
+                        (*words).max(0) as usize,
+                        (*words.add(1)).max(0) as usize,
+                        f64::from_bits(*words.add(2) as u64),
+                        f64::from_bits(*words.add(3) as u64),
+                    );
                 }
             }
             activation.resume_pc = pc as usize;
@@ -895,15 +955,74 @@ pub unsafe extern "C" fn jit_duplicate(
     }
 }
 
-/// An ALTREP `for` loop sequence expanded into an ordinary vector, as tier 0's `ForInit`
-/// expands it; any other value is returned as it is.
-pub unsafe extern "C" fn jit_expand_sequence(
+/// `vector[[position]] <- value` on a plain list nothing else references, in place or appended
+/// within the list's capacity as tier 0 appends. Returns 0, having changed nothing, for anything
+/// else, which tier 0 then runs: a `NULL` value, which deletes the element, a list that must
+/// grow or be copied first, or one with attributes, which may be names to extend.
+pub unsafe extern "C" fn jit_store_list_element(
+    vector: *mut Header,
+    position: i64,
+    value: *mut Header,
+) -> i32 {
+    unsafe {
+        let (Some(vector), Some(value)) = (Sexp::from_raw(vector), Sexp::from_raw(value)) else {
+            return 0;
+        };
+        // Storing a list into itself must copy it first (`x[[2]] <- x`), which tier 0 does.
+        if vector.kind() != SexpType::List
+            || value == values::nil()
+            || value == vector
+            || vector.attrib() != values::nil()
+            || vector.is_altrep()
+            || vector.is_array()
+            || values::maybe_shared(vector)
+        {
+            return 0;
+        }
+        let length = vector.length();
+        let Ok(offset) = usize::try_from(position - 1) else {
+            return 0;
+        };
+        if position - 1 == length as i64 && heap().resize_vector(vector, length + 1).is_err() {
+            return 0;
+        }
+        if offset >= vector.length() as usize {
+            return 0;
+        }
+        values::set_elt(vector, offset, value);
+        1
+    }
+}
+
+/// The words each `for` loop keeps in [`Activation::loops`]: the index, the count, and the
+/// first element and increment of a compact sequence as double bits (an increment of 0 when
+/// the loop reads the sequence's storage), as in tier 0's [`LoopState`].
+pub const LOOP_WORDS: usize = 4;
+
+/// Prepares an ALTREP `for` loop sequence as tier 0's `ForInit` does: a compact sequence is
+/// returned as it is, with its first element and increment stored in loop `index`'s words,
+/// and any other ALTREP vector is expanded into an ordinary one, with an increment of 0. The
+/// sequence's length goes in the loop's count word.
+pub unsafe extern "C" fn jit_loop_sequence(
     activation: *mut Activation,
     value: *mut Header,
+    index: i64,
 ) -> *mut Header {
     unsafe {
+        let words = (*activation).loops.add(LOOP_WORDS * index as usize);
         boxed(activation, || match Sexp::from_raw(value) {
-            Some(value) => values::materialize(value),
+            Some(value) => {
+                let steps = (interp::interp().hooks.compact_sequence_steps)(value);
+                let (first, step) = steps.unwrap_or((0.0, 0.0));
+                let sequence = match steps {
+                    Some(_) => value,
+                    None => values::materialize(value)?,
+                };
+                *words.add(1) = values::length(sequence) as i64;
+                *words.add(2) = first.to_bits() as i64;
+                *words.add(3) = step.to_bits() as i64;
+                Ok(sequence)
+            }
             None => Ok(values::nil()),
         })
     }

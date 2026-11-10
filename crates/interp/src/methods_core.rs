@@ -183,6 +183,8 @@ pub unsafe fn install_fast_paths(namespace: Sexp) -> R<()> {
             let mut body = crate::bytecode::closure_body(closure);
             // ry builds its bundled base R itself, so the methods namespace it saved holds the
             // closures with their fast paths already in front: hash the original body behind it.
+            // A fast path saved by an older `methods_core.R` is replaced, so editing a fast path
+            // needs no rebuild of base R.
             let mut already = false;
             if let Some([(_, first), (_, original)]) = call_args::<2>(body, "{")? {
                 let mut first_hash = FNV_OFFSET;
@@ -190,6 +192,8 @@ pub unsafe fn install_fast_paths(namespace: Sexp) -> R<()> {
                 if first_hash == prologue_hash {
                     body = original;
                     already = true;
+                } else if calls_fast_path(first) {
+                    body = original;
                 }
             }
             let mut hash = FNV_OFFSET;
@@ -221,6 +225,31 @@ pub unsafe fn install_fast_paths(namespace: Sexp) -> R<()> {
         )));
     }
     Ok(())
+}
+
+/// Whether `expression` calls one of the `.Internal(ryS4...)` fast paths, which marks the first
+/// statement of a body as a fast path an older ry put there.
+unsafe fn calls_fast_path(expression: Sexp) -> bool {
+    if expression.kind() != SexpType::Language {
+        return false;
+    }
+    if expression.car() == symbols().dot_internal {
+        let inner = expression.cdr().car();
+        if inner.kind() == SexpType::Language
+            && inner.car().kind() == SexpType::Symbol
+            && values::symbol_name(inner.car()).starts_with("ryS4")
+        {
+            return true;
+        }
+    }
+    let mut cell = expression.cdr();
+    while cell.kind() == SexpType::Pairlist {
+        if calls_fast_path(cell.car()) {
+            return true;
+        }
+        cell = cell.cdr();
+    }
+    false
 }
 
 /// Every method of the `initialize` generic the namespace holds: the generic's `default` slot
@@ -671,13 +700,11 @@ unsafe fn answer(result: Option<bool>) -> R<Sexp> {
     })
 }
 
-/// `is(object, class2)`.
+/// `is(object, class2)` with `class2` supplied. The fast path takes the forced value rather than
+/// the frame, so `is` runs in a slot frame; the original body forces `class2` as soon as it has
+/// looked up the class of `object`, before anything observable.
 unsafe fn do_is(call: &Call<'_>) -> R<Sexp> {
-    let (object, frame) = (call.arg(0), call.arg(1));
-    let Some(class2) = quiet_value(install("class2")?, frame)? else {
-        return answer(None);
-    };
-    answer(is_instance(object, class2)?)
+    answer(is_instance(call.arg(0), call.arg(1))?)
 }
 
 unsafe fn is_instance(object: Sexp, class2: Sexp) -> R<Option<bool>> {
@@ -1031,7 +1058,7 @@ unsafe fn quiet_binding(cell: Sexp, depth: u32) -> R<Option<Sexp>> {
         SexpType::Symbol => {
             depth < 4
                 && code != symbols().dots
-                && match eval::find_cell(code, value.tag()) {
+                && match eval::find_cell(code, eval::promise_env(value)?) {
                     Some(inner) => quiet_binding(inner, depth + 1)?.is_some(),
                     None => false,
                 }
@@ -5438,10 +5465,10 @@ unsafe fn default_where(frame: Sexp, promise: Sexp) -> R<Option<Sexp>> {
         }
     }
     let frames = &interp().frames;
-    let Some(record) = frames.iter().rev().find(|record| record.env == frame) else {
+    let Some(position) = frames.iter().rposition(|record| record.owns(frame)) else {
         return Ok(None);
     };
-    let caller = record.sys_parent;
+    let caller = crate::eval::frame_sys_parent(position, crate::eval::Reify::Site("S4 dispatch"))?;
     let target = crate::envir::get_option("topLevelEnvironment");
     Ok(Some(crate::envir::top_env(caller, target)))
 }

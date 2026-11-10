@@ -1,0 +1,61 @@
+[stdout]
+| round 1 
+| [1] 2
+| [1] "failed"
+| [1] "caught boom 1 1"
+| [1] 12
+| [1] 101
+| [1] 1 2
+| [1] 2
+| [1] TRUE
+| [1] TRUE
+| [1] 3
+| handler formals: w 
+| parent is a frame: TRUE 
+| [1] "done"
+| [1] "replaced"
+| [1] 10 20 30
+| [1]  1 18
+| [1] "opt1"
+| round 2 
+| [1] 3
+| [1] "failed"
+| [1] "caught boom 2 2"
+| [1] 14
+| [1] 102
+| [1] 2 4
+| [1] 3
+| [1] TRUE
+| [1] TRUE
+| [1] 6
+| handler formals: w 
+| parent is a frame: TRUE 
+| [1] "done"
+| [1] "replaced"
+| [1] 10 20 30
+| [1]  1 18
+| [1] "opt2"
+| round 3 
+| [1] 4
+| [1] "failed"
+| [1] "caught boom 3 3"
+| [1] 16
+| [1] 103
+| [1] 3 6
+| [1] 4
+| [1] TRUE
+| [1] TRUE
+| [1] 9
+| handler formals: w 
+| parent is a frame: TRUE 
+| [1] "done"
+| [1] "replaced"
+| [1] 10 20 30
+| [1]  1 18
+| [1] "opt3"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
