@@ -375,7 +375,7 @@ builtin that asked, or a named site such as `"function definition"` or `"method 
 | Class | Meaning |
 |---|---|
 | direct | the frame never reified and was passed no promise |
-| a reify cause | the frame reified for that reason; `eval::OBSERVING_REASONS` marks the causes where code observed the environment itself (`eval`, `environment()`, `sys.frame`, `parent.frame`, `assign`, `get`, native code, `environment outliving the frame`) |
+| a reify cause | the frame reified for that reason; `eval::OBSERVING_REASONS` marks the causes where code observed the environment itself (`eval`, `environment()`, `sys.frame`, `parent.frame`, `assign`, `get`, native code, `.External2`, `environment outliving the frame`) |
 | `promise argument: variable`, `call`, `other` | the frame stayed unreified but was passed a real promise of that kind |
 | `frame with an environment` | the callee has no slot table and always gets a heap frame |
 

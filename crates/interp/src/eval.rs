@@ -2211,11 +2211,13 @@ pub enum Reify {
 
 /// The reasons that observe a frame's environment: they evaluate code in it, hand it out as a
 /// value, or read or write its bindings by name. Every other reason is a mechanism a slot
-/// frame could serve without one.
-pub const OBSERVING_REASONS: [&str; 16] = [
+/// frame could serve without one. `.External2` hands its routine the calling environment, and
+/// the routines packages call through it (rlang's `ffi_enquo`, `ffi_eval` and the like) read
+/// bindings there.
+pub const OBSERVING_REASONS: [&str; 17] = [
     "eval", "evalq", "environment", "environment()", "sys.frame", "sys.frames", "parent.frame",
     "pos = -1", "assign", "get", "get0", "exists", "mget", "native code", "as.environment",
-    "environment outliving the frame",
+    "environment outliving the frame", ".External2",
 ];
 
 /// The `...` slot of the frame at `index`, when it is a slot frame without an environment and
