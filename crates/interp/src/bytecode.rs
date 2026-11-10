@@ -5337,12 +5337,17 @@ unsafe fn rebinding_reusable(
         + 1
         + length(state.constants.element(SLOTS).element(1));
     let base = state.registers.offset_from(registers.as_ptr()) as usize;
+    // The scan ends at the activation's own registers: tier 1 caches variable values in cells
+    // above them, and it writes those back and forgets them before this opaque step, so a
+    // cached copy of the subject is never read again.
+    let end = base + values::ints(state.constants.element(REGISTERS))[0] as usize;
     let arguments = base + arguments.start..base + arguments.end;
     let held = registers
+        .get(start..end.min(registers.len()))
+        .unwrap_or_default()
         .iter()
-        .enumerate()
-        .skip(start)
-        .any(|(index, &value)| {
+        .zip(start..)
+        .any(|(&value, index)| {
             value == subject && !arguments.contains(&index) && index != base + dst
         });
     Ok((!held).then_some(subject))
