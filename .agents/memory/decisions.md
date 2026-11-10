@@ -8721,10 +8721,10 @@ Each one trades a narrow class of missed errors for a class of false reports see
   once the predecessors are known, which creates 99k and keeps the same 3.9k; translation went
   from 95 to 54 ms.
 - **The rest was quadratic in merges times slots, and in register allocation.** With the
-  steps below, testthat's forced codegen fell from 3.1 to 1.2 s, and the 12 bodies over 3,000
-  words went from 17 to 4.7 µs per word, below the 5.5 of bodies under 250 words, so cost is
-  linear in body size and no size cap or hotness threshold is needed. For `[<-.data.frame`
-  (14,819 words) one compile went from about 300 to about 95 ms.
+  steps below, testthat's forced codegen fell from 3.1 to 1.4 s, and the 12 bodies over 3,000
+  words went from 17 to 7.1 µs per word (5.3 for bodies under 250 words), so cost is linear in
+  body size and no size cap or hotness threshold is needed. For `[<-.data.frame` (14,819 words)
+  one compile went from about 300 to about 125 ms.
   - Each slot's run-time status was an SSA variable live across the whole body, so every merge
     got a parameter per slot: 47k parameters over 8k blocks, and a `PureUnlessObserved` step
     redefined all of them. Statuses now live in a stack array of 4-byte cells
