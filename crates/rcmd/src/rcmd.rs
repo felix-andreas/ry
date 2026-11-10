@@ -3339,6 +3339,9 @@ PATH="${R_CUSTOM_TOOLS_PATH:-${R_RTOOLS45_PATH}};${PATH}/"
             "Package: base\nVersion: 4.6.2\nBuilt: R 4.6.2; ; 2026-01-01; unix\n",
         )
         .expect("write base DESCRIPTION");
+        for directory in ["share", "etc", "bin", "library"] {
+            fs::create_dir_all(base.join(directory)).expect("create base directory");
+        }
         let libr = root.join("build").join(LIBR_FILE);
         let rcmd = root.join("build/ry-rcmd");
         put(&libr, "first build").expect("write libR");
