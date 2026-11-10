@@ -12,6 +12,13 @@ w_sqrt <- function(x) sqrt(x)
 w_named <- function(a = TRUE, b = 1) list(first = a, second = b)
 w_named_braced <- function(a = TRUE, b = 1) { list(first = a, second = b) }
 
+# The code of the wrapper's argument `x`, read from its frame as a handler would.
+wrapper_code <- function() {
+  for (index in rev(seq_len(sys.nframe()))) {
+    if (identical(sys.function(index), w_log)) return(substitute(x, sys.frames()[[index]]))
+  }
+}
+
 show_stack <- function() {
   calls <- sys.calls()
   frames <- sys.parents()
@@ -37,6 +44,7 @@ drive <- function(round) {
     w_log(negative),
     warning = function(w) {
       print(conditionCall(w))
+      print(wrapper_code())
       show_stack()
       invokeRestart("muffleWarning")
     }
@@ -44,6 +52,13 @@ drive <- function(round) {
   tryCatch(
     withCallingHandlers(w_crc(1), error = function(e) show_stack()),
     error = function(e) cat("caught\n")
+  )
+  withCallingHandlers(
+    w_log(-1.5 + 0.5),
+    warning = function(w) {
+      print(wrapper_code())
+      invokeRestart("muffleWarning")
+    }
   )
   str(w_named())
   str(w_named_braced(value, b = "x"))

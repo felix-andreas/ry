@@ -248,9 +248,11 @@ execute, no promises and no environment.
   so `sys.call`, `sys.calls`, `sys.function`, `conditionCall` and native code that calls back
   into R see the wrapper exactly as they would through the generic path. The builtin gets the
   inner call (`log(x)`, not the `{` around it) as its call.
-- **Known gap.** Formals hold values rather than promises. Only code that reifies the wrapper's
-  frame and inspects a formal as a promise (`substitute` on that environment from native code)
-  can tell the difference.
+- **Reify.** The slots hold values, so a reify of the wrapper's frame (a handler calling
+  `sys.frames()`, say) binds each formal the caller passed a variable to as a forced promise
+  whose code is that variable, as the generic path would have. `substitute(x, frame)` then
+  answers the variable's name, and building those promises costs nothing on calls that never
+  reify.
 
 `crates/oracle/cases/functions__builtin_wrappers.R` pins these rules with the JIT off, on and
 forced. Measured on a `node_car` loop: 7,751 instructions per call through the generic path,

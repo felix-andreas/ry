@@ -1696,6 +1696,7 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
         caller: crate::NO_SLOTS,
         pending: nil(),
         unforced: 0,
+        inlined: false,
     });
     let depth = state.frames.len();
     let result = apply_method(new_call, found.method, promised, env, &found.vars, true);

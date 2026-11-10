@@ -159,6 +159,9 @@ pub struct Frame {
     /// How many promises over [`Frame::pending`] may still be unforced. When none are left as
     /// the frame returns, the environment is never made.
     pub unforced: u32,
+    /// A builtin wrapper run by [`eval::run_wrapper`]: its slots hold the values of arguments
+    /// that the generic path would have bound as promises, so a reify wraps them.
+    pub inlined: bool,
     /// Where the call's arguments (values or promises, with the tags the call gave them) start
     /// in [`Interp::frame_args`]; they run up to the next frame's start. `sys.function`'s
     /// pairlist of them is built only when dispatch asks for it, so a call allocates none.

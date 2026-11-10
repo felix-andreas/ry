@@ -17,6 +17,7 @@
 | w_crc(1)
 | 
 | log(x)
+| negative
 |  [1] "local({"                                                     
 |  [2] "eval.parent(substitute(eval(quote(expr), envir)))"           
 |  [3] "eval(expr, p)"                                               
@@ -67,6 +68,7 @@
 | [24] "show_stack()"                                                              
 | [1] TRUE
 | caught
+| -1.5 + 0.5
 | List of 2
 |  $ first : logi TRUE
 |  $ second: num 1
@@ -106,6 +108,7 @@
 | w_crc(1)
 | 
 | log(x)
+| negative
 |  [1] "local({"                                                     
 |  [2] "eval.parent(substitute(eval(quote(expr), envir)))"           
 |  [3] "eval(expr, p)"                                               
@@ -156,6 +159,7 @@
 | [24] "show_stack()"                                                              
 | [1] TRUE
 | caught
+| -1.5 + 0.5
 | List of 2
 |  $ first : logi TRUE
 |  $ second: num 1
@@ -195,6 +199,7 @@
 | w_crc(1)
 | 
 | log(x)
+| negative
 |  [1] "local({"                                                     
 |  [2] "eval.parent(substitute(eval(quote(expr), envir)))"           
 |  [3] "eval(expr, p)"                                               
@@ -245,6 +250,7 @@
 | [24] "show_stack()"                                                              
 | [1] TRUE
 | caught
+| -1.5 + 0.5
 | List of 2
 |  $ first : logi TRUE
 |  $ second: num 1
@@ -284,6 +290,7 @@
 | w_crc(1)
 | 
 | log(x)
+| negative
 |  [1] "local({"                                                     
 |  [2] "eval.parent(substitute(eval(quote(expr), envir)))"           
 |  [3] "eval(expr, p)"                                               
@@ -334,6 +341,7 @@
 | [24] "show_stack()"                                                              
 | [1] TRUE
 | caught
+| -1.5 + 0.5
 | List of 2
 |  $ first : logi TRUE
 |  $ second: num 1
