@@ -42,7 +42,6 @@ pub mod combine;
 pub mod conditions;
 pub mod connections;
 pub mod console_server;
-pub mod data_table;
 pub mod dataframe;
 pub mod debugger;
 pub mod deparse;
@@ -119,7 +118,7 @@ pub mod viewer;
 pub use crate::unwind::{Jump, RError};
 use {
     crate::{
-        base_fast_paths::NativeEntry,
+        base_fast_paths::Entry,
         builtins::{Arg, BuiltinDef, Kind},
         conditions::{HandlerStack, RestartStack},
         unwind::{R, Unwind},
@@ -129,7 +128,6 @@ use {
         object::{Sexp, SexpType},
     },
     rustc_hash::FxHashMap,
-    smallvec::SmallVec,
     std::{cell::UnsafeCell, rc::Rc},
 };
 
@@ -372,9 +370,10 @@ pub struct Interp {
     pub srcref: Sexp,
     pub builtins: Vec<BuiltinDef>,
     pub builtin_index: FxHashMap<&'static str, u32>,
-    /// The formals `.ArgsEnv` or `.GenericArgsEnv` give each builtin, read on first use;
-    /// `None` for a builtin with `...` or with no entry, whose argument names go unchecked.
-    pub primitive_formals: FxHashMap<&'static str, Option<Box<[String]>>>,
+    /// The formals `.ArgsEnv` or `.GenericArgsEnv` give each builtin, by builtin index and read
+    /// on first use (`None` until then); an inner `None` is a builtin with `...` or with no
+    /// entry, whose argument names go unchecked.
+    pub primitive_formals: Vec<Option<Option<Box<[String]>>>>,
     pub symbols: values::Symbols,
     /// `R_Visible`: whether the value of the last top-level evaluation prints.
     pub visible: bool,
@@ -386,9 +385,9 @@ pub struct Interp {
     /// assignment, so a builtin replacement function reports its errors and warnings against
     /// `x[i] <- v`, not `` `[<-`(*tmp*, i, v) `` or the enclosing function's call.
     pub assignment_call: Option<(Sexp, Sexp, usize)>,
-    /// The base closures whose calls run natively, each with its native code
+    /// The closures whose calls run natively, each with its native code, sorted by address
     /// (`base_fast_paths::native_entry`).
-    pub native_entries: SmallVec<[(Sexp, NativeEntry); 8]>,
+    pub native_entries: Vec<(Sexp, Entry)>,
     /// Base R's `loadNamespace`, whose calls the collector treats as a namespace load
     /// (`Heap::enter_namespace_load`), or nil before base is loaded. Matched by identity and
     /// preserved, so a collected closure's address cannot be reused by another function.
@@ -560,12 +559,12 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         srcref: heap.known().nil,
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
-        primitive_formals: FxHashMap::default(),
+        primitive_formals: Vec::new(),
         symbols,
         visible: true,
         returned_values: Vec::new(),
         assignment_call: None,
-        native_entries: SmallVec::new(),
+        native_entries: Vec::new(),
         namespace_loader: heap.known().nil,
         tmp_values: Vec::new(),
         loops: Vec::new(),

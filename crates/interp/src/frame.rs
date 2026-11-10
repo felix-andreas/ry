@@ -159,22 +159,22 @@ DataFrame.read_parquet <- function(path) .frame_read_parquet(path)
 DataFrame.write_csv <- function(df, path) .frame_write_csv(df, path)
 DataFrame.write_parquet <- function(df, path) .frame_write_parquet(df, path)
 setkey <- function(x, ...) {
-  if (!inherits(x, "DataFrame")) return(data.table::setkey(x, ...))
+  if (!inherits(x, "DataFrame")) stop("`setkey` takes a DataFrame here; use `data.table::setkey` for a data.table")
   columns <- vapply(as.list(substitute(list(...)))[-1L], function(e) {
     if (is.character(e)) e else deparse(e)
   }, "")
   .frame_setkey(substitute(x), columns, parent.frame())
 }
 setkeyv <- function(x, cols, ...) {
-  if (!inherits(x, "DataFrame")) return(data.table::setkeyv(x, cols, ...))
+  if (!inherits(x, "DataFrame")) stop("`setkeyv` takes a DataFrame here; use `data.table::setkeyv` for a data.table")
   .frame_setkey(substitute(x), cols, parent.frame())
 }
 key <- function(x) {
-  if (!inherits(x, "DataFrame")) return(data.table::key(x))
+  if (!inherits(x, "DataFrame")) stop("`key` takes a DataFrame here; use `data.table::key` for a data.table")
   .frame_key(x)
 }
 copy <- function(x) {
-  if (!inherits(x, "DataFrame")) return(data.table::copy(x))
+  if (!inherits(x, "DataFrame")) stop("`copy` takes a DataFrame here; use `data.table::copy` for a data.table")
   .frame_copy(x)
 }
 "#;
@@ -194,17 +194,6 @@ local({
   environment(to_data_table) <- list2env(list(to_data_frame = to_data_frame), parent = ns)
   setHook(packageEvent("data.table", "onLoad"), function(...) {
     registerS3method("as.data.table", "DataFrame", to_data_table, envir = asNamespace("data.table"))
-  })
-  # `package:ry` binds these names so that they also take frames. Binding the same functions in
-  # `package:data.table` keeps them working on frames once data.table is attached above ry, and
-  # keeps `library(data.table)` from reporting that it masks them, which GNU R never prints.
-  setHook(packageEvent("data.table", "attach"), function(...) {
-    attached <- as.environment("package:data.table")
-    for (name in c("setkey", "setkeyv", "key", "copy")) {
-      unlockBinding(name, attached)
-      assign(name, get(name, envir = as.environment("package:ry")), envir = attached)
-      lockBinding(name, attached)
-    }
   })
 })
 "#;
@@ -231,7 +220,6 @@ pub unsafe fn attach_package() -> R<()> {
     )?;
     crate::session::eval_text(PACKAGE, namespace)?;
     crate::session::eval_text(crate::dataframe::PACKAGE, namespace)?;
-    crate::data_table::attach(namespace)?;
     let library_names = crate::standard_library::names()
         .map(|name| format!("{name:?}"))
         .collect::<Vec<_>>()
@@ -1257,52 +1245,6 @@ impl Piece {
         matches!(self.source, Source::Missing)
     }
 
-    /// Replaces `eval(e)` by the call or symbol `e` evaluates to, the way data.table's `[`
-    /// expands `j = eval(e)`: it evaluates `e` in the caller's frame and runs the result as `j`.
-    /// data.table matches `eval` by name, so a local `eval` does not stop the expansion, and it
-    /// leaves `eval(e)` alone when a variable of `e` names a column, because `e` then means that
-    /// column. An expansion that reads no column is an error: data.table decides `with = FALSE`
-    /// on the unexpanded `j`, so it evaluates `eval(quote(1:2))` to `1:2`, where the lowering
-    /// would read the numbers as column positions.
-    pub(crate) unsafe fn expand_eval(&mut self, lowering: &Lowering) -> R<()> {
-        let Some((expression, env)) = self.unevaluated()? else {
-            return Ok(());
-        };
-        if expression.kind() != SexpType::Language
-            || expression.car().kind() != SexpType::Symbol
-            || symbol_name(expression.car()) != "eval"
-            || length(expression) != 2
-            || !is_nil(expression.cdr().tag())
-        {
-            return Ok(());
-        }
-        let argument = expression.cdr().car();
-        if lowering.has_column_variable(argument) {
-            return Ok(());
-        }
-        let mut value = lowering.evaluate_in(argument, env)?;
-        if value.kind() == SexpType::Expression && length(value) == 1 {
-            value = values::list_elt(value, 0);
-        }
-        if !matches!(value.kind(), SexpType::Language | SexpType::Symbol) {
-            return Ok(());
-        }
-        if !lowering.mentions_columns(value) {
-            return Err(error_in(lowering.call, "`eval()` in `j` reads no column"));
-        }
-        self.source = Source::Expression(value, env);
-        Ok(())
-    }
-
-    /// The expression [`Piece::value`] would evaluate and its environment, when it has not been
-    /// evaluated yet.
-    unsafe fn unevaluated(&self) -> R<Option<(Sexp, Sexp)>> {
-        Ok(match self.source {
-            Source::Expression(expression, env) => Some((expression, env)),
-            Source::Promise(promise) => Some((promise.cdr(), eval::promise_env(promise)?)),
-            _ => None,
-        })
-    }
 }
 
 /// The arguments of a call as pieces, expanding `...` into the promises it holds.
@@ -1388,7 +1330,7 @@ pub(crate) struct Parts {
 
 /// Runs `subject[i, j, by]`, where `call` is the whole `[` call as written.
 pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
-    let parts = parse_parts(call, env, false)?;
+    let parts = parse_parts(call, env)?;
     let table = table_of(subject)?;
     let schema = table.schema();
     let lowering = Lowering {
@@ -1396,7 +1338,6 @@ pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
         height: table.height(),
         env,
         call,
-        strict: false,
     };
     let (parts, plan) = plan(parts, &lowering)?;
     let assigns = plan.assigns;
@@ -1438,9 +1379,9 @@ pub(crate) struct Plan {
     pub(crate) assigns: bool,
 }
 
-/// Sorts the arguments of a `[` call into their parts. In `strict` mode, an argument a frame
-/// query ignores (`drop`, `verbose`, `allow.cartesian`) is an error too.
-pub(crate) unsafe fn parse_parts(call: Sexp, env: Sexp, strict: bool) -> R<Parts> {
+/// Sorts the arguments of a `[` call into their parts. An argument a frame query ignores
+/// (`drop`, `verbose`, `allow.cartesian`) is skipped.
+unsafe fn parse_parts(call: Sexp, env: Sexp) -> R<Parts> {
     let args: Vec<Arg> = values::pairlist_items(call.cdr().cdr())
         .into_iter()
         .map(|(tag, value)| Arg { tag, value })
@@ -1482,7 +1423,7 @@ pub(crate) unsafe fn parse_parts(call: Sexp, env: Sexp, strict: bool) -> R<Parts
                     "mult" => &mut parts.mult,
                     ".SDcols" => &mut parts.sdcols,
                     "with" => &mut parts.with,
-                    "drop" | "verbose" | "allow.cartesian" if !strict => continue,
+                    "drop" | "verbose" | "allow.cartesian" => continue,
                     other => {
                         return Err(error_in(
                             call,
@@ -1627,10 +1568,6 @@ pub(crate) struct Lowering<'a> {
     pub(crate) height: usize,
     pub(crate) env: Sexp,
     pub(crate) call: Sexp,
-    /// Whether lowering may evaluate only expressions without side effects, failing on any
-    /// other. A data.table query lowers this way, because when it cannot lower, data.table runs
-    /// it from the start and would evaluate a second time whatever lowering already evaluated.
-    pub(crate) strict: bool,
 }
 
 impl Lowering<'_> {
@@ -1643,34 +1580,11 @@ impl Lowering<'_> {
     }
 
     unsafe fn evaluate_in(&self, expression: Sexp, env: Sexp) -> R<Sexp> {
-        if !self.strict {
-            return eval::eval(expression, env);
-        }
-        if !is_pure(expression, env)? {
-            return Err(error_in(
-                self.call,
-                "the query evaluates an expression that may have side effects",
-            ));
-        }
-        conditions::quietly(|| eval::eval(expression, env))?
-            .ok_or_else(|| error_in(self.call, "the query raised a condition"))
+        eval::eval(expression, env)
     }
 
     unsafe fn value(&self, piece: &Piece) -> R<Sexp> {
-        if self.strict
-            && let Some((expression, env)) = piece.unevaluated()?
-            && !is_pure(expression, env)?
-        {
-            return Err(error_in(
-                self.call,
-                "the query evaluates an expression that may have side effects",
-            ));
-        }
-        if !self.strict {
-            return piece.value();
-        }
-        conditions::quietly(|| piece.value())?
-            .ok_or_else(|| error_in(self.call, "the query raised a condition"))
+        piece.value()
     }
 
     unsafe fn rows(&self, piece: &Piece, parts: &Parts) -> R<Option<Rows>> {
@@ -2302,24 +2216,6 @@ impl Lowering<'_> {
         }
     }
 
-    /// Whether `expression` reads a column or one of data.table's special symbols anywhere,
-    /// which decides whether it runs inside the query or once in the caller's scope.
-    /// Whether a variable of `expression`, as R's `all.vars` lists them (every symbol outside a
-    /// call's head), names a column.
-    unsafe fn has_column_variable(&self, expression: Sexp) -> bool {
-        match expression.kind() {
-            SexpType::Symbol => self.is_column(&symbol_name(expression)),
-            SexpType::Language => {
-                let head = expression.car();
-                (head.kind() == SexpType::Language && self.has_column_variable(head))
-                    || values::pairlist_items(expression.cdr())
-                        .into_iter()
-                        .any(|(_, item)| self.has_column_variable(item))
-            }
-            _ => false,
-        }
-    }
-
     unsafe fn mentions_columns(&self, expression: Sexp) -> bool {
         self.mentions(expression, true)
     }
@@ -2353,44 +2249,6 @@ impl Lowering<'_> {
             }
             _ => false,
         }
-    }
-}
-
-/// Functions whose call has no side effect and whose result depends only on their arguments, for
-/// [`is_pure`].
-const PURE_FUNCTIONS: &[&str] = &[
-    "(", "c", "list", ":", "-", "+", "*", "/", "^", "%%", "%/%", "==", "!=", "<", ">", "<=", ">=",
-    "!", "&", "|",
-];
-
-/// Whether evaluating `expression` in `env` has no side effect: a constant, a variable (forcing
-/// a promise is memoized, so a later evaluation sees the same value), or a call of base's
-/// [`PURE_FUNCTIONS`] on such arguments.
-unsafe fn is_pure(expression: Sexp, env: Sexp) -> R<bool> {
-    match expression.kind() {
-        SexpType::Symbol => {
-            Ok(expression != symbols().dots && eval::dot_dot_index(expression).is_none())
-        }
-        SexpType::Language => {
-            let head = expression.car();
-            if head.kind() != SexpType::Symbol
-                || !PURE_FUNCTIONS.contains(&symbol_name(head).as_ref())
-            {
-                return Ok(false);
-            }
-            let base = eval::find_fun(head, values::base_env())?;
-            if eval::find_fun(head, env)? != base {
-                return Ok(false);
-            }
-            for (_, argument) in values::pairlist_items(expression.cdr()) {
-                if argument == missing_arg() || !is_pure(argument, env)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        SexpType::Promise => Ok(false),
-        _ => Ok(true),
     }
 }
 

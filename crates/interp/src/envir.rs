@@ -1150,6 +1150,22 @@ pub unsafe fn get_option(name: &str) -> Sexp {
     nil()
 }
 
+/// The option the string `name` (a `CHARSXP`) names, or `NULL`. An ASCII name is the same
+/// interned object as the printname of the symbol tagging its option, so it compares by
+/// identity, without reading the bytes of every option it passes.
+pub unsafe fn option_value(name: Sexp) -> Sexp {
+    let ascii = name.has_gp(gp::ASCII);
+    let mut cell = options();
+    while cell.kind() == SexpType::Pairlist {
+        let printname = cell.tag().car();
+        if printname == name || (!ascii && printname.bytes() == name.bytes()) {
+            return cell.car();
+        }
+        cell = cell.cdr();
+    }
+    nil()
+}
+
 /// Sets the option `symbol` names, removing it for `NULL`, and returns the old value.
 pub unsafe fn set_option(symbol: Sexp, value: Sexp) -> R<Sexp> {
     match symbol.car().bytes() {
@@ -1452,7 +1468,11 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
 }
 
 unsafe fn do_get_option(call: &Call<'_>) -> R<Sexp> {
-    let name = values::require_string(call.arg(0), "x")?;
+    let name = call.arg(0);
+    if name.kind() == SexpType::String && length(name) == 1 && name.element(0) != values::na_string() {
+        return Ok(option_value(name.element(0)));
+    }
+    let name = values::require_string(name, "x")?;
     Ok(get_option(&name))
 }
 

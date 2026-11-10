@@ -1,0 +1,263 @@
+---
+// A horizontal bar chart of speed relative to GNU R, rendered to static HTML at build time. The
+// axis is logarithmic and centred on 1x, so a bar to the right means faster than GNU R and a bar
+// to the left slower, and 10x either way has the same length. Values sit in their own columns
+// beside the bars, so they stay legible on a phone, and every bar's title gives the seconds behind it.
+import { formatRatio, kernelChart, realChart, tooShortNote } from '../lib/benchmarks';
+
+interface Props {
+	name: 'real' | 'kernels';
+	caption: string;
+}
+
+const { name, caption } = Astro.props;
+const chart = name === 'real' ? realChart() : kernelChart();
+const ratios = chart.rows.flatMap((row) => row.ratios);
+const low = Math.min(1, ...ratios);
+const high = Math.max(1, ...ratios);
+// The axis spans the data with a little room at both ends. Ticks fall on decades when the data
+// spans more than one, otherwise on halvings and doublings around 1x.
+const minimum = Math.log(low / 1.25);
+const span = Math.log(high * 1.25) - minimum;
+const base = high / low > 16 ? 10 : 2;
+const ticks: number[] = [];
+for (let exponent = Math.ceil(minimum / Math.log(base)); base ** exponent <= high * 1.25; exponent++) {
+	ticks.push(base ** exponent);
+}
+const position = (value: number) => ((Math.log(value) - minimum) / span) * 100;
+const one = position(1);
+const tickLabel = (value: number) => (value >= 1 ? `${value}x` : `${Number(value.toPrecision(2))}x`);
+const columns = `--series-count: ${chart.series.length}`;
+---
+
+<figure class="speed-chart not-content" style={columns}>
+	<figcaption>{caption}</figcaption>
+	{
+		chart.series.length > 1 && (
+			<ul class="legend">
+				{chart.series.map((series, index) => (
+					<li>
+						<span class={`swatch series-${index}`} aria-hidden="true" />
+						{series.label}
+					</li>
+				))}
+			</ul>
+		)
+	}
+	<div class="rows">
+		{
+			chart.series.length > 1 && (
+				<div class="row heading" aria-hidden="true">
+					<span class="label" />
+					<span />
+					{chart.series.map((_, index) => (
+						<span class="value">
+							<span class={`swatch series-${index}`} />
+						</span>
+					))}
+				</div>
+			)
+		}
+		{
+			chart.rows.map((row) => (
+				<div class:list={['row', { summary: row.summary, short: row.tooShort }]}>
+					<span class="label">
+						{row.summary ? row.label : <code>{row.label}</code>}
+						{row.tooShort && <span class="flag">too short</span>}
+					</span>
+					<div class="track" aria-hidden="true">
+						{ticks.map((tick) => <span class:list={['grid', { one: tick === 1 }]} style={`left: ${position(tick)}%`} />)}
+						{row.ratios.map((ratio, index) => {
+							const at = position(ratio);
+							const left = Math.min(at, one);
+							const width = Math.abs(at - one);
+							return (
+								<span
+									class:list={['bar', `series-${index}`, ratio >= 1 ? 'faster' : 'slower']}
+									style={`left: ${left}%; width: ${width}%; --index: ${index}`}
+									title={`${row.details[index]}: ${formatRatio(ratio)} the speed of GNU R`}
+								/>
+							);
+						})}
+					</div>
+					{row.ratios.map((ratio, index) => (
+						<span class="value">
+							<span class="sr-only">{chart.series[index].label}: </span>
+							{formatRatio(ratio)}
+						</span>
+					))}
+				</div>
+			))
+		}
+		<div class="row axis" aria-hidden="true">
+			<span class="label" />
+			<div class="track">
+				{ticks.map((tick) => (
+					<span class="tick" style={`left: ${position(tick)}%`}>
+						{tickLabel(tick)}
+					</span>
+				))}
+			</div>
+		</div>
+	</div>
+	<p class="note">
+		Speed relative to GNU R on a log scale: a bar to the right of 1x is faster than GNU R, to the left slower.
+		{chart.rows.some((row) => row.tooShort) && ` ${tooShortNote()}`}
+	</p>
+	<p class="note">{chart.metadata}</p>
+</figure>
+
+<style>
+	.speed-chart {
+		--series-0: #2a78d6;
+		--series-1: #eb6834;
+		--ink: var(--sl-color-white);
+		--ink-muted: var(--sl-color-gray-3);
+		--rule: var(--sl-color-gray-6);
+		--bar: 9px;
+		margin-block: 1.5rem;
+		font-size: var(--sl-text-sm);
+		font-variant-numeric: tabular-nums;
+	}
+	:global(:root[data-theme='dark']) .speed-chart {
+		--series-0: #3987e5;
+		--series-1: #d95926;
+	}
+	.speed-chart[style*='--series-count: 1'] {
+		--bar: 14px;
+	}
+	figcaption {
+		color: var(--ink);
+		font-weight: 600;
+		margin-bottom: 0.5rem;
+	}
+	.legend {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.25rem 1.25rem;
+		list-style: none;
+		margin: 0 0 0.5rem;
+		padding: 0;
+		color: var(--ink-muted);
+	}
+	.legend li {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+	.swatch {
+		width: 0.75rem;
+		height: 0.75rem;
+		border-radius: 3px;
+	}
+	.series-0 {
+		background: var(--series-0);
+	}
+	.series-1 {
+		background: var(--series-1);
+	}
+	.row {
+		display: grid;
+		grid-template-columns: minmax(5.5rem, 9.5rem) 1fr repeat(var(--series-count), 3.6rem);
+		align-items: center;
+		column-gap: 0.75rem;
+		min-height: calc(var(--series-count) * (var(--bar) + 2px) + 0.6rem);
+	}
+	.row.summary {
+		border-top: 1px solid var(--rule);
+		margin-top: 0.25rem;
+		padding-top: 0.25rem;
+		font-weight: 600;
+		color: var(--ink);
+	}
+	.label {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.label code {
+		font-size: inherit;
+		background: none;
+		padding: 0;
+	}
+	.label .flag {
+		display: block;
+		font-size: 0.75em;
+		color: var(--sl-color-gray-3);
+	}
+	.row.short .bar {
+		opacity: 0.4;
+	}
+	.track {
+		position: relative;
+		align-self: stretch;
+	}
+	.grid {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		width: 1px;
+		background: var(--rule);
+	}
+	.grid.one {
+		width: 2px;
+		margin-left: -0.5px;
+		background: var(--ink-muted);
+	}
+	.bar {
+		position: absolute;
+		top: calc(50% - var(--series-count) * (var(--bar) + 2px) / 2 + var(--index) * (var(--bar) + 2px));
+		height: var(--bar);
+		min-width: 2px;
+	}
+	.bar.faster {
+		border-radius: 0 4px 4px 0;
+	}
+	.bar.slower {
+		border-radius: 4px 0 0 4px;
+	}
+	.value {
+		text-align: right;
+		white-space: nowrap;
+		color: var(--ink);
+	}
+	.row.heading {
+		min-height: 1rem;
+	}
+	.row.heading .swatch {
+		display: inline-block;
+	}
+	.row.axis {
+		min-height: 1.5rem;
+	}
+	.tick {
+		position: absolute;
+		top: 0.2rem;
+		transform: translateX(-50%);
+		color: var(--ink-muted);
+		font-size: var(--sl-text-xs);
+		white-space: nowrap;
+	}
+	.note {
+		margin-top: 0.25rem;
+		color: var(--ink-muted);
+		font-size: var(--sl-text-xs);
+	}
+	@media (max-width: 40rem) {
+		.speed-chart {
+			font-size: var(--sl-text-xs);
+		}
+		.row {
+			grid-template-columns: 6.25rem 1fr repeat(var(--series-count), 2.6rem);
+			column-gap: 0.4rem;
+		}
+		.row.summary .label {
+			white-space: normal;
+		}
+	}
+	@media (forced-colors: active) {
+		.bar {
+			background: CanvasText;
+		}
+	}
+</style>

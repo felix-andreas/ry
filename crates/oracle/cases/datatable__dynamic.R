@@ -1,6 +1,6 @@
 # oracle: requires data.table
 # Queries whose `j` arrives through `eval()`, or with a primitive spliced in as the function, as
-# data.table's own `dcast` builds them, run on ry's engine with data.table's results.
+# data.table's own `dcast` builds them.
 library(data.table)
 dt <- data.table(
   g = c("b", "a", "b", "c", "a", "b"),
