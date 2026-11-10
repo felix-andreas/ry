@@ -1354,7 +1354,9 @@ unsafe fn subset2_level(
                 dimension: Some(dimension),
                 ..Bounds::of(shown.unwrap_or(object))
             };
-            let position = single_position(index, extent, names, exact, call, bounds)?;
+            // GNU R hands an array subscript an uninitialized length, which is 0 in practice,
+            // so a negative subscript never counts from the end the way `x[[-1]]` does.
+            let position = single_position(index, extent, false, names, exact, call, bounds)?;
             offset += position * stride;
             stride *= extent;
         }
@@ -1422,7 +1424,7 @@ unsafe fn subset2_level(
         reported: recursive,
         ..Bounds::of(shown.unwrap_or(object))
     };
-    let position = single_position(index, length(object), names, exact, call, bounds)?;
+    let position = single_position(index, length(object), true, names, exact, call, bounds)?;
     element_or_value(object, position)
 }
 
@@ -1433,10 +1435,12 @@ unsafe fn element_or_value(object: Sexp, position: usize) -> R<Sexp> {
     }
 }
 
-/// The position a `[[` subscript selects, with GNU R's errors.
+/// The position a `[[` subscript selects, with GNU R's errors. With `from_end`, a negative
+/// subscript of a length-two extent selects the element it does not drop.
 unsafe fn single_position(
     index: Sexp,
     extent: usize,
+    from_end: bool,
     names: Sexp,
     exact: Option<bool>,
     call: Sexp,
@@ -1481,11 +1485,11 @@ unsafe fn single_position(
                     index,
                 ));
             }
-            if value < 0 && extent == 2 && value >= -2 {
+            if from_end && value < 0 && extent == 2 && value >= -2 {
                 return Ok(if value == -1 { 1 } else { 0 });
             }
             if value <= 0 {
-                let amount = if value < 0 && extent > 1 {
+                let amount = if from_end && value < 0 && extent > 1 {
                     "more"
                 } else {
                     "less"
@@ -1517,7 +1521,7 @@ unsafe fn single_position(
             }
             let value = value.trunc();
             if value < 0.0 {
-                if extent == 2 && value >= -2.0 {
+                if from_end && extent == 2 && value >= -2.0 {
                     return Ok(if value == -1.0 { 1 } else { 0 });
                 }
                 return Err(error_in(
@@ -1543,7 +1547,7 @@ unsafe fn single_position(
         }
         SexpType::Symbol => {
             let name = values::scalar_string_charsxp(index.car())?;
-            single_position(name, extent, names, exact, call, bounds)
+            single_position(name, extent, from_end, names, exact, call, bounds)
         }
         kind => Err(error_in(
             call,
