@@ -8,9 +8,10 @@ once with `RY_JIT=off`, so both tiers' paths are in the profile. The mix:
   at an error still runs to its end, as it does under `oracle compare`;
 - every workload of the representative mix (tools/bench/real/*.R) with its harness and
   `RY_BENCH_REPEAT=1`; the testthat workload is skipped when testthat is not installed;
-- the training half of the vendored public suites (tools/bench/real/suites): programs at even
-  positions in sorted order. The odd half is held out, so a measurement on it shows whether the
-  profile generalizes (`--held-out` prints those programs).
+- the training half of the vendored public suites (tools/bench/real/suites): the `rcp` and
+  `shootout` programs at even positions in sorted order. The odd half and the whole `awfy` suite
+  are held out, so a measurement on them shows whether the profile generalizes (`--held-out`
+  prints those programs).
 
 The instrumented binaries write their profiles wherever their build put them (LLVM_PROFILE_FILE
 for PGO, the BOLT runtime's file for BOLT); this script only runs programs. A program that fails
@@ -26,12 +27,15 @@ root = here.parent.parent
 bench = root / "tools/bench/real"
 # The instrumented build runs up to a few times slower than the release build.
 TIMEOUT = 900
+# Suites no training run sees, so they measure the profile on programs of a kind it never ran.
+HELD_OUT_SUITES = {"awfy"}
 
 
 def public_programs():
     """The public suite programs split into the training half and the held-out half."""
     programs = sorted((bench / "suites").glob("*/*.R"))
-    return programs[0::2], programs[1::2]
+    trained = [program for program in programs[0::2] if program.parent.name not in HELD_OUT_SUITES]
+    return trained, [program for program in programs if program not in trained]
 
 
 def has_package(ry, package, env, scratch):
