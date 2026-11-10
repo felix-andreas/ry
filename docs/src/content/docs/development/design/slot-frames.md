@@ -183,6 +183,41 @@ The second step is built (`slot_promise`, `force_slot_promise` and `resolved_env
   `eval` expansion. Identity checks against a promise's environment compare the pending
   environment, which is the frame's environment once it reifies.
 
+## Argument references
+
+A variable passed to a callee that has a direct-call plan needs neither a promise allocation nor
+the caller's pending environment, because the callee's frame is above the caller's for as long
+as the callee runs. `slot_promises_into` passes such a variable as an argument reference
+(`eval::argument_reference`).
+
+- **Shape.** A reference is a promise with `gp::ARGUMENT_REFERENCE`: its expression is the
+  variable's name, its environment is nil, and its attribute is an integer vector holding the
+  caller's frame position, the variable's slot (`NO_REFERENCE_SLOT` when the caller keeps the
+  variable in no slot) and the caller's header register, which `reference_target` checks so a
+  reference that outlived its frame panics. References come from `Interp.references`, a pool
+  that the calling instruction releases when the call returns, so a call allocates none once
+  the pool has grown.
+- **Forcing.** `force_promise` forces a reference once, reading the caller's slot at that moment:
+  a value as it is, a promise (or another reference) by forcing it, an unbound slot from the
+  caller's enclosure, and anything once the caller has an environment from that environment.
+  A write the caller's frame takes before the force is therefore visible, and one after it is
+  not, exactly as for a promise of the name.
+- **Readers.** `missing()` follows a reference into the caller (`reference_is_missing`),
+  `substitute`, `match.call` and `sys.call` read the name from the expression, and
+  `promise_env` reifies the caller. The package-call counter does not count a reference as a
+  promise.
+- **Escape.** Before anything could keep a reference past the call, `materialize_references`
+  turns the callee's references, in its arguments and its slots alike, into ordinary promises
+  over the caller: a forced one into a forced promise of its name, an unforced one into a
+  promise over the caller's environment or pending environment. `reify` runs it, as do S3 and
+  S4 dispatch, which hand the arguments to a method, and `call_with_plan` when a debugger or
+  move tracking sends the call down the generic path.
+- **Scope.** Only names become references. Compiled argument code still becomes a promise over
+  the pending environment, and a callee with a `...` formal or a call that passes `...` gets no
+  plan, so it gets promises.
+
+`crates/oracle/cases/environments__argument_references.R` pins these rules.
+
 ## Checking it
 
 Behind `syntax::testing::enable_invariants()`, reification cross-checks itself: it compares the
