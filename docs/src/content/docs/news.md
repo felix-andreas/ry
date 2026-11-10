@@ -37,6 +37,15 @@ past GNU R (1.63x and 1.58x), and the rcp geometric mean rises from 2.64x to 2.8
 `unserialize()` and `readRDS()` on a connection read from its buffer, which takes a third off
 their cost during `library(testthat)`.
 
+### Faster `attr()` lookups, large matrix products and small vector allocation
+
+`attr(x, which)` finds a full or partial match in one pass over the attributes, which takes
+shootout's knucleotide_brute_2 from 1.38x to 2.08x of GNU R. `%*%` computes four result columns
+per pass over its left operand, with each entry summed in the same order as before, so results
+are unchanged and spectralnorm_math rises from 1.27x to 1.44x.
+Small vectors are allocated inline at the call site, which takes 2.2% off the instructions of
+the testthat workload.
+
 ## ry 0.4.3-beta, Linux only
 
 *Released in November 2026 as a pre-release.*
