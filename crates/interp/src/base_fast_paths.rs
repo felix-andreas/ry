@@ -16,7 +16,7 @@ use {
         Jump,
         builtins::{Arg, BuiltinDef, BuiltinFn, Call, internal},
         eval, interp,
-        session::{FNV_OFFSET, eval_text, stable_hash},
+        session::{FNV_OFFSET, stable_hash},
         sort::{self, IdenticalFlags},
         unwind::{R, Unwind, jump},
         values::{self, install, length, missing_arg, nil, symbols},
@@ -60,38 +60,8 @@ pub unsafe fn install_all(namespace: Sexp) -> R<()> {
     let mut missed = Vec::new();
     for &(name, internal_name, expected) in FAST_PATHS {
         let function = eval::value_of(eval::find_var_in_frame(install(name)?, namespace)?)?;
-        if function.kind() != SexpType::Closure {
+        if !install_prologue(function, name, internal_name, expected, print)? {
             missed.push(name);
-            continue;
-        }
-        let prologue = eval_text(&format!("quote(.Internal({internal_name}()))"), namespace)?;
-        crate::heap().root(prologue);
-        let mut body = crate::bytecode::closure_body(function);
-        let mut already = false;
-        if body.kind() == SexpType::Language
-            && body.car() == install("{")?
-            && values::pairlist_length(body.cdr()) == 2
-            && crate::sort::identical(body.cdr().car(), prologue, &IdenticalFlags::default())
-        {
-            body = body.cdr().cdr().car();
-            already = true;
-        }
-        let mut hash = FNV_OFFSET;
-        stable_hash(function.car(), &mut hash);
-        stable_hash(body, &mut hash);
-        if print {
-            eprintln!("{name} {hash:#018x}");
-        }
-        if hash != expected {
-            missed.push(name);
-            continue;
-        }
-        if !already {
-            let block = values::lcons(
-                install("{")?,
-                values::cons(prologue, values::cons(body, nil())?)?,
-            )?;
-            crate::heap().set_cdr(function, block);
         }
     }
     if bundled && !missed.is_empty() {
@@ -102,6 +72,52 @@ pub unsafe fn install_all(namespace: Sexp) -> R<()> {
         )));
     }
     register_native_entries(namespace)
+}
+
+/// Puts `.Internal(<internal_name>())` in front of the body of `function` when its formals and
+/// body hash to `expected`, changing the closure in place. Returns whether the closure has the
+/// prologue, which it may already have when it was saved in an image.
+pub(crate) unsafe fn install_prologue(
+    function: Sexp,
+    name: &str,
+    internal_name: &str,
+    expected: u64,
+    print: bool,
+) -> R<bool> {
+    if function.kind() != SexpType::Closure {
+        return Ok(false);
+    }
+    let prologue = values::lcons(
+        install(".Internal")?,
+        values::cons(values::lcons(install(internal_name)?, nil())?, nil())?,
+    )?;
+    let mut body = crate::bytecode::closure_body(function);
+    let mut already = false;
+    if body.kind() == SexpType::Language
+        && body.car() == install("{")?
+        && values::pairlist_length(body.cdr()) == 2
+        && crate::sort::identical(body.cdr().car(), prologue, &IdenticalFlags::default())
+    {
+        body = body.cdr().cdr().car();
+        already = true;
+    }
+    let mut hash = FNV_OFFSET;
+    stable_hash(function.car(), &mut hash);
+    stable_hash(body, &mut hash);
+    if print {
+        eprintln!("{name} {hash:#018x}");
+    }
+    if hash != expected {
+        return Ok(false);
+    }
+    if !already {
+        let block = values::lcons(
+            install("{")?,
+            values::cons(prologue, values::cons(body, nil())?)?,
+        )?;
+        crate::heap().set_cdr(function, block);
+    }
+    Ok(true)
 }
 
 /// The native code for a whole call of a base closure: the result, or `None` when the closure
@@ -546,19 +562,19 @@ unsafe fn native_or_else(args: &[Arg]) -> R<Option<Sexp>> {
 }
 
 /// The prologue's result when the R body is to run.
-fn decline() -> R<Sexp> {
+pub(crate) fn decline() -> R<Sexp> {
     Ok(nil())
 }
 
 /// Finishes the call of the closure whose frame is `frame` with `value`, as `return(value)`.
-unsafe fn finish(frame: Sexp, value: Sexp, visible: bool) -> R<Sexp> {
+pub(crate) unsafe fn finish(frame: Sexp, value: Sexp, visible: bool) -> R<Sexp> {
     interp().visible = visible;
     Err(jump(Jump::Return { env: frame, value }))
 }
 
 /// The value of the formal `name` in `frame`, supplied or defaulted, forced as evaluating the
 /// name would; `None` when it has neither a value nor a default.
-unsafe fn argument(frame: Sexp, name: &str) -> R<Option<Sexp>> {
+pub(crate) unsafe fn argument(frame: Sexp, name: &str) -> R<Option<Sexp>> {
     let symbol = install(name)?;
     match crate::heap().frame_cell(frame, symbol) {
         Some(cell) if cell.cdr() != missing_arg() => {}

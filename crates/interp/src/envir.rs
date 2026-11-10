@@ -135,7 +135,7 @@ unsafe fn environment_arg(value: Sexp, what: &str) -> R<Sexp> {
 }
 
 /// The frame of the closure whose environment is `env`, as a stack index.
-unsafe fn frame_of(env: Sexp) -> Option<usize> {
+pub(crate) unsafe fn frame_of(env: Sexp) -> Option<usize> {
     interp().frames.iter().rposition(|frame| frame.env == env)
 }
 
@@ -233,7 +233,7 @@ pub(crate) unsafe fn sys_parent_of(env: Sexp) -> R<Option<(Sexp, Sexp)>> {
 }
 
 /// `R_sysparent`: the frame number of the parent of frame `n` counted back from `context`.
-unsafe fn sys_parent_number(mut n: i64, context: Option<usize>) -> i64 {
+pub(crate) unsafe fn sys_parent_number(mut n: i64, context: Option<usize>) -> i64 {
     let frames = &interp().frames;
     let Some(mut index) = context else {
         return 0;
