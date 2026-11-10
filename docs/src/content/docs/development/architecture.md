@@ -605,12 +605,26 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
 
 - **Build output, read-only.** `ry-rcmd build-base` writes the image as its last step, into the
   base tree at `library/base/R/ry-start.image`, by running `ry-rcmd write-start-image` with an
-  emptied environment. A release embeds the tree, image included. Nothing writes an image at run
-  time, and nothing keys it on the run-time environment. `ry-rcmd start-image BASE --libr FILE`
-  (`just start-image`) writes it again over a built tree.
+  emptied environment. A release embeds the tree, image included. A session never writes an
+  image, and nothing keys it on the run-time environment. `ry-rcmd start-image BASE --libr FILE`
+  (`just start-image`) writes it again over a built tree, and so does assembling an R home
+  (`ry-rcmd assemble`) when the given `libR` cannot load the base tree's image: the home links
+  that image, so a stale one would make every start in the home slow. `libR` exports
+  `ry_start_image_current`, which applies the loader's own format and identity checks. A current
+  image is only read, so a home assembles over a read-only base tree. A stale one is rewritten
+  under a lock file in the base tree (`.start-image.lock`), so homes assembled at once take
+  turns, and over a base tree that cannot be written, assembly fails and names `just start-image`.
+- **Base code images.** Right after the start image, the same step starts a session from it,
+  fetches every record of every lazy-load database of the base-priority packages by its key
+  (start-up has already forced some bindings, so forcing bindings would miss their records), and
+  writes the images (`R/<package>.ryc`, `R/sysdata.ryc`) with the uncompressed records alone, so those fetches read them in place
+  instead of inflating them. They hold no compiled or machine code: for untrained base code,
+  decoding it and mapping a native section cost more than compiling the closures a session
+  calls. They are written for the same build as the start image.
 - **One build.** The header carries the runtime's identity (`RY_RUNTIME_ID`, a hash of the
   runtime's sources), and an image of another build is skipped silently, so a development
-  checkout starts the slow way after a runtime edit until `just start-image` runs.
+  checkout starts the slow way after a runtime edit until `just start-image` runs or a home is
+  assembled over the tree.
 - **The environment is read again on every start.** After the load, the start clears the options
   and runs the steps that read the process environment: the C-level options, `.Machine`,
   `.Platform` and the device variables, base R's profile, and the `.onLoad` hooks of utils,
@@ -623,23 +637,41 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   directory) and its canonical form. The loader moves every string under either prefix to the
   directory the image file really lives in, which is where a slow start's resolved namespace paths
   and lazy-load databases point.
-- **Loaded in one bulk pass.** The file is mapped read-only and populated in one call, and its
-  objects are copied into the heap rather than used in place. The heap image lists every reachable
-  object with references as dense positions, and the loader allocates them all and then fills them in a second
-  pass. Fixed objects (the heap's well-known objects, the primitives by index, `package:ry` and
-  libR's ALTREP classes) are referred to by position, because both processes create them before
-  start-up. Strings, symbols and base bindings are interned again, weak references load empty,
-  and compiled closure bodies are stored as their source, since the bytecode tier recompiles them.
+- **The heap's pages, used in place.** The first heap in a process reserves its small-object
+  space at a fixed address (`heap::space::IMAGE_BASE`), and the writer moves every large object
+  into a second fixed section, so every handle in the written pages is the address the object has
+  in the loading process too. The loader maps the file's pages privately over the space and the
+  large section (`fill_from` in `crates/interp/src/image.rs`; Windows reads them instead): nothing
+  is decoded or patched per object, a page start-up never writes stays shared through the page
+  cache by every process that loads the image, and a page is copied when it is first written.
+  The objects carry their tenured bits, so no minor or intermediate collection traces them and a
+  major collection's marking leaves their headers alone.
+- **The same starting state, or no load.** Fixed objects (the heap's well-known objects, the
+  primitives by index, `package:ry` and libR's ALTREP classes) exist before start-up in both
+  processes. The writer records a digest of its heap's allocation state at that moment
+  (`Heap::image_precondition`), and the loader compares its own before it takes anything: equal
+  digests mean every object the loading heap holds sits where the image holds the same object,
+  so the mapped pages replace them without leaving a dangling handle. A different digest starts
+  the slow way.
+- **Process-local state lives beside the pages.** The few fields that hold a process's own
+  addresses are cleared in the written pages and restored by the loader: environment frames whose
+  bindings spilled into memory outside the heap, external pointers to builtin routines (carried
+  as tokens), and the native tables of the fixed ALTREP classes, which keep the loader's. The
+  metadata carries the intern and symbol tables, the precious set, the global roots and the
+  counters. Weak-pair lists load empty, and compiled closure bodies are written as their source,
+  since the bytecode tier recompiles them.
 - **The writer refuses what it cannot carry.** Writing fails, and so does the base tree's build,
-  when start-up warned (a load would not print the warning), left `.Random.seed` in the global
-  environment, a frame, a C finalizer, an external pointer other than a builtin routine, a new
-  record layout, an open graphics device, or a loaded shared library.
-- **Damage fails before the heap changes.** A checksum over the whole file is verified before the
-  heap takes any of it, and a damaged image starts the slow way with a line on stderr. A failure
-  past that point (`LoadError::Partial`) would leave the heap half-built, so the start fails.
-
-- **Tenured on load.** Every object the image loads joins the oldest generation at once
-  (`Heap::promote_young`), so no minor or intermediate collection traces them.
+  when start-up left interpreter state behind (warnings, a call in progress, `.Random.seed` in the
+  global environment, a new record layout, an open graphics device; `image::check_empty`), an
+  external pointer other than a builtin routine, or a weak reference with a C finalizer.
+- **The file is replaced, never rewritten.** The writer writes beside the image and renames, so
+  a process that has the old image mapped keeps its pages.
+- **Damage to the header fails before the heap changes.** The header (the heap metadata and the
+  interpreter state) carries a checksum that is verified before the heap takes any of it, and a
+  damaged header starts the slow way with a line on stderr. The pages are not checksummed, since
+  reading them all would undo the sharing; like the runtime library beside it, the image is build
+  output of the install. A failure past the precondition check (`LoadError::Partial`) would leave
+  the heap half-built, so the start fails.
 - **The base tree only.** Installed packages have no image. Lazy loading already fetches a small
   fraction of a namespace's objects, so their cost is setup work (S4 metadata, S3 registration,
   `.onLoad`), which runs natively behind hash-guarded prologues instead (`decisions.md`,

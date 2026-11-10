@@ -47,7 +47,7 @@ use {
         conditions::warning,
         eval::{define, eval, find_var_in_frame},
         interp,
-        rmath::{qnorm, qnorm_standard},
+        rmath::{qnorm, qnorm_standard_fill},
         unwind::{R, error},
         values::{
             alloc_uninit, as_integer_scalar, as_logical_scalar, as_real_scalar, global_env,
@@ -55,7 +55,7 @@ use {
             reals_mut, string_at, symbols, unbound,
         },
     },
-    heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType},
+    heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp},
     rustc_hash::{FxHashMap, FxHashSet},
     std::time::{SystemTime, UNIX_EPOCH},
 };
@@ -100,7 +100,7 @@ impl Default for Rng {
 
 /// A uniform generator and its state. GNU R also offers Knuth's TAOCP generators, which ry
 /// does not implement, so they have no variant.
-enum State {
+pub(crate) enum State {
     WichmannHill([u32; 3]),
     MarsagliaMulticarry([u32; 2]),
     SuperDuper([u32; 2]),
@@ -117,7 +117,7 @@ enum State {
 /// `user_unif_rand` returns a pointer to the next uniform, and the optional `user_unif_nseed`
 /// and `user_unif_seedloc` expose the generator's seed words for `.Random.seed` to mirror.
 #[derive(Clone, Copy)]
-struct UserGenerator {
+pub(crate) struct UserGenerator {
     unif_rand: NativeSymbol,
     /// The generator's own seed words, null when it exposes none.
     seeds: *mut u32,
@@ -207,7 +207,27 @@ pub unsafe fn put_rng_state() -> R<()> {
     let rng = rng();
     let (position, words) = rng.state.words();
     let leading = 1 + usize::from(position.is_some());
-    let seeds = alloc_uninit(SexpType::Integer, leading + words.len())?;
+    let count = leading + words.len();
+    let symbol = symbols().dot_random_seed;
+    // Rewriting the bound vector is indistinguishable from binding a fresh one when nothing
+    // else references it, and it spares every drawing builtin an allocation of the twister's
+    // 626 words.
+    let reusable = crate::heap()
+        .frame_cell(global_env(), symbol)
+        .map(|cell| (cell, cell.cdr()))
+        .filter(|&(cell, seeds)| {
+            !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED | gp::WATCHED)
+                && cell.tracks_references()
+                && seeds.kind() == SexpType::Integer
+                && !seeds.is_altrep()
+                && seeds.refcount() == 1
+                && seeds.attrib() == nil()
+                && length(seeds) == count
+        });
+    let seeds = match reusable {
+        Some((_, seeds)) => seeds,
+        None => alloc_uninit(SexpType::Integer, count)?,
+    };
     let slots = seeds.slice_mut::<i32>();
     slots[0] = kinds_code(rng);
     if let Some(position) = position {
@@ -216,7 +236,10 @@ pub unsafe fn put_rng_state() -> R<()> {
     for (slot, &word) in slots[leading..].iter_mut().zip(words) {
         *slot = word as i32;
     }
-    define(symbols().dot_random_seed, seeds, global_env())
+    if reusable.is_some() {
+        return Ok(());
+    }
+    define(symbol, seeds, global_env())
 }
 
 /// The first element of `.Random.seed`, which encodes the three kinds.
@@ -233,10 +256,16 @@ fn stores_current_state(rng: &Rng, stored: &[i32]) -> bool {
     if code != kinds_code(rng) {
         return false;
     }
+    // Folding every difference instead of stopping at the first lets the comparison of the
+    // twister's 624 words run across SIMD lanes; a mismatch is the rare case.
     let same = |stored: &[i32], words: &[u32]| {
-        stored
-            .get(..words.len())
-            .is_some_and(|stored| stored.iter().zip(words).all(|(&a, &b)| a as u32 == b))
+        stored.get(..words.len()).is_some_and(|stored| {
+            stored
+                .iter()
+                .zip(words)
+                .fold(0, |difference, (&a, &b)| difference | (a as u32 ^ b))
+                == 0
+        })
     };
     match rng.state.words() {
         (None, words) => same(stored, words),
@@ -252,44 +281,260 @@ fn stores_current_state(rng: &Rng, stored: &[i32]) -> bool {
 
 /// A uniform deviate in the open interval (0, 1) from the current generator.
 pub unsafe fn unif_rand() -> R<f64> {
-    Ok(next_uniform(&mut rng().state))
+    rng().draws().uniform()
 }
 
 /// A standard normal deviate by the current normal method.
 pub unsafe fn norm_rand() -> R<f64> {
-    next_normal(rng())
-}
-
-/// Fills `slots` with standard normal deviates, exactly as as many calls of [`norm_rand`] would,
-/// and returns false without drawing unless the generator is the Mersenne twister with
-/// inversion. Drawing every uniform first keeps the twister's state in registers, and the
-/// quantiles then run as one loop over the batch.
-pub unsafe fn fill_standard_normal(slots: &mut [f64]) -> bool {
-    let rng = rng();
-    let (NormalKind::Inversion, State::MersenneTwister { position, words }) =
-        (rng.normal_kind, &mut rng.state)
-    else {
-        return false;
-    };
-    for slot in slots.iter_mut() {
-        let first = fixup(mersenne_twister(position, words));
-        let second = fixup(mersenne_twister(position, words));
-        *slot = (f64::from((INVERSION_SCALE * first) as i32) + second) / INVERSION_SCALE;
-    }
-    for slot in slots.iter_mut() {
-        *slot = qnorm_standard(*slot);
-    }
-    true
+    rng().draws().normal()
 }
 
 /// A standard exponential deviate.
 pub unsafe fn exp_rand() -> R<f64> {
-    Ok(next_exponential(&mut rng().state))
+    rng().draws().exponential()
 }
 
 /// `R_unif_index`: a uniform integer in `0..n`, as a double, by the current sampling method.
 pub unsafe fn unif_index(n: f64) -> R<f64> {
-    Ok(next_index(rng(), n))
+    rng().draws().index(n)
+}
+
+/// A source of the uniform, normal and exponential deviates and the uniform indices that the
+/// random generators are built from.
+pub trait Deviates {
+    fn uniform(&mut self) -> R<f64>;
+    fn normal(&mut self) -> R<f64>;
+    fn exponential(&mut self) -> R<f64>;
+    /// A uniform integer in `0..n`, as a double.
+    fn index(&mut self, n: f64) -> R<f64>;
+
+    /// Fills `slots` with uniform deviates strictly inside (0, 1), exactly as as many calls of
+    /// [`Deviates::uniform`] would, or declines with `false` without drawing when the generator
+    /// may return a value outside that interval.
+    fn fill_uniform(&mut self, _slots: &mut [f64]) -> R<bool> {
+        Ok(false)
+    }
+
+    /// Fills `slots` with standard normal deviates, exactly as as many calls of
+    /// [`Deviates::normal`] would.
+    fn fill_normal(&mut self, slots: &mut [f64]) -> R<()> {
+        for slot in slots {
+            *slot = self.normal()?;
+        }
+        Ok(())
+    }
+}
+
+/// The session's generator for a batch of draws, with the uniform generator resolved to the
+/// concrete type `U` once, so a loop over the batch keeps the generator's state in registers
+/// instead of dispatching on its kind for every deviate.
+pub struct Draws<'a, U> {
+    uniform: U,
+    normal_kind: NormalKind,
+    sample_kind: SampleKind,
+    box_muller_saved: &'a mut f64,
+}
+
+/// [`Draws`] for each family of generators: the Mersenne twister, which is the default and
+/// gets its own instantiation of every batch loop, and every other generator behind one
+/// dispatch per deviate.
+pub(crate) enum SessionDraws<'a> {
+    Twister(Draws<'a, Twister<'a>>),
+    Other(Draws<'a, &'a mut State>),
+}
+
+/// Runs `$body` with `$deviates` bound to `&mut` the session's [`Draws`], instantiated once
+/// for the Mersenne twister and once for the other generators. The caller brackets the
+/// draws with `get_rng_state` and `put_rng_state`.
+macro_rules! with_deviates {
+    (|$deviates:ident| $body:expr) => {
+        match $crate::random::session_draws() {
+            $crate::random::SessionDraws::Twister(mut draws) => {
+                let $deviates = &mut draws;
+                $body
+            }
+            $crate::random::SessionDraws::Other(mut draws) => {
+                let $deviates = &mut draws;
+                $body
+            }
+        }
+    };
+}
+pub(crate) use with_deviates;
+
+/// The session's generator, split by family for [`with_deviates`].
+pub(crate) fn session_draws() -> SessionDraws<'static> {
+    split_draws(rng())
+}
+
+fn split_draws(rng: &mut Rng) -> SessionDraws<'_> {
+    let Rng {
+        state,
+        normal_kind,
+        sample_kind,
+        box_muller_saved,
+        ..
+    } = rng;
+    let (normal_kind, sample_kind) = (*normal_kind, *sample_kind);
+    match state {
+        State::MersenneTwister { position, words } => SessionDraws::Twister(Draws {
+            uniform: Twister { position, words },
+            normal_kind,
+            sample_kind,
+            box_muller_saved,
+        }),
+        state => SessionDraws::Other(Draws {
+            uniform: state,
+            normal_kind,
+            sample_kind,
+            box_muller_saved,
+        }),
+    }
+}
+
+impl Rng {
+    /// The generator behind one dispatch per deviate, for single draws.
+    fn draws(&mut self) -> Draws<'_, &mut State> {
+        Draws {
+            uniform: &mut self.state,
+            normal_kind: self.normal_kind,
+            sample_kind: self.sample_kind,
+            box_muller_saved: &mut self.box_muller_saved,
+        }
+    }
+}
+
+impl<U: Uniform> Draws<'_, U> {
+    /// [`Deviates::index`] without the result type, which cannot fail.
+    #[inline]
+    fn index_value(&mut self, n: f64) -> f64 {
+        next_index(&mut self.uniform, self.sample_kind, n)
+    }
+}
+
+impl<U: Uniform> Deviates for Draws<'_, U> {
+    #[inline]
+    fn uniform(&mut self) -> R<f64> {
+        Ok(self.uniform.next())
+    }
+
+    #[inline]
+    fn normal(&mut self) -> R<f64> {
+        next_normal(&mut self.uniform, self.normal_kind, self.box_muller_saved)
+    }
+
+    #[inline]
+    fn exponential(&mut self) -> R<f64> {
+        Ok(next_exponential(&mut self.uniform))
+    }
+
+    #[inline]
+    fn index(&mut self, n: f64) -> R<f64> {
+        Ok(self.index_value(n))
+    }
+
+    fn fill_uniform(&mut self, slots: &mut [f64]) -> R<bool> {
+        if !self.uniform.open() {
+            return Ok(false);
+        }
+        self.uniform.fill(slots);
+        Ok(true)
+    }
+
+    fn fill_normal(&mut self, slots: &mut [f64]) -> R<()> {
+        if self.normal_kind != NormalKind::Inversion {
+            for slot in slots {
+                *slot = self.normal()?;
+            }
+            return Ok(());
+        }
+        // Each normal takes two uniforms, which are drawn a chunk at a time so that both the
+        // generator's loop and the quantile's loop run over a whole chunk in L1.
+        const CHUNK: usize = 256;
+        let mut uniforms = [0.0f64; 2 * CHUNK];
+        for chunk in slots.chunks_mut(CHUNK) {
+            let uniforms = &mut uniforms[..2 * chunk.len()];
+            self.uniform.fill(uniforms);
+            if self.uniform.open() {
+                inversion_fill(uniforms, chunk);
+            } else {
+                inversion_fill_portable(uniforms, chunk);
+            }
+            qnorm_standard_fill(chunk);
+        }
+        Ok(())
+    }
+}
+
+/// A uniform generator borrowed for a batch of draws.
+pub trait Uniform {
+    /// The next deviate.
+    fn next(&mut self) -> f64;
+
+    /// Fills `slots` with the next deviates, exactly as as many calls of [`Uniform::next`]
+    /// would.
+    fn fill(&mut self, slots: &mut [f64]) {
+        for slot in slots {
+            *slot = self.next();
+        }
+    }
+
+    /// Whether every deviate lies strictly inside (0, 1). A user-supplied generator's
+    /// deviates are returned as they are, so they may not.
+    fn open(&self) -> bool {
+        true
+    }
+}
+
+/// The Mersenne twister's state, borrowed from the session.
+pub struct Twister<'a> {
+    position: &'a mut i32,
+    words: &'a mut [u32; TWISTER_WORDS],
+}
+
+impl Uniform for Twister<'_> {
+    #[inline]
+    fn next(&mut self) -> f64 {
+        fixup(mersenne_twister(self.position, self.words))
+    }
+
+    fn fill(&mut self, slots: &mut [f64]) {
+        let mut rest = slots;
+        while !rest.is_empty() {
+            if !(0..TWISTER_WORDS as i32).contains(self.position) {
+                regenerate_twister(self.position, self.words);
+            }
+            let start = *self.position as usize;
+            let take = (TWISTER_WORDS - start).min(rest.len());
+            let (head, tail) = std::mem::take(&mut rest).split_at_mut(take);
+            temper_block(&self.words[start..start + take], head);
+            *self.position += take as i32;
+            rest = tail;
+        }
+    }
+}
+
+impl Uniform for &mut State {
+    #[inline]
+    fn next(&mut self) -> f64 {
+        next_uniform(self)
+    }
+
+    fn fill(&mut self, slots: &mut [f64]) {
+        // One dispatch on the kind for the whole batch.
+        match &mut **self {
+            State::WichmannHill(seeds) => slots.fill_with(|| wichmann_hill(seeds)),
+            State::MarsagliaMulticarry(seeds) => slots.fill_with(|| marsaglia_multicarry(seeds)),
+            State::SuperDuper(seeds) => slots.fill_with(|| super_duper(seeds)),
+            State::MersenneTwister { position, words } => Twister { position, words }.fill(slots),
+            State::LecuyerCmrg(seeds) => slots.fill_with(|| lecuyer_cmrg(seeds)),
+            State::UserSupplied(generator) => slots.fill_with(|| user_supplied(generator)),
+        }
+    }
+
+    fn open(&self) -> bool {
+        !matches!(**self, State::UserSupplied(_))
+    }
 }
 
 /// `R_sample_kind`: GNU R's `Sampletype` code of the current sampling method.
@@ -389,21 +634,22 @@ unsafe fn do_sample2(call: &Call<'_>) -> R<Sexp> {
         return Err(error("This algorithm is for size <= n/2"));
     }
     get_rng_state()?;
-    let rng = rng();
     let mut drawn = Vec::with_capacity(size as usize);
     let mut seen = FxHashSet::default();
-    for _ in 0..size {
-        // GNU R gives up after 100 redraws and keeps the duplicate; with size <= n/2 a redraw is
-        // needed less than half the time, so the cap is never reached in practice.
-        let mut value = 0.0;
-        for _ in 0..100 {
-            value = next_index(rng, population) + 1.0;
-            if seen.insert(value.to_bits()) {
-                break;
+    with_deviates!(|draws| {
+        for _ in 0..size {
+            // GNU R gives up after 100 redraws and keeps the duplicate; with size <= n/2 a
+            // redraw is needed less than half the time, so the cap is never reached in practice.
+            let mut value = 0.0;
+            for _ in 0..100 {
+                value = draws.index_value(population) + 1.0;
+                if seen.insert(value.to_bits()) {
+                    break;
+                }
             }
+            drawn.push(value);
         }
-        drawn.push(value);
-    }
+    });
     let result = if population > f64::from(i32::MAX) {
         real_vector(&drawn)?
     } else {
@@ -446,10 +692,21 @@ unsafe fn sample_uniform(population: Sexp, size: Sexp, replace: bool) -> R<Sexp>
             reals_mut(result)[index] = value as f64;
         }
     };
-    let rng = rng();
+    with_deviates!(|draws| draw_uniform_sample(draws, count, size, replace, &mut store));
+    Ok(result)
+}
+
+/// The draws of [`sample_uniform`], handed to `store` by position.
+fn draw_uniform_sample(
+    draws: &mut Draws<'_, impl Uniform>,
+    count: f64,
+    size: usize,
+    replace: bool,
+    store: &mut impl FnMut(usize, u64),
+) {
     if replace || size < 2 {
         for index in 0..size {
-            store(index, next_index(rng, count) as u64 + 1);
+            store(index, draws.index_value(count) as u64 + 1);
         }
     } else {
         // Partial Fisher-Yates over `0..count`: the drawn slot takes the value of the last
@@ -460,15 +717,15 @@ unsafe fn sample_uniform(population: Sexp, size: Sexp, replace: bool) -> R<Sexp>
             // A 32-bit table halves the working memory whenever the population allows it.
             if remaining <= u64::from(u32::MAX) {
                 let slots: Vec<u32> = (0..remaining as u32).collect();
-                shuffle_prefix(rng, slots, size, &mut store);
+                shuffle_prefix(draws, slots, size, store);
             } else {
                 let slots: Vec<u64> = (0..remaining).collect();
-                shuffle_prefix(rng, slots, size, &mut store);
+                shuffle_prefix(draws, slots, size, store);
             }
         } else {
             let mut moved: FxHashMap<u64, u64> = FxHashMap::default();
             for index in 0..size {
-                let slot = next_index(rng, remaining as f64) as u64;
+                let slot = draws.index_value(remaining as f64) as u64;
                 store(index, moved.get(&slot).copied().unwrap_or(slot) + 1);
                 remaining -= 1;
                 let last = moved.get(&remaining).copied().unwrap_or(remaining);
@@ -476,19 +733,18 @@ unsafe fn sample_uniform(population: Sexp, size: Sexp, replace: bool) -> R<Sexp>
             }
         }
     }
-    Ok(result)
 }
 
 /// Draws `size` values without replacement from the table `slots`, which holds the population
 /// still to draw from.
 fn shuffle_prefix<T: Copy + Into<u64>>(
-    rng: &mut Rng,
+    draws: &mut Draws<'_, impl Uniform>,
     mut slots: Vec<T>,
     size: usize,
     store: &mut impl FnMut(usize, u64),
 ) {
     for index in 0..size {
-        let slot = next_index(rng, slots.len() as f64) as usize;
+        let slot = draws.index_value(slots.len() as f64) as usize;
         store(index, slots[slot].into() + 1);
         slots.swap_remove(slot);
     }
@@ -516,20 +772,19 @@ unsafe fn sample_weighted(population: Sexp, size: Sexp, replace: bool, prob: Sex
     }
     normalize_probabilities(&mut probabilities, size as usize, replace)?;
     let mut drawn = vec![0; size as usize];
-    let rng = rng();
-    if replace {
+    with_deviates!(|draws| if replace {
         let likely = probabilities
             .iter()
             .filter(|&&probability| f64::from(count) * probability > 0.1)
             .count();
         if likely > 200 {
-            walker_sample(rng, &probabilities, &mut drawn);
+            walker_sample(draws, &probabilities, &mut drawn);
         } else {
-            inversion_sample(&mut rng.state, &mut probabilities, &mut drawn);
+            inversion_sample(draws, &mut probabilities, &mut drawn);
         }
     } else {
-        sample_without_replacement(&mut rng.state, &mut probabilities, &mut drawn);
-    }
+        sample_without_replacement(draws, &mut probabilities, &mut drawn);
+    });
     integer_vector(&drawn)
 }
 
@@ -561,7 +816,11 @@ fn normalize_probabilities(probabilities: &mut [f64], size: usize, replace: bool
 
 /// With replacement, few likely items: a linear search of the cumulative probabilities, most
 /// likely first.
-fn inversion_sample(state: &mut State, probabilities: &mut [f64], drawn: &mut [i32]) {
+fn inversion_sample(
+    draws: &mut Draws<'_, impl Uniform>,
+    probabilities: &mut [f64],
+    drawn: &mut [i32],
+) {
     let count = probabilities.len();
     let mut labels: Vec<i32> = (1..=count as i32).collect();
     sort_descending(probabilities, &mut labels);
@@ -569,7 +828,7 @@ fn inversion_sample(state: &mut State, probabilities: &mut [f64], drawn: &mut [i
         probabilities[index] += probabilities[index - 1];
     }
     for slot in drawn.iter_mut() {
-        let uniform = next_uniform(state);
+        let uniform = draws.uniform.next();
         let chosen = probabilities[..count - 1]
             .iter()
             .position(|&cumulative| uniform <= cumulative)
@@ -580,7 +839,7 @@ fn inversion_sample(state: &mut State, probabilities: &mut [f64], drawn: &mut [i
 
 /// With replacement, many likely items: Walker's alias method, which draws in constant time
 /// after linear setup.
-fn walker_sample(rng: &mut Rng, probabilities: &[f64], drawn: &mut [i32]) {
+fn walker_sample(draws: &mut Draws<'_, impl Uniform>, probabilities: &[f64], drawn: &mut [i32]) {
     let count = probabilities.len();
     let mut thresholds: Vec<f64> = probabilities
         .iter()
@@ -619,13 +878,13 @@ fn walker_sample(rng: &mut Rng, probabilities: &[f64], drawn: &mut [i32]) {
         // GNU R before 3.6 split one uniform into the column and the coin, which the
         // `Rounding` sampler keeps reproducible; the comparison is against the threshold
         // shifted by the column, exactly as that version computed it.
-        let (item, keep) = if rng.sample_kind == SampleKind::Rounding {
-            let scaled = next_uniform(&mut rng.state) * count as f64;
+        let (item, keep) = if draws.sample_kind == SampleKind::Rounding {
+            let scaled = draws.uniform.next() * count as f64;
             let item = (scaled as usize).min(count - 1);
             (item, scaled < thresholds[item] + item as f64)
         } else {
-            let item = next_index(rng, count as f64) as usize;
-            (item, next_uniform(&mut rng.state) < thresholds[item])
+            let item = draws.index_value(count as f64) as usize;
+            (item, draws.uniform.next() < thresholds[item])
         };
         *slot = if keep {
             item as i32 + 1
@@ -637,14 +896,18 @@ fn walker_sample(rng: &mut Rng, probabilities: &[f64], drawn: &mut [i32]) {
 
 /// Without replacement: each draw searches the remaining mass, most likely first, and removes
 /// the item it picks.
-fn sample_without_replacement(state: &mut State, probabilities: &mut [f64], drawn: &mut [i32]) {
+fn sample_without_replacement(
+    draws: &mut Draws<'_, impl Uniform>,
+    probabilities: &mut [f64],
+    drawn: &mut [i32],
+) {
     let count = probabilities.len();
     let mut labels: Vec<i32> = (1..=count as i32).collect();
     sort_descending(probabilities, &mut labels);
     let mut total = 1.0;
     let mut last = count.saturating_sub(1);
     for slot in drawn.iter_mut() {
-        let target = total * next_uniform(state);
+        let target = total * draws.uniform.next();
         let mut mass = 0.0;
         let mut chosen = last;
         for (item, &probability) in probabilities[..last].iter().enumerate() {
@@ -1078,63 +1341,80 @@ fn fixup_seeds(state: &mut State, initial: bool) -> bool {
 }
 
 /// The next uniform deviate in (0, 1).
-// L'Ecuyer's normalizing constant is quoted with every published digit.
-#[allow(clippy::excessive_precision)]
+#[inline]
 fn next_uniform(state: &mut State) -> f64 {
     match state {
-        State::WichmannHill(seeds) => {
-            seeds[0] = seeds[0] * 171 % 30269;
-            seeds[1] = seeds[1] * 172 % 30307;
-            seeds[2] = seeds[2] * 170 % 30323;
-            let value = f64::from(seeds[0]) / 30269.0
-                + f64::from(seeds[1]) / 30307.0
-                + f64::from(seeds[2]) / 30323.0;
-            fixup(value - value.trunc())
-        }
-        State::MarsagliaMulticarry(seeds) => {
-            seeds[0] = 36969u32
-                .wrapping_mul(seeds[0] & 0xffff)
-                .wrapping_add(seeds[0] >> 16);
-            seeds[1] = 18000u32
-                .wrapping_mul(seeds[1] & 0xffff)
-                .wrapping_add(seeds[1] >> 16);
-            fixup(f64::from((seeds[0] << 16) ^ (seeds[1] & 0xffff)) * INVERSE_2_32_MINUS_1)
-        }
-        State::SuperDuper(seeds) => {
-            seeds[0] ^= (seeds[0] >> 15) & 0x1ffff;
-            seeds[0] ^= seeds[0] << 17;
-            seeds[1] = seeds[1].wrapping_mul(69069);
-            fixup(f64::from(seeds[0] ^ seeds[1]) * INVERSE_2_32_MINUS_1)
-        }
+        State::WichmannHill(seeds) => wichmann_hill(seeds),
+        State::MarsagliaMulticarry(seeds) => marsaglia_multicarry(seeds),
+        State::SuperDuper(seeds) => super_duper(seeds),
         State::MersenneTwister { position, words } => fixup(mersenne_twister(position, words)),
-        State::LecuyerCmrg(seeds) => {
-            let mut first = 1_403_580 * i64::from(seeds[1]) - 810_728 * i64::from(seeds[0]);
-            first -= first / LECUYER_MODULUS_1 * LECUYER_MODULUS_1;
-            if first < 0 {
-                first += LECUYER_MODULUS_1;
-            }
-            seeds[0] = seeds[1];
-            seeds[1] = seeds[2];
-            seeds[2] = first as u32;
-            let mut second = 527_612 * i64::from(seeds[5]) - 1_370_589 * i64::from(seeds[3]);
-            second -= second / LECUYER_MODULUS_2 * LECUYER_MODULUS_2;
-            if second < 0 {
-                second += LECUYER_MODULUS_2;
-            }
-            seeds[3] = seeds[4];
-            seeds[4] = seeds[5];
-            seeds[5] = second as u32;
-            let difference = if first > second {
-                first - second
-            } else {
-                first - second + LECUYER_MODULUS_1
-            };
-            difference as f64 * 2.328306549295727688e-10
-        }
-        // GNU R returns the user's uniform as it is, without the fix-up into (0, 1).
-        // SAFETY: `user_unif_rand` returns a pointer to its current deviate.
-        State::UserSupplied(generator) => unsafe { *(generator.unif_rand)().cast::<f64>() },
+        State::LecuyerCmrg(seeds) => lecuyer_cmrg(seeds),
+        State::UserSupplied(generator) => user_supplied(generator),
     }
+}
+
+#[inline]
+fn wichmann_hill(seeds: &mut [u32; 3]) -> f64 {
+    seeds[0] = seeds[0] * 171 % 30269;
+    seeds[1] = seeds[1] * 172 % 30307;
+    seeds[2] = seeds[2] * 170 % 30323;
+    let value = f64::from(seeds[0]) / 30269.0
+        + f64::from(seeds[1]) / 30307.0
+        + f64::from(seeds[2]) / 30323.0;
+    fixup(value - value.trunc())
+}
+
+#[inline]
+fn marsaglia_multicarry(seeds: &mut [u32; 2]) -> f64 {
+    seeds[0] = 36969u32
+        .wrapping_mul(seeds[0] & 0xffff)
+        .wrapping_add(seeds[0] >> 16);
+    seeds[1] = 18000u32
+        .wrapping_mul(seeds[1] & 0xffff)
+        .wrapping_add(seeds[1] >> 16);
+    fixup(f64::from((seeds[0] << 16) ^ (seeds[1] & 0xffff)) * INVERSE_2_32_MINUS_1)
+}
+
+#[inline]
+fn super_duper(seeds: &mut [u32; 2]) -> f64 {
+    seeds[0] ^= (seeds[0] >> 15) & 0x1ffff;
+    seeds[0] ^= seeds[0] << 17;
+    seeds[1] = seeds[1].wrapping_mul(69069);
+    fixup(f64::from(seeds[0] ^ seeds[1]) * INVERSE_2_32_MINUS_1)
+}
+
+// L'Ecuyer's normalizing constant is quoted with every published digit.
+#[allow(clippy::excessive_precision)]
+#[inline]
+fn lecuyer_cmrg(seeds: &mut [u32; 6]) -> f64 {
+    let mut first = 1_403_580 * i64::from(seeds[1]) - 810_728 * i64::from(seeds[0]);
+    first -= first / LECUYER_MODULUS_1 * LECUYER_MODULUS_1;
+    if first < 0 {
+        first += LECUYER_MODULUS_1;
+    }
+    seeds[0] = seeds[1];
+    seeds[1] = seeds[2];
+    seeds[2] = first as u32;
+    let mut second = 527_612 * i64::from(seeds[5]) - 1_370_589 * i64::from(seeds[3]);
+    second -= second / LECUYER_MODULUS_2 * LECUYER_MODULUS_2;
+    if second < 0 {
+        second += LECUYER_MODULUS_2;
+    }
+    seeds[3] = seeds[4];
+    seeds[4] = seeds[5];
+    seeds[5] = second as u32;
+    let difference = if first > second {
+        first - second
+    } else {
+        first - second + LECUYER_MODULUS_1
+    };
+    difference as f64 * 2.328306549295727688e-10
+}
+
+/// GNU R returns the user's uniform as it is, without the fix-up into (0, 1).
+fn user_supplied(generator: &UserGenerator) -> f64 {
+    // SAFETY: `user_unif_rand` returns a pointer to its current deviate.
+    unsafe { *(generator.unif_rand)().cast::<f64>() }
 }
 
 /// Keeps a deviate strictly inside (0, 1): a 32-bit generator can produce exactly 0, and its
@@ -1156,8 +1436,14 @@ fn mersenne_twister(position: &mut i32, words: &mut [u32; TWISTER_WORDS]) -> f64
     if !(0..TWISTER_WORDS as i32).contains(position) {
         regenerate_twister(position, words);
     }
-    let mut value = words.get(*position as usize).copied().unwrap_or(0);
+    let value = words.get(*position as usize).copied().unwrap_or(0);
     *position += 1;
+    temper(value)
+}
+
+/// MT19937's tempering of one word, scaled to [0, 1) by 2^-32.
+#[inline(always)]
+fn temper(mut value: u32) -> f64 {
     value ^= value >> 11;
     value ^= (value << 7) & 0x9d2c_5680;
     value ^= (value << 15) & 0xefc6_0000;
@@ -1165,18 +1451,99 @@ fn mersenne_twister(position: &mut i32, words: &mut [u32; TWISTER_WORDS]) -> f64
     f64::from(value) * 2.3283064365386963e-10
 }
 
+/// Tempers a run of the twister's words into fixed-up deviates. The loop has no dependence
+/// between iterations, so it runs across SIMD lanes, eight words at a time where AVX2 is
+/// available.
+fn temper_block(words: &[u32], slots: &mut [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU supports AVX2, as just checked.
+        return unsafe { temper_block_avx2(words, slots) };
+    }
+    temper_block_portable(words, slots);
+}
+
+/// The tempering four words at a time. The unsigned word converts exactly: flipping its top
+/// bit gives the signed value `word - 2^31`, whose conversion plus `2^31` is exact in a double,
+/// and the scale is the power of two `2^-32`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn temper_block_avx2(words: &[u32], slots: &mut [f64]) {
+    use std::arch::x86_64::{
+        __m128i, _CMP_LE_OQ, _mm_and_si128, _mm_loadu_si128, _mm_set1_epi32, _mm_slli_epi32,
+        _mm_srli_epi32, _mm_xor_si128, _mm256_add_pd, _mm256_blendv_pd, _mm256_cmp_pd,
+        _mm256_cvtepi32_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_setzero_pd, _mm256_storeu_pd,
+        _mm256_sub_pd,
+    };
+    const LANES: usize = 4;
+    let length = words.len().min(slots.len());
+    let blocks = length / LANES * LANES;
+    let first_mask = _mm_set1_epi32(0x9d2c_5680_u32 as i32);
+    let second_mask = _mm_set1_epi32(0xefc6_0000_u32 as i32);
+    let sign = _mm_set1_epi32(i32::MIN);
+    let offset = _mm256_set1_pd(2_147_483_648.0);
+    let scale = _mm256_set1_pd(2.3283064365386963e-10);
+    let zero = _mm256_setzero_pd();
+    let one = _mm256_set1_pd(1.0);
+    let low = _mm256_set1_pd(0.5 * INVERSE_2_32_MINUS_1);
+    let high = _mm256_set1_pd(1.0 - 0.5 * INVERSE_2_32_MINUS_1);
+    for start in (0..blocks).step_by(LANES) {
+        // SAFETY: `start + LANES <= length`, which neither slice exceeds.
+        unsafe {
+            let mut word = _mm_loadu_si128(words.as_ptr().add(start).cast::<__m128i>());
+            word = _mm_xor_si128(word, _mm_srli_epi32::<11>(word));
+            word = _mm_xor_si128(word, _mm_and_si128(_mm_slli_epi32::<7>(word), first_mask));
+            word = _mm_xor_si128(word, _mm_and_si128(_mm_slli_epi32::<15>(word), second_mask));
+            word = _mm_xor_si128(word, _mm_srli_epi32::<18>(word));
+            let whole = _mm256_add_pd(_mm256_cvtepi32_pd(_mm_xor_si128(word, sign)), offset);
+            let value = _mm256_mul_pd(whole, scale);
+            // `fixup`: the first blend is the upper bound, the second the lower one.
+            let at_one = _mm256_cmp_pd::<_CMP_LE_OQ>(_mm256_sub_pd(one, value), zero);
+            let at_zero = _mm256_cmp_pd::<_CMP_LE_OQ>(value, zero);
+            let fixed = _mm256_blendv_pd(_mm256_blendv_pd(value, high, at_one), low, at_zero);
+            _mm256_storeu_pd(slots.as_mut_ptr().add(start), fixed);
+        }
+    }
+    temper_block_portable(&words[blocks..length], &mut slots[blocks..length]);
+}
+
+#[inline(always)]
+fn temper_block_portable(words: &[u32], slots: &mut [f64]) {
+    for (slot, &word) in slots.iter_mut().zip(words) {
+        *slot = fixup(temper(word));
+    }
+}
+
 /// Computes the twister's next 624 words and rewinds its position.
 #[inline(never)]
 fn regenerate_twister(position: &mut i32, words: &mut [u32; TWISTER_WORDS]) {
-    const UPPER: u32 = 0x8000_0000;
-    const LOWER: u32 = 0x7fff_ffff;
-    let twist = |upper: u32, lower: u32, shifted: u32| {
-        let mixed = (upper & UPPER) | (lower & LOWER);
-        shifted ^ (mixed >> 1) ^ if mixed & 1 == 1 { 0x9908_b0df } else { 0 }
-    };
     if *position == TWISTER_WORDS as i32 + 1 {
         seed_twister(words, 4357);
     }
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU supports AVX2, as just checked.
+        unsafe { twist_words_avx2(words) };
+        *position = 0;
+        return;
+    }
+    twist_words_portable(words);
+    *position = 0;
+}
+
+const TWISTER_UPPER: u32 = 0x8000_0000;
+const TWISTER_LOWER: u32 = 0x7fff_ffff;
+const TWISTER_MATRIX: u32 = 0x9908_b0df;
+
+/// One word of MT19937's recurrence, from the word itself, its successor and the word
+/// `TWISTER_SHIFT` ahead.
+#[inline(always)]
+fn twist(upper: u32, lower: u32, shifted: u32) -> u32 {
+    let mixed = (upper & TWISTER_UPPER) | (lower & TWISTER_LOWER);
+    shifted ^ (mixed >> 1) ^ (0u32.wrapping_sub(mixed & 1) & TWISTER_MATRIX)
+}
+
+fn twist_words_portable(words: &mut [u32; TWISTER_WORDS]) {
     // The three ranges are the wrap-around of `index + 1` and `index + TWISTER_SHIFT`
     // spelled out, which keeps the modulo out of the refill.
     let last = TWISTER_WORDS - 1;
@@ -1191,7 +1558,64 @@ fn regenerate_twister(position: &mut i32, words: &mut [u32; TWISTER_WORDS]) {
         );
     }
     words[last] = twist(words[last], words[0], words[TWISTER_SHIFT - 1]);
-    *position = 0;
+}
+
+/// The recurrence eight words at a time. A block reads its successors before it writes, and
+/// in the second range the words `TWISTER_WORDS - TWISTER_SHIFT` behind it, which earlier
+/// blocks finished, so every word gets the value the sequential loop gives it.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn twist_words_avx2(words: &mut [u32; TWISTER_WORDS]) {
+    use std::arch::x86_64::{
+        __m256i, _mm256_and_si256, _mm256_loadu_si256, _mm256_or_si256, _mm256_set1_epi32,
+        _mm256_setzero_si256, _mm256_srli_epi32, _mm256_storeu_si256, _mm256_sub_epi32,
+        _mm256_xor_si256,
+    };
+    const LANES: usize = 8;
+    let upper = _mm256_set1_epi32(TWISTER_UPPER as i32);
+    let lower = _mm256_set1_epi32(TWISTER_LOWER as i32);
+    let matrix = _mm256_set1_epi32(TWISTER_MATRIX as i32);
+    let one = _mm256_set1_epi32(1);
+    let block = |words: &mut [u32; TWISTER_WORDS], index: usize, shifted: usize| {
+        let base = words.as_mut_ptr();
+        // SAFETY: the callers keep `index + LANES` (the successors' block end) and `shifted +
+        // LANES` within the 624 words.
+        unsafe {
+            let current = _mm256_loadu_si256(base.add(index).cast::<__m256i>());
+            let next = _mm256_loadu_si256(base.add(index + 1).cast::<__m256i>());
+            let ahead = _mm256_loadu_si256(base.add(shifted).cast::<__m256i>());
+            let mixed = _mm256_or_si256(
+                _mm256_and_si256(current, upper),
+                _mm256_and_si256(next, lower),
+            );
+            let odd = _mm256_sub_epi32(_mm256_setzero_si256(), _mm256_and_si256(mixed, one));
+            let word = _mm256_xor_si256(
+                _mm256_xor_si256(ahead, _mm256_srli_epi32::<1>(mixed)),
+                _mm256_and_si256(odd, matrix),
+            );
+            _mm256_storeu_si256(base.add(index).cast::<__m256i>(), word);
+        }
+    };
+    let first_range = TWISTER_WORDS - TWISTER_SHIFT;
+    let last = TWISTER_WORDS - 1;
+    let mut index = 0;
+    while index + LANES <= first_range {
+        block(words, index, index + TWISTER_SHIFT);
+        index += LANES;
+    }
+    while index < first_range {
+        words[index] = twist(words[index], words[index + 1], words[index + TWISTER_SHIFT]);
+        index += 1;
+    }
+    while index + LANES <= last {
+        block(words, index, index - first_range);
+        index += LANES;
+    }
+    while index < last {
+        words[index] = twist(words[index], words[index + 1], words[index - first_range]);
+        index += 1;
+    }
+    words[last] = twist(words[last], words[0], words[TWISTER_SHIFT - 1]);
 }
 
 /// The original MT19937 initialization from one seed (Knuth's multiplier 69069), which applies
@@ -1210,28 +1634,83 @@ fn seed_twister(words: &mut [u32; TWISTER_WORDS], seed: u32) {
 /// does, because one uniform has only 32 bits and the tails need full resolution.
 const INVERSION_SCALE: f64 = 134_217_728.0;
 
-fn next_normal(rng: &mut Rng) -> R<f64> {
-    match rng.normal_kind {
+/// The probability whose normal quantile is an inversion deviate, from the deviate's two
+/// uniforms.
+#[inline(always)]
+fn inversion_probability(first: f64, second: f64) -> f64 {
+    (f64::from((INVERSION_SCALE * first) as i32) + second) / INVERSION_SCALE
+}
+
+/// Writes the inversion probability of each pair of uniforms. The uniforms must lie in (0, 1),
+/// where the truncation to an integer cannot overflow, because the vector truncation and Rust's
+/// saturating cast disagree outside it.
+fn inversion_fill(uniforms: &[f64], slots: &mut [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU supports AVX2, as just checked.
+        return unsafe { inversion_fill_avx2(uniforms, slots) };
+    }
+    inversion_fill_portable(uniforms, slots);
+}
+
+fn inversion_fill_portable(uniforms: &[f64], slots: &mut [f64]) {
+    for (slot, pair) in slots.iter_mut().zip(uniforms.as_chunks::<2>().0) {
+        *slot = inversion_probability(pair[0], pair[1]);
+    }
+}
+
+/// Four pairs at a time: the unpacks split the first and second uniforms of two loads into
+/// lanes ordered 0, 2, 1, 3, and the final permute restores the order. Each lane performs the
+/// scalar operations: multiply, truncate, convert back, add and divide.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn inversion_fill_avx2(uniforms: &[f64], slots: &mut [f64]) {
+    use std::arch::x86_64::{
+        _mm256_add_pd, _mm256_cvtepi32_pd, _mm256_cvttpd_epi32, _mm256_div_pd, _mm256_loadu_pd,
+        _mm256_mul_pd, _mm256_permute4x64_pd, _mm256_set1_pd, _mm256_storeu_pd, _mm256_unpackhi_pd,
+        _mm256_unpacklo_pd,
+    };
+    const LANES: usize = 4;
+    let length = slots.len().min(uniforms.len() / 2);
+    let blocks = length / LANES * LANES;
+    let scale = _mm256_set1_pd(INVERSION_SCALE);
+    for start in (0..blocks).step_by(LANES) {
+        // SAFETY: `start + LANES <= length`, so the slots and the `2 * (start + LANES)`
+        // uniforms read are in bounds.
+        unsafe {
+            let left = _mm256_loadu_pd(uniforms.as_ptr().add(2 * start));
+            let right = _mm256_loadu_pd(uniforms.as_ptr().add(2 * start + LANES));
+            let first = _mm256_unpacklo_pd(left, right);
+            let second = _mm256_unpackhi_pd(left, right);
+            let whole = _mm256_cvtepi32_pd(_mm256_cvttpd_epi32(_mm256_mul_pd(scale, first)));
+            let probability = _mm256_div_pd(_mm256_add_pd(whole, second), scale);
+            let ordered = _mm256_permute4x64_pd::<0b11_01_10_00>(probability);
+            _mm256_storeu_pd(slots.as_mut_ptr().add(start), ordered);
+        }
+    }
+    inversion_fill_portable(&uniforms[2 * blocks..], &mut slots[blocks..]);
+}
+
+fn next_normal(uniform: &mut impl Uniform, kind: NormalKind, saved: &mut f64) -> R<f64> {
+    match kind {
         NormalKind::Inversion => {
-            let first = next_uniform(&mut rng.state);
-            let combined =
-                f64::from((INVERSION_SCALE * first) as i32) + next_uniform(&mut rng.state);
-            Ok(qnorm(combined / INVERSION_SCALE, 0.0, 1.0, true, false))
+            let first = uniform.next();
+            let probability = inversion_probability(first, uniform.next());
+            Ok(qnorm(probability, 0.0, 1.0, true, false))
         }
         NormalKind::BoxMuller => {
-            if rng.box_muller_saved != 0.0 {
-                let saved = rng.box_muller_saved;
-                rng.box_muller_saved = 0.0;
-                return Ok(saved);
+            if *saved != 0.0 {
+                let value = *saved;
+                *saved = 0.0;
+                return Ok(value);
             }
-            let theta = 2.0 * std::f64::consts::PI * next_uniform(&mut rng.state);
-            let radius =
-                (-2.0 * next_uniform(&mut rng.state).ln()).sqrt() + 10.0 * f64::MIN_POSITIVE;
-            rng.box_muller_saved = radius * theta.sin();
+            let theta = 2.0 * std::f64::consts::PI * uniform.next();
+            let radius = (-2.0 * uniform.next().ln()).sqrt() + 10.0 * f64::MIN_POSITIVE;
+            *saved = radius * theta.sin();
             Ok(radius * theta.cos())
         }
-        NormalKind::KindermanRamage => Ok(kinderman_ramage(&mut rng.state, false)),
-        NormalKind::BuggyKindermanRamage => Ok(kinderman_ramage(&mut rng.state, true)),
+        NormalKind::KindermanRamage => Ok(kinderman_ramage(uniform, false)),
+        NormalKind::BuggyKindermanRamage => Ok(kinderman_ramage(uniform, true)),
         other => Err(error(format!(
             "normal.kind \"{}\" is not supported by ry",
             other.name()
@@ -1244,13 +1723,13 @@ fn next_normal(rng: &mut Rng) -> R<f64> {
 /// `RNGversion` still selects: a mistyped constant in the main region and a first region that
 /// accepts a candidate without the density test whenever max(u2, u3) <= 0.8056.
 #[allow(clippy::excessive_precision)]
-fn kinderman_ramage(state: &mut State, buggy: bool) -> f64 {
+fn kinderman_ramage(uniform: &mut impl Uniform, buggy: bool) -> f64 {
     const A: f64 = 2.216035867166471;
     let g = |x: f64| 0.398942280401433 * (-x * x / 2.0).exp() - 0.180025191068563 * (A - x);
     let signed = |u2: f64, u3: f64, value: f64| if u2 < u3 { value } else { -value };
-    let u1 = next_uniform(state);
+    let u1 = uniform.next();
     if u1 < 0.884070402298758 {
-        let u2 = next_uniform(state);
+        let u2 = uniform.next();
         let slope = if buggy {
             1.13113163544180
         } else {
@@ -1260,8 +1739,8 @@ fn kinderman_ramage(state: &mut State, buggy: bool) -> f64 {
     }
     if u1 >= 0.973310954173898 {
         loop {
-            let u2 = next_uniform(state);
-            let u3 = next_uniform(state);
+            let u2 = uniform.next();
+            let u3 = uniform.next();
             let tail = A * A - 2.0 * u3.ln();
             if u2 * u2 < (A * A) / tail {
                 return if u1 < 0.986655477086949 {
@@ -1274,8 +1753,8 @@ fn kinderman_ramage(state: &mut State, buggy: bool) -> f64 {
     }
     if u1 >= 0.958720824790463 {
         loop {
-            let u2 = next_uniform(state);
-            let u3 = next_uniform(state);
+            let u2 = uniform.next();
+            let u3 = uniform.next();
             let value = A - 0.630834801921960 * u2.min(u3);
             if u2.max(u3) <= 0.755591531667601 || 0.034240503750111 * (u2 - u3).abs() <= g(value) {
                 return signed(u2, u3, value);
@@ -1284,8 +1763,8 @@ fn kinderman_ramage(state: &mut State, buggy: bool) -> f64 {
     }
     if u1 >= 0.911312780288703 {
         loop {
-            let u2 = next_uniform(state);
-            let u3 = next_uniform(state);
+            let u2 = uniform.next();
+            let u3 = uniform.next();
             let value = 0.479727404222441 + 1.105473661022070 * u2.min(u3);
             if u2.max(u3) <= 0.872834976671790 || 0.049264496342790 * (u2 - u3).abs() <= g(value) {
                 return signed(u2, u3, value);
@@ -1293,8 +1772,8 @@ fn kinderman_ramage(state: &mut State, buggy: bool) -> f64 {
         }
     }
     loop {
-        let u2 = next_uniform(state);
-        let u3 = next_uniform(state);
+        let u2 = uniform.next();
+        let u3 = uniform.next();
         let value = 0.479727404222441 - 0.595507138015940 * u2.min(u3);
         if buggy {
             if u2.max(u3) <= 0.805577924423817 {
@@ -1314,7 +1793,7 @@ fn kinderman_ramage(state: &mut State, buggy: bool) -> f64 {
 /// Ahrens and Dieter's (1972) algorithm SA for the standard exponential distribution.
 // The coefficients are quoted with every published digit.
 #[allow(clippy::excessive_precision)]
-fn next_exponential(state: &mut State) -> f64 {
+fn next_exponential(generator: &mut impl Uniform) -> f64 {
     // `QUANTILES[k - 1]` is the sum of ln(2)^j / j! for j = 1..=k. The digits are those of the
     // published table rather than freshly computed sums, which differ in the last place for a few
     // entries, so that the stream matches GNU R's exactly.
@@ -1337,9 +1816,9 @@ fn next_exponential(state: &mut State) -> f64 {
         1.0000000000000000,
     ];
     let mut offset = 0.0;
-    let mut uniform = next_uniform(state);
+    let mut uniform = generator.next();
     while uniform <= 0.0 || uniform >= 1.0 {
-        uniform = next_uniform(state);
+        uniform = generator.next();
     }
     loop {
         uniform += uniform;
@@ -1352,9 +1831,9 @@ fn next_exponential(state: &mut State) -> f64 {
     if uniform <= std::f64::consts::LN_2 {
         return offset + uniform;
     }
-    let mut minimum = next_uniform(state);
+    let mut minimum = generator.next();
     for &quantile in &QUANTILES[1..] {
-        let candidate = next_uniform(state);
+        let candidate = generator.next();
         if candidate < minimum {
             minimum = candidate;
         }
@@ -1367,21 +1846,21 @@ fn next_exponential(state: &mut State) -> f64 {
 
 /// `R_unif_index`. Rejection draws just enough random bits to cover `0..n` and retries values
 /// past `n`, which avoids the bias of scaling one uniform.
-fn next_index(rng: &mut Rng, n: f64) -> f64 {
-    if rng.sample_kind == SampleKind::Rounding {
-        return (n * next_uniform(&mut rng.state)).floor();
+fn next_index(uniform: &mut impl Uniform, kind: SampleKind, n: f64) -> f64 {
+    if kind == SampleKind::Rounding {
+        return (n * uniform.next()).floor();
     }
     if n <= 0.0 {
         return 0.0;
     }
-    let bits = n.log2().ceil() as u32;
+    let bits = index_bits(n);
     loop {
         // Sixteen bits per uniform; GNU R's loop runs while the bit count so far is at most
         // `bits`, which draws one chunk more than needed whenever `bits` is a multiple of 16.
         let mut value: i64 = 0;
         let mut drawn = 0;
         while drawn <= bits {
-            let chunk = (next_uniform(&mut rng.state) * 65536.0).floor() as i64;
+            let chunk = (uniform.next() * 65536.0).floor() as i64;
             value = value.wrapping_mul(65536).wrapping_add(chunk);
             drawn += 16;
         }
@@ -1389,6 +1868,19 @@ fn next_index(rng: &mut Rng, n: f64) -> f64 {
         if candidate < n {
             return candidate;
         }
+    }
+}
+
+/// `ceil(log2(n))`, the bits [`next_index`] draws. For a whole `n` up to 2^40 the count of
+/// significant bits of `n - 1` is exactly that, since `log2` of such an `n` is either an exact
+/// integer or hundreds of units in the last place away from one. Larger or fractional values,
+/// which the C API's `R_unif_index` accepts, take `log2` itself, rounding included.
+#[inline]
+fn index_bits(n: f64) -> u32 {
+    if n.fract() == 0.0 && (1.0..=1_099_511_627_776.0).contains(&n) {
+        u64::BITS - (n as u64 - 1).leading_zeros()
+    } else {
+        n.log2().ceil() as u32
     }
 }
 
@@ -1485,28 +1977,39 @@ impl SeededDeviates {
 }
 
 #[cfg(test)]
-impl crate::distributions::Deviates for SeededDeviates {
+impl Deviates for SeededDeviates {
     fn uniform(&mut self) -> R<f64> {
-        Ok(next_uniform(&mut self.0.state))
+        self.0.draws().uniform()
     }
 
     fn normal(&mut self) -> R<f64> {
-        next_normal(&mut self.0)
+        self.0.draws().normal()
     }
 
     fn exponential(&mut self) -> R<f64> {
-        Ok(next_exponential(&mut self.0.state))
+        self.0.draws().exponential()
     }
 
     fn index(&mut self, n: f64) -> R<f64> {
-        Ok(next_index(&mut self.0, n))
+        self.0.draws().index(n)
+    }
+
+    fn fill_uniform(&mut self, slots: &mut [f64]) -> R<bool> {
+        self.0.draws().fill_uniform(slots)
+    }
+
+    fn fill_normal(&mut self, slots: &mut [f64]) -> R<()> {
+        self.0.draws().fill_normal(slots)
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::excessive_precision)]
 mod tests {
-    use super::*;
+    use {
+        super::*,
+        syntax::testing::{SplitMix64, for_each_seed},
+    };
 
     fn seeded_rng(seed: u32) -> Rng {
         let mut rng = Rng::default();
@@ -1551,7 +2054,7 @@ mod tests {
     fn normal_matches_gnu_r() {
         let mut rng = seeded_rng(10);
         let drawn: Vec<f64> = (0..5)
-            .map(|_| next_normal(&mut rng).unwrap_or(f64::NAN))
+            .map(|_| rng.draws().normal().unwrap_or(f64::NAN))
             .collect();
         assert_eq!(
             drawn,
@@ -1568,7 +2071,9 @@ mod tests {
     #[test]
     fn exponential_matches_gnu_r() {
         let mut rng = seeded_rng(42);
-        let drawn: Vec<f64> = (0..5).map(|_| next_exponential(&mut rng.state)).collect();
+        let drawn: Vec<f64> = (0..5)
+            .map(|_| next_exponential(&mut &mut rng.state))
+            .collect();
         assert_eq!(
             drawn,
             [
@@ -1592,12 +2097,147 @@ mod tests {
         let mut pool: Vec<i32> = (1..=10).collect();
         let mut drawn = Vec::new();
         for _ in 0..4 {
-            let slot = next_index(&mut rng, remaining) as usize;
+            let slot = rng.draws().index_value(remaining) as usize;
             drawn.push(pool[slot]);
             pool.swap_remove(slot);
             remaining -= 1.0;
         }
         assert_eq!(drawn, [9, 4, 2, 8]);
+    }
+
+    /// The AVX2 kernels must give their portable references' bits: the twister's recurrence,
+    /// its tempering with the fix-up, and the inversion probabilities, over random words and
+    /// lengths that leave every remainder.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn simd_kernels_match_their_portable_versions() {
+        if !std::arch::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        for_each_seed(300, |seed| {
+            let mut picks = SplitMix64(0x5e1d_0000 ^ seed);
+            let mut words = [0u32; TWISTER_WORDS];
+            for word in &mut words {
+                // Zero words exercise the fix-up's lower bound.
+                *word = if picks.below(50) == 0 {
+                    0
+                } else {
+                    picks.next_u64() as u32
+                };
+            }
+            let mut expected = words;
+            twist_words_portable(&mut expected);
+            // SAFETY: the CPU supports AVX2, as checked above.
+            unsafe { twist_words_avx2(&mut words) };
+            assert_eq!(words, expected);
+
+            let length = picks.below(TWISTER_WORDS + 1);
+            let mut vector = vec![0.0; length];
+            let mut portable = vec![0.0; length];
+            // SAFETY: as above.
+            unsafe { temper_block_avx2(&words[..length], &mut vector) };
+            temper_block_portable(&words[..length], &mut portable);
+            assert_eq!(bits(&vector), bits(&portable));
+
+            let pairs = length / 2;
+            let mut vector = vec![0.0; pairs];
+            let mut portable = vec![0.0; pairs];
+            // SAFETY: as above.
+            unsafe { inversion_fill_avx2(&expected_uniforms(&words, length), &mut vector) };
+            inversion_fill_portable(&expected_uniforms(&words, length), &mut portable);
+            assert_eq!(bits(&vector), bits(&portable));
+        });
+
+        fn expected_uniforms(words: &[u32], length: usize) -> Vec<f64> {
+            let mut uniforms = vec![0.0; length];
+            temper_block_portable(&words[..length], &mut uniforms);
+            uniforms
+        }
+
+        fn bits(values: &[f64]) -> Vec<u64> {
+            values.iter().map(|value| value.to_bits()).collect()
+        }
+    }
+
+    /// A batch must draw exactly the deviates, and leave exactly the state, that as many single
+    /// draws would, for every generator, normal method and starting position in the stream.
+    #[test]
+    fn batched_draws_match_single_draws() {
+        const KINDS: [Kind; 5] = [
+            Kind::WichmannHill,
+            Kind::MarsagliaMulticarry,
+            Kind::SuperDuper,
+            Kind::MersenneTwister,
+            Kind::LecuyerCmrg,
+        ];
+        const NORMALS: [NormalKind; 4] = [
+            NormalKind::Inversion,
+            NormalKind::BoxMuller,
+            NormalKind::KindermanRamage,
+            NormalKind::BuggyKindermanRamage,
+        ];
+        for_each_seed(300, |seed| {
+            let mut picks = SplitMix64(0xba7c_0000 ^ seed);
+            let kind = KINDS[picks.below(KINDS.len())];
+            let normal_kind = NORMALS[picks.below(NORMALS.len())];
+            let skip = picks.below(1300);
+            let length = picks.below(2500);
+            let mut rngs = [(); 2].map(|()| {
+                let mut rng = Rng::default();
+                rng.state = State::seeded(kind, seed as u32).expect("seeding a built-in generator");
+                rng.normal_kind = normal_kind;
+                rng
+            });
+            for rng in &mut rngs {
+                for _ in 0..skip {
+                    next_uniform(&mut rng.state);
+                }
+            }
+            let [single, batched] = &mut rngs;
+            let draw_single = |rng: &mut Rng, uniform: bool| -> Vec<u64> {
+                (0..length)
+                    .map(|_| {
+                        let mut draws = rng.draws();
+                        let value = if uniform {
+                            draws.uniform()
+                        } else {
+                            draws.normal()
+                        };
+                        value.expect("a built-in generator draws").to_bits()
+                    })
+                    .collect()
+            };
+            let draw_batch = |rng: &mut Rng, uniform: bool| -> Vec<u64> {
+                let mut slots = vec![0.0; length];
+                let filled = match split_draws(rng) {
+                    SessionDraws::Twister(mut draws) => fill(&mut draws, &mut slots, uniform),
+                    SessionDraws::Other(mut draws) => fill(&mut draws, &mut slots, uniform),
+                };
+                assert!(filled, "a built-in generator fills uniforms in bulk");
+                slots.iter().map(|value| value.to_bits()).collect()
+            };
+            for uniform in [false, true] {
+                assert_eq!(
+                    draw_single(single, uniform),
+                    draw_batch(batched, uniform),
+                    "{kind:?} {normal_kind:?} uniform={uniform}"
+                );
+                assert_eq!(single.state.words(), batched.state.words());
+                assert_eq!(
+                    single.box_muller_saved.to_bits(),
+                    batched.box_muller_saved.to_bits()
+                );
+            }
+        });
+    }
+
+    fn fill(draws: &mut Draws<'_, impl Uniform>, slots: &mut [f64], uniform: bool) -> bool {
+        let outcome = if uniform {
+            draws.fill_uniform(slots)
+        } else {
+            draws.fill_normal(slots).map(|()| true)
+        };
+        outcome.expect("a built-in generator draws")
     }
 
     #[test]
@@ -1607,14 +2247,14 @@ mod tests {
         let probabilities: Vec<f64> = (1..=300).map(|weight| weight as f64 / total).collect();
         let mut drawn = [0; 12];
         let mut rng = seeded_rng(7);
-        walker_sample(&mut rng, &probabilities, &mut drawn);
+        walker_sample(&mut rng.draws(), &probabilities, &mut drawn);
         assert_eq!(
             drawn,
             [238, 250, 211, 118, 168, 271, 268, 236, 287, 134, 150, 290]
         );
         let mut rng = seeded_rng(7);
         rng.sample_kind = SampleKind::Rounding;
-        walker_sample(&mut rng, &probabilities, &mut drawn);
+        walker_sample(&mut rng.draws(), &probabilities, &mut drawn);
         assert_eq!(
             drawn,
             [237, 120, 283, 290, 74, 238, 103, 232, 276, 138, 275, 70]

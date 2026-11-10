@@ -182,7 +182,30 @@ fn run_checked(seed: u64, steps: usize, stress: bool, verify_reconcile: bool) {
                 .symbols
                 .push(heap.install(name.as_bytes()).expect("install"));
         }
+        // Pretenured objects are built and stored into like young ones, and old ones point at
+        // them, so the barrier check at each collection proves the flush remembered exactly
+        // the pretenured parents of young children.
+        let mut pretenuring = 0u32;
+        let mut suspended = None;
         for _ in 0..steps {
+            if rng.chance(1, 8) {
+                match (rng.below(4), suspended) {
+                    (_, Some(depth)) => {
+                        heap.resume_pretenuring(depth);
+                        suspended = None;
+                    }
+                    (0, None) if pretenuring > 0 => suspended = Some(heap.suspend_pretenuring()),
+                    (1 | 2, None) if pretenuring < 2 => {
+                        heap.begin_pretenuring();
+                        pretenuring += 1;
+                    }
+                    (_, None) if pretenuring > 0 => {
+                        heap.end_pretenuring();
+                        pretenuring -= 1;
+                    }
+                    _ => {}
+                }
+            }
             let live = model.live();
             sync_roots(&mut heap, &model);
             // Without the extra handles, a live node the roots reach only through a counted
@@ -356,6 +379,12 @@ fn run_checked(seed: u64, steps: usize, stress: bool, verify_reconcile: bool) {
                     verify(&mut heap, &mut model);
                 }
             }
+        }
+        if let Some(depth) = suspended {
+            heap.resume_pretenuring(depth);
+        }
+        for _ in 0..pretenuring {
+            heap.end_pretenuring();
         }
         sync_roots(&mut heap, &model);
         heap.collect(Collection::Minor);
@@ -734,6 +763,39 @@ fn the_write_barrier_keeps_young_objects_stored_into_old_ones() {
         assert_eq!(old.element(0).kind(), SexpType::Integer);
         assert_eq!(old.element(0).slice::<i32>(), &[42]);
         assert_eq!(young.refcount(), 1, "a store counts as one reference");
+    }
+}
+
+#[test]
+fn pretenured_objects_are_old_and_keep_the_young_objects_they_hold() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        heap.collect(Collection::Minor);
+        let young = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        *young.slice_mut::<i32>().first_mut().expect("one element") = 7;
+        heap.root(young);
+        heap.begin_pretenuring();
+        // Built by unbarriered stores, as a reader fills what it allocates.
+        let holder = heap.alloc_vector(SexpType::List, 2).expect("alloc");
+        let inner = heap.alloc_vector(SexpType::List, 1).expect("alloc");
+        heap.set_element(inner, 0, young);
+        heap.set_element(holder, 0, inner);
+        let suspended = heap.suspend_pretenuring();
+        let fresh = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        *fresh.slice_mut::<i32>().first_mut().expect("one element") = 8;
+        heap.resume_pretenuring(suspended);
+        heap.set_element(holder, 1, fresh);
+        heap.end_pretenuring();
+        heap.add_global_root(holder);
+        let collections = heap.stats().minor_collections;
+        heap.collect(Collection::Minor);
+        assert_eq!(heap.stats().minor_collections, collections + 1);
+        heap.collect(Collection::Minor);
+        heap.collect(Collection::Intermediate);
+        heap.collect(Collection::Minor);
+        assert_eq!(holder.element(0).element(0).slice::<i32>(), &[7]);
+        assert_eq!(holder.element(1).slice::<i32>(), &[8]);
     }
 }
 
@@ -1738,4 +1800,197 @@ fn a_namespace_load_defers_major_collections_until_it_ends() {
     );
     assert!(after >= during);
     assert_eq!(majors(true), (0, 0));
+}
+
+/// The string and symbol tables against a reference map. Random strings in every encoding are
+/// interned, kept or dropped, and collected at random points; random names are installed, past
+/// the point where the symbol table grows. A string the reference still holds must intern to the
+/// same object, a new one must differ from every live string, and each symbol must be found by
+/// its name and stay the only symbol with that name.
+fn run_interning(seed: u64, steps: usize, stress: bool) {
+    use std::collections::HashMap;
+    let mut rng = SplitMix64(seed);
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| {
+        policy.young_limit = 4096 + rng.below(64 * 1024);
+        if stress {
+            policy.stress = GcStress::EveryAllocation;
+        }
+    });
+    let encodings = [
+        Encoding::Native,
+        Encoding::Utf8,
+        Encoding::Latin1,
+        Encoding::Bytes,
+    ];
+    let mut text = |rng: &mut SplitMix64, longest: usize| -> Vec<u8> {
+        // A small alphabet makes repeats common; lengths cross the scan's 4, 8 and 16-byte paths.
+        let length = rng.below(longest + 1);
+        (0..length)
+            .map(|_| b"ab_.Z9\xc3\xa9\xff"[rng.below(9)])
+            .collect()
+    };
+    let mut strings: HashMap<(Vec<u8>, u32), Sexp> = HashMap::new();
+    let mut symbols: HashMap<Vec<u8>, Sexp> = HashMap::new();
+    let initial_symbols = heap.symbol_count();
+    unsafe {
+        let check_symbol =
+            |heap: &mut Heap, symbols: &mut HashMap<Vec<u8>, Sexp>, name: Vec<u8>| {
+                let symbol = heap.install(&name).expect("install");
+                assert_eq!(symbol.kind(), SexpType::Symbol);
+                assert_eq!(
+                    symbol.car().bytes(),
+                    name.as_slice(),
+                    "a symbol's print name"
+                );
+                assert_eq!(heap.find_symbol(&name), Some(symbol));
+                match symbols.get(&name) {
+                    Some(&known) => assert_eq!(symbol, known, "a name installed twice"),
+                    None => {
+                        assert!(
+                            !symbols.values().any(|&other| other == symbol),
+                            "two names share a symbol"
+                        );
+                        symbols.insert(name, symbol);
+                    }
+                }
+            };
+        // Enough names to grow the symbol table at least once in most seeds.
+        for _ in 0..rng.below(6000) {
+            let mut name = b"fz_".to_vec();
+            name.extend(text(&mut rng, 10));
+            check_symbol(&mut heap, &mut symbols, name);
+        }
+        for _ in 0..steps {
+            match rng.below(10) {
+                0..=4 => {
+                    let bytes = text(&mut rng, 24);
+                    let encoding = encodings[rng.below(encodings.len())];
+                    let string = heap.mk_char(&bytes, encoding).expect("mk_char");
+                    assert_eq!(string.kind(), SexpType::Char);
+                    assert_eq!(string.bytes(), bytes.as_slice());
+                    // ASCII text is one string in every encoding, stored unmarked.
+                    let marked = if bytes.is_ascii() {
+                        Encoding::Native
+                    } else {
+                        encoding
+                    };
+                    assert_eq!(Encoding::of(string), marked, "the encoding of {bytes:?}");
+                    let key = (bytes, marked as u32);
+                    match strings.get(&key) {
+                        Some(&known) => assert_eq!(string, known, "{key:?} interned twice"),
+                        None => {
+                            assert!(
+                                !strings.values().any(|&other| other == string),
+                                "{key:?} is another live string"
+                            );
+                            if rng.chance(2, 3) {
+                                heap.root(string);
+                                strings.insert(key, string);
+                            }
+                        }
+                    }
+                }
+                5 | 6 => {
+                    let mut name = b"fz_".to_vec();
+                    name.extend(text(&mut rng, 10));
+                    check_symbol(&mut heap, &mut symbols, name);
+                }
+                7 if !strings.is_empty() => {
+                    let key = strings.keys().nth(rng.below(strings.len())).cloned();
+                    if let Some(key) = key {
+                        strings.remove(&key);
+                    }
+                }
+                _ => {
+                    heap.release_handles(0);
+                    for &string in strings.values() {
+                        heap.root(string);
+                    }
+                    let kind = match rng.below(4) {
+                        0 => Collection::Major,
+                        1 => Collection::Intermediate,
+                        _ => Collection::Minor,
+                    };
+                    heap.collect(kind);
+                    for ((bytes, _), &string) in &strings {
+                        assert_eq!(string.kind(), SexpType::Char, "a live string was freed");
+                        assert_eq!(string.bytes(), bytes.as_slice());
+                    }
+                }
+            }
+        }
+        for ((bytes, encoding), &string) in &strings {
+            let encoding = Encoding::from_code(*encoding).expect("an encoding");
+            assert_eq!(heap.mk_char(bytes, encoding).expect("mk_char"), string);
+        }
+        for (name, &symbol) in &symbols {
+            assert_eq!(heap.find_symbol(name), Some(symbol));
+        }
+        assert_eq!(heap.symbol_count(), initial_symbols + symbols.len());
+    }
+}
+
+#[test]
+fn fuzz_interning_agrees_with_a_reference_map() {
+    for_each_seed(fuzz_iterations(24), |seed| run_interning(seed, 1500, false));
+}
+
+#[test]
+fn fuzz_interning_agrees_with_a_reference_map_under_stress() {
+    for_each_seed(fuzz_iterations(4), |seed| {
+        run_interning(500 + seed, 300, true)
+    });
+}
+
+#[test]
+fn a_preserved_object_needs_as_many_releases_as_preserves() {
+    let mut heap = Heap::new();
+    unsafe {
+        let twice = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        *twice.slice_mut::<i32>().first_mut().expect("one element") = 2;
+        let once = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        *once.slice_mut::<i32>().first_mut().expect("one element") = 1;
+        heap.preserve(twice);
+        heap.preserve(once);
+        heap.preserve(twice);
+        heap.release(twice);
+        heap.collect(Collection::Major);
+        assert!(heap.is_preserved(twice));
+        assert_eq!(twice.slice::<i32>(), &[2]);
+        heap.release(once);
+        assert!(!heap.is_preserved(once));
+        heap.collect(Collection::Major);
+        assert_eq!(twice.slice::<i32>(), &[2]);
+        heap.release(twice);
+        assert!(!heap.is_preserved(twice));
+        // Releasing what is not preserved does nothing, as in GNU R.
+        heap.release(twice);
+        assert!(!heap.is_preserved(twice));
+    }
+}
+
+#[test]
+fn an_escalation_skips_an_intermediate_collection_that_freed_nothing_before() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| {
+        policy.young_limit = 64 * 1024;
+        policy.node_limit = 1024 * 1024;
+        policy.min_node_limit = 1024 * 1024;
+    });
+    unsafe {
+        // A program building a structure it keeps: what each minor collection promotes is
+        // still live at the next escalation.
+        let list = heap.alloc_vector(SexpType::List, 200_000).expect("alloc");
+        heap.add_global_root(list);
+        for index in 0..200_000 {
+            let element = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            *element.slice_mut::<i32>().first_mut().expect("one element") = index;
+            heap.set_element(list, index as usize, element);
+        }
+        let stats = heap.stats();
+        assert!(stats.major_collections >= 2, "{stats:?}");
+        assert_eq!(stats.intermediate_collections, 1, "{stats:?}");
+        assert_eq!(list.element(199_999).slice::<i32>(), &[199_999]);
+    }
 }

@@ -2690,6 +2690,8 @@ impl<'a> Builder<'a> {
                     ) || a == Ty::Dbl
                         || b == Ty::Dbl)
             }
+            // A matrix subscript reads a `Num` as the double it holds.
+            Op::CallBuiltin => unsafe { self.matrix_element(inst, state).is_some() },
             _ => false,
         };
         if keeps {
@@ -3676,6 +3678,31 @@ impl<'a> Builder<'a> {
         Ok(action)
     }
 
+    /// The element type when the `CallBuiltin` at `inst` reads `x[i, j]` or `x[[i, j]]` as an
+    /// [`Intrinsic::MatrixElement`]. A matrix's shape is not part of its type, so the read is
+    /// chosen from the site's feedback, and compiled code checks the shape on every read; a
+    /// subscript out of range, `NA` or not positive hands the call to tier 0, which raises
+    /// `[[`'s errors.
+    unsafe fn matrix_element(&self, inst: &Inst<'a>, state: &State<'a>) -> Option<Ty> {
+        let Ty::Fun(function) = state.registers[inst.operand(1)] else {
+            return None;
+        };
+        let name = interp::eval::builtin_def(function).ok()?.name;
+        let (first, count) = (inst.operand(3), inst.operand(4));
+        let subscript = |ty: Ty| matches!(ty, Ty::Int | Ty::Dbl | Ty::Num);
+        let feedback = self.feedback_at(inst.pc);
+        let matches = matches!(name, "[" | "[[")
+            && count == 3
+            && state.registers[first] == Ty::Boxed
+            && subscript(state.registers[first + 1])
+            && subscript(state.registers[first + 2])
+            && matches!(feedback, Ty::Dbl | Ty::Int | Ty::Lgl)
+            && values::pairlist_items(self.constant(inst.operand(2)).cdr())
+                .iter()
+                .all(|(tag, _)| *tag == values::nil());
+        matches.then_some(feedback)
+    }
+
     unsafe fn call_builtin(
         &mut self,
         inst: &Inst<'a>,
@@ -3707,23 +3734,15 @@ impl<'a> Builder<'a> {
         {
             return Ok(action);
         }
-        // A matrix's shape is not part of its type, so the read is chosen from the site's
-        // feedback, and compiled code checks the shape on every read.
-        if untagged
-            && name == "["
-            && let [Ty::Boxed, Ty::Int | Ty::Dbl, Ty::Int | Ty::Dbl] = types[..]
-        {
-            let feedback = self.feedback_at(inst.pc);
-            if matches!(feedback, Ty::Dbl | Ty::Int | Ty::Lgl) {
-                state.registers[dst] = feedback;
-                state.visible = Some(true);
-                return Ok(Action::Intrinsic {
-                    intrinsic: Intrinsic::MatrixElement,
-                    dst,
-                    args,
-                    result: feedback,
-                });
-            }
+        if let Some(result) = self.matrix_element(inst, state) {
+            state.registers[dst] = result;
+            state.visible = Some(true);
+            return Ok(Action::Intrinsic {
+                intrinsic: Intrinsic::MatrixElement,
+                dst,
+                args,
+                result,
+            });
         }
         if untagged && let Some((intrinsic, mut result)) = intrinsic_for(name, &types) {
             // A list element is boxed, so its type comes from what the site has read so far,

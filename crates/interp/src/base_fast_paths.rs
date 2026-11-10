@@ -38,6 +38,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rySysSetenv", 0, do_sys_setenv),
     internal("ryFormatDefault", 0, do_format_default),
     internal("ryReduce", 0, do_reduce),
+    internal("ryMessage", 0, do_message),
+    internal("rySignalCondition", 0, do_signal_condition),
 ];
 
 /// The base functions that get a fast path, with the internal their prologue calls and the
@@ -53,6 +55,8 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("Sys.setenv", "rySysSetenv", 0xb3ad8ec3b2915ce0),
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
     ("Reduce", "ryReduce", 0xd929e4c219983788),
+    ("message", "ryMessage", 0x9b452884cddd7ceb),
+    ("signalCondition", "rySignalCondition", 0xfb659fdee977c35c),
 ];
 
 /// Puts the fast paths in front of the base namespace's functions, changing each closure in
@@ -95,7 +99,7 @@ pub unsafe fn prologue_needs_environment(body: Sexp) -> bool {
     let inner = first.cdr().car();
     inner.kind() == SexpType::Language
         && inner.car().kind() == SexpType::Symbol
-        && ["ryMatchArg", "ryReduce", "ryTraceBack"].contains(&&*values::symbol_name(inner.car()))
+        && ["ryMatchArg", "ryReduce", "ryTraceBack", "rySignalCondition"].contains(&&*values::symbol_name(inner.car()))
 }
 
 /// Puts `.Internal(<internal_name>())` in front of the body of `function` when its formals and
@@ -170,6 +174,7 @@ const NATIVE_ENTRIES: &[(&str, u64, NativeEntry)] = &[
     ("is.vector", 0xf347f791e9374052, native_is_vector),
     ("isNamespace", 0x9dbd26992b319771, native_is_namespace),
     ("Sys.unsetenv", 0x3bf70db0fa5a60ee, native_sys_unsetenv),
+    ("getOption", 0x2778de423545af25, native_get_option),
 ];
 
 /// Marks the closures of [`NATIVE_ENTRIES`] whose code matches and records them in
@@ -455,7 +460,7 @@ unsafe fn native_typeof(args: &[Arg]) -> R<Option<Sexp>> {
     let Some([x]) = resolved_all::<1>(args)? else {
         return Ok(None);
     };
-    values::scalar_string(crate::coerce::type_name(x)).map(Some)
+    crate::coerce::type_of(x).map(Some)
 }
 
 /// `inherits(x, what, which)` for `what` a character vector and an `x` that is not an S4
@@ -617,6 +622,30 @@ unsafe fn native_or_else(args: &[Arg]) -> R<Option<Sexp>> {
     resolved(y.value)
 }
 
+/// `getOption(x, default)` of one option name. The R body reads `default` only when the option
+/// is unset.
+unsafe fn native_get_option(args: &[Arg]) -> R<Option<Sexp>> {
+    let (x, default) = match args {
+        [x] => (x, None),
+        [x, default] => (x, Some(default)),
+        _ => return Ok(None),
+    };
+    let Some(name) = resolved(x.value)? else {
+        return Ok(None);
+    };
+    if name.kind() != SexpType::String
+        || length(name) != 1
+        || name.element(0) == values::na_string()
+    {
+        return Ok(None);
+    }
+    let value = crate::envir::option_value(name.element(0));
+    match default {
+        Some(default) if value == nil() => resolved(default.value),
+        _ => Ok(Some(value)),
+    }
+}
+
 /// `Sys.unsetenv(x)` of a character vector, which `as.character()` would leave as it is.
 unsafe fn native_sys_unsetenv(args: &[Arg]) -> R<Option<Sexp>> {
     let Some([x]) = resolved_all::<1>(args)? else {
@@ -632,6 +661,13 @@ unsafe fn native_sys_unsetenv(args: &[Arg]) -> R<Option<Sexp>> {
     )?;
     interp().visible = false;
     Ok(Some(value))
+}
+
+/// Whether the fast paths that skip R frames may run. Setting `RY_FAST_PATHS=0` turns them off,
+/// so a test can compare their output with the R bodies they stand for on the same base R.
+pub(crate) fn fast_paths_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RY_FAST_PATHS").is_none_or(|value| value != "0"))
 }
 
 /// The prologue's result when the R body is to run.
@@ -948,8 +984,8 @@ unsafe fn do_stopifnot(call: &Call<'_>) -> R<Sexp> {
     finish(frame, nil(), false)
 }
 
-/// `Reduce(f, x, init, right)` without `accumulate`, over a plain vector and with `f` a closure
-/// or a builtin. The R body calls `forceAndCall(2, f, init, x[[i]])` per element, which builds a
+/// `Reduce(f, x, init, right, accumulate)` over a plain vector and with `f` a closure or a
+/// builtin. The R body calls `forceAndCall(2, f, init, x[[i]])` per element, which builds a
 /// call and evaluates `x[[i]]` through the evaluator each time; this loop reads the element
 /// directly and passes both arguments as forced promises of the same expressions, so `f` sees
 /// the same call, the same `substitute()` results and the same frame variables `init` and `i`.
@@ -1000,7 +1036,7 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         };
         (right, Some(accumulate))
     };
-    let Some(false) = accumulate else {
+    let Some(accumulate) = accumulate else {
         return decline();
     };
     let symbols = symbols();
@@ -1039,11 +1075,65 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
     } else if argument(ClosureFrame::Env(frame), symbols.init)?.is_none() {
         return decline();
     }
-    let step = |position: usize| -> R<()> {
-        let index = values::scalar_integer(position as i32 + 1)?;
-        eval::define(i_symbol, index, frame)?;
-        let element = crate::subset::subset2(x, &[index], Some(true), element_call)?;
+    // With `accumulate`, `out` holds `len` slots and `out[[slot]] <- init` stores the running
+    // value. The store writes the slot directly while `out` is unshared and `init` is not NULL
+    // (which deletes the slot), and evaluates the assignment itself otherwise.
+    let out_symbol = values::install("out")?;
+    let slots = positions.len() + 1;
+    let store = |slot: usize| -> R<()> {
+        let value = eval::value_of(eval::find_var_in_frame(init_symbol, frame)?)?;
+        let out = eval::value_of(eval::find_var_in_frame(out_symbol, frame)?)?;
+        if value != nil()
+            && out.kind() == SexpType::List
+            && !out.is_altrep()
+            && !values::maybe_shared(out)
+            && slot <= length(out)
+        {
+            crate::heap().set_element(out, slot - 1, value);
+            return Ok(());
+        }
+        let slot = values::scalar_integer(slot as i32)?;
+        crate::heap().root(slot);
+        let target = values::call(symbols.bracket2, &[out_symbol, slot])?;
+        crate::heap().root(target);
+        let assignment = values::call(symbols.assign, &[target, init_symbol])?;
+        crate::heap().root(assignment);
+        eval::eval(assignment, frame).map(drop)
+    };
+    if accumulate {
+        eval::define(symbols.len, values::scalar_integer(slots as i32)?, frame)?;
+        eval::define(out_symbol, values::alloc(SexpType::List, slots)?, frame)?;
+        if right {
+            store(slots)?;
+        } else if missing_init {
+            store(1)?;
+        }
+    }
+    // `i` is bound to one integer updated in place, as `lapply` does, until `f` keeps or
+    // rebinds it (its reference count changes), and a list's elements are read directly.
+    let mut index = values::scalar_integer(0)?;
+    heap.root(index);
+    eval::define(i_symbol, index, frame)?;
+    let mut bound_refcount = index.refcount();
+    let mut step = |position: usize| -> R<()> {
+        if index.refcount() != bound_refcount {
+            index = values::scalar_integer(0)?;
+            crate::heap().root(index);
+            eval::define(i_symbol, index, frame)?;
+            bound_refcount = index.refcount();
+        }
+        index.slice_mut::<i32>()[0] = position as i32 + 1;
+        let element = if x.kind() == SexpType::List {
+            x.element(position)
+        } else {
+            crate::subset::subset2(x, &[index], Some(true), element_call)?
+        };
         crate::heap().root(element);
+        // `for (i in ind) { out[[i]] <- init; init <- f(init, x[[i]]) }` stores before calling.
+        let store_before = accumulate && !missing_init && !right;
+        if store_before {
+            store(position + 1)?;
+        }
         let init = eval::find_var_in_frame(init_symbol, frame)?;
         let init = eval::value_of(init)?;
         let values = if right {
@@ -1052,7 +1142,11 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
             [init, element]
         };
         let value = eval::call_with_values(inner_call, function, &values, frame)?;
-        eval::define(init_symbol, value, frame)
+        eval::define(init_symbol, value, frame)?;
+        if accumulate && !store_before {
+            store(position + 1)?;
+        }
+        Ok(())
     };
     if right {
         for position in positions.rev() {
@@ -1063,8 +1157,45 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
             crate::scope(|| step(position))?;
         }
     }
-    let value = eval::value_of(eval::find_var_in_frame(init_symbol, frame)?)?;
-    finish(ClosureFrame::Env(frame), value, true)
+    if !accumulate {
+        let value = eval::value_of(eval::find_var_in_frame(init_symbol, frame)?)?;
+        return finish(ClosureFrame::Env(frame), value, true);
+    }
+    if !missing_init && !right {
+        store(slots)?;
+    }
+    let out = eval::value_of(eval::find_var_in_frame(out_symbol, frame)?)?;
+    // `if (all(lengths(out) == 1L)) out <- unlist(out, recursive = FALSE)`: with no element an
+    // object (whose `length` and `unlist` could dispatch) the test reads lengths directly.
+    let plain = out.kind() == SexpType::List
+        && !out.is_object()
+        && (0..length(out)).all(|position| {
+            let element = out.element(position);
+            (element.kind().is_atomic() || element.kind() == SexpType::List)
+                && !element.is_object()
+        });
+    if !plain {
+        let tail = crate::lower::parse_text(
+            "if (all(lengths(out) == 1L)) out <- unlist(out, recursive = FALSE)\nout",
+            "<Reduce>",
+        )?;
+        crate::heap().root(tail);
+        let mut value = nil();
+        for position in 0..length(tail) {
+            value = eval::eval(tail.element(position), frame)?;
+        }
+        return finish(ClosureFrame::Env(frame), value, true);
+    }
+    if (0..length(out)).all(|position| length(out.element(position)) == 1) {
+        let no = values::scalar_bool(false)?;
+        crate::heap().root(no);
+        let yes = values::scalar_bool(true)?;
+        crate::heap().root(yes);
+        let value = kernel(crate::combine::do_unlist, &[out, no, yes], ClosureFrame::Env(frame))?;
+        eval::define(out_symbol, value, frame)?;
+        return finish(ClosureFrame::Env(frame), value, true);
+    }
+    finish(ClosureFrame::Env(frame), out, true)
 }
 
 /// Whether `value` has no attribute other than `names`, as `is.vector` requires.
@@ -1446,4 +1577,144 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
         Err(other) => return Err(other),
     };
     finish(frame, result, true)
+}
+
+/// `message(...)` that no handler takes, with arguments that are plain vectors: the text goes
+/// straight to `stderr()`. The R body builds the condition, establishes the `muffleMessage`
+/// restart through `withRestarts` and signals the condition, but without a handler for it no R
+/// code runs while it is signalled, so none of those frames can be observed. A handler, an
+/// argument that needs evaluating, or a `conditionMessage` method of the user's own sends the
+/// call to the R body.
+unsafe fn do_message(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    if !fast_paths_enabled()
+        || crate::conditions::handled(&[b"simpleMessage", b"message", b"condition"])
+        || !is_default(frame, symbols().domain)?
+    {
+        return decline();
+    }
+    let Some(items) = dots(frame)? else {
+        return decline();
+    };
+    let mut parts: SmallVec<[Sexp; 8]> = SmallVec::new();
+    for &(_, item) in &items {
+        let Some(value) = resolved(item)? else {
+            return decline();
+        };
+        let plain = matches!(
+            value.kind(),
+            SexpType::Nil
+                | SexpType::Logical
+                | SexpType::Integer
+                | SexpType::Real
+                | SexpType::String
+        ) && !value.is_object()
+            && !values::has_attributes(value);
+        if !plain {
+            return decline();
+        }
+        parts.push(value);
+    }
+    let Some(append_lf) = flag(frame, symbols().append_lf)? else {
+        return decline();
+    };
+    for name in [
+        symbols().condition_message_simple_message,
+        symbols().condition_message_message,
+    ] {
+        let base = values::base_namespace();
+        if crate::dispatch::lookup_method(name, base, base)?.is_some() {
+            return decline();
+        }
+    }
+    let mut text = Vec::new();
+    for value in parts {
+        let strings = crate::coerce::coerce_vector(value, SexpType::String)?;
+        crate::heap().root(strings);
+        for index in 0..length(strings) {
+            let string = values::string_elt(strings, index);
+            if string == values::na_string() {
+                text.extend_from_slice(b"NA");
+            } else if string.has_gp(gp::LATIN1 | gp::BYTES) {
+                return decline();
+            } else {
+                text.extend_from_slice(string.bytes());
+            }
+        }
+    }
+    if append_lf {
+        text.push(b'\n');
+    }
+    crate::connections::cat_text(crate::connections::stderr_connection()?, &text)?;
+    finish(frame, nil(), false)
+}
+
+/// `signalCondition(cond)` for a condition list whose message and call come from base's
+/// `conditionMessage.condition` and `conditionCall.condition`. The R body reaches them through
+/// `inherits()`, two generics and their methods, which all return before any handler runs, so
+/// only the variables they leave in the frame, `msg` and `call`, can be observed.
+unsafe fn do_signal_condition(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let frame = call.env()?;
+    let Some(condition) = argument(ClosureFrame::Env(frame), symbols().cond)? else {
+        return decline();
+    };
+    let class = values::get_attr(condition, symbols().class);
+    if condition.kind() != SexpType::List
+        || class.kind() != SexpType::String
+        || !(0..length(class)).any(|index| class.element(index).bytes() == b"condition")
+    {
+        return decline();
+    }
+    let (Some(message), Some(condition_call)) = (
+        list_field(condition, b"message"),
+        list_field(condition, b"call"),
+    ) else {
+        return decline();
+    };
+    // `conditionMessage(cond)` and `conditionCall(cond)` dispatch on the class, and the base
+    // methods read the fields with `$`, which dispatches too: only base's `condition` methods
+    // may apply.
+    let base = values::base_namespace();
+    let mut method_name: SmallVec<[u8; 64]> = SmallVec::new();
+    for index in 0..length(class) {
+        let name = class.element(index).bytes();
+        if name == b"condition" {
+            break;
+        }
+        for generic in [&b"conditionMessage"[..], b"conditionCall", b"$"] {
+            method_name.clear();
+            method_name.extend_from_slice(generic);
+            method_name.push(b'.');
+            method_name.extend_from_slice(name);
+            let method = values::install_bytes(&method_name)?;
+            if crate::dispatch::lookup_method(method, frame, base)?.is_some() {
+                return decline();
+            }
+        }
+    }
+    eval::define(symbols().msg, message, frame)?;
+    eval::define(symbols().call, condition_call, frame)?;
+    let value = crate::conditions::signal_condition(condition, condition_call)?;
+    finish(ClosureFrame::Env(frame), value, true)
+}
+
+/// `list$name` for a list without a `$` method: the element named exactly `name`, or `NULL`
+/// when no name begins with `name`. `None` when only a partial match could find it, which the R
+/// body resolves (and may warn about under `warnPartialMatchDollar`).
+unsafe fn list_field(list: Sexp, name: &[u8]) -> Option<Sexp> {
+    let names = values::get_attr(list, symbols().names);
+    if names.kind() != SexpType::String {
+        return Some(nil());
+    }
+    let count = length(names).min(length(list));
+    if let Some(index) = (0..count).find(|&index| names.element(index).bytes() == name) {
+        return Some(list.element(index));
+    }
+    if (0..count).any(|index| names.element(index).bytes().starts_with(name)) {
+        return None;
+    }
+    Some(nil())
 }

@@ -21,7 +21,7 @@
 |  - attr(*, "names")= chr [1:2] "RY_ORACLE_T3" "RY_ORACLE_T4"
 |  chr "error: all arguments must be named"
 |  chr "error: all arguments must be named"
-|  chr "error: wrong length for argument"
+|  chr "error: 'names' and 'val' are of different lengths"
 |  logi [1:2] TRUE TRUE
 |  Named chr [1:2] "1" "1"
 |  - attr(*, "names")= chr [1:2] "RY_ORACLE_T5" "RY_ORACLE_T6"

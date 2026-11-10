@@ -61,7 +61,7 @@ const WORDS: [&str; 8] = ["alpha", "b", "", "Gamma", "delta e", "x1", "NA", "zz"
 
 impl Generator {
     fn block_text(&mut self) -> String {
-        match self.rng.below(26) {
+        match self.rng.below(28) {
             0..=3 => self.hot_scalar_loop(),
             4..=5 => self.vector_writes(),
             6 => self.while_and_repeat(),
@@ -83,6 +83,8 @@ impl Generator {
             22 => self.ill_typed_block(),
             23 => self.constant_defaults(),
             24 => self.loop_variable_aliasing(),
+            25 => self.named_appends(),
+            26 => self.slabs_and_rounding(),
             _ => self.global_scalars(),
         }
     }
@@ -537,6 +539,70 @@ impl Generator {
         text
     }
 
+    /// Names appended and replaced with `$<-`, `[[<-` and `[<-` on locals, shared copies and
+    /// arguments, over lists and atomic vectors, so every in-place and copying path of a
+    /// compiled element assignment meets GNU R's replacement functions.
+    fn named_appends(&mut self) -> String {
+        let k = self.block;
+        let start = [
+            "list()",
+            "list(a = 1)",
+            "c(a = 1)",
+            "c(a = 1L)",
+            "c(a = \"x\")",
+            "list(1, 2)",
+            "c(1, 2)",
+        ][self.rng.below(7)];
+        let value = match start {
+            "c(a = 1L)" => "i",
+            "c(a = \"x\")" => "as.character(i)",
+            _ => "i * 0.5",
+        };
+        let name = [
+            "paste0(\"k\", i %% 3)",
+            "\"a\"",
+            "letters[i]",
+            "NA_character_",
+        ][self.rng.below(4)];
+        let form = match self.rng.below(3) {
+            0 => format!("x[[{name}]] <- {value}"),
+            1 => format!("x[{name}] <- {value}"),
+            _ => format!("x$k <- {value}"),
+        };
+        let share = if self.rng.chance(1, 2) {
+            "kept <- x\n    "
+        } else {
+            ""
+        };
+        let size = 1 + self.rng.below(6);
+        format!(
+            "ap{k} <- function(x, n) {{\n  for (i in seq_len(n)) {{\n    {share}{form}\n  }}\n  x\n}}\nbase{k} <- {start}\nstr(ap{k}(base{k}, {size}))\nstr(base{k})\nstr(Reduce(function(acc, i) {{ acc[[paste0(\"r\", i %% 2)]] <- i; acc }}, seq_len({size}), {start}))\n"
+        )
+    }
+
+    /// Whole rows, columns and slabs assigned with recycling, and `round` over vectors with
+    /// ties, signed zeros, NA and a random digit count.
+    fn slabs_and_rounding(&mut self) -> String {
+        let k = self.block;
+        let rows = 1 + self.rng.below(5);
+        let columns = 1 + self.rng.below(4);
+        let column = 1 + self.rng.below(columns);
+        let row = 1 + self.rng.below(rows);
+        let recycle = if rows % 2 == 0 { "c(-1, 1)" } else { "-1" };
+        let digits = self.rng.below(7) as i64 - 2;
+        let kind = ["0", "0L", "FALSE"][self.rng.below(3)];
+        let subscript =
+            ["i", "-i", "i + 0.5", "-(i + 0L)", "c(i, NA)", "i - 1L"][self.rng.below(6)];
+        let fill = match kind {
+            "0L" => format!("seq_len({rows})"),
+            "FALSE" => format!("rep(c(TRUE, NA), length.out = {rows})"),
+            _ => format!("seq_len({rows}) / 3"),
+        };
+        format!(
+            "sm{k} <- matrix({kind}, {rows}, {columns})\nsalias{k} <- sm{k}\nsm{k}[, {column}] <- {fill}\nprint(sm{k})\nprint(salias{k})\nsm{k}[{row}, ] <- sm{k}[{row}, ]\nsn{k} <- matrix(0, {rows}, {columns})\nsn{k}[, {column}] <- {recycle}\nprint(sn{k})\nprint(round(c(0.5, 1.5, 2.5, -0.5, -0, 0.125, 2.675, NA, NaN, Inf, {rows}.{columns}5), {digits}))\nprint(round(seq_len({rows}) / 7 * 100, {digits}))\nprint(c(a = {rows}, b = {columns}, {rows}))\nfor (i in seq_len({rows} + 1L)) print(list(sm{k}[{subscript}], c(p = 1, q = 2)[{subscript}], -i))\n"
+        )
+    }
+
     fn integer_arithmetic(&mut self) -> String {
         let k = self.block;
         let left = self.rng.below(41) as i64 - 20;
@@ -873,10 +939,12 @@ pub fn check_seed(
             Err(EngineError::Unavailable(reason)) => {
                 unavailable.push(format!("{}: {reason}", engine.name()))
             }
-            Err(EngineError::Failed(reason)) => divergences.push(Divergence {
-                engine: engine.name(),
-                detail: reason,
-            }),
+            Err(EngineError::Failed(reason) | EngineError::Crashed(reason)) => {
+                divergences.push(Divergence {
+                    engine: engine.name(),
+                    detail: reason,
+                })
+            }
         }
     }
     if let Err(error) = std::fs::remove_file(&path) {

@@ -5,7 +5,7 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, builtin, internal},
-        code_image,
+        code_image::{self, Source},
         connections::Rconnection,
         eval,
         unwind::{R, error},
@@ -442,12 +442,14 @@ impl Reader<'_> {
                 } else {
                     // The hook may read from the same connection.
                     self.settle()?;
-                    eval::apply(
-                        nil(),
-                        self.hook,
-                        &eval::value_args(&[names]),
-                        values::global_env(),
-                    )?
+                    outside_pretenuring(|| {
+                        eval::apply(
+                            nil(),
+                            self.hook,
+                            &eval::value_args(&[names]),
+                            values::global_env(),
+                        )
+                    })?
                 };
                 self.add_reference(value);
                 return Ok(value);
@@ -460,31 +462,36 @@ impl Reader<'_> {
             }
             PACKAGESXP => {
                 let names = self.string_vector()?;
-                let function =
-                    eval::find_fun(values::install("findPackageEnv")?, values::base_env())?;
-                let env = eval::apply(
-                    nil(),
-                    function,
-                    &eval::value_args(&[names]),
-                    values::global_env(),
-                )?;
+                let env = outside_pretenuring(|| {
+                    let function =
+                        eval::find_fun(values::install("findPackageEnv")?, values::base_env())?;
+                    eval::apply(
+                        nil(),
+                        function,
+                        &eval::value_args(&[names]),
+                        values::global_env(),
+                    )
+                })?;
                 self.add_reference(env);
                 return Ok(env);
             }
             NAMESPACESXP => {
                 let names = self.string_vector()?;
-                let function =
-                    eval::find_fun(values::install("..getNamespace")?, values::base_env())?;
-                // GNU R names the object being read when it knows it, else "<unknown>", which
-                // `..getNamespace` compares as a string when the namespace fails to load.
-                let location = values::scalar_string("<unknown>")?;
-                crate::heap().root(location);
-                let env = eval::apply(
-                    nil(),
-                    function,
-                    &eval::value_args(&[names, location]),
-                    values::global_env(),
-                )?;
+                let env = outside_pretenuring(|| {
+                    let function =
+                        eval::find_fun(values::install("..getNamespace")?, values::base_env())?;
+                    // GNU R names the object being read when it knows it, else "<unknown>",
+                    // which `..getNamespace` compares as a string when the namespace fails to
+                    // load.
+                    let location = values::scalar_string("<unknown>")?;
+                    crate::heap().root(location);
+                    eval::apply(
+                        nil(),
+                        function,
+                        &eval::value_args(&[names, location]),
+                        values::global_env(),
+                    )
+                })?;
                 self.add_reference(env);
                 return Ok(env);
             }
@@ -1063,19 +1070,8 @@ unsafe fn read_header(reader: &mut Reader<'_>) -> R<Header> {
 
 // Lazy-load databases.
 
-/// The contents of lazy-load database files, read once per session.
-fn file_cache() -> &'static mut FxHashMap<String, Vec<u8>> {
-    static mut CACHE: Option<FxHashMap<String, Vec<u8>>> = None;
-    // SAFETY: single-threaded access, as for the rest of the interpreter state.
-    #[allow(static_mut_refs)]
-    unsafe {
-        CACHE.get_or_insert_with(FxHashMap::default)
-    }
-}
-
-/// Drops a database file from the read cache, because the installer appends to it.
+/// Drops a database file this process mapped, because the installer appends to it.
 pub fn forget_database(path: &str) {
-    file_cache().remove(path);
     code_image::forget(path);
 }
 
@@ -1227,43 +1223,86 @@ fn inflate_into(input: &[u8], output: &mut Vec<u8>, limit: usize) -> Result<(), 
 
 /// `lazyLoadDBfetch(key, file, compressed, hook)`.
 unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
-    let file = values::require_string(call.arg(1), "file")?;
+    let database = code_image::database(database_name(call.arg(1), "file")?);
     let key = call.arg(0);
     let compressed = values::as_integer_scalar(call.arg(2));
     let hook = call.arg(3);
-    let record = cached_record(key, &file)?;
-    let image_record = code_image::wants(&file)?
-        .then(|| code_image::Record::of(crate::subset::numeric_element(key, 0) as u64, record));
-    // The record is decoded (or copied) out of the cached file before `unserialize` runs, because
-    // its refhook can fetch from another database and so insert into the cache.
-    let data = if compressed != 0 {
-        decompress_record(record, compressed)?
-    } else {
-        record.to_vec()
-    };
-    let value = match image_record {
-        Some(image_record) => code_image::read_record(&file, image_record, &data, hook)?,
-        None => unserialize(&data, hook)?,
-    };
+    let (offset, size) = record_key(key);
+    // A record is decoded (or copied) out of the mapped database before `unserialize` runs,
+    // because its refhook can fetch from another database and so map it.
+    let value = pretenured(|| match code_image::source(database, offset as u64, size)? {
+        Source::Image(record) => code_image::read_image_record(database, &record, hook),
+        Source::Recording => {
+            let stream = record_stream(database, offset, size, compressed)?;
+            code_image::read_recorded(database, offset as u64, size, stream, hook)
+        }
+        Source::Database => unserialize(&record_stream(database, offset, size, compressed)?, hook),
+    })?;
     if value.kind() == SexpType::Promise {
         return eval::force_promise(value);
     }
     Ok(value)
 }
 
-/// The bytes of the record at `key` (offset and length) in the cached database `file`.
-unsafe fn cached_record(key: Sexp, file: &str) -> R<&'static [u8]> {
-    let offset = crate::subset::numeric_element(key, 0) as usize;
-    let size = crate::subset::numeric_element(key, 1) as usize;
-    let cache = file_cache();
-    if !cache.contains_key(file) {
-        let bytes = std::fs::read(file)
-            .map_err(|failure| error(format!("cannot open file '{file}': {failure}")))?;
-        cache.insert(file.to_owned(), bytes);
+/// Runs `read` with what it allocates pretenured ([`heap::Heap::begin_pretenuring`]). A lazy-load
+/// fetch builds a package's functions and data, which live as long as the session, and in a
+/// package load almost all of what minor collections traced was such objects, traced only to
+/// be promoted.
+unsafe fn pretenured<T>(read: impl FnOnce() -> R<T>) -> R<T> {
+    struct End;
+    impl Drop for End {
+        fn drop(&mut self) {
+            // SAFETY: the guard lives on the interpreter's thread, inside the pretenuring it ends.
+            unsafe { crate::heap().end_pretenuring() }
+        }
     }
-    cache[file]
-        .get(offset..offset.saturating_add(size))
-        .ok_or_else(|| error("lazy-load database is corrupt"))
+    crate::heap().begin_pretenuring();
+    let _end = End;
+    read()
+}
+
+/// Runs R code from inside [`pretenured`] with young allocation: a hook's temporaries are
+/// garbage, which the old generation would keep until an intermediate collection, and the hook
+/// may need a collection to finish.
+unsafe fn outside_pretenuring<T>(run: impl FnOnce() -> R<T>) -> R<T> {
+    struct Resume(u32);
+    impl Drop for Resume {
+        fn drop(&mut self) {
+            crate::heap().resume_pretenuring(self.0);
+        }
+    }
+    let _resume = Resume(unsafe { crate::heap().suspend_pretenuring() });
+    run()
+}
+
+/// The `CHARSXP` of the database path `file`, a single string.
+unsafe fn database_name(file: Sexp, what: &str) -> R<Sexp> {
+    if file.kind() != SexpType::String || length(file) != 1 {
+        return Err(error(format!("invalid '{what}' argument")));
+    }
+    let name = values::string_elt(file, 0);
+    if name == values::na_string() {
+        return Err(error(format!("invalid '{what}' argument")));
+    }
+    Ok(name)
+}
+
+/// The offset and length a lazy-load key names.
+unsafe fn record_key(key: Sexp) -> (usize, usize) {
+    (
+        crate::subset::numeric_element(key, 0) as usize,
+        crate::subset::numeric_element(key, 1) as usize,
+    )
+}
+
+/// The decompressed stream of the record at `offset` of `database`.
+unsafe fn record_stream(database: u32, offset: usize, size: usize, compressed: i32) -> R<Vec<u8>> {
+    let record = code_image::database_record(database, offset, size)?;
+    if compressed != 0 {
+        decompress_record(record, compressed)
+    } else {
+        Ok(record.to_vec())
+    }
 }
 
 /// The object a lazy-load promise (`lazyLoadDBfetch(key, datafile, compressed, envhook)` as
@@ -1300,12 +1339,22 @@ pub unsafe fn lazy_record_header(promise: Sexp) -> R<Option<(u32, bool, u16)>> {
     {
         return Ok(None);
     }
-    let file = values::require_string(file, "file")?;
+    let database = code_image::database(database_name(file, "file")?);
     // The format line, the header (with a version-3 encoding name) and the object's flags fit
-    // in the first 64 bytes, so only those are inflated.
-    let record = cached_record(key, &file)?;
-    let Some(data) = record_prefix(record, values::as_integer_scalar(compressed), 64)? else {
-        return Ok(None);
+    // in the first 64 bytes, so only those are read, from the image or by inflating the record.
+    let (offset, size) = record_key(key);
+    let data = match code_image::source(database, offset as u64, size)? {
+        Source::Image(record) => {
+            let stream = code_image::stream(&record);
+            stream[..stream.len().min(64)].to_vec()
+        }
+        Source::Recording | Source::Database => {
+            let record = code_image::database_record(database, offset, size)?;
+            match record_prefix(record, values::as_integer_scalar(compressed), 64)? {
+                Some(data) => data,
+                None => return Ok(None),
+            }
+        }
     };
     let (format, skip) = match data.get(..2) {
         Some(b"X\n") => (Format::Xdr, 2),
@@ -1795,8 +1844,18 @@ impl Encoder<'_> {
         }
         let words = values::ints(code.car());
         write_varint(self.out, words.len() as u64);
-        for &word in words {
-            write_varint(self.out, u64::from(word as u32));
+        // Tier 0 specializes instructions in place for the operands this process saw, so an
+        // image keeps each instruction as the compiler emitted it.
+        let mut next_instruction = 0;
+        for (pc, &word) in words.iter().enumerate() {
+            let mut word = word as u32;
+            if pc == next_instruction {
+                let op =
+                    crate::bytecode::op_of(word).ok_or(Unencodable("an invalid instruction"))?;
+                word = crate::bytecode::op_word(op);
+                next_instruction = pc + 1 + crate::bytecode::operand_count(op);
+            }
+            write_varint(self.out, u64::from(word));
         }
         let constants = code.cdr();
         let count = length(constants);

@@ -72,27 +72,45 @@ pub(crate) unsafe fn trace_restarts(stack: &RestartStack, marker: &mut Marker<'_
     }
 }
 
+/// Whether a handler on the stack takes a condition of one of `classes`. When none does,
+/// signalling such a condition runs no R code, so nothing can observe the frames GNU R pushes to
+/// signal it, and a fast path may skip them and go straight to the default handler.
+pub(crate) unsafe fn handled(classes: &[&[u8]]) -> bool {
+    let mut entry = interp().handlers.as_ref();
+    while let Some(handler) = entry {
+        if classes.contains(&handler.class.bytes()) {
+            return true;
+        }
+        entry = handler.next.as_ref();
+    }
+    false
+}
+
 /// The topmost handler for one of `classes`, and the stack below it.
 unsafe fn find_handler(stack: &HandlerStack, classes: &[&[u8]]) -> Option<Rc<Handler>> {
-    let mut entry = stack.clone();
+    find_handler_where(stack, |class| classes.contains(&class))
+}
+
+/// The topmost handler whose class satisfies `takes`. The walk borrows the stack and clones
+/// only the handler it returns.
+unsafe fn find_handler_where(
+    stack: &HandlerStack,
+    takes: impl Fn(&[u8]) -> bool,
+) -> Option<Rc<Handler>> {
+    let mut entry = stack.as_ref();
     while let Some(handler) = entry {
-        let class = handler.class.bytes();
-        if classes.contains(&class) {
-            return Some(handler);
+        if takes(handler.class.bytes()) {
+            return Some(handler.clone());
         }
-        entry = handler.next.clone();
+        entry = handler.next.as_ref();
     }
     None
 }
 
-unsafe fn condition_classes(condition: Sexp) -> Vec<Vec<u8>> {
-    let class = values::get_attr(condition, symbols().class);
-    if class.kind() != SexpType::String {
-        return Vec::new();
-    }
-    (0..length(class))
-        .map(|index| class.element(index).bytes().to_vec())
-        .collect()
+/// Whether the class attribute of a condition, `class`, names `wanted`.
+unsafe fn class_names(class: Sexp, wanted: &[u8]) -> bool {
+    class.kind() == SexpType::String
+        && (0..length(class)).any(|index| class.element(index).bytes() == wanted)
 }
 
 /// Signals an error raised by a builtin, native code or the evaluator: runs the calling
@@ -439,6 +457,15 @@ pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
     let call = resolve_call(call);
     let message = message.into();
     let hook = values::install(".signalSimpleWarning")?;
+    // Without a handler for the warning, `.signalSimpleWarning` only runs the default handler.
+    // Its frames are then observable only when `options(warn = 2)` turns the warning into an
+    // error, whose handlers and traceback see them.
+    if crate::base_fast_paths::fast_paths_enabled()
+        && !handled(&[b"simpleWarning", b"warning", b"condition"])
+        && warn_level() < 2
+    {
+        return default_warning(call, &message);
+    }
     if crate::heap()
         .frame_cell(values::base_namespace(), hook)
         .is_some()
@@ -481,12 +508,7 @@ pub unsafe fn default_warning(call: Sexp, message: &str) -> R<()> {
     } else {
         message
     };
-    let level = crate::envir::get_option("warn");
-    let level = if level == nil() {
-        0
-    } else {
-        values::as_integer_scalar(level)
-    };
+    let level = warn_level();
     if level < 0 {
         return Ok(());
     }
@@ -506,6 +528,16 @@ pub unsafe fn default_warning(call: Sexp, message: &str) -> R<()> {
         state.warnings.push((call, message.to_owned()));
     }
     Ok(())
+}
+
+/// `getOption("warn")`, 0 when unset.
+unsafe fn warn_level() -> i32 {
+    let level = crate::envir::get_option("warn");
+    if level == nil() {
+        0
+    } else {
+        values::as_integer_scalar(level)
+    }
 }
 
 /// How many deferred warnings are kept: `getOption("nwarnings")`, 50 by default.
@@ -684,13 +716,20 @@ unsafe fn do_reset_cond_hands(_call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_signal_condition(call: &Call<'_>) -> R<Sexp> {
+    signal_condition(call.arg(0), call.arg(2))
+}
+
+/// Runs the handlers that take `condition`, as `.signalCondition(cond, message, call)`: each
+/// calling handler in turn from the top of the stack, until an exiting one unwinds to its
+/// `tryCatch`. Returns `NULL` when none unwinds.
+pub(crate) unsafe fn signal_condition(condition: Sexp, condition_call: Sexp) -> R<Sexp> {
     activity::count(Counter::ConditionsSignalled);
-    let condition = call.arg(0);
-    let condition_call = call.arg(2);
-    let classes = condition_classes(condition);
-    let class_slices: Vec<&[u8]> = classes.iter().map(Vec::as_slice).collect();
     let saved = interp().handlers.clone();
-    while let Some(entry) = find_handler(&interp().handlers, &class_slices) {
+    // A calling handler may change the condition's class, which GNU R reads afresh for each
+    // handler it looks for.
+    while let Some(entry) = find_handler_where(&interp().handlers, |wanted| {
+        class_names(values::get_attr(condition, symbols().class), wanted)
+    }) {
         interp().handlers = entry.next.clone();
         if entry.calling {
             let handler_call = values::call(entry.handler, &[condition])?;

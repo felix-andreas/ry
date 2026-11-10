@@ -6,6 +6,8 @@
 //!   branch and loop programs, including NA, integer overflow and errors, and on random reads and
 //!   writes of attributes, names and elements and `c()` calls, whose compiled calls take the
 //!   builtins' direct entries;
+//! - tier 0 resumes a call at every pc it reaches with the result it gives alone, the way it
+//!   resumes after the optimizing tier deoptimizes;
 //! - reading a corrupted serialized stream fails with an R error, never a panic;
 //! - a compiled closure's code survives the code image's encoding, and a corrupted image or code
 //!   object fails with an error, never a panic.
@@ -24,8 +26,9 @@ use {
         testing::{
             check_bytecode_agreement, check_code_image_file, check_code_image_load,
             check_code_image_round_trip, check_element_access_agreement,
-            check_environment_agreement, check_fused_agreement, check_lowering_input,
-            check_render_drawing, check_unserialize_input, with_interpreter,
+            check_environment_agreement, check_fused_agreement, check_image_bodies_round_trip,
+            check_lowering_input, check_quickening_agreement, check_render_drawing,
+            check_resume_at_every_pc, check_unserialize_input, with_interpreter,
         },
         values,
     },
@@ -128,6 +131,18 @@ fn fuzz_bytecode_agrees_with_the_ast_evaluator() {
 }
 
 #[test]
+fn fuzz_quickened_arithmetic_agrees_with_the_ast_evaluator() {
+    for_each_seed(300, |seed| {
+        check_quickening_agreement(&mut SplitMix64(seed))
+    });
+}
+
+#[test]
+fn fuzz_tier_zero_resumes_at_every_pc() {
+    for_each_seed(60, |seed| check_resume_at_every_pc(&mut SplitMix64(seed)));
+}
+
+#[test]
 fn fuzz_element_access_agrees_with_the_ast_evaluator() {
     for_each_seed(300, |seed| {
         check_element_access_agreement(&mut SplitMix64(seed))
@@ -136,7 +151,9 @@ fn fuzz_element_access_agrees_with_the_ast_evaluator() {
 
 #[test]
 fn fuzz_environment_variables_agree_with_the_c_library() {
-    for_each_seed(200, |seed| check_environment_agreement(&mut SplitMix64(seed)));
+    for_each_seed(200, |seed| {
+        check_environment_agreement(&mut SplitMix64(seed))
+    });
 }
 
 #[test]
@@ -144,6 +161,11 @@ fn fuzz_code_image_round_trip() {
     for_each_seed(150, |seed| {
         check_code_image_round_trip(&mut SplitMix64(seed))
     });
+}
+
+#[test]
+fn code_image_round_trips_every_image_body() {
+    check_image_bodies_round_trip();
 }
 
 #[test]
