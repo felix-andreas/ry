@@ -1772,22 +1772,27 @@ fn run_interning(seed: u64, steps: usize, stress: bool) {
     let mut symbols: HashMap<Vec<u8>, Sexp> = HashMap::new();
     let initial_symbols = heap.symbol_count();
     unsafe {
-        let check_symbol = |heap: &mut Heap, symbols: &mut HashMap<Vec<u8>, Sexp>, name: Vec<u8>| {
-            let symbol = heap.install(&name).expect("install");
-            assert_eq!(symbol.kind(), SexpType::Symbol);
-            assert_eq!(symbol.car().bytes(), name.as_slice(), "a symbol's print name");
-            assert_eq!(heap.find_symbol(&name), Some(symbol));
-            match symbols.get(&name) {
-                Some(&known) => assert_eq!(symbol, known, "a name installed twice"),
-                None => {
-                    assert!(
-                        !symbols.values().any(|&other| other == symbol),
-                        "two names share a symbol"
-                    );
-                    symbols.insert(name, symbol);
+        let check_symbol =
+            |heap: &mut Heap, symbols: &mut HashMap<Vec<u8>, Sexp>, name: Vec<u8>| {
+                let symbol = heap.install(&name).expect("install");
+                assert_eq!(symbol.kind(), SexpType::Symbol);
+                assert_eq!(
+                    symbol.car().bytes(),
+                    name.as_slice(),
+                    "a symbol's print name"
+                );
+                assert_eq!(heap.find_symbol(&name), Some(symbol));
+                match symbols.get(&name) {
+                    Some(&known) => assert_eq!(symbol, known, "a name installed twice"),
+                    None => {
+                        assert!(
+                            !symbols.values().any(|&other| other == symbol),
+                            "two names share a symbol"
+                        );
+                        symbols.insert(name, symbol);
+                    }
                 }
-            }
-        };
+            };
         // Enough names to grow the symbol table at least once in most seeds.
         for _ in 0..rng.below(6000) {
             let mut name = b"fz_".to_vec();
@@ -1871,5 +1876,7 @@ fn fuzz_interning_agrees_with_a_reference_map() {
 
 #[test]
 fn fuzz_interning_agrees_with_a_reference_map_under_stress() {
-    for_each_seed(fuzz_iterations(4), |seed| run_interning(500 + seed, 300, true));
+    for_each_seed(fuzz_iterations(4), |seed| {
+        run_interning(500 + seed, 300, true)
+    });
 }

@@ -597,7 +597,8 @@ impl crate::boundary::Handout for Option<Sexp> {
 const NATIVE_BUILTINS: &[BuiltinDef] = &[
     builtin(".Call", -1, |call| unsafe {
         foreign_context(call.call, || dot_call(call, RoutineKind::Call))
-    }),
+    })
+    .direct(crate::dot_call::direct_call),
     builtin(".External", -1, |call| unsafe {
         foreign_context(call.call, || dot_call(call, RoutineKind::External))
     }),

@@ -1059,14 +1059,18 @@ pub unsafe fn call_builtin(
 /// full call. The entry is skipped while a profile or activity trace is being taken, so that
 /// samples and counts name the builtin as the full call does.
 #[inline]
-pub unsafe fn call_direct(definition: &BuiltinDef, args: &[Sexp]) -> R<Option<Sexp>> {
+pub unsafe fn call_direct(
+    definition: &BuiltinDef,
+    call: Sexp,
+    args: &[Sexp],
+) -> R<Option<Sexp>> {
     let Some(direct) = definition.direct else {
         return Ok(None);
     };
     if activity::enabled() || PROFILE_TICK.load(Ordering::Relaxed) {
         return Ok(None);
     }
-    let value = scope(|| direct(args))
+    let value = scope(|| direct(call, args))
         .and_then(|value| crate::unwind::raise_parked().map(|()| value))
         .map_err(|unwind| builtin_failure(definition, unwind))?;
     if value.is_some() {

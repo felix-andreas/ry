@@ -103,7 +103,8 @@ impl Samples {
             | Activity::S3Dispatch
             | Activity::S4Dispatch
             | Activity::Collector
-            | Activity::JitCompile => (innermost_owner, Slot::Overhead),
+            | Activity::JitCompile
+            | Activity::Profiler => (innermost_owner, Slot::Overhead),
             _ => (innermost_owner, Slot::Code),
         };
         let time = self.packages.entry(package).or_default();

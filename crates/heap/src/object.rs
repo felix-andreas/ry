@@ -1171,24 +1171,8 @@ impl Sexp {
         }
     }
 
-    /// Writes the flag byte whole, as an image load restores it.
-    pub(crate) unsafe fn set_flags(self, flags: u8) {
-        unsafe { self.header().flags.set(flags) }
-    }
-
     pub(crate) unsafe fn set_refcount(self, count: u16) {
         unsafe { self.header().refcount.set(count) }
-    }
-
-    /// Writes a fresh record's layout id and slot count, with every slot a handle until the
-    /// slots are stored.
-    pub(crate) unsafe fn init_record_header(self, layout: u32, slot_count: u32) {
-        unsafe {
-            let payload = self.payload::<RecordObject>();
-            payload.layout.set(layout);
-            payload.slot_count.set(slot_count);
-            payload.unboxed.set(0);
-        }
     }
 
     /// Slot `index` as its stored eight bytes, with whether they are a raw number.
@@ -1200,14 +1184,56 @@ impl Sexp {
         }
     }
 
-    /// Stores slot `index` from its eight bytes, as [`Sexp::record_slot_bits`] read them.
-    pub(crate) unsafe fn set_record_slot_bits(self, index: usize, bits: u64, raw: bool) {
+    /// Calls `visit` with the address of every field of the object that holds a handle: the
+    /// attributes, then the fields of its shape. A frame's bindings live outside these fields and
+    /// are not visited; a weak reference's key and value, and a weak-pair list's elements, are.
+    pub(crate) unsafe fn for_each_handle_field(self, visit: &mut dyn FnMut(*mut Sexp)) {
         unsafe {
-            if index < UNBOXED_SLOTS && raw {
-                let payload = self.payload::<RecordObject>();
-                payload.unboxed.set(payload.unboxed.get() | 1 << index);
+            visit(self.header().attrib.as_ptr());
+            if self.is_altrep() {
+                let triple = self.payload::<TripleObject>();
+                for field in [&triple.first, &triple.second, &triple.third] {
+                    visit(field.as_ptr());
+                }
+                return;
             }
-            *(self.record_slots() as *mut u64).add(index) = bits;
+            match self.kind().shape() {
+                Shape::Vector => {
+                    if holds_handles(self.kind()) {
+                        let data = self.data() as *mut Sexp;
+                        for index in 0..self.length() as usize {
+                            visit(data.add(index));
+                        }
+                    }
+                }
+                Shape::Triple => {
+                    let triple = self.payload::<TripleObject>();
+                    for field in [&triple.first, &triple.second, &triple.third] {
+                        visit(field.as_ptr());
+                    }
+                }
+                Shape::Environment => visit(self.payload::<EnvironmentObject>().enclosure.as_ptr()),
+                Shape::ExternalPtr => {
+                    let pointer = self.payload::<ExternalPtrObject>();
+                    visit(pointer.tag.as_ptr());
+                    visit(pointer.protected.as_ptr());
+                }
+                Shape::WeakRef => {
+                    let weak = self.payload::<WeakRefObject>();
+                    for field in [&weak.key, &weak.value, &weak.finalizer] {
+                        visit(field.as_ptr());
+                    }
+                }
+                Shape::Record => {
+                    let slots = self.record_slots() as *mut Sexp;
+                    for index in 0..self.record_slot_count() {
+                        if !self.record_slot_bits(index).1 {
+                            visit(slots.add(index));
+                        }
+                    }
+                }
+                Shape::Primitive => {}
+            }
         }
     }
 

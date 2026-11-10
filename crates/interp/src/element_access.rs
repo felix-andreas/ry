@@ -20,7 +20,7 @@ use {
 /// `x[[i, j]]` for a matrix `x` with positions `i` and `j` within its rows and columns. Anything
 /// else (out of bounds, a missing name, a recursive subscript, a name in a matrix subscript)
 /// declines to `[[`'s full path, which owns those errors and results.
-pub(crate) unsafe fn direct_subset2(args: &[Sexp]) -> R<Option<Sexp>> {
+pub(crate) unsafe fn direct_subset2(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
     let (object, index, column) = match *args {
         [object, index] => (object, index, None),
         [object, row, column] => (object, row, Some(column)),
