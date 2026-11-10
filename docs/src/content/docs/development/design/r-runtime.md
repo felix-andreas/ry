@@ -983,7 +983,7 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | Per-signature numeric specialization of vector code | Julia | planned | | |
 | Effect-free `lapply`, `vapply`, `Map` and long element-wise operations across cores; reductions stay sequential | Bend | planned | wall time of independent per-element work | |
 | **5. Memory and start-up** | | | | |
-| A start-up image mapped read-only and shared | V8 snapshots, Bun | planned | stats-only start-up peak | |
+| A start-up image of the heap's pages at a fixed address, mapped privately and shared until written | V8 snapshots, Bun | built | empty `ry run` 121.5M to 47.9M instructions, 38.5 to 29.2 ms; 4 concurrent workers 117 to 87 MB Pss | `crates/heap/src/image.rs`, `fill_from` in `crates/interp/src/image.rs` |
 | No major collection while a namespace loads; the limit is rebased when the outermost load returns | ry | built | 2 major collections to 0 loading testthat, xts, data.table and a 40,744-object package; GC 15.7% to about 5% of the load | `enter_namespace_load` in `crates/heap/src/heap.rs` |
 | Lazy-load records read with borrowed strings, bulk vectors and iterative pairlists; `makeLazy` with GNU R's shared environment; S4-generic checks answered from a record's header | GNU R | built | `library()` of 11 packages: 1,197.8M to 1,133.0M instructions, 914 records fetched to 651 | `crates/interp/src/serialize.rs`, `do_local_s4_generics` in `envir.rs` |
 | Card marking for remembered old objects | V8, HotSpot | planned | minor collections during a load cost about 24M instructions each, mostly re-marking namespace frames being filled | |
@@ -1024,6 +1024,12 @@ R's vector builtins share one kernel layer in `crates/interp/src/kernels.rs`, wh
   operands, and reads that operand from the output buffer, so aliasing is exact under recycling.
   A destination of length one is never reused, because the shared `TRUE`, `FALSE` and `NA`
   constants can look private. A scalar operand of a math function, a comparison or unary minus is answered without the element loop.
+- **Complex arithmetic.** `+`, `-`, `*`, `/` and `^` with a complex operand run as slice kernels
+  under the same reuse rule. `*` and `/` are ports of libgcc's `__muldc3` and `__divdc3`, which
+  GCC-compiled GNU R uses and Rust's runtime replaces with compiler-rt's, and every step keeps
+  GCC's operand order so the same NaN payload wins: results match GNU R bit for bit, `NA` versus
+  `NaN` included. `^` is GNU R's `mycpow`, and `z^2` reproduces `R_cpow_n`'s `1 * (z * z)`. A double
+  beside a complex vector is lifted per element, NA as `NA + 0i`.
 - **Reductions.** `sum` on integers, `any`, `all`, `min`, `max` and `range` are SIMD kernels;
   `range` finds both bounds in one pass. `prod` and the double `sum` accumulate in x87 long double
   as GNU R does, so they keep scalar loops.

@@ -4973,12 +4973,15 @@ unsafe fn do_make_lazy(call: &Call<'_>) -> R<Sexp> {
     let expression = call.arg(2);
     let eval_env = call.arg(3);
     let assign_env = call.arg(4);
+    if names.kind() != SexpType::String && names != nil() {
+        return Err(error("invalid first argument"));
+    }
     // As in GNU R, each promise's code is a copy of `expression` with its first argument
     // replaced by the variable's key, and every promise shares `eval_env`, so `PRCODE` reads
     // `lazyLoadDBfetch(c(offset, length), datafile, compressed, envhook)`.
     for index in 0..length(names) {
         crate::scope(|| {
-            let symbol = values::install(&values::string_at(names, index).unwrap_or_default())?;
+            let symbol = values::install_charsxp_text(names.element(index))?;
             let key = eval(crate::subset::vector_element(keys, index)?, eval_env)?;
             crate::heap().root(key);
             let expression_copy = values::duplicate(expression)?;
