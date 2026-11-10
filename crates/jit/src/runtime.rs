@@ -699,6 +699,10 @@ pub unsafe extern "C" fn jit_call(
                     Some(signature) if signature == values::nil() => Entry::Checked(None),
                     Some(signature) => Entry::Checked(Some(signature)),
                 };
+                // `NULL` from a slot frame names the frame below the callee's as its caller.
+                if let Some(frame) = eval::bind_slots(call, function, &args)? {
+                    return eval::run_frame(call, function, frame, machine.env(), &args, entry);
+                }
                 let env = eval::bind_arguments(call, function, &args, None)?;
                 eval::run_closure(call, function, env, machine.env(), &args, entry)
             });

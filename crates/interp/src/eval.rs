@@ -1313,7 +1313,7 @@ pub enum CallFrame {
 /// returns `None` when the call needs an environment from the start: the body is not compiled
 /// with a slot table, a debugger, a move or a type signature watches the frame, or a missing
 /// formal's default is not a literal (its promise would capture the frame).
-unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallFrame>> {
+pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallFrame>> {
     let body = function.cdr();
     if body.kind() != SexpType::Bytecode {
         return Ok(None);
@@ -3701,6 +3701,9 @@ pub unsafe fn force_and_call_with(
         }
         _ => Entry::Unchecked,
     };
+    if let Some(frame) = bind_slots(call, function, &args)? {
+        return run_frame(call, function, frame, env, &args, entry);
+    }
     let frame = bind_arguments(call, function, &args, None)?;
     run_closure(call, function, frame, env, &args, entry)
 }
