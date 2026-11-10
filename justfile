@@ -320,10 +320,16 @@ package version target="":
     	*apple*) library=libR.dylib executable=ry ;;
     	*) library=libR.so executable=ry ;;
     esac
-    # The runtime and base R are built first, because `ry` embeds both (crates/repl/build.rs).
-    just base-r release "$target"
-    base="$(cd "${CARGO_TARGET_DIR:-target}/$target/base-r" && pwd)"
-    RY_EMBED_RUNTIME="$(cd "$build" && pwd)/$library" RY_EMBED_BASE="$base" cargo build --release --locked --target "$target" -p ry-lang
+    # The runtime and base R are built first, because `ry` embeds both (crates/repl/build.rs). On
+    # x86_64 Linux the build is profile-guided and libR is laid out by BOLT (tools/layout/optimize.sh,
+    # decisions.md "The Linux release build is profile-guided"); RY_LAYOUT=off builds it plainly.
+    if [ "$target" = x86_64-unknown-linux-gnu ] && [ "${RY_LAYOUT:-}" != off ]; then
+    	tools/layout/optimize.sh "$target"
+    else
+    	just base-r release "$target"
+    	base="$(cd "${CARGO_TARGET_DIR:-target}/$target/base-r" && pwd)"
+    	RY_EMBED_RUNTIME="$(cd "$build" && pwd)/$library" RY_EMBED_BASE="$base" cargo build --release --locked --target "$target" -p ry-lang
+    fi
     case "$target" in
     	*windows*)
     		# The archive carries no toolchain runtime, so the binaries may import only Windows and
