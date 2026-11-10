@@ -367,9 +367,8 @@ unsafe fn do_sys(call: &Call<'_>, kind: SysKind) -> R<Sexp> {
                 many => {
                     let mut items = vec![(nil(), symbols().brace)];
                     items.extend(
-                        many.iter().map(|&expression| {
-                            (nil(), crate::bytecode::source_of_body(expression))
-                        }),
+                        many.iter()
+                            .map(|&expression| (nil(), crate::bytecode::source_of_body(expression))),
                     );
                     values::pairlist(&items, SexpType::Language)
                 }
@@ -405,9 +404,7 @@ unsafe fn do_environment(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(0);
     match function.kind() {
         SexpType::Nil => match call.frame_index() {
-            Some(index) => {
-                crate::eval::frame_sys_parent(index, crate::eval::Reify::Site("environment()"))
-            }
+            Some(index) => crate::eval::frame_sys_parent(index, crate::eval::Reify::Site("environment()")),
             None => Ok(global_env()),
         },
         SexpType::Closure => Ok(function.tag()),
@@ -1007,10 +1004,7 @@ pub unsafe fn as_environment(value: Sexp) -> R<Sexp> {
                 // The calling environment.
                 return match interp().frames.len() {
                     0 => Ok(global_env()),
-                    count => crate::eval::frame_sys_parent(
-                        count - 1,
-                        crate::eval::Reify::Site("pos = -1"),
-                    ),
+                    count => crate::eval::frame_sys_parent(count - 1, crate::eval::Reify::Site("pos = -1")),
                 };
             }
             if position < 1 || position as usize > path.len() {

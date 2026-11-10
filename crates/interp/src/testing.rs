@@ -271,14 +271,8 @@ unsafe fn outcomes(body: &str, a: &str, b: &str) -> (String, Vec<String>) {
 /// of `A=B` finds).
 pub fn check_environment_agreement(entropy: &mut impl Entropy) {
     const NAMES: &[&str] = &[
-        "RY_FUZZ_ENV",
-        "RY_FUZZ_ENV_A",
-        "RY_FUZZ_ENVA",
-        "RY_FUZZ_EN",
-        "RY_FUZZ_ENV=B",
-        "",
-        "RY_FUZZ_\u{e9}",
-        "NA",
+        "RY_FUZZ_ENV", "RY_FUZZ_ENV_A", "RY_FUZZ_ENVA", "RY_FUZZ_EN", "RY_FUZZ_ENV=B", "",
+        "RY_FUZZ_\u{e9}", "NA",
     ];
     const VALUES: &[&str] = &["a", "", "B=x", "\u{e9}t\u{e9}", "NA", "x y", "=", "long"];
     fn text(entropy: &mut impl Entropy, table: &[&str]) -> String {
@@ -361,10 +355,7 @@ pub fn check_environment_agreement(entropy: &mut impl Entropy) {
                     let (actual, expected) = unsafe { (run(&call), run(&expected)) };
                     assert_eq!(actual, expected, "step {step}: {call}");
                     for name in names.iter().filter(|name| valid(name)) {
-                        assert!(
-                            std::env::var_os(name).is_none(),
-                            "step {step}: {call} kept {name}"
-                        );
+                        assert!(std::env::var_os(name).is_none(), "step {step}: {call} kept {name}");
                     }
                 }
                 _ => {}
@@ -375,7 +366,9 @@ pub fn check_environment_agreement(entropy: &mut impl Entropy) {
             let expected: Vec<String> = probe
                 .iter()
                 .map(|name| {
-                    let found = (!name.is_empty()).then(|| std::env::var_os(name)).flatten();
+                    let found = (!name.is_empty())
+                        .then(|| std::env::var_os(name))
+                        .flatten();
                     found.map_or_else(
                         || "<unset>".to_owned(),
                         |value| value.to_string_lossy().into_owned(),

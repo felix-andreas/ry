@@ -2994,8 +2994,8 @@ impl Compiler {
     /// frame, so the compiled assignment may evaluate it before reading `target`: a variable of
     /// the frame (a formal's promise runs in the caller's frame), a numeric constant, a name,
     /// base arithmetic and comparison on those, base `$` and `[[` reading one of those, `if`
-    /// or parentheses over them, or an assignment of one of them to another local variable (the growth idiom
-    /// `x[[cap <- if (cap < n) 2L * cap else cap]] <- v`).
+    /// or parentheses over them, or an assignment of one of them to another local variable (the
+    /// growth idiom `x[[cap <- if (cap < n) 2L * cap else cap]] <- v`).
     unsafe fn side_effect_free_index(&self, index: Sexp, target: Sexp, depth: u32) -> bool {
         match index.kind() {
             SexpType::Symbol => {
@@ -3034,13 +3034,11 @@ impl Compiler {
                         && !self.frame_may_bind(index.car())
                         && self.side_effect_free_index(*object, target, depth + 1);
                 }
-                if arguments.iter().any(|(tag, _)| *tag != nil())
-                    || self.frame_may_bind(index.car())
+                if arguments.iter().any(|(tag, _)| *tag != nil()) || self.frame_may_bind(index.car())
                 {
                     return false;
                 }
-                let operand =
-                    |argument: Sexp| self.side_effect_free_index(argument, target, depth + 1);
+                let operand = |argument: Sexp| self.side_effect_free_index(argument, target, depth + 1);
                 match (&*operator, arguments.as_slice()) {
                     ("<-" | "=", [(_, variable), (_, value)]) => {
                         variable.kind() == SexpType::Symbol
@@ -3128,15 +3126,7 @@ impl Compiler {
                 let setter_call = self.constant(setter_call);
                 self.emit(
                     Op::SubAssign,
-                    &[
-                        dst,
-                        variable,
-                        index,
-                        value,
-                        call_constant,
-                        kind as u32,
-                        setter_call,
-                    ],
+                    &[dst, variable, index, value, call_constant, kind as u32, setter_call],
                 )
             }
             [] => self.evaluate(dst, call_constant),
@@ -6431,18 +6421,13 @@ unsafe fn slot_special_call(
             // `UseMethod("generic", object)` dispatches on a local's value.
             "UseMethod" if argument.kind() == SexpType::String && length(argument) == 1 => {
                 match slot_operand(state, rest.car())? {
-                    Some(object) => {
-                        slot_use_method(state, instruction, call, argument, Some(object))
-                    }
+                    Some(object) => slot_use_method(state, instruction, call, argument, Some(object)),
                     None => Ok(None),
                 }
             }
             // `name <<- value` assigns from the enclosure outwards, so only the value reads the
             // frame.
-            "<<-"
-                if argument.kind() == SexpType::Symbol
-                    && eval::dot_dot_index(argument).is_none() =>
-            {
+            "<<-" if argument.kind() == SexpType::Symbol && eval::dot_dot_index(argument).is_none() => {
                 let Some(value) = slot_operand(state, rest.car())? else {
                     return Ok(None);
                 };
@@ -6450,9 +6435,7 @@ unsafe fn slot_special_call(
                 interp().visible = false;
                 Ok(Some(value))
             }
-            "switch" if rest.car() == symbols().dots => {
-                slot_switch(state, instruction, call, argument)
-            }
+            "switch" if rest.car() == symbols().dots => slot_switch(state, instruction, call, argument),
             _ => Ok(None),
         };
     }
@@ -6487,11 +6470,7 @@ unsafe fn slot_special_call(
 /// a special called from a slot frame runs there. The site's promise-code entry serves this:
 /// it is otherwise read only when the site calls a closure, and `compile_promise_arguments`
 /// builds the same list for that.
-unsafe fn site_promise_code(
-    state: &Activation<'_, '_>,
-    instruction: Instruction,
-    call: Sexp,
-) -> R<Sexp> {
+unsafe fn site_promise_code(state: &Activation<'_, '_>, instruction: Instruction, call: Sexp) -> R<Sexp> {
     let mut compiled = state.constants.element(instruction.operand(2) + 1);
     if compiled == unbound() {
         compiled = compile_promise_arguments(state.machine.function, call.cdr())?;
@@ -6671,8 +6650,7 @@ unsafe fn slot_use_method(
     };
     // Through R 4.3 the method sees the generic's locals, which only an environment can show.
     let names = state.constants.element(SLOTS).element(1);
-    let locals =
-        (length(formals)..length(names)).any(|index| *state.header.add(1 + index) != unbound());
+    let locals = (length(formals)..length(names)).any(|index| *state.header.add(1 + index) != unbound());
     if locals && !crate::system::r_at_least(4, 4) {
         return Ok(None);
     }
@@ -6778,9 +6756,10 @@ unsafe fn slot_owns(state: &Activation<'_, '_>, value: Sexp) -> bool {
     let registers = &interp().bytecode.registers;
     let header = state.header.offset_from(registers.as_ptr()) as usize;
     if state.machine.function != nil()
-        && interp().frames.last().is_some_and(|frame| {
-            frame.slots as usize == header && frame.function == state.machine.function
-        })
+        && interp()
+            .frames
+            .last()
+            .is_some_and(|frame| frame.slots as usize == header && frame.function == state.machine.function)
     {
         return true;
     }
@@ -6830,7 +6809,8 @@ unsafe fn assign_slot_element(
             | SexpType::List
             | SexpType::Expression
     );
-    if !replaceable || target.is_object() || (kind == ElementKind::Dollar && length(index) != 1) {
+    if !replaceable || target.is_object() || (kind == ElementKind::Dollar && length(index) != 1)
+    {
         return Ok(false);
     }
     moves::modifying(target)?;
@@ -7267,12 +7247,7 @@ unsafe fn op_call_rebinding(state: &mut Activation<'_, '_>, instruction: Instruc
             return op_call_generic(state, instruction);
         }
     }
-    let value = eval::rebind_call(
-        call,
-        function,
-        target,
-        state.env(Reify::Site("rebinding call"))?,
-    )?;
+    let value = eval::rebind_call(call, function, target, state.env(Reify::Site("rebinding call"))?)?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
@@ -7283,12 +7258,7 @@ unsafe fn op_call_tail_update(state: &mut Activation<'_, '_>, instruction: Instr
     let function = instruction.input(1);
     let call = state.constant(instruction, 2);
     let target = state.constant(instruction, 3);
-    let value = eval::tail_update(
-        call,
-        function,
-        target,
-        state.env(Reify::Site("tail update"))?,
-    )?;
+    let value = eval::tail_update(call, function, target, state.env(Reify::Site("tail update"))?)?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
@@ -7405,12 +7375,7 @@ unsafe fn op_bound_eval(state: &mut Activation<'_, '_>, instruction: Instruction
         instruction.registers.add(instruction.operand(3)),
         instruction.operand(4),
     );
-    let value = crate::records::eval_bound_registers(
-        expression,
-        names,
-        bound,
-        state.env(Reify::Site("bound evaluation"))?,
-    )?;
+    let value = crate::records::eval_bound_registers(expression, names, bound, state.env(Reify::Site("bound evaluation"))?)?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
@@ -7539,13 +7504,7 @@ unsafe fn op_guard(state: &mut Activation<'_, '_>, instruction: Instruction) -> 
     let found = if instruction.operand(3) == 0 {
         lookup_enclosing_function(symbol, enclosure, state.cache, slot)
     } else {
-        lookup_function(
-            symbol,
-            state.env(Reify::Site("function guard"))?,
-            state.cache,
-            slot,
-            unbound(),
-        )
+        lookup_function(symbol, state.env(Reify::Site("function guard"))?, state.cache, slot, unbound())
     };
     if !matches!(found, Ok(function) if function == expected) {
         return Ok(Flow::Goto(instruction.operand(4)));
@@ -7704,19 +7663,12 @@ unsafe fn fused_pass(
         }
         let slot = leaf[2] as usize;
         let hint = &mut *cache.hints.add(slot);
-        let local_value = if env == nil() {
-            local_slot(constant)
-        } else {
-            None
-        };
+        let local_value = if env == nil() { local_slot(constant) } else { None };
         let (value, local) = match local_value {
             Some(value) => (value, true),
             None => {
-                let local_cell = if env == nil() {
-                    None
-                } else {
-                    heap.frame_cell_hinted(env, constant, hint)
-                };
+                let local_cell =
+                    if env == nil() { None } else { heap.frame_cell_hinted(env, constant, hint) };
                 let (cell, local) = match local_cell {
                     Some(cell) => (cell, true),
                     None => match outside_function_frames(constant, enclosure, hint) {
@@ -8054,12 +8006,7 @@ unsafe fn op_closure(state: &mut Activation<'_, '_>, instruction: Instruction) -
     let closure = if state.in_slots() {
         eval::slot_closure(state.machine.header, formals, body, srcref)?
     } else {
-        eval::make_closure(
-            formals,
-            body,
-            srcref,
-            state.env(Reify::Site("function definition"))?,
-        )?
+        eval::make_closure(formals, body, srcref, state.env(Reify::Site("function definition"))?)?
     };
     // Every closure this site creates shares one compiled body, as GNU R compiles inner
     // functions with their outer one. Compiling per closure object would leave a function
@@ -8564,10 +8511,9 @@ unsafe fn replace_variable(
                 item = item.cdr();
             }
             let interpreter = interp();
-            let outer =
-                interpreter
-                    .assignment_call
-                    .replace((setter_call, whole, interpreter.frames.len()));
+            let outer = interpreter
+                .assignment_call
+                .replace((setter_call, whole, interpreter.frames.len()));
             let result = eval::call_builtin(definition, setter_call, function, &arguments, env);
             interp().assignment_call = outer;
             result

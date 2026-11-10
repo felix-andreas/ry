@@ -596,7 +596,9 @@ pub fn fround_slice(input: &[f64], digits: f64, output: &mut [f64]) {
                 let up = x10.ceil() / pow10;
                 let distance_up = up - x;
                 let distance_down = x - down;
-                sgn * if distance_up < distance_down || (odd(i10) && distance_up == distance_down) {
+                sgn * if distance_up < distance_down
+                    || (odd(i10) && distance_up == distance_down)
+                {
                     up
                 } else {
                     down
@@ -8330,7 +8332,9 @@ fn wilcox_counts(m: usize, n: usize) -> Rc<[f64]> {
     let mut memo = WilcoxMemo {
         cells: FxHashMap::default(),
     };
-    let counts: Rc<[f64]> = (0..=m * n).map(|k| memo.count(k as i64, m, n)).collect();
+    let counts: Rc<[f64]> = (0..=m * n)
+        .map(|k| memo.count(k as i64, m, n))
+        .collect();
     WILCOX_CACHE.with_borrow_mut(|cache| *cache = Some((key, Rc::clone(&counts))));
     counts
 }

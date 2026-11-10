@@ -1135,7 +1135,8 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         && !out.is_object()
         && (0..length(out)).all(|position| {
             let element = out.element(position);
-            (element.kind().is_atomic() || element.kind() == SexpType::List) && !element.is_object()
+            (element.kind().is_atomic() || element.kind() == SexpType::List)
+                && !element.is_object()
         });
     if !plain {
         let tail = crate::lower::parse_text(
@@ -1154,11 +1155,7 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         crate::heap().root(no);
         let yes = values::scalar_bool(true)?;
         crate::heap().root(yes);
-        let value = kernel(
-            crate::combine::do_unlist,
-            &[out, no, yes],
-            ClosureFrame::Env(frame),
-        )?;
+        let value = kernel(crate::combine::do_unlist, &[out, no, yes], ClosureFrame::Env(frame))?;
         eval::define(out_symbol, value, frame)?;
         return finish(ClosureFrame::Env(frame), value, true);
     }

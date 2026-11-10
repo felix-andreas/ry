@@ -795,9 +795,8 @@ pub(crate) unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
     let count = length(names);
     let result = alloc(SexpType::String, count)?;
     crate::heap().root(result);
-    let texts: SmallVec<[Cow<'_, str>; 4]> = (0..count)
-        .map(|index| values::char_str(names.element(index)))
-        .collect();
+    let texts: SmallVec<[Cow<'_, str>; 4]> =
+        (0..count).map(|index| values::char_str(names.element(index))).collect();
     let keys: SmallVec<[&[u8]; 4]> = texts.iter().map(|text| text.as_bytes()).collect();
     let mut found: SmallVec<[bool; 4]> = smallvec::smallvec![false; count];
     let mut failure = None;
@@ -842,9 +841,8 @@ pub(crate) unsafe fn do_sys_setenv(call: &Call<'_>) -> R<Sexp> {
     let count = length(names);
     let result = alloc(SexpType::Logical, count)?;
     // GNU R translates an `NA` element to the text "NA".
-    let texts: SmallVec<[Cow<'_, str>; 4]> = (0..count)
-        .map(|index| values::char_str(names.element(index)))
-        .collect();
+    let texts: SmallVec<[Cow<'_, str>; 4]> =
+        (0..count).map(|index| values::char_str(names.element(index))).collect();
     let keys: SmallVec<[&[u8]; 4]> = texts.iter().map(|text| text.as_bytes()).collect();
     let replacements: SmallVec<[Cow<'_, str>; 4]> = (0..count)
         .map(|index| values::char_str(new_values.element(index)))
@@ -885,9 +883,8 @@ pub(crate) unsafe fn do_sys_unsetenv(call: &Call<'_>) -> R<Sexp> {
     let result = alloc(SexpType::Logical, count)?;
     // GNU R translates an `NA` element to the text "NA", and reports whether each variable is
     // unset afterwards, which `unsetenv()` guarantees for every name it accepts.
-    let texts: SmallVec<[Cow<'_, str>; 4]> = (0..count)
-        .map(|index| values::char_str(names.element(index)))
-        .collect();
+    let texts: SmallVec<[Cow<'_, str>; 4]> =
+        (0..count).map(|index| values::char_str(names.element(index))).collect();
     let keys: SmallVec<[&[u8]; 4]> = texts.iter().map(|text| text.as_bytes()).collect();
     let mut present: SmallVec<[bool; 4]> = smallvec::smallvec![false; count];
     scan_environment(&keys, |index, _| present[index] = true);
@@ -1020,10 +1017,7 @@ fn variable_key(name: &[u8]) -> Option<u16> {
     if name.contains(&0) {
         return None;
     }
-    Some(u16::from_le_bytes([
-        first,
-        rest.first().copied().unwrap_or(b'='),
-    ]))
+    Some(u16::from_le_bytes([first, rest.first().copied().unwrap_or(b'=')]))
 }
 
 /// Whether the entry at `start` defines `name`.
