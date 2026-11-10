@@ -1,11 +1,13 @@
-//! The direct entry of `[[` for one element of a plain vector or list, which a compiled
-//! `x[[i]]` takes once its subject is known not to dispatch, and the in-place `x[i] <- value` a
-//! compiled assignment takes for an index vector when the variable owns its value.
+//! Element reads without a call: the direct entry of `[[` for one element of a plain vector or
+//! list, which a compiled `x[[i]]` takes once its subject is known not to dispatch, and
+//! `read_element` for compiled element reads. Also the in-place `x[i] <- value` a compiled
+//! assignment takes for an index vector when the variable owns its value.
 
 use {
     crate::{
         attribute_access::same_text,
         builtins::is_native_value,
+        bytecode::ElementKind,
         eval::reuse_permitted,
         moves,
         subset::{int_to_real, vector_element},
@@ -14,6 +16,55 @@ use {
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp},
 };
+
+/// `x[i]`, `x[[i]]` or `x$name` read without a call: the element when the subject does not
+/// dispatch and the subscript selects one element by the direct paths of [`scalar_subset`] and
+/// [`direct_subset2`], and `None` for everything else, which the general call handles.
+#[expect(dead_code, reason = "the compiled element read op is its caller")]
+pub(crate) unsafe fn read_element(
+    subject: Sexp,
+    index: Sexp,
+    kind: ElementKind,
+) -> R<Option<Sexp>> {
+    if is_native_value(subject) || is_native_value(index) {
+        return Ok(None);
+    }
+    match kind {
+        ElementKind::Single if !subject.is_object() => scalar_subset(subject, index),
+        ElementKind::Single => Ok(None),
+        ElementKind::Double => direct_subset2(nil(), &[subject, index]),
+        // `$` matches a name exactly first, which is `[[`'s exact match; a partial match and
+        // `$` on an atomic vector take the general path.
+        ElementKind::Dollar if index.kind() == SexpType::String => {
+            direct_subset2(nil(), &[subject, index])
+        }
+        ElementKind::Dollar => Ok(None),
+    }
+}
+
+/// `x[i]` for an attribute-free atomic vector `x` and a plain numeric scalar `i` within bounds:
+/// the element as a length-one vector. `None` otherwise.
+pub(crate) unsafe fn scalar_subset(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
+    if !matches!(index.kind(), SexpType::Integer | SexpType::Real)
+        || !object.kind().is_atomic()
+        || object.is_altrep()
+        || index.is_altrep()
+        || values::has_attributes(object)
+        || values::has_attributes(index)
+        || length(index) != 1
+    {
+        return Ok(None);
+    }
+    let position = match index.kind() {
+        SexpType::Integer => f64::from(index.slice::<i32>()[0]),
+        _ => index.slice::<f64>()[0],
+    };
+    // NA_integer_ and NaN fail the lower bound, and `x[2.7]` truncates to the second element.
+    if position >= 1.0 && position < length(object) as f64 + 1.0 {
+        return vector_element(object, position as usize - 1).map(Some);
+    }
+    Ok(None)
+}
 
 /// `x[[i]]` for a vector or list `x` that is not an object and a scalar `i` that selects an
 /// element: a position within bounds, or for a list a name one element has exactly, and
@@ -117,7 +168,8 @@ unsafe fn scalar_position(index: Sexp, count: usize) -> Option<usize> {
 /// or real) or a logical index as long as the vector, and a value without attributes whose type
 /// the vector holds without widening and whose length divides the number of positions. Returns
 /// whether it assigned; anything else (an index that grows, drops or names elements, `NA`, a
-/// value that widens the vector or recycles with a warning, a list) declines to the full `[<-`.
+/// value that widens the vector or recycles with a warning, an atomic value for a list target)
+/// declines to the full `[<-`. A list target takes a list value's elements, counted as stored.
 pub(crate) unsafe fn assign_subset_in_place(
     env: Sexp,
     variable: Sexp,
@@ -131,12 +183,12 @@ pub(crate) unsafe fn assign_subset_in_place(
     let target = cell.cdr();
     if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED)
         || target == value
-        || !target.kind().is_atomic()
+        || !(target.kind().is_atomic() || target.kind() == SexpType::List)
         || target.is_object()
         || target.is_altrep()
         || index.is_altrep()
         || index.attrib() != nil()
-        || !value.kind().is_atomic()
+        || !(value.kind().is_atomic() || value.kind() == SexpType::List)
         || value.is_altrep()
         || value.attrib() != nil()
     {
@@ -148,6 +200,7 @@ pub(crate) unsafe fn assign_subset_in_place(
             SexpType::Real | SexpType::Integer | SexpType::Logical
         ),
         SexpType::Integer => matches!(value.kind(), SexpType::Integer | SexpType::Logical),
+        // A list target takes the elements of a list value; an atomic value would need boxing.
         kind => value.kind() == kind,
     };
     let supply = length(value);

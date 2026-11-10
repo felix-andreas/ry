@@ -2084,6 +2084,7 @@ impl Compiler {
         for (index, constant) in compiler.constants.iter().enumerate() {
             heap.set_element(constants, FIRST_CONSTANT + index, *constant);
         }
+        index_slots(words, constants)?;
         let caches = values::alloc(SexpType::List, compiler.caches as usize * 2)?;
         heap.mark_weak_pairs(caches);
         let code = values::triple(SexpType::Bytecode, words, constants, caches)?;
@@ -2091,8 +2092,8 @@ impl Compiler {
     }
 
     /// The [`SLOTS`] constant: the formals take the first slots, and every other local symbol
-    /// that a `GetVar`, `SetVar` or `GetFun` names takes the next free one in code order, so the
-    /// table depends on the code alone.
+    /// that a `GetVar`, `SetVar`, `GetFun` or `ForStep` names takes the next free one in code
+    /// order, so the table depends on the code alone.
     unsafe fn slot_table(&self) -> R<Sexp> {
         let (Some(formals), Some(locals)) = (&self.slot_formals, &self.local_symbols) else {
             return Ok(nil());
@@ -2104,8 +2105,11 @@ impl Compiler {
             let op =
                 op_of(self.code[pc]).ok_or_else(|| error("compiled an invalid instruction"))?;
             let symbol_and_cache = match op {
-                Op::GetVar | Op::GetFun => Some((self.code[pc + 2], self.code[pc + 3])),
-                Op::SetVar => Some((self.code[pc + 1], self.code[pc + 3])),
+                Op::GetVar | Op::GetFun => Some((self.code[pc + 2], Some(self.code[pc + 3]))),
+                Op::SetVar => Some((self.code[pc + 1], Some(self.code[pc + 3]))),
+                // A loop variable the body never reads still needs a slot, or the first step
+                // would give the frame an environment.
+                Op::ForStep => Some((self.code[pc + 3], None)),
                 _ => None,
             };
             if let Some((constant, cache)) = symbol_and_cache {
@@ -2121,7 +2125,9 @@ impl Compiler {
                             names.len() - 1
                         }
                     };
-                    table[cache as usize] = slot as i32;
+                    if let Some(cache) = cache {
+                        table[cache as usize] = slot as i32;
+                    }
                 }
             }
             pc += 1 + operand_count(op);
@@ -2135,8 +2141,9 @@ impl Compiler {
         for (index, name) in names.iter().enumerate() {
             heap.set_element(symbols, index, *name);
         }
-        // The third element is filled by `slot_defaults` on the first call that needs it.
-        let slots = values::alloc(SexpType::List, 3)?;
+        // The third element is filled by `slot_defaults` on the first call that needs it, and
+        // the fourth by `index_slots` once the constants are in place.
+        let slots = values::alloc(SexpType::List, 4)?;
         heap.set_element(slots, 0, map);
         heap.set_element(slots, 1, symbols);
         Ok(slots)
@@ -3038,8 +3045,8 @@ impl Compiler {
     /// frame, so the compiled assignment may evaluate it before reading `target`: a variable of
     /// the frame (a formal's promise runs in the caller's frame), a numeric constant, a name,
     /// base arithmetic and comparison on those, base `$` and `[[` reading one of those, `if`
-    /// over them, or an assignment of one of them to another local variable (the growth idiom
-    /// `x[[cap <- if (cap < n) 2L * cap else cap]] <- v`).
+    /// or parentheses over them, or an assignment of one of them to another local variable (the
+    /// growth idiom `x[[cap <- if (cap < n) 2L * cap else cap]] <- v`).
     unsafe fn side_effect_free_index(&self, index: Sexp, target: Sexp, depth: u32) -> bool {
         match index.kind() {
             SexpType::Symbol => {
@@ -3093,6 +3100,7 @@ impl Compiler {
                     ("if", [(_, condition), (_, yes), (_, no)]) => {
                         operand(*condition) && operand(*yes) && operand(*no)
                     }
+                    ("(", [(_, inner)]) => operand(*inner),
                     _ => {
                         ARITHS.iter().any(|(_, name)| *name == &*operator)
                             && (1..=2).contains(&arguments.len())
@@ -6892,6 +6900,64 @@ unsafe fn wrapper_argument(state: &Activation<'_, '_>, expression: Sexp) -> R<Op
 
 /// The slot of `symbol` in a slot frame, found by name for instructions that carry no lookup
 /// cache. Slot tables are short, so the scan costs less than a hash lookup.
+/// Fills the fourth element of a code object's [`SLOTS`] table: for each constant that a
+/// `ForStep` or `SubAssign` names as its variable, that variable's slot, so those handlers find
+/// it with one load ([`slot_at`]); -1 elsewhere. The map ends at the last such constant, and code
+/// with neither op has none, because most code has no loop or element assignment and a map over
+/// every constant of every function costs megabytes. It is derived from the code, the names and
+/// the constants, so the code image stores neither it nor anything it could disagree with.
+pub(crate) unsafe fn index_slots(words: Sexp, constants: Sexp) -> R<()> {
+    let table = constants.element(SLOTS);
+    if table == nil() {
+        return Ok(());
+    }
+    let names = table.element(1);
+    let code = values::ints(words);
+    let mut variables: SmallVec<[(usize, i32); 8]> = SmallVec::new();
+    let mut pc = 0;
+    while let Some(&word) = code.get(pc) {
+        let op =
+            op_of(word as u32).ok_or_else(|| error("the code holds an invalid instruction"))?;
+        let variable = match op {
+            Op::ForStep => code.get(pc + 3),
+            Op::SubAssign => code.get(pc + 2),
+            _ => None,
+        };
+        if let Some(&constant) = variable
+            && let constant = constant as usize
+            && constant < length(constants)
+            && let symbol = constants.element(constant)
+            && symbol.kind() == SexpType::Symbol
+            && let Some(slot) = (0..length(names)).find(|&slot| names.element(slot) == symbol)
+        {
+            variables.push((constant, slot as i32));
+        }
+        pc += 1 + operand_count(op);
+    }
+    let Some(last) = variables.iter().map(|&(constant, _)| constant).max() else {
+        return Ok(());
+    };
+    let by_constant = values::alloc(SexpType::Integer, last + 1)?;
+    let map = values::ints_mut(by_constant);
+    map.fill(-1);
+    for (constant, slot) in variables {
+        map[constant] = slot;
+    }
+    crate::heap().set_element(table, 3, by_constant);
+    Ok(())
+}
+
+/// The frame slot of the symbol at constant `constant`, as [`slot_named`] finds it.
+#[inline(always)]
+unsafe fn slot_at(state: &Activation<'_, '_>, constant: usize) -> Option<*mut Sexp> {
+    let by_constant = state.constants.element(SLOTS).element(3);
+    if by_constant == nil() {
+        return None;
+    }
+    let slot = *values::ints(by_constant).get(constant)?;
+    (slot >= 0).then(|| state.header.add(1 + slot as usize))
+}
+
 unsafe fn slot_named(state: &Activation<'_, '_>, symbol: Sexp) -> Option<*mut Sexp> {
     let names = state.constants.element(SLOTS).element(1);
     (0..length(names))
@@ -8438,7 +8504,7 @@ unsafe fn op_for_step(state: &mut Activation<'_, '_>, instruction: Instruction) 
     let variable = state.constant(instruction, 2);
     // A slot frame keeps its loop variable in a slot, so stepping the loop needs no environment.
     let slot = if state.in_slots() {
-        slot_named(state, variable)
+        slot_at(state, instruction.operand(2))
     } else {
         None
     };
@@ -8623,7 +8689,7 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
         _ => ElementKind::Dollar,
     };
     if state.in_slots()
-        && let Some(slot) = slot_named(state, variable)
+        && let Some(slot) = slot_at(state, instruction.operand(1))
         && let Some(index) = slot_subscript(state, instruction.input(2))
         && assign_slot_element(
             state,
