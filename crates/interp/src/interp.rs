@@ -188,6 +188,11 @@ pub struct Frame {
     pub method_vars: u32,
     /// Where this call's entries in [`Interp::frame_closures`] start.
     pub closures: usize,
+    /// The handle stack's height when the frame's body starts: [`eval::leave`] releases what
+    /// the body rooted down to it.
+    pub handle_mark: u32,
+    /// [`Interp::slot_owner`] when the frame was pushed, which [`eval::leave`] restores.
+    pub previous_owner: u32,
 }
 
 impl Frame {
@@ -393,6 +398,10 @@ pub struct Interp {
     /// (`Heap::enter_namespace_load`), or nil before base is loaded. Matched by identity and
     /// preserved, so a collected closure's address cannot be reused by another function.
     pub namespace_loader: Sexp,
+    /// Base R's `do.call`, which a call site runs without its body when it can
+    /// (`bytecode::call_do_call`), or nil before base is loaded. Matched by identity and
+    /// preserved, as [`Interp::namespace_loader`] is.
+    pub do_call: Sexp,
     /// The `*tmp*` of each complex assignment running, innermost last: the environment it runs
     /// in and the variable's value. GNU R binds `*tmp*` in that environment for the duration;
     /// ry answers a lookup that finds no binding from here instead, so an assignment neither
@@ -567,6 +576,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         assignment_call: None,
         native_entries: Vec::new(),
         namespace_loader: heap.known().nil,
+        do_call: heap.known().nil,
         tmp_values: Vec::new(),
         loops: Vec::new(),
         warnings: Vec::new(),
@@ -783,7 +793,11 @@ impl RootSource for InterpRoots {
 
     fn clear_dead(&self, liveness: &Liveness<'_>) {
         // SAFETY: as for `trace`.
-        unsafe { interp().bytecode.call_plans.clear_dead(liveness) }
+        unsafe {
+            let state = interp();
+            state.bytecode.call_plans.clear_dead(liveness);
+            state.method_cache.clear_dead(liveness);
+        }
     }
 }
 
