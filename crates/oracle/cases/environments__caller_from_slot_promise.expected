@@ -1,0 +1,13 @@
+[stdout]
+| List of 2
+|  $ : language h(2)
+|  $ : symbol type
+| [1] TRUE
+| [1] 1
+| c("a", "b")
+[messages]
+[warnings]
+[errors]
+[value]
+language
+| c("a", "b")

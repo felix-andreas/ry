@@ -178,7 +178,7 @@ pub unsafe fn cell_value(cell: Sexp) -> R<Sexp> {
 /// the innermost call.
 unsafe fn lexical_call(env: Sexp) -> Sexp {
     let frames = &interp().frames;
-    if let Some(frame) = frames.iter().rev().find(|frame| frame.env == env) {
+    if let Some(frame) = frames.iter().rev().find(|frame| frame.owns(env)) {
         return frame.call;
     }
     if env == values::global_env() {
@@ -361,10 +361,15 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     heap.root(promise);
     promise.set_gp_bits(PROMISE_SEEN, true);
     let code = promise.attrib();
-    let result = if code.kind() == SexpType::Bytecode {
-        bytecode::run_promise(code, promise.tag())
+    let env = promise.tag();
+    let result = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
+        force_reference(promise)
+    } else if env.has_gp(gp::PENDING_FRAME) {
+        force_slot_promise(promise, env)
+    } else if code.kind() == SexpType::Bytecode {
+        bytecode::run_promise(code, env)
     } else {
-        eval(promise.cdr(), promise.tag())
+        eval(promise.cdr(), env)
     };
     promise.set_gp_bits(PROMISE_SEEN, false);
     let settled = result.and_then(|value| settle_promise(promise, value));
@@ -375,6 +380,537 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
         heap.root(*value);
     }
     settled
+}
+
+/// Forces a promise over the slots of the live slot frame whose pending environment is `env`:
+/// compiled code runs on the slots, a name reads its slot, and anything else, or a name whose
+/// slot holds an empty argument, gets the frame's environment and evaluates there.
+#[cold]
+#[inline(never)]
+unsafe fn force_slot_promise(promise: Sexp, env: Sexp) -> R<Sexp> {
+    let Some(owner) = interp()
+        .frames
+        .iter()
+        .rposition(|frame| frame.pending == env)
+    else {
+        panic!("a promise names the pending environment of a frame that has returned");
+    };
+    let value = slot_promise_value(promise, owner)?;
+    // A promise whose forcing failed stays unforced, so only a value settles the count.
+    let frame = &mut interp().frames[owner];
+    frame.unforced = frame.unforced.saturating_sub(1);
+    Ok(value)
+}
+
+unsafe fn slot_promise_value(promise: Sexp, owner: usize) -> R<Sexp> {
+    let frame = &interp().frames[owner];
+    let (function, header) = (frame.function, frame.slots as usize);
+    let code = promise.attrib();
+    if code.kind() == SexpType::Bytecode {
+        return bytecode::run_promise_on_slots(code, function, owner, header);
+    }
+    let expression = promise.cdr();
+    if expression.kind() == SexpType::Symbol {
+        let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
+        match (0..values::length(names)).find(|&index| names.element(index) == expression) {
+            None => return eval(expression, function.tag()),
+            Some(slot) => {
+                let value = *bytecode::register_address(header + 1 + slot);
+                if value == unbound() {
+                    return eval(expression, function.tag());
+                }
+                if value.kind() == SexpType::Promise {
+                    return force_promise(value);
+                }
+                if value != missing_arg() {
+                    return Ok(value);
+                }
+            }
+        }
+    }
+    eval(expression, frame_env(owner, Reify::Site("promise over the frame"))?)
+}
+
+/// A promise of `expression`, compiled code or a name, over the slots of the slot frame at
+/// `owner`. It names the frame's pending environment, which is made bare on the first such
+/// promise and gets its bindings only if the frame reifies.
+pub unsafe fn slot_promise(owner: usize, expression: Sexp) -> R<Sexp> {
+    let env = pending_env(owner)?;
+    let promise = if expression.kind() == SexpType::Bytecode {
+        compiled_promise(expression, env)?
+    } else {
+        make_promise(expression, env)?
+    };
+    interp().frames[owner].unforced += 1;
+    Ok(promise)
+}
+
+/// A closure of `formals` and `body` defined in the slot frame whose header register is
+/// `header`, which has no environment yet. The closure's environment is the frame's pending
+/// one, so defining it leaves the frame in its slots: anything that reads the environment's
+/// bindings, such as a call of the closure or `environment(f)$x`, reifies the frame into that
+/// same object first ([`resolve_pending_read`]), and a frame that returns with the closure
+/// still reachable reifies then ([`finish_frame`]). A frame that makes more closures than
+/// [`crate::FRAME_CLOSURES`] reifies instead, which bounds the list that tracks them.
+pub unsafe fn slot_closure(header: usize, formals: Sexp, body: Sexp, srcref: Sexp) -> R<Sexp> {
+    let state = interp();
+    let Some(owner) = state
+        .frames
+        .iter()
+        .rposition(|frame| frame.slots as usize == header)
+    else {
+        panic!("a slot frame's activation outlived its frame");
+    };
+    let made = state
+        .pending_closures
+        .iter()
+        .filter(|&&(frame, _)| frame as usize == owner)
+        .count();
+    if made >= crate::FRAME_CLOSURES {
+        let env = frame_env(owner, Reify::Site("function definition"))?;
+        return make_closure(formals, body, srcref, env);
+    }
+    let env = pending_env(owner)?;
+    let closure = make_closure(formals, body, srcref, env)?;
+    let state = interp();
+    state.pending_closures.push((owner as u32, closure));
+    state.frames[owner].unforced += 1;
+    Ok(closure)
+}
+
+/// The heap's resolver for a read of a pending environment's bindings
+/// (`heap::set_pending_resolver`): it reifies the live slot frame the environment belongs to.
+/// The read may come from anywhere, including native code between allocations it has not
+/// protected, so the frame reifies with collection suspended.
+pub unsafe fn resolve_pending_read(env: Sexp) {
+    let Some(owner) = interp()
+        .frames
+        .iter()
+        .rposition(|frame| frame.pending == env)
+    else {
+        panic!("the bindings of a slot frame's environment were read after the frame returned");
+    };
+    // Bindings read through an environment `parent.frame` handed out are the frame observed.
+    let cause = if interp().frames[owner].pending_shared {
+        Reify::Site("parent.frame")
+    } else {
+        Reify::Site("environment read")
+    };
+    let heap = crate::heap();
+    heap.inhibit_collection();
+    let result = reify(owner, cause);
+    crate::heap().allow_collection();
+    if let Err(unwind) = result {
+        panic!("a slot frame failed to make its environment: {unwind:?}");
+    }
+}
+
+/// An argument reference: the promise a slot frame at `owner` passes for the variable
+/// `symbol` to a callee that takes its arguments straight into slots ([`call_with_plan`]).
+/// Instead of an environment it names the variable's slot (`NO_REFERENCE_SLOT` when the frame
+/// keeps none for it), so passing a variable allocates nothing and leaves the caller without
+/// an environment. It forces like any promise ([`force_promise`]), once, reading the slot at
+/// that moment, and it comes from [`Interp::references`], which the calling instruction
+/// releases when the call returns. Nothing may keep one past that: a frame that hands its
+/// arguments to code that could keep them ([`materialize_references`]) turns them into
+/// ordinary promises first.
+pub unsafe fn argument_reference(owner: usize, slot: u32, symbol: Sexp) -> R<Sexp> {
+    let reference = pooled_reference(symbol)?;
+    let header = interp().frames[owner].slots;
+    values::ints_mut(interp().reference_targets[interp().references_used as usize - 1])
+        .copy_from_slice(&[owner as i32, slot as i32, header as i32]);
+    Ok(reference)
+}
+
+/// An argument reference to `expression`, a variable, uncompiled code or a constant, of a
+/// caller that has the environment `env`, for a callee that takes its arguments straight into
+/// slots: it forces as a promise of the expression in `env` would, and like a slot frame's reference it allocates nothing and is
+/// released when the call returns. The reference keeps `env` in its environment field, where
+/// a slot frame's reference keeps nil.
+pub unsafe fn env_reference(env: Sexp, expression: Sexp) -> R<Sexp> {
+    let reference = pooled_reference(expression)?;
+    crate::heap().set_tag(reference, env);
+    Ok(reference)
+}
+
+/// An argument reference to the compiled argument `code` of a caller that has the environment
+/// `env`: [`env_reference`] of the code's source, which keeps the code as its attribute in
+/// place of its frame target and runs it when forced, as a compiled promise would.
+pub unsafe fn env_code_reference(env: Sexp, code: Sexp) -> R<Sexp> {
+    let reference = env_reference(env, bytecode::source_of(code))?;
+    crate::heap().set_attrib(reference, code);
+    Ok(reference)
+}
+
+/// An argument reference to the compiled argument `code` of the slot frame at `owner`, for a
+/// callee that takes its arguments straight into slots: it forces as [`slot_promise`] of the
+/// code would, by running the code on the frame's slots, without a promise or an environment.
+/// It keeps the code in its environment field and the code's source as its expression, so
+/// `substitute` sees the source.
+pub unsafe fn code_reference(owner: usize, code: Sexp) -> R<Sexp> {
+    let reference = argument_reference(owner, NO_REFERENCE_SLOT, bytecode::source_of(code))?;
+    crate::heap().set_tag(reference, code);
+    Ok(reference)
+}
+
+/// The environment an environment reference ([`env_reference`]) reads its variable in.
+#[inline]
+unsafe fn reference_env(reference: Sexp) -> Option<Sexp> {
+    let tag = reference.tag();
+    (tag.kind() == SexpType::Environment).then_some(tag)
+}
+
+/// The compiled code a code reference ([`code_reference`]) runs.
+#[inline]
+unsafe fn reference_code(reference: Sexp) -> Option<Sexp> {
+    let tag = reference.tag();
+    (tag.kind() == SexpType::Bytecode).then_some(tag)
+}
+
+/// The next free reference of [`Interp::references`], naming `symbol`, with its target left
+/// for the caller to fill in.
+unsafe fn pooled_reference(symbol: Sexp) -> R<Sexp> {
+    let state = interp();
+    let heap = crate::heap();
+    let used = state.references_used as usize;
+    let reference = match state.references.get(used) {
+        Some(&reference) => {
+            heap.set_cdr(reference, symbol);
+            reference
+        }
+        None => {
+            let target = values::integer_vector(&[0, 0, 0])?;
+            heap.root(target);
+            let reference = heap.alloc_compiled_promise(unbound(), symbol, nil(), target)?;
+            reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
+            // The pool's own counts keep a reference that a slot releases, and a target that a
+            // code reference displaced, from being freed.
+            reference.increment_refcount();
+            target.increment_refcount();
+            state.references.push(reference);
+            state.reference_targets.push(target);
+            reference
+        }
+    };
+    state.references_used += 1;
+    activity::count(Counter::ArgumentReferences);
+    Ok(reference)
+}
+
+/// The slot an argument reference names for a variable its frame keeps in no slot: forcing it
+/// reads the variable where the frame's code would, in the frame's enclosure until the frame
+/// has an environment and in that environment after.
+pub const NO_REFERENCE_SLOT: u32 = u32::MAX;
+
+/// Returns the argument references made since `mark` to the pool once the call they were made
+/// for has returned, dropping the values they were forced to.
+pub unsafe fn release_references(mark: u32) {
+    let state = interp();
+    let heap = crate::heap();
+    let unbound = unbound();
+    let live = mark as usize..state.references_used as usize;
+    for (&reference, &target) in state
+        .references
+        .get(live.clone())
+        .unwrap_or(&[])
+        .iter()
+        .zip(state.reference_targets.get(live).unwrap_or(&[]))
+    {
+        if reference.car() != unbound {
+            heap.set_car(reference, unbound);
+        }
+        if reference.tag() != nil() {
+            heap.set_tag(reference, nil());
+        }
+        if reference.attrib() != target {
+            heap.set_attrib(reference, target);
+        }
+    }
+    state.references_used = mark;
+}
+
+/// Whether `value` is an argument reference ([`argument_reference`]).
+#[inline]
+pub unsafe fn is_reference(value: Sexp) -> bool {
+    value.kind() == SexpType::Promise && value.has_gp(gp::ARGUMENT_REFERENCE)
+}
+
+/// The frame position and slot an argument reference names. A reference is released before
+/// its frame returns, so one that names another frame is a broken invariant.
+unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
+    let &[owner, slot, header] = values::ints(reference.attrib()) else {
+        panic!("an argument reference lost its target");
+    };
+    if interp()
+        .frames
+        .get(owner as usize)
+        .is_none_or(|frame| frame.slots != header as u32)
+    {
+        panic!("an argument reference outlived the frame it names");
+    }
+    (owner as usize, slot as u32)
+}
+
+/// Forces an unforced argument reference: what its variable holds in the frame it names, read
+/// as a promise of the variable's name in that frame would read it.
+unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
+    let symbol = reference.cdr();
+    if let Some(env) = reference_env(reference) {
+        let code = reference.attrib();
+        if code.kind() == SexpType::Bytecode {
+            return bytecode::run_promise(code, env);
+        }
+        return eval(symbol, env);
+    }
+    let (owner, slot) = reference_target(reference);
+    let frame = &interp().frames[owner];
+    if let Some(code) = reference_code(reference) {
+        return bytecode::run_promise_on_slots(code, frame.function, owner, frame.slots as usize);
+    }
+    if frame.env != nil() {
+        return eval(symbol, frame.env);
+    }
+    if slot == NO_REFERENCE_SLOT {
+        return eval(symbol, frame.function.tag());
+    }
+    let value = *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
+    if value == unbound() {
+        return eval(symbol, frame.function.tag());
+    }
+    if value.kind() == SexpType::Promise {
+        return force_promise(value);
+    }
+    if value == missing_arg() {
+        return eval(symbol, frame_env(owner, Reify::Site("promise over the frame"))?);
+    }
+    Ok(value)
+}
+
+/// The value an unforced argument reference stands for when reading it runs no code: its
+/// variable's slot holds a value or a forced promise.
+pub unsafe fn reference_value(reference: Sexp) -> Option<Sexp> {
+    if let Some(env) = reference_env(reference) {
+        let expression = reference.cdr();
+        if reference.attrib().kind() == SexpType::Bytecode {
+            return None;
+        }
+        return match expression.kind() {
+            SexpType::Symbol => crate::effects::eager_argument(expression, env)
+                .filter(|value| value.kind() != SexpType::Promise),
+            SexpType::Language => None,
+            _ => Some(expression),
+        };
+    }
+    if reference_code(reference).is_some() {
+        return None;
+    }
+    let (owner, slot) = reference_target(reference);
+    let frame = &interp().frames[owner];
+    if frame.env != nil() || slot == NO_REFERENCE_SLOT {
+        return None;
+    }
+    let value = *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
+    if value == unbound() || value == missing_arg() {
+        return None;
+    }
+    if value.kind() != SexpType::Promise {
+        return Some(value);
+    }
+    (value.car() != unbound()).then(|| value.car())
+}
+
+/// Whether the variable an unforced argument reference names is a missing argument in its
+/// frame, as [`value_is_missing`] asks of a promise of a name.
+unsafe fn reference_is_missing(reference: Sexp) -> R<bool> {
+    let symbol = reference.cdr();
+    if reference_code(reference).is_some() || symbol.kind() != SexpType::Symbol {
+        return Ok(false);
+    }
+    let env = if let Some(env) = reference_env(reference) {
+        env
+    } else {
+        let (owner, _) = reference_target(reference);
+        interp().frames[owner].env
+    };
+    if env != nil() {
+        if crate::heap().frame_cell(env, symbol).is_none() {
+            return Ok(false);
+        }
+        return symbol_is_missing(symbol, env, false);
+    }
+    let (owner, slot) = reference_target(reference);
+    let frame = &interp().frames[owner];
+    if slot == NO_REFERENCE_SLOT {
+        return Ok(false);
+    }
+    let value = *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
+    if value == unbound() {
+        return Ok(false);
+    }
+    value_is_missing(value)
+}
+
+/// Turns the argument references the frame at `index` was called with into ordinary promises
+/// over the frames they name ([`detach_reference`]), wherever the frame holds them: its
+/// arguments, its slots and the `...` it collected. Every path that hands a frame's arguments
+/// or variables to code that may keep them past the call (its environment, dispatch to a
+/// method) runs this first, since a reference is reused once the call returns.
+pub unsafe fn materialize_references(index: usize) -> R<()> {
+    let state = interp();
+    let Some(frame) = state.frames.get(index) else {
+        return Ok(());
+    };
+    if frame.slots == crate::NO_SLOTS {
+        return Ok(());
+    }
+    let start = frame.args as usize;
+    let end = state
+        .frames
+        .get(index + 1)
+        .map_or(state.frame_args.len(), |next| next.args as usize);
+    for position in start..end {
+        let reference = interp().frame_args[position].value;
+        if is_reference(reference) {
+            detach_reference(reference)?;
+        }
+    }
+    Ok(())
+}
+
+/// [`detach_reference`] for each argument reference in `args`, before they go to a call that
+/// may keep them past its return.
+pub unsafe fn detach_references(args: &[Arg]) -> R<()> {
+    for arg in args {
+        if is_reference(arg.value) {
+            detach_reference(arg.value)?;
+        }
+    }
+    Ok(())
+}
+
+/// Makes `reference` the ordinary promise that stands for it ([`reference_promise`]), in place,
+/// and gives its place in the pool to a fresh reference. Forwarding `...` hands the same
+/// reference to several frames, so converting it in place is what keeps it one promise that
+/// forces once for all of them.
+pub unsafe fn detach_reference(reference: Sexp) -> R<()> {
+    let [value, code, env, compiled] = reference_promise(reference)?;
+    let state = interp();
+    let used = state.references_used as usize;
+    let Some(index) = state.references[..used]
+        .iter()
+        .position(|&pooled| pooled == reference)
+    else {
+        panic!("an argument reference outlived the call it was made for");
+    };
+    let heap = crate::heap();
+    heap.set_car(reference, value);
+    heap.set_cdr(reference, code);
+    heap.set_tag(reference, env);
+    heap.set_attrib(reference, compiled);
+    reference.set_gp_bits(gp::ARGUMENT_REFERENCE, false);
+    let target = values::integer_vector(&[0, 0, 0])?;
+    heap.root(target);
+    let fresh = heap.alloc_compiled_promise(unbound(), nil(), nil(), target)?;
+    fresh.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
+    fresh.increment_refcount();
+    target.increment_refcount();
+    let state = interp();
+    state.references[index] = fresh;
+    state.reference_targets[index] = target;
+    Ok(())
+}
+
+/// The fields (value, code, environment, compiled code) of the ordinary promise that stands for
+/// an argument reference: a forced promise of its name once it is forced, and a promise of its
+/// name in the frame it names before. [`detach_reference`] writes them into the reference
+/// itself, so no promise is allocated only to be copied.
+unsafe fn reference_promise(reference: Sexp) -> R<[Sexp; 4]> {
+    let symbol = reference.cdr();
+    if reference.car() != unbound() {
+        return Ok([reference.car(), symbol, nil(), nil()]);
+    }
+    let (env, expression) = if let Some(env) = reference_env(reference) {
+        let code = reference.attrib();
+        (
+            env,
+            if code.kind() == SexpType::Bytecode {
+                code
+            } else {
+                symbol
+            },
+        )
+    } else {
+        let (owner, _) = reference_target(reference);
+        let expression = reference_code(reference).unwrap_or(symbol);
+        let frame = &mut interp().frames[owner];
+        if frame.env != nil() {
+            (frame.env, expression)
+        } else {
+            let env = pending_env(owner)?;
+            interp().frames[owner].unforced += 1;
+            (env, expression)
+        }
+    };
+    activity::count(Counter::PromisesCreated);
+    Ok(if expression.kind() == SexpType::Bytecode {
+        [unbound(), bytecode::source_of(expression), env, expression]
+    } else {
+        [unbound(), symbol, env, nil()]
+    })
+}
+
+/// The pending environment of the slot frame at `owner`, made bare on first use: the value that
+/// stands for the frame's environment until something reads it, which [`resolved_env`] then
+/// makes real.
+pub unsafe fn pending_env(owner: usize) -> R<Sexp> {
+    let env = interp().frames[owner].pending;
+    if env != nil() {
+        return Ok(env);
+    }
+    let function = interp().frames[owner].function;
+    let env = frame_environment(function, function.car())?;
+    env.set_gp_bits(gp::PENDING_FRAME, true);
+    interp().frames[owner].pending = env;
+    Ok(env)
+}
+
+/// `value`, or the environment it stands for when it is a slot frame's pending one: what a
+/// binding gets for a value that may be pending (a method's `.GenericCallEnv`).
+pub unsafe fn resolved_value(value: Sexp) -> R<Sexp> {
+    if value.kind() == SexpType::Environment {
+        resolved_env(value)
+    } else {
+        Ok(value)
+    }
+}
+
+/// The environment of an unforced `promise`, made first when it is a slot frame's pending one
+/// or the frame an argument reference names. Anything that reads a promise's environment other
+/// than to force it reads it here.
+pub unsafe fn promise_env(promise: Sexp) -> R<Sexp> {
+    if promise.has_gp(gp::ARGUMENT_REFERENCE)
+        && promise.car() == unbound()
+        && reference_env(promise).is_none()
+    {
+        return frame_env(reference_target(promise).0, Reify::Site("promise environment"));
+    }
+    resolved_env(promise.tag())
+}
+
+/// `env`, made first when it is a slot frame's pending environment, which a promise's
+/// environment may be (see [`promise_env`]).
+pub unsafe fn resolved_env(env: Sexp) -> R<Sexp> {
+    if !env.has_gp(gp::PENDING_FRAME) {
+        return Ok(env);
+    }
+    let Some(owner) = interp()
+        .frames
+        .iter()
+        .rposition(|frame| frame.pending == env)
+    else {
+        panic!("a promise names the pending environment of a frame that has returned");
+    };
+    frame_env(owner, Reify::Site("resolved environment"))
 }
 
 /// Stores `value` as the value of the unforced `promise`, as forcing it to that value does.
@@ -447,11 +983,30 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
         SexpType::Closure => {
             if function.has_gp(gp::NATIVE_ENTRY)
                 && let Some(value) =
-                    crate::base_fast_paths::native_entry_by_value(function, arguments, env)?
+                    crate::base_fast_paths::native_entry_by_value(function, arguments, |symbol| {
+                        crate::effects::eager_argument(symbol, env)
+                    })?
             {
                 return Ok(value);
             }
             let mut args = Args::new();
+            // Matching here replaces the matching the generic call would do, so a call the
+            // plan covers costs no more, and its arguments become references, not promises.
+            if arguments == call.cdr()
+                && let Some(sources) = direct_sources(function, call)?
+            {
+                let references = interp().references_used;
+                closure_args_into::<EVALUATOR_REFERENCES>(arguments, env, &mut args)?;
+                let result = if sources[..] == [MATCH_PER_CALL] {
+                    call_matching(call, function, &args, env)
+                } else {
+                    call_with_plan(call, function, &sources, &args, env)
+                };
+                if interp().references_used != references {
+                    release_references(references);
+                }
+                return result;
+            }
             promise_args_into(arguments, env, &mut args)?;
             apply_closure_owning(call, function, &args, env, None)
         }
@@ -530,7 +1085,7 @@ pub unsafe fn call_direct(definition: &BuiltinDef, args: &[Sexp]) -> R<Option<Se
 // target to copy) runs straight through; anything else takes the out-of-line path, so this
 // frame stays small enough that entry and exit cost a handful of instructions.
 #[inline]
-unsafe fn call_builtin_reusing(
+pub(crate) unsafe fn call_builtin_reusing(
     definition: &BuiltinDef,
     call: Sexp,
     op: Sexp,
@@ -630,7 +1185,12 @@ unsafe fn run_builtin(
         call,
         op,
         args,
-        env,
+        rho: env,
+        frame: if env == nil() {
+            interp().slot_owner
+        } else {
+            crate::NO_SLOTS
+        },
         reusable,
     };
     if checks.native != NativeArgs::Accepted
@@ -943,6 +1503,13 @@ pub unsafe fn compiled_args_into(arguments: Sexp, env: Sexp, args: &mut Args) ->
     closure_args_into::<COMPILED>(arguments, env, args)
 }
 
+/// [`compiled_args_into`] for a callee that takes its arguments straight into slots
+/// ([`call_with_plan`]): a variable is passed as an argument reference to it in `env`, which
+/// the calling instruction releases when the call returns.
+pub unsafe fn referenced_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
+    closure_args_into::<REFERENCES>(arguments, env, args)
+}
+
 /// [`compiled_args_into`] for a call of an effect-free closure (see [`crate::effects`]) whose
 /// other arguments cannot assign a variable, made while no calling handler is established: a
 /// variable argument is bound to its value, or to the caller's own promise for it, instead of a
@@ -958,6 +1525,11 @@ const PROMISES: u8 = 0;
 const COMPILED: u8 = 1;
 /// A constant or a variable as its value.
 const EAGER: u8 = 2;
+/// A constant as its own value and a variable as an argument reference ([`env_reference`]).
+const REFERENCES: u8 = 3;
+/// [`REFERENCES`] for the AST evaluator, which also passes a constant as a reference, so that
+/// the callee sees a promise for it as it does from GNU R's AST evaluator.
+const EVALUATOR_REFERENCES: u8 = 4;
 
 unsafe fn closure_args_into<const MODE: u8>(
     mut arguments: Sexp,
@@ -999,8 +1571,22 @@ unsafe fn closure_args_into<const MODE: u8>(
             };
             let value = if let Some(value) = eager {
                 value
-            } else if expression == missing_arg() || (MODE != PROMISES && constant) {
+            } else if expression == missing_arg()
+                || (MODE != PROMISES && MODE != EVALUATOR_REFERENCES && constant)
+            {
                 expression
+            } else if (MODE == REFERENCES || MODE == EVALUATOR_REFERENCES)
+                && match expression.kind() {
+                    SexpType::Symbol => dot_dot_index(expression).is_none(),
+                    SexpType::Promise => false,
+                    _ => true,
+                }
+            {
+                if expression.kind() == SexpType::Bytecode {
+                    env_code_reference(env, expression)?
+                } else {
+                    env_reference(env, expression)?
+                }
             } else if expression.kind() == SexpType::Bytecode {
                 compiled_promise(expression, env)?
             } else {
@@ -1112,6 +1698,18 @@ pub unsafe fn apply_closure(
     {
         return value;
     }
+    if let Some(frame) = bind_slots(call, function, args)? {
+        let method_vars = supplied.unwrap_or(&[]);
+        return run_frame(
+            call,
+            function,
+            frame,
+            sys_parent,
+            args,
+            Entry::Unchecked,
+            method_vars,
+        );
+    }
     let env = bind_arguments(call, function, args, supplied)?;
     run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
 }
@@ -1139,6 +1737,18 @@ pub unsafe fn apply_closure_owning(
         && let Some(value) = (tier.call)(function, args)
     {
         return value;
+    }
+    if let Some(frame) = bind_slots(call, function, args)? {
+        let method_vars = supplied.unwrap_or(&[]);
+        return run_frame(
+            call,
+            function,
+            frame,
+            sys_parent,
+            args,
+            Entry::Unchecked,
+            method_vars,
+        );
     }
     let env = bind_arguments(call, function, args, supplied)?;
     run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
@@ -1182,11 +1792,660 @@ pub unsafe fn bind_arguments(
     if let Some(supplied) = supplied {
         for &(symbol, value) in supplied {
             if heap.frame_cell(env, symbol).is_none() {
-                heap.define(env, symbol, value)?;
+                heap.define(env, symbol, resolved_value(value)?)?;
             }
         }
     }
     Ok(env)
+}
+
+/// The frame a closure call runs in: an environment, or a slot frame
+/// (`docs/src/content/docs/development/design/slot-frames.md`) whose header register is
+/// `header`, with `missing` its formals' missing bits.
+#[derive(Clone, Copy)]
+pub enum CallFrame {
+    Env(Sexp),
+    Slots { header: u32, missing: u64 },
+}
+
+/// Binds `args` to `function`'s formals in a slot frame pushed onto the register file, or
+/// returns `None` when the call needs an environment from the start: the body is not compiled
+/// with a slot table, a debugger, a move or a type signature watches the frame, or a missing
+/// formal's default is neither a literal, a symbol, nor code compiled with its own slot table.
+pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallFrame>> {
+    let body = function.cdr();
+    if body.kind() != SexpType::Bytecode {
+        return Ok(None);
+    }
+    let constants = body.cdr();
+    let table = constants.element(bytecode::SLOTS);
+    let state = interp();
+    if table == nil()
+        || state.debugger.is_some()
+        || moves::tracking()
+        || function == state.namespace_loader
+        || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
+        || crate::annotations::is_typed(function)
+    {
+        return Ok(None);
+    }
+    let _activity = activity::enter(Activity::CallSetup, 0);
+    let names = table.element(1);
+    let count = values::length(names);
+    let formals = function.car();
+    let actuals = if positional(formals, args) {
+        None
+    } else {
+        activity::count(Counter::FormalsMatchedByName);
+        Some(match_args_cached(function, formals, args, call)?)
+    };
+    let missing_value = missing_arg();
+    let mut bound: SmallVec<[Sexp; 12]> = SmallVec::new();
+    let mut missing = 0u64;
+    let mut defaults = None;
+    let mut formal = formals;
+    while formal.kind() == SexpType::Pairlist {
+        let index = bound.len();
+        // A closure whose formals were replaced keeps the body's code, whose table names the
+        // formals it was compiled with.
+        if index >= count || names.element(index) != formal.tag() {
+            return Ok(None);
+        }
+        let actual = match &actuals {
+            Some(actuals) => actuals.get(index).copied().unwrap_or(missing_value),
+            None => args.get(index).map_or(missing_value, |arg| arg.value),
+        };
+        let default = formal.car();
+        if actual == missing_value && default != missing_value {
+            if !slot_default_fits(function, default, index, &mut defaults)? {
+                return Ok(None);
+            }
+            missing |= 1 << index;
+            bound.push(default);
+        } else {
+            bound.push(actual);
+        }
+        formal = formal.cdr();
+    }
+    let header = state.bytecode.registers.len();
+    // The body's own registers follow the slots, so one reservation covers the whole window.
+    let register_count = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
+    bytecode::reserve_registers(header + 1 + count + register_count)?;
+    let registers = bytecode::register_address(header);
+    for (index, &value) in bound.iter().enumerate() {
+        value.increment_refcount();
+        *registers.add(1 + index) = value;
+    }
+    for index in bound.len()..count {
+        *registers.add(1 + index) = unbound();
+    }
+    Ok(Some(CallFrame::Slots {
+        header: header as u32,
+        missing,
+    }))
+}
+
+/// The source [`direct_sources`] gives a `...` formal, whose arguments follow the formals'.
+pub const DOTS_SOURCE: i32 = -2;
+
+/// The plan [`direct_sources`] gives a call that passes `...`: which argument fills which slot
+/// depends on what `...` holds at each call, so [`matched_sources`] matches the call's
+/// arguments once they are collected.
+pub const MATCH_PER_CALL: i32 = -3;
+
+/// The direct-call plan of the call `call` for closures with `function`'s formals and body:
+/// for each formal, the position of the argument that fills its slot, -1 when the site
+/// supplies none, or [`DOTS_SOURCE`] for `...`, followed by the positions of the arguments
+/// `...` collects, in order. A call that passes `...` gets the one entry [`MATCH_PER_CALL`].
+/// `None` when such calls need [`bind_slots`] or a heap frame: the body has no slot table that
+/// names the formals, the call passes `..N`, its arguments do not match, or a formal the site
+/// leaves out has a default whose promise would capture the frame.
+pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<SmallVec<[i32; 8]>>> {
+    let Some((formal_count, dots_index)) = plannable(function) else {
+        return Ok(None);
+    };
+    let mut args = Args::new();
+    let mut forwards_dots = false;
+    let mut cell = call.cdr();
+    while cell.kind() == SexpType::Pairlist {
+        let expression = cell.car();
+        if expression.kind() == SexpType::Symbol {
+            if expression == symbols().dots {
+                forwards_dots = true;
+            } else if dot_dot_index(expression).is_some() {
+                return Ok(None);
+            }
+        }
+        args.push(Arg {
+            tag: cell.tag(),
+            value: expression,
+        });
+        cell = cell.cdr();
+    }
+    if forwards_dots {
+        return Ok(Some(smallvec![MATCH_PER_CALL]));
+    }
+    plan_sources(function, formal_count, dots_index, &args, call)
+}
+
+/// The plan of a call whose site plans per call ([`MATCH_PER_CALL`]), from `args`, the
+/// arguments it collected with `...` spread out. `None` when they do not match, which the
+/// generic path then reports, or a default does not fit a slot.
+pub unsafe fn matched_sources(
+    function: Sexp,
+    args: &[Arg],
+    call: Sexp,
+) -> R<Option<SmallVec<[i32; 8]>>> {
+    let Some((formal_count, dots_index)) = plannable(function) else {
+        return Ok(None);
+    };
+    plan_sources(function, formal_count, dots_index, args, call)
+}
+
+/// How many formals `function` has and which is `...`, when calls of it can take their
+/// arguments straight into slots: its body is compiled with a slot table whose first names
+/// are its formals.
+unsafe fn plannable(function: Sexp) -> Option<(usize, Option<usize>)> {
+    let body = function.cdr();
+    if body.kind() != SexpType::Bytecode
+        || function == interp().namespace_loader
+        || crate::annotations::is_typed(function)
+    {
+        return None;
+    }
+    let table = body.cdr().element(bytecode::SLOTS);
+    if table == nil() {
+        return None;
+    }
+    let names = table.element(1);
+    let mut formal_count = 0;
+    let mut dots_index = None;
+    let mut formal = function.car();
+    while formal.kind() == SexpType::Pairlist {
+        if formal_count >= values::length(names) || names.element(formal_count) != formal.tag() {
+            return None;
+        }
+        if formal.tag() == symbols().dots {
+            dots_index = Some(formal_count);
+        }
+        formal_count += 1;
+        formal = formal.cdr();
+    }
+    Some((formal_count, dots_index))
+}
+
+/// The sources of [`direct_sources`] for `args` matched to `function`'s formals.
+unsafe fn plan_sources(
+    function: Sexp,
+    formal_count: usize,
+    dots_index: Option<usize>,
+    args: &[Arg],
+    call: Sexp,
+) -> R<Option<SmallVec<[i32; 8]>>> {
+    let formals = function.car();
+    let Ok(plan) = match_plan(formals, args, call) else {
+        return Ok(None);
+    };
+    let missing_value = missing_arg();
+    let mut sources: SmallVec<[i32; 8]> = smallvec![-1; formal_count];
+    if let Some(index) = dots_index {
+        sources[index] = DOTS_SOURCE;
+    }
+    for (position, &target) in plan.iter().enumerate() {
+        if Some(target as usize) == dots_index {
+            sources.push(position as i32);
+        } else if args[position].value != missing_value {
+            sources[target as usize] = position as i32;
+        }
+    }
+    let mut defaults = None;
+    let mut formal = formals;
+    for (index, &source) in sources[..formal_count].iter().enumerate() {
+        let default = formal.car();
+        if source < 0
+            && default != missing_value
+            && !slot_default_fits(function, default, index, &mut defaults)?
+        {
+            return Ok(None);
+        }
+        formal = formal.cdr();
+    }
+    Ok(Some(sources))
+}
+
+/// Whether a slot frame of `function` can hold the default of the formal at `index` for a call
+/// that leaves it out: a literal goes in the slot as it is, and anything else as a promise of
+/// its code over the slots ([`bytecode::slot_defaults`], which `defaults` keeps once read), which
+/// [`run_frame`] makes once the frame is on the stack.
+unsafe fn slot_default_fits(
+    function: Sexp,
+    default: Sexp,
+    index: usize,
+    defaults: &mut Option<Sexp>,
+) -> R<bool> {
+    if default.kind().is_atomic() || default == nil() {
+        return Ok(true);
+    }
+    let defaults = match *defaults {
+        Some(defaults) => defaults,
+        None => *defaults.insert(bytecode::slot_defaults(function)?),
+    };
+    Ok(defaults != nil() && defaults.element(index) != nil())
+}
+
+/// Calls `function` for a call whose site plans per call ([`MATCH_PER_CALL`]): in a slot frame
+/// when `args` match its formals, and down the generic path, which reports the mismatch,
+/// otherwise.
+pub unsafe fn call_matching(call: Sexp, function: Sexp, args: &[Arg], sys_parent: Sexp) -> R<Sexp> {
+    match matched_sources(function, args, call)? {
+        Some(sources) => call_with_plan(call, function, &sources, args, sys_parent),
+        None => {
+            detach_references(args)?;
+            apply_closure_owning(call, function, args, sys_parent, None)
+        }
+    }
+}
+
+/// Calls `function` in a slot frame for a call whose plan `sources` ([`direct_sources`], which
+/// `bytecode::CallPlans` keeps per site) matched `args` to its formals already: the arguments go straight into the slots, with no
+/// matching and none of [`apply_closure`]'s checks, which the plan settled for the closure's
+/// formals and body. What can change between calls (a debugger, a move) sends the call down
+/// the generic path.
+pub unsafe fn call_with_plan(
+    call: Sexp,
+    function: Sexp,
+    sources: &[i32],
+    args: &[Arg],
+    sys_parent: Sexp,
+) -> R<Sexp> {
+    let constants = function.cdr().cdr();
+    let state = interp();
+    if state.debugger.is_some()
+        || moves::tracking()
+        || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
+    {
+        detach_references(args)?;
+        return apply_closure(call, function, args, sys_parent, None);
+    }
+    let count = values::length(constants.element(bytecode::SLOTS).element(1));
+    let header = state.bytecode.registers.len();
+    let register_count = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
+    bytecode::reserve_registers(header + 1 + count + register_count)?;
+    let registers = bytecode::register_address(header);
+    let missing_value = missing_arg();
+    let formal_count = values::length(function.car());
+    let (sources, dots_sources) = sources.split_at(formal_count.min(sources.len()));
+    let mut dots = missing_value;
+    for &source in dots_sources.iter().rev() {
+        if let Some(arg) = args.get(source as usize) {
+            dots = values::triple(
+                SexpType::Dots,
+                arg.value,
+                if dots == missing_value { nil() } else { dots },
+                arg.tag,
+            )?;
+        }
+    }
+    let mut missing = 0u64;
+    let mut formal = function.car();
+    for (index, &source) in sources.iter().enumerate() {
+        let default = formal.car();
+        let value = match args.get(source as usize) {
+            Some(arg) if source >= 0 => arg.value,
+            _ if source == DOTS_SOURCE => dots,
+            _ if default != missing_value => {
+                missing |= 1 << index;
+                default
+            }
+            _ => missing_value,
+        };
+        value.increment_refcount();
+        *registers.add(1 + index) = value;
+        formal = formal.cdr();
+    }
+    let unbound = unbound();
+    for index in sources.len()..count {
+        *registers.add(1 + index) = unbound;
+    }
+    run_frame(
+        call,
+        function,
+        CallFrame::Slots {
+            header: header as u32,
+            missing,
+        },
+        sys_parent,
+        args,
+        Entry::Unchecked,
+        &[],
+    )
+}
+
+/// Runs a call of `function`, a closure whose body is the single call `body` of the builtin
+/// `builtin`, by calling the builtin with `builtin_args` from a frame that holds only the
+/// formals' values in a slot window at `header`, with `missing` their missing bits. The
+/// arguments are values that reading ran no R code for, so binding them where the body would
+/// have forced promises is invisible, and the frame is real: native code the builtin calls back
+/// into R from, an error it raises, `sys.call()`, `sys.function()` and `traceback()` all see the
+/// wrapper's call, and anything that asks for the frame's environment gets one made from the
+/// slots. What the body's activation would add (its registers, the lookups of the builtin and
+/// the free variables, the forcing of promises) is gone, which is most of a wrapper call.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn run_wrapper(
+    call: Sexp,
+    function: Sexp,
+    header: u32,
+    missing: u64,
+    sys_parent: Sexp,
+    args: &[Arg],
+    body: Sexp,
+    builtin: Sexp,
+    builtin_args: &[Arg],
+) -> R<Sexp> {
+    let _window = SlotWindow(header);
+    activity::count(Counter::ClosureCalls);
+    activity::count(Counter::WrappersInlined);
+    let _frame = crate::profile_summary::enter_closure(call, function);
+    let state = interp();
+    if state.frames.len() as u32 >= state.max_depth {
+        return Err(error_in(
+            call,
+            "evaluation nested too deeply: infinite recursion / options(expressions=)?",
+        ));
+    }
+    let caller = if sys_parent == nil() {
+        state.slot_owner
+    } else {
+        crate::NO_SLOTS
+    };
+    let (depth, caller_srcref) = push_frame(
+        call,
+        function,
+        nil(),
+        sys_parent,
+        args,
+        &[],
+        header,
+        missing,
+        caller,
+    )?;
+    let state = interp();
+    state.frames[depth - 1].inlined = true;
+    let owner = state.slot_owner;
+    state.slot_owner = (depth - 1) as u32;
+    let result = scope(|| {
+        let definition = builtin_def(builtin)?;
+        bytecode::call_builtin(definition, body, builtin, builtin_args, nil())
+    });
+    let state = interp();
+    state.slot_owner = owner;
+    let frame = &state.frames[depth - 1];
+    let result = if frame.env != nil() || !frame.on_exit.is_empty() || frame.pending != nil() {
+        finish_frame(call, depth, None, result)
+    } else {
+        result
+    };
+    pop_frame(function, depth, args, caller_srcref, result)
+}
+
+/// The environment of the frame at `index`, made from its slots first if it is a slot frame
+/// that has none yet. Everything that hands a frame's environment to R code or native code
+/// reads it here.
+#[inline]
+pub unsafe fn frame_env(index: usize, cause: Reify) -> R<Sexp> {
+    let frame = &interp().frames[index];
+    if frame.env != nil() || frame.slots == crate::NO_SLOTS {
+        return Ok(frame.env);
+    }
+    reify(index, cause)
+}
+
+/// What asked for a slot frame's environment, which the profile summary reports as the reason
+/// a package call's frame was reified.
+#[derive(Clone, Copy)]
+pub enum Reify {
+    /// The builtin `op`, through [`crate::builtins::Call::env`].
+    Builtin(Sexp),
+    Site(&'static str),
+}
+
+/// The reasons that observe a frame's environment: they evaluate code in it, hand it out as a
+/// value, or read or write its bindings by name. Every other reason is a mechanism a slot
+/// frame could serve without one. `.External2` hands its routine the calling environment, and
+/// the routines packages call through it (rlang's `ffi_enquo`, `ffi_eval` and the like) read
+/// bindings there.
+pub const OBSERVING_REASONS: [&str; 17] = [
+    "eval", "evalq", "environment", "environment()", "sys.frame", "sys.frames", "parent.frame",
+    "pos = -1", "assign", "get", "get0", "exists", "mget", "native code", "as.environment",
+    "environment outliving the frame", ".External2",
+];
+
+/// The `...` slot of the frame at `index`, when it is a slot frame without an environment and
+/// has a `...` formal.
+pub unsafe fn slot_dots(index: usize) -> Option<Sexp> {
+    let frame = interp().frames.get(index)?;
+    if frame.env != nil() || frame.slots == crate::NO_SLOTS {
+        return None;
+    }
+    let mut formal = frame.function.car();
+    let mut position = 0;
+    while formal.kind() == SexpType::Pairlist {
+        if formal.tag() == symbols().dots {
+            return Some(*bytecode::register_address(
+                frame.slots as usize + 1 + position,
+            ));
+        }
+        position += 1;
+        formal = formal.cdr();
+    }
+    None
+}
+
+/// What the slot of the formal `symbol` holds in the frame at `index`, and whether the formal is
+/// missing, when it is a slot frame without an environment that has such a formal.
+pub unsafe fn slot_formal(index: usize, symbol: Sexp) -> Option<(Sexp, bool)> {
+    let frame = interp().frames.get(index)?;
+    if frame.env != nil() || frame.slots == crate::NO_SLOTS {
+        return None;
+    }
+    let mut formal = frame.function.car();
+    let mut position = 0;
+    while formal.kind() == SexpType::Pairlist {
+        if formal.tag() == symbol {
+            let value = *bytecode::register_address(frame.slots as usize + 1 + position);
+            let missing = position < 64 && frame.missing & (1 << position) != 0;
+            return Some((value, missing));
+        }
+        position += 1;
+        formal = formal.cdr();
+    }
+    None
+}
+
+/// The environment of the slot frame whose slots the running byte code reads, which a `NULL`
+/// environment it hands out stands for (see [`crate::builtins::Call::env`]).
+pub unsafe fn slot_owner_env(cause: Reify) -> R<Sexp> {
+    let owner = interp().slot_owner;
+    if owner == crate::NO_SLOTS {
+        panic!("byte code handed out a slot frame's environment outside any slot frame");
+    }
+    frame_env(owner as usize, cause)
+}
+
+/// `parent.frame()` of the frame at `index`: the environment its call was made from.
+pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
+    let frame = &interp().frames[index];
+    if frame.sys_parent != nil() || frame.caller == crate::NO_SLOTS {
+        return Ok(frame.sys_parent);
+    }
+    frame_env(frame.caller as usize, cause)
+}
+
+/// The environment the frame at `index` was called from, as `parent.frame` hands it out: a
+/// slot frame that has none gives its pending environment instead of reifying, and reifies
+/// only once code reads its bindings ([`resolve_pending_read`]) or keeps the environment past
+/// the frame's return ([`finish_frame`]).
+pub unsafe fn frame_sys_parent_pending(index: usize) -> R<Sexp> {
+    let frame = &interp().frames[index];
+    if frame.sys_parent != nil() || frame.caller == crate::NO_SLOTS {
+        return Ok(frame.sys_parent);
+    }
+    let owner = frame.caller as usize;
+    let target = &interp().frames[owner];
+    if target.env != nil() || target.slots == crate::NO_SLOTS {
+        return Ok(target.env);
+    }
+    let env = pending_env(owner)?;
+    interp().frames[owner].pending_shared = true;
+    Ok(env)
+}
+
+/// The environment of the slot frame whose header register is `header`, which must be live.
+pub unsafe fn slot_frame_env(header: usize, cause: Reify) -> R<Sexp> {
+    let frames = &interp().frames;
+    let Some(index) = frames
+        .iter()
+        .rposition(|frame| frame.slots as usize == header)
+    else {
+        panic!("a slot frame's activation outlived its frame");
+    };
+    frame_env(index, cause)
+}
+
+/// Gives the slot frame at `index` its environment: one binding cell per bound slot, formals
+/// first and with their missing flags, exactly as [`bind_arguments`] and the assignments since
+/// would have bound them. The environment is the frame's from then on, so the slots give up
+/// their references and nothing reads them again.
+#[cold]
+#[inline(never)]
+unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
+    if activity::enabled() {
+        let name = match cause {
+            Reify::Builtin(op) => builtin_def(op)?.name,
+            Reify::Site(name) => name,
+        };
+        interp().frames[index].reified_by = activity::label(name);
+    }
+    materialize_references(index)?;
+    let frame = &interp().frames[index];
+    // A variable the caller passed to an inlined wrapper sits in its slot as the value; the
+    // generic path would have bound a promise of the variable, forced by the builtin call, and
+    // `substitute` reads the variable from it. Constants bind as themselves either way.
+    if frame.inlined
+        && let Some(sources) = direct_sources(frame.function, frame.call)?
+    {
+        let header = frame.slots as usize;
+        let call = frame.call;
+        let formal_count = values::length(frame.function.car());
+        for (slot, &source) in sources.iter().take(formal_count).enumerate() {
+            if source < 0 {
+                continue;
+            }
+            let mut cell = call.cdr();
+            for _ in 0..source {
+                cell = cell.cdr();
+            }
+            let expression = cell.car();
+            if expression.kind() != SexpType::Symbol {
+                continue;
+            }
+            let register = bytecode::register_address(header + 1 + slot);
+            let promise = forced_promise(expression, *register)?;
+            promise.increment_refcount();
+            (*register).decrement_refcount();
+            *register = promise;
+        }
+    }
+    let frame = &interp().frames[index];
+    let (function, header, missing) = (frame.function, frame.slots as usize, frame.missing);
+    let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
+    let count = values::length(names);
+    let formals = function.car();
+    let pending = frame.pending;
+    let env = if pending == nil() {
+        frame_environment(function, formals)?
+    } else {
+        pending.set_gp_bits(gp::PENDING_FRAME, false);
+        pending
+    };
+    let registers = bytecode::register_address(header);
+    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
+    let mut formal = formals;
+    while formal.kind() == SexpType::Pairlist {
+        let index = bindings.len();
+        bindings.push(Formal {
+            symbol: formal.tag(),
+            value: *registers.add(1 + index),
+            missing: missing & (1 << index) != 0,
+        });
+        formal = formal.cdr();
+    }
+    let heap = crate::heap();
+    heap.define_formals_uncollected(env, &bindings)?;
+    heap.mark_frame_formals(env);
+    for slot in bindings.len()..count {
+        let value = *registers.add(1 + slot);
+        if value != unbound() {
+            heap.define(env, names.element(slot), value)?;
+        }
+    }
+    let method_vars: SmallVec<[(Sexp, Sexp); 6]> = crate::method_vars(interp(), index).into();
+    for (symbol, value) in method_vars {
+        if heap.frame_cell(env, symbol).is_none() {
+            heap.define(env, symbol, resolved_value(value)?)?;
+        }
+    }
+    let nil = nil();
+    for slot in 0..count {
+        (*registers.add(1 + slot)).decrement_refcount();
+        *registers.add(1 + slot) = nil;
+    }
+    env.set_gp_bits(gp::COMPILED_FRAME, true);
+    *registers = env;
+    let state = interp();
+    state.frames[index].env = env;
+    if !state.pending_closures.is_empty() {
+        state
+            .pending_closures
+            .retain(|&(owner, _)| owner as usize != index);
+    }
+    activity::count(Counter::FramesReified);
+    if syntax::testing::invariants_enabled() {
+        check_reified(index, env, &bindings);
+    }
+    Ok(env)
+}
+
+/// The cross-check behind `syntax::testing::enable_invariants()`: the environment made from a
+/// slot frame binds each formal as the heap-frame path would have, to the same value with the
+/// same missing flag, and binds nothing it should not.
+unsafe fn check_reified(index: usize, env: Sexp, bindings: &[Formal]) {
+    let heap = crate::heap();
+    for binding in bindings {
+        let Some(cell) = heap.frame_cell(env, binding.symbol) else {
+            panic!(
+                "frame {index}: a reified slot frame lost formal {:?}",
+                values::symbol_name(binding.symbol)
+            );
+        };
+        assert!(
+            cell.cdr() == binding.value && cell.has_gp(gp::BINDING_MISSING) == binding.missing,
+            "frame {index}: a reified slot frame binds formal {:?} differently",
+            values::symbol_name(binding.symbol)
+        );
+    }
+    let function = interp().frames[index].function;
+    let locals = bytecode::local_symbols(bytecode::source_of_body(function.cdr()), function.car());
+    let Some(locals) = locals else {
+        panic!("frame {index}: a slot frame whose body has no known local symbols");
+    };
+    for symbol in crate::envir::env_symbols(env, true, false) {
+        assert!(
+            locals.contains(&symbol),
+            "frame {index}: a reified slot frame binds {:?}, which its body cannot bind",
+            values::symbol_name(symbol)
+        );
+    }
 }
 
 /// A fresh, rooted function frame for a call of `function`, after one collection check that
@@ -1293,10 +2552,40 @@ pub unsafe fn run_closure(
     args: &[Arg],
     entry: Entry,
 ) -> R<Sexp> {
+    run_frame(
+        call,
+        function,
+        CallFrame::Env(env),
+        sys_parent,
+        args,
+        entry,
+        &[],
+    )
+}
+
+/// Runs a closure body in `frame`, whose arguments are already bound. `sys_parent` is the
+/// environment the call was made from, or `NULL` when the caller is the frame below this one
+/// and has no environment yet. A slot frame's registers are released however the call ends.
+pub unsafe fn run_frame(
+    call: Sexp,
+    function: Sexp,
+    frame: CallFrame,
+    sys_parent: Sexp,
+    args: &[Arg],
+    entry: Entry,
+    method_vars: &[(Sexp, Sexp)],
+) -> R<Sexp> {
+    let (env, slots, missing) = match frame {
+        CallFrame::Env(env) => (env, crate::NO_SLOTS, 0),
+        CallFrame::Slots { header, missing } => (nil(), header, missing),
+    };
+    let _window = SlotWindow(slots);
     let _activity = activity::enter(Activity::CallSetup, 0);
     activity::count(Counter::ClosureCalls);
     let _frame = crate::profile_summary::enter_closure(call, function);
-    moves::entering_closure(function, env)?;
+    if slots == crate::NO_SLOTS {
+        moves::entering_closure(function, env)?;
+    }
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
         return Err(error_in(
@@ -1304,35 +2593,41 @@ pub unsafe fn run_closure(
             "evaluation nested too deeply: infinite recursion / options(expressions=)?",
         ));
     }
+    // A `NULL` `sys_parent` comes from byte code running on a slot frame's slots, the caller.
+    let caller = if sys_parent == nil() {
+        state.slot_owner
+    } else {
+        crate::NO_SLOTS
+    };
     if !state.object_systems {
+        let sys_parent = if caller != crate::NO_SLOTS {
+            frame_env(caller as usize, Reify::Site("object-system check"))?
+        } else {
+            sys_parent
+        };
         refuse_object_system(call, function, sys_parent)?;
     }
-    let restarts = state.restarts.clone();
-    let start = state.frame_args.len() as u32;
-    state.frame_args.extend_from_slice(args);
-    state.frames.push(Frame {
+    let (depth, caller_srcref) = push_frame(
         call,
         function,
         env,
         sys_parent,
-        args: start,
-        on_exit: Vec::new(),
-        handlers: state.handlers.clone(),
-        restarts: restarts.clone(),
-        srcref: state.srcref,
-        closures: state.frame_closures.len(),
-    });
-    if PROFILE_TICK.load(Ordering::Relaxed) {
-        record_profile_sample(None)?;
-    }
-    let depth = state.frames.len();
-    let caller_srcref = state.srcref;
-    state.srcref = values::get_attr(function, symbols().srcref);
+        args,
+        method_vars,
+        slots,
+        missing,
+        caller,
+    )?;
+    let state = interp();
     if state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP) {
         function.set_gp_bits(gp::CLOSURE_STEP, false);
         crate::debugger::debugged_call(depth);
     }
     let signature = match entry {
+        // A slot frame's closure is never typed (`bind_slots`).
+        _ if slots != crate::NO_SLOTS => {
+            default_promises(depth - 1, function, slots as usize, missing).map(|()| None)
+        }
         Entry::Unchecked => crate::annotations::enter(call, function, env, depth),
         Entry::Checked(signature) => Ok(signature),
     };
@@ -1351,6 +2646,14 @@ pub unsafe fn run_closure(
     let result = signature.map(|signature| {
         let result = scope(|| {
             on_large_stack(|| {
+                if slots != crate::NO_SLOTS {
+                    let state = interp();
+                    let owner = state.slot_owner;
+                    state.slot_owner = (depth - 1) as u32;
+                    let result = bytecode::run_slots(function, slots as usize);
+                    interp().slot_owner = owner;
+                    return result;
+                }
                 let body = function.cdr();
                 bytecode::run_body(function, body, env)
             })
@@ -1362,7 +2665,28 @@ pub unsafe fn run_closure(
         Ok(pair) => pair,
         Err(unwind) => (None, Err(unwind)),
     };
-    let result = stray_loop_jump(call, env, catch_return(env, result));
+    let result = finish_frame(call, depth, signature, result);
+    pop_frame(function, depth, args, caller_srcref, result)
+}
+
+/// What a call returns once its body has run with `result`: a `return()` aimed at the frame, the
+/// return type check, and the `on.exit` expressions, before the frame pops.
+#[inline(always)]
+unsafe fn finish_frame(
+    call: Sexp,
+    depth: usize,
+    signature: Option<Sexp>,
+    result: R<Sexp>,
+) -> R<Sexp> {
+    // A slot frame may have made its environment while the body ran; until it does, only its
+    // pending environment, if it handed one out, can name the frame as a `return` target.
+    let frame = &interp().frames[depth - 1];
+    let env = if frame.env == nil() { frame.pending } else { frame.env };
+    let result = if env == nil() {
+        result
+    } else {
+        stray_loop_jump(call, env, catch_return(env, result))
+    };
     let result = match (signature, result) {
         (Some(signature), Ok(value)) => crate::annotations::check_return(call, signature, value),
         (_, result) => result,
@@ -1374,20 +2698,302 @@ pub unsafe fn run_closure(
     let result = if state.frames[depth - 1].on_exit.is_empty() {
         result
     } else {
-        catch_return(env, run_on_exit(depth, result))
+        let result = run_on_exit(depth, result);
+        let frame = &interp().frames[depth - 1];
+        catch_return(if frame.env == nil() { frame.pending } else { frame.env }, result)
     };
+    // Promises over the slots that may still be forced need the environment once the slots are
+    // gone, and so does anything that kept the pending environment itself.
+    let frame = &state.frames[depth - 1];
+    if frame.env == nil() && frame.pending != nil() {
+        let (closures, dying) = if frame.unforced > 0 {
+            pending_closures_dying(depth - 1, &result)
+        } else {
+            (0, 0)
+        };
+        let frame = &interp().frames[depth - 1];
+        if closures > dying {
+            reify(depth - 1, Reify::Site("closure outliving the frame"))?;
+        } else if frame.unforced > unforced_defaults(frame) + closures {
+            reify(depth - 1, Reify::Site("promise outliving the frame"))?;
+        } else if pending_env_kept(depth - 1, &result) {
+            reify(depth - 1, Reify::Site("environment outliving the frame"))?;
+        } else if closures > 0 {
+            interp()
+                .pending_closures
+                .retain(|&(owner, _)| owner as usize != depth - 1);
+        }
+    }
+    result
+}
+
+/// Whether something other than what dies with the slot frame at `index` holds its pending
+/// environment as the frame returns `result`: the counted references to it must all come from
+/// the frame's dying closures and the unforced default promises in its slots, the environment
+/// must not be the value returned, and `R_PreserveObject` must not hold it. An error
+/// return keeps it, since the unwind may carry it.
+unsafe fn pending_env_kept(index: usize, result: &R<Sexp>) -> bool {
+    let Ok(value) = *result else {
+        return true;
+    };
+    let state = interp();
+    let frame = &state.frames[index];
+    let pending = frame.pending;
+    if value == pending || crate::heap().is_preserved(pending) {
+        return true;
+    }
+    let closures = state
+        .pending_closures
+        .iter()
+        .filter(|&&(owner, closure)| owner as usize == index && closure.tag() == pending)
+        .count() as u32;
+    u32::from(pending.refcount()) > unforced_defaults(frame) + closures
+}
+
+/// How many closures the slot frame at `index` made over its pending environment, and how many
+/// of them die with it as it returns `result`. One dies when nothing counts a reference to it
+/// but the frame's slots, it
+/// is not the value returned, and no root the counts do not see holds it (`R_PreserveObject`
+/// or a global calling handler). A closure whose environment was replaced no longer needs the
+/// frame either. An error return keeps every closure, since the unwind may carry one.
+unsafe fn pending_closures_dying(index: usize, result: &R<Sexp>) -> (u32, u32) {
+    let state = interp();
+    if state.pending_closures.is_empty() {
+        return (0, 0);
+    }
+    let closures = state
+        .pending_closures
+        .iter()
+        .filter(|&&(owner, _)| owner as usize == index)
+        .count() as u32;
+    let Ok(value) = *result else {
+        return (closures, 0);
+    };
+    let frame = &state.frames[index];
+    let (pending, header) = (frame.pending, frame.slots as usize);
+    let names = frame.function.cdr().cdr().element(bytecode::SLOTS).element(1);
+    let count = values::length(names);
+    let heap = crate::heap();
+    let mut dying = 0;
+    for &(owner, closure) in &state.pending_closures {
+        if owner as usize != index {
+            continue;
+        }
+        if closure.tag() != pending {
+            dying += 1;
+            continue;
+        }
+        if closure == value || heap.is_preserved(closure) {
+            continue;
+        }
+        let held = (0..count)
+            .filter(|&slot| *bytecode::register_address(header + 1 + slot) == closure)
+            .count();
+        if closure.refcount() as usize == held
+            && !crate::conditions::handlers_hold(&state.global_handlers, closure)
+        {
+            dying += 1;
+        }
+    }
+    (closures, dying)
+}
+
+/// A slot frame that never made its environment gives up its slots' references, and the
+/// register file drops the window, on every way out.
+struct SlotWindow(u32);
+
+impl Drop for SlotWindow {
+    fn drop(&mut self) {
+        if self.0 == crate::NO_SLOTS {
+            return;
+        }
+        let header = self.0 as usize;
+        unsafe {
+            let registers = &mut interp().bytecode.registers;
+            if *registers.get_unchecked(header) == nil()
+                && let Some(slots) = registers.get_mut(header + 1..)
+            {
+                crate::heap().release_slots(slots);
+            }
+            registers.truncate(header);
+        }
+    }
+}
+
+/// Pushes the frame of a call of the closure `function`, makes the closure's srcref current,
+/// and returns the frame's depth with the srcref current before.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+unsafe fn push_frame(
+    call: Sexp,
+    function: Sexp,
+    env: Sexp,
+    sys_parent: Sexp,
+    args: &[Arg],
+    method_vars: &[(Sexp, Sexp)],
+    slots: u32,
+    missing: u64,
+    caller: u32,
+) -> R<(usize, Sexp)> {
+    let state = interp();
+    let start = state.frame_args.len() as u32;
+    state.frame_args.extend_from_slice(args);
+    let method_vars_start = state.method_vars.len() as u32;
+    state.method_vars.extend_from_slice(method_vars);
+    state.calls_ever = state.calls_ever.wrapping_add(1);
+    state.frames.push(Frame {
+        call,
+        function,
+        env,
+        sys_parent,
+        args: start,
+        on_exit: Vec::new(),
+        handlers: state.handlers.clone(),
+        restarts: state.restarts.clone(),
+        srcref: state.srcref,
+        method_vars: method_vars_start,
+        closures: state.frame_closures.len(),
+        slots,
+        missing,
+        caller,
+        pending: nil(),
+        unforced: 0,
+        inlined: false,
+        reified_by: crate::NOT_REIFIED,
+        pending_shared: false,
+    });
+    if PROFILE_TICK.load(Ordering::Relaxed) {
+        record_profile_sample(None)?;
+    }
+    let depth = state.frames.len();
+    let caller_srcref = state.srcref;
+    state.srcref = values::get_attr(function, symbols().srcref);
+    Ok((depth, caller_srcref))
+}
+
+/// Pops the frame at `depth` (one-based) once its call has finished with `result`, restoring
+/// the condition stacks and srcref of the caller.
+#[inline(always)]
+unsafe fn pop_frame(
+    function: Sexp,
+    depth: usize,
+    args: &[Arg],
+    caller_srcref: Sexp,
+    result: R<Sexp>,
+) -> R<Sexp> {
+    let state = interp();
+    if activity::enabled() {
+        count_package_call(function, Some(&state.frames[depth - 1]), args);
+    }
+    crate::truncate_frames(state, depth);
+    let Some(frame) = state.frames.pop() else {
+        panic!("a closure call's frame was popped while the call ran");
+    };
+    state.frame_args.truncate(frame.args as usize);
+    state.method_vars.truncate(frame.method_vars as usize);
+    let (env, closures) = (frame.env, frame.closures);
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
-    state.handlers = state.frames[depth - 1].handlers.clone();
-    let closures = state.frames[depth - 1].closures;
-    crate::truncate_frames(state, depth - 1);
-    state.restarts = restarts;
+    state.handlers = frame.handlers;
+    state.restarts = frame.restarts;
     state.srcref = caller_srcref;
-    if let Ok(value) = result {
+    if let Ok(value) = result
+        && env != nil()
+    {
         let created = state.frame_closures.get(closures..).unwrap_or(&[]);
         crate::heap().release_frame(env, value, created);
     }
     state.frame_closures.truncate(closures);
     result
+}
+
+/// Counts a call to a closure of a package namespace, and whether it skipped the generic call
+/// protocol: it ran natively without a frame (`frame` is `None`) or in a slot frame that never
+/// made its environment, and no argument was a promise. A call that did not is counted under
+/// the reason: what reified its frame, a frame that had an environment from the start, or the
+/// kind of its first promise argument's code.
+#[cold]
+pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, args: &[Arg]) {
+    let enclosure = function.tag();
+    if enclosure == values::base_namespace() || !crate::envir::is_namespace(enclosure) {
+        return;
+    }
+    activity::count(Counter::PackageCalls);
+    let reason = match frame {
+        Some(frame) if frame.slots == crate::NO_SLOTS => Some("frame with an environment"),
+        Some(frame) if frame.env != nil() => {
+            let reason = activity::label_name(frame.reified_by);
+            if reason.as_deref().is_some_and(|name| OBSERVING_REASONS.contains(&name)) {
+                activity::count(Counter::PackageCallsObserved);
+            }
+            activity::count_package_fallback(match reason {
+                Some(_) => frame.reified_by,
+                None => activity::label("reason not recorded"),
+            });
+            return;
+        }
+        _ => args
+            .iter()
+            .find(|arg| arg.value.kind() == SexpType::Promise && !is_reference(arg.value))
+            .map(|arg| match arg.value.cdr().kind() {
+                SexpType::Symbol => "promise argument: variable",
+                SexpType::Language => "promise argument: call",
+                _ => "promise argument: other",
+            }),
+    };
+    match reason {
+        Some(reason) => activity::count_package_fallback(activity::label(reason)),
+        None => activity::count(Counter::PackageCallsDirect),
+    }
+}
+
+/// Replaces each left-out formal's default that is not a literal, which the binding put in its
+/// slot as the bare expression, with a promise of its code over the slot frame at `owner`.
+unsafe fn default_promises(owner: usize, function: Sexp, header: usize, missing: u64) -> R<()> {
+    if missing == 0 {
+        return Ok(());
+    }
+    let mut defaults = nil();
+    let mut formal = function.car();
+    let mut index = 0;
+    while formal.kind() == SexpType::Pairlist {
+        let default = formal.car();
+        if missing & (1 << index) != 0 && !(default.kind().is_atomic() || default == nil()) {
+            if defaults == nil() {
+                defaults = bytecode::slot_defaults(function)?;
+            }
+            let promise = slot_promise(owner, defaults.element(index))?;
+            crate::heap().store_slot(
+                &mut *bytecode::register_address(header + 1 + index),
+                promise,
+            );
+        }
+        formal = formal.cdr();
+        index += 1;
+    }
+    Ok(())
+}
+
+/// How many of the frame's unforced promises are its own defaults that nothing but their slot
+/// holds. They die with the slots, so they need no environment once the frame returns.
+unsafe fn unforced_defaults(frame: &Frame) -> u32 {
+    let mut count = 0;
+    let mut formal = frame.function.car();
+    let mut index = 0;
+    while formal.kind() == SexpType::Pairlist && frame.missing >> index != 0 {
+        if frame.missing & (1 << index) != 0 {
+            let value = *bytecode::register_address(frame.slots as usize + 1 + index);
+            if value.kind() == SexpType::Promise
+                && value.car() == unbound()
+                && value.tag() == frame.pending
+                && value.refcount() == 1
+            {
+                count += 1;
+            }
+        }
+        formal = formal.cdr();
+        index += 1;
+    }
+    count
 }
 
 /// The stack a closure body may use before the interpreter moves to a fresh segment.
@@ -1531,7 +3137,20 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         return result;
     }
     let expressions = std::mem::take(&mut frame.on_exit);
-    let env = frame.env;
+    // A slot frame keeps exit code compiled for its slots, which runs there without an
+    // environment; only an expression that did not compile needs one.
+    let (function, header) = (frame.function, frame.slots);
+    // Other exit code, such as the call `withr::defer` registers through `do.call`, runs in
+    // the frame's pending environment, which reifies only if the code reads a binding.
+    let env = if frame.env != nil()
+        || expressions.iter().all(|expression| expression.kind() == SexpType::Bytecode)
+    {
+        frame.env
+    } else if frame.slots == crate::NO_SLOTS {
+        frame_env(depth - 1, Reify::Site("on.exit"))?
+    } else {
+        pending_env(depth - 1)?
+    };
     let visible = interp().visible;
     let mark = crate::heap().handle_mark();
     for &expression in &expressions {
@@ -1552,7 +3171,11 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         // A handler stack that a condition left in place must not run the exit code.
         let saved_handlers = interp().handlers.clone();
         interp().handlers = interp().frames[depth - 1].handlers.clone();
-        let exit = eval(expression, env);
+        let exit = if expression.kind() == SexpType::Bytecode {
+            bytecode::run_promise_on_slots(expression, function, depth - 1, header as usize)
+        } else {
+            eval(expression, env)
+        };
         interp().handlers = saved_handlers;
         match exit {
             // `on.exit(return(x))` makes `x` the frame's value, even over an error unwinding
@@ -1940,9 +3563,12 @@ unsafe fn symbol_is_missing(symbol: Sexp, env: Sexp, defaults_count: bool) -> R<
     value_is_missing(cell.cdr())
 }
 
-unsafe fn value_is_missing(value: Sexp) -> R<bool> {
+pub(crate) unsafe fn value_is_missing(value: Sexp) -> R<bool> {
     if value == missing_arg() {
         return Ok(true);
+    }
+    if is_reference(value) && value.car() == unbound() {
+        return reference_is_missing(value);
     }
     if value.kind() == SexpType::Promise
         && value.car() == unbound()
@@ -1950,7 +3576,12 @@ unsafe fn value_is_missing(value: Sexp) -> R<bool> {
         && value.tag().kind() == SexpType::Environment
     {
         let code = value.cdr();
-        let caller = value.tag();
+        // A promise over a slot frame that has no environment yet reads the frame's slot, as
+        // reifying the frame and asking its binding would, without making the environment.
+        if value.tag().has_gp(gp::PENDING_FRAME) && dot_dot_index(code).is_none() {
+            return pending_slot_is_missing(value.tag(), code);
+        }
+        let caller = promise_env(value)?;
         // A promise for `..1` asks about the caller's `...`, the binding that holds it.
         let bound = if dot_dot_index(code).is_some() {
             symbols().dots
@@ -1962,6 +3593,35 @@ unsafe fn value_is_missing(value: Sexp) -> R<bool> {
         }
     }
     Ok(false)
+}
+
+/// [`symbol_is_missing`] of `symbol` in the slot frame whose pending environment is `pending`,
+/// for a caller the argument came from, so a defaulted formal is not missing. A reified slot
+/// frame binds each slot to its content and the method variables after them, so reading them in
+/// that order asks what its environment would answer.
+unsafe fn pending_slot_is_missing(pending: Sexp, symbol: Sexp) -> R<bool> {
+    let state = interp();
+    let Some(owner) = state.frames.iter().rposition(|frame| frame.pending == pending) else {
+        panic!("a promise names the pending environment of a frame that has returned");
+    };
+    let frame = &state.frames[owner];
+    let names = frame.function.cdr().cdr().element(bytecode::SLOTS).element(1);
+    if let Some(slot) = (0..values::length(names)).find(|&slot| names.element(slot) == symbol) {
+        let value = *bytecode::register_address(frame.slots as usize + 1 + slot);
+        return if value == unbound() {
+            Ok(false)
+        } else {
+            value_is_missing(value)
+        };
+    }
+    let bound = crate::method_vars(state, owner)
+        .iter()
+        .find(|(name, _)| *name == symbol)
+        .map(|&(_, value)| value);
+    match bound {
+        Some(value) => value_is_missing(value),
+        None => Ok(false),
+    }
 }
 
 // The control-flow specials.
@@ -2139,8 +3799,8 @@ unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
             interp().srcref = statement_srcref(srcrefs, index + 1);
         }
         let result = match interp().debugger.is_some() {
-            true => crate::debugger::statement().and_then(|()| eval(arg.value, call.env)),
-            false => eval(arg.value, call.env),
+            true => crate::debugger::statement().and_then(|()| eval(arg.value, call.env()?)),
+            false => eval(arg.value, call.env()?),
         };
         interp().srcref = saved;
         crate::heap().release_handles(mark);
@@ -2176,10 +3836,10 @@ pub unsafe fn statement_srcref(srcrefs: Sexp, index: usize) -> Sexp {
 unsafe fn do_paren(call: &Call<'_>) -> R<Sexp> {
     call.check_arity(1)?;
     if call.arg(0) != symbols().dots {
-        return eval(call.arg(0), call.env);
+        return eval(call.arg(0), call.env()?);
     }
     // `(...)` is a builtin call in GNU R, so the dots expand into its single argument.
-    let args = evaluate_args(call.call.cdr(), call.env, false, call.call)?;
+    let args = evaluate_args(call.call.cdr(), call.env()?, false, call.call)?;
     let expanded = Call {
         args: &args,
         ..*call
@@ -2251,7 +3911,7 @@ unsafe fn general_condition(value: Sexp, call: Sexp) -> R<bool> {
 }
 
 unsafe fn do_if(call: &Call<'_>) -> R<Sexp> {
-    let condition = eval(call.arg(0), call.env)?;
+    let condition = eval(call.arg(0), call.env()?)?;
     if crate::records::is_native(condition) {
         return Err(crate::records::boundary_error(
             condition,
@@ -2260,9 +3920,9 @@ unsafe fn do_if(call: &Call<'_>) -> R<Sexp> {
         ));
     }
     if as_condition(condition, call.call)? {
-        eval(call.arg(1), call.env)
+        eval(call.arg(1), call.env()?)
     } else if call.len() > 2 {
-        eval(call.arg(2), call.env)
+        eval(call.arg(2), call.env()?)
     } else {
         interp().visible = false;
         Ok(nil())
@@ -2286,7 +3946,7 @@ unsafe fn loop_body(body: Sexp, env: Sexp) -> R<bool> {
 }
 
 unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env;
+    let env = call.env()?;
     let variable = call.arg(0);
     if variable.kind() != SexpType::Symbol {
         return Err(call.error("invalid for() loop sequence"));
@@ -2355,7 +4015,7 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_while(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env;
+    let env = call.env()?;
     loop {
         let condition = scope(|| eval(call.arg(0), env))?;
         if !as_condition(condition, call.call)? {
@@ -2369,7 +4029,7 @@ unsafe fn do_while(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_repeat(call: &Call<'_>) -> R<Sexp> {
-    while loop_body(call.arg(0), call.env)? {}
+    while loop_body(call.arg(0), call.env()?)? {}
     Ok(nil())
 }
 
@@ -2392,7 +4052,7 @@ pub struct LoopContext {
 unsafe fn in_loop(call: &Call<'_>, run: unsafe fn(&Call<'_>) -> R<Sexp>) -> R<Sexp> {
     let body = call.args.last().map_or(nil(), |arg| arg.value);
     let context = LoopContext {
-        env: call.env,
+        env: call.env()?,
         depth: interp().frames.len(),
         body,
     };
@@ -2470,13 +4130,13 @@ unsafe fn skips_loop_context(expression: Sexp, jumps_allowed: bool) -> bool {
 }
 
 unsafe fn do_break(call: &Call<'_>) -> R<Sexp> {
-    reachable_loop(call.env)?;
-    Err(jump(Jump::Break { env: call.env }))
+    reachable_loop(call.env()?)?;
+    Err(jump(Jump::Break { env: call.env()? }))
 }
 
 unsafe fn do_next(call: &Call<'_>) -> R<Sexp> {
-    reachable_loop(call.env)?;
-    Err(jump(Jump::Next { env: call.env }))
+    reachable_loop(call.env()?)?;
+    Err(jump(Jump::Next { env: call.env()? }))
 }
 
 /// GNU R raises a `break` or `next` without a loop for its environment as an error at once, so
@@ -2506,22 +4166,22 @@ unsafe fn reachable_loop(env: Sexp) -> R<()> {
 unsafe fn do_return(call: &Call<'_>) -> R<Sexp> {
     let value = match call.args {
         [] => nil(),
-        [arg] => eval(arg.value, call.env)?,
+        [arg] => eval(arg.value, call.env()?)?,
         _ => return Err(call.error("multi-argument returns are not permitted")),
     };
     // GNU R looks for the function context before jumping, so a `return` with no function to
     // return from is an ordinary error that `tryCatch` can catch.
-    if !interp().frames.iter().any(|frame| frame.env == call.env) {
+    if call.frame_index().is_none() {
         return Err(error("no function to return from, jumping to top level"));
     }
     Err(jump(Jump::Return {
-        env: call.env,
+        env: call.env()?,
         value,
     }))
 }
 
 unsafe fn do_function(call: &Call<'_>) -> R<Sexp> {
-    make_closure(call.arg(0), call.arg(1), call.arg(2), call.env)
+    make_closure(call.arg(0), call.arg(1), call.arg(2), call.env()?)
 }
 
 /// A closure of `formals` and `body` in `env`. A `function` call parsed with source references
@@ -2610,7 +4270,7 @@ unsafe fn general_logical_operand(value: Sexp, call: Sexp, operator: &str, side:
 }
 
 unsafe fn logical_operator(call: &Call<'_>, is_and: bool) -> R<Sexp> {
-    let left = eval(call.arg(0), call.env)?;
+    let left = eval(call.arg(0), call.env()?)?;
     let left = logical_operand(left, call, "x")?;
     let na = heap::object::NA_LOGICAL;
     if is_and && left == 0 {
@@ -2619,7 +4279,7 @@ unsafe fn logical_operator(call: &Call<'_>, is_and: bool) -> R<Sexp> {
     if !is_and && left == 1 {
         return values::scalar_logical(1);
     }
-    let right = eval(call.arg(1), call.env)?;
+    let right = eval(call.arg(1), call.env()?)?;
     let right = logical_operand(right, call, "y")?;
     let result = if is_and {
         if right == 0 {
@@ -2643,12 +4303,12 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
     let Some(first) = call.args.first() else {
         return Err(call.error("'EXPR' is missing"));
     };
-    let selector = eval(first.value, call.env)?;
+    let selector = eval(first.value, call.env()?)?;
     // `switch(x, ...)` forwards the caller's alternatives, so `...` expands to its promises.
     let mut alternatives: Vec<Arg> = Vec::with_capacity(call.args.len() - 1);
     for arg in &call.args[1..] {
         if arg.value == symbols().dots && arg.tag == nil() {
-            let dots = find_var(symbols().dots, call.env)?;
+            let dots = find_var(symbols().dots, call.env()?)?;
             if dots.kind() == SexpType::Dots {
                 crate::heap().root(dots);
                 for (tag, value) in values::pairlist_items(dots) {
@@ -2659,10 +4319,25 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
             alternatives.push(*arg);
         }
     }
-    let alternatives = &alternatives[..];
-    let selector = switch_selector(selector, call.call)?;
+    match switch_alternative(selector, call.call, &alternatives)? {
+        Some(chosen) => eval(chosen, call.env()?),
+        None => {
+            interp().visible = false;
+            Ok(nil())
+        }
+    }
+}
+
+/// The alternative `switch(selector, ...)` evaluates, given the selector's value, or `None`
+/// when it returns an invisible `NULL`. `call` is the `switch` call, which a warning names.
+pub(crate) unsafe fn switch_alternative(
+    selector: Sexp,
+    call: Sexp,
+    alternatives: &[Arg],
+) -> R<Option<Sexp>> {
+    let selector = switch_selector(selector, call)?;
     if alternatives.is_empty() {
-        crate::conditions::warning_call(call.call, "'switch' with no alternatives")?;
+        crate::conditions::warning_call(call, "'switch' with no alternatives")?;
     }
     let missing = missing_arg();
     let text = match selector {
@@ -2673,10 +4348,9 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
                 if arg.value == missing {
                     return Err(error("empty alternative in numeric switch"));
                 }
-                return eval(arg.value, call.env);
+                return Ok(Some(arg.value));
             }
-            interp().visible = false;
-            return Ok(nil());
+            return Ok(None);
         }
     };
     // GNU R rejects a second default before it looks for a match, naming the calling function
@@ -2698,22 +4372,16 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
         if arg.tag.kind() == SexpType::Symbol && arg.tag.car().bytes() == text.bytes() {
             // Fall through empty alternatives to the next non-empty one, and to an invisible
             // NULL when every later one is empty.
-            for later in &alternatives[position..] {
-                if later.value != missing {
-                    return eval(later.value, call.env);
-                }
-            }
-            interp().visible = false;
-            return Ok(nil());
+            return Ok(alternatives[position..]
+                .iter()
+                .find(|later| later.value != missing)
+                .map(|later| later.value));
         }
     }
     match defaults.first() {
         Some(default) if default.value == missing => Err(error(SWITCH_EMPTY_DEFAULT)),
-        Some(default) => eval(default.value, call.env),
-        None => {
-            interp().visible = false;
-            Ok(nil())
-        }
+        Some(default) => Ok(Some(default.value)),
+        None => Ok(None),
     }
 }
 
@@ -2776,25 +4444,24 @@ unsafe fn do_missing(call: &Call<'_>) -> R<Sexp> {
     if symbol.kind() != SexpType::Symbol {
         return Err(call.error("invalid use of 'missing'"));
     }
-    values::scalar_bool(is_missing(symbol, call.env)?)
+    values::scalar_bool(is_missing(symbol, call.env()?)?)
 }
 
 unsafe fn do_on_exit(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["expr", "add", "after"])?;
     let expression = crate::builtins::present(matched[0]).unwrap_or(nil());
     let add = match crate::builtins::present(matched[1]) {
-        Some(value) => values::as_logical_scalar(eval(value, call.env)?) == 1,
+        Some(value) => values::as_logical_scalar(eval(value, call.env()?)?) == 1,
         None => false,
     };
     let after = match crate::builtins::present(matched[2]) {
-        Some(value) => values::as_logical_scalar(eval(value, call.env)?) != 0,
+        Some(value) => values::as_logical_scalar(eval(value, call.env()?)?) != 0,
         None => true,
     };
-    let env = call.env;
-    let state = interp();
-    let Some(frame) = state.frames.iter_mut().rev().find(|frame| frame.env == env) else {
+    let Some(index) = call.frame_index() else {
         return Ok(nil());
     };
+    let frame = &mut interp().frames[index];
     if !add {
         frame.on_exit.clear();
     }
@@ -2821,17 +4488,17 @@ unsafe fn do_internal(call: &Call<'_>) -> R<Sexp> {
     };
     let definition = builtin_def(function)?;
     let args = if function.kind() == SexpType::Builtin {
-        evaluate_args(inner.cdr(), call.env, definition.keep_missing, inner)?
+        evaluate_args(inner.cdr(), call.env()?, definition.keep_missing, inner)?
     } else {
         unevaluated_args(inner.cdr())
     };
     if definition.generic != Generic::None
         && let Some(value) =
-            dispatch::try_builtin_dispatch(definition, inner, function, &args, call.env)?
+            dispatch::try_builtin_dispatch(definition, inner, function, &args, call.env()?)?
     {
         return Ok(value);
     }
-    call_builtin(definition, inner, function, &args, call.env)
+    call_builtin(definition, inner, function, &args, call.env()?)
 }
 
 unsafe fn do_invisible(call: &Call<'_>) -> R<Sexp> {
@@ -2839,22 +4506,17 @@ unsafe fn do_invisible(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_nargs(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env;
     let state = interp();
-    let count = state
-        .frames
-        .iter()
-        .rposition(|frame| frame.env == env)
-        .map_or(NA_INTEGER, |index| {
-            crate::frame_args(state, index).len() as i32
-        });
+    let count = call.frame_index().map_or(NA_INTEGER, |index| {
+        crate::frame_args(state, index).len() as i32
+    });
     // Outside any closure, such as at top level, GNU R finds no call to count and answers NA.
     values::scalar_integer(count)
 }
 
 unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
-    let count = values::as_integer_scalar(eval(call.arg(0), call.env)?).max(0) as usize;
-    let function = eval(call.arg(1), call.env)?;
+    let count = values::as_integer_scalar(eval(call.arg(0), call.env()?)?).max(0) as usize;
+    let function = eval(call.arg(1), call.env()?)?;
     let heap = crate::heap();
     heap.root(function);
     // The callee's arguments are the call's own cells after `n` and `FUN` whenever the special
@@ -2883,18 +4545,18 @@ unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
                 && !crate::effects::calling_handler_established()
                 && crate::effects::effect_free(function)?
             {
-                eager_args_into(rest, call.env, &mut args)?;
+                eager_args_into(rest, call.env()?, &mut args)?;
             } else {
-                promise_args_into(rest, call.env, &mut args)?;
+                promise_args_into(rest, call.env()?, &mut args)?;
             }
             for arg in args.iter().take(count) {
                 if arg.value.kind() == SexpType::Promise {
                     force_promise(arg.value)?;
                 }
             }
-            apply_closure_owning(inner_call, function, &args, call.env, None)
+            apply_closure_owning(inner_call, function, &args, call.env()?, None)
         }
-        _ => apply_call(inner_call, function, rest, call.env),
+        _ => apply_call(inner_call, function, rest, call.env()?),
     }
 }
 
@@ -2954,7 +4616,7 @@ unsafe fn do_tailcall(call: &Call<'_>) -> R<Sexp> {
             .collect::<Vec<_>>(),
         SexpType::Pairlist,
     )?;
-    eval(values::lcons(function, rest)?, call.env)
+    eval(values::lcons(function, rest)?, call.env()?)
 }
 
 /// `Exec(expr, envir)`: evaluates the call `expr` in `envir`, by default the caller's frame,
@@ -2979,7 +4641,7 @@ unsafe fn do_exec(call: &Call<'_>) -> R<Sexp> {
     let Some(expr) = expr.filter(|expr| *expr != values::missing_arg()) else {
         return Err(error("argument \"expr\" is missing, with no default"));
     };
-    let mut expr = eval(expr, call.env)?;
+    let mut expr = eval(expr, call.env()?)?;
     if expr.kind() == SexpType::Expression && length(expr) == 1 {
         expr = values::list_elt(expr, 0);
     }
@@ -2987,8 +4649,8 @@ unsafe fn do_exec(call: &Call<'_>) -> R<Sexp> {
         return Err(error("\"expr\" must be a call expression"));
     }
     let env = match envir.filter(|envir| *envir != values::missing_arg()) {
-        Some(envir) => eval(envir, call.env)?,
-        None => call.env,
+        Some(envir) => eval(envir, call.env()?)?,
+        None => call.env()?,
     };
     eval(expr, env)
 }
@@ -3112,18 +4774,42 @@ pub unsafe fn force_and_call_with(
         return apply_call(call, function, arguments, env);
     }
     let mut args = Args::new();
-    promise_args_into(call.cdr(), env, &mut args)?;
-    let mut seeded = false;
-    if let (Some(value), Some(arg)) = (first, args.first())
-        && arg.value.kind() == SexpType::Promise
-        && arg.value.car() == unbound()
-        && !arg.value.has_gp(gp::CHECKED_PROMISE)
+    let arguments = call.cdr();
+    // The known first value, as `lapply` reads `X[[i]]`, binds as a forced argument reference to
+    // its expression: a forced promise of it once anything keeps it, and no allocation until.
+    let mark = interp().references_used;
+    let seeded = if let Some(value) = first
+        && arguments.kind() == SexpType::Pairlist
+        && arguments.car().kind() == SexpType::Language
     {
-        let heap = crate::heap();
-        heap.set_car(arg.value, value);
-        heap.set_tag(arg.value, nil());
-        seeded = true;
-    }
+        let reference = env_reference(env, arguments.car())?;
+        crate::heap().set_car(reference, value);
+        args.push(Arg {
+            tag: arguments.tag(),
+            value: reference,
+        });
+        promise_args_into(arguments.cdr(), env, &mut args)?;
+        true
+    } else {
+        promise_args_into(arguments, env, &mut args)?;
+        false
+    };
+    let result = call_seeded(call, function, env, &mut args, count, seeded, known);
+    release_references(mark);
+    result
+}
+
+/// The rest of [`force_and_call_with`] for a closure `function`, with `args` made; a seeded
+/// first argument is an argument reference, which only a slot frame may take.
+unsafe fn call_seeded(
+    call: Sexp,
+    function: Sexp,
+    env: Sexp,
+    args: &mut Args,
+    count: usize,
+    seeded: bool,
+    known: Option<&mut KnownFirst>,
+) -> R<Sexp> {
     for arg in args.iter().take(count) {
         if arg.value.kind() == SexpType::Promise {
             force_promise(arg.value)?;
@@ -3140,8 +4826,16 @@ pub unsafe fn force_and_call_with(
         }
         _ => Entry::Unchecked,
     };
-    let frame = bind_arguments(call, function, &args, None)?;
-    run_closure(call, function, frame, env, &args, entry)
+    if !matches!(entry, Entry::Checked(Some(_)))
+        && let Some(frame) = bind_slots(call, function, args)?
+    {
+        return run_frame(call, function, frame, env, args, entry, &[]);
+    }
+    if seeded {
+        detach_reference(args[0].value)?;
+    }
+    let frame = bind_arguments(call, function, args, None)?;
+    run_closure(call, function, frame, env, args, entry)
 }
 
 unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
@@ -3166,7 +4860,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         }
         SexpType::Integer | SexpType::Real => {
             let which = values::as_integer_scalar(env);
-            env = crate::envir::sys_frame(which, call.env)?;
+            env = crate::envir::sys_frame(which, call.env()?)?;
         }
         _ => {
             return Err(call.error(
@@ -3180,17 +4874,27 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     let caller = state.frames.last().map_or(nil(), |frame| frame.call);
     let handlers = state.handlers.clone();
     let restarts = state.restarts.clone();
+    state.calls_ever = state.calls_ever.wrapping_add(1);
     state.frames.push(Frame {
         call: caller,
         function: call.op,
         env,
-        sys_parent: call.env,
+        sys_parent: call.env()?,
         args: state.frame_args.len() as u32,
         on_exit: Vec::new(),
         handlers: handlers.clone(),
         restarts: restarts.clone(),
         srcref: state.srcref,
+        method_vars: state.method_vars.len() as u32,
         closures: state.frame_closures.len(),
+        slots: crate::NO_SLOTS,
+        missing: 0,
+        caller: crate::NO_SLOTS,
+        pending: nil(),
+        unforced: 0,
+        inlined: false,
+        reified_by: crate::NOT_REIFIED,
+        pending_shared: false,
     });
     let depth = state.frames.len();
     let result = scope(|| match expression.kind() {
@@ -3219,24 +4923,15 @@ unsafe fn do_with_visible(call: &Call<'_>) -> R<Sexp> {
     values::named_list(&[("value", value), ("visible", flag)])
 }
 
+/// `Recall(...)`: calls the function that called `Recall` again, with that call's call and its
+/// caller as the new frame's parent, as GNU R does. Neither frame needs an environment, so a
+/// slot frame hands out its pending one.
 unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env;
-    let state = interp();
-    let Some(frame) = state.frames.iter().rev().find(|frame| frame.env == env) else {
-        return Err(call.error("'Recall' called from outside a closure"));
-    };
-    let sys_parent = frame.sys_parent;
-    let caller = state
-        .frames
-        .iter()
-        .rev()
-        .find(|candidate| candidate.env == sys_parent);
-    let function = match caller {
-        Some(caller) => caller.function,
-        None => return Err(call.error("'Recall' called from outside a closure")),
-    };
-    let caller_call = caller.map_or(nil(), |caller| caller.call);
-    apply(caller_call, function, call.args, sys_parent)
+    let outside = || call.error("'Recall' called from outside a closure");
+    let own = call.frame_index().ok_or_else(outside)?;
+    let caller = crate::envir::caller_index(own).ok_or_else(outside)?;
+    let (caller_call, function) = (interp().frames[caller].call, interp().frames[caller].function);
+    apply(caller_call, function, call.args, frame_sys_parent_pending(caller)?)
 }
 
 unsafe fn do_primitive(call: &Call<'_>) -> R<Sexp> {
@@ -3252,7 +4947,7 @@ unsafe fn do_tilde(call: &Call<'_>) -> R<Sexp> {
         let class = values::scalar_string("formula")?;
         values::set_attr(formula, symbols().class, class)?;
         let environment = symbols().dot_environment;
-        values::set_attr(formula, environment, call.env)?;
+        values::set_attr(formula, environment, call.env()?)?;
     }
     Ok(formula)
 }
@@ -3303,8 +4998,8 @@ unsafe fn do_substitute(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["expr", "env"])?;
     let expression = crate::builtins::present(matched[0]).unwrap_or(missing_arg());
     let env = match crate::builtins::present(matched[1]) {
-        Some(env) => eval(env, call.env)?,
-        None => call.env,
+        Some(env) => eval(env, call.env()?)?,
+        None => call.env()?,
     };
     let env = match env.kind() {
         SexpType::Environment => env,
@@ -3425,18 +5120,18 @@ unsafe fn do_assign(call: &Call<'_>) -> R<Sexp> {
     match target.kind() {
         SexpType::Symbol => {
             let value = match superassign {
-                false => rebind(target, call.arg(1), call.env)?,
-                true => eval(call.arg(1), call.env)?,
+                false => rebind(target, call.arg(1), call.env()?)?,
+                true => eval(call.arg(1), call.env()?)?,
             };
-            assign_symbol(target, value, call.env, superassign)?;
+            assign_symbol(target, value, call.env()?, superassign)?;
             Ok(value)
         }
         SexpType::Language => {
             let value = match superassign {
-                false => rebind(target, call.arg(1), call.env)?,
-                true => eval(call.arg(1), call.env)?,
+                false => rebind(target, call.arg(1), call.env()?)?,
+                true => eval(call.arg(1), call.env()?)?,
             };
-            complex_assign(call.call, target, value, call.env, superassign)?;
+            complex_assign(call.call, target, value, call.env()?, superassign)?;
             Ok(value)
         }
         _ => Err(call.error("invalid (do_set) left-hand side to assignment")),

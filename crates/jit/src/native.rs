@@ -3228,7 +3228,12 @@ unsafe fn argument_value(value: Sexp) -> Option<Sexp> {
         return Some(symbol);
     }
     // A checked promise runs its annotation check when forced, which only tier 0 does.
-    if value.tag() == values::nil() || value.has_gp(heap::object::gp::CHECKED_PROMISE) {
+    // A promise over an unreified slot frame names a placeholder environment that binds
+    // nothing yet, so a lookup there would find the enclosure's variable instead.
+    if value.tag() == values::nil()
+        || value.has_gp(heap::object::gp::CHECKED_PROMISE)
+        || value.tag().has_gp(heap::object::gp::PENDING_FRAME)
+    {
         return None;
     }
     pure_value(symbol, value.tag(), 0)

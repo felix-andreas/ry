@@ -80,6 +80,24 @@ pub unsafe fn install_all(namespace: Sexp) -> R<()> {
     register_native_entries(namespace)
 }
 
+/// Whether `body` opens with a fast-path prologue that reads the closure's frame as an
+/// environment: it evaluates code there or defines variables in it, so such a closure gets no
+/// slot frame, which would be reified on every call. Every other prologue reads its formals and
+/// finishes the call through [`ClosureFrame`], which serves a slot frame without reifying it.
+pub unsafe fn prologue_needs_environment(body: Sexp) -> bool {
+    if body.kind() != SexpType::Language || body.cdr().kind() != SexpType::Pairlist {
+        return false;
+    }
+    let first = body.cdr().car();
+    if first.kind() != SexpType::Language || first.car() != symbols().dot_internal {
+        return false;
+    }
+    let inner = first.cdr().car();
+    inner.kind() == SexpType::Language
+        && inner.car().kind() == SexpType::Symbol
+        && ["ryMatchArg", "ryReduce", "ryTraceBack"].contains(&&*values::symbol_name(inner.car()))
+}
+
 /// Puts `.Internal(<internal_name>())` in front of the body of `function` when its formals and
 /// body hash to `expected`, changing the closure in place. Returns whether the closure has the
 /// prologue, which it may already have when it was saved in an image.
@@ -213,16 +231,23 @@ pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
         .find(|(candidate, _)| *candidate == function)
     else {
         // A closure with install-time machine code carries the same mark.
-        return match crate::code_image::native_hooks() {
-            Some(hooks) => (hooks.call)(function, args).transpose(),
-            None => Ok(None),
+        let value = match crate::code_image::native_hooks() {
+            Some(hooks) => (hooks.call)(function, args).transpose()?,
+            None => None,
         };
+        if value.is_some() && activity::enabled() {
+            crate::eval::count_package_call(function, None, args);
+        }
+        return Ok(value);
     };
     // An entry whose closure returns invisibly clears the flag itself.
     interp().visible = true;
     let value = entry(args)?;
     if value.is_some() {
         activity::count(Counter::NativeEntries);
+        if activity::enabled() {
+            crate::eval::count_package_call(function, None, args);
+        }
     }
     Ok(value)
 }
@@ -231,8 +256,14 @@ pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
 /// unevaluated `arguments` when each is a constant or a variable bound to a value, so the call
 /// builds no promise at all. Reading such an argument runs no R code, so reading it now gives
 /// the value forcing its promise would give, and the native code reads only values; when it
-/// declines, nothing has changed and the caller builds the promises as usual.
-pub unsafe fn native_entry_by_value(function: Sexp, arguments: Sexp, env: Sexp) -> R<Option<Sexp>> {
+/// declines, nothing has changed and the caller builds the promises as usual. `lookup` gives a
+/// variable's value when reading it runs no R code ([`crate::effects::eager_argument`] in the
+/// caller's environment, or the slots of a caller that has none).
+pub unsafe fn native_entry_by_value(
+    function: Sexp,
+    arguments: Sexp,
+    lookup: impl Fn(Sexp) -> Option<Sexp>,
+) -> R<Option<Sexp>> {
     let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
@@ -245,7 +276,7 @@ pub unsafe fn native_entry_by_value(function: Sexp, arguments: Sexp, env: Sexp) 
                 if expression == missing_arg() || expression == symbols().dots {
                     return Ok(None);
                 }
-                match crate::effects::eager_argument(expression, env) {
+                match lookup(expression) {
                     Some(value) if value.kind() != SexpType::Promise => value,
                     _ => return Ok(None),
                 }
@@ -269,7 +300,15 @@ unsafe fn resolved(argument: Sexp) -> R<Option<Sexp>> {
     if argument.car() != values::unbound() {
         return Ok(Some(argument.car()));
     }
-    if argument.has_gp(gp::CHECKED_PROMISE) {
+    if eval::is_reference(argument) {
+        return match eval::reference_value(argument) {
+            Some(value) => eval::settle_promise(argument, value).map(Some),
+            None => Ok(None),
+        };
+    }
+    // A promise over a slot frame without an environment names a placeholder that binds
+    // nothing yet, so a lookup there would find the enclosure's variable instead.
+    if argument.has_gp(gp::CHECKED_PROMISE) || argument.tag().has_gp(gp::PENDING_FRAME) {
         return Ok(None);
     }
     let code = argument.cdr();
@@ -483,7 +522,12 @@ unsafe fn native_is_vector(args: &[Arg]) -> R<Option<Sexp>> {
     if mode.kind() != SexpType::String || mode.length() != 1 || mode.is_object() {
         return Ok(None);
     }
-    kernel(crate::coerce::do_is_vector, &[x, mode], nil()).map(Some)
+    kernel(
+        crate::coerce::do_is_vector,
+        &[x, mode],
+        ClosureFrame::Env(nil()),
+    )
+    .map(Some)
 }
 
 /// `isNamespace(ns)`: `.Internal(isNamespaceEnv(ns))`.
@@ -551,7 +595,11 @@ unsafe fn positions(x: Sexp, table: Sexp, nomatch: i32) -> R<Option<Position>> {
 unsafe fn kernel_positions(x: Sexp, table: Sexp, nomatch: i32) -> R<Option<Position>> {
     let nomatch = values::scalar_integer(nomatch)?;
     crate::heap().root(nomatch);
-    let positions = kernel(sort::do_match, &[x, table, nomatch, nil()], nil())?;
+    let positions = kernel(
+        sort::do_match,
+        &[x, table, nomatch, nil()],
+        ClosureFrame::Env(nil()),
+    )?;
     Ok(Some(Position::Vector(positions)))
 }
 
@@ -577,7 +625,11 @@ unsafe fn native_sys_unsetenv(args: &[Arg]) -> R<Option<Sexp>> {
     if x.kind() != SexpType::String || x.is_object() {
         return Ok(None);
     }
-    let value = kernel(crate::system::do_sys_unsetenv, &[x], values::global_env())?;
+    let value = kernel(
+        crate::system::do_sys_unsetenv,
+        &[x],
+        ClosureFrame::Env(values::global_env()),
+    )?;
     interp().visible = false;
     Ok(Some(value))
 }
@@ -587,15 +639,68 @@ pub(crate) fn decline() -> R<Sexp> {
     Ok(nil())
 }
 
+/// The frame of the closure whose prologue is running: its environment, or a slot frame that
+/// has none, whose formals the helpers below read from its slots so the frame stays without one.
+#[derive(Clone, Copy)]
+pub(crate) enum ClosureFrame {
+    Env(Sexp),
+    Slots(usize),
+}
+
+impl ClosureFrame {
+    /// The frame the builtin `call` was made from.
+    pub(crate) unsafe fn of(call: &Call<'_>) -> ClosureFrame {
+        if call.rho != nil() || call.frame == crate::NO_SLOTS {
+            ClosureFrame::Env(call.rho)
+        } else {
+            ClosureFrame::Slots(call.frame as usize)
+        }
+    }
+
+    /// The slot frame's position while it has no environment, or the environment it has, which
+    /// a slot frame may have made since the call began (forcing an argument can make it).
+    unsafe fn resolve(self) -> Result<usize, Sexp> {
+        match self {
+            ClosureFrame::Env(env) => Err(env),
+            ClosureFrame::Slots(index) => match interp().frames[index].env {
+                env if env == nil() => Ok(index),
+                env => Err(env),
+            },
+        }
+    }
+}
+
 /// Finishes the call of the closure whose frame is `frame` with `value`, as `return(value)`.
-pub(crate) unsafe fn finish(frame: Sexp, value: Sexp, visible: bool) -> R<Sexp> {
+pub(crate) unsafe fn finish(frame: ClosureFrame, value: Sexp, visible: bool) -> R<Sexp> {
+    let env = match frame.resolve() {
+        Err(env) => env,
+        Ok(index) => eval::pending_env(index)?,
+    };
     interp().visible = visible;
-    Err(jump(Jump::Return { env: frame, value }))
+    Err(jump(Jump::Return { env, value }))
 }
 
 /// The value of the formal `name` in `frame`, supplied or defaulted, forced as evaluating the
 /// name would; `None` when it has neither a value nor a default.
-pub(crate) unsafe fn argument(frame: Sexp, symbol: Sexp) -> R<Option<Sexp>> {
+pub(crate) unsafe fn argument(frame: ClosureFrame, symbol: Sexp) -> R<Option<Sexp>> {
+    let frame = match frame.resolve() {
+        Err(env) => env,
+        Ok(index) => {
+            let Some((value, _)) = eval::slot_formal(index, symbol) else {
+                return Ok(None);
+            };
+            if value == missing_arg() || value == values::unbound() {
+                return Ok(None);
+            }
+            let value = if value.kind() == SexpType::Promise {
+                eval::force_promise(value)?
+            } else {
+                value
+            };
+            crate::heap().root(value);
+            return Ok(Some(value));
+        }
+    };
     match crate::heap().frame_cell(frame, symbol) {
         Some(cell) if cell.cdr() != missing_arg() => {}
         _ => return Ok(None),
@@ -608,7 +713,14 @@ pub(crate) unsafe fn argument(frame: Sexp, symbol: Sexp) -> R<Option<Sexp>> {
 /// Whether the formal `name` holds its own default, untouched: no value at all, or the default
 /// the call bound because the argument was left out. An argument the caller passed on from its
 /// own missing formal is not a default, because forcing it raises an error.
-unsafe fn is_default(frame: Sexp, symbol: Sexp) -> R<bool> {
+unsafe fn is_default(frame: ClosureFrame, symbol: Sexp) -> R<bool> {
+    let frame = match frame.resolve() {
+        Err(env) => env,
+        Ok(index) => {
+            return Ok(eval::slot_formal(index, symbol)
+                .is_none_or(|(value, missing)| missing || value == missing_arg()));
+        }
+    };
     let Some(cell) = crate::heap().frame_cell(frame, symbol) else {
         return Ok(true);
     };
@@ -616,16 +728,28 @@ unsafe fn is_default(frame: Sexp, symbol: Sexp) -> R<bool> {
 }
 
 /// Whether the call supplied the formal `name`, as `missing(name)` is false.
-unsafe fn is_supplied(frame: Sexp, symbol: Sexp) -> R<bool> {
-    Ok(!eval::is_missing(symbol, frame)?)
+unsafe fn is_supplied(frame: ClosureFrame, symbol: Sexp) -> R<bool> {
+    match frame.resolve() {
+        Ok(index) => match eval::slot_formal(index, symbol) {
+            Some((value, missing)) => Ok(!missing && !eval::value_is_missing(value)?),
+            None => Ok(!eval::is_missing(
+                symbol,
+                eval::frame_env(index, eval::Reify::Site("missing()"))?,
+            )?),
+        },
+        Err(env) => Ok(!eval::is_missing(symbol, env)?),
+    }
 }
 
 /// The elements of the frame's `...`, unforced; `None` when one is an empty argument.
-unsafe fn dots(frame: Sexp) -> R<Option<SmallVec<[(Sexp, Sexp); 8]>>> {
-    let Some(cell) = crate::heap().frame_cell(frame, symbols().dots) else {
-        return Ok(Some(SmallVec::new()));
+unsafe fn dots(frame: ClosureFrame) -> R<Option<SmallVec<[(Sexp, Sexp); 8]>>> {
+    let list = match frame.resolve() {
+        Ok(index) => eval::slot_dots(index).unwrap_or(nil()),
+        Err(env) => match crate::heap().frame_cell(env, symbols().dots) {
+            Some(cell) => cell.cdr(),
+            None => nil(),
+        },
     };
-    let list = cell.cdr();
     if list.kind() != SexpType::Dots {
         return Ok(Some(SmallVec::new()));
     }
@@ -641,18 +765,23 @@ unsafe fn dots(frame: Sexp) -> R<Option<SmallVec<[(Sexp, Sexp); 8]>>> {
     Ok(Some(items))
 }
 
-/// Calls the builtin `function` with positional `args`, for a kernel that reads only its
-/// arguments.
-pub(crate) unsafe fn kernel(function: BuiltinFn, args: &[Sexp], env: Sexp) -> R<Sexp> {
+/// Calls the builtin `function` with positional `args` from `frame`, for a kernel that reads
+/// only its arguments.
+pub(crate) unsafe fn kernel(function: BuiltinFn, args: &[Sexp], frame: ClosureFrame) -> R<Sexp> {
     let args: SmallVec<[Arg; 9]> = args
         .iter()
         .map(|&value| Arg { tag: nil(), value })
         .collect();
+    let (rho, frame) = match frame {
+        ClosureFrame::Env(env) => (env, crate::NO_SLOTS),
+        ClosureFrame::Slots(index) => (nil(), index as u32),
+    };
     let call = Call {
         call: nil(),
         op: nil(),
         args: &args,
-        env,
+        rho,
+        frame,
         reusable: None,
     };
     let value = function(&call)?;
@@ -682,12 +811,12 @@ unsafe fn is_ascii(text: Sexp) -> bool {
 /// choices themselves. With `choices` missing it evaluates the caller's default for `arg` in
 /// the caller's frame, as the R body does through `sys.function(sys.parent())`.
 unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
-    if !is_default(frame, symbols().several_ok)? {
+    let frame = call.env()?;
+    if !is_default(ClosureFrame::Env(frame), symbols().several_ok)? {
         return decline();
     }
     // The R body evaluates a missing `choices` before it forces `arg`, and a supplied one after.
-    let defaulted = if is_supplied(frame, symbols().choices)? {
+    let defaulted = if is_supplied(ClosureFrame::Env(frame), symbols().choices)? {
         None
     } else {
         let Some(choices) = default_choices(frame)? else {
@@ -695,7 +824,7 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
         };
         Some(choices)
     };
-    let Some(arg) = argument(frame, symbols().arg)? else {
+    let Some(arg) = argument(ClosureFrame::Env(frame), symbols().arg)? else {
         return decline();
     };
     if arg.kind() != SexpType::String || arg.attrib() != nil() {
@@ -703,7 +832,7 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
     }
     let choices = match defaulted {
         Some(choices) => choices,
-        None => match argument(frame, symbols().choices)? {
+        None => match argument(ClosureFrame::Env(frame), symbols().choices)? {
             Some(choices) => choices,
             None => return decline(),
         },
@@ -714,7 +843,7 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
     let result = values::alloc(SexpType::String, 1)?;
     if length(arg) >= 1 && sort::identical(arg, choices, &IdenticalFlags::default()) {
         crate::heap().set_element(result, 0, arg.element(0));
-        return finish(frame, result, true);
+        return finish(ClosureFrame::Env(frame), result, true);
     }
     if length(arg) != 1 {
         return decline();
@@ -746,7 +875,7 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
         return decline();
     };
     crate::heap().set_element(result, 0, choices.element(index));
-    finish(frame, result, true)
+    finish(ClosureFrame::Env(frame), result, true)
 }
 
 /// The default of the caller's formal that `arg` names, evaluated in the caller's frame, when
@@ -798,7 +927,7 @@ unsafe fn default_choices(frame: Sexp) -> R<Option<Sexp>> {
 /// `stopifnot(...)` when every expression is all `TRUE`. The first that is not leaves the R body
 /// to build the error from its call.
 unsafe fn do_stopifnot(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = ClosureFrame::of(call);
     if is_supplied(frame, symbols().exprs)? || is_supplied(frame, symbols().expr_object)? {
         return decline();
     }
@@ -825,9 +954,9 @@ unsafe fn do_stopifnot(call: &Call<'_>) -> R<Sexp> {
 /// directly and passes both arguments as forced promises of the same expressions, so `f` sees
 /// the same call, the same `substitute()` results and the same frame variables `init` and `i`.
 unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
-    let missing_init = !is_supplied(frame, symbols().init)?;
-    let Some(x) = argument(frame, symbols().x)? else {
+    let frame = call.env()?;
+    let missing_init = !is_supplied(ClosureFrame::Env(frame), symbols().init)?;
+    let Some(x) = argument(ClosureFrame::Env(frame), symbols().x)? else {
         return decline();
     };
     // `is.vector(x) && !is.object(x)`, and `length(x)` cannot dispatch.
@@ -848,7 +977,7 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         return decline();
     }
     // `match.fun(f)` returns a function as it is.
-    let Some(function) = argument(frame, symbols().f)? else {
+    let Some(function) = argument(ClosureFrame::Env(frame), symbols().f)? else {
         return decline();
     };
     if !matches!(function.kind(), SexpType::Closure | SexpType::Builtin) {
@@ -858,15 +987,15 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
     // A flag that is not TRUE or FALSE stops the R body with an error before it reads the
     // other one, so the prologue declines before forcing it.
     let (right, accumulate) = if missing_init {
-        let Some(right) = flag(frame, symbols().right)? else {
+        let Some(right) = flag(ClosureFrame::Env(frame), symbols().right)? else {
             return decline();
         };
-        (right, flag(frame, symbols().accumulate)?)
+        (right, flag(ClosureFrame::Env(frame), symbols().accumulate)?)
     } else {
-        let Some(accumulate) = flag(frame, symbols().accumulate)? else {
+        let Some(accumulate) = flag(ClosureFrame::Env(frame), symbols().accumulate)? else {
             return decline();
         };
-        let Some(right) = flag(frame, symbols().right)? else {
+        let Some(right) = flag(ClosureFrame::Env(frame), symbols().right)? else {
             return decline();
         };
         (right, Some(accumulate))
@@ -907,7 +1036,7 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         heap.root(index);
         let value = crate::subset::subset2(x, &[index], Some(true), element_call)?;
         eval::define(init_symbol, value, frame)?;
-    } else if argument(frame, symbols.init)?.is_none() {
+    } else if argument(ClosureFrame::Env(frame), symbols.init)?.is_none() {
         return decline();
     }
     let step = |position: usize| -> R<()> {
@@ -935,7 +1064,7 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         }
     }
     let value = eval::value_of(eval::find_var_in_frame(init_symbol, frame)?)?;
-    finish(frame, value, true)
+    finish(ClosureFrame::Env(frame), value, true)
 }
 
 /// Whether `value` has no attribute other than `names`, as `is.vector` requires.
@@ -951,7 +1080,7 @@ unsafe fn only_names(value: Sexp) -> bool {
 }
 
 /// The formal `name` forced as `if (name)` reads it, when it is a single `TRUE` or `FALSE`.
-unsafe fn flag(frame: Sexp, symbol: Sexp) -> R<Option<bool>> {
+unsafe fn flag(frame: ClosureFrame, symbol: Sexp) -> R<Option<bool>> {
     let Some(value) = argument(frame, symbol)? else {
         return Ok(None);
     };
@@ -966,7 +1095,7 @@ unsafe fn flag(frame: Sexp, symbol: Sexp) -> R<Option<bool>> {
 
 /// `setdiff(x, y)` of plain vectors: `unique(x)` without names, less the elements `y` has.
 unsafe fn do_setdiff(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = ClosureFrame::of(call);
     let Some(x) = argument(frame, symbols().x)? else {
         return decline();
     };
@@ -1007,7 +1136,7 @@ unsafe fn do_setdiff(call: &Call<'_>) -> R<Sexp> {
 /// first, which costs two `tryCatch()` calls, and for plain vectors its answer cannot change the
 /// result because `unique()` drops every attribute.
 unsafe fn do_intersect(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = ClosureFrame::of(call);
     let Some(x) = argument(frame, symbols().x)? else {
         return decline();
     };
@@ -1067,7 +1196,7 @@ unsafe fn do_intersect(call: &Call<'_>) -> R<Sexp> {
 /// `unset`, and a single logical for `names`: the values, named by `x` when `names` asks for
 /// it, without the closure's `structure()` call.
 unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = ClosureFrame::of(call);
     let symbols = symbols();
     let Some(x) = argument(frame, symbols.x)? else {
         return decline();
@@ -1111,7 +1240,7 @@ unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
 /// `Sys.setenv(...)` where every argument is named and is a single string, so `unlist()` and
 /// `as.character()` leave the values as they are.
 unsafe fn do_sys_setenv(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = ClosureFrame::of(call);
     let Some(items) = dots(frame)? else {
         return decline();
     };
@@ -1170,7 +1299,7 @@ fn sets_unchecked(name: &[u8]) -> bool {
 /// `structure(.Data, ...)` when every attribute is named and is either a plain one, `names` that
 /// need no coercion, or a `class` that is a character vector without `"factor"`.
 unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = ClosureFrame::of(call);
     let Some(data) = argument(frame, symbols().dot_data)? else {
         return decline();
     };
@@ -1255,7 +1384,7 @@ unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
 /// `zero.print` and `drop0trailing` left at its default, where `prettyNum()` returns what the
 /// `format` internal made unchanged.
 unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
-    let frame = call.env;
+    let frame = ClosureFrame::of(call);
     let symbols = symbols();
     for symbol in [
         symbols.justify,

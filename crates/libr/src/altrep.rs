@@ -1485,6 +1485,21 @@ unsafe fn new_sequence(
     new_altrep(class, info, nil)
 }
 
+/// The first element and the increment of a compact sequence, expanded or not, or `None` for
+/// any other value.
+pub unsafe fn compact_sequence_steps(object: Sexp) -> Option<(f64, f64)> {
+    if !object.is_altrep() {
+        return None;
+    }
+    let builtins = BUILTINS.get()?;
+    let class = object.tag();
+    if class != builtins.compact_intseq.pointer && class != builtins.compact_realseq.pointer {
+        return None;
+    }
+    let (_, first, increment) = sequence_info(object);
+    Some((first, increment))
+}
+
 unsafe fn sequence_info(object: Sexp) -> (R_xlen_t, f64, f64) {
     let info = object.car().slice::<f64>();
     (info[0] as R_xlen_t, info[1], info[2])
@@ -1945,7 +1960,7 @@ unsafe fn do_wrap_meta(call: &Call<'_>) -> ApiResult<Sexp> {
     if !matches!(no_na, 0 | 1) {
         return Err(call.error("no_na must be 0 or +1"));
     }
-    if top_env(call.env) == base_namespace() {
+    if top_env(call.env()?) == base_namespace() {
         return Ok(object);
     }
     wrap(object, sorted, no_na)

@@ -133,7 +133,7 @@ unsafe fn paste(
         // Every element of a column is read, so a deferred column converts in one batch.
         columns.push(values::materialize(as_character(
             list.element(index),
-            call.env,
+            || call.env(),
         )?)?);
     }
     let lengths: Vec<usize> = columns.iter().map(|&column| length(column)).collect();
@@ -702,7 +702,7 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
         {
             let argument = &mut arguments[conversion.argument];
             if argument.text.is_none() && argument.value.is_object() {
-                let text = as_character(argument.value, call.env)?;
+                let text = as_character(argument.value, || call.env())?;
                 argument.text = Some(text);
                 argument.length = length(text);
             }
@@ -729,7 +729,7 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
                         conversion,
                         &mut arguments,
                         row,
-                        call.env,
+                        call.env()?,
                     )?);
                 }
             }
@@ -938,7 +938,7 @@ unsafe fn format_conversion(
         let text = match argument.text {
             Some(text) => text,
             None => {
-                let text = as_character(value, env)?;
+                let text = as_character(value, || Ok(env))?;
                 argument.text = Some(text);
                 text
             }
@@ -4015,12 +4015,14 @@ pub(crate) unsafe fn flag(value: Sexp) -> bool {
 
 /// `as.character(value)`, dispatching for objects, as `paste` and `sprintf` convert their
 /// arguments. A classed character vector is already text and is used as it is, which matters
-/// for vctrs, whose `as.character` method refuses a class with no cast to character.
-unsafe fn as_character(value: Sexp, env: Sexp) -> R<Sexp> {
+/// for vctrs, whose `as.character` method refuses a class with no cast to character. Only that
+/// dispatch needs the caller's environment, so `env` is asked for then, and a slot frame keeps
+/// its slots otherwise.
+unsafe fn as_character(value: Sexp, env: impl FnOnce() -> R<Sexp>) -> R<Sexp> {
     if value.is_object() && value.kind() != SexpType::String {
         let function = values::install("as.character")?;
         let call = values::call(function, &[eval::quote_value(value)?])?;
-        let converted = eval::eval(call, env)?;
+        let converted = eval::eval(call, env()?)?;
         if converted.kind() != SexpType::String {
             return coerce_vector(converted, SexpType::String);
         }
