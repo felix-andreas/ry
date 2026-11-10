@@ -4455,8 +4455,13 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
     let slots = constants.element(SLOTS);
     if slots != nil() {
         let well_formed = slots.kind() == SexpType::List
-            && length(slots) == 3
+            && length(slots) == 4
             && slots.element(2) == nil()
+            && (slots.element(3) == nil()
+                || slots.element(3).kind() == SexpType::Integer
+                    && values::ints(slots.element(3)).iter().all(|&slot| {
+                        (-1..length(slots.element(1)) as i64).contains(&i64::from(slot))
+                    }))
             && slots.element(0).kind() == SexpType::Integer
             && length(slots.element(0)) == caches
             && slots.element(1).kind() == SexpType::List
