@@ -24,6 +24,15 @@ from 2.27x to 2.78x on rcp and from 1.53x to 2.04x on shootout (`tools/bench/rea
 --public all --repeat 3`). Complex division and non-integer powers follow C99, so special values
 such as `(Inf+1i) / 0` match GNU R.
 
+### Cheaper minor collections and package metadata reads
+
+Large lists and character vectors record stores in cards, so a minor collection rescans only the
+parts that changed, and growing a list with `[[<-` moves its elements instead of copying them.
+rcp's list-for drops from 1.54 s to 0.73 s and list-while from 1.20 s to 0.73 s, which takes both
+past GNU R (1.63x and 1.58x), and the rcp geometric mean rises from 2.64x to 2.80x.
+`unserialize()` and `readRDS()` on a connection read from its buffer, which takes a third off
+their cost during `library(testthat)`.
+
 ## ry 0.4.3-beta, Linux only
 
 *Released in November 2026 as a pre-release.*
