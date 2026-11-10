@@ -23,6 +23,7 @@
 use {
     crate::{
         env::Frame,
+        image::{ImageError, Reader, Writer},
         object::{Sexp, SexpType, Shape, flag_bits, gc_bits},
     },
     std::ptr::NonNull,
@@ -58,6 +59,13 @@ type Bitmap = [u64; BITMAP_WORDS];
 /// then. It bounds the small objects one session can hold at 64 GiB. A process with a capped
 /// address space (`ulimit -v`, valgrind) gets the largest power of two down to the floor.
 const RESERVED_BYTES: usize = 64 << 30;
+/// Where the space starts when the address is free, so that a start-up image written by one
+/// process holds the addresses its objects have in another, and loads without relocating a single
+/// pointer (`crate::image`). It is below 2^48, which the intern table's packed addresses need,
+/// and far from where Linux, macOS and Windows place mappings and executables.
+pub(crate) const IMAGE_BASE: usize = 0x2000_0000_0000;
+/// Where a start-up image's large objects live: past the largest reservation of the space.
+pub(crate) const IMAGE_LARGE_BASE: usize = IMAGE_BASE + RESERVED_BYTES + HUGE_PAGE_SIZE;
 const MINIMUM_RESERVED_BYTES: usize = 1 << 30;
 /// Pages committed per system call.
 const COMMIT_PAGES: usize = HUGE_PAGE_SIZE / PAGE_SIZE;
@@ -150,7 +158,14 @@ pub(crate) struct Swept {
 impl Space {
     pub fn new() -> Space {
         let mut reserved_bytes = RESERVED_BYTES;
+        // The first space of a process takes the image address; any other, and a process whose
+        // address space has no room there, reserves wherever the system puts it and cannot load
+        // an image.
+        let fixed = virtual_memory::reserve_at(IMAGE_BASE as *mut u8, RESERVED_BYTES);
         let base_mapping = loop {
+            if let Some(mapping) = fixed {
+                break mapping;
+            }
             if let Some(mapping) = virtual_memory::reserve(reserved_bytes) {
                 break mapping;
             }
@@ -674,6 +689,202 @@ impl Space {
         self.total_live_slots
     }
 
+    /// The address of the first page.
+    pub fn base(&self) -> usize {
+        self.base.as_ptr() as usize
+    }
+
+    /// Whether the space starts at [`IMAGE_BASE`], where an image's pages belong.
+    pub fn at_image_base(&self) -> bool {
+        self.base.as_ptr() as usize == IMAGE_BASE
+    }
+
+    /// Feeds the state that decides where the next objects go into `digest`: which slots are
+    /// taken, what each page holds and where each cursor stands.
+    pub fn digest_allocation(&self, digest: &mut crate::image::Digest) {
+        digest.word(self.page_count as u64);
+        for page in 0..self.page_count {
+            digest.word(u64::from(self.page_class[page]));
+            for &word in &self.allocated[page] {
+                digest.word(word);
+            }
+        }
+        for cursor in &self.cursors {
+            digest.word(cursor.next as u64);
+            digest.word(cursor.end as u64);
+            digest.word(u64::from(cursor.page));
+            digest.word(u64::from(cursor.next_slot));
+        }
+    }
+
+    /// Writes the per-page metadata of an image to `out` and returns the bytes of the pages it
+    /// describes, starting at the space's base. Every cursor is released first, so the slots a
+    /// cursor claimed count as free and the loader's cursors start idle.
+    pub fn write_image(&mut self, out: &mut Writer) -> &[u8] {
+        self.release_cursors();
+        self.cursors = [IDLE_CURSOR; CLASS_COUNT];
+        out.u32(self.page_count as u32);
+        out.bytes
+            .extend_from_slice(&self.page_class[..self.page_count]);
+        for &live in &self.live_slots[..self.page_count] {
+            out.u16(live);
+        }
+        for bitmaps in [
+            &self.marks,
+            &self.tenured,
+            &self.allocated,
+            &self.finalizable,
+            &self.interned,
+        ] {
+            for bitmap in &bitmaps[..self.page_count] {
+                for &word in bitmap {
+                    out.u64(word);
+                }
+            }
+        }
+        // SAFETY: the first `page_count` pages are committed.
+        unsafe { std::slice::from_raw_parts(self.base.as_ptr(), self.page_count * PAGE_SIZE) }
+    }
+
+    /// The free slots of the image's pages, as `(start, length)` byte ranges from the base, so a
+    /// writer can clear what they last held.
+    pub fn free_ranges(&self) -> Vec<(usize, usize)> {
+        let mut ranges = Vec::new();
+        for page in 0..self.page_count {
+            let Some(&slot_size) = SLOT_SIZES.get(self.page_class[page] as usize) else {
+                ranges.push((page * PAGE_SIZE, PAGE_SIZE));
+                continue;
+            };
+            let slots = PAGE_SIZE / slot_size;
+            for slot in 0..slots {
+                if self.allocated[page][slot / 64] & (1 << (slot % 64)) == 0 {
+                    ranges.push((page * PAGE_SIZE + slot * slot_size, slot_size));
+                }
+            }
+            // The bytes past a page's last slot.
+            let tail = slots * slot_size;
+            if tail < PAGE_SIZE {
+                ranges.push((page * PAGE_SIZE + tail, PAGE_SIZE - tail));
+            }
+        }
+        ranges
+    }
+
+    /// Takes over the pages and metadata [`Space::write_image`] wrote, in place of everything the
+    /// space held. `fill` receives the memory of the image's pages, at the space's base, and
+    /// fills it with the pages' bytes. The caller has checked that the space allocated exactly
+    /// what the writer's had when its image's objects began, so the objects allocated since live
+    /// where the image's copies of them go.
+    ///
+    /// `held` are objects the process holds outside the heap's tables, which must be among the
+    /// image's objects; when one is not, the space is left unchanged and the error is
+    /// [`ImageError::Mismatch`].
+    pub unsafe fn load_image(
+        &mut self,
+        input: &mut Reader<'_>,
+        held: &[Sexp],
+        fill: &mut dyn FnMut(&mut [u8]) -> Result<(), ImageError>,
+    ) -> Result<(), ImageError> {
+        let page_count = input.u32()? as usize;
+        let invalid = |message: &str| ImageError::Invalid(message.to_owned());
+        if page_count < self.page_count
+            || page_count * PAGE_SIZE > self.reserved_bytes - HUGE_PAGE_SIZE
+        {
+            return Err(invalid("its pages do not fit the heap"));
+        }
+        let page_class = input.take(page_count)?.to_vec();
+        if page_class
+            .iter()
+            .any(|&class| class != EMPTY_PAGE && class as usize >= CLASS_COUNT)
+        {
+            return Err(invalid("a page has an unknown size class"));
+        }
+        let mut live_slots = Vec::with_capacity(page_count);
+        for _ in 0..page_count {
+            live_slots.push(input.u16()?);
+        }
+        let mut bitmaps: [Vec<Bitmap>; 5] = Default::default();
+        for bitmap in &mut bitmaps {
+            let bytes = input.take(page_count * size_of::<Bitmap>())?;
+            bitmap.reserve_exact(page_count);
+            for page in bytes.chunks_exact(size_of::<Bitmap>()) {
+                let mut words = [0u64; BITMAP_WORDS];
+                for (word, bytes) in words.iter_mut().zip(page.chunks_exact(8)) {
+                    let mut array = [0u8; 8];
+                    array.copy_from_slice(bytes);
+                    *word = u64::from_le_bytes(array);
+                }
+                bitmap.push(words);
+            }
+        }
+        for &object in held {
+            let offset = (object.as_ptr() as usize).wrapping_sub(self.base.as_ptr() as usize);
+            let page = offset / PAGE_SIZE;
+            let allocated = page < page_count
+                && SLOT_SIZES
+                    .get(page_class[page] as usize)
+                    .is_some_and(|&slot_size| {
+                        let slot = offset % PAGE_SIZE / slot_size;
+                        bitmaps[2][page][slot / 64] & (1 << (slot % 64)) != 0
+                    });
+            if !allocated {
+                return Err(ImageError::Mismatch(
+                    "the process holds an object the image does not".to_owned(),
+                ));
+            }
+        }
+        let needed = page_count.next_multiple_of(COMMIT_PAGES);
+        if needed > self.committed_pages {
+            // SAFETY: the range lies inside the reservation, past every committed page.
+            let committed = unsafe {
+                virtual_memory::commit(
+                    self.base.as_ptr().add(self.committed_pages * PAGE_SIZE),
+                    (needed - self.committed_pages) * PAGE_SIZE,
+                )
+            };
+            if !committed {
+                return Err(ImageError::Heap(crate::HeapError::CannotAllocate {
+                    bytes: needed * PAGE_SIZE,
+                }));
+            }
+            self.committed_pages = needed;
+        }
+        // The image's pages replace every frame these pages hold.
+        self.drop_frames();
+        // SAFETY: the first `page_count` pages are committed, and the objects in them are
+        // replaced by the image's copies as a whole.
+        fill(unsafe {
+            std::slice::from_raw_parts_mut(self.base.as_ptr(), page_count * PAGE_SIZE)
+        })?;
+        let [marks, tenured, allocated, finalizable, interned] = bitmaps;
+        self.page_count = page_count;
+        self.page_class = page_class;
+        self.total_live_slots = live_slots.iter().map(|&live| live as usize).sum();
+        self.live_slots = live_slots;
+        self.marks = marks;
+        self.tenured = tenured;
+        self.allocated = allocated;
+        self.finalizable = finalizable;
+        self.interned = interned;
+        self.cursors = [IDLE_CURSOR; CLASS_COUNT];
+        self.touched.clear();
+        self.empty_pages.clear();
+        for available in &mut self.available {
+            available.clear();
+        }
+        for page in 0..page_count {
+            if self.page_class[page] == EMPTY_PAGE {
+                self.empty_pages.push(page as u32);
+            } else {
+                self.file_page(page as u32);
+            }
+        }
+        self.marked_vector_cells = 0;
+        self.tenured_vector_cells = 0;
+        self.promote_bits = gc_bits::OLD;
+        Ok(())
+    }
+
     pub fn page_count(&self) -> usize {
         self.page_count
     }
@@ -681,6 +892,21 @@ impl Space {
 
 impl Drop for Space {
     fn drop(&mut self) {
+        self.drop_frames();
+        // SAFETY: the reservation is unmapped exactly once, after its last object is dropped.
+        let released = unsafe { virtual_memory::release(self.reservation, self.reserved_bytes) };
+        if !released {
+            panic!(
+                "cannot release the R heap's address space: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+impl Space {
+    /// Drops the frames of every live environment, which own memory outside the space.
+    fn drop_frames(&mut self) {
         for page in 0..self.page_count {
             if self.page_class[page] == EMPTY_PAGE {
                 continue;
@@ -697,14 +923,7 @@ impl Drop for Space {
                     }
                 }
             }
-        }
-        // SAFETY: the reservation is unmapped exactly once, after its last object is dropped.
-        let released = unsafe { virtual_memory::release(self.reservation, self.reserved_bytes) };
-        if !released {
-            panic!(
-                "cannot release the R heap's address space: {}",
-                std::io::Error::last_os_error()
-            );
+            self.finalizable[page] = [0; BITMAP_WORDS];
         }
     }
 }
@@ -815,7 +1034,7 @@ fn set_bits(mut bits: u64) -> impl Iterator<Item = usize> {
 /// reserved inaccessible up front and committed a run of pages at a time, so the heap's pages
 /// stay contiguous without claiming physical memory before they are used.
 #[cfg(unix)]
-mod virtual_memory {
+pub(crate) mod virtual_memory {
     /// Reserves `bytes` of inaccessible, page-aligned address space.
     pub fn reserve(bytes: usize) -> Option<*mut u8> {
         // SAFETY: an anonymous private mapping with no access rights only reserves addresses.
@@ -841,6 +1060,35 @@ mod virtual_memory {
         Some(mapping.cast())
     }
 
+    /// Reserves `bytes` of inaccessible address space at exactly `start`, or `None` when
+    /// something is mapped there or the system places it elsewhere.
+    pub fn reserve_at(start: *mut u8, bytes: usize) -> Option<*mut u8> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let flags = libc::MAP_PRIVATE
+            | libc::MAP_ANONYMOUS
+            | libc::MAP_NORESERVE
+            | libc::MAP_FIXED_NOREPLACE;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE;
+        // SAFETY: as in `reserve`; without `MAP_FIXED` the address is a hint, and a mapping
+        // placed elsewhere is returned to the system below.
+        let mapping = unsafe { libc::mmap(start.cast(), bytes, libc::PROT_NONE, flags, -1, 0) };
+        if mapping == libc::MAP_FAILED {
+            return None;
+        }
+        if mapping.cast() != start {
+            // SAFETY: the mapping was just made and nothing uses it.
+            unsafe { libc::munmap(mapping, bytes) };
+            return None;
+        }
+        // SAFETY: as in `reserve`.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::madvise(mapping, bytes, libc::MADV_HUGEPAGE);
+        }
+        Some(mapping.cast())
+    }
+
     /// Makes `bytes` at `start`, inside a reservation, readable and writable.
     pub unsafe fn commit(start: *mut u8, bytes: usize) -> bool {
         unsafe { libc::mprotect(start.cast(), bytes, libc::PROT_READ | libc::PROT_WRITE) == 0 }
@@ -853,7 +1101,7 @@ mod virtual_memory {
 }
 
 #[cfg(windows)]
-mod virtual_memory {
+pub(crate) mod virtual_memory {
     use windows_sys::Win32::System::Memory::{
         MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc,
         VirtualFree,
@@ -865,6 +1113,14 @@ mod virtual_memory {
         // SAFETY: reserving without committing maps nothing.
         let start = unsafe { VirtualAlloc(std::ptr::null(), bytes, MEM_RESERVE, PAGE_NOACCESS) };
         (!start.is_null()).then_some(start.cast())
+    }
+
+    /// Reserves `bytes` of inaccessible address space at exactly `start`, or `None` when the
+    /// range is taken.
+    pub fn reserve_at(start: *mut u8, bytes: usize) -> Option<*mut u8> {
+        // SAFETY: reserving without committing maps nothing.
+        let mapping = unsafe { VirtualAlloc(start.cast(), bytes, MEM_RESERVE, PAGE_NOACCESS) };
+        (mapping.cast() == start).then_some(start)
     }
 
     /// Commits `bytes` at `start`, inside a reservation, as readable and writable memory.

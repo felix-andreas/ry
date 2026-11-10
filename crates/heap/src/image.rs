@@ -1,43 +1,45 @@
-//! Heap images: the objects reachable from a heap's roots, written out with every reference as a
-//! dense index, and loaded back into another heap of the same build.
+//! Heap images: a heap's pages as they stand once a session has started, written out so that
+//! another process of the same build takes them over in place instead of rebuilding the objects.
 //!
-//! An image is not mapped in place. The loader allocates every object afresh and then patches
-//! its references, which costs a few milliseconds for a started R session and keeps the heap free
-//! of a second kind of object that would need copy-on-write.
+//! The small-object space of the first heap in a process starts at a fixed address
+//! ([`crate::space::IMAGE_BASE`]), and its large objects move to a second fixed address when an
+//! image is written. Every handle in the image is therefore the address the object has in the
+//! loading process too, so the loader copies or maps the pages and patches nothing in them. Two
+//! things make that sound:
 //!
-//! Some objects already exist in the heap an image loads into, and an image refers to them
-//! instead of copying them:
+//! - **The same starting state.** The writer records a digest of its heap's allocation state at
+//!   the moment its session began to start ([`Heap::image_precondition`]), and the loader compares
+//!   it with its own heap's before it takes anything. Equal digests mean that every object the
+//!   loading heap holds was allocated at the address where the image holds the same object, so
+//!   the image's pages replace them without leaving a dangling handle.
+//! - **No process-local addresses in the pages.** The few fields that hold one are cleared in the
+//!   written pages and listed in the metadata, and the loader sets them for its own process: a
+//!   frame's spilled bindings, an external pointer's address, and the contents of the fixed
+//!   objects that hold native addresses (the ALTREP class tables), which keep the loader's.
 //!
-//! - the *fixed* objects: the well-known objects, the primitives by index, and any others the
-//!   caller names in a fixed order (such as registered ALTREP classes);
-//! - interned strings and symbols, which load by their text, so a symbol keeps its identity;
-//! - the binding cells of the base environment, which hang off their symbols.
-//!
-//! The loader overwrites the contents of the mutable ones among these (an environment's frame, a
-//! symbol's base binding), so the loaded heap holds what the image's heap held.
+//! The metadata also carries the heap's state outside the pages: the intern table's slots, the
+//! symbol table, the precious set, the global roots, the weak references and the counters.
 //!
 //! A string that names a path under a directory the writer saw elsewhere can be moved under the
-//! loader's directory with a [`Relocation`], so an image built in one place loads in another.
-//!
-//! The image has two passes' worth of records. The allocation table describes every object that
-//! is not fixed, in index order, with what allocating it needs: a vector's length and its plain
-//! elements, a string's text, a symbol's name. The contents then give every object's header and
-//! references, which the loader writes once every object exists.
+//! loader's directory with a [`Relocation`]. Such a string is listed with the fields that refer
+//! to it, and the loader allocates the moved string and points those fields at it.
 
 use {
     crate::{
         Heap, HeapError,
         env::{Frame, FrameImage, TableImage},
-        object::{Sexp, SexpType, Shape, flag_bits, gc_bits, gp, holds_handles, object_size},
+        object::{ExternalPtrObject, Header, Sexp, SexpType, Shape, flag_bits, gp, holds_handles},
+        space::{IMAGE_LARGE_BASE, PAGE_SIZE, virtual_memory},
         strings,
     },
-    rustc_hash::{FxHashMap, FxHashSet},
+    rustc_hash::FxHashMap,
     std::{borrow::Cow, ffi::c_void, fmt},
 };
 
-const MAGIC: &[u8; 8] = b"RYIMAGE\x01";
+const MAGIC: &[u8; 8] = b"RYHEAP\x00\x02";
 
-/// The objects an image refers to by position instead of storing.
+/// The objects that exist before a session starts and that an image holds at the addresses they
+/// have in both processes.
 pub struct Fixed<'a> {
     /// Every primitive object, by primitive index.
     pub primitives: &'a [Sexp],
@@ -57,13 +59,10 @@ impl Relocation {
     /// `bits` the image recorded.
     pub fn apply<'t>(&self, text: &'t [u8], bits: u16) -> (Cow<'t, [u8]>, u16) {
         for (from, to) in &self.prefixes {
-            let Some(rest) = text.strip_prefix(from.as_slice()) else {
-                continue;
-            };
-            if !(rest.is_empty() || rest.first() == Some(&b'/')) || from == to {
+            if !under(from, text) || from == to {
                 continue;
             }
-            let moved = [to.as_slice(), rest].concat();
+            let moved = [to.as_slice(), &text[from.len()..]].concat();
             // A path keeps its marks unless the new prefix is not ASCII, which makes it UTF-8.
             let bits = if to.is_ascii() {
                 bits
@@ -76,25 +75,30 @@ impl Relocation {
     }
 }
 
+/// Whether `text` is the path `prefix` or a path below it.
+fn under(prefix: &[u8], text: &[u8]) -> bool {
+    text.strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.first() == Some(&b'/'))
+}
+
 #[derive(Debug)]
 pub enum ImageError {
     /// The heap holds something an image cannot carry; the message says what.
     Unsupported(String),
-    /// The image does not match the heap it is loaded into, or is damaged.
+    /// The image is damaged or does not belong to this build.
     Invalid(String),
-    /// The image was written against other fixed objects; the heap is unchanged.
-    FixedObjects,
+    /// The image cannot apply to this heap, which it left unchanged; the message says why.
+    Mismatch(String),
     Heap(HeapError),
 }
 
 impl fmt::Display for ImageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ImageError::Unsupported(message) => write!(formatter, "{message}"),
-            ImageError::Invalid(message) => write!(formatter, "the image is invalid: {message}"),
-            ImageError::FixedObjects => {
-                write!(formatter, "its fixed objects differ from this heap's")
+            ImageError::Unsupported(message) | ImageError::Mismatch(message) => {
+                write!(formatter, "{message}")
             }
+            ImageError::Invalid(message) => write!(formatter, "the image is invalid: {message}"),
             ImageError::Heap(error) => write!(formatter, "{error}"),
         }
     }
@@ -108,676 +112,697 @@ impl From<HeapError> for ImageError {
     }
 }
 
-/// How an object that is not fixed comes to exist in the loading heap.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Origin {
-    /// An interned string, found or interned by its text.
-    String,
-    /// A symbol, installed by its name, which is a string earlier in the table.
-    Symbol,
-    /// A symbol's binding in the base environment, reused if the loading heap has one.
-    BaseCell,
-    /// Anything else, allocated afresh.
-    Fresh,
+/// What [`Heap::write_image`] writes: the metadata, the bytes of the small-object pages from
+/// the space's base, and the bytes of the large-object section from [`IMAGE_LARGE_BASE`]. The
+/// two runs of bytes are kept in words so that the writer can clear fields in them in place.
+pub struct HeapImage {
+    pub metadata: Vec<u8>,
+    pages: Vec<u64>,
+    large: Vec<u64>,
 }
 
-const ORIGIN_STRING: u8 = 0;
-const ORIGIN_SYMBOL: u8 = 1;
-const ORIGIN_BASE_CELL: u8 = 2;
-const ORIGIN_FRESH: u8 = 3;
-const ORIGIN_ALTREP: u8 = 4;
+impl HeapImage {
+    pub fn pages(&self) -> &[u8] {
+        words_as_bytes(&self.pages)
+    }
 
-const NO_INDEX: u32 = u32::MAX;
+    pub fn large(&self) -> &[u8] {
+        words_as_bytes(&self.large)
+    }
+}
+
+fn words_as_bytes(words: &[u64]) -> &[u8] {
+    // SAFETY: any initialized `u64` is eight initialized bytes.
+    unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), words.len() * 8) }
+}
+
+/// Fills a run of memory with the bytes an image stored for it: by reading them, or by mapping
+/// the file over it.
+pub type Fill<'a> = &'a mut dyn FnMut(&mut [u8]) -> Result<(), ImageError>;
+
+/// A 64-bit digest of a sequence of words.
+pub struct Digest(u64);
+
+impl Digest {
+    const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+
+    pub fn new() -> Digest {
+        Digest(Digest::SEED)
+    }
+
+    pub fn word(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(26) ^ word).wrapping_mul(Digest::SEED);
+    }
+
+    pub fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for Digest {
+    fn default() -> Digest {
+        Digest::new()
+    }
+}
+
+/// A frame whose bindings live outside its environment object, as the image lists it.
+struct ListedFrame {
+    env: Sexp,
+    image: FrameImage,
+}
 
 impl Heap {
-    /// Writes the objects reachable from the heap's roots and from `roots` as an image. The
-    /// loader returns `roots` mapped to its own objects, in order. `address` encodes each
-    /// external pointer's address as a nonzero token the loading process can decode, or `None`
-    /// when it cannot be carried. `replace` names an object the image stores in place of another
-    /// everywhere it is referenced, such as a closure body's source in place of its compiled code.
-    pub unsafe fn write_image(
-        &self,
-        fixed: &Fixed<'_>,
-        roots: &[Sexp],
-        replace: &dyn Fn(Sexp) -> Option<Sexp>,
-        address: &mut dyn FnMut(Sexp) -> Option<u64>,
-    ) -> Result<Vec<u8>, ImageError> {
-        let resolve = |object: Sexp| replace(object).unwrap_or(object);
-        let mut index: FxHashMap<Sexp, u32> = FxHashMap::default();
-        let mut objects: Vec<Sexp> = Vec::new();
-        let fixed_objects: Vec<Sexp> = self
-            .known
+    /// The digest of everything that decides where this heap allocates its next objects, and of
+    /// the addresses of the fixed objects. An image applies only to a heap whose digest equals
+    /// the one its writer's heap had when its session began to start.
+    pub unsafe fn image_precondition(&self, fixed: &Fixed<'_>) -> u64 {
+        let mut digest = Digest::new();
+        self.space.digest_allocation(&mut digest);
+        for count in [
+            self.large.len(),
+            self.strings.len(),
+            self.symbols.len(),
+            self.roots.precious.len(),
+            self.roots.globals.entries.len(),
+            self.weak_refs.len(),
+            self.layouts.counts().0,
+            self.layouts.counts().1,
+        ] {
+            digest.word(count as u64);
+        }
+        for object in self.fixed_objects(fixed) {
+            digest.word(object.as_ptr() as u64);
+        }
+        digest.finish()
+    }
+
+    fn fixed_objects(&self, fixed: &Fixed<'_>) -> Vec<Sexp> {
+        self.known
             .all()
             .into_iter()
             .chain(fixed.primitives.iter().copied())
             .chain(fixed.extra.iter().copied())
-            .collect();
-        for &object in &fixed_objects {
-            if index.insert(object, objects.len() as u32).is_some() {
-                return Err(ImageError::Unsupported(format!(
-                    "a fixed {} is listed twice",
-                    object.kind().name()
-                )));
-            }
-            objects.push(object);
-        }
-        let fixed_count = objects.len();
+            .collect()
+    }
 
-        let mut stack: Vec<Sexp> = fixed_objects.clone();
-        let mut discovered: Vec<Sexp> = Vec::new();
-        let mut seen: FxHashSet<Sexp> = fixed_objects.iter().copied().collect();
-        let mut visit = |object: Sexp, stack: &mut Vec<Sexp>, discovered: &mut Vec<Sexp>| {
-            if seen.insert(object) {
-                discovered.push(object);
-                stack.push(object);
-            }
-        };
-        let mut start: Vec<Sexp> = self.symbols.values().copied().collect();
-        start.extend(self.roots.precious.keys().copied());
-        start.extend(self.roots.globals.entries.iter().copied());
-        start.extend(roots.iter().copied());
-        for object in start {
-            visit(resolve(object), &mut stack, &mut discovered);
+    /// Writes the heap as an image that a heap whose [`Heap::image_precondition`] is
+    /// `precondition` can load, and leaves this heap fit only to be dropped or exited from.
+    ///
+    /// Everything the heap's roots, the fixed objects and `roots` reach is kept; the loader
+    /// returns `roots`, in order. `replace` names an object the image stores in place of another
+    /// everywhere it is referenced, such as a closure body's source in place of its compiled
+    /// code. `address` encodes each external pointer's address as a nonzero token the loading
+    /// process can decode, or `None` when it cannot be carried. Strings that name a path at or
+    /// under one of `prefixes` are listed so that a [`Relocation`] can move them.
+    pub unsafe fn write_image(
+        &mut self,
+        fixed: &Fixed<'_>,
+        precondition: u64,
+        roots: &[Sexp],
+        prefixes: &[Vec<u8>],
+        replace: &dyn Fn(Sexp) -> Option<Sexp>,
+        address: &mut dyn FnMut(Sexp) -> Option<u64>,
+    ) -> Result<HeapImage, ImageError> {
+        let unsupported = |message: &str| Err(ImageError::Unsupported(message.to_owned()));
+        if !self.space.at_image_base() {
+            return unsupported("the heap does not start at the image address");
         }
-        while let Some(object) = stack.pop() {
-            for child in children(object, self.known.nil) {
-                visit(resolve(child), &mut stack, &mut discovered);
-            }
+        if self.inhibit > 0 {
+            return unsupported("collection is inhibited");
         }
+        let fixed_objects = self.fixed_objects(fixed);
+        let mut roots = roots.to_vec();
+        let keep = |roots: &[Sexp]| [fixed_objects.as_slice(), roots].concat();
 
-        let mut classified: Vec<(Origin, Sexp)> = Vec::with_capacity(discovered.len());
-        for &object in &discovered {
-            classified.push((self.origin(object)?, object));
+        self.collect_for_image(&keep(&roots));
+        self.retire_escaped();
+        let forward = |object: Sexp| replace(object);
+        for object in self.live_objects() {
+            object.for_each_handle_field(&mut |field| {
+                if let Some(replacement) = forward(*field) {
+                    *field = replacement;
+                }
+            });
         }
-        // Strings come first so that a symbol's name loads before the symbol, and symbols before
-        // their base bindings.
-        classified.sort_by_key(|&(origin, _)| origin);
-        for &(_, object) in &classified {
-            index.insert(object, objects.len() as u32);
-            objects.push(object);
+        self.forward_roots(&mut roots, &forward);
+        let nil = self.known.nil;
+        for object in self.live_objects() {
+            if object.kind().shape() == Shape::Vector
+                && holds_handles(object.kind())
+                && object.flags() & flag_bits::WEAK_PAIRS != 0
+            {
+                // A weak-pair list is a cache whose pairs may be dead, so it loads empty.
+                for index in 0..object.length() as usize {
+                    object.set_element_unbarriered(index, nil);
+                }
+            }
         }
-
-        let reference = |object: Sexp| -> Result<u32, ImageError> {
-            let object = resolve(object);
-            index.get(&object).copied().ok_or_else(|| {
-                ImageError::Unsupported(format!(
-                    "a {} is referenced but was not reached",
-                    // SAFETY: the object is live, being referenced from a reached one.
-                    unsafe { object.kind().name() }
-                ))
-            })
-        };
+        for symbol in self.symbols.values() {
+            symbol.reset_symbol_caches();
+        }
+        self.collect_for_image(&keep(&roots));
+        if !self.ready_to_finalize.is_empty() {
+            // Finalizers that start-up left pending are not run by the loading process either.
+            self.ready_to_finalize.clear();
+            self.collect_for_image(&keep(&roots));
+        }
+        self.promote_young();
 
         let mut out = Writer::default();
         out.bytes.extend_from_slice(MAGIC);
-        out.u32(fixed_count as u32);
-        out.u32(objects.len() as u32);
+        out.u64(precondition);
+        let large = self.move_large_objects(&mut roots)?;
+        out.u64(IMAGE_LARGE_BASE as u64);
+        out.u64(large.len() as u64 * 8);
+        let mut large_objects: Vec<u64> = self
+            .large
+            .iter()
+            .map(|object| object.as_ptr() as u64)
+            .collect();
+        large_objects.sort_unstable();
+        out.u64s(&large_objects);
 
-        for &(origin, object) in &classified {
-            match origin {
-                Origin::String => {
-                    out.u8(ORIGIN_STRING);
-                    out.u16(object.gp());
-                    out.blob(object.bytes());
-                }
-                Origin::Symbol => {
-                    out.u8(ORIGIN_SYMBOL);
-                    out.u32(reference(object.car())?);
-                }
-                Origin::BaseCell => {
-                    out.u8(ORIGIN_BASE_CELL);
-                    out.u32(reference(object.car())?);
-                }
-                Origin::Fresh if object.is_altrep() => {
-                    out.u8(ORIGIN_ALTREP);
-                    out.u8(object.kind() as u8);
-                }
-                Origin::Fresh => {
-                    out.u8(ORIGIN_FRESH);
-                    let kind = object.kind();
-                    out.u8(kind as u8);
-                    match kind.shape() {
-                        Shape::Vector => {
-                            out.u64(object.length() as u64);
-                            if kind == SexpType::Char {
-                                // An uninterned string: its text and marks are all it has.
-                                out.u16(object.gp());
-                                out.blob(object.bytes());
-                            } else {
-                                out.u64(object.capacity() as u64);
-                                if !holds_handles(kind) {
-                                    let size = kind.element_size().unwrap_or(0);
-                                    out.blob(std::slice::from_raw_parts(
-                                        object.data(),
-                                        object.length() as usize * size,
-                                    ));
-                                }
-                            }
-                        }
-                        Shape::Record => {
-                            out.u32(object.record_layout());
-                            out.u32(object.record_slot_count() as u32);
-                        }
-                        Shape::Primitive => {
-                            return Err(ImageError::Unsupported(format!(
-                                "the primitive with index {} is not the registered one",
-                                object.primitive_index()
-                            )));
-                        }
-                        Shape::Triple
-                        | Shape::Environment
-                        | Shape::ExternalPtr
-                        | Shape::WeakRef => {}
-                    }
-                }
-            }
-        }
-
-        for (position, &object) in objects.iter().enumerate() {
-            out.u16(object.refcount());
-            if !restores_contents(object, position < fixed_count, &self.known) {
-                out.u8(0);
-                continue;
-            }
-            out.u8(1);
-            out.u16(object.gp());
-            out.u8(object.flags());
-            out.u32(reference(object.attrib())?);
+        let live = self.live_objects();
+        let mut frames: Vec<ListedFrame> = Vec::new();
+        let mut external: Vec<(Sexp, u64)> = Vec::new();
+        for &object in &live {
             if object.is_altrep() {
-                for field in [object.car(), object.cdr(), object.tag()] {
-                    out.u32(reference(field)?);
-                }
                 continue;
             }
             match object.kind().shape() {
-                Shape::Vector => {
-                    if holds_handles(object.kind()) {
-                        let weak = object.flags() & flag_bits::WEAK_PAIRS != 0;
-                        for element in 0..object.length() as usize {
-                            // A weak-pair list is a cache whose pairs may be dead, so it loads
-                            // empty.
-                            let element = if weak {
-                                self.known.nil
-                            } else {
-                                object.element(element)
-                            };
-                            out.u32(reference(element)?);
+                Shape::Environment if (*object.frame_ptr()).owns_memory() => {
+                    frames.push(ListedFrame {
+                        env: object,
+                        image: (*object.frame_ptr()).image(),
+                    });
+                }
+                Shape::ExternalPtr if !object.external_address().is_null() => {
+                    match address(object) {
+                        Some(token) if token != 0 => external.push((object, token)),
+                        _ => {
+                            return unsupported(
+                                "an external pointer holds an address that cannot be carried",
+                            );
                         }
                     }
                 }
-                Shape::Triple => {
-                    for field in [object.car(), object.cdr(), object.tag()] {
-                        out.u32(reference(field)?);
-                    }
+                Shape::WeakRef if object.weak_c_finalizer() != 0 => {
+                    return unsupported("a weak reference has a C finalizer");
                 }
-                Shape::Environment => {
-                    out.u32(reference(object.enclosure())?);
-                    let frame = (*object.frame_ptr()).image();
-                    out.u32(frame.slots.len() as u32);
-                    for slot in &frame.slots {
-                        match *slot {
-                            Some((symbol, cell)) => {
-                                out.u32(reference(symbol)?);
-                                out.u32(reference(cell)?);
-                            }
-                            None => {
-                                out.u32(NO_INDEX);
-                                out.u32(NO_INDEX);
-                            }
-                        }
-                    }
-                    out.u32(frame.formals);
-                    out.u32(frame.removed);
-                    match &frame.table {
-                        Some(table) => {
-                            out.u8(1);
-                            out.u32s(&table.heads);
-                            out.u32s(&table.next);
-                            out.u32s(&table.hashes);
-                            out.u32(table.count);
-                        }
-                        None => out.u8(0),
-                    }
-                }
-                Shape::ExternalPtr => {
-                    let token = if object.external_address().is_null() {
-                        0
-                    } else {
-                        match address(object) {
-                            Some(token) if token != 0 => token,
-                            _ => {
-                                return Err(ImageError::Unsupported(
-                                    "an external pointer holds an address that cannot be carried"
-                                        .to_owned(),
-                                ));
-                            }
-                        }
-                    };
-                    out.u64(token);
-                    out.u32(reference(object.external_tag())?);
-                    out.u32(reference(object.external_protected())?);
-                }
-                Shape::WeakRef => {
-                    if object.weak_c_finalizer() != 0 {
-                        return Err(ImageError::Unsupported(
-                            "a weak reference has a C finalizer".to_owned(),
-                        ));
-                    }
-                    out.u32(reference(object.weak_key())?);
-                    out.u32(reference(object.weak_value())?);
-                    out.u32(reference(object.weak_finalizer())?);
-                    out.u8(u8::from(object.weak_finalize_on_exit()));
-                }
-                Shape::Record => {
-                    out.u64(object.record_unboxed());
-                    for slot in 0..object.record_slot_count() {
-                        let (bits, raw) = object.record_slot_bits(slot);
-                        if raw {
-                            out.u64(bits);
-                        } else {
-                            let handle = Sexp::from_raw(bits as *mut crate::object::Header)
-                                .ok_or_else(|| {
-                                    ImageError::Unsupported("a record slot is null".to_owned())
-                                })?;
-                            out.u64(u64::from(reference(handle)?));
-                        }
-                    }
-                }
-                Shape::Primitive => {}
+                _ => {}
             }
+        }
+        let relocatable = self.relocatable_strings(&live, prefixes);
+
+        let base = self.space.base();
+        let page_bytes = self.space.write_image(&mut out);
+        let mut pages = vec![0u64; page_bytes.len() / 8];
+        std::ptr::copy_nonoverlapping(
+            page_bytes.as_ptr(),
+            pages.as_mut_ptr().cast::<u8>(),
+            page_bytes.len(),
+        );
+        let copy = pages.as_mut_ptr().cast::<u8>();
+        for (start, length) in self.space.free_ranges() {
+            std::ptr::write_bytes(copy.add(start), 0, length);
+        }
+        for frame in &frames {
+            let offset = frame.env.frame_ptr() as usize - base;
+            Frame::write_empty(copy.add(offset).cast(), 0);
+        }
+        for &(object, _) in &external {
+            let offset =
+                object.as_ptr() as usize - base + std::mem::offset_of!(ExternalPtrObject, address);
+            copy.add(offset)
+                .cast::<*mut c_void>()
+                .write_unaligned(std::ptr::null_mut());
         }
 
-        let mut precious: Vec<(u32, u32)> = Vec::new();
-        for (&object, &count) in &self.roots.precious {
-            let position = reference(object)?;
-            if position as usize >= fixed_count {
-                precious.push((position, count));
-            }
+        for value in [
+            self.old_small_bytes as u64,
+            self.old_large_bytes as u64,
+            self.tenured_vector_cells,
+            self.retired_bytes,
+            self.binding_epoch,
+            self.enclosure_epoch,
+        ] {
+            out.u64(value);
         }
-        precious.sort_unstable();
-        out.u32(precious.len() as u32);
-        for (position, count) in precious {
-            out.u32(position);
+        let (slots, len, tombstones) = self.strings.image();
+        out.u64s(slots);
+        out.u64(len as u64);
+        out.u64(tombstones as u64);
+        let mut symbols: Vec<u64> = Vec::with_capacity(self.symbols.len() * 2);
+        for (&name, &symbol) in &self.symbols {
+            symbols.extend([name.as_ptr() as u64, symbol.as_ptr() as u64]);
+        }
+        out.u64s(&symbols);
+        out.u32(self.roots.precious.len() as u32);
+        for (&object, &count) in &self.roots.precious {
+            out.u64(object.as_ptr() as u64);
             out.u32(count);
         }
-        let mut globals: Vec<u32> = Vec::new();
-        for &object in &self.roots.globals.entries {
-            let position = reference(object)?;
-            if position as usize >= fixed_count {
-                globals.push(position);
+        out.u64s(&addresses(&self.roots.globals.entries));
+        out.u64s(&addresses(&self.weak_refs));
+        out.u64s(&addresses(&self.untracked));
+        out.u32(frames.len() as u32);
+        for frame in &frames {
+            out.u64(frame.env.as_ptr() as u64);
+            out.u32(frame.image.formals);
+            out.u32(frame.image.removed);
+            out.u32(frame.image.slots.len() as u32);
+            for slot in &frame.image.slots {
+                let (symbol, cell) = slot.map_or((0, 0), |(symbol, cell)| {
+                    (symbol.as_ptr() as u64, cell.as_ptr() as u64)
+                });
+                out.u64(symbol);
+                out.u64(cell);
+            }
+            match &frame.image.table {
+                Some(table) => {
+                    out.u8(1);
+                    out.u32s(&table.heads);
+                    out.u32s(&table.next);
+                    out.u32s(&table.hashes);
+                    out.u32(table.count);
+                }
+                None => out.u8(0),
             }
         }
-        out.u32s(&globals);
-        let roots: Vec<u32> = roots
-            .iter()
-            .map(|&root| reference(root))
-            .collect::<Result<_, _>>()?;
-        out.u32s(&roots);
-        Ok(out.bytes)
+        out.u32(external.len() as u32);
+        for &(object, token) in &external {
+            out.u64(object.as_ptr() as u64);
+            out.u64(token);
+        }
+        out.u32(relocatable.len() as u32);
+        for (string, referrers) in &relocatable {
+            out.u64(string.as_ptr() as u64);
+            out.u32(referrers.len() as u32);
+            for &(parent, field) in referrers {
+                out.u64(parent.as_ptr() as u64);
+                out.u64(field as u64);
+            }
+        }
+        out.u64s(&addresses(&roots));
+        Ok(HeapImage {
+            metadata: out.bytes,
+            pages,
+            large,
+        })
+    }
+
+    /// Runs a major collection that keeps only what an image carries: what the heap's own
+    /// roots, other than the per-call ones and the host's root sources, and `keep` reach.
+    unsafe fn collect_for_image(&mut self, keep: &[Sexp]) {
+        let sources = std::mem::take(&mut self.sources);
+        let protect = std::mem::take(&mut self.roots.protect.stack);
+        let handles = std::mem::take(&mut self.roots.handles);
+        let handouts = std::mem::take(&mut self.roots.handouts);
+        self.collect_keeping(crate::Collection::Major, keep, 0);
+        self.sources = sources;
+        self.roots.protect.stack = protect;
+        self.roots.handles = handles;
+        self.roots.handouts = handouts;
+    }
+
+    /// Every live object, outside a collection that left marks on the dead.
+    unsafe fn live_objects(&self) -> Vec<Sexp> {
+        let mut live: Vec<Sexp> = self.space.marked_objects().collect();
+        let mut large: Vec<Sexp> = self.large.iter().copied().collect();
+        large.sort_unstable_by_key(|object| object.as_ptr() as usize);
+        live.extend(large);
+        live
+    }
+
+    /// Points `roots` and the heap's root tables at what `forward` returns for their entries.
+    unsafe fn forward_roots(&mut self, roots: &mut [Sexp], forward: &dyn Fn(Sexp) -> Option<Sexp>) {
+        let moved = |object: Sexp| forward(object).unwrap_or(object);
+        for root in roots.iter_mut() {
+            *root = moved(*root);
+        }
+        let precious = std::mem::take(&mut self.roots.precious);
+        for (object, count) in precious {
+            *self.roots.precious.entry(moved(object)).or_insert(0) += count;
+        }
+        for entry in &mut self.roots.globals.entries {
+            *entry = moved(*entry);
+        }
+        for list in [&mut self.weak_refs, &mut self.untracked] {
+            for entry in list.iter_mut() {
+                *entry = moved(*entry);
+            }
+        }
+    }
+
+    /// Moves every large object to [`IMAGE_LARGE_BASE`], where the loading process maps them
+    /// too, and returns the section's bytes.
+    unsafe fn move_large_objects(&mut self, roots: &mut [Sexp]) -> Result<Vec<u64>, ImageError> {
+        let mut old: Vec<Sexp> = self.large.iter().copied().collect();
+        old.sort_unstable_by_key(|object| object.as_ptr() as usize);
+        let mut offsets = Vec::with_capacity(old.len());
+        let mut length = 0;
+        for &object in &old {
+            offsets.push(length);
+            length += self.size_of(object).next_multiple_of(16);
+        }
+        let section_length = length.next_multiple_of(PAGE_SIZE);
+        if section_length == 0 {
+            return Ok(Vec::new());
+        }
+        let start = IMAGE_LARGE_BASE as *mut u8;
+        if virtual_memory::reserve_at(start, section_length).is_none()
+            || !virtual_memory::commit(start, section_length)
+        {
+            return Err(ImageError::Unsupported(
+                "the large objects' image address is taken".to_owned(),
+            ));
+        }
+        self.image_large = IMAGE_LARGE_BASE..IMAGE_LARGE_BASE + section_length;
+        let mut moves: FxHashMap<Sexp, Sexp> = FxHashMap::default();
+        for (&object, &offset) in old.iter().zip(&offsets) {
+            let target = start.add(offset);
+            std::ptr::copy_nonoverlapping(
+                object.as_ptr().cast::<u8>(),
+                target,
+                self.size_of(object),
+            );
+            let moved = Sexp::from_raw(target.cast())
+                .ok_or_else(|| ImageError::Unsupported("a large object is null".to_owned()))?;
+            moves.insert(object, moved);
+        }
+        let forward = |object: Sexp| moves.get(&object).copied();
+        for &object in &old {
+            self.free_large(object);
+        }
+        self.large = moves.values().copied().collect();
+        for object in self.live_objects() {
+            object.for_each_handle_field(&mut |field| {
+                if let Some(moved) = forward(*field) {
+                    *field = moved;
+                }
+            });
+        }
+        self.strings.forward(&forward);
+        self.symbols = std::mem::take(&mut self.symbols)
+            .into_iter()
+            .map(|(name, symbol)| {
+                (
+                    forward(name).unwrap_or(name),
+                    forward(symbol).unwrap_or(symbol),
+                )
+            })
+            .collect();
+        self.forward_roots(roots, &forward);
+        let mut section = vec![0u64; section_length / 8];
+        std::ptr::copy_nonoverlapping(start, section.as_mut_ptr().cast::<u8>(), section_length);
+        Ok(section)
+    }
+
+    /// The strings that name a path at or under one of `prefixes`, each with the fields that
+    /// refer to it. A symbol's name is left out, because moving it would rename the symbol.
+    unsafe fn relocatable_strings(
+        &self,
+        live: &[Sexp],
+        prefixes: &[Vec<u8>],
+    ) -> Vec<(Sexp, Vec<(Sexp, *mut Sexp)>)> {
+        let mut strings: FxHashMap<Sexp, Vec<(Sexp, *mut Sexp)>> = FxHashMap::default();
+        for &object in live {
+            if object.kind() == SexpType::Char
+                && !object.is_altrep()
+                && !self.symbols.contains_key(&object)
+                && prefixes.iter().any(|prefix| under(prefix, object.bytes()))
+            {
+                strings.insert(object, Vec::new());
+            }
+        }
+        if strings.is_empty() {
+            return Vec::new();
+        }
+        for &object in live {
+            object.for_each_handle_field(&mut |field| {
+                if let Some(referrers) = strings.get_mut(&*field) {
+                    referrers.push((object, field));
+                }
+            });
+        }
+        let mut strings: Vec<_> = strings.into_iter().collect();
+        strings.sort_unstable_by_key(|(string, _)| string.as_ptr() as usize);
+        strings
     }
 
     /// Loads an image [`Heap::write_image`] wrote in a process of the same build, and returns the
-    /// objects its roots map to. `address` decodes an external pointer's token, and `relocation`
-    /// moves the paths in its strings. The heap must
-    /// hold no state the image replaces other than what a fresh start leaves: the image's
-    /// environments, symbols and bindings overwrite the loading heap's.
+    /// objects its roots map to. `metadata` is the image's metadata; `pages` and `large` fill the
+    /// memory of the small-object pages and of the large objects with the bytes the image holds
+    /// for them. `address` decodes an external pointer's token, and `relocation` moves the paths
+    /// in its strings.
+    ///
+    /// An [`ImageError::Mismatch`] leaves the heap unchanged. Any other error leaves it unusable.
     pub unsafe fn load_image(
         &mut self,
-        image: &[u8],
+        metadata: &[u8],
         fixed: &Fixed<'_>,
         relocation: &Relocation,
         address: &mut dyn FnMut(u64) -> Option<*mut c_void>,
+        pages: Fill<'_>,
+        large: Fill<'_>,
     ) -> Result<Vec<Sexp>, ImageError> {
         self.inhibit_collection();
-        let result = self.load_image_inhibited(image, fixed, relocation, address);
+        let result = self.load_image_inhibited(metadata, fixed, relocation, address, pages, large);
         self.allow_collection();
-        if result.is_ok() {
-            self.promote_young();
-        }
         result
     }
 
     unsafe fn load_image_inhibited(
         &mut self,
-        image: &[u8],
+        metadata: &[u8],
         fixed: &Fixed<'_>,
         relocation: &Relocation,
         address: &mut dyn FnMut(u64) -> Option<*mut c_void>,
+        pages: Fill<'_>,
+        large: Fill<'_>,
     ) -> Result<Vec<Sexp>, ImageError> {
-        let mut input = Reader { bytes: image };
+        let mismatch = |message: &str| Err(ImageError::Mismatch(message.to_owned()));
+        let mut input = Reader { bytes: metadata };
         if input.take(MAGIC.len())? != MAGIC {
-            return Err(invalid("it does not start with the image signature"));
+            return Err(invalid("it does not start with the heap image signature"));
         }
-        let fixed_count = input.u32()? as usize;
-        let object_count = input.u32()? as usize;
-        let mut objects: Vec<Sexp> = Vec::with_capacity(object_count);
-        objects.extend(self.known.all());
-        objects.extend(fixed.primitives.iter().copied());
-        objects.extend(fixed.extra.iter().copied());
-        if objects.len() != fixed_count || object_count < fixed_count {
-            return Err(ImageError::FixedObjects);
+        if input.u64()? != self.image_precondition(fixed) {
+            return mismatch(
+                "the heap before start-up differs from the one the image was written from",
+            );
         }
-        // Objects that existed before the load keep their reference counts at least as high as
-        // the image's, and an old one that comes to point at a loaded object is remembered.
-        let mut preexisting = vec![0u64; object_count.div_ceil(64)];
-        for position in 0..fixed_count {
-            preexisting[position / 64] |= 1 << (position % 64);
+        if !self.space.at_image_base() {
+            return mismatch("the heap does not start at the image address");
         }
-        let nil = self.known.nil;
-
-        while objects.len() < object_count {
-            let origin = input.u8()?;
-            let (object, existed) = match origin {
-                ORIGIN_STRING => {
-                    let bits = input.u16()?;
-                    let (text, bits) = relocation.apply(input.blob()?, bits);
-                    let existed = self.find_interned(&text, bits);
-                    match existed {
-                        Some(found) => (found, true),
-                        None => (self.intern_with_bits(&text, bits)?, false),
-                    }
-                }
-                ORIGIN_SYMBOL => {
-                    let name = lookup(&objects, input.u32()?)?;
-                    let existed = self.symbols.contains_key(&name);
-                    (self.install_char(name)?, existed)
-                }
-                ORIGIN_BASE_CELL => {
-                    let symbol = lookup(&objects, input.u32()?)?;
-                    let cell = symbol.cdr();
-                    if cell.kind() == SexpType::Binding {
-                        (cell, true)
-                    } else {
-                        let size = object_size(SexpType::Binding, 0).unwrap_or(40);
-                        let cell = self.allocate_uncollected(SexpType::Binding, size, size)?;
-                        cell.set_car_unbarriered(symbol);
-                        cell.set_cdr_unbarriered(nil);
-                        cell.set_tag_unbarriered(nil);
-                        (cell, false)
-                    }
-                }
-                ORIGIN_ALTREP => {
-                    let kind = kind_of(input.u8()?)?;
-                    let size = object_size(SexpType::Pairlist, 0).unwrap_or(40);
-                    (self.allocate_uncollected(kind, size, size)?, false)
-                }
-                ORIGIN_FRESH => (self.allocate_from_image(&mut input, relocation)?, false),
-                _ => return Err(invalid("an object has an unknown origin")),
-            };
-            if existed {
-                preexisting[objects.len() / 64] |= 1 << (objects.len() % 64);
-            }
-            objects.push(object);
+        if !self.large.is_empty() || !self.image_large.is_empty() {
+            return mismatch("the heap holds large objects");
+        }
+        let large_base = input.u64()? as usize;
+        let large_length = input.u64()? as usize;
+        let large_objects = input.u64s()?;
+        if large_base != IMAGE_LARGE_BASE || large_length % PAGE_SIZE != 0 {
+            return Err(invalid("its large objects are not at the image address"));
+        }
+        let section = IMAGE_LARGE_BASE as *mut u8;
+        if large_length > 0 && virtual_memory::reserve_at(section, large_length).is_none() {
+            return mismatch("the large objects' image address is taken");
+        }
+        if large_length > 0 {
+            self.image_large = IMAGE_LARGE_BASE..IMAGE_LARGE_BASE + large_length;
         }
 
-        for position in 0..object_count {
-            let object = objects[position];
-            let refcount = input.u16()?;
-            let existed = preexisting[position / 64] & (1 << (position % 64)) != 0;
-            if existed {
-                object.set_refcount(object.refcount().max(refcount));
-            } else {
-                object.set_refcount(refcount);
-            }
-            if input.u8()? == 0 {
-                continue;
-            }
-            object.set_gp(input.u16()?);
-            object.set_flags(input.u8()?);
-            object.set_attrib_unbarriered(lookup(&objects, input.u32()?)?);
-            if existed && object.gc_bits() & (gc_bits::OLD | gc_bits::REMEMBERED) == gc_bits::OLD {
-                object.set_gc_bit(gc_bits::REMEMBERED, true);
-                self.remembered.push(object);
-            }
-            if object.is_altrep() {
-                object.set_car_unbarriered(lookup(&objects, input.u32()?)?);
-                object.set_cdr_unbarriered(lookup(&objects, input.u32()?)?);
-                object.set_tag_unbarriered(lookup(&objects, input.u32()?)?);
-                continue;
-            }
-            match object.kind().shape() {
-                Shape::Vector => {
-                    if holds_handles(object.kind()) {
-                        for element in 0..object.length() as usize {
-                            object
-                                .set_element_unbarriered(element, lookup(&objects, input.u32()?)?);
-                        }
-                    }
-                }
-                Shape::Triple => {
-                    let car = lookup(&objects, input.u32()?)?;
-                    let cdr = lookup(&objects, input.u32()?)?;
-                    let tag = lookup(&objects, input.u32()?)?;
-                    // A symbol's name is what found it.
-                    if object.kind() != SexpType::Symbol {
-                        object.set_car_unbarriered(car);
-                    } else {
-                        object.reset_symbol_caches();
-                    }
-                    object.set_cdr_unbarriered(cdr);
-                    object.set_tag_unbarriered(tag);
-                }
-                Shape::Environment => {
-                    object.set_enclosure_unbarriered(lookup(&objects, input.u32()?)?);
-                    let slot_count = input.u32()? as usize;
-                    let mut slots = Vec::with_capacity(slot_count);
-                    for _ in 0..slot_count {
-                        let symbol = input.u32()?;
-                        let cell = input.u32()?;
-                        slots.push(if symbol == NO_INDEX {
-                            None
-                        } else {
-                            Some((lookup(&objects, symbol)?, lookup(&objects, cell)?))
-                        });
-                    }
-                    let formals = input.u32()?;
-                    let removed = input.u32()?;
-                    let table = match input.u8()? {
-                        0 => None,
-                        _ => Some(TableImage {
-                            heads: input.u32s()?,
-                            next: input.u32s()?,
-                            hashes: input.u32s()?,
-                            count: input.u32()?,
-                        }),
-                    };
-                    let frame = Frame::from_image(
-                        FrameImage {
-                            slots,
-                            formals,
-                            removed,
-                            table,
-                        },
-                        nil,
-                    );
-                    *object.frame_ptr() = frame;
-                    if (*object.frame_ptr()).owns_memory() {
-                        self.space.set_finalizable(object);
-                    }
-                }
-                Shape::ExternalPtr => {
-                    let token = input.u64()?;
-                    let pointer = if token == 0 {
-                        std::ptr::null_mut()
-                    } else {
-                        address(token).ok_or_else(|| {
-                            invalid("an external pointer's address does not resolve")
-                        })?
-                    };
-                    object.set_external_address(pointer);
-                    object.set_external_tag_unbarriered(lookup(&objects, input.u32()?)?);
-                    object.set_external_protected_unbarriered(lookup(&objects, input.u32()?)?);
-                }
-                Shape::WeakRef => {
-                    let payload = object.weak_payload();
-                    payload.key.set(lookup(&objects, input.u32()?)?);
-                    payload.value.set(lookup(&objects, input.u32()?)?);
-                    payload.finalizer.set(lookup(&objects, input.u32()?)?);
-                    payload.c_finalizer.set(0);
-                    payload.finalize_on_exit.set(input.u8()? != 0);
-                }
-                Shape::Record => {
-                    let unboxed = input.u64()?;
-                    for slot in 0..object.record_slot_count() {
-                        let bits = input.u64()?;
-                        let raw = slot < crate::object::UNBOXED_SLOTS && unboxed & (1 << slot) != 0;
-                        let bits = if raw {
-                            bits
-                        } else {
-                            lookup(&objects, bits as u32)?.as_ptr() as u64
-                        };
-                        object.set_record_slot_bits(slot, bits, raw);
-                    }
-                }
-                Shape::Primitive => {}
-            }
-        }
-
-        for _ in 0..input.u32()? {
-            let object = lookup(&objects, input.u32()?)?;
-            let count = input.u32()?;
-            *self.roots.precious.entry(object).or_insert(0) += count;
-            self.new_roots.push(object);
-        }
-        for position in input.u32s()? {
-            let object = lookup(&objects, position)?;
-            self.add_global_root(object);
-        }
-        let roots = input
-            .u32s()?
+        // Objects outside the heap's tables that the loading process holds already must be among
+        // the image's objects.
+        let held: Vec<Sexp> = [
+            &self.roots.protect.stack.entries,
+            &self.roots.handles.entries,
+            &self.roots.handouts.entries,
+        ]
+        .into_iter()
+        .flatten()
+        .copied()
+        .collect();
+        // The fixed objects that hold native addresses keep this process's contents.
+        let kept: Vec<(Sexp, usize)> = self
+            .fixed_objects(fixed)
             .into_iter()
-            .map(|position| lookup(&objects, position))
-            .collect::<Result<Vec<_>, _>>()?;
+            .filter(|&object| keeps_contents(object))
+            .map(|object| (object, self.size_of(object)))
+            .collect();
+        let header = size_of::<Header>();
+        let mut fill_pages = |memory: &mut [u8]| -> Result<(), ImageError> {
+            let saved: Vec<Vec<u8>> = kept
+                .iter()
+                .map(|&(object, size)| {
+                    std::slice::from_raw_parts(
+                        object.as_ptr().cast::<u8>().add(header),
+                        size - header,
+                    )
+                    .to_vec()
+                })
+                .collect();
+            pages(memory)?;
+            for (&(object, _), contents) in kept.iter().zip(&saved) {
+                std::ptr::copy_nonoverlapping(
+                    contents.as_ptr(),
+                    object.as_ptr().cast::<u8>().add(header),
+                    contents.len(),
+                );
+            }
+            Ok(())
+        };
+        self.space.load_image(&mut input, &held, &mut fill_pages)?;
+        if large_length > 0 {
+            if !virtual_memory::commit(section, large_length) {
+                return Err(ImageError::Heap(HeapError::CannotAllocate {
+                    bytes: large_length,
+                }));
+            }
+            large(std::slice::from_raw_parts_mut(section, large_length))?;
+        }
+
+        self.remembered.clear();
+        self.escaped.clear();
+        self.escaped_lists.clear();
+        self.zero_count.clear();
+        self.returned.clear();
+        self.expect_dead.clear();
+        self.new_roots.clear();
+        self.young_large.clear();
+        self.weak_pairs.clear();
+        self.ready_to_finalize.clear();
+        self.mark_stack.clear();
+        self.zero_bytes = 0;
+        self.reconcile_at = crate::RECONCILE_ENTRIES;
+        self.young_bytes = 0;
+        self.young_large_bytes = 0;
+        self.large_allocated_since_major = 0;
+        self.roots.protect.stack.scanned = 0;
+        self.roots.handles.scanned = 0;
+        self.roots.handouts.scanned = 0;
+        self.large = large_objects
+            .iter()
+            .map(|&object| handle(object))
+            .collect::<Result<_, _>>()?;
+
+        self.old_small_bytes = input.u64()? as usize;
+        self.old_large_bytes = input.u64()? as usize;
+        self.tenured_vector_cells = input.u64()?;
+        self.retired_bytes = input.u64()?;
+        self.binding_epoch = self.binding_epoch.max(input.u64()?) + 1;
+        self.enclosure_epoch = self.enclosure_epoch.max(input.u64()?) + 1;
+        let slots = input.u64s()?;
+        let len = input.u64()? as usize;
+        let tombstones = input.u64()? as usize;
+        if !self.strings.load_image(slots, len, tombstones) {
+            return Err(invalid("its string table is malformed"));
+        }
+        let symbols = input.u64s()?;
+        self.symbols.clear();
+        for pair in symbols.chunks_exact(2) {
+            self.symbols.insert(handle(pair[0])?, handle(pair[1])?);
+        }
+        self.roots.precious.clear();
+        for _ in 0..input.u32()? {
+            let object = handle(input.u64()?)?;
+            let count = input.u32()?;
+            self.roots.precious.insert(object, count);
+        }
+        self.roots.globals.entries = handles(&input.u64s()?)?;
+        self.roots.globals.scanned = 0;
+        self.weak_refs = handles(&input.u64s()?)?;
+        self.untracked = handles(&input.u64s()?)?;
+
+        let nil = self.known.nil;
+        for _ in 0..input.u32()? {
+            let env = handle(input.u64()?)?;
+            let formals = input.u32()?;
+            let removed = input.u32()?;
+            let slot_count = input.u32()? as usize;
+            let mut slots = Vec::with_capacity(slot_count);
+            for _ in 0..slot_count {
+                let symbol = input.u64()?;
+                let cell = input.u64()?;
+                slots.push(if symbol == 0 {
+                    None
+                } else {
+                    Some((handle(symbol)?, handle(cell)?))
+                });
+            }
+            let table = match input.u8()? {
+                0 => None,
+                _ => Some(TableImage {
+                    heads: input.u32s()?,
+                    next: input.u32s()?,
+                    hashes: input.u32s()?,
+                    count: input.u32()?,
+                }),
+            };
+            if env.kind() != SexpType::Environment {
+                return Err(invalid("a listed frame is not an environment's"));
+            }
+            let image = FrameImage {
+                slots,
+                formals,
+                removed,
+                table,
+            };
+            // The page holds an empty frame that owns nothing, so it is overwritten unread.
+            std::ptr::write(env.frame_ptr(), Frame::from_image(image, nil));
+        }
+        for _ in 0..input.u32()? {
+            let object = handle(input.u64()?)?;
+            let token = input.u64()?;
+            let pointer = address(token)
+                .ok_or_else(|| invalid("an external pointer's address does not resolve"))?;
+            object.set_external_address(pointer);
+        }
+
+        let mut moved: FxHashMap<Sexp, Sexp> = FxHashMap::default();
+        for _ in 0..input.u32()? {
+            let string = handle(input.u64()?)?;
+            let referrers = input.u32()? as usize;
+            let mut fields = Vec::with_capacity(referrers);
+            for _ in 0..referrers {
+                fields.push((handle(input.u64()?)?, input.u64()? as usize as *mut Sexp));
+            }
+            let (text, bits) = relocation.apply(string.bytes(), string.gp());
+            let Cow::Owned(text) = text else {
+                continue;
+            };
+            let replacement = if string.has_gp(gp::CACHED) {
+                match self.find_interned(&text, bits) {
+                    Some(found) => found,
+                    None => self.intern_with_bits(&text, bits)?,
+                }
+            } else {
+                let replacement = self.new_char(&text, 0)?;
+                replacement.set_gp(bits);
+                replacement
+            };
+            replacement.set_refcount(replacement.refcount().max(string.refcount()));
+            for (parent, field) in fields {
+                *field = replacement;
+                if parent.is_carded() {
+                    let index = (field as usize - parent.data() as usize) / size_of::<Sexp>();
+                    self.element_barrier(parent, index, replacement);
+                } else {
+                    self.write_barrier(parent, replacement);
+                }
+            }
+            moved.insert(string, replacement);
+        }
+        let mut roots = handles(&input.u64s()?)?;
         if !input.bytes.is_empty() {
             return Err(invalid("it has bytes past its end"));
         }
-        for symbol in self.symbols.values() {
-            symbol.reset_symbol_caches();
+        if !moved.is_empty() {
+            self.forward_roots(&mut roots, &|object| moved.get(&object).copied());
         }
-        self.binding_epoch += 1;
-        self.enclosure_epoch += 1;
+        self.refresh_small_trigger();
+        self.stats.live_vector_cells = self.tenured_vector_cells;
+        self.refresh_live_stats();
         Ok(roots)
-    }
-
-    /// How an object reached by the writer comes to exist in the loading heap.
-    unsafe fn origin(&self, object: Sexp) -> Result<Origin, ImageError> {
-        if object.is_altrep() {
-            return Ok(Origin::Fresh);
-        }
-        Ok(match object.kind() {
-            SexpType::Char if object.has_gp(gp::CACHED) => Origin::String,
-            SexpType::Symbol => {
-                if self.symbols.get(&object.car()) != Some(&object) {
-                    return Err(ImageError::Unsupported(
-                        "an uninterned symbol is reachable".to_owned(),
-                    ));
-                }
-                Origin::Symbol
-            }
-            SexpType::Binding
-                if object.car().kind() == SexpType::Symbol && object.car().cdr() == object =>
-            {
-                Origin::BaseCell
-            }
-            _ => Origin::Fresh,
-        })
-    }
-
-    /// Allocates an object of the allocation table's [`ORIGIN_FRESH`] kind, with its plain
-    /// elements.
-    unsafe fn allocate_from_image(
-        &mut self,
-        input: &mut Reader<'_>,
-        relocation: &Relocation,
-    ) -> Result<Sexp, ImageError> {
-        let kind = kind_of(input.u8()?)?;
-        let nil = self.known.nil;
-        Ok(match kind.shape() {
-            Shape::Vector => {
-                let length = input.u64()? as usize;
-                if kind == SexpType::Char {
-                    let bits = input.u16()?;
-                    let text = input.blob()?;
-                    if text.len() != length {
-                        return Err(invalid("a string's length differs from its text"));
-                    }
-                    let (text, bits) = relocation.apply(text, bits);
-                    let object = self.new_char(&text, 0)?;
-                    object.set_gp(bits);
-                    return Ok(object);
-                }
-                let capacity = input.u64()? as usize;
-                if capacity < length {
-                    return Err(invalid("a vector is longer than its capacity"));
-                }
-                let size = object_size(kind, capacity).ok_or(HeapError::TooLong)?;
-                let object =
-                    self.allocate_uncollected(kind, size, crate::object::VECTOR_DATA_OFFSET)?;
-                object.set_length_and_capacity(length as isize, capacity as isize);
-                if holds_handles(kind) {
-                    // Every element is stored by the contents pass; until then they must be
-                    // valid handles.
-                    std::slice::from_raw_parts_mut(object.data() as *mut Sexp, capacity).fill(nil);
-                    if object.is_carded() {
-                        object.clear_cards();
-                    }
-                } else {
-                    let element = kind.element_size().unwrap_or(0);
-                    let data = input.blob()?;
-                    if data.len() != length * element {
-                        return Err(invalid("a vector's data has the wrong size"));
-                    }
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), object.data(), data.len());
-                    std::ptr::write_bytes(
-                        object.data().add(data.len()),
-                        0,
-                        (capacity - length) * element,
-                    );
-                }
-                object
-            }
-            Shape::Triple => {
-                let size = object_size(kind, 0).ok_or(HeapError::TooLong)?;
-                let object = self.allocate_uncollected(kind, size, size)?;
-                object.set_car_unbarriered(nil);
-                object.set_cdr_unbarriered(nil);
-                object.set_tag_unbarriered(nil);
-                object
-            }
-            Shape::Environment => self.alloc_environment_uncollected(nil, 0)?,
-            Shape::ExternalPtr => {
-                let size = object_size(kind, 0).ok_or(HeapError::TooLong)?;
-                let object = self.allocate_uncollected(kind, size, size)?;
-                object.set_external_tag_unbarriered(nil);
-                object.set_external_protected_unbarriered(nil);
-                object
-            }
-            Shape::WeakRef => {
-                let size = object_size(kind, 0).ok_or(HeapError::TooLong)?;
-                let object = self.allocate_uncollected(kind, size, size)?;
-                let payload = object.weak_payload();
-                payload.key.set(nil);
-                payload.value.set(nil);
-                payload.finalizer.set(nil);
-                self.weak_refs.push(object);
-                object
-            }
-            Shape::Record => {
-                let layout = input.u32()?;
-                let slot_count = input.u32()?;
-                if self.layouts.get(layout).is_none() {
-                    return Err(invalid("a record's layout is not registered"));
-                }
-                let size = object_size(kind, slot_count as usize).ok_or(HeapError::TooLong)?;
-                let object = self.allocate_uncollected(kind, size, size)?;
-                object.init_record_header(layout, slot_count);
-                for slot in 0..slot_count as usize {
-                    object.set_record_slot_bits(slot, nil.as_ptr() as u64, false);
-                }
-                object
-            }
-            Shape::Primitive => return Err(invalid("a primitive is not fixed")),
-        })
     }
 
     pub(crate) unsafe fn find_interned(&self, text: &[u8], bits: u16) -> Option<Sexp> {
@@ -794,78 +819,36 @@ impl Heap {
     }
 }
 
-/// The objects a collection traces from `object`, plus a weak reference's fields, which an
-/// image keeps.
-unsafe fn children(object: Sexp, nil: Sexp) -> smallvec::SmallVec<[Sexp; 4]> {
-    let mut children = smallvec::SmallVec::new();
-    children.push(object.attrib());
-    if object.is_altrep() {
-        children.extend([object.car(), object.cdr(), object.tag()]);
-        return children;
-    }
+/// Whether a fixed object keeps the loading process's contents over the image's: a primitive,
+/// and a vector of plain elements, which may hold native addresses (an ALTREP class's methods)
+/// and which start-up does not change otherwise.
+unsafe fn keeps_contents(object: Sexp) -> bool {
     match object.kind().shape() {
-        Shape::Vector => {
-            if holds_handles(object.kind()) && object.flags() & flag_bits::WEAK_PAIRS == 0 {
-                children.extend((0..object.length() as usize).map(|index| object.element(index)));
-            }
-        }
-        Shape::Triple => children.extend([object.car(), object.cdr(), object.tag()]),
-        Shape::Environment => {
-            children.push(object.enclosure());
-            let frame = &*object.frame_ptr();
-            children.extend(frame.symbols());
-            children.extend(frame.cells());
-        }
-        Shape::ExternalPtr => {
-            children.extend([object.external_tag(), object.external_protected()]);
-        }
-        Shape::WeakRef => {
-            children.extend([
-                object.weak_key(),
-                object.weak_value(),
-                object.weak_finalizer(),
-            ]);
-        }
-        Shape::Record => {
-            children.extend(
-                (0..object.record_slot_count()).filter_map(|index| object.record_handle(index)),
-            );
-        }
-        Shape::Primitive => {}
+        Shape::Primitive => true,
+        Shape::Vector => !object.is_altrep() && !holds_handles(object.kind()),
+        _ => false,
     }
-    children.retain(|child| *child != nil);
-    children
 }
 
-/// Whether the loader writes an object's header and references. Fixed objects that cannot
-/// change keep the loading heap's contents.
-unsafe fn restores_contents(object: Sexp, fixed: bool, known: &crate::WellKnown) -> bool {
-    if !fixed {
-        return object.kind() != SexpType::Char;
-    }
-    if object == known.unbound || object == known.missing_arg || object == known.empty_env {
-        return false;
-    }
-    matches!(
-        object.kind().shape(),
-        Shape::Environment | Shape::ExternalPtr | Shape::WeakRef | Shape::Record
-    ) || (object.kind().shape() == Shape::Triple && object.kind() != SexpType::Nil)
-}
-
-fn kind_of(code: u8) -> Result<SexpType, ImageError> {
-    // A binding cell's code is internal, so the decoder native code reaches leaves it out.
-    if code == SexpType::Binding as u8 {
-        return Ok(SexpType::Binding);
-    }
-    SexpType::from_code(u32::from(code)).ok_or_else(|| invalid("an object has an unknown type"))
-}
-
-#[inline(always)]
-fn lookup(objects: &[Sexp], position: u32) -> Result<Sexp, ImageError> {
+fn addresses(objects: &[Sexp]) -> Vec<u64> {
     objects
-        .get(position as usize)
-        .copied()
-        .ok_or_else(|| invalid("a reference points past the objects loaded so far"))
+        .iter()
+        .map(|object| object.as_ptr() as u64)
+        .collect()
+}
+
+/// The handle at `address`, which the image's writer recorded and which the loader trusts as
+/// much as the pages it maps.
+unsafe fn handle(address: u64) -> Result<Sexp, ImageError> {
+    unsafe { Sexp::from_raw(address as usize as *mut Header) }
+        .ok_or_else(|| invalid("a handle is null"))
+}
+
+unsafe fn handles(addresses: &[u64]) -> Result<Vec<Sexp>, ImageError> {
+    addresses
+        .iter()
+        .map(|&address| unsafe { handle(address) })
+        .collect()
 }
 
 #[cold]
@@ -899,6 +882,13 @@ impl Writer {
     pub fn blob(&mut self, bytes: &[u8]) {
         self.u64(bytes.len() as u64);
         self.bytes.extend_from_slice(bytes);
+    }
+
+    pub fn u64s(&mut self, values: &[u64]) {
+        self.u64(values.len() as u64);
+        for &value in values {
+            self.u64(value);
+        }
     }
 
     pub fn u32s(&mut self, values: &[u32]) {
@@ -969,6 +959,23 @@ impl<'a> Reader<'a> {
         Ok(words
             .chunks_exact(4)
             .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect())
+    }
+
+    pub fn u64s(&mut self) -> Result<Vec<u64>, ImageError> {
+        let count = usize::try_from(self.u64()?).map_err(|_| invalid("a length is too large"))?;
+        let bytes = self.take(
+            count
+                .checked_mul(8)
+                .ok_or_else(|| invalid("a length is too large"))?,
+        )?;
+        Ok(bytes
+            .chunks_exact(8)
+            .map(|word| {
+                let mut array = [0u8; 8];
+                array.copy_from_slice(word);
+                u64::from_le_bytes(array)
+            })
             .collect())
     }
 }
