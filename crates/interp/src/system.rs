@@ -777,8 +777,11 @@ fn append_file(target: &str, source: &str) -> std::io::Result<()> {
     std::io::Write::write_all(&mut file, &bytes)
 }
 
-unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
     let names = call.arg(0);
+    if !values::is_string_scalar(call.arg(1)) {
+        return Err(error("wrong type for argument"));
+    }
     let unset = values::first_string(call.arg(1)).map(|text| text.into_owned());
     if length(names) == 0 {
         let mut entries: Vec<String> = std::env::vars()
@@ -805,18 +808,21 @@ unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-unsafe fn do_sys_setenv(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_sys_setenv(call: &Call<'_>) -> R<Sexp> {
     let names = call.arg(0);
     let new_values = call.arg(1);
+    if names.kind() != SexpType::String || new_values.kind() != SexpType::String {
+        return Err(error("wrong type for argument"));
+    }
+    if length(new_values) != length(names) {
+        return Err(error("wrong length for argument"));
+    }
     let count = length(names);
     let result = alloc(SexpType::Logical, count)?;
     for index in 0..count {
-        let name = values::string_at(names, index)
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        let value = values::string_at(new_values, index)
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
+        // GNU R translates an `NA` element to the text "NA".
+        let name = values::char_str(names.element(index)).into_owned();
+        let value = values::char_str(new_values.element(index)).into_owned();
         // SAFETY: the interpreter is single-threaded.
         std::env::set_var(&name, &value);
         values::ints_mut(result)[index] = 1;
@@ -824,7 +830,7 @@ unsafe fn do_sys_setenv(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-unsafe fn do_sys_unsetenv(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_sys_unsetenv(call: &Call<'_>) -> R<Sexp> {
     let names = call.arg(0);
     let count = length(names);
     let result = alloc(SexpType::Logical, count)?;
