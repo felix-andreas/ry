@@ -10,8 +10,7 @@ Each query runs inside the [Polars](https://pola.rs) engine instead of as R code
 db-benchmark's questions at ten million rows takes about a quarter of the time data.table does
 ([Speed](#speed)), and the type checker knows every column's type at every step, so a misspelled
 column is reported before the query runs ([Types](#types)). Code you already wrote for data.table
-keeps working, and most of its queries run on the same engine
-([Existing data.table code](#existing-datatable-code)).
+keeps working on data.table itself ([Existing data.table code](#existing-datatable-code)).
 
 You query it with Polars' verbs (`select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
 `join`, `join_asof` and `head`) and column expressions written as `col("x")`. DataFrames need ry's own runtime,
@@ -54,12 +53,9 @@ into a column; `List.from_r(sales$price)` turns it back into a `List` and fails 
 
 ## Existing data.table code
 
-Code written for data.table runs unchanged under `ry run`, and most queries on a `data.table` run
-on the same engine as DataFrames. ry answers a query only when it can produce exactly what
-data.table would, meaning the same values, attributes, printing and warnings, and otherwise
-data.table answers it. data.table's own test suite, `test.data.table()`, passes in full under ry.
-[Moving from data.table](/reference/from-data-table#existing-datatable-code) lists which queries go
-where, and maps each data.table idiom to its DataFrame equivalent.
+Code written for data.table runs unchanged under `ry run`, on data.table's own code. A DataFrame
+is the table to choose for new code; [Moving from data.table](/reference/from-data-table) maps each
+data.table idiom to its DataFrame equivalent.
 
 ## Building a DataFrame
 

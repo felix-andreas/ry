@@ -1323,15 +1323,3 @@ check <- function(index, call) {
     }
 }
 "#;
-
-/// A program that runs `count` seeded random data.table queries twice, with ry's `[` bridge on
-/// and off, and prints a `MISMATCH replay: seed=.. count=.. index=..` block for each query whose
-/// value, attributes, tables afterwards, output or conditions differ. It ends with a
-/// `summary:` line counting the queries the bridge answered. Without data.table installed it
-/// prints `data.table is not installed`.
-pub fn datatable_program(seed: u64, count: u64) -> String {
-    format!(
-        "seed <- {seed}L\ncount <- {count}L\n{}",
-        include_str!("datatable_differential.R")
-    )
-}
