@@ -5,6 +5,10 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### Package code is allocated old
+
+A lazy-load fetch, which reads a package's functions and data when they are first used, allocates them directly in the old generation, so minor collections no longer trace them only to promote them. `library(testthat)` runs no collection and 6% fewer instructions, the collector's instructions over the testthat workload drop by 14%, and peak memory is unchanged.
+
 ### Cheaper minor collections
 
 A minor collection checks an already marked object inline, without a function call or bounds checks, and handles a newly marked one out of line. Minor collections during `library(testthat)` take 29% fewer instructions, and the testthat workload takes 1.2% fewer in total.

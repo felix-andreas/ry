@@ -254,16 +254,42 @@ impl Machine<'_> {
     pub unsafe fn assign(&self, symbol: Sexp, value: Sexp) -> R<()> {
         if let Some(slot) = self.slot_of(symbol) {
             crate::heap().store_slot(&mut *slot, value);
-            let formal = slot.offset_from(register_address(self.header)) as usize - 1;
-            if formal < 64
-                && let Some(frame) = interp().frames.last_mut()
-            {
-                frame.missing &= !(1 << formal);
-            }
+            self.clear_missing(slot);
             return Ok(());
         }
         let env = self.reify(Reify::Site("assignment"))?;
         eval::assign_symbol(symbol, value, env, false)
+    }
+
+    /// Assigns the scalar `element` of `kind` to `symbol` by storing it into the value the
+    /// variable is bound to, when that is a plain scalar of `kind` that nothing else references.
+    /// Returns that value, or `None` when the assignment needs a new one.
+    pub unsafe fn overwrite(&self, symbol: Sexp, kind: SexpType, element: f64) -> Option<Sexp> {
+        let current = match self.slot_of(symbol) {
+            Some(slot) => {
+                let current = *slot;
+                if !overwrite_scalar(current, kind, element) {
+                    return None;
+                }
+                self.clear_missing(slot);
+                return Some(current);
+            }
+            None if self.env() == values::nil() => return None,
+            None => crate::heap()
+                .frame_cell(self.env(), symbol)
+                .filter(|cell| !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED))?
+                .cdr(),
+        };
+        overwrite_scalar(current, kind, element).then_some(current)
+    }
+
+    unsafe fn clear_missing(&self, slot: *mut Sexp) {
+        let formal = slot.offset_from(register_address(self.header)) as usize - 1;
+        if formal < 64
+            && let Some(frame) = interp().frames.last_mut()
+        {
+            frame.missing &= !(1 << formal);
+        }
     }
 }
 
@@ -354,6 +380,35 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
             run(function, code, env)
         }
         Ok(None) | Err(_) => eval::eval(body, env),
+    }
+}
+
+/// `function`'s body, compiled first when [`run_body`] would compile it at this call. Binding the
+/// arguments calls this, so that such a call runs in a slot frame rather than in the environment
+/// the uncompiled body needs: the first call of a body with a loop, which compiles at once, is
+/// often its only call, as for a benchmark's driver. It counts nothing, so [`run_body`] counts a
+/// call that does not compile.
+pub unsafe fn compile_before_call(function: Sexp) -> R<Sexp> {
+    let body = function.cdr();
+    if !worth_compiling(body) {
+        return Ok(body);
+    }
+    let state = &mut interp().bytecode;
+    let calls = state.calls.get(&body).copied().unwrap_or(0);
+    if calls + 1 < COMPILE_AFTER_CALLS && !contains_loop(body, LOOP_SEARCH_DEPTH) {
+        return Ok(body);
+    }
+    state.calls.remove(&body);
+    if let Some(code) = crate::code_image::take_pending(function, body)? {
+        return Ok(code);
+    }
+    match compile(body, function) {
+        Ok(Some(code)) => {
+            crate::heap().set_cdr(function, code);
+            Ok(code)
+        }
+        // A body the compiler rejects runs on the AST evaluator, as in `run_body`.
+        Ok(None) | Err(_) => Ok(body),
     }
 }
 
@@ -5641,7 +5696,7 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
         && positional_arguments(call.cdr())
     {
         let values = std::slice::from_raw_parts(instruction.registers.add(first), count);
-        if let Some(value) = eval::call_direct(definition, values)? {
+        if let Some(value) = eval::call_direct(definition, call, values)? {
             state.record(instruction.at, value);
             instruction.output(0, value);
             return Ok(Flow::Next);
@@ -6822,7 +6877,8 @@ unsafe fn assign_slot_element(
 
 /// [`assign_element`] on a slot's value: the slot's value changes in place when the slot owns
 /// it, under the rule `x <- f(x, ...)` follows (see [`slot_reusable`]); a value the slot shares,
-/// such as a formal's forced argument, is copied into the slot first.
+/// such as a formal's forced argument, is copied, and the copy (or a vector grown by an
+/// appended name) is stored in the slot.
 unsafe fn assign_slot_element_in_place(
     state: &Activation<'_, '_>,
     slot: *mut Sexp,
@@ -6845,20 +6901,13 @@ unsafe fn assign_slot_element_in_place(
     if target == unbound() || target == missing_arg() || target.kind() == SexpType::Promise {
         return Ok(false);
     }
-    if current == target && slot_owns(state, target) {
-        return assign_element(target, index, value, kind, |_| true);
-    }
-    // What `assign_element` refuses on the copy, it refuses on the value, without the copy.
-    if target.is_object() || target.is_array() || target.is_altrep() {
+    let owned = current == target && slot_owns(state, target);
+    let Some(result) = assign_element(target, index, value, kind, |_| owned)? else {
         return Ok(false);
+    };
+    if result != current {
+        (*state.heap).store_slot(&mut *slot, result);
     }
-    let copy = values::shallow_duplicate(target)?;
-    let heap = &mut *state.heap;
-    heap.root(copy);
-    if !assign_element(copy, index, value, kind, |_| true)? {
-        return Ok(false);
-    }
-    heap.store_slot(&mut *slot, copy);
     Ok(true)
 }
 
@@ -8192,24 +8241,42 @@ unsafe fn assign_element_in_place(
     if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED) {
         return Ok(false);
     }
-    let done = assign_element(cell.cdr(), index, value, kind, |target| {
-        !values::maybe_shared(target) && eval::reuse_permitted(env, target)
-    })?;
-    if done {
-        cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
+    let current = cell.cdr();
+    // An argument's forced promise holds a value the caller may also hold, so the update goes
+    // to a copy bound in place of the promise, as GNU R does for any value read through one.
+    let through_promise = current.kind() == SexpType::Promise;
+    let target = if through_promise {
+        current.car()
+    } else {
+        current
+    };
+    if target == values::unbound() {
+        return Ok(false);
     }
-    Ok(done)
+    let Some(result) = assign_element(target, index, value, kind, |target| {
+        !through_promise && !values::maybe_shared(target) && eval::reuse_permitted(env, target)
+    })?
+    else {
+        return Ok(false);
+    };
+    if result != current {
+        eval::assign_local(variable, result, env, Some(cell))?;
+    }
+    cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
+    Ok(true)
 }
 
-/// The update [`assign_element_in_place`] does on the value `target` a variable holds, when
-/// `owned` says nothing else can see the change.
+/// The update [`assign_element_in_place`] does on the value `target` a variable holds: the
+/// variable's new value, which is `target` itself when `owned` says nothing else can see the
+/// change, and otherwise a copy (or, for an appended name, a longer vector) the caller binds.
+/// `None` declines to `complex_assign`.
 unsafe fn assign_element(
     target: Sexp,
     index: Sexp,
     value: Sexp,
     kind: ElementKind,
     owned: impl FnOnce(Sexp) -> bool,
-) -> R<bool> {
+) -> R<Option<Sexp>> {
     let heap = crate::heap();
     if target == value
         || target.kind() == SexpType::Promise
@@ -8220,7 +8287,7 @@ unsafe fn assign_element(
         || values::has_attributes(index)
         || length(index) != 1
     {
-        return Ok(false);
+        return Ok(None);
     }
     let fits = match target.kind() {
         SexpType::List => kind != ElementKind::Single && value != nil(),
@@ -8234,7 +8301,7 @@ unsafe fn assign_element(
         _ => false,
     };
     if !fits {
-        return Ok(false);
+        return Ok(None);
     }
     let position = match index.kind() {
         // `$<-` on a list replaces the first element whose name matches exactly; a name `x`
@@ -8245,9 +8312,9 @@ unsafe fn assign_element(
             let names = values::get_attr(target, symbols().names);
             if wanted == values::na_string()
                 || wanted.bytes().is_empty()
-                || names.kind() != SexpType::String
+                || !(names == nil() || names.kind() == SexpType::String && !names.is_altrep())
             {
-                return Ok(false);
+                return Ok(None);
             }
             let wanted_bytes = wanted.bytes();
             let found = (0..length(names)).find(|&at| {
@@ -8256,14 +8323,27 @@ unsafe fn assign_element(
             });
             match found {
                 Some(at) => at as f64 + 1.0,
-                None => return Ok(false),
+                // Appending a name: `x` grows in place where it has room when nothing else sees
+                // it, as the replacement call would extend `x` itself, and is otherwise copied
+                // with room to grow, so repeated appends are amortized.
+                None => {
+                    let attributes = target.attrib();
+                    if attributes != nil()
+                        && (attributes.tag() != symbols().names || attributes.cdr() != nil())
+                    {
+                        return Ok(None);
+                    }
+                    moves::modifying(target)?;
+                    let reuse = owned(target);
+                    return crate::subset::append_named(target, wanted, value, reuse).map(Some);
+                }
             }
         }
         SexpType::Integer if index.slice::<i32>()[0] != NA_INTEGER => {
             f64::from(index.slice::<i32>()[0])
         }
         SexpType::Real => index.slice::<f64>()[0],
-        _ => return Ok(false),
+        _ => return Ok(None),
     };
     let count = length(target);
     // Assigning one past the end appends, which a vector without attributes that a previous
@@ -8274,14 +8354,22 @@ unsafe fn assign_element(
         && target.attrib() == nil();
     // NaN fails both comparisons, and `x[[2.7]]` truncates to the second element.
     if !appends && !(position >= 1.0 && position < count as f64 + 1.0) {
-        return Ok(false);
+        return Ok(None);
     }
     let position = position as usize - 1;
     // The conditions under which `complex_assign` updates the variable's value in place.
+    // Otherwise the replacement function would change a shallow copy and bind it, which this
+    // does without building the call.
     moves::modifying(target)?;
-    if !owned(target) {
-        return Ok(false);
-    }
+    let target = if owned(target) {
+        target
+    } else if appends {
+        return Ok(None);
+    } else {
+        let copy = values::shallow_duplicate(target)?;
+        heap.root(copy);
+        copy
+    };
     if appends {
         heap.resize_vector(target, count as isize + 1)?;
     }
@@ -8293,7 +8381,7 @@ unsafe fn assign_element(
         SexpType::String => heap.set_element(target, position, value.element(0)),
         _ => heap.set_element(target, position, value),
     }
-    Ok(true)
+    Ok(Some(target))
 }
 
 /// The value of a compiled assignment's subscript register. A register holding a symbol holds a
@@ -8422,7 +8510,7 @@ unsafe fn replace_variable(
         Some(definition)
             if definition.direct.is_some() && replacement_arguments(setter_call, special) =>
         {
-            eval::call_direct(definition, args)
+            eval::call_direct(definition, setter_call, args)
         }
         _ => Ok(None),
     };
@@ -8538,7 +8626,17 @@ unsafe fn assign_matrix_element_in_place(
     let Some(cell) = heap.frame_cell(env, variable) else {
         return Ok(false);
     };
-    let target = cell.cdr();
+    let mut target = cell.cdr();
+    // An argument's forced promise holds a value the caller may also hold, which the
+    // replacement copies and binds in place of the promise, as GNU R does for any value it
+    // reads through a promise.
+    let through_promise = target.kind() == SexpType::Promise;
+    if through_promise {
+        target = target.car();
+        if target == values::unbound() {
+            return Ok(false);
+        }
+    }
     if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED)
         || target == value
         || target.is_object()
@@ -8754,7 +8852,9 @@ unsafe fn lookup_variable(
 }
 
 /// [`lookup_variable`] past a frame that does not bind `symbol`: the lookup from the frame's
-/// enclosure `start`.
+/// enclosure `start`. Inlined into both callers: as a call, a free variable's read in a heap
+/// frame cost about 14 more instructions in saved registers.
+#[inline(always)]
 unsafe fn lookup_outside(
     symbol: Sexp,
     start: Sexp,

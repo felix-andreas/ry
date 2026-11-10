@@ -442,12 +442,14 @@ impl Reader<'_> {
                 } else {
                     // The hook may read from the same connection.
                     self.settle()?;
-                    eval::apply(
-                        nil(),
-                        self.hook,
-                        &eval::value_args(&[names]),
-                        values::global_env(),
-                    )?
+                    outside_pretenuring(|| {
+                        eval::apply(
+                            nil(),
+                            self.hook,
+                            &eval::value_args(&[names]),
+                            values::global_env(),
+                        )
+                    })?
                 };
                 self.add_reference(value);
                 return Ok(value);
@@ -460,31 +462,36 @@ impl Reader<'_> {
             }
             PACKAGESXP => {
                 let names = self.string_vector()?;
-                let function =
-                    eval::find_fun(values::install("findPackageEnv")?, values::base_env())?;
-                let env = eval::apply(
-                    nil(),
-                    function,
-                    &eval::value_args(&[names]),
-                    values::global_env(),
-                )?;
+                let env = outside_pretenuring(|| {
+                    let function =
+                        eval::find_fun(values::install("findPackageEnv")?, values::base_env())?;
+                    eval::apply(
+                        nil(),
+                        function,
+                        &eval::value_args(&[names]),
+                        values::global_env(),
+                    )
+                })?;
                 self.add_reference(env);
                 return Ok(env);
             }
             NAMESPACESXP => {
                 let names = self.string_vector()?;
-                let function =
-                    eval::find_fun(values::install("..getNamespace")?, values::base_env())?;
-                // GNU R names the object being read when it knows it, else "<unknown>", which
-                // `..getNamespace` compares as a string when the namespace fails to load.
-                let location = values::scalar_string("<unknown>")?;
-                crate::heap().root(location);
-                let env = eval::apply(
-                    nil(),
-                    function,
-                    &eval::value_args(&[names, location]),
-                    values::global_env(),
-                )?;
+                let env = outside_pretenuring(|| {
+                    let function =
+                        eval::find_fun(values::install("..getNamespace")?, values::base_env())?;
+                    // GNU R names the object being read when it knows it, else "<unknown>",
+                    // which `..getNamespace` compares as a string when the namespace fails to
+                    // load.
+                    let location = values::scalar_string("<unknown>")?;
+                    crate::heap().root(location);
+                    eval::apply(
+                        nil(),
+                        function,
+                        &eval::value_args(&[names, location]),
+                        values::global_env(),
+                    )
+                })?;
                 self.add_reference(env);
                 return Ok(env);
             }
@@ -1223,18 +1230,49 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
     let (offset, size) = record_key(key);
     // A record is decoded (or copied) out of the mapped database before `unserialize` runs,
     // because its refhook can fetch from another database and so map it.
-    let value = match code_image::source(database, offset as u64, size)? {
-        Source::Image(record) => code_image::read_image_record(database, &record, hook)?,
+    let value = pretenured(|| match code_image::source(database, offset as u64, size)? {
+        Source::Image(record) => code_image::read_image_record(database, &record, hook),
         Source::Recording => {
             let stream = record_stream(database, offset, size, compressed)?;
-            code_image::read_recorded(database, offset as u64, size, stream, hook)?
+            code_image::read_recorded(database, offset as u64, size, stream, hook)
         }
-        Source::Database => unserialize(&record_stream(database, offset, size, compressed)?, hook)?,
-    };
+        Source::Database => unserialize(&record_stream(database, offset, size, compressed)?, hook),
+    })?;
     if value.kind() == SexpType::Promise {
         return eval::force_promise(value);
     }
     Ok(value)
+}
+
+/// Runs `read` with what it allocates pretenured ([`heap::Heap::begin_pretenuring`]). A lazy-load
+/// fetch builds a package's functions and data, which live as long as the session, and in a
+/// package load almost all of what minor collections traced was such objects, traced only to
+/// be promoted.
+unsafe fn pretenured<T>(read: impl FnOnce() -> R<T>) -> R<T> {
+    struct End;
+    impl Drop for End {
+        fn drop(&mut self) {
+            // SAFETY: the guard lives on the interpreter's thread, inside the pretenuring it ends.
+            unsafe { crate::heap().end_pretenuring() }
+        }
+    }
+    crate::heap().begin_pretenuring();
+    let _end = End;
+    read()
+}
+
+/// Runs R code from inside [`pretenured`] with young allocation: a hook's temporaries are
+/// garbage, which the old generation would keep until an intermediate collection, and the hook
+/// may need a collection to finish.
+unsafe fn outside_pretenuring<T>(run: impl FnOnce() -> R<T>) -> R<T> {
+    struct Resume(u32);
+    impl Drop for Resume {
+        fn drop(&mut self) {
+            crate::heap().resume_pretenuring(self.0);
+        }
+    }
+    let _resume = Resume(unsafe { crate::heap().suspend_pretenuring() });
+    run()
 }
 
 /// The `CHARSXP` of the database path `file`, a single string.

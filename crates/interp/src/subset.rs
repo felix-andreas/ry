@@ -23,7 +23,9 @@ use {
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    special("[", -1, do_subset).dispatch_or_eval(),
+    special("[", -1, do_subset)
+        .dispatch_or_eval()
+        .direct(direct_subset),
     special("[[", -1, do_subset2)
         .dispatch_or_eval()
         .direct(direct_subset2),
@@ -848,6 +850,42 @@ unsafe fn do_subset(call: &Call<'_>) -> R<Sexp> {
     subset(object, &indices, drop, call.call)
 }
 
+/// `x[i, ...]` with positional subscripts on a subject that is not an object: the same
+/// selection as [`do_subset`] without building the argument list, and a numeric scalar
+/// position in an attribute-free atomic vector read straight out.
+pub(crate) unsafe fn direct_subset(call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
+    let [object, indices @ ..] = args else {
+        return Ok(None);
+    };
+    let object = *object;
+    if object.is_object()
+        || is_native_value(object)
+        || indices.iter().any(|&index| is_native_value(index))
+    {
+        return Ok(None);
+    }
+    if let [index] = indices
+        && matches!(index.kind(), SexpType::Integer | SexpType::Real)
+        && object.kind().is_atomic()
+        && !object.is_altrep()
+        && !index.is_altrep()
+        && !values::has_attributes(object)
+        && !values::has_attributes(*index)
+        && length(*index) == 1
+    {
+        let position = match index.kind() {
+            SexpType::Integer => f64::from(index.slice::<i32>()[0]),
+            _ => index.slice::<f64>()[0],
+        };
+        // NA_integer_ and NaN fail the lower bound, and `x[2.7]` truncates to the second
+        // element.
+        if position >= 1.0 && position < length(object) as f64 + 1.0 {
+            return vector_element(object, position as usize - 1).map(Some);
+        }
+    }
+    subset(object, indices, true, call).map(Some)
+}
+
 pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> R<Sexp> {
     if object.is_array() {
         return crate::arrays::subset(object, indices, call);
@@ -1178,7 +1216,7 @@ fn gather_row<T: Copy>(target: &mut [T], matrix: &[T], row: usize, rows: usize) 
 
 /// `[<-` for `m[i, ] <- value` or `a[i, j, ] <- value` (see [`slab`]), called without
 /// building the general call's arguments; any other shape answers `None` and takes the builtin.
-pub(crate) unsafe fn direct_subassign(args: &[Sexp]) -> R<Option<Sexp>> {
+pub(crate) unsafe fn direct_subassign(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
     let [object, indices @ .., value] = args else {
         return Ok(None);
     };
@@ -1265,14 +1303,35 @@ fn scatter_slab<T: Copy>(array: &mut [T], value: &[T], dims: &[usize], fixed: &[
         }
         stride *= extent;
     }
-    let mut counters: SmallVec<[usize; 4]> = smallvec![0; free.len()];
-    for &element in value.iter().cycle() {
-        if let Some(slot) = array.get_mut(offset) {
-            *slot = element;
+    if value.is_empty() {
+        return;
+    }
+    // A free first dimension makes the slab a sequence of contiguous runs (a whole column for
+    // `m[, j] <- v`), each copied as a block from the recycled value.
+    let (run, outer) = match free.first() {
+        Some(&(1, extent)) => (extent, &free[1..]),
+        _ => (1, &free[..]),
+    };
+    let mut counters: SmallVec<[usize; 4]> = smallvec![0; outer.len()];
+    let mut source = 0;
+    loop {
+        let mut filled = 0;
+        while filled < run {
+            let chunk = (run - filled).min(value.len() - source);
+            if let Some(target) = array.get_mut(offset + filled..offset + filled + chunk)
+                && let Some(from) = value.get(source..source + chunk)
+            {
+                target.copy_from_slice(from);
+            }
+            filled += chunk;
+            source += chunk;
+            if source == value.len() {
+                source = 0;
+            }
         }
         let mut dimension = 0;
         loop {
-            let Some(&(stride, extent)) = free.get(dimension) else {
+            let Some(&(stride, extent)) = outer.get(dimension) else {
                 return;
             };
             counters[dimension] += 1;
@@ -2630,6 +2689,54 @@ unsafe fn grow(vector: Sexp, new_length: usize, final_step: bool) -> R<Sexp> {
         let names = values::materialize(names)?;
         crate::heap().copy_elements(grown, 0, names, 0, count);
         values::set_attr(result, symbols().names, grown)?;
+    }
+    Ok(result)
+}
+
+/// `vector` with `value` appended as a new last element named `name`, a CHARSXP: `x$name <- value`
+/// or `x[["name"]] <- value` for a name `x` lacks. `vector` is an unshared list or atomic vector
+/// whose only attribute is `names`, and `value` a list element or a scalar of `vector`'s type. An
+/// unnamed `vector` gets blank names before the new one. The vector grows in place when it has
+/// room, as [`grow`] does, and otherwise the result is a copy with room to grow.
+pub(crate) unsafe fn append_named(
+    vector: Sexp,
+    name: Sexp,
+    value: Sexp,
+    reuse: bool,
+) -> R<Sexp> {
+    let heap = crate::heap();
+    let count = length(vector);
+    let names = values::names(vector);
+    let result = if reuse
+        && grows_in_place(vector, count + 1)
+        && (names == nil() || grows_in_place(names, count + 1))
+    {
+        heap.resize_vector(vector, count as isize + 1)?;
+        vector
+    } else {
+        let result = alloc_with_room(vector.kind(), count + 1)?;
+        copy_prefix(vector, result, count)?;
+        result
+    };
+    let names = if names == nil() || result != vector {
+        let grown = alloc_with_room(SexpType::String, count + 1)?;
+        if names != nil() {
+            heap.copy_elements(grown, 0, names, 0, count);
+        }
+        values::set_attr(result, symbols().names, grown)?;
+        grown
+    } else {
+        heap.resize_vector(names, count as isize + 1)?;
+        names
+    };
+    heap.set_element(names, count, name);
+    match result.kind() {
+        SexpType::Real => values::reals_mut(result)[count] = value.slice::<f64>()[0],
+        SexpType::Integer | SexpType::Logical => {
+            values::ints_mut(result)[count] = value.slice::<i32>()[0]
+        }
+        SexpType::String => heap.set_element(result, count, value.element(0)),
+        _ => heap.set_element(result, count, value),
     }
     Ok(result)
 }
