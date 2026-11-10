@@ -1,0 +1,15 @@
+[stdout]
+| mismatches: 0 
+| 22 character character run_stack(kinds, trim)/0/TRUE/NA/global;step(list(marks = list(globalenv()), trim = trim))/1/TRUE/NA/NA;wrapper(state, inner)/2/TRUE/NA/global;state %then% next_step/3/TRUE/NA/NA;step(state)/4/TRUE/NA/NA;wrapper(state, inner)/5/TRUE/NA/global;print(structure(list(run = function() next_step(state)), class = "marker"))/6/TRUE/base/::;print.marker(structure(list(run = function() next_step(state)),      class = "marker"))/6/TRUE/NA/global;x$run()/8/TRUE/NA/NA;next_step(state)/9/TRUE/NA/NA;wrapper(state, inner)/10/TRUE/NA/global;eval(quote(next_step(state)))/11/TRUE/base/::;eval(quote(next_step(state)))/12/TRUE/base/::;next_step(state)/11/TRUE/NA/NA;wrapper(state, inner)/14/TRUE/NA/global;local(next_step(state))/15/TRUE/base/::;eval.parent(substitute(eval(quote(expr), envir)))/16/TRUE/base/::;eval(expr, p)/17/TRUE/base/::;eval(expr, p)/18/TRUE/base/::;eval(quote(next_step(state)), new.env())/15/TRUE/base/::;eval(quote(next_step(state)), new.env())/20/TRUE/base/::;next_step(state)/21/TRUE/NA/global
+| 13 character character run_stack(kinds, trim)/0/TRUE/NA/global;step(list(marks = list(globalenv()), trim = trim))/1/TRUE/NA/NA;wrapper(state, inner)/2/TRUE/NA/global;eval(quote(next_step(state)))/3/TRUE/base/::;eval(quote(next_step(state)))/4/TRUE/base/::;next_step(state)/3/TRUE/NA/NA;wrapper(state, inner)/6/TRUE/NA/global;print(structure(list(run = function() next_step(state)), class = "marker"))/7/TRUE/base/::;print.marker(structure(list(run = function() next_step(state)),      class = "marker"))/7/TRUE/NA/global;x$run()/9/TRUE/NA/NA;next_step(state)/10/TRUE/NA/NA;wrapper(state, inner)/11/TRUE/NA/global;next_step(state)/12/TRUE/NA/global
+| 0 character character 
+| 6 character character run_stack(kinds, trim)/0/TRUE/NA/global;step(list(marks = list(globalenv()), trim = trim))/1/TRUE/NA/NA;wrapper(state, inner)/2/TRUE/NA/global;withCallingHandlers(next_step(state), warning = function(w) NULL)/3/TRUE/base/::;next_step(state)/3/TRUE/NA/NA;wrapper(state, inner)/5/TRUE/NA/global
+| 2 character character run_stack(kinds, trim)/0/TRUE/NA/global;step(list(marks = list(globalenv()), trim = trim))/1/TRUE/NA/global
+| traces: 87 distinct of 150 
+| checksum: 5630665 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

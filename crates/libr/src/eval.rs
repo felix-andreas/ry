@@ -189,7 +189,7 @@ impl Evaluator for Interpreter {
         // Handing the environment to native code reifies a slot frame.
         match interp::interp().frames.len() {
             0 => Ok(runtime().heap.known().global_env),
-            count => Ok(interp::eval::frame_env(count - 1)?),
+            count => Ok(interp::eval::frame_env(count - 1, interp::eval::Reify::Site("native code"))?),
         }
     }
 

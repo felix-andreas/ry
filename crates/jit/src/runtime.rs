@@ -516,7 +516,7 @@ pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -
                             Ok((value, true))
                         }
                         Some(value) if value == values::missing_arg() => {
-                            let env = machine.reify()?;
+                            let env = machine.reify(eval::Reify::Site("missing argument lookup"))?;
                             eval::eval_symbol(symbol, env).map(|value| (value, true))
                         }
                         _ => eval::eval_symbol(symbol, machine.enclosure())

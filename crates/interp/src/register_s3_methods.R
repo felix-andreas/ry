@@ -13,9 +13,12 @@
 # The runtime installs this in place of base R's own `registerS3methods()` only when that one is
 # the GNU R 4.6.2 function this copies (`session::install_register_s3_methods`). The two loops
 # that look at every method run natively (`ryLocalS4Generics`, `ryRegisterS3Methods` in
-# `envir.rs`); every other step is GNU R's.
+# `envir.rs`); every other step is GNU R's. It also installs the native fast paths of the package
+# (`ryPackageFastPaths` in `package_fast_paths.rs`), because this runs once the namespace's code
+# is loaded.
 function(info, package, env)
 {
+    .Internal(ryPackageFastPaths(package, env))
     n <- NROW(info)
     if (n == 0L)
         return()

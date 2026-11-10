@@ -75,6 +75,7 @@ pub mod methods_core;
 pub mod moves;
 pub mod native;
 pub mod numbers;
+mod package_fast_paths;
 pub mod parallel;
 pub mod parse_data;
 mod pcre;
@@ -163,6 +164,9 @@ pub struct Frame {
     /// A builtin wrapper run by [`eval::run_wrapper`]: its slots hold the values of arguments
     /// that the generic path would have bound as promises, so a reify wraps them.
     pub inlined: bool,
+    /// The [`heap::activity::label`] of what gave the slot frame its environment, while a
+    /// profile summary is collected; [`NOT_REIFIED`] otherwise.
+    pub reified_by: u32,
     /// Where the call's arguments (values or promises, with the tags the call gave them) start
     /// in [`Interp::frame_args`]; they run up to the next frame's start. `sys.function`'s
     /// pairlist of them is built only when dispatch asks for it, so a call allocates none.
@@ -183,6 +187,9 @@ pub struct Frame {
 
 /// [`Frame::slots`] of a frame that keeps its variables in an environment.
 pub const NO_SLOTS: u32 = u32::MAX;
+
+/// [`Frame::reified_by`] of a frame no reason was recorded for.
+pub const NOT_REIFIED: u32 = u32::MAX;
 
 /// The arguments of the frame at `index` (zero-based), as the call passed them.
 pub fn frame_args(state: &Interp, index: usize) -> &[Arg] {
@@ -420,6 +427,9 @@ pub struct Interp {
     /// The evaluator polls left before the next one that delivers a pending user interrupt
     /// (see [`crate::unwind::poll_interrupt`]).
     pub interrupt_countdown: u32,
+    /// Closure calls the session has made, wrapping: the JIT's measure of how much work ran
+    /// between two calls of a body, which does not change when a call allocates less.
+    pub calls_ever: u32,
     /// The processes `parallel::mcfork` forked, and the pipe to the master in a forked child.
     #[cfg(unix)]
     pub forks: fork::Forks,
@@ -550,6 +560,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         prelude: true,
         parked_unwind: None,
         interrupt_countdown: crate::unwind::INTERRUPT_CHECK_INTERVAL,
+        calls_ever: 0,
         #[cfg(unix)]
         forks: fork::Forks::default(),
         builtins_env: None,

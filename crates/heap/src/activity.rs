@@ -121,11 +121,12 @@ pub enum Counter {
     FramesReified,
     PackageCalls,
     PackageCallsDirect,
+    PackageCallsObserved,
     WrappersInlined,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 21] = [
+    pub const ALL: [Counter; 22] = [
         Counter::ClosureCalls,
         Counter::NativeEntries,
         Counter::BuiltinCalls,
@@ -146,6 +147,7 @@ impl Counter {
         Counter::FramesReified,
         Counter::PackageCalls,
         Counter::PackageCallsDirect,
+        Counter::PackageCallsObserved,
         Counter::WrappersInlined,
     ];
 
@@ -173,6 +175,9 @@ impl Counter {
             Counter::PackageCallsDirect => {
                 "package calls that ran in slots, with no argument promise and no environment"
             }
+            Counter::PackageCallsObserved => {
+                "package calls whose frame was reified because code observed its environment"
+            }
             Counter::WrappersInlined => "calls of one-builtin wrappers run without their body",
         }
     }
@@ -181,12 +186,16 @@ impl Counter {
 /// The most builtins [`count_builtin`] keeps a count for; ry defines fewer than this.
 pub const BUILTIN_SLOTS: usize = 4096;
 
+/// The most [`label`]s [`count_package_fallback`] keeps a count for.
+pub const LABEL_SLOTS: usize = 1024;
+
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static CURRENT: AtomicU32 = AtomicU32::new(0);
 static COUNTERS: [AtomicU64; Counter::ALL.len()] =
     [const { AtomicU64::new(0) }; Counter::ALL.len()];
 static BUILTINS: [AtomicU64; BUILTIN_SLOTS] = [const { AtomicU64::new(0) }; BUILTIN_SLOTS];
 static LABELS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static PACKAGE_FALLBACKS: [AtomicU64; LABEL_SLOTS] = [const { AtomicU64::new(0) }; LABEL_SLOTS];
 static FRAME_OWNERS: [AtomicU32; FRAME_SLOTS] = [const { AtomicU32::new(0) }; FRAME_SLOTS];
 static FRAME_NAMES: [AtomicUsize; FRAME_SLOTS] = [const { AtomicUsize::new(0) }; FRAME_SLOTS];
 static FRAME_DEPTH: AtomicU32 = AtomicU32::new(0);
@@ -265,6 +274,27 @@ pub fn count_builtin(index: usize) {
 #[inline(always)]
 fn bump(counter: &AtomicU64) {
     counter.store(counter.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+}
+
+/// Counts a package call that took the generic call protocol, under the [`label`] of the reason.
+pub fn count_package_fallback(reason: u32) {
+    if let Some(slot) = PACKAGE_FALLBACKS.get(reason as usize) {
+        bump(slot);
+    }
+}
+
+/// The package calls [`count_package_fallback`] counted under each reason, largest first.
+pub fn package_fallbacks() -> Vec<(String, u64)> {
+    let mut fallbacks: Vec<(String, u64)> = PACKAGE_FALLBACKS
+        .iter()
+        .enumerate()
+        .filter_map(|(id, slot)| {
+            let count = slot.load(Ordering::Relaxed);
+            (count > 0).then(|| (label_name(id as u32).unwrap_or_else(|| "?".to_owned()), count))
+        })
+        .collect();
+    fallbacks.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    fallbacks
 }
 
 pub fn counter(counter: Counter) -> u64 {

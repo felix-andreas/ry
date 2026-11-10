@@ -47,7 +47,7 @@ use {
         Interp,
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
         conditions, dispatch, effects,
-        eval::{self, SwitchSelector, as_condition},
+        eval::{self, Reify, SwitchSelector, as_condition},
         interp, moves,
         unwind::{Jump, R, Unwind, error, error_in},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
@@ -195,12 +195,12 @@ impl Machine<'_> {
 
     /// The activation's environment, made from its slots first if it has none.
     #[inline]
-    pub unsafe fn reify(&self) -> R<Sexp> {
+    pub unsafe fn reify(&self, cause: Reify) -> R<Sexp> {
         let env = self.env();
         if env != nil() {
             return Ok(env);
         }
-        eval::slot_frame_env(self.header)
+        eval::slot_frame_env(self.header, cause)
     }
 
     /// The environment free names are looked up in: the enclosure of the activation's frame.
@@ -256,7 +256,7 @@ impl Machine<'_> {
             }
             return Ok(());
         }
-        let env = self.reify()?;
+        let env = self.reify(Reify::Site("assignment"))?;
         eval::assign_symbol(symbol, value, env, false)
     }
 }
@@ -493,8 +493,8 @@ pub mod profile {
     /// of them, which cost about 30 instructions per call of every body. Whatever changes a
     /// count or a state those decisions read outside an entry sets this to `i32::MIN`.
     pub const NEXT: usize = 4;
-    /// The session's allocation clock ([`heap::Heap::allocated_ever`], in KiB, wrapping) when the
-    /// recording window opened, which the optimizing tier reads to estimate how often the body
+    /// The session's call clock ([`crate::interp::Interp::calls_ever`]) when the recording window
+    /// opened, which the optimizing tier reads to estimate how often the body
     /// runs.
     pub const WINDOW: usize = 5;
     pub const LENGTH: usize = 6;
@@ -4199,7 +4199,7 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
                 };
                 (forced, true)
             } else if value == missing_arg() {
-                let env = machine.reify()?;
+                let env = machine.reify(Reify::Site("missing argument lookup"))?;
                 (
                     lookup_variable(symbol, env, LookupCache::of(code), cache, 0..0)?,
                     true,
@@ -4258,12 +4258,12 @@ impl Activation<'_, '_> {
     /// The activation's environment, made from its slots first if it has none: what every
     /// instruction that hands the frame to other code reads.
     #[inline(always)]
-    unsafe fn env(&self) -> R<Sexp> {
+    unsafe fn env(&self, cause: Reify) -> R<Sexp> {
         let env = *self.header;
         if env != nil() {
             return Ok(env);
         }
-        self.machine.reify()
+        self.machine.reify(cause)
     }
 
     /// Whether the activation runs in a slot frame that has no environment yet.
@@ -4773,7 +4773,7 @@ unsafe fn op_set_var(state: &mut Activation<'_, '_>, instruction: Instruction) -
         (*state.interp).visible = false;
         return Ok(Flow::Next);
     }
-    let env = state.env()?;
+    let env = state.env(Reify::Site("assignment"))?;
     let hint = &mut *state.cache.hints.add(instruction.operand(2));
     let cell = (*state.heap).frame_cell_hinted(env, symbol, hint);
     eval::assign_local(symbol, value, env, cell)?;
@@ -4817,7 +4817,7 @@ unsafe fn slot_variable(
             return Ok(forced);
         }
         if value == missing_arg() {
-            let env = state.env()?;
+            let env = state.env(Reify::Site("variable lookup"))?;
             return lookup_variable(symbol, env, state.cache, cache, held);
         }
         if value != unbound() {
@@ -4845,7 +4845,7 @@ unsafe fn slot_function(
     if let Some(slot) = state.slot(cache) {
         let mut value = *slot;
         if value == missing_arg() {
-            let env = state.env()?;
+            let env = state.env(Reify::Site("function lookup"))?;
             return lookup_function(symbol, env, state.cache, cache, call);
         }
         if value.kind() == SexpType::Promise {
@@ -4979,7 +4979,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                     slot_eager_argument(state, symbol)
                 })?
             } else {
-                let env = state.env()?;
+                let env = state.env(Reify::Site("generic call"))?;
                 crate::base_fast_paths::native_entry_by_value(function, arguments, |symbol| {
                     effects::eager_argument(symbol, env)
                 })?
@@ -5017,7 +5017,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             nil()
         } else {
             args.clear();
-            let env = state.env()?;
+            let env = state.env(Reify::Site("generic call"))?;
             if eager {
                 eval::eager_args_into(arguments, env, &mut args)?;
             } else if plan.is_some() {
@@ -5063,7 +5063,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         {
             crate::heap().known().base_env
         } else {
-            state.env()?
+            state.env(Reify::Site("generic call"))?
         };
         eval::apply_call(call, function, call.cdr(), env)?
     };
@@ -5241,7 +5241,7 @@ unsafe fn call_wrapper(
     let sys_parent = if state.in_slots() {
         nil()
     } else {
-        state.env()?
+        state.env(Reify::Site("wrapper call"))?
     };
     eval::run_wrapper(
         call,
@@ -5435,7 +5435,7 @@ unsafe fn wrapper_argument(state: &Activation<'_, '_>, expression: Sexp) -> R<Op
             let found = if state.in_slots() {
                 slot_eager_argument(state, expression)
             } else {
-                effects::eager_argument(expression, state.env()?)
+                effects::eager_argument(expression, state.env(Reify::Site("wrapper argument"))?)
             };
             match found {
                 Some(value) => value,
@@ -5562,7 +5562,7 @@ unsafe fn slot_builtin_call(
     // Dispatch reads the caller's environment, which only an object argument can lead to.
     let env = if definition.generic != Generic::None && args.iter().any(|arg| arg.value.is_object())
     {
-        state.env()?
+        state.env(Reify::Site("builtin call"))?
     } else {
         nil()
     };
@@ -6012,7 +6012,7 @@ unsafe fn op_call_rebinding(state: &mut Activation<'_, '_>, instruction: Instruc
             return op_call_generic(state, instruction);
         }
     }
-    let value = eval::rebind_call(call, function, target, state.env()?)?;
+    let value = eval::rebind_call(call, function, target, state.env(Reify::Site("rebinding call"))?)?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
@@ -6023,7 +6023,7 @@ unsafe fn op_call_tail_update(state: &mut Activation<'_, '_>, instruction: Instr
     let function = instruction.input(1);
     let call = state.constant(instruction, 2);
     let target = state.constant(instruction, 3);
-    let value = eval::tail_update(call, function, target, state.env()?)?;
+    let value = eval::tail_update(call, function, target, state.env(Reify::Site("tail update"))?)?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
@@ -6037,7 +6037,7 @@ unsafe fn op_field(state: &mut Activation<'_, '_>, instruction: Instruction) -> 
     let shape = state.constant(instruction, 4);
     let value = match crate::records::cached_field(object, name, shape)? {
         Some(value) => value,
-        None => crate::subset::dollar_value(object, name.car(), call, state.env()?)?,
+        None => crate::subset::dollar_value(object, name.car(), call, state.env(Reify::Site("`$` field"))?)?,
     };
     record_feedback(state.constants, instruction.at, value);
     (*state.interp).visible = true;
@@ -6133,7 +6133,7 @@ unsafe fn op_bound_eval(state: &mut Activation<'_, '_>, instruction: Instruction
         instruction.registers.add(instruction.operand(3)),
         instruction.operand(4),
     );
-    let value = crate::records::eval_bound_registers(expression, names, bound, state.env()?)?;
+    let value = crate::records::eval_bound_registers(expression, names, bound, state.env(Reify::Site("bound evaluation"))?)?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
@@ -6182,7 +6182,7 @@ unsafe fn op_dispatch_subject(state: &mut Activation<'_, '_>, instruction: Instr
         function,
         call.cdr(),
         instruction.input(3),
-        state.env()?,
+        state.env(Reify::Site("dispatch subject"))?,
         &mut args,
     )? {
         Some(value) => value,
@@ -6196,7 +6196,7 @@ unsafe fn op_dispatch_subject(state: &mut Activation<'_, '_>, instruction: Instr
 #[inline(always)]
 unsafe fn op_ast(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let expression = state.constant(instruction, 1);
-    let value = eval::eval(expression, state.env()?)?;
+    let value = eval::eval(expression, state.env(Reify::Site("uncompiled expression"))?)?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
@@ -6231,7 +6231,7 @@ unsafe fn slot_missing(state: &Activation<'_, '_>, symbol: Sexp) -> R<bool> {
             return eval::value_is_missing(*state.header.add(1 + position));
         }
     }
-    eval::is_missing(symbol, state.env()?)
+    eval::is_missing(symbol, state.env(Reify::Site("missing()"))?)
 }
 
 #[inline(always)]
@@ -6254,7 +6254,7 @@ unsafe fn op_guard(state: &mut Activation<'_, '_>, instruction: Instruction) -> 
     let found = if instruction.operand(3) == 0 {
         lookup_enclosing_function(symbol, enclosure, state.cache, slot)
     } else {
-        lookup_function(symbol, state.env()?, state.cache, slot, unbound())
+        lookup_function(symbol, state.env(Reify::Site("function guard"))?, state.cache, slot, unbound())
     };
     if !matches!(found, Ok(function) if function == expected) {
         return Ok(Flow::Goto(instruction.operand(4)));
@@ -6353,7 +6353,7 @@ unsafe fn op_for_step(state: &mut Activation<'_, '_>, instruction: Instruction) 
     };
     let env = match slot {
         Some(_) => nil(),
-        None => state.env()?,
+        None => state.env(Reify::Site("for loop"))?,
     };
     let loop_state = state
         .machine
@@ -6484,7 +6484,7 @@ unsafe fn op_closure(state: &mut Activation<'_, '_>, instruction: Instruction) -
     let formals = state.constant(instruction, 1);
     let body = state.constant(instruction, 2);
     let srcref = state.constant(instruction, 3);
-    let closure = eval::make_closure(formals, body, srcref, state.env()?)?;
+    let closure = eval::make_closure(formals, body, srcref, state.env(Reify::Site("function definition"))?)?;
     // Every closure this site creates shares one compiled body, as GNU R compiles inner
     // functions with their outer one. Compiling per closure object would leave a function
     // created anew on each call (a `vapply` callback, say) on the AST evaluator, or recompile it
@@ -6522,7 +6522,7 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
         (*state.interp).visible = false;
         return Ok(Flow::Next);
     }
-    let env = state.env()?;
+    let env = state.env(Reify::Site("subassignment"))?;
     let done = match subscript_value(env, instruction.input(2))? {
         Some(index) => {
             assign_element_in_place(env, variable, index, value, kind)?
@@ -6544,7 +6544,7 @@ unsafe fn op_sub_assign_matrix(
     state: &mut Activation<'_, '_>,
     instruction: Instruction,
 ) -> R<Flow> {
-    let env = state.env()?;
+    let env = state.env(Reify::Site("matrix subassignment"))?;
     let call = state.constant(instruction, 5);
     let value = instruction.input(4);
     let variable = state.constant(instruction, 1);
@@ -6567,7 +6567,7 @@ unsafe fn op_sub_assign_matrix(
 
 #[inline(always)]
 unsafe fn op_replace(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
-    let env = state.env()?;
+    let env = state.env(Reify::Site("replacement call"))?;
     let whole = state.constant(instruction, 7);
     let (first, count) = (instruction.operand(5), instruction.operand(6));
     let value = instruction.register(first + count - 1);
@@ -7029,7 +7029,7 @@ pub(crate) unsafe fn call_builtin(
         // Dispatch hands the frame to a method, so an unreified slot frame (a `NULL` `env`)
         // gets its environment, but only when an argument is an object to dispatch on.
         let env = if env == nil() && args.iter().any(|arg| arg.value.is_object()) {
-            eval::slot_owner_env()?
+            eval::slot_owner_env(Reify::Site("builtin dispatch"))?
         } else {
             env
         };

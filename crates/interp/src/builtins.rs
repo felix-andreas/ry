@@ -86,7 +86,7 @@ impl Call<'_> {
         if self.rho != nil() || self.frame == crate::NO_SLOTS {
             return Ok(self.rho);
         }
-        crate::eval::frame_env(self.frame as usize)
+        crate::eval::frame_env(self.frame as usize, crate::eval::Reify::Builtin(self.op))
     }
 
     /// What the calling slot frame's `...` slot holds, when the call was made from a slot frame
@@ -371,6 +371,7 @@ pub(crate) unsafe fn install_all() {
         crate::dispatch::BUILTINS,
         crate::methods_core::BUILTINS,
         crate::base_fast_paths::BUILTINS,
+        crate::package_fast_paths::BUILTINS,
         crate::arith::BUILTINS,
         crate::linalg::BUILTINS,
         crate::coerce::BUILTINS,
