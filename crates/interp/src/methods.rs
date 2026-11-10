@@ -793,6 +793,7 @@ unsafe fn try_eval(expression: Sexp, env: Sexp) -> R<Result<Sexp, String>> {
         class: values::mkchar("error")?,
         handler: nil(),
         calling: false,
+        calling_below: crate::conditions::calling_established(&saved),
         parent_env: env,
         target,
         next: saved.clone(),
