@@ -989,6 +989,19 @@ pub mod feedback {
     pub const INTEGER_ARRAY: u16 = 1 << 8;
     pub const DOUBLE_ARRAY: u16 = 1 << 9;
     pub const LOGICAL_ARRAY: u16 = 1 << 10;
+    /// A `JumpUnless` jumped: its condition was `FALSE`.
+    pub const BRANCH_TAKEN: u16 = 1 << 11;
+    /// A `JumpUnless` fell through: its condition was `TRUE`.
+    pub const BRANCH_NOT_TAKEN: u16 = 1 << 12;
+}
+
+/// The feedback tier 0 recorded at `pc` of the byte code `code`: the [`feedback`] kinds of the
+/// values a value-producing instruction made, or the branch bits of a `JumpUnless`. Tier 0 only
+/// adds bits, so what it reports never shrinks until the optimizing tier clears the record.
+pub unsafe fn feedback_bits(code: Sexp, pc: usize) -> u16 {
+    values::ints(code.cdr().element(FEEDBACK))
+        .get(pc)
+        .map_or(0, |&bits| bits as u16)
 }
 
 /// The [`feedback`] bit for `value`.
@@ -1027,8 +1040,9 @@ struct Compiler {
     constants: Vec<Sexp>,
     caches: u32,
     loops: Vec<Loop>,
-    /// The loops the code being compiled is inside, innermost last.
-    open_loops: Vec<usize>,
+    /// The loops the code being compiled is inside, innermost last, each with the length
+    /// [`Compiler::cold`] had when it opened.
+    open_loops: Vec<(usize, usize)>,
     registers: u32,
     next_register: u32,
     /// The closure's enclosure, against which the compiler checks that a construct's symbol
@@ -1052,7 +1066,8 @@ struct Compiler {
     /// While a `match` guard compiles: its arm's bound names, which it reads from registers
     /// instead of the frame.
     bound: Option<Bound>,
-    /// Guard fallbacks laid out after the body's `Return` (see [`Compiler::cold_fallback`]).
+    /// Guard fallbacks waiting to be laid out after the body's `Return` or the innermost open
+    /// loop's back edge (see [`Compiler::cold_fallback`]).
     cold: Vec<Cold>,
     /// The stored half of the effect-free fact, `NULL` for an argument's code.
     summary: Sexp,
@@ -2234,19 +2249,10 @@ impl Compiler {
     }
 
     /// Compiles what runs when one of `guards` fails: the general evaluation of `call` into
-    /// `dst`, after which execution continues here. Outside loops the fallback goes after the
-    /// body's `Return`, so the inline path runs straight on instead of jumping over it; inside a
-    /// loop it stays in place, where the loop's range covers it for `break` and `next`.
+    /// `dst`, after which execution continues here. The fallback goes out of line, so the inline
+    /// path runs straight on instead of jumping over it: after the body's `Return`, or inside a
+    /// loop after the loop's back edge (see [`Compiler::back_edge`]).
     unsafe fn cold_fallback(&mut self, guards: &[usize], call: Sexp, dst: u32) -> R<()> {
-        if !self.open_loops.is_empty() {
-            let done = self.emit_patchable(Op::Jump, &[0]);
-            for &guard in guards {
-                self.patch(guard);
-            }
-            self.fallback(call, dst)?;
-            self.patch(done);
-            return Ok(());
-        }
         let resume = self.here();
         self.fallback(call, dst)?;
         let words = self.code.drain(resume as usize..).collect();
@@ -3108,7 +3114,15 @@ impl Compiler {
                 let setter_call = self.constant(setter_call);
                 self.emit(
                     Op::SubAssign,
-                    &[dst, variable, index, value, call_constant, kind as u32, setter_call],
+                    &[
+                        dst,
+                        variable,
+                        index,
+                        value,
+                        call_constant,
+                        kind as u32,
+                        setter_call,
+                    ],
                 )
             }
             [] => self.evaluate(dst, call_constant),
@@ -3472,7 +3486,7 @@ impl Compiler {
                 self.expression(args[0].1, dst)?;
                 let exit = self.emit_patchable(Op::JumpUnless, &[dst, call_constant, 0]);
                 self.expression(args[1].1, dst)?;
-                self.emit(Op::Jump, &[top]);
+                self.back_edge(top);
                 self.patch(exit);
                 self.close_loop(loop_index);
                 self.loop_value(dst);
@@ -3482,12 +3496,12 @@ impl Compiler {
                 let top = self.here();
                 self.loops[loop_index].step = top;
                 self.expression(args[0].1, dst)?;
-                self.emit(Op::Jump, &[top]);
+                self.back_edge(top);
                 self.close_loop(loop_index);
                 self.loop_value(dst);
             }
             "break" | "next" => {
-                let loop_index = *self
+                let (loop_index, _) = *self
                     .open_loops
                     .last()
                     .ok_or_else(|| error("no loop for break/next"))?;
@@ -3628,7 +3642,7 @@ impl Compiler {
         let body = self.allocate();
         self.expression(args[2].1, body)?;
         self.release_to(mark);
-        self.emit(Op::Jump, &[step]);
+        self.back_edge(step);
         self.patch(exit);
         self.close_loop(loop_index);
         self.emit(Op::ForEnd, &[sequence]);
@@ -3645,8 +3659,26 @@ impl Compiler {
             exit: 0,
             step: 0,
         });
-        self.open_loops.push(self.loops.len() - 1);
+        self.open_loops
+            .push((self.loops.len() - 1, self.cold.len()));
         self.loops.len() - 1
+    }
+
+    /// The backward jump that closes a loop's body, followed by the guard fallbacks compiled
+    /// inside the body. They sit behind the unconditional jump, so the body runs straight
+    /// through, and inside the loop's range, so a `break` or `next` the fallback's evaluator
+    /// raises still finds this loop.
+    fn back_edge(&mut self, top: u32) {
+        self.emit(Op::Jump, &[top]);
+        let mark = self.open_loops.last().map_or(0, |&(_, mark)| mark);
+        let cold: SmallVec<[Cold; 4]> = self.cold.drain(mark..).collect();
+        for cold in cold {
+            for guard in cold.guards {
+                self.patch(guard);
+            }
+            self.code.extend_from_slice(&cold.words);
+            self.emit(Op::Resume, &[cold.resume]);
+        }
     }
 
     /// Ends the loop at the current position: its exit is here, and every `break` and `next`
@@ -4139,24 +4171,67 @@ pub const fn op_word(op: Op) -> u32 {
     op as u32 | (operand_count(op) as u32) << OP_BITS
 }
 
-/// The opcode of the code word `word`, unless it is not a valid one.
+/// The opcode of the code word `word`, unless it is not a valid one. A specialized form (see
+/// [`QUICK_ARITHMETIC`]) reads as the instruction it specializes, so every reader other than
+/// tier 0's dispatch sees the instructions the compiler emitted.
 pub fn op_of(word: u32) -> Option<Op> {
-    OPS.get((word & OP_MASK) as usize)
-        .copied()
-        .filter(|&op| op_word(op) == word)
+    let index = (word & OP_MASK) as usize;
+    let op = match OPS.get(index) {
+        Some(&op) => op,
+        None if index < HANDLER_COUNT => Op::Arithmetic,
+        None => return None,
+    };
+    (op_word(op) & !OP_MASK == word & !(RESPECIALIZE_MASK | OP_MASK)).then_some(op)
 }
 
 const OP_BITS: u32 = 8;
 const OP_MASK: u32 = (1 << OP_BITS) - 1;
+/// The top byte of a generic instruction's word counts how often tier 0 specialized it and
+/// had to undo the specialization; at [`RESPECIALIZE_LIMIT`] the site stays generic.
+const RESPECIALIZE_SHIFT: u32 = 24;
+const RESPECIALIZE_MASK: u32 = 0xFF << RESPECIALIZE_SHIFT;
+const RESPECIALIZE_LIMIT: u32 = 4;
+
+/// Tier 0's specialized forms of [`Op::Arithmetic`], by opcode minus `OPS.len()`: the operator
+/// and whether the form takes doubles (one operand a double, the other a double or an integer)
+/// rather than two integers. Tier 0 writes a form's opcode over a site's once the site computed
+/// a result on two plain scalars of those kinds (quickening, as in CPython's PEP 659). A form
+/// has the operands of the generic instruction, which [`op_of`] reports in its place, so the
+/// optimizing tiers, the verifier and code images never see it. Its handler checks the operand
+/// kinds with a masked header load each, and when they differ writes the generic opcode back.
+const QUICK_ARITHMETIC: [(Arith, bool); 19] = [
+    (Arith::Add, false),
+    (Arith::Subtract, false),
+    (Arith::Multiply, false),
+    (Arith::Equal, false),
+    (Arith::NotEqual, false),
+    (Arith::Less, false),
+    (Arith::Greater, false),
+    (Arith::LessEqual, false),
+    (Arith::GreaterEqual, false),
+    (Arith::Add, true),
+    (Arith::Subtract, true),
+    (Arith::Multiply, true),
+    (Arith::Divide, true),
+    (Arith::Equal, true),
+    (Arith::NotEqual, true),
+    (Arith::Less, true),
+    (Arith::Greater, true),
+    (Arith::LessEqual, true),
+    (Arith::GreaterEqual, true),
+];
+
+/// The size of tier 0's handler tables: every generic and specialized opcode.
+const HANDLER_COUNT: usize = OPS.len() + QUICK_ARITHMETIC.len();
 
 // The interpreter turns a code word's low byte back into an `Op` by its discriminant.
 const _: () = {
     let mut index = 0;
     while index < OPS.len() {
-        assert!(OPS[index] as usize == index && operand_count(OPS[index]) < 1 << 24);
+        assert!(OPS[index] as usize == index && operand_count(OPS[index]) < 1 << 16);
         index += 1;
     }
-    assert!(OPS.len() <= OP_MASK as usize);
+    assert!(HANDLER_COUNT <= OP_MASK as usize + 1);
 };
 
 /// What an operand of an instruction is, as far as [`verify`] checks it.
@@ -4335,6 +4410,10 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
     let mut pc = 0;
     while pc < words.len() {
         let op = op_of(words[pc] as u32).ok_or("an invalid instruction")?;
+        // Specialized forms trust what tier 0 saw when it wrote them, which a file cannot show.
+        if words[pc] as u32 != op_word(op) {
+            return Err("a specialized instruction".to_owned());
+        }
         operands(op).ok_or("a record instruction")?;
         starts[pc / 64] |= 1 << (pc % 64);
         let next = pc + 1 + operand_count(op);
@@ -4832,7 +4911,7 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
 
 unsafe fn execute_code(machine: &mut Machine<'_>, pc: usize) -> R<Sexp> {
     let _activity = activity::enter(Activity::Interpreter, 0);
-    interpret::<false>(machine, pc)
+    interpret::<false>(machine, pc).0
 }
 
 /// Where interpretation continues after the instruction at `pc` unwound: the loop target of a
@@ -4873,7 +4952,27 @@ unsafe fn loop_target(loops: Sexp, pc: usize, is_break: bool) -> Option<usize> {
 /// Runs the one instruction at `pc` for the optimizing tier, which calls it for instructions it
 /// does not specialize. It must not be a jump, a branch, `Return` or a loop instruction.
 pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<()> {
-    interpret::<true>(machine, pc).map(|_| ())
+    interpret::<true>(machine, pc).0.map(|_| ())
+}
+
+/// Where an activation stands after [`step`] ran one of its instructions.
+pub enum Stepped {
+    /// Interpretation continues at this pc.
+    At(usize),
+    /// The activation returned this value.
+    Returned(Sexp),
+}
+
+/// Runs the one instruction at `pc`, of any kind, including jumps, branches and `Return`, and
+/// answers where interpretation continues. Stepping a body from pc 0 leaves the registers and
+/// loop states exactly as tier 0 has them at every pc it reaches, which lets a test hand the
+/// activation back through [`TierExit::Resume`] at each of them.
+pub unsafe fn step(machine: &mut Machine<'_>, pc: usize) -> R<Stepped> {
+    match interpret::<true>(machine, pc) {
+        (Ok(value), STOP) => Ok(Stepped::Returned(value)),
+        (Ok(_), next) => Ok(Stepped::At(next)),
+        (Err(unwind), _) => continue_after(machine, pc, unwind).map(Stepped::At),
+    }
 }
 
 /// The frame-position hints of `code`'s lookup slots, one `u32` per slot, which compiled code
@@ -4968,6 +5067,8 @@ struct Activation<'m, 'a> {
     registers: *mut Sexp,
     /// What the activation returns once a handler stops the chain by answering [`STOP`].
     exit: R<Sexp>,
+    /// Where a single-stepped instruction continues, or [`STOP`] once the activation finished.
+    stepped: usize,
 }
 
 impl Activation<'_, '_> {
@@ -5000,11 +5101,16 @@ impl Activation<'_, '_> {
         self.constants.element(instruction.operand(index))
     }
 
+    /// Records `value`'s kind as feedback for the instruction at `pc`. The kind is computed only
+    /// while something records, since it takes several loads and tests.
     #[inline(always)]
     unsafe fn record(&self, pc: usize, value: Sexp) {
-        self.record_kind(pc, value_kind(value));
+        if !self.feedback.is_null() {
+            *self.feedback.add(pc) |= i32::from(value_kind(value));
+        }
     }
 
+    #[inline(always)]
     unsafe fn record_kind(&self, pc: usize, kind: u16) {
         if !self.feedback.is_null() {
             *self.feedback.add(pc) |= i32::from(kind);
@@ -5068,7 +5174,7 @@ type Handler = unsafe fn(&mut Activation<'_, '_>, usize);
 /// Interprets `machine`'s code from `pc` until it returns, or, when `SINGLE`, runs the one
 /// instruction at `pc`.
 #[inline(always)]
-unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) -> R<Sexp> {
+unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) -> (R<Sexp>, usize) {
     let constants = machine.code.cdr();
     let feedback = if values::ints(constants.element(PROFILE))[profile::RECORDING] != 0 {
         values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
@@ -5095,6 +5201,7 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
         code,
         registers,
         exit: Ok(nil()),
+        stepped: STOP,
         machine,
     };
     let handlers = if SINGLE {
@@ -5106,11 +5213,11 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
         release(&state);
         if let Some(baseline) = baseline_code(constants) {
             run_baseline(&mut state, baseline, pc);
-            return state.exit;
+            return (state.exit, STOP);
         }
     }
     (*handlers.as_ptr().add(op_index(code, pc)))(&mut state, pc);
-    state.exit
+    (state.exit, state.stepped)
 }
 
 /// The machine code the baseline tier compiled for these constants' code, if any.
@@ -5265,12 +5372,19 @@ macro_rules! handlers {
             table
         };
 
+        // Never inlined: a fast handler tail-calls these on its slow path, and inlining one
+        // would bring its frame setup back onto the fast path.
         $(
+            #[inline(never)]
             unsafe fn $name<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
                 let instruction = Instruction { code: state.code, at, registers: state.registers };
                 let flow = $body(state, instruction);
                 let pc = advance::<SINGLE>(state, at, at + 1 + operand_count(Op::$op), flow);
-                if SINGLE || pc == STOP {
+                if SINGLE {
+                    state.stepped = pc;
+                    return;
+                }
+                if pc == STOP {
                     return;
                 }
                 if $roots {
@@ -5280,9 +5394,16 @@ macro_rules! handlers {
             }
         )*
 
-        const fn handler_table<const SINGLE: bool>() -> [Handler; OPS.len()] {
-            let mut table: [Handler; OPS.len()] = [jump::<SINGLE>; OPS.len()];
+        /// The handler of every opcode. A specialized opcode steps as the instruction it
+        /// specializes, so single-stepping never depends on what tier 0 specialized.
+        const fn handler_table<const SINGLE: bool>() -> [Handler; HANDLER_COUNT] {
+            let mut table: [Handler; HANDLER_COUNT] = [jump::<SINGLE>; HANDLER_COUNT];
             $(table[Op::$op as usize] = $name::<SINGLE>;)*
+            let mut index = 0;
+            while OPS.len() + index < HANDLER_COUNT {
+                table[OPS.len() + index] = table[Op::Arithmetic as usize];
+                index += 1;
+            }
             table
         }
     };
@@ -5329,8 +5450,9 @@ unsafe fn failed<const SINGLE: bool>(
     }
 }
 
-static RUN_HANDLERS: [Handler; OPS.len()] = handler_table::<false>();
-static STEP_HANDLERS: [Handler; OPS.len()] = handler_table::<true>();
+static RUN_HANDLERS: [Handler; HANDLER_COUNT] =
+    specialized_table(fast_path_table(handler_table::<false>()));
+static STEP_HANDLERS: [Handler; HANDLER_COUNT] = handler_table::<true>();
 
 handlers! {
     run_constant, step_constant: Constant, false, op_constant;
@@ -5386,6 +5508,7 @@ handlers! {
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
 /// optimizing tier can take over at a back edge and hand back an unwind from a later position.
 /// It also fills the table slots of the ops listed in `handlers!` before they are overwritten.
+#[inline(never)]
 unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
     let target = *state.code.add(at + 1) as usize;
     let mut pc = target;
@@ -5407,7 +5530,11 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
             }
         }
     }
-    if SINGLE || pc == STOP {
+    if SINGLE {
+        state.stepped = pc;
+        return;
+    }
+    if pc == STOP {
         return;
     }
     release(state);
@@ -5451,6 +5578,386 @@ unsafe extern "C" fn step_jump(state: *mut std::ffi::c_void, at: usize) -> usize
         }
         baseline_answer(pc, at + 1 + operand_count(Op::Jump))
     })
+}
+
+// Fast paths and specialized forms.
+//
+// A handler that runs only straight-line code with no calls compiles without a frame, so its
+// `become` is a load and an indirect jump. The generic handlers cannot be frameless, because
+// their slow paths call into the evaluator, and LLVM sets up the frame on entry to the whole
+// function. So each of the commonest instructions gets a handler that tries a call-free fast
+// path and otherwise tail-calls the generic handler, which pays for the frame only on that path.
+
+/// Continues the handler chain at `pc`.
+macro_rules! dispatch {
+    ($state:expr, $pc:expr) => {
+        become (*RUN_HANDLERS.as_ptr().add(op_index($state.code, $pc)))($state, $pc)
+    };
+}
+
+/// The generic handlers, which the fast paths fall back to.
+const GENERIC_HANDLERS: [Handler; HANDLER_COUNT] = handler_table::<false>();
+
+/// Defines a fast handler per op around a fast path, which answers the next pc or `None` to
+/// run the generic handler, and the table that puts them in place of the generic ones.
+macro_rules! fast_paths {
+    ($($name:ident: $op:ident, $fast:ident;)*) => {
+        $(
+            unsafe fn $name(state: &mut Activation<'_, '_>, at: usize) {
+                if let Some(next) = $fast(state, at) {
+                    dispatch!(state, next);
+                }
+                become GENERIC_HANDLERS[Op::$op as usize](state, at)
+            }
+        )*
+
+        const fn fast_path_table(mut table: [Handler; HANDLER_COUNT]) -> [Handler; HANDLER_COUNT] {
+            $(table[Op::$op as usize] = $name;)*
+            table
+        }
+    };
+}
+
+fast_paths! {
+    fast_get_var: GetVar, get_var_fast;
+    fast_set_var: SetVar, set_var_fast;
+    fast_guard: Guard, guard_fast;
+    fast_jump_unless: JumpUnless, jump_unless_fast;
+    fast_set_srcref: SetSrcref, set_srcref_fast;
+    fast_jump: Jump, jump_fast;
+    fast_constant: Constant, constant_fast;
+    fast_end_statement: EndStatement, end_statement_fast;
+}
+
+/// The constant `index` of the activation's constant pool, read without the ALTREP check of
+/// [`Sexp::element`]: the pool is a plain list.
+#[inline(always)]
+unsafe fn pool_constant(state: &Activation<'_, '_>, index: usize) -> Sexp {
+    *state.constants.data().cast::<Sexp>().add(index)
+}
+
+/// `GetVar` of a local in a slot frame: the slot's value, or a promise's value once forced.
+/// What needs the evaluator (an unforced promise, a missing argument, a name without a slot or
+/// value) runs the generic handler.
+#[inline(always)]
+unsafe fn get_var_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let known = (*state.heap).known();
+    if *state.header != known.nil {
+        return None;
+    }
+    let code = state.code;
+    let slot = *state.slot_map.add(*code.add(at + 3) as usize);
+    if slot < 0 {
+        return None;
+    }
+    let mut value = *state.header.add(1 + slot as usize);
+    match value.kind() {
+        SexpType::Promise => {
+            value = value.car();
+            if value == known.unbound {
+                return None;
+            }
+        }
+        SexpType::Symbol if value == known.missing_arg || value == known.unbound => return None,
+        _ => {}
+    }
+    state.record(at, value);
+    *state.registers.add(*code.add(at + 1) as usize) = value;
+    (*state.interp).visible = true;
+    Some(at + 1 + operand_count(Op::GetVar))
+}
+
+/// `SetVar` of a local in a slot frame, when giving up the old value needs no bookkeeping.
+#[inline(always)]
+unsafe fn set_var_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    if *state.header != (*state.heap).known().nil {
+        return None;
+    }
+    let code = state.code;
+    let slot = *state.slot_map.add(*code.add(at + 3) as usize);
+    if slot < 0 {
+        return None;
+    }
+    let slot = state.header.add(1 + slot as usize);
+    let value = *state.registers.add(*code.add(at + 2) as usize);
+    if !(*state.heap).try_store_slot(&mut *slot, value) {
+        return None;
+    }
+    clear_missing(state, slot);
+    (*state.interp).visible = false;
+    Some(at + 1 + operand_count(Op::SetVar))
+}
+
+/// `Guard` of a name the closure's frame cannot bind, while the cached cell holds the expected
+/// function. A cache key is never a function frame, so a hit also means the enclosure is not one.
+#[inline(always)]
+unsafe fn guard_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    if *code.add(at + 4) != 0 {
+        return None;
+    }
+    let heap = &*state.heap;
+    let env = *state.header;
+    let enclosure = if env != heap.known().nil {
+        env.enclosure()
+    } else {
+        state.machine.function.tag()
+    };
+    let slot = *code.add(at + 3) as usize;
+    let symbol = pool_constant(state, *code.add(at + 1) as usize);
+    let cache = state.cache;
+    if *cache.epochs.add(slot) != heap.lookup_stamp(symbol)
+        || *cache.slots.add(slot * 2) != enclosure
+        || (*cache.slots.add(slot * 2 + 1)).cdr()
+            != pool_constant(state, *code.add(at + 2) as usize)
+    {
+        return None;
+    }
+    Some(at + 1 + operand_count(Op::Guard))
+}
+
+/// `JumpUnless` on `TRUE` or `FALSE`, the shared logical scalars every comparison answers.
+#[inline(always)]
+unsafe fn jump_unless_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    let value = *state.registers.add(*code.add(at + 1) as usize);
+    let known = (*state.heap).known();
+    if value == known.true_value {
+        state.record_kind(at, feedback::BRANCH_NOT_TAKEN);
+        Some(at + 1 + operand_count(Op::JumpUnless))
+    } else if value == known.false_value {
+        state.record_kind(at, feedback::BRANCH_TAKEN);
+        Some(*code.add(at + 3) as usize)
+    } else {
+        None
+    }
+}
+
+/// `SetSrcref` while no debugger asks to stop at the statement.
+#[inline(always)]
+unsafe fn set_srcref_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    let interp = &mut *state.interp;
+    if *code.add(at + 2) == 1 && interp.debugger.is_some() {
+        return None;
+    }
+    interp.srcref = pool_constant(state, *code.add(at + 1) as usize);
+    Some(at + 1 + operand_count(Op::SetSrcref))
+}
+
+/// `Jump` forward, and backward while no optimizing tier counts back edges and no interrupt is
+/// pending.
+#[inline(always)]
+unsafe fn jump_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let target = *state.code.add(at + 1) as usize;
+    if target < at
+        && ((*state.interp).bytecode.tier.is_some()
+            || crate::unwind::INTERRUPT_REQUESTED.load(std::sync::atomic::Ordering::Relaxed))
+    {
+        return None;
+    }
+    Some(target)
+}
+
+#[inline(always)]
+unsafe fn constant_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    *state.registers.add(*code.add(at + 1) as usize) =
+        pool_constant(state, *code.add(at + 2) as usize);
+    (*state.interp).visible = true;
+    Some(at + 1 + operand_count(Op::Constant))
+}
+
+/// `EndStatement` clearing at most two temporaries besides its target, the usual statement.
+#[inline(always)]
+unsafe fn end_statement_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    let registers = state.registers;
+    let nil = (*state.heap).known().nil;
+    let (start, end) = (*code.add(at + 2) as usize, *code.add(at + 3) as usize);
+    if end > start + 2 {
+        return None;
+    }
+    *registers.add(*code.add(at + 1) as usize) = nil;
+    let mut register = start;
+    while register < end {
+        *registers.add(register) = nil;
+        register += 1;
+    }
+    Some(at + 1 + operand_count(Op::EndStatement))
+}
+
+/// The handler of each specialized arithmetic form, in place of the generic `Arithmetic`'s.
+const fn specialized_table(mut table: [Handler; HANDLER_COUNT]) -> [Handler; HANDLER_COUNT] {
+    macro_rules! forms {
+        ($($index:literal),*) => {
+            $(table[OPS.len() + $index] = quick_arithmetic::<$index>;)*
+        };
+    }
+    forms!(
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+    );
+    table
+}
+
+/// The opcode of the specialized form of `operator` on two integers or on doubles, if there is
+/// one.
+fn quick_form(operator: Arith, real: bool) -> Option<u32> {
+    QUICK_ARITHMETIC
+        .iter()
+        .position(|&form| form == (operator, real))
+        .map(|index| (OPS.len() + index) as u32)
+}
+
+/// Whether `left` and `right` are plain scalars of the kinds a form takes: two integers, or
+/// for a double form, doubles or integers with at least one double.
+#[inline(always)]
+unsafe fn form_fits(left: Sexp, right: Sexp, real: bool, nil: Sexp) -> bool {
+    if !real {
+        return left.is_plain_scalar(SexpType::Integer, nil)
+            && right.is_plain_scalar(SexpType::Integer, nil);
+    }
+    let left_real = left.is_plain_scalar(SexpType::Real, nil);
+    let right_real = right.is_plain_scalar(SexpType::Real, nil);
+    (left_real || left.is_plain_scalar(SexpType::Integer, nil))
+        && (right_real || right.is_plain_scalar(SexpType::Integer, nil))
+        && (left_real || right_real)
+}
+
+/// The specialized form `FORM` of `Arithmetic` (see [`QUICK_ARITHMETIC`]). It computes exactly
+/// what [`fast_arithmetic`] does on the same operands, and leaves to the generic handler what
+/// that leaves to the builtin: an integer result that is NA or overflows, and an allocation the
+/// young generation has no room for.
+unsafe fn quick_arithmetic<const FORM: usize>(state: &mut Activation<'_, '_>, at: usize) {
+    let (operator, real) = QUICK_ARITHMETIC[FORM];
+    let code = state.code;
+    let registers = state.registers;
+    let left = *registers.add(*code.add(at + 3) as usize);
+    let right = *registers.add(*code.add(at + 4) as usize);
+    let heap = &mut *state.heap;
+    let known = *heap.known();
+    if !form_fits(left, right, real, known.nil) {
+        become arithmetic_miss(state, at);
+    }
+    let logical = |result: Option<bool>| match result {
+        Some(true) => Some(known.true_value),
+        Some(false) => Some(known.false_value),
+        None => Some(known.logical_na_value),
+    };
+    let (value, kind) = if real {
+        let as_real = |value: Sexp| {
+            if value.kind() == SexpType::Integer {
+                let integer = *value.data().cast::<i32>();
+                if integer == NA_INTEGER {
+                    NA_REAL
+                } else {
+                    f64::from(integer)
+                }
+            } else {
+                *value.data().cast::<f64>()
+            }
+        };
+        let (a, b) = (as_real(left), as_real(right));
+        let nan = a.is_nan() || b.is_nan();
+        let mut number = |value: f64| heap.try_alloc_scalar(SexpType::Real, [value.to_bits(), 0]);
+        match operator {
+            Arith::Add => (number(crate::arith::add(a, b)), feedback::DOUBLE_SCALAR),
+            Arith::Subtract => (number(a - b), feedback::DOUBLE_SCALAR),
+            Arith::Multiply => (
+                number(crate::arith::multiply(a, b)),
+                feedback::DOUBLE_SCALAR,
+            ),
+            Arith::Divide => (number(a / b), feedback::DOUBLE_SCALAR),
+            Arith::Equal => (logical((!nan).then_some(a == b)), feedback::LOGICAL_SCALAR),
+            Arith::NotEqual => (logical((!nan).then_some(a != b)), feedback::LOGICAL_SCALAR),
+            Arith::Less => (logical((!nan).then_some(a < b)), feedback::LOGICAL_SCALAR),
+            Arith::Greater => (logical((!nan).then_some(a > b)), feedback::LOGICAL_SCALAR),
+            Arith::LessEqual => (logical((!nan).then_some(a <= b)), feedback::LOGICAL_SCALAR),
+            _ => (logical((!nan).then_some(a >= b)), feedback::LOGICAL_SCALAR),
+        }
+    } else {
+        let a = *left.data().cast::<i32>();
+        let b = *right.data().cast::<i32>();
+        let na = a == NA_INTEGER || b == NA_INTEGER;
+        let mut integer = |result: Option<i32>| match result {
+            Some(value) if !na && value != NA_INTEGER => {
+                heap.try_alloc_scalar(SexpType::Integer, [value as u32 as u64, 0])
+            }
+            _ => None,
+        };
+        match operator {
+            Arith::Add => (integer(a.checked_add(b)), feedback::INTEGER_SCALAR),
+            Arith::Subtract => (integer(a.checked_sub(b)), feedback::INTEGER_SCALAR),
+            Arith::Multiply => (integer(a.checked_mul(b)), feedback::INTEGER_SCALAR),
+            Arith::Equal => (logical((!na).then_some(a == b)), feedback::LOGICAL_SCALAR),
+            Arith::NotEqual => (logical((!na).then_some(a != b)), feedback::LOGICAL_SCALAR),
+            Arith::Less => (logical((!na).then_some(a < b)), feedback::LOGICAL_SCALAR),
+            Arith::Greater => (logical((!na).then_some(a > b)), feedback::LOGICAL_SCALAR),
+            Arith::LessEqual => (logical((!na).then_some(a <= b)), feedback::LOGICAL_SCALAR),
+            _ => (logical((!na).then_some(a >= b)), feedback::LOGICAL_SCALAR),
+        }
+    };
+    let Some(value) = value else {
+        become run_arithmetic::<false>(state, at);
+    };
+    state.record_kind(at, kind);
+    let destination = *code.add(at + 2);
+    *registers.add(destination as usize) = value;
+    (*state.interp).visible = true;
+    let next = at + 1 + operand_count(Op::Arithmetic);
+    // A comparison that the next instruction branches on, as every loop test and most `if`
+    // tests are, takes the branch itself and saves that instruction's dispatch. An NA leaves
+    // the error to the branch.
+    if kind == feedback::LOGICAL_SCALAR
+        && *code.add(next) as u32 == op_word(Op::JumpUnless)
+        && *code.add(next + 1) == destination
+    {
+        if value == known.true_value {
+            state.record_kind(next, feedback::BRANCH_NOT_TAKEN);
+            dispatch!(state, next + 1 + operand_count(Op::JumpUnless));
+        }
+        if value == known.false_value {
+            state.record_kind(next, feedback::BRANCH_TAKEN);
+            dispatch!(state, *code.add(next + 3) as usize);
+        }
+    }
+    dispatch!(state, next);
+}
+
+/// A specialized form whose operands are no longer of its kinds: the site goes back to the
+/// generic instruction, counting the undo, and runs it.
+#[cold]
+#[inline(never)]
+unsafe fn arithmetic_miss(state: &mut Activation<'_, '_>, at: usize) {
+    let word = state.code.add(at).cast_mut();
+    let undone = ((*word as u32) >> RESPECIALIZE_SHIFT) + 1;
+    *word = (op_word(Op::Arithmetic) | undone << RESPECIALIZE_SHIFT) as i32;
+    become run_arithmetic::<false>(state, at)
+}
+
+/// Writes the specialized form for `left` and `right` over the generic `Arithmetic` at `at`,
+/// unless the site has undone its specializations too often.
+#[inline(always)]
+unsafe fn quicken_arithmetic(
+    code: *const i32,
+    at: usize,
+    operator: Arith,
+    left: Sexp,
+    right: Sexp,
+) {
+    let word = code.add(at).cast_mut();
+    let current = *word as u32;
+    if current & OP_MASK != Op::Arithmetic as u32
+        || current >> RESPECIALIZE_SHIFT >= RESPECIALIZE_LIMIT
+    {
+        return;
+    }
+    let real = left.kind() == SexpType::Real || right.kind() == SexpType::Real;
+    if let Some(form) = quick_form(operator, real)
+        && form_fits(left, right, real, nil())
+    {
+        *word = ((current & !OP_MASK) | form) as i32;
+    }
 }
 
 #[inline(always)]
@@ -6392,7 +6899,9 @@ unsafe fn slot_special_call(
             // `UseMethod("generic", object)` dispatches on a local's value.
             "UseMethod" if argument.kind() == SexpType::String && length(argument) == 1 => {
                 match slot_operand(state, rest.car())? {
-                    Some(object) => slot_use_method(state, instruction, call, argument, Some(object)),
+                    Some(object) => {
+                        slot_use_method(state, instruction, call, argument, Some(object))
+                    }
                     None => Ok(None),
                 }
             }
@@ -6406,7 +6915,9 @@ unsafe fn slot_special_call(
                 interp().visible = false;
                 Ok(Some(value))
             }
-            "switch" if rest.car() == symbols().dots => slot_switch(state, instruction, call, argument),
+            "switch" if rest.car() == symbols().dots => {
+                slot_switch(state, instruction, call, argument)
+            }
             _ => Ok(None),
         };
     }
@@ -6441,7 +6952,11 @@ unsafe fn slot_special_call(
 /// a special called from a slot frame runs there. The site's promise-code entry serves this:
 /// it is otherwise read only when the site calls a closure, and `compile_promise_arguments`
 /// builds the same list for that.
-unsafe fn site_promise_code(state: &Activation<'_, '_>, instruction: Instruction, call: Sexp) -> R<Sexp> {
+unsafe fn site_promise_code(
+    state: &Activation<'_, '_>,
+    instruction: Instruction,
+    call: Sexp,
+) -> R<Sexp> {
     let mut compiled = state.constants.element(instruction.operand(2) + 1);
     if compiled == unbound() {
         compiled = compile_promise_arguments(state.machine.function, call.cdr())?;
@@ -6727,10 +7242,9 @@ unsafe fn slot_owns(state: &Activation<'_, '_>, value: Sexp) -> bool {
     let registers = &interp().bytecode.registers;
     let header = state.header.offset_from(registers.as_ptr()) as usize;
     if state.machine.function != nil()
-        && interp()
-            .frames
-            .last()
-            .is_some_and(|frame| frame.slots as usize == header && frame.function == state.machine.function)
+        && interp().frames.last().is_some_and(|frame| {
+            frame.slots as usize == header && frame.function == state.machine.function
+        })
     {
         return true;
     }
@@ -7224,7 +7738,12 @@ unsafe fn op_call_rebinding(state: &mut Activation<'_, '_>, instruction: Instruc
             return op_call_generic(state, instruction);
         }
     }
-    let value = eval::rebind_call(call, function, target, state.env(Reify::Site("rebinding call"))?)?;
+    let value = eval::rebind_call(
+        call,
+        function,
+        target,
+        state.env(Reify::Site("rebinding call"))?,
+    )?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
@@ -7235,7 +7754,12 @@ unsafe fn op_call_tail_update(state: &mut Activation<'_, '_>, instruction: Instr
     let function = instruction.input(1);
     let call = state.constant(instruction, 2);
     let target = state.constant(instruction, 3);
-    let value = eval::tail_update(call, function, target, state.env(Reify::Site("tail update"))?)?;
+    let value = eval::tail_update(
+        call,
+        function,
+        target,
+        state.env(Reify::Site("tail update"))?,
+    )?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
@@ -7352,7 +7876,12 @@ unsafe fn op_bound_eval(state: &mut Activation<'_, '_>, instruction: Instruction
         instruction.registers.add(instruction.operand(3)),
         instruction.operand(4),
     );
-    let value = crate::records::eval_bound_registers(expression, names, bound, state.env(Reify::Site("bound evaluation"))?)?;
+    let value = crate::records::eval_bound_registers(
+        expression,
+        names,
+        bound,
+        state.env(Reify::Site("bound evaluation"))?,
+    )?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
@@ -7481,7 +8010,13 @@ unsafe fn op_guard(state: &mut Activation<'_, '_>, instruction: Instruction) -> 
     let found = if instruction.operand(3) == 0 {
         lookup_enclosing_function(symbol, enclosure, state.cache, slot)
     } else {
-        lookup_function(symbol, state.env(Reify::Site("function guard"))?, state.cache, slot, unbound())
+        lookup_function(
+            symbol,
+            state.env(Reify::Site("function guard"))?,
+            state.cache,
+            slot,
+            unbound(),
+        )
     };
     if !matches!(found, Ok(function) if function == expected) {
         return Ok(Flow::Goto(instruction.operand(4)));
@@ -7498,8 +8033,10 @@ unsafe fn op_resume(_state: &mut Activation<'_, '_>, instruction: Instruction) -
 unsafe fn op_jump_unless(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let call = state.constant(instruction, 1);
     if !as_condition(instruction.input(0), call)? {
+        state.record_kind(instruction.at, feedback::BRANCH_TAKEN);
         return Ok(Flow::Goto(instruction.operand(2)));
     }
+    state.record_kind(instruction.at, feedback::BRANCH_NOT_TAKEN);
     Ok(Flow::Next)
 }
 
@@ -7528,7 +8065,10 @@ unsafe fn op_arithmetic(state: &mut Activation<'_, '_>, instruction: Instruction
     let right = instruction.input(3);
     let operator = ARITHS[instruction.operand(0)].0;
     let value = match fast_arithmetic(operator, left, right)? {
-        Some(value) => value,
+        Some(value) => {
+            quicken_arithmetic(instruction.code, instruction.at, operator, left, right);
+            value
+        }
         None if let Some(value) = kernels::binary(
             state.constant(instruction, 4),
             operator,
@@ -7982,7 +8522,12 @@ unsafe fn op_closure(state: &mut Activation<'_, '_>, instruction: Instruction) -
     let closure = if state.in_slots() {
         eval::slot_closure(state.machine.header, formals, body, srcref)?
     } else {
-        eval::make_closure(formals, body, srcref, state.env(Reify::Site("function definition"))?)?
+        eval::make_closure(
+            formals,
+            body,
+            srcref,
+            state.env(Reify::Site("function definition"))?,
+        )?
     };
     // Every closure this site creates shares one compiled body, as GNU R compiles inner
     // functions with their outer one. Compiling per closure object would leave a function

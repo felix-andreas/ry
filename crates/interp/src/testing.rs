@@ -113,6 +113,177 @@ pub fn check_bytecode_agreement(entropy: &mut impl Entropy) {
     });
 }
 
+/// One compiled arithmetic site, called with a seeded sequence of operand pairs of changing
+/// kinds, agrees with the AST evaluator on every call. Tier 0 specializes the site to the kinds
+/// it sees and must undo the specialization when they change, give up after repeated undos,
+/// and leave an NA or overflowing integer result and every operand that is not a plain scalar
+/// to the generic instruction.
+pub fn check_quickening_agreement(entropy: &mut impl Entropy) {
+    syntax::testing::enable_invariants();
+    const OPERANDS: &[&str] = &[
+        "3L",
+        "-7L",
+        "2147483647L",
+        "-2147483647L",
+        "NA_integer_",
+        "0L",
+        "2.5",
+        "-0.0",
+        "NaN",
+        "NA_real_",
+        "Inf",
+        "1e308",
+        "TRUE",
+        "NA",
+        "c(1L, 2L)",
+        "c(a = 1)",
+        "c(x = 2L)",
+        "[3L]",
+        "[1.5]",
+    ];
+    const OPERATORS: &[&str] = &[
+        "+", "-", "*", "/", "==", "!=", "<", ">", "<=", ">=", "^", "%%",
+    ];
+    let operator = OPERATORS[entropy.below(OPERATORS.len())];
+    let body = match entropy.below(3) {
+        0 => format!("a {operator} b"),
+        1 => format!("r <- a; j <- 0L; while (j < 3L) {{ r <- r {operator} b; j <- j + 1L }}; r"),
+        _ => format!("x <- a {operator} b; y <- b {operator} a; c(x, y)"),
+    };
+    let mut calls: Vec<(&str, &str)> = Vec::new();
+    for _ in 0..2 + entropy.below(10) {
+        // Runs of one kind let a site specialize before the kind changes.
+        let a = OPERANDS[entropy.below(OPERANDS.len())];
+        let b = OPERANDS[entropy.below(OPERANDS.len())];
+        for _ in 0..1 + entropy.below(3) {
+            calls.push((a, b));
+        }
+    }
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            run(&format!("f <- function(a, b) {{ {body} }}"));
+            for (call, &(a, b)) in calls.iter().enumerate() {
+                let direct = run(&format!("a <- {a}\nb <- {b}\n{{ {body} }}"));
+                let compiled = run(&format!("f({a}, {b})"));
+                assert_eq!(
+                    direct,
+                    compiled,
+                    "call {}: `{body}` with a = {a}, b = {b}, after {:?}",
+                    call + 1,
+                    &calls[..call]
+                );
+            }
+        }
+    });
+}
+
+/// Tier 0 resumes an activation at any pc it reaches, as it does when the optimizing tier
+/// deoptimizes there. A test tier takes every activation of a random closure over at entry,
+/// single-steps it through `k` instructions, and hands it back through the same
+/// [`bytecode::TierExit::Resume`] path compiled code exits by. For every `k` up to the number
+/// of instructions the call runs, the result must equal tier 0's alone.
+pub fn check_resume_at_every_pc(entropy: &mut impl Entropy) {
+    use {
+        bytecode::{Machine, Stepped, Tier, TierExit},
+        std::cell::Cell,
+    };
+    thread_local! {
+        static TARGET: Cell<Option<Sexp>> = const { Cell::new(None) };
+        static BUDGET: Cell<Option<usize>> = const { Cell::new(None) };
+        static STEPS: Cell<usize> = const { Cell::new(0) };
+    }
+    unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
+        if TARGET.get() != Some(machine.function) {
+            return None;
+        }
+        // Only the outermost activation is taken over, so a recursive call runs in tier 0.
+        let budget = BUDGET.take()?;
+        let mut pc = 0;
+        for taken in 0..budget {
+            match unsafe { bytecode::step(machine, pc) } {
+                Ok(Stepped::At(next)) => pc = next,
+                Ok(Stepped::Returned(value)) => {
+                    STEPS.set(taken + 1);
+                    return Some(TierExit::Finished(Ok(value)));
+                }
+                Err(unwind) => {
+                    STEPS.set(taken + 1);
+                    return Some(TierExit::Finished(Err(unwind)));
+                }
+            }
+        }
+        STEPS.set(budget);
+        Some(TierExit::Resume { pc, pending: None })
+    }
+    syntax::testing::enable_invariants();
+    let body = program(entropy);
+    let arguments = [
+        "3L",
+        "-2.5",
+        "NA",
+        "TRUE",
+        "2147483647L",
+        "0",
+        "[3L]",
+        "[-2.5, 1]",
+    ];
+    let a = arguments[entropy.below(arguments.len())];
+    let b = arguments[entropy.below(arguments.len())];
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed, and the test tier is removed before returning.
+        unsafe {
+            // Restores the tier even when an assertion fails, so later tests sharing the
+            // interpreter do not run under the test tier.
+            struct Restore(Option<Tier>);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    TARGET.set(None);
+                    bytecode::set_tier(self.0);
+                }
+            }
+            let _restore = Restore(bytecode::tier().copied());
+            // Installed before `f` exists, so its first entry already schedules the tier.
+            bytecode::set_tier(Some(Tier {
+                enter,
+                entry_threshold: 1,
+                worth_recording: |_| false,
+                back_edge: |_, _| None,
+                back_edge_threshold: bytecode::NEVER,
+                baseline: |_| {},
+                baseline_threshold: bytecode::NEVER,
+                call: |_, _| None,
+            }));
+            let reset = format!("a <- {a}\nb <- {b}\ns <- 7L\nk <- 0L\ni <- 0L");
+            run(&reset);
+            run(&format!("f <- function(a, b) {{ {body} }}"));
+            let function = values::install("f")
+                .and_then(|symbol| eval::eval(symbol, values::global_env()))
+                .ok();
+            TARGET.set(function);
+            let call = format!("f({a}, {b})");
+            // With no budget the test tier declines, so this call runs in tier 0 alone.
+            let alone = run(&call);
+            let mut budget = 0;
+            loop {
+                run(&reset);
+                BUDGET.set(Some(budget));
+                STEPS.set(0);
+                let resumed = run(&call);
+                assert_eq!(
+                    alone, resumed,
+                    "resumed after {budget} instructions: `{body}` with a = {a}, b = {b}"
+                );
+                assert!(BUDGET.take().is_none(), "the test tier never took `f` over");
+                if STEPS.get() < budget {
+                    break;
+                }
+                budget += 1;
+            }
+        }
+    });
+}
+
 /// A random element-wise tree over vector operands, the shape the tier-0 compiler fuses into
 /// one pass, gives the same value from the fused pass as from the AST evaluator: the same NA
 /// and NaN payloads, the same NA on integer overflow, the same recycling and reductions.

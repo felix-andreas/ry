@@ -944,6 +944,26 @@ impl Heap {
         Ok(object)
     }
 
+    /// [`Heap::alloc_scalar`] when the young generation has room and its pool a free slot,
+    /// and `None` otherwise, without collecting. An interpreter fast path that holds unrooted
+    /// values takes this and leaves the collecting case to its generic path.
+    #[inline(always)]
+    pub unsafe fn try_alloc_scalar(&mut self, kind: SexpType, payload: [u64; 2]) -> Option<Sexp> {
+        const SIZE: usize = VECTOR_DATA_OFFSET + 16;
+        const CLASS: u8 = SIZE_CLASS_BY_WORDS[SIZE / 8];
+        let young = self.young_bytes + SIZE;
+        if young > self.small_trigger {
+            return None;
+        }
+        let memory = self.space.allocate_from_run(CLASS as usize)?;
+        self.young_bytes = young;
+        let object = Sexp::from_non_null(memory.cast());
+        object.init_header(kind, CLASS, 0, self.known.nil);
+        object.set_length_and_capacity(1, 1);
+        object.data().cast::<[u64; 2]>().write(payload);
+        Some(object)
+    }
+
     /// Reports every vector allocation whose size, as GNU R counts it, exceeds `threshold`
     /// bytes to `reporter`, or stops reporting when `reporter` is `None`.
     pub fn report_allocations(&mut self, reporter: Option<fn(usize) -> bool>, threshold: usize) {
@@ -2115,6 +2135,22 @@ impl Heap {
             self.note_zero(*slot);
         }
         *slot = value;
+    }
+
+    /// [`Heap::store_slot`] when giving up the old value needs no bookkeeping, answering
+    /// whether it stored. An interpreter fast path stores this way and leaves the old value
+    /// that a reconcile could reclaim to the full form.
+    #[inline(always)]
+    pub unsafe fn try_store_slot(&mut self, slot: &mut Sexp, value: Sexp) -> bool {
+        let old = *slot;
+        if old.refcount() == 1 && (old.kind() == SexpType::List || old.size_class() == LARGE_CLASS)
+        {
+            return false;
+        }
+        value.increment_refcount();
+        old.release_reference();
+        *slot = value;
+        true
     }
 
     /// Gives up the references a returning call's slot frame holds, as [`Heap::clear_frame`]

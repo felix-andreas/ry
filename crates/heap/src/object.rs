@@ -773,6 +773,26 @@ impl Sexp {
         unsafe { self.set_flag(flag_bits::ARRAY, on) }
     }
 
+    /// Whether this is a length-one vector of `kind` that is neither ALTREP nor an Array and
+    /// has no attributes when `nil` is the heap's `NULL`: the shape an interpreter fast path
+    /// reads through [`Sexp::data`] directly. The kind and flag tests are one masked load of
+    /// the header's first word.
+    #[inline(always)]
+    pub unsafe fn is_plain_scalar(self, kind: SexpType, nil: Sexp) -> bool {
+        const MASK: u32 = u32::from_ne_bytes([
+            0xFF,
+            0,
+            flag_bits::OBJECT | flag_bits::ALTREP | flag_bits::ARRAY,
+            0,
+        ]);
+        unsafe {
+            let word = self.0.as_ptr().cast::<u32>().read();
+            word & MASK == u32::from_ne_bytes([kind as u8, 0, 0, 0])
+                && self.header().attrib.get() == nil
+                && self.payload::<VectorObject>().length.get() == 1
+        }
+    }
+
     pub unsafe fn is_altrep(self) -> bool {
         unsafe { self.header().flags.get() & flag_bits::ALTREP != 0 }
     }
