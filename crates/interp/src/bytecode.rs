@@ -2585,6 +2585,7 @@ impl Compiler {
                 | ".ry_match"
                 | "switch"
                 | "missing"
+                | "quote"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -5052,8 +5053,19 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
     {
         value
     } else {
-        // A special reads its arguments as expressions, so they stay uncompiled.
-        eval::apply_call(call, function, call.cdr(), state.env()?)?
+        // A special reads its arguments as expressions, so they stay uncompiled. `pkg::name`
+        // reads only the two names, never the frame, so a slot frame needs no environment
+        // for it.
+        let head = call.car();
+        let env = if state.in_slots()
+            && function.kind() == SexpType::Special
+            && (head == symbols().double_colon || head == symbols().triple_colon)
+        {
+            crate::heap().known().base_env
+        } else {
+            state.env()?
+        };
+        eval::apply_call(call, function, call.cdr(), env)?
     };
     state.record(instruction.at, value);
     instruction.output(0, value);

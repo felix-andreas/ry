@@ -8,6 +8,10 @@
 |     e[[2]] <- 1
 |     e
 | }
+| TRUE FALSE TRUE 2 1 
+| TRUE FALSE TRUE 2 1 
+| TRUE FALSE TRUE 2 1 
+| TRUE FALSE TRUE 2 1 
 [messages]
 [warnings]
 [errors]
