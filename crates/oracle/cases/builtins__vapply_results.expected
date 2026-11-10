@@ -1,0 +1,101 @@
+[stdout]
+|  num [1:3] 1 2 3
+|  int [1:3] 0 1 1
+|  cplx [1:3] 1+0i 2+0i 3+0i
+|  cplx [1:2] 1+0i NA
+| Error: values must be type 'integer',
+|  but FUN(X[[1]]) result is type 'double' 
+| Error: values must be type 'list',
+|  but FUN(X[[1]]) result is type 'integer' 
+| List of 2
+|  $ : int 1
+|  $ : int 2
+| List of 4
+|  $ : int 1
+|  $ : chr "a"
+|  $ : int 2
+|  $ : chr "a"
+|  - attr(*, "dim")= int [1:2] 2 2
+|  chr [1:2] "1" "2"
+| Error: values must be type 'character',
+|  but FUN(X[[1]]) result is type 'integer' 
+|  raw [1:2] 01 02
+| Error: values must be type 'raw',
+|  but FUN(X[[1]]) result is type 'integer' 
+|  num [1:2] NA NA
+|  num [1:2] NA NA
+| Error: values must be length 1,
+|  but FUN(X[[1]]) result is length 3 
+| Error: values must be length 2,
+|  but FUN(X[[2]]) result is length 1 
+| Error: values must be length 1,
+|  but FUN(X[[1]]) result is length 0 
+| Error: 'FUN.VALUE' must be a vector 
+|  num[0 , 1:2] 
+|  num(0) 
+|  num[1:2, 0 ] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:2] "a" "b"
+|   ..$ : NULL
+|  Named chr(0) 
+|  - attr(*, "names")= chr(0) 
+| Error: 'FUN.VALUE' must be a vector 
+| Error: invalid 'USE.NAMES' value 
+| Error: invalid 'USE.NAMES' value 
+|  Named num [1:2] 1 2
+|  - attr(*, "names")= chr [1:2] "a" "b"
+|  Named int [1:2] 1 1
+|  - attr(*, "names")= chr [1:2] "x" "y"
+|  int [1:2] 1 1
+|  Named int [1:2] 1 1
+|  - attr(*, "names")= chr [1:2] "u" "v"
+|  int [1:2, 1:2] 1 2 3 4
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:2] "p" "q"
+|   ..$ : chr [1:2] "a" "b"
+|  int [1:2, 1:2] 1 2 3 4
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:2] "m" "n"
+|   ..$ : chr [1:2] "a" "b"
+|  int [1:2, 1:2] 1 2 3 4
+|  num [1:2] 1 2
+|  Named num [1:2] 1 2
+|  - attr(*, "names")= chr [1:2] "a" "b"
+|  num[0 , 1:2] 
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : NULL
+|   ..$ : chr [1:2] "a" "b"
+|  num [1:2, 1:2, 1:2] 1 1 1 1 2 2 2 2
+|  num [1:2, 1:2, 1:2] 1 1 1 1 2 2 2 2
+|  - attr(*, "dimnames")=List of 3
+|   ..$ : chr [1:2] "r" "s"
+|   ..$ : chr [1:2] "t" "u"
+|   ..$ : chr [1:2] "a" "b"
+|  num [1, 1:2, 1:2] 1 1 2 2
+|  - attr(*, "dimnames")=List of 3
+|   ..$ : chr "r"
+|   ..$ : chr [1:2] "t" "u"
+|   ..$ : chr [1:2] "a" "b"
+|  num [1:2, 1:3] 1 1 2 2 3 3
+|  num [1:2, 1:2] 1 1 2 2
+|  - attr(*, "dimnames")=List of 2
+|   ..$ : chr [1:2] "p" "q"
+|   ..$ : NULL
+|  num [1:2] 1 2
+|  int [1:2] 1 1
+| Error: values must be type 'character',
+|  but FUN(X[[1]]) result is type 'integer' 
+|  num 18262
+| Error: values must be type 'double',
+|  but FUN(X[[4]]) result is type 'character' 
+| Error: values must be length 1,
+|  but FUN(X[[3]]) result is length 2 
+|  chr [1:2] "u" "v"
+|  chr [1:2] "2020" "2021"
+|  chr [1:2] "name" "call"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
