@@ -2721,8 +2721,10 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   - POSIX (TRE) patterns still run on fancy-regex through a translation (`perl = TRUE` is PCRE2,
     `decisions.md`). A non-constant-size pattern runs on fancy-regex's backtracking VM because of
     `leftmost_longest`; linking TRE itself would give GNU R's exact POSIX semantics.
-  - `getParseData` ids are ry's own node numbers, where GNU R's are bison's internal ones, so code
-    that hard-codes an id would differ (none in the corpus does).
+  - `getParseData` columns and srcref bytes differ from GNU R on lines with non-ASCII text. GNU R
+    counts a multibyte character inside a string literal as its bytes, and whether it counts
+    columns in characters depends on the text's declared encoding (`known_to_be_utf8`); ry counts
+    characters. 26 of rlang's test-file rows differ for this reason alone.
   - lobstr's `obj_size` counts a closure's environment a few kilobytes higher than GNU R, because
     ry's environments and bytecode have their own layout. Only relative comparisons are portable.
   - Each ALTREP string or list element read through `Sexp::element` pushes a handle that lives
@@ -2731,9 +2733,6 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
     allocation.
   - The TRE matcher now compiles three regexes per pattern, which costs `grepl` in a loop with no
     matcher cache.
-  - `getParseData`'s comment parents (`comment_parent` in `crates/interp/src/lower.rs`) scan every
-    row per comment, quadratic in a heavily commented file parsed with `keep.source = TRUE`. The
-    builder knows each comment's enclosing node while it walks, so record it there.
   - Tier-1 code is freed once its enclosure dies (`compiled_for` in `crates/jit/src/jit.rs`), on
     the reasoning that a running activation keeps its closure, and so its enclosure, alive. An
     activation whose closure's environment is replaced while it runs (`environment(f) <- e`
