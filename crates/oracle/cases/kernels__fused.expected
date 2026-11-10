@@ -1,54 +1,119 @@
 [stdout]
 | chain double 
-| [1] NaN  NA  NA NaN   0  15
+|  [1] NaN  NA  NA NaN   0  15 NaN  NA  NA NaN   0  15 NaN  NA  NA NaN   0  15 NaN
+| [20]  NA  NA NaN   0  15 NaN  NA  NA NaN   0  15 NaN  NA  NA NaN   0  15 NaN  NA
+| [39]  NA NaN   0  15 NaN  NA  NA NaN   0  15 NaN  NA  NA NaN   0  15 NaN  NA  NA
+| [58] NaN   0  15 NaN  NA  NA NaN   0  15
 | chain2 double 
-| [1] NaN  NA  NA NaN  -1  16
+|  [1] NaN  NA  NA NaN  -1  16 NaN  NA  NA NaN  -1  16 NaN  NA  NA NaN  -1  16 NaN
+| [20]  NA  NA NaN  -1  16 NaN  NA  NA NaN  -1  16 NaN  NA  NA NaN  -1  16 NaN  NA
+| [39]  NA NaN  -1  16 NaN  NA  NA NaN  -1  16 NaN  NA  NA NaN  -1  16 NaN  NA  NA
+| [58] NaN  -1  16 NaN  NA  NA NaN  -1  16
 | payload double 
-| [1] NaN  NA  NA NaN   0   0
+|  [1] NaN  NA  NA NaN   0   0 NaN  NA  NA NaN   0   0 NaN  NA  NA NaN   0   0 NaN
+| [20]  NA  NA NaN   0   0 NaN  NA  NA NaN   0   0 NaN  NA  NA NaN   0   0 NaN  NA
+| [39]  NA NaN   0   0 NaN  NA  NA NaN   0   0 NaN  NA  NA NaN   0   0 NaN  NA  NA
+| [58] NaN   0   0 NaN  NA  NA NaN   0   0
 | power double 
-| [1] NaN  NA  NA NaN   1  25
+|  [1] NaN  NA  NA NaN   1  25 NaN  NA  NA NaN   1  25 NaN  NA  NA NaN   1  25 NaN
+| [20]  NA  NA NaN   1  25 NaN  NA  NA NaN   1  25 NaN  NA  NA NaN   1  25 NaN  NA
+| [39]  NA NaN   1  25 NaN  NA  NA NaN   1  25 NaN  NA  NA NaN   1  25 NaN  NA  NA
+| [58] NaN   1  25 NaN  NA  NA NaN   1  25
 | negate double 
-| [1] NaN  NA  NA NaN   0 -12
+|  [1] NaN  NA  NA NaN   0 -12 NaN  NA  NA NaN   0 -12 NaN  NA  NA NaN   0 -12 NaN
+| [20]  NA  NA NaN   0 -12 NaN  NA  NA NaN   0 -12 NaN  NA  NA NaN   0 -12 NaN  NA
+| [39]  NA NaN   0 -12 NaN  NA  NA NaN   0 -12 NaN  NA  NA NaN   0 -12 NaN  NA  NA
+| [58] NaN   0 -12 NaN  NA  NA NaN   0 -12
 | mixed double 
-| [1]  0.050000 -5.733333  8.500000  5.100000  6.966667  9.666667
+|  [1]  0.050000 -5.733333  8.500000  5.100000  6.966667  9.666667  0.050000
+|  [8] -5.733333  8.500000  5.100000  6.966667  9.666667  0.050000 -5.733333
+| [15]  8.500000  5.100000  6.966667  9.666667  0.050000 -5.733333  8.500000
+| [22]  5.100000  6.966667  9.666667  0.050000 -5.733333  8.500000  5.100000
+| [29]  6.966667  9.666667  0.050000 -5.733333  8.500000  5.100000  6.966667
+| [36]  9.666667  0.050000 -5.733333  8.500000  5.100000  6.966667  9.666667
+| [43]  0.050000 -5.733333  8.500000  5.100000  6.966667  9.666667  0.050000
+| [50] -5.733333  8.500000  5.100000  6.966667  9.666667  0.050000 -5.733333
+| [57]  8.500000  5.100000  6.966667  9.666667  0.050000 -5.733333  8.500000
+| [64]  5.100000  6.966667  9.666667
 | int integer 
-| [1]  4 -1 18 NA 11 18
+|  [1]  4 -1 18 NA 11 18  4 -1 18 NA 11 18  4 -1 18 NA 11 18  4 -1 18 NA 11 18  4
+| [26] -1 18 NA 11 18  4 -1 18 NA 11 18  4 -1 18 NA 11 18  4 -1 18 NA 11 18  4 -1
+| [51] 18 NA 11 18  4 -1 18 NA 11 18  4 -1 18 NA 11 18
 | overflow warning: NAs produced by integer overflow 
 | overflow warning: NAs produced by integer overflow 
 | overflow warning: NAs produced by integer overflow 
 | overflow integer 
-| [1]  0 -4 NA NA  5 NA
+|  [1]  0 -4 NA NA  5 NA  0 -4 NA NA  5 NA  0 -4 NA NA  5 NA  0 -4 NA NA  5 NA  0
+| [26] -4 NA NA  5 NA  0 -4 NA NA  5 NA  0 -4 NA NA  5 NA  0 -4 NA NA  5 NA  0 -4
+| [51] NA NA  5 NA  0 -4 NA NA  5 NA  0 -4 NA NA  5 NA
 | intdiv double 
-| [1] 1.5000000 0.3333333        NA        NA 6.0000000       Inf
+|  [1] 1.5000000 0.3333333        NA        NA 6.0000000       Inf 1.5000000
+|  [8] 0.3333333        NA        NA 6.0000000       Inf 1.5000000 0.3333333
+| [15]        NA        NA 6.0000000       Inf 1.5000000 0.3333333        NA
+| [22]        NA 6.0000000       Inf 1.5000000 0.3333333        NA        NA
+| [29] 6.0000000       Inf 1.5000000 0.3333333        NA        NA 6.0000000
+| [36]       Inf 1.5000000 0.3333333        NA        NA 6.0000000       Inf
+| [43] 1.5000000 0.3333333        NA        NA 6.0000000       Inf 1.5000000
+| [50] 0.3333333        NA        NA 6.0000000       Inf 1.5000000 0.3333333
+| [57]        NA        NA 6.0000000       Inf 1.5000000 0.3333333        NA
+| [64]        NA 6.0000000       Inf
 | negint integer 
-| [1]           1           5          NA          NA          -4 -2147483647
+|  [1]           1           5          NA          NA          -4 -2147483647
+|  [7]           1           5          NA          NA          -4 -2147483647
+| [13]           1           5          NA          NA          -4 -2147483647
+| [19]           1           5          NA          NA          -4 -2147483647
+| [25]           1           5          NA          NA          -4 -2147483647
+| [31]           1           5          NA          NA          -4 -2147483647
+| [37]           1           5          NA          NA          -4 -2147483647
+| [43]           1           5          NA          NA          -4 -2147483647
+| [49]           1           5          NA          NA          -4 -2147483647
+| [55]           1           5          NA          NA          -4 -2147483647
+| [61]           1           5          NA          NA          -4 -2147483647
 | abs warning: NAs produced by integer overflow 
 | abs warning: NAs produced by integer overflow 
 | abs warning: NAs produced by integer overflow 
 | abs integer 
-| [1]  2  3 NA  5  6 NA
+|  [1]  2  3 NA  5  6 NA  2  3 NA  5  6 NA  2  3 NA  5  6 NA  2  3 NA  5  6 NA  2
+| [26]  3 NA  5  6 NA  2  3 NA  5  6 NA  2  3 NA  5  6 NA  2  3 NA  5  6 NA  2  3
+| [51] NA  5  6 NA  2  3 NA  5  6 NA  2  3 NA  5  6 NA
 | compare logical 
-| [1]   NA   NA   NA   NA TRUE TRUE
+|  [1]   NA   NA   NA   NA TRUE TRUE   NA   NA   NA   NA TRUE TRUE   NA   NA   NA
+| [16]   NA TRUE TRUE   NA   NA   NA   NA TRUE TRUE   NA   NA   NA   NA TRUE TRUE
+| [31]   NA   NA   NA   NA TRUE TRUE   NA   NA   NA   NA TRUE TRUE   NA   NA   NA
+| [46]   NA TRUE TRUE   NA   NA   NA   NA TRUE TRUE   NA   NA   NA   NA TRUE TRUE
+| [61]   NA   NA   NA   NA TRUE TRUE
 | logic logical 
-| [1]  TRUE FALSE    NA  TRUE  TRUE  TRUE
+|  [1]  TRUE FALSE    NA  TRUE  TRUE  TRUE  TRUE FALSE    NA  TRUE  TRUE  TRUE
+| [13]  TRUE FALSE    NA  TRUE  TRUE  TRUE  TRUE FALSE    NA  TRUE  TRUE  TRUE
+| [25]  TRUE FALSE    NA  TRUE  TRUE  TRUE  TRUE FALSE    NA  TRUE  TRUE  TRUE
+| [37]  TRUE FALSE    NA  TRUE  TRUE  TRUE  TRUE FALSE    NA  TRUE  TRUE  TRUE
+| [49]  TRUE FALSE    NA  TRUE  TRUE  TRUE  TRUE FALSE    NA  TRUE  TRUE  TRUE
+| [61]  TRUE FALSE    NA  TRUE  TRUE  TRUE
 | not logical 
-| [1] FALSE FALSE    NA    NA  TRUE FALSE
+|  [1] FALSE FALSE    NA    NA  TRUE FALSE FALSE FALSE    NA    NA  TRUE FALSE
+| [13] FALSE FALSE    NA    NA  TRUE FALSE FALSE FALSE    NA    NA  TRUE FALSE
+| [25] FALSE FALSE    NA    NA  TRUE FALSE FALSE FALSE    NA    NA  TRUE FALSE
+| [37] FALSE FALSE    NA    NA  TRUE FALSE FALSE FALSE    NA    NA  TRUE FALSE
+| [49] FALSE FALSE    NA    NA  TRUE FALSE FALSE FALSE    NA    NA  TRUE FALSE
+| [61] FALSE FALSE    NA    NA  TRUE FALSE
 | logical integer 
-| [1]  3  0 NA  3  3  0
+|  [1]  3  0 NA  3  3  0  3  0 NA  3  3  0  3  0 NA  3  3  0  3  0 NA  3  3  0  3
+| [26]  0 NA  3  3  0  3  0 NA  3  3  0  3  0 NA  3  3  0  3  0 NA  3  3  0  3  0
+| [51] NA  3  3  0  3  0 NA  3  3  0  3  0 NA  3  3  0
 | sum_na integer 
 | [1] NA
 | sum_int_na integer 
 | [1] NA
 | sum_gt integer 
-| [1] 3
+| [1] 33
 | sum_double double 
-| [1] 9.3
+| [1] 102.3
 | sum_int integer 
-| [1] 42
+| [1] 462
 | sum_not integer 
-| [1] 3
+| [1] 33
 | sum_wide double 
-| [1] 2147483648
+| [1] 68719476736
 | any logical 
 | [1] TRUE
 | any_na logical 
@@ -65,23 +130,71 @@
 | all_na logical 
 | [1] NA
 | gbm double 
-| [1] 1.0211272 0.9727790 1.0001191 1.0425766 1.0571259 0.9331639
+|  [1] 1.0211272 0.9727790 1.0001191 1.0425766 1.0571259 0.9331639 1.0211272
+|  [8] 0.9727790 1.0001191 1.0425766 1.0571259 0.9331639 1.0211272 0.9727790
+| [15] 1.0001191 1.0425766 1.0571259 0.9331639 1.0211272 0.9727790 1.0001191
+| [22] 1.0425766 1.0571259 0.9331639 1.0211272 0.9727790 1.0001191 1.0425766
+| [29] 1.0571259 0.9331639 1.0211272 0.9727790 1.0001191 1.0425766 1.0571259
+| [36] 0.9331639 1.0211272 0.9727790 1.0001191 1.0425766 1.0571259 0.9331639
+| [43] 1.0211272 0.9727790 1.0001191 1.0425766 1.0571259 0.9331639 1.0211272
+| [50] 0.9727790 1.0001191 1.0425766 1.0571259 0.9331639 1.0211272 0.9727790
+| [57] 1.0001191 1.0425766 1.0571259 0.9331639 1.0211272 0.9727790 1.0001191
+| [64] 1.0425766 1.0571259 0.9331639
 | gbm_na double 
-| [1] 0.9875978 1.0001191 1.0127991        NA       NaN 1.0256399
+|  [1] 0.9875978 1.0001191 1.0127991        NA       NaN 1.0256399 0.9875978
+|  [8] 1.0001191 1.0127991        NA       NaN 1.0256399 0.9875978 1.0001191
+| [15] 1.0127991        NA       NaN 1.0256399 0.9875978 1.0001191 1.0127991
+| [22]        NA       NaN 1.0256399 0.9875978 1.0001191 1.0127991        NA
+| [29]       NaN 1.0256399 0.9875978 1.0001191 1.0127991        NA       NaN
+| [36] 1.0256399 0.9875978 1.0001191 1.0127991        NA       NaN 1.0256399
+| [43] 0.9875978 1.0001191 1.0127991        NA       NaN 1.0256399 0.9875978
+| [50] 1.0001191 1.0127991        NA       NaN 1.0256399 0.9875978 1.0001191
+| [57] 1.0127991        NA       NaN 1.0256399 0.9875978 1.0001191 1.0127991
+| [64]        NA       NaN 1.0256399
 | sqrt_nan warning: NaNs produced 
 | sqrt_nan warning: NaNs produced 
 | sqrt_nan warning: NaNs produced 
 | sqrt_nan double 
-| [1] 1.707107      NaN       NA      NaN      NaN 2.414214
+|  [1] 1.707107      NaN       NA      NaN      NaN 2.414214 1.707107      NaN
+|  [9]       NA      NaN      NaN 2.414214 1.707107      NaN       NA      NaN
+| [17]      NaN 2.414214 1.707107      NaN       NA      NaN      NaN 2.414214
+| [25] 1.707107      NaN       NA      NaN      NaN 2.414214 1.707107      NaN
+| [33]       NA      NaN      NaN 2.414214 1.707107      NaN       NA      NaN
+| [41]      NaN 2.414214 1.707107      NaN       NA      NaN      NaN 2.414214
+| [49] 1.707107      NaN       NA      NaN      NaN 2.414214 1.707107      NaN
+| [57]       NA      NaN      NaN 2.414214 1.707107      NaN       NA      NaN
+| [65]      NaN 2.414214
 | math double 
-| [1]   2.761096  11.991493   1.000000   3.670064   4.207513 249.382348
+|  [1]   2.761096  11.991493   1.000000   3.670064   4.207513 249.382348
+|  [7]   2.761096  11.991493   1.000000   3.670064   4.207513 249.382348
+| [13]   2.761096  11.991493   1.000000   3.670064   4.207513 249.382348
+| [19]   2.761096  11.991493   1.000000   3.670064   4.207513 249.382348
+| [25]   2.761096  11.991493   1.000000   3.670064   4.207513 249.382348
+| [31]   2.761096  11.991493   1.000000   3.670064   4.207513 249.382348
+| [37]   2.761096  11.991493   1.000000   3.670064   4.207513 249.382348
+| [43]   2.761096  11.991493   1.000000   3.670064   4.207513 249.382348
+| [49]   2.761096  11.991493   1.000000   3.670064   4.207513 249.382348
+| [55]   2.761096  11.991493   1.000000   3.670064   4.207513 249.382348
+| [61]   2.761096  11.991493   1.000000   3.670064   4.207513 249.382348
 | floor_int warning: NAs produced by integer overflow 
 | floor_int warning: NAs produced by integer overflow 
 | floor_int warning: NAs produced by integer overflow 
 | floor_int double 
-| [1]  4 -2 NA 10 12 NA
+|  [1]  4 -2 NA 10 12 NA  4 -2 NA 10 12 NA  4 -2 NA 10 12 NA  4 -2 NA 10 12 NA  4
+| [26] -2 NA 10 12 NA  4 -2 NA 10 12 NA  4 -2 NA 10 12 NA  4 -2 NA 10 12 NA  4 -2
+| [51] NA 10 12 NA  4 -2 NA 10 12 NA  4 -2 NA 10 12 NA
 | trig double 
-| [1]  0.08764102  0.25218162  0.00000000  0.49829555  0.76323912 -0.11311011
+|  [1]  0.08764102  0.25218162  0.00000000  0.49829555  0.76323912 -0.11311011
+|  [7]  0.08764102  0.25218162  0.00000000  0.49829555  0.76323912 -0.11311011
+| [13]  0.08764102  0.25218162  0.00000000  0.49829555  0.76323912 -0.11311011
+| [19]  0.08764102  0.25218162  0.00000000  0.49829555  0.76323912 -0.11311011
+| [25]  0.08764102  0.25218162  0.00000000  0.49829555  0.76323912 -0.11311011
+| [31]  0.08764102  0.25218162  0.00000000  0.49829555  0.76323912 -0.11311011
+| [37]  0.08764102  0.25218162  0.00000000  0.49829555  0.76323912 -0.11311011
+| [43]  0.08764102  0.25218162  0.00000000  0.49829555  0.76323912 -0.11311011
+| [49]  0.08764102  0.25218162  0.00000000  0.49829555  0.76323912 -0.11311011
+| [55]  0.08764102  0.25218162  0.00000000  0.49829555  0.76323912 -0.11311011
+| [61]  0.08764102  0.25218162  0.00000000  0.49829555  0.76323912 -0.11311011
 | long double 
 | [1] 1500.00000 1001.00022    1.00000    1.00000    2.56748
 | recycle warning: longer object length is not a multiple of shorter object length 
@@ -108,10 +221,25 @@
 | [1] 3 5 7
 | 
 | promise double 
-| [1] NaN  NA  NA NaN   0  15
+|  [1] NaN  NA  NA NaN   0  15 NaN  NA  NA NaN   0  15 NaN  NA  NA NaN   0  15 NaN
+| [20]  NA  NA NaN   0  15 NaN  NA  NA NaN   0  15 NaN  NA  NA NaN   0  15 NaN  NA
+| [39]  NA NaN   0  15 NaN  NA  NA NaN   0  15 NaN  NA  NA NaN   0  15 NaN  NA  NA
+| [58] NaN   0  15 NaN  NA  NA NaN   0  15
 | [1] "mine"
-| [1] 7.369979e+01 3.337327e-02 2.718282e+00 1.998196e+03 1.803374e+04
-| [6] 4.539993e-05
+|  [1] 7.369979e+01 3.337327e-02 2.718282e+00 1.998196e+03 1.803374e+04
+|  [6] 4.539993e-05 7.369979e+01 3.337327e-02 2.718282e+00 1.998196e+03
+| [11] 1.803374e+04 4.539993e-05 7.369979e+01 3.337327e-02 2.718282e+00
+| [16] 1.998196e+03 1.803374e+04 4.539993e-05 7.369979e+01 3.337327e-02
+| [21] 2.718282e+00 1.998196e+03 1.803374e+04 4.539993e-05 7.369979e+01
+| [26] 3.337327e-02 2.718282e+00 1.998196e+03 1.803374e+04 4.539993e-05
+| [31] 7.369979e+01 3.337327e-02 2.718282e+00 1.998196e+03 1.803374e+04
+| [36] 4.539993e-05 7.369979e+01 3.337327e-02 2.718282e+00 1.998196e+03
+| [41] 1.803374e+04 4.539993e-05 7.369979e+01 3.337327e-02 2.718282e+00
+| [46] 1.998196e+03 1.803374e+04 4.539993e-05 7.369979e+01 3.337327e-02
+| [51] 2.718282e+00 1.998196e+03 1.803374e+04 4.539993e-05 7.369979e+01
+| [56] 3.337327e-02 2.718282e+00 1.998196e+03 1.803374e+04 4.539993e-05
+| [61] 7.369979e+01 3.337327e-02 2.718282e+00 1.998196e+03 1.803374e+04
+| [66] 4.539993e-05
 | local_function character 
 | [1] "local"
 | [1]  TRUE FALSE

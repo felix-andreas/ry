@@ -9,7 +9,7 @@ g <- function(x, y) {
   d <- f(x) * f(y) + x
   list(a, b, c, d)
 }
-x <- c(1, 2, NA, 4); y <- c(0.5, NaN, 3, 4)
+x <- rep(c(1, 2, NA, 4), 16); y <- rep(c(0.5, NaN, 3, 4), 16)
 for (i in 1:30) r <- g(x, y)
 print(r); print(counter)
 # a redefined operator that never evaluates its operand

@@ -1,18 +1,18 @@
 # Element-wise chains inside a closure, which compiles them to one fused pass from the second
-# call on. Each runs three times, so the fused pass, its declines and its warnings all show.
+# call on. The vectors are long enough for the pass to run (it skips fewer than 64 elements). Each runs three times, so the fused pass, its declines and its warnings all show.
 three <- function(label, f) {
   for (i in 1:3) value <- withCallingHandlers(f(), warning = function(w) {
     cat(label, "warning:", conditionMessage(w), "\n"); invokeRestart("muffleWarning")
   })
   cat(label, typeof(value), "\n"); print(value)
 }
-x <- c(1.5, -2, NA, NaN, 0, 3)
-y <- c(NaN, NA, 1, 2, -1, 4)
-i <- c(1L, -2L, NA, 4L, 5L, 2147483647L)
-j <- c(2L, 3L, 4L, NA, 1L, 0L)
-l <- c(TRUE, FALSE, NA, TRUE, TRUE, FALSE)
-xs <- c(1.5, -2, 0, 3, 4, -5) * 1.1
-is <- c(1L, -2L, 7L, 4L, 5L, 9L)
+x <- rep(c(1.5, -2, NA, NaN, 0, 3), 11)
+y <- rep(c(NaN, NA, 1, 2, -1, 4), 11)
+i <- rep(c(1L, -2L, NA, 4L, 5L, 2147483647L), 11)
+j <- rep(c(2L, 3L, 4L, NA, 1L, 0L), 11)
+l <- rep(c(TRUE, FALSE, NA, TRUE, TRUE, FALSE), 11)
+xs <- rep(c(1.5, -2, 0, 3, 4, -5) * 1.1, 11)
+is <- rep(c(1L, -2L, 7L, 4L, 5L, 9L), 11)
 
 # NA and NaN keep the first operand's payload through every node.
 three("chain", function() x * y + x)
@@ -42,7 +42,7 @@ three("sum_gt", function() sum(xs > 0))
 three("sum_double", function() sum(xs * 2 + 1))
 three("sum_int", function() sum(is * 2L - 1L))
 three("sum_not", function() sum(!(xs > 0)))
-three("sum_wide", function() sum(c(2147483647L, 1L) * 1L + 0L))
+three("sum_wide", function() sum(rep(c(2147483647L, 1L), 32) * 1L + 0L))
 three("any", function() any(xs * 2 > 7))
 three("any_na", function() any(x + 1 > 2))
 three("any_overflow", function() any(i + 1L > 0L))
@@ -53,7 +53,7 @@ three("all_na", function() all(y * 0 == 0))
 # Math functions, with the "NaNs produced" warning.
 gbm <- function(mu, sigma, dt, shock) exp((mu - sigma^2 / 2) * dt + sigma * sqrt(dt) * shock)
 three("gbm", function() gbm(0.05, 0.2, 1 / 252, xs))
-three("gbm_na", function() gbm(0.05, 0.2, 1 / 252, c(-1, 0, 1, NA, NaN, 2)))
+three("gbm_na", function() gbm(0.05, 0.2, 1 / 252, rep(c(-1, 0, 1, NA, NaN, 2), 11)))
 three("sqrt_nan", function() sqrt(x - 1) + 1)
 three("math", function() sqrt(abs(xs)) * 2 + exp(-xs))
 three("floor_int", function() floor(i + 1L) * 2)

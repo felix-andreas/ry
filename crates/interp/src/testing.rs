@@ -114,14 +114,15 @@ pub fn check_bytecode_agreement(entropy: &mut impl Entropy) {
 /// and NaN payloads, the same NA on integer overflow, the same recycling and reductions.
 pub fn check_fused_agreement(entropy: &mut impl Entropy) {
     let operands = [
-        "c(1.5, NA, -2, NaN, 0, 1e308)",
-        "c(NaN, 2, NA, -0.5, 3, -1e308)",
-        "c(2147483647L, -3L, NA, 0L, 7L, -2147483647L)",
-        "c(1L, 2L, 3L, 4L, 5L, 6L)",
-        "c(TRUE, NA, FALSE, TRUE, FALSE, TRUE)",
-        "c(0.25, -4, 9, 1, 16, 100)",
+        "rep(c(1.5, NA, -2, NaN, 0, 1e308), 40)",
+        "rep(c(NaN, 2, NA, -0.5, 3, -1e308), 40)",
+        "rep(c(2147483647L, -3L, NA, 0L, 7L, -2147483647L), 40)",
+        "rep(c(1L, 2L, 3L, 4L, 5L, 6L), 40)",
+        "rep(c(TRUE, NA, FALSE, TRUE, FALSE, TRUE), 40)",
+        "rep(c(0.25, -4, 9, 1, 16, 100), 40)",
+        "rep(c(2, -1), 40)",
+        "rep(c(3L, 1L, 2L), 40)",
         "c(2, -1)",
-        "c(3L, 1L, 2L)",
         "5",
         "-2L",
     ];

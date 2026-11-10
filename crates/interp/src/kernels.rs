@@ -315,6 +315,11 @@ pub fn arithmetic_of(operator: Arith) -> Op {
 /// The most nodes, leaves included, a fused tree may have.
 pub const MAX_NODES: usize = 32;
 
+/// The shortest vector a fused tree runs on. Below it the ordinary instructions are cheaper,
+/// because the pass's fixed cost (reading the tree, typing its nodes, setting up the chunk
+/// buffers) outweighs the intermediate vectors it saves.
+const SHORTEST_FUSED: usize = 64;
+
 /// How many elements a fused tree computes at a time: each intermediate result lives in a
 /// buffer of this many elements, small enough to stay in the first-level cache.
 const CHUNK: usize = 512;
@@ -367,7 +372,7 @@ pub struct Fused {
 /// element of `a`, `b` and `c` once and writes the result once, and `sum(x > 0)` writes
 /// nothing but its total. `None` sends the expression to its unfused code, which then gives
 /// the result or the error or warning: a leaf that is not plain, lengths that differ other
-/// than by a scalar, fewer than two elements, an operand type the fused operators do not
+/// than by a scalar, fewer than [`SHORTEST_FUSED`] elements, an operand type the fused operators do not
 /// cover, and any result that would warn (integer overflow, NaN from a math function) or
 /// whose rounding the unfused builtin handles specially (a non-finite double total).
 pub unsafe fn fused(
@@ -386,7 +391,7 @@ pub unsafe fn fused(
         .map(|&leaf| leaf.length() as usize)
         .max()
         .unwrap_or(0);
-    if count < 2
+    if count < SHORTEST_FUSED
         || leaves.iter().any(|&leaf| {
             let length = leaf.length() as usize;
             length != 1 && length != count
