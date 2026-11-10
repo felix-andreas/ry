@@ -25,13 +25,13 @@ use {
         values::{List, Str},
     },
     heap::{
-        object::{Sexp, SexpType, gp},
+        object::{Sexp, SexpType, Slot, gp},
         strings::Encoding,
     },
     interp::{unwind::Unwind, values as rvalues},
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
-    std::{cell::RefCell, sync::OnceLock},
+    std::cell::RefCell,
 };
 
 /// Why a closure does not compile, for the log.
@@ -44,16 +44,29 @@ impl From<ssa::Error> for Refusal {
     }
 }
 
+/// The type of one argument a closure compiles for.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum Param {
+    /// A value the compiled code holds in one local.
+    Value(Type),
+    /// A record of layout `layout` (an id of the heap's layout table) whose fields, in the
+    /// layout's order, have these types. Each field arrives as its own parameter, so the code
+    /// never holds the record itself.
+    Record {
+        layout: u32,
+        fields: SmallVec<[Type; 4]>,
+    },
+}
+
 /// A closure compiled for one list of argument types.
 pub struct Compiled {
     pub code: Code,
-    pub params: SmallVec<[Type; 4]>,
     pub result: Type,
     /// The function lookups this code and every function it calls assume.
     pub speculations: Vec<Speculation>,
 }
 
-type Key = (Sexp, SmallVec<[Type; 4]>);
+type Key = (Sexp, SmallVec<[Param; 4]>);
 
 thread_local! {
     /// Compiled closures and refusals, by closure and argument types.
@@ -86,14 +99,18 @@ pub unsafe fn call(function: Sexp, values: &[Sexp]) -> Option<Result<Sexp, Unwin
     {
         return None;
     }
-    let mut params: SmallVec<[Type; 4]> = SmallVec::new();
+    let mut params: SmallVec<[Param; 4]> = SmallVec::new();
     for (position, &value) in values.iter().enumerate() {
+        if value.kind() == SexpType::Record {
+            params.push(record_param(value)?);
+            continue;
+        }
         // An `I64` formal converts a whole R number at the boundary, which `Arguments::push`
         // does, or gives up for the interpreter to raise the error.
         if interp::annotations::declares_i64(function, position)
             && matches!(type_of(value), Some(Type::Int | Type::Dbl | Type::I64))
         {
-            params.push(Type::I64);
+            params.push(Param::Value(Type::I64));
             continue;
         }
         let ty = type_of(value)?;
@@ -105,15 +122,15 @@ pub unsafe fn call(function: Sexp, values: &[Sexp]) -> Option<Result<Sexp, Unwin
             }
             _ => ty,
         };
-        params.push(ty);
+        params.push(Param::Value(ty));
     }
     let compiled = compiled_for(function, &params)?;
-    if matches!(compiled.result, Type::Dict { .. }) {
+    if storage(compiled.result).is_none() {
         return None;
     }
     let mut arguments = Arguments::default();
-    for (&value, &ty) in values.iter().zip(&params) {
-        if !arguments.push(value, ty) {
+    for (&value, param) in values.iter().zip(&params) {
+        if !arguments.push_param(value, param) {
             arguments.release();
             return None;
         }
@@ -138,7 +155,7 @@ pub unsafe fn call(function: Sexp, values: &[Sexp]) -> Option<Result<Sexp, Unwin
 
 /// The compiled code for calling `function` with arguments of types `params`, compiling it on
 /// first use. `None` when the closure does not compile for them.
-pub unsafe fn compiled_for(function: Sexp, params: &[Type]) -> Option<&'static Compiled> {
+pub unsafe fn compiled_for(function: Sexp, params: &[Param]) -> Option<&'static Compiled> {
     let key: Key = (function, SmallVec::from_slice(params));
     match COMPILED.with_borrow(|compiled| compiled.get(&key).copied()) {
         // A function the code calls was rebound since it compiled: compile it again.
@@ -157,13 +174,13 @@ pub unsafe fn compiled_for(function: Sexp, params: &[Type]) -> Option<&'static C
     let compiled = match result {
         Ok(compiled) => {
             interp::heap().add_global_root(function);
-            if logging() {
+            if interp::annotations::typed_logging() {
                 eprintln!("typed: compiled for {params:?} -> {:?}", compiled.result);
             }
             Some(&*Box::leak(Box::new(compiled)))
         }
         Err(Refusal(why)) => {
-            if logging() {
+            if interp::annotations::typed_logging() {
                 eprintln!("typed: no code for {params:?}: {why}");
             }
             None
@@ -200,7 +217,7 @@ unsafe fn still_resolves(compiled: &Compiled) -> bool {
     })
 }
 
-unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> {
+unsafe fn compile(function: Sexp, params: &[Param]) -> Result<Compiled, Refusal> {
     let declared = if interp::annotations::returns_i64(function) {
         Some(Type::I64)
     } else {
@@ -230,8 +247,13 @@ unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> 
     }
     let (lowered, linker) = found.ok_or(refusal)?;
     let mut ir = lowered.function;
-    let arguments: SmallVec<[Option<(SexpType, bool)>; 4]> =
-        params.iter().map(|&ty| storage(ty)).collect();
+    let arguments: SmallVec<[Option<(SexpType, bool)>; 4]> = params
+        .iter()
+        .map(|param| match param {
+            Param::Value(ty) => storage(*ty),
+            Param::Record { .. } => Some((SexpType::Record, false)),
+        })
+        .collect();
     if !interp::annotations::admits_storage(function, &arguments, storage(ir.result)) {
         return Err(Refusal("the types fail the closure's annotations"));
     }
@@ -241,7 +263,6 @@ unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> 
     speculations.extend(linker.speculations);
     Ok(Compiled {
         code,
-        params: SmallVec::from_slice(params),
         result: ir.result,
         speculations,
     })
@@ -266,7 +287,8 @@ struct Linker {
 
 impl Callees for Linker {
     unsafe fn callee(&mut self, function: Sexp, params: &[Type]) -> Result<(usize, Type), Refusal> {
-        let compiled = compiled_for(function, params)
+        let keyed: SmallVec<[Param; 4]> = params.iter().map(|&ty| Param::Value(ty)).collect();
+        let compiled = compiled_for(function, &keyed)
             .ok_or(Refusal("a typed function it calls does not compile"))?;
         // Code that calls another function directly is only right while that function's own
         // lookups hold.
@@ -305,7 +327,7 @@ fn storage(ty: Type) -> Option<(SexpType, bool)> {
         Type::Null => (SexpType::Nil, false),
         Type::Vector { item, array } => (item_storage(item), array),
         Type::List(_) => (SexpType::List, false),
-        Type::Dict { .. } => return None,
+        Type::Set(_) | Type::Dict { .. } => return None,
     })
 }
 
@@ -358,6 +380,29 @@ unsafe fn type_of(value: Sexp) -> Option<Type> {
     Some(Type::Vector { item, array })
 }
 
+/// The parameter type of a record: its layout and the type of each field. `None` for a tuple,
+/// a tag or a collection, and for a record with a field the typed core has no type for.
+unsafe fn record_param(value: Sexp) -> Option<Param> {
+    if value.attrib() != rvalues::nil()
+        || interp::records::native_kind(value) != heap::records::NativeKind::Record
+    {
+        return None;
+    }
+    let mut fields = SmallVec::new();
+    for index in 0..value.record_slot_count() {
+        fields.push(match value.record_slot(index) {
+            Slot::Handle(field) => type_of(field)?,
+            Slot::Real(_) => Type::Dbl,
+            Slot::Integer(_) => Type::Int,
+            Slot::Logical(_) => Type::Lgl,
+        });
+    }
+    Some(Param::Record {
+        layout: value.record_layout(),
+        fields,
+    })
+}
+
 unsafe fn list_type(value: Sexp, length: usize) -> Option<Type> {
     let mut item = None;
     for index in 0..length {
@@ -390,6 +435,29 @@ struct Arguments {
 }
 
 impl Arguments {
+    /// Appends `value`, of parameter type `param`, and whether converting it worked. A record
+    /// appends each of its fields.
+    unsafe fn push_param(&mut self, value: Sexp, param: &Param) -> bool {
+        let fields = match param {
+            Param::Value(ty) => return self.push(value, *ty),
+            Param::Record { fields, .. } => fields,
+        };
+        fields
+            .iter()
+            .enumerate()
+            .all(|(index, &ty)| match value.record_slot(index) {
+                Slot::Handle(field) => self.push(field, ty),
+                Slot::Real(number) => {
+                    self.words.push(number.to_bits());
+                    true
+                }
+                Slot::Integer(number) | Slot::Logical(number) => {
+                    self.words.push(number as u32 as u64);
+                    true
+                }
+            })
+    }
+
     /// Appends `value`, of type `ty`, and whether converting it worked.
     unsafe fn push(&mut self, value: Sexp, ty: Type) -> bool {
         match ty {
@@ -453,7 +521,7 @@ impl Arguments {
                 self.lists.push(list);
                 self.words.push(list as u64);
             }
-            Type::Bool | Type::Null | Type::Dict { .. } => return false,
+            Type::Bool | Type::Null | Type::Set(_) | Type::Dict { .. } => return false,
         }
         true
     }
@@ -564,8 +632,8 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
             }
             Ok(vector)
         }
-        Type::Dict { .. } => Err(interp::unwind::error(
-            "a typed function returned a dictionary",
+        Type::Set(_) | Type::Dict { .. } => Err(interp::unwind::error(
+            "a typed function returned a set or a dictionary",
         )),
     }
 }
@@ -578,7 +646,7 @@ unsafe fn charsxp_of(string: Str) -> Result<Sexp, Unwind> {
 unsafe fn drop_words(ty: Type, out: [u64; 2]) {
     match ty {
         Type::Str => values::ry_str_drop(out[0], out[1]),
-        Type::Vector { .. } | Type::List(_) | Type::Dict { .. } => {
+        Type::Vector { .. } | Type::List(_) | Type::Set(_) | Type::Dict { .. } => {
             values::ry_list_drop(out[0] as *mut List)
         }
         _ => {}
@@ -592,7 +660,3 @@ fn depth_budget() -> i64 {
     i64::from(state.max_depth) - state.frames.len() as i64
 }
 
-pub(crate) fn logging() -> bool {
-    static LOGGING: OnceLock<bool> = OnceLock::new();
-    *LOGGING.get_or_init(|| std::env::var_os("RY_TYPED_LOG").is_some())
-}

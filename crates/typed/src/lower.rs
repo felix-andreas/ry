@@ -14,14 +14,17 @@
 
 use {
     crate::{
-        Refusal,
+        Param, Refusal,
         ir::{
             Arith, BlockId, Builder, Compare, Constant, Item, Local, Math, Op, Reduce, Terminator,
             Text, Type,
         },
         values,
     },
-    heap::object::{Sexp, SexpType},
+    heap::{
+        object::{Sexp, SexpType},
+        records::Fields,
+    },
     interp::values as rvalues,
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
@@ -62,7 +65,7 @@ const MAX_NESTING: usize = 256;
 /// Lowers `closure` for arguments of `params`, assuming a recursive call returns `guess`.
 pub unsafe fn lower(
     closure: Sexp,
-    params: &[Type],
+    params: &[Param],
     guess: Type,
     callees: &mut dyn Callees,
 ) -> Result<Lowered, Refusal> {
@@ -77,11 +80,21 @@ pub unsafe fn lower(
         return Err(Refusal("the body's value may be invisible"));
     }
     let name = String::from("typed");
+    // A record's fields are parameters of their own, so the IR function's parameters are the
+    // arguments with every record spread out.
+    let mut locals: SmallVec<[Type; 8]> = SmallVec::new();
+    for param in params {
+        match param {
+            Param::Value(ty) => locals.push(*ty),
+            Param::Record { fields, .. } => locals.extend_from_slice(fields),
+        }
+    }
     let mut lowering = Lowering {
-        builder: Builder::new(name, params),
+        builder: Builder::new(name, &locals),
         closure,
         env: closure.tag(),
         params: SmallVec::from_slice(params),
+        records: Vec::new(),
         guess,
         callees,
         scopes: vec![Scope::default()],
@@ -94,14 +107,36 @@ pub unsafe fn lower(
     };
     let mut assigned = Vec::new();
     assigned_symbols(body, &mut assigned);
-    for (index, &(symbol, _)) in formals.iter().enumerate() {
+    let mut next = 0;
+    for (&(symbol, _), param) in formals.iter().zip(params) {
         if symbol == rvalues::symbols().dots {
             return Err(Refusal("a function with `...`"));
         }
-        let param = Local(index as u32);
+        let ty = match param {
+            Param::Value(ty) => *ty,
+            Param::Record { layout, fields } => {
+                if assigned.contains(&symbol) {
+                    return Err(Refusal("a record parameter the function assigns"));
+                }
+                let names = match interp::heap().layouts.get(*layout).map(|found| &found.fields) {
+                    Some(Fields::Named(names)) if names.len() == fields.len() => names,
+                    _ => return Err(Refusal("a record whose layout has no field names")),
+                };
+                let record = names
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, &name)| (name, Local((next + offset) as u32)))
+                    .collect();
+                next += fields.len();
+                lowering.records.push(record);
+                lowering.bind(symbol, Binding::Record(lowering.records.len() - 1));
+                continue;
+            }
+        };
+        let param = Local(next as u32);
+        next += 1;
         let variable = if assigned.contains(&symbol) {
             // An assigned parameter gets an owned copy, since the parameter only borrows.
-            let ty = params[index];
             lowering.builder.emit(ty, Op::Copy(param))
         } else {
             param
@@ -138,6 +173,8 @@ enum Binding {
     /// A local function: its formals, its body and the index of the scope that defines it, whose
     /// names are the only ones the body sees when it is inlined.
     Function(Sexp, Sexp, usize),
+    /// A record parameter, by index into [`Lowering::records`]. Only its fields are values.
+    Record(usize),
 }
 
 #[derive(Default)]
@@ -155,9 +192,11 @@ struct Lowering<'c> {
     builder: Builder,
     closure: Sexp,
     env: Sexp,
-    params: SmallVec<[Type; 4]>,
+    params: SmallVec<[Param; 4]>,
     guess: Type,
     callees: &'c mut dyn Callees,
+    /// The fields of each record parameter, by name, with the parameter local holding each.
+    records: Vec<SmallVec<[(Sexp, Local); 4]>>,
     /// The function's own names, then one scope per inlined function.
     scopes: Vec<Scope>,
     /// The `next` and `break` targets of the loops around the current point.
@@ -291,7 +330,7 @@ impl Lowering<'_> {
             .filter(|(symbol, _)| !saved.contains_key(symbol))
             .filter_map(|(&symbol, &binding)| match binding {
                 Binding::Value(local) => Some((symbol, local)),
-                Binding::Function(..) => None,
+                Binding::Function(..) | Binding::Record(_) => None,
             })
             .collect();
         // The join emits copies in this order, which must not depend on hashing.
@@ -350,6 +389,7 @@ impl Lowering<'_> {
         match self.lookup(symbol) {
             Some(Binding::Value(local)) => Ok(local),
             Some(Binding::Function(..)) => Err(Refusal("a local function used as a value")),
+            Some(Binding::Record(_)) => Err(Refusal("a record used whole, not by its fields")),
             None => self.library_constant(symbol),
         }
     }
@@ -411,7 +451,7 @@ impl Lowering<'_> {
     /// The variable an assignment in the current scope writes, if it exists there.
     fn lookup_assignable(&self, symbol: Sexp) -> Option<Local> {
         match self.scopes.last()?.names.get(&symbol) {
-            Some(Binding::Value(local)) if (local.0 as usize) >= self.params.len() => Some(*local),
+            Some(Binding::Value(local)) if !self.builder.function.is_param(*local) => Some(*local),
             _ => None,
         }
     }
@@ -496,7 +536,13 @@ impl Lowering<'_> {
             let values = self.call_arguments(&arguments)?;
             let types: SmallVec<[Type; 4]> =
                 values.iter().map(|&value| self.builder.ty(value)).collect();
-            let (index, result) = if function == self.closure && types[..] == self.params[..] {
+            let recursive = function == self.closure
+                && types.len() == self.params.len()
+                && types
+                    .iter()
+                    .zip(&self.params)
+                    .all(|(&ty, param)| *param == Param::Value(ty));
+            let (index, result) = if recursive {
                 (crate::lower::SELF, self.guess)
             } else {
                 self.callees.callee(function, &types)?
@@ -1322,7 +1368,18 @@ impl Lowering<'_> {
                 let a = self.value(a)?;
                 let b = self.value(b)?;
                 let and = name == "&";
-                match (self.builder.ty(a), self.builder.ty(b)) {
+                let (ta, tb) = (self.builder.ty(a), self.builder.ty(b));
+                let list = |ty: Type| matches!(ty, Type::Vector { array: true, .. });
+                let plain = |ty: Type| matches!(ty, Type::Vector { array: false, .. });
+                if (list(ta) || list(tb)) && (plain(ta) || plain(tb)) {
+                    return Err(Refusal("a logical operator on a list and an R vector"));
+                }
+                // `&` of a `List<Bool>` gives a `List<Bool>`.
+                let result = Type::Vector {
+                    item: Item::Lgl,
+                    array: list(ta) || list(tb),
+                };
+                match (ta, tb) {
                     (Type::Lgl | Type::Bool, Type::Lgl | Type::Bool) => Ok(self
                         .builder
                         .emit(Type::Lgl, if and { Op::And(a, b) } else { Op::Or(a, b) })),
@@ -1338,9 +1395,7 @@ impl Lowering<'_> {
                     ) => {
                         let a = self.as_vector(a)?;
                         let b = self.as_vector(b)?;
-                        Ok(self
-                            .builder
-                            .emit(Type::vector(Item::Lgl), Op::VectorLogic(and, a, b)))
+                        Ok(self.builder.emit(result, Op::VectorLogic(and, a, b)))
                     }
                     _ => Err(Refusal(
                         "a logical operator on something other than logicals",
@@ -1873,8 +1928,22 @@ impl Lowering<'_> {
                 };
                 let vector = self.value(vector)?;
                 let index = self.value(index)?;
-                let index = self.integer_index(index)?;
                 let ty = self.builder.ty(vector);
+                if name == "["
+                    && matches!(
+                        self.builder.ty(index),
+                        Type::Vector {
+                            item: Item::Lgl,
+                            ..
+                        }
+                    )
+                {
+                    return match ty {
+                        Type::Vector { .. } => Ok(self.builder.emit(ty, Op::Select(vector, index))),
+                        _ => Err(Refusal("a logical index into something other than a vector")),
+                    };
+                }
+                let index = self.integer_index(index)?;
                 let item = ty
                     .items()
                     .ok_or(Refusal("an index into something other than a vector"))?;
@@ -1893,6 +1962,68 @@ impl Lowering<'_> {
                 self.value(list)
             }
             "lapply" | "vapply" | "List.map" => self.map(name, &arguments),
+            "$" => {
+                let [record, field] = arguments.exactly(2)?[..] else {
+                    return Err(Refusal("a malformed `$`"));
+                };
+                let binding = (record.kind() == SexpType::Symbol)
+                    .then(|| self.lookup(record))
+                    .flatten();
+                let Some(Binding::Record(index)) = binding else {
+                    return Err(Refusal("a `$` of something other than a record parameter"));
+                };
+                self.records
+                    .get(index)
+                    .and_then(|fields| fields.iter().find(|&&(name, _)| name == field))
+                    .map(|&(_, local)| local)
+                    .ok_or(Refusal("a field the record does not have"))
+            }
+            "Set.from_list" => {
+                let [list] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal("a malformed `Set.from_list`"));
+                };
+                let list = self.value(list)?;
+                match self.builder.ty(list) {
+                    Type::Vector {
+                        item: item @ (Item::I64 | Item::Str),
+                        array: true,
+                    } => Ok(self.builder.emit(Type::Set(item), Op::Unique(list))),
+                    _ => Err(Refusal(
+                        "a `Set.from_list` of something other than a list of integers or strings",
+                    )),
+                }
+            }
+            "Set.to_list" | "Set.len" => {
+                let [set] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal("a malformed set function"));
+                };
+                let set = self.value(set)?;
+                let Type::Set(item) = self.builder.ty(set) else {
+                    return Err(Refusal("a set function of something other than a set"));
+                };
+                if name == "Set.len" {
+                    return Ok(self.builder.emit(Type::I64, Op::Length(set)));
+                }
+                // The set's items are already a list in first-insertion order.
+                let list = Type::Vector { item, array: true };
+                Ok(self.builder.emit(list, Op::Relabel(set, list)))
+            }
+            "List.sort_asc" | "List.sort_desc" => {
+                let [list] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal("a malformed sort"));
+                };
+                let list = self.value(list)?;
+                let ty = self.builder.ty(list);
+                match ty {
+                    Type::Vector {
+                        item: Item::I64 | Item::Dbl,
+                        array: true,
+                    } => Ok(self
+                        .builder
+                        .emit(ty, Op::Sort(list, name == "List.sort_desc"))),
+                    _ => Err(Refusal("a sort of something other than a list of numbers")),
+                }
+            }
             "unlist" => {
                 let [a] = arguments.exactly(1)?[..] else {
                     return Err(Refusal("an `unlist` of an unsupported form"));
@@ -2698,6 +2829,28 @@ impl Lowering<'_> {
 
     unsafe fn compare(&mut self, op: Compare, a: Local, b: Local) -> Result<Local, Refusal> {
         let (ta, tb) = (self.builder.ty(a), self.builder.ty(b));
+        let i64_list = |ty: Type| {
+            matches!(
+                ty,
+                Type::Vector {
+                    item: Item::I64,
+                    ..
+                }
+            )
+        };
+        // A `List<I64>` compares with another or with a number as `I64`s, giving a
+        // `List<Bool>`.
+        if i64_list(ta) || i64_list(tb) {
+            let a = if i64_list(ta) { a } else { self.to_i64(a)? };
+            let b = if i64_list(tb) { b } else { self.to_i64(b)? };
+            let result = Type::Vector {
+                item: Item::Lgl,
+                array: true,
+            };
+            return Ok(self
+                .builder
+                .emit(result, Op::VectorCompare(op, Item::I64, a, b)));
+        }
         // A comparison with an `I64` converts the other side as arithmetic does, and its
         // logical is never `NA`.
         if ta == Type::I64 || tb == Type::I64 {
@@ -3013,7 +3166,7 @@ pub unsafe fn resolve_value(symbol: Sexp, start: Sexp) -> Option<Speculation> {
 
 /// Logs the name a refusal is about, since the refusal itself is a fixed message.
 fn note(name: &str) {
-    if crate::logging() {
+    if interp::annotations::typed_logging() {
         eprintln!("typed: refusing `{name}`");
     }
 }

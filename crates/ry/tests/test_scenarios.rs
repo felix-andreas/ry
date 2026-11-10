@@ -70,6 +70,91 @@ fn scenarios_hold() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// The typed benchmark programs whose kernels do not run on native code yet, with what the
+/// typed core refuses in each. Every other program in `tools/bench/why/typed` must run natively.
+const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 4] = [
+    ("expr_tree", "tagged unions (`.ry_tag`)"),
+    ("orders", "records built in the kernel (`.ry_record`, `.ry_tag`)"),
+    ("report", "text building (`.ry_text`)"),
+    ("validate", "`Result.with_default` and a mapped non-local function"),
+];
+
+/// The harness's own typed functions, which read R's clock and so run in the interpreter.
+const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
+
+/// A typed benchmark program that compiles natively has to stay native: a change elsewhere in
+/// the runtime once made every warm call of a strict typed closure run in the interpreter
+/// without failing anything, only running 500 times slower. Each program runs once with
+/// `RY_TYPED_LOG`, which names every typed function a call of falls back to the interpreter.
+#[test]
+fn typed_benchmarks_run_natively() {
+    if let Some(reason) = missing_requirement(&["ry-runtime".to_owned()]) {
+        eprintln!("typed benchmarks: skipped, {reason}");
+        return;
+    }
+    let programs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/bench/why/typed");
+    let harness = fs::read_to_string(programs.join("harness.R")).expect("read the harness");
+    let mut names: Vec<String> = fs::read_dir(&programs)
+        .expect("the typed benchmark directory exists")
+        .map(|entry| entry.expect("a benchmark directory entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "R"))
+        .filter_map(|path| Some(path.file_stem()?.to_str()?.to_owned()))
+        .filter(|name| name != "harness")
+        .collect();
+    names.sort();
+    let directory = tempfile::tempdir().expect("temporary directory");
+    // Strict mode, as the benchmark runs the programs.
+    fs::copy(programs.join("ry.toml"), directory.path().join("ry.toml")).expect("copy ry.toml");
+    let mut failures = Vec::new();
+    for name in &names {
+        if TYPED_BENCHMARKS_NOT_NATIVE
+            .iter()
+            .any(|(listed, _)| listed == name)
+        {
+            continue;
+        }
+        let program = fs::read_to_string(programs.join(format!("{name}.R")))
+            .unwrap_or_else(|error| panic!("read {name}.R: {error}"));
+        let script = directory.path().join(format!("{name}.R"));
+        fs::write(&script, format!("{harness}\n{program}")).expect("write the script");
+        let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .args(["run", "--runtime", "ry"])
+            .arg(&script)
+            .current_dir(directory.path())
+            .env("RY_TYPED_LOG", "1")
+            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+            .output()
+            .expect("run ry");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            failures.push(format!("{name} failed:\n{stderr}"));
+            continue;
+        }
+        let interpreted: Vec<&str> = stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("typed: `")?.strip_suffix("` runs in the interpreter"))
+            .filter(|function| !TYPED_HARNESS_INTERPRETED.contains(function))
+            .collect();
+        if !interpreted.is_empty() {
+            let refusals: Vec<&str> = stderr
+                .lines()
+                .filter(|line| line.starts_with("typed: no code") || line.starts_with("typed: refusing"))
+                .collect();
+            failures.push(format!(
+                "{name}: {} ran in the interpreter\n{}",
+                interpreted.join(", "),
+                refusals.join("\n")
+            ));
+        }
+    }
+    for (listed, _) in TYPED_BENCHMARKS_NOT_NATIVE {
+        if !names.iter().any(|name| name == listed) {
+            failures.push(format!("{listed} is listed as not native but is not a benchmark"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
 enum Outcome {
     Passed(usize),
     Skipped(String),

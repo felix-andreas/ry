@@ -636,16 +636,15 @@ unsafe fn resolved_through(argument: Sexp, depth: u32) -> R<Option<Sexp>> {
             None => Ok(None),
         };
     }
-    // A promise over a slot frame without an environment names a placeholder that binds
-    // nothing yet, so a lookup there would find the enclosure's variable instead.
-    if argument.has_gp(gp::CHECKED_PROMISE) || argument.tag().has_gp(gp::PENDING_FRAME) {
+    if argument.has_gp(gp::CHECKED_PROMISE) {
         return Ok(None);
     }
     let code = argument.cdr();
     let value = match code.kind() {
         SexpType::Symbol if code != missing_arg() && code != symbols().dots => {
-            match crate::effects::eager_argument(code, argument.tag()) {
+            match eval::peek_variable(code, argument.tag()) {
                 Some(value) if value.kind() != SexpType::Promise => value,
+                Some(inner) if inner.car() != values::unbound() => inner.car(),
                 Some(inner) if inner != argument && depth > 0 => {
                     match resolved_through(inner, depth - 1)? {
                         Some(value) => value,
@@ -660,7 +659,8 @@ unsafe fn resolved_through(argument: Sexp, depth: u32) -> R<Option<Sexp>> {
         }
         _ => code,
     };
-    eval::settle_promise(argument, value).map(Some)
+    eval::settle_unforced(argument, value);
+    Ok(Some(value))
 }
 
 /// The values of exactly `N` arguments, all [`resolved`].
