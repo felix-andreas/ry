@@ -904,6 +904,12 @@ impl<'p> Translator<'p> {
                         None => (value, self.builder.ins().load(I64, flags(), value, LENGTH)),
                     }
                 };
+                // An empty loop binds its variable to NULL, a type the loop's slot does not
+                // take, so tier 0 runs it.
+                let none = self.builder.ins().iconst(I64, 0);
+                let nonempty = self.builder.ins().icmp(IntCC::NotEqual, count, none);
+                let empty = self.deopt(pc, before.id, None, position, reason::HANDOFF);
+                self.guard(nonempty, empty);
                 // The body must see the sequence as shared, as in the interpreter, so that
                 // modifying the variable it came from copies it.
                 self.increment(sequence);

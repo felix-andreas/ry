@@ -8627,6 +8627,17 @@ unsafe fn op_for_step(state: &mut Activation<'_, '_>, instruction: Instruction) 
         .get_mut(instruction.operand(0))
         .ok_or_else(|| error("compiled code names a loop it does not have"))?;
     if loop_state.index >= loop_state.count {
+        // R binds the variable to NULL before the first iteration, which only shows when there
+        // is none; binding it on every entry would cost a loop the scalar it overwrites in place.
+        if loop_state.count == 0 {
+            match slot {
+                Some(slot) => {
+                    crate::heap().store_slot(&mut *slot, nil());
+                    clear_missing(state, slot);
+                }
+                None => eval::define(variable, nil(), env)?,
+            }
+        }
         return Ok(Flow::Goto(instruction.operand(3)));
     }
     let sequence = instruction.input(1);

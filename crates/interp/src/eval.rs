@@ -4046,6 +4046,11 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
         }
         _ => return Err(call.error("invalid for() loop sequence")),
     };
+    // R binds the variable to NULL before the first iteration, which only shows when there is
+    // none.
+    if count == 0 {
+        define(variable, nil(), env)?;
+    }
     // The body must see the sequence as shared, so that modifying the variable it came from
     // copies it instead of changing the elements still to come.
     sequence.increment_refcount();
