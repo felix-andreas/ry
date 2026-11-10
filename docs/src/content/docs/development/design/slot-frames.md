@@ -79,7 +79,9 @@ describes it, and the open gaps are marked.
   `DOTSXP` the call collected, or the empty argument when it collected nothing.
 - **Reads and writes.** `GetVar`/`SetVar` on a numbered symbol read and write the slot while the
   header is nil, and the environment after. Builtins that only read a frame property take the
-  frame's index (`Call::frame_index`) instead of its environment.
+  frame's index (`Call::frame_index`) instead of its environment. A fused element-wise pass
+  (`fused_pass`) finds a leaf's slot by name (`Machine::slot_of`), because its leaves carry no
+  slot number, and `<<-` starts from the closure's environment, so neither reifies.
 - **Reification.** `reify` builds the environment from the slots exactly as `bind_arguments` and
   the assignments since would have: formals first with their missing flags, then each bound local.
   The slots then drop their references, the header and `Frame.env` point at the environment, and
