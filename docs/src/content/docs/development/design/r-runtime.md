@@ -1001,7 +1001,8 @@ R's vector builtins share one kernel layer in `crates/interp/src/kernels.rs`, wh
   into `x`'s buffer. Every kernel takes its destination as an argument that may be one of its
   operands, and reads that operand from the output buffer, so aliasing is exact under recycling.
   A destination of length one is never reused, because the shared `TRUE`, `FALSE` and `NA`
-  constants can look private.
+  constants can look private. An input shorter than 16 elements skips the AVX2 build, and a scalar
+  operand of a math function, a comparison or unary minus is answered without the element loop.
 - **Reductions.** `sum` on integers, `any`, `all`, `min`, `max` and `range` are SIMD kernels;
   `range` finds both bounds in one pass. `prod` and the double `sum` accumulate in x87 long double
   as GNU R does, so they keep scalar loops.
@@ -1011,7 +1012,8 @@ R's vector builtins share one kernel layer in `crates/interp/src/kernels.rs`, wh
   variable read would) and checks every operator's binding through its guard cache. It declines
   and falls through to the ordinary code on anything observable (an active binding, an attribute,
   an object, ALTREP, recycling other than scalar against equal lengths, integer overflow, a NaN
-  that a math function produced), so fused and unfused evaluation cannot be told apart. Otherwise
+  that a math function produced), so fused and unfused evaluation cannot be told apart. It also
+  declines when every leaf is a scalar, where the ordinary instructions are cheaper. Otherwise
   it runs the tree in 512-element chunks, writes only the root, and records the type feedback of
   the instructions it skipped, so the JIT, which compiles the ordinary code, sees the same types.
   A leaf may also be a call the pass cannot compute, such as `mean(x)` in `sum(x - mean(x) > 0)`,

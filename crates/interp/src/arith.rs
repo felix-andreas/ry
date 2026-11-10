@@ -1108,6 +1108,17 @@ unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
     if !matches!(op, Op::Add | Op::Subtract) {
         return Err(call.error("invalid unary operator".to_string()));
     }
+    // The usual `-1` or `-x` on a plain scalar, before the vector machinery.
+    if op == Op::Subtract && operand.length() == 1 && kernels::plain(operand) {
+        match operand.kind() {
+            SexpType::Real => return values::scalar_real(-values::reals(operand)[0]),
+            SexpType::Integer => {
+                let value = values::ints(operand)[0];
+                return values::scalar_integer(if value == NA_INTEGER { NA_INTEGER } else { -value });
+            }
+            _ => {}
+        }
+    }
     if op == Op::Subtract
         && call.reusable == Some(operand)
         && kernels::fits(operand, operand.kind(), length(operand))
@@ -2100,72 +2111,59 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
 
 // The Math group.
 
-/// The math functions an element-wise tree can apply, by their base names.
-pub const MATHS: [(Math, &str); 30] = [
-    (Math::Abs, "abs"),
-    (Math::Sign, "sign"),
-    (Math::Sqrt, "sqrt"),
-    (Math::Floor, "floor"),
-    (Math::Ceiling, "ceiling"),
-    (Math::Trunc, "trunc"),
-    (Math::Exp, "exp"),
-    (Math::Expm1, "expm1"),
-    (Math::Log1p, "log1p"),
-    (Math::Log2, "log2"),
-    (Math::Log10, "log10"),
-    (Math::Cos, "cos"),
-    (Math::Sin, "sin"),
-    (Math::Tan, "tan"),
-    (Math::Cospi, "cospi"),
-    (Math::Sinpi, "sinpi"),
-    (Math::Tanpi, "tanpi"),
-    (Math::Acos, "acos"),
-    (Math::Asin, "asin"),
-    (Math::Atan, "atan"),
-    (Math::Cosh, "cosh"),
-    (Math::Sinh, "sinh"),
-    (Math::Tanh, "tanh"),
-    (Math::Acosh, "acosh"),
-    (Math::Asinh, "asinh"),
-    (Math::Atanh, "atanh"),
-    (Math::Gamma, "gamma"),
-    (Math::Lgamma, "lgamma"),
-    (Math::Digamma, "digamma"),
-    (Math::Trigamma, "trigamma"),
-];
+macro_rules! math_functions {
+    ($($variant:ident = $name:literal),* $(,)?) => {
+        /// The math functions an element-wise tree can apply, by their base names. A function's
+        /// position here is its index in a fusion program.
+        pub const MATHS: [(Math, &str); [$(Math::$variant),*].len()] = [$((Math::$variant, $name)),*];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Math {
-    Abs,
-    Sign,
-    Sqrt,
-    Floor,
-    Ceiling,
-    Trunc,
-    Exp,
-    Expm1,
-    Log1p,
-    Log2,
-    Log10,
-    Cos,
-    Sin,
-    Tan,
-    Cospi,
-    Sinpi,
-    Tanpi,
-    Acos,
-    Asin,
-    Atan,
-    Cosh,
-    Sinh,
-    Tanh,
-    Acosh,
-    Asinh,
-    Atanh,
-    Gamma,
-    Lgamma,
-    Digamma,
-    Trigamma,
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        pub enum Math {
+            $($variant),*
+        }
+
+        /// The position in [`MATHS`] of the math function called `name`. A `match` on the name
+        /// rather than a scan of the table, since the compiler asks this of every call it sees.
+        pub fn math_index(name: &str) -> Option<usize> {
+            match name {
+                $($name => Some(Math::$variant as usize),)*
+                _ => None,
+            }
+        }
+    };
+}
+
+math_functions! {
+    Abs = "abs",
+    Sign = "sign",
+    Sqrt = "sqrt",
+    Floor = "floor",
+    Ceiling = "ceiling",
+    Trunc = "trunc",
+    Exp = "exp",
+    Expm1 = "expm1",
+    Log1p = "log1p",
+    Log2 = "log2",
+    Log10 = "log10",
+    Cos = "cos",
+    Sin = "sin",
+    Tan = "tan",
+    Cospi = "cospi",
+    Sinpi = "sinpi",
+    Tanpi = "tanpi",
+    Acos = "acos",
+    Asin = "asin",
+    Atan = "atan",
+    Cosh = "cosh",
+    Sinh = "sinh",
+    Tanh = "tanh",
+    Acosh = "acosh",
+    Asinh = "asinh",
+    Atanh = "atanh",
+    Gamma = "gamma",
+    Lgamma = "lgamma",
+    Digamma = "digamma",
+    Trigamma = "trigamma",
 }
 
 pub fn math_value(function: Math, x: f64) -> f64 {

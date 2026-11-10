@@ -45,7 +45,7 @@
 use {
     crate::{
         Interp,
-        arith::MATHS,
+        arith::{MATHS, math_index},
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
         conditions, dispatch, effects,
         eval::{self, SwitchSelector, as_condition},
@@ -2124,11 +2124,14 @@ impl Compiler {
             return Ok(plan.call_leaf(expression));
         }
         let name = symbol_name(head);
-        let arith = ARITHS
-            .iter()
-            .find(|(_, operator)| *operator == name)
+        // The operators are all short and start with punctuation, which rules out the table scan
+        // for most of the calls the compiler sees.
+        let operator = name.len() <= 3 && name.bytes().next().is_some_and(|byte| byte.is_ascii_punctuation());
+        let arith = operator
+            .then(|| ARITHS.iter().find(|(_, operator)| *operator == name))
+            .flatten()
             .map(|(arith, _)| *arith);
-        let math = MATHS.iter().position(|(_, function)| *function == name);
+        let math = if operator { None } else { math_index(&name) };
         if arith.is_none() && math.is_none() && !matches!(&*name, "(" | "&" | "|" | "!") {
             return Ok(plan.call_leaf(expression));
         }

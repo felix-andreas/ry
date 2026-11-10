@@ -105,6 +105,19 @@ pub unsafe fn binary(
     } else {
         SexpType::Real
     };
+    if count == 1
+        && let Some(comparison) = comparison
+    {
+        // R's shared `TRUE`, `FALSE` and `NA` hold a scalar result, so the comparison goes
+        // through a stack buffer instead of a vector.
+        let mut output = [0];
+        if both_integral {
+            compare_integers(comparison, Some(integers(left)), Some(integers(right)), &mut output);
+        } else {
+            compare_reals(comparison, reals(left), reals(right), &mut output);
+        }
+        return Ok(Some(values::scalar_logical(output[0])?));
+    }
     let result = match destination {
         Some(destination) if fits(destination, kind, count) => destination,
         _ => values::alloc_uninit(kind, count)?,
@@ -124,9 +137,6 @@ pub unsafe fn binary(
             let fresh = values::alloc_uninit(SexpType::Logical, count)?;
             compare_reals(comparison, self::reals(left), self::reals(right), values::ints_mut(fresh));
             return Ok(Some(fresh));
-        }
-        if count == 1 {
-            return Ok(Some(values::scalar_logical(output[0])?));
         }
         return Ok(Some(result));
     }
@@ -178,6 +188,16 @@ pub unsafe fn unary(
     } else {
         SexpType::Real
     };
+    // A scalar result is never written into a destination (see [`fits`]), and the element loop
+    // costs more than the one value.
+    if count == 1 && kind == SexpType::Real {
+        let value = arith::real_at(operand, 0);
+        let result = if is_na_real(value) { NA_REAL } else { arith::math_value(function, value) };
+        if result.is_nan() && !value.is_nan() {
+            conditions::warning_call(call, "NaNs produced")?;
+        }
+        return Ok(Some(values::scalar_real(result)?));
+    }
     let result = match destination {
         Some(destination) if fits(destination, kind, count) => destination,
         _ => values::alloc_uninit(kind, count)?,
@@ -800,12 +820,20 @@ macro_rules! integer_reader {
 
 // The kernels. `multiversion!` compiles each body for AVX2 and for the baseline.
 
+/// The input length from which a kernel runs its AVX2 build.
+const WIDE_FROM: usize = 16;
+
 macro_rules! multiversion {
-    ($(#[$meta:meta])* pub fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
+    (($length:ident) $(#[$meta:meta])* pub fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
         $(#[$meta])*
         pub fn $name($($arg: $ty),*) $(-> $ret)? {
             #[inline(always)]
             fn body($($arg: $ty),*) $(-> $ret)? $body
+            // A short input gains nothing from wide registers, and the call into the AVX2 build
+            // costs more than the work on a scalar.
+            if $length.len() < WIDE_FROM {
+                return body($($arg),*);
+            }
             #[cfg(target_arch = "x86_64")]
             {
                 #[target_feature(enable = "avx2")]
@@ -823,6 +851,7 @@ macro_rules! multiversion {
 }
 
 multiversion! {
+    (output)
     /// `left op right` element by element into `output`, as doubles. An operand that is `None`
     /// is the double vector `output` holds on entry.
     pub fn real_arithmetic(op: Op, left: Option<Reals<'_>>, right: Option<Reals<'_>>, output: &mut [f64]) {
@@ -831,6 +860,7 @@ multiversion! {
 }
 
 multiversion! {
+    (output)
     /// `left op right` on integers for `+`, `-`, `*`, `%%` and `%/%`, `NA` where either side is
     /// `NA`, a divisor is zero or a result leaves the integer range. Returns whether a result
     /// overflowed, which R warns about. An operand that is `None` is the vector `output` holds
@@ -841,6 +871,7 @@ multiversion! {
 }
 
 multiversion! {
+    (output)
     /// Compares two numeric operands as doubles, `NA` wherever either side is NaN.
     pub fn compare_reals(comparison: Comparison, left: Reals<'_>, right: Reals<'_>, output: &mut [i32]) {
         macro_rules! compare {
@@ -862,6 +893,7 @@ multiversion! {
 }
 
 multiversion! {
+    (output)
     /// Compares two integer or logical operands, `NA` wherever either side is `NA`. An operand
     /// that is `None` is the logical vector `output` holds on entry.
     pub fn compare_integers(comparison: Comparison, left: Option<Integers<'_>>, right: Option<Integers<'_>>, output: &mut [i32]) {
@@ -884,6 +916,7 @@ multiversion! {
 }
 
 multiversion! {
+    (output)
     /// `&` (`is_and`) or `|` on logicals: `FALSE & NA` is `FALSE` and `TRUE | NA` is `TRUE`.
     /// An operand that is `None` is the logical vector `output` holds on entry.
     pub fn logic(is_and: bool, left: Option<Integers<'_>>, right: Option<Integers<'_>>, output: &mut [i32]) {
@@ -892,6 +925,7 @@ multiversion! {
 }
 
 multiversion! {
+    (output)
     /// `!` on logicals; with `source` `None`, `output` holds the operand on entry.
     pub fn not(source: Option<&[i32]>, output: &mut [i32]) {
         map1(source, output, |x| if x == NA_LOGICAL { NA_LOGICAL } else { 1 - x });
@@ -899,6 +933,7 @@ multiversion! {
 }
 
 multiversion! {
+    (output)
     /// Unary minus on integers; with `source` `None`, `output` holds the operand on entry.
     pub fn negate_integers(source: Option<&[i32]>, output: &mut [i32]) {
         map1(source, output, |x| if x == NA_INTEGER { NA_INTEGER } else { -x });
@@ -906,6 +941,7 @@ multiversion! {
 }
 
 multiversion! {
+    (output)
     /// `abs` on integers or logicals; with `source` `None`, `output` holds the operand on entry.
     pub fn abs_integers(source: Option<&[i32]>, output: &mut [i32]) {
         map1(source, output, |x| if x == NA_INTEGER { NA_INTEGER } else { x.abs() });
@@ -913,6 +949,7 @@ multiversion! {
 }
 
 multiversion! {
+    (output)
     /// Unary minus on doubles; with `source` `None`, `output` holds the operand on entry.
     pub fn negate_reals(source: Option<&[f64]>, output: &mut [f64]) {
         map1(source, output, |x: f64| -x);
@@ -920,6 +957,7 @@ multiversion! {
 }
 
 multiversion! {
+    (output)
     /// A function of the `Math` group on each element, `NA` staying `NA`. With `source` `None`,
     /// `output` holds the operand on entry. Returns whether a NaN came out of a value that was not
     /// NaN, which R warns about.
@@ -939,6 +977,7 @@ multiversion! {
 }
 
 multiversion! {
+    (values)
     /// The total of integers or logicals in 64 bits, or `None` when one is `NA` and `na_rm` is
     /// false. With `na_rm`, an `NA` counts as nothing.
     pub fn sum_integers(values: &[i32], na_rm: bool) -> Option<i64> {
@@ -954,10 +993,23 @@ multiversion! {
 }
 
 multiversion! {
+    (values)
     /// `any` (`is_any`) or `all` over logicals or integers, as R's three-valued logic gives
     /// them: a nonzero integer is `TRUE`.
     pub fn any_all(is_any: bool, values: &[i32]) -> i32 {
-        // The decisive value ends the scan, a block at a time so the block's loop vectorizes.
+        // The decisive value ends the scan: on a short input at once, on a long one a block at a
+        // time so the block's loop vectorizes.
+        if values.len() < WIDE_FROM {
+            let mut missing = false;
+            for &value in values {
+                if value == NA_LOGICAL {
+                    missing = true;
+                } else if (value != 0) == is_any {
+                    return i32::from(is_any);
+                }
+            }
+            return if missing { NA_LOGICAL } else { i32::from(!is_any) };
+        }
         let mut missing = false;
         for block in values.chunks(1024) {
             let mut found = false;
@@ -986,6 +1038,7 @@ pub struct Extremes<T> {
 }
 
 multiversion! {
+    (values)
     /// The extremes of integers or logicals, `NA` aside.
     pub fn integer_extremes(values: &[i32]) -> Extremes<i32> {
         let (mut least, mut greatest) = (i32::MAX, i32::MIN);
@@ -1006,6 +1059,7 @@ multiversion! {
 }
 
 multiversion! {
+    (values)
     /// The extremes of doubles, NaNs aside. Of a `0` and a `-0`, which compare equal, the one
     /// that comes first is the extreme, as GNU R's `min` and `max` keep the first of equal values.
     pub fn real_extremes(values: &[f64]) -> Extremes<f64> {
