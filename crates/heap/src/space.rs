@@ -234,6 +234,22 @@ impl Space {
         self.refill(class)
     }
 
+    /// [`Space::allocate`] without the refill: the next slot of the cursor's current run, or
+    /// `None` when the run is used up. It makes no call, so an interpreter fast path that
+    /// allocates through it needs no stack frame and leaves the refill to its slow path.
+    #[inline(always)]
+    pub fn allocate_from_run(&mut self, class: usize) -> Option<NonNull<u8>> {
+        let cursor = &mut self.cursors[class];
+        let slot = cursor.next;
+        if slot == cursor.end {
+            return None;
+        }
+        // SAFETY: as in `allocate`.
+        cursor.next = unsafe { slot.add(SLOT_SIZES[class]) };
+        // SAFETY: as in `allocate`.
+        Some(unsafe { NonNull::new_unchecked(slot) })
+    }
+
     /// Claims the cursor's next run of free slots, moving to another page when its page has
     /// none left, and hands out the run's first slot.
     #[cold]
