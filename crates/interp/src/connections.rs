@@ -37,7 +37,7 @@ use {
         borrow::Cow,
         ffi::{CStr, CString, c_char, c_int, c_void},
         fs::{File, OpenOptions},
-        io::{BufReader, Read, Seek, SeekFrom, Write},
+        io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
         net::{Ipv4Addr, TcpListener, TcpStream, ToSocketAddrs},
         path::PathBuf,
         ptr::null_mut,
@@ -2939,6 +2939,51 @@ pub(crate) unsafe fn read_all(con: Rconnection, buffer: &mut [u8]) -> R<usize> {
     Ok(filled)
 }
 
+/// The bytes a binary connection has read ahead of its position, without consuming them, or
+/// `None` when its device keeps no such buffer or has nothing buffered. [`consume`] then moves
+/// the position past the bytes the caller used, so a reader that takes a few bytes at a time
+/// skips the per-read dispatch and still leaves the connection exactly after what it read.
+/// An empty slice means the input is exhausted.
+pub(crate) unsafe fn peek<'a>(con: Rconnection) -> R<Option<&'a [u8]>> {
+    if !is_method(
+        (*con).read.ok_or_else(|| missing("read"))?,
+        builtin_read as ReadMethod,
+    ) {
+        return Ok(None);
+    }
+    Ok(match device(con)? {
+        Device::File(file) => match &mut file.stream {
+            Some(Stream::Inflate(inflate)) if !file.invalid_input => {
+                Some(inflate.reader.fill_buf().map_err(io_error)?)
+            }
+            _ => None,
+        },
+        Device::Raw(RawDevice { data, position })
+        | Device::Loaded(LoadedDevice { data, position, .. })
+        | Device::Gzcon(GzconDevice { data, position, .. }) => {
+            Some(data.get(*position..).unwrap_or_default())
+        }
+        _ => None,
+    })
+}
+
+/// Moves `con` past `count` bytes of what [`peek`] returned.
+pub(crate) unsafe fn consume(con: Rconnection, count: usize) -> R<()> {
+    match device(con)? {
+        Device::File(file) => {
+            if let Some(Stream::Inflate(inflate)) = &mut file.stream {
+                inflate.reader.consume(count);
+                inflate.position += count as u64;
+            }
+        }
+        Device::Raw(RawDevice { position, .. })
+        | Device::Loaded(LoadedDevice { position, .. })
+        | Device::Gzcon(GzconDevice { position, .. }) => *position += count,
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Writes every byte, as `R_WriteConnection` callers expect.
 unsafe fn write_all(con: Rconnection, bytes: &[u8]) -> R<()> {
     if !bytes.is_empty() {
@@ -3601,7 +3646,8 @@ struct PlainFile {
 
 /// A file read through gzip decompression when it starts with gzip's magic bytes.
 struct Inflate {
-    reader: Box<dyn Read>,
+    /// Buffered, so [`peek`] can lend out the decoded bytes.
+    reader: Box<dyn BufRead>,
     path: PathBuf,
     position: u64,
 }
@@ -4110,7 +4156,7 @@ fn decoder<'a>(
 /// A decompressing reader that reads an uncompressed file as it is, as GNU R's gzfile does.
 fn open_inflate(path: &PathBuf) -> std::io::Result<Inflate> {
     let file = BufReader::new(File::open(path)?);
-    let reader: Box<dyn Read> = match file_compression(path)? {
+    let reader: Box<dyn BufRead> = match file_compression(path)? {
         // `unserialize` reads a few bytes at a time, and each read straight from a decoder pays
         // for a checksum update and a decoder step, so the decoded bytes are buffered.
         Some(compression) => Box::new(BufReader::with_capacity(

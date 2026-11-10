@@ -130,7 +130,21 @@ struct Bindings {
 
 union Storage {
     inline: [MaybeUninit<Binding>; INLINE_BINDINGS],
-    heap: *mut Binding,
+    heap: Spilled,
+}
+
+/// A spilled frame's slots, and the bookkeeping that only a large frame needs, kept in the inline
+/// buffer it no longer uses so that it costs the environment object nothing.
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct Spilled {
+    /// First, because machine code loads it from [`layout::STORAGE`].
+    slots: *mut Binding,
+    /// How many leading slots held only old cells when a minor collection last scanned this
+    /// frame as a remembered parent. Slots are appended, so a later young cell lands at or past
+    /// it, and a minor collection rescans only the tail. Compaction moves cells down and resets
+    /// it to 0.
+    scanned: u32,
 }
 
 impl Bindings {
@@ -152,7 +166,7 @@ impl Bindings {
         // SAFETY: the capacity says which union field is live.
         unsafe {
             if self.spilled() {
-                self.storage.heap
+                self.storage.heap.slots
             } else {
                 self.storage.inline.as_ptr().cast()
             }
@@ -163,7 +177,7 @@ impl Bindings {
         // SAFETY: as in `data`.
         unsafe {
             if self.spilled() {
-                self.storage.heap
+                self.storage.heap.slots
             } else {
                 self.storage.inline.as_mut_ptr().cast()
             }
@@ -197,8 +211,12 @@ impl Bindings {
                 handle_alloc_error(layout);
             }
             std::ptr::copy_nonoverlapping(self.data(), data, self.length as usize);
+            let scanned = self.scanned() as u32;
             self.release();
-            self.storage.heap = data;
+            self.storage.heap = Spilled {
+                slots: data,
+                scanned,
+            };
         }
         self.capacity = capacity;
     }
@@ -209,7 +227,25 @@ impl Bindings {
             let layout = Layout::array::<Binding>(self.capacity as usize)
                 .expect("a frame's layout was valid when it grew");
             // SAFETY: the slots were allocated with this layout in `grow`.
-            unsafe { dealloc(self.storage.heap.cast(), layout) };
+            unsafe { dealloc(self.storage.heap.slots.cast(), layout) };
+        }
+    }
+
+    /// See [`Spilled::scanned`]. An inline frame is small enough to rescan whole.
+    fn scanned(&self) -> usize {
+        // SAFETY: the capacity says which union field is live.
+        unsafe {
+            if self.spilled() {
+                self.storage.heap.scanned as usize
+            } else {
+                0
+            }
+        }
+    }
+
+    fn set_scanned(&mut self, scanned: u32) {
+        if self.spilled() {
+            self.storage.heap.scanned = scanned;
         }
     }
 
@@ -227,6 +263,7 @@ impl Bindings {
             }
         }
         self.length = kept as u32;
+        self.set_scanned(0);
     }
 }
 
@@ -283,6 +320,29 @@ impl Frame {
 
     pub fn cells(&self) -> impl Iterator<Item = Sexp> + '_ {
         self.live().map(|binding| binding.cell)
+    }
+
+    /// The cells a minor collection must mark in this frame as a remembered parent: those past
+    /// the slots it found old last time (see [`Spilled::scanned`]).
+    pub(crate) fn unscanned_cells(&self) -> impl Iterator<Item = Sexp> + '_ {
+        self.bindings[self.bindings.scanned()..]
+            .iter()
+            .filter(|binding| binding.symbol != REMOVED)
+            .map(|binding| binding.cell)
+    }
+
+    /// The cells [`Frame::unscanned_cells`] leaves out.
+    pub(crate) fn scanned_cells(&self) -> impl Iterator<Item = Sexp> + '_ {
+        self.bindings[..self.bindings.scanned()]
+            .iter()
+            .filter(|binding| binding.symbol != REMOVED)
+            .map(|binding| binding.cell)
+    }
+
+    /// Records that every cell now in the frame is marked and survives the collection under way.
+    pub(crate) fn mark_scanned(&mut self) {
+        let length = self.bindings.length;
+        self.bindings.set_scanned(length);
     }
 
     pub fn symbols(&self) -> impl Iterator<Item = Sexp> + '_ {
