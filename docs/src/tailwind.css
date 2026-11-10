@@ -37,3 +37,53 @@ actually wants.
 .markdown-wrapper > .sl-markdown-content > :first-child {
 	margin-top: 0;
 }
+
+/*
+The theme caps the text column at 40rem, which leaves code blocks and tables cramped on a desktop
+screen. 48rem keeps prose lines readable and gives most tables and diagnostics room without a
+scrollbar. The theme sets the cap twice, once as a variable and once on the main pane.
+*/
+:root {
+	--sl-content-width: 48rem;
+}
+[data-has-sidebar][data-has-toc] .main-pane {
+	max-width: 48rem;
+}
+
+/*
+Tables are dense, striped and ruled on both axes, so a row of numbers reads across without the eye
+drifting to the next line. Numbers line up because every digit has the same width, and a number never
+breaks away from its unit.
+*/
+.sl-markdown-content table:not(:where(.not-content *)) {
+	width: fit-content;
+	max-width: 100%;
+	border-collapse: collapse;
+	font-size: var(--sl-text-sm);
+	line-height: 1.45;
+	font-variant-numeric: tabular-nums;
+}
+.sl-markdown-content :is(th, td):not(:where(.not-content *)) {
+	border: 1px solid var(--sl-color-gray-6);
+	padding: 0.3rem 0.65rem;
+}
+.sl-markdown-content :is(th:first-child, td:first-child):not(:where(.not-content *)) {
+	padding-inline-start: 0.65rem;
+}
+.sl-markdown-content :is(th:last-child, td:last-child):not(:where(.not-content *)) {
+	padding-inline-end: 0.65rem;
+}
+.sl-markdown-content thead th:not(:where(.not-content *)) {
+	background: var(--sl-color-gray-7);
+	vertical-align: bottom;
+}
+.sl-markdown-content tbody tr:nth-child(even):not(:where(.not-content *)) {
+	background: color-mix(in oklab, var(--sl-color-gray-7) 55%, transparent);
+}
+.sl-markdown-content :is(td, th):is([align='right'], [style*='right']):not(:where(.not-content *)) {
+	text-align: right;
+	white-space: nowrap;
+}
+.sl-markdown-content td code:not(:where(.not-content *)) {
+	white-space: nowrap;
+}

@@ -66,7 +66,7 @@ The editor offers the same fixes as quick fixes.
 `--annotate` writes the inferred type of each unannotated top-level function and binding in the
 named files, inline or as a `#:` comment as [`inline-annotations`](/reference/configuration#inline-annotations)
 says, prints how many it added, and then reports what is left.
-[Strict mode](/tutorial/fully-typed#strict-mode) shows it at work. A binding
+[Strict mode](/guide#strict-mode) shows it at work. A binding
 whose type inference cannot write down, such as one involving `Unknown`, is skipped.
 
 ### The check cache
@@ -146,8 +146,8 @@ stops a script with exit status 1, as with `Rscript`, and so does `q(status = 1)
 only what the script prints, with no startup banner.
 
 Before anything runs, both commands check the script, and the console checks each command, against
-the project's `ry.toml`. They print the [inline annotation](/tutorial/runtime#inline-annotations)
-warnings, and in [strict mode](/tutorial/fully-typed#strict-mode) they print every error and refuse code
+the project's `ry.toml`. They print the [inline annotation](/guide#inline-annotations)
+warnings, and in [strict mode](/guide#strict-mode) they print every error and refuse code
 that has one.
 
 The runtimes differ in what they do with the annotations. ry's runtime turns them into [checks at

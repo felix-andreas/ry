@@ -115,7 +115,7 @@ and hovering one shows its type. A path computed at run time, or a file the proj
 gives a `DataFrame` whose columns are unknown, so nothing about them is checked. Annotate the
 variable to give it its columns, as in
 `sales: DataFrame{region: character, units: integer, price: double} <- DataFrame.read_csv(path)`.
-In [strict mode](/tutorial/fully-typed#strict-mode), a query that names a column of a frame whose columns
+In [strict mode](/guide#strict-mode), a query that names a column of a frame whose columns
 are unknown is an error.
 
 ## Expressions

@@ -2223,7 +2223,7 @@ impl Decoder<'_, '_> {
                 heap.root(map);
                 let names = self.value(depth + 1)?;
                 heap.root(names);
-                let slots = alloc(SexpType::List, 3)?;
+                let slots = alloc(SexpType::List, 4)?;
                 heap.set_element(slots, 0, map);
                 heap.set_element(slots, 1, names);
                 slots
@@ -2288,6 +2288,7 @@ impl Decoder<'_, '_> {
             let constant = self.value(depth + 1)?;
             heap.set_element(constants, FIRST_CONSTANT + index, constant);
         }
+        crate::bytecode::index_slots(words, constants)?;
         let inline_caches = alloc(SexpType::List, caches * 2)?;
         heap.root(inline_caches);
         heap.mark_weak_pairs(inline_caches);
