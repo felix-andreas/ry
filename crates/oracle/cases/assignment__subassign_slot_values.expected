@@ -1,0 +1,214 @@
+[stdout]
+| round 1 
+| List of 2
+|  $ x: num [1:3] 0 2 3
+|  $ y: num [1:3] 1 2 3
+| List of 2
+|  $ x:List of 3
+|   ..$ a: num 10
+|   ..$ b: chr "three"
+|   ..$ c: logi TRUE
+|  $ y:List of 2
+|   ..$ a: num 1
+|   ..$ b: chr "two"
+| [1]   1  99 100   4
+| [1] 1 2 3 4
+| List of 3
+|  $ : num [1:3] 2 4 6
+|  $ : chr [1:3] "a" "b" "c"
+|  $ :List of 3
+|   ..$ a: int 1
+|   ..$ b: int 2
+|   ..$ c: int 3
+| List of 2
+|  $ : num 1
+|  $ :List of 2
+|   ..$ : num 1
+|   ..$ : num 2
+| [[1]]
+|      [,1] [,2] [,3]
+| [1,]    1    0    5
+| [2,]    2    4    6
+| 
+| [[2]]
+|      [,1] [,2] [,3]
+| [1,]    1    3    5
+| [2,]    2    4    6
+| 
+| [1] a a a
+| Levels: a b
+| [[1]]
+| [1] "1"   "b"   "3"   "2.5"
+| 
+| [[2]]
+| [1] 1 2 3
+| 
+| warning: number of items to replace is not a multiple of replacement length 
+| frame has x: TRUE 
+| [1]  1  2 30  4
+| `[[<-`(`*tmp*`, 5:6, value = 1L)
+| [1] "attempt to select less than one element in OneIndex <real>"
+| [1] -1  6  5  6
+| List of 5
+|  $ x: Named num [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "p" "q"
+|   ..- attr(*, "note")= chr "kept"
+|  $ y: Named num [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "a" "b"
+|  $ v: int [1:2, 1:2] 1 2 3 4
+|  $ z: int [1:2] 1 2
+|   ..- attr(*, "levels")= chr [1:2] "lo" "hi"
+|  $ w: Named int [1:2] 1 2
+|   ..- attr(*, "levels")= chr [1:2] "lo" "hi"
+|   ..- attr(*, "names")= chr [1:2] "m" "n"
+| [1] 1 2 3 4
+| List of 2
+|  $ : Named int [1:3] 1 20 3
+|   ..- attr(*, "names")= chr [1:3] "a" "b" "c"
+|  $ : int [1:3] 1 2 3
+|   a   b 
+| "a" "b" 
+| round 2 
+| List of 2
+|  $ x: num [1:3] 0 2 3
+|  $ y: num [1:3] 1 2 3
+| List of 2
+|  $ x:List of 3
+|   ..$ a: num 10
+|   ..$ b: chr "three"
+|   ..$ c: logi TRUE
+|  $ y:List of 2
+|   ..$ a: num 1
+|   ..$ b: chr "two"
+| [1]   1  99 100   4
+| [1] 1 2 3 4
+| List of 3
+|  $ : num [1:3] 2 4 6
+|  $ : chr [1:3] "a" "b" "c"
+|  $ :List of 3
+|   ..$ a: int 1
+|   ..$ b: int 2
+|   ..$ c: int 3
+| List of 2
+|  $ : num 1
+|  $ :List of 2
+|   ..$ : num 1
+|   ..$ : num 2
+| [[1]]
+|      [,1] [,2] [,3]
+| [1,]    1    0    5
+| [2,]    2    4    6
+| 
+| [[2]]
+|      [,1] [,2] [,3]
+| [1,]    1    3    5
+| [2,]    2    4    6
+| 
+| [1] a a a
+| Levels: a b
+| [[1]]
+| [1] "1"   "b"   "3"   "2.5"
+| 
+| [[2]]
+| [1] 1 2 3
+| 
+| warning: number of items to replace is not a multiple of replacement length 
+| frame has x: TRUE 
+| [1]  1  2 30  4
+| `[[<-`(`*tmp*`, 5:6, value = 1L)
+| [1] "attempt to select less than one element in OneIndex <real>"
+| [1] -1  6  5  6
+| List of 5
+|  $ x: Named num [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "p" "q"
+|   ..- attr(*, "note")= chr "kept"
+|  $ y: Named num [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "a" "b"
+|  $ v: int [1:2, 1:2] 1 2 3 4
+|  $ z: int [1:2] 1 2
+|   ..- attr(*, "levels")= chr [1:2] "lo" "hi"
+|  $ w: Named int [1:2] 1 2
+|   ..- attr(*, "levels")= chr [1:2] "lo" "hi"
+|   ..- attr(*, "names")= chr [1:2] "m" "n"
+| [1] 1 2 3 4
+| List of 2
+|  $ : Named int [1:3] 1 20 3
+|   ..- attr(*, "names")= chr [1:3] "a" "b" "c"
+|  $ : int [1:3] 1 2 3
+|   a   b 
+| "a" "b" 
+| round 3 
+| List of 2
+|  $ x: num [1:3] 0 2 3
+|  $ y: num [1:3] 1 2 3
+| List of 2
+|  $ x:List of 3
+|   ..$ a: num 10
+|   ..$ b: chr "three"
+|   ..$ c: logi TRUE
+|  $ y:List of 2
+|   ..$ a: num 1
+|   ..$ b: chr "two"
+| [1]   1  99 100   4
+| [1] 1 2 3 4
+| List of 3
+|  $ : num [1:3] 2 4 6
+|  $ : chr [1:3] "a" "b" "c"
+|  $ :List of 3
+|   ..$ a: int 1
+|   ..$ b: int 2
+|   ..$ c: int 3
+| List of 2
+|  $ : num 1
+|  $ :List of 2
+|   ..$ : num 1
+|   ..$ : num 2
+| [[1]]
+|      [,1] [,2] [,3]
+| [1,]    1    0    5
+| [2,]    2    4    6
+| 
+| [[2]]
+|      [,1] [,2] [,3]
+| [1,]    1    3    5
+| [2,]    2    4    6
+| 
+| [1] a a a
+| Levels: a b
+| [[1]]
+| [1] "1"   "b"   "3"   "2.5"
+| 
+| [[2]]
+| [1] 1 2 3
+| 
+| warning: number of items to replace is not a multiple of replacement length 
+| frame has x: TRUE 
+| [1]  1  2 30  4
+| `[[<-`(`*tmp*`, 5:6, value = 1L)
+| [1] "attempt to select less than one element in OneIndex <real>"
+| [1] -1  6  5  6
+| List of 5
+|  $ x: Named num [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "p" "q"
+|   ..- attr(*, "note")= chr "kept"
+|  $ y: Named num [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "a" "b"
+|  $ v: int [1:2, 1:2] 1 2 3 4
+|  $ z: int [1:2] 1 2
+|   ..- attr(*, "levels")= chr [1:2] "lo" "hi"
+|  $ w: Named int [1:2] 1 2
+|   ..- attr(*, "levels")= chr [1:2] "lo" "hi"
+|   ..- attr(*, "names")= chr [1:2] "m" "n"
+| [1] 1 2 3 4
+| List of 2
+|  $ : Named int [1:3] 1 20 3
+|   ..- attr(*, "names")= chr [1:3] "a" "b" "c"
+|  $ : int [1:3] 1 2 3
+|   a   b 
+| "a" "b" 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

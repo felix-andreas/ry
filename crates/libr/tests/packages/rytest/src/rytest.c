@@ -884,6 +884,38 @@ SEXP rytest_suspended_error(void)
     return R_NilValue;
 }
 
+/* Native code reading the environment of a closure an R function defined: `name`'s binding in
+   CLOENV(fn), or NULL when the environment does not bind it. */
+SEXP rytest_closure_lookup(SEXP fn, SEXP name)
+{
+    SEXP env = CLOENV(fn);
+    SEXP value = Rf_findVarInFrame(env, Rf_installChar(STRING_ELT(name, 0)));
+    return value == R_UnboundValue ? R_NilValue : value;
+}
+
+/* A callback native state keeps past the call that registered it, preserved as an R package's
+   C code keeps one, and run later. */
+static SEXP kept_callback = NULL;
+
+SEXP rytest_keep_callback(SEXP fn)
+{
+    if (kept_callback != NULL)
+        R_ReleaseObject(kept_callback);
+    R_PreserveObject(fn);
+    kept_callback = fn;
+    return R_NilValue;
+}
+
+SEXP rytest_run_callback(void)
+{
+    if (kept_callback == NULL)
+        return R_NilValue;
+    SEXP call = PROTECT(Rf_lang1(kept_callback));
+    SEXP value = Rf_eval(call, R_GlobalEnv);
+    UNPROTECT(1);
+    return value;
+}
+
 SEXP rytest_cpp_unwind(SEXP call);
 SEXP rytest_destructor_count(void);
 
@@ -942,6 +974,9 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_suspended_interrupt", (DL_FUNC) &rytest_suspended_interrupt, 0},
     {"rytest_suspended_progress", (DL_FUNC) &rytest_suspended_progress, 0},
     {"rytest_suspended_error", (DL_FUNC) &rytest_suspended_error, 0},
+    {"rytest_closure_lookup", (DL_FUNC) &rytest_closure_lookup, 2},
+    {"rytest_keep_callback", (DL_FUNC) &rytest_keep_callback, 1},
+    {"rytest_run_callback", (DL_FUNC) &rytest_run_callback, 0},
     {NULL, NULL, 0}
 };
 

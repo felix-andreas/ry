@@ -396,3 +396,79 @@ fn fuzz_inline_accessors_agree_with_libr() {
         r.release_to(mark);
     });
 }
+
+/// Closures an R function defines while its frame keeps its variables in slots, so the
+/// closure's environment is made only when something reads it. Native code reads it through
+/// `CLOENV` while the frame runs, keeps the closure past the frame's return with
+/// `R_PreserveObject` and calls it later, or gets it back as the function's value, and the
+/// frame assigns the variable again after making the closure. Native code must see the frame's
+/// bindings as they are at each moment.
+#[test]
+fn fuzz_native_code_reads_closures_over_slot_frames() {
+    let r = r_with_base();
+    rytest(&r);
+    let parsed = r
+        .eval("parse", &[(Some("text"), r.string("closure_case_call <- function(f) f()"))])
+        .expect("the helper parses");
+    r.eval("eval", &[(None, parsed)]).expect("the helper defines");
+    for_each_seed(80, |seed| {
+        let mut rng = SplitMix64(0xc105e ^ seed);
+        let mark = r.protected.get();
+        r.stress(seed % 10 == 9);
+        let (start, factor, step) = (rng.below(50), 1 + rng.below(9), 1 + rng.below(20));
+        let read = rng.chance(1, 2);
+        let keep = rng.chance(1, 2);
+        let returned = rng.chance(1, 3);
+        let name = format!("closure_case_{seed}");
+        let mut body = format!("  v <- a + {start}L\n  g <- function() v * {factor}L\n");
+        if read {
+            body += "  seen <- .Call(\"rytest_closure_lookup\", g, \"v\")\n";
+        } else {
+            body += "  seen <- NULL\n";
+        }
+        if keep {
+            body += "  .Call(\"rytest_keep_callback\", g)\n";
+        }
+        body += &format!("  v <- v + {step}L\n");
+        body += if returned { "  g\n" } else { "  seen\n" };
+        let source = format!("{name} <- function(a) {{\n{body}}}\n");
+        let parsed = r
+            .eval("parse", &[(Some("text"), r.string(&source))])
+            .expect("the case parses");
+        r.eval("eval", &[(None, parsed)]).expect("the case defines");
+        for round in 0..4 {
+            let argument = round as c_int;
+            let value = r
+                .eval(&name, &[(None, r.integer(argument))])
+                .unwrap_or_else(|message| panic!("seed {seed}: {message}\n{source}"));
+            let defined = argument + start as c_int;
+            let final_value = (defined + step as c_int) * factor as c_int;
+            if returned {
+                let called = r.eval("closure_case_call", &[(None, value)]);
+                assert_eq!(
+                    called.map(|value| r.integers(value)),
+                    Ok(vec![final_value]),
+                    "seed {seed}, round {round}: the returned closure\n{source}"
+                );
+            } else if read {
+                assert_eq!(
+                    r.integers(value),
+                    vec![defined],
+                    "seed {seed}, round {round}: CLOENV during the call\n{source}"
+                );
+            } else {
+                assert_eq!(r.type_of(value), 0, "seed {seed}, round {round}\n{source}");
+            }
+            if keep {
+                let called = r.call("rytest_run_callback", &[]).expect("the callback runs");
+                assert_eq!(
+                    r.integers(called),
+                    vec![final_value],
+                    "seed {seed}, round {round}: the kept callback\n{source}"
+                );
+            }
+        }
+        r.stress(false);
+        r.release_to(mark);
+    });
+}

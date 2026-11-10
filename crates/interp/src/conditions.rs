@@ -41,6 +41,18 @@ pub struct RestartEntry {
     pub next: RestartStack,
 }
 
+/// Whether an entry of `stack` has `closure` as its handler.
+pub(crate) fn handlers_hold(stack: &HandlerStack, closure: Sexp) -> bool {
+    let mut entry = stack.as_ref();
+    while let Some(handler) = entry {
+        if handler.handler == closure {
+            return true;
+        }
+        entry = handler.next.as_ref();
+    }
+    false
+}
+
 pub(crate) unsafe fn trace_handlers(stack: &HandlerStack, marker: &mut Marker<'_>) {
     let mut entry = stack.as_ref();
     while let Some(handler) = entry {

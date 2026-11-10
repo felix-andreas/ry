@@ -158,8 +158,9 @@ pub struct Frame {
     /// name: it has no bindings and carries [`heap::object::gp::PENDING_FRAME`] until the frame reifies into
     /// it, so a forced promise finds the frame by it and runs on the slots.
     pub pending: Sexp,
-    /// How many promises over [`Frame::pending`] may still be unforced. When none are left as
-    /// the frame returns, the environment is never made.
+    /// How many promises over [`Frame::pending`] may still be unforced, plus the closures made
+    /// over it ([`Interp::pending_closures`]). When none of them can outlive the frame as it
+    /// returns, the environment is never made.
     pub unforced: u32,
     /// A builtin wrapper run by [`eval::run_wrapper`]: its slots hold the values of arguments
     /// that the generic path would have bound as promises, so a reify wraps them.
@@ -230,6 +231,11 @@ pub fn truncate_frames(state: &mut Interp, depth: usize) {
     }
     if depth == 0 {
         state.references_used = 0;
+    }
+    if !state.pending_closures.is_empty() {
+        state
+            .pending_closures
+            .retain(|&(owner, _)| (owner as usize) < depth);
     }
     state.frames.truncate(depth);
 }
@@ -322,6 +328,10 @@ pub struct Interp {
     /// [`FRAME_CLOSURES`] each, which the heap needs to release the frame when the call returns
     /// (`Heap::release_frame`).
     pub frame_closures: Vec<Sexp>,
+    /// The closures slot frames made over their pending environments, each with the index of
+    /// its frame, at most [`FRAME_CLOSURES`] per frame. A frame that returns without its
+    /// environment checks that none outlives it (`eval::finish_frame`).
+    pub pending_closures: Vec<(u32, Sexp)>,
     /// The foreign calls (`.Call`, `.External`, `.C`, `.Fortran`) in progress, each with the
     /// number of frames below it. GNU R gives them a builtin context, which tracebacks list and
     /// `sys.calls()` does not, so they live beside the frames rather than among them.
@@ -502,6 +512,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         return;
     }
     state.heap = heap_pointer;
+    heap::set_pending_resolver(crate::eval::resolve_pending_read);
     let heap = &mut *heap_pointer;
     heap.inhibit_collection();
     let symbols = values::Symbols::install(heap);
@@ -515,6 +526,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         reference_targets: Vec::new(),
         references_used: 0,
         frame_closures: Vec::new(),
+        pending_closures: Vec::new(),
         foreign_calls: Vec::new(),
         handlers: None,
         restarts: None,
@@ -696,6 +708,9 @@ impl RootSource for InterpRoots {
                 marker.mark(target);
             }
             for &closure in &interp.frame_closures {
+                marker.mark(closure);
+            }
+            for &(_, closure) in &interp.pending_closures {
                 marker.mark(closure);
             }
             for &(call, _) in &interp.foreign_calls {

@@ -849,7 +849,7 @@ pub enum Op {
     Missing,
 }
 
-/// Which replacement an [`Op::SubAssign`] does, stored as its last operand.
+/// Which replacement an [`Op::SubAssign`] does, stored as its sixth operand.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 enum ElementKind {
@@ -2542,10 +2542,24 @@ impl Compiler {
                 Op::SubAssignMatrix,
                 &[dst, variable, row, column, value, call_constant],
             ),
-            [index, ..] => self.emit(
-                Op::SubAssign,
-                &[dst, variable, index, value, call_constant, kind as u32],
-            ),
+            [index, ..] => {
+                // The replacement call `complex_assign` would make, `` `[<-`(`*tmp*`, i,
+                // value = v) ``, which errors from the primitive name as GNU R's do.
+                let mut items: SmallVec<[(Sexp, Sexp); 4]> =
+                    smallvec![(nil(), replacement_symbol), (nil(), symbols().tmp)];
+                let mut rest = target.cdr().cdr();
+                while matches!(rest.kind(), SexpType::Pairlist | SexpType::Language) {
+                    items.push((rest.tag(), rest.car()));
+                    rest = rest.cdr();
+                }
+                items.push((symbols().value, args[1].1));
+                let setter_call = values::pairlist(&items, SexpType::Language)?;
+                let setter_call = self.constant(setter_call);
+                self.emit(
+                    Op::SubAssign,
+                    &[dst, variable, index, value, call_constant, kind as u32, setter_call],
+                )
+            }
             [] => self.evaluate(dst, call_constant),
         }
         self.release_to(mark);
@@ -3511,7 +3525,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::LogicLeft => 5,
         Op::LogicRight => 5,
         Op::Closure => 4,
-        Op::SubAssign => 6,
+        Op::SubAssign => 7,
         Op::SubAssignMatrix => 6,
         Op::Replace => 8,
         Op::SetSrcref => 2,
@@ -5609,11 +5623,90 @@ unsafe fn slot_owns(state: &Activation<'_, '_>, value: Sexp) -> bool {
         .is_some_and(|registers| !registers.contains(&value))
 }
 
-/// [`assign_element_in_place`] on a slot frame's slot, without making its environment. The
-/// slot's value changes in place when the slot owns it, under the rule `x <- f(x, ...)` follows
-/// (see [`slot_reusable`]); a value the slot shares, such as a formal's forced argument, is
-/// copied into the slot first, as the replacement function would copy it.
+/// `x[i] <- value`, `x[[i]] <- value` or `x$name <- value` on a slot frame's slot, without
+/// making its environment, for any `x` that is not an object (an object dispatches, and its
+/// method may look at the frame). The compiler guarded the replacement function as the base
+/// primitive, so its own code runs here directly, reporting against the whole assignment as the
+/// complex assignment does. The slot's value changes in place when the slot alone holds it, as
+/// `complex_assign` updates a binding's; a value anything else holds, such as another
+/// variable's after `y <- x` or a formal's forced argument, is copied first, which keeps the
+/// copy semantics. Returns `false`, changing nothing, when the general assignment must run.
 unsafe fn assign_slot_element(
+    state: &Activation<'_, '_>,
+    slot: *mut Sexp,
+    variable: Sexp,
+    (index, value, kind): (Sexp, Sexp, ElementKind),
+    (whole, setter_call): (Sexp, Sexp),
+) -> R<bool> {
+    let current = *slot;
+    if assign_slot_element_in_place(state, slot, index, value, kind)? {
+        return Ok(true);
+    }
+    // Forcing a formal's promise ran code that may have given the frame its environment.
+    if *state.header != nil() {
+        return Ok(false);
+    }
+    let target = if current.kind() == SexpType::Promise {
+        current.car()
+    } else {
+        current
+    };
+    let replaceable = matches!(
+        target.kind(),
+        SexpType::Nil
+            | SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::String
+            | SexpType::Raw
+            | SexpType::List
+            | SexpType::Expression
+    );
+    if !replaceable || target.is_object() || (kind == ElementKind::Dollar && length(index) != 1)
+    {
+        return Ok(false);
+    }
+    moves::modifying(target)?;
+    let heap = &mut *state.heap;
+    let object = if current == target && slot_owns(state, target) {
+        target
+    } else {
+        let was_array = target.is_array();
+        let copy = values::shallow_duplicate(target)?;
+        copy.set_array(was_array);
+        heap.root(copy);
+        copy
+    };
+    let interpreter = interp();
+    let outer = interpreter
+        .assignment_call
+        .replace((setter_call, whole, interpreter.frames.len()));
+    let result = match kind {
+        ElementKind::Single => crate::subset::subassign(object, &[index], value, setter_call),
+        ElementKind::Double => crate::subset::subassign2(object, &[index], value, setter_call),
+        ElementKind::Dollar => {
+            crate::subset::dollar_assign(object, index.element(0), value, setter_call)
+        }
+    };
+    interp().assignment_call = outer;
+    let result = result?;
+    // A warning's calling handler may have looked at the frame, which then holds the variable
+    // in its environment instead of the slot.
+    if *state.header != nil() {
+        let env = *state.header;
+        heap.root(result);
+        eval::assign_local(variable, result, env, heap.frame_cell(env, variable))?;
+    } else {
+        heap.store_slot(&mut *slot, result);
+    }
+    Ok(true)
+}
+
+/// [`assign_element`] on a slot's value: the slot's value changes in place when the slot owns
+/// it, under the rule `x <- f(x, ...)` follows (see [`slot_reusable`]); a value the slot shares,
+/// such as a formal's forced argument, is copied into the slot first.
+unsafe fn assign_slot_element_in_place(
     state: &Activation<'_, '_>,
     slot: *mut Sexp,
     index: Sexp,
@@ -6037,7 +6130,14 @@ unsafe fn op_field(state: &mut Activation<'_, '_>, instruction: Instruction) -> 
     let shape = state.constant(instruction, 4);
     let value = match crate::records::cached_field(object, name, shape)? {
         Some(value) => value,
-        None => crate::subset::dollar_value(object, name.car(), call, state.env(Reify::Site("`$` field"))?)?,
+        // Only an object dispatches, to a method that may look at the frame.
+        None if object.is_object() => crate::subset::dollar_value(
+            object,
+            name.car(),
+            call,
+            state.env(Reify::Site("`$` field"))?,
+        )?,
+        None => crate::subset::dollar(object, name.car(), call)?,
     };
     record_feedback(state.constants, instruction.at, value);
     (*state.interp).visible = true;
@@ -6484,7 +6584,11 @@ unsafe fn op_closure(state: &mut Activation<'_, '_>, instruction: Instruction) -
     let formals = state.constant(instruction, 1);
     let body = state.constant(instruction, 2);
     let srcref = state.constant(instruction, 3);
-    let closure = eval::make_closure(formals, body, srcref, state.env(Reify::Site("function definition"))?)?;
+    let closure = if state.in_slots() {
+        eval::slot_closure(state.machine.header, formals, body, srcref)?
+    } else {
+        eval::make_closure(formals, body, srcref, state.env(Reify::Site("function definition"))?)?
+    };
     // Every closure this site creates shares one compiled body, as GNU R compiles inner
     // functions with their outer one. Compiling per closure object would leave a function
     // created anew on each call (a `vapply` callback, say) on the AST evaluator, or recompile it
@@ -6516,7 +6620,13 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
     if state.in_slots()
         && let Some(slot) = slot_named(state, variable)
         && let Some(index) = slot_subscript(state, instruction.input(2))
-        && assign_slot_element(state, slot, index, value, kind)?
+        && assign_slot_element(
+            state,
+            slot,
+            variable,
+            (index, value, kind),
+            (call, state.constant(instruction, 6)),
+        )?
     {
         instruction.output(0, value);
         (*state.interp).visible = false;
@@ -6567,24 +6677,25 @@ unsafe fn op_sub_assign_matrix(
 
 #[inline(always)]
 unsafe fn op_replace(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
-    let env = state.env(Reify::Site("replacement call"))?;
     let whole = state.constant(instruction, 7);
     let (first, count) = (instruction.operand(5), instruction.operand(6));
     let value = instruction.register(first + count - 1);
-    let done = replace_variable(
-        env,
-        state.constant(instruction, 1),
-        (
-            state.constant(instruction, 2),
-            state.cache,
-            instruction.operand(3),
-        ),
-        state.constant(instruction, 4),
-        whole,
-        std::slice::from_raw_parts_mut(instruction.registers.add(first), count),
-    )?;
-    if !done {
-        eval::complex_assign(whole, whole.cdr().car(), value, env, false)?;
+    let replace = |state: &Activation<'_, '_>, env: Sexp| {
+        replace_variable(
+            state,
+            env,
+            state.constant(instruction, 1),
+            (state.constant(instruction, 2), instruction.operand(3)),
+            state.constant(instruction, 4),
+            whole,
+            std::slice::from_raw_parts_mut(instruction.registers.add(first), count),
+        )
+    };
+    if !(state.in_slots() && replace(state, nil())?) {
+        let env = state.env(Reify::Site("replacement call"))?;
+        if !replace(state, env)? {
+            eval::complex_assign(whole, whole.cdr().car(), value, env, false)?;
+        }
     }
     instruction.output(0, value);
     (*state.interp).visible = false;
@@ -6803,38 +6914,66 @@ unsafe fn subscript_value(env: Sexp, index: Sexp) -> R<Option<Sexp>> {
     Ok(Some(value))
 }
 
-/// `variable[row, column] <- value` on an atomic matrix, done in place when the matrix is the
-/// frame's own unshared value, `value` is one element of its type and both subscripts are in
-/// bounds. Returns false, having changed nothing, when the general assignment must run.
+/// Where [`replace_variable`]'s variable lives: its binding cell in the frame's environment, or
+/// a slot of a frame that has none.
+#[derive(Clone, Copy)]
+enum Home {
+    Cell(Sexp),
+    Slot(*mut Sexp),
+}
+
 /// [`Op::Replace`]'s one-level update of a local variable, as `complex_assign` runs it, through
 /// a builtin replacement or a closure that takes only the target and the value: `false`
 /// leaves the assignment to `complex_assign`. `args` are the call's argument registers, the
 /// first for the variable's value and the last holding the value assigned.
+///
+/// A variable in a slot (`env` is `NULL`) is updated without making the frame's environment
+/// when the replacement is a builtin and the target is not an object, since then nothing can
+/// look at the frame. Its value changes in place only when the slot alone holds it, which keeps
+/// `y <- x; names(x) <- v` from changing `y`.
 unsafe fn replace_variable(
+    state: &Activation<'_, '_>,
     env: Sexp,
     variable: Sexp,
-    (setter, cache, slot): (Sexp, LookupCache, usize),
+    (setter, lookup): (Sexp, usize),
     setter_call: Sexp,
     whole: Sexp,
     args: &mut [Sexp],
 ) -> R<bool> {
     let heap = crate::heap();
-    let Some(cell) = heap.frame_cell(env, variable) else {
-        return Ok(false);
+    let home = if env == nil() {
+        match slot_named(state, variable) {
+            Some(slot) => Home::Slot(slot),
+            None => return Ok(false),
+        }
+    } else {
+        match heap.frame_cell(env, variable) {
+            Some(cell) if !cell.has_gp(gp::BINDING_LOCKED | gp::ACTIVE_BINDING) => Home::Cell(cell),
+            _ => return Ok(false),
+        }
     };
-    if cell.has_gp(gp::BINDING_LOCKED | gp::ACTIVE_BINDING) {
-        return Ok(false);
-    }
-    let mut target = cell.cdr();
-    if target.kind() == SexpType::Promise {
-        target = target.car();
-    }
+    let held = match home {
+        Home::Cell(cell) => cell.cdr(),
+        Home::Slot(slot) => *slot,
+    };
+    let mut target = if held.kind() == SexpType::Promise {
+        held.car()
+    } else {
+        held
+    };
     if target == unbound() || target == missing_arg() {
         return Ok(false);
     }
     // `complex_assign` reads the variable before it looks the replacement up, so a missing
     // variable is the error both report.
-    let function = lookup_function(setter, env, cache, slot, unbound())?;
+    let function = match home {
+        Home::Cell(_) => lookup_function(setter, env, state.cache, lookup, unbound())?,
+        Home::Slot(_) => slot_function(state, setter, lookup, unbound())?,
+    };
+    // Looking the replacement up may have forced a promise that gave the frame its environment.
+    if matches!(home, Home::Slot(_)) && *state.header != nil() {
+        return Ok(false);
+    }
     let builtin = match function.kind() {
         // An object may dispatch to a replacement method, which `complex_assign` calls with the
         // `*tmp*` and value promises it expects.
@@ -6844,24 +6983,33 @@ unsafe fn replace_variable(
             }
             Some(eval::builtin_def(function)?)
         }
-        SexpType::Closure if args.len() == 2 => None,
+        // A closure's frame has the caller's as its parent frame, which must then exist.
+        SexpType::Closure if args.len() == 2 && matches!(home, Home::Cell(_)) => None,
         _ => return Ok(false),
     };
     moves::modifying(target)?;
     // Registers count no reference, so an argument that is the target itself, as in
     // `names(x) <- x`, must not watch the replacement change it.
-    if values::maybe_shared(target)
-        || !eval::reuse_permitted(env, target)
-        || args[1..].contains(&target)
-    {
+    let shared = match home {
+        Home::Cell(_) => values::maybe_shared(target) || !eval::reuse_permitted(env, target),
+        Home::Slot(_) => {
+            // The first argument register still holds the value the previous run of this
+            // instruction replaced, which is no reason to copy.
+            args[0] = nil();
+            held != target || !slot_owns(state, target)
+        }
+    };
+    if shared || args[1..].contains(&target) {
         let was_array = target.is_array();
         target = values::shallow_duplicate(target)?;
         target.set_array(was_array);
     }
+    heap.root(target);
     args[0] = target;
-    heap.count_transient_binding(env, symbols().tmp);
-    let state = interp();
-    state.tmp_values.push((env, target));
+    if let Home::Cell(_) = home {
+        heap.count_transient_binding(env, symbols().tmp);
+        interp().tmp_values.push((env, target));
+    }
     let direct = match builtin {
         Some(definition) if definition.direct.is_some() && replacement_arguments(setter_call) => {
             eval::call_direct(definition, args)
@@ -6881,17 +7029,31 @@ unsafe fn replace_variable(
                 });
                 item = item.cdr();
             }
-            let outer = state
+            let interpreter = interp();
+            let outer = interpreter
                 .assignment_call
-                .replace((setter_call, whole, state.frames.len()));
+                .replace((setter_call, whole, interpreter.frames.len()));
             let result = eval::call_builtin(definition, setter_call, function, &arguments, env);
             interp().assignment_call = outer;
             result
         }
         (Ok(None), None) => replace_with_closure(function, setter, whole, target, args[1], env),
     };
-    interp().tmp_values.pop();
-    eval::assign_local(variable, result?, env, Some(cell))?;
+    if let Home::Cell(_) = home {
+        interp().tmp_values.pop();
+    }
+    let result = result?;
+    match home {
+        Home::Cell(cell) => eval::assign_local(variable, result, env, Some(cell))?,
+        // A warning's calling handler may have looked at the frame, which then holds the
+        // variable in its environment instead of the slot.
+        Home::Slot(_) if *state.header != nil() => {
+            let env = *state.header;
+            heap.root(result);
+            eval::assign_local(variable, result, env, heap.frame_cell(env, variable))?
+        }
+        Home::Slot(slot) => heap.store_slot(&mut *slot, result),
+    }
     Ok(true)
 }
 
@@ -6942,6 +7104,9 @@ unsafe fn replace_with_closure(
     eval::apply_call(call, function, arguments, env)
 }
 
+/// `variable[row, column] <- value` on an atomic matrix, done in place when the matrix is the
+/// frame's own unshared value, `value` is one element of its type and both subscripts are in
+/// bounds. Returns false, having changed nothing, when the general assignment must run.
 unsafe fn assign_matrix_element_in_place(
     env: Sexp,
     variable: Sexp,

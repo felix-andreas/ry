@@ -56,6 +56,39 @@ use {
     },
 };
 
+/// What reading the bindings of a slot frame's pending environment (`gp::PENDING_FRAME`) runs
+/// first. A slot frame keeps its variables in registers, and the environment it hands to
+/// promises and closures it makes stays bare until something needs its bindings; the
+/// interpreter installs a resolver that gives the environment the frame's bindings in place.
+/// Routing every bindings read through [`bindings`] means no reader can see the bare frame.
+static PENDING_RESOLVER: std::sync::OnceLock<unsafe fn(Sexp)> = std::sync::OnceLock::new();
+
+/// Installs the interpreter's resolver for pending environments ([`PENDING_RESOLVER`]).
+pub fn set_pending_resolver(resolver: unsafe fn(Sexp)) {
+    if PENDING_RESOLVER.set(resolver).is_err() {
+        // Installed already, by an earlier interpreter in this process.
+    }
+}
+
+/// `env`'s own frame of bindings, given its bindings first when it is a slot frame's pending
+/// environment. Everything but the collector reads bindings through here.
+#[inline(always)]
+unsafe fn bindings(env: Sexp) -> *mut Frame {
+    if env.has_gp(gp::PENDING_FRAME) {
+        resolve_pending(env);
+    }
+    env.frame_ptr()
+}
+
+#[cold]
+#[inline(never)]
+unsafe fn resolve_pending(env: Sexp) {
+    let Some(resolver) = PENDING_RESOLVER.get() else {
+        panic!("a pending environment was read without an interpreter to resolve it");
+    };
+    resolver(env);
+}
+
 /// The longest vector R allows, `R_XLEN_T_MAX`.
 pub const MAX_VECTOR_LENGTH: isize = 4_503_599_627_370_496;
 /// GNU R's default `PROTECT` stack size, `R_PPSSIZE`.
@@ -1656,7 +1689,7 @@ impl Heap {
         if env == self.known.empty_env {
             return None;
         }
-        (*env.frame_ptr()).find(symbol)
+        (*bindings(env)).find(symbol)
     }
 
     /// [`Heap::frame_cell`] through a lookup site's position hint (see [`Frame::find_hinted`]).
@@ -1670,7 +1703,7 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return self.frame_cell(env, symbol);
         }
-        (*env.frame_ptr()).find_hinted(symbol, hint)
+        (*bindings(env)).find_hinted(symbol, hint)
     }
 
     /// The binding cells of `env`'s own frame. The global frame's bindings live on the symbols,
@@ -1678,7 +1711,7 @@ impl Heap {
     pub unsafe fn local_cells(&self, env: Sexp) -> impl Iterator<Item = Sexp> + '_ {
         let frame = (!self.is_symbol_frame(env) && env != self.known.empty_env)
             // SAFETY: an environment other than these owns its frame for as long as it lives.
-            .then(|| unsafe { &*env.frame_ptr() });
+            .then(|| unsafe { &*bindings(env) });
         frame.into_iter().flat_map(Frame::cells)
     }
 
@@ -1718,7 +1751,7 @@ impl Heap {
             symbol.set_cdr_unbarriered(cell);
         } else {
             self.write_barrier(env, cell);
-            (*env.frame_ptr()).insert(symbol, cell);
+            (*bindings(env)).insert(symbol, cell);
         }
         Ok(())
     }
@@ -2016,7 +2049,7 @@ impl Heap {
         if env == self.known.empty_env {
             return Ok(false);
         }
-        let Some(cell) = (*env.frame_ptr()).remove(symbol) else {
+        let Some(cell) = (*bindings(env)).remove(symbol) else {
             return Ok(false);
         };
         self.clear_removed_cell(cell);
@@ -2080,7 +2113,7 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return self.frame_symbols(env);
         }
-        (*env.frame_ptr()).symbols().collect()
+        (*bindings(env)).symbols().collect()
     }
 
     /// The symbols bound in `env`'s own frame, in the order GNU R lists them.
@@ -2096,7 +2129,7 @@ impl Heap {
         if env == self.known.empty_env {
             return Vec::new();
         }
-        (*env.frame_ptr())
+        (*bindings(env))
             .listed_cells()
             .iter()
             .map(|cell| cell.car())
@@ -2107,7 +2140,7 @@ impl Heap {
     /// decides the order the frame is listed in.
     pub unsafe fn set_frame_hashed(&mut self, env: Sexp, size: i32) {
         if !self.is_symbol_frame(env) && env != self.known.empty_env {
-            (*env.frame_ptr()).set_hashed(size);
+            (*bindings(env)).set_hashed(size);
         }
     }
 
@@ -2117,7 +2150,7 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return None;
         }
-        unsafe { (*env.frame_ptr()).hash_profile() }
+        unsafe { (*bindings(env)).hash_profile() }
     }
 
     /// Counts a binding of `symbol` that `env` holds only for the length of one operation, as
@@ -2128,7 +2161,7 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return;
         }
-        unsafe { (*env.frame_ptr()).count_transient(symbol) }
+        unsafe { (*bindings(env)).count_transient(symbol) }
     }
 
     /// Marks the bindings of a closure frame made so far as its formals.
@@ -2176,6 +2209,11 @@ impl Heap {
     /// Keeps `object` alive for the rest of the heap's life.
     pub fn add_global_root(&mut self, object: Sexp) {
         self.roots.globals.push(object);
+    }
+
+    /// Whether `R_PreserveObject` holds `object`.
+    pub fn is_preserved(&self, object: Sexp) -> bool {
+        self.roots.precious.contains_key(&object)
     }
 
     /// `R_PreserveObject`. Preserving twice needs two releases.

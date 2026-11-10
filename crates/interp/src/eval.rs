@@ -435,13 +435,7 @@ unsafe fn slot_promise_value(promise: Sexp, owner: usize) -> R<Sexp> {
 /// `owner`. It names the frame's pending environment, which is made bare on the first such
 /// promise and gets its bindings only if the frame reifies.
 pub unsafe fn slot_promise(owner: usize, expression: Sexp) -> R<Sexp> {
-    let mut env = interp().frames[owner].pending;
-    if env == nil() {
-        let function = interp().frames[owner].function;
-        env = frame_environment(function, function.car())?;
-        env.set_gp_bits(gp::PENDING_FRAME, true);
-        interp().frames[owner].pending = env;
-    }
+    let env = pending_env(owner)?;
     let promise = if expression.kind() == SexpType::Bytecode {
         compiled_promise(expression, env)?
     } else {
@@ -449,6 +443,74 @@ pub unsafe fn slot_promise(owner: usize, expression: Sexp) -> R<Sexp> {
     };
     interp().frames[owner].unforced += 1;
     Ok(promise)
+}
+
+/// The pending environment of the slot frame at `owner`, made bare on first use: it gets the
+/// frame's bindings only if the frame reifies, and is the frame's environment from then on.
+unsafe fn pending_env(owner: usize) -> R<Sexp> {
+    let env = interp().frames[owner].pending;
+    if env != nil() {
+        return Ok(env);
+    }
+    let function = interp().frames[owner].function;
+    let env = frame_environment(function, function.car())?;
+    env.set_gp_bits(gp::PENDING_FRAME, true);
+    interp().frames[owner].pending = env;
+    Ok(env)
+}
+
+/// A closure of `formals` and `body` defined in the slot frame whose header register is
+/// `header`, which has no environment yet. The closure's environment is the frame's pending
+/// one, so defining it leaves the frame in its slots: anything that reads the environment's
+/// bindings, such as a call of the closure or `environment(f)$x`, reifies the frame into that
+/// same object first ([`resolve_pending_read`]), and a frame that returns with the closure
+/// still reachable reifies then ([`finish_frame`]). A frame that makes more closures than
+/// [`crate::FRAME_CLOSURES`] reifies instead, which bounds the list that tracks them.
+pub unsafe fn slot_closure(header: usize, formals: Sexp, body: Sexp, srcref: Sexp) -> R<Sexp> {
+    let state = interp();
+    let Some(owner) = state
+        .frames
+        .iter()
+        .rposition(|frame| frame.slots as usize == header)
+    else {
+        panic!("a slot frame's activation outlived its frame");
+    };
+    let made = state
+        .pending_closures
+        .iter()
+        .filter(|&&(frame, _)| frame as usize == owner)
+        .count();
+    if made >= crate::FRAME_CLOSURES {
+        let env = frame_env(owner, Reify::Site("function definition"))?;
+        return make_closure(formals, body, srcref, env);
+    }
+    let env = pending_env(owner)?;
+    let closure = make_closure(formals, body, srcref, env)?;
+    let state = interp();
+    state.pending_closures.push((owner as u32, closure));
+    state.frames[owner].unforced += 1;
+    Ok(closure)
+}
+
+/// The heap's resolver for a read of a pending environment's bindings
+/// (`heap::set_pending_resolver`): it reifies the live slot frame the environment belongs to.
+/// The read may come from anywhere, including native code between allocations it has not
+/// protected, so the frame reifies with collection suspended.
+pub unsafe fn resolve_pending_read(env: Sexp) {
+    let Some(owner) = interp()
+        .frames
+        .iter()
+        .rposition(|frame| frame.pending == env)
+    else {
+        panic!("the bindings of a slot frame's environment were read after the frame returned");
+    };
+    let heap = crate::heap();
+    heap.inhibit_collection();
+    let result = reify(owner, Reify::Site("environment read"));
+    crate::heap().allow_collection();
+    if let Err(unwind) = result {
+        panic!("a slot frame failed to make its environment: {unwind:?}");
+    }
 }
 
 /// An argument reference: the promise a slot frame at `owner` passes for the variable
@@ -792,13 +854,7 @@ unsafe fn reference_promise(reference: Sexp) -> R<[Sexp; 4]> {
         if frame.env != nil() {
             (frame.env, expression)
         } else {
-            let mut env = frame.pending;
-            if env == nil() {
-                let function = frame.function;
-                env = frame_environment(function, function.car())?;
-                env.set_gp_bits(gp::PENDING_FRAME, true);
-                interp().frames[owner].pending = env;
-            }
+            let env = pending_env(owner)?;
             interp().frames[owner].unforced += 1;
             (env, expression)
         }
@@ -2286,7 +2342,13 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
     }
     env.set_gp_bits(gp::COMPILED_FRAME, true);
     *registers = env;
-    interp().frames[index].env = env;
+    let state = interp();
+    state.frames[index].env = env;
+    if !state.pending_closures.is_empty() {
+        state
+            .pending_closures
+            .retain(|&(owner, _)| owner as usize != index);
+    }
     activity::count(Counter::FramesReified);
     if syntax::testing::invariants_enabled() {
         check_reified(index, env, &bindings);
@@ -2581,14 +2643,68 @@ unsafe fn finish_frame(
     // Promises over the slots that may still be forced need the environment once the slots are
     // gone.
     let frame = &state.frames[depth - 1];
-    if frame.env == nil()
-        && frame.pending != nil()
-        && frame.unforced > 0
-        && frame.unforced > unforced_defaults(frame)
-    {
-        reify(depth - 1, Reify::Site("promise outliving the frame"))?;
+    if frame.env == nil() && frame.pending != nil() && frame.unforced > 0 {
+        let (closures, dying) = pending_closures_dying(depth - 1, &result);
+        let frame = &interp().frames[depth - 1];
+        if closures > dying {
+            reify(depth - 1, Reify::Site("closure outliving the frame"))?;
+        } else if frame.unforced > unforced_defaults(frame) + closures {
+            reify(depth - 1, Reify::Site("promise outliving the frame"))?;
+        } else if closures > 0 {
+            interp()
+                .pending_closures
+                .retain(|&(owner, _)| owner as usize != depth - 1);
+        }
     }
     result
+}
+
+/// How many closures the slot frame at `index` made over its pending environment, and how many
+/// of them die with it as it returns `result`. One dies when nothing counts a reference to it
+/// but the frame's slots, it
+/// is not the value returned, and no root the counts do not see holds it (`R_PreserveObject`
+/// or a global calling handler). A closure whose environment was replaced no longer needs the
+/// frame either. An error return keeps every closure, since the unwind may carry one.
+unsafe fn pending_closures_dying(index: usize, result: &R<Sexp>) -> (u32, u32) {
+    let state = interp();
+    if state.pending_closures.is_empty() {
+        return (0, 0);
+    }
+    let closures = state
+        .pending_closures
+        .iter()
+        .filter(|&&(owner, _)| owner as usize == index)
+        .count() as u32;
+    let Ok(value) = *result else {
+        return (closures, 0);
+    };
+    let frame = &state.frames[index];
+    let (pending, header) = (frame.pending, frame.slots as usize);
+    let names = frame.function.cdr().cdr().element(bytecode::SLOTS).element(1);
+    let count = values::length(names);
+    let heap = crate::heap();
+    let mut dying = 0;
+    for &(owner, closure) in &state.pending_closures {
+        if owner as usize != index {
+            continue;
+        }
+        if closure.tag() != pending {
+            dying += 1;
+            continue;
+        }
+        if closure == value || heap.is_preserved(closure) {
+            continue;
+        }
+        let held = (0..count)
+            .filter(|&slot| *bytecode::register_address(header + 1 + slot) == closure)
+            .count();
+        if closure.refcount() as usize == held
+            && !crate::conditions::handlers_hold(&state.global_handlers, closure)
+        {
+            dying += 1;
+        }
+    }
+    (closures, dying)
 }
 
 /// A slot frame that never made its environment gives up its slots' references, and the

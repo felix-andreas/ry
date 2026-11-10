@@ -109,13 +109,15 @@ These are the reads that need the environment as an object. Each one reifies the
 | Trigger | Where |
 |---|---|
 | A promise made in the frame that the slot-promise path does not cover (see below), default promises, `delayedAssign` | `make_promise`, `compiled_promise`, `formal_binding` in `eval.rs`; `NextMethod`'s promises in `dispatch.rs` |
-| A closure created in the frame | `make_closure` in `eval.rs`; `Op::Closure`; `~` (the formula's environment) |
+| A closure created in the frame, past the frame's 16 tracked closures (see below) | `slot_closure` in `eval.rs`; `make_closure` for an uncompiled `function`; `~` (the formula's environment) |
+| A closure made in the frame that may outlive it | `finish_frame` in `eval.rs` |
 | Reflection that returns the environment | `environment()`, `sys.frame(s)`, `parent.frame`, `as.environment(-1)`, `sys.function` with its environment, `eval`'s numeric `envir` |
 | Code that the compiler did not translate and that runs in the frame | `Op::Ast` (`<<-` targets, `...` forms), `BoundEval`, the debugger and `browser()` |
 | S3 and S4 dispatch reading the generic's frame | `UseMethod` and `NextMethod` (`dispatch.rs`); `standardGeneric`, which reads the signature arguments from the generic's frame and evaluates the method in a frame derived from it (`do_standard_generic` passes `call.env` to `dispatch_generic`), and `exec_method` and `callNextMethod` (`methods.rs`) |
 | Condition handlers and restarts that record a frame | `.addCondHands`, `.addRestart` (`conditions.rs`) |
 | The C API | `R_GetCurrentEnv`, `PRENV` on a promise over the frame, `.External` and `.External2` (which pass the environment) |
 | A promise over the frame still unforced when the frame returns | `run_frame` in `eval.rs` |
+| Subassignment, a replacement call or `x$name` on an object, which may dispatch to a method | `op_sub_assign`, `op_replace`, `op_field` in `bytecode.rs` |
 | A method `UseMethod` dispatches to while the generic has locals to forward (the R < 4.4 behavior) | `do_usemethod` in `dispatch.rs` runs the method in a heap frame, because a slot frame shows the forwarded locals only once it has an environment |
 
 A builtin that receives `call.env` and only reads a frame property (`missing`, `nargs`, `on.exit`,
@@ -185,6 +187,42 @@ The second step is built (`slot_promise`, `force_slot_promise` and `resolved_env
   through a promise of a name reads the owner's slot instead (`pending_slot_is_missing`), as
   the binding in the reified environment would answer. Identity checks against a promise's environment compare the pending
   environment, which is the frame's environment once it reifies.
+
+## Closures over a slot frame
+
+A `function` expression compiled in an unreified slot frame makes its closure on the frame's
+pending environment (`slot_closure`) instead of reifying, so a `tryCatch` handler or an `lapply`
+callback that never escapes costs no environment.
+
+- **Reads resolve through the heap.** Every binding read or write of an environment goes through
+  `bindings` in `heap.rs`, which checks `PENDING_FRAME` and, when set, calls the resolver the
+  interpreter installs (`eval::resolve_pending_read`). The resolver reifies the live owner frame,
+  with collection inhibited, and the read proceeds on the filled environment. No reader can see
+  the empty pending frame: `CLOENV` followed by `findVarInFrame` in C, `environment(f)` and
+  `get`, lexical lookup from the closure's body, and the analysis passes all reach bindings this
+  way. Readers that use only the environment's identity or its enclosure need no resolution,
+  because reifying keeps the object.
+- **Tracking.** `Interp.pending_closures` lists each closure with its owner frame, at most 16 per
+  frame, and `Frame.unforced` counts them with the frame's promises. A 17th closure reifies the
+  frame.
+- **Return.** A closure dies with its frame when its reference count equals the number of the
+  frame's slots that hold it, it is not the frame's result, `R_PreserveObject` does not hold it
+  and no global calling handler is it. A frame that returns with any other closure reifies first
+  (the profile reason "closure outliving the frame"), so the escaped closure sees the values its
+  variables held at return. A frame that returns
+  through an error keeps none of its closures as dead.
+
+## Subassignment and replacement in slots
+
+`x[i] <- v`, `x[[i]] <- v`, `x$name <- v` and one-level replacement calls with a builtin setter,
+such as `names(x) <- v`, update a slot without an environment when `x` is not an object
+(`assign_slot_element`, `replace_variable` in `bytecode.rs`). The primitive's own code runs with
+the replacement call `` `[<-`(`*tmp*`, i, value = v) `` that the compiler stores beside the
+instruction, so errors name the same call as the general assignment's. The value changes in place
+only when the slot alone holds it (`slot_owns`: a reference count of one and no expression
+register holding it); otherwise the slot gets a copy, so `y <- x; x[1] <- 0` leaves `y` alone.
+An object reifies the frame, because a replacement method may look at it. `x$name` reads on a
+non-object likewise skip the environment.
 
 ## Argument references
 
