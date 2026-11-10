@@ -28,6 +28,18 @@ print(k2(z))
 z <- 1
 lazy <- function(u) { r <- getOption("digits", u); z <<- 2; c(r, u) }
 print(lazy(z))
+z <- 1
+print(lazy(z))
+unset <- function(u) { r <- getOption("ry.oracle.unset", u); z <<- 3; c(r, u) }
+z <- 1
+print(unset(z))
+z <- 1
+print(unset(z))
+either <- function(a, u) { r <- a %||% u; z <<- 2; c(r, u) }
+z <- 1
+print(either(0, z)); z <- 1; print(either(0, z))
+z <- 1
+print(either(NULL, z)); z <- 1; print(either(NULL, z))
 # inherits and is.vector through two layers.
 inh <- function(x) inherits(x, "data.frame")
 inh2 <- function(x) inh(x)

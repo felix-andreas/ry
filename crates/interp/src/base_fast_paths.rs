@@ -496,8 +496,9 @@ pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
 /// unevaluated `arguments` when each is a constant or a variable, so the call builds no promise
 /// at all. `lookup` gives a variable's binding when reading it runs no R code
 /// ([`crate::effects::eager_argument`] in the caller's environment, or the slots of a caller
-/// that has none), and a promise bound there is read only when that runs no code
-/// ([`resolved`]). When the native code declines, the caller builds the promises as usual.
+/// that has none), and the entry reads a promise bound there only when its R body would read
+/// the argument and reading runs no code ([`resolved`]). When the native code declines, the
+/// caller builds the promises as usual.
 ///
 /// From `compiled` code, the arguments of a closure GNU R's compiler inlines (see
 /// [`NATIVE_ENTRIES`]) are forced here, in order, whatever code that runs, because compiled GNU
@@ -542,11 +543,11 @@ pub unsafe fn native_entry_by_value(
                 {
                     eval::force_promise(value)?
                 }
-                Some(value) => match resolved(value)? {
-                    Some(value) => value,
-                    None => return Ok(None),
-                },
-                None => return Ok(None),
+                // Otherwise the binding goes through as it is: each entry resolves only the
+                // arguments its R body would read, so an argument it skips (`getOption`'s
+                // `default` when the option is set) stays an unsettled promise.
+                Some(value) if value != missing_arg() => value,
+                _ => return Ok(None),
             }
         } else {
             expression
