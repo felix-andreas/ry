@@ -61,7 +61,7 @@ unsafe fn do_c(call: &Call<'_>) -> R<Sexp> {
 /// `c(...)` of untagged arguments, none of which dispatches. When every argument is `NULL` or an
 /// atomic vector without attributes, no names can arise, so one pass sizes the result and a
 /// second copies the elements, without the naming walk.
-unsafe fn direct_c(args: &[Sexp]) -> R<Option<Sexp>> {
+unsafe fn direct_c(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
     let mut kind = SexpType::Nil;
     let mut total = 0;
     let mut plain = true;
@@ -94,6 +94,7 @@ unsafe fn direct_c(args: &[Sexp]) -> R<Option<Sexp>> {
         position: 0,
         any_names: false,
         base: String::new(),
+        base_name: None,
     };
     for &value in args {
         if value != nil() {
@@ -105,7 +106,7 @@ unsafe fn direct_c(args: &[Sexp]) -> R<Option<Sexp>> {
     Ok(Some(result))
 }
 
-unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let recursive = values::as_logical_scalar(call.arg(1)) != 0;
     let use_names = values::as_logical_scalar(call.arg(2)) != 0;
@@ -181,6 +182,7 @@ unsafe fn combine_items(items: Items<'_>, recursive: bool, use_names: bool) -> R
         position: 0,
         any_names: false,
         base: String::new(),
+        base_name: None,
     };
     for index in 0..items.len() {
         let (value, name) = items.get(index);
@@ -244,6 +246,10 @@ struct Combiner {
     /// The tagged base of the elements being added, such as `a.b` inside `c(a = list(b = ...))`;
     /// empty when there is none.
     base: String,
+    /// The interned name `base` was started from, while `base` still holds exactly it, so a
+    /// lone unnamed leaf under a tag (`c(a = 1)`) reuses the tag's string instead of
+    /// interning `base` again.
+    base_name: Option<Sexp>,
 }
 
 /// The names GNU R gives the leaves under one tagged base: a leaf without a name of its own is
@@ -262,6 +268,7 @@ impl Combiner {
         let unnamed = name != na_string() && values::is_blank(name);
         if !unnamed {
             self.base.push_str(&char_str(name));
+            self.base_name = Some(name);
         }
         let mut scope = NameScope {
             base_is_na: name == na_string(),
@@ -274,6 +281,7 @@ impl Combiner {
         };
         let added = self.add_in(value, &mut scope);
         self.base.clear();
+        self.base_name = None;
         added
     }
 
@@ -394,6 +402,12 @@ impl Combiner {
         } else if scope.count == 1 {
             if scope.base_is_na {
                 values::set_elt(self.names, index, na_string());
+                return Ok(());
+            }
+            if let Some(name) = self.base_name
+                && name.length() as usize == self.base.len()
+            {
+                values::set_elt(self.names, index, name);
                 return Ok(());
             }
         } else {

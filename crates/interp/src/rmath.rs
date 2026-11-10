@@ -547,10 +547,75 @@ pub fn fround(x: f64, digits: f64) -> f64 {
     }
     let distance_up = up - x;
     let distance_down = x - down;
-    sgn * if distance_up < distance_down || (i10 % 2.0 == 1.0 && distance_up == distance_down) {
+    sgn * if distance_up < distance_down || (odd(i10) && distance_up == distance_down) {
         up
     } else {
         down
+    }
+}
+
+/// [`fround`] of every element of `input` with the same `digits`, written to `output`, with `NA`
+/// kept as `NA`. For 1 to 308 digits the power of ten is computed once rather than per element,
+/// and the result is the one `fround` gives, element by element.
+pub fn fround_slice(input: &[f64], digits: f64, output: &mut [f64]) {
+    let keep_na = |x: f64, rounded: f64| {
+        if heap::object::is_na_real(x) {
+            heap::object::NA_REAL
+        } else {
+            rounded
+        }
+    };
+    if digits == 0.0 {
+        for (out, &x) in output.iter_mut().zip(input) {
+            *out = keep_na(x, if x == 0.0 { x } else { forceint(x) });
+        }
+        return;
+    }
+    let dig = (digits + 0.5).floor();
+    if !(1.0..=308.0).contains(&dig) {
+        for (out, &x) in output.iter_mut().zip(input) {
+            *out = keep_na(x, fround(x, digits));
+        }
+        return;
+    }
+    let dig = dig as i32;
+    let pow10 = r_pow_di(10.0, dig);
+    for (out, &x) in output.iter_mut().zip(input) {
+        *out = if x.is_nan() {
+            keep_na(x, x + digits)
+        } else if x.is_infinite() || x == 0.0 {
+            x
+        } else {
+            let (sgn, x) = if x < 0.0 { (-1.0, -x) } else { (1.0, x) };
+            if std::f64::consts::LOG10_2 * (0.5 + logb(x)) + dig as f64 > f64::DIGITS as f64 {
+                sgn * x
+            } else {
+                let x10 = x * pow10;
+                let i10 = x10.floor();
+                let down = i10 / pow10;
+                let up = x10.ceil() / pow10;
+                let distance_up = up - x;
+                let distance_down = x - down;
+                sgn * if distance_up < distance_down
+                    || (odd(i10) && distance_up == distance_down)
+                {
+                    up
+                } else {
+                    down
+                }
+            }
+        };
+    }
+}
+
+/// Whether a whole number below 2^53, as `fround` scales to, is odd: `i10 % 2.0 == 1.0`
+/// without the call to `fmod`.
+#[inline]
+fn odd(whole: f64) -> bool {
+    if whole < 9007199254740992.0 {
+        (whole as u64) & 1 == 1
+    } else {
+        whole % 2.0 == 1.0
     }
 }
 
