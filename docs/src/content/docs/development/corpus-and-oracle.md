@@ -235,7 +235,9 @@ cases depend on that build:
   print, and each declares the packages it needs in an `# oracle: requires` line.
 
 Other builds differ in the last digits too: OpenBLAS changes `lm` and `arima` results, and the sign
-of `NA^NaN` depends on the compiler. glibc's `mktime` starts its search from the offset its last call
+of `NA^NaN` depends on the compiler. So does `NaN + NA_integer_` (and `*`) in a closure's first,
+uncompiled call, where GNU R's AST interpreter gives NA or NaN depending on how the C compiler
+ordered the operands, so a case about NaN and NA makes those calls with `NA_real_`. glibc's `mktime` starts its search from the offset its last call
 found, so a repeated wall-clock time with unknown daylight saving depends on what ran before; the
 cases that print one convert a summer time first.
 
