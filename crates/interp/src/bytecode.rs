@@ -2008,7 +2008,7 @@ impl Compiler {
         }
         if !subscripts
             .iter()
-            .all(|(_, index)| self.side_effect_free_index(*index, 0))
+            .all(|(_, index)| self.side_effect_free_index(*index, *variable, 0))
         {
             return Ok(None);
         }
@@ -2062,7 +2062,7 @@ impl Compiler {
                         || (element && *value == missing_arg())
                         // A formal may itself be missing, which selects everything only
                         // when `[<-` sees the symbol, so it keeps the general assignment.
-                        || (self.side_effect_free_index(*value, 0)
+                        || (self.side_effect_free_index(*value, *variable, 0)
                             && !(element && self.formals.contains(value))))
             })
         {
@@ -2135,11 +2135,13 @@ impl Compiler {
         Ok(())
     }
 
-    /// Whether evaluating the subscript `index` cannot change a variable of the frame, so the
-    /// compiled assignment may evaluate it before reading the target: a variable of the frame (a
-    /// formal's promise runs in the caller's frame), a numeric constant, a name, base arithmetic
-    /// on variables and numbers, or base `$` and `[[` reading one of those.
-    unsafe fn side_effect_free_index(&self, index: Sexp, depth: u32) -> bool {
+    /// Whether evaluating the subscript `index` cannot change `target` or anything outside the
+    /// frame, so the compiled assignment may evaluate it before reading `target`: a variable of
+    /// the frame (a formal's promise runs in the caller's frame), a numeric constant, a name,
+    /// base arithmetic and comparison on those, base `$` and `[[` reading one of those, `if`
+    /// over them, or an assignment of one of them to another local variable (the growth idiom
+    /// `x[[cap <- if (cap < n) 2L * cap else cap]] <- v`).
+    unsafe fn side_effect_free_index(&self, index: Sexp, target: Sexp, depth: u32) -> bool {
         match index.kind() {
             SexpType::Symbol => {
                 index != symbols().dots
@@ -2169,20 +2171,35 @@ impl Compiler {
                 {
                     let key_free = match &*operator {
                         "$" => key.kind() == SexpType::Symbol && *key != symbols().dots,
-                        _ => name(*key) || self.side_effect_free_index(*key, depth + 1),
+                        _ => name(*key) || self.side_effect_free_index(*key, target, depth + 1),
                     };
                     return *nil_tag == nil()
                         && *key_tag == nil()
                         && key_free
                         && !self.frame_may_bind(index.car())
-                        && self.side_effect_free_index(*object, depth + 1);
+                        && self.side_effect_free_index(*object, target, depth + 1);
                 }
-                ARITHS[..5].iter().any(|(_, name)| *name == &*operator)
-                    && (1..=2).contains(&arguments.len())
-                    && !self.frame_may_bind(index.car())
-                    && arguments.iter().all(|(tag, argument)| {
-                        *tag == nil() && self.side_effect_free_index(*argument, depth + 1)
-                    })
+                if arguments.iter().any(|(tag, _)| *tag != nil()) || self.frame_may_bind(index.car())
+                {
+                    return false;
+                }
+                let operand = |argument: Sexp| self.side_effect_free_index(argument, target, depth + 1);
+                match (&*operator, arguments.as_slice()) {
+                    ("<-" | "=", [(_, variable), (_, value)]) => {
+                        variable.kind() == SexpType::Symbol
+                            && *variable != target
+                            && self.side_effect_free_index(*variable, target, depth + 1)
+                            && operand(*value)
+                    }
+                    ("if", [(_, condition), (_, yes), (_, no)]) => {
+                        operand(*condition) && operand(*yes) && operand(*no)
+                    }
+                    _ => {
+                        ARITHS.iter().any(|(_, name)| *name == &*operator)
+                            && (1..=2).contains(&arguments.len())
+                            && arguments.iter().all(|(_, argument)| operand(*argument))
+                    }
+                }
             }
             _ => false,
         }
@@ -5157,9 +5174,22 @@ unsafe fn replace_variable(
             }
             Some(eval::builtin_def(function)?)
         }
+        // A special such as `[<-` evaluates its own arguments, so only its direct entry can take
+        // the registers; anything that entry declines goes to `complex_assign`.
+        SexpType::Special => {
+            let definition = eval::builtin_def(function)?;
+            if target.is_object()
+                || definition.direct.is_none()
+                || !replacement_arguments(setter_call, true)
+            {
+                return Ok(false);
+            }
+            Some(definition)
+        }
         SexpType::Closure if args.len() == 2 => None,
         _ => return Ok(false),
     };
+    let special = function.kind() == SexpType::Special;
     moves::modifying(target)?;
     // Registers count no reference, so an argument that is the target itself, as in
     // `names(x) <- x`, must not watch the replacement change it.
@@ -5172,15 +5202,21 @@ unsafe fn replace_variable(
         target.set_array(was_array);
     }
     args[0] = target;
-    heap.count_transient_binding(env, symbols().tmp);
     let state = interp();
     state.tmp_values.push((env, target));
     let direct = match builtin {
-        Some(definition) if definition.direct.is_some() && replacement_arguments(setter_call) => {
+        Some(definition)
+            if definition.direct.is_some() && replacement_arguments(setter_call, special) =>
+        {
             eval::call_direct(definition, args)
         }
         _ => Ok(None),
     };
+    if special && matches!(direct, Ok(None)) {
+        interp().tmp_values.pop();
+        return Ok(false);
+    }
+    heap.count_transient_binding(env, symbols().tmp);
     let result = match (direct, builtin) {
         (Ok(Some(value)), _) => Ok(value),
         (Err(unwind), _) => Err(unwind),
@@ -5209,13 +5245,14 @@ unsafe fn replace_variable(
 }
 
 /// Whether a replacement call's arguments are untagged but for the trailing `value`, the shape
-/// `complex_assign` builds and a [`BuiltinDef::direct`] entry takes in formal order.
-unsafe fn replacement_arguments(setter_call: Sexp) -> bool {
+/// `complex_assign` builds and a [`BuiltinDef::direct`] entry takes in formal order. Only a
+/// special's entry, which sees subscripts as `[<-` does, takes an empty one (`x[i, ]`).
+unsafe fn replacement_arguments(setter_call: Sexp, empty_allowed: bool) -> bool {
     let mut cell = setter_call.cdr();
     while cell != nil() {
         let last = cell.cdr() == nil();
         let expected = if last { symbols().value } else { nil() };
-        if cell.tag() != expected || cell.car() == missing_arg() {
+        if cell.tag() != expected || (!empty_allowed && cell.car() == missing_arg()) {
             return false;
         }
         cell = cell.cdr();
