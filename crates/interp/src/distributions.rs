@@ -61,13 +61,14 @@
 pub use crate::random::Deviates;
 use {
     crate::{
+        base_fast_paths::NativeEntry,
         builtin_libraries::NativeFn,
         builtins::{Arg, BuiltinDef, internal},
         coerce::coerce_vector,
         conditions::warning,
         random::{self, with_deviates},
         rmath::*,
-        unwind::{R, error},
+        unwind::{R, Unwind, error},
         values::{
             alloc, alloc_uninit, as_integer_scalar, copy_attributes, get_attr, inherits,
             integer_vector, ints, ints_mut, length, list_vector, materialize, nil, reals,
@@ -95,10 +96,10 @@ macro_rules! distributions {
         /// and the Bessel functions and `psigamma`, which only base has.
         #[rustfmt::skip]
         pub const BUILTINS: &[BuiltinDef] = &[
-            $(internal($name, $arity, |call| unsafe { math::<$kernel>(call.args, Interface::Internal) }),)*
-            $(internal($base_name, $base_arity, |call| unsafe { math::<$base_kernel>(call.args, Interface::Internal) }),)*
+            $(internal($name, $arity, |call| unsafe { signalled(math::<$kernel>(call.args, Interface::Internal, Conditions::Signal)) }),)*
+            $(internal($base_name, $base_arity, |call| unsafe { signalled(math::<$base_kernel>(call.args, Interface::Internal, Conditions::Signal)) }),)*
             $(internal($random_name, $random_arity, |call| unsafe {
-                random_vector::<$sampler>(call.args, Interface::Internal, distributions!(@integer $shape))
+                signalled(random_vector::<$sampler>(call.args, Interface::Internal, distributions!(@integer $shape), Conditions::Signal))
             }),)*
             internal("dtukey", 5, |_| Err(error("unimplemented real function of 4 numeric arguments"))),
         ];
@@ -107,9 +108,9 @@ macro_rules! distributions {
         /// binds to the `C_` symbols of stats' R code.
         #[rustfmt::skip]
         pub const ROUTINES: &[(&str, NativeFn)] = &[
-            $(($name, |call| unsafe { math::<$kernel>(call.args, Interface::Stats) }),)*
+            $(($name, |call| unsafe { signalled(math::<$kernel>(call.args, Interface::Stats, Conditions::Signal)) }),)*
             $(($random_name, |call| unsafe {
-                random_vector::<$sampler>(call.args, Interface::Stats, distributions!(@integer $shape))
+                signalled(random_vector::<$sampler>(call.args, Interface::Stats, distributions!(@integer $shape), Conditions::Signal))
             }),)*
             ("rmultinom", |call| unsafe { rmultinom_routine(call.arg(0), call.arg(1), call.arg(2)) }),
             ("signrank_free", |_| Ok(nil())),
@@ -117,6 +118,30 @@ macro_rules! distributions {
                 wilcox_free();
                 Ok(nil())
             }),
+        ];
+
+        /// The stats routines a closure call can reach without a frame, with their arity: each
+        /// returns `None` instead of signalling a condition, so the caller runs the closure,
+        /// whose frame the condition reports (`base_fast_paths::register_routine_entries`).
+        #[rustfmt::skip]
+        pub const DIRECT_ROUTINES: &[(&str, usize, NativeEntry)] = &[
+            $(($name, $arity, |args| unsafe {
+                if !plain_numbers(args) {
+                    return Ok(None);
+                }
+                declined_on_error(math::<$kernel>(args, Interface::Stats, Conditions::Decline))
+            }),)*
+            $(($random_name, $random_arity, |args| unsafe {
+                if !plain_numbers(args) {
+                    return Ok(None);
+                }
+                declined_on_error(random_vector::<$sampler>(
+                    args,
+                    Interface::Stats,
+                    distributions!(@integer $shape),
+                    Conditions::Decline,
+                ))
+            }),)*
         ];
     };
     (@kernel $kernel:ident $vectors:literal |$v:ident, $f:tt| $body:expr) => {
@@ -296,6 +321,51 @@ impl Deviates for SessionDeviates {
     }
 }
 
+/// Whether a routine signals the warnings and errors it meets, or declines with `None` before
+/// any effect, so that a caller running a closure's call without its frame
+/// (`base_fast_paths::native_entry`) runs the closure instead and the condition reports the
+/// closure's call, as it does in GNU R.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Conditions {
+    Signal,
+    Decline,
+}
+
+/// The value of a routine run with [`Conditions::Signal`], which never declines.
+fn signalled(value: R<Option<Sexp>>) -> R<Sexp> {
+    value.map(|value| value.unwrap_or_else(nil))
+}
+
+/// The value of a routine run with [`Conditions::Decline`]: an error declines too, because the
+/// closure's own run raises it again against its call.
+fn declined_on_error(value: R<Option<Sexp>>) -> R<Option<Sexp>> {
+    match value {
+        Err(Unwind::Error(_)) => Ok(None),
+        value => value,
+    }
+}
+
+/// Whether every argument is a logical, integer or double vector held in memory, which the
+/// routines read without coercing (a string flag warns as it converts) or running an ALTREP
+/// class's code, neither of which a declining routine could undo.
+unsafe fn plain_numbers(args: &[Arg]) -> bool {
+    args.iter().all(|arg| {
+        matches!(
+            arg.value.kind(),
+            SexpType::Logical | SexpType::Integer | SexpType::Real
+        ) && !arg.value.is_altrep()
+    })
+}
+
+/// Whether the routine must decline rather than signal, discarding the warnings Rmath raised.
+fn declines(conditions: Conditions, signals: bool) -> bool {
+    if conditions == Conditions::Decline && (signals || has_warnings()) {
+        take_warnings();
+        return true;
+    }
+    false
+}
+
 unsafe fn raise_warnings() -> R<()> {
     for message in take_warnings() {
         warning(message)?;
@@ -329,7 +399,11 @@ trait Kernel {
 
 /// GNU R's `math2` to `math4`: the first `K::VECTORS` arguments recycle, the rest are integer
 /// flags (`log`, `lower.tail`, `log.p`, Bessel's `expo`), read as `asInteger` reads them.
-unsafe fn math<K: Kernel>(args: &[Arg], interface: Interface) -> R<Sexp> {
+unsafe fn math<K: Kernel>(
+    args: &[Arg],
+    interface: Interface,
+    conditions: Conditions,
+) -> R<Option<Sexp>> {
     let vectors = K::VECTORS;
     let mut originals = [nil(); 4];
     let mut operands = [nil(); 4];
@@ -351,7 +425,7 @@ unsafe fn math<K: Kernel>(args: &[Arg], interface: Interface) -> R<Sexp> {
         flags[slot] = flag(argument(args, index))?;
     }
     if lengths[..vectors].contains(&0) {
-        return alloc(SexpType::Real, 0);
+        return alloc(SexpType::Real, 0).map(Some);
     }
     let count = lengths[..vectors].iter().copied().max().unwrap_or(0);
     // The loop below writes every element.
@@ -376,6 +450,9 @@ unsafe fn math<K: Kernel>(args: &[Arg], interface: Interface) -> R<Sexp> {
         Some(nan_produced) => nan_produced,
         None => math_loop::<K>(&values, flags, out),
     };
+    if declines(conditions, nan_produced) {
+        return Ok(None);
+    }
     raise_warnings()?;
     if nan_produced {
         warning("NaNs produced")?;
@@ -383,7 +460,7 @@ unsafe fn math<K: Kernel>(args: &[Arg], interface: Interface) -> R<Sexp> {
     if let Some(index) = (0..vectors).find(|&index| lengths[index] == count) {
         copy_attributes(originals[index], result)?;
     }
-    Ok(result)
+    Ok(Some(result))
 }
 
 /// The element loop of [`math`], which recycles each operand with its own wrapping position
@@ -545,7 +622,12 @@ trait Sampler {
 /// parameters recycle over it. Missing parameters give `NA`s, and every NaN drawn raises "NAs
 /// produced". The stats routines return the discrete generators' counts as integers when they
 /// all fit.
-unsafe fn random_vector<S: Sampler>(args: &[Arg], interface: Interface, integer: bool) -> R<Sexp> {
+unsafe fn random_vector<S: Sampler>(
+    args: &[Arg],
+    interface: Interface,
+    integer: bool,
+    conditions: Conditions,
+) -> R<Option<Sexp>> {
     let count = random_count(argument(args, 0))?;
     let parameters = args.len().saturating_sub(1).min(3);
     let mut operands = [nil(); 3];
@@ -564,18 +646,40 @@ unsafe fn random_vector<S: Sampler>(args: &[Arg], interface: Interface, integer:
     let result = alloc_uninit(SexpType::Real, count)?;
     let drawn = reals_mut(result);
     if count > 0 && lengths[..parameters].contains(&0) {
+        if conditions == Conditions::Decline {
+            return Ok(None);
+        }
         drawn.fill(NA_REAL);
         warning("NAs produced")?;
-        return random_result(result, integer);
+        return random_result(result, integer).map(Some);
     }
     if count > 0 {
         let mut values: [&[f64]; 3] = [&[]; 3];
         for index in 0..parameters {
             values[index] = reals(operands[index]);
         }
-        random::get_rng_state()?;
+        // Declining discards the draws, which only works while `.Random.seed` holds the state
+        // the draws start from.
+        let checkpoint = match conditions {
+            Conditions::Signal => None,
+            Conditions::Decline => match random::checkpoint() {
+                Some(checkpoint) => Some(checkpoint),
+                None => return Ok(None),
+            },
+        };
+        // A checkpoint found `.Random.seed` holding the generator's state already.
+        if checkpoint.is_none() {
+            random::get_rng_state()?;
+        }
         let outcome =
             with_deviates!(|deviates| draw_all::<S, _>(deviates, &values[..parameters], drawn));
+        if let Some(checkpoint) = checkpoint {
+            let produced_na = reals(result).iter().any(|value| value.is_nan());
+            if declines(conditions, outcome.is_err() || produced_na) {
+                random::rollback(checkpoint);
+                return Ok(None);
+            }
+        }
         random::put_rng_state()?;
         outcome?;
         raise_warnings()?;
@@ -583,7 +687,7 @@ unsafe fn random_vector<S: Sampler>(args: &[Arg], interface: Interface, integer:
             warning("NAs produced")?;
         }
     }
-    random_result(result, integer)
+    random_result(result, integer).map(Some)
 }
 
 /// Fills `slots` with draws whose parameters recycle from `values`. Scalar parameters prepare

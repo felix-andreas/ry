@@ -110,6 +110,7 @@ unsafe fn prepare_process() {
 /// R's start-up gives them.
 unsafe fn start_from_image(home: &str) -> R<()> {
     crate::base_fast_paths::register_native_entries(base_namespace())?;
+    crate::base_fast_paths::register_routine_entries()?;
     mark_base_closures()?;
     crate::envir::clear_options()?;
     define_process_variables()?;

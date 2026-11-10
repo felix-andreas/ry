@@ -15,7 +15,7 @@
 
 use {
     crate::{
-        builtin_libraries, bytecode, data_table, dispatch, format, heap, interp, unwind::R,
+        builtin_libraries, bytecode, dispatch, format, heap, interp, unwind::R,
         values::nil,
     },
     heap::{
@@ -531,14 +531,6 @@ unsafe fn save_state(roots: &mut Vec<Sexp>) -> Vec<u8> {
         out.blob(path.as_bytes());
     }
 
-    match data_table::namespace() {
-        Some(namespace) => {
-            out.u8(1);
-            out.u32(root(namespace));
-        }
-        None => out.u8(0),
-    }
-
     out.bytes
 }
 
@@ -620,10 +612,6 @@ unsafe fn restore_state(
         libraries.push((package, text(&path)?));
     }
     interp().builtin_libraries = libraries;
-
-    if input.u8()? != 0 {
-        data_table::set_namespace(root(&mut input)?);
-    }
 
     if !input.bytes.is_empty() {
         return Err(invalid("the session state has bytes past its end"));

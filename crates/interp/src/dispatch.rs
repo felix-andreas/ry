@@ -1903,12 +1903,6 @@ pub unsafe fn dispatch_evaluated_subject(
     if definition.name == "[" && crate::frame::is_frame(object) {
         return crate::frame::run(call, object, env).map(Some);
     }
-    if definition.name == "["
-        && values::inherits(object, "data.table")
-        && let Some(value) = crate::data_table::query(call, object, env)?
-    {
-        return Ok(Some(value));
-    }
     let mut promised: Args = smallvec::smallvec![Arg {
         tag: arguments.tag(),
         value: forced_promise(arguments.car(), object)?,
