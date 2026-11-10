@@ -1,10 +1,11 @@
 use {
     clap::{Parser, Subcommand},
     oracle::{
-        Engine, EngineError, ProcessEngine,
+        BUILD_FILE, Build, BuildCheck, Engine, EngineError, ProcessEngine,
         bench::{self, Summary},
-        diff, engine_from_environment, engine_packages, expected_path, find_cases, gallery,
-        gnu_r_available, install, installed_packages, packages, parse, render, runnable_cases,
+        build_file, check_build, diff, engine_from_environment, engine_packages, expected_path,
+        find_cases, gallery, gnu_r_available, gnu_r_build, install, installed_packages, packages,
+        parse, read_build, render, runnable_cases, write_build,
     },
     packages::{PackageOutcome, Runtime, Settings},
     std::{
@@ -332,7 +333,14 @@ fn cases(paths: Vec<PathBuf>, installed: impl FnOnce() -> Option<Vec<String>>) -
 }
 
 fn verify(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {
+    let Some(build) = announce_build() else {
+        return ExitCode::from(2);
+    };
+    if check_suites(cases, &build, "verify").is_err() {
+        return ExitCode::from(2);
+    }
     let mut failures = 0;
+    let mut skipped = 0;
     for case in cases {
         let expected = std::fs::read_to_string(expected_path(case))
             .ok()
@@ -350,18 +358,41 @@ fn verify(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {
                     failures += 1;
                 }
             },
+            Err(EngineError::Crashed(error)) => {
+                println!("skip    {}: this GNU R crashed: {error}", case.display());
+                skipped += 1;
+            }
             Err(error) => {
                 println!("ERROR   {}: {error}", case.display());
                 failures += 1;
             }
         }
     }
-    summarize(cases.len(), failures)
+    summarize(cases.len() - skipped, failures)
 }
 
 fn record(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {
+    let Some(build) = announce_build() else {
+        return ExitCode::from(2);
+    };
+    if check_suites(cases, &build, "record").is_err() {
+        return ExitCode::from(2);
+    }
     let mut failures = 0;
+    let mut skipped = 0;
     for case in cases {
+        if build_file(case).is_none()
+            && let Some(directory) = case.parent()
+        {
+            let file = directory.join(BUILD_FILE);
+            match write_build(&file, &build) {
+                Ok(()) => println!("wrote   {}", file.display()),
+                Err(error) => {
+                    eprintln!("{}: {error}", file.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
         match gnu_r.run(case) {
             Ok(outcome) => match std::fs::write(expected_path(case), render(&outcome)) {
                 Ok(()) => println!("wrote   {}", expected_path(case).display()),
@@ -370,13 +401,70 @@ fn record(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {
                     failures += 1;
                 }
             },
+            Err(EngineError::Crashed(error)) => {
+                println!("skip    {}: this GNU R crashed: {error}", case.display());
+                skipped += 1;
+            }
             Err(error) => {
                 println!("ERROR   {}: {error}", case.display());
                 failures += 1;
             }
         }
     }
-    summarize(cases.len(), failures)
+    summarize(cases.len() - skipped, failures)
+}
+
+/// Prints the build of the GNU R at hand, so every report says which R it ran.
+fn announce_build() -> Option<Build> {
+    match gnu_r_build() {
+        Ok(build) => {
+            println!("GNU R {build}");
+            Some(build)
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            None
+        }
+    }
+}
+
+/// Checks the build each suite among `cases` was recorded with against `build`. Another release
+/// refuses `action`; other linear-algebra libraries only warn.
+fn check_suites(cases: &[PathBuf], build: &Build, action: &str) -> Result<(), ()> {
+    let mut seen = Vec::new();
+    for case in cases {
+        let key = build_file(case);
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key.clone());
+        match check_build(case, build) {
+            Ok(BuildCheck::Same) => {}
+            Ok(BuildCheck::LibrariesDiffer(message)) => println!("warning: {message}"),
+            Ok(BuildCheck::ReleaseDiffers(message)) => {
+                eprintln!("refusing to {action}: {message}");
+                if action == "record"
+                    && let Some(file) = key
+                {
+                    eprintln!(
+                        "to move the suite to another release, delete {} and record every case",
+                        file.display()
+                    );
+                }
+                return Err(());
+            }
+            Ok(BuildCheck::Unrecorded) if action == "verify" => println!(
+                "warning: no {BUILD_FILE} names the GNU R build {} was recorded with",
+                case.parent().unwrap_or(Path::new(".")).display()
+            ),
+            Ok(BuildCheck::Unrecorded) => {}
+            Err(error) => {
+                eprintln!("{error}");
+                return Err(());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The engine `--engine` names, else the one `ORACLE_ENGINE` names.
@@ -395,18 +483,47 @@ fn second_engine(name: Option<&str>) -> Option<Box<dyn Engine>> {
 
 /// Compares `second` with GNU R, or with each case's recorded outcome when `gnu_r` is `None`.
 fn compare(gnu_r: Option<&ProcessEngine>, second: &dyn Engine, cases: &[PathBuf]) -> ExitCode {
+    match gnu_r {
+        Some(_) => {
+            if announce_build().is_none() {
+                return ExitCode::from(2);
+            }
+        }
+        None => {
+            let mut seen = Vec::new();
+            for file in cases.iter().filter_map(|case| build_file(case)) {
+                if seen.contains(&file) {
+                    continue;
+                }
+                match read_build(&file) {
+                    Ok(build) => println!(
+                        "recorded with GNU R {build} ({})",
+                        file.parent().unwrap_or(Path::new(".")).display()
+                    ),
+                    Err(error) => eprintln!("{error}"),
+                }
+                seen.push(file);
+            }
+        }
+    }
     let mut failures = 0;
     let mut skipped = 0;
+    let mut crashed = 0;
     for case in cases {
         let expected = match gnu_r {
-            Some(gnu_r) => gnu_r.run(case).map_err(|error| error.to_string()),
+            Some(gnu_r) => gnu_r.run(case),
             None => std::fs::read_to_string(expected_path(case))
                 .ok()
                 .and_then(|text| parse(&text))
-                .ok_or_else(|| "no recorded outcome".to_string()),
+                .ok_or_else(|| EngineError::Failed("no recorded outcome".to_string())),
         };
         let expected = match expected {
             Ok(outcome) => outcome,
+            Err(EngineError::Crashed(error)) => {
+                println!("skip    {}: this GNU R crashed: {error}", case.display());
+                crashed += 1;
+                continue;
+            }
             Err(error) => {
                 println!("ERROR   {}: {error}", case.display());
                 failures += 1;
@@ -434,10 +551,10 @@ fn compare(gnu_r: Option<&ProcessEngine>, second: &dyn Engine, cases: &[PathBuf]
             second.name()
         );
     }
-    if skipped == cases.len() {
+    if skipped + crashed == cases.len() {
         return ExitCode::SUCCESS;
     }
-    summarize(cases.len() - skipped, failures)
+    summarize(cases.len() - skipped - crashed, failures)
 }
 
 fn run_fuzz(first: u64, count: u64, engines: &str, timeout: Duration) -> ExitCode {

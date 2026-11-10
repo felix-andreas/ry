@@ -10,7 +10,7 @@ to giving a wrong answer: a construct it cannot describe becomes `Unknown`, whic
 everything, so a gap means a skipped check rather than a false error, and [strict mode](#strict-mode)
 shows where the gaps are. Second, every rule must be cheap enough to check on every keystroke, which
 is why inference is Hindley–Milner, why your own functions cannot be overloaded, and why there is no
-subtyping between nominal types. The [tutorial](/tutorial/types) introduces the same ideas
+subtyping between nominal types. The [guide](/guide#step-2-type-your-code) introduces the same ideas
 through examples.
 
 `ry check` reports the type errors on this page only when typing is on, through `[check] typing = true`
@@ -371,7 +371,7 @@ new definition and is not checked.
 
 Before running anything, `ry run` and `ry R` check the script and their console checks each command, with the
 project's `ry.toml`. They print every `annotation-mismatch` and `inline-annotation` warning. In
-[strict mode](/tutorial/fully-typed#strict-mode) they also print every error and refuse to run code that
+[strict mode](/guide#strict-mode) they also print every error and refuse to run code that
 has one: a script exits with status 1, and the console drops the command. A paste from a terminal
 with bracketed paste is one command, so an error anywhere in it drops all of it. Other findings are left
 to `ry check`, so they never change whether R code runs.
@@ -861,7 +861,7 @@ the value with the member type you intend.
 ## Records, tuples and tags
 
 Records, tuples and tags are ry's own values, not R lists. The user guide is
-[Records and tags](/tutorial/runtime#records-tags-and-match); this section is their typing contract. They are
+[Records and tags](/guide#records-tags-and-match); this section is their typing contract. They are
 inline syntax, so with `[check] inline-annotations = false` each literal, tag or `match` is reported
 as a `ry-syntax` warning. Literals are still typed then, but a `match` gets no coverage check. Their types may be written in `#:` comments
 either way.

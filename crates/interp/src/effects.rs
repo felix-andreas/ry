@@ -179,17 +179,20 @@ pub unsafe fn effect_free(function: Sexp) -> R<bool> {
     }
     let slot = CacheSlot::of(code, values::ints(summary.element(0))[0] as usize);
     let enclosure = function.tag();
-    let home = home_of(enclosure);
     let heap = crate::heap();
     let key = slot.key();
     let proof = slot.value();
-    let current = key == enclosure
-        || (key == home
+    // The home is a walk up the enclosures, needed only when the proof was made for another
+    // enclosure or must be made again, so the usual call from the same closure skips it.
+    let current = key == enclosure || {
+        let home = home_of(enclosure);
+        key == home
             && match proof_kind(proof) {
                 Proof::Fails => true,
                 Proof::HoldsHere => false,
                 Proof::HoldsFromHome => !frames_bind(enclosure, home, summary),
-            });
+            }
+    };
     if current {
         let epoch = heap.binding_epoch();
         if slot.stamp() == epoch {
@@ -203,6 +206,7 @@ pub unsafe fn effect_free(function: Sexp) -> R<bool> {
             return Ok(proof_kind(proof) != Proof::Fails);
         }
     }
+    let home = home_of(enclosure);
     let mut found = Vec::new();
     let holds = resolve(function, &mut found, &mut SmallVec::new())?;
     // A failed proof stays sound for any enclosure, because a binding in a function frame on
@@ -246,14 +250,7 @@ pub unsafe fn effect_free_lookups(function: Sexp) -> R<Option<Vec<Speculation>>>
 /// Whether a calling handler is established, which could run R code in the middle of a call
 /// and look at, or assign, what an argument reads before the callee forces it.
 pub fn calling_handler_established() -> bool {
-    let mut entry = interp().handlers.as_ref();
-    while let Some(handler) = entry {
-        if handler.calling {
-            return true;
-        }
-        entry = handler.next.as_ref();
-    }
-    false
+    crate::conditions::calling_established(&interp().handlers)
 }
 
 /// The closure a variable lookup of `symbol` from `start` finds when it is a function, without

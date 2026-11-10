@@ -27,6 +27,9 @@ use {
 const TIMEOUT: Duration = Duration::from_secs(120);
 /// Collecting on every allocation makes a fuzz program take up to a few minutes on a busy machine.
 const TORTURE_TIMEOUT: Duration = Duration::from_secs(900);
+/// Seeds outside the default range whose programs once diverged, run on every pass:
+/// 24 reported an unbound variable against the wrong call once a closure ran compiled.
+const REGRESSION_SEEDS: &[u64] = &[24];
 
 #[test]
 fn programs_are_deterministic() {
@@ -53,7 +56,7 @@ fn fuzz_programs_agree_across_tiers() {
     let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT);
     let tier0 = ProcessEngine::ry_tier0().with_timeout(TIMEOUT);
     let jit = ProcessEngine::ry_jit().with_timeout(TIMEOUT);
-    let reports = run_seeds(&gnu_r, &[&tier0, &jit], fuzz_iterations(3));
+    let mut reports = run_seeds(&gnu_r, &[&tier0, &jit], fuzz_iterations(3));
     // A generator that drifts into erroring early would compare almost nothing, so most
     // programs must run to the end under GNU R.
     let completed = reports
@@ -65,6 +68,14 @@ fn fuzz_programs_agree_across_tiers() {
         "only {completed} of {} programs ran without an error under GNU R",
         reports.len()
     );
+    let directory = scratch_directory();
+    for &seed in REGRESSION_SEEDS {
+        reports.push(
+            check_seed(seed, &gnu_r, &[&tier0, &jit], &directory)
+                .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", gnu_r.name())),
+        );
+    }
+    std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
     assert_agree(&reports);
 }
 

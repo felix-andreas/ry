@@ -217,7 +217,7 @@ impl Generator {
         let size = 1 + self.rng.below(12);
         let scope = vec![("i".to_owned(), Kind::Integer)];
         let element = self.scalar_in(Kind::Double, 2, &scope);
-        let (allocate, write) = match self.rng.below(5) {
+        let (allocate, write) = match self.rng.below(7) {
             0 => ("numeric(n)", format!("v[i] <- {element}")),
             1 => ("integer(n)", "v[i] <- i * 2L".to_owned()),
             2 => (
@@ -225,6 +225,8 @@ impl Generator {
                 format!("v[i] <- v[max(1L, i - 1L)] + {element}"),
             ),
             3 => ("logical(n)", "v[[i]] <- i %% 2L == 0L".to_owned()),
+            4 => ("vector(\"list\", n)", format!("v[i] <- list({element})")),
+            5 => ("numeric(n)", format!("v[[(i %% n) + 1L]] <- {element}")),
             _ => ("character(n)", "v[i] <- paste0(\"s\", i)".to_owned()),
         };
         let read = match self.rng.below(4) {
@@ -237,7 +239,11 @@ impl Generator {
         let mut text = format!(
             "g{k} <- function(n) {{\n  v <- {allocate}\n  for (i in seq_len(n)) {write}\n  {read}\n}}\nw{k} <- NA\n{run}\n"
         );
-        let shown = self.show(&format!("w{k}"));
+        // `cat` rejects a list, so a list result is always printed.
+        let shown = match allocate.starts_with("vector") {
+            true => format!("print(w{k})"),
+            false => self.show(&format!("w{k}")),
+        };
         text.push_str(&shown);
         text.push('\n');
         if self.rng.chance(1, 2) {
@@ -939,10 +945,12 @@ pub fn check_seed(
             Err(EngineError::Unavailable(reason)) => {
                 unavailable.push(format!("{}: {reason}", engine.name()))
             }
-            Err(EngineError::Failed(reason)) => divergences.push(Divergence {
-                engine: engine.name(),
-                detail: reason,
-            }),
+            Err(EngineError::Failed(reason) | EngineError::Crashed(reason)) => {
+                divergences.push(Divergence {
+                    engine: engine.name(),
+                    detail: reason,
+                })
+            }
         }
     }
     if let Err(error) = std::fs::remove_file(&path) {

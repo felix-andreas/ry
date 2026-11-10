@@ -43,7 +43,7 @@ test *args:
     cargo test -- --nocapture {{ args }}
 
 # The pre-landing check: tests, clippy at -D warnings, fmt, and the licence notices.
-gate: battery clippy fmt-check (notices "--check")
+gate: battery clippy fmt-check (notices "--check") (bench-readme "--check")
 
 # Workspace tests; `zed_ry` needs a wasm toolchain, so it is excluded.
 battery *args:
@@ -131,6 +131,11 @@ climb *args:
 bench-real *args:
     cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/real/run.py {{ args }}
+
+# Rewrites the benchmark blocks of the two READMEs from the committed results files; `--check` only
+# reports a README that differs.
+bench-readme *args:
+    python3 -I tools/bench/readme.py {{ args }}
 
 # Times the test suites of real CRAN packages, pinned in tools/bench/packages/lock.tsv, on GNU R and ry's runtime:
 # `just bench-packages install` fetches and installs the corpus from the rrepo CRAN mirror into .corpus/packages,

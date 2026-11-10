@@ -101,21 +101,21 @@ non-exhaustive-match
 
 ## Speed
 
-On ry's runtime, loops and recursion run several times faster than on GNU R, and vectorized code
-runs about as fast. The table gives seconds per program and the peak memory of the whole process,
-R's startup included:
+ry's runtime against GNU R, as the geometric mean of each benchmark suite's speed-ups:
 
-<!-- bench-why -->
-| program | GNU R | ry | ry, typed and strict | speed-up | peak memory, GNU R / ry / typed |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `fib` | 0.559 s | 0.007 s | 0.004 s | 79.9x | 52 / 49 / 50 MiB |
-| `drawdown` | 0.200 s | 0.029 s | 0.007 s | 6.9x | 71 / 146 / 134 MiB |
-| `vector_arith` | 0.111 s | 0.091 s | 0.053 s | 1.2x | 107 / 114 / 77 MiB |
-| `log_rank` | 0.071 s | 0.046 s | 1.426 s | 1.5x | 105 / 64 / 108 MiB |
-<!-- /bench-why -->
+<!-- bench-summary -->
+| Suite | What it is | ry vs GNU R | ry typed |
+| --- | --- | ---: | ---: |
+| Numeric kernels (ours) | 17 small programs we wrote: loops, recursion, vector code and records | 2.92x | 10x |
+| Application workloads (ours) | 7 call-heavy programs we wrote: conditions, S3, S4 and R6 objects, records, tables, validation | 0.90x | not typed |
 
-The typed column runs the same program with type annotations in strict mode.
-[Benchmarks](https://ry-lang.org/benchmarks) has the code of each program and the method.
+Geometric means of the speed-ups over GNU R; above 1x means ry is faster.
+
+- Numeric kernels (ours): measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v233; each engine's best time over 3 processes, run one engine after another.
+- Application workloads (ours): measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores; each engine's median time over 3 rounds.
+
+[Benchmarks](https://ry-lang.org/benchmarks) explains how each suite is built and measured, and shows every program.
+<!-- /bench-summary -->
 
 ## Settings
 
