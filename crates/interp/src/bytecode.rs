@@ -1118,7 +1118,7 @@ struct Compiler {
     /// The call `x <- call` assigns to `x`, with the symbol's constant and the assignment's
     /// lookup cache slot, while the compiler compiles that call, so a fused pass may compute
     /// the result into the value `x` holds.
-    assigning: Option<(Sexp, u32, u32)>,
+    assigning: Option<Sexp>,
     /// The body's calls in tail position that are `f(p, ...)` for a library builtin that
     /// updates its first argument in place, `p` the first parameter, with `p`: each becomes
     /// [`Op::CallTailUpdate`] (see [`tail_updates`]).
@@ -1242,15 +1242,13 @@ mod fusion {
     pub const DECLINES: usize = 0;
     pub const NODES: usize = 1;
     pub const LEAVES: usize = 2;
-    /// -1 for none, else 0 for `sum`, 1 for `any` and 2 for `all`.
+    /// -1 for none, [`ASSIGNED`] for none with the result assigned by the `SetVar` the pass
+    /// jumps to, else 0 for `sum`, 1 for `any` and 2 for `all`.
     pub const REDUCTION: usize = 3;
     pub const REDUCTION_SITE: usize = 4;
     pub const GUARDS: usize = 5;
-    /// The constant of the symbol the result is assigned to, or -1 for none.
-    pub const TARGET: usize = 6;
-    /// The assignment's lookup cache slot.
-    pub const TARGET_SLOT: usize = 7;
-    pub const HEADER: usize = 8;
+    pub const HEADER: usize = 6;
+    pub const ASSIGNED: i32 = -2;
     pub const GUARD: usize = 4;
     pub const LEAF: usize = 4;
     pub const NODE: usize = 5;
@@ -2392,10 +2390,7 @@ impl Compiler {
     /// name their base functions, since a redefined operator might not evaluate it at all; when
     /// one does not, the whole call goes to the evaluator instead.
     unsafe fn fused_call(&mut self, call: Sexp, dst: u32, plan: &FusionPlan) -> R<()> {
-        let assigned = self
-            .assigning
-            .filter(|&(value, ..)| value == call)
-            .map(|(_, symbol, slot)| (symbol, slot));
+        let assigned = self.assigning == Some(call);
         let ahead_end = plan
             .steps
             .iter()
@@ -2648,7 +2643,7 @@ impl Compiler {
         plan: &FusionPlan,
         sites: &[u32],
         ahead: &[(usize, u32)],
-        target: Option<(u32, u32)>,
+        assigned: bool,
     ) -> Option<Vec<i32>> {
         if sites.len() != plan.steps.len() {
             return None;
@@ -2707,6 +2702,7 @@ impl Compiler {
             }
         }
         let reduction = match plan.reduction {
+            None if assigned => fusion::ASSIGNED,
             None => -1,
             Some(Reduction::Sum) => 0,
             Some(Reduction::Any) => 1,
@@ -2719,8 +2715,6 @@ impl Compiler {
             reduction,
             reduction_site as i32,
             guards.len() as i32,
-            target.map_or(-1, |(symbol, _)| symbol as i32),
-            target.map_or(0, |(_, slot)| slot as i32),
         ];
         words.extend(guards.iter().flatten());
         words.extend(leaves.iter().flatten());
@@ -3636,15 +3630,15 @@ impl Compiler {
                 if rebinds_first_argument(call) {
                     self.rebinding = Some((args[1].1, args[0].1));
                 }
-                let symbol = self.constant(args[0].1);
-                let slot = self.cache();
                 if assigns_fusible(call) {
-                    self.assigning = Some((args[1].1, symbol, slot));
+                    self.assigning = Some(args[1].1);
                 }
                 let compiled = self.expression(args[1].1, dst);
                 self.rebinding = None;
                 self.assigning = None;
                 compiled?;
+                let symbol = self.constant(args[0].1);
+                let slot = self.cache();
                 self.emit(Op::SetVar, &[symbol, dst, slot]);
             }
             "<<-" => {
@@ -4658,7 +4652,7 @@ unsafe fn valid_fusion_program(
         || leaves > MAX_NODES
         || guards > MAX_NODES
         || words.len() != leaves_end + nodes * fusion::NODE
-        || !(-1..=2).contains(&words[fusion::REDUCTION])
+        || !(fusion::ASSIGNED..=2).contains(&words[fusion::REDUCTION])
         || count(fusion::REDUCTION_SITE).is_none_or(|site| site >= sites)
     {
         return false;
@@ -4701,9 +4695,7 @@ unsafe fn valid_fusion_program(
                 _ => false,
             }
         });
-    let target_valid = words[fusion::TARGET] == -1
-        || symbol(words[fusion::TARGET]) && below(words[fusion::TARGET_SLOT], caches);
-    target_valid && guards_valid && leaves_valid && nodes_valid
+    guards_valid && leaves_valid && nodes_valid
 }
 
 /// Whether `table` has the shape [`switch_table`] gives it, which [`switch_arm`] reads unchecked.
@@ -8686,13 +8678,20 @@ unsafe fn fused_pass(
         2 => Some(Reduction::All),
         _ => None,
     };
-    let into = match words[fusion::TARGET] {
-        -1 => None,
-        symbol => reusable_target(
+    // The assignment's `SetVar` names the symbol and its lookup cache; a code image is only
+    // checked to make the jump target an instruction, so the pass checks that it is this one.
+    let assignment = instruction.code.add(instruction.operand(2));
+    let into = if words[fusion::REDUCTION] == fusion::ASSIGNED
+        && *assignment == op_word(Op::SetVar) as i32
+        && *assignment.add(2) as usize == instruction.operand(0)
+    {
+        reusable_target(
             state,
-            state.constants.element(symbol as usize),
-            words[fusion::TARGET_SLOT] as usize,
-        ),
+            state.constants.element(*assignment.add(1) as usize),
+            *assignment.add(3) as usize,
+        )
+    } else {
+        None
     };
     let Some(fused) = kernels::fused(&nodes, &leaves[..leaf_count], reduction, into)? else {
         return Ok(None);
