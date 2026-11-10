@@ -8450,6 +8450,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 | Bucket | Owner | 10x end shape |
 | --- | --- | --- |
 | R code | JIT track (inlining tier, roadmap row (c)) | Almost all R-level time runs as machine code. Callees are inlined across closures and S3/S4 dispatch, and frames, promises and environments materialize only on deoptimization |
+| R code: tier-0 interpreter (44% of testthat) | T0 | 10 to 20 instructions per simple bytecode op (about 120 today): pinned interpreter state, quickened slot-local typed ops, superinstructions, feedback recorded only until a site is quickened |
 | R code | AOT track | 80% or more of package closures compiled at install, so package code is machine code from its first call |
 | Builtins: call machinery, subassignment, `[`/`[[`, apply family | B5 | No allocation on any fast path, arguments passed without pairlists, results written in place when unshared; faster than GNU R's C |
 | Builtins: element-wise kernels | B1 | Fused element-wise temporaries and SIMD kernels that beat GNU R's C |
