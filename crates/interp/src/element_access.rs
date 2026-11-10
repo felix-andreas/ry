@@ -7,38 +7,54 @@ use {
     crate::{
         attribute_access::same_text,
         builtins::is_native_value,
-        bytecode::ElementKind,
         eval::reuse_permitted,
         moves,
         subset::{int_to_real, vector_element},
         unwind::R,
         values::{self, length, na_string, nil},
     },
-    heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp},
+    heap::{
+        Heap,
+        object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp},
+    },
 };
 
-/// `x[i]`, `x[[i]]` or `x$name` read without a call: the element when the subject does not
-/// dispatch and the subscript selects one element by the direct paths of [`scalar_subset`] and
-/// [`direct_subset2`], and `None` for everything else, which the general call handles.
-#[expect(dead_code, reason = "the compiled element read op is its caller")]
+/// `x[i]` or `x[[i]]` (`double`) read by tier 0's handler of a call to the base primitive,
+/// without the call: the element when `x` is a double, integer or logical vector (or for `[[` a
+/// list) that is not an object, an array or ALTREP, and has no attributes for `[`, and `i` a
+/// plain numeric scalar within bounds. A number is a fresh scalar from the young generation.
+/// `None` for anything else, and when that allocation needs a collection, so the builtin runs.
+#[inline(always)]
 pub(crate) unsafe fn read_element(
+    heap: &mut Heap,
     subject: Sexp,
     index: Sexp,
-    kind: ElementKind,
-) -> R<Option<Sexp>> {
-    if is_native_value(subject) || is_native_value(index) {
-        return Ok(None);
+    double: bool,
+) -> Option<Sexp> {
+    let kind = subject.kind();
+    if !matches!(
+        kind,
+        SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::List
+    ) || (kind == SexpType::List && !double)
+        || subject.is_object()
+        || subject.is_array()
+        || subject.is_altrep()
+        || (!double && subject.attrib() != heap.known().nil)
+    {
+        return None;
     }
+    let position = scalar_position(index, subject.length() as usize)?;
+    let data = subject.data();
     match kind {
-        ElementKind::Single if !subject.is_object() => scalar_subset(subject, index),
-        ElementKind::Single => Ok(None),
-        ElementKind::Double => direct_subset2(nil(), &[subject, index]),
-        // `$` matches a name exactly first, which is `[[`'s exact match; a partial match and
-        // `$` on an atomic vector take the general path.
-        ElementKind::Dollar if index.kind() == SexpType::String => {
-            direct_subset2(nil(), &[subject, index])
+        SexpType::List => Some(*data.cast::<Sexp>().add(position)),
+        SexpType::Real => {
+            let bits = (*data.cast::<f64>().add(position)).to_bits();
+            heap.try_alloc_scalar(kind, [bits, 0])
         }
-        ElementKind::Dollar => Ok(None),
+        _ => {
+            let bits = *data.cast::<i32>().add(position) as u32 as u64;
+            heap.try_alloc_scalar(kind, [bits, 0])
+        }
     }
 }
 
@@ -144,7 +160,8 @@ pub(crate) unsafe fn direct_subset2(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp
 
 /// The zero-based position a plain scalar integer or real subscript selects among `count`
 /// elements, or `None` when it is out of bounds, `NA`, or not such a scalar.
-unsafe fn scalar_position(index: Sexp, count: usize) -> Option<usize> {
+#[inline(always)]
+pub(crate) unsafe fn scalar_position(index: Sexp, count: usize) -> Option<usize> {
     if index.is_altrep() || index.attrib() != nil() || length(index) != 1 {
         return None;
     }

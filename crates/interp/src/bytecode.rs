@@ -5709,6 +5709,11 @@ fast_paths! {
     fast_jump: Jump, jump_fast;
     fast_constant: Constant, constant_fast;
     fast_end_statement: EndStatement, end_statement_fast;
+    fast_get_fun: GetFun, get_fun_fast;
+    fast_branch_unless_primitive: BranchUnlessPrimitive, branch_unless_primitive_fast;
+    fast_branch_if_object: BranchIfObject, branch_if_object_fast;
+    fast_call_builtin: CallBuiltin, call_builtin_fast;
+    fast_sub_assign: SubAssign, sub_assign_fast;
 }
 
 /// The constant `index` of the activation's constant pool, read without the ALTREP check of
@@ -5867,6 +5872,189 @@ unsafe fn end_statement_fast(state: &mut Activation<'_, '_>, at: usize) -> Optio
         register += 1;
     }
     Some(at + 1 + operand_count(Op::EndStatement))
+}
+
+/// `GetFun` in a slot frame of a name the frame has no slot for, while the lookup cache holds
+/// the cell a function lookup from the closure's enclosure found and the cell holds a function:
+/// the check [`slot_function`] makes first, without its call. The cache is keyed by the
+/// enclosure only when that is not a function frame.
+#[inline(always)]
+unsafe fn get_fun_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let heap = &*state.heap;
+    if *state.header != heap.known().nil {
+        return None;
+    }
+    let code = state.code;
+    let slot = *code.add(at + 3) as usize;
+    if *state.slot_map.add(slot) >= 0 {
+        return None;
+    }
+    let enclosure = state.machine.function.tag();
+    let symbol = pool_constant(state, *code.add(at + 2) as usize);
+    let cache = state.cache;
+    if enclosure.has_gp(gp::FUNCTION_FRAME)
+        || *cache.epochs.add(slot) != heap.lookup_stamp(symbol)
+        || *cache.slots.add(slot * 2) != enclosure
+    {
+        return None;
+    }
+    let function = (*cache.slots.add(slot * 2 + 1)).cdr();
+    if !matches!(
+        function.kind(),
+        SexpType::Closure | SexpType::Builtin | SexpType::Special
+    ) {
+        return None;
+    }
+    *state.registers.add(*code.add(at + 1) as usize) = function;
+    Some(at + 1 + operand_count(Op::GetFun))
+}
+
+#[inline(always)]
+unsafe fn branch_unless_primitive_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    if *state.registers.add(*code.add(at + 1) as usize)
+        != pool_constant(state, *code.add(at + 2) as usize)
+    {
+        return Some(*code.add(at + 3) as usize);
+    }
+    Some(at + 1 + operand_count(Op::BranchUnlessPrimitive))
+}
+
+#[inline(always)]
+unsafe fn branch_if_object_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    if (*state.registers.add(*code.add(at + 1) as usize)).is_object() {
+        return Some(*code.add(at + 2) as usize);
+    }
+    Some(at + 1 + operand_count(Op::BranchIfObject))
+}
+
+/// `CallBuiltin` of the base `[` or `[[` on two positional values, reading the element as
+/// [`element_access::read_element`] does without the call. A profile or activity trace being
+/// taken sees the full call, as [`eval::call_direct`] arranges for every direct entry.
+#[inline(always)]
+unsafe fn call_builtin_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    let registers = state.registers;
+    if *code.add(at + 5) != 2 {
+        return None;
+    }
+    let function = *registers.add(*code.add(at + 2) as usize);
+    if function.kind() != SexpType::Special {
+        return None;
+    }
+    let symbol = (*state.interp)
+        .builtin(function.primitive_index())?
+        .symbol?;
+    let names = symbols();
+    let double = if symbol == names.bracket2 {
+        true
+    } else if symbol == names.bracket {
+        false
+    } else {
+        return None;
+    };
+    let heap = &mut *state.heap;
+    let known = *heap.known();
+    let arguments = pool_constant(state, *code.add(at + 3) as usize).cdr();
+    let second = arguments.cdr();
+    if arguments.tag() != known.nil
+        || second.tag() != known.nil
+        || arguments.car() == known.missing_arg
+        || second.car() == known.missing_arg
+        || activity::enabled()
+        || crate::utils::PROFILE_TICK.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return None;
+    }
+    let first = *code.add(at + 4) as usize;
+    let value = crate::element_access::read_element(
+        heap,
+        *registers.add(first),
+        *registers.add(first + 1),
+        double,
+    )?;
+    state.record(at, value);
+    *registers.add(*code.add(at + 1) as usize) = value;
+    (*state.interp).visible = true;
+    Some(at + 1 + operand_count(Op::CallBuiltin))
+}
+
+/// `SubAssign` of `x[i] <- v` or `x[[i]] <- v` on a slot frame's slot that alone holds a
+/// double, integer, logical vector or (for `[[`) a list that is not an object, an array or
+/// ALTREP, at a plain numeric position within bounds, with a value of the vector's own type
+/// (a plain scalar for a vector, anything but `NULL` for a list): the element is written in
+/// place, which is what [`assign_slot_element`] does for that case, without its call. Owning
+/// is [`slot_owns`]'s rule for the innermost frame's body, and no move may be in progress, since
+/// [`moves::modifying`] would end it.
+#[inline(always)]
+unsafe fn sub_assign_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let heap = &mut *state.heap;
+    let known = *heap.known();
+    if *state.header != known.nil {
+        return None;
+    }
+    let code = state.code;
+    let registers = state.registers;
+    let double = match *code.add(at + 6) {
+        0 => false,
+        1 => true,
+        _ => return None,
+    };
+    let by_constant = pool_constant(state, SLOTS).element(3);
+    if by_constant == known.nil {
+        return None;
+    }
+    let slot = *values::ints(by_constant).get(*code.add(at + 2) as usize)?;
+    if slot < 0 {
+        return None;
+    }
+    let slot = state.header.add(1 + slot as usize);
+    let target = *slot;
+    let value = *registers.add(*code.add(at + 4) as usize);
+    let kind = target.kind();
+    let fits = match kind {
+        SexpType::Real | SexpType::Integer | SexpType::Logical => {
+            value.kind() == kind
+                && value.length() == 1
+                && value.attrib() == known.nil
+                && !value.is_altrep()
+        }
+        SexpType::List => double && value != known.nil,
+        _ => false,
+    };
+    if !fits
+        || value == target
+        || target.refcount() != 1
+        || target.is_object()
+        || target.is_array()
+        || target.is_altrep()
+    {
+        return None;
+    }
+    let interp = &*state.interp;
+    let header = state.header.offset_from(interp.bytecode.registers.as_ptr()) as usize;
+    if state.machine.function == known.nil
+        || moves::tracking()
+        || !interp.frames.last().is_some_and(|frame| {
+            frame.slots as usize == header && frame.function == state.machine.function
+        })
+    {
+        return None;
+    }
+    let position = crate::element_access::scalar_position(
+        *registers.add(*code.add(at + 3) as usize),
+        target.length() as usize,
+    )?;
+    let data = target.data();
+    match kind {
+        SexpType::Real => *data.cast::<f64>().add(position) = *value.data().cast::<f64>(),
+        SexpType::List => heap.set_element(target, position, value),
+        _ => *data.cast::<i32>().add(position) = *value.data().cast::<i32>(),
+    }
+    *registers.add(*code.add(at + 1) as usize) = value;
+    (*state.interp).visible = false;
+    Some(at + 1 + operand_count(Op::SubAssign))
 }
 
 /// The handler of each specialized arithmetic form, in place of the generic `Arithmetic`'s.
