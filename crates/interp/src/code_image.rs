@@ -185,11 +185,10 @@ pub fn path(database: &str) -> PathBuf {
     Path::new(database.strip_suffix(".rdb").unwrap_or(database)).with_extension("ryc")
 }
 
-/// The code images this process opened, by database path; `None` for a database without a usable
-/// image, so its absence is looked up once.
+/// The lazy-load databases this process read from and the code images it opened for them.
 #[derive(Default)]
 pub struct State {
-    images: FxHashMap<String, Option<Rc<Image>>>,
+    databases: Databases,
     /// Per closure body fetched from an image but not called yet, where its code lies. Each body
     /// is preserved while it waits, so its address cannot be reused by an unrelated object.
     pending: FxHashMap<Sexp, Pending>,
@@ -198,6 +197,31 @@ pub struct State {
     /// The runtime build images are stamped with; empty when the host named none, which turns
     /// images off.
     pub build: &'static str,
+}
+
+/// The lazy-load databases this process fetched from, numbered in the order they were first
+/// fetched from, one column per fact. A database is named by the interned `CHARSXP` of its path,
+/// which every promise of one database shares, so a fetch finds its number by comparing
+/// pointers: a session reads from a few dozen databases, and a scan of that many words costs
+/// less than hashing the path.
+#[derive(Default)]
+struct Databases {
+    /// Each path's `CHARSXP`, preserved so its address cannot name another string.
+    names: Vec<Sexp>,
+    paths: Vec<Rc<str>>,
+    /// The database file, mapped on its first read and dropped when the database changes.
+    files: Vec<Option<ImageFile>>,
+    images: Vec<ImageSlot>,
+    /// One bit per database under the directory an install is recording.
+    recorded: Vec<u64>,
+}
+
+/// Whether a database's code image was looked for, and what was found.
+enum ImageSlot {
+    Unopened,
+    /// No usable image, so its absence is looked up once.
+    Absent,
+    Open(Rc<Image>),
 }
 
 struct Image {
@@ -218,7 +242,7 @@ struct Image {
 /// own. `formals` is preserved while the entry waits, like the body.
 struct Pending {
     image: Rc<Image>,
-    database: Rc<str>,
+    database: u32,
     formals: Sexp,
     entry: u32,
     start: u32,
@@ -298,17 +322,27 @@ impl DatabaseStamp {
 
 /// Forgets the image of `database` and the code waiting in it, which `lazyLoadDBflush` calls when
 /// the database changes or its namespace unloads.
+/// The database file is read again on its next fetch.
 pub fn forget(database: &str) {
     let state = &mut interp().code_image;
-    state.images.remove(database);
-    drop_pending(state, database);
+    let Some(index) = state
+        .databases
+        .paths
+        .iter()
+        .position(|path| &**path == database)
+    else {
+        return;
+    };
+    state.databases.files[index] = None;
+    state.databases.images[index] = ImageSlot::Unopened;
+    drop_pending(state, index as u32);
 }
 
 /// Drops the code waiting in the image of `database`, releasing what each entry preserved.
-fn drop_pending(state: &mut State, database: &str) {
+fn drop_pending(state: &mut State, database: u32) {
     let heap = crate::heap();
     state.pending.retain(|&body, pending| {
-        if &*pending.database != database {
+        if pending.database != database {
             return true;
         }
         heap.release(body);
@@ -319,14 +353,14 @@ fn drop_pending(state: &mut State, database: &str) {
 
 /// Stops using the image of `database` after it turned out damaged, with one warning: the image
 /// only saves compiling, so its package goes on loading and its functions compile as they run.
-unsafe fn give_up(database: &str, message: &str) {
+unsafe fn give_up(database: u32, message: &str) {
     let state = &mut interp().code_image;
-    state.images.insert(database.to_owned(), None);
+    state.databases.images[database as usize] = ImageSlot::Absent;
     drop_pending(state, database);
     report_damage(&format!(
         "cannot use the code image {} ({message}), so its functions compile as they run; \
          reinstall the package to repair it",
-        path(database).display()
+        path(&state.databases.paths[database as usize]).display()
     ));
 }
 
@@ -353,33 +387,84 @@ pub struct ImageRecord {
     entry: usize,
 }
 
+/// The number of the lazy-load database whose path is the `CHARSXP` `name`, which the other
+/// functions here take.
+///
+/// # Safety
+/// Runs on the interpreter's thread.
+pub unsafe fn database(name: Sexp) -> u32 {
+    let state = &mut interp().code_image;
+    let databases = &mut state.databases;
+    if let Some(index) = databases.names.iter().position(|&known| known == name) {
+        return index as u32;
+    }
+    let index = databases.names.len();
+    crate::heap().preserve(name);
+    let path: Rc<str> = Rc::from(&*values::char_str(name));
+    if index % 64 == 0 {
+        databases.recorded.push(0);
+    }
+    if state
+        .recording
+        .as_ref()
+        .is_some_and(|recording| Path::new(&*path).starts_with(&recording.directory))
+    {
+        databases.recorded[index / 64] |= 1 << (index % 64);
+    }
+    databases.names.push(name);
+    databases.paths.push(path);
+    databases.files.push(None);
+    databases.images.push(ImageSlot::Unopened);
+    index as u32
+}
+
+/// The path of `database`.
+pub fn database_path(database: u32) -> Rc<str> {
+    Rc::clone(&interp().code_image.databases.paths[database as usize])
+}
+
+/// The bytes of the record at `offset` of `database`, `size` bytes long, from the database file,
+/// which is mapped on its first read.
+pub fn database_record(database: u32, offset: usize, size: usize) -> R<&'static [u8]> {
+    let databases = &mut interp().code_image.databases;
+    let index = database as usize;
+    let file = match &mut databases.files[index] {
+        Some(file) => file,
+        slot => {
+            let path = &databases.paths[index];
+            let opened = ImageFile::open(Path::new(&**path))
+                .map_err(|failure| error(format!("cannot open file '{path}': {failure}")))?;
+            slot.insert(opened)
+        }
+    };
+    file.bytes()
+        .get(offset..offset.saturating_add(size))
+        .ok_or_else(|| error("lazy-load database is corrupt"))
+}
+
 /// Where a fetch of the record at `offset` of `database`, `length` bytes long there, reads it:
 /// the database's image when this build wrote one for this version of the database with this
 /// record in it, otherwise the database.
 ///
 /// # Safety
 /// Runs on the interpreter's thread.
-pub unsafe fn source(database: &str, offset: u64, length: usize) -> R<Source> {
+pub unsafe fn source(database: u32, offset: u64, length: usize) -> R<Source> {
     let state = &mut interp().code_image;
     if state.build.is_empty() {
         return Ok(Source::Database);
     }
-    if state
-        .recording
-        .as_ref()
-        .is_some_and(|recording| Path::new(database).starts_with(&recording.directory))
-    {
+    let index = database as usize;
+    if state.databases.recorded[index / 64] & (1 << (index % 64)) != 0 {
         return Ok(Source::Recording);
     }
-    if !state.images.contains_key(database) {
-        match open(database, state.build) {
-            Ok(image) => {
-                state.images.insert(database.to_owned(), image);
-            }
+    if let ImageSlot::Unopened = state.databases.images[index] {
+        match open(&state.databases.paths[index], state.build) {
+            Ok(Some(image)) => state.databases.images[index] = ImageSlot::Open(image),
+            Ok(None) => state.databases.images[index] = ImageSlot::Absent,
             Err(message) => give_up(database, &message),
         }
     }
-    let Some(Some(image)) = interp().code_image.images.get(database) else {
+    let ImageSlot::Open(image) = &interp().code_image.databases.images[index] else {
         return Ok(Source::Database);
     };
     let Ok(entry) = image
@@ -434,7 +519,7 @@ pub fn stream_hash(bytes: &[u8]) -> u64 {
 ///
 /// # Safety
 /// Runs on the interpreter's thread.
-pub unsafe fn read_image_record(database: &str, record: &ImageRecord, hook: Sexp) -> R<Sexp> {
+pub unsafe fn read_image_record(database: u32, record: &ImageRecord, hook: Sexp) -> R<Sexp> {
     // `record` holds the image, so its pages stay mapped while the hook runs, even if the hook
     // flushes the database.
     let (value, closures) = serialize::unserialize_with_closures(stream(record), hook)?;
@@ -442,7 +527,7 @@ pub unsafe fn read_image_record(database: &str, record: &ImageRecord, hook: Sexp
     if let Err(message) = note_pending(&record.image, record.entry, database, &closures) {
         give_up(database, &message);
     }
-    attach_native(&record.image, record.entry, database, &closures)?;
+    attach_native(&record.image, record.entry, &closures)?;
     Ok(value)
 }
 
@@ -452,7 +537,7 @@ pub unsafe fn read_image_record(database: &str, record: &ImageRecord, hook: Sexp
 /// # Safety
 /// Runs on the interpreter's thread.
 pub unsafe fn read_recorded(
-    database: &str,
+    database: u32,
     offset: u64,
     length: usize,
     stream: Vec<u8>,
@@ -460,7 +545,7 @@ pub unsafe fn read_recorded(
 ) -> R<Sexp> {
     let (value, closures) = serialize::unserialize_with_closures(&stream, hook)?;
     crate::heap().root(value);
-    record_fetch(database, offset, length, stream, &closures)?;
+    record_fetch(&database_path(database), offset, length, stream, &closures)?;
     Ok(value)
 }
 
@@ -495,7 +580,7 @@ pub unsafe fn take_pending(function: Sexp, body: Sexp) -> R<Option<Sexp>> {
             Ok(Some(code))
         }
         Err(message) => {
-            give_up(&pending.database, &message);
+            give_up(pending.database, &message);
             Ok(None)
         }
     }
@@ -506,7 +591,7 @@ pub unsafe fn take_pending(function: Sexp, body: Sexp) -> R<Option<Sexp>> {
 unsafe fn note_pending(
     image: &Rc<Image>,
     entry: usize,
-    database: &str,
+    database: u32,
     closures: &[Sexp],
 ) -> Result<(), String> {
     let (payload_start, payload) = payload(image, entry)?;
@@ -545,13 +630,12 @@ unsafe fn note_pending(
     if input.position != payload.len() {
         return Err("a record holds more than its closures".to_owned());
     }
-    let database: Rc<str> = Rc::from(database);
     let state = &mut interp().code_image;
     let heap = crate::heap();
     for (body, formals, start, end) in noted {
         let pending = Pending {
             image: Rc::clone(image),
-            database: Rc::clone(&database),
+            database,
             formals,
             entry: entry as u32,
             start,
@@ -569,7 +653,7 @@ unsafe fn note_pending(
 
 /// Gives the closures of record `entry` the image's native code for them, mapping the native
 /// section on first use. A section that cannot be mapped warns once and is ignored.
-unsafe fn attach_native(image: &Image, entry: usize, database: &str, closures: &[Sexp]) -> R<()> {
+unsafe fn attach_native(image: &Image, entry: usize, closures: &[Sexp]) -> R<()> {
     let Some(hooks) = native_hooks() else {
         return Ok(());
     };
@@ -598,7 +682,7 @@ unsafe fn attach_native(image: &Image, entry: usize, database: &str, closures: &
                     report_damage(&format!(
                         "cannot use the code image {} ({message}), so its functions run without \
                          its machine code; reinstall the package to repair it",
-                        path(database).display()
+                        image.path.display()
                     ));
                     return Ok(());
                 }
@@ -812,7 +896,17 @@ unsafe fn do_record(call: &Call<'_>) -> R<Sexp> {
     let directory = values::require_string(call.arg(0), "directory")?;
     let directory = std::path::absolute(&directory)
         .map_err(|failure| error(format!("cannot resolve {directory}: {failure}")))?;
-    let previous = interp().code_image.recording.replace(Recording {
+    let state = &mut interp().code_image;
+    let databases = &mut state.databases;
+    for (index, path) in databases.paths.iter().enumerate() {
+        let bit = 1 << (index % 64);
+        if Path::new(&**path).starts_with(&directory) {
+            databases.recorded[index / 64] |= bit;
+        } else {
+            databases.recorded[index / 64] &= !bit;
+        }
+    }
+    let previous = state.recording.replace(Recording {
         directory: directory.display().to_string(),
         records: BTreeMap::new(),
     });
@@ -847,6 +941,7 @@ unsafe fn do_write(call: &Call<'_>) -> R<Sexp> {
     let Some(recording) = state.recording.take() else {
         return Err(error("no fetches were recorded"));
     };
+    state.databases.recorded.fill(0);
     let build = state.build;
     let mut summary = Summary::default();
     let written = recording

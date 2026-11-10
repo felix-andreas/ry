@@ -724,9 +724,10 @@ pub fn check_code_image_load(entropy: &mut impl Entropy) {
             let loaded = (|| -> Result<Option<Sexp>, Unwind> {
                 // The database holds zeros, so a record the image does not hold is read from the
                 // stream directly, as decompressing it from the database would give it.
-                let value = match code_image::source(database, 0, stream.len())? {
+                let number = code_image::database(values::mkchar(database)?);
+                let value = match code_image::source(number, 0, stream.len())? {
                     code_image::Source::Image(record) => {
-                        code_image::read_image_record(database, &record, values::nil())?
+                        code_image::read_image_record(number, &record, values::nil())?
                     }
                     _ => serialize::unserialize(&stream, values::nil())?,
                 };

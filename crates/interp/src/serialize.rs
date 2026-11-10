@@ -1063,19 +1063,8 @@ unsafe fn read_header(reader: &mut Reader<'_>) -> R<Header> {
 
 // Lazy-load databases.
 
-/// The contents of lazy-load database files, read once per session.
-fn file_cache() -> &'static mut FxHashMap<String, Vec<u8>> {
-    static mut CACHE: Option<FxHashMap<String, Vec<u8>>> = None;
-    // SAFETY: single-threaded access, as for the rest of the interpreter state.
-    #[allow(static_mut_refs)]
-    unsafe {
-        CACHE.get_or_insert_with(FxHashMap::default)
-    }
-}
-
-/// Drops a database file from the read cache, because the installer appends to it.
+/// Drops a database file this process mapped, because the installer appends to it.
 pub fn forget_database(path: &str) {
-    file_cache().remove(path);
     code_image::forget(path);
 }
 
@@ -1227,25 +1216,37 @@ fn inflate_into(input: &[u8], output: &mut Vec<u8>, limit: usize) -> Result<(), 
 
 /// `lazyLoadDBfetch(key, file, compressed, hook)`.
 unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
-    let file = values::require_string(call.arg(1), "file")?;
+    let database = code_image::database(database_name(call.arg(1), "file")?);
     let key = call.arg(0);
     let compressed = values::as_integer_scalar(call.arg(2));
     let hook = call.arg(3);
     let (offset, size) = record_key(key);
-    // A record is decoded (or copied) out of the cached file before `unserialize` runs, because
-    // its refhook can fetch from another database and so insert into the cache.
-    let value = match code_image::source(&file, offset as u64, size)? {
-        Source::Image(record) => code_image::read_image_record(&file, &record, hook)?,
+    // A record is decoded (or copied) out of the mapped database before `unserialize` runs,
+    // because its refhook can fetch from another database and so map it.
+    let value = match code_image::source(database, offset as u64, size)? {
+        Source::Image(record) => code_image::read_image_record(database, &record, hook)?,
         Source::Recording => {
-            let stream = record_stream(&file, offset, size, compressed)?;
-            code_image::read_recorded(&file, offset as u64, size, stream, hook)?
+            let stream = record_stream(database, offset, size, compressed)?;
+            code_image::read_recorded(database, offset as u64, size, stream, hook)?
         }
-        Source::Database => unserialize(&record_stream(&file, offset, size, compressed)?, hook)?,
+        Source::Database => unserialize(&record_stream(database, offset, size, compressed)?, hook)?,
     };
     if value.kind() == SexpType::Promise {
         return eval::force_promise(value);
     }
     Ok(value)
+}
+
+/// The `CHARSXP` of the database path `file`, a single string.
+unsafe fn database_name(file: Sexp, what: &str) -> R<Sexp> {
+    if file.kind() != SexpType::String || length(file) != 1 {
+        return Err(error(format!("invalid '{what}' argument")));
+    }
+    let name = values::string_elt(file, 0);
+    if name == values::na_string() {
+        return Err(error(format!("invalid '{what}' argument")));
+    }
+    Ok(name)
 }
 
 /// The offset and length a lazy-load key names.
@@ -1256,27 +1257,14 @@ unsafe fn record_key(key: Sexp) -> (usize, usize) {
     )
 }
 
-/// The decompressed stream of the record at `offset` of the database `file`.
-unsafe fn record_stream(file: &str, offset: usize, size: usize, compressed: i32) -> R<Vec<u8>> {
-    let record = cached_record(file, offset, size)?;
+/// The decompressed stream of the record at `offset` of `database`.
+unsafe fn record_stream(database: u32, offset: usize, size: usize, compressed: i32) -> R<Vec<u8>> {
+    let record = code_image::database_record(database, offset, size)?;
     if compressed != 0 {
         decompress_record(record, compressed)
     } else {
         Ok(record.to_vec())
     }
-}
-
-/// The bytes of the record at `offset`, `size` bytes long, in the cached database `file`.
-fn cached_record(file: &str, offset: usize, size: usize) -> R<&'static [u8]> {
-    let cache = file_cache();
-    if !cache.contains_key(file) {
-        let bytes = std::fs::read(file)
-            .map_err(|failure| error(format!("cannot open file '{file}': {failure}")))?;
-        cache.insert(file.to_owned(), bytes);
-    }
-    cache[file]
-        .get(offset..offset.saturating_add(size))
-        .ok_or_else(|| error("lazy-load database is corrupt"))
 }
 
 /// The object a lazy-load promise (`lazyLoadDBfetch(key, datafile, compressed, envhook)` as
@@ -1313,17 +1301,17 @@ pub unsafe fn lazy_record_header(promise: Sexp) -> R<Option<(u32, bool, u16)>> {
     {
         return Ok(None);
     }
-    let file = values::require_string(file, "file")?;
+    let database = code_image::database(database_name(file, "file")?);
     // The format line, the header (with a version-3 encoding name) and the object's flags fit
     // in the first 64 bytes, so only those are read, from the image or by inflating the record.
     let (offset, size) = record_key(key);
-    let data = match code_image::source(&file, offset as u64, size)? {
+    let data = match code_image::source(database, offset as u64, size)? {
         Source::Image(record) => {
             let stream = code_image::stream(&record);
             stream[..stream.len().min(64)].to_vec()
         }
         Source::Recording | Source::Database => {
-            let record = cached_record(&file, offset, size)?;
+            let record = code_image::database_record(database, offset, size)?;
             match record_prefix(record, values::as_integer_scalar(compressed), 64)? {
                 Some(data) => data,
                 None => return Ok(None),
