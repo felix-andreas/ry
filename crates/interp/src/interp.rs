@@ -42,7 +42,6 @@ pub mod combine;
 pub mod conditions;
 pub mod connections;
 pub mod console_server;
-pub mod data_table;
 pub mod dataframe;
 pub mod debugger;
 pub mod deparse;
