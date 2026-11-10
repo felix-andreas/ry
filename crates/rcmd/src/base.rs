@@ -23,6 +23,7 @@ use {
         read_directory, shlib, staging_suffix, write, write_script,
     },
     std::{
+        ffi::OsStr,
         fs,
         path::{Path, PathBuf},
         process::Command,
@@ -344,15 +345,73 @@ pub fn write_start_image(root: &Path, rcmd: &Path, libr: &Path) -> Result<()> {
     written
 }
 
-/// Runs `front_end write-start-image` in the home `root`. The environment is emptied down to
+/// Runs `front_end write-start-image` in the home `root`, then writes the code images of the
+/// base packages from a session that starts from that image. The environment is emptied down to
 /// what finds programs and temporary files, because the image holds start-up as this one
 /// environment ran it; the steps that read the environment run again on every start.
 fn run_image_writer(front_end: &Path, root: &Path, work: &Path) -> Result<()> {
     let image = root.join("library/base/R/ry-start.image");
+    run_in_home(
+        front_end,
+        root,
+        work,
+        "ry-rcmd write-start-image",
+        &[OsStr::new("write-start-image"), image.as_os_str()],
+    )?;
+    let driver = work.join("base-code-images.R");
+    write(&driver, BASE_CODE_IMAGES)?;
+    // A code image speeds up first calls but is not part of what a package means, so a base
+    // tree without one is still complete.
+    if let Err(error) = run_in_home(
+        front_end,
+        root,
+        work,
+        "ry-rcmd base code images",
+        &[
+            OsStr::new("R"),
+            OsStr::new("--vanilla"),
+            OsStr::new("--no-echo"),
+            OsStr::new("-f"),
+            driver.as_os_str(),
+        ],
+    ) {
+        eprintln!("Warning: the code images of the base packages were not written\n{error}");
+    }
+    Ok(())
+}
+
+/// Fetches every record of the base packages' lazy-load databases and writes each database's
+/// image with the records' streams alone, so a session reads those records uncompressed and in
+/// place instead of inflating them. The records are fetched by key rather than by forcing the
+/// namespaces' bindings because start-up has already forced some of them in this process.
+/// Recommended packages get full images when they are installed, so they are left alone here.
+const BASE_CODE_IMAGES: &str = r#"
+library <- file.path(R.home(), "library")
+packages <- rownames(utils::installed.packages(library, priority = "base"))
+.Internal(ryCodeImageRecord(library))
+hook <- function(name) new.env()
+for (package in packages) {
+    for (index_file in list.files(file.path(library, package, "R"), "\\.rdx$", full.names = TRUE)) {
+        database <- sub("\\.rdx$", ".rdb", index_file)
+        index <- readRDS(index_file)
+        for (key in c(index$variables, index$references)) {
+            tryCatch(lazyLoadDBfetch(key, database, index$compressed, hook), error = function(condition) NULL)
+        }
+    }
+}
+invisible(.Internal(ryCodeImageWrite(FALSE, FALSE, FALSE)))
+"#;
+
+fn run_in_home(
+    front_end: &Path,
+    root: &Path,
+    work: &Path,
+    label: &str,
+    arguments: &[&OsStr],
+) -> Result<()> {
     let mut command = Command::new(front_end);
     command
-        .arg("write-start-image")
-        .arg(&image)
+        .args(arguments)
         .current_dir(work)
         .env_clear()
         .env("R_HOME", root)
@@ -373,12 +432,12 @@ fn run_image_writer(front_end: &Path, root: &Path, work: &Path) -> Result<()> {
     }
     let output = command
         .output()
-        .map_err(|error| Error::Command("ry-rcmd write-start-image".into(), error.to_string()))?;
+        .map_err(|error| Error::Command(label.into(), error.to_string()))?;
     if output.status.success() {
         return Ok(());
     }
     Err(Error::Command(
-        "ry-rcmd write-start-image".into(),
+        label.into(),
         format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),

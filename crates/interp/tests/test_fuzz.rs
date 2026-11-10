@@ -26,9 +26,9 @@ use {
         testing::{
             check_bytecode_agreement, check_code_image_file, check_code_image_load,
             check_code_image_round_trip, check_element_access_agreement,
-            check_environment_agreement, check_fused_agreement, check_lowering_input,
-            check_quickening_agreement, check_render_drawing, check_resume_at_every_pc,
-            check_unserialize_input, with_interpreter,
+            check_environment_agreement, check_fused_agreement, check_image_bodies_round_trip,
+            check_lowering_input, check_quickening_agreement, check_render_drawing,
+            check_resume_at_every_pc, check_unserialize_input, with_interpreter,
         },
         values,
     },
@@ -161,6 +161,11 @@ fn fuzz_code_image_round_trip() {
     for_each_seed(150, |seed| {
         check_code_image_round_trip(&mut SplitMix64(seed))
     });
+}
+
+#[test]
+fn code_image_round_trips_every_image_body() {
+    check_image_bodies_round_trip();
 }
 
 #[test]

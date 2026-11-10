@@ -73,6 +73,18 @@ unsafe fn eval_unsignalled(expression: Sexp, env: Sexp) -> R<Sexp> {
 
 /// The value of a symbol: its binding, with promises forced.
 pub unsafe fn eval_symbol(symbol: Sexp, env: Sexp) -> R<Sexp> {
+    eval_symbol_reporting(symbol, env, || lexical_call(env))
+}
+
+/// [`eval_symbol`] for a lookup that starts in `env` on behalf of a frame that is not `env`
+/// itself, such as a slot frame that has no environment or a frame whose own bindings were
+/// already searched: an unbound symbol is reported against `lexical()`, the call of the frame
+/// the code runs in, as GNU R's `getLexicalCall` does.
+pub unsafe fn eval_symbol_reporting(
+    symbol: Sexp,
+    env: Sexp,
+    lexical: impl FnOnce() -> Sexp,
+) -> R<Sexp> {
     let symbols = symbols();
     if symbol == symbols.dots {
         return Err(error("'...' used in an incorrect context"));
@@ -83,7 +95,7 @@ pub unsafe fn eval_symbol(symbol: Sexp, env: Sexp) -> R<Sexp> {
     let value = find_var(symbol, env)?;
     if value == unbound() {
         return Err(error_in(
-            lexical_call(env),
+            lexical(),
             format!("object '{}' not found", symbol_name(symbol)),
         ));
     }
@@ -176,7 +188,7 @@ pub unsafe fn cell_value(cell: Sexp) -> R<Sexp> {
 /// variable: so a promise forced inside a callee still blames the caller's code, and top-level
 /// code blames no call. An environment no frame owns, like one `eval` was handed, falls back to
 /// the innermost call.
-unsafe fn lexical_call(env: Sexp) -> Sexp {
+pub(crate) unsafe fn lexical_call(env: Sexp) -> Sexp {
     let frames = &interp().frames;
     if let Some(frame) = frames.iter().rev().find(|frame| frame.owns(env)) {
         return frame.call;
@@ -413,11 +425,11 @@ unsafe fn slot_promise_value(promise: Sexp, owner: usize) -> R<Sexp> {
     if expression.kind() == SexpType::Symbol {
         let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
         match (0..values::length(names)).find(|&index| names.element(index) == expression) {
-            None => return eval(expression, function.tag()),
+            None => return eval_enclosed_name(expression, function.tag(), owner),
             Some(slot) => {
                 let value = *bytecode::register_address(header + 1 + slot);
                 if value == unbound() {
-                    return eval(expression, function.tag());
+                    return eval_enclosed_name(expression, function.tag(), owner);
                 }
                 if value.kind() == SexpType::Promise {
                     return force_promise(value);
@@ -429,6 +441,17 @@ unsafe fn slot_promise_value(promise: Sexp, owner: usize) -> R<Sexp> {
         }
     }
     eval(expression, frame_env(owner, Reify::Site("promise over the frame"))?)
+}
+
+/// Evaluates `symbol` from `enclosure` for the slot frame at `owner`, whose own slots do not bind
+/// it, so an unbound name is reported against the frame's call and not the enclosure's.
+unsafe fn eval_enclosed_name(symbol: Sexp, enclosure: Sexp, owner: usize) -> R<Sexp> {
+    interp().visible = true;
+    let lexical = || interp().frames.get(owner).map_or(nil(), |frame| frame.call);
+    match eval_symbol_reporting(symbol, enclosure, lexical) {
+        Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
+        result => result,
+    }
 }
 
 /// A promise of `expression`, compiled code or a name, over the slots of the slot frame at
@@ -671,11 +694,11 @@ unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
         return eval(symbol, frame.env);
     }
     if slot == NO_REFERENCE_SLOT {
-        return eval(symbol, frame.function.tag());
+        return eval_enclosed_name(symbol, frame.function.tag(), owner);
     }
     let value = *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
     if value == unbound() {
-        return eval(symbol, frame.function.tag());
+        return eval_enclosed_name(symbol, frame.function.tag(), owner);
     }
     if value.kind() == SexpType::Promise {
         return force_promise(value);
@@ -1347,17 +1370,18 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
     {
         return Ok(());
     }
-    let state = interp();
-    let formals = match state.primitive_formals.get(definition.name) {
-        Some(formals) => formals,
-        None => {
+    let index = builtin_index(definition);
+    let formals = match interp().primitive_formals.get(index) {
+        Some(Some(formals)) => formals,
+        _ => {
             let Some(formals) = recorded_formals(definition.name)? else {
                 return Ok(());
             };
-            interp()
-                .primitive_formals
-                .entry(definition.name)
-                .or_insert(formals)
+            let table = &mut interp().primitive_formals;
+            if table.len() <= index {
+                table.resize(interp().builtins.len().max(index + 1), None);
+            }
+            &*table[index].insert(formals)
         }
     };
     let Some(formals) = formals else {

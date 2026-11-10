@@ -66,7 +66,7 @@ The editor offers the same fixes as quick fixes.
 `--annotate` writes the inferred type of each unannotated top-level function and binding in the
 named files, inline or as a `#:` comment as [`inline-annotations`](/reference/configuration#inline-annotations)
 says, prints how many it added, and then reports what is left.
-[Strict mode](/tutorial/fully-typed#strict-mode) shows it at work. A binding
+[Strict mode](/guide#strict-mode) shows it at work. A binding
 whose type inference cannot write down, such as one involving `Unknown`, is skipped.
 
 ### The check cache
@@ -146,8 +146,8 @@ stops a script with exit status 1, as with `Rscript`, and so does `q(status = 1)
 only what the script prints, with no startup banner.
 
 Before anything runs, both commands check the script, and the console checks each command, against
-the project's `ry.toml`. They print the [inline annotation](/tutorial/runtime#inline-annotations)
-warnings, and in [strict mode](/tutorial/fully-typed#strict-mode) they print every error and refuse code
+the project's `ry.toml`. They print the [inline annotation](/guide#inline-annotations)
+warnings, and in [strict mode](/guide#strict-mode) they print every error and refuse code
 that has one.
 
 The runtimes differ in what they do with the annotations. ry's runtime turns them into [checks at
@@ -370,13 +370,15 @@ runs again with one job, reusing the objects already built.
 
 An install on ry's runtime also writes the package's code image, `R/<package>.ryc` beside its
 lazy-load database: the compiled code of every closure, which a later session takes instead of
-compiling the closure itself. `--train tests`, `--train examples` or `--train SCRIPT` (`R CMD
+compiling the closure itself, and the package's lazy-load records uncompressed, which a later
+session reads in place instead of inflating them. `--train tests`, `--train examples` or `--train SCRIPT` (`R CMD
 INSTALL --ry-train=...`) first runs the package's tests, its help-page examples or a script, and
 the image then keeps the profile of that run, so a function that ran hot there is handed to the
 optimizing tier as soon as a new session compiles it. `R CMD INSTALL --ry-no-code-image` writes no
 image, and `RY_CODE_IMAGE=0` makes a session ignore images. An image written by another ry build,
 or for other package sources, is ignored, and a damaged one warns once and is ignored; reinstall
-the package to write a fresh one.
+the package to write a fresh one. The base packages (base, stats, utils, methods and the rest)
+carry images that ry's own build writes, holding their uncompressed records but no code.
 
 The image also holds machine code for the package's numeric functions, compiled at install for
 the argument types they are likely to get: the types their annotations or constant defaults

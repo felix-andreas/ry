@@ -1251,6 +1251,20 @@ pub extern "C" fn ry_runtime_id() -> *const c_char {
     concat!(env!("RY_RUNTIME_ID"), "\0").as_ptr().cast()
 }
 
+/// Whether the start-up image at the NUL-terminated `path` is one this library loads: 1 when it
+/// is, 0 when it is missing, of another format, or written by another build.
+///
+/// # Safety
+/// `path` is a valid NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_start_image_current(path: *const c_char) -> c_int {
+    let path = unsafe { std::ffi::CStr::from_ptr(path) }.to_string_lossy();
+    c_int::from(interp::image::is_current(
+        std::path::Path::new(&*path),
+        env!("RY_RUNTIME_ID"),
+    ))
+}
+
 /// The text [`ry_run`] runs in place of reading its script, set by [`ry_set_script_source`].
 static SCRIPT_SOURCE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 

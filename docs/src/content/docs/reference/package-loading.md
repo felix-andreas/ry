@@ -17,7 +17,7 @@ loads the same way; put the line in `~/.Rprofile`. It takes `path`, `export_all`
   evaluates only that definition the first time anything uses `name`. When another top-level
   statement writes the same name, as `f <- memoise(f)` does, every writer of it runs in order
   instead.
-- **A constant of a strict file**, `name <- value` in a file under [strict mode](/tutorial/fully-typed#strict-mode)
+- **A constant of a strict file**, `name <- value` in a file under [strict mode](/guide#strict-mode)
   whose value calls only pure functions, becomes a promise the same way, unless another statement
   writes the same name. Strict mode guarantees the value has no effect, so evaluating it on first use
   gives what a load would have computed
@@ -81,7 +81,7 @@ loads the same way; put the line in `~/.Rprofile`. It takes `path`, `export_all`
   valid UTF-8 refuses the load with a message naming the field.
 - **A syntax error stops the load before anything runs**, and names the file and line. A statement
   that fails at load time is reported with its file and line too.
-- **With [strict mode](/tutorial/fully-typed#strict-mode) on**, in `ry.toml` or in a file's
+- **With [strict mode](/guide#strict-mode) on**, in `ry.toml` or in a file's
   `# typing: strict` comment, `ry load` checks the package's `R/` files. If any has a strict-mode
   error, it prints the errors and exits with status 1 before anything with an effect runs. On GNU
   R the check finishes before the load starts. On ry's runtime it runs while the runtime starts
@@ -210,7 +210,7 @@ importer keeps its old imports with a warning until you reload it.
 ## Speed
 
 A load parses a function only when something first calls it, and a reload touches only the
-definitions you changed. On a generated package of 326,000 lines in 500 files, against
+definitions you changed. On a generated package of about 300,000 lines in 500 files, against
 `devtools::load_all()` and [loadfast](https://github.com/finccam/loadfast):
 
 | | `load_all()` | `load_fast()` | `ry R` | `ry load` |

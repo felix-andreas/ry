@@ -2,7 +2,7 @@
 // The measured benchmark from tools/bench/why/results.json, as a CPU tab and a Memory tab. The tabs
 // share a sync key, so the reader's choice holds on every page. `programs` picks and orders rows.
 import { TabItem, Tabs } from '@astrojs/starlight/components';
-import { benchmarkRows, benchmarkViews } from '../lib/benchmarks';
+import { benchmarkRows, benchmarkViews, suiteMetadata } from '../lib/benchmarks';
 
 interface Props {
 	programs?: string[];
@@ -38,3 +38,4 @@ const rows = benchmarkRows(Astro.props.programs);
 		))
 	}
 </Tabs>
+<p>{suiteMetadata('kernels')}</p>
