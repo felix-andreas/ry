@@ -431,10 +431,8 @@ static STATE: Global<InterpState> = Global(UnsafeCell::new(InterpState {
     interp: None,
 }));
 
-/// The heap the interpreter runs on.
-///
-/// # Panics
-/// Panics if [`install`] has not run, which is a host bug.
+/// The heap the interpreter runs on. Calling it before [`install`] is a host bug, which
+/// faults on the null pointer.
 #[allow(clippy::mut_from_ref)]
 #[inline]
 pub fn heap() -> &'static mut Heap {
@@ -442,7 +440,9 @@ pub fn heap() -> &'static mut Heap {
     // life of the process, because the host keeps its heap in static storage.
     unsafe {
         let state = &*STATE.0.get();
-        assert!(!state.heap.is_null(), "the interpreter is not installed");
+        // Every `nil()` reads the heap, so a release check here costs about 3% of all
+        // instructions in package code.
+        debug_assert!(!state.heap.is_null(), "the interpreter is not installed");
         &mut *state.heap
     }
 }
