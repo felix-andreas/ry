@@ -783,7 +783,7 @@ impl RootSource for InterpRoots {
 
     fn clear_dead(&self, liveness: &Liveness<'_>) {
         // SAFETY: as for `trace`.
-        unsafe { interp().bytecode.call_plans.clear_dead(liveness) }
+        unsafe { interp().bytecode.clear_dead(liveness) }
     }
 }
 

@@ -103,6 +103,13 @@ pub struct State {
     /// Calls seen per uncompiled body. Keys are only compared, never dereferenced, so a body
     /// that died and whose address was reused merely compiles one call early.
     calls: FxHashMap<Sexp, u32>,
+    /// The code each compiled expression body became, keyed by a structural hash of its formals
+    /// and body. A closure whose formals and body are identical to an entry's (each R6 object's
+    /// copy of a method, each closure an AST-evaluated `function` expression makes, a body rlang
+    /// copied when it captured the expression) adopts the entry's code, so the body compiles
+    /// once and its copies share one profile and one tier-1 compilation. Weak: an entry goes
+    /// when its code or formals die ([`State::clear_dead`]).
+    codes: FxHashMap<u64, Compiled>,
     tier: Option<Tier>,
     pub(crate) call_plans: CallPlans,
 }
@@ -112,6 +119,7 @@ impl Default for State {
         State {
             registers: Vec::with_capacity(REGISTER_FILE_CAPACITY),
             calls: FxHashMap::default(),
+            codes: FxHashMap::default(),
             tier: None,
             call_plans: CallPlans::default(),
         }
@@ -124,6 +132,14 @@ impl State {
             marker.mark(register);
         }
         self.call_plans.trace(marker);
+    }
+
+    pub(crate) unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
+        self.call_plans.clear_dead(liveness);
+        let live = |object: Sexp| object == nil() || liveness.is_live(object);
+        self.codes.retain(|_, compiled| {
+            live(compiled.code) && live(compiled.formals) && live(compiled.body)
+        });
     }
 }
 
@@ -367,20 +383,61 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
         return eval::eval(body, env);
     }
     state.calls.remove(&body);
+    match install_code(function, body)? {
+        Some(code) => run(function, code, env),
+        None => eval::eval(body, env),
+    }
+}
+
+/// Gives `function`, whose body `body` is an expression, its compiled code: the code another
+/// closure with this body and these formals already has, else the code its package's image
+/// holds, else a fresh compile. `None` when the compiler rejects the body (an error is its way
+/// of saying so, such as for a `break` outside a loop), which then runs on the AST evaluator.
+unsafe fn install_code(function: Sexp, body: Sexp) -> R<Option<Sexp>> {
+    let formals = function.car();
+    let mut hash = crate::session::FNV_OFFSET;
+    crate::session::stable_hash(formals, &mut hash);
+    crate::session::stable_hash(body, &mut hash);
+    if let Some(&compiled) = interp().bytecode.codes.get(&hash) {
+        // The hash leaves srcrefs out, and the code reports the srcrefs of the body it was
+        // compiled from, so a copy must match them too.
+        let flags = crate::sort::IdenticalFlags {
+            ignore_srcref: false,
+            ..crate::sort::IdenticalFlags::default()
+        };
+        if (compiled.body == body || crate::sort::identical(compiled.body, body, &flags))
+            && (compiled.formals == formals
+                || crate::sort::identical(compiled.formals, formals, &flags))
+        {
+            crate::heap().set_cdr(function, compiled.code);
+            return Ok(Some(compiled.code));
+        }
+    }
     // A package's code image replaces compiling, at the same call, rather than running code from
     // the first call: decoding costs about as much as compiling, and many closures run only once.
-    if let Some(code) = crate::code_image::take_pending(function, body)? {
-        return run(function, code, env);
-    }
-    // A body the compiler rejects (an error is its way of saying so, such as for a `break`
-    // outside a loop) still runs correctly on the AST evaluator.
-    match compile(body, function) {
-        Ok(Some(code)) => {
-            crate::heap().set_cdr(function, code);
-            run(function, code, env)
-        }
-        Ok(None) | Err(_) => eval::eval(body, env),
-    }
+    let code = match crate::code_image::take_pending(function, body)? {
+        Some(code) => code,
+        None => match compile(body, function) {
+            Ok(Some(code)) => {
+                crate::heap().set_cdr(function, code);
+                code
+            }
+            Ok(None) | Err(_) => return Ok(None),
+        },
+    };
+    interp()
+        .bytecode
+        .codes
+        .insert(hash, Compiled { body, formals, code });
+    Ok(Some(code))
+}
+
+/// An entry of [`State::codes`].
+#[derive(Clone, Copy)]
+struct Compiled {
+    body: Sexp,
+    formals: Sexp,
+    code: Sexp,
 }
 
 /// `function`'s body, compiled first when [`run_body`] would compile it at this call. Binding the
@@ -399,17 +456,7 @@ pub unsafe fn compile_before_call(function: Sexp) -> R<Sexp> {
         return Ok(body);
     }
     state.calls.remove(&body);
-    if let Some(code) = crate::code_image::take_pending(function, body)? {
-        return Ok(code);
-    }
-    match compile(body, function) {
-        Ok(Some(code)) => {
-            crate::heap().set_cdr(function, code);
-            Ok(code)
-        }
-        // A body the compiler rejects runs on the AST evaluator, as in `run_body`.
-        Ok(None) | Err(_) => Ok(body),
-    }
+    Ok(install_code(function, body)?.unwrap_or(body))
 }
 
 /// A closure's body as source: the expression of compiled code.
@@ -428,16 +475,7 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Sexp> {
     if body.kind() == SexpType::Bytecode {
         return Ok(body);
     }
-    if let Some(code) = crate::code_image::take_pending(function, body)? {
-        return Ok(code);
-    }
-    match compile(body, function)? {
-        Some(code) => {
-            crate::heap().set_cdr(function, code);
-            Ok(code)
-        }
-        None => Ok(body),
-    }
+    Ok(install_code(function, body)?.unwrap_or(body))
 }
 
 /// Compiles, ahead of their first call, the functions `code` defines with `function(...)`
