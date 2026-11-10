@@ -170,6 +170,9 @@ pub struct Frame {
     /// The srcref current when the call was made (`R_Srcref`), which `sys.call` and `traceback`
     /// attach to the call, and which is current again once the call returns.
     pub srcref: Sexp,
+    /// Where this call's entries in [`Interp::method_vars`] start; they run up to the next
+    /// frame's start.
+    pub method_vars: u32,
     /// Where this call's entries in [`Interp::frame_closures`] start.
     pub closures: usize,
 }
@@ -192,10 +195,27 @@ pub fn frame_args(state: &Interp, index: usize) -> &[Arg] {
         .unwrap_or(&[])
 }
 
+/// The S3 dispatch variables (`.Generic` and its kin) of the method slot frame at `index`,
+/// which its environment binds once it has one.
+pub fn method_vars(state: &Interp, index: usize) -> &[(Sexp, Sexp)] {
+    let Some(frame) = state.frames.get(index) else {
+        return &[];
+    };
+    let end = state
+        .frames
+        .get(index + 1)
+        .map_or(state.method_vars.len(), |next| next.method_vars as usize);
+    state
+        .method_vars
+        .get(frame.method_vars as usize..end)
+        .unwrap_or(&[])
+}
+
 /// Keeps the first `depth` frames and drops the rest with their arguments.
 pub fn truncate_frames(state: &mut Interp, depth: usize) {
     if let Some(frame) = state.frames.get(depth) {
         state.frame_args.truncate(frame.args as usize);
+        state.method_vars.truncate(frame.method_vars as usize);
     }
     state.frames.truncate(depth);
 }
@@ -273,6 +293,9 @@ pub struct Interp {
     pub slot_owner: u32,
     /// The arguments of every frame, back to back in frame order (see [`Frame::args`]).
     pub frame_args: Vec<Arg>,
+    /// The dispatch variables of every method slot frame, back to back in frame order (see
+    /// [`Frame::method_vars`]).
+    pub method_vars: Vec<(Sexp, Sexp)>,
     /// The closures each running call created in its own frame, at most
     /// [`FRAME_CLOSURES`] each, which the heap needs to release the frame when the call returns
     /// (`Heap::release_frame`).
@@ -462,6 +485,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         frames: Vec::new(),
         slot_owner: NO_SLOTS,
         frame_args: Vec::new(),
+        method_vars: Vec::new(),
         frame_closures: Vec::new(),
         foreign_calls: Vec::new(),
         handlers: None,
@@ -632,6 +656,9 @@ impl RootSource for InterpRoots {
             for arg in &interp.frame_args {
                 marker.mark(arg.tag);
                 marker.mark(arg.value);
+            }
+            for &(_, value) in &interp.method_vars {
+                marker.mark(value);
             }
             for &closure in &interp.frame_closures {
                 marker.mark(closure);

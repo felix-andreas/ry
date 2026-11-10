@@ -1687,6 +1687,7 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
         handlers: handlers.clone(),
         restarts: restarts.clone(),
         srcref: state.srcref,
+        method_vars: state.method_vars.len() as u32,
         closures: state.frame_closures.len(),
         slots: crate::NO_SLOTS,
         missing: 0,

@@ -1,0 +1,20 @@
+[stdout]
+| List of 12
+|  $ : num 10
+|  $ : num 20
+|  $ : num 30
+|  $ : num 40
+|  $ : chr "via_sys_call(i)"
+|  $ : num [1:2] 50 50
+|  $ : num 60
+|  $ : num 70
+|  $ : num 80
+|  $ : num 90
+|  $ : num [1:2] 1 0
+|  $ : num [1:2] 100 100
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

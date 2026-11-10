@@ -44,14 +44,29 @@ The first step is built (`bind_slots` and `reify` in `crates/interp/src/eval.rs`
 describes it, and the open gaps are marked.
 
 - **Which calls get a slot frame.** The compiler gives a body a slot table (`SLOTS` in its
-  constants) when `local_symbols` succeeds, which means the body has no `assign`, `eval`, `local`,
-  `environment`, `sys.function`, `on.exit`, `Recall` or similar (`collect_bindings` in
-  `crates/interp/src/bytecode.rs`), it has at most 64 formals, and it does not
+  constants) when `local_symbols` succeeds (`collect_bindings` in `crates/interp/src/bytecode.rs`).
+  It fails for a body that may bind a name its own text does not show or hand its frame to code
+  that may: a bare `environment()`, `sys.frames()`, `attach`, `source` or `Recall`, an `eval`,
+  `evalq`, `assign`, `delayedAssign` or `rm` without an explicit environment, an assignment to a
+  string target, or a read of an S3 dispatch variable (`.Generic`, `.Class`, `.Method`, `.Group`,
+  `.GenericCallEnv`, `.GenericDefEnv`). The same calls with an explicit environment, `local`,
+  `with`, `on.exit`, `sys.function` and `do.call` of a named function are accepted, because every
+  route by which a callee reaches the frame (`parent.frame`, `sys.frame`, `environment(fn)` of a
+  closure made inside) reifies it on demand. The body also has at most 64 formals and does not
   open with a base fast-path prologue (`base_fast_paths::has_prologue`), which reads its frame as an
   environment. At the call, `bind_slots` also refuses a closure with tier-1 or baseline machine code
   (which reads variables through the environment), a closure under the debugger or a type signature,
-  and a call where a missing formal has a default that is not a literal. Those calls bind a heap
-  frame as before.
+  and a call where a missing formal's default is neither a literal, a symbol, nor code compiled
+  with its own slot table. Those calls bind a heap frame as before.
+- **Defaults.** A missing formal whose default is not a literal starts with the default's
+  expression in its slot and its missing bit set. Once the frame is pushed, `default_promises`
+  replaces it with a promise over the slots, compiled once per closure (`bytecode::slot_defaults`,
+  cached in the slot table's third element against the closure's formals and never written to a
+  code image). On return, default promises that were never forced and that nothing else holds do
+  not count as escaping promises (`unforced_defaults`), so they do not force the environment.
+- **S3 methods.** A method called by `UseMethod` or `NextMethod` gets a slot frame too. Its
+  dispatch variables live beside the frame (`Interp::method_vars`, `Frame::method_vars`), and
+  `reify` binds them, so `NextMethod` and `environment()` in the method find them.
 - **Layout.** The activation reserves `1 + n` registers above its own: a header register, then one
   slot per symbol the table numbers, formals first in order. The header holds the frame's
   environment once it has one, and `R_NilValue` before. A slot holds a value and counts one
@@ -84,8 +99,7 @@ describes it, and the open gaps are marked.
   to a closure (`slot_dots_into`) or, forced, to a builtin (`slot_builtin_call`, when every other
   argument is a constant or a slotted local), so `f(x, ...)`, `list(...)` and `c(x, ...)` leave the
   frame without an environment.
-- **Not built.** Promises for non-literal defaults over the slots, and slot access from the JIT's
-  tiers ([the native execution model](/development/design/r-runtime/#the-native-execution-model)).
+- **Not built.** Slot access from the JIT's tiers ([the native execution model](/development/design/r-runtime/#the-native-execution-model)).
 
 ## Reification triggers
 

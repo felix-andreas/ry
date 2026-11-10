@@ -751,6 +751,7 @@ unsafe fn invoke(call: &Call<'_>, callback: Callback, arguments: &[Sexp]) -> R<S
                 call.env()?,
                 &arguments,
                 Entry::Unchecked,
+                &[],
             )
         }
         _ => {

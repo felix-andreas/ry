@@ -1691,6 +1691,21 @@ unsafe fn reuses_first_argument(expression: Sexp) -> bool {
 /// over, and it is refused wherever it appears. The call inside `.Internal(...)` names an
 /// internal, which binds only in the environments its arguments give it.
 unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> bool {
+    if expression.kind() == SexpType::Symbol {
+        // A method's slot frame keeps `.Generic` and its kin beside the frame and binds them
+        // only when it makes its environment, so a body that reads one by name needs the
+        // environment from the start.
+        let symbols = symbols();
+        return ![
+            symbols.dot_generic,
+            symbols.dot_class,
+            symbols.dot_method,
+            symbols.dot_group,
+            symbols.dot_generic_call_env,
+            symbols.dot_generic_def_env,
+        ]
+        .contains(&expression);
+    }
     if expression.kind() != SexpType::Language {
         return true;
     }

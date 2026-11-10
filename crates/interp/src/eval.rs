@@ -1213,10 +1213,9 @@ pub unsafe fn apply_closure(
     {
         return value;
     }
-    if supplied.is_none()
-        && let Some(frame) = bind_slots(call, function, args)?
-    {
-        return run_frame(call, function, frame, sys_parent, args, Entry::Unchecked);
+    if let Some(frame) = bind_slots(call, function, args)? {
+        let method_vars = supplied.unwrap_or(&[]);
+        return run_frame(call, function, frame, sys_parent, args, Entry::Unchecked, method_vars);
     }
     let env = bind_arguments(call, function, args, supplied)?;
     run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
@@ -1246,10 +1245,9 @@ pub unsafe fn apply_closure_owning(
     {
         return value;
     }
-    if supplied.is_none()
-        && let Some(frame) = bind_slots(call, function, args)?
-    {
-        return run_frame(call, function, frame, sys_parent, args, Entry::Unchecked);
+    if let Some(frame) = bind_slots(call, function, args)? {
+        let method_vars = supplied.unwrap_or(&[]);
+        return run_frame(call, function, frame, sys_parent, args, Entry::Unchecked, method_vars);
     }
     let env = bind_arguments(call, function, args, supplied)?;
     run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
@@ -1535,6 +1533,7 @@ pub unsafe fn call_with_plan(
         sys_parent,
         args,
         Entry::Unchecked,
+        &[],
     )
 }
 
@@ -1638,6 +1637,12 @@ unsafe fn reify(index: usize) -> R<Sexp> {
         let value = *registers.add(1 + slot);
         if value != unbound() {
             heap.define(env, names.element(slot), value)?;
+        }
+    }
+    let method_vars: SmallVec<[(Sexp, Sexp); 6]> = crate::method_vars(interp(), index).into();
+    for (symbol, value) in method_vars {
+        if heap.frame_cell(env, symbol).is_none() {
+            heap.define(env, symbol, value)?;
         }
     }
     let nil = nil();
@@ -1791,7 +1796,7 @@ pub unsafe fn run_closure(
     args: &[Arg],
     entry: Entry,
 ) -> R<Sexp> {
-    run_frame(call, function, CallFrame::Env(env), sys_parent, args, entry)
+    run_frame(call, function, CallFrame::Env(env), sys_parent, args, entry, &[])
 }
 
 /// Runs a closure body in `frame`, whose arguments are already bound. `sys_parent` is the
@@ -1804,6 +1809,7 @@ pub unsafe fn run_frame(
     sys_parent: Sexp,
     args: &[Arg],
     entry: Entry,
+    method_vars: &[(Sexp, Sexp)],
 ) -> R<Sexp> {
     let (env, slots, missing) = match frame {
         CallFrame::Env(env) => (env, crate::NO_SLOTS, 0),
@@ -1859,6 +1865,8 @@ pub unsafe fn run_frame(
     }
     let start = state.frame_args.len() as u32;
     state.frame_args.extend_from_slice(args);
+    let method_vars_start = state.method_vars.len() as u32;
+    state.method_vars.extend_from_slice(method_vars);
     state.frames.push(Frame {
         call,
         function,
@@ -1869,6 +1877,7 @@ pub unsafe fn run_frame(
         handlers: state.handlers.clone(),
         restarts: state.restarts.clone(),
         srcref: state.srcref,
+        method_vars: method_vars_start,
         closures: state.frame_closures.len(),
         slots,
         missing,
@@ -1971,6 +1980,7 @@ pub unsafe fn run_frame(
         panic!("a closure call's frame was popped while the call ran");
     };
     state.frame_args.truncate(frame.args as usize);
+    state.method_vars.truncate(frame.method_vars as usize);
     let (env, closures) = (frame.env, frame.closures);
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = frame.handlers;
@@ -3780,7 +3790,7 @@ pub unsafe fn force_and_call_with(
     if !matches!(entry, Entry::Checked(Some(_)))
         && let Some(frame) = bind_slots(call, function, &args)?
     {
-        return run_frame(call, function, frame, env, &args, entry);
+        return run_frame(call, function, frame, env, &args, entry, &[]);
     }
     let frame = bind_arguments(call, function, &args, None)?;
     run_closure(call, function, frame, env, &args, entry)
@@ -3832,6 +3842,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         handlers: handlers.clone(),
         restarts: restarts.clone(),
         srcref: state.srcref,
+        method_vars: state.method_vars.len() as u32,
         closures: state.frame_closures.len(),
         slots: crate::NO_SLOTS,
         missing: 0,
