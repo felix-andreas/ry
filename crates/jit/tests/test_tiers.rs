@@ -1045,9 +1045,9 @@ fn a_body_that_could_run_nothing_natively_never_records() {
 
 #[test]
 fn a_hot_body_that_runs_rarely_waits_to_compile() {
-    // `rare` reaches the entry threshold, but each call comes with 160 KiB of other allocation,
-    // so its expected calls cannot repay a compile: it is refused, not for good, and its count
-    // starts over. A second refusal doubles the wait. Called back to back, the same body then
+    // `rare` reaches the entry threshold, but it makes one of every 201 closure calls, so its
+    // expected calls cannot repay a compile: it is refused, not for good, and its count starts
+    // over. A second refusal doubles the wait. Called back to back, the same body then
     // compiles.
     with_interpreter(|| unsafe {
         use interp::bytecode::{PROFILE, profile};
@@ -1060,8 +1060,9 @@ fn a_hot_body_that_runs_rarely_waits_to_compile() {
             values::ints(function.cdr().cdr().element(PROFILE)).to_vec()
         };
         run("rare <- function(x) x * 3");
+        run("other <- function(x) { y <- x + 1; y }");
         run(&format!(
-            "for (i in 1:{}) {{ big <- (1:20000) * 1.5; rare(i) }}",
+            "for (i in 1:{}) {{ for (j in 1:200) other(j); rare(i) }}",
             threshold + 1
         ));
         let counters = profile_of();
@@ -1075,7 +1076,7 @@ fn a_hot_body_that_runs_rarely_waits_to_compile() {
             "rare's count went on: {counters:?}"
         );
         run(&format!(
-            "for (i in 1:{}) {{ big <- (1:20000) * 1.5; rare(i) }}",
+            "for (i in 1:{}) {{ for (j in 1:200) other(j); rare(i) }}",
             threshold + 1
         ));
         let counters = profile_of();
