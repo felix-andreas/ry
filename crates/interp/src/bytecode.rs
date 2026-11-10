@@ -5155,7 +5155,7 @@ unsafe fn call_wrapper(
     }
     let kinds = values::ints(pin.element(WrapperPin::KINDS));
     let payload = pin.element(WrapperPin::PAYLOAD);
-    let body = source_body(function);
+    let body = wrapper_call(source_body(function));
     let mut builtin_args: SmallVec<[Arg; 4]> = SmallVec::new();
     let mut cell = body.cdr();
     for (index, &kind) in kinds.iter().enumerate() {

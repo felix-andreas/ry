@@ -9,6 +9,8 @@ w_round <- function(x, digits = 1) round(x, digits)
 w_rev <- function(a, b) c(b, a)
 w_unused <- function(x, y) abs(x)
 w_sqrt <- function(x) sqrt(x)
+w_named <- function(a = TRUE, b = 1) list(first = a, second = b)
+w_named_braced <- function(a = TRUE, b = 1) { list(first = a, second = b) }
 
 show_stack <- function() {
   calls <- sys.calls()
@@ -24,6 +26,7 @@ drive <- function(round) {
   # Arguments are variables and literals: a call argument (even `-1`) needs a promise.
   two <- exp(2)
   negative <- -1
+  value <- 4
   print(w_log(two))
   print(w_braced(1))
   print(w_crc("hello"))
@@ -42,6 +45,15 @@ drive <- function(round) {
     withCallingHandlers(w_crc(1), error = function(e) show_stack()),
     error = function(e) cat("caught\n")
   )
+  str(w_named())
+  str(w_named_braced(value, b = "x"))
+  withCallingHandlers(
+    w_braced(negative),
+    warning = function(w) {
+      print(conditionCall(w))
+      invokeRestart("muffleWarning")
+    }
+  )
   print(w_round(2.345))
   print(w_round(2.345, 2))
   print(w_round(digits = 0, x = 2.5))
@@ -51,7 +63,6 @@ drive <- function(round) {
   print(w_rev(p, q))
   delayedAssign("bad", stop("never forced"))
   print(w_unused(-3, bad))
-  value <- 4
   print(w_sqrt(value))
 }
 for (round in 1:4) drive(round)

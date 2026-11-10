@@ -67,6 +67,13 @@
 | [24] "show_stack()"                                                              
 | [1] TRUE
 | caught
+| List of 2
+|  $ first : logi TRUE
+|  $ second: num 1
+| List of 2
+|  $ first : num 4
+|  $ second: chr "x"
+| log(x)
 | [1] 2.3
 | [1] 2.35
 | [1] 2
@@ -149,6 +156,13 @@
 | [24] "show_stack()"                                                              
 | [1] TRUE
 | caught
+| List of 2
+|  $ first : logi TRUE
+|  $ second: num 1
+| List of 2
+|  $ first : num 4
+|  $ second: chr "x"
+| log(x)
 | [1] 2.3
 | [1] 2.35
 | [1] 2
@@ -231,6 +245,13 @@
 | [24] "show_stack()"                                                              
 | [1] TRUE
 | caught
+| List of 2
+|  $ first : logi TRUE
+|  $ second: num 1
+| List of 2
+|  $ first : num 4
+|  $ second: chr "x"
+| log(x)
 | [1] 2.3
 | [1] 2.35
 | [1] 2
@@ -313,6 +334,13 @@
 | [24] "show_stack()"                                                              
 | [1] TRUE
 | caught
+| List of 2
+|  $ first : logi TRUE
+|  $ second: num 1
+| List of 2
+|  $ first : num 4
+|  $ second: chr "x"
+| log(x)
 | [1] 2.3
 | [1] 2.35
 | [1] 2
