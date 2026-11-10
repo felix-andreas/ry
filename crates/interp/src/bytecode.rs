@@ -1102,7 +1102,9 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
             formals.push(formal.tag());
             formal = formal.cdr();
         }
-        if formals.len() <= MAX_SLOT_FORMALS && !crate::base_fast_paths::has_prologue(body) {
+        if formals.len() <= MAX_SLOT_FORMALS
+            && !crate::base_fast_paths::prologue_needs_environment(body)
+        {
             compiler.slot_formals = Some(formals);
         }
     }

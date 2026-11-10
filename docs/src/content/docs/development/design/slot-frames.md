@@ -53,8 +53,11 @@ describes it, and the open gaps are marked.
   `with`, `on.exit`, `sys.function` and `do.call` of a named function are accepted, because every
   route by which a callee reaches the frame (`parent.frame`, `sys.frame`, `environment(fn)` of a
   closure made inside) reifies it on demand. The body also has at most 64 formals and does not
-  open with a base fast-path prologue (`base_fast_paths::has_prologue`), which reads its frame as an
-  environment. At the call, `bind_slots` also refuses a closure with tier-1 or baseline machine code
+  open with one of the fast-path prologues that evaluate code in their frame or define variables
+  there (`match.arg`, `Reduce` and rlang's `trace_back`, listed in
+  `base_fast_paths::prologue_needs_environment`). The other prologues read their formals from the
+  slots and return through the pending environment (`base_fast_paths::ClosureFrame`), so
+  `stopifnot`, `structure`, `setdiff` and the withr helpers keep their slot frames. At the call, `bind_slots` also refuses a closure with tier-1 or baseline machine code
   (which reads variables through the environment), a closure under the debugger or a type signature,
   and a call where a missing formal's default is neither a literal, a symbol, nor code compiled
   with its own slot table. Those calls bind a heap frame as before.

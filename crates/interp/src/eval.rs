@@ -2239,6 +2239,27 @@ pub unsafe fn slot_dots(index: usize) -> Option<Sexp> {
     None
 }
 
+/// What the slot of the formal `symbol` holds in the frame at `index`, and whether the formal is
+/// missing, when it is a slot frame without an environment that has such a formal.
+pub unsafe fn slot_formal(index: usize, symbol: Sexp) -> Option<(Sexp, bool)> {
+    let frame = interp().frames.get(index)?;
+    if frame.env != nil() || frame.slots == crate::NO_SLOTS {
+        return None;
+    }
+    let mut formal = frame.function.car();
+    let mut position = 0;
+    while formal.kind() == SexpType::Pairlist {
+        if formal.tag() == symbol {
+            let value = *bytecode::register_address(frame.slots as usize + 1 + position);
+            let missing = position < 64 && frame.missing & (1 << position) != 0;
+            return Some((value, missing));
+        }
+        position += 1;
+        formal = formal.cdr();
+    }
+    None
+}
+
 /// The environment of the slot frame whose slots the running byte code reads, which a `NULL`
 /// environment it hands out stands for (see [`crate::builtins::Call::env`]).
 pub unsafe fn slot_owner_env(cause: Reify) -> R<Sexp> {
