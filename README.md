@@ -22,44 +22,6 @@ ry fmt      # format in place
 ry run      # run a script on ry's runtime, or open a console that reloads your package
 ```
 
-## Example
-
-A typo and an argument of the wrong type. The `#:` comment is an optional annotation that keeps the
-file plain R:
-
-```r
-#: fn(price: double, rate: double) -> double
-net_price <- function(price, rate) {
-  price * (1 - ratee)
-}
-
-net_price(100, "0.2")
-```
-
-```
-$ ry check
-unresolved
-
-  ! I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?
-   --[price.R:3:16]
- 2 | net_price <- function(price, rate) {
- 3 |   price * (1 - ratee)
-   |                ^^^^^
- 4 | }
-  help: Change to `rate` (`ry check --fix --unsafe-fixes` applies it)
-
-type-mismatch
-
-  x expected `double`, found `character`
-   --[price.R:6:16]
- 5 |
- 6 | net_price(100, "0.2")
-   |                ^^^^^
-```
-
-Type errors need `typing = true` in `ry.toml`; names, syntax and lints are checked without any
-configuration.
-
 ## ry's own typed language
 
 ry extends R with statically typed features of its own: records, tuples, tagged unions, exhaustive
