@@ -5,7 +5,7 @@
 | [1] "C_check_nonASCII"  "C_check_nonASCII2" "C_codeFilesAppend"
 | [1] TRUE
 | [1] TRUE
-| [1] "CallRoutine"      "NativeSymbolInfo"
+| [1] "CRoutine"         "NativeSymbolInfo"
 | [1] "name"          "address"       "dll"           "numParameters"
 | [1] TRUE
 | [1] TRUE
