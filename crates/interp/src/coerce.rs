@@ -4,6 +4,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, Generic, builtin, internal, is_native_value},
         conditions, deparse,
+        system::r_at_least,
         unwind::{R, error},
         values::{
             self, alloc, char_str, length, na_string, nil, scalar_bool, scalar_string, symbols,
@@ -489,16 +490,19 @@ pub unsafe fn coerce_atomic(
             }
         }
         SexpType::Complex => {
+            // A double keeps its value, NA included, as the real part. An integer or logical NA
+            // gave NA in both parts before R 4.4.0 and gives `NA + 0i` since.
+            let integer_na = Rcomplex {
+                r: NA_REAL,
+                i: if r_at_least(4, 4) { 0.0 } else { NA_REAL },
+            };
             let target = values::complexes_mut(result);
             for (index, slot) in target.iter_mut().enumerate() {
                 *slot = match source {
                     SexpType::Logical | SexpType::Integer => {
                         let value = values::ints(object)[index];
                         if value == NA_INTEGER {
-                            Rcomplex {
-                                r: NA_REAL,
-                                i: NA_REAL,
-                            }
+                            integer_na
                         } else {
                             Rcomplex {
                                 r: value as f64,
@@ -506,17 +510,10 @@ pub unsafe fn coerce_atomic(
                             }
                         }
                     }
-                    SexpType::Real => {
-                        let value = values::reals(object)[index];
-                        if is_na_real(value) {
-                            Rcomplex {
-                                r: NA_REAL,
-                                i: NA_REAL,
-                            }
-                        } else {
-                            Rcomplex { r: value, i: 0.0 }
-                        }
-                    }
+                    SexpType::Real => Rcomplex {
+                        r: values::reals(object)[index],
+                        i: 0.0,
+                    },
                     SexpType::String => match values::string_at(object, index) {
                         Some(text) => match parse_complex(&text) {
                             Some(value) => value,
@@ -815,9 +812,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("as.vector", 2, do_as_vector).generic(Generic::Internal),
     builtin("as.call", 1, do_as_call).generic(Generic::Internal),
     internal("as.function.default", 2, do_as_function),
-    internal("typeof", 1, |call| unsafe {
-        type_of(call.arg(0))
-    }),
+    internal("typeof", 1, |call| unsafe { type_of(call.arg(0)) }),
     internal("vector", 2, do_vector),
     builtin("storage.mode<-", 2, do_set_storage_mode),
     internal("is.vector", 2, do_is_vector),
@@ -907,9 +902,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
             // NULL stopped counting as atomic in R 4.4, and R 4.3's own `var()` relies on
             // the older answer.
             let kind = call.arg(0).kind();
-            scalar_bool(
-                kind.is_atomic() || (kind == SexpType::Nil && !crate::system::r_at_least(4, 4)),
-            )
+            scalar_bool(kind.is_atomic() || (kind == SexpType::Nil && !r_at_least(4, 4)))
         }
     }),
     builtin("is.recursive", 1, |call| unsafe {

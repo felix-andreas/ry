@@ -125,6 +125,9 @@ pub fn check_fused_agreement(entropy: &mut impl Entropy) {
         "c(2, -1)",
         "5",
         "-2L",
+        "rep(c(1.5-2i, NA, complex(real = NaN, imaginary = 1), complex(real = Inf, imaginary = 0), 0i, complex(real = 1, imaginary = NA_real_)), 40)",
+        "rep(c(0.5+0.5i, -1i, 2+0i), 80)",
+        "2+0i",
     ];
     let a = operands[entropy.below(operands.len())];
     let b = operands[entropy.below(operands.len())];

@@ -1005,6 +1005,12 @@ R's vector builtins share one kernel layer in `crates/interp/src/kernels.rs`, wh
   operands, and reads that operand from the output buffer, so aliasing is exact under recycling.
   A destination of length one is never reused, because the shared `TRUE`, `FALSE` and `NA`
   constants can look private. A scalar operand of a math function, a comparison or unary minus is answered without the element loop.
+- **Complex arithmetic.** `+`, `-`, `*`, `/` and `^` with a complex operand run as slice kernels
+  under the same reuse rule. `*` and `/` are ports of libgcc's `__muldc3` and `__divdc3`, which
+  GCC-compiled GNU R uses and Rust's runtime replaces with compiler-rt's, and every step keeps
+  GCC's operand order so the same NaN payload wins: results match GNU R bit for bit, `NA` versus
+  `NaN` included. `^` is GNU R's `mycpow`, and `z^2` reproduces `R_cpow_n`'s `1 * (z * z)`. A double
+  beside a complex vector is lifted per element, NA as `NA + 0i`.
 - **Reductions.** `sum` on integers, `any`, `all`, `min`, `max` and `range` are SIMD kernels;
   `range` finds both bounds in one pass. `prod` and the double `sum` accumulate in x87 long double
   as GNU R does, so they keep scalar loops.

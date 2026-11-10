@@ -5249,19 +5249,20 @@ unsafe fn op_jump_unless(state: &mut Activation<'_, '_>, instruction: Instructio
 }
 
 /// The operand of an [`Op::Arithmetic`] whose storage may hold the result: a temporary the
-/// `reuse` bits mark that no counted reference holds. Of two candidates, a double one is
-/// preferred, since a double operand makes the result double.
+/// `reuse` bits mark that no counted reference holds. Of two candidates, the one of the wider
+/// type is preferred, since the wider operand's type is the result's.
 #[inline(always)]
 unsafe fn arithmetic_destination(left: Sexp, right: Sexp, reuse: usize) -> Option<Sexp> {
     let candidate = |value: Sexp, bit: usize| {
         (reuse & bit != 0 && left != right && value.refcount() == 0).then_some(value)
     };
+    let width = |value: Sexp| match value.kind() {
+        SexpType::Complex => 2,
+        SexpType::Real => 1,
+        _ => 0,
+    };
     match (candidate(left, 1), candidate(right, 2)) {
-        (Some(left), Some(right))
-            if left.kind() != SexpType::Real && right.kind() == SexpType::Real =>
-        {
-            Some(right)
-        }
+        (Some(left), Some(right)) if width(left) < width(right) => Some(right),
         (Some(left), _) => Some(left),
         (None, right) => right,
     }
