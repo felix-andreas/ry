@@ -858,10 +858,14 @@ pub unsafe extern "C" fn jit_deopt(activation: *mut Activation, pc: i64, why: i3
                 invalidate(machine.code);
             }
             for index in 0..compiled.loops {
-                let index_value = *activation.loops.add(2 * index);
-                let count = *activation.loops.add(2 * index + 1);
+                let words = activation.loops.add(LOOP_WORDS * index);
                 if let Some(state) = machine.loops.get_mut(index) {
-                    *state = LoopState::vector(index_value.max(0) as usize, count.max(0) as usize);
+                    *state = LoopState::vector(
+                        (*words).max(0) as usize,
+                        (*words.add(1)).max(0) as usize,
+                        f64::from_bits(*words.add(2) as u64),
+                        f64::from_bits(*words.add(3) as u64),
+                    );
                 }
             }
             activation.resume_pc = pc as usize;
@@ -990,15 +994,35 @@ pub unsafe extern "C" fn jit_store_list_element(
     }
 }
 
-/// An ALTREP `for` loop sequence expanded into an ordinary vector, as tier 0's `ForInit`
-/// expands it; any other value is returned as it is.
-pub unsafe extern "C" fn jit_expand_sequence(
+/// The words each `for` loop keeps in [`Activation::loops`]: the index, the count, and the
+/// first element and increment of a compact sequence as double bits (an increment of 0 when
+/// the loop reads the sequence's storage), as in tier 0's [`LoopState`].
+pub const LOOP_WORDS: usize = 4;
+
+/// Prepares an ALTREP `for` loop sequence as tier 0's `ForInit` does: a compact sequence is
+/// returned as it is, with its first element and increment stored in loop `index`'s words,
+/// and any other ALTREP vector is expanded into an ordinary one, with an increment of 0. The
+/// sequence's length goes in the loop's count word.
+pub unsafe extern "C" fn jit_loop_sequence(
     activation: *mut Activation,
     value: *mut Header,
+    index: i64,
 ) -> *mut Header {
     unsafe {
+        let words = (*activation).loops.add(LOOP_WORDS * index as usize);
         boxed(activation, || match Sexp::from_raw(value) {
-            Some(value) => values::materialize(value),
+            Some(value) => {
+                let steps = (interp::interp().hooks.compact_sequence_steps)(value);
+                let (first, step) = steps.unwrap_or((0.0, 0.0));
+                let sequence = match steps {
+                    Some(_) => value,
+                    None => values::materialize(value)?,
+                };
+                *words.add(1) = values::length(sequence) as i64;
+                *words.add(2) = first.to_bits() as i64;
+                *words.add(3) = step.to_bits() as i64;
+                Ok(sequence)
+            }
             None => Ok(values::nil()),
         })
     }

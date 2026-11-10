@@ -760,6 +760,11 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 - **Unboxing.** Integers, doubles and logicals of length one without attributes live in machine
   registers, with R's `NA` and overflow rules. Element reads and writes on integer, double and
   logical vectors are inline, and a write copies only when the vector is shared.
+- **Loops over sequences.** A `for` loop over a compact sequence such as `1:n` or `seq_len(n)`
+  never expands it: both tiers compute each element from the first element and the increment, so
+  `for (i in 1:1e8)` runs in constant memory. The loop state carries the index, the count, the
+  first element and the increment (an increment of 0 means the loop reads the vector's storage),
+  and deoptimization hands all four to tier 0.
 - **Variables.** A body that never reflects on its frame keeps its variables in slots instead of
   its environment. The environment object still exists, but compiled code writes a variable back
   only before something that could observe it runs (a generic call, a dispatching operation, the

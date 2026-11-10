@@ -3868,16 +3868,25 @@ unsafe fn valid_switch_table(table: Sexp) -> bool {
 pub struct LoopState {
     pub index: usize,
     pub count: usize,
+    /// The first element of a compact sequence such as `1:n`, which the loop steps through
+    /// without expanding it.
+    pub first: f64,
+    /// The compact sequence's increment, 1 or -1, or 0 when the loop reads its elements from
+    /// the sequence's storage.
+    pub step: f64,
     /// The next cell, for a pairlist sequence.
     cell: Option<Sexp>,
 }
 
 impl LoopState {
-    /// The state of a loop over a vector, which is all the optimizing tier compiles.
-    pub fn vector(index: usize, count: usize) -> LoopState {
+    /// The state of a loop over a vector or a compact sequence, which is all the optimizing
+    /// tier compiles.
+    pub fn vector(index: usize, count: usize, first: f64, step: f64) -> LoopState {
         LoopState {
             index,
             count,
+            first,
+            step,
             cell: None,
         }
     }
@@ -3889,12 +3898,21 @@ impl LoopState {
 /// the body stored the value somewhere, and that copy must keep the old element.
 /// `value` is what the loop variable's binding or slot holds, which counts as its one reference.
 unsafe fn overwrite_loop_variable(sequence: Sexp, index: usize, value: Sexp) -> bool {
-    let kind = sequence.kind();
-    if !matches!(kind, SexpType::Integer | SexpType::Real | SexpType::Logical)
-        || sequence.is_altrep()
-    {
+    if sequence.is_altrep() {
         return false;
     }
+    match sequence.kind() {
+        SexpType::Real => overwrite_scalar(value, SexpType::Real, sequence.slice::<f64>()[index]),
+        kind @ (SexpType::Integer | SexpType::Logical) => {
+            overwrite_scalar(value, kind, f64::from(sequence.slice::<i32>()[index]))
+        }
+        _ => false,
+    }
+}
+
+/// Stores `element` into `value` when it is a plain scalar of `kind` that nothing but the loop
+/// variable references. An integer or logical element is exact in a double.
+unsafe fn overwrite_scalar(value: Sexp, kind: SexpType, element: f64) -> bool {
     if value.kind() != kind
         || value.is_altrep()
         || value.refcount() != 1
@@ -3904,8 +3922,8 @@ unsafe fn overwrite_loop_variable(sequence: Sexp, index: usize, value: Sexp) -> 
         return false;
     }
     match kind {
-        SexpType::Real => value.slice_mut::<f64>()[0] = sequence.slice::<f64>()[index],
-        _ => value.slice_mut::<i32>()[0] = sequence.slice::<i32>()[index],
+        SexpType::Real => value.slice_mut::<f64>()[0] = element,
+        _ => value.slice_mut::<i32>()[0] = element as i32,
     }
     true
 }
@@ -4302,8 +4320,12 @@ impl Activation<'_, '_> {
 
     #[inline(always)]
     unsafe fn record(&self, pc: usize, value: Sexp) {
+        self.record_kind(pc, value_kind(value));
+    }
+
+    unsafe fn record_kind(&self, pc: usize, kind: u16) {
         if !self.feedback.is_null() {
-            *self.feedback.add(pc) |= i32::from(value_kind(value));
+            *self.feedback.add(pc) |= i32::from(kind);
         }
     }
 }
@@ -6818,17 +6840,39 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
     if values::inherits(sequence, "factor") {
         sequence = crate::coerce::factor_as_character(sequence)?;
     }
-    let sequence = values::materialize(sequence)?;
+    // A compact sequence is stepped through by its first element and increment; expanding
+    // `1:n` would allocate all n elements the loop reads one at a time.
+    let steps = if sequence.is_altrep() {
+        (interp().hooks.compact_sequence_steps)(sequence)
+    } else {
+        None
+    };
+    let (first, step) = steps.unwrap_or((0.0, 0.0));
+    let sequence = match steps {
+        Some(_) => sequence,
+        None => values::materialize(sequence)?,
+    };
     let count = match sequence.kind() {
         SexpType::Nil => 0,
         SexpType::Pairlist | SexpType::Language => values::pairlist_length(sequence),
-        kind if kind.is_vector() => sequence.length() as usize,
+        kind if kind.is_vector() => values::length(sequence),
         _ => return Err(error_in(call, "invalid for() loop sequence")),
     };
     // The body must see the sequence as shared, so that modifying the variable it came from
     // copies it instead of changing the elements still to come.
     sequence.increment_refcount();
-    state.record(instruction.at, sequence);
+    match steps {
+        // Feedback sees through the compact form, because the compiled loop steps through it
+        // the same way.
+        Some(_) => state.record_kind(
+            instruction.at,
+            match sequence.kind() {
+                SexpType::Integer => feedback::INTEGER_VECTOR,
+                _ => feedback::DOUBLE_VECTOR,
+            },
+        ),
+        None => state.record(instruction.at, sequence),
+    }
     instruction.output(1, sequence);
     // Promise code runs without loop states, so only code read from a file could name one here.
     *state
@@ -6838,6 +6882,8 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
         .ok_or_else(|| error("compiled code names a loop it does not have"))? = LoopState {
         index: 0,
         count,
+        first,
+        step,
         cell: Some(sequence),
     };
     Ok(Flow::Next)
@@ -6867,7 +6913,9 @@ unsafe fn op_for_step(state: &mut Activation<'_, '_>, instruction: Instruction) 
     let sequence = instruction.input(1);
     // The compiler steps the register its `ForInit` filled, which keeps the index in bounds;
     // code read from a file is only verified operand by operand.
-    if sequence.kind().is_vector() && loop_state.index >= sequence.length() as usize {
+    let (first, step) = (loop_state.first, loop_state.step);
+    if step == 0.0 && sequence.kind().is_vector() && loop_state.index >= sequence.length() as usize
+    {
         return Err(error("compiled code steps a loop over another sequence"));
     }
     let index = loop_state.index;
@@ -6879,10 +6927,17 @@ unsafe fn op_for_step(state: &mut Activation<'_, '_>, instruction: Instruction) 
             .filter(|cell| !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED))
             .map(|cell| cell.cdr()),
     };
-    if current.is_some_and(|value| overwrite_loop_variable(sequence, index, value)) {
+    let number = first + step * index as f64;
+    let overwritten = current.is_some_and(|value| match step == 0.0 {
+        true => overwrite_loop_variable(sequence, index, value),
+        false => overwrite_scalar(value, sequence.kind(), number),
+    });
+    if overwritten {
         return Ok(Flow::Next);
     }
     let element = match sequence.kind() {
+        SexpType::Integer if step != 0.0 => values::scalar_integer(number as i32)?,
+        SexpType::Real if step != 0.0 => values::scalar_real(number)?,
         SexpType::List | SexpType::Expression => sequence.element(index),
         SexpType::Pairlist | SexpType::Language => {
             let cell = loop_state.cell.unwrap_or(sequence);

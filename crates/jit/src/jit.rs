@@ -745,10 +745,17 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         }
         std::slice::from_raw_parts_mut(bytecode::register_address(cells), compiled.slots.len())
             .fill(values::nil());
-        let mut loops = vec![0i64; 2 * compiled.loops];
-        for (index, state) in machine.loops.iter().enumerate().take(compiled.loops) {
-            loops[2 * index] = state.index as i64;
-            loops[2 * index + 1] = state.count as i64;
+        let mut loops = vec![0i64; runtime::LOOP_WORDS * compiled.loops];
+        for (words, state) in loops
+            .chunks_exact_mut(runtime::LOOP_WORDS)
+            .zip(machine.loops.iter())
+        {
+            words.copy_from_slice(&[
+                state.index as i64,
+                state.count as i64,
+                state.first.to_bits() as i64,
+                state.step.to_bits() as i64,
+            ]);
         }
         let mut activation = Activation {
             registers: bytecode::register_address(machine.base),
