@@ -1,0 +1,18 @@
+[stdout]
+| [1] 2
+| [1] 2
+| [1] 2
+| [1] 2
+| [1] 2
+| [1] 2
+|  chr "stats"
+| [1] "unknown input format"
+| [1] TRUE
+| [1] "error reading from connection"
+| [1] "simpleError" "error"       "condition"  
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 0L

@@ -5,6 +5,10 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### Faster namespace loads
+
+Loading a package's namespace does less work in R. `ls()` sorts names by a byte key per name, `methods::cacheMetaData()` handles packages whose old classes ask for the `Ops` group natively, the registered native routines are bound in one pass, and `readRDS()` of a path reads the file whole instead of through a connection. `loadNamespace("rlang")` in a fresh process takes 31 ms instead of 45 ms, and 30 load and unload cycles in one process take 0.54 s instead of 0.66 s.
+
 ### Package code is read without decompressing it
 
 A package's code image holds each lazy-loaded record uncompressed, and ry maps the image and reads records from it in place instead of inflating them from the `.rdb`. The base packages get such images when the start image is built. On the testthat workload no `.rdb` is opened, fetches take 33% fewer instructions, the whole run takes 1.3% fewer, and four workers together hold 10 MB less private memory.
