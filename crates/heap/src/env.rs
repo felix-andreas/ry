@@ -620,6 +620,13 @@ pub(crate) struct TableImage {
 }
 
 impl Frame {
+    /// Whether the frame owns memory outside its environment object: spilled slots, a lookup
+    /// index or a hash table. An image cannot carry those addresses, so it stores such a frame's
+    /// contents and the loader builds it again.
+    pub(crate) fn owns_memory(&self) -> bool {
+        self.bindings.spilled() || self.index.is_some() || self.table.is_some()
+    }
+
     pub(crate) fn image(&self) -> FrameImage {
         FrameImage {
             slots: self

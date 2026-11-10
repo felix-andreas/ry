@@ -7891,6 +7891,51 @@ Each one trades a narrow class of missed errors for a class of false reports see
   (GNU R `Rscript` 152 ms). The image load (79M instructions) and the remaining faults are the
   floor. Analysis is unaffected.
 
+## The start-up image is the heap's pages at a fixed address, mapped in place
+
+- **Previous shape.** The heap image listed every reachable object with its references as dense
+  positions, and the loader allocated each object, filled it in a second pass, re-interned every
+  string and symbol and rebuilt every frame. On an empty `ry run` the load took 81.6M of 121.5M
+  instructions, 57.4M of them exclusive in `Heap::load_image_inhibited`.
+- **What was structurally weak.** The image held a second encoding of objects that already had a
+  memory layout, so each start paid a per-object decode for a result that was the same in every
+  process.
+- **Target shape.** The first heap in a process reserves its small-object space at
+  `IMAGE_BASE` (`0x2000_0000_0000`, 64 GiB of address space), and the writer moves every large
+  object into a section at `IMAGE_LARGE_BASE`, so a handle in the written pages is valid as is in
+  the loader. The writer collects, tenures everything (headers carry `OLD | TENURED`) and writes
+  the space's pages, its per-page metadata and the large section. The loader maps both sections
+  of the file `MAP_PRIVATE | MAP_FIXED` over the heap (`fill_from` in `interp/src/image.rs`;
+  Windows reads them). Soundness rests on two rules (`heap/src/image.rs`, module doc):
+  - **The same starting state.** `Heap::image_precondition` digests the space's allocation state,
+    the table counts and the fixed objects' addresses after the host registers its fixed objects;
+    the writer records it before start-up and the loader compares its own before touching the
+    heap. Equal digests mean the image's pages replace every object the loader holds in place. A
+    mismatch, or a heap not at `IMAGE_BASE` (a second heap in the process), starts the slow way.
+  - **No process-local addresses in the pages.** Spilled frames, external pointers to builtin
+    routines (as tokens) and the payload of fixed objects that keep native addresses (ALTREP
+    class tables) are cleared in the written copy and restored by the loader from the metadata.
+  Relocated path strings are new strings that the listed referring fields are pointed at; the
+  pages are not patched otherwise. The header (metadata and interpreter state) is checksummed,
+  the pages are not, since reading them would fault in every page and undo the sharing. The
+  writer replaces the file by rename, because a mapped file truncated in place raises SIGBUS.
+- **Mapping against reading.** Reading the pages into the heap's huge-page memory costs about
+  4.5 ms for 14 MB on a 4-processor VM (the kernel zeroes each huge page and then copies into
+  it) and makes every page private. A private mapping faults pages in lazily with fault-around,
+  copies only pages that are written, and keeps the rest shared through the page cache. Marking
+  writes a header only to promote an object, and every image object is already tenured, so
+  collections leave mapped small-object pages clean; large objects take a mark bit per major
+  collection. Measured on an empty run: mapping 29.2 ms median against 33.3 ms for reading and
+  4,337 faults against 3,217, and Pss summed over 4 concurrent workers 87 MB against 131 MB.
+  Test suites run in parallel workers, so the mapping is the shape.
+- **Impact.** Empty `ry run`: 121.5M to 47.9M instructions, the load phase 81.6M to 7.2M
+  inclusive (0.9M exclusive in the heap loader; `Frame::from_image` 1.2M is the largest part);
+  38.5 ms to 29.2 ms median wall (paired ratio 0.75, 15 rounds, noisy); peak RSS 39.6 MB to
+  38.0 MB; 4 concurrent workers 117 MB to 87 MB Pss. testthat_full process wall 675 ms to 673 ms
+  (within noise) and 4 workers 245 MB to 237 MB Pss: its remaining start-up cost is package
+  loading, whose lazy-load fetches inflate and unserialize each record (the 29M of inflate
+  measured on testthat_full is there, not in the start-up image). Analysis is unaffected.
+
 ## Package builds run `make` in parallel and link BLAS and LAPACK by versioned file
 
 - **Previous shape.** `R CMD INSTALL` ran `make` with one job, as GNU R does, and the Linux

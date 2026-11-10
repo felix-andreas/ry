@@ -259,6 +259,37 @@ impl StringTable {
         }
     }
 
+    /// Replaces each entry's string with what `forward` returns for it, when that is another
+    /// string with the same text, such as the string moved elsewhere.
+    pub unsafe fn forward(&mut self, forward: &dyn Fn(Sexp) -> Option<Sexp>) {
+        for slot in &mut self.slots {
+            if *slot == EMPTY || *slot == TOMBSTONE {
+                continue;
+            }
+            if let Some(moved) = forward(unsafe { unpack(*slot) }) {
+                *slot = (*slot & !ADDRESS_MASK) | (moved.as_ptr() as u64 >> 3);
+            }
+        }
+    }
+
+    /// The table's slots and counts, for an image.
+    pub fn image(&self) -> (&[u64], usize, usize) {
+        (&self.slots, self.len, self.tombstones)
+    }
+
+    /// Takes over the slots and counts [`StringTable::image`] gave in the writing process, whose
+    /// strings live at the same addresses here.
+    pub fn load_image(&mut self, slots: Vec<u64>, len: usize, tombstones: usize) -> bool {
+        if !slots.len().is_power_of_two() || len + tombstones > slots.len() {
+            return false;
+        }
+        self.slots = slots;
+        self.len = len;
+        self.tombstones = tombstones;
+        self.young_large.clear();
+        true
+    }
+
     /// The young strings outside the small-object space.
     pub fn young_large(&self) -> &[Sexp] {
         &self.young_large

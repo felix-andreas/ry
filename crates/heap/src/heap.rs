@@ -106,6 +106,9 @@ pub struct Heap {
     /// The largest single allocation the heap attempts (`memory_ceiling`).
     allocation_ceiling: usize,
     large: FxHashSet<Sexp>,
+    /// The section a start-up image's large objects live in (`crate::image`), mapped as a whole:
+    /// freeing one of them leaves its memory to the section.
+    image_large: std::ops::Range<usize>,
     /// Freed mappings of large vectors kept for the next one.
     mapped: MappedPool,
     /// Large objects allocated since the last collection, which a minor collection sweeps.
@@ -667,6 +670,7 @@ impl Heap {
             allocation_ceiling: memory_ceiling(),
             space: Space::new(),
             large: FxHashSet::default(),
+            image_large: 0..0,
             mapped: MappedPool::new(policy.heap_limit),
             young_large: Vec::new(),
             escalating: false,
@@ -3844,6 +3848,9 @@ impl Heap {
         let size = self.size_of(object);
         self.large.remove(&object);
         let memory = object.as_ptr().cast::<u8>();
+        if self.image_large.contains(&(memory as usize)) {
+            return;
+        }
         if size >= MAPPED_BYTES {
             self.mapped.release(NonNull::new_unchecked(memory), size);
         } else {
@@ -3933,6 +3940,15 @@ impl Drop for Heap {
             let large: Vec<Sexp> = self.large.iter().copied().collect();
             for object in large {
                 self.free_large(object);
+            }
+            if !self.image_large.is_empty() {
+                let start = self.image_large.start as *mut u8;
+                if !crate::space::virtual_memory::release(start, self.image_large.len()) {
+                    panic!(
+                        "cannot release the start-up image's large objects: {}",
+                        std::io::Error::last_os_error()
+                    );
+                }
             }
         }
     }
