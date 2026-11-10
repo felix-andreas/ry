@@ -1021,6 +1021,10 @@ Instructions per call at tier 0, measured with callgrind net of the loop:
   attributes writes the selected elements directly, recycling `v` as GNU R does. It declines to
   the full `[<-` whenever the result would change shape or a warning is due: NA or zero
   positions, growth, a coercion that widens `x`, or a length that does not divide.
+- **`vapply` results.** One module checks each result against `FUN.VALUE` and copies it into
+  the preallocated answer, widening integer and logical values inline, then sets names, dims and
+  dimnames once. Every loop that calls `FUN` per element uses it, so the checks and their error
+  text exist once.
 - **`.Call` by address.** A routine is native code exactly when its `NativeSymbolInfo`'s
   `address` pointer has no tag and a non-null address, so the call reads two slots by position
   and passes its arguments from the stack, with no name search or allocation before native code
