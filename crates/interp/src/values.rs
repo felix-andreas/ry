@@ -211,6 +211,12 @@ symbol_table! {
     decimal_mark = "decimal.mark",
     top = "top",
     bottom = "bottom",
+    envs = "envs",
+    action = "action",
+    new_options = "new_options",
+    old_options = "old_options",
+    lhs = "lhs",
+    rhs = "rhs",
 }
 
 /// Session-wide objects the builtins keep. Each is rooted for the life of the session.
@@ -499,6 +505,19 @@ pub unsafe fn install_charsxp(name: Sexp) -> R<Sexp> {
         return Ok(crate::heap().install_char(name)?);
     }
     install_bytes(name.bytes())
+}
+
+/// The symbol whose name is the text of the `CHARSXP` `name`, as GNU R's `installTrChar`
+/// gives: a string in another encoding installs under its UTF-8 text, and `NA_STRING` installs
+/// as `NA`, as GNU R's `installTrChar` does.
+pub unsafe fn install_charsxp_text(name: Sexp) -> R<Sexp> {
+    if name == na_string() {
+        return install("NA");
+    }
+    if name.has_gp(gp::ASCII) {
+        return install_charsxp(name);
+    }
+    install(&char_str(name))
 }
 
 pub unsafe fn scalar_logical(value: i32) -> R<Sexp> {
@@ -816,12 +835,19 @@ pub unsafe fn refuse_bytes(strings: Sexp) -> R<()> {
 
 /// A `CHARSXP` as text. A byte that is not valid UTF-8 becomes its private-use stand-in (see
 /// [`escape_invalid_bytes`]), which [`mkchar`] turns back into the byte.
+#[inline]
 pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
-    let bytes = charsxp.bytes();
     if charsxp.is_valid_utf8() && !charsxp.has_gp(gp::LATIN1 | gp::BYTES) {
         // SAFETY: the heap validated these bytes when it interned them, and they never change.
-        return Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(bytes) });
+        return Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(charsxp.bytes()) });
     }
+    unsafe { char_str_decoded(charsxp) }
+}
+
+/// [`char_str`] for a string the heap has not validated as UTF-8 text.
+#[cold]
+unsafe fn char_str_decoded<'a>(charsxp: Sexp) -> Cow<'a, str> {
+    let bytes = charsxp.bytes();
     // Strict validation runs a word at a time over ASCII, where the lossy decoder steps through
     // chunks. The bit is only a hint, since native code can set any of a string's flags.
     if charsxp.has_gp(gp::ASCII)
