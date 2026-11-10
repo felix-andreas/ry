@@ -3518,6 +3518,11 @@ unsafe fn reuse_first_argument(
 ) -> R<Sexp> {
     let definition = builtin_def(function)?;
     let args = evaluate_args(call.cdr(), env, definition.keep_missing, call)?;
+    if definition.generic != Generic::None
+        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
+    {
+        return Ok(value);
+    }
     // Argument values are not counted, so another argument that is the subject, or one of the
     // lists holding it, would see the update.
     let reusable = args.first().map(|arg| arg.value).filter(|&subject| {
