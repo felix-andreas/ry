@@ -84,3 +84,16 @@ print(exists("seen"))
 set_global <- function(v) fresh_global <<- v
 print(withVisible(set_global(7))$visible)
 print(fresh_global)
+
+# switch() over the caller's `...` from a frame without an environment.
+kind_of <- function(x) if (is.numeric(x)) "num" else if (is.character(x)) "chr" else "other"
+switch_dots <- function(.x, ...) switch(kind_of(.x), ...)
+print(switch_dots(1, num = "a number", chr = "a string", "something else"))
+print(switch_dots("s", num = "a number", chr = , str = "a string"))
+print(switch_dots(TRUE, num = "a number", "default"))
+print(withVisible(switch_dots(TRUE, num = 1))$visible)
+by_position <- function(i, ...) switch(i, ...)
+print(by_position(2, "one", "two", "three"))
+lazy_arm <- function(.x, ...) switch(kind_of(.x), ...)
+print(lazy_arm(1, num = { cat("forced num\n"); 1 }, chr = { cat("forced chr\n"); 2 }))
+print(tryCatch(switch_dots(1, chr = "x", "a", "b"), error = conditionMessage))

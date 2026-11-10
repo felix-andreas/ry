@@ -4107,10 +4107,25 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
             alternatives.push(*arg);
         }
     }
-    let alternatives = &alternatives[..];
-    let selector = switch_selector(selector, call.call)?;
+    match switch_alternative(selector, call.call, &alternatives)? {
+        Some(chosen) => eval(chosen, call.env()?),
+        None => {
+            interp().visible = false;
+            Ok(nil())
+        }
+    }
+}
+
+/// The alternative `switch(selector, ...)` evaluates, given the selector's value, or `None`
+/// when it returns an invisible `NULL`. `call` is the `switch` call, which a warning names.
+pub(crate) unsafe fn switch_alternative(
+    selector: Sexp,
+    call: Sexp,
+    alternatives: &[Arg],
+) -> R<Option<Sexp>> {
+    let selector = switch_selector(selector, call)?;
     if alternatives.is_empty() {
-        crate::conditions::warning_call(call.call, "'switch' with no alternatives")?;
+        crate::conditions::warning_call(call, "'switch' with no alternatives")?;
     }
     let missing = missing_arg();
     let text = match selector {
@@ -4121,10 +4136,9 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
                 if arg.value == missing {
                     return Err(error("empty alternative in numeric switch"));
                 }
-                return eval(arg.value, call.env()?);
+                return Ok(Some(arg.value));
             }
-            interp().visible = false;
-            return Ok(nil());
+            return Ok(None);
         }
     };
     // GNU R rejects a second default before it looks for a match, naming the calling function
@@ -4146,22 +4160,16 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
         if arg.tag.kind() == SexpType::Symbol && arg.tag.car().bytes() == text.bytes() {
             // Fall through empty alternatives to the next non-empty one, and to an invisible
             // NULL when every later one is empty.
-            for later in &alternatives[position..] {
-                if later.value != missing {
-                    return eval(later.value, call.env()?);
-                }
-            }
-            interp().visible = false;
-            return Ok(nil());
+            return Ok(alternatives[position..]
+                .iter()
+                .find(|later| later.value != missing)
+                .map(|later| later.value));
         }
     }
     match defaults.first() {
         Some(default) if default.value == missing => Err(error(SWITCH_EMPTY_DEFAULT)),
-        Some(default) => eval(default.value, call.env()?),
-        None => {
-            interp().visible = false;
-            Ok(nil())
-        }
+        Some(default) => Ok(Some(default.value)),
+        None => Ok(None),
     }
 }
 

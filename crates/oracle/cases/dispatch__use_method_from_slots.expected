@@ -22,9 +22,17 @@
 | [1] TRUE
 | [1] FALSE
 | [1] 7
+| [1] "a number"
+| [1] "a string"
+| [1] "default"
+| [1] FALSE
+| [1] "two"
+| forced num
+| [1] 1
+| [1] "duplicate 'switch' defaults: '\"a\"' and '\"b\"'"
 [messages]
 [warnings]
 [errors]
 [value]
-double
-| 7
+character
+| "duplicate 'switch' defaults: '\"a\"' and '\"b\"'"

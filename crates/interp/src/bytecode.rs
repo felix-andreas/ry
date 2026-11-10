@@ -5558,6 +5558,7 @@ unsafe fn slot_special_call(
                 interp().visible = false;
                 Ok(Some(value))
             }
+            "switch" if rest.car() == symbols().dots => slot_switch(state, instruction, call, argument),
             _ => Ok(None),
         };
     }
@@ -5585,6 +5586,68 @@ unsafe fn slot_special_call(
             Ok(Some(argument))
         }
         _ => Ok(None),
+    }
+}
+
+/// `switch(selector, ...)` from a slot frame, choosing among the alternatives its `...` holds.
+/// They are its caller's promises, so only the selector reads the frame, and it runs as promise
+/// code on the slots, compiled once per call site.
+unsafe fn slot_switch(
+    state: &Activation<'_, '_>,
+    instruction: Instruction,
+    call: Sexp,
+    selector: Sexp,
+) -> R<Option<Sexp>> {
+    let function = state.machine.function;
+    let Some(dots) = slot_named(state, symbols().dots) else {
+        return Ok(None);
+    };
+    if function == nil() || !forwardable_dots(*dots) {
+        return Ok(None);
+    }
+    let value = if selector.kind() == SexpType::Language {
+        // The site's promise-code entry is free: it serves calls that turn out to be closures,
+        // and `compile_promise_arguments` builds the same list for them.
+        let mut compiled = state.constants.element(instruction.operand(2) + 1);
+        if compiled == unbound() {
+            compiled = compile_promise_arguments(function, call.cdr())?;
+            (*state.heap).set_element(state.constants, instruction.operand(2) + 1, compiled);
+        }
+        let code = compiled.car();
+        if code.kind() != SexpType::Bytecode {
+            return Ok(None);
+        }
+        let owner = (*state.interp).slot_owner as usize;
+        run_promise_on_slots(code, function, owner, state.machine.header)?
+    } else {
+        match slot_operand(state, selector)? {
+            Some(value) => value,
+            None => return Ok(None),
+        }
+    };
+    let dots = *dots;
+    let alternatives: Vec<Arg> = if dots.kind() == SexpType::Dots {
+        values::pairlist_items(dots)
+            .into_iter()
+            .map(|(tag, value)| Arg { tag, value })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    match eval::switch_alternative(value, call, &alternatives)? {
+        Some(chosen) if chosen.kind() == SexpType::Promise => eval::force_promise(chosen).map(Some),
+        // The special evaluates the alternative it chose in the frame, as `do_switch` does.
+        Some(chosen) if matches!(chosen.kind(), SexpType::Language | SexpType::Symbol) => {
+            eval::eval(chosen, state.env(Reify::Site("generic call"))?).map(Some)
+        }
+        Some(chosen) => {
+            interp().visible = true;
+            Ok(Some(chosen))
+        }
+        None => {
+            interp().visible = false;
+            Ok(Some(nil()))
+        }
     }
 }
 
