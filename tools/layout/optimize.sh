@@ -153,7 +153,15 @@ if [ -n "$bolt" ]; then
 	python3 -I tools/layout/hot_functions.py "$profdata" "$work/pgo.profdata" "$optimized/$library" > "$work/hot.txt"
 	"$bolt" "$optimized/$library" -o "$work/bolt-instrumented/$library" -instrument \
 		-funcs-file-no-regex="$work/hot.txt" \
-		-instrumentation-file="$work/bolt-raw/libR.fdata" -instrumentation-file-append-pid
+		-instrumentation-file="$work/bolt-raw/libR.fdata" -instrumentation-file-append-pid |
+		tee "$work/bolt-instrument.log"
+	# BOLT ignores a name it does not know, so a list in the wrong naming form instruments only a
+	# handful of functions and gives a profile that lays out nothing. Most names must match.
+	instrumented_functions=$(sed -n 's/.*Number of function descriptors: //p' "$work/bolt-instrument.log")
+	if [ $((${instrumented_functions:-0} * 2)) -lt "$(wc -l < "$work/hot.txt")" ]; then
+		echo "error: BOLT instrumented ${instrumented_functions:-0} of the $(wc -l < "$work/hot.txt") functions listed in $work/hot.txt" >&2
+		exit 1
+	fi
 	# The image is tied to the runtime's identity, not its layout, so the base R tree's image
 	# serves the instrumented copy too.
 	RY_BASE_R="$base" RY_LIBR="$work/bolt-instrumented/$library" python3 -I tools/layout/train.py "$optimized/$ry"

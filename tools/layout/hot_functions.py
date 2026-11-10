@@ -5,7 +5,7 @@ tools/layout/optimize.sh hands the list to BOLT, which then instruments only the
 A function the profile records but that never ran is left out, and so is one that LTO inlined
 everywhere, since it has no symbol of its own. Local functions carry their codegen unit as a
 `cgu;` prefix in the profile, and LTO may suffix a symbol with `.llvm.<hash>`; both are dropped
-for the match.
+for the match, and a local symbol is printed with the `/1` suffix BOLT gives it.
 
 usage: tools/layout/hot_functions.py LLVM_PROFDATA PROFILE LIBRARY
 """
@@ -29,7 +29,8 @@ def main():
     for line in symbols.splitlines():
         fields = line.split()
         if len(fields) == 3 and fields[1] in "tTwW" and re.sub(r"\.llvm\.\d+$", "", fields[2]) in ran:
-            chosen.add(fields[2])
+            # BOLT names a local symbol `name/1`, and LTO makes nearly every Rust function local.
+            chosen.add(fields[2] + "/1" if fields[1] == "t" else fields[2])
     if not chosen:
         sys.exit(f"hot_functions: no symbol of {library} has a count in {profile}")
     print(f"hot_functions: {len(chosen)} of {len(ran)} functions that ran have a symbol", file=sys.stderr)
