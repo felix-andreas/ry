@@ -5198,6 +5198,20 @@ unsafe fn call_wrapper(
     .map(Some)
 }
 
+/// The call a wrapper's body makes: the body itself, or the one call inside `{ }`.
+unsafe fn wrapper_call(body: Sexp) -> Sexp {
+    if body.kind() == SexpType::Language
+        && body.car() == symbols().brace
+        && body.cdr().kind() == SexpType::Pairlist
+        && body.cdr().cdr() == nil()
+        && body.cdr().car().kind() == SexpType::Language
+    {
+        body.cdr().car()
+    } else {
+        body
+    }
+}
+
 /// The layout of a call site's pin of a wrapper's lookups (see [`call_wrapper`]), a list.
 struct WrapperPin;
 
@@ -5240,7 +5254,8 @@ unsafe fn pin_holds(pin: Sexp, function: Sexp) -> bool {
 /// is one call whose function is a name bound outside any function frame and whose arguments
 /// are formals, literals, or other such names, and it has no `...` formal.
 unsafe fn pin_wrapper(function: Sexp) -> R<Sexp> {
-    let body = source_body(function);
+    let source = source_body(function);
+    let body = wrapper_call(source);
     let enclosure = function.tag();
     let constants = function.cdr().cdr();
     if body.kind() != SexpType::Language
@@ -5271,6 +5286,19 @@ unsafe fn pin_wrapper(function: Sexp) -> R<Sexp> {
         return Ok(nil());
     };
     pinned.push((head, cell));
+    // `{ f(x) }` runs as `f(x)` only while `{` is base R's.
+    if body != source {
+        let brace = symbols().brace;
+        let Some(cell) = resolve(brace, enclosure, false)? else {
+            return Ok(nil());
+        };
+        match cell_value(cell) {
+            Some(value)
+                if value.kind() == SexpType::Special && values::primitive_name(value) == "{" => {}
+            _ => return Ok(nil()),
+        }
+        pinned.push((brace, cell));
+    }
     let mut kinds: SmallVec<[i32; 8]> = SmallVec::new();
     let mut payload: SmallVec<[Sexp; 8]> = SmallVec::new();
     let mut argument = body.cdr();
