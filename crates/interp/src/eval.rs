@@ -1818,20 +1818,22 @@ pub enum CallFrame {
 /// with a slot table, a debugger, a move or a type signature watches the frame, or a missing
 /// formal's default is neither a literal, a symbol, nor code compiled with its own slot table.
 pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallFrame>> {
-    let body = function.cdr();
-    if body.kind() != SexpType::Bytecode {
-        return Ok(None);
-    }
-    let constants = body.cdr();
-    let table = constants.element(bytecode::SLOTS);
     let state = interp();
-    if table == nil()
-        || state.debugger.is_some()
+    if state.debugger.is_some()
         || moves::tracking()
         || function == state.namespace_loader
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
         || crate::annotations::is_typed(function)
     {
+        return Ok(None);
+    }
+    let body = bytecode::compile_before_call(function)?;
+    if body.kind() != SexpType::Bytecode {
+        return Ok(None);
+    }
+    let constants = body.cdr();
+    let table = constants.element(bytecode::SLOTS);
+    if table == nil() {
         return Ok(None);
     }
     let _activity = activity::enter(Activity::CallSetup, 0);

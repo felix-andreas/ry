@@ -193,7 +193,7 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **`gc()`'s "max used" is sampled only at collections**, so it reads below the process peak (575 MB against an 833 MB VmHWM for a loop that makes and drops large vectors; GNU R reports 1,054 MB because it counts at allocation). Updating the peak on each large-vector allocation would match GNU R's meaning (`crates/heap/src/heap.rs`, `crates/heap/tests/test_gc.rs` `released_old_vectors_leave_the_peak_at_one_vector`).
 - **`for` over a compact `1:n` expands it.** Both tiers materialize the sequence (40 MB for ten million elements) before the loop; GNU R iterates the compact form. Iterating start and step directly removes the allocation, the page faults and `loop_sum`'s peak.
 - **Builder peaks still above GNU R's by more than 10%** (fresh process per case, 2e7 doubles, peak over the inputs in MB, ry against GNU R 4.3.3): `x * 2 + 1` 305/153 (GNU R writes the result into an unshared temporary operand; ry cannot take a reference count of 0 as proof yet, because bytecode registers and JIT slots hold uncounted references, `eval::reuse_permitted`), `seq(1, n, by = 1)` 381/305, `vapply(l, function(v) v + 1, numeric(1))` over a 1e6 list 112/58, `unlist` 20/4. `resolve()` in `crates/interp/src/subset.rs` still builds a `Vec<usize>` per general subscript.
-- **Collector throughput toward a tenth of today's collection time** (testthat workload: 22 minor collections, 24 ms of pauses, 0.021 s in `--profile-summary`'s bucket). Where the pauses go: the 3 collections during `library(testthat)` trace about 360k load survivors each, once each (about 10 ms; `locate` is about 13 instructions per child), so only allocating a lazy load's objects old and marked, with the write barrier covering their pointers to young objects, removes that tracing; dead returned frames are cleared one cell at a time, with a cache miss on each value's mark bit and refcount (about 7 ms over 20k frames and 110k cells); the sweep and the young string table about 3 ms (`decisions.md`, "Minor collections touch only what changed").
+- **Collector throughput toward a tenth of today's collection time** (testthat workload: 9 minor collections, about 17 ms of pauses, `collect_keeping` 66.9M instructions). Lazy-load fetches are pretenured (`decisions.md`, "Pretenuring lazy-load fetches"), so `library(testthat)` runs no collection. Where the pauses go: a minor collection's `trace` visits tens of thousands of objects at about 260 instructions each, most of them old objects rescanned from the remembered set or the roots rather than young survivors (39k traced against 4.5k newly aged in a load's collection), so find which old objects are rescanned and why; dead returned frames are cleared one cell at a time, with a cache miss on each value's mark bit and refcount (about 7 ms over 20k frames and 110k cells); the sweep and the young string table about 3 ms (`decisions.md`, "Minor collections touch only what changed").
 - **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `development/robustness.md`).
 - **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
 
@@ -207,6 +207,7 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **Array subassignment with empty indices:** `X[,,k] <- W` on a 1000 x 1000 x 20 double array inside a function builds about 16 MB of index temporaries per call, which come from fresh mappings (78k page faults over 20 calls, GNU R none), so it takes 0.14 s against GNU R's 0.07 s. It is the largest single cost in shootout `mandelbrot_noout_naive` outside the complex kernel; a strided copy over the empty dimensions needs no index vector.
 - **Matrix products** (`linalg.rs`, `real_product`) are ry's own kernels in reference BLAS's summation order (`decisions.md`, "base R's linear algebra"), so they run at reference BLAS's speed, not OpenBLAS's; not yet timed against a GNU R on OpenBLAS. A faster kernel may block over rows and columns and thread across columns, but must keep each entry's sum sequential in the inner index and use no FMA, or the bits move. CI has only OpenBLAS (setup-r installs it), so `test_linalg.rs` compares its LAPACK cases there with live GNU R; adding `libblas3 liblapack3` to the workflow's apt line (a human edit: workflow scope) would make CI check the pinned reference bits too.
 - **Package kernels** (`kernels.R`, zoo, xts, lubridate, stringr, jsonlite, readr) at 1e7 rows: `rollmean`, `rollapply`, `na.locf`, `endpoints`, `to.period`, `str_detect`, `str_replace_all` and `read_csv` are at or below GNU R. Still slower: `str_split` 1.54x, xts `period.apply` 1.39x (per-call interpreter cost, tier-0 work), `ymd` 1.29x, `fromJSON` 1.26x and `toJSON` 1.20x. `str_split` executes only 1.14x GNU R's instructions, so the rest of its gap is memory traffic in `allocVector` and `mkCharLenCE` (the heap's allocation path and string table). The jsonlite simplify step and lubridate's format training are R-level interpreter cost. At 1e6 rows these ratios swing by 30% between runs.
+- **Bessel and polygamma ports differ in the last bits.** `besselJ(2, 1)` is `0.57672480775687351` against GNU R's `0.5767248077568734`, and `psigamma(0.5, 0)` `-1.9635100260214227` against `-1.9635100260214231` (`sprintf("%.17g")`); `besselJ(1:5, c(0, 1))` differs at 16 significant digits in two of five values. `distributions__vector_paths.R` prints them at 12 digits until the ports follow GNU R's operation order.
 - **Complex printing** does not share significant digits between the two parts as GNU R's `formatComplex` does: `print((1+2i)^0.5)` gives `1.27202+0.7861514i` against GNU R's `1.27202+0.786151i`, and `print((-1+0i)^0.5)` gives `6.123234e-17+1i` against `0+1i`. The values are bit-identical; only the formatter differs.
 - **Peak memory** (`run.py --memory`) at 1e6 rows is within 1.13 times GNU R's for every kernel (`decisions.md`, "String keys sort by rank"). The highest are `unsplit` 1.13 (184 MB against 163), `gsub(perl = TRUE)` 1.08, `xts period.apply` and `as.character(double)` 1.07. `make.unique` on 1e6 names peaks at 127 MB against GNU R's 92 MB; names that are not ASCII still take the `String` path.
 
@@ -865,6 +866,79 @@ change that does not pay.
    stack: `match_args` returns `eval::Matched` and calls fill an `eval::Args`, both `SmallVec`s,
    so a typical closure call allocates nothing on the Rust heap (`decisions.md`, "the
    interpreter's call path, lookups and allocation").
+
+**Measured ranking of the evaluation path.** An inventory of every hash map, cache, `Vec<bool>`
+and short heap list in `interp`, `heap`, `jit`, `libr` and `typed` found 307 sites, 211 of them
+touched per operation rather than per load. Ranked by callgrind instructions (profiling build, JIT
+on, one repeat), what costs time is frame and lookup layout, not hashing: hash-map code, inlined
+or not, is 0.50% of instructions on the mean `bench-real` workload and 0.83% on `testthat_full`.
+The 21-package corpus `--profile-summary` puts the time in the same places (builtins 28 to 32%,
+tier 0 23 to 27%, closure call setup 20 to 22%, GC 8 to 9%, S3 lookup about 2%) but cannot name a
+structure. In the table, "real" is the mean share over the nine `bench-real` workloads, "tt" is
+`testthat_full`, and a share is inclusive of the functions the site calls. JIT inline caches and
+type feedback are the design and are not listed.
+
+| # | Site | real | tt | Data-oriented replacement | Owner |
+| -: | --- | -: | -: | --- | --- |
+| 6 | GC entered from the allocation slow path (`Heap::maybe_collect`; `trace` 1.6 self, `Space::refill` 0.8). `escalate_if_full` alone is 10.5% of `records` and 1.6 mean | 3.36 | 2.91 | find why `records` escalates past a minor collection on most refills, then size the nursery per evaluation phase so short-lived call garbage never reaches a deeper collection | B2 |
+| 7 | Formals copied into the frame's `Bindings` vector on reify (`bind_slots` 1.44 / 0.60, `define_formals_uncollected` 0.94 / 0.61) | 2.38 | 1.21 | the reified frame's bindings alias the call's slot array instead of copying it | AOT |
+| 8 | Variable lookup by scanning `Frame` bindings (`Heap::frame_cell`, self 2.1 / 1.9), from `find_var`, `find_called_fun`, `define` and `resolve_s3` | 2.35 | 2.04 | lexical addressing: compile a closure's local reads to slot indices and global or base reads to the symbol's binding cell behind a binding epoch, so only `get()`, `assign()` and `eval()` on an arbitrary environment scan | T0 |
+| 9 | Argument references detached when a frame becomes an environment (`materialize_references`, `detach_reference`), inside `reify` (4.9 / 3.4 inclusive) | 2.26 | 1.94 | a per-frame bitset of slots whose reference escaped, so reify detaches only those; better, let the effect analysis prove a body never reifies, so references stay in the `frame_args` arena | AOT |
+| 10 | A promise per argument at every generic call (`slot_promises_into`, `alloc_compiled_promise` 0.4) | 1.94 | 3.53 | keep an unforced argument as a (code index, environment) pair in the `frame_args` arena and allocate the `PROMSXP` only when it escapes | AOT |
+| 11 | Frame teardown (`release_frame` 0.89 / 0.61, `release_slots` 0.67 / 0.77, `truncate_frames` 0.27), with an `FxHashMap` probe of `Roots.precious` per release | 1.83 | 1.65 | frames on a bump stack reset to a watermark, with a bitset of the slots that need a release; `precious` as a dense vector whose index lives in the object header | AOT, B2 for `precious` |
+| 12 | The callee looked up by name at each tier-0 call (`bytecode::lookup_function`) | 1.56 | 1.47 | the binding cell at the call site, checked against the binding epoch, as in row 8 | T0 |
+| 13 | S3 dispatch (`resolve_s3`) through `MethodCache`'s three `FxHashMap`s (`entries` keyed by a 4-tuple, `names`, `sites: FxHashMap<Sexp, Vec<SiteEntry>>`) plus `implicit_class`. Hashing itself is only 0.03 | 1.20 | 1.78 | one monomorphic entry per call site (class vector, epoch, method) in a dense array indexed by site id | AOT |
+| 14 | Tier-0 bytecode compilation (`bytecode::compile`, behind the `COMPILED` map) | 1.14 | 3.44 | not a layout problem: the map is 0.01. Compile less (lazily per branch) or keep the code with the closure | T0 |
+| 15 | Locals appended one at a time (`Heap::define_unbound`, `Frame::insert` 0.81 / 0.58) | 1.07 | 1.42 | preallocate every local the body assigns from the compiler's slot table, so a first assignment is an indexed store | T0 |
+| 16 | `warning()` builds a call and evaluates `.signalSimpleWarning` (`warning_call`; 8.2 on `conditions`) | 0.97 | 2.31 | signal natively when no calling handler for `warning` or `condition` is on the stack; check first that GNU R shows no observable difference | C |
+
+The rest of the inventory measured cold. The largest hash maps are the large-frame index in
+`Frame` (0.08 / 0.16), the `CHARSXP` table behind `install_char` (0.05 / 0.07), the string-keyed
+`primitive_formals` probe in `call_builtin_checked` (0.04 / 0.05) and `Roots.precious` (0.05 /
+0.06). `Vec<bool>` sites are below 0.1: `match_builtin_args` 0.09, the `keep` vector in
+`subset::resolve` 0.06. `primitive_formals` is indexed by builtin index and both `Vec<bool>`s
+are bitsets. Left: give `precious` the dense layout of row 11 (B2).
+
+**Allocations per operation against GNU R.** Loops of 20,000 and 40,000 iterations of each operation,
+differenced. GNU R (4.6.2, its loop byte-compiled) counts `allocVector3`, `CONS_NR`, `cons`,
+`mkPROMISE` and `NewEnvironment` calls under callgrind; ry counts heap objects freed by kind from
+`--profile-summary` and Rust allocator calls under callgrind. Bytes per operation were not
+measured.
+
+| Operation | GNU R objects | ry tier 0 | ry JIT | GNU R malloc | ry Rust malloc | GNU R instr | ry tier 0 instr | ry JIT instr |
+| --- | -: | -: | -: | -: | -: | -: | -: | -: |
+| empty loop | 1 | 1 | 0 | 0 | 0 | 430 | 1044 | 52 |
+| `f()` | 2 | 1 | 0 | 0 | 0 | 1695 | 2211 | 44 |
+| `f(x)` | 5 | 4 | 0 | 0 | 0 | 3046 | 3705 | 56 |
+| `f(x, y, z)` | 11 | 8 | 0 | 0 | 0 | 4544 | 4355 | 51 |
+| `f(a = x, b = y, c = z)` | 11 | 8 | 9 | 0 | 0 | 4849 | 5596 | 5540 |
+| `f(...)` with 3 | 12 | 8 | 8 | 0 | 0 | 3916 | 3613 | 3119 |
+| S3 generic and method | 20 | 11 | 12 | 0 | 0 | 11848 | 9341 | 9290 |
+| `x[i]` | 4 | 3 | 0 | 0 | 0 | 2519 | 2209 | 106 |
+| `x[[i]]` | 3 | 2 | 0 | 0 | 0 | 2455 | 2042 | 138 |
+| `x[1:3]` | 3 | 1 | 1 | 0 | 0 | 3202 | 1917 | 1114 |
+| `x[-i]` | 7 | 2 | 2 | 4 | 1 | 9362 | 4508 | 4531 |
+| `x[lgl]` | 5 | 1 | 1 | 3 | 0 | 7287 | 3544 | 2737 |
+| `x + 1` scalar | 0 | 2 | 0 | 0 | 0 | 320 | 1465 | 53 |
+| `x + 1` vector | 1 | 1 | 1 | 1 | 0 | 3768 | 2245 | 1493 |
+| `x[i] <- v` | 3 | 2 | 0 | 0 | 0 | 1634 | 1725 | 118 |
+| `x[[i]] <- v` | 4 | 2 | 1 | 0 | 0 | 1840 | 1711 | 309 |
+
+ry allocates fewer objects than GNU R everywhere except three places, each with a fix:
+
+- Scalar arithmetic in tier 0 boxes two doubles where GNU R's bytecode keeps the result unboxed on
+  its stack. Keep scalar results unboxed in tier-0 registers, or reuse an unshared result in place
+  (T0).
+- The JIT allocates one object more than tier 0 for named-argument and S3 calls, because it falls
+  back to the generic call path for them (and costs as much as tier 0 for `...`). Compile these
+  calls natively or hand them to tier 0's path (JIT, with AOT for the call plan).
+- `x[-i]` makes one Rust allocation for the excluded-index set (GNU R makes four). Give it inline
+  stack capacity in `subset::resolve` (B5).
+
+Every other measured operation makes no Rust heap allocation in the steady state, and the call
+path allocates less than GNU R: a closure call with three arguments makes 8 objects against 11.
+Where tier 0 still loses is instructions on the empty loop and on `f()`, which is dispatch
+overhead, not allocation.
 
 - **Columnar record Arrays.** Store `Array<record>` as one buffer per field once the JIT fuses `xs[[i]]$field`; decided and deferred in `decisions.md`, "Array storage stays row-major". Measure a million-item loop both ways first.
 - **Typed Array loops trail untyped ones slightly.** `python3 tools/bench/why/run.py --filter array` (GNU R / ry untyped / ry typed and strict, seconds, 4-core Xeon): array_dot 0.188/0.021/0.022, array_filter 0.167/0.022/0.026, array_map 0.247/0.038/0.041, array_sum 0.116/0.024/0.027. The JIT compiles Array element loops natively, but the typed program still pays 5 to 15 percent over the plain-vector one; find where (the strict operator check, `as.Array`, or the annotation checks) before calling Arrays a speed feature.
