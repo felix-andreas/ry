@@ -929,7 +929,7 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 
 | Target row | Status | What it needs |
 | --- | --- | --- |
-| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | in progress | builtins from 28% (workloads) and 18% (corpus) to 10x faster; the top of the ranking above first. Built: `attributes`, `c`, `[[` and `[[<-` with constant subscripts, `forceAndCall`, a builtin `FUN` in the apply family, `Reduce`, the one-argument builtins `!`, `length`, `is.null`, `is.na`, `is.character`, `is.logical` and `is.function` in compiled calls, and native entries for `identical`, `isTRUE`, `isFALSE`, `nrow`, `ncol`, `match`, `%in%` and `%||%` (the "Builtin fast paths" rows below), a tier-0 op for `missing()`, `lapply` and `vapply` that reuse `i` and read `X[[i]]` directly per element, `structure()` that sets attributes in place, tier-0 `%%` and `%/%`, element assignments indexed by `$` and `[[` reads, a `.Call` that resolves its routine from the address pointer, `x[i] <- v` written in place, direct entries for `[`, `.Call` and `round` (the entry takes the call, so builtins that name it in errors qualify), names appended in place by `$<-` and `[[<-`, `m[, j] <- v` as contiguous block copies, scalar `-x`, and a native `Reduce(accumulate = TRUE)`. Per call, `[` with a negative, logical or character subscript, `round`, `m[, j] <- v`, name appends and `Reduce` now match or beat GNU R (the second table under "Builtin fast paths"). Next: what is left is closure frame setup inside `structure()`, `format.default` and `Reduce`'s callee, which is the frames and call convention of row (c), and `.Call`'s loop and JIT call sequence |
+| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | in progress | builtins from 28% (workloads) and 18% (corpus) to 10x faster; the top of the ranking above first. Built: `attributes`, `c`, `[[` and `[[<-` with constant subscripts, `forceAndCall`, a builtin `FUN` in the apply family, `Reduce`, the one-argument builtins `!`, `length`, `is.null`, `is.na`, `is.character`, `is.logical` and `is.function` in compiled calls, and native entries for `identical`, `isTRUE`, `isFALSE`, `nrow`, `ncol`, `match`, `%in%` and `%||%` (the "Builtin fast paths" rows below), a tier-0 op for `missing()`, `lapply` and `vapply` that reuse `i` and read `X[[i]]` directly per element, `structure()` that sets attributes in place, tier-0 `%%` and `%/%`, element assignments indexed by `$` and `[[` reads, a `.Call` that resolves its routine from the address pointer, `x[i] <- v` written in place, direct entries for `[`, `.Call` and `round` (the entry takes the call, so builtins that name it in errors qualify), names appended in place by `$<-` and `[[<-`, `m[, j] <- v` as contiguous block copies, scalar `-x`, and a native `Reduce(accumulate = TRUE)`. Per call, `[` with a negative, logical or character subscript, `round`, `m[, j] <- v`, name appends and `Reduce` match or beat GNU R (the second table under "Builtin fast paths"). Next: what is left is closure frame setup inside `structure()`, `format.default` and `Reduce`'s callee, which is the frames and call convention of row (c), and `.Call`'s loop and JIT call sequence |
 | (b) Automatic parallelism for effect-free apply-family calls and long element-wise operations, deterministic, with bit-identical reductions | deferred, architecture-ready | the effect-free fact per function and the invariants in `decisions.md`; package native code stays single-threaded. Deferred because the target users already run their test suites in parallel across processes and are CPU bound, so every core is busy and threads inside one process would only compete with the other workers. Single-core speed is the goal, and every cost paid per process (warm-up, compile time, package loading, resident memory) is paid once per worker |
 | (c) Tier-1 compilation of most R-level time | planned | R code from 56% (workloads) to 30x faster; tier 1 today runs under 3% of the time on eight of nine workloads |
 | (d) Native code shrinks only through ry-native replacements or parallelism | planned | ry's own ports (`stats`: 40% of `simulation`) are ry's to speed up; third-party C stays: `data.table` and `xts` on the workloads, `data.table` and `rlang` on the corpus |
@@ -1207,20 +1207,22 @@ Instructions per loop iteration with the JIT on, measured with callgrind:
 
 | Call | Before | After | GNU R 4.3 |
 | --- | ---: | ---: | ---: |
-| `x[-1L]`, five doubles | 3196 | 2438 | 2372 |
-| `x[m]`, logical `m` | 1429 | 1124 | 1948 |
-| `l[c("a", "c")]`, a list | 2306 | 2000 | 3775 |
-| `round(x, 2)`, a scalar | 1756 | 1122 | 2526 |
-| `round(x)`, per element of a double vector | 70 | 29 | 76 |
-| `x <- list(a = 1); x$b <- 2` | 7712 | 4192 | 4387 |
-| `x <- list(a = 1); x[["b"]] <- 2` | 8004 | 4191 | 6112 |
+| `x[-1L]`, five doubles | 3179 | 2485 | 2372 |
+| `x[m]`, logical `m` | 1467 | 1132 | 1948 |
+| `l[c("a", "c")]`, a list | 2295 | 1959 | 3775 |
+| `round(x, 2)`, a scalar | 1785 | 1129 | 2526 |
+| `round(x)`, per element of a double vector | 63 | 29 | 76 |
+| `x <- list(a = 1); x$b <- 2` | 7739 | 4292 | 4387 |
+| `x <- list(a = 1); x[["b"]] <- 2` | 7937 | 4289 | 6112 |
 | `m[, j] <- v`, per element | 35 | 8 | 20 |
-| `.Call(f, 1)` with a registered routine | 2081 | 1883 | 964 |
-| `Reduce(f, 1:20, accumulate = TRUE)`, per call | 213.0k | 103.9k | 190.9k |
-| `c(a = 1, b = k)` | 4481 | 3954 | 4149 |
+| `.Call(f, 1)` with a registered routine | 2229 | 2021 | 964 |
+| `Reduce(f, 1:20, accumulate = TRUE)`, per call | 208.4k | 93.4k | 190.9k |
+| `c(a = 1, b = k)` | 4282 | 3698 | 4149 |
 
-On whole programs, callgrind counts fall by 11.3% on records, 8.2% on simulation, 5.6% on
-tables, 2.6% on functional and 1.2% on testthat, and peak memory does not grow.
+On whole programs (callgrind, JIT on), instruction counts fall by 7.9% on records, 7.9% on
+simulation, 5.4% on tables, 2.5% on functional and 0.2% on testthat, and change by less than
+0.5% on the rest. Peak memory falls by 14 MB on functional and 4 MB on objects and is level
+elsewhere.
 
 - **Assignment in place.** Compiled `x[i] <- v` on an unshared atomic vector without
   attributes writes the selected elements directly, recycling `v` as GNU R does. It declines to
