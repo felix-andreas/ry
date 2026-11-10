@@ -5044,8 +5044,8 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
 
 /// What every instruction of an activation reads besides its code and registers, loaded once
 /// instead of once per instruction. None of these addresses changes while the activation runs:
-/// the code object is rooted and never patched, its vectors are never resized, and the register
-/// window was reserved on entry in a file that never reallocates. What they point at (registers,
+/// the code object is rooted and never moved (quickening rewrites an op word in place, never the
+/// vector), its vectors are never resized, and the register window was reserved on entry in a file that never reallocates. What they point at (registers,
 /// cache slots) does change.
 struct Activation<'m, 'a> {
     machine: &'m mut Machine<'a>,
