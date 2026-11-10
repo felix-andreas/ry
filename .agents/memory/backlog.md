@@ -721,6 +721,26 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 
 `crates/jit` compiles hot bodies and loops (`decisions.md`, "the JIT tier"). In priority order:
 
+- **An optimizing layer for LuaJIT-class loops (not queued; starts only on the orchestrator's go,
+  after the call-setup enter/leave contract lands).** The current tracks (call setup, tier-0 lexical
+  addressing and unboxed scalars, slot frames) close the interpreter and value-representation gaps
+  to LuaJIT. The three that remain need one JIT-optimizer track, because each depends on the others:
+  - *Cross-closure inlining with deopt.* Inline hot callees under guards on the binding version and
+    on an observer bit (no `parent.frame`, `sys.call`, `eval` or `environment()` on the inlined
+    frame), and rebuild the callee frames from a snapshot when a guard fails. Needs the enter/leave
+    contract and the observer bitset from "Closure call setup: the 10x end shape" in `decisions.md`.
+  - *Allocation sinking.* Escape analysis over the JIT IR, so a temporary vector, a scalar box or a
+    short-lived list that never escapes the compiled region is never allocated, and is materialized
+    only on a deopt exit. Builds on counted registers.
+  - *Loop optimizations above Cranelift.* Cranelift does little loop work, so ry needs its own pass
+    over its IR: hoist invariant guards and loads (`length(x)`, attribute and class checks), remove
+    redundant type and NA guards, eliminate bounds checks on `x[i]` for `i` in `seq_along(x)` or
+    `1:n` with `n <= length(x)`, and peel the first iteration so guards run once.
+  - Compile latency stays a constraint: Cranelift takes milliseconds per function, so these passes
+    run only in the optimizing tier, behind the cheap baseline tier and install-time images.
+  - Target: scalar and `x[i]` loops in the bench-why and bench-real programs within 2x of the same
+    loop in C, measured with `just bench-why` and callgrind.
+
 - **Typed natives, the rest of the end shape** (`decisions.md`, "Typed closures run as native
   functions over records, tags and match"). Typed closures run as natives at their first call over
   scalars, plain vectors, records, tags and `match`. Not built, by expected gain:
