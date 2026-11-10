@@ -1,0 +1,351 @@
+[stdout]
+| round 1 
+| [1] 2
+| [1] 0
+| [1] "9b1edae5dbb937b1"
+| [[1]]
+| [1] "non-numeric argument to mathematical function"
+| 
+| [[2]]
+| log(x)
+| 
+| log(x)
+| [[1]]
+| [1] "input must be a character string"
+| 
+| [[2]]
+| w_crc(1)
+| 
+| log(x)
+|  [1] "local({"                                                     
+|  [2] "eval.parent(substitute(eval(quote(expr), envir)))"           
+|  [3] "eval(expr, p)"                                               
+|  [4] "eval(expr, p)"                                               
+|  [5] "eval(quote({"                                                
+|  [6] "eval(quote({"                                                
+|  [7] "withCallingHandlers(tryCatch({"                              
+|  [8] "tryCatch({"                                                  
+|  [9] "tryCatchList(expr, classes, parentenv, handlers)"            
+| [10] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"         
+| [11] "doTryCatch(return(expr), name, parentenv, handler)"          
+| [12] "withVisible(eval(expression, globalenv()))"                  
+| [13] "eval(expression, globalenv())"                               
+| [14] "eval(expression, globalenv())"                               
+| [15] "drive(round)"                                                
+| [16] "withCallingHandlers(w_log(negative), warning = function(w) {"
+| [17] "w_log(negative)"                                             
+| [18] ".signalSimpleWarning(\"NaNs produced\", base::quote(log(x)))"
+| [19] "withRestarts({"                                              
+| [20] "withOneRestart(expr, restarts[[1L]])"                        
+| [21] "doWithOneRestart(return(expr), restart)"                     
+| [22] "(function (w) "                                              
+| [23] "show_stack()"                                                
+| [1] TRUE
+|  [1] "local({"                                                                   
+|  [2] "eval.parent(substitute(eval(quote(expr), envir)))"                         
+|  [3] "eval(expr, p)"                                                             
+|  [4] "eval(expr, p)"                                                             
+|  [5] "eval(quote({"                                                              
+|  [6] "eval(quote({"                                                              
+|  [7] "withCallingHandlers(tryCatch({"                                            
+|  [8] "tryCatch({"                                                                
+|  [9] "tryCatchList(expr, classes, parentenv, handlers)"                          
+| [10] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"                       
+| [11] "doTryCatch(return(expr), name, parentenv, handler)"                        
+| [12] "withVisible(eval(expression, globalenv()))"                                
+| [13] "eval(expression, globalenv())"                                             
+| [14] "eval(expression, globalenv())"                                             
+| [15] "drive(round)"                                                              
+| [16] "tryCatch(withCallingHandlers(w_crc(1), error = function(e) show_stack()), "
+| [17] "tryCatchList(expr, classes, parentenv, handlers)"                          
+| [18] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"                       
+| [19] "doTryCatch(return(expr), name, parentenv, handler)"                        
+| [20] "withCallingHandlers(w_crc(1), error = function(e) show_stack())"           
+| [21] "w_crc(1)"                                                                  
+| [22] ".handleSimpleError(function (e) "                                          
+| [23] "h(simpleError(msg, call))"                                                 
+| [24] "show_stack()"                                                              
+| [1] TRUE
+| caught
+| [1] 2.3
+| [1] 2.35
+| [1] 2
+| [[1]]
+| [1] "argument \"x\" is missing, with no default"
+| 
+| [[2]]
+| w_sqrt()
+| 
+| forcing q
+| forcing p
+| [1] 2 1
+| [1] 3
+| [1] 2
+| round 2 
+| [1] 2
+| [1] 0
+| [1] "9b1edae5dbb937b1"
+| [[1]]
+| [1] "non-numeric argument to mathematical function"
+| 
+| [[2]]
+| log(x)
+| 
+| log(x)
+| [[1]]
+| [1] "input must be a character string"
+| 
+| [[2]]
+| w_crc(1)
+| 
+| log(x)
+|  [1] "local({"                                                     
+|  [2] "eval.parent(substitute(eval(quote(expr), envir)))"           
+|  [3] "eval(expr, p)"                                               
+|  [4] "eval(expr, p)"                                               
+|  [5] "eval(quote({"                                                
+|  [6] "eval(quote({"                                                
+|  [7] "withCallingHandlers(tryCatch({"                              
+|  [8] "tryCatch({"                                                  
+|  [9] "tryCatchList(expr, classes, parentenv, handlers)"            
+| [10] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"         
+| [11] "doTryCatch(return(expr), name, parentenv, handler)"          
+| [12] "withVisible(eval(expression, globalenv()))"                  
+| [13] "eval(expression, globalenv())"                               
+| [14] "eval(expression, globalenv())"                               
+| [15] "drive(round)"                                                
+| [16] "withCallingHandlers(w_log(negative), warning = function(w) {"
+| [17] "w_log(negative)"                                             
+| [18] ".signalSimpleWarning(\"NaNs produced\", base::quote(log(x)))"
+| [19] "withRestarts({"                                              
+| [20] "withOneRestart(expr, restarts[[1L]])"                        
+| [21] "doWithOneRestart(return(expr), restart)"                     
+| [22] "(function (w) "                                              
+| [23] "show_stack()"                                                
+| [1] TRUE
+|  [1] "local({"                                                                   
+|  [2] "eval.parent(substitute(eval(quote(expr), envir)))"                         
+|  [3] "eval(expr, p)"                                                             
+|  [4] "eval(expr, p)"                                                             
+|  [5] "eval(quote({"                                                              
+|  [6] "eval(quote({"                                                              
+|  [7] "withCallingHandlers(tryCatch({"                                            
+|  [8] "tryCatch({"                                                                
+|  [9] "tryCatchList(expr, classes, parentenv, handlers)"                          
+| [10] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"                       
+| [11] "doTryCatch(return(expr), name, parentenv, handler)"                        
+| [12] "withVisible(eval(expression, globalenv()))"                                
+| [13] "eval(expression, globalenv())"                                             
+| [14] "eval(expression, globalenv())"                                             
+| [15] "drive(round)"                                                              
+| [16] "tryCatch(withCallingHandlers(w_crc(1), error = function(e) show_stack()), "
+| [17] "tryCatchList(expr, classes, parentenv, handlers)"                          
+| [18] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"                       
+| [19] "doTryCatch(return(expr), name, parentenv, handler)"                        
+| [20] "withCallingHandlers(w_crc(1), error = function(e) show_stack())"           
+| [21] "w_crc(1)"                                                                  
+| [22] ".handleSimpleError(function (e) "                                          
+| [23] "h(simpleError(msg, call))"                                                 
+| [24] "show_stack()"                                                              
+| [1] TRUE
+| caught
+| [1] 2.3
+| [1] 2.35
+| [1] 2
+| [[1]]
+| [1] "argument \"x\" is missing, with no default"
+| 
+| [[2]]
+| w_sqrt()
+| 
+| forcing q
+| forcing p
+| [1] 2 1
+| [1] 3
+| [1] 2
+| round 3 
+| [1] 2
+| [1] 0
+| [1] "9b1edae5dbb937b1"
+| [[1]]
+| [1] "non-numeric argument to mathematical function"
+| 
+| [[2]]
+| log(x)
+| 
+| log(x)
+| [[1]]
+| [1] "input must be a character string"
+| 
+| [[2]]
+| w_crc(1)
+| 
+| log(x)
+|  [1] "local({"                                                     
+|  [2] "eval.parent(substitute(eval(quote(expr), envir)))"           
+|  [3] "eval(expr, p)"                                               
+|  [4] "eval(expr, p)"                                               
+|  [5] "eval(quote({"                                                
+|  [6] "eval(quote({"                                                
+|  [7] "withCallingHandlers(tryCatch({"                              
+|  [8] "tryCatch({"                                                  
+|  [9] "tryCatchList(expr, classes, parentenv, handlers)"            
+| [10] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"         
+| [11] "doTryCatch(return(expr), name, parentenv, handler)"          
+| [12] "withVisible(eval(expression, globalenv()))"                  
+| [13] "eval(expression, globalenv())"                               
+| [14] "eval(expression, globalenv())"                               
+| [15] "drive(round)"                                                
+| [16] "withCallingHandlers(w_log(negative), warning = function(w) {"
+| [17] "w_log(negative)"                                             
+| [18] ".signalSimpleWarning(\"NaNs produced\", base::quote(log(x)))"
+| [19] "withRestarts({"                                              
+| [20] "withOneRestart(expr, restarts[[1L]])"                        
+| [21] "doWithOneRestart(return(expr), restart)"                     
+| [22] "(function (w) "                                              
+| [23] "show_stack()"                                                
+| [1] TRUE
+|  [1] "local({"                                                                   
+|  [2] "eval.parent(substitute(eval(quote(expr), envir)))"                         
+|  [3] "eval(expr, p)"                                                             
+|  [4] "eval(expr, p)"                                                             
+|  [5] "eval(quote({"                                                              
+|  [6] "eval(quote({"                                                              
+|  [7] "withCallingHandlers(tryCatch({"                                            
+|  [8] "tryCatch({"                                                                
+|  [9] "tryCatchList(expr, classes, parentenv, handlers)"                          
+| [10] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"                       
+| [11] "doTryCatch(return(expr), name, parentenv, handler)"                        
+| [12] "withVisible(eval(expression, globalenv()))"                                
+| [13] "eval(expression, globalenv())"                                             
+| [14] "eval(expression, globalenv())"                                             
+| [15] "drive(round)"                                                              
+| [16] "tryCatch(withCallingHandlers(w_crc(1), error = function(e) show_stack()), "
+| [17] "tryCatchList(expr, classes, parentenv, handlers)"                          
+| [18] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"                       
+| [19] "doTryCatch(return(expr), name, parentenv, handler)"                        
+| [20] "withCallingHandlers(w_crc(1), error = function(e) show_stack())"           
+| [21] "w_crc(1)"                                                                  
+| [22] ".handleSimpleError(function (e) "                                          
+| [23] "h(simpleError(msg, call))"                                                 
+| [24] "show_stack()"                                                              
+| [1] TRUE
+| caught
+| [1] 2.3
+| [1] 2.35
+| [1] 2
+| [[1]]
+| [1] "argument \"x\" is missing, with no default"
+| 
+| [[2]]
+| w_sqrt()
+| 
+| forcing q
+| forcing p
+| [1] 2 1
+| [1] 3
+| [1] 2
+| round 4 
+| [1] 2
+| [1] 0
+| [1] "9b1edae5dbb937b1"
+| [[1]]
+| [1] "non-numeric argument to mathematical function"
+| 
+| [[2]]
+| log(x)
+| 
+| log(x)
+| [[1]]
+| [1] "input must be a character string"
+| 
+| [[2]]
+| w_crc(1)
+| 
+| log(x)
+|  [1] "local({"                                                     
+|  [2] "eval.parent(substitute(eval(quote(expr), envir)))"           
+|  [3] "eval(expr, p)"                                               
+|  [4] "eval(expr, p)"                                               
+|  [5] "eval(quote({"                                                
+|  [6] "eval(quote({"                                                
+|  [7] "withCallingHandlers(tryCatch({"                              
+|  [8] "tryCatch({"                                                  
+|  [9] "tryCatchList(expr, classes, parentenv, handlers)"            
+| [10] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"         
+| [11] "doTryCatch(return(expr), name, parentenv, handler)"          
+| [12] "withVisible(eval(expression, globalenv()))"                  
+| [13] "eval(expression, globalenv())"                               
+| [14] "eval(expression, globalenv())"                               
+| [15] "drive(round)"                                                
+| [16] "withCallingHandlers(w_log(negative), warning = function(w) {"
+| [17] "w_log(negative)"                                             
+| [18] ".signalSimpleWarning(\"NaNs produced\", base::quote(log(x)))"
+| [19] "withRestarts({"                                              
+| [20] "withOneRestart(expr, restarts[[1L]])"                        
+| [21] "doWithOneRestart(return(expr), restart)"                     
+| [22] "(function (w) "                                              
+| [23] "show_stack()"                                                
+| [1] TRUE
+|  [1] "local({"                                                                   
+|  [2] "eval.parent(substitute(eval(quote(expr), envir)))"                         
+|  [3] "eval(expr, p)"                                                             
+|  [4] "eval(expr, p)"                                                             
+|  [5] "eval(quote({"                                                              
+|  [6] "eval(quote({"                                                              
+|  [7] "withCallingHandlers(tryCatch({"                                            
+|  [8] "tryCatch({"                                                                
+|  [9] "tryCatchList(expr, classes, parentenv, handlers)"                          
+| [10] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"                       
+| [11] "doTryCatch(return(expr), name, parentenv, handler)"                        
+| [12] "withVisible(eval(expression, globalenv()))"                                
+| [13] "eval(expression, globalenv())"                                             
+| [14] "eval(expression, globalenv())"                                             
+| [15] "drive(round)"                                                              
+| [16] "tryCatch(withCallingHandlers(w_crc(1), error = function(e) show_stack()), "
+| [17] "tryCatchList(expr, classes, parentenv, handlers)"                          
+| [18] "tryCatchOne(expr, names, parentenv, handlers[[1L]])"                       
+| [19] "doTryCatch(return(expr), name, parentenv, handler)"                        
+| [20] "withCallingHandlers(w_crc(1), error = function(e) show_stack())"           
+| [21] "w_crc(1)"                                                                  
+| [22] ".handleSimpleError(function (e) "                                          
+| [23] "h(simpleError(msg, call))"                                                 
+| [24] "show_stack()"                                                              
+| [1] TRUE
+| caught
+| [1] 2.3
+| [1] 2.35
+| [1] 2
+| [[1]]
+| [1] "argument \"x\" is missing, with no default"
+| 
+| [[2]]
+| w_sqrt()
+| 
+| forcing q
+| forcing p
+| [1] 2 1
+| [1] 3
+| [1] 2
+| [1] 0
+| [1] 0
+| [1] 0
+| [1] 0
+| [1] "global log"
+| [1] "global log"
+| [1] "global log"
+| [1] "global log"
+| [1] 0
+| [1] 0
+| [1] 0
+| [1] 0
+| [1] "hijacked brace"
+| [1] "hijacked brace"
+| [1] "hijacked brace"
+| [1] "hijacked brace"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
