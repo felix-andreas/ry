@@ -79,6 +79,20 @@ the compiled tier on every case. `ry-tier0` runs with `RY_JIT=off`, and `ry-gcto
 is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or `ry-jit`, or any command line) makes
 `cargo test -p oracle` also require the engine to match GNU R on every case.
 
+Both engines must search the same package library, installed by GNU R. ry runs on GNU R's base
+R when the two releases differ, so a package that ry installed (its `DESCRIPTION` says it was built
+under ry's release) makes `library()` warn "package 'x' was built under R version 4.6.2". The
+driver therefore reports the `R_LIBS` each engine saw, and a case whose engines saw different values
+fails with that message instead of a diff. A wrapper given as `ORACLE_RY` must not set `R_LIBS`
+itself.
+
+ry's native fast paths for base closures (`crates/interp/src/base_fast_paths.rs`) install only on
+the GNU R release whose code they follow, recognised by a hash. Against an older GNU R, such as a
+container's 4.3.3, ry runs that release's base R and most fast paths stay out, so only CI, which
+pins the matching release, checks them against GNU R. Locally, `RY_FAST_PATHS=0` turns off the
+paths that skip R frames (`message`, `signalCondition`, the unhandled-warning shortcut), and running
+a case with and without it on ry's own base R compares them with the R bodies they stand for.
+
 ## The plot gallery
 
 ```sh

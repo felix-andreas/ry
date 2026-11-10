@@ -395,7 +395,10 @@ tenured and takes tenured ones as roots through the remembered set. A major coll
 everything dead. The heap has two limits, as GNU R's `R_VSize` and `R_NSize` do: one on large
 vectors (at least 64 MB) and one on small objects (at least 32 MB). When a minor collection leaves
 less than a fifth of a limit's minimum free, an intermediate collection runs, then a major one if
-that is still not enough. After each major collection the limits move with GNU R's fractions: a
+that is still not enough. An intermediate collection is skipped when it would not free enough: the
+share of the younger old objects (old but not yet tenured) that the last escalation found dead
+predicts what it frees now, so a program that keeps what it builds goes straight to the major
+collection instead of tracing its young structure twice. After each major collection the limits move with GNU R's fractions: a
 limit grows by a fifth when the survivors plus that fifth fill more than 70% of it, and shrinks by
 a fifth when they fill less than 30%. A major collection that escalation forced before the program
 allocated a limit's worth of vectors grows the vector limit too, because the working set it keeps
@@ -403,6 +406,11 @@ promoting is larger than the survivors show. GNU R's `R_GC_MEM_GROW` and its fra
 set the same numbers ([CLI reference](/reference/cli#memory)). The nursery's budget for small
 objects scales with the old small objects only, as GNU R's cons-cell trigger ignores vector memory,
 so a few big live vectors do not let as many bytes of small garbage pile up.
+
+`R_PreserveObject` sets a flag bit in the object's header and appends the object to a dense vector
+of preserved objects with their counts, so a frame release asks the header, not a hash table,
+whether an environment is preserved. `R_ReleaseObject` searches the vector from its newest entry,
+as GNU R's precious list does.
 
 The write barrier is one load and one compare on the parent's header: a store into a young object,
 or into an old one that is already remembered, does nothing more. An old object that receives a
@@ -603,10 +611,18 @@ compilation earlier: a namespace fetches many closures it never calls, such as e
 registers, and calls many others only once. What the image adds is what compiling cannot produce,
 the trained profile below, and the native code it reserves room for.
 
-- **Identity.** A record is identified by its offset in the database, its length and an FNV-1a hash
-  of its stored bytes; a closure within the record by the order the stream reader creates closures.
-  An image written for other bytes (a reinstall by GNU R, another version) is ignored record by
-  record. Only databases that have an image pay for the hash.
+- **Identity.** A record is identified by its offset and length in the database, and a closure
+  within the record by the order the stream reader creates closures. The image is stamped with the
+  database's length and modification time, so an image written for another database (a reinstall
+  by GNU R, another version) is ignored whole. A copy that does not keep modification times loses
+  the image, never serves a stale record.
+- **Streams.** The image also holds the serialized stream of every record the install fetched,
+  uncompressed, after the payloads. A fetch from a database with an image reads that stream in
+  place from the mapped file: it does not read the database, inflate the record or copy it, and
+  processes that load the same package share the pages. A record the install did not fetch is read
+  from the database. Each stream carries a hash that is checked the first time the stream is read
+  (`stream_hash`, a word-at-a-time hash, since only one build ever reads the image); a mismatch is
+  damage, below, and the fetch reads the database instead.
 - **No copy of the source.** A code object points into its closure's body, so the image stores those
   pointers as the preorder position of the object in the body. The body itself comes from the
   database, as without an image.
@@ -619,7 +635,7 @@ the trained profile below, and the native code it reserves room for.
   other compiles its own.
 - **Damage.** The image only saves compiling, so a damaged one never stops a package from loading.
   A file that cannot be read or parsed, a payload whose hash does not match (checked when the first
-  closure of its record is called), a record whose closures do not match the database's, or code
+  closure of its record is called), a stream whose hash does not match, a record whose closures do not match the database's, or code
   the decoder rejects each print one warning to the console (`cannot use the code image ..., so its
   functions compile as they run; reinstall the package to repair it`). The warning is not
   signalled as a condition, so neither a handler nor `options(warn = 2)` can turn the damage into

@@ -213,6 +213,7 @@ fn rendering_round_trips() {
             kind: "double".to_string(),
             deparsed: "c(1,\n2)".to_string(),
         }),
+        libraries: None,
     };
     assert_eq!(parse(&render(&outcome)), Some(outcome));
 }

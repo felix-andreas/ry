@@ -52,8 +52,9 @@ local({
       value <- sprintf("{\"kind\":%s,\"deparsed\":%s}", json_string(typeof(last$value)), json_string(deparsed))
     }
     body <- sprintf(
-      "{\"messages\":%s,\"warnings\":%s,\"errors\":%s,\"value\":%s}\n",
-      json_array(messages), json_array(warnings), json_array(errors), value
+      "{\"messages\":%s,\"warnings\":%s,\"errors\":%s,\"value\":%s,\"libraries\":%s}\n",
+      json_array(messages), json_array(warnings), json_array(errors), value,
+      json_string(Sys.getenv("R_LIBS"))
     )
     writeLines(body, report, useBytes = TRUE)
   }
