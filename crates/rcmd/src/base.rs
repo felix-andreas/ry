@@ -23,6 +23,7 @@ use {
         read_directory, shlib, staging_suffix, write, write_script,
     },
     std::{
+        ffi::OsStr,
         fs,
         path::{Path, PathBuf},
         process::Command,
@@ -344,15 +345,71 @@ pub fn write_start_image(root: &Path, rcmd: &Path, libr: &Path) -> Result<()> {
     written
 }
 
-/// Runs `front_end write-start-image` in the home `root`. The environment is emptied down to
+/// Runs `front_end write-start-image` in the home `root`, then writes the code images of the
+/// base packages from a session that starts from that image. The environment is emptied down to
 /// what finds programs and temporary files, because the image holds start-up as this one
 /// environment ran it; the steps that read the environment run again on every start.
 fn run_image_writer(front_end: &Path, root: &Path, work: &Path) -> Result<()> {
     let image = root.join("library/base/R/ry-start.image");
+    run_in_home(
+        front_end,
+        root,
+        work,
+        "ry-rcmd write-start-image",
+        &[OsStr::new("write-start-image"), image.as_os_str()],
+    )?;
+    let driver = work.join("base-code-images.R");
+    write(&driver, BASE_CODE_IMAGES)?;
+    // A code image speeds up first calls but is not part of what a package means, so a base
+    // tree without one is still complete.
+    if let Err(error) = run_in_home(
+        front_end,
+        root,
+        work,
+        "ry-rcmd base code images",
+        &[
+            OsStr::new("R"),
+            OsStr::new("--vanilla"),
+            OsStr::new("--no-echo"),
+            OsStr::new("-f"),
+            driver.as_os_str(),
+        ],
+    ) {
+        eprintln!("Warning: the code images of the base packages were not written\n{error}");
+    }
+    Ok(())
+}
+
+/// Fetches every lazy-loaded binding of the base packages still left in their lazy-load
+/// databases once the start-up image is loaded, and writes each database's code image, so a
+/// session reads those records uncompressed and in place instead of inflating them. Recommended
+/// packages get their images when they are installed, trained, so they are left alone here.
+const BASE_CODE_IMAGES: &str = r#"
+library <- file.path(R.home(), "library")
+packages <- rownames(utils::installed.packages(library, priority = "base"))
+.Internal(ryCodeImageRecord(library))
+for (package in packages) {
+    namespace <- tryCatch(loadNamespace(package), error = function(condition) NULL)
+    if (is.null(namespace)) next
+    for (name in ls(namespace, all.names = TRUE)) {
+        if (!bindingIsActive(name, namespace)) {
+            tryCatch(get(name, envir = namespace, inherits = FALSE), error = function(condition) NULL)
+        }
+    }
+}
+invisible(.Internal(ryCodeImageWrite(FALSE, FALSE)))
+"#;
+
+fn run_in_home(
+    front_end: &Path,
+    root: &Path,
+    work: &Path,
+    label: &str,
+    arguments: &[&OsStr],
+) -> Result<()> {
     let mut command = Command::new(front_end);
     command
-        .arg("write-start-image")
-        .arg(&image)
+        .args(arguments)
         .current_dir(work)
         .env_clear()
         .env("R_HOME", root)
@@ -373,12 +430,12 @@ fn run_image_writer(front_end: &Path, root: &Path, work: &Path) -> Result<()> {
     }
     let output = command
         .output()
-        .map_err(|error| Error::Command("ry-rcmd write-start-image".into(), error.to_string()))?;
+        .map_err(|error| Error::Command(label.into(), error.to_string()))?;
     if output.status.success() {
         return Ok(());
     }
     Err(Error::Command(
-        "ry-rcmd write-start-image".into(),
+        label.into(),
         format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),

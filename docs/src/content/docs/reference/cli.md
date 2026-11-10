@@ -377,7 +377,8 @@ the image then keeps the profile of that run, so a function that ran hot there i
 optimizing tier as soon as a new session compiles it. `R CMD INSTALL --ry-no-code-image` writes no
 image, and `RY_CODE_IMAGE=0` makes a session ignore images. An image written by another ry build,
 or for other package sources, is ignored, and a damaged one warns once and is ignored; reinstall
-the package to write a fresh one.
+the package to write a fresh one. The base packages (base, stats, utils, methods and the rest)
+carry untrained images that ry's own build writes.
 
 The image also holds machine code for the package's numeric functions, compiled at install for
 the argument types they are likely to get: the types their annotations or constant defaults
