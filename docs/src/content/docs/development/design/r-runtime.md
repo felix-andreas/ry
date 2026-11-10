@@ -592,10 +592,18 @@ compilation earlier: a namespace fetches many closures it never calls, such as e
 registers, and calls many others only once. What the image adds is what compiling cannot produce,
 the trained profile below, and the native code it reserves room for.
 
-- **Identity.** A record is identified by its offset in the database, its length and an FNV-1a hash
-  of its stored bytes; a closure within the record by the order the stream reader creates closures.
-  An image written for other bytes (a reinstall by GNU R, another version) is ignored record by
-  record. Only databases that have an image pay for the hash.
+- **Identity.** A record is identified by its offset and length in the database, and a closure
+  within the record by the order the stream reader creates closures. The image is stamped with the
+  database's length and modification time, so an image written for another database (a reinstall
+  by GNU R, another version) is ignored whole. A copy that does not keep modification times loses
+  the image, never serves a stale record.
+- **Streams.** The image also holds the serialized stream of every record the install fetched,
+  uncompressed, after the payloads. A fetch from a database with an image reads that stream in
+  place from the mapped file: it does not read the database, inflate the record or copy it, and
+  processes that load the same package share the pages. A record the install did not fetch is read
+  from the database. Each stream carries a hash that is checked the first time the stream is read
+  (`stream_hash`, a word-at-a-time hash, since only one build ever reads the image); a mismatch is
+  damage, below, and the fetch reads the database instead.
 - **No copy of the source.** A code object points into its closure's body, so the image stores those
   pointers as the preorder position of the object in the body. The body itself comes from the
   database, as without an image.
@@ -608,7 +616,7 @@ the trained profile below, and the native code it reserves room for.
   other compiles its own.
 - **Damage.** The image only saves compiling, so a damaged one never stops a package from loading.
   A file that cannot be read or parsed, a payload whose hash does not match (checked when the first
-  closure of its record is called), a record whose closures do not match the database's, or code
+  closure of its record is called), a stream whose hash does not match, a record whose closures do not match the database's, or code
   the decoder rejects each print one warning to the console (`cannot use the code image ..., so its
   functions compile as they run; reinstall the package to repair it`). The warning is not
   signalled as a condition, so neither a handler nor `options(warn = 2)` can turn the damage into

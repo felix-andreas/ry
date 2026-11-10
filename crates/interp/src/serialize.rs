@@ -5,7 +5,7 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, builtin, internal},
-        code_image,
+        code_image::{self, Source},
         connections::Rconnection,
         eval,
         unwind::{R, error},
@@ -1231,19 +1231,16 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
     let key = call.arg(0);
     let compressed = values::as_integer_scalar(call.arg(2));
     let hook = call.arg(3);
-    let record = cached_record(key, &file)?;
-    let image_record = code_image::wants(&file)?
-        .then(|| code_image::Record::of(crate::subset::numeric_element(key, 0) as u64, record));
-    // The record is decoded (or copied) out of the cached file before `unserialize` runs, because
+    let (offset, size) = record_key(key);
+    // A record is decoded (or copied) out of the cached file before `unserialize` runs, because
     // its refhook can fetch from another database and so insert into the cache.
-    let data = if compressed != 0 {
-        decompress_record(record, compressed)?
-    } else {
-        record.to_vec()
-    };
-    let value = match image_record {
-        Some(image_record) => code_image::read_record(&file, image_record, &data, hook)?,
-        None => unserialize(&data, hook)?,
+    let value = match code_image::source(&file, offset as u64, size)? {
+        Source::Image(record) => code_image::read_image_record(&file, &record, hook)?,
+        Source::Recording => {
+            let stream = record_stream(&file, offset, size, compressed)?;
+            code_image::read_recorded(&file, offset as u64, size, stream, hook)?
+        }
+        Source::Database => unserialize(&record_stream(&file, offset, size, compressed)?, hook)?,
     };
     if value.kind() == SexpType::Promise {
         return eval::force_promise(value);
@@ -1251,10 +1248,26 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
     Ok(value)
 }
 
-/// The bytes of the record at `key` (offset and length) in the cached database `file`.
-unsafe fn cached_record(key: Sexp, file: &str) -> R<&'static [u8]> {
-    let offset = crate::subset::numeric_element(key, 0) as usize;
-    let size = crate::subset::numeric_element(key, 1) as usize;
+/// The offset and length a lazy-load key names.
+unsafe fn record_key(key: Sexp) -> (usize, usize) {
+    (
+        crate::subset::numeric_element(key, 0) as usize,
+        crate::subset::numeric_element(key, 1) as usize,
+    )
+}
+
+/// The decompressed stream of the record at `offset` of the database `file`.
+unsafe fn record_stream(file: &str, offset: usize, size: usize, compressed: i32) -> R<Vec<u8>> {
+    let record = cached_record(file, offset, size)?;
+    if compressed != 0 {
+        decompress_record(record, compressed)
+    } else {
+        Ok(record.to_vec())
+    }
+}
+
+/// The bytes of the record at `offset`, `size` bytes long, in the cached database `file`.
+fn cached_record(file: &str, offset: usize, size: usize) -> R<&'static [u8]> {
     let cache = file_cache();
     if !cache.contains_key(file) {
         let bytes = std::fs::read(file)
@@ -1302,10 +1315,20 @@ pub unsafe fn lazy_record_header(promise: Sexp) -> R<Option<(u32, bool, u16)>> {
     }
     let file = values::require_string(file, "file")?;
     // The format line, the header (with a version-3 encoding name) and the object's flags fit
-    // in the first 64 bytes, so only those are inflated.
-    let record = cached_record(key, &file)?;
-    let Some(data) = record_prefix(record, values::as_integer_scalar(compressed), 64)? else {
-        return Ok(None);
+    // in the first 64 bytes, so only those are read, from the image or by inflating the record.
+    let (offset, size) = record_key(key);
+    let data = match code_image::source(&file, offset as u64, size)? {
+        Source::Image(record) => {
+            let stream = code_image::stream(&record);
+            stream[..stream.len().min(64)].to_vec()
+        }
+        Source::Recording | Source::Database => {
+            let record = cached_record(&file, offset, size)?;
+            match record_prefix(record, values::as_integer_scalar(compressed), 64)? {
+                Some(data) => data,
+                None => return Ok(None),
+            }
+        }
     };
     let (format, skip) = match data.get(..2) {
         Some(b"X\n") => (Format::Xdr, 2),
