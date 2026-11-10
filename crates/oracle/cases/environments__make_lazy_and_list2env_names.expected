@@ -1,0 +1,26 @@
+[stdout]
+| [1] "alpha" "beta"  "été"  
+| [1] TRUE
+| [1] "names(x) must be a character vector of the same length as x"
+| [1] "attempt to use zero-length variable name"
+| [1] 2
+| character(0)
+| forcing lazy_b 
+| [1] 6
+| [1] 6
+| forcing lazy_a 
+| [1] 6
+| $first
+| [1] 1
+| 
+| $second
+| [1] 2
+| 
+| [1] "NA"
+| [1] 5
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 5

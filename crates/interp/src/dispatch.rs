@@ -237,7 +237,8 @@ unsafe fn is_top_env(env: Sexp) -> bool {
 ///
 /// Both caches are roots ([`trace_method_cache`]), so no environment, cell or class vector they
 /// name is freed and its address reused by a different object while the entry exists; a
-/// collection therefore leaves them valid. A site's own key is not traced: an entry checks every
+/// collection therefore leaves them valid. A minor collection marks only the entries stored
+/// since the last collection ([`MethodCache::written`]). A site's own key is not traced: an entry checks every
 /// input of the lookup, so a site whose call was freed and whose address was reused by another
 /// call can only produce misses.
 #[derive(Default)]
@@ -252,6 +253,42 @@ pub struct MethodCache {
     pub s4: crate::methods::S4Cache,
     /// The `.Group` NextMethod defines when there is no group: `""`, shared and not mutable.
     blank_group: Option<Sexp>,
+    /// The key of every entry stored into either cache since the last collection. An older
+    /// entry's objects were marked by that collection and stay marked through a minor one, so a
+    /// minor collection marks the entries this log names instead of walking every entry, which
+    /// grows to thousands of sites in a package's test run. The log names keys rather than
+    /// objects so that an entry replaced or cleared before the collection keeps nothing alive:
+    /// in a run of only minor collections, whatever one marks is promoted and never freed.
+    written: Vec<Written>,
+    /// Set when [`MethodCache::written`] passed [`WRITTEN_LIMIT`] and was dropped, so the next
+    /// collection walks every entry.
+    overflowed: bool,
+}
+
+/// Stores logged between two collections before the log gives up and the next collection walks
+/// every entry instead.
+const WRITTEN_LIMIT: usize = 1 << 16;
+
+/// The key of an entry stored into a method cache.
+#[derive(Clone, Copy)]
+pub(crate) enum Written {
+    Site(Sexp),
+    Entry((Sexp, Sexp, Sexp, bool)),
+    Name((Sexp, Sexp)),
+    S4Site(Sexp),
+}
+
+impl MethodCache {
+    pub(crate) fn note_written(&mut self, key: Written) {
+        if self.overflowed {
+            return;
+        }
+        self.written.push(key);
+        if self.written.len() > WRITTEN_LIMIT {
+            self.written = Vec::new();
+            self.overflowed = true;
+        }
+    }
 }
 
 /// The class vectors one site remembers. Real generics see one to three at a site; a site that
@@ -306,23 +343,73 @@ struct MethodStrings {
     method: Sexp,
 }
 
-pub unsafe fn trace_method_cache(cache: &MethodCache, marker: &mut heap::Marker<'_>) {
+pub unsafe fn trace_method_cache(cache: &mut MethodCache, marker: &mut heap::Marker<'_>) {
+    if marker.is_minor() && !cache.overflowed {
+        if let Some(blank) = cache.blank_group {
+            marker.mark(blank);
+        }
+        for &key in &cache.written {
+            match key {
+                Written::Site(site) => {
+                    if let Some(entries) = cache.sites.get(&site) {
+                        mark_site_entries(entries, marker);
+                    }
+                }
+                Written::Entry(key) => {
+                    if let Some(&cell) = cache.entries.get(&key) {
+                        mark_entry(key, cell, marker);
+                    }
+                }
+                Written::Name(key) => {
+                    if cache.names.contains_key(&key) {
+                        marker.mark(key.1);
+                    }
+                }
+                Written::S4Site(generic) => {
+                    crate::methods::trace_s4_site(&cache.s4, generic, marker)
+                }
+            }
+        }
+    } else {
+        trace_every_entry(cache, marker);
+    }
+    if marker.is_collecting() {
+        cache.written.clear();
+        cache.overflowed = false;
+    }
+}
+
+unsafe fn trace_every_entry(cache: &MethodCache, marker: &mut heap::Marker<'_>) {
     crate::methods::trace_s4_cache(&cache.s4, marker);
     if let Some(blank) = cache.blank_group {
         marker.mark(blank);
     }
-    for (&(name, top, table, _), &cell) in &cache.entries {
-        marker.mark(name);
-        marker.mark(top);
-        marker.mark(table);
-        if let Some(cell) = cell {
-            marker.mark(cell);
-        }
+    for (&key, &cell) in &cache.entries {
+        mark_entry(key, cell, marker);
     }
     for &(_, class) in cache.names.keys() {
         marker.mark(class);
     }
-    for entry in cache.sites.values().flatten() {
+    for entries in cache.sites.values() {
+        mark_site_entries(entries, marker);
+    }
+}
+
+unsafe fn mark_entry(
+    (name, top, table, _): (Sexp, Sexp, Sexp, bool),
+    cell: Option<Sexp>,
+    marker: &mut heap::Marker<'_>,
+) {
+    marker.mark(name);
+    marker.mark(top);
+    marker.mark(table);
+    if let Some(cell) = cell {
+        marker.mark(cell);
+    }
+}
+
+unsafe fn mark_site_entries(entries: &[SiteEntry], marker: &mut heap::Marker<'_>) {
+    for entry in entries {
         for object in [
             entry.classes,
             entry.def_env,
@@ -470,6 +557,7 @@ unsafe fn resolve_s3(
             found,
         };
         let cache = &mut interp().method_cache;
+        cache.note_written(Written::Site(site));
         if cache.sites.len() >= MAX_SITES {
             cache.sites.clear();
         }
@@ -672,7 +760,9 @@ unsafe fn lookup_in_scope(
     // Forcing a lazily loaded binding can run code that defines bindings or collects, and an
     // entry stamped before that would claim a validity it never had.
     if cacheable_here && cache.stamp == stamp {
-        cache.entries.insert(key, found.map(|(cell, _)| cell));
+        let cell = found.map(|(cell, _)| cell);
+        cache.note_written(Written::Entry(key));
+        cache.entries.insert(key, cell);
     }
     Ok(found.map(|(cell, function)| (function, Some(cell))))
 }
@@ -764,7 +854,9 @@ unsafe fn method_name(prefix: Sexp, class: Sexp) -> R<Sexp> {
     name.push(b'.');
     name.extend_from_slice(class.bytes());
     let name = values::install_bytes(&name)?;
-    interp().method_cache.names.insert(key, name);
+    let cache = &mut interp().method_cache;
+    cache.note_written(Written::Name(key));
+    cache.names.insert(key, name);
     Ok(name)
 }
 
