@@ -83,7 +83,7 @@ pub unsafe fn write_start_image(host: crate::image::ImageHost, path: &std::path:
     interp().interactive = false;
     prepare_process();
     let home = crate::system::r_home();
-    let before = crate::image::before();
+    let before = crate::image::before(&host).map_err(error)?;
     if start_slowly(&home, None, None)? {
         return Err(error("start-up warned, so it cannot be imaged"));
     }

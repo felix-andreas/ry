@@ -1,90 +1,97 @@
 //! Heap images against the heap they were written from. A generator builds a random object graph
-//! in one heap, binds parts of it in the global and base environments, and writes an image; a
-//! fresh heap loads it, and the loaded graph must be isomorphic to the original, with interned
-//! strings and symbols shared and every binding where it was. `FUZZ_ITERS` scales the budget.
+//! in one heap, binds parts of it in the global and base environments, and writes an image; the
+//! heap is dropped, a fresh one loads the image at the same addresses, and the loaded graph must
+//! describe the same as the original, with interned strings and symbols shared and every binding
+//! where it was. `FUZZ_ITERS` scales the budget.
+//!
+//! Only the first heap a process holds at a time starts at the image address, so the tests take
+//! turns, and each drops one heap before it makes the next.
 
 use {
     heap::{
         Collection, Fixed, Heap, ImageError, Relocation,
+        image::HeapImage,
         object::{Sexp, SexpType, Shape},
         records::{Fields, Layout},
         strings::Encoding,
     },
-    std::collections::HashMap,
+    std::{collections::HashMap, sync::Mutex},
     syntax::testing::{SplitMix64, for_each_seed},
 };
 
 const LAYOUT_WIDTH: u32 = 3;
 
+static IMAGE_ADDRESS: Mutex<()> = Mutex::new(());
+
 #[test]
 fn images_round_trip_random_graphs() {
+    let _turn = IMAGE_ADDRESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     for_each_seed(32, |seed| unsafe { round_trip(seed) });
 }
 
 #[test]
-fn damaged_images_are_rejected() {
+fn damaged_or_mismatched_images_leave_the_heap_alone() {
+    let _turn = IMAGE_ADDRESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {
-        let mut source = Heap::new();
-        let mut names = Vec::new();
-        let roots = build(&mut source, &mut SplitMix64(7), &mut names);
-        let image = write(&source, &roots);
-        for cut in [0, 7, 8, 12, image.len() / 2, image.len() - 1] {
+        let (image, _, _) = written(7, &[]);
+        for cut in [0, 7, 8, 12] {
             let mut target = fresh_heap();
-            let result = target.load_image(
-                &image[..cut],
-                &fixed(&[]),
-                &Relocation::default(),
-                &mut decode,
-            );
+            let result = load(&mut target, &image, &image.metadata[..cut], &Relocation::default());
             assert!(
                 matches!(result, Err(ImageError::Invalid(_))),
-                "an image cut at {cut} of {} bytes loads",
-                image.len()
+                "an image cut at {cut} bytes loads"
             );
         }
-        let mut longer = image.clone();
-        longer.push(0);
+        // A heap that allocated something the writer's had not is refused before anything
+        // changes, and stays usable.
         let mut target = fresh_heap();
-        assert!(matches!(
-            target.load_image(&longer, &fixed(&[]), &Relocation::default(), &mut decode),
-            Err(ImageError::Invalid(_))
-        ));
+        let before = target.alloc_vector(SexpType::Integer, 3).expect("alloc");
+        target.root(before);
+        let result = load(&mut target, &image, &image.metadata, &Relocation::default());
+        assert!(matches!(result, Err(ImageError::Mismatch(_))));
+        target.collect(Collection::Major);
+        assert_eq!(before.length(), 3);
+        // So is a heap that is not at the image address.
+        let mut other = fresh_heap();
+        let result = load(&mut other, &image, &image.metadata, &Relocation::default());
+        assert!(matches!(result, Err(ImageError::Mismatch(_))));
     }
 }
 
 #[test]
 fn relocation_moves_paths_under_a_prefix() {
+    let _turn = IMAGE_ADDRESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {
-        let mut source = Heap::new();
         let texts = [
             "/build/home",
             "/build/home/library/base",
             "/build/homes",
             "elsewhere",
         ];
-        let vector = source
-            .alloc_vector(SexpType::String, texts.len() as isize)
-            .expect("alloc");
-        for (index, text) in texts.iter().enumerate() {
-            let string = source
-                .mk_char(text.as_bytes(), Encoding::Native)
-                .expect("mk_char");
-            source.set_element(vector, index, string);
-        }
-        source.root(vector);
-        let image = write(&source, &[vector]);
+        let image = {
+            let mut source = fresh_heap();
+            let precondition = source.image_precondition(&fixed());
+            let vector = source
+                .alloc_vector(SexpType::String, texts.len() as isize)
+                .expect("alloc");
+            for (index, text) in texts.iter().enumerate() {
+                let string = source
+                    .mk_char(text.as_bytes(), Encoding::Native)
+                    .expect("mk_char");
+                source.set_element(vector, index, string);
+            }
+            write(&mut source, precondition, &[vector], &[b"/build/home".to_vec()])
+        };
         let mut target = fresh_heap();
         let relocation = Relocation {
             prefixes: vec![(b"/build/home".to_vec(), "/run/hôme".as_bytes().to_vec())],
         };
-        let loaded = target
-            .load_image(&image, &fixed(&[]), &relocation, &mut decode)
+        let loaded = load(&mut target, &image, &image.metadata, &relocation)
             .unwrap_or_else(|error| panic!("the image does not load: {error}"));
+        target.root(loaded[0]);
+        target.collect(Collection::Major);
         let texts: Vec<Vec<u8>> = (0..texts.len())
-            .map(|index| {
-                let string = loaded[0].element(index);
-                std::slice::from_raw_parts(string.data(), string.length() as usize).to_vec()
-            })
+            .map(|index| loaded[0].element(index).bytes().to_vec())
             .collect();
         let expected: [&[u8]; 4] = [
             "/run/hôme".as_bytes(),
@@ -98,58 +105,19 @@ fn relocation_moves_paths_under_a_prefix() {
 
 unsafe fn round_trip(seed: u64) {
     unsafe {
-        let mut rng = SplitMix64(seed);
-        let mut source = Heap::new();
-        let mut names = Vec::new();
-        let roots = build(&mut source, &mut rng, &mut names);
-        let image = write(&source, &roots);
-
+        let (image, names, expected) = written(seed, &[]);
         let mut target = fresh_heap();
-        // A symbol the loading heap made before the image must be the one the image's
-        // bindings land on.
-        let preinstalled = target.install(b"name0").expect("install");
-        let loaded = target
-            .load_image(&image, &fixed(&[]), &Relocation::default(), &mut decode)
+        let loaded = load(&mut target, &image, &image.metadata, &Relocation::default())
             .unwrap_or_else(|error| panic!("seed {seed}: the image does not load: {error}"));
-        assert_eq!(loaded.len(), roots.len(), "seed {seed}");
-        assert_eq!(target.install(b"name0").expect("install"), preinstalled);
-
-        let known = [
-            (source.known().nil, target.known().nil),
-            (source.known().global_env, target.known().global_env),
-            (source.known().base_env, target.known().base_env),
-            (source.known().empty_env, target.known().empty_env),
-            (source.known().unbound, target.known().unbound),
-        ];
-        let mut check = Check {
-            source: &source,
-            target: &target,
-            mapped: known.into_iter().collect(),
-            seed,
-        };
-        for (&root, &loaded) in roots.iter().zip(&loaded) {
-            check.same(root, loaded);
-        }
-        for environment in [source.known().global_env, source.known().base_env] {
-            let other = check.mapped[&environment];
-            for name in &names {
-                let from = source.find_symbol(name.as_bytes()).expect("installed");
-                let to = target.find_symbol(name.as_bytes()).expect("installed");
-                match (
-                    source.frame_cell(environment, from),
-                    target.frame_cell(other, to),
-                ) {
-                    (Some(from), Some(to)) => check.same(from.cdr(), to.cdr()),
-                    (None, None) => {}
-                    _ => panic!("seed {seed}: `{name}` is bound in only one heap"),
-                }
-            }
-        }
+        assert_eq!(
+            describe(&target, &loaded, &names),
+            expected,
+            "seed {seed}: the loaded graph differs"
+        );
 
         // The loaded objects are ordinary heap objects: they survive collections and take new
-        // bindings.
-        // A load tenures every object, so each kind of collection must find the barrier intact
-        // and keep a young object stored into a loaded environment.
+        // bindings. A load tenures every object, so each kind of collection must find the
+        // barrier intact and keep a young object stored into a loaded environment.
         target.update_policy(|policy| policy.verify = true);
         for &root in &loaded {
             target.root(root);
@@ -169,15 +137,31 @@ unsafe fn round_trip(seed: u64) {
             let cell = target.frame_cell(global, symbol).expect("bound");
             assert_eq!(cell.cdr(), value, "seed {seed}: {kind:?} dropped a binding");
         }
-        let mut recheck = Check {
-            source: &source,
-            target: &target,
-            mapped: known.into_iter().collect(),
-            seed,
-        };
-        for (&root, &loaded) in roots.iter().zip(&loaded) {
-            recheck.same(root, loaded);
+        assert_eq!(
+            describe(&target, &loaded, &names),
+            expected,
+            "seed {seed}: collections changed the loaded graph"
+        );
+    }
+}
+
+/// Builds the graph of `seed` in a heap at the image address and writes it, returning the image,
+/// the names the graph binds, and the graph's description.
+unsafe fn written(seed: u64, prefixes: &[Vec<u8>]) -> (HeapImage, Vec<String>, Vec<String>) {
+    unsafe {
+        let mut source = fresh_heap();
+        let precondition = source.image_precondition(&fixed());
+        // Garbage that fills whole pages, so the image carries pages the writer's collection
+        // emptied and the loader must file as empty.
+        for _ in 0..20_000 {
+            source.alloc_vector(SexpType::Real, 1).expect("alloc");
         }
+        let mut names = Vec::new();
+        let roots = build(&mut source, &mut SplitMix64(seed), &mut names);
+        source.collect(Collection::Major);
+        let expected = describe(&source, &roots, &names);
+        let image = write(&mut source, precondition, &roots, prefixes);
+        (image, names, expected)
     }
 }
 
@@ -340,19 +324,47 @@ unsafe fn build(heap: &mut Heap, rng: &mut SplitMix64, names: &mut Vec<String>) 
             heap.root(root);
         }
         heap.allow_collection();
-        heap.collect(Collection::Major);
         roots
     }
 }
 
-unsafe fn write(heap: &Heap, roots: &[Sexp]) -> Vec<u8> {
+unsafe fn write(
+    heap: &mut Heap,
+    precondition: u64,
+    roots: &[Sexp],
+    prefixes: &[Vec<u8>],
+) -> HeapImage {
     unsafe {
-        heap.write_image(&fixed(&[]), roots, &|_| None, &mut encode)
+        heap.write_image(&fixed(), precondition, roots, prefixes, &|_| None, &mut encode)
             .unwrap_or_else(|error| panic!("the image does not write: {error}"))
     }
 }
 
-unsafe fn fresh_heap() -> Heap {
+unsafe fn load(
+    heap: &mut Heap,
+    image: &HeapImage,
+    metadata: &[u8],
+    relocation: &Relocation,
+) -> Result<Vec<Sexp>, ImageError> {
+    unsafe {
+        heap.load_image(
+            metadata,
+            &fixed(),
+            relocation,
+            &mut decode,
+            &mut |memory| {
+                memory.copy_from_slice(image.pages());
+                Ok(())
+            },
+            &mut |memory| {
+                memory.copy_from_slice(image.large());
+                Ok(())
+            },
+        )
+    }
+}
+
+fn fresh_heap() -> Heap {
     let mut heap = Heap::new();
     layout(&mut heap);
     heap
@@ -365,10 +377,10 @@ fn layout(heap: &mut Heap) -> u32 {
     })
 }
 
-fn fixed(extra: &[Sexp]) -> Fixed<'_> {
+fn fixed() -> Fixed<'static> {
     Fixed {
         primitives: &[],
-        extra,
+        extra: &[],
     }
 }
 
@@ -382,102 +394,129 @@ fn decode(token: u64) -> Option<*mut std::ffi::c_void> {
     Some(token as *mut std::ffi::c_void)
 }
 
-struct Check<'a> {
-    source: &'a Heap,
-    target: &'a Heap,
-    /// Each source object already matched, with its loaded counterpart.
-    mapped: HashMap<Sexp, Sexp>,
-    seed: u64,
+/// A description of what `roots` reach and of the bindings of `names` in the global and base
+/// environments, with each object named by when the walk first met it, so that two heaps holding
+/// the same graph describe it the same way.
+unsafe fn describe(heap: &Heap, roots: &[Sexp], names: &[String]) -> Vec<String> {
+    unsafe {
+        let mut walk = Walk {
+            heap,
+            seen: HashMap::new(),
+            lines: Vec::new(),
+        };
+        for &root in roots {
+            let name = walk.visit(root);
+            walk.lines.push(format!("root {name}"));
+        }
+        for environment in [heap.known().global_env, heap.known().base_env] {
+            let environment_name = walk.visit(environment);
+            for name in names {
+                let symbol = heap.find_symbol(name.as_bytes()).expect("installed");
+                if let Some(cell) = heap.frame_cell(environment, symbol) {
+                    let value = walk.visit(cell.cdr());
+                    walk.lines.push(format!("{environment_name} binds {name} to {value}"));
+                }
+            }
+        }
+        walk.lines
+    }
 }
 
-impl Check<'_> {
-    unsafe fn same(&mut self, from: Sexp, to: Sexp) {
+struct Walk<'a> {
+    heap: &'a Heap,
+    seen: HashMap<Sexp, usize>,
+    lines: Vec<String>,
+}
+
+impl Walk<'_> {
+    unsafe fn visit(&mut self, object: Sexp) -> String {
         unsafe {
-            let seed = self.seed;
-            if let Some(&expected) = self.mapped.get(&from) {
-                assert_eq!(expected, to, "seed {seed}: one object loaded as two");
-                return;
+            let heap = self.heap;
+            if object == heap.nil() {
+                return "nil".to_owned();
             }
-            self.mapped.insert(from, to);
-            assert_eq!(from.kind(), to.kind(), "seed {seed}");
-            assert_eq!(from.gp(), to.gp(), "seed {seed}: {}", from.kind().name());
-            self.same(from.attrib(), to.attrib());
-            match from.kind() {
-                SexpType::Char => assert_eq!(from.bytes(), to.bytes(), "seed {seed}"),
+            if object == heap.known().global_env {
+                return "global".to_owned();
+            }
+            if object == heap.known().base_env {
+                return "base".to_owned();
+            }
+            if let Some(&index) = self.seen.get(&object) {
+                return format!("#{index}");
+            }
+            let index = self.seen.len();
+            self.seen.insert(object, index);
+            let name = format!("#{index}");
+            let attrib = self.visit(object.attrib());
+            let line = match object.kind() {
+                SexpType::Char => format!("{:?} {}", object.bytes(), object.gp()),
                 SexpType::Symbol => {
-                    assert_eq!(from.car().bytes(), to.car().bytes(), "seed {seed}");
-                    let name = from.car().bytes().to_vec();
-                    let installed = self.target.find_symbol(&name);
-                    assert_eq!(installed, Some(to), "seed {seed}: a symbol is not interned");
+                    let text = object.car().bytes().to_vec();
+                    assert_eq!(
+                        heap.find_symbol(&text),
+                        Some(object),
+                        "a symbol is not interned"
+                    );
+                    format!("symbol {}", String::from_utf8_lossy(&text))
                 }
-                SexpType::Integer => assert_eq!(from.slice::<i32>(), to.slice::<i32>()),
-                SexpType::Real => {
-                    let bits = |object: Sexp| -> Vec<u64> {
-                        object
-                            .slice::<f64>()
-                            .iter()
-                            .map(|value| value.to_bits())
-                            .collect()
-                    };
-                    assert_eq!(bits(from), bits(to), "seed {seed}");
-                }
+                SexpType::Integer => format!("{:?}", object.slice::<i32>()),
+                SexpType::Real => format!(
+                    "{:?}",
+                    object
+                        .slice::<f64>()
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                ),
                 SexpType::String | SexpType::List => {
-                    assert_eq!(from.length(), to.length(), "seed {seed}");
-                    for index in 0..from.length() as usize {
-                        self.same(from.element(index), to.element(index));
-                    }
+                    let elements: Vec<String> = (0..object.length() as usize)
+                        .map(|element| self.visit(object.element(element)))
+                        .collect();
+                    format!("{} {elements:?}", object.kind().name())
                 }
                 SexpType::Pairlist | SexpType::Binding => {
-                    self.same(from.car(), to.car());
-                    self.same(from.cdr(), to.cdr());
-                    self.same(from.tag(), to.tag());
+                    let fields = [object.car(), object.cdr(), object.tag()]
+                        .map(|field| self.visit(field));
+                    format!("{} {fields:?}", object.kind().name())
                 }
                 SexpType::Environment => {
-                    self.same(from.enclosure(), to.enclosure());
-                    let names = |heap: &Heap, environment: Sexp| -> Vec<Vec<u8>> {
-                        let mut names: Vec<Vec<u8>> = heap
-                            .bound_symbols(environment)
-                            .into_iter()
-                            .map(|symbol| symbol.car().bytes().to_vec())
-                            .collect();
-                        names.sort();
-                        names
-                    };
-                    assert_eq!(
-                        names(self.source, from),
-                        names(self.target, to),
-                        "seed {seed}"
-                    );
-                    for symbol in self.source.bound_symbols(from) {
-                        let name = symbol.car().bytes().to_vec();
-                        let other = self.target.find_symbol(&name).expect("interned");
-                        let from_cell = self.source.frame_cell(from, symbol).expect("bound");
-                        let to_cell = self.target.frame_cell(to, other).expect("bound");
-                        self.same(from_cell.cdr(), to_cell.cdr());
-                    }
+                    let enclosure = self.visit(object.enclosure());
+                    let mut bindings: Vec<(Vec<u8>, Sexp)> = heap
+                        .bound_symbols(object)
+                        .into_iter()
+                        .map(|symbol| {
+                            let cell = heap.frame_cell(object, symbol).expect("bound");
+                            (symbol.car().bytes().to_vec(), cell.cdr())
+                        })
+                        .collect();
+                    bindings.sort_by(|left, right| left.0.cmp(&right.0));
+                    let bindings: Vec<String> = bindings
+                        .into_iter()
+                        .map(|(name, value)| {
+                            format!("{}={}", String::from_utf8_lossy(&name), self.visit(value))
+                        })
+                        .collect();
+                    format!("environment in {enclosure} {bindings:?}")
                 }
-                SexpType::ExternalPtr => {
-                    assert_eq!(
-                        from.external_address(),
-                        to.external_address(),
-                        "seed {seed}"
-                    );
-                    self.same(from.external_tag(), to.external_tag());
-                    self.same(from.external_protected(), to.external_protected());
-                }
+                SexpType::ExternalPtr => format!(
+                    "pointer {:?} {} {}",
+                    object.external_address(),
+                    self.visit(object.external_tag()),
+                    self.visit(object.external_protected())
+                ),
                 SexpType::Record => {
-                    assert_eq!(from.record_slot_count(), to.record_slot_count());
-                    for slot in 0..from.record_slot_count() {
-                        match (from.record_handle(slot), to.record_handle(slot)) {
-                            (Some(from), Some(to)) => self.same(from, to),
-                            (None, None) => {}
-                            _ => panic!("seed {seed}: a record slot changed representation"),
-                        }
-                    }
+                    let slots: Vec<String> = (0..object.record_slot_count())
+                        .map(|slot| match object.record_handle(slot) {
+                            Some(handle) => self.visit(handle),
+                            None => "raw".to_owned(),
+                        })
+                        .collect();
+                    format!("record {slots:?}")
                 }
-                SexpType::Nil => {}
-                kind => panic!("seed {seed}: the generator made no {}", kind.name()),
-            }
+                kind => panic!("the generator made no {}", kind.name()),
+            };
+            self.lines.push(format!("{name} {line} attributes {attrib}"));
+            name
         }
     }
 }

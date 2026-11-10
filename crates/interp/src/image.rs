@@ -50,7 +50,7 @@ pub unsafe fn host_environment() -> Option<Sexp> {
     (environment.kind() == SexpType::Environment).then_some(environment)
 }
 
-const MAGIC: &[u8; 8] = b"RYSTART\x04";
+const MAGIC: &[u8; 8] = b"RYSTART\x05";
 
 /// The variables that change which namespaces start-up loads or how it loads them, which the
 /// image holds as the fixed build environment loaded them.
@@ -93,8 +93,8 @@ pub(crate) enum LoadError {
 /// the runtime wrote it, and the caller starts the slow way.
 pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadError> {
     let path = &path(home);
-    let bytes = match ImageFile::open(path, true) {
-        Ok(bytes) => bytes,
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(failure) => {
             return Err(LoadError::Untouched(format!(
@@ -103,27 +103,36 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
             )));
         }
     };
-    let mut input = Reader {
-        bytes: bytes.bytes(),
+    let cannot_read = |failure: std::io::Error| {
+        LoadError::Untouched(format!("cannot read {}: {failure}", path.display()))
     };
-    let untouched = |error: ImageError| LoadError::Untouched(error.to_string());
-    if input.take(MAGIC.len()).map_err(untouched)? != MAGIC {
-        return Err(LoadError::Untouched(format!(
-            "{} is not a start-up image",
-            path.display()
-        )));
+    let not_an_image = || LoadError::Untouched(format!("{} is not a start-up image", path.display()));
+    let mut prefix = [0u8; 16];
+    read_at(&file, &mut prefix, 0).map_err(cannot_read)?;
+    if &prefix[..MAGIC.len()] != MAGIC {
+        return Err(not_an_image());
     }
+    let mut length = [0u8; 8];
+    length.copy_from_slice(&prefix[MAGIC.len()..]);
+    let header_length =
+        usize::try_from(u64::from_le_bytes(length)).map_err(|_| not_an_image())?;
+    let file_length = file.metadata().map_err(cannot_read)?.len();
+    if header_length as u64 > file_length {
+        return Err(not_an_image());
+    }
+    let mut header = vec![0u8; header_length];
+    read_at(&file, &mut header, prefix.len() as u64).map_err(cannot_read)?;
+    let mut input = Reader { bytes: &header };
+    let untouched = |error: ImageError| LoadError::Untouched(error.to_string());
     // A development build changes its identity with every edit to the runtime, until the base
     // tree is rebuilt; that start is simply slow.
     if input.blob().map_err(untouched)? != host.identity.as_bytes() {
         return Ok(false);
     }
     let expected = input.u64().map_err(untouched)?;
+    let damaged = || LoadError::Untouched(format!("{} is damaged", path.display()));
     if checksum(input.bytes) != expected {
-        return Err(LoadError::Untouched(format!(
-            "{} is damaged",
-            path.display()
-        )));
+        return Err(damaged());
     }
     // The writer's R home was the base tree in its build directory, and every path start-up
     // recorded under it (the lazy-load databases, the namespaces' directories) moves to where
@@ -138,13 +147,17 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
         let from = input.blob().map_err(untouched)?.to_vec();
         relocation.prefixes.push((from, tree.as_bytes().to_vec()));
     }
-    let heap_image = input.blob().map_err(untouched)?;
+    let metadata = input.blob().map_err(untouched)?;
     let state = input.blob().map_err(untouched)?;
+    let pages_length = input.u64().map_err(untouched)?;
+    let large_length = input.u64().map_err(untouched)?;
     if !input.bytes.is_empty() {
-        return Err(LoadError::Untouched(format!(
-            "{} has bytes past its end",
-            path.display()
-        )));
+        return Err(damaged());
+    }
+    let pages_offset = section_start(prefix.len() as u64 + header_length as u64);
+    let large_offset = section_start(pages_offset + pages_length);
+    if large_offset + large_length > file_length {
+        return Err(damaged());
     }
     let host_objects = (host.fixed_objects)().map_err(LoadError::Untouched)?;
     let primitives = primitives();
@@ -152,18 +165,67 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
         primitives: &primitives,
         extra: &extra_objects(&host_objects),
     };
+    let fill = |offset: u64, length: u64| {
+        let file = &file;
+        move |memory: &mut [u8]| -> Result<(), ImageError> {
+            if memory.len() as u64 != length {
+                return Err(ImageError::Invalid(
+                    "its pages differ in size from their memory".to_owned(),
+                ));
+            }
+            read_at(file, memory, offset).map_err(|failure| {
+                ImageError::Invalid(format!("its pages cannot be read: {failure}"))
+            })
+        }
+    };
     let roots = heap()
-        .load_image(heap_image, &fixed, &relocation, &mut |token| {
-            builtin_libraries::routine_address(token)
-        })
+        .load_image(
+            metadata,
+            &fixed,
+            &relocation,
+            &mut |token| builtin_libraries::routine_address(token),
+            &mut fill(pages_offset, pages_length),
+            &mut fill(large_offset, large_length),
+        )
         .map_err(|error| match error {
-            // The fixed objects are compared before the heap takes anything.
-            ImageError::FixedObjects => LoadError::Untouched(error.to_string()),
+            ImageError::Mismatch(_) => LoadError::Untouched(error.to_string()),
             _ => LoadError::Partial(error.to_string()),
         })?;
     restore_state(state, &roots, &relocation)
         .map_err(|error| LoadError::Partial(error.to_string()))?;
     Ok(true)
+}
+
+/// Where a run of pages starts in the image file: the next 64 KiB boundary, so that the pages
+/// can be mapped from the file as well as read.
+fn section_start(offset: u64) -> u64 {
+    offset.next_multiple_of(SECTION_ALIGNMENT)
+}
+
+const SECTION_ALIGNMENT: u64 = 64 * 1024;
+
+/// Fills `memory` with the bytes of `file` at `offset`.
+fn read_at(file: &std::fs::File, memory: &mut [u8], offset: u64) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::read_exact_at(file, memory, offset)
+    }
+    #[cfg(windows)]
+    {
+        let mut done = 0;
+        while done < memory.len() {
+            let read = std::os::windows::fs::FileExt::seek_read(
+                file,
+                &mut memory[done..],
+                offset + done as u64,
+            )?;
+            if read == 0 {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            done += read;
+        }
+        Ok(())
+    }
 }
 
 /// `path` as R spells a resolved path: without Windows' verbatim `\\?\` prefix and with forward
@@ -177,9 +239,9 @@ fn r_path(path: &Path) -> String {
     }
 }
 
-/// A checksum of an image's contents, so that a damaged file is rejected before the heap takes
-/// any of it rather than failing partway. It reads eight bytes per step, because it runs over
-/// the whole image on every start.
+/// A checksum of an image's header, so that a damaged file is rejected before the heap takes
+/// any of it rather than failing partway. The pages are left out: reading them twice would cost
+/// as much as loading them.
 fn checksum(bytes: &[u8]) -> u64 {
     const SEED: u64 = 0xf135_7aea_2e62_a9c5;
     let mix = |hash: u64, word: u64| (hash.rotate_left(26) ^ word).wrapping_mul(SEED);
@@ -195,19 +257,32 @@ fn checksum(bytes: &[u8]) -> u64 {
     mix(hash, u64::from_le_bytes(tail))
 }
 
-/// The record layout counts before start-up, taken before the start the writer images. A layout
-/// start-up registers would not exist in the loading process.
+/// The heap's state before start-up, taken before the start the writer images: the record
+/// layout counts, since a layout start-up registers would not exist in the loading process, and
+/// the digest a loading heap must match ([`heap::Heap::image_precondition`]).
 pub(crate) struct Before {
     layouts: (usize, usize),
+    precondition: u64,
 }
 
-pub(crate) unsafe fn before() -> Before {
-    Before {
+/// Takes the state [`Before`] describes. It registers the host's fixed objects first, as a load
+/// does before it compares the digest.
+pub(crate) unsafe fn before(host: &ImageHost) -> Result<Before, String> {
+    let host_objects = (host.fixed_objects)()?;
+    let primitives = primitives();
+    let fixed = Fixed {
+        primitives: &primitives,
+        extra: &extra_objects(&host_objects),
+    };
+    Ok(Before {
         layouts: heap().layouts.counts(),
-    }
+        precondition: heap().image_precondition(&fixed),
+    })
 }
 
-/// Writes the image of the session start-up just finished in the R home `home` to `path`.
+/// Writes the image of the session start-up just finished in the R home `home` to `path`. The
+/// file is the signature, the header's length, the header, and then the heap's pages and its
+/// large objects, each from a 64 KiB boundary.
 pub(crate) unsafe fn write(
     host: &ImageHost,
     home: &str,
@@ -224,32 +299,46 @@ pub(crate) unsafe fn write(
     };
     let mut roots: Vec<Sexp> = Vec::new();
     let state = save_state(&mut roots);
-    let heap_image = heap()
-        .write_image(
-            &fixed,
-            &roots,
-            &|object| (object.kind() == SexpType::Bytecode).then(|| bytecode::source_of(object)),
-            &mut |pointer| builtin_libraries::routine_token(pointer),
-        )
-        .map_err(|error| error.to_string())?;
-    let mut payload = Writer::default();
     let mut homes = vec![home.to_owned()];
     if let Ok(canonical) = std::fs::canonicalize(home)
         && r_path(&canonical) != home
     {
         homes.push(r_path(&canonical));
     }
+    let prefixes: Vec<Vec<u8>> = homes.iter().map(|home| home.as_bytes().to_vec()).collect();
+    let image = heap()
+        .write_image(
+            &fixed,
+            before.precondition,
+            &roots,
+            &prefixes,
+            &|object| (object.kind() == SexpType::Bytecode).then(|| bytecode::source_of(object)),
+            &mut |pointer| builtin_libraries::routine_token(pointer),
+        )
+        .map_err(|error| error.to_string())?;
+    let mut payload = Writer::default();
     payload.u32(homes.len() as u32);
     for home in &homes {
         payload.blob(home.as_bytes());
     }
-    payload.blob(&heap_image);
+    payload.blob(&image.metadata);
     payload.blob(&state);
+    payload.u64(image.pages().len() as u64);
+    payload.u64(image.large().len() as u64);
+    let mut header = Writer::default();
+    header.blob(host.identity.as_bytes());
+    header.u64(checksum(&payload.bytes));
+    header.bytes.extend_from_slice(&payload.bytes);
     let mut out = Writer::default();
     out.bytes.extend_from_slice(MAGIC);
-    out.blob(host.identity.as_bytes());
-    out.u64(checksum(&payload.bytes));
-    out.bytes.extend_from_slice(&payload.bytes);
+    out.u64(header.bytes.len() as u64);
+    out.bytes.extend_from_slice(&header.bytes);
+    let pages_offset = section_start(out.bytes.len() as u64);
+    out.bytes.resize(pages_offset as usize, 0);
+    out.bytes.extend_from_slice(image.pages());
+    let large_offset = section_start(out.bytes.len() as u64);
+    out.bytes.resize(large_offset as usize, 0);
+    out.bytes.extend_from_slice(image.large());
     std::fs::write(path, &out.bytes)
         .map_err(|failure| format!("cannot write {}: {failure}", path.display()))
 }
@@ -475,9 +564,8 @@ unsafe fn restore_state(
     Ok(())
 }
 
-/// The image file's bytes. On Unix the file is mapped read-only (and populated in one call on
-/// Linux), which shares the page cache's pages instead of faulting in and filling a private copy
-/// of every page.
+/// The bytes of a file of compiled code (`crate::code_image`). On Unix the file is mapped
+/// read-only, which shares the page cache's pages instead of filling a private copy of each.
 pub(crate) enum ImageFile {
     #[cfg(unix)]
     Mapped {
@@ -488,8 +576,7 @@ pub(crate) enum ImageFile {
 }
 
 impl ImageFile {
-    /// Opens `path`. `populate` faults every page in at once, which suits a file read whole.
-    pub(crate) fn open(path: &Path, populate: bool) -> std::io::Result<ImageFile> {
+    pub(crate) fn open(path: &Path) -> std::io::Result<ImageFile> {
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
@@ -499,17 +586,6 @@ impl ImageFile {
             if length == 0 {
                 return Ok(ImageFile::Read(Vec::new()));
             }
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            let flags = if populate {
-                libc::MAP_PRIVATE | libc::MAP_POPULATE
-            } else {
-                libc::MAP_PRIVATE
-            };
-            #[cfg(not(any(target_os = "linux", target_os = "android")))]
-            let flags = {
-                let _ = populate;
-                libc::MAP_PRIVATE
-            };
             // SAFETY: a read-only private mapping of an open file. The base tree is build
             // output that nothing rewrites in place, so the bytes do not change under the map.
             let start = unsafe {
@@ -517,7 +593,7 @@ impl ImageFile {
                     std::ptr::null_mut(),
                     length,
                     libc::PROT_READ,
-                    flags,
+                    libc::MAP_PRIVATE,
                     file.as_raw_fd(),
                     0,
                 )
