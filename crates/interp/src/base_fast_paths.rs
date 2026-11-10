@@ -262,6 +262,7 @@ const NATIVE_ENTRIES: &[(&str, u64, NativeEntry)] = &[
     ("is.vector", 0xf347f791e9374052, native_is_vector),
     ("isNamespace", 0x9dbd26992b319771, native_is_namespace),
     ("Sys.unsetenv", 0x3bf70db0fa5a60ee, native_sys_unsetenv),
+    ("readRDS", 0x92a81976dbd4c35a, native_read_rds),
 ];
 
 /// Marks the closures of [`NATIVE_ENTRIES`] whose code matches and records them in
@@ -724,6 +725,63 @@ unsafe fn native_sys_unsetenv(args: &[Arg]) -> R<Option<Sexp>> {
     )?;
     interp().visible = false;
     Ok(Some(value))
+}
+
+/// `readRDS(file)` for a path: the file read whole, inflated in one pass when it is gzip and
+/// unserialized from memory. The R body reads through a `gzfile()` connection, which hands the
+/// unserializer a few bytes at a time and costs about three times as much on the `Meta/*.rds`
+/// and `.rdx` files every namespace load reads. It declines for a path `gzfile()` would expand
+/// (`~`), a file it cannot open or read, an xz or bzip2 file, and a stream that does not
+/// unserialize, so the R body raises those errors and warnings itself.
+unsafe fn native_read_rds(args: &[Arg]) -> R<Option<Sexp>> {
+    let Some([file]) = resolved_all::<1>(args)? else {
+        return Ok(None);
+    };
+    if file.kind() != SexpType::String
+        || file.is_object()
+        || length(file) != 1
+        || file.element(0) == values::na_string()
+    {
+        return Ok(None);
+    }
+    let path = file.element(0).bytes();
+    if path.is_empty() || path.starts_with(b"~") {
+        return Ok(None);
+    }
+    let Ok(path) = std::str::from_utf8(path) else {
+        return Ok(None);
+    };
+    let Ok(bytes) = std::fs::read(path) else {
+        return Ok(None);
+    };
+    let inflated;
+    let stream = if bytes.starts_with(&[0x1f, 0x8b]) {
+        let mut decoder = flate2::read::MultiGzDecoder::new(bytes.as_slice());
+        let mut output = Vec::with_capacity(bytes.len() * 4);
+        if std::io::Read::read_to_end(&mut decoder, &mut output).is_err() {
+            return Ok(None);
+        }
+        inflated = output;
+        inflated.as_slice()
+    } else if bytes.starts_with(b"BZh") || bytes.starts_with(b"\xFD7zXZ") {
+        return Ok(None);
+    } else {
+        bytes.as_slice()
+    };
+    // `unserialize()` of memory also takes `save()` files, which `readRDS()` rejects.
+    if !(stream.starts_with(b"X\n") || stream.starts_with(b"B\n") || stream.starts_with(b"A\n"))
+    {
+        return Ok(None);
+    }
+    match crate::serialize::unserialize(stream, nil()) {
+        Ok(value) => {
+            interp().visible = true;
+            Ok(Some(value))
+        }
+        // The R body reads the same stream and reports the error against its own call.
+        Err(Unwind::Error(_)) => Ok(None),
+        Err(other) => Err(other),
+    }
 }
 
 /// The prologue's result when the R body is to run.
