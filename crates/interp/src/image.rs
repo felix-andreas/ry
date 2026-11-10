@@ -173,6 +173,24 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
                     "its pages differ in size from their memory".to_owned(),
                 ));
             }
+            #[cfg(unix)]
+            if std::env::var_os("RY_IMAGE_MAP").is_some() && !memory.is_empty() {
+                use std::os::fd::AsRawFd;
+                let mapped = unsafe {
+                    libc::mmap(
+                        memory.as_mut_ptr().cast(),
+                        memory.len(),
+                        libc::PROT_READ | libc::PROT_WRITE,
+                        libc::MAP_PRIVATE | libc::MAP_FIXED,
+                        file.as_raw_fd(),
+                        offset as libc::off_t,
+                    )
+                };
+                if mapped == libc::MAP_FAILED {
+                    return Err(ImageError::Invalid("cannot map".to_owned()));
+                }
+                return Ok(());
+            }
             read_at(file, memory, offset).map_err(|failure| {
                 ImageError::Invalid(format!("its pages cannot be read: {failure}"))
             })
