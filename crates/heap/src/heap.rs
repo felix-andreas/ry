@@ -257,6 +257,8 @@ pub struct Marker<'a> {
     /// `None` while the zero-count table is reconciled: every object a source names is then
     /// collected into `stack` as a root, without marking or tracing.
     space: Option<&'a mut Space>,
+    /// Whether a minor collection is marking ([`Marker::is_minor`]).
+    minor: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1270,7 +1272,9 @@ impl Heap {
         // Every field is written below, so zeroing the slot first would store it twice.
         let object = self.allocate_uncollected(SexpType::Environment, ENVIRONMENT_BYTES, 0)?;
         Frame::write_empty(object.frame_ptr(), bindings);
-        self.space.set_finalizable(object);
+        if (*object.frame_ptr()).owns_memory() {
+            self.space.set_finalizable(object);
+        }
         object.set_enclosure_unbarriered(enclosure);
         enclosure.increment_refcount();
         Ok(object)
@@ -1868,7 +1872,12 @@ impl Heap {
             symbol.set_cdr_unbarriered(cell);
         } else {
             self.write_barrier(env, cell);
-            (*env.frame_ptr()).insert(symbol, cell);
+            let frame = &mut *env.frame_ptr();
+            let owned = frame.owns_memory();
+            frame.insert(symbol, cell);
+            if !owned && frame.owns_memory() {
+                self.space.set_finalizable(env);
+            }
         }
         Ok(())
     }
@@ -1916,8 +1925,12 @@ impl Heap {
         // young, so one barrier check covers every one. A failed allocation leaves no cell in
         // the frame, and the cells made before it are garbage.
         if let Some(&first) = cells.first() {
-            (*env.frame_ptr())
-                .insert_formals(&cells, bindings.iter().map(|binding| binding.symbol));
+            let frame = &mut *env.frame_ptr();
+            let owned = frame.owns_memory();
+            frame.insert_formals(&cells, bindings.iter().map(|binding| binding.symbol));
+            if !owned && frame.owns_memory() {
+                self.space.set_finalizable(env);
+            }
             self.write_barrier(env, first);
         }
         Ok(())
@@ -2229,6 +2242,7 @@ impl Heap {
     pub unsafe fn set_frame_hashed(&mut self, env: Sexp, size: i32) {
         if !self.is_symbol_frame(env) && env != self.known.empty_env {
             (*env.frame_ptr()).set_hashed(size);
+            self.space.set_finalizable(env);
         }
     }
 
@@ -2820,6 +2834,7 @@ impl Heap {
             source.trace(&mut Marker {
                 stack: &mut roots,
                 space: None,
+                minor: false,
             });
         }
         self.sources = sources;
@@ -3239,6 +3254,7 @@ impl Heap {
             let mut marker = Marker {
                 stack: &mut self.mark_stack,
                 space: Some(&mut self.space),
+                minor: kind == Collection::Minor,
             };
             source.trace(&mut marker);
         }
@@ -3688,10 +3704,8 @@ impl Heap {
     }
 
     unsafe fn sweep_young(&mut self) {
-        let mut swept = Swept {
-            by_kind: crate::activity::enabled().then_some([0; 32]),
-            ..Swept::default()
-        };
+        self.count_dead_by_kind(false);
+        let mut swept = Swept::default();
         let change = self.space.sweep_young(&mut swept);
         self.old_small_bytes = self.old_small_bytes.saturating_add_signed(change);
         let young_large = std::mem::take(&mut self.young_large);
@@ -3706,15 +3720,12 @@ impl Heap {
         self.young_large = young_large;
         self.young_large.clear();
         self.stats.objects_freed += swept.freed;
-        self.count_freed_kinds(&swept);
         self.refresh_live_stats();
     }
 
     unsafe fn sweep_all(&mut self) {
-        let mut swept = Swept {
-            by_kind: crate::activity::enabled().then_some([0; 32]),
-            ..Swept::default()
-        };
+        self.count_dead_by_kind(true);
+        let mut swept = Swept::default();
         self.old_small_bytes = self.space.sweep_all(&mut swept);
         let mut old_large_bytes = 0;
         let large: Vec<Sexp> = self.large.iter().copied().collect();
@@ -3729,15 +3740,16 @@ impl Heap {
         self.young_large.clear();
         self.old_large_bytes = old_large_bytes;
         self.stats.objects_freed += swept.freed;
-        self.count_freed_kinds(&swept);
         self.refresh_live_stats();
     }
 
-    fn count_freed_kinds(&mut self, swept: &Swept) {
-        if let Some(by_kind) = &swept.by_kind {
-            for (total, count) in self.stats.freed_by_kind.iter_mut().zip(by_kind) {
-                *total += count;
-            }
+    /// Counts the small objects the coming sweep frees by type, for the profile summary, as
+    /// its own activity so that the summary does not charge its bookkeeping to the collector.
+    fn count_dead_by_kind(&mut self, all: bool) {
+        if activity::enabled() {
+            let _activity = activity::enter(activity::Activity::Profiler, 0);
+            self.space
+                .count_dead_by_kind(all, &mut self.stats.freed_by_kind);
         }
     }
 
@@ -4074,6 +4086,19 @@ impl RootStack {
 }
 
 impl Marker<'_> {
+    /// Whether this marker serves a minor collection. Every object that survived an earlier
+    /// collection stays marked through a minor one, so a source that knows which objects it
+    /// stored since the last collection may mark only those.
+    pub fn is_minor(&self) -> bool {
+        self.minor
+    }
+
+    /// Whether this marker serves a collection rather than a reconcile's scan of the roots.
+    /// A source that logs its stores clears the log only after a collection has marked it.
+    pub fn is_collecting(&self) -> bool {
+        self.space.is_some()
+    }
+
     pub unsafe fn mark(&mut self, object: Sexp) {
         match &mut self.space {
             Some(space) => {

@@ -213,7 +213,9 @@ your code and no data. It lists:
 - the time split after start-up: tier-0 bytecode, the AST evaluator, closure call setup, variable
   lookups past the inline caches, builtins, S3 and S4 method lookup, native code, condition
   handling, frame introspection (`sys.call`, `parent.frame`, `match.call`), garbage collection,
-  JIT compilation and JIT-compiled code;
+  JIT compilation and JIT-compiled code. The summary's own work, counting each collection's freed
+  objects by type, is listed apart as "profile summary bookkeeping" rather than in garbage
+  collection;
 - base R's builtins by time and by number of calls;
 - native code (`.Call`, `.External`, `.C`) by package. A package outside R's own, its
   recommended packages and the common CRAN dependencies ry benchmarks against is printed as

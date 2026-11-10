@@ -50,10 +50,13 @@ pub enum Activity {
     JitCompile,
     /// Machine code the JIT produced.
     Compiled,
+    /// The summary's own bookkeeping that cannot be a store: counting a collection's dead
+    /// objects by type, which reads every dead object's header.
+    Profiler,
 }
 
 impl Activity {
-    pub const ALL: [Activity; 14] = [
+    pub const ALL: [Activity; 15] = [
         Activity::Other,
         Activity::Interpreter,
         Activity::Evaluator,
@@ -68,6 +71,7 @@ impl Activity {
         Activity::Collector,
         Activity::JitCompile,
         Activity::Compiled,
+        Activity::Profiler,
     ];
 
     pub fn from_word(word: u32) -> Activity {
@@ -93,6 +97,7 @@ impl Activity {
             Activity::Collector => "garbage collection",
             Activity::JitCompile => "JIT compilation",
             Activity::Compiled => "JIT-compiled code",
+            Activity::Profiler => "profile summary bookkeeping",
         }
     }
 }

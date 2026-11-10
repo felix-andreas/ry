@@ -318,6 +318,13 @@ impl Frame {
         }
     }
 
+    /// Whether the frame holds memory outside its environment object, so the sweep must drop
+    /// it when the environment dies. Most closure-call frames fit their inline slots, and
+    /// sweeping only the frames that own memory keeps a dead call frame from being read at all.
+    pub(crate) fn owns_memory(&self) -> bool {
+        self.bindings.spilled() || self.index.is_some() || self.table.is_some()
+    }
+
     pub fn cells(&self) -> impl Iterator<Item = Sexp> + '_ {
         self.live().map(|binding| binding.cell)
     }

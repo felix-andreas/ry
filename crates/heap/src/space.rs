@@ -145,9 +145,6 @@ const IDLE_CURSOR: Cursor = Cursor {
 #[derive(Default)]
 pub(crate) struct Swept {
     pub freed: u64,
-    /// The freed objects by type code, counted only while the profile summary is on, because
-    /// reading each dead slot's header costs a load per object.
-    pub by_kind: Option<[u64; 32]>,
 }
 
 impl Space {
@@ -371,7 +368,8 @@ impl Space {
         }
     }
 
-    /// Records that `object`, an environment in this space, owns a frame to drop when it dies.
+    /// Records that `object`, an environment in this space, has a frame that owns memory, which
+    /// the sweep drops when the environment dies.
     pub fn set_finalizable(&mut self, object: Sexp) {
         if let Some((page, word, bit)) = self.locate(object) {
             self.finalizable[page][word] |= bit;
@@ -570,14 +568,6 @@ impl Space {
                     unsafe { drop_frame(object) };
                 }
                 self.finalizable[page][word] &= !dead;
-                if let Some(by_kind) = &mut swept.by_kind {
-                    for bit in set_bits(dead) {
-                        let kind = unsafe { *page_base.add((word * 64 + bit) * slot_size) };
-                        if let Some(count) = by_kind.get_mut(usize::from(kind & 31)) {
-                            *count += 1;
-                        }
-                    }
-                }
                 // Poisoning makes a use after free fail loudly, but costs a store per byte of
                 // every dead slot, so only debug builds pay for it. The kind byte stays
                 // meaningful: a freed slot reads as `FREESXP`.
@@ -649,6 +639,34 @@ impl Space {
                     ..IDLE_CURSOR
                 };
             }
+        }
+    }
+
+    /// Adds the objects the coming sweep frees to `by_kind`, by type code: those of the pages
+    /// allocated into since the last collection, or with `all`, of every page. Reading each
+    /// dead object's header costs a cache miss per object, so only the profile summary asks.
+    pub fn count_dead_by_kind(&self, all: bool, by_kind: &mut [u64; 32]) {
+        let mut count_page = |page: usize| {
+            let slot_size = SLOT_SIZES[self.page_class[page] as usize];
+            let page_base = self.base.as_ptr().wrapping_add(page * PAGE_SIZE);
+            for word in 0..BITMAP_WORDS {
+                for bit in set_bits(self.allocated[page][word] & !self.marks[page][word]) {
+                    // SAFETY: an allocated slot of a committed page starts with its kind byte.
+                    let kind = unsafe { *page_base.add((word * 64 + bit) * slot_size) };
+                    if let Some(count) = by_kind.get_mut(usize::from(kind & 31)) {
+                        *count += 1;
+                    }
+                }
+            }
+        };
+        if all {
+            (0..self.page_count)
+                .filter(|&page| self.page_class[page] != EMPTY_PAGE)
+                .for_each(&mut count_page);
+        } else {
+            self.touched
+                .iter()
+                .for_each(|&page| count_page(page as usize));
         }
     }
 

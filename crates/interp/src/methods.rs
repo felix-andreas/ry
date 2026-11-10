@@ -209,19 +209,30 @@ struct S4Entry {
 
 pub unsafe fn trace_s4_cache(cache: &S4Cache, marker: &mut Marker<'_>) {
     for (&generic, site) in &cache.sites {
-        marker.mark(generic);
-        marker.mark(site.env);
-        for (cell, value) in site.bindings {
-            marker.mark(cell);
-            marker.mark(value);
+        mark_s4_site(generic, site, marker);
+    }
+}
+
+/// Marks the site of `generic`, if the cache still holds one.
+pub(crate) unsafe fn trace_s4_site(cache: &S4Cache, generic: Sexp, marker: &mut Marker<'_>) {
+    if let Some(site) = cache.sites.get(&generic) {
+        mark_s4_site(generic, site, marker);
+    }
+}
+
+unsafe fn mark_s4_site(generic: Sexp, site: &S4Site, marker: &mut Marker<'_>) {
+    marker.mark(generic);
+    marker.mark(site.env);
+    for (cell, value) in site.bindings {
+        marker.mark(cell);
+        marker.mark(value);
+    }
+    for entry in &site.entries {
+        for &class in &entry.classes {
+            marker.mark(class);
         }
-        for entry in &site.entries {
-            for &class in &entry.classes {
-                marker.mark(class);
-            }
-            marker.mark(entry.cell);
-            marker.mark(entry.method);
-        }
+        marker.mark(entry.cell);
+        marker.mark(entry.method);
     }
 }
 
@@ -363,7 +374,9 @@ unsafe fn remember_method(
     if !classes.iter().all(|class| class.has_gp(gp::CACHED)) {
         return;
     }
-    let cache = &mut interp().method_cache.s4;
+    let method_cache = &mut interp().method_cache;
+    method_cache.note_written(dispatch::Written::S4Site(generic));
+    let cache = &mut method_cache.s4;
     if cache.sites.len() >= MAX_S4_SITES {
         cache.sites.clear();
     }

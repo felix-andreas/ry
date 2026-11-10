@@ -591,6 +591,9 @@ impl Heap {
                         nil,
                     );
                     *object.frame_ptr() = frame;
+                    if (*object.frame_ptr()).owns_memory() {
+                        self.space.set_finalizable(object);
+                    }
                 }
                 Shape::ExternalPtr => {
                     let token = input.u64()?;
