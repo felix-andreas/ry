@@ -1288,12 +1288,18 @@ fn declarations_and_runtime_bind_the_same_names() {
     );
 }
 
-/// The design promises that no library name shadows a name any shipped package exports, so a
-/// program that defines or attaches one never meets the library by accident.
+/// No name the standard library or `package:ry` binds shadows a name any shipped package exports,
+/// so a program that defines or attaches one never meets ry's by accident, and attaching a
+/// package prints no masking message GNU R would not print.
 #[test]
 fn no_shipped_package_exports_a_library_name() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../types");
-    let library: BTreeSet<String> = standard_library::names().map(str::to_owned).collect();
+    // `col` keeps base R's meaning for anything but a column name by calling `base::col`, and
+    // base is never attached after `package:ry`, so nothing reports the mask.
+    let library: BTreeSet<String> = standard_library::names()
+        .chain(frame::package_functions().filter(|&name| name != "col"))
+        .map(str::to_owned)
+        .collect();
     let mut collisions = Vec::new();
     let entries = fs::read_dir(&directory)
         .unwrap_or_else(|failure| panic!("cannot list {}: {failure}", directory.display()));

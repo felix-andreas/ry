@@ -30,6 +30,9 @@ DataFrame.schema : fn(df: DataFrame) -> character
 DataFrame.height : fn(df: DataFrame) -> integer
 DataFrame.width : fn(df: DataFrame) -> integer
 DataFrame.columns : fn(df: DataFrame) -> character
+DataFrame.key : fn(df: DataFrame) -> character | NULL
+DataFrame.set_key : fn(df: DataFrame, cols: character) -> DataFrame
+DataFrame.copy : fn(df: DataFrame) -> DataFrame
 DataFrame.read_csv : fn(path: character, [strings_as_factors]: logical) -> DataFrame
 DataFrame.read_parquet : fn(path: character) -> DataFrame
 DataFrame.write_csv : fn(df: DataFrame, path: character) -> DataFrame
