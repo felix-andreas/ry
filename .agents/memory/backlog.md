@@ -867,6 +867,80 @@ change that does not pay.
    so a typical closure call allocates nothing on the Rust heap (`decisions.md`, "the
    interpreter's call path, lookups and allocation").
 
+**Measured ranking of the evaluation path.** An inventory of every hash map, cache, `Vec<bool>`
+and short heap list in `interp`, `heap`, `jit`, `libr` and `typed` found 307 sites, 211 of them
+touched per operation rather than per load. Ranked by callgrind instructions (profiling build, JIT
+on, one repeat), what costs time is frame and lookup layout, not hashing: hash-map code, inlined
+or not, is 0.50% of instructions on the mean `bench-real` workload and 0.83% on `testthat_full`.
+The 21-package corpus `--profile-summary` puts the time in the same places (builtins 28 to 32%,
+tier 0 23 to 27%, closure call setup 20 to 22%, GC 8 to 9%, S3 lookup about 2%) but cannot name a
+structure. In the table, "real" is the mean share over the nine `bench-real` workloads, "tt" is
+`testthat_full`, and a share is inclusive of the functions the site calls. JIT inline caches and
+type feedback are the design and are not listed.
+
+| # | Site | real | tt | Data-oriented replacement | Owner |
+| -: | --- | -: | -: | --- | --- |
+| 6 | GC entered from the allocation slow path (`Heap::maybe_collect`; `trace` 1.6 self, `Space::refill` 0.8). `escalate_if_full` alone is 10.5% of `records` and 1.6 mean | 3.36 | 2.91 | find why `records` escalates past a minor collection on most refills, then size the nursery per evaluation phase so short-lived call garbage never reaches a deeper collection | B2 |
+| 7 | Formals copied into the frame's `Bindings` vector on reify (`bind_slots` 1.44 / 0.60, `define_formals_uncollected` 0.94 / 0.61) | 2.38 | 1.21 | the reified frame's bindings alias the call's slot array instead of copying it | AOT |
+| 8 | Variable lookup by scanning `Frame` bindings (`Heap::frame_cell`, self 2.1 / 1.9), from `find_var`, `find_called_fun`, `define` and `resolve_s3` | 2.35 | 2.04 | lexical addressing: compile a closure's local reads to slot indices and global or base reads to the symbol's binding cell behind a binding epoch, so only `get()`, `assign()` and `eval()` on an arbitrary environment scan | T0 |
+| 9 | Argument references detached when a frame becomes an environment (`materialize_references`, `detach_reference`), inside `reify` (4.9 / 3.4 inclusive) | 2.26 | 1.94 | a per-frame bitset of slots whose reference escaped, so reify detaches only those; better, let the effect analysis prove a body never reifies, so references stay in the `frame_args` arena | AOT |
+| 10 | A promise per argument at every generic call (`slot_promises_into`, `alloc_compiled_promise` 0.4) | 1.94 | 3.53 | keep an unforced argument as a (code index, environment) pair in the `frame_args` arena and allocate the `PROMSXP` only when it escapes | AOT |
+| 11 | Frame teardown (`release_frame` 0.89 / 0.61, `release_slots` 0.67 / 0.77, `truncate_frames` 0.27), with an `FxHashMap` probe of `Roots.precious` per release | 1.83 | 1.65 | frames on a bump stack reset to a watermark, with a bitset of the slots that need a release; `precious` as a dense vector whose index lives in the object header | AOT, B2 for `precious` |
+| 12 | The callee looked up by name at each tier-0 call (`bytecode::lookup_function`) | 1.56 | 1.47 | the binding cell at the call site, checked against the binding epoch, as in row 8 | T0 |
+| 13 | S3 dispatch (`resolve_s3`) through `MethodCache`'s three `FxHashMap`s (`entries` keyed by a 4-tuple, `names`, `sites: FxHashMap<Sexp, Vec<SiteEntry>>`) plus `implicit_class`. Hashing itself is only 0.03 | 1.20 | 1.78 | one monomorphic entry per call site (class vector, epoch, method) in a dense array indexed by site id | AOT |
+| 14 | Tier-0 bytecode compilation (`bytecode::compile`, behind the `COMPILED` map) | 1.14 | 3.44 | not a layout problem: the map is 0.01. Compile less (lazily per branch) or keep the code with the closure | T0 |
+| 15 | Locals appended one at a time (`Heap::define_unbound`, `Frame::insert` 0.81 / 0.58) | 1.07 | 1.42 | preallocate every local the body assigns from the compiler's slot table, so a first assignment is an indexed store | T0 |
+| 16 | `warning()` builds a call and evaluates `.signalSimpleWarning` (`warning_call`; 8.2 on `conditions`) | 0.97 | 2.31 | signal natively when no calling handler for `warning` or `condition` is on the stack; check first that GNU R shows no observable difference | C |
+
+The rest of the inventory measured cold. The largest hash maps are the large-frame index in
+`Frame` (0.08 / 0.16), the `CHARSXP` table behind `install_char` (0.05 / 0.07), the string-keyed
+`primitive_formals` probe in `call_builtin_checked` (0.04 / 0.05) and `Roots.precious` (0.05 /
+0.06). `Vec<bool>` sites are below 0.1: `match_builtin_args` 0.09, the `keep` vector in
+`subset::resolve` 0.06. These are cheap clean-ups, not wins: index `primitive_formals` by builtin
+id and turn the `Vec<bool>`s into bitsets (B5), and give `precious` the dense layout of row 11
+(B2).
+
+**Allocations per operation against GNU R.** `ops.R`-style loops of 20,000 and 40,000 iterations,
+differenced. GNU R (4.6.2, its loop byte-compiled) counts `allocVector3`, `CONS_NR`, `cons`,
+`mkPROMISE` and `NewEnvironment` calls under callgrind; ry counts heap objects freed by kind from
+`--profile-summary` and Rust allocator calls under callgrind. Bytes per operation were not
+measured.
+
+| Operation | GNU R objects | ry tier 0 | ry JIT | GNU R malloc | ry Rust malloc | GNU R instr | ry tier 0 instr | ry JIT instr |
+| --- | -: | -: | -: | -: | -: | -: | -: | -: |
+| empty loop | 1 | 1 | 0 | 0 | 0 | 430 | 1044 | 52 |
+| `f()` | 2 | 1 | 0 | 0 | 0 | 1695 | 2211 | 44 |
+| `f(x)` | 5 | 4 | 0 | 0 | 0 | 3046 | 3705 | 56 |
+| `f(x, y, z)` | 11 | 8 | 0 | 0 | 0 | 4544 | 4355 | 51 |
+| `f(a = x, b = y, c = z)` | 11 | 8 | 9 | 0 | 0 | 4849 | 5596 | 5540 |
+| `f(...)` with 3 | 12 | 8 | 8 | 0 | 0 | 3916 | 3613 | 3119 |
+| S3 generic and method | 20 | 11 | 12 | 0 | 0 | 11848 | 9341 | 9290 |
+| `x[i]` | 4 | 3 | 0 | 0 | 0 | 2519 | 2209 | 106 |
+| `x[[i]]` | 3 | 2 | 0 | 0 | 0 | 2455 | 2042 | 138 |
+| `x[1:3]` | 3 | 1 | 1 | 0 | 0 | 3202 | 1917 | 1114 |
+| `x[-i]` | 7 | 2 | 2 | 4 | 1 | 9362 | 4508 | 4531 |
+| `x[lgl]` | 5 | 1 | 1 | 3 | 0 | 7287 | 3544 | 2737 |
+| `x + 1` scalar | 0 | 2 | 0 | 0 | 0 | 320 | 1465 | 53 |
+| `x + 1` vector | 1 | 1 | 1 | 1 | 0 | 3768 | 2245 | 1493 |
+| `x[i] <- v` | 3 | 2 | 0 | 0 | 0 | 1634 | 1725 | 118 |
+| `x[[i]] <- v` | 4 | 2 | 1 | 0 | 0 | 1840 | 1711 | 309 |
+
+ry allocates fewer objects than GNU R everywhere except three places, each with a fix:
+
+- Scalar arithmetic in tier 0 boxes two doubles where GNU R's bytecode keeps the result unboxed on
+  its stack. Keep scalar results unboxed in tier-0 registers, or reuse an unshared result in place
+  (T0).
+- The JIT allocates one object more than tier 0 for named-argument and S3 calls, because it falls
+  back to the generic call path for them (and costs as much as tier 0 for `...`). Compile these
+  calls natively or hand them to tier 0's path (JIT, with AOT for the call plan).
+- `x[-i]` makes one Rust allocation for the excluded-index set (GNU R makes four). Give it inline
+  stack capacity in `subset::resolve` (B5).
+
+Every other measured operation makes no Rust heap allocation in the steady state, and the call
+path allocates less than GNU R: a closure call with three arguments makes 8 objects against 11.
+Where tier 0 still loses is instructions on the empty loop and on `f()`, which is dispatch
+overhead, not allocation.
+
 - **Columnar record Arrays.** Store `Array<record>` as one buffer per field once the JIT fuses `xs[[i]]$field`; decided and deferred in `decisions.md`, "Array storage stays row-major". Measure a million-item loop both ways first.
 - **Typed Array loops trail untyped ones slightly.** `python3 tools/bench/why/run.py --filter array` (GNU R / ry untyped / ry typed and strict, seconds, 4-core Xeon): array_dot 0.188/0.021/0.022, array_filter 0.167/0.022/0.026, array_map 0.247/0.038/0.041, array_sum 0.116/0.024/0.027. The JIT compiles Array element loops natively, but the typed program still pays 5 to 15 percent over the plain-vector one; find where (the strict operator check, `as.Array`, or the annotation checks) before calling Arrays a speed feature.
 
