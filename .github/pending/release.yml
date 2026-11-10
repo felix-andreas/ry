@@ -99,8 +99,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
-          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" | sudo tee /etc/apt/sources.list.d/llvm-18.list
-          sudo apt-get update && sudo apt-get install -y bolt-18
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" | sudo tee /etc/apt/sources.list.d/llvm-20.list
+          sudo apt-get update && sudo apt-get install -y bolt-20
           Rscript -e 'install.packages(c("testthat", "purrr", "stringr", "lubridate", "data.table", "xts", "zoo"))'
       - name: package
         run: just package "$VERSION" ${{ matrix.target }}

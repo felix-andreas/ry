@@ -18,7 +18,8 @@
 #   RY_LAYOUT_BASE  an existing base R tree to reuse for training instead of building one with
 #                   the instrumented runtime (its start-up image is rewritten for each runtime)
 #   RY_LAYOUT_BOLT  `off` skips BOLT even where it is available
-#   LLVM_BOLT       the llvm-bolt to use (default: llvm-bolt, then llvm-bolt-18 on PATH)
+#   LLVM_BOLT       the llvm-bolt to use (default: llvm-bolt, llvm-bolt-21, then llvm-bolt-20 on
+#                   PATH; a BOLT older than LLVM 20 is skipped)
 set -euo pipefail
 target=$1
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -41,15 +42,23 @@ esac
 
 bolt=""
 if [ "$target" = x86_64-unknown-linux-gnu ] && [ "${RY_LAYOUT_BOLT:-}" != off ]; then
-	for candidate in "${LLVM_BOLT:-}" llvm-bolt llvm-bolt-18 /usr/lib/llvm-18/bin/llvm-bolt; do
+	for candidate in "${LLVM_BOLT:-}" llvm-bolt llvm-bolt-21 llvm-bolt-20; do
 		if [ -n "$candidate" ] && command -v "$candidate" > /dev/null; then
+			# BOLT 18 rewrites libR into a library that crashes: data.table's grouping ends up
+			# calling blake3's AVX-512 assembly with a garbage argument, both instrumented and laid
+			# out. BOLT 20 lays out the same input correctly.
+			major=$("$candidate" --version | sed -n 's/.*LLVM version \([0-9]*\).*/\1/p')
+			if [ "${major:-0}" -lt 20 ]; then
+				echo "optimize: skipping $candidate, which is LLVM ${major:-?}; BOLT needs LLVM 20 or newer" >&2
+				continue
+			fi
 			# Resolved, because BOLT finds its instrumentation runtime and merge-fdata beside its
-			# real location, not beside a symlink such as /usr/bin/llvm-bolt-18.
+			# real location, not beside a symlink such as /usr/bin/llvm-bolt-20.
 			bolt=$(realpath "$(command -v "$candidate")")
 			break
 		fi
 	done
-	[ -n "$bolt" ] || echo "optimize: llvm-bolt not found, so libR gets PGO without BOLT" >&2
+	[ -n "$bolt" ] || echo "optimize: llvm-bolt 20 or newer not found, so libR gets PGO without BOLT" >&2
 fi
 merge_fdata="$(dirname "${bolt:-/nonexistent}")/merge-fdata"
 
@@ -167,8 +176,8 @@ if [ -n "$bolt" ]; then
 	RY_BASE_R="$base" RY_LIBR="$work/bolt-instrumented/$library" python3 -I tools/layout/train.py "$optimized/$ry"
 	"$merge_fdata" "$work/bolt-raw/"*.fdata > "$work/libR.fdata"
 	"$bolt" "$optimized/$library" -o "$runtime" -data="$work/libR.fdata" \
-		-reorder-blocks=ext-tsp -reorder-functions=hfsort+ -split-functions -split-all-cold \
-		-split-eh -icf=1 -use-gnu-stack -dyno-stats
+		-reorder-blocks=ext-tsp -reorder-functions=cdsort -split-functions -split-all-cold \
+		-split-eh -icf=safe -use-gnu-stack -dyno-stats
 fi
 # `--emit-relocs` leaves static relocation sections, which keep the symbol table alive through a
 # plain strip and double the file. Only those go: the dynamic relocations stay.
