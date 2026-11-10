@@ -529,6 +529,7 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
         .ok_or_else(|| error("could not find the generic function's frame"))?;
     let call = state.frames[position].call;
     let sys_parent = eval::frame_sys_parent(position)?;
+    eval::materialize_references(position)?;
     let promargs: eval::Args = crate::frame_args(state, position).into();
     let heap = crate::heap();
     let method_env = values::new_env(method.tag())?;

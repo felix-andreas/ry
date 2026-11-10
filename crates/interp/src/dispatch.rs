@@ -870,6 +870,7 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     // Methods are looked up from the generic's caller and see it as their `parent.frame()`,
     // so a generic called from a slot frame gives that frame its environment.
     let sys_parent = eval::frame_sys_parent(position)?;
+    eval::materialize_references(position)?;
     let promargs: eval::Args = crate::frame_args(interp(), position).into();
     let object = if call.len() >= 2 {
         eval::eval(call.arg(1), env)?
@@ -1068,6 +1069,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     };
     let method_env = eval::frame_env(position)?;
     let sys_parent = eval::frame_sys_parent(position)?;
+    eval::materialize_references(position)?;
     let promargs: eval::Args = crate::frame_args(interp(), position).into();
     if frame_call.car().kind() != SexpType::Symbol {
         return Err(error("'NextMethod' called from an anonymous function"));

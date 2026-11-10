@@ -105,6 +105,7 @@ pub enum Counter {
     NativeEntries,
     BuiltinCalls,
     PromisesCreated,
+    ArgumentReferences,
     PromisesForced,
     FormalsMatchedByName,
     DotsCalls,
@@ -123,11 +124,12 @@ pub enum Counter {
 }
 
 impl Counter {
-    pub const ALL: [Counter; 19] = [
+    pub const ALL: [Counter; 20] = [
         Counter::ClosureCalls,
         Counter::NativeEntries,
         Counter::BuiltinCalls,
         Counter::PromisesCreated,
+        Counter::ArgumentReferences,
         Counter::PromisesForced,
         Counter::FormalsMatchedByName,
         Counter::DotsCalls,
@@ -151,6 +153,7 @@ impl Counter {
             Counter::NativeEntries => "closure calls run natively, without a frame",
             Counter::BuiltinCalls => "builtin calls (outside inline fast paths)",
             Counter::PromisesCreated => "promises created",
+            Counter::ArgumentReferences => "arguments passed as references to a caller's slot",
             Counter::PromisesForced => "promises forced",
             Counter::FormalsMatchedByName => "calls matched by name or partially",
             Counter::DotsCalls => "calls passing `...`",

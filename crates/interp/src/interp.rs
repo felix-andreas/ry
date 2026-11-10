@@ -217,6 +217,9 @@ pub fn truncate_frames(state: &mut Interp, depth: usize) {
         state.frame_args.truncate(frame.args as usize);
         state.method_vars.truncate(frame.method_vars as usize);
     }
+    if depth == 0 {
+        state.references_used = 0;
+    }
     state.frames.truncate(depth);
 }
 
@@ -296,6 +299,10 @@ pub struct Interp {
     /// The dispatch variables of every method slot frame, back to back in frame order (see
     /// [`Frame::method_vars`]).
     pub method_vars: Vec<(Sexp, Sexp)>,
+    /// The argument references calls have made and may reuse ([`eval::argument_reference`]):
+    /// the first [`Interp::references_used`] are live, the rest wait for the next call.
+    pub references: Vec<Sexp>,
+    pub references_used: u32,
     /// The closures each running call created in its own frame, at most
     /// [`FRAME_CLOSURES`] each, which the heap needs to release the frame when the call returns
     /// (`Heap::release_frame`).
@@ -486,6 +493,8 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         slot_owner: NO_SLOTS,
         frame_args: Vec::new(),
         method_vars: Vec::new(),
+        references: Vec::new(),
+        references_used: 0,
         frame_closures: Vec::new(),
         foreign_calls: Vec::new(),
         handlers: None,
@@ -659,6 +668,9 @@ impl RootSource for InterpRoots {
             }
             for &(_, value) in &interp.method_vars {
                 marker.mark(value);
+            }
+            for &reference in &interp.references {
+                marker.mark(reference);
             }
             for &closure in &interp.frame_closures {
                 marker.mark(closure);

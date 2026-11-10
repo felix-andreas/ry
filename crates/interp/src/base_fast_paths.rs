@@ -277,6 +277,12 @@ unsafe fn resolved(argument: Sexp) -> R<Option<Sexp>> {
     if argument.car() != values::unbound() {
         return Ok(Some(argument.car()));
     }
+    if eval::is_reference(argument) {
+        return match eval::reference_value(argument) {
+            Some(value) => eval::settle_promise(argument, value).map(Some),
+            None => Ok(None),
+        };
+    }
     // A promise over a slot frame without an environment names a placeholder that binds
     // nothing yet, so a lookup there would find the enclosure's variable instead.
     if argument.has_gp(gp::CHECKED_PROMISE) || argument.tag().has_gp(gp::PENDING_FRAME) {

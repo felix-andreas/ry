@@ -4965,11 +4965,13 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         let eager = state.constants.element(instruction.operand(2) + 2) != nil()
             && !effects::calling_handler_established()
             && effects::effect_free(function)?;
+        let plan = direct_plan(state, instruction, function, call)?;
+        let references = (*state.interp).references_used;
         // From a slot frame, a call whose arguments need no promise over the frame leaves it
         // without an environment, and the callee finds its caller as the frame below its own.
         let sys_parent = if state.in_slots()
             && (slot_args_into(state, arguments, eager, &mut args)?
-                || slot_promises_into(state, arguments, eager, &mut args)?)
+                || slot_promises_into(state, arguments, eager, plan.is_some(), &mut args)?)
         {
             nil()
         } else {
@@ -4982,10 +4984,14 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             }
             env
         };
-        match direct_plan(state, instruction, function, call)? {
-            Some(sources) => eval::call_with_plan(call, function, sources, &args, sys_parent)?,
-            None => eval::apply_closure_owning(call, function, &args, sys_parent, None)?,
+        let result = match plan {
+            Some(sources) => eval::call_with_plan(call, function, sources, &args, sys_parent),
+            None => eval::apply_closure_owning(call, function, &args, sys_parent, None),
+        };
+        if (*state.interp).references_used != references {
+            eval::release_references(references);
         }
+        result?
     } else if state.in_slots()
         && let Some(value) = slot_substitute(state, function, call)?
     {
@@ -5309,13 +5315,16 @@ unsafe fn slot_args_into(
 
 /// [`slot_args_into`] for a call whose arguments need promises: a name or compiled code
 /// becomes a promise over the frame's slots ([`eval::slot_promise`]), and `...` passes on what
-/// it collected. `false`, with `args` cleared, when an argument needs the frame's environment
+/// it collected. With `references`, for a callee that takes its arguments straight into slots,
+/// a name becomes an argument reference ([`eval::argument_reference`]) instead, which needs no
+/// allocation and no environment. `false`, with `args` cleared, when an argument needs the frame's environment
 /// itself: `..N`, code that was not compiled, or code that uses a local the frame keeps in no
 /// slot.
 unsafe fn slot_promises_into(
     state: &Activation<'_, '_>,
     arguments: Sexp,
     eager: bool,
+    references: bool,
     args: &mut eval::Args,
 ) -> R<bool> {
     args.clear();
@@ -5350,6 +5359,13 @@ unsafe fn slot_promises_into(
             }
             SexpType::Symbol => match eager.then(|| slot_eager_argument(state, expression)) {
                 Some(Some(value)) => value,
+                _ if references => {
+                    let names = state.constants.element(SLOTS).element(1);
+                    let slot = (0..length(names))
+                        .find(|&index| names.element(index) == expression)
+                        .map_or(eval::NO_REFERENCE_SLOT, |index| index as u32);
+                    eval::argument_reference(owner, slot, expression)?
+                }
                 _ => eval::slot_promise(owner, expression)?,
             },
             SexpType::Bytecode => eval::slot_promise(owner, expression)?,

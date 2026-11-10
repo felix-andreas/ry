@@ -349,6 +349,10 @@ pub mod gp {
     pub const TYPED_DEFINITION: u16 = 1 << 12;
     /// A promise whose value an inline parameter annotation checks when it is forced.
     pub const CHECKED_PROMISE: u16 = 1 << 12;
+    /// A promise that is an argument reference: it names a variable's slot in a live slot
+    /// frame instead of an environment, and its attribute holds the frame's position, the slot
+    /// and the frame's header register (`interp::eval::argument_reference`).
+    pub const ARGUMENT_REFERENCE: u16 = 1 << 13;
     /// A closure `debug()` flagged, GNU R's `RDEBUG`: every call stops at its first statement
     /// while a debugger is attached.
     pub const CLOSURE_DEBUG: u16 = 1 << 15;

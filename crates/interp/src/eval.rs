@@ -362,7 +362,9 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     promise.set_gp_bits(PROMISE_SEEN, true);
     let code = promise.attrib();
     let env = promise.tag();
-    let result = if env.has_gp(gp::PENDING_FRAME) {
+    let result = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
+        force_reference(promise)
+    } else if env.has_gp(gp::PENDING_FRAME) {
         force_slot_promise(promise, env)
     } else if code.kind() == SexpType::Bytecode {
         bytecode::run_promise(code, env)
@@ -449,9 +451,221 @@ pub unsafe fn slot_promise(owner: usize, expression: Sexp) -> R<Sexp> {
     Ok(promise)
 }
 
-/// The environment of an unforced `promise`, made first when it is a slot frame's pending one.
-/// Anything that reads a promise's environment other than to force it reads it here.
+/// An argument reference: the promise a slot frame at `owner` passes for the variable
+/// `symbol` to a callee that takes its arguments straight into slots ([`call_with_plan`]).
+/// Instead of an environment it names the variable's slot (`NO_REFERENCE_SLOT` when the frame
+/// keeps none for it), so passing a variable allocates nothing and leaves the caller without
+/// an environment. It forces like any promise ([`force_promise`]), once, reading the slot at
+/// that moment, and it comes from [`Interp::references`], which the calling instruction
+/// releases when the call returns. Nothing may keep one past that: a frame that hands its
+/// arguments to code that could keep them ([`materialize_references`]) turns them into
+/// ordinary promises first.
+pub unsafe fn argument_reference(owner: usize, slot: u32, symbol: Sexp) -> R<Sexp> {
+    let state = interp();
+    let heap = crate::heap();
+    let used = state.references_used as usize;
+    let reference = match state.references.get(used) {
+        Some(&reference) => {
+            heap.set_cdr(reference, symbol);
+            reference
+        }
+        None => {
+            let target = values::integer_vector(&[0, 0, 0])?;
+            heap.root(target);
+            let reference = heap.alloc_compiled_promise(unbound(), symbol, nil(), target)?;
+            reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
+            // The pool's own count keeps a reference that a slot releases from being freed.
+            reference.increment_refcount();
+            state.references.push(reference);
+            reference
+        }
+    };
+    let header = state.frames[owner].slots;
+    values::ints_mut(reference.attrib()).copy_from_slice(&[
+        owner as i32,
+        slot as i32,
+        header as i32,
+    ]);
+    state.references_used += 1;
+    activity::count(Counter::ArgumentReferences);
+    Ok(reference)
+}
+
+/// The slot an argument reference names for a variable its frame keeps in no slot: forcing it
+/// reads the variable where the frame's code would, in the frame's enclosure until the frame
+/// has an environment and in that environment after.
+pub const NO_REFERENCE_SLOT: u32 = u32::MAX;
+
+/// Returns the argument references made since `mark` to the pool once the call they were made
+/// for has returned, dropping the values they were forced to.
+pub unsafe fn release_references(mark: u32) {
+    let state = interp();
+    let heap = crate::heap();
+    let unbound = unbound();
+    for &reference in state
+        .references
+        .get(mark as usize..state.references_used as usize)
+        .unwrap_or(&[])
+    {
+        if reference.car() != unbound {
+            heap.set_car(reference, unbound);
+        }
+    }
+    state.references_used = mark;
+}
+
+/// Whether `value` is an argument reference ([`argument_reference`]).
+#[inline]
+pub unsafe fn is_reference(value: Sexp) -> bool {
+    value.kind() == SexpType::Promise && value.has_gp(gp::ARGUMENT_REFERENCE)
+}
+
+/// The frame position and slot an argument reference names. A reference is released before
+/// its frame returns, so one that names another frame is a broken invariant.
+unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
+    let &[owner, slot, header] = values::ints(reference.attrib()) else {
+        panic!("an argument reference lost its target");
+    };
+    if interp()
+        .frames
+        .get(owner as usize)
+        .is_none_or(|frame| frame.slots != header as u32)
+    {
+        panic!("an argument reference outlived the frame it names");
+    }
+    (owner as usize, slot as u32)
+}
+
+/// Forces an unforced argument reference: what its variable holds in the frame it names, read
+/// as a promise of the variable's name in that frame would read it.
+unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
+    let (owner, slot) = reference_target(reference);
+    let symbol = reference.cdr();
+    let frame = &interp().frames[owner];
+    if frame.env != nil() {
+        return eval(symbol, frame.env);
+    }
+    if slot == NO_REFERENCE_SLOT {
+        return eval(symbol, frame.function.tag());
+    }
+    let value = *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
+    if value == unbound() {
+        return eval(symbol, frame.function.tag());
+    }
+    if value.kind() == SexpType::Promise {
+        return force_promise(value);
+    }
+    if value == missing_arg() {
+        return eval(symbol, frame_env(owner)?);
+    }
+    Ok(value)
+}
+
+/// The value an unforced argument reference stands for when reading it runs no code: its
+/// variable's slot holds a value or a forced promise.
+pub unsafe fn reference_value(reference: Sexp) -> Option<Sexp> {
+    let (owner, slot) = reference_target(reference);
+    let frame = &interp().frames[owner];
+    if frame.env != nil() || slot == NO_REFERENCE_SLOT {
+        return None;
+    }
+    let value = *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
+    if value == unbound() || value == missing_arg() {
+        return None;
+    }
+    if value.kind() != SexpType::Promise {
+        return Some(value);
+    }
+    (value.car() != unbound()).then(|| value.car())
+}
+
+/// Whether the variable an unforced argument reference names is a missing argument in its
+/// frame, as [`value_is_missing`] asks of a promise of a name.
+unsafe fn reference_is_missing(reference: Sexp) -> R<bool> {
+    let (owner, slot) = reference_target(reference);
+    let symbol = reference.cdr();
+    let frame = &interp().frames[owner];
+    if frame.env != nil() {
+        if crate::heap().frame_cell(frame.env, symbol).is_none() {
+            return Ok(false);
+        }
+        return symbol_is_missing(symbol, frame.env, false);
+    }
+    if slot == NO_REFERENCE_SLOT {
+        return Ok(false);
+    }
+    let value = *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
+    if value == unbound() {
+        return Ok(false);
+    }
+    value_is_missing(value)
+}
+
+/// Replaces the argument references the frame at `index` was called with, in its arguments
+/// and in its slots alike, with ordinary promises over the frames they name: a forced one
+/// becomes a forced promise of its name, an unforced one a promise of its name in that frame.
+/// Every path that hands a frame's arguments or variables to code that may keep them past the
+/// call (its environment, dispatch to a method) runs this first, since a reference is reused
+/// once the call returns.
+pub unsafe fn materialize_references(index: usize) -> R<()> {
+    let state = interp();
+    let Some(frame) = state.frames.get(index) else {
+        return Ok(());
+    };
+    if frame.slots == crate::NO_SLOTS {
+        return Ok(());
+    }
+    let start = frame.args as usize;
+    let end = state
+        .frames
+        .get(index + 1)
+        .map_or(state.frame_args.len(), |next| next.args as usize);
+    for position in start..end {
+        let reference = interp().frame_args[position].value;
+        if !is_reference(reference) {
+            continue;
+        }
+        let promise = reference_promise(reference)?;
+        interp().frame_args[position].value = promise;
+        let frame = &interp().frames[index];
+        if frame.env == nil() {
+            let header = frame.slots as usize;
+            let formals = values::length(frame.function.car());
+            for slot in 0..formals {
+                let register = bytecode::register_address(header + 1 + slot);
+                if *register == reference {
+                    promise.increment_refcount();
+                    reference.decrement_refcount();
+                    *register = promise;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The ordinary promise that stands for an argument reference: a forced promise of its name
+/// once it is forced, and a promise of its name in the frame it names before.
+unsafe fn reference_promise(reference: Sexp) -> R<Sexp> {
+    let symbol = reference.cdr();
+    if reference.car() != unbound() {
+        return forced_promise(symbol, reference.car());
+    }
+    let (owner, _) = reference_target(reference);
+    let caller = &interp().frames[owner];
+    if caller.env != nil() {
+        return make_promise(symbol, caller.env);
+    }
+    slot_promise(owner, symbol)
+}
+
+/// The environment of an unforced `promise`, made first when it is a slot frame's pending one
+/// or the frame an argument reference names. Anything that reads a promise's environment other
+/// than to force it reads it here.
 pub unsafe fn promise_env(promise: Sexp) -> R<Sexp> {
+    if promise.has_gp(gp::ARGUMENT_REFERENCE) && promise.car() == unbound() {
+        return frame_env(reference_target(promise).0);
+    }
     resolved_env(promise.tag())
 }
 
@@ -1509,7 +1723,19 @@ pub unsafe fn call_with_plan(
         || moves::tracking()
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
     {
-        return apply_closure(call, function, args, sys_parent, None);
+        let mut promises = Args::new();
+        for arg in args {
+            let value = if is_reference(arg.value) {
+                reference_promise(arg.value)?
+            } else {
+                arg.value
+            };
+            promises.push(Arg {
+                tag: arg.tag,
+                value,
+            });
+        }
+        return apply_closure(call, function, &promises, sys_parent, None);
     }
     let count = values::length(constants.element(bytecode::SLOTS).element(1));
     let header = state.bytecode.registers.len();
@@ -1624,6 +1850,7 @@ pub unsafe fn slot_frame_env(header: usize) -> R<Sexp> {
 #[cold]
 #[inline(never)]
 unsafe fn reify(index: usize) -> R<Sexp> {
+    materialize_references(index)?;
     let frame = &interp().frames[index];
     let (function, header, missing) = (frame.function, frame.slots as usize, frame.missing);
     let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
@@ -2036,7 +2263,9 @@ pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, a
     }
     activity::count(Counter::PackageCalls);
     if frame.is_none_or(|frame| frame.slots != crate::NO_SLOTS && frame.env == nil())
-        && args.iter().all(|arg| arg.value.kind() != SexpType::Promise)
+        && args
+            .iter()
+            .all(|arg| arg.value.kind() != SexpType::Promise || is_reference(arg.value))
     {
         activity::count(Counter::PackageCallsDirect);
     }
@@ -2645,6 +2874,9 @@ unsafe fn symbol_is_missing(symbol: Sexp, env: Sexp, defaults_count: bool) -> R<
 pub(crate) unsafe fn value_is_missing(value: Sexp) -> R<bool> {
     if value == missing_arg() {
         return Ok(true);
+    }
+    if is_reference(value) && value.car() == unbound() {
+        return reference_is_missing(value);
     }
     if value.kind() == SexpType::Promise
         && value.car() == unbound()
