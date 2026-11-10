@@ -51,11 +51,6 @@ if [ "$target" = x86_64-unknown-linux-gnu ] && [ "${RY_LAYOUT_BOLT:-}" != off ];
 fi
 merge_fdata="$(dirname "${bolt:-/nonexistent}")/merge-fdata"
 
-# Prints the warnings LLVM gives for a profile that does not match the code, from a build log.
-profile_warnings() {
-	grep -E 'hash mismatch|profile data may be (out of date|corrupt)|function control flow change|no profile data available|-Wbackend-plugin' "$1" || true
-}
-
 # Sets up base R for RUNTIME (a libR) in DIRECTORY, built with RCMD or copied from
 # RY_LAYOUT_BASE, with a start-up image for RUNTIME.
 base_r() {
@@ -89,13 +84,25 @@ build() {
 	cargo build --release --locked --target "$target" -p ry-lang 2> >(tee -a "$work/build.log" >&2)
 }
 
-# Fails when the build log holds a profile mismatch warning.
+# Fails when the build log shows a profile that does not match the code. A hash mismatch or a
+# corrupt profile fails outright. A function with no profile record is expected now and then:
+# LTO drops a function the instrumented binary never calls, together with its record. Many
+# missing records mean the two builds named their functions differently, as they do when the
+# profile flags reach cargo's metadata hash, so more than one percent of the profile's records
+# fails the build.
 check_profile() {
-	local mismatches
-	mismatches=$(profile_warnings "$work/build.log")
+	local mismatches missing records
+	mismatches=$(grep -E 'hash mismatch|profile data may be (out of date|corrupt)|function control flow change|-Wbackend-plugin' "$work/build.log" || true)
 	if [ -n "$mismatches" ]; then
 		printf '%s\n' "$mismatches" >&2
 		echo "error: the profile does not match the code it was applied to (see above)" >&2
+		exit 1
+	fi
+	missing=$(grep -c 'no profile data available' "$work/build.log" || true)
+	records=$("$profdata" show "$work/pgo.profdata" | sed -n 's/^Total functions: //p')
+	echo "optimize: $missing functions without a profile record, against $records records" >&2
+	if [ $((missing * 100)) -gt "$records" ]; then
+		echo "error: the profile names no record for $missing functions; the two builds named them differently" >&2
 		exit 1
 	fi
 }
