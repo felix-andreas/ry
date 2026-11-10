@@ -47,7 +47,7 @@ use {
         Interp,
         arith::{MATHS, math_index},
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
-        conditions, dispatch, effects,
+        conditions, dispatch::{self, Site}, effects,
         eval::{self, Reify, SwitchSelector, as_condition},
         interp,
         kernels::{self, Element, MAX_NODES, Node, Reduction},
@@ -5662,7 +5662,7 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
         });
         cell = cell.cdr();
     }
-    let value = call_builtin(definition, call, function, &args, *state.header)?;
+    let value = call_builtin(definition, call, function, &args, *state.header, Some(site(state, instruction)))?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
@@ -5781,7 +5781,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         value
     } else if state.in_slots()
         && function.kind() == SexpType::Builtin
-        && let Some(value) = slot_builtin_call(state, call, function, None)?
+        && let Some(value) = slot_builtin_call(state, Some(site(state, instruction)), call, function, None)?
     {
         value
     } else {
@@ -5846,6 +5846,9 @@ unsafe fn direct_plan(
             values::ints_mut(owner.element(FEEDBACK))[word_at] = -1;
             return Ok(None);
         }
+        // A word below every miss count is an S3 dispatch site's, which a closure call site
+        // only holds after it dispatched, so it does not plan.
+        None if word < -1 - PLAN_MISSES => return Ok(None),
         None => (-word - 1).max(0),
     };
     if misses >= PLAN_MISSES {
@@ -6107,7 +6110,7 @@ unsafe fn call_wrapper(
         let state = crate::interp();
         let owner = state.slot_owner;
         state.slot_owner = frame;
-        let result = call_builtin(definition, body, builtin, &builtin_args, nil());
+        let result = call_builtin(definition, body, builtin, &builtin_args, nil(), None);
         crate::interp().slot_owner = owner;
         result
     })
@@ -6551,7 +6554,7 @@ unsafe fn slot_special_call(
             // `UseMethod("generic", object)` dispatches on a local's value.
             "UseMethod" if argument.kind() == SexpType::String && length(argument) == 1 => {
                 match slot_operand(state, rest.car())? {
-                    Some(object) => slot_use_method(state, instruction, call, argument, Some(object)),
+                    Some(object) => slot_use_method(state, instruction, argument, Some(object)),
                     None => Ok(None),
                 }
             }
@@ -6576,7 +6579,7 @@ unsafe fn slot_special_call(
             }
             match crate::builtins::internal_function(argument.car()) {
                 Some(internal) if internal.kind() == SexpType::Builtin => {
-                    slot_builtin_call(state, argument, internal, None)
+                    slot_builtin_call(state, None, argument, internal, None)
                 }
                 _ => Ok(None),
             }
@@ -6586,7 +6589,7 @@ unsafe fn slot_special_call(
                 && argument.kind() == SexpType::String
                 && length(argument) == 1 =>
         {
-            slot_use_method(state, instruction, call, argument, None)
+            slot_use_method(state, instruction, argument, None)
         }
         "quote" if arguments.tag() == nil() || values::symbol_name(arguments.tag()) == "expr" => {
             interp().visible = true;
@@ -6754,10 +6757,17 @@ unsafe fn slot_operand(state: &Activation<'_, '_>, expression: Sexp) -> R<Option
 
 /// `UseMethod("generic")` or `UseMethod("generic", object)` from a slot frame, when the body returns its value at once (a generic
 /// whose body is the call), dispatched without giving the frame an environment.
+/// The S3 dispatch site an instruction names: its feedback word one past the op's own.
+fn site(state: &Activation<'_, '_>, instruction: Instruction) -> Site {
+    Site {
+        constants: state.constants,
+        at: instruction.at as u32,
+    }
+}
+
 unsafe fn slot_use_method(
     state: &Activation<'_, '_>,
     instruction: Instruction,
-    call: Sexp,
     generic: Sexp,
     object: Option<Sexp>,
 ) -> R<Option<Sexp>> {
@@ -6785,7 +6795,7 @@ unsafe fn slot_use_method(
         return Ok(None);
     }
     let owner = (*state.interp).slot_owner as usize;
-    dispatch::use_method_in_slots(call, generic, owner, first, object)
+    dispatch::use_method_in_slots(site(state, instruction), generic, owner, first, object)
 }
 
 /// A builtin call from a slot frame whose arguments the slots answer: `...`, a constant, or a
@@ -6799,6 +6809,7 @@ unsafe fn slot_use_method(
 /// only reference (see [`slot_reusable`]).
 unsafe fn slot_builtin_call(
     state: &Activation<'_, '_>,
+    site: Option<Site>,
     call: Sexp,
     function: Sexp,
     target: Option<*mut Sexp>,
@@ -6846,7 +6857,7 @@ unsafe fn slot_builtin_call(
         nil()
     };
     if definition.generic != Generic::None
-        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
+        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env, site)?
     {
         return Ok(Some(value));
     }
@@ -6855,7 +6866,7 @@ unsafe fn slot_builtin_call(
             let reusable = slot_reusable(state, slot, &args);
             eval::call_builtin_reusing(definition, call, function, &args, env, reusable).map(Some)
         }
-        _ => call_builtin(definition, call, function, &args, env).map(Some),
+        _ => call_builtin(definition, call, function, &args, env, site).map(Some),
     }
 }
 
@@ -7296,7 +7307,7 @@ unsafe fn op_call_builtin_rebinding(
     let value = if reusable.is_some() {
         eval::call_builtin_reusing(definition, call, function, &args, *state.header, reusable)?
     } else {
-        call_builtin(definition, call, function, &args, *state.header)?
+        call_builtin(definition, call, function, &args, *state.header, Some(site(state, instruction)))?
     };
     state.record(instruction.at, value);
     instruction.output(0, value);
@@ -7365,7 +7376,7 @@ unsafe fn op_call_rebinding(state: &mut Activation<'_, '_>, instruction: Instruc
         && let Some(slot) = slot_named(state, target)
     {
         if function.kind() == SexpType::Builtin
-            && let Some(value) = slot_builtin_call(state, call, function, Some(slot))?
+            && let Some(value) = slot_builtin_call(state, Some(site(state, instruction)), call, function, Some(slot))?
         {
             state.record(instruction.at, value);
             instruction.output(0, value);
@@ -7554,9 +7565,10 @@ unsafe fn op_dispatch_subject(state: &mut Activation<'_, '_>, instruction: Instr
         instruction.input(3),
         state.env(Reify::Site("dispatch subject"))?,
         &mut args,
+        Some(site(state, instruction)),
     )? {
         Some(value) => value,
-        None => call_builtin(definition, call, function, &args, *state.header)?,
+        None => call_builtin(definition, call, function, &args, *state.header, None)?,
     };
     state.record(instruction.at, value);
     instruction.output(0, value);
@@ -7705,7 +7717,7 @@ unsafe fn op_arithmetic(state: &mut Activation<'_, '_>, instruction: Instruction
                     value: right,
                 },
             ];
-            call_builtin(definition, call, function, &args, *state.header)?
+            call_builtin(definition, call, function, &args, *state.header, Some(site(state, instruction)))?
         }
     };
     state.record(instruction.at, value);
@@ -8809,6 +8821,7 @@ pub(crate) unsafe fn call_builtin(
     function: Sexp,
     args: &[Arg],
     env: Sexp,
+    site: Option<Site>,
 ) -> R<Sexp> {
     if definition.generic != Generic::None {
         // Dispatch hands the frame to a method, so an unreified slot frame (a `NULL` `env`)
@@ -8818,7 +8831,7 @@ pub(crate) unsafe fn call_builtin(
         } else {
             env
         };
-        if let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, args, env)?
+        if let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, args, env, site)?
         {
             return Ok(value);
         }

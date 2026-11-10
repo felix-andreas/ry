@@ -787,7 +787,11 @@ impl RootSource for InterpRoots {
 
     fn clear_dead(&self, liveness: &Liveness<'_>) {
         // SAFETY: as for `trace`.
-        unsafe { interp().bytecode.call_plans.clear_dead(liveness) }
+        unsafe {
+            let state = interp();
+            state.bytecode.call_plans.clear_dead(liveness);
+            state.method_cache.clear_dead(liveness);
+        }
     }
 }
 
