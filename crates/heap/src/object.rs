@@ -429,6 +429,9 @@ pub(crate) mod flag_bits {
     /// Interned bytes never change, and C code cannot reach this byte, so unlike the `ASCII`
     /// general-purpose bit it is a fact rather than a hint.
     pub const VALID_UTF8: u8 = 1 << 6;
+    /// Held by `R_PreserveObject` (the heap's precious set), so a frame release can tell from
+    /// the header it already holds that the frame must stay.
+    pub const PRECIOUS: u8 = 1 << 7;
 }
 
 /// The reference count saturates here, and a saturated count is sticky, as in GNU R.

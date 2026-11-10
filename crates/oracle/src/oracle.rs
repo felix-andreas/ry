@@ -43,17 +43,38 @@ pub enum EngineError {
     /// The engine started but produced no usable report.
     #[error("{0}")]
     Failed(String),
+    /// The engine was killed by a signal before it wrote a report. Some hardened builds of GNU R
+    /// abort with "buffer overflow detected" in graphics devices that a plain source build runs,
+    /// so a GNU R crash skips the case, naming the build, instead of counting as a difference.
+    #[error("{0}")]
+    Crashed(String),
 }
 
-/// Everything observable about one run.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Everything observable about one run, and the package libraries it searched.
+#[derive(Debug, Clone, Default)]
 pub struct Outcome {
     pub stdout: String,
     pub messages: Vec<String>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
     pub value: Option<Value>,
+    /// `R_LIBS` as the script saw it, when the engine reports it. It is not part of the
+    /// behavior: [`diff`] refuses to compare runs that searched different libraries, because a
+    /// package installed by one engine makes the other warn that it was built under another R.
+    pub libraries: Option<String>,
 }
+
+impl PartialEq for Outcome {
+    fn eq(&self, other: &Self) -> bool {
+        self.stdout == other.stdout
+            && self.messages == other.messages
+            && self.warnings == other.warnings
+            && self.errors == other.errors
+            && self.value == other.value
+    }
+}
+
+impl Eq for Outcome {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Value {
@@ -67,6 +88,8 @@ struct Report {
     warnings: Vec<String>,
     errors: Vec<String>,
     value: Option<Value>,
+    #[serde(default)]
+    libraries: Option<String>,
 }
 
 /// The stand-in until ry's runtime exists. It reports itself as unavailable for every file.
@@ -304,12 +327,16 @@ impl Engine for ProcessEngine {
         }
         let report = std::fs::read_to_string(&report_path);
         let report = report.map_err(|_| {
-            EngineError::Failed(format!(
+            let message = format!(
                 "{} wrote no report ({}): {}",
                 self.name,
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
-            ))
+            );
+            match killed_by_signal(output.status) {
+                true => EngineError::Crashed(message),
+                false => EngineError::Failed(message),
+            }
         })?;
         let report: Report = serde_json::from_str(&report).map_err(|error| {
             EngineError::Failed(format!("{} wrote an unreadable report: {error}", self.name))
@@ -320,6 +347,7 @@ impl Engine for ProcessEngine {
             warnings: report.warnings,
             errors: report.errors,
             value: report.value,
+            libraries: report.libraries,
         })
     }
 }
@@ -385,6 +413,16 @@ fn run_command(mut command: Command, timeout: Option<Duration>) -> std::io::Resu
         stderr: joined(stderr)?,
         timed_out,
     })
+}
+
+#[cfg(unix)]
+fn killed_by_signal(status: std::process::ExitStatus) -> bool {
+    std::os::unix::process::ExitStatusExt::signal(&status).is_some()
+}
+
+#[cfg(not(unix))]
+fn killed_by_signal(_status: std::process::ExitStatus) -> bool {
+    false
 }
 
 /// The script itself when it has no inline annotation, else its erasure written to `scratch`
@@ -494,6 +532,162 @@ fn ry_default_version() -> Option<String> {
     }
     let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     (output.status.success() && !version.is_empty()).then_some(version)
+}
+
+/// The GNU R build a suite's outcomes come from. The release decides which behaviors a case
+/// shows, so outcomes from two releases never mix. The linear-algebra libraries change the last
+/// digits of numerical results, so a different BLAS or LAPACK is worth a warning but not a
+/// refusal. The libraries are named by file, not path, so the same build installed in another
+/// prefix is the same build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Build {
+    pub release: String,
+    pub blas: String,
+    pub lapack: String,
+}
+
+impl std::fmt::Display for Build {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} (BLAS {}, LAPACK {})",
+            self.release, self.blas, self.lapack
+        )
+    }
+}
+
+/// The file in a case directory that names the build its `.expected` files were recorded with.
+pub const BUILD_FILE: &str = "gnu-r.txt";
+
+/// How the GNU R at hand relates to the build a suite was recorded with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildCheck {
+    Same,
+    /// Only the linear-algebra libraries differ: compare, but expect last-digit differences.
+    LibrariesDiffer(String),
+    /// Another release: its outcomes are not this suite's, so comparing them is refused.
+    ReleaseDiffers(String),
+    /// The suite names no build yet.
+    Unrecorded,
+}
+
+/// The build of the GNU R that `ORACLE_R` or `PATH` names, asked from R itself.
+pub fn gnu_r_build() -> Result<Build, String> {
+    static BUILD: OnceLock<Result<Build, String>> = OnceLock::new();
+    BUILD
+        .get_or_init(|| {
+            let program = gnu_r_program();
+            let output = Command::new(&program)
+                .args(["--vanilla", "--slave", "--no-restore", "-e"])
+                .arg(
+                    "cat(R.version$major, \".\", R.version$minor, \"\\n\", \
+                     basename(extSoftVersion()[[\"BLAS\"]]), \"\\n\", \
+                     basename(La_library()), \" \", La_version(), \"\\n\", sep = \"\")",
+                )
+                .env("LC_ALL", "C.UTF-8")
+                .output()
+                .map_err(|error| format!("`{program}`: {error}"))?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            let mut lines = text.lines().map(str::trim);
+            match (lines.next(), lines.next(), lines.next()) {
+                (Some(release), Some(blas), Some(lapack))
+                    if output.status.success() && !release.is_empty() =>
+                {
+                    Ok(Build {
+                        release: release.to_owned(),
+                        blas: blas.to_owned(),
+                        lapack: lapack.to_owned(),
+                    })
+                }
+                _ => Err(format!(
+                    "`{program}` did not report its build ({}): {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )),
+            }
+        })
+        .clone()
+}
+
+/// The build file that governs `case`: the nearest one in its directory or an ancestor.
+pub fn build_file(case: &Path) -> Option<PathBuf> {
+    let start = match case.is_dir() {
+        true => case,
+        false => case.parent()?,
+    };
+    start
+        .ancestors()
+        .map(|directory| directory.join(BUILD_FILE))
+        .find(|path| path.is_file())
+}
+
+/// The build `file` names, or an error that says what is wrong with it.
+pub fn read_build(file: &Path) -> Result<Build, String> {
+    let text =
+        std::fs::read_to_string(file).map_err(|error| format!("{}: {error}", file.display()))?;
+    let mut release = None;
+    let mut blas = None;
+    let mut lapack = None;
+    for line in text
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+    {
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        let slot = match key {
+            "release" => &mut release,
+            "blas" => &mut blas,
+            "lapack" => &mut lapack,
+            _ => return Err(format!("{}: unknown line `{line}`", file.display())),
+        };
+        *slot = Some(value.trim().to_owned());
+    }
+    match (release, blas, lapack) {
+        (Some(release), Some(blas), Some(lapack)) => Ok(Build {
+            release,
+            blas,
+            lapack,
+        }),
+        _ => Err(format!(
+            "{}: needs `release`, `blas` and `lapack` lines",
+            file.display()
+        )),
+    }
+}
+
+pub fn write_build(file: &Path, build: &Build) -> std::io::Result<()> {
+    std::fs::write(
+        file,
+        format!(
+            "# The GNU R build the .expected files here were recorded with; `oracle record` writes \
+             it.\n# `oracle verify` refuses another release and warns on other BLAS or LAPACK \
+             libraries.\nrelease {}\nblas {}\nlapack {}\n",
+            build.release, build.blas, build.lapack
+        ),
+    )
+}
+
+/// Compares the GNU R at hand with the build the suite around `case` was recorded with.
+pub fn check_build(case: &Path, actual: &Build) -> Result<BuildCheck, String> {
+    let Some(file) = build_file(case) else {
+        return Ok(BuildCheck::Unrecorded);
+    };
+    let recorded = read_build(&file)?;
+    Ok(if recorded.release != actual.release {
+        BuildCheck::ReleaseDiffers(format!(
+            "{} were recorded with GNU R {recorded}, but this is GNU R {actual}; set ORACLE_R to \
+             an R {} build",
+            file.parent().unwrap_or(Path::new(".")).display(),
+            recorded.release
+        ))
+    } else if recorded != *actual {
+        BuildCheck::LibrariesDiffer(format!(
+            "{} were recorded with GNU R {recorded}, but this is GNU R {actual}; the last digits \
+             of numerical results may differ",
+            file.parent().unwrap_or(Path::new(".")).display()
+        ))
+    } else {
+        BuildCheck::Same
+    })
 }
 
 pub fn gnu_r_available() -> bool {
@@ -724,6 +918,15 @@ pub fn diff(
     actual_label: &str,
     actual: &Outcome,
 ) -> Option<String> {
+    if let (Some(left), Some(right)) = (&expected.libraries, &actual.libraries)
+        && left != right
+    {
+        return Some(format!(
+            "the engines searched different package libraries, so their runs are not comparable: \
+             {expected_label} had R_LIBS={left:?} and {actual_label} had R_LIBS={right:?}; give \
+             both the same library, installed by GNU R"
+        ));
+    }
     if expected == actual {
         return None;
     }

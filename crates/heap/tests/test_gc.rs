@@ -1942,3 +1942,55 @@ fn fuzz_interning_agrees_with_a_reference_map_under_stress() {
         run_interning(500 + seed, 300, true)
     });
 }
+
+#[test]
+fn a_preserved_object_needs_as_many_releases_as_preserves() {
+    let mut heap = Heap::new();
+    unsafe {
+        let twice = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        *twice.slice_mut::<i32>().first_mut().expect("one element") = 2;
+        let once = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        *once.slice_mut::<i32>().first_mut().expect("one element") = 1;
+        heap.preserve(twice);
+        heap.preserve(once);
+        heap.preserve(twice);
+        heap.release(twice);
+        heap.collect(Collection::Major);
+        assert!(heap.is_preserved(twice));
+        assert_eq!(twice.slice::<i32>(), &[2]);
+        heap.release(once);
+        assert!(!heap.is_preserved(once));
+        heap.collect(Collection::Major);
+        assert_eq!(twice.slice::<i32>(), &[2]);
+        heap.release(twice);
+        assert!(!heap.is_preserved(twice));
+        // Releasing what is not preserved does nothing, as in GNU R.
+        heap.release(twice);
+        assert!(!heap.is_preserved(twice));
+    }
+}
+
+#[test]
+fn an_escalation_skips_an_intermediate_collection_that_freed_nothing_before() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| {
+        policy.young_limit = 64 * 1024;
+        policy.node_limit = 1024 * 1024;
+        policy.min_node_limit = 1024 * 1024;
+    });
+    unsafe {
+        // A program building a structure it keeps: what each minor collection promotes is
+        // still live at the next escalation.
+        let list = heap.alloc_vector(SexpType::List, 200_000).expect("alloc");
+        heap.add_global_root(list);
+        for index in 0..200_000 {
+            let element = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            *element.slice_mut::<i32>().first_mut().expect("one element") = index;
+            heap.set_element(list, index as usize, element);
+        }
+        let stats = heap.stats();
+        assert!(stats.major_collections >= 2, "{stats:?}");
+        assert_eq!(stats.intermediate_collections, 1, "{stats:?}");
+        assert_eq!(list.element(199_999).slice::<i32>(), &[199_999]);
+    }
+}

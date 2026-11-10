@@ -22,11 +22,18 @@ installed package, tinytest suites through `run_test_dir()`, and other packages'
 one by one. The time is the wall time of the whole process, so it includes start-up and loading
 the package and its imports, as real use does.
 
+The corpus runs offline, because a network round trip measures the network, not the engine, and
+costs both engines the same. Test files that need the network are listed in NETWORK_TESTS and left
+out. Both engines send every HTTP and HTTPS request through a local proxy that refuses it and
+records the host, and a run in which any test reached for the network fails once the table is
+printed, naming the package and the host, so a new network test cannot slip in silently.
+
 Usage: tools/bench/packages/run.py lock | install [--jobs N] | run [--ry PATH] [--filter NAME]
                                    [--repeat N] [--write]
 """
 import argparse, concurrent.futures, hashlib, json, math, os, pathlib, platform, re, shutil
-import subprocess, sys, tarfile, tempfile, time, urllib.error, urllib.request
+import socketserver, subprocess, sys, tarfile, tempfile, threading, time, urllib.error, urllib.parse
+import urllib.request
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent.parent
@@ -34,6 +41,16 @@ corpus = pathlib.Path(os.environ.get("RY_CORPUS_DIR", root / ".corpus")) / "pack
 mirror = "https://rrepo.dev/upstream/cran"
 # One package's suite must not stall the whole table when an engine loops or deadlocks.
 SUITE_TIMEOUT = 900
+# Test files left out of the corpus because they need the network, by package, each with a glob
+# relative to the package's tests directory and the reason.
+NETWORK_TESTS = {
+    "jsonlite": [
+        ("testthat/test-network-*.R",
+         "fromJSON() on api.github.com URLs; it has no skip_on_cran(), so it runs offline too"),
+    ],
+}
+# Hosts that tests may reach through the proxy's bypass: a package's own local servers.
+LOCAL_HOSTS = "localhost,127.0.0.1,::1"
 BASE_PACKAGES = {
     "R", "base", "compiler", "datasets", "graphics", "grDevices", "grid", "methods", "parallel",
     "splines", "stats", "stats4", "tcltk", "tools", "utils",
@@ -194,6 +211,12 @@ def run_corpus(args):
     base = {key: value for key, value in os.environ.items() if key not in ("NOT_CRAN", "RY_JIT")}
     base.update(LC_ALL="C.UTF-8", R_LIBS=str(library), R_LIBS_USER=str(library), R_LIBS_SITE=gnu_r_paths,
                 TESTTHAT_CPUS="1", _R_CHECK_FORCE_SUGGESTS_="false")
+    proxy = RefusingProxy()
+    for name in ("http_proxy", "https_proxy", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
+        base[name] = proxy.url
+    for name in ("no_proxy", "NO_PROXY"):
+        base[name] = LOCAL_HOSTS
+    reached = []
     engines = [
         ("gnu_r", "GNU R", ["Rscript", "--vanilla"]),
         ("ry", "ry", [args.ry, "run", "--runtime", "ry"]),
@@ -213,8 +236,9 @@ def run_corpus(args):
             row = {"package": name, "version": version, "runner": kind}
             results = {key: [] for key, _, _ in engines}
             for _ in range(args.repeat):
-                for key, _, command in engines:
+                for key, label, command in engines:
                     results[key].append(run_suite(command, base, name, kind, tests, work))
+                    reached.extend(f"{name} on {label}: {host}" for host in proxy.take())
             for key, _, _ in engines:
                 passed = [result for result in results[key] if result["seconds"] is not None]
                 best = min(passed, key=lambda result: result["seconds"]) if passed else results[key][-1]
@@ -224,6 +248,10 @@ def run_corpus(args):
         finally:
             shutil.rmtree(work, ignore_errors=True)
     print_table(rows, engines)
+    if reached:
+        raise SystemExit("corpus tests reached for the network, which skews both engines' times; "
+                         "add each test file to NETWORK_TESTS in run.py:\n  "
+                         + "\n  ".join(sorted(set(reached))))
     if args.write:
         cpu, r_version = machine()
         (here / "results.json").write_text(json.dumps(
@@ -239,6 +267,9 @@ def unpack_tests(name, version, work):
                    and ".." not in member.name and (member.isfile() or member.isdir())]
         archive.extractall(work, members=members, filter="data")
     package = work / name
+    for pattern, _ in NETWORK_TESTS.get(name, []):
+        for test in (package / "tests").glob(pattern):
+            test.unlink()
     if (package / "tests" / "testthat").is_dir():
         return "testthat", package / "tests" / "testthat"
     if (package / "inst" / "tinytest").is_dir():
@@ -326,8 +357,51 @@ def print_table(rows, engines):
         print(f"| {row['package']} {row['version']} | {row['runner']} | {cell(gnu_r)} | {cell(ry)} | {ratio} "
               f"| {gnu_r['outcome']} | {ry['outcome']} |")
     if ratios:
-        geomean = math.exp(sum(map(math.log, ratios)) / len(ratios))
-        print(f"\nGeometric mean of GNU R's time over ry's ({len(ratios)} of {len(rows)} packages run on both): {geomean:.2f}x")
+        logs = [math.log(ratio) for ratio in ratios]
+        mean = sum(logs) / len(logs)
+        interval = ""
+        if len(logs) > 1:
+            spread = math.sqrt(sum((value - mean) ** 2 for value in logs) / (len(logs) - 1))
+            half = student_t_975(len(logs) - 1) * spread / math.sqrt(len(logs))
+            interval = f", 95% interval {math.exp(mean - half):.2f}x to {math.exp(mean + half):.2f}x"
+        print(f"\nGeometric mean of GNU R's time over ry's ({len(ratios)} of {len(rows)} packages run on both): "
+              f"{math.exp(mean):.2f}x{interval}")
+
+def student_t_975(freedom):
+    """The 97.5% quantile of Student's t, for a two-sided 95% interval on the mean log ratio."""
+    table = [12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179,
+             2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064,
+             2.060, 2.056, 2.052, 2.048, 2.045, 2.042]
+    return table[freedom - 1] if freedom <= len(table) else 1.96
+
+class RefusingProxy:
+    """An HTTP proxy on a local port that answers every request with 403 and records its host,
+    so an offline run fails fast instead of waiting on the network, and says what it tried."""
+
+    def __init__(self):
+        self.hosts = []
+        self.lock = threading.Lock()
+        proxy = self
+
+        class Handler(socketserver.StreamRequestHandler):
+            def handle(self):
+                line = self.rfile.readline(65536).decode("latin-1").split()
+                if len(line) >= 2:
+                    target = line[1]
+                    host = target if line[0] == "CONNECT" else urllib.parse.urlsplit(target).netloc
+                    with proxy.lock:
+                        proxy.hosts.append(host)
+                self.wfile.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def take(self):
+        with self.lock:
+            hosts, self.hosts = self.hosts, []
+        return hosts
 
 # Helpers.
 

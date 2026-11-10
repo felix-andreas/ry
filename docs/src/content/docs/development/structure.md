@@ -232,9 +232,7 @@ builtins. The root holds the interpreter state (`Interp`, the frame stack, the h
 - **`records.rs`**: records, tuples, tags and `match` at run time. **`arrays.rs`**: `List<T>`, an R
   vector with the heap's list bit set, and the strict rules that go with it; **`numbers.rs`**: the native number types.
 - **`dataframe.rs`**: the Polars-style `DataFrame` verbs and column expressions. **`frame.rs`**: the
-  `DataFrame` value, its readers, writers and conversions. **`data_table.rs`**: data.table queries
-  answered on ry's engine when the result is guaranteed identical, and declined to data.table
-  otherwise.
+  `DataFrame` value, its readers, writers and conversions.
 - **`standard_library.rs`**: `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` and `Set`, typed by
   `types/std.Rtypes`.
 - **`testing.rs`**: the fuzz contracts of the interpreter, shared by the in-tree harness and the

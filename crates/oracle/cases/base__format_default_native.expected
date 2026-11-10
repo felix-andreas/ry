@@ -30,7 +30,7 @@
 | [1] "invalid 'nsmall' argument"
 | [1] "invalid value 30 for 'digits' argument"
 | [1] "invalid 'width' argument"
-| [1] "'big.mark' and 'decimal.mark' are both '', which could be confusing"
+| [1] "the decimal mark is less than one character wide; this will become an error"
 | [1] "1,25"
 | [1] "Inf"
 | [1] "-Inf" " NaN"

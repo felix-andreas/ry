@@ -62,7 +62,7 @@ stopped it, and the deparsed last value. A warning or error carries its call, as
 environments, S3 and S4, conditions, vectors, recycling, attributes, NA handling, numerics,
 control flow, printing, delimited data I/O (`read.table`, `write.table`, `scan`, `type.convert`),
 colours, contour lines and axis ticks, graphics devices and parameters (`par`, layouts, the
-device list, text metrics), grid and the graphics engine (the `grid__*` cases, which need ragg and lattice installed and compare drawings with GNU R by pixel checksums of a ragg capture), object sizes, hash tables, and data.table queries (the `datatable__*` cases, which need data.table installed and check that the queries ry answers itself print and behave exactly as under data.table). `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.6.2 output, the release ry bundles as its base R (see [The reference GNU R](#the-reference-gnu-r)).
+device list, text metrics), grid and the graphics engine (the `grid__*` cases, which need ragg and lattice installed and compare drawings with GNU R by pixel checksums of a ragg capture), object sizes, hash tables, and data.table queries (the `datatable__*` cases, which need data.table installed and check that data.table's own code prints and behaves under ry exactly as under GNU R). `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.6.2 output, the release ry bundles as its base R (see [The reference GNU R](#the-reference-gnu-r)).
 
 The driver differs from `Rscript` in four ways that the cases avoid: it parses the whole file first, so a syntax error hides the output of the lines before it; its own frames show in `sys.nframe()` and `sys.calls()` (so data.table prints the table after a top-level `:=`, which it skips at a real prompt); `commandArgs(TRUE)` holds the two paths; and `quit()` ends the run without a report.
 
@@ -78,6 +78,20 @@ the compiled tier on every case. `ry-tier0` runs with `RY_JIT=off`, and `ry-gcto
 `RY_GC_STRESS=1`, which collects before every allocation once the script starts. Without `--engine` or `ORACLE_ENGINE` the second engine
 is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or `ry-jit`, or any command line) makes
 `cargo test -p oracle` also require the engine to match GNU R on every case.
+
+Both engines must search the same package library, installed by GNU R. ry runs on GNU R's base
+R when the two releases differ, so a package that ry installed (its `DESCRIPTION` says it was built
+under ry's release) makes `library()` warn "package 'x' was built under R version 4.6.2". The
+driver therefore reports the `R_LIBS` each engine saw, and a case whose engines saw different values
+fails with that message instead of a diff. A wrapper given as `ORACLE_RY` must not set `R_LIBS`
+itself.
+
+ry's native fast paths for base closures (`crates/interp/src/base_fast_paths.rs`) install only on
+the GNU R release whose code they follow, recognised by a hash. Against an older GNU R, such as a
+container's 4.3.3, ry runs that release's base R and most fast paths stay out, so only CI, which
+pins the matching release, checks them against GNU R. Locally, `RY_FAST_PATHS=0` turns off the
+paths that skip R frames (`message`, `signalCondition`, the unhandled-warning shortcut), and running
+a case with and without it on ry's own base R compares them with the R bodies they stand for.
 
 ## The plot gallery
 
@@ -224,6 +238,25 @@ Other builds differ in the last digits too: OpenBLAS changes `lm` and `arima` re
 of `NA^NaN` depends on the compiler. glibc's `mktime` starts its search from the offset its last call
 found, so a repeated wall-clock time with unknown daylight saving depends on what ran before; the
 cases that print one convert a summer time first.
+
+`crates/oracle/cases/gnu-r.txt` names the build the suite was recorded with: its release, and its
+BLAS and LAPACK libraries by file name. Every `verify`, `record` and `compare` report starts with the
+build of the GNU R it ran, and a comparison against recorded outcomes names the recorded build.
+`verify`, `record` and the `recorded_outcomes_match_gnu_r` test check the build file before they run
+a case:
+
+| GNU R at hand | `verify` | `record`, `RY_BLESS=1` | `recorded_outcomes_match_gnu_r` |
+|---|---|---|---|
+| same release and libraries | runs | runs | runs |
+| other BLAS or LAPACK | warns, runs | warns, runs | warns, runs |
+| other release | refuses (exit 2) | refuses (exit 2) | skips, naming both builds |
+| no build file | warns, runs | writes the file | fails (bless writes it) |
+
+On a machine whose `PATH` has another release, set `ORACLE_R` to a 4.6.2 build. To move the suite
+to a new release, delete `gnu-r.txt` and record every case. A GNU R killed by a signal before it
+writes its report skips the case with `skip ... this GNU R crashed`, because some hardened builds
+abort with "buffer overflow detected" in graphics cases that the reference build runs; a crash of
+the second engine stays a failure.
 
 Record with `ORACLE_R=<that R> oracle record crates/oracle/cases` and review every changed
 `.expected` file.

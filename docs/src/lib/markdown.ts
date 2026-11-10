@@ -4,7 +4,7 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
 import starlightConfig from 'virtual:starlight/user-config';
 import vennSource from '../components/Venn.astro?raw';
-import { benchmarkMachine, benchmarkProgramsMarkdown, benchmarkSummaryMarkdown, benchmarkTableMarkdown, realWorkloadMarkdown } from './benchmarks';
+import { benchmarkFact, benchmarkProgramsMarkdown, benchmarkSummaryMarkdown, benchmarkTableMarkdown, realWorkloadMarkdown, speedChartMarkdown } from './benchmarks';
 
 type DocsPage = CollectionEntry<'docs'>;
 type SidebarItem = { label?: string; slug?: string; items?: SidebarItem[] };
@@ -117,15 +117,25 @@ function bodyToMarkdown(body: string): string {
       push(benchmarkProgramsMarkdown(headingLevel + 1), false);
       continue;
     }
-    if (/^<BenchmarkMachine\b/.test(line.trim())) {
-      push(`Measured on ${benchmarkMachine}.`, false);
+    const chart = /^<SpeedChart\b[^>]*\bname="(real|kernels)"/.exec(line.trim());
+    if (chart) {
+      push(speedChartMarkdown(chart[1] as 'real' | 'kernels'), false);
       continue;
     }
 
-    push(rewriteLinks(line), false);
+    push(rewriteLinks(inlineFacts(line)), false);
   }
 
   return output.join('\n').trim();
+}
+
+// `<BenchmarkMachine suite="real" field="repeat" />` inside a table cell becomes its text.
+function inlineFacts(line: string): string {
+  return line.replace(/<BenchmarkMachine\b([^>]*)\/>/g, (_, attributes: string) => {
+    const suite = /suite="(real|kernels)"/.exec(attributes)?.[1] ?? 'kernels';
+    const field = /field="(machine|repeat)"/.exec(attributes)?.[1] ?? 'machine';
+    return benchmarkFact(suite as 'real' | 'kernels', field as 'machine' | 'repeat');
+  });
 }
 
 function vennDescription(): string {

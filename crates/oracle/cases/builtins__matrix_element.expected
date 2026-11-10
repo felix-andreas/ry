@@ -12,9 +12,9 @@
 | [1] "subscript out of bounds"
 | [1] "attempt to select less than one element in get1index <real>"
 | [1] "subscript out of bounds"
-| [1] "invalid negative subscript in get1index <real>"
-| [1] "attempt to select less than one element in integerOneIndex"
-| [1] "attempt to select less than one element in integerOneIndex"
+| [1] 2
+| [1] 2
+| [1] "attempt to select more than one element in integerOneIndex"
 | [1] 2
 | [1] "attempt to select more than one element in get1index"
 | [1] "incorrect number of subscripts"
