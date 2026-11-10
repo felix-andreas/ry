@@ -121,10 +121,11 @@ pub enum Counter {
     FramesReified,
     PackageCalls,
     PackageCallsDirect,
+    WrappersInlined,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 20] = [
+    pub const ALL: [Counter; 21] = [
         Counter::ClosureCalls,
         Counter::NativeEntries,
         Counter::BuiltinCalls,
@@ -145,6 +146,7 @@ impl Counter {
         Counter::FramesReified,
         Counter::PackageCalls,
         Counter::PackageCallsDirect,
+        Counter::WrappersInlined,
     ];
 
     pub fn describe(self) -> &'static str {
@@ -171,6 +173,7 @@ impl Counter {
             Counter::PackageCallsDirect => {
                 "package calls that ran in slots, with no argument promise and no environment"
             }
+            Counter::WrappersInlined => "calls of one-builtin wrappers run without their body",
         }
     }
 }

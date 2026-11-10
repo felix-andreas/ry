@@ -1833,6 +1833,64 @@ pub unsafe fn call_with_plan(
     )
 }
 
+/// Runs a call of `function`, a closure whose body is the single call `body` of the builtin
+/// `builtin`, by calling the builtin with `builtin_args` from a frame that holds only the
+/// formals' values in a slot window at `header`, with `missing` their missing bits. The
+/// arguments are values that reading ran no R code for, so binding them where the body would
+/// have forced promises is invisible, and the frame is real: native code the builtin calls back
+/// into R from, an error it raises, `sys.call()`, `sys.function()` and `traceback()` all see the
+/// wrapper's call, and anything that asks for the frame's environment gets one made from the
+/// slots. What the body's activation would add (its registers, the lookups of the builtin and
+/// the free variables, the forcing of promises) is gone, which is most of a wrapper call.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn run_wrapper(
+    call: Sexp,
+    function: Sexp,
+    header: u32,
+    missing: u64,
+    sys_parent: Sexp,
+    args: &[Arg],
+    body: Sexp,
+    builtin: Sexp,
+    builtin_args: &[Arg],
+) -> R<Sexp> {
+    let _window = SlotWindow(header);
+    activity::count(Counter::ClosureCalls);
+    activity::count(Counter::WrappersInlined);
+    let _frame = crate::profile_summary::enter_closure(call, function);
+    let state = interp();
+    if state.frames.len() as u32 >= state.max_depth {
+        return Err(error_in(
+            call,
+            "evaluation nested too deeply: infinite recursion / options(expressions=)?",
+        ));
+    }
+    let caller = if sys_parent == nil() {
+        state.slot_owner
+    } else {
+        crate::NO_SLOTS
+    };
+    let (depth, caller_srcref) = push_frame(
+        call, function, nil(), sys_parent, args, &[], header, missing, caller,
+    )?;
+    let state = interp();
+    let owner = state.slot_owner;
+    state.slot_owner = (depth - 1) as u32;
+    let result = scope(|| {
+        let definition = builtin_def(builtin)?;
+        bytecode::call_builtin(definition, body, builtin, builtin_args, nil())
+    });
+    let state = interp();
+    state.slot_owner = owner;
+    let frame = &state.frames[depth - 1];
+    let result = if frame.env != nil() || !frame.on_exit.is_empty() || frame.pending != nil() {
+        finish_frame(call, depth, None, result)
+    } else {
+        result
+    };
+    pop_frame(function, depth, args, caller_srcref, result)
+}
+
 /// The environment of the frame at `index`, made from its slots first if it is a slot frame
 /// that has none yet. Everything that hands a frame's environment to R code or native code
 /// reads it here.
@@ -2122,26 +2180,6 @@ pub unsafe fn run_frame(
         CallFrame::Env(env) => (env, crate::NO_SLOTS, 0),
         CallFrame::Slots { header, missing } => (nil(), header, missing),
     };
-    // A slot frame that never made its environment gives up its slots' references, and the
-    // register file drops the window, on every way out.
-    struct SlotWindow(u32);
-    impl Drop for SlotWindow {
-        fn drop(&mut self) {
-            if self.0 == crate::NO_SLOTS {
-                return;
-            }
-            let header = self.0 as usize;
-            unsafe {
-                let registers = &mut interp().bytecode.registers;
-                if *registers.get_unchecked(header) == nil()
-                    && let Some(slots) = registers.get_mut(header + 1..)
-                {
-                    crate::heap().release_slots(slots);
-                }
-                registers.truncate(header);
-            }
-        }
-    }
     let _window = SlotWindow(slots);
     let _activity = activity::enter(Activity::CallSetup, 0);
     activity::count(Counter::ClosureCalls);
@@ -2170,34 +2208,18 @@ pub unsafe fn run_frame(
         };
         refuse_object_system(call, function, sys_parent)?;
     }
-    let start = state.frame_args.len() as u32;
-    state.frame_args.extend_from_slice(args);
-    let method_vars_start = state.method_vars.len() as u32;
-    state.method_vars.extend_from_slice(method_vars);
-    state.frames.push(Frame {
+    let (depth, caller_srcref) = push_frame(
         call,
         function,
         env,
         sys_parent,
-        args: start,
-        on_exit: Vec::new(),
-        handlers: state.handlers.clone(),
-        restarts: state.restarts.clone(),
-        srcref: state.srcref,
-        method_vars: method_vars_start,
-        closures: state.frame_closures.len(),
+        args,
+        method_vars,
         slots,
         missing,
         caller,
-        pending: nil(),
-        unforced: 0,
-    });
-    if PROFILE_TICK.load(Ordering::Relaxed) {
-        record_profile_sample(None)?;
-    }
-    let depth = state.frames.len();
-    let caller_srcref = state.srcref;
-    state.srcref = values::get_attr(function, symbols().srcref);
+    )?;
+    let state = interp();
     if state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP) {
         function.set_gp_bits(gp::CLOSURE_STEP, false);
         crate::debugger::debugged_call(depth);
@@ -2244,6 +2266,19 @@ pub unsafe fn run_frame(
         Ok(pair) => pair,
         Err(unwind) => (None, Err(unwind)),
     };
+    let result = finish_frame(call, depth, signature, result);
+    pop_frame(function, depth, args, caller_srcref, result)
+}
+
+/// What a call returns once its body has run with `result`: a `return()` aimed at the frame, the
+/// return type check, and the `on.exit` expressions, before the frame pops.
+#[inline(always)]
+unsafe fn finish_frame(
+    call: Sexp,
+    depth: usize,
+    signature: Option<Sexp>,
+    result: R<Sexp>,
+) -> R<Sexp> {
     // A slot frame may have made its environment while the body ran; until it does, nothing
     // can name the frame as a `return` or loop target.
     let env = interp().frames[depth - 1].env;
@@ -2269,18 +2304,95 @@ pub unsafe fn run_frame(
     // Promises over the slots that may still be forced need the environment once the slots are
     // gone.
     let frame = &state.frames[depth - 1];
-    let result = if frame.env == nil()
+    if frame.env == nil()
         && frame.pending != nil()
         && frame.unforced > 0
         && frame.unforced > unforced_defaults(frame)
     {
-        match reify(depth - 1) {
-            Ok(_) => result,
-            Err(unwind) => Err(unwind),
+        reify(depth - 1)?;
+    }
+    result
+}
+
+/// A slot frame that never made its environment gives up its slots' references, and the
+/// register file drops the window, on every way out.
+struct SlotWindow(u32);
+
+impl Drop for SlotWindow {
+    fn drop(&mut self) {
+        if self.0 == crate::NO_SLOTS {
+            return;
         }
-    } else {
-        result
-    };
+        let header = self.0 as usize;
+        unsafe {
+            let registers = &mut interp().bytecode.registers;
+            if *registers.get_unchecked(header) == nil()
+                && let Some(slots) = registers.get_mut(header + 1..)
+            {
+                crate::heap().release_slots(slots);
+            }
+            registers.truncate(header);
+        }
+    }
+}
+
+/// Pushes the frame of a call of the closure `function`, makes the closure's srcref current,
+/// and returns the frame's depth with the srcref current before.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+unsafe fn push_frame(
+    call: Sexp,
+    function: Sexp,
+    env: Sexp,
+    sys_parent: Sexp,
+    args: &[Arg],
+    method_vars: &[(Sexp, Sexp)],
+    slots: u32,
+    missing: u64,
+    caller: u32,
+) -> R<(usize, Sexp)> {
+    let state = interp();
+    let start = state.frame_args.len() as u32;
+    state.frame_args.extend_from_slice(args);
+    let method_vars_start = state.method_vars.len() as u32;
+    state.method_vars.extend_from_slice(method_vars);
+    state.frames.push(Frame {
+        call,
+        function,
+        env,
+        sys_parent,
+        args: start,
+        on_exit: Vec::new(),
+        handlers: state.handlers.clone(),
+        restarts: state.restarts.clone(),
+        srcref: state.srcref,
+        method_vars: method_vars_start,
+        closures: state.frame_closures.len(),
+        slots,
+        missing,
+        caller,
+        pending: nil(),
+        unforced: 0,
+    });
+    if PROFILE_TICK.load(Ordering::Relaxed) {
+        record_profile_sample(None)?;
+    }
+    let depth = state.frames.len();
+    let caller_srcref = state.srcref;
+    state.srcref = values::get_attr(function, symbols().srcref);
+    Ok((depth, caller_srcref))
+}
+
+/// Pops the frame at `depth` (one-based) once its call has finished with `result`, restoring
+/// the condition stacks and srcref of the caller.
+#[inline(always)]
+unsafe fn pop_frame(
+    function: Sexp,
+    depth: usize,
+    args: &[Arg],
+    caller_srcref: Sexp,
+    result: R<Sexp>,
+) -> R<Sexp> {
     let state = interp();
     if activity::enabled() {
         count_package_call(function, Some(&state.frames[depth - 1]), args);
