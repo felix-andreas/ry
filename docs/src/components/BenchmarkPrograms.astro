@@ -5,7 +5,7 @@ import { Code, TabItem, Tabs } from '@astrojs/starlight/components';
 import { benchmarkProgram, benchmarkRows, formatRatio } from '../lib/benchmarks';
 
 const programs = [
-	...benchmarkRows().map((row) => ({ name: row.program, note: formatRatio(row.speedup) })),
+	...benchmarkRows().map((row) => ({ name: row.program, note: `${formatRatio(row.speedup)}${row.tooShort ? ' (too short)' : ''}` })),
 	{ name: 'harness', note: 'measure()' },
 ].map((entry) => ({ ...entry, ...benchmarkProgram(entry.name) }));
 ---
