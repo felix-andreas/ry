@@ -1039,10 +1039,25 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
     } else if argument(ClosureFrame::Env(frame), symbols.init)?.is_none() {
         return decline();
     }
-    let step = |position: usize| -> R<()> {
-        let index = values::scalar_integer(position as i32 + 1)?;
-        eval::define(i_symbol, index, frame)?;
-        let element = crate::subset::subset2(x, &[index], Some(true), element_call)?;
+    // `i` is bound to one integer updated in place, as `lapply` does, until `f` keeps or
+    // rebinds it (its reference count changes), and a list's elements are read directly.
+    let mut index = values::scalar_integer(0)?;
+    heap.root(index);
+    eval::define(i_symbol, index, frame)?;
+    let mut bound_refcount = index.refcount();
+    let mut step = |position: usize| -> R<()> {
+        if index.refcount() != bound_refcount {
+            index = values::scalar_integer(0)?;
+            crate::heap().root(index);
+            eval::define(i_symbol, index, frame)?;
+            bound_refcount = index.refcount();
+        }
+        index.slice_mut::<i32>()[0] = position as i32 + 1;
+        let element = if x.kind() == SexpType::List {
+            x.element(position)
+        } else {
+            crate::subset::subset2(x, &[index], Some(true), element_call)?
+        };
         crate::heap().root(element);
         let init = eval::find_var_in_frame(init_symbol, frame)?;
         let init = eval::value_of(init)?;

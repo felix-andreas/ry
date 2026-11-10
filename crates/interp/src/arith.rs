@@ -349,7 +349,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("log", -1, do_log).generic(Generic::Math),
     builtin("round", -1, |call| unsafe { round_like(call, false) })
         .generic(Generic::Math)
-        .keep_missing(),
+        .keep_missing()
+        .direct(direct_round),
     builtin("signif", -1, |call| unsafe { round_like(call, true) })
         .generic(Generic::Math)
         .keep_missing(),
@@ -2739,6 +2740,7 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
         rmath::fround
     };
     match operand.kind() {
+        SexpType::Real if !significant => round_reals(operand, digits),
         SexpType::Integer | SexpType::Logical | SexpType::Real => {
             let count = length(operand);
             let result = alloc(SexpType::Real, count)?;
@@ -2777,6 +2779,60 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
         }
         _ => Err(call.error("non-numeric argument to mathematical function")),
     }
+}
+
+/// `round(x)` or `round(x, digits)` with positional arguments, `x` a double, integer or logical
+/// vector that does not dispatch and `digits` one number that is not `NaN`.
+unsafe fn direct_round(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
+    let (operand, digits) = match *args {
+        [operand] => (operand, 0.0),
+        [operand, digits] => {
+            if !matches!(
+                digits.kind(),
+                SexpType::Real | SexpType::Integer | SexpType::Logical
+            ) || length(digits) != 1
+                || digits.is_object()
+            {
+                return Ok(None);
+            }
+            let digits = values::as_real_scalar(digits);
+            if digits.is_nan() {
+                return Ok(None);
+            }
+            (operand, digits)
+        }
+        _ => return Ok(None),
+    };
+    if operand.is_object() || operand.is_altrep() {
+        return Ok(None);
+    }
+    match operand.kind() {
+        SexpType::Real => round_reals(operand, digits).map(Some),
+        SexpType::Integer | SexpType::Logical => {
+            let count = length(operand);
+            let result = alloc(SexpType::Real, count)?;
+            for (out, &value) in values::reals_mut(result).iter_mut().zip(values::ints(operand)) {
+                *out = if value == NA_INTEGER {
+                    NA_REAL
+                } else {
+                    rmath::fround(value as f64, digits)
+                };
+            }
+            values::copy_most_attributes(operand, result, true)?;
+            Ok(Some(result))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `round(x, digits)` of a materialized double vector, keeping its attributes.
+unsafe fn round_reals(operand: Sexp, digits: f64) -> R<Sexp> {
+    let result = alloc(SexpType::Real, length(operand))?;
+    rmath::fround_slice(values::reals(operand), digits, values::reals_mut(result));
+    if operand.attrib() != nil() {
+        values::copy_most_attributes(operand, result, true)?;
+    }
+    Ok(result)
 }
 
 /// `round` or `signif` with several `digits`, recycled against `x` as GNU R's `math2` recycles
