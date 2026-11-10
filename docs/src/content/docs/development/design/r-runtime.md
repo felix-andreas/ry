@@ -1457,7 +1457,7 @@ columns as ALTREP vectors to native code. The user guide is [DataFrames](/refere
   typing reference). `LazyFrame` holds a plan instead of a table, and `GroupBy` a DataFrame or plan
   plus its keys.
 - **The primary API is Polars' verbs over expressions** (`DataFrame.select`, `with_columns`,
-  `filter`, `group_by` + `GroupBy.agg`, `sort`, `join`, `head`, with `col("x")` expressions), all
+  `filter`, `group_by` + `GroupBy.agg`, `sort`, `join`, `head`, with `DataFrame.col("x")` expressions), all
   qualified names in `package:ry`. Every verb builds a step of `table::lazy::Plan`, and an eager
   verb collects at once. The planner pushes filters below `with_columns` and projections, and pushes
   filters, needed columns and row limits into a file scan. The bracket syntax below stays as

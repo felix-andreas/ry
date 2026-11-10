@@ -1294,10 +1294,8 @@ fn declarations_and_runtime_bind_the_same_names() {
 #[test]
 fn no_shipped_package_exports_a_library_name() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../types");
-    // `col` keeps base R's meaning for anything but a column name by calling `base::col`, and
-    // base is never attached after `package:ry`, so nothing reports the mask.
     let library: BTreeSet<String> = standard_library::names()
-        .chain(frame::package_functions().filter(|&name| name != "col"))
+        .chain(frame::package_functions())
         .map(str::to_owned)
         .collect();
     let mut collisions = Vec::new();

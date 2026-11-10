@@ -49,7 +49,7 @@ dt[units > 2L & region != "asia"]
 `DataFrame.filter` keeps the rows where every condition holds:
 
 ```r
-sales |> DataFrame.filter(col("units") > 2L, col("region") != "asia")
+sales |> DataFrame.filter(DataFrame.col("units") > 2L, DataFrame.col("region") != "asia")
 ```
 
 ```text ry run runtime=ry exact continue
@@ -70,7 +70,7 @@ dt[, .(revenue = units * price)]
 
 ```r
 sales |> DataFrame.select("region", "units")
-sales |> DataFrame.select(revenue = col("units") * col("price"))
+sales |> DataFrame.select(revenue = DataFrame.col("units") * DataFrame.col("price"))
 ```
 
 ```text ry run runtime=ry exact continue
@@ -99,7 +99,7 @@ dt[, .(units = sum(units)), by = region]
 ```r
 sales |>
   DataFrame.group_by("region") |>
-  GroupBy.agg(units = col("units") |> Expr.sum())
+  GroupBy.agg(units = DataFrame.col("units") |> Expr.sum())
 ```
 
 ```text ry run runtime=ry exact continue
@@ -121,7 +121,7 @@ result. A DataFrame follows R's copy-on-modify rule instead of updating in place
 earlier keeps its old columns:
 
 ```r
-sales <- sales |> DataFrame.with_columns(revenue = col("units") * col("price"))
+sales <- sales |> DataFrame.with_columns(revenue = DataFrame.col("units") * DataFrame.col("price"))
 sales
 ```
 
@@ -191,12 +191,12 @@ sales |> DataFrame.sort("region", "units", descending = c(FALSE, TRUE))
 
 | data.table | DataFrame |
 | --- | --- |
-| `dt[, share := x / sum(x), by = g]` | `DataFrame.with_columns(df, share = col("x") / Expr.over(Expr.sum(col("x")), "g"))` |
-| `dt[, r := frank(-x, ties.method = "first"), by = g]` | `DataFrame.with_columns(df, r = Expr.over(Expr.rank(col("x"), descending = TRUE), "g"))` |
+| `dt[, share := x / sum(x), by = g]` | `DataFrame.with_columns(df, share = DataFrame.col("x") / Expr.over(Expr.sum(DataFrame.col("x")), "g"))` |
+| `dt[, r := frank(-x, ties.method = "first"), by = g]` | `DataFrame.with_columns(df, r = Expr.over(Expr.rank(DataFrame.col("x"), descending = TRUE), "g"))` |
 | `dcast(dt, g ~ k, value.var = "x", fun.aggregate = sum)` | `DataFrame.pivot(df, on = "k", index = "g", values = "x", agg = "sum")` |
 | `CJ`-style pairing, or `dt[, .(v = 1:n), by = .(id)]` | `DataFrame.join(df, DataFrame(v = 1:n), how = "cross")` |
-| `dt[, due := day + 28L]` | `DataFrame.with_columns(df, due = col("day") + 28L)` |
-| `dt[, days := as.integer(due - day)]` | `DataFrame.with_columns(df, days = col("due") - col("day"))` |
+| `dt[, due := day + 28L]` | `DataFrame.with_columns(df, due = DataFrame.col("day") + 28L)` |
+| `dt[, days := as.integer(due - day)]` | `DataFrame.with_columns(df, days = DataFrame.col("due") - DataFrame.col("day"))` |
 
 [Working with DataFrames](/reference/dataframes/#windows-and-ranks) shows each with its output.
 
@@ -240,8 +240,8 @@ applied 4 rewrites in 1 file
 ```r
 library(data.table)
 sales <- DataFrame.read_csv("sales.csv")
-totals <- sales |> DataFrame.filter(col("units") > 2L) |> DataFrame.group_by("region") |> GroupBy.agg(units = col("units") |> Expr.sum(), n = Expr.len())
-sales <- sales |> DataFrame.with_columns(revenue = col("units") * col("price"))
+totals <- sales |> DataFrame.filter(DataFrame.col("units") > 2L) |> DataFrame.group_by("region") |> GroupBy.agg(units = DataFrame.col("units") |> Expr.sum(), n = Expr.len())
+sales <- sales |> DataFrame.with_columns(revenue = DataFrame.col("units") * DataFrame.col("price"))
 sales <- sales |> DataFrame.sort("region", "units", descending = c(FALSE, TRUE))
 ```
 
@@ -262,7 +262,7 @@ top <- function(sales: data.table) {
 }
 # becomes
 top <- function(sales: data.table) {
-  return(data.table::as.data.table(as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L)))
+  return(data.table::as.data.table(as.DataFrame(sales) |> DataFrame.filter(DataFrame.col("units") > 2L)))
 }
 ```
 

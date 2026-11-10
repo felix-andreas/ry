@@ -898,7 +898,7 @@ impl<'db> Migration<'_, 'db> {
                                 test.clone()
                             };
                             format!(
-                                "Expr.if_else({guarded} & !Expr.is_null({test}), {}, col({}))",
+                                "Expr.if_else({guarded} & !Expr.is_null({test}), {}, DataFrame.col({}))",
                                 node_text(&value),
                                 quote(&name)
                             )
@@ -1137,7 +1137,7 @@ impl<'db> Migration<'_, 'db> {
                 }
                 // Outside an aggregation, a column in aggregate context gives one value per row.
                 (context == Context::Row).then(|| Fragment {
-                    text: format!("col({})", quote(&name)),
+                    text: format!("DataFrame.col({})", quote(&name)),
                     is_expression: true,
                     piped: false,
                 })

@@ -6,8 +6,8 @@ as.DataFrame
 as.record
 as.tag
 as.tuple
-col
 DataFrame
+DataFrame.col
 DataFrame.columns
 DataFrame.copy
 DataFrame.filter

@@ -137,9 +137,9 @@ Error in ada$email :
   price = [1.5, 2, 4, 3]
 )
 sales |>
-  DataFrame.filter(col("units") > 1L) |>
+  DataFrame.filter(DataFrame.col("units") > 1L) |>
   DataFrame.group_by("region") |>
-  GroupBy.agg(revenue = (col("units") * col("price")) |> Expr.sum())`,
+  GroupBy.agg(revenue = (DataFrame.col("units") * DataFrame.col("price")) |> Expr.sum())`,
         command: "ry run sales.R",
         output: `   region revenue
    <char>   <num>

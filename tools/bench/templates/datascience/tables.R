@@ -27,15 +27,15 @@ make_events_@ID@ <- function(rows: integer = @ROWS@L, groups: integer = @GROUPS@
 
 #@ typed
 summarise_groups_@ID@ <- function(events: Events@ID@) -> DataFrame{group: character[], n: integer[], total: double[], share_flagged: double[]} {
-  DataFrame.sort(GroupBy.agg(DataFrame.group_by(events, "group"), n = Expr.len(), total = Expr.sum(col("amount")), share_flagged = Expr.mean(col("flag"))), "total", descending = TRUE)
+  DataFrame.sort(GroupBy.agg(DataFrame.group_by(events, "group"), n = Expr.len(), total = Expr.sum(DataFrame.col("amount")), share_flagged = Expr.mean(DataFrame.col("flag"))), "total", descending = TRUE)
 }
 
 add_features_@ID@ <- function(events: Events@ID@) -> FeaturedEvents@ID@ {
   DataFrame.with_columns(
     events,
-    rank_in_group = Expr.over(Expr.rank(col("amount"), descending = TRUE), "group"),
-    size_class = Expr.if_else(col("amount") < 25, "small", Expr.if_else(col("amount") < 75, "medium", "large")),
-    z = (col("amount") - Expr.over(Expr.mean(col("amount")), "group")) / Expr.over(Expr.std(col("amount")), "group")
+    rank_in_group = Expr.over(Expr.rank(DataFrame.col("amount"), descending = TRUE), "group"),
+    size_class = Expr.if_else(DataFrame.col("amount") < 25, "small", Expr.if_else(DataFrame.col("amount") < 75, "medium", "large")),
+    z = (DataFrame.col("amount") - Expr.over(Expr.mean(DataFrame.col("amount")), "group")) / Expr.over(Expr.std(DataFrame.col("amount")), "group")
   )
 }
 

@@ -245,9 +245,9 @@ a misspelled column is an error before the query runs:
 ```r ry run runtime=ry strict
 sales <- DataFrame(region = ["eu", "us", "eu"], units = [3L, 5L, 2L], price = [1.5, 2, 3])
 sales |>
-  DataFrame.with_columns(revenue = col("units") * col("price")) |>
+  DataFrame.with_columns(revenue = DataFrame.col("units") * DataFrame.col("price")) |>
   DataFrame.group_by("region") |>
-  GroupBy.agg(total = col("revenue") |> Expr.sum())
+  GroupBy.agg(total = DataFrame.col("revenue") |> Expr.sum())
 #>    region total
 #>    <char> <num>
 #> 1:     eu  10.5

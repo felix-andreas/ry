@@ -184,7 +184,7 @@ pub enum TypeErrorKind<'db> {
         column: String,
     },
     /// An operand of a DataFrame expression whose column type the operation does not take, such
-    /// as `col("region") * 2` on a column of strings. `column` names the column when the operand
+    /// as `DataFrame.col("region") * 2` on a column of strings. `column` names the column when the operand
     /// reads one directly.
     ExpressionOperand {
         operation: String,
@@ -198,7 +198,7 @@ pub enum TypeErrorKind<'db> {
         left: Ty<'db>,
         right: Ty<'db>,
     },
-    /// An operator in a DataFrame expression that dates do not support, such as `col("day") * 2`
+    /// An operator in a DataFrame expression that dates do not support, such as `DataFrame.col("day") * 2`
     /// or a date compared with a number.
     DateOperation {
         operator: &'static str,
@@ -11506,7 +11506,7 @@ impl<'db> Checker<'db, '_> {
                     ..column
                 };
                 match name.as_str() {
-                    "col" => {
+                    "DataFrame.col" => {
                         let first = first?;
                         let ExpressionKind::Literal(LiteralKind::String(text)) = module.kind(first)
                         else {
@@ -18298,7 +18298,7 @@ fn variable_name(module: &Module, id: ExprId) -> Option<Symbol> {
     }
 }
 
-/// The column `col("name")` reads, looking through parentheses.
+/// The column `DataFrame.col("name")` reads, looking through parentheses.
 fn column_read(module: &Module, mut id: ExprId) -> Option<String> {
     while let ExpressionKind::Paren(inner) = module.kind(id) {
         id = *inner;
@@ -18306,7 +18306,7 @@ fn column_read(module: &Module, mut id: ExprId) -> Option<String> {
     let ExpressionKind::Call { callee, arguments } = module.kind(id) else {
         return None;
     };
-    if !matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "col") {
+    if !matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "DataFrame.col") {
         return None;
     }
     let first = module[arguments].first()?.value?;
@@ -18519,10 +18519,10 @@ fn first_named_column(module: &Module, rest: &[Argument]) -> Option<String> {
     None
 }
 
-/// The first column an expression reads with `col("name")`, in source order.
+/// The first column an expression reads with `DataFrame.col("name")`, in source order.
 fn first_column_read(module: &Module, value: ExprId) -> Option<String> {
     if let ExpressionKind::Call { callee, arguments } = module.kind(value)
-        && matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "col")
+        && matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "DataFrame.col")
         && let Some(first) = module[arguments].first().and_then(|first| first.value)
         && let ExpressionKind::Literal(LiteralKind::String(text)) = module.kind(first)
     {

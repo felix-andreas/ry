@@ -44,7 +44,7 @@ missing: DataFrame
 #---- an_annotation_types_a_read_without_a_file
 #: DataFrame{region: character[], units: integer[]}
 sales <- DataFrame.read_csv("elsewhere.csv")
-kept <- sales |> DataFrame.filter(col("units") > 1L)
+kept <- sales |> DataFrame.filter(DataFrame.col("units") > 1L)
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 kept: DataFrame{region: character[], units: integer[]}
@@ -75,12 +75,12 @@ eu,9.5,north
 sales <- DataFrame.read_csv("data/sales.csv")
 regions <- DataFrame.read_csv("data/regions.csv")
 wider <- sales |>
-  DataFrame.filter(col("units") > 1L) |>
-  DataFrame.with_columns(revenue = col("units") * col("price"))
+  DataFrame.filter(DataFrame.col("units") > 1L) |>
+  DataFrame.with_columns(revenue = DataFrame.col("units") * DataFrame.col("price"))
 joined <- DataFrame.join(wider, regions, on = "region", how = "left")
 totals <- joined |>
   DataFrame.group_by("zone") |>
-  GroupBy.agg(revenue = col("revenue") |> Expr.sum(), top = col("price_right") |> Expr.max())
+  GroupBy.agg(revenue = DataFrame.col("revenue") |> Expr.sum(), top = DataFrame.col("price_right") |> Expr.max())
 #++++
 sales: DataFrame{region: character[], units: integer[], price: double[]}
 regions: DataFrame{region: character[], price: double[], zone: character[]}
@@ -95,7 +95,7 @@ region,units
 eu,3
 #~~~~ main.R
 result <- LazyFrame.scan_csv("data/sales.csv") |>
-  LazyFrame.filter(col("units") > 1L) |>
+  LazyFrame.filter(DataFrame.col("units") > 1L) |>
   LazyFrame.select("region") |>
   LazyFrame.collect()
 #++++
@@ -108,10 +108,10 @@ region,units
 eu,3
 #~~~~ main.R
 sales <- DataFrame.read_csv("data/sales.csv")
-typo <- sales |> DataFrame.filter(col("unit") > 1L)
-text <- sales |> DataFrame.with_columns(bumped = col("region") + 1)
+typo <- sales |> DataFrame.filter(DataFrame.col("unit") > 1L)
+text <- sales |> DataFrame.with_columns(bumped = DataFrame.col("region") + 1)
 factors <- DataFrame.read_csv("data/sales.csv", strings_as_factors = TRUE)
-level <- factors |> DataFrame.select(col("region") * 2)
+level <- factors |> DataFrame.select(DataFrame.col("region") * 2)
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 typo: Unknown
@@ -131,9 +131,9 @@ level: Unknown
 path <- file.path("data", "sales.csv")
 sales <- DataFrame.read_csv(path)
 kept <- sales |>
-  DataFrame.filter(col("units") > 1L) |>
+  DataFrame.filter(DataFrame.col("units") > 1L) |>
   DataFrame.group_by("region") |>
-  GroupBy.agg(total = col("units") |> Expr.sum())
+  GroupBy.agg(total = DataFrame.col("units") |> Expr.sum())
 first <- sales |> DataFrame.head(2L)
 #++++
 path: character
@@ -151,7 +151,7 @@ sales <- DataFrame.read_csv(path)
 kept <- sales |>
   DataFrame.head(5L) |>
   DataFrame.lazy() |>
-  LazyFrame.filter(col("units") > 1L) |>
+  LazyFrame.filter(DataFrame.col("units") > 1L) |>
   LazyFrame.select("units")
 #++++
 path: character
@@ -172,7 +172,7 @@ pick: fn(df: DataFrame) -> DataFrame
 #---- strict_mode_reports_a_query_on_a_frame_that_is_not_a_variable
 # typing: strict
 path <- file.path("data", "sales.csv")
-kept <- DataFrame.read_csv(path) |> DataFrame.filter(col("units") > 1L)
+kept <- DataFrame.read_csv(path) |> DataFrame.filter(DataFrame.col("units") > 1L)
 #++++
 path: character
 kept: DataFrame
@@ -188,7 +188,7 @@ eu,3
 path <- file.path("data", "sales.csv")
 #: DataFrame{region: character[], units: integer[]}
 annotated <- DataFrame.read_csv(path)
-kept <- annotated |> DataFrame.filter(col("units") > 1L)
+kept <- annotated |> DataFrame.filter(DataFrame.col("units") > 1L)
 read <- DataFrame.read_csv("data/sales.csv") |> DataFrame.select("region")
 #++++
 path: character

@@ -1,4 +1,4 @@
-//! The Polars-style `DataFrame` API: column expressions built with `col("x")` and the verbs
+//! The Polars-style `DataFrame` API: column expressions built with `DataFrame.col("x")` and the verbs
 //! `DataFrame.select`, `DataFrame.filter`, `DataFrame.group_by` with `GroupBy.agg`, and the rest,
 //! called by qualified name and chained with `|>`.
 //!
@@ -59,9 +59,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
 /// The API, bound in the `ry` namespace and attached with the rest of `package:ry`. Each verb
 /// passes `sys.call()` so an error names the call the user wrote, not the internal one.
 pub const PACKAGE: &str = r#"
-col <- function(x, as.factor = FALSE) {
-  if (is.character(x)) .expr_column(x) else base::col(x, as.factor)
-}
+DataFrame.col <- function(name) .expr_column(name)
 lit <- function(value) .expr_literal(value)
 Expr.alias <- function(expr, name) .expr_alias(expr, name)
 Expr.sum <- function(expr) .expr_aggregate(expr, "sum")
@@ -131,7 +129,7 @@ local({
     Ops.Expr = function(e1, e2) {
       if (missing(e2)) .expr_operator(.Generic, e1, NULL, TRUE) else .expr_operator(.Generic, e1, e2, FALSE)
     },
-    # An expression wins over the other operand's class, so `col("d") >= as.Date(...)` builds an
+    # An expression wins over the other operand's class, so `DataFrame.col("d") >= as.Date(...)` builds an
     # expression instead of failing on conflicting `Ops.Expr` and `Ops.Date` methods.
     chooseOpsMethod.Expr = function(x, y, mx, my, cl, reverse) TRUE,
     format.Expr = function(x, ...) .expr_format(x),
@@ -276,7 +274,7 @@ unsafe fn expression(value: Sexp, call: Sexp) -> R<Named> {
         _ => Err(error_in(
             call,
             format!(
-                "expected an expression such as `col(\"x\")`, got {}",
+                "expected an expression such as `DataFrame.col(\"x\")`, got {}",
                 describe(value)
             ),
         )),
@@ -551,7 +549,7 @@ unsafe fn named_expressions(list: Sexp, verb: &str, call: Sexp) -> R<Vec<(PlSmal
         return Err(error_in(
             call,
             format!(
-                "`{verb}` takes column names and expressions such as `col(\"x\")`, not {}",
+                "`{verb}` takes column names and expressions such as `DataFrame.col(\"x\")`, not {}",
                 describe(item)
             ),
         ));
@@ -589,7 +587,7 @@ unsafe fn do_filter(call: &Call<'_>) -> R<Sexp> {
     let Some(predicate) = predicate else {
         return Err(error_in(
             caller,
-            "`filter` needs a predicate such as `col(\"x\") > 0`",
+            "`filter` needs a predicate such as `DataFrame.col(\"x\") > 0`",
         ));
     };
     finish(plan.with(Step::Filter(predicate)), lazy, caller)

@@ -32,7 +32,7 @@ synthetic_source_@ID@ <- function(symbols: character[], start: Date, end: Date) 
 
 #@ typed
 latest_prices_@ID@ <- function(prices: Prices@ID@) -> DataFrame{symbol: character[], price: double[], observations: integer[]} {
-  GroupBy.agg(DataFrame.group_by(DataFrame.sort(prices, "date"), "symbol"), price = Expr.last(col("price")), observations = Expr.len())
+  GroupBy.agg(DataFrame.group_by(DataFrame.sort(prices, "date"), "symbol"), price = Expr.last(DataFrame.col("price")), observations = Expr.len())
 }
 
 to_wide_@ID@ <- function(prices: Prices@ID@) -> DataFrame {
