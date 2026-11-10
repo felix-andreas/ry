@@ -15,6 +15,10 @@ native code follows; any other release runs its own R code unchanged.
 | rlang | `trace_back()` | 1.3.0 | 0.16 ms instead of 9 ms at a depth of 200 frames, so every `expect_error()` and `expect_warning()` is cheaper; the testthat workload takes 31% fewer instructions |
 | withr | the helpers behind `local_envvar()`, `with_envvar()`, `local_options()`, `with_options()` and `local_language()` | 3.0.3 | the testthat workload takes 23% fewer instructions, and every test skips creating and deleting a temporary directory, so its wall time halves together with the base fast paths below |
 
+### Faster environment variables
+
+`Sys.getenv()` looks up every name it is given in one pass over the environment. `Sys.setenv()` leaves a variable alone when it already holds the new value, and `Sys.unsetenv()` skips a variable that is not set. withr's `local_envvar()` restores often hit both cases, and the testthat workload takes 1.4% fewer instructions.
+
 ### Faster assignment forms and kernels in the public benchmark suites
 
 `<<-`, array slab writes such as `a[i, 2, ] <- v`, matrix `m[[i, j]]`, vector growth, `attr<-`,
