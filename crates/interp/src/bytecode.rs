@@ -712,6 +712,9 @@ pub enum Op {
     /// site rewrites its own opcode to it after [`fusion::GIVE_UP`] declines in a row, so a site
     /// that never fuses costs one dispatch in tier 0 and no code at all in baseline code.
     Unfused,
+    /// `symbol src`: `symbol <<- src`, which assigns in the first enclosing frame that binds
+    /// `symbol`, or in the global environment.
+    SuperAssign,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its last operand.
@@ -726,7 +729,7 @@ enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 47] = [
+pub const OPS: [Op; 48] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -774,6 +777,7 @@ pub const OPS: [Op; 47] = [
     Op::Missing,
     Op::Fused,
     Op::Unfused,
+    Op::SuperAssign,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2410,7 +2414,7 @@ impl Compiler {
                 }
                 ("for", 3) => plain && args[0].1.kind() == SexpType::Symbol,
                 ("break" | "next", 0) => !self.open_loops.is_empty(),
-                ("<-" | "=", 2) => plain && args[0].1.kind() == SexpType::Symbol,
+                ("<-" | "=" | "<<-", 2) => plain && args[0].1.kind() == SexpType::Symbol,
                 ("&&" | "||", 2) => plain,
                 ("switch", 1..) => switch_compiles(&args),
                 ("function", 2..) => true,
@@ -2518,7 +2522,7 @@ impl Compiler {
         }
         if !subscripts
             .iter()
-            .all(|(_, index)| self.side_effect_free_index(*index, 0))
+            .all(|(_, index)| self.side_effect_free_index(*index, *variable, 0))
         {
             return Ok(None);
         }
@@ -2545,7 +2549,10 @@ impl Compiler {
             return Ok(None);
         }
         let getter = symbol_name(target.car());
-        if matches!(&*getter, "[" | "[[" | "$" | "@") {
+        // `x[i]` and `x[[i]]` with one or two plain subscripts take the element assignment;
+        // the shapes it refuses, such as `x[i, j, ]` or `x[, j]`, replace through `[<-` here.
+        let element = matches!(&*getter, "[" | "[[");
+        if matches!(&*getter, "$" | "@") {
             return Ok(None);
         }
         let parts = values::pairlist_items(target.cdr());
@@ -2565,7 +2572,12 @@ impl Compiler {
             || eval::dot_dot_index(*variable).is_some()
             || !rest.iter().all(|(tag, value)| {
                 *tag != symbols().value
-                    && (constant(*value) || self.side_effect_free_index(*value, 0))
+                    && (constant(*value)
+                        || (element && *value == missing_arg())
+                        // A formal may itself be missing, which selects everything only
+                        // when `[<-` sees the symbol, so it keeps the general assignment.
+                        || (self.side_effect_free_index(*value, *variable, 0)
+                            && !(element && self.formals.contains(value))))
             })
         {
             return Ok(None);
@@ -2600,7 +2612,13 @@ impl Compiler {
         }
         self.expression(args[1].1, base + count - 1)?;
         for (index, (_, value)) in rest.iter().enumerate() {
-            self.expression(*value, base + 1 + index as u32)?;
+            let register = base + 1 + index as u32;
+            if *value == missing_arg() {
+                let empty = self.constant(missing_arg());
+                self.emit(Op::Constant, &[register, empty]);
+            } else {
+                self.expression(*value, register)?;
+            }
         }
         // The call the builtin sees, as GNU R builds it: `` `f<-`(`*tmp*`, ..., value = <rhs>) ``.
         let mut items: SmallVec<[(Sexp, Sexp); 6]> =
@@ -2631,11 +2649,13 @@ impl Compiler {
         Ok(())
     }
 
-    /// Whether evaluating the subscript `index` cannot change a variable of the frame, so the
-    /// compiled assignment may evaluate it before reading the target: a variable of the frame (a
-    /// formal's promise runs in the caller's frame), a numeric constant, a name, base arithmetic
-    /// on variables and numbers, or base `$` and `[[` reading one of those.
-    unsafe fn side_effect_free_index(&self, index: Sexp, depth: u32) -> bool {
+    /// Whether evaluating the subscript `index` cannot change `target` or anything outside the
+    /// frame, so the compiled assignment may evaluate it before reading `target`: a variable of
+    /// the frame (a formal's promise runs in the caller's frame), a numeric constant, a name,
+    /// base arithmetic and comparison on those, base `$` and `[[` reading one of those, `if`
+    /// over them, or an assignment of one of them to another local variable (the growth idiom
+    /// `x[[cap <- if (cap < n) 2L * cap else cap]] <- v`).
+    unsafe fn side_effect_free_index(&self, index: Sexp, target: Sexp, depth: u32) -> bool {
         match index.kind() {
             SexpType::Symbol => {
                 index != symbols().dots
@@ -2665,20 +2685,35 @@ impl Compiler {
                 {
                     let key_free = match &*operator {
                         "$" => key.kind() == SexpType::Symbol && *key != symbols().dots,
-                        _ => name(*key) || self.side_effect_free_index(*key, depth + 1),
+                        _ => name(*key) || self.side_effect_free_index(*key, target, depth + 1),
                     };
                     return *nil_tag == nil()
                         && *key_tag == nil()
                         && key_free
                         && !self.frame_may_bind(index.car())
-                        && self.side_effect_free_index(*object, depth + 1);
+                        && self.side_effect_free_index(*object, target, depth + 1);
                 }
-                ARITHS[..5].iter().any(|(_, name)| *name == &*operator)
-                    && (1..=2).contains(&arguments.len())
-                    && !self.frame_may_bind(index.car())
-                    && arguments.iter().all(|(tag, argument)| {
-                        *tag == nil() && self.side_effect_free_index(*argument, depth + 1)
-                    })
+                if arguments.iter().any(|(tag, _)| *tag != nil()) || self.frame_may_bind(index.car())
+                {
+                    return false;
+                }
+                let operand = |argument: Sexp| self.side_effect_free_index(argument, target, depth + 1);
+                match (&*operator, arguments.as_slice()) {
+                    ("<-" | "=", [(_, variable), (_, value)]) => {
+                        variable.kind() == SexpType::Symbol
+                            && *variable != target
+                            && self.side_effect_free_index(*variable, target, depth + 1)
+                            && operand(*value)
+                    }
+                    ("if", [(_, condition), (_, yes), (_, no)]) => {
+                        operand(*condition) && operand(*yes) && operand(*no)
+                    }
+                    _ => {
+                        ARITHS.iter().any(|(_, name)| *name == &*operator)
+                            && (1..=2).contains(&arguments.len())
+                            && arguments.iter().all(|(_, argument)| operand(*argument))
+                    }
+                }
             }
             _ => false,
         }
@@ -2760,6 +2795,7 @@ impl Compiler {
                 | "return"
                 | "<-"
                 | "="
+                | "<<-"
                 | "&&"
                 | "||"
                 | "function"
@@ -3116,6 +3152,11 @@ impl Compiler {
                 let symbol = self.constant(args[0].1);
                 let slot = self.cache();
                 self.emit(Op::SetVar, &[symbol, dst, slot]);
+            }
+            "<<-" => {
+                self.expression(args[1].1, dst)?;
+                let symbol = self.constant(args[0].1);
+                self.emit(Op::SuperAssign, &[symbol, dst]);
             }
             "&&" | "||" => {
                 let is_and = (name == "&&") as u32;
@@ -3676,7 +3717,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::Ast => 2,
         Op::Guard => 5,
         Op::Jump | Op::Resume => 1,
-        Op::Missing => 2,
+        Op::Missing | Op::SuperAssign => 2,
         Op::JumpUnless => 3,
         Op::Arithmetic => 7,
         Op::Return => 1,
@@ -3793,6 +3834,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::Arithmetic => &[Operator, Register, Register, Register, Call, Constant],
         Op::Return | Op::ForEnd => &[Register],
         Op::Missing => &[Register, Symbol],
+        Op::SuperAssign => &[Symbol, Register],
         Op::ForInit => &[Loop, Register, Constant],
         Op::ForStep => &[Loop, Register, Symbol, Target],
         Op::Invisible | Op::Visible => &[],
@@ -4768,6 +4810,7 @@ handlers! {
     run_missing, step_missing: Missing, true, op_missing;
     run_fused, step_fused: Fused, true, op_fused;
     run_unfused, step_unfused: Unfused, false, op_unfused;
+    run_super_assign, step_super_assign: SuperAssign, true, op_super_assign;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -5197,6 +5240,14 @@ unsafe fn op_ast(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<
 }
 
 #[inline(always)]
+unsafe fn op_super_assign(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let symbol = state.constant(instruction, 0);
+    let value = instruction.input(1);
+    eval::set_var(symbol, value, state.env.enclosure())?;
+    (*state.interp).visible = false;
+    Ok(Flow::Next)
+}
+
 unsafe fn op_missing(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let symbol = state.constant(instruction, 1);
     let value = values::scalar_bool(eval::is_missing(symbol, state.env)?)?;
@@ -5975,9 +6026,22 @@ unsafe fn replace_variable(
             }
             Some(eval::builtin_def(function)?)
         }
+        // A special such as `[<-` evaluates its own arguments, so only its direct entry can take
+        // the registers; anything that entry declines goes to `complex_assign`.
+        SexpType::Special => {
+            let definition = eval::builtin_def(function)?;
+            if target.is_object()
+                || definition.direct.is_none()
+                || !replacement_arguments(setter_call, true)
+            {
+                return Ok(false);
+            }
+            Some(definition)
+        }
         SexpType::Closure if args.len() == 2 => None,
         _ => return Ok(false),
     };
+    let special = function.kind() == SexpType::Special;
     moves::modifying(target)?;
     // Registers count no reference, so an argument that is the target itself, as in
     // `names(x) <- x`, must not watch the replacement change it.
@@ -5990,15 +6054,21 @@ unsafe fn replace_variable(
         target.set_array(was_array);
     }
     args[0] = target;
-    heap.count_transient_binding(env, symbols().tmp);
     let state = interp();
     state.tmp_values.push((env, target));
     let direct = match builtin {
-        Some(definition) if definition.direct.is_some() && replacement_arguments(setter_call) => {
+        Some(definition)
+            if definition.direct.is_some() && replacement_arguments(setter_call, special) =>
+        {
             eval::call_direct(definition, args)
         }
         _ => Ok(None),
     };
+    if special && matches!(direct, Ok(None)) {
+        interp().tmp_values.pop();
+        return Ok(false);
+    }
+    heap.count_transient_binding(env, symbols().tmp);
     let result = match (direct, builtin) {
         (Ok(Some(value)), _) => Ok(value),
         (Err(unwind), _) => Err(unwind),
@@ -6027,13 +6097,14 @@ unsafe fn replace_variable(
 }
 
 /// Whether a replacement call's arguments are untagged but for the trailing `value`, the shape
-/// `complex_assign` builds and a [`BuiltinDef::direct`] entry takes in formal order.
-unsafe fn replacement_arguments(setter_call: Sexp) -> bool {
+/// `complex_assign` builds and a [`BuiltinDef::direct`] entry takes in formal order. Only a
+/// special's entry, which sees subscripts as `[<-` does, takes an empty one (`x[i, ]`).
+unsafe fn replacement_arguments(setter_call: Sexp, empty_allowed: bool) -> bool {
     let mut cell = setter_call.cdr();
     while cell != nil() {
         let last = cell.cdr() == nil();
         let expected = if last { symbols().value } else { nil() };
-        if cell.tag() != expected || cell.car() == missing_arg() {
+        if cell.tag() != expected || (!empty_allowed && cell.car() == missing_arg()) {
             return false;
         }
         cell = cell.cdr();

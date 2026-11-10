@@ -1,0 +1,26 @@
+[stdout]
+| [1]  1  2  3 NA NA  9
+|   a   b   d 
+| 1.5 2.5 4.0 
+| [1] 1+3i 2+4i   NA 0+1i
+| [1] 01 02 00 ff
+| [1]  TRUE    NA FALSE
+|   p   q         
+| "x" "y"  NA "w" 
+| List of 4
+|  $ a:List of 1
+|   ..$ : num 1
+|  $ b: chr "two"
+|  $  : NULL
+|  $  : num 4
+| [1] 2000
+| [1] 2001000
+| [1] 1000500
+| [1] 1 2
+| [1]  1  2 NA  4
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(1, 2, NA, 4)

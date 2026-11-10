@@ -327,6 +327,9 @@ pub struct Interp {
     /// Evaluation depth, for `expressions` and the C stack check.
     pub depth: u32,
     pub max_depth: u32,
+    /// `options(matprod =, ry.blas =)`, which every matrix product reads, kept here by
+    /// `set_option` as GNU R keeps `R_Matprod`, so a product does not walk the options.
+    pub product_options: linalg::ProductOptions,
     /// The lowest address of the stack segment the interpreter runs on, or 0 before the first
     /// closure call learns it (see `eval::on_large_stack`).
     pub stack_floor: usize,
@@ -473,6 +476,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         connections: connection_table,
         depth: 0,
         max_depth: 5000,
+        product_options: linalg::ProductOptions::default(),
         stack_floor: 0,
         stack_ceiling: 0,
         started: std::time::Instant::now(),

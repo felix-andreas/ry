@@ -45,6 +45,7 @@ unsafe extern "C" {
     // two doubles, which `Rcomplex` is.
     fn csqrt(z: Rcomplex) -> Rcomplex;
     fn cexp(z: Rcomplex) -> Rcomplex;
+    fn cpow(x: Rcomplex, y: Rcomplex) -> Rcomplex;
     fn ccos(z: Rcomplex) -> Rcomplex;
     fn csin(z: Rcomplex) -> Rcomplex;
     fn ctan(z: Rcomplex) -> Rcomplex;
@@ -54,7 +55,6 @@ unsafe extern "C" {
     fn clog(z: Rcomplex) -> Rcomplex;
     fn ccosh(z: Rcomplex) -> Rcomplex;
     fn csinh(z: Rcomplex) -> Rcomplex;
-    fn cpow(x: Rcomplex, y: Rcomplex) -> Rcomplex;
 }
 
 pub const BUILTINS: &[BuiltinDef] = &[

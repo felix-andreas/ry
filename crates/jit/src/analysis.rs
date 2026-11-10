@@ -1216,6 +1216,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::SwitchArm
             | Op::Replace
             | Op::Missing
+            | Op::SuperAssign
             | Op::SetSrcref
             | Op::Resume
             | Op::Fused
@@ -2255,6 +2256,8 @@ impl<'a> Builder<'a> {
                 &[],
                 Effect::Opaque,
             ),
+            // An active binding or a frame on the search path may run arbitrary code.
+            Op::SuperAssign => self.opaque_step(state, None, &[], Effect::Opaque),
             Op::Replace => {
                 let value = match state.registers[operand(5) + operand(6) - 1] {
                     Ty::Bottom => Ty::Boxed,
@@ -3357,7 +3360,11 @@ impl<'a> Builder<'a> {
                 return None;
             }
             let register = self.lower_expression(lowering, value, depth)?;
-            match lowering.scope.iter_mut().find(|(symbol, _)| *symbol == target) {
+            match lowering
+                .scope
+                .iter_mut()
+                .find(|(symbol, _)| *symbol == target)
+            {
                 Some(entry) => entry.1 = register,
                 None => lowering.scope.push((target, register)),
             }
@@ -3977,11 +3984,7 @@ fn vector_arithmetic(arith: Arith, a: Ty, b: Ty) -> Option<Ty> {
         | Arith::Greater
         | Arith::LessEqual
         | Arith::GreaterEqual => Ty::LglVec,
-        Arith::Add
-        | Arith::Subtract
-        | Arith::Multiply
-        | Arith::Modulo
-        | Arith::IntegerDivide
+        Arith::Add | Arith::Subtract | Arith::Multiply | Arith::Modulo | Arith::IntegerDivide
             if !doubles =>
         {
             Ty::IntVec
@@ -4019,7 +4022,7 @@ pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
         Op::JumpUnless | Op::Return | Op::ForEnd => smallvec![operand(0)],
         Op::ForInit | Op::ForStep | Op::LogicLeft => smallvec![operand(1)],
         Op::LogicRight => smallvec![operand(1), operand(2)],
-        Op::SetVar => smallvec![operand(1)],
+        Op::SetVar | Op::SuperAssign => smallvec![operand(1)],
         _ => SmallVec::new(),
     }
 }
@@ -4072,7 +4075,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
         Op::Constant | Op::GetVar | Op::GetFun | Op::Ast | Op::Closure | Op::Missing => {
             kill(operand(0), live)
         }
-        Op::SetVar => gen_(operand(1), live),
+        Op::SetVar | Op::SuperAssign => gen_(operand(1), live),
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             gen_(operand(0), live)
         }

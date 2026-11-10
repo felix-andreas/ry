@@ -521,26 +521,26 @@ pub unsafe fn scalar_bool(value: bool) -> R<Sexp> {
 }
 
 pub unsafe fn scalar_integer(value: i32) -> R<Sexp> {
-    let object = alloc(SexpType::Integer, 1)?;
-    object.slice_mut::<i32>()[0] = value;
-    Ok(object)
+    scalar(SexpType::Integer, [value as u32 as u64, 0])
 }
 
 pub unsafe fn scalar_real(value: f64) -> R<Sexp> {
-    let object = alloc(SexpType::Real, 1)?;
-    object.slice_mut::<f64>()[0] = value;
-    Ok(object)
+    scalar(SexpType::Real, [value.to_bits(), 0])
 }
 
 pub unsafe fn scalar_complex(value: Rcomplex) -> R<Sexp> {
-    let object = alloc(SexpType::Complex, 1)?;
-    object.slice_mut::<Rcomplex>()[0] = value;
-    Ok(object)
+    scalar(SexpType::Complex, [value.r.to_bits(), value.i.to_bits()])
 }
 
 pub unsafe fn scalar_raw(value: u8) -> R<Sexp> {
-    let object = alloc(SexpType::Raw, 1)?;
-    object.slice_mut::<u8>()[0] = value;
+    scalar(SexpType::Raw, [value as u64, 0])
+}
+
+#[inline]
+unsafe fn scalar(kind: SexpType, payload: [u64; 2]) -> R<Sexp> {
+    let heap = crate::heap();
+    let object = heap.alloc_scalar(kind, payload)?;
+    heap.root(object);
     Ok(object)
 }
 

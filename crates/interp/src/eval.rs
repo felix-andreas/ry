@@ -3765,7 +3765,7 @@ pub unsafe fn complex_assign(
     // promise deliberately counts no reference, so the inner assignment cannot see the share.
     let index_assigns = getters.iter().any(|getter| {
         any_item(getter.cdr().cdr(), |argument| {
-            contains_assignment(argument, symbols)
+            assigns_to(argument, inner, symbols)
         })
     });
     let mut binding_env = lookup_env;
@@ -3885,15 +3885,28 @@ pub unsafe fn complex_assign(
     assign_symbol(inner, replaced?, env, superassign)
 }
 
-unsafe fn contains_assignment(expression: Sexp, symbols: &values::Symbols) -> bool {
+/// Whether `expression` contains an assignment whose target is `variable` or a part of it. An
+/// assignment to another variable cannot rebind `variable`, so it needs no defensive copy.
+unsafe fn assigns_to(expression: Sexp, variable: Sexp, symbols: &values::Symbols) -> bool {
     if expression.kind() != SexpType::Language {
         return false;
     }
     let head = expression.car();
-    head == symbols.assign
-        || head == symbols.assign2
-        || head == symbols.assign_eq
-        || any_item(expression, |part| contains_assignment(part, symbols))
+    let assignment = head == symbols.assign || head == symbols.assign2 || head == symbols.assign_eq;
+    if assignment {
+        let mut target = expression.cdr().car();
+        while target.kind() == SexpType::Language {
+            target = target.cdr().car();
+        }
+        let named = target == variable
+            || (target.kind() == SexpType::String
+                && length(target) == 1
+                && target.element(0).bytes() == variable.car().bytes());
+        if named {
+            return true;
+        }
+    }
+    any_item(expression, |part| assigns_to(part, variable, symbols))
 }
 
 /// Whether `test` holds for any value of the pairlist or call `list`.

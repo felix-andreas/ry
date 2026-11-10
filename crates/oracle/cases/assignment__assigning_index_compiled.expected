@@ -1,0 +1,22 @@
+[stdout]
+| List of 2
+|  $ x  : int [1:16] 1 2 3 4 5 6 7 8 9 NA ...
+|   ..- attr(*, "tag")= chr "kept"
+|  $ cap: int 16
+| List of 3
+|  $ x   : Named num [1:3] 10 20 30
+|   ..- attr(*, "names")= chr [1:3] "a" "b" "c"
+|  $ kept: Named num [1:3] 1 2 3
+|   ..- attr(*, "names")= chr [1:3] "a" "b" "c"
+|  $ k   : int 3
+| List of 2
+|  $ : int [1:4] -3 -4 3 4
+|  $ : int 2
+| [1] 1 0 3
+| [1] "missing value where TRUE/FALSE needed"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "missing value where TRUE/FALSE needed"
