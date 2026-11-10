@@ -4,9 +4,8 @@
 //!
 //! A forked child talks to its master over a pipe with GNU R's framing: each message is its
 //! length as a native-endian `R_xlen_t`, then that many bytes, and a zero length announces that
-//! the child is exiting. A second pipe feeds the child's standard input. The runtime's one helper
-//! thread, `unlink()`'s background removal, is joined before a fork, so a fork copies the whole
-//! interpreter in a consistent state with no lock held by a thread the child lacks; what it must
+//! the child is exiting. A second pipe feeds the child's standard input. The runtime starts no
+//! helper threads, so a fork copies the whole interpreter in a consistent state; what it must
 //! not copy is unwritten output, which is flushed first so it is not written twice.
 
 use {
@@ -124,7 +123,6 @@ unsafe fn fork(call: &NativeCall<'_>) -> R<Sexp> {
     // Buffered output would otherwise be written once by each process.
     crate::connections::flush_pending_writes()?;
     flush_standard();
-    crate::file_removal::finish();
     let pipes = if estranged {
         None
     } else {
@@ -158,7 +156,6 @@ unsafe fn fork(call: &NativeCall<'_>) -> R<Sexp> {
             close_fd(master);
         }
         state.is_child = true;
-        crate::file_removal::in_forked_child();
         let master = match pipes {
             Some((result, input)) => {
                 close_fd(result[0]);

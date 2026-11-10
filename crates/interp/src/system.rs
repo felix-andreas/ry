@@ -420,7 +420,6 @@ pub fn session_temp_dir() -> Result<&'static str, String> {
 /// Removes the session's temporary directory. Only the process that created it does: a forked
 /// child shares the path but must leave the directory to its parent.
 pub fn remove_session_temp_dir() {
-    crate::file_removal::finish();
     let Some(Ok(temp)) = SESSION_TEMP.get() else {
         return;
     };

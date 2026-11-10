@@ -3,9 +3,9 @@
 //! Each seed builds the same random tree twice, in two sandboxes: files, nested and read-only
 //! directories, symbolic links into and out of the tree, dangling links, FIFOs and Unix sockets
 //! (which GNU R walks as directories, because it tests `st_mode & S_IFDIR`). One copy is removed by
-//! the reference below, the other by `interp::file_removal::unlink`, which may hand the emptied
-//! skeleton to its background thread. Both must agree on whether the call failed and on everything
-//! left in the sandbox, including what symbolic links point to and the modes `force` changed.
+//! the reference below, the other by `interp::file_removal::unlink`. Both must agree on whether
+//! the call failed and on everything left in the sandbox, including what symbolic links point to
+//! and the modes `force` changed.
 #![cfg(unix)]
 
 use {
@@ -50,7 +50,6 @@ fn unlink_matches_gnu_r_on_generated_trees() {
         );
         assert_eq!(left_reference, left_actual, "seed {seed}: {plan:?}");
     });
-    file_removal::finish();
     fs::remove_dir_all(&scratch).expect("remove the scratch directory");
 }
 

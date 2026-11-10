@@ -898,11 +898,10 @@ a callr worker even on one CPU, and their row comes from the worker's profile
 worker in `processx`'s native code. Weighted by time, R code is 53% of the corpus, builtins 23%,
 native code 5%, I/O 0.7% and waiting 9.5%. Most I/O is `unlink` (1.7 s of a 158 s corpus run), and most
 of that removes single files, such as the `verify_exec_*` files testthat writes around each
-snapshot test in `cli`, which cost GNU R the same system call. Removing a directory tree costs more,
-because `rmdir` waits on the ext4 journal (0.1 ms on an idle disk, 2 to 4 ms under writes), so
-`unlink()` empties the tree on the R thread and leaves the `rmdir` calls to a background thread
-(`decisions.md`, "unlink() leaves rmdir to a background thread"): 300 trees take 0.27 to 0.46 ms
-each under write load, against 2.1 to 3.6 ms on GNU R. The waiting is the suites' own `Sys.sleep`
+snapshot test in `cli`, which cost GNU R the same system call. Removing a directory tree costs
+more, because `rmdir` waits on the ext4 journal (0.1 ms on an idle disk, 2 to 4 ms under writes),
+and GNU R pays that wait too: a testthat-shaped tree takes about 0.35 ms on both idle and 2.6 ms on
+both under write load (`decisions.md`, "unlink() follows GNU R's R_unlink"). The waiting is the suites' own `Sys.sleep`
 (`foreach` 77%, `lgr` 22%, `cachem` 10%), which GNU R pays too. Child R processes started through
 `callr` and `processx` run ry, because `R.home()`'s `bin/R` and `bin/Rscript` start ry, and
 `Rscript -e` starts in 32 ms against GNU R's 140 ms. Start-up dominates the smallest suites
