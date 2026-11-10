@@ -11,6 +11,14 @@ w_unused <- function(x, y) abs(x)
 w_sqrt <- function(x) sqrt(x)
 w_named <- function(a = TRUE, b = 1) list(first = a, second = b)
 w_named_braced <- function(a = TRUE, b = 1) { list(first = a, second = b) }
+# The shape of a namespace's `function(a = NA) { list(a = a) }`, defined in a locked
+# environment and called with every argument left to its default.
+locked <- new.env()
+evalq(locked_context <- function(namespace = NA, scope = NA) {
+  list(namespace = namespace, scope = scope)
+}, locked)
+lockEnvironment(locked, bindings = TRUE)
+locked_context <- get("locked_context", locked)
 w_round_braced <- function(x, digits = 1) { round(x, digits = digits) }
 w_dots <- function(...) c(...)
 pass <- function(...) w_round(...)
@@ -65,6 +73,8 @@ drive <- function(round) {
     }
   )
   str(w_named())
+  str(w_named_braced())
+  str(locked_context())
   str(w_named_braced(value, b = "x"))
   withCallingHandlers(
     w_braced(negative),

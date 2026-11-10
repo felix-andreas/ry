@@ -73,6 +73,12 @@
 |  $ first : logi TRUE
 |  $ second: num 1
 | List of 2
+|  $ first : logi TRUE
+|  $ second: num 1
+| List of 2
+|  $ namespace: logi NA
+|  $ scope    : logi NA
+| List of 2
 |  $ first : num 4
 |  $ second: chr "x"
 | log(x)
@@ -173,6 +179,12 @@
 | List of 2
 |  $ first : logi TRUE
 |  $ second: num 1
+| List of 2
+|  $ first : logi TRUE
+|  $ second: num 1
+| List of 2
+|  $ namespace: logi NA
+|  $ scope    : logi NA
 | List of 2
 |  $ first : num 4
 |  $ second: chr "x"
@@ -275,6 +287,12 @@
 |  $ first : logi TRUE
 |  $ second: num 1
 | List of 2
+|  $ first : logi TRUE
+|  $ second: num 1
+| List of 2
+|  $ namespace: logi NA
+|  $ scope    : logi NA
+| List of 2
 |  $ first : num 4
 |  $ second: chr "x"
 | log(x)
@@ -375,6 +393,12 @@
 | List of 2
 |  $ first : logi TRUE
 |  $ second: num 1
+| List of 2
+|  $ first : logi TRUE
+|  $ second: num 1
+| List of 2
+|  $ namespace: logi NA
+|  $ scope    : logi NA
 | List of 2
 |  $ first : num 4
 |  $ second: chr "x"
