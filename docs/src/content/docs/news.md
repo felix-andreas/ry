@@ -12,7 +12,7 @@ native code follows; any other release runs its own R code unchanged.
 
 | Package | Function | Release | Effect |
 | --- | --- | --- | --- |
-| rlang | `trace_back()` | 1.3.0 | 0.16 ms instead of 9 ms at a depth of 200 frames, so every `expect_error()` and `expect_warning()` is cheaper; the testthat workload takes 32% fewer instructions |
+| rlang | `trace_back()` | 1.3.0 | 0.16 ms instead of 9 ms at a depth of 200 frames, so every `expect_error()` and `expect_warning()` is cheaper; the testthat workload takes 31% fewer instructions |
 
 ## ry 0.4.3-beta, Linux only
 
