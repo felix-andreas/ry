@@ -23,7 +23,7 @@ use {
         lower,
         testing::{
             check_bytecode_agreement, check_code_image_file, check_code_image_load,
-            check_code_image_round_trip, check_element_access_agreement, check_lowering_input,
+            check_code_image_round_trip, check_element_access_agreement, check_environment_agreement, check_lowering_input,
             check_render_drawing, check_unserialize_input, with_interpreter,
         },
         values,
@@ -131,6 +131,11 @@ fn fuzz_element_access_agrees_with_the_ast_evaluator() {
     for_each_seed(300, |seed| {
         check_element_access_agreement(&mut SplitMix64(seed))
     });
+}
+
+#[test]
+fn fuzz_environment_variables_agree_with_the_c_library() {
+    for_each_seed(200, |seed| check_environment_agreement(&mut SplitMix64(seed)));
 }
 
 #[test]

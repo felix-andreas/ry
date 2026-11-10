@@ -148,6 +148,132 @@ unsafe fn outcomes(body: &str, a: &str, b: &str) -> (String, Vec<String>) {
     }
 }
 
+/// `Sys.getenv`, `Sys.setenv` and `Sys.unsetenv` agree with the C library, compared by their
+/// deparsed results because the bare interpreter has no `identical()`: after a random
+/// sequence of changes made from R and from Rust, every name reads back what `getenv()` returns,
+/// a set reports which names `setenv()` accepts, and an unset reports `TRUE` for every name. The
+/// names overlap as prefixes of one another, repeat within a call, are empty, hold `=` or are not
+/// ASCII, and a value may itself look like the rest of an entry (`A` set to `B=x` is what a lookup
+/// of `A=B` finds).
+pub fn check_environment_agreement(entropy: &mut impl Entropy) {
+    const NAMES: &[&str] = &[
+        "RY_FUZZ_ENV", "RY_FUZZ_ENV_A", "RY_FUZZ_ENVA", "RY_FUZZ_EN", "RY_FUZZ_ENV=B", "",
+        "RY_FUZZ_\u{e9}", "NA",
+    ];
+    const VALUES: &[&str] = &["a", "", "B=x", "\u{e9}t\u{e9}", "NA", "x y", "=", "long"];
+    fn text(entropy: &mut impl Entropy, table: &[&str]) -> String {
+        match table[entropy.below(table.len())] {
+            "long" => "v".repeat(300),
+            other => other.to_owned(),
+        }
+    }
+    fn quoted(text: &str) -> String {
+        let mut out = String::from("\"");
+        for character in text.chars() {
+            match character {
+                '"' | '\\' => {
+                    out.push('\\');
+                    out.push(character);
+                }
+                ' '..='~' => out.push(character),
+                _ => out.push_str(&format!("\\u{{{:x}}}", u32::from(character))),
+            }
+        }
+        out.push('"');
+        out
+    }
+    fn vector(items: &[String]) -> String {
+        let items: Vec<String> = items.iter().map(|item| quoted(item)).collect();
+        format!("c({})", items.join(", "))
+    }
+    fn valid(name: &str) -> bool {
+        !name.is_empty() && !name.contains('=')
+    }
+    with_interpreter(|| {
+        for name in NAMES.iter().filter(|name| valid(name)) {
+            // SAFETY: the interpreter lock is held, and nothing else in the process changes these
+            // variables.
+            unsafe { std::env::remove_var(name) };
+        }
+        for step in 0..12 {
+            let count = 1 + entropy.below(3);
+            let names: Vec<String> = (0..count).map(|_| text(entropy, NAMES)).collect();
+            match entropy.below(4) {
+                0 => {
+                    for name in names.iter().filter(|name| valid(name)) {
+                        let value = text(entropy, VALUES);
+                        // SAFETY: as above.
+                        unsafe { std::env::set_var(name, value) };
+                    }
+                }
+                1 => {
+                    let new_values: Vec<String> =
+                        (0..count).map(|_| text(entropy, VALUES)).collect();
+                    let accepted: Vec<&str> = names
+                        .iter()
+                        .map(|name| if valid(name) { "TRUE" } else { "FALSE" })
+                        .collect();
+                    let call = format!(
+                        ".Internal(Sys.setenv({}, {}))",
+                        vector(&names),
+                        vector(&new_values)
+                    );
+                    let expected = format!("c({})", accepted.join(", "));
+                    // SAFETY: the interpreter is installed.
+                    let (actual, expected) = unsafe { (run(&call), run(&expected)) };
+                    assert_eq!(actual, expected, "step {step}: {call}");
+                    // The last of a repeated name wins, as consecutive `setenv()` calls leave it.
+                    for (name, value) in names.iter().zip(&new_values).rev() {
+                        if valid(name) {
+                            assert_eq!(
+                                std::env::var(name).ok().as_deref(),
+                                Some(value.as_str()),
+                                "step {step}: {call} left {name}"
+                            );
+                            break;
+                        }
+                    }
+                }
+                2 => {
+                    let call = format!(".Internal(Sys.unsetenv({}))", vector(&names));
+                    let expected = format!("c({})", vec!["TRUE"; count].join(", "));
+                    // SAFETY: the interpreter is installed.
+                    let (actual, expected) = unsafe { (run(&call), run(&expected)) };
+                    assert_eq!(actual, expected, "step {step}: {call}");
+                    for name in names.iter().filter(|name| valid(name)) {
+                        assert!(std::env::var_os(name).is_none(), "step {step}: {call} kept {name}");
+                    }
+                }
+                _ => {}
+            }
+            let probe: Vec<String> = (0..1 + entropy.below(4))
+                .map(|_| text(entropy, NAMES))
+                .collect();
+            let expected: Vec<String> = probe
+                .iter()
+                .map(|name| {
+                    let found = (!name.is_empty())
+                        .then(|| std::env::var_os(name))
+                        .flatten();
+                    found.map_or_else(
+                        || "<unset>".to_owned(),
+                        |value| value.to_string_lossy().into_owned(),
+                    )
+                })
+                .collect();
+            let call = format!(".Internal(Sys.getenv({}, \"<unset>\"))", vector(&probe));
+            // SAFETY: the interpreter is installed.
+            let (actual, expected) = unsafe { (run(&call), run(&vector(&expected))) };
+            assert_ne!(actual, "error", "step {step}: {call}");
+            assert_eq!(actual, expected, "step {step}: {call}");
+        }
+        for name in NAMES.iter().filter(|name| valid(name)) {
+            // SAFETY: as above.
+            unsafe { std::env::remove_var(name) };
+        }
+    });
+}
+
 /// Bodies that put into a code object what the arithmetic generator does not: strings, nested
 /// functions, named arguments and calls the compiler leaves to the evaluator.
 const IMAGE_BODIES: &[&str] = &[
