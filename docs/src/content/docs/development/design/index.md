@@ -41,7 +41,7 @@ the next step needs column vocabularies and depends on how data frame row types 
 ### [Inline type syntax](/development/design/inline-type-syntax/)
 
 The proposal to write types inline instead of in `#:` comments. Inline annotations are now built
-and on by default (see [inline annotations](/tutorial/runtime#inline-annotations)), so the page's
+and on by default (see [inline annotations](/guide#inline-annotations)), so the page's
 recommendation against building them is superseded; it remains the record of the design.
 
 ### [REPL design](/development/design/repl/)

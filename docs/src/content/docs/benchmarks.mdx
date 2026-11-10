@@ -64,10 +64,12 @@ left out of the results.
 
 Recursion and loops gain the most from the JIT, while vectorized builtins already run in C on GNU R.
 Types add a second gain: a typed function in strict mode compiles to native code before its first
-call and works on native numbers, strings and lists, so `closures`, `report` and `expr_tree` run far
+call and works on native numbers and lists, so `closures` and the `array_*` kernels run tens of times
 faster typed. Whole-vector arithmetic (`vector_arith`) gains little, because each operation still
-writes a new vector. `log_rank` is the exception: its typed version takes a record parameter, which
-the native compiler does not handle yet, so it runs in the interpreter and is slower than plain R.
+writes a new vector. Programs built on records, tags and text (`expr_tree`, `orders`, `report`,
+`validate`, `log_rank`) run mostly in the interpreter, because the native compiler does not handle
+those types, so their typed versions gain little or lose. `log_rank` loses the most: only its small
+counting helper compiles, and the rest runs about 20 times slower than plain R.
 
 <details>
 <summary>The numbers: seconds and peak memory</summary>

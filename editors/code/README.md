@@ -101,20 +101,18 @@ non-exhaustive-match
 
 ## Speed
 
-On ry's runtime, loops and recursion run several times faster than on GNU R, and vectorized code
-runs about as fast. The table gives seconds per program and the peak memory of the whole process,
-R's startup included:
+ry's runtime against GNU R on a few synthetic kernels, as speed-ups, untyped and typed in strict
+mode. Loops and recursion gain the most; call-heavy code is slower than on GNU R:
 
 <!-- bench-why -->
-| program | GNU R | ry | ry, typed and strict | speed-up | peak memory, GNU R / ry / typed |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `fib` | 0.559 s | 0.007 s | 0.004 s | 79.9x | 52 / 49 / 50 MiB |
-| `drawdown` | 0.200 s | 0.029 s | 0.007 s | 6.9x | 71 / 146 / 134 MiB |
-| `vector_arith` | 0.111 s | 0.091 s | 0.053 s | 1.2x | 107 / 114 / 77 MiB |
-| `log_rank` | 0.071 s | 0.046 s | 1.426 s | 1.5x | 105 / 64 / 108 MiB |
+| program | ry | ry, typed |
+| --- | ---: | ---: |
+| `fib` | 80x | 140x |
+| `drawdown` | 6.90x | 29x |
+| `vector_arith` | 1.22x | 2.09x |
+| `log_rank` | 1.54x | 0.05x |
 <!-- /bench-why -->
 
-The typed column runs the same program with type annotations in strict mode.
 [Benchmarks](https://ry-lang.org/benchmarks) has the code of each program and the method.
 
 ## Settings

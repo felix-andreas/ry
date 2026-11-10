@@ -62,7 +62,7 @@ illegal dependency unrepresentable.
   interpreter, which plugs into it through the `Evaluator` hook in `eval.rs`.
 - **`interp`** is the R interpreter: the evaluator, the tier-0 bytecode, conditions, S3 and S4
   dispatch, and base R's primitives and internals in Rust, plus the check of
-  [inline annotations](/tutorial/runtime#inline-annotations) at function boundaries. It depends on
+  [inline annotations](/guide#inline-annotations) at function boundaries. It depends on
   `heap`, `syntax` and `table`, and `libr` installs it through the `Evaluator` hook, so it knows
   nothing about C. The values that are ry's own live here too: records and tags, `List`,
   `DataFrame` and the standard library.

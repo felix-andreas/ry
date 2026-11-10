@@ -1,106 +1,70 @@
 ---
-title: Introduction
-description: A type checker, formatter, language server and fast runtime for R, written in Rust
+title: Getting started
+description: ry is a type checker, linter, formatter, language server and fast runtime for R, written in Rust
 ---
 
 import BenchmarkSummary from '../../components/BenchmarkSummary.astro';
-import BenchmarkTable from '../../components/BenchmarkTable.astro';
 
-ry is a toolchain for R, written in Rust. It checks, formats and runs the R code you have, and adds
-static types and its own data types on top. You adopt it in four steps and can stop after any of
-them:
+ry is a toolchain for R, written in Rust. It checks, formats and runs the R code you already have,
+and it adds static types and its own data types on top. Plain R stays valid, and the checker never
+runs your code.
 
-| Step | You add | ry reports or runs | Runs on GNU R |
-| --- | --- | --- | --- |
-| [1. Check](/tutorial/check) | nothing | unresolved names, syntax errors, lints; formats | yes |
-| [2. Type](/tutorial/types) | `typing = true`, `#:` comments | type errors | yes |
-| [3. Run](/tutorial/runtime) | `ry run` | faster R, inline types, records, tagged unions | no |
-| [4. Go fully typed](/tutorial/fully-typed) | `strict = true` | an error for every value without a known type | no |
-
-## Check
-
-With no configuration, ry resolves every name by R's scoping rules:
-
-```r
-net_price <- function(price, rate) {
-  price * (1 - ratee)
-}
-```
-
-```text ry check
-unresolved
-  ! I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?
-```
-
-## Type
-
-With `typing = true`, ry infers types from use. A `#:` comment pins a contract, and the file stays
-plain R:
+Here is a function with a typo and a call with the wrong type of argument. The `#:` comment is an
+optional type annotation, so the file stays plain R:
 
 ```r
 #: fn(price: double, rate: double) -> double
 net_price <- function(price, rate) {
-  price * (1 - rate)
+  price * (1 - ratee)
 }
 
 net_price(100, "0.2")
 ```
 
 ```text ry check typing
+unresolved
+
+  ! I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?
+   --[main.R:3:16]
+ 2 | net_price <- function(price, rate) {
+ 3 |   price * (1 - ratee)
+   |                ^^^^^
+ 4 | }
+  help: Change to `rate` (`ry check --fix --unsafe-fixes` applies it)
+
 type-mismatch
+
   x expected `double`, found `character`
+   --[main.R:6:16]
+ 5 |
+ 6 | net_price(100, "0.2")
+   |                ^^^^^
 ```
 
-## Run
+The same findings appear in your editor as you type, through ry's language server.
 
-`ry run` runs R on ry's own runtime. Untyped R is faster than GNU R where the JIT applies and slower
-on call-heavy code, so the two benchmarks are shown side by side:
+## What ry does
+
+- **Check**: unresolved names, syntax errors, lints and, once you switch typing on, type errors.
+- **Format**: `ry fmt`, one style for every file.
+- **Edit**: hover, completion, rename, go to definition and quick fixes in any LSP editor.
+- **Load**: `ry load` and the `ry run` console reload a package after an edit in milliseconds.
+- **Run**: `ry run` runs R on ry's own runtime, with a JIT, records, tagged unions and a typed
+  table.
+
+How ry's runtime compares with GNU R on two benchmark suites:
 
 <BenchmarkSummary />
 
-The real-world workloads are call-heavy: most time goes to calling small closures, dispatching S3
-and S4 methods, signaling conditions and building strings and lists, which the JIT does not
-speed up yet. The kernels are tight loops and vector code. Seconds per kernel, the same plain R on
-GNU R and on ry, and typed in strict mode on ry:
+[Benchmarks](/benchmarks) explains both suites and shows every program.
 
-<BenchmarkTable programs={["fib", "drawdown", "loop_sum", "orders", "expr_tree", "vector_arith", "report"]} />
+## Next steps
 
-Typed functions over numbers, records and `match` compile to native code, which is where the large
-gains are. [Benchmarks](/benchmarks) has every program, the real-world table and the method.
-
-## Model data
-
-ry's records and tagged unions run on its runtime, and `match` must handle every case:
-
-```r
-alias Payment =
-  | :Paid(amount: double)
-  | :Refunded(amount: double)
-  | :Pending
-
-balance <- function(payment: Payment) -> double {
-  match (payment) {
-    :Paid(amount = a) => a
-    :Refunded(amount = a) => -a
-  }
-}
-```
-
-```text ry check typing
-non-exhaustive-match
-  x this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ => ...` arm
-```
-
-Records, tags, `I64`, `Str`, `List` and the standard library together form typed ry, a small
-language with sound types that never touches an R data type. [Typed ry](/reference/language) is a
-one-page tour.
-
-## Status
+1. [Install ry](/installation) and set up your editor.
+2. [Adopt ry](/guide) on a project, in four steps from plain R to fully typed code.
+3. Take the [language tour](/ry) for every feature on one page.
 
 ry is in beta. The checker, formatter, language server and package loader are ready for daily use,
 and diagnostic codes, `ry.toml` keys and the JSON output are stable. ry's runtime is incomplete:
 code that needs something it lacks stops with an error that names it, and `ry R` runs the same code
 on GNU R.
-
-**Next:** [install ry](/installation), then [check your code](/tutorial/check).
-[ry at a glance](/ry) has everything on one page.

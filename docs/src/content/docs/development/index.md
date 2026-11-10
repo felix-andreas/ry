@@ -127,7 +127,7 @@ Every block of `ry` output on a page is a test that `just docs-test` runs throug
 [Docs examples](/development/testing#docs-examples) has the marker format and the rules for tabs.
 
 Agents read the site as Markdown. Every page is also served at its URL plus `.md` (for example
-`/tutorial/types.md`), with the frontmatter, imports and components removed and each tab
+`/guide#step-2-type-your-code.md`), with the frontmatter, imports and components removed and each tab
 group turned into one subheading per tab. `/llms.txt` lists the pages with their descriptions in
 sidebar order, and `/llms-full.txt` concatenates them all. Each page's head
 links its Markdown version with `<link rel="alternate" type="text/markdown">`, and the breadcrumb row

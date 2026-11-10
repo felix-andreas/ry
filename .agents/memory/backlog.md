@@ -214,7 +214,7 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 ## Open: the package loader
 
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
-`docs/.../tutorial/runtime.mdx`). Gaps, roughly in order of how often a real package hits them:
+`docs/.../guide#step-3-run-on-rys-runtime.mdx`). Gaps, roughly in order of how often a real package hits them:
 
 - **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
   the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.

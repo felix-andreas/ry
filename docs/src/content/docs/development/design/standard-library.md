@@ -4,7 +4,7 @@ description: "Design draft: ry's Roc-style standard library of Result, List, Str
 ---
 
 This draft designs ry's standard library: a set of typed, native functions modeled on Roc's
-builtins, which build on ry's [records, tuples and tags](/tutorial/runtime#records-tags-and-match). It
+builtins, which build on ry's [records, tuples and tags](/guide#records-tags-and-match). It
 settles which modules exist, how they are named and typed, and how they reach a program. Once the
 library ships, the user contract is the [standard library reference](/reference/standard-library/).
 
