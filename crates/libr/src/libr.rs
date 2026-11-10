@@ -75,6 +75,7 @@ pub mod attributes;
 pub mod boundary;
 pub mod classes;
 pub mod connections;
+pub mod dot_call;
 pub mod dynload;
 pub mod embed;
 pub mod environments;

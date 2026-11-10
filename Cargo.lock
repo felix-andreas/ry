@@ -2109,6 +2109,7 @@ dependencies = [
  "rcmd",
  "rustc-hash",
  "serde_json",
+ "smallvec",
  "stacker",
  "syntax",
  "table",

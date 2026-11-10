@@ -10,6 +10,7 @@ use {
             ApiResult, DlFunc, Unwind, call_native, enter, error, error_in, report,
             with_native_scope,
         },
+        dot_call::{MAX_ARGUMENTS, slot, symbol_address, symbol_arity},
         dynload::{Dll, RoutineKind, find_routine},
         globals::R_NamesSymbol,
         runtime,
@@ -630,6 +631,11 @@ const NATIVE_BUILTINS: &[BuiltinDef] = &[
 /// Rust; any other routine is native code in a loaded library.
 unsafe fn dot_call(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
     if kind == RoutineKind::Call
+        && let Some(result) = crate::dot_call::call_registered(call)?
+    {
+        return Ok(result);
+    }
+    if kind == RoutineKind::Call
         && let Some(result) = interp::native::call_base_routine(call, Interface::Call)?
     {
         return Ok(result);
@@ -721,14 +727,12 @@ unsafe fn native_call(
             )?
         }
         // A `NativeSymbolInfo` list carries the routine's address in its `address` element.
-        SexpType::List if let Some(address) = native_symbol_address(*name)? => {
+        SexpType::List if let Some(address) = symbol_address(*name) => {
             let address = address.external_address();
             if address.is_null() {
                 return Err(error_in(call, "NULL value passed as symbol address"));
             }
-            let arity = list_element(*name, "numParameters")
-                .filter(|value| value.kind() == SexpType::Integer && value.length() == 1)
-                .map(|value| value.slice::<i32>()[0]);
+            let arity = symbol_arity(*name);
             (
                 std::mem::transmute::<*mut std::ffi::c_void, crate::boundary::DlFunc>(address),
                 arity,
@@ -756,7 +760,7 @@ unsafe fn native_call(
     let arity_error = |count: usize, arity: i32| -> ApiResult<Sexp> {
         let routine_name = match name.kind() {
             SexpType::String => utf8_text(crate::vectors::sexp_elt(*name, 0)?)?.into_owned(),
-            SexpType::List => list_element(*name, "name")
+            SexpType::List => slot(*name, 0, interp::values::symbols().name.car())
                 .filter(|value| value.kind() == SexpType::String)
                 .and_then(|value| {
                     utf8_text(value.element(0))
@@ -775,7 +779,7 @@ unsafe fn native_call(
     };
     match kind {
         RoutineKind::Call => {
-            if values.len() > 65 {
+            if values.len() > MAX_ARGUMENTS {
                 return Err(error_in(call, "too many arguments, sorry"));
             }
             if let Some(arity) = arity
@@ -811,7 +815,7 @@ unsafe fn native_call(
             }
         }
         RoutineKind::C | RoutineKind::Fortran => {
-            if values.len() > 65 {
+            if values.len() > MAX_ARGUMENTS {
                 return Err(error_in(call, "too many arguments, sorry"));
             }
             if let Some(arity) = arity
@@ -1872,25 +1876,6 @@ pub unsafe extern "C" fn R_dot_Last() {
         Some(evaluator) => evaluator.dot_last(),
         None => Ok(()),
     })
-}
-
-/// The element of a named list called `name`.
-unsafe fn list_element(list: Sexp, name: &str) -> Option<Sexp> {
-    let names = crate::attributes::raw_attribute(list, R_NamesSymbol.get());
-    if names.kind() != SexpType::String {
-        return None;
-    }
-    (0..names.length() as usize)
-        .find(|&index| names.element(index).bytes() == name.as_bytes())
-        .map(|index| list.element(index))
-}
-
-/// The routine address of a `NativeSymbolInfo` list, if `value` is one.
-unsafe fn native_symbol_address(value: Sexp) -> ApiResult<Option<Sexp>> {
-    if !crate::attributes::inherits(value, "NativeSymbolInfo")? {
-        return Ok(None);
-    }
-    Ok(list_element(value, "address").filter(|address| address.kind() == SexpType::ExternalPtr))
 }
 
 const INFIX: &[&str] = &[
