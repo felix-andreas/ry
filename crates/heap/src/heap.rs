@@ -868,6 +868,24 @@ impl Heap {
         Ok(object)
     }
 
+    /// A one-element numeric vector whose element is the leading bytes of `payload`. Every
+    /// such scalar occupies the same 48-byte slot, so the size class is a constant, and the
+    /// payload's two words cover the whole data area, so nothing is zeroed first.
+    #[inline]
+    pub unsafe fn alloc_scalar(&mut self, kind: SexpType, payload: [u64; 2]) -> HeapResult<Sexp> {
+        debug_assert!(matches!(
+            kind,
+            SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex | SexpType::Raw
+        ));
+        const SIZE: usize = VECTOR_DATA_OFFSET + 16;
+        const CLASS: u8 = SIZE_CLASS_BY_WORDS[SIZE / 8];
+        let object = self.allocate_small(kind, CLASS as usize, SIZE, VECTOR_DATA_OFFSET, &[])?;
+        object.set_length_and_capacity(1, 1);
+        let data = object.data().cast::<[u64; 2]>();
+        data.write(payload);
+        Ok(object)
+    }
+
     /// Reports every vector allocation whose size, as GNU R counts it, exceeds `threshold`
     /// bytes to `reporter`, or stops reporting when `reporter` is `None`.
     pub fn report_allocations(&mut self, reporter: Option<fn(usize) -> bool>, threshold: usize) {

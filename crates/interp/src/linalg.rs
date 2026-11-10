@@ -373,6 +373,17 @@ fn real_product(
         return;
     }
     match product {
+        // A single row makes each entry one dot product, summed in the order `dgemm` uses.
+        Product::Matrix if x_rows == 1 => {
+            for (col, entry) in z.iter_mut().enumerate() {
+                let y_col = &y[col * y_rows..][..y_rows];
+                let mut sum = 0.0;
+                for (&value, &scale) in x.iter().zip(y_col) {
+                    sum += value * scale;
+                }
+                *entry = sum;
+            }
+        }
         // `dgemm("N", "N")` adds whole columns, `z[, col] += x[, inner] * y[inner, col]`, which
         // keeps each entry's order and lets the inner loop vectorize.
         Product::Matrix => {

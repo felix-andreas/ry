@@ -19,7 +19,7 @@ use {
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
     rustc_hash::FxHashSet,
-    smallvec::SmallVec,
+    smallvec::{SmallVec, smallvec},
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -29,7 +29,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
         .direct(direct_subset2),
     special("$", 2, do_dollar),
     special("@", 2, do_at),
-    special("[<-", -1, do_subassign).dispatch_or_eval(),
+    special("[<-", -1, do_subassign)
+        .dispatch_or_eval()
+        .direct(direct_subassign),
     special("[[<-", -1, do_subassign2).dispatch_or_eval(),
     special("$<-", 3, do_dollar_assign),
     special("@<-", 3, do_at_assign),
@@ -192,6 +194,63 @@ pub unsafe fn copy_element(from: Sexp, from_index: usize, to: Sexp, to_index: us
             let single = vector_element(from, from_index)?;
             let converted = coerce_vector(single, to.kind())?;
             copy_element(converted, 0, to, to_index)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copies the first `count` elements of `from` into a fresh `to` of the same type, which is not
+/// ALTREP, in bulk.
+unsafe fn copy_prefix(from: Sexp, to: Sexp, count: usize) -> R<()> {
+    match from.kind() {
+        SexpType::String | SexpType::List | SexpType::Expression => {
+            crate::heap().copy_elements(to, 0, from, 0, count);
+            Ok(())
+        }
+        _ => copy_mapped(from, to, count, |index| index, |index| index),
+    }
+}
+
+/// `to[target(i)] <- from[source(i)]` for `i` in `0..count`, converting to `to`'s type, with a
+/// typed loop for the same type and for the widening to double. `from` is not ALTREP.
+unsafe fn copy_mapped(
+    from: Sexp,
+    to: Sexp,
+    count: usize,
+    source: impl Fn(usize) -> usize,
+    target: impl Fn(usize) -> usize,
+) -> R<()> {
+    match (from.kind(), to.kind()) {
+        (SexpType::Logical | SexpType::Integer, SexpType::Logical | SexpType::Integer)
+            if from.kind() == to.kind() =>
+        {
+            let (from, to) = (values::ints(from), values::ints_mut(to));
+            for index in 0..count {
+                to[target(index)] = from[source(index)];
+            }
+        }
+        (SexpType::Real, SexpType::Real) => {
+            let (from, to) = (values::reals(from), values::reals_mut(to));
+            for index in 0..count {
+                to[target(index)] = from[source(index)];
+            }
+        }
+        (SexpType::Logical | SexpType::Integer, SexpType::Real) => {
+            let (from, to) = (values::ints(from), values::reals_mut(to));
+            for index in 0..count {
+                to[target(index)] = int_to_real(from[source(index)]);
+            }
+        }
+        (SexpType::Complex, SexpType::Complex) => {
+            let (from, to) = (values::complexes(from), values::complexes_mut(to));
+            for index in 0..count {
+                to[target(index)] = from[source(index)];
+            }
+        }
+        _ => {
+            for index in 0..count {
+                copy_element(from, source(index), to, target(index))?;
+            }
         }
     }
     Ok(())
@@ -1117,15 +1176,112 @@ fn gather_row<T: Copy>(target: &mut [T], matrix: &[T], row: usize, rows: usize) 
     }
 }
 
-/// Writes `value`, recycled, over row `row` of a column-major matrix with `rows` rows.
-fn scatter_row<T: Copy>(matrix: &mut [T], value: &[T], row: usize, rows: usize) {
-    for (slot, &element) in matrix
-        .iter_mut()
-        .skip(row)
-        .step_by(rows)
-        .zip(value.iter().cycle())
+/// `[<-` for `m[i, ] <- value` or `a[i, j, ] <- value` (see [`slab`]), called without
+/// building the general call's arguments; any other shape answers `None` and takes the builtin.
+pub(crate) unsafe fn direct_subassign(args: &[Sexp]) -> R<Option<Sexp>> {
+    let [object, indices @ .., value] = args else {
+        return Ok(None);
+    };
+    if indices.len() < 2
+        || object.is_object()
+        || object.is_altrep()
+        || object.is_array()
+        || *value == *object
+        || value.is_object()
+        || value.is_altrep()
     {
-        *slot = element;
+        return Ok(None);
+    }
+    let Some(dims) = values::dims(*object) else {
+        return Ok(None);
+    };
+    let Some(fixed) = slab(indices, &dims, *object, *value) else {
+        return Ok(None);
+    };
+    let result = modifiable(*object)?;
+    write_slab(result, *value, &dims, &fixed);
+    Ok(Some(result))
+}
+
+/// For an assignment into a numeric array of extents `dims` whose every subscript is empty or
+/// one in-range position, given a value of the same type whose length divides the selection:
+/// the position each dimension fixes, or `None` for a dimension taken whole.
+unsafe fn slab(
+    indices: &[Sexp],
+    dims: &[usize],
+    result: Sexp,
+    value: Sexp,
+) -> Option<SmallVec<[Option<usize>; 4]>> {
+    if indices.len() != dims.len()
+        || value.kind() != result.kind()
+        || !matches!(
+            result.kind(),
+            SexpType::Real | SexpType::Integer | SexpType::Logical
+        )
+    {
+        return None;
+    }
+    let fixed = indices
+        .iter()
+        .zip(dims)
+        .map(|(&index, &extent)| {
+            if index == missing_arg() {
+                Some(None)
+            } else {
+                matrix_position(index, extent).map(Some)
+            }
+        })
+        .collect::<Option<SmallVec<[Option<usize>; 4]>>>()?;
+    let selected: usize = fixed
+        .iter()
+        .zip(dims)
+        .map(|(position, &extent)| if position.is_some() { 1 } else { extent })
+        .product();
+    let value_count = length(value);
+    (value_count > 0 && selected > 0 && selected.is_multiple_of(value_count)).then_some(fixed)
+}
+
+/// Writes the slab [`slab`] found.
+unsafe fn write_slab(result: Sexp, value: Sexp, dims: &[usize], fixed: &[Option<usize>]) {
+    match result.kind() {
+        SexpType::Real => scatter_slab(values::reals_mut(result), values::reals(value), dims, fixed),
+        _ => scatter_slab(values::ints_mut(result), values::ints(value), dims, fixed),
+    }
+}
+
+/// Writes `value`, recycled, over the elements of a column-major array with extents `dims`
+/// that `fixed` selects: one position along each dimension that has one, and every position
+/// along the others, the first dimension varying fastest.
+fn scatter_slab<T: Copy>(array: &mut [T], value: &[T], dims: &[usize], fixed: &[Option<usize>]) {
+    let mut offset = 0;
+    let mut stride = 1;
+    let mut free: SmallVec<[(usize, usize); 4]> = SmallVec::new();
+    for (&extent, position) in dims.iter().zip(fixed) {
+        match position {
+            Some(position) => offset += position * stride,
+            None => free.push((stride, extent)),
+        }
+        stride *= extent;
+    }
+    let mut counters: SmallVec<[usize; 4]> = smallvec![0; free.len()];
+    for &element in value.iter().cycle() {
+        if let Some(slot) = array.get_mut(offset) {
+            *slot = element;
+        }
+        let mut dimension = 0;
+        loop {
+            let Some(&(stride, extent)) = free.get(dimension) else {
+                return;
+            };
+            counters[dimension] += 1;
+            offset += stride;
+            if counters[dimension] < extent {
+                break;
+            }
+            offset -= stride * extent;
+            counters[dimension] = 0;
+            dimension += 1;
+        }
     }
 }
 
@@ -2213,26 +2369,11 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         if dims.len() != indices.len() {
             return Err(error_in(call, "incorrect number of subscripts"));
         }
-        // `m[i, ] <- value` on a plain numeric matrix writes one strided row in place.
-        if let ([row, column], &[rows, columns]) = (indices, &dims[..])
-            && *column == missing_arg()
-            && let Some(row) = matrix_position(*row, rows)
-            && value != result
-            && value.kind() == result.kind()
-            && value_count > 0
-            && columns.is_multiple_of(value_count)
+        if value != result
+            && let Some(fixed) = slab(indices, &dims, result, value)
         {
-            match result.kind() {
-                SexpType::Real => {
-                    scatter_row(values::reals_mut(result), values::reals(value), row, rows);
-                    return Ok(result);
-                }
-                SexpType::Integer | SexpType::Logical => {
-                    scatter_row(values::ints_mut(result), values::ints(value), row, rows);
-                    return Ok(result);
-                }
-                _ => {}
-            }
+            write_slab(result, value, &dims, &fixed);
+            return Ok(result);
         }
         let dimnames = get_attr(result, symbols().dimnames);
         let mut selections = Vec::new();
@@ -2324,19 +2465,21 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         .max(stretch);
     if needed > count {
         result = grow(result, needed)?;
-        if names != nil() || !new_names.is_empty() {
-            let grown_names = alloc(SexpType::String, needed)?;
-            for position in 0..needed {
-                let name = if names != nil() && position < count {
-                    names.element(position)
-                } else if position >= count && position - count < new_names.len() {
-                    new_names[position - count].unwrap_or(values::blank_string())
-                } else {
-                    values::blank_string()
-                };
-                values::set_elt(grown_names, position, name);
+        // `grow` keeps the names, padded with blanks, in a vector with room to grow, so only
+        // the appended names are written.
+        if !new_names.is_empty() {
+            let mut grown_names = values::names(result);
+            if grown_names == nil() {
+                grown_names = alloc_with_room(SexpType::String, needed)?;
+                values::set_attr(result, symbols().names, grown_names)?;
             }
-            values::set_attr(result, symbols().names, grown_names)?;
+            for (offset, name) in new_names.iter().enumerate() {
+                if let Some(name) = *name
+                    && count + offset < needed
+                {
+                    values::set_elt(grown_names, count + offset, name);
+                }
+            }
         }
     }
     for (position, &target) in positions.iter().enumerate() {
@@ -2449,12 +2592,9 @@ unsafe fn grow(vector: Sexp, new_length: usize) -> R<Sexp> {
         }
     }
     let result = alloc_with_room(vector.kind(), new_length)?;
-    for position in 0..new_length {
-        if position < count {
-            copy_element(vector, position, result, position)?;
-        } else {
-            set_na(result, position);
-        }
+    copy_prefix(values::materialize(vector)?, result, count)?;
+    for position in count..new_length {
+        set_na(result, position);
     }
     let mut cell = vector.attrib();
     while cell.kind() == SexpType::Pairlist {
@@ -2467,9 +2607,8 @@ unsafe fn grow(vector: Sexp, new_length: usize) -> R<Sexp> {
     let names = values::names(vector);
     if names != nil() {
         let grown = alloc_with_room(SexpType::String, new_length)?;
-        for position in 0..count {
-            values::set_elt(grown, position, names.element(position));
-        }
+        let names = values::materialize(names)?;
+        crate::heap().copy_elements(grown, 0, names, 0, count);
         values::set_attr(result, symbols().names, grown)?;
     }
     Ok(result)
@@ -3106,19 +3245,14 @@ unsafe fn do_set_length(call: &Call<'_>) -> R<Sexp> {
         return Ok(object);
     }
     let result = alloc(object.kind(), new_length)?;
-    for position in 0..new_length {
-        if position < count {
-            copy_element(object, position, result, position)?;
-        } else {
-            set_na(result, position);
-        }
+    copy_prefix(object, result, new_length.min(count))?;
+    for position in count..new_length {
+        set_na(result, position);
     }
     let names = values::names(object);
     if names != nil() {
         let new_names = alloc(SexpType::String, new_length)?;
-        for position in 0..new_length.min(count) {
-            values::set_elt(new_names, position, names.element(position));
-        }
+        copy_prefix(values::materialize(names)?, new_names, new_length.min(count))?;
         values::set_attr(result, symbols().names, new_names)?;
     }
     Ok(result)
@@ -4137,28 +4271,31 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                 other_names = dimnames.element(if by_row { 1 } else { 0 });
             }
         }
+        let source = values::materialize(value)?;
+        let source_rows = if is_matrix {
+            values::dims(value).and_then(|dims| dims.first().copied()).unwrap_or(0)
+        } else {
+            0
+        };
         for line in 0..count {
-            for along in 0..extent {
-                let target = if by_row {
-                    (offset + line) + along * rows
+            let line_offset = offset + line;
+            let target = |along: usize| {
+                if by_row {
+                    line_offset + along * rows
                 } else {
-                    along + (offset + line) * rows
-                };
-                if source_length == 0 {
-                    set_na(result, target);
-                    continue;
+                    along + line_offset * rows
                 }
-                let source = if is_matrix {
-                    let dims = values::dims(value).unwrap_or_default();
-                    if by_row {
-                        line + along * dims[0]
-                    } else {
-                        along + line * dims[0]
-                    }
-                } else {
-                    along % source_length
-                };
-                copy_element(value, source, result, target)?;
+            };
+            if source_length == 0 {
+                for along in 0..extent {
+                    set_na(result, target(along));
+                }
+            } else if is_matrix && by_row {
+                copy_mapped(source, result, extent, |along| line + along * source_rows, target)?;
+            } else if is_matrix {
+                copy_mapped(source, result, extent, |along| along + line * source_rows, target)?;
+            } else {
+                copy_mapped(source, result, extent, |along| along % source_length, target)?;
             }
             let arg = &items[position];
             if is_matrix {

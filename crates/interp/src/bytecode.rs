@@ -692,6 +692,9 @@ pub enum Op {
     /// `dst symbol`: `missing(symbol)` for a plain symbol, read from the frame without building
     /// the special's call.
     Missing,
+    /// `symbol src`: `symbol <<- src`, which assigns in the first enclosing frame that binds
+    /// `symbol`, or in the global environment.
+    SuperAssign,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its last operand.
@@ -706,7 +709,7 @@ enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 45] = [
+pub const OPS: [Op; 46] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -752,6 +755,7 @@ pub const OPS: [Op; 45] = [
     Op::Replace,
     Op::Resume,
     Op::Missing,
+    Op::SuperAssign,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1896,7 +1900,7 @@ impl Compiler {
                 }
                 ("for", 3) => plain && args[0].1.kind() == SexpType::Symbol,
                 ("break" | "next", 0) => !self.open_loops.is_empty(),
-                ("<-" | "=", 2) => plain && args[0].1.kind() == SexpType::Symbol,
+                ("<-" | "=" | "<<-", 2) => plain && args[0].1.kind() == SexpType::Symbol,
                 ("&&" | "||", 2) => plain,
                 ("switch", 1..) => switch_compiles(&args),
                 ("function", 2..) => true,
@@ -2031,7 +2035,10 @@ impl Compiler {
             return Ok(None);
         }
         let getter = symbol_name(target.car());
-        if matches!(&*getter, "[" | "[[" | "$" | "@") {
+        // `x[i]` and `x[[i]]` with one or two plain subscripts take the element assignment;
+        // the shapes it refuses, such as `x[i, j, ]` or `x[, j]`, replace through `[<-` here.
+        let element = matches!(&*getter, "[" | "[[");
+        if matches!(&*getter, "$" | "@") {
             return Ok(None);
         }
         let parts = values::pairlist_items(target.cdr());
@@ -2051,7 +2058,12 @@ impl Compiler {
             || eval::dot_dot_index(*variable).is_some()
             || !rest.iter().all(|(tag, value)| {
                 *tag != symbols().value
-                    && (constant(*value) || self.side_effect_free_index(*value, 0))
+                    && (constant(*value)
+                        || (element && *value == missing_arg())
+                        // A formal may itself be missing, which selects everything only
+                        // when `[<-` sees the symbol, so it keeps the general assignment.
+                        || (self.side_effect_free_index(*value, 0)
+                            && !(element && self.formals.contains(value))))
             })
         {
             return Ok(None);
@@ -2086,7 +2098,13 @@ impl Compiler {
         }
         self.expression(args[1].1, base + count - 1)?;
         for (index, (_, value)) in rest.iter().enumerate() {
-            self.expression(*value, base + 1 + index as u32)?;
+            let register = base + 1 + index as u32;
+            if *value == missing_arg() {
+                let empty = self.constant(missing_arg());
+                self.emit(Op::Constant, &[register, empty]);
+            } else {
+                self.expression(*value, register)?;
+            }
         }
         // The call the builtin sees, as GNU R builds it: `` `f<-`(`*tmp*`, ..., value = <rhs>) ``.
         let mut items: SmallVec<[(Sexp, Sexp); 6]> =
@@ -2246,6 +2264,7 @@ impl Compiler {
                 | "return"
                 | "<-"
                 | "="
+                | "<<-"
                 | "&&"
                 | "||"
                 | "function"
@@ -2589,6 +2608,11 @@ impl Compiler {
                 let symbol = self.constant(args[0].1);
                 let slot = self.cache();
                 self.emit(Op::SetVar, &[symbol, dst, slot]);
+            }
+            "<<-" => {
+                self.expression(args[1].1, dst)?;
+                let symbol = self.constant(args[0].1);
+                self.emit(Op::SuperAssign, &[symbol, dst]);
             }
             "&&" | "||" => {
                 let is_and = (name == "&&") as u32;
@@ -3125,7 +3149,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::Ast => 2,
         Op::Guard => 5,
         Op::Jump | Op::Resume => 1,
-        Op::Missing => 2,
+        Op::Missing | Op::SuperAssign => 2,
         Op::JumpUnless => 3,
         Op::Arithmetic => 6,
         Op::Return => 1,
@@ -3239,6 +3263,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::Arithmetic => &[Operator, Register, Register, Register, Call, Constant],
         Op::Return | Op::ForEnd => &[Register],
         Op::Missing => &[Register, Symbol],
+        Op::SuperAssign => &[Symbol, Register],
         Op::ForInit => &[Loop, Register, Constant],
         Op::ForStep => &[Loop, Register, Symbol, Target],
         Op::Invisible | Op::Visible => &[],
@@ -4126,6 +4151,7 @@ handlers! {
     run_sub_assign_matrix, step_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
     run_replace, step_replace: Replace, true, op_replace;
     run_missing, step_missing: Missing, true, op_missing;
+    run_super_assign, step_super_assign: SuperAssign, true, op_super_assign;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -4555,6 +4581,14 @@ unsafe fn op_ast(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<
 }
 
 #[inline(always)]
+unsafe fn op_super_assign(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let symbol = state.constant(instruction, 0);
+    let value = instruction.input(1);
+    eval::set_var(symbol, value, state.env.enclosure())?;
+    (*state.interp).visible = false;
+    Ok(Flow::Next)
+}
+
 unsafe fn op_missing(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let symbol = state.constant(instruction, 1);
     let value = values::scalar_bool(eval::is_missing(symbol, state.env)?)?;
