@@ -508,11 +508,11 @@ pub unsafe fn install_charsxp(name: Sexp) -> R<Sexp> {
 }
 
 /// The symbol whose name is the text of the `CHARSXP` `name`, as GNU R's `installTrChar`
-/// gives: a string in another encoding installs under its UTF-8 text. `NA_STRING` installs as
-/// the empty name, which `install` rejects.
+/// gives: a string in another encoding installs under its UTF-8 text, and `NA_STRING` installs
+/// as `NA`, as GNU R's `installTrChar` does.
 pub unsafe fn install_charsxp_text(name: Sexp) -> R<Sexp> {
     if name == na_string() {
-        return install("");
+        return install("NA");
     }
     if name.has_gp(gp::ASCII) {
         return install_charsxp(name);

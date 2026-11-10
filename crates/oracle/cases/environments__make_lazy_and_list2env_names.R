@@ -9,3 +9,6 @@ nm <- c("lazy_a", "lazy_b"); env <- new.env()
 for (n in nm) eval(substitute(delayedAssign(N, { cat("forcing", N, "\n"); nchar(N) }, assign.env = env), list(N = n)))
 print(env$lazy_b); print(env$lazy_b); print(env$lazy_a)
 x <- as.environment(list(first = 1L, second = 2L)); print(mget(c("first", "second"), envir = x))
+# An NA name binds `NA`; eval over a list skips an empty name instead of rejecting it.
+print(ls(list2env(setNames(list(1), NA_character_))))
+print(evalq(x, setNames(list(1, 5), c("", "x"))))

@@ -16,9 +16,11 @@
 | $second
 | [1] 2
 | 
+| [1] "NA"
+| [1] 5
 [messages]
 [warnings]
 [errors]
 [value]
-list
-| list(first = 1L, second = 2L)
+double
+| 5

@@ -810,24 +810,35 @@ pub unsafe fn list_to_env(list: Sexp, enclosure: Sexp) -> R<Sexp> {
         base_env()
     };
     let env = new_env(enclosure)?;
-    fill_env(env, list)?;
+    fill_env(env, list, EmptyName::Skip)?;
     Ok(env)
 }
 
-unsafe fn fill_env(env: Sexp, list: Sexp) -> R<()> {
+/// GNU R's `list2env` rejects an empty name, while `eval` and `substitute` over a list skip
+/// one, so the caller says which.
+unsafe fn fill_env(env: Sexp, list: Sexp, empty_name: EmptyName) -> R<()> {
     let names = values::names(list);
     if names == nil() {
         return Ok(());
     }
     for index in 0..length(list) {
         let name = names.element(index);
-        if name == values::na_string() || name.length() == 0 {
-            continue;
+        if name.length() == 0 && name != values::na_string() {
+            match empty_name {
+                EmptyName::Skip => continue,
+                EmptyName::Reject => return Err(error("attempt to use zero-length variable name")),
+            }
         }
         let symbol = values::install_charsxp_text(name)?;
         define(symbol, list.element(index), env)?;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum EmptyName {
+    Skip,
+    Reject,
 }
 
 unsafe fn do_list2env(call: &Call<'_>) -> R<Sexp> {
@@ -839,7 +850,7 @@ unsafe fn do_list2env(call: &Call<'_>) -> R<Sexp> {
     if length(list) > 0 && values::names(list) == nil() {
         return Err(call.error("names(x) must be a character vector of the same length as x"));
     }
-    fill_env(env, list)?;
+    fill_env(env, list, EmptyName::Reject)?;
     Ok(env)
 }
 
@@ -1026,7 +1037,7 @@ unsafe fn do_attach(call: &Call<'_>) -> R<Sexp> {
     // namespace leaves its own parent, the imports, in place.
     let env = new_env(empty_env())?;
     if what.kind() == SexpType::List {
-        fill_env(env, what)?;
+        fill_env(env, what, EmptyName::Skip)?;
     } else if what.kind() == SexpType::Environment {
         let heap = crate::heap();
         for symbol in env_symbols(what, true, false) {
