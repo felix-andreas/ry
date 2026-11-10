@@ -109,17 +109,21 @@ pub unsafe fn modifiable(object: Sexp) -> R<Sexp> {
 
 /// Element `index` of any vector as a length-one vector (or, for lists, the element).
 pub unsafe fn vector_element(vector: Sexp, index: usize) -> R<Sexp> {
-    // A string or list element reads through the ALTREP class's `Elt` method on its own.
-    let vector = if matches!(vector.kind(), SexpType::String | SexpType::List) {
+    // String and list elements read through the ALTREP class's `Elt` method on their own, and
+    // logical, integer and double ones through `int_elt` and `real_elt`.
+    let vector = if matches!(
+        vector.kind(),
+        SexpType::String | SexpType::List | SexpType::Logical | SexpType::Integer | SexpType::Real
+    ) {
         vector
     } else {
         values::materialize(vector)?
     };
     match vector.kind() {
         SexpType::List | SexpType::Expression => Ok(vector.element(index)),
-        SexpType::Logical => values::fresh_logical(values::ints(vector)[index]),
-        SexpType::Integer => values::scalar_integer(values::ints(vector)[index]),
-        SexpType::Real => values::scalar_real(values::reals(vector)[index]),
+        SexpType::Logical => values::fresh_logical(values::int_elt(vector, index)?),
+        SexpType::Integer => values::scalar_integer(values::int_elt(vector, index)?),
+        SexpType::Real => values::scalar_real(values::real_elt(vector, index)?),
         SexpType::Complex => values::scalar_complex(values::complexes(vector)[index]),
         SexpType::String => values::scalar_string_charsxp(vector.element(index)),
         SexpType::Raw => values::scalar_raw(values::raws(vector)[index]),
@@ -221,6 +225,19 @@ unsafe fn set_na(to: Sexp, to_index: usize) {
 }
 
 /// A vector of the elements at `indices` (`usize::MAX` gives NA).
+/// Whether [`select_positions`] reads `count` elements of `vector` one at a time instead of
+/// expanding it: for a long ALTREP number vector, such as a compact sequence, of which the
+/// selection is a small part. A short one expands cheaply, and its class keeps the expansion.
+unsafe fn reads_sparsely(vector: Sexp, count: usize) -> bool {
+    vector.is_altrep()
+        && matches!(
+            vector.kind(),
+            SexpType::Logical | SexpType::Integer | SexpType::Real
+        )
+        && length(vector) >= 1 << 16
+        && count <= length(vector) / 8
+}
+
 pub unsafe fn select_elements(vector: Sexp, indices: &[usize]) -> R<Sexp> {
     select_positions(vector, indices.iter().copied(), indices.len())
 }
@@ -246,6 +263,28 @@ pub unsafe fn select_positions(
                 crate::unwind::raise_parked()?;
             } else {
                 set_na(result, slot);
+            }
+        }
+        return Ok(result);
+    }
+    // A few elements of a long ALTREP number vector, such as `seq_len(2^31 - 1)[c(1, 10)]`, read
+    // one at a time, because expanding a compact sequence can take gigabytes.
+    if reads_sparsely(vector, count) {
+        let extent = length(vector);
+        let result = alloc(vector.kind(), count)?;
+        for (slot, index) in positions.enumerate() {
+            if vector.kind() == SexpType::Real {
+                values::reals_mut(result)[slot] = if index < extent {
+                    values::real_elt(vector, index)?
+                } else {
+                    NA_REAL
+                };
+            } else {
+                values::ints_mut(result)[slot] = if index < extent {
+                    values::int_elt(vector, index)?
+                } else {
+                    NA_INTEGER
+                };
             }
         }
         return Ok(result);
@@ -309,7 +348,12 @@ pub unsafe fn select_positions(
 /// it to a position list. `None` defers to the general path, which handles every other shape
 /// (negative or zero subscripts, recycled logical subscripts, other element types).
 unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
-    if index == missing_arg() || values::has_attributes(index) || values::has_attributes(object) {
+    // A selection `select_positions` reads sparsely takes the general path.
+    if index == missing_arg()
+        || values::has_attributes(index)
+        || values::has_attributes(object)
+        || reads_sparsely(object, length(index))
+    {
         return Ok(None);
     }
     let kind = object.kind();
@@ -751,8 +795,10 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
     }
     // String and list elements read through the class's `Elt` method in `select_elements`; the
     // matrix and array paths read the data directly, so a vector with dimensions materializes.
-    let object = if matches!(object.kind(), SexpType::String | SexpType::List)
-        && values::dims(object).is_none()
+    let object = if matches!(
+        object.kind(),
+        SexpType::String | SexpType::List | SexpType::Logical | SexpType::Integer | SexpType::Real
+    ) && values::dims(object).is_none()
     {
         object
     } else {
@@ -1594,7 +1640,7 @@ pub unsafe fn dollar_value(object: Sexp, name: Sexp, call: Sexp, env: Sexp) -> R
                 value: name_string,
             },
         ];
-        if let Some(value) = crate::dispatch::dispatch_builtin("$", call, &args, env)? {
+        if let Some(value) = crate::dispatch::dispatch_builtin(symbols().dollar, call, &args, env)? {
             return Ok(value);
         }
     }
@@ -1693,7 +1739,8 @@ unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
                 value: values::scalar_string_charsxp(symbol.car())?,
             },
         ];
-        if let Some(value) = crate::dispatch::dispatch_builtin("@", call.call, &args, call.env()?)?
+        if let Some(value) =
+            crate::dispatch::dispatch_builtin(symbols().at, call.call, &args, call.env()?)?
         {
             return Ok(value);
         }
@@ -1904,7 +1951,7 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
             },
         ];
         if let Some(result) =
-            crate::dispatch::dispatch_builtin("@<-", call.call, &args, call.env()?)?
+            crate::dispatch::dispatch_builtin(symbols().at_assign, call.call, &args, call.env()?)?
         {
             return Ok(result);
         }
@@ -2937,8 +2984,12 @@ unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
                 value,
             },
         ];
-        if let Some(result) =
-            crate::dispatch::dispatch_builtin("$<-", call.call, &args, call.env()?)?
+        if let Some(result) = crate::dispatch::dispatch_builtin(
+            symbols().dollar_assign,
+            call.call,
+            &args,
+            call.env()?,
+        )?
         {
             return Ok(result);
         }

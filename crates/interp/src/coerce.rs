@@ -816,7 +816,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("as.call", 1, do_as_call).generic(Generic::Internal),
     internal("as.function.default", 2, do_as_function),
     internal("typeof", 1, |call| unsafe {
-        scalar_string(type_name(call.arg(0)))
+        type_of(call.arg(0))
     }),
     internal("vector", 2, do_vector),
     builtin("storage.mode<-", 2, do_set_storage_mode),
@@ -1231,6 +1231,14 @@ pub unsafe fn type_name(object: Sexp) -> &'static str {
     match object.kind() {
         SexpType::Record => crate::records::native_kind(object).type_name(),
         kind => kind.name(),
+    }
+}
+
+/// `typeof(object)` as a character vector, built from the interned type name.
+pub unsafe fn type_of(object: Sexp) -> R<Sexp> {
+    match object.kind() {
+        SexpType::Record => scalar_string(type_name(object)),
+        kind => values::scalar_string_charsxp(symbols().type_names[kind as usize]),
     }
 }
 

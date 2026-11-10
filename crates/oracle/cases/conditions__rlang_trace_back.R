@@ -25,6 +25,10 @@ show <- function(trace) {
     for (column in names(columns)) {
         values <- columns[[column]]
         if (is.list(values)) values <- vapply(values, function(call) paste(deparse(call), collapse = " "), "")
+        # rlang abbreviates inlined objects through vctrs when it is installed (`<df[,1]>` against
+        # `<data.frame>`), so the printed calls show only where an inlined value sits; the
+        # comparison with the R body checks the abbreviations exactly.
+        if (column == "call") values <- gsub("`<[^`]*>`", "<inlined>", values)
         cat(column, " <", typeof(columns[[column]]), ">: ", paste(values, collapse = " | "), "\n", sep = "")
     }
     invisible(trace)

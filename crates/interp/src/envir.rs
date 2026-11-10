@@ -1205,7 +1205,7 @@ unsafe fn options_list(names: Option<&[String]>) -> R<Sexp> {
     values::named_list(&items)
 }
 
-unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
     let mut args: Vec<Arg> = Vec::new();
     for arg in call.args {
         if arg.tag == nil() && arg.value.kind() == SexpType::List {
@@ -1216,7 +1216,7 @@ unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
                     if name.bytes().is_empty() {
                         nil()
                     } else {
-                        crate::heap().install_char(name)?
+                        values::install_charsxp(name)?
                     }
                 } else {
                     nil()
@@ -1244,14 +1244,17 @@ unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
             entries.push((arg.tag.car(), old));
             changed = true;
         } else if arg.value.kind() == SexpType::String {
-            for index in 0..length(arg.value) {
-                let name = arg.value.element(index);
-                let value = get_option(&char_str(name));
-                // A later argument may remove the option, which leaves the value reachable only
-                // from here.
-                crate::heap().root(value);
-                entries.push((name, value));
+            // GNU R reads only the first name of a character argument: `options(c("a", "b"))`
+            // answers `a` alone.
+            if length(arg.value) == 0 {
+                return Err(call.error("invalid argument"));
             }
+            let name = arg.value.element(0);
+            let value = get_option(&char_str(name));
+            // A later argument may remove the option, which leaves the value reachable only
+            // from here.
+            crate::heap().root(value);
+            entries.push((name, value));
         } else if arg.value == nil() {
             continue;
         } else {
@@ -1267,6 +1270,18 @@ unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
     }
     values::set_attr(list, symbols().names, names)?;
     Ok(list)
+}
+
+/// Whether `options()` sets the option `name` to `value` without an error, a warning or any
+/// other effect than storing the value, so that a native caller can set it through
+/// [`do_options`] knowing that no condition will name the call.
+pub(crate) unsafe fn option_sets_quietly(name: &str, value: Sexp) -> bool {
+    // These warn about some values, or change output formatting as they are validated.
+    if matches!(name, "max.print" | "nwarnings" | "OutDec" | "scipen") {
+        return false;
+    }
+    // An invalid value is an error whose call is the caller's; it is only inspected here.
+    validate_option(name, value).is_ok()
 }
 
 unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
@@ -1783,7 +1798,7 @@ unsafe fn call_function(function: Sexp, args: &[Arg], env: Sexp, call_expression
 /// each iteration reports is exactly that.
 unsafe fn do_lapply(call: &Call<'_>) -> R<Sexp> {
     let env = call.env()?;
-    let list = eval::eval_symbol(values::install("X")?, env)?;
+    let list = eval::eval_symbol(symbols().upper_x, env)?;
     let count = length(list);
     let result = alloc(SexpType::List, count)?;
     let mut calls = ElementCalls::new(list, env)?;
@@ -1819,9 +1834,9 @@ struct ElementCalls {
 impl ElementCalls {
     unsafe fn new(list: Sexp, env: Sexp) -> R<ElementCalls> {
         let symbols = symbols();
-        let index_symbol = values::install("i")?;
-        let element = values::call(symbols.bracket2, &[values::install("X")?, index_symbol])?;
-        let fun_call = values::call(values::install("FUN")?, &[element, symbols.dots])?;
+        let index_symbol = symbols.i;
+        let element = values::call(symbols.bracket2, &[symbols.upper_x, index_symbol])?;
+        let fun_call = values::call(symbols.fun, &[element, symbols.dots])?;
         crate::heap().root(fun_call);
         let plain = if list.kind().is_vector()
             && !list.is_object()

@@ -22,6 +22,10 @@ describe <- function(trace) {
     while (n < length(harness) && n < nrow(trace) && identical(trace$call[[n + 1L]], harness[[n + 1L]])) n <- n + 1L
     keep <- seq_len(nrow(trace)) > n
     calls <- vapply(trace$call[keep], function(call) paste(deparse(call), collapse = " "), "")
+    # rlang abbreviates inlined objects through vctrs when it is installed (`<df[,1]>` against
+    # `<data.frame>`), so the printed calls show only where an inlined value sits; the
+    # comparison with the R body above still checks the abbreviations exactly.
+    calls <- gsub("`<[^`]*>`", "<inlined>", calls)
     paste(sum(keep), typeof(trace$namespace), typeof(trace$scope),
         paste(calls, pmax(trace$parent[keep] - n, 0L), trace$visible[keep], trace$namespace[keep], trace$scope[keep],
             sep = "/", collapse = ";"))

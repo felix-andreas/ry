@@ -62,6 +62,10 @@ left, in order of expected gain:
   `run_call_builtin` +8M, `run_call_generic` +5M). The likely cause is tier 0's type-feedback
   recording and entry and back-edge counting (unconfirmed; compare against
   `RY_JIT_THRESHOLDS=0,0,0`).
+- The JIT's first compile costs about 4 MB of peak RSS (code generator start-up). On
+  `testthat_full` one compile of `isTRUE`'s body (3 KB of code) makes JIT on 4 MB above JIT off;
+  a compile that saves microseconds should not cost megabytes (`decisions.md`, "withr's
+  environment and option helpers run natively", peak RSS).
 - Calls from compiled code (baseline and tier 1) while calling handlers are established, instead
   of falling back to tier 0, pinned in `crates/jit/tests/test_tiers.rs` with a body hot under
   `withCallingHandlers`.
