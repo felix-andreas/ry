@@ -570,6 +570,12 @@ fn refresh_start_image(sources: &HomeSources<'_>) -> Result<()> {
     if !image.is_file() {
         return Ok(());
     }
+    // The writer relinks `lib` and `bin/exec` inside the base tree, so homes assembled at once
+    // over the same stale image take turns, and the later ones find the image current. The lock
+    // is released when `lock` drops.
+    let lock_path = sources.base.join(".start-image.lock");
+    let lock = fs::File::create(&lock_path).map_err(io_error(&lock_path))?;
+    lock.lock().map_err(io_error(&lock_path))?;
     let library = front_end::load_runtime(sources.libr)?;
     let current = unsafe { library.get::<Current>(b"ry_start_image_current\0") }
         .map(|entry| *entry)
