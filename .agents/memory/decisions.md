@@ -8462,7 +8462,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 | ry's own ports | B3 | Vector d/p/q/r* paths, SIMD across lanes with bit-identical results, batched RNG with identical streams |
 | GC | B2 | Young-survivor tracing at a fraction of today's 70 instructions per object; the GC bucket at a tenth of today's |
 | Start-up | D | A mapped start-up image with no inflate and no per-object decode |
-| Corpus I/O and waiting | B4 | Fewer system calls than GNU R (testthat's `unlink`), and child processes that run ry |
+| Corpus I/O and waiting (0.4% and 6% of ry's corpus time) | B4, done | `unlink()` leaves `rmdir` to a background thread; children already run ry. The rest of the waiting is the suites' own `Sys.sleep`, which GNU R pays too ("unlink() leaves rmdir to a background thread", "The corpus's waiting is the suites' own sleeps") |
 
 - **Inlining tier.**
   - Hot call sites inline their callees across closure calls, `UseMethod`/`NextMethod` and S4 dispatch, guarded by version-stamped bindings and the receiver's class.
