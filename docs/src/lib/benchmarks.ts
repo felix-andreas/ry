@@ -272,7 +272,7 @@ function geomeanRow(suite: Suite, engines: string[], grouped: boolean): ChartRow
 }
 
 export function chartMarkdown(suite: Suite): string {
-  if (suite.results === undefined) return missingResults(suite.id);
+  if (suite.results === undefined) return '';
   return suiteCharts(suite)
     .map((chart) =>
       [
@@ -289,10 +289,6 @@ export function chartMarkdown(suite: Suite): string {
       ].join('\n'),
     )
     .join('\n\n');
-}
-
-export function missingResults(id: string): string {
-  return `No results for this suite are committed yet, so it has no chart. \`just bench ${id}\` measures it.`;
 }
 
 // The measurement as tables: seconds and ratios, peak memory where the runner recorded it, and the

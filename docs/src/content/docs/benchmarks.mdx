@@ -1,6 +1,6 @@
 ---
 title: Benchmarks
-description: How fast R runs on ry against GNU R, on public R JIT benchmarks, package test suites, our numeric kernels and our application workloads, with every program and the method
+description: How fast R runs on ry against GNU R, on our numeric kernels and application workloads, with every program and the method
 ---
 
 import BenchmarkMethod from '../../components/BenchmarkMethod.astro';
@@ -9,44 +9,14 @@ import BenchmarkSummary from '../../components/BenchmarkSummary.astro';
 import BenchmarkTable from '../../components/BenchmarkTable.astro';
 import SpeedChart from '../../components/SpeedChart.astro';
 
-Four suites compare ry's runtime with GNU R. Two measure code that other people wrote: the programs
-that published R compilers are measured on, and the test suites of real packages. Two measure code
-we wrote: small numeric kernels, each also written typed, and call-heavy programs in the style of
-production packages. Each suite's geometric mean of ry's speed-ups over GNU R:
+These suites compare ry's runtime with GNU R on code we wrote: small numeric kernels, each also
+written typed, and call-heavy programs in the style of production packages. Each suite's geometric
+mean of ry's speed-ups over GNU R:
 
 <BenchmarkSummary />
 
-A suite appears in this table once its results file is committed. Every number on this page is
-rendered from the files in `tools/bench/<suite>/`, and each chart names the date, the ry commit, the
-GNU R version and the machine of its measurement.
-
-## Public R JIT benchmarks
-
-These are the 54 programs that the Ř (rir) and rcp R compilers are measured on, from the suite of
-Kocourek, Křikava and Vitek, "Copy-and-Patch Just-in-Time Compiler for R" (VMIL 2025), minus three
-programs that cannot be sized to a few seconds. They are vendored unchanged with their licences, and
-each file gets a driver block that calls the program once at a fixed size and prints a checksum.
-The sizes make GNU R 4.3 take about 0.5 to 2.5 seconds per program. A run starts a fresh process
-per program and engine, so the time includes GNU R's byte compilation and ry's tier-up.
-
-<SpeedChart suite="public" />
-
-<BenchmarkPrograms suite="public" />
-
-## Package test suites
-
-This suite times the test suites of the packages in ry's benchmark dependency set, with their
-dependencies: 58 packages, each pinned by version and the SHA-256 of its source tarball, so two
-machines measure the same code. Both engines load the same builds, installed by GNU R, because ry's
-`libR` is ABI-compatible with GNU R's. The tests run the way `R CMD check` runs them, offline, and
-each time is the wall time of a whole process, so it includes start-up and loading the package and
-its imports, as real use does. The suite also counts the tests that pass and fail on each engine.
-
-<SpeedChart suite="packages" />
-
-<BenchmarkTable suite="packages" />
-
-<BenchmarkPrograms suite="packages" />
+Every number on this page is rendered from the files in `tools/bench/<suite>/`, and each chart names
+the date, the ry commit, the GNU R version and the machine of its measurement.
 
 ## Numeric kernels (ours)
 
@@ -119,7 +89,8 @@ The runner, not this page, judges the data:
 - **Refused typed programs.** A typed program the compiler refuses in strict mode has no typed time,
   and its flag gives the compiler's reason.
 
-No suite includes ry's static check. Each suite's own section says whether process start-up counts.
+No time includes ry's static check or process start-up, because each program times its own work
+inside the process.
 
 <BenchmarkMethod />
 

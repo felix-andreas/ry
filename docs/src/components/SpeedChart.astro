@@ -4,7 +4,7 @@
 // to the left slower, and 10x either way has the same length. A thin line across a bar spans its
 // interval. Values sit in their own columns beside the bars, so they stay legible on a phone, and
 // every bar's title gives the seconds behind it. A suite with groups gets one chart per group.
-import { engineLabel, formatRatio, missingResults, suite as findSuite, suiteCharts } from '../lib/benchmarks';
+import { engineLabel, formatRatio, suite as findSuite, suiteCharts } from '../lib/benchmarks';
 
 interface Props {
 	suite: string;
@@ -32,15 +32,6 @@ function axis(values: number[]) {
 const tickLabel = (value: number) => (value >= 1 ? `${value}x` : `${Number(value.toPrecision(2))}x`);
 ---
 
-{
-	charts.length === 0 && (
-		<p class="speed-chart-missing">
-			{missingResults(Astro.props.suite)
-				.split('`')
-				.map((part, index) => (index % 2 === 1 ? <code>{part}</code> : part))}
-		</p>
-	)
-}
 {
 	charts.map((chart) => {
 		const values = chart.rows.flatMap((row) => row.bars.flatMap((bar) => (bar.ratio === undefined ? [] : [bar.ratio.median, bar.ratio.low ?? bar.ratio.median, bar.ratio.high ?? bar.ratio.median])));
@@ -165,10 +156,6 @@ const tickLabel = (value: number) => (value >= 1 ? `${value}x` : `${Number(value
 	}
 	.speed-chart[style*='--series-count: 1'] {
 		--bar: 14px;
-	}
-	.speed-chart-missing {
-		color: var(--sl-color-gray-3);
-		font-style: italic;
 	}
 	figcaption {
 		color: var(--ink);

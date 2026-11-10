@@ -4,7 +4,7 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
 import starlightConfig from 'virtual:starlight/user-config';
 import vennSource from '../components/Venn.astro?raw';
-import { chartMarkdown, methodMarkdown, missingResults, programsMarkdown, suite, summaryMarkdown, tableMarkdown } from './benchmarks';
+import { chartMarkdown, methodMarkdown, programsMarkdown, suite, summaryMarkdown, tableMarkdown } from './benchmarks';
 
 type DocsPage = CollectionEntry<'docs'>;
 type SidebarItem = { label?: string; slug?: string; items?: SidebarItem[] };
@@ -103,10 +103,8 @@ function bodyToMarkdown(body: string): string {
     const benchmark = /^<(BenchmarkTable|BenchmarkPrograms|SpeedChart)\b[^>]*\bsuite="([a-z_]+)"/.exec(line.trim());
     if (benchmark) {
       const found = suite(benchmark[2]);
-      if (benchmark[1] === 'SpeedChart' && found?.results === undefined) {
-        push(missingResults(benchmark[2]), false);
-      } else if (found === undefined) {
-        // A suite without a manifest has no programs or tables to list.
+      if (found?.results === undefined) {
+        // A suite without results is left off the page.
       } else if (benchmark[1] === 'SpeedChart') {
         push(chartMarkdown(found), false);
       } else if (benchmark[1] === 'BenchmarkTable') {
