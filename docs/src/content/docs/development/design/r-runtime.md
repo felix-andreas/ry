@@ -947,8 +947,11 @@ today's ratio):
 So 10x on the workloads is reachable on one thread: R code needs about 30x (tier 1 for most of it,
 row (c) below) and builtins about 10x (row (a)). `tables` and `timeseries` stop near 9x and 8x
 because of `data.table`'s and `xts`'s C code, and the geometric mean carries them. The corpus
-runs at 1.94x GNU R today (geometric mean over the 21 packages that pass on both engines, 95%
-interval 1.76x to 2.15x). Its column counts all native code as fixed, because the profile does not
+runs at 2.01x GNU R today (geometric mean over the 21 packages that pass on both engines, 95%
+interval 1.83x to 2.20x). The corpus runs offline: `run.py` drops test files that fetch URLs
+(`NETWORK_TESTS`, such as `jsonlite`'s `test-network-*.R`, whose GitHub requests cost both engines
+the same 0.2 s each) and routes both engines through a proxy that refuses every request, so a test
+that reaches for the network fails the run. Its column counts all native code as fixed, because the profile does not
 split ry's ports from CRAN code, and its single-thread ceiling is 34.4x, because I/O, waiting and
 native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.sleep`), then
 `rlang`, `withr` and `cli` at 11x to 12x (their native code and waiting).
