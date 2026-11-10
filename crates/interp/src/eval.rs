@@ -73,6 +73,18 @@ unsafe fn eval_unsignalled(expression: Sexp, env: Sexp) -> R<Sexp> {
 
 /// The value of a symbol: its binding, with promises forced.
 pub unsafe fn eval_symbol(symbol: Sexp, env: Sexp) -> R<Sexp> {
+    eval_symbol_reporting(symbol, env, || lexical_call(env))
+}
+
+/// [`eval_symbol`] for a lookup that starts in `env` on behalf of a frame that is not `env`
+/// itself, such as a slot frame that has no environment or a frame whose own bindings were
+/// already searched: an unbound symbol is reported against `lexical()`, the call of the frame
+/// the code runs in, as GNU R's `getLexicalCall` does.
+pub unsafe fn eval_symbol_reporting(
+    symbol: Sexp,
+    env: Sexp,
+    lexical: impl FnOnce() -> Sexp,
+) -> R<Sexp> {
     let symbols = symbols();
     if symbol == symbols.dots {
         return Err(error("'...' used in an incorrect context"));
@@ -83,7 +95,7 @@ pub unsafe fn eval_symbol(symbol: Sexp, env: Sexp) -> R<Sexp> {
     let value = find_var(symbol, env)?;
     if value == unbound() {
         return Err(error_in(
-            lexical_call(env),
+            lexical(),
             format!("object '{}' not found", symbol_name(symbol)),
         ));
     }
@@ -176,7 +188,7 @@ pub unsafe fn cell_value(cell: Sexp) -> R<Sexp> {
 /// variable: so a promise forced inside a callee still blames the caller's code, and top-level
 /// code blames no call. An environment no frame owns, like one `eval` was handed, falls back to
 /// the innermost call.
-unsafe fn lexical_call(env: Sexp) -> Sexp {
+pub(crate) unsafe fn lexical_call(env: Sexp) -> Sexp {
     let frames = &interp().frames;
     if let Some(frame) = frames.iter().rev().find(|frame| frame.owns(env)) {
         return frame.call;
