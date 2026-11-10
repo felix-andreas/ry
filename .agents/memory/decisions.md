@@ -7739,6 +7739,17 @@ Each one trades a narrow class of missed errors for a class of false reports see
   runs GNU R's own loop body for that one item (`Template::CacheClassItem` and
   `CacheGenericItem`), so the order of effects matches and a partial port is safe. On
   `target/s4plain` this took `cacheMetaData` from 104 to 16 ms.
+- **A foreign generic with no methods in the namespace is reset natively.** `setOldClass()` with
+  a prototype leaves `.requireCachedGenerics` asking for `Ops`, so nearly every package (rlang
+  among them) caches a base group generic it defines no methods for. For such a generic,
+  `cache_foreign_generic` walks the group tree as `.updateMethodsInTable` does, resets each
+  `.AllMTable` to its direct methods and re-sets the primitives' dispatch tables. It bails before
+  any effect on a group slot, a global binding, a method table in the namespace or a default that
+  is not a primitive. Group members that are primitives (`&`, `+`) take their generic from the
+  generic table, as `getGeneric()` does. Lazy-loaded namespaces bind `.packageName`,
+  `.requireCachedGenerics` and class definitions to promises, which `forced_value` forces as
+  `get()` does. This took `cacheMetaData` of rlang from 19% to 2% of a warm load
+  (`s4__cache_metadata_shapes.R` pins the shapes).
 - **Order.** Object creation and class queries came first because they are the run-time hot path
   (`new()` 13.7 µs, `validObject` 3 µs, `is()` 2.3 µs against GNU R's 130, 73 and 11.8 µs). Then
   the definition functions, then `setClassUnion` and `cacheMetaData`; `as()`, `setDataPart()` and
