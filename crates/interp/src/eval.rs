@@ -1291,17 +1291,18 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
     {
         return Ok(());
     }
-    let state = interp();
-    let formals = match state.primitive_formals.get(definition.name) {
-        Some(formals) => formals,
-        None => {
+    let index = builtin_index(definition);
+    let formals = match interp().primitive_formals.get(index) {
+        Some(Some(formals)) => formals,
+        _ => {
             let Some(formals) = recorded_formals(definition.name)? else {
                 return Ok(());
             };
-            interp()
-                .primitive_formals
-                .entry(definition.name)
-                .or_insert(formals)
+            let table = &mut interp().primitive_formals;
+            if table.len() <= index {
+                table.resize(interp().builtins.len().max(index + 1), None);
+            }
+            &*table[index].insert(formals)
         }
     };
     let Some(formals) = formals else {
