@@ -60,6 +60,42 @@ type-mismatch
 Type errors need `typing = true` in `ry.toml`; names, syntax and lints are checked without any
 configuration.
 
+## ry's own typed language
+
+ry extends R with statically typed features of its own: records, tuples, tagged unions, exhaustive
+`match`, typed lists and a standard library. They are ry syntax, not R, so code that uses them runs
+only on ry's runtime. One example is exhaustive `match`: when you add a case to a tagged union, ry
+points you at every `match` that does not handle it.
+
+```r
+alias Payment =
+  | :Paid(amount: double)
+  | :Refunded(amount: double)
+  | :Pending
+
+balance <- function(payment: Payment) -> double {
+  match (payment) {
+    :Paid(amount = a) => a
+    :Refunded(amount = a) => -a
+  }
+}
+```
+
+```
+$ ry check
+non-exhaustive-match
+
+  x this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ => ...` arm
+   --[payment.R:7:3]
+ 6 | balance <- function(payment: Payment) -> double {
+ 7 |   match (payment) {
+   |   ^^^^^^^^^^^^^^^
+ 8 |     :Paid(amount = a) => a
+  help: Add an arm for `:Pending` (`ry check --fix --unsafe-fixes` applies it)
+```
+
+The [language tour](https://ry-lang.org/ry) shows every feature.
+
 ## Speed
 
 ry's runtime against GNU R, as the geometric mean of each suite's speed-ups:
@@ -92,8 +128,8 @@ program and the method.
 - **Types:** `#:` comments or inline syntax, generics, unions, records, tagged unions, strict mode.
 - **Formatter:** `ry fmt`, one style for every file.
 - **Editor:** a language server for any LSP editor, and a VS Code extension with a debugger.
-- **Loader:** reloads a 326,000-line package after an edit in about 80 ms, where `load_all()`
-  takes 8.6 s.
+- **Loader:** reloads a package of about 300,000 lines after an edit in under 100 ms, where
+  `load_all()` takes about 9 s.
 - **Runtime:** a JIT, R's C API for compiled packages, and `DataFrame`, a typed table on Polars.
 
 ry is in beta. The checker, formatter, language server and loader are ready for daily use. The

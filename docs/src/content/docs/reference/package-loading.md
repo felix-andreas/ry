@@ -210,7 +210,7 @@ importer keeps its old imports with a warning until you reload it.
 ## Speed
 
 A load parses a function only when something first calls it, and a reload touches only the
-definitions you changed. On a generated package of 326,000 lines in 500 files, against
+definitions you changed. On a generated package of about 300,000 lines in 500 files, against
 `devtools::load_all()` and [loadfast](https://github.com/finccam/loadfast):
 
 | | `load_all()` | `load_fast()` | `ry R` | `ry load` |

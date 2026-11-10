@@ -268,8 +268,8 @@ its first call. [Strict mode](/reference/type-system#strict-mode) lists what it 
 ## Loading packages
 
 `ry run` inside a package opens a console that reloads exactly the definitions you changed before
-each command. On a 326,000-line package, a cold load takes 1.3 to 1.7 s against
-`devtools::load_all()`'s 9.6 s, and a reload after an edit 79 to 83 ms against 8.6 s. In RStudio,
+each command. On a package of about 300,000 lines, a cold load takes under 2 s against about 10 s for
+`devtools::load_all()`, and a reload after an edit takes under 100 ms against about 9 s. In RStudio,
 `source(pipe("ry load --r-entry"))` in `~/.Rprofile` gives you the same fast `load_all()`.
 [Package loading](/reference/package-loading) has the details.
 
