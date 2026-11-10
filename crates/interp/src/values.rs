@@ -21,14 +21,27 @@ macro_rules! symbol_table {
         /// Symbols the interpreter compares against or looks up by, installed once.
         pub struct Symbols {
             $(pub $field: Sexp,)*
+            /// `typeof`'s answer for each type code, as the interned string: the print name of
+            /// the symbol of that name. `NULL` for a code that names no type.
+            pub type_names: [Sexp; 32],
         }
 
         impl Symbols {
             pub(crate) unsafe fn install(heap: &mut Heap) -> Symbols {
+                let mut type_names = [heap.nil(); 32];
+                for (code, slot) in type_names.iter_mut().enumerate() {
+                    if let Some(kind) = SexpType::from_code(code as u32) {
+                        *slot = heap
+                            .install(kind.name().as_bytes())
+                            .unwrap_or_else(|error| panic!("cannot install `{}`: {error}", kind.name()))
+                            .car();
+                    }
+                }
                 Symbols {
                     $($field: heap
                         .install($name.as_bytes())
                         .unwrap_or_else(|error| panic!("cannot install `{}`: {error}", $name)),)*
+                    type_names,
                 }
             }
         }
@@ -117,7 +130,10 @@ symbol_table! {
     bracket = "[",
     bracket2 = "[[",
     dollar = "$",
+    dollar_assign = "$<-",
+    seq = "seq",
     at = "@",
+    at_assign = "@<-",
     double_colon = "::",
     triple_colon = ":::",
     tilde = "~",
@@ -612,9 +628,11 @@ pub unsafe fn pairlist(items: &[(Sexp, Sexp)], kind: SexpType) -> R<Sexp> {
 
 /// A call `function(arguments...)` with untagged arguments.
 pub unsafe fn call(function: Sexp, arguments: &[Sexp]) -> R<Sexp> {
-    let mut items = vec![(nil(), function)];
-    items.extend(arguments.iter().map(|&argument| (nil(), argument)));
-    pairlist(&items, SexpType::Language)
+    let mut list = nil();
+    for &argument in arguments.iter().rev() {
+        list = cons(argument, list)?;
+    }
+    lcons(function, list)
 }
 
 // Reading.
@@ -741,6 +759,27 @@ typed_slice!(ints, ints_mut, ints_altrep, i32);
 typed_slice!(reals, reals_mut, reals_altrep, f64);
 typed_slice!(complexes, complexes_mut, complexes_altrep, Rcomplex);
 typed_slice!(raws, raws_mut, raws_altrep, u8);
+
+/// Element `index` of a logical or integer vector. An ALTREP vector answers through its class's
+/// `Elt` method, so a compact sequence is never expanded to read one element.
+#[inline]
+pub unsafe fn int_elt(object: Sexp, index: usize) -> R<i32> {
+    if object.is_altrep() {
+        (interp().hooks.altrep_int_elt)(object, index)
+    } else {
+        Ok(object.slice::<i32>()[index])
+    }
+}
+
+/// Element `index` of a double vector, read like [`int_elt`].
+#[inline]
+pub unsafe fn real_elt(object: Sexp, index: usize) -> R<f64> {
+    if object.is_altrep() {
+        (interp().hooks.altrep_real_elt)(object, index)
+    } else {
+        Ok(object.slice::<f64>()[index])
+    }
+}
 
 #[inline]
 pub unsafe fn string_elt(object: Sexp, index: usize) -> Sexp {

@@ -1361,7 +1361,7 @@ pub unsafe fn try_builtin_dispatch(
             if !first.value.is_object() {
                 return Ok(None);
             }
-            internal_dispatch("c", call, &kept, env)
+            internal_dispatch(symbols().c, call, &kept, env)
         }
         Generic::Internal => {
             if !first.value.is_object() {
@@ -1373,10 +1373,10 @@ pub unsafe fn try_builtin_dispatch(
                 return Ok(Some(value));
             }
             // `seq.int` is the primitive behind the `seq` generic, so it finds `seq` methods.
-            let generic = if definition.name == "seq.int" {
-                "seq"
-            } else {
-                definition.name
+            let generic = match definition.symbol {
+                _ if definition.name == "seq.int" => symbols().seq,
+                Some(symbol) => symbol,
+                None => values::install(definition.name)?,
             };
             internal_dispatch(generic, call, args, env)
         }
@@ -1486,7 +1486,12 @@ unsafe fn promised_args(call: Sexp, args: &[Arg]) -> R<Vec<Arg>> {
 
 /// S3 dispatch for a builtin that evaluated its own arguments (`$`, `$<-`). A call named
 /// `<generic>.default` comes from `NextMethod` and runs the builtin's own code.
-pub unsafe fn dispatch_builtin(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+pub unsafe fn dispatch_builtin(
+    generic: Sexp,
+    call: Sexp,
+    args: &[Arg],
+    env: Sexp,
+) -> R<Option<Sexp>> {
     if call.kind() == SexpType::Language
         && call.car().kind() == SexpType::Symbol
         && symbol_name(call.car()).ends_with(".default")
@@ -1496,12 +1501,12 @@ pub unsafe fn dispatch_builtin(name: &str, call: Sexp, args: &[Arg], env: Sexp) 
     if args
         .first()
         .is_some_and(|arg| arg.value.has_gp(gp::S4_OBJECT))
-        && let Some(op) = crate::builtins::primitive(name)
+        && let Some(op) = crate::builtins::primitive(&symbol_name(generic))
         && let Some(value) = s4_dispatch(op, call, args, env)?
     {
         return Ok(Some(value));
     }
-    internal_dispatch(name, call, args, env)
+    internal_dispatch(generic, call, args, env)
 }
 
 /// GNU R's `DispatchOrEval`, for a [`BuiltinDef::dispatch_or_eval`] special called with the
@@ -1652,9 +1657,13 @@ unsafe fn promise_of_missing(value: Sexp) -> R<bool> {
     eval::argument_is_missing(value.cdr(), environment)
 }
 
-unsafe fn internal_dispatch(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+unsafe fn internal_dispatch(
+    generic: Sexp,
+    call: Sexp,
+    args: &[Arg],
+    env: Sexp,
+) -> R<Option<Sexp>> {
     let object = args[0].value;
-    let generic = values::install(name)?;
     let Some(found) = find_s3_method(Some(call), generic, object, env, values::base_namespace())?
     else {
         return Ok(None);
@@ -2018,16 +2027,20 @@ pub unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Op
 /// inherited from a group generic such as `Summary` reads `.Generic` to learn which member ran.
 unsafe fn cached_method_vars(method: Sexp, generic: Sexp) -> R<Vec<(Sexp, Sexp)>> {
     let mut vars = Vec::with_capacity(4);
-    let generic_symbol = values::install(".Generic")?;
+    let symbols = symbols();
+    let generic_symbol = symbols.dot_generic;
     let name = eval::find_var(generic_symbol, generic.tag())?;
     if name != unbound() {
         vars.push((generic_symbol, value_of(name)?));
     }
-    vars.push((values::install(".Method")?, method));
-    for (name, slot) in [(".defined", "defined"), (".target", "target")] {
-        let value = get_attr(method, values::install(slot)?);
+    vars.push((symbols.dot_method, method));
+    for (name, slot) in [
+        (symbols.dot_defined, symbols.defined),
+        (symbols.dot_target, symbols.target),
+    ] {
+        let value = get_attr(method, slot);
         if value != nil() {
-            vars.push((values::install(name)?, value));
+            vars.push((name, value));
         }
     }
     Ok(vars)

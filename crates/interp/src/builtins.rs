@@ -125,6 +125,9 @@ pub struct BuiltinDef {
     /// the builtin is invisible. The caller releases the handles it roots.
     pub direct: Option<DirectFn>,
     pub object: Option<Sexp>,
+    /// The symbol of `name`, set at registration so that dispatch looks methods up without
+    /// hashing the name on every call.
+    pub symbol: Option<Sexp>,
 }
 
 /// What a call checks before its builtin runs. The checks follow from the rest of the
@@ -202,6 +205,7 @@ pub const fn builtin(name: &'static str, arity: i32, function: BuiltinFn) -> Bui
         unary: None,
         direct: None,
         object: None,
+        symbol: None,
     }
 }
 
@@ -320,6 +324,7 @@ impl BuiltinDef {
             unary: self.unary,
             direct: self.direct,
             object: self.object,
+            symbol: self.symbol,
         }
     }
 }
@@ -412,7 +417,9 @@ unsafe fn register_in(definitions: &[BuiltinDef], env: Sexp) {
         if let Some(&index) = state.builtin_index.get(key) {
             let existing = &mut state.builtins[index as usize];
             let object = existing.object;
+            let symbol = existing.symbol;
             *existing = definition.copy();
+            existing.symbol = symbol;
             existing.accepts_native =
                 definition.accepts_native || ACCEPTS_NATIVE.contains(&definition.name);
             existing.checks = Checks::of(existing);
@@ -444,6 +451,7 @@ unsafe fn register_in(definitions: &[BuiltinDef], env: Sexp) {
             definition.accepts_native || ACCEPTS_NATIVE.contains(&definition.name);
         entry.checks = Checks::of(&entry);
         entry.object = Some(object);
+        entry.symbol = Some(symbol);
         state.builtins.push(entry);
         state.builtin_index.insert(key, index);
     }
