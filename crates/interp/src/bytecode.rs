@@ -48,6 +48,7 @@ use {
         arith::{MATHS, math_index},
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
         conditions, dispatch, effects,
+        envir::namespace_binding,
         eval::{self, Reify, SwitchSelector, as_condition},
         interp,
         kernels::{self, Element, MAX_NODES, Node, Reduction},
@@ -914,6 +915,11 @@ pub enum Op {
     /// `dst symbol`: `missing(symbol)` for a plain symbol, read from the frame without building
     /// the special's call.
     Missing,
+    /// `dst package symbol exported cache`: `package::symbol` (`exported` 1) or
+    /// `package:::symbol` (0) for literal names, read from the namespace binding the cache slot
+    /// holds while the lookup stamps of the bindings that led to it stand still
+    /// ([`namespace_binding`]).
+    Namespace,
     /// `dst program target`: an element-wise expression such as `exp(a * b + c)` or
     /// `sum(x > 0)` computed in one pass by `kernels::fused`, without intermediate vectors,
     /// after which execution goes on at `target`. The expression's ordinary code follows, and
@@ -942,7 +948,7 @@ pub enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 49] = [
+pub const OPS: [Op; 50] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -989,6 +995,7 @@ pub const OPS: [Op; 49] = [
     Op::Replace,
     Op::Resume,
     Op::Missing,
+    Op::Namespace,
     Op::Fused,
     Op::Unfused,
     Op::SuperAssign,
@@ -2767,6 +2774,31 @@ impl Compiler {
                         _ => self.general_call(call, head, dst),
                     };
                 }
+                "::" | ":::" => {
+                    let literal = match args.as_slice() {
+                        [(package_tag, package), (name_tag, symbol)]
+                            if *package_tag == nil() && *name_tag == nil() =>
+                        {
+                            match (colon_literal(*package)?, colon_literal(*symbol)?) {
+                                (Some(package), Some(symbol)) => Some((package, symbol)),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    return match literal {
+                        Some((package, symbol)) => self.namespace(
+                            call,
+                            head,
+                            primitive,
+                            dst,
+                            package,
+                            symbol,
+                            name == "::",
+                        ),
+                        None => self.general_call(call, head, dst),
+                    };
+                }
                 "missing" => {
                     return match args.as_slice() {
                         [(tag, symbol)]
@@ -3223,6 +3255,8 @@ impl Compiler {
                 | "switch"
                 | "missing"
                 | "quote"
+                | "::"
+                | ":::"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -3394,6 +3428,33 @@ impl Compiler {
         let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
         let symbol = self.constant(symbol);
         self.emit(Op::Missing, &[dst, symbol]);
+        self.cold_fallback(&[guard], call, dst)
+    }
+
+    /// `package::symbol` or `package:::symbol`, guarded by the operator: [`Op::Namespace`].
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn namespace(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        dst: u32,
+        package: Sexp,
+        symbol: Sexp,
+        exported: bool,
+    ) -> R<()> {
+        let name = self.constant(head);
+        let expected = self.constant(primitive);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
+        let package = self.constant(package);
+        let symbol = self.constant(symbol);
+        let lookup = self.cache();
+        self.emit(
+            Op::Namespace,
+            &[dst, package, symbol, u32::from(exported), lookup],
+        );
         self.cold_fallback(&[guard], call, dst)
     }
 
@@ -4198,6 +4259,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::Guard => 5,
         Op::Jump | Op::Resume => 1,
         Op::Missing | Op::SuperAssign => 2,
+        Op::Namespace => 5,
         Op::JumpUnless => 3,
         Op::Arithmetic => 7,
         Op::Return => 1,
@@ -4358,6 +4420,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::Arithmetic => &[Operator, Register, Register, Register, Call, Constant],
         Op::Return | Op::ForEnd => &[Register],
         Op::Missing => &[Register, Symbol],
+        Op::Namespace => &[Register, Symbol, Symbol, Immediate, Cache],
         Op::SuperAssign => &[Symbol, Register],
         Op::ForInit => &[Loop, Register, Constant],
         Op::ForStep => &[Loop, Register, Symbol, Target],
@@ -4851,7 +4914,13 @@ unsafe fn run_at(function: Sexp, code: Sexp, header: usize, base: usize) -> R<Se
     let profile = values::ints_mut(constants.element(PROFILE));
     let entries = profile[profile::ENTRIES].saturating_add(1);
     profile[profile::ENTRIES] = entries;
-    let mut loops: SmallVec<[LoopState; 4]> = smallvec![LoopState::default(); loop_count(code)];
+    // Built empty and filled only for a body with loops, so the inline buffer is not assembled
+    // on the stack and copied, which every call of a body paid.
+    let mut loops: SmallVec<[LoopState; 4]> = SmallVec::new();
+    let count = loop_count(code);
+    if count != 0 {
+        loops.extend(std::iter::repeat_n(LoopState::default(), count));
+    }
     let env = *register_address(header);
     // A slot frame's environment, once it has one, is fresh and marked as compiled when made.
     let was_compiled_frame = env != nil() && env.has_gp(gp::COMPILED_FRAME);
@@ -5557,6 +5626,7 @@ handlers! {
     run_sub_assign_matrix, step_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
     run_replace, step_replace: Replace, true, op_replace;
     run_missing, step_missing: Missing, true, op_missing;
+    run_namespace, step_namespace: Namespace, true, op_namespace;
     run_fused, step_fused: Fused, true, op_fused;
     run_unfused, step_unfused: Unfused, false, op_unfused;
     run_super_assign, step_super_assign: SuperAssign, true, op_super_assign;
@@ -5677,6 +5747,7 @@ macro_rules! fast_paths {
 
 fast_paths! {
     fast_get_var: GetVar, get_var_fast;
+    fast_get_fun: GetFun, get_fun_fast;
     fast_set_var: SetVar, set_var_fast;
     fast_guard: Guard, guard_fast;
     fast_jump_unless: JumpUnless, jump_unless_fast;
@@ -5722,6 +5793,41 @@ unsafe fn get_var_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usiz
     *state.registers.add(*code.add(at + 1) as usize) = value;
     (*state.interp).visible = true;
     Some(at + 1 + operand_count(Op::GetVar))
+}
+
+/// `GetFun` in a slot frame: a slot holding a function, or else the cached cell of a name the
+/// frame does not bind, while it holds a function. A cache key is never a function frame, so a
+/// hit also means no function frame lies between the closure and the cached binding.
+#[inline(always)]
+unsafe fn get_fun_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let heap = &*state.heap;
+    let known = heap.known();
+    if *state.header != known.nil {
+        return None;
+    }
+    let code = state.code;
+    let cache_slot = *code.add(at + 3) as usize;
+    let slot = *state.slot_map.add(cache_slot);
+    let mut value = if slot >= 0 {
+        *state.header.add(1 + slot as usize)
+    } else {
+        let cache = state.cache;
+        let symbol = pool_constant(state, *code.add(at + 2) as usize);
+        if *cache.epochs.add(cache_slot) != heap.lookup_stamp(symbol)
+            || *cache.slots.add(cache_slot * 2) != state.machine.function.tag()
+        {
+            return None;
+        }
+        (*cache.slots.add(cache_slot * 2 + 1)).cdr()
+    };
+    if value.kind() == SexpType::Promise {
+        value = value.car();
+    }
+    if !values::is_function(value) {
+        return None;
+    }
+    *state.registers.add(*code.add(at + 1) as usize) = value;
+    Some(at + 1 + operand_count(Op::GetFun))
 }
 
 /// `SetVar` of a local in a slot frame, when giving up the old value needs no bookkeeping.
@@ -8020,6 +8126,78 @@ unsafe fn op_missing(state: &mut Activation<'_, '_>, instruction: Instruction) -
     (*state.interp).visible = true;
     instruction.output(0, value);
     Ok(Flow::Next)
+}
+
+/// `package::symbol` through the cached namespace binding, and through the evaluator's lookup,
+/// which may load the namespace, when the cache is empty or stale.
+unsafe fn op_namespace(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let package = state.constant(instruction, 1);
+    let symbol = state.constant(instruction, 2);
+    let slot = instruction.operand(4);
+    let cache = state.cache;
+    let cached = if *cache.epochs.add(slot) == namespace_stamp(package, symbol) {
+        bound_value(*cache.slots.add(slot * 2 + 1))
+    } else {
+        None
+    };
+    let value = match cached {
+        Some(value) => value,
+        None => {
+            let exported = instruction.operand(3) != 0;
+            let (value, cell) = namespace_binding(package, symbol, exported)?;
+            if let Some(cell) = cell {
+                let heap = crate::heap();
+                heap.set_element(cache.caches, slot * 2, package);
+                heap.set_element(cache.caches, slot * 2 + 1, cell);
+                *cache.epochs.add(slot) = namespace_stamp(package, symbol);
+            }
+            value
+        }
+    };
+    state.record(instruction.at, value);
+    (*state.interp).visible = true;
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+/// What a cached `package::symbol` depends on besides the cell's value: the registry's binding
+/// of the package, the namespace's `.__NAMESPACE__.` and its `exports` table, and every binding
+/// of the name on the way from the namespace to the cell. [`namespace_binding`] watches
+/// the bindings it read, so changing any of them moves one of these stamps, and stamps only
+/// grow, so their sum moves too.
+#[inline(always)]
+unsafe fn namespace_stamp(package: Sexp, symbol: Sexp) -> u64 {
+    let heap = crate::heap();
+    let symbols = symbols();
+    heap.lookup_stamp(package)
+        .wrapping_add(heap.lookup_stamp(symbol))
+        .wrapping_add(heap.lookup_stamp(symbols.dot_namespace))
+        .wrapping_add(heap.lookup_stamp(symbols.exports))
+}
+
+/// The value a binding cell holds when reading it needs no evaluation: not an active binding,
+/// an unforced promise, or a missing or unbound value.
+#[inline(always)]
+unsafe fn bound_value(cell: Sexp) -> Option<Sexp> {
+    if cell == nil() || cell.has_gp(gp::ACTIVE_BINDING) {
+        return None;
+    }
+    let mut value = cell.cdr();
+    if value.kind() == SexpType::Promise {
+        value = value.car();
+    }
+    (value != unbound() && value != missing_arg()).then_some(value)
+}
+
+/// The symbol a side of a literal `::` names: a symbol as written, or a one-element string.
+unsafe fn colon_literal(value: Sexp) -> R<Option<Sexp>> {
+    match value.kind() {
+        SexpType::Symbol if value != missing_arg() && value != symbols().dots => Ok(Some(value)),
+        SexpType::String if length(value) == 1 && value.attrib() == nil() => {
+            values::install_charsxp(value.element(0)).map(Some)
+        }
+        _ => Ok(None),
+    }
 }
 
 /// `missing(symbol)`, read from a slot frame's slots and missing bits when `symbol` is one of

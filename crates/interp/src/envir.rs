@@ -2335,6 +2335,74 @@ unsafe fn namespace_value(call: &Call<'_>, exported: bool) -> R<Sexp> {
     namespace_lookup(package, symbol, exported)
 }
 
+/// `package::symbol` (or `:::` when not `exported`) for a package named by a symbol, with the
+/// binding cell the value came from when reading that cell again gives the same answer as long
+/// as the lookup stamps of `package`, `symbol`, `.__NAMESPACE__.` and `exports` stand still.
+/// Every binding the lookup read on the way (the registry's, the namespace information's, the
+/// export table's entry) is marked watched, so assigning one moves its symbol's stamp; adding or
+/// removing a binding moves it anyway. Lazy data, renamed exports and lookups that pass a
+/// function frame give no cell.
+pub unsafe fn namespace_binding(
+    package: Sexp,
+    symbol: Sexp,
+    exported: bool,
+) -> R<(Sexp, Option<Sexp>)> {
+    let value = namespace_lookup(package, symbol, exported)?;
+    Ok((value, namespace_cell(package, symbol, exported)))
+}
+
+unsafe fn namespace_cell(package: Sexp, symbol: Sexp, exported: bool) -> Option<Sexp> {
+    let heap = crate::heap();
+    let symbols = symbols();
+    let watch = |cell: Sexp| cell.set_gp_bits(gp::WATCHED, true);
+    let namespace = if package == symbols.base {
+        base_namespace()
+    } else {
+        let entry = heap.frame_cell(heap.known().namespace_registry, package)?;
+        let namespace = entry.cdr();
+        if namespace.kind() != SexpType::Environment || entry.has_gp(gp::ACTIVE_BINDING) {
+            return None;
+        }
+        watch(entry);
+        namespace
+    };
+    if namespace == base_namespace() || !exported {
+        return heap.frame_cell(namespace, symbol);
+    }
+    let environment_in = |env: Sexp, name: Sexp| -> Option<(Sexp, Sexp)> {
+        let cell = heap.frame_cell(env, name)?;
+        let value = cell.cdr();
+        (value.kind() == SexpType::Environment && !cell.has_gp(gp::ACTIVE_BINDING))
+            .then_some((cell, value))
+    };
+    let (info_cell, info) = environment_in(namespace, symbols.dot_namespace)?;
+    let (exports_cell, exports) = environment_in(info, symbols.exports)?;
+    let entry = heap.frame_cell(exports, symbol)?;
+    let internal = entry.cdr();
+    let renamed = internal.kind() == SexpType::String
+        && length(internal) > 0
+        && values::install_charsxp(internal.element(0)).ok()? != symbol;
+    if renamed || entry.has_gp(gp::ACTIVE_BINDING) {
+        return None;
+    }
+    watch(info_cell);
+    watch(exports_cell);
+    watch(entry);
+    let empty = empty_env();
+    let mut env = namespace;
+    while env != empty {
+        if env.has_gp(gp::FUNCTION_FRAME) {
+            return None;
+        }
+        if let Some(cell) = heap.frame_cell(env, symbol) {
+            heap.observe_environment(namespace);
+            return Some(cell);
+        }
+        env = env.enclosure();
+    }
+    None
+}
+
 /// Looks `symbol` up in a package's namespace (a namespace environment, or a package name as a
 /// symbol or a string), loading it if needed. An exported name is looked up through the
 /// namespace's export table, which maps it to the internal name, from the namespace outward,
