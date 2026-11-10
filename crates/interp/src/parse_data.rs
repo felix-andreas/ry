@@ -13,11 +13,12 @@
 
 use {
     crate::{
-        lower::{SourceMap, is_skipped, position},
+        lower::{SourceMap, is_skipped, position_near},
         unwind::R,
         values::{self, symbols},
     },
-    heap::object::Sexp,
+    heap::object::{Sexp, SexpType},
+    smallvec::{SmallVec, smallvec},
     syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken},
 };
 
@@ -26,7 +27,7 @@ use {
 /// such as a ry record literal.
 pub unsafe fn parse_data(root: &SyntaxNode, source: &SourceMap) -> R<Option<Sexp>> {
     let mut replay = Replay {
-        lexemes: Vec::new(),
+        lexemes: Vec::with_capacity(source.text.len() / 4),
         cursor: 0,
         lookahead: None,
         last_id: 0,
@@ -37,38 +38,57 @@ pub unsafe fn parse_data(root: &SyntaxNode, source: &SourceMap) -> R<Option<Sexp
         argument_start: false,
     };
     collect_lexemes(root, &mut replay.lexemes, source.text);
-    let Some(roots) = replay.program(root) else {
+    // Each lexeme becomes an item or is skipped, and the grammar's reductions add fewer than two
+    // items per token.
+    replay.items.reserve(replay.lexemes.len() * 3);
+    if replay.program(root).is_none() {
         return Ok(None);
-    };
-    for &item in &roots {
-        assign_parents(&mut replay.items, item, 0);
     }
-    let mut top_level: Vec<i32> = replay
-        .items
+    let items = &replay.items;
+    // A reduction is pushed after its children, so walking the items backwards reaches every
+    // item's reduction before the item itself, and each item hands its visible ancestor's id
+    // (its own id if it is visible) down to its children.
+    let mut parents = vec![0; items.len()];
+    let mut handed_down = vec![0; items.len()];
+    for index in (0..items.len()).rev() {
+        let item = &items[index];
+        let parent = match item.reduced_by {
+            NO_ITEM => 0,
+            reduction => handed_down[reduction as usize],
+        };
+        parents[index] = parent;
+        handed_down[index] = if item.visible { item.id } else { parent };
+    }
+    comment_parents(items, &replay.comments, &mut parents);
+    // Ids are dense, so placing each visible item at its id orders the rows without a sort.
+    let mut row_of_id = vec![NO_ITEM; replay.last_id as usize + 1];
+    for (index, item) in items.iter().enumerate() {
+        if item.visible {
+            row_of_id[item.id as usize] = index as u32;
+        }
+    }
+    let rows = row_of_id.iter().filter(|&&index| index != NO_ITEM).count();
+    let mut matrix = Vec::with_capacity(rows * 8);
+    let tokens = values::alloc(SexpType::String, rows)?;
+    let texts = values::alloc(SexpType::String, rows)?;
+    // A table repeats a few dozen token names thousands of times, so each name is interned once
+    // and its CHARSXP reused by pointer identity of the static name.
+    let mut interned: SmallVec<[(&'static str, Sexp); 64]> = SmallVec::new();
+    let mut line = 0;
+    for (row, &index) in row_of_id
         .iter()
-        .filter(|item| item.visible && item.parent == 0 && item.name != "COMMENT")
-        .map(|item| item.id)
-        .collect();
-    top_level.sort_unstable();
-    for index in 0..replay.comments.len() {
-        let comment = replay.comments[index];
-        let parent = comment_parent(&replay.items, &roots, &top_level, comment);
-        replay.items[comment].parent = parent;
-    }
-    let mut visible: Vec<&Item> = replay.items.iter().filter(|item| item.visible).collect();
-    visible.sort_by_key(|item| item.id);
-    let mut matrix = Vec::with_capacity(visible.len() * 8);
-    let mut tokens = Vec::with_capacity(visible.len());
-    let mut texts = Vec::with_capacity(visible.len());
-    for item in &visible {
+        .filter(|&&index| index != NO_ITEM)
+        .enumerate()
+    {
+        let item = &items[index as usize];
         let (start, end) = item.range.unwrap_or((0, 0));
         let last = source.text[..end]
             .chars()
             .next_back()
             .map_or(start, |character| end - character.len_utf8())
             .max(start);
-        let (first_line, _, first_column) = position(source, start);
-        let (last_line, _, last_column) = position(source, last);
+        let (first_line, _, first_column) = position_near(source, start, &mut line);
+        let (last_line, _, last_column) = position_near(source, last, &mut line);
         matrix.extend_from_slice(&[
             first_line,
             first_column,
@@ -77,31 +97,32 @@ pub unsafe fn parse_data(root: &SyntaxNode, source: &SourceMap) -> R<Option<Sexp
             i32::from(item.terminal),
             token_number(item.name),
             item.id,
-            item.parent,
+            parents[index as usize],
         ]);
-        tokens.push(item.name);
-        texts.push(if item.terminal {
-            &source.text[start..end]
+        match interned
+            .iter()
+            .find(|(name, _)| std::ptr::eq(*name, item.name))
+        {
+            Some(&(_, charsxp)) => crate::heap().set_element(tokens, row, charsxp),
+            None => {
+                values::set_mkchar(tokens, row, item.name)?;
+                interned.push((item.name, values::string_elt(tokens, row)));
+            }
+        }
+        if item.terminal {
+            values::set_mkchar(texts, row, &source.text[start..end])?;
         } else {
-            ""
-        });
+            crate::heap().set_element(texts, row, values::blank_string());
+        }
     }
     let data = values::integer_vector(&matrix)?;
     values::set_attr(
         data,
         symbols().dim,
-        values::integer_vector(&[8, visible.len() as i32])?,
+        values::integer_vector(&[8, rows as i32])?,
     )?;
-    values::set_attr(
-        data,
-        values::install("tokens")?,
-        values::string_vector(&tokens)?,
-    )?;
-    values::set_attr(
-        data,
-        values::install("text")?,
-        values::string_vector(&texts)?,
-    )?;
+    values::set_attr(data, values::install("tokens")?, tokens)?;
+    values::set_attr(data, values::install("text")?, texts)?;
     values::set_attr(data, symbols().class, values::scalar_string("parseData")?)?;
     Ok(Some(data))
 }
@@ -134,12 +155,17 @@ struct Item {
     visible: bool,
     /// The byte range it spans, or `None` for a rule that matched nothing.
     range: Option<(usize, usize)>,
-    children: Vec<usize>,
-    parent: i32,
+    /// The index of the reduction that took this item as a child, or [`NO_ITEM`].
+    reduced_by: u32,
 }
+
+const NO_ITEM: u32 = u32::MAX;
 
 /// The node an expression reduced to, as an index into the replay's items.
 type ItemIndex = usize;
+
+/// The children of one grammar reduction, which are few.
+type Parts = SmallVec<[ItemIndex; 8]>;
 
 struct Replay {
     lexemes: Vec<Lexeme>,
@@ -159,19 +185,19 @@ struct Replay {
 
 impl Replay {
     /// The top-level statements.
-    fn program(&mut self, root: &SyntaxNode) -> Option<Vec<ItemIndex>> {
+    fn program(&mut self, root: &SyntaxNode) -> Option<()> {
         let mut statements = root.children().filter(|child| !is_skipped(child));
-        let mut roots = Vec::new();
+
         loop {
             match self.peek() {
-                Next::End => return Some(roots),
+                Next::End => return Some(()),
                 Next::Newline(_) => {
                     let newline = self.shift_separator()?;
-                    self.reduce("prog", false, vec![newline], false);
+                    self.reduce("prog", false, &[newline], false);
                 }
                 Next::Token(token) if token.kind() == SyntaxKind::SEMICOLON => {
                     let separator = self.shift_separator()?;
-                    self.reduce("prog", false, vec![separator], false);
+                    self.reduce("prog", false, &[separator], false);
                 }
                 Next::Token(_) => {
                     let statement = self.statement(&statements.next()?)?;
@@ -179,10 +205,9 @@ impl Replay {
                     {
                         return None;
                     }
-                    roots.push(statement);
                     if !matches!(self.peek(), Next::End) {
                         let separator = self.shift_separator()?;
-                        self.reduce("prog", false, vec![statement, separator], false);
+                        self.reduce("prog", false, &[statement, separator], false);
                     }
                 }
             }
@@ -202,13 +227,13 @@ impl Replay {
                 return Some(self.reduce(
                     "expr_or_assign_or_help",
                     true,
-                    vec![left, operator, right],
+                    &[left, operator, right],
                     true,
                 ));
             }
         }
         let expression = self.expression(node)?;
-        Some(self.reduce("expr_or_assign_or_help", false, vec![expression], true))
+        Some(self.reduce("expr_or_assign_or_help", false, &[expression], true))
     }
 
     /// An expression in a position GNU R's grammar reads as `expr_or_help`: a condition, an
@@ -221,10 +246,10 @@ impl Replay {
             let left = self.help(&left)?;
             let operator = self.shift(&operator_token(node)?, None)?;
             let right = self.help(&right)?;
-            return Some(self.reduce("expr_or_help", true, vec![left, operator, right], true));
+            return Some(self.reduce("expr_or_help", true, &[left, operator, right], true));
         }
         let expression = self.expression(node)?;
-        Some(self.reduce("expr_or_help", false, vec![expression], true))
+        Some(self.reduce("expr_or_help", false, &[expression], true))
     }
 
     fn expression(&mut self, node: &SyntaxNode) -> Option<ItemIndex> {
@@ -235,7 +260,7 @@ impl Replay {
                 let token = first_token(node)?;
                 let placeholder = token.kind() == SyntaxKind::UNDERSCORE;
                 let symbol = self.shift(&token, None)?;
-                Some(self.reduce("expr", true, vec![symbol], !placeholder))
+                Some(self.reduce("expr", true, &[symbol], !placeholder))
             }
             SyntaxKind::LITERAL => {
                 let token = first_token(node)?;
@@ -245,11 +270,11 @@ impl Replay {
                     _ => false,
                 };
                 let constant = self.shift(&token, None)?;
-                Some(self.reduce("expr", true, vec![constant], lookahead))
+                Some(self.reduce("expr", true, &[constant], lookahead))
             }
             SyntaxKind::BREAK_EXPR | SyntaxKind::NEXT_EXPR => {
                 let keyword = self.shift(&first_token(node)?, None)?;
-                Some(self.reduce("expr", true, vec![keyword], false))
+                Some(self.reduce("expr", true, &[keyword], false))
             }
             SyntaxKind::UNARY_EXPR => {
                 let operator = operator_token(node)?;
@@ -260,7 +285,7 @@ impl Replay {
                 } else {
                     self.expression(operand)?
                 };
-                Some(self.reduce("expr", true, vec![operator, operand], true))
+                Some(self.reduce("expr", true, &[operator, operand], true))
             }
             SyntaxKind::BINARY_EXPR => {
                 let operator = operator_token(node)?;
@@ -271,21 +296,21 @@ impl Replay {
                 let left = self.expression(&left)?;
                 let operator = self.shift(&operator, None)?;
                 let right = self.expression(&right)?;
-                Some(self.reduce("expr", true, vec![left, operator, right], true))
+                Some(self.reduce("expr", true, &[left, operator, right], true))
             }
             SyntaxKind::PAREN_EXPR => {
                 let open = self.shift_kind(node, SyntaxKind::L_PAREN)?;
                 let inner = self.statement(children.first()?)?;
                 let close = self.shift_kind(node, SyntaxKind::R_PAREN)?;
-                Some(self.reduce("expr", true, vec![open, inner, close], false))
+                Some(self.reduce("expr", true, &[open, inner, close], false))
             }
             SyntaxKind::BRACE_EXPR => self.brace(node, children),
             SyntaxKind::CALL_EXPR | SyntaxKind::SUBSET_EXPR | SyntaxKind::SUBSET2_EXPR => {
                 let [callee, arguments] = <[SyntaxNode; 2]>::try_from(children).ok()?;
                 let callee = self.expression(&callee)?;
-                let mut parts = vec![callee];
+                let mut parts: Parts = smallvec![callee];
                 parts.extend(self.arguments(&arguments)?);
-                Some(self.reduce("expr", true, parts, false))
+                Some(self.reduce("expr", true, &parts, false))
             }
             SyntaxKind::DOLLAR_EXPR | SyntaxKind::AT_EXPR => {
                 let [object, member] = <[SyntaxNode; 2]>::try_from(children).ok()?;
@@ -295,7 +320,7 @@ impl Replay {
                     && first_token(&member)?.kind() == SyntaxKind::IDENT)
                     .then_some("SLOT");
                 let member = self.shift(&first_token(&member)?, name)?;
-                Some(self.reduce("expr", true, vec![object, operator, member], false))
+                Some(self.reduce("expr", true, &[object, operator, member], false))
             }
             SyntaxKind::NAMESPACE_EXPR => {
                 let [package, name] = <[SyntaxNode; 2]>::try_from(children).ok()?;
@@ -305,37 +330,37 @@ impl Replay {
                 let package = self.shift(&package_token, package_name)?;
                 let operator = self.shift(&operator_token(node)?, None)?;
                 let name = self.shift(&first_token(&name)?, None)?;
-                Some(self.reduce("expr", true, vec![package, operator, name], false))
+                Some(self.reduce("expr", true, &[package, operator, name], false))
             }
             SyntaxKind::FUNCTION_DEF => {
                 let keyword = self.shift(&first_token(node)?, None)?;
                 let parameters = children
                     .iter()
                     .find(|child| child.kind() == SyntaxKind::PARAMETER_LIST)?;
-                let mut parts = vec![keyword];
+                let mut parts: Parts = smallvec![keyword];
                 parts.extend(self.parameters(parameters)?);
                 let body = children
                     .iter()
                     .find(|child| child.kind() != SyntaxKind::PARAMETER_LIST)?;
                 parts.push(self.statement(body)?);
-                Some(self.reduce("expr", true, parts, true))
+                Some(self.reduce("expr", true, &parts, true))
             }
             SyntaxKind::IF_EXPR => {
                 let keyword = self.shift_kind(node, SyntaxKind::IF_KW)?;
                 let condition = self.condition(node, children.first()?, "ifcond")?;
                 let then = self.statement(children.get(1)?)?;
-                let mut parts = vec![keyword, condition, then];
+                let mut parts: Parts = smallvec![keyword, condition, then];
                 if let Some(otherwise) = children.get(2) {
                     parts.push(self.shift_kind(node, SyntaxKind::ELSE_KW)?);
                     parts.push(self.statement(otherwise)?);
                 }
-                Some(self.reduce("expr", true, parts, true))
+                Some(self.reduce("expr", true, &parts, true))
             }
             SyntaxKind::WHILE_EXPR => {
                 let keyword = self.shift_kind(node, SyntaxKind::WHILE_KW)?;
                 let condition = self.condition(node, children.first()?, "cond")?;
                 let body = self.statement(children.get(1)?)?;
-                Some(self.reduce("expr", true, vec![keyword, condition, body], true))
+                Some(self.reduce("expr", true, &[keyword, condition, body], true))
             }
             SyntaxKind::FOR_EXPR => {
                 let keyword = self.shift_kind(node, SyntaxKind::FOR_KW)?;
@@ -347,16 +372,16 @@ impl Replay {
                 let header = self.reduce(
                     "forcond",
                     true,
-                    vec![open, variable, keyword_in, sequence, close],
+                    &[open, variable, keyword_in, sequence, close],
                     false,
                 );
                 let body = self.statement(children.get(2)?)?;
-                Some(self.reduce("expr", true, vec![keyword, header, body], true))
+                Some(self.reduce("expr", true, &[keyword, header, body], true))
             }
             SyntaxKind::REPEAT_EXPR => {
                 let keyword = self.shift_kind(node, SyntaxKind::REPEAT_KW)?;
                 let body = self.statement(children.first()?)?;
-                Some(self.reduce("expr", true, vec![keyword, body], true))
+                Some(self.reduce("expr", true, &[keyword, body], true))
             }
             _ => None,
         }
@@ -373,7 +398,7 @@ impl Replay {
         let open = self.shift_kind(node, SyntaxKind::L_PAREN)?;
         let condition = self.help(condition)?;
         let close = self.shift_kind(node, SyntaxKind::R_PAREN)?;
-        Some(self.reduce(name, false, vec![open, condition, close], false))
+        Some(self.reduce(name, false, &[open, condition, close], false))
     }
 
     /// `{ ... }`: GNU R's `exprlist`, whose statements are separated by `;` or significant
@@ -396,8 +421,8 @@ impl Replay {
             {
                 let visible = self.items[pending].name == "';'";
                 let empty = list.is_none();
-                let parts = list.into_iter().chain([pending]).collect();
-                let reduced = self.reduce("exprlist", visible, parts, true);
+                let parts: Parts = list.into_iter().chain([pending]).collect();
+                let reduced = self.reduce("exprlist", visible, &parts, true);
                 // An empty list sits where the token before it ends, so a list that starts
                 // empty starts on the last character of `{`.
                 if empty && let Some((start, end)) = self.items[reduced].range {
@@ -414,21 +439,21 @@ impl Replay {
                 continue;
             }
             let statement = self.statement(&statements.next()?)?;
-            let mut parts: Vec<ItemIndex> = list.into_iter().collect();
+            let mut parts: Parts = list.into_iter().collect();
             parts.extend(separator.take());
             parts.push(statement);
-            list = Some(self.reduce("exprlist", false, parts, true));
+            list = Some(self.reduce("exprlist", false, &parts, true));
         }
         let close = self.shift_kind(node, SyntaxKind::R_BRACE)?;
-        let mut parts = vec![open];
+        let mut parts: Parts = smallvec![open];
         parts.extend(list);
         parts.push(close);
-        Some(self.reduce("expr", true, parts, false))
+        Some(self.reduce("expr", true, &parts, false))
     }
 
     /// The bracketed arguments of a call or subset, GNU R's `sublist`: the opening token, the
     /// list, and the closing token or tokens (two `]` close `[[`).
-    fn arguments(&mut self, list: &SyntaxNode) -> Option<Vec<ItemIndex>> {
+    fn arguments(&mut self, list: &SyntaxNode) -> Option<Parts> {
         let mut elements = significant_elements(list).into_iter();
         let open = self.shift(&elements.next()?.into_token()?, None)?;
         let mut previous: Option<(ItemIndex, ItemIndex)> = None;
@@ -438,17 +463,17 @@ impl Replay {
                 SyntaxElement::Node(argument) => slot = Some(argument),
                 SyntaxElement::Token(token) => {
                     let argument = self.argument(slot.take())?;
-                    let mut parts = Vec::new();
+                    let mut parts = Parts::new();
                     if let Some((list, comma)) = previous {
                         parts.extend([list, comma]);
                     }
                     parts.extend(argument);
-                    let sublist = self.reduce("sublist", false, parts, true);
+                    let sublist = self.reduce("sublist", false, &parts, true);
                     if token.kind() == SyntaxKind::COMMA {
                         previous = Some((sublist, self.shift(&token, None)?));
                         continue;
                     }
-                    let mut result = vec![open, sublist, self.shift(&token, None)?];
+                    let mut result: Parts = smallvec![open, sublist, self.shift(&token, None)?];
                     for element in elements.by_ref() {
                         result.push(self.shift(&element.into_token()?, None)?);
                     }
@@ -481,24 +506,28 @@ impl Replay {
             // after NULL before it reduces it.
             self.argument_start = true;
             let value = self.help(&value)?;
-            return Some(Some(self.reduce("sub", false, vec![value], true)));
+            return Some(Some(self.reduce("sub", false, &[value], true)));
         };
         let name_token = first_token(elements.first()?.as_node()?)?;
-        let name = (name_token.kind() == SyntaxKind::IDENT).then_some("SYMBOL_SUB");
+        let name = matches!(
+            name_token.kind(),
+            SyntaxKind::IDENT | SyntaxKind::DOTS | SyntaxKind::DOTDOTI
+        )
+        .then_some("SYMBOL_SUB");
         let name = self.shift(&name_token, name)?;
         let equals_sign = self.shift(&elements.get(equals)?.as_token()?.clone(), Some("EQ_SUB"))?;
-        let mut parts = vec![name, equals_sign];
+        let mut parts: Parts = smallvec![name, equals_sign];
         if let Some(value) = elements
             .get(equals + 1)
             .and_then(|element| element.as_node().cloned())
         {
             parts.push(self.help(&value)?);
         }
-        Some(Some(self.reduce("sub", false, parts, true)))
+        Some(Some(self.reduce("sub", false, &parts, true)))
     }
 
     /// `( formals )` of a function, GNU R's `formlist`, which reduces once per parameter.
-    fn parameters(&mut self, list: &SyntaxNode) -> Option<Vec<ItemIndex>> {
+    fn parameters(&mut self, list: &SyntaxNode) -> Option<Parts> {
         let open = self.shift_kind(list, SyntaxKind::L_PAREN)?;
         let mut formals: Option<ItemIndex> = None;
         let mut comma: Option<ItemIndex> = None;
@@ -506,7 +535,7 @@ impl Replay {
             match element {
                 SyntaxElement::Node(parameter) => {
                     let elements = significant_elements(&parameter);
-                    let mut parts: Vec<ItemIndex> = formals.into_iter().collect();
+                    let mut parts: Parts = formals.into_iter().collect();
                     parts.extend(comma.take());
                     let name = elements.first()?.as_token()?.clone();
                     parts.push(self.shift(&name, Some("SYMBOL_FORMALS"))?);
@@ -519,14 +548,14 @@ impl Replay {
                         let default = elements.iter().find_map(|element| element.as_node())?;
                         parts.push(self.help(&default.clone())?);
                     }
-                    formals = Some(self.reduce("formlist", false, parts, true));
+                    formals = Some(self.reduce("formlist", false, &parts, true));
                 }
                 SyntaxElement::Token(token) if token.kind() == SyntaxKind::COMMA => {
                     comma = Some(self.shift(&token, None)?);
                 }
                 SyntaxElement::Token(token) => {
                     let close = self.shift(&token, None)?;
-                    let mut result = vec![open];
+                    let mut result: Parts = smallvec![open];
                     result.extend(formals);
                     result.push(close);
                     return Some(result);
@@ -632,8 +661,7 @@ impl Replay {
             terminal: true,
             visible: true,
             range: Some((start, end)),
-            children: Vec::new(),
-            parent: 0,
+            reduced_by: NO_ITEM,
         });
         self.comments.push(self.items.len() - 1);
     }
@@ -697,8 +725,7 @@ impl Replay {
             terminal: true,
             visible: true,
             range: Some((start, usize::from(token.text_range().end()))),
-            children: Vec::new(),
-            parent: 0,
+            reduced_by: NO_ITEM,
         });
         Some(self.items.len() - 1)
     }
@@ -730,8 +757,7 @@ impl Replay {
                     terminal: true,
                     visible: false,
                     range: Some((offset, offset + 1)),
-                    children: Vec::new(),
-                    parent: 0,
+                    reduced_by: NO_ITEM,
                 });
                 Some(self.items.len() - 1)
             }
@@ -746,27 +772,34 @@ impl Replay {
         &mut self,
         name: &'static str,
         visible: bool,
-        children: Vec<ItemIndex>,
+        children: &[ItemIndex],
         lookahead: bool,
     ) -> ItemIndex {
         if lookahead {
             self.peek();
         }
         let id = self.allocate();
-        let range = children
-            .iter()
-            .filter_map(|&child| self.items[child].range)
-            .reduce(|(first, last), (start, end)| (first.min(start), last.max(end)));
+        let index = self.items.len();
+        let mut range: Option<(usize, usize)> = None;
+        for &child in children {
+            let child = &mut self.items[child];
+            debug_assert_eq!(child.reduced_by, NO_ITEM, "an item reduced twice");
+            child.reduced_by = index as u32;
+            if let Some((start, end)) = child.range {
+                range = Some(range.map_or((start, end), |(first, last)| {
+                    (first.min(start), last.max(end))
+                }));
+            }
+        }
         self.items.push(Item {
             id,
             name,
             terminal: false,
             visible,
             range,
-            children,
-            parent: 0,
+            reduced_by: NO_ITEM,
         });
-        self.items.len() - 1
+        index
     }
 }
 
@@ -774,58 +807,58 @@ fn is_close_brace(next: &Next) -> bool {
     matches!(next, Next::Token(token) if token.kind() == SyntaxKind::R_BRACE)
 }
 
-/// Gives every visible item below `item` the id of its nearest visible ancestor as its parent.
-fn assign_parents(items: &mut [Item], item: ItemIndex, parent: i32) {
-    let Some(entry) = items.get_mut(item) else {
-        return;
-    };
-    let below = if entry.visible {
-        entry.parent = parent;
-        entry.id
-    } else {
-        parent
-    };
-    let children = entry.children.clone();
-    for child in children {
-        assign_parents(items, child, below);
-    }
-}
-
-/// A comment's parent: the smallest visible expression whose range holds it, or, at the top
-/// level, the negated id of the first top-level item, such as an expression or a `;`, that took
-/// an id after it (0 if none did). `top_level` holds those ids in order.
-fn comment_parent(
-    items: &[Item],
-    roots: &[ItemIndex],
-    top_level: &[i32],
-    comment: ItemIndex,
-) -> i32 {
-    let Some((start, end)) = items[comment].range else {
-        return 0;
-    };
-    let contains = |item: ItemIndex| {
-        !items[item].terminal
-            && items[item]
-                .range
-                .is_some_and(|(first, last)| first <= start && end <= last)
-    };
-    let mut found = None;
-    let mut candidates: Vec<ItemIndex> = roots.to_vec();
-    while let Some(item) = candidates.iter().copied().find(|&item| contains(item)) {
-        if items[item].visible {
-            found = Some(items[item].id);
-        }
-        candidates = items[item].children.clone();
-    }
-    if let Some(parent) = found {
-        return parent;
-    }
-    let comment_id = items[comment].id;
-    top_level
+/// Gives each comment its parent: the id of the smallest visible grammar rule whose range holds
+/// it, or, at the top level, the negated id of the first top-level item, such as an expression or
+/// a `;`, that took an id after it (0 if none did). Rule ranges nest, so one sweep in source
+/// order with a stack of the rules still open finds every comment's rule.
+fn comment_parents(items: &[Item], comments: &[ItemIndex], parents: &mut [i32]) {
+    let mut top_level: Vec<i32> = items
         .iter()
-        .copied()
-        .find(|&id| id > comment_id)
-        .map_or(0, |id| -id)
+        .zip(parents.iter())
+        .filter(|(item, parent)| item.visible && **parent == 0 && item.name != "COMMENT")
+        .map(|(item, _)| item.id)
+        .collect();
+    top_level.sort_unstable();
+    // A rule and its only visible child can span the same text; the child, which took the
+    // smaller id, is the smaller rule, so among equal ranges it comes later on the stack.
+    let mut rules: Vec<(usize, usize, i32)> = items
+        .iter()
+        .filter(|item| item.visible && !item.terminal)
+        .filter_map(|item| item.range.map(|(start, end)| (start, end, item.id)))
+        .collect();
+    rules.sort_unstable_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then(right.1.cmp(&left.1))
+            .then(right.2.cmp(&left.2))
+    });
+    let mut ordered: Vec<ItemIndex> = comments.to_vec();
+    ordered.sort_unstable_by_key(|&comment| items[comment].range);
+    let mut open: Vec<(usize, usize, i32)> = Vec::new();
+    let mut next_rule = 0;
+    for comment in ordered {
+        let Some((start, end)) = items[comment].range else {
+            continue;
+        };
+        while let Some(&rule) = rules.get(next_rule).filter(|rule| rule.0 <= start) {
+            while open.last().is_some_and(|top| top.1 <= rule.0) {
+                open.pop();
+            }
+            open.push(rule);
+            next_rule += 1;
+        }
+        while open.last().is_some_and(|top| top.1 < end) {
+            open.pop();
+        }
+        let comment_id = items[comment].id;
+        parents[comment] = match open.last() {
+            Some(&(_, _, id)) => id,
+            None => {
+                let after = top_level.partition_point(|&id| id <= comment_id);
+                top_level.get(after).map_or(0, |&id| -id)
+            }
+        };
+    }
 }
 
 fn collect_lexemes(node: &SyntaxNode, lexemes: &mut Vec<Lexeme>, text: &str) {
@@ -836,7 +869,10 @@ fn collect_lexemes(node: &SyntaxNode, lexemes: &mut Vec<Lexeme>, text: &str) {
     for element in node.children_with_tokens() {
         match element {
             SyntaxElement::Node(child) if child.kind() == SyntaxKind::ANNOTATION => {
-                // `#:` lines are comments to R, one per line.
+                // `#:` lines are comments to R, one per line. A trailing annotation that runs
+                // on over `#:` lines sits inside the expression it follows, but its newlines
+                // end that expression for R wherever a newline after it would.
+                let significant = annotation_newline_significant(&child);
                 let start = usize::from(child.text_range().start());
                 let end = usize::from(child.text_range().end()).min(text.len());
                 let mut line_start = start;
@@ -873,6 +909,36 @@ fn collect_lexemes(node: &SyntaxNode, lexemes: &mut Vec<Lexeme>, text: &str) {
             },
         }
     }
+}
+
+/// Whether R's lexer returns the newlines inside `annotation` as statement separators: walking
+/// out from the annotation, the first node that has a token after it decides, and a statement
+/// list (the file or a brace) decides it directly.
+fn annotation_newline_significant(annotation: &SyntaxNode) -> bool {
+    let mut child = annotation.clone();
+    while let Some(parent) = child.parent() {
+        if matches!(
+            parent.kind(),
+            SyntaxKind::SOURCE_FILE | SyntaxKind::BRACE_EXPR
+        ) {
+            return true;
+        }
+        let mut next = child.next_sibling_or_token();
+        while let Some(element) = next {
+            let follows = match &element {
+                SyntaxElement::Token(token) => !token.kind().is_trivia(),
+                SyntaxElement::Node(node) => {
+                    node.kind() != SyntaxKind::ANNOTATION && !is_skipped(node)
+                }
+            };
+            if follows {
+                return false;
+            }
+            next = element.next_sibling_or_token();
+        }
+        child = parent;
+    }
+    true
 }
 
 fn push_comment(lexemes: &mut Vec<Lexeme>, text: &str, start: usize, end: usize) {

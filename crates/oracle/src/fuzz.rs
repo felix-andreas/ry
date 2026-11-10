@@ -1323,3 +1323,47 @@ check <- function(index, call) {
     }
 }
 "#;
+
+/// An R program for `seed` that parses the text of [`program`]`(seed)` with `keep.source = TRUE`
+/// and prints its parse data, one `|`-separated row per line, then every top-level srcref and
+/// the whole-file srcref. Before parsing, the text gains comments on lines of their own and
+/// after code, blank lines, and tab indentation, the inputs whose positions and parents are
+/// easiest to get wrong. Parse data comes from the parser alone, so the program runs nothing it
+/// parses.
+pub fn parse_data_program(seed: u64) -> String {
+    const COMMENTS: &[&str] = &["# note", "#", "#: (x: Int) -> Int", "## twice", "#'roxygen"];
+    let mut rng = SplitMix64(seed ^ 0x7061_7273_6564_6174);
+    let mut source = String::new();
+    for line in program(seed).lines() {
+        if rng.chance(1, 6) {
+            let indent = ["", "  ", "\t", " \t "][rng.below(4)];
+            source.push_str(&format!(
+                "{indent}{}\n",
+                COMMENTS[rng.below(COMMENTS.len())]
+            ));
+        }
+        if rng.chance(1, 10) {
+            source.push('\n');
+        }
+        let code = match line.strip_prefix("  ") {
+            Some(rest) if rng.chance(1, 4) => format!("\t{rest}"),
+            _ => line.to_owned(),
+        };
+        source.push_str(&code);
+        // A trailing comment is safe only where the line cannot end inside a string.
+        let plain = !code.contains(['"', '\'', '`', '\\', '#']);
+        if plain && !code.trim().is_empty() && rng.chance(1, 4) {
+            source.push_str(&format!(" {}", COMMENTS[rng.below(COMMENTS.len())]));
+        }
+        source.push('\n');
+    }
+    format!(
+        "# parse data fuzz program, seed {seed}\n\
+         src <- r\"-----[{source}]-----\"\n\
+         p <- parse(text = src, keep.source = TRUE)\n\
+         d <- getParseData(p, includeText = TRUE)\n\
+         writeLines(do.call(paste, c(unname(as.list(d)), sep = \"|\")))\n\
+         for (ref in attr(p, \"srcref\")) cat(as.integer(ref), \"\\n\")\n\
+         cat(as.integer(attr(p, \"wholeSrcref\")), \"\\n\")\n"
+    )
+}
