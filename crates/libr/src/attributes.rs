@@ -295,13 +295,19 @@ pub unsafe fn dim_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {
         return Err(error("length-0 dimension vector is invalid"));
     }
     if dims.contains(&NA_INTEGER) {
-        return Err(error("the dims contain missing or negative values"));
+        return Err(error("the dims contain missing values"));
     }
     if dims.iter().any(|&extent| extent < 0) {
         return Err(error("the dims contain negative values"));
     }
-    let product = dims.iter().map(|&extent| extent as i64).product::<i64>();
+    let product = dims.iter().fold(1i64, |product, &extent| {
+        product.saturating_mul(extent as i64)
+    });
     if product != length as i64 {
+        // GNU R prints the extents only when both fit in an `int`.
+        if product > i32::MAX as i64 || length as i64 > i32::MAX as i64 {
+            return Err(error("dims do not match the length of object"));
+        }
         return Err(error(format!(
             "dims [product {product}] do not match the length of object [{length}]"
         )));

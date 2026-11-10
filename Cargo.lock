@@ -1822,6 +1822,7 @@ name = "interp"
 version = "0.4.3-beta"
 dependencies = [
  "ab_glyph",
+ "bincode",
  "bzip2",
  "encoding_rs",
  "fancy-regex",
@@ -2109,6 +2110,7 @@ dependencies = [
  "rcmd",
  "rustc-hash",
  "serde_json",
+ "smallvec",
  "stacker",
  "syntax",
  "table",

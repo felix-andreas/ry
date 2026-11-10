@@ -1614,6 +1614,10 @@ impl Heap {
     /// package touched once would be rescanned by every minor collection for the rest of the
     /// session.
     pub unsafe fn retire_escaped(&mut self) {
+        // Most native calls hand out no data pointer, and this runs after every one of them.
+        if self.escaped_lists.is_empty() && self.escaped.is_empty() {
+            return;
+        }
         // Native code may have replaced elements without counting either side, so the counts
         // move from what the list held when it escaped to what it holds now.
         for (vector, before) in std::mem::take(&mut self.escaped_lists) {

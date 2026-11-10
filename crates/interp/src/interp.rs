@@ -27,6 +27,7 @@
 #![allow(incomplete_features)]
 
 pub mod annotations;
+pub mod apply_results;
 mod approximate;
 pub mod arith;
 pub mod arrays;

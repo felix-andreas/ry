@@ -39,6 +39,7 @@ use {
             symbols,
         },
     },
+    bincode::{Decode, Encode},
     heap::object::{NA_INTEGER, Sexp, SexpType},
     std::{
         cell::{Cell, RefCell},
@@ -178,7 +179,7 @@ struct Device {
 }
 
 /// What a snapshot of base graphics holds.
-#[derive(Clone)]
+#[derive(Clone, Encode, Decode)]
 struct Saved {
     pars: Pars,
     started: bool,
@@ -187,7 +188,7 @@ struct Saved {
 /// The base graphics parameters of a device. GNU R keeps two copies, the defaults that
 /// `par` sets and the current values that a high-level call's inline parameters change for
 /// its duration; ry reads inline parameters straight from the call, so one copy is enough.
-#[derive(Clone)]
+#[derive(Clone, Encode, Decode)]
 struct Pars {
     adj: f64,
     ann: bool,
@@ -264,7 +265,7 @@ struct Pars {
     square: bool,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Encode, Decode)]
 enum Pch {
     Code(i32),
     Text(String),
@@ -272,7 +273,7 @@ enum Pch {
 
 /// The outer margins in the unit they were last set in: lines (`oma`), inches (`omi`) or the
 /// inner region as a fraction of the device (`omd`).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Encode, Decode)]
 enum OuterMargins {
     Lines([f64; 4]),
     Inches([f64; 4]),
@@ -280,7 +281,7 @@ enum OuterMargins {
 }
 
 /// The figure margins in the unit they were last set in: lines (`mar`) or inches (`mai`).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Encode, Decode)]
 enum Margins {
     Lines([f64; 4]),
     Inches([f64; 4]),
@@ -288,7 +289,7 @@ enum Margins {
 
 /// How the plot region is placed in the figure: inside the margins, at a fraction of the
 /// figure (`plt`), or centred with a size in inches (`pin`).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Encode, Decode)]
 enum PlotRegion {
     Margins,
     Fraction([f64; 4]),
@@ -298,7 +299,7 @@ enum PlotRegion {
 /// How the figure region is placed in the inner region: the current cell of the layout, a
 /// fraction of the inner region (`fig`), or centred in the layout cell with a size in inches
 /// (`fin`).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Encode, Decode)]
 enum FigureRegion {
     Layout,
     Fraction([f64; 4]),
@@ -307,7 +308,7 @@ enum FigureRegion {
 
 /// An array of figures from `mfrow`, `mfcol` or `layout`. `cells` holds the figure number of
 /// each cell, row by row.
-#[derive(Clone)]
+#[derive(Clone, Encode, Decode)]
 struct Layout {
     rows: usize,
     columns: usize,
@@ -842,27 +843,15 @@ fn restore_saved(device: &mut Device) {
     device.clip = None;
 }
 
-/// Base graphics' part of a `recordPlot()` snapshot: the saved state behind an external
-/// pointer tagged `graphics`, which carries `pkgName` as GNU R's raw vector does.
+/// Base graphics' part of a `recordPlot()` snapshot: the saved state encoded into a raw vector
+/// that carries `pkgName`, as GNU R's does. Its bytes depend only on the state, so two snapshots
+/// of one plot are `identical()`, which is how evaluate and knitr tell a new plot from an old one.
 unsafe fn snapshot_state(saved: &Saved) -> R<Sexp> {
-    let address = Box::into_raw(Box::new(saved.clone())).cast::<std::ffi::c_void>();
-    let heap = crate::heap();
-    let tag = values::install("graphics")?;
-    let value = match heap.alloc_external_ptr(address, tag, nil()) {
-        Ok(value) => value,
-        Err(failure) => {
-            drop(Box::from_raw(address.cast::<Saved>()));
-            return Err(failure.into());
-        }
-    };
-    heap.root(value);
-    heap.alloc_weak_ref(
-        value,
-        nil(),
-        nil(),
-        finalize_snapshot as *const () as usize,
-        false,
-    )?;
+    let mut bytes = SNAPSHOT_MAGIC.to_vec();
+    bincode::encode_into_std_write(saved, &mut bytes, bincode::config::standard())
+        .map_err(|failure| error(format!("cannot save the graphics state: {failure}")))?;
+    let value = values::alloc(SexpType::Raw, bytes.len())?;
+    values::raws_mut(value).copy_from_slice(&bytes);
     values::set_attr(
         value,
         values::install("pkgName")?,
@@ -871,13 +860,8 @@ unsafe fn snapshot_state(saved: &Saved) -> R<Sexp> {
     Ok(value)
 }
 
-unsafe extern "C" fn finalize_snapshot(value: Sexp) {
-    let address = value.external_address();
-    if !address.is_null() {
-        value.set_external_address(std::ptr::null_mut());
-        drop(Box::from_raw(address.cast::<Saved>()));
-    }
-}
+/// Marks a graphics state ry encoded, since a snapshot GNU R saved holds its own raw layout.
+const SNAPSHOT_MAGIC: &[u8; 8] = b"ry-base\x01";
 
 /// The base graphics state in a snapshot's list of system states, which follow its display
 /// list. A state ry did not record, such as one from a snapshot GNU R saved, is skipped.
@@ -885,14 +869,16 @@ unsafe fn snapshot_saved(snapshot: Sexp) -> R<Option<Saved>> {
     if snapshot.kind() != SexpType::List {
         return Ok(None);
     }
-    let tag = values::install("graphics")?;
     for index in 1..length(snapshot) {
         let state = snapshot.element(index);
-        if state.kind() == SexpType::ExternalPtr
-            && state.external_tag() == tag
-            && !state.external_address().is_null()
+        if state.kind() != SexpType::Raw {
+            continue;
+        }
+        if let Some(encoded) = values::raws(state).strip_prefix(SNAPSHOT_MAGIC)
+            && let Ok((saved, _)) =
+                bincode::decode_from_slice::<Saved, _>(encoded, bincode::config::standard())
         {
-            return Ok(Some((*state.external_address().cast::<Saved>()).clone()));
+            return Ok(Some(saved));
         }
     }
     Ok(None)

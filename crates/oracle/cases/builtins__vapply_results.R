@@ -1,0 +1,62 @@
+# `vapply` checks each result against `FUN.VALUE` and assembles the answer: its type, its
+# names or dimnames, and the dims an array-valued `FUN.VALUE` adds.
+show <- function(expr) {
+  value <- tryCatch(expr, error = function(e) cat("Error:", conditionMessage(e), "\n"))
+  if (!is.null(value)) str(value)
+}
+# Type checks: widening is allowed, narrowing and list mixing are not.
+show(vapply(1:3, function(i) i, 0))
+show(vapply(1:3, function(i) i > 1, 0L))
+show(vapply(1:3, function(i) i, 0i))
+show(vapply(c(TRUE, NA), function(v) v, 0i))
+show(vapply(1:2, function(i) i + 0.5, 0L))
+show(vapply(1:2, function(i) i, list(1)))
+show(vapply(1:2, function(i) list(i), list(1)))
+show(vapply(1:2, function(i) list(i, "a"), list(1, 2)))
+show(vapply(1:2, function(i) as.character(i), ""))
+show(vapply(1:2, function(i) i, ""))
+show(vapply(1:2, function(i) as.raw(i), raw(1)))
+show(vapply(1:2, function(i) i, raw(1)))
+show(vapply(1:2, function(i) NA, 0))
+show(vapply(1:2, function(i) NA_integer_, 0))
+show(vapply(1:2, function(i) 1:3, 0))
+show(vapply(1:2, function(i) if (i == 2) 1 else 1:2, c(0, 0)))
+show(vapply(1:2, function(i) NULL, 0))
+show(vapply(1:2, function(i) NULL, NULL))
+show(vapply(1:2, function(i) numeric(), numeric()))
+show(vapply(list(), function(i) i, 0))
+show(vapply(list(), function(i) i, c(a = 0, b = 0)))
+show(vapply(character(), function(i) i, ""))
+show(vapply(1:2, function(i) i, quote(x)))
+show(vapply(1:2, function(i) i, 0, USE.NAMES = NA))
+show(vapply(1:2, function(i) i, 0, USE.NAMES = "yes"))
+# Names come from `X`, or from a character `X` itself; row names from `FUN.VALUE`, else the
+# first result.
+show(vapply(c(a = 1, b = 2), function(v) v, 0))
+show(vapply(c("x", "y"), nchar, 0L))
+show(vapply(c("x", "y"), nchar, 0L, USE.NAMES = FALSE))
+show(vapply(c(u = "x", v = "y"), nchar, 0L))
+show(vapply(list(a = 1:2, b = 3:4), function(v) v, c(p = 0L, q = 0L)))
+show(vapply(list(a = c(m = 1L, n = 2L), b = 3:4), function(v) v, c(0L, 0L)))
+show(vapply(list(1:2, c(m = 3L, n = 4L)), function(v) v, c(0L, 0L)))
+show(vapply(1:2, function(i) c(a = i), 0))
+show(vapply(c(a = 1, b = 2), function(v) c(z = v), c(y = 0)))
+show(vapply(c(a = 1, b = 2), function(v) numeric(), numeric()))
+# An array-valued `FUN.VALUE` adds a dimension.
+show(vapply(1:2, function(i) matrix(i, 2, 2), matrix(0, 2, 2)))
+show(vapply(c(a = 1, b = 2), function(i) matrix(i, 2, 2, dimnames = list(c("r", "s"), c("t", "u"))), matrix(0, 2, 2)))
+show(vapply(c(a = 1, b = 2), function(i) matrix(i, 1, 2), matrix(0, 1, 2, dimnames = list("r", c("t", "u")))))
+show(vapply(1:3, function(i) array(i, 2), array(0, 2)))
+show(vapply(1:2, function(i) structure(c(i, i), dim = 2L, dimnames = list(c("p", "q"))), array(0, 2)))
+show(vapply(1:2, function(i) matrix(i, 1, 1), matrix(0, 1, 1)))
+# Attributes on the results are dropped; factors read as integers.
+show(vapply(1:2, function(i) factor("a"), 0L))
+show(vapply(1:2, function(i) factor("a"), ""))
+show(vapply(list(as.Date("2020-01-01")), function(d) d, 0))
+# The error names the element.
+show(vapply(1:5, function(i) if (i == 4) "a" else i, 0))
+show(vapply(1:5, function(i) if (i == 3) 1:2 else i, 0))
+# `X` with a class goes through `as.list()`.
+show(vapply(factor(c("u", "v")), function(v) as.character(v), ""))
+show(vapply(as.Date(c("2020-01-01", "2021-01-01")), function(d) format(d, "%Y"), ""))
+show(vapply(expression(a, b + 1), function(e) class(e), ""))
