@@ -9,7 +9,7 @@
 
 use {
     crate::{
-        base_fast_paths::{argument, decline, finish, install_prologue},
+        base_fast_paths::{argument, decline, finish, install_prologue, kernel},
         builtins::{BuiltinDef, Call, internal},
         envir::{self, frame_of, get_option, sys_parent_number, top_env},
         eval, interp,
@@ -17,11 +17,20 @@ use {
         values::{self, global_env, install, length, na_string, nil, symbols},
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType},
+    smallvec::SmallVec,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryPackageFastPaths", 2, do_package_fast_paths).invisible(),
     internal("ryTraceBack", 0, do_trace_back),
+    internal("ryWithrListCombine", 0, do_withr_list_combine),
+    internal("ryWithrAsEnvvars", 0, do_withr_as_envvars),
+    internal("ryWithrGetEnvvar", 0, do_withr_get_envvar),
+    internal("ryWithrSetEnvvar", 0, do_withr_set_envvar),
+    internal("ryWithrGetOptions", 0, do_withr_get_options),
+    internal("ryWithrSetOptions", 0, do_withr_set_options),
+    internal("ryWithrResetOptions", 0, do_withr_reset_options),
+    internal("ryWithrResetGettextCache", 0, do_withr_reset_gettext_cache),
 ];
 
 /// The package functions that get a fast path: package, the one release whose code the native
@@ -31,13 +40,71 @@ pub const BUILTINS: &[BuiltinDef] = &[
 /// fails when the installed release is not the one listed, so an update shows up in the test
 /// suite rather than as a silent slowdown. `RY_PRINT_FAST_PATH_HASHES=1` prints the hashes of the
 /// loaded functions.
-const FAST_PATHS: &[(&str, &str, &str, &str, u64)] = &[(
-    "rlang",
-    "1.3.0",
-    "trace_back",
-    "ryTraceBack",
-    0x41ea91d219cd95a7,
-)];
+const FAST_PATHS: &[(&str, &str, &str, &str, u64)] = &[
+    (
+        "rlang",
+        "1.3.0",
+        "trace_back",
+        "ryTraceBack",
+        0x41ea91d219cd95a7,
+    ),
+    (
+        "withr",
+        "3.0.3",
+        "list_combine",
+        "ryWithrListCombine",
+        0x96ded904a19a25c1,
+    ),
+    (
+        "withr",
+        "3.0.3",
+        "as_envvars",
+        "ryWithrAsEnvvars",
+        0x40a3abb5a00b5204,
+    ),
+    (
+        "withr",
+        "3.0.3",
+        "get_envvar",
+        "ryWithrGetEnvvar",
+        0x885db5dfca63aa94,
+    ),
+    (
+        "withr",
+        "3.0.3",
+        "set_envvar",
+        "ryWithrSetEnvvar",
+        0xaa5e7d53355e6593,
+    ),
+    (
+        "withr",
+        "3.0.3",
+        "get_options",
+        "ryWithrGetOptions",
+        0xc8cc10869f10f45b,
+    ),
+    (
+        "withr",
+        "3.0.3",
+        "set_options",
+        "ryWithrSetOptions",
+        0x84f8ff73c6a4bff0,
+    ),
+    (
+        "withr",
+        "3.0.3",
+        "reset_options",
+        "ryWithrResetOptions",
+        0xf18c31a44631e557,
+    ),
+    (
+        "withr",
+        "3.0.3",
+        "reset_gettext_cache",
+        "ryWithrResetGettextCache",
+        0xb1b537bb7c8f99b7,
+    ),
+];
 
 /// `ryPackageFastPaths(package, env)`: installs the fast paths of `package` into its namespace.
 unsafe fn do_package_fast_paths(call: &Call<'_>) -> R<Sexp> {
@@ -538,4 +605,370 @@ unsafe fn type_sum(value: Sexp, namespace: Sexp) -> R<Sexp> {
     let result = eval::eval(call, env)?;
     crate::heap().root(result);
     Ok(result)
+}
+
+// withr 3.0.3 runs every `local_envvar()`, `local_options()` and `local_language()` through the
+// small helpers below, and testthat calls those for every test. `withr::defer()` itself, and the
+// `local_*()` functions that call it, keep their R bodies, so each deferred restore registers
+// through the usual exit handlers.
+
+/// withr's `list_combine(rhs, lhs)` of two plain lists: `rhs[nme] <- lhs[nme]` for each name of
+/// `lhs`, which replaces the first element of `rhs` with that name by the first element of `lhs`
+/// with it, or appends it.
+unsafe fn do_withr_list_combine(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.env;
+    let (Some(rhs), Some(lhs)) = (
+        argument(frame, install("rhs")?)?,
+        argument(frame, install("lhs")?)?,
+    ) else {
+        return decline();
+    };
+    if !is_plain_list(rhs) || !is_plain_list(lhs) {
+        return decline();
+    }
+    let lhs_names = values::names(lhs);
+    if lhs_names == nil() {
+        return finish(frame, rhs, true);
+    }
+    let rhs_names = values::names(rhs);
+    let blank = values::mkchar("")?;
+    crate::heap().root(blank);
+    let mut entries: Vec<(Sexp, Sexp)> = (0..length(rhs))
+        .map(|index| {
+            let name = if rhs_names == nil() {
+                blank
+            } else {
+                rhs_names.element(index)
+            };
+            (name, rhs.element(index))
+        })
+        .collect();
+    let named = |names: Sexp| (0..length(names)).all(|index| names.element(index) != na_string());
+    if (rhs_names != nil() && !named(rhs_names)) || !named(lhs_names) {
+        return decline();
+    }
+    for index in 0..length(lhs_names) {
+        let name = lhs_names.element(index);
+        if name.bytes().is_empty() {
+            return decline();
+        }
+        let Some(first) =
+            (0..length(lhs)).find(|&other| lhs_names.element(other).bytes() == name.bytes())
+        else {
+            return decline();
+        };
+        let value = lhs.element(first);
+        match entries
+            .iter_mut()
+            .find(|(existing, _)| existing.bytes() == name.bytes())
+        {
+            Some(entry) => entry.1 = value,
+            None => entries.push((name, value)),
+        }
+    }
+    let result = values::alloc(SexpType::List, entries.len())?;
+    crate::heap().root(result);
+    let names = values::alloc(SexpType::String, entries.len())?;
+    crate::heap().root(names);
+    for (index, &(name, value)) in entries.iter().enumerate() {
+        values::set_elt(result, index, value);
+        values::set_elt(names, index, name);
+    }
+    values::set_attr(result, symbols().names, names)?;
+    finish(frame, result, true)
+}
+
+/// withr's `as_envvars(envs)` of a named character vector or plain list: `NULL` elements become
+/// `NA` and, of elements with the same name, only the last is kept.
+unsafe fn do_withr_as_envvars(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.env;
+    let Some(envs) = argument(frame, install("envs")?)? else {
+        return decline();
+    };
+    match envvars(envs)? {
+        Some(envs) => finish(frame, envs, true),
+        None => decline(),
+    }
+}
+
+/// withr's `get_envvar(envs, action)`: the current values of the variables `envs` names, `NA`
+/// for those unset, named by the variables.
+unsafe fn do_withr_get_envvar(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.env;
+    let Some(envs) = argument(frame, install("envs")?)? else {
+        return decline();
+    };
+    // `Sys.getenv(NULL)` lists the whole environment instead.
+    if length(envs) == 0 {
+        return decline();
+    }
+    let Some(envs) = envvars(envs)? else {
+        return decline();
+    };
+    let old = current_envvars(values::names(envs), frame)?;
+    finish(frame, old, true)
+}
+
+/// withr's `set_envvar(envs, action = "replace")`: sets each variable `envs` gives a string and
+/// unsets each it gives `NA`, returning the old values invisibly as `get_envvar()` does. The
+/// prefix and suffix actions, and values other than single strings, keep the R body.
+unsafe fn do_withr_set_envvar(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.env;
+    let Some(envs) = argument(frame, install("envs")?)? else {
+        return decline();
+    };
+    let Some(envs) = envvars(envs)? else {
+        return decline();
+    };
+    let Some(action) = argument(frame, install("action")?)? else {
+        return decline();
+    };
+    if action.kind() != SexpType::String
+        || length(action) != 1
+        || action.attrib() != nil()
+        || action.element(0).bytes() != b"replace"
+    {
+        return decline();
+    }
+    let count = length(envs);
+    if count == 0 {
+        return finish(frame, nil(), true);
+    }
+    // `is.na()` of each element decides between setting and unsetting.
+    let mut set: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
+    let mut unset: SmallVec<[Sexp; 8]> = SmallVec::new();
+    let names = values::names(envs);
+    for index in 0..count {
+        let name = names.element(index);
+        let value = if envs.kind() == SexpType::String {
+            envs.element(index)
+        } else {
+            let element = envs.element(index);
+            match element.kind() {
+                _ if length(element) != 1 => return decline(),
+                SexpType::String if element.attrib() == nil() => element.element(0),
+                SexpType::Logical if values::ints(element)[0] == NA_LOGICAL => na_string(),
+                SexpType::Integer if values::ints(element)[0] == NA_INTEGER => na_string(),
+                SexpType::Real if crate::arith::real_at(element, 0).is_nan() => na_string(),
+                _ => return decline(),
+            }
+        };
+        if value == na_string() {
+            unset.push(name);
+        } else {
+            set.push((name, value));
+        }
+    }
+    let old = current_envvars(names, frame)?;
+    if !set.is_empty() {
+        let set_names = values::alloc(SexpType::String, set.len())?;
+        crate::heap().root(set_names);
+        let set_values = values::alloc(SexpType::String, set.len())?;
+        crate::heap().root(set_values);
+        for (index, &(name, value)) in set.iter().enumerate() {
+            values::set_elt(set_names, index, name);
+            values::set_elt(set_values, index, value);
+        }
+        kernel(
+            crate::system::do_sys_setenv,
+            &[set_names, set_values],
+            frame,
+        )?;
+    }
+    if !unset.is_empty() {
+        let unset_names = values::alloc(SexpType::String, unset.len())?;
+        crate::heap().root(unset_names);
+        for (index, &name) in unset.iter().enumerate() {
+            values::set_elt(unset_names, index, name);
+        }
+        kernel(crate::system::do_sys_unsetenv, &[unset_names], frame)?;
+    }
+    finish(frame, old, false)
+}
+
+/// withr's `get_options(new_options)`: `options()` of the names of `new_options`, which gives the
+/// current value of each.
+unsafe fn do_withr_get_options(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.env;
+    let Some(new_options) = argument(frame, install("new_options")?)? else {
+        return decline();
+    };
+    let vector = matches!(
+        new_options.kind(),
+        SexpType::List
+            | SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::String
+            | SexpType::Raw
+    );
+    let names = values::names(new_options);
+    // Without names, `options()` lists every option instead.
+    if !vector || new_options.is_object() || names == nil() {
+        return decline();
+    }
+    let old = kernel(envir::do_options, &[names], frame)?;
+    finish(frame, old, interp().visible)
+}
+
+/// withr's `set_options(new_options)` of a plain list whose elements are all named and set
+/// without a condition: `options()` with each element as a named argument.
+unsafe fn do_withr_set_options(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.env;
+    let Some(new_options) = argument(frame, install("new_options")?)? else {
+        return decline();
+    };
+    if !settable_options(new_options) || length(new_options) == 0 {
+        return decline();
+    }
+    let old = kernel(envir::do_options, &[new_options], frame)?;
+    finish(frame, old, interp().visible)
+}
+
+/// withr's `reset_options(old_options)`, which is `options(old_options)`, for the same lists
+/// `set_options()` takes natively.
+unsafe fn do_withr_reset_options(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.env;
+    let Some(old_options) = argument(frame, install("old_options")?)? else {
+        return decline();
+    };
+    if !settable_options(old_options) {
+        return decline();
+    }
+    let old = kernel(envir::do_options, &[old_options], frame)?;
+    finish(frame, old, interp().visible)
+}
+
+/// withr's `reset_gettext_cache()`, which is `bindtextdomain("reset", local_tempdir())`: binding
+/// a domain flushes GNU R's cache of translations. The R body creates a fresh directory under the
+/// session's temporary directory and removes it again before it returns, so no R code can see it;
+/// binding the domain to the fresh path without creating the directory gives the same result.
+/// When the session's temporary directory is missing, the R body's `dir.create(recursive =
+/// TRUE)` would create it again, so the R body runs.
+unsafe fn do_withr_reset_gettext_cache(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.env;
+    let Ok(temp) = crate::system::session_temp_dir() else {
+        return decline();
+    };
+    if !std::path::Path::new(temp).is_dir() {
+        return decline();
+    }
+    let pattern = values::scalar_string("file")?;
+    crate::heap().root(pattern);
+    let directory = values::scalar_string(temp)?;
+    crate::heap().root(directory);
+    let extension = values::scalar_string("")?;
+    crate::heap().root(extension);
+    let path = kernel(
+        crate::system::do_tempfile,
+        &[pattern, directory, extension],
+        frame,
+    )?;
+    let domain = values::scalar_string("reset")?;
+    crate::heap().root(domain);
+    let value = kernel(crate::system::do_bindtextdomain, &[domain, path], frame)?;
+    finish(frame, value, true)
+}
+
+/// A list with no attribute but its names, which `[` and `[<-` treat without dispatch.
+unsafe fn is_plain_list(value: Sexp) -> bool {
+    value.kind() == SexpType::List && !value.is_object() && only_names(value)
+}
+
+unsafe fn only_names(value: Sexp) -> bool {
+    let attributes = value.attrib();
+    attributes == nil() || (attributes.cdr() == nil() && attributes.tag() == symbols().names)
+}
+
+/// withr's `as_envvars(envs)` for a character vector or plain list whose elements all have a
+/// name, or an empty one; `None` when the R body is to run.
+unsafe fn envvars(envs: Sexp) -> R<Option<Sexp>> {
+    if length(envs) == 0 {
+        return Ok(Some(envs));
+    }
+    if !matches!(envs.kind(), SexpType::String | SexpType::List)
+        || envs.is_object()
+        || !only_names(envs)
+    {
+        return Ok(None);
+    }
+    let names = values::names(envs);
+    // `stopifnot(is.named(envs))` fails on a missing, empty or `NA` name.
+    if names == nil()
+        || (0..length(names)).any(|index| {
+            let name = names.element(index);
+            name == na_string() || name.bytes().is_empty()
+        })
+    {
+        return Ok(None);
+    }
+    let count = length(envs);
+    let kept: Vec<usize> = (0..count)
+        .filter(|&index| {
+            let name = names.element(index).bytes();
+            !(index + 1..count).any(|later| names.element(later).bytes() == name)
+        })
+        .collect();
+    let nulls =
+        envs.kind() == SexpType::List && kept.iter().any(|&index| envs.element(index) == nil());
+    if kept.len() == count && !nulls {
+        return Ok(Some(envs));
+    }
+    let result = values::alloc(envs.kind(), kept.len())?;
+    crate::heap().root(result);
+    let result_names = values::alloc(SexpType::String, kept.len())?;
+    crate::heap().root(result_names);
+    let na = if nulls {
+        let na = values::scalar_logical(NA_LOGICAL)?;
+        crate::heap().root(na);
+        na
+    } else {
+        nil()
+    };
+    for (position, &index) in kept.iter().enumerate() {
+        let element = envs.element(index);
+        let element = if envs.kind() == SexpType::List && element == nil() {
+            na
+        } else {
+            element
+        };
+        values::set_elt(result, position, element);
+        values::set_elt(result_names, position, names.element(index));
+    }
+    values::set_attr(result, symbols().names, result_names)?;
+    Ok(Some(result))
+}
+
+/// `Sys.getenv(names, names = TRUE, unset = NA)` for a non-empty character vector `names`.
+unsafe fn current_envvars(names: Sexp, frame: Sexp) -> R<Sexp> {
+    let unset = values::scalar_string_charsxp(na_string())?;
+    crate::heap().root(unset);
+    let old = kernel(crate::system::do_sys_getenv, &[names, unset], frame)?;
+    values::set_attr(old, symbols().names, names)?;
+    Ok(old)
+}
+
+/// A plain list that `options()` sets element by element, under its names, with no condition:
+/// the call `do.call(options, as.list(x))` would make and `options(x)` gives the same result.
+unsafe fn settable_options(options: Sexp) -> bool {
+    if !is_plain_list(options) {
+        return false;
+    }
+    let names = values::names(options);
+    if names == nil() && length(options) > 0 {
+        return false;
+    }
+    (0..length(options)).all(|index| {
+        let name = names.element(index);
+        let value = options.element(index);
+        // `do.call()` evaluates a symbol or a call it is given as an argument.
+        name != na_string()
+            && !name.bytes().is_empty()
+            && !matches!(
+                value.kind(),
+                SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
+            )
+            && envir::option_sets_quietly(&values::char_str(name), value)
+    })
 }

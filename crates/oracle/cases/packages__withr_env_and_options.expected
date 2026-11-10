@@ -1,0 +1,63 @@
+[stdout]
+|  Named chr [1:3] "start" NA NA
+|  - attr(*, "names")= chr [1:3] "RY_W_A" "RY_W_B" "RY_W_C"
+|  Named chr [1:3] "inner" "été" NA
+|  - attr(*, "names")= chr [1:3] "RY_W_A" "RY_W_B" "RY_W_C"
+|  chr "last"
+|  Named chr [1:2] NA ""
+|  - attr(*, "names")= chr [1:2] "RY_W_B" "RY_W_C"
+|  Named chr [1:3] "start" NA NA
+|  - attr(*, "names")= chr [1:3] "RY_W_A" "RY_W_B" "RY_W_C"
+|  chr "w"
+|  chr "p start"
+|  chr "start s"
+|  chr "error: is.named(envs) is not TRUE"
+|  chr "1"
+|  chr "start"
+|  Named chr [1:2] "start" NA
+|  - attr(*, "names")= chr [1:2] "RY_W_A" "RY_W_NONE"
+| List of 2
+|  $ b: chr "x"
+|  $ a: chr "y"
+|  chr "error: is.named(envs) is not TRUE"
+| List of 3
+|  $ a: num 1
+|  $ b: NULL
+|  $ c: num 3
+| List of 3
+|  $  : num 1
+|  $  : num 2
+|  $ z: chr "z"
+| List of 1
+|  $ a: num 1
+| List of 3
+|  $ ry.w.one: NULL
+|  $ ry.w.two: NULL
+|  $ digits  : int 7
+| [1] 3.142
+|  NULL
+|  NULL
+|  NULL
+| [1] 3.141593
+|  int 30
+|  chr "error: invalid 'digits' parameter, allowed 1...22"
+|  int 7
+| List of 2
+|  $ digits   : int 7
+|  $ ry.w.none: NULL
+| List of 1
+|  $ width: int 80
+|  logi FALSE
+| List of 1
+|  $ ry.w.three: num 3
+|  Named list()
+|  chr "fr"
+|  logi TRUE
+|  logi TRUE
+|  chr "en"
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| c(TRUE, TRUE)

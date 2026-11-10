@@ -10,7 +10,10 @@
 use {
     oracle::{
         Engine, ProcessEngine,
-        fuzz::{SeedReport, check_seed, program, render_divergences, trace_back_program},
+        fuzz::{
+            SeedReport, check_seed, native_helpers_program, program, render_divergences,
+            trace_back_program,
+        },
         gnu_r_available, ry_runtime_available,
     },
     std::{
@@ -119,6 +122,52 @@ fn assert_agree(reports: &[SeedReport]) {
         reports.len(),
         failures.join("\n")
     );
+}
+
+/// The native withr helpers and base fast paths must give what their own R bodies give from the
+/// same state, at tier 0 and under the JIT.
+#[test]
+fn fuzz_native_helpers_match_their_r_bodies() {
+    if !ry_runtime_available() {
+        eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
+        return;
+    }
+    let engines = [
+        ProcessEngine::ry_tier0().with_timeout(TIMEOUT),
+        ProcessEngine::ry_jit().with_timeout(TIMEOUT),
+    ];
+    let directory = scratch_directory();
+    for seed in fuzz_seeds(8) {
+        let script = directory.join(format!("native_helpers_{seed}.R"));
+        std::fs::write(&script, native_helpers_program(seed)).expect("write the fuzz program");
+        for engine in &engines {
+            let outcome = engine
+                .run(&script)
+                .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", engine.name()));
+            if outcome.stdout.contains("withr 3.0.3 is not installed") {
+                eprintln!("skipped: withr 3.0.3 is not installed for ry");
+                std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
+                return;
+            }
+            let checks = outcome
+                .stdout
+                .lines()
+                .filter(|line| line.starts_with("check "))
+                .count();
+            let differing = outcome
+                .stdout
+                .lines()
+                .any(|line| line.starts_with("check ") && !line.ends_with(": TRUE"));
+            assert!(
+                checks == 12 && !differing && outcome.errors.is_empty(),
+                "seed {seed} under {}: {:?}\n{}\nreplay with FUZZ_SEED={seed} cargo test -p oracle --test test_differential fuzz_native_helpers",
+                engine.name(),
+                outcome.errors,
+                outcome.stdout
+            );
+        }
+    }
+    std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
 }
 
 fn scratch_directory() -> PathBuf {
