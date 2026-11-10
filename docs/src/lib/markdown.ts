@@ -4,7 +4,7 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
 import starlightConfig from 'virtual:starlight/user-config';
 import vennSource from '../components/Venn.astro?raw';
-import { benchmarkFact, benchmarkProgramsMarkdown, benchmarkSummaryMarkdown, benchmarkTableMarkdown, realWorkloadMarkdown, speedChartMarkdown } from './benchmarks';
+import { chartMarkdown, methodMarkdown, missingResults, programsMarkdown, suite, summaryMarkdown, tableMarkdown } from './benchmarks';
 
 type DocsPage = CollectionEntry<'docs'>;
 type SidebarItem = { label?: string; slug?: string; items?: SidebarItem[] };
@@ -100,42 +100,35 @@ function bodyToMarkdown(body: string): string {
       push(`Diagram: ${vennDescription()}`, false);
       continue;
     }
-    const table = /^<BenchmarkTable\b(?:\s+programs=\{(\[[^\]]*\])\})?/.exec(line.trim());
-    if (table) {
-      push(benchmarkTableMarkdown(headingLevel + 1, table[1] === undefined ? undefined : JSON.parse(table[1])), false);
+    const benchmark = /^<(BenchmarkTable|BenchmarkPrograms|SpeedChart)\b[^>]*\bsuite="([a-z_]+)"/.exec(line.trim());
+    if (benchmark) {
+      const found = suite(benchmark[2]);
+      if (benchmark[1] === 'SpeedChart' && found?.results === undefined) {
+        push(missingResults(benchmark[2]), false);
+      } else if (found === undefined) {
+        // A suite without a manifest has no programs or tables to list.
+      } else if (benchmark[1] === 'SpeedChart') {
+        push(chartMarkdown(found), false);
+      } else if (benchmark[1] === 'BenchmarkTable') {
+        push(tableMarkdown(found, headingLevel + 1), false);
+      } else {
+        push(programsMarkdown(found, headingLevel + 1), false);
+      }
       continue;
     }
     if (/^<BenchmarkSummary\b/.test(line.trim())) {
-      push(benchmarkSummaryMarkdown(), false);
+      push(summaryMarkdown(), false);
       continue;
     }
-    if (/^<RealWorkloads\b/.test(line.trim())) {
-      push(realWorkloadMarkdown(), false);
-      continue;
-    }
-    if (/^<BenchmarkPrograms\b/.test(line.trim())) {
-      push(benchmarkProgramsMarkdown(headingLevel + 1), false);
-      continue;
-    }
-    const chart = /^<SpeedChart\b[^>]*\bname="(real|kernels)"/.exec(line.trim());
-    if (chart) {
-      push(speedChartMarkdown(chart[1] as 'real' | 'kernels'), false);
+    if (/^<BenchmarkMethod\b/.test(line.trim())) {
+      push(methodMarkdown(), false);
       continue;
     }
 
-    push(rewriteLinks(inlineFacts(line)), false);
+    push(rewriteLinks(line), false);
   }
 
   return output.join('\n').trim();
-}
-
-// `<BenchmarkMachine suite="real" field="repeat" />` inside a table cell becomes its text.
-function inlineFacts(line: string): string {
-  return line.replace(/<BenchmarkMachine\b([^>]*)\/>/g, (_, attributes: string) => {
-    const suite = /suite="(real|kernels)"/.exec(attributes)?.[1] ?? 'kernels';
-    const field = /field="(machine|repeat)"/.exec(attributes)?.[1] ?? 'machine';
-    return benchmarkFact(suite as 'real' | 'kernels', field as 'machine' | 'repeat');
-  });
 }
 
 function vennDescription(): string {

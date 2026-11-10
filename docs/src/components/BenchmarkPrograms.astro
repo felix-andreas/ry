@@ -1,32 +1,101 @@
 ---
-// Each benchmark program, folded, with tabs between its plain R and its typed version. The tabs share
-// a sync key, so choosing "Typed" once shows every program typed.
+// What each program of a suite computes, with a link to its source, grouped by upstream source where
+// the suite has groups. A suite with typed programs folds each one open to its plain R and typed
+// code, in tabs that share a sync key, so choosing "Typed" once shows every program typed.
 import { Code, TabItem, Tabs } from '@astrojs/starlight/components';
-import { benchmarkProgram, benchmarkRows, formatRatio } from '../lib/benchmarks';
+import { programCode, programGroups, programRatio, sourceUrl, suite as findSuite } from '../lib/benchmarks';
 
-const programs = [
-	...benchmarkRows().map((row) => ({ name: row.program, note: `${formatRatio(row.speedup)}${row.tooShort ? ' (too short)' : ''}` })),
-	{ name: 'harness', note: 'measure()' },
-].map((entry) => ({ ...entry, ...benchmarkProgram(entry.name) }));
+interface Props {
+	suite: string;
+}
+
+const suite = findSuite(Astro.props.suite);
+const groups = suite === undefined ? [] : programGroups(suite);
+const typed = suite?.programs.some((program) => program.typedSource !== undefined) ?? false;
 ---
 
 {
-	programs.map((program) => (
-		<details class="benchmark-program">
-			<summary>
-				<code>{program.name}</code> <span class="benchmark-note">{program.note}</span>
-			</summary>
-			<p>{program.description}</p>
-			<Tabs syncKey="benchmark-version">
-				<TabItem label="Plain R">
-					<Code code={program.untyped} lang="r" />
-				</TabItem>
-				<TabItem label="Typed">
-					<Code code={program.typed} lang="r" />
-				</TabItem>
-			</Tabs>
-		</details>
-	))
+	suite !== undefined &&
+		groups.map(({ group, programs }) => (
+			<>
+				{group && (
+					<p>
+						<strong>{group.name}.</strong> {group.description}{' '}
+						{group.url && (
+							<>
+								Source: <a href={group.url}>{group.url.replace(/^https:\/\//, '')}</a>
+								{group.license ? `, ${group.license}` : ''}.
+							</>
+						)}
+					</p>
+				)}
+				{typed ? (
+					programs.map((program) => {
+						const untyped = programCode(program.source);
+						const typedCode = programCode(program.typedSource);
+						return (
+							<details class="benchmark-program">
+								<summary>
+									{program.display} <code class="benchmark-id">{program.id}</code> <span class="benchmark-note">{programRatio(program)}</span>
+								</summary>
+								<p>
+									{program.summary}{' '}
+									{program.source && <a href={sourceUrl(program.source)}>Source</a>}
+								</p>
+								{untyped !== undefined && typedCode !== undefined && (
+									<Tabs syncKey="benchmark-version">
+										<TabItem label="Plain R">
+											<Code code={untyped} lang="r" />
+										</TabItem>
+										<TabItem label="Typed">
+											<Code code={typedCode} lang="r" />
+										</TabItem>
+									</Tabs>
+								)}
+							</details>
+						);
+					})
+				) : (
+					<table>
+						<thead>
+							<tr>
+								<th>Program</th>
+								<th>What it runs</th>
+								<th style="text-align: right">ry vs GNU R</th>
+							</tr>
+						</thead>
+						<tbody>
+							{programs.map((program) => (
+								<tr>
+									<td>
+										{program.display}
+										{program.version && ` ${program.version}`}
+										<br />
+										{program.source ? (
+											<a href={sourceUrl(program.source)}>
+												<code class="benchmark-id">{program.id}</code>
+											</a>
+										) : (
+											<code class="benchmark-id">{program.id}</code>
+										)}
+									</td>
+									<td>{program.summary}</td>
+									<td style="text-align: right">{programRatio(program)}</td>
+								</tr>
+							))}
+						</tbody>
+					</table>
+				)}
+			</>
+		))
+}
+{
+	suite?.harness && (
+		<p>
+			Every program reports its time through <a href={sourceUrl(suite.harness)}><code>{suite.harness.split('/').pop()}</code></a>,
+			which also prints the checksum that all engines must agree on.
+		</p>
+	)
 }
 
 <style>
@@ -36,6 +105,10 @@ const programs = [
 	}
 	.benchmark-program summary {
 		cursor: pointer;
+	}
+	.benchmark-id {
+		font-size: var(--sl-text-xs);
+		color: var(--sl-color-gray-3);
 	}
 	.benchmark-note {
 		color: var(--sl-color-gray-3);
