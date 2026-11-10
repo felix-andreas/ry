@@ -1844,8 +1844,18 @@ impl Encoder<'_> {
         }
         let words = values::ints(code.car());
         write_varint(self.out, words.len() as u64);
-        for &word in words {
-            write_varint(self.out, u64::from(word as u32));
+        // Tier 0 specializes instructions in place for the operands this process saw, so an
+        // image keeps each instruction as the compiler emitted it.
+        let mut next_instruction = 0;
+        for (pc, &word) in words.iter().enumerate() {
+            let mut word = word as u32;
+            if pc == next_instruction {
+                let op =
+                    crate::bytecode::op_of(word).ok_or(Unencodable("an invalid instruction"))?;
+                word = crate::bytecode::op_word(op);
+                next_instruction = pc + 1 + crate::bytecode::operand_count(op);
+            }
+            write_varint(self.out, u64::from(word));
         }
         let constants = code.cdr();
         let count = length(constants);

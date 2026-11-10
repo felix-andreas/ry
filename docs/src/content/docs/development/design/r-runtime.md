@@ -395,7 +395,10 @@ tenured and takes tenured ones as roots through the remembered set. A major coll
 everything dead. The heap has two limits, as GNU R's `R_VSize` and `R_NSize` do: one on large
 vectors (at least 64 MB) and one on small objects (at least 32 MB). When a minor collection leaves
 less than a fifth of a limit's minimum free, an intermediate collection runs, then a major one if
-that is still not enough. After each major collection the limits move with GNU R's fractions: a
+that is still not enough. An intermediate collection is skipped when it would not free enough: the
+share of the younger old objects (old but not yet tenured) that the last escalation found dead
+predicts what it frees now, so a program that keeps what it builds goes straight to the major
+collection instead of tracing its young structure twice. After each major collection the limits move with GNU R's fractions: a
 limit grows by a fifth when the survivors plus that fifth fill more than 70% of it, and shrinks by
 a fifth when they fill less than 30%. A major collection that escalation forced before the program
 allocated a limit's worth of vectors grows the vector limit too, because the working set it keeps
@@ -403,6 +406,11 @@ promoting is larger than the survivors show. GNU R's `R_GC_MEM_GROW` and its fra
 set the same numbers ([CLI reference](/reference/cli#memory)). The nursery's budget for small
 objects scales with the old small objects only, as GNU R's cons-cell trigger ignores vector memory,
 so a few big live vectors do not let as many bytes of small garbage pile up.
+
+`R_PreserveObject` sets a flag bit in the object's header and appends the object to a dense vector
+of preserved objects with their counts, so a frame release asks the header, not a hash table,
+whether an environment is preserved. `R_ReleaseObject` searches the vector from its newest entry,
+as GNU R's precious list does.
 
 The write barrier is one load and one compare on the parent's header: a store into a young object,
 or into an old one that is already remembered, does nothing more. An old object that receives a
@@ -955,8 +963,11 @@ today's ratio):
 So 10x on the workloads is reachable on one thread: R code needs about 30x (tier 1 for most of it,
 row (c) below) and builtins about 10x (row (a)). `tables` and `timeseries` stop near 9x and 8x
 because of `data.table`'s and `xts`'s C code, and the geometric mean carries them. The corpus
-runs at 1.94x GNU R today (geometric mean over the 21 packages that pass on both engines, 95%
-interval 1.76x to 2.15x). Its column counts all native code as fixed, because the profile does not
+runs at 2.01x GNU R today (geometric mean over the 21 packages that pass on both engines, 95%
+interval 1.83x to 2.20x). The corpus runs offline: `run.py` drops test files that fetch URLs
+(`NETWORK_TESTS`, such as `jsonlite`'s `test-network-*.R`, whose GitHub requests cost both engines
+the same 0.2 s each) and routes both engines through a proxy that refuses every request, so a test
+that reaches for the network fails the run. Its column counts all native code as fixed, because the profile does not
 split ry's ports from CRAN code, and its single-thread ceiling is 34.4x, because I/O, waiting and
 native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.sleep`), then
 `rlang`, `withr` and `cli` at 11x to 12x (their native code and waiting).
@@ -998,7 +1009,10 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | One-argument builtins without dispatch, and native entries for small base closures: compiled code calls a builtin's `unary` function with the operand register before any dispatch, and a call to a hash-guarded base closure whose arguments are already values runs natively without a frame | ry | built | instructions per call, JIT off, before and after (GNU R): `!x` 944 to 563 (750); `length(x)` 1,002 to 772 (1,232); `is.null(x)` 754 to 575 (697); `is.na(x)` 1,128 to 641 (1,490); `is.character(x)` 754 to 574 (699); `identical(x, y)` 8,545 to 1,818 (3,149); `isTRUE(x)` 6,087 to 1,114 (5,594); `nrow(m)` 4,575 to 1,324 (4,075); `match(x, t)` 6,869 to 1,905 (2,963); `x %in% t` 11,327 to 1,745 (8,226); `x %\|\|% y` 3,293 to 1,027 (absent in GNU R 4.3.3) | `BuiltinDef::unary` in `builtins.rs`, its call in `op_call_builtin` (`bytecode.rs`); `native_entry` and `NATIVE_ENTRIES` in `base_fast_paths.rs` |
 | Getter instructions for nested complex assignment (`names(x)[2] <-`, `x$a$b <-`) | GNU R bytecode | planned | the nested levels still build their calls in `complex_assign` | |
 | **3. LLInt- and LuaJIT-grade tier 0** | | | | |
-| In-place specialization (quickening) with value profiles | CPython (PEP 659), JSC | planned | tier-0 instructions 23 to 44%; JIT-off scalar loops 0.35 to 0.41 times GNU R | |
+| In-place specialization (quickening) with value profiles | CPython (PEP 659), JSC | built for scalar integer and double arithmetic and comparisons; a comparison that a `JumpUnless` tests takes the branch itself | `while (i < n) i <- i + 1L`, JIT off: 1,123 to 406 instructions per iteration with the two rows below | `QUICK_ARITHMETIC`, `quick_arithmetic`, `arithmetic_miss` in `bytecode.rs` |
+| Frameless fast handlers: a call-free fast path per hot instruction, with the generic handler a tail jump away | LuaJIT, LLInt | built for `GetVar`, `SetVar`, `Guard`, `JumpUnless`, `Jump`, `Constant`, `SetSrcref`, `EndStatement` and the quickened arithmetic | the callee-saved spills of every handler; scalar results from `Heap::try_alloc_scalar`, which never calls | `fast_paths!`, `GENERIC_HANDLERS` in `bytecode.rs` |
+| Cold fallbacks of in-loop instructions after the back edge | LuaJIT, V8 | built | loop bodies contiguous in the code vector | `back_edge` in `bytecode.rs` |
+| Guards folded into one version check per body entry; code, registers and pc pinned as handler arguments; the visible flag set once per statement | LuaJIT | planned | the warmed loop's remaining 406 instructions: three guards (about 34 each), three `GetVar`s (about 31 each), `SetVar` (52) | |
 | Tail-call dispatch, one indirect jump per handler | LuaJIT, JSC | built | the shared indirect jump; measured level with the match loop (121.4k against 120.8k per `seq()`), since handlers that call out still need a frame. The handler signature is `(activation, pc)` so that few values stay live across calls | `handlers!` in `bytecode.rs` |
 | Dense feedback storage, one slot per profiled instruction | V8 | planned | feedback is one `i32` per code word | |
 | One description of each instruction's semantics, shared by tier 0 and the baseline | Deegen (LuaJIT Remake) | planned | the baseline drifting from tier 0 | |
