@@ -7996,9 +7996,9 @@ Each one trades a narrow class of missed errors for a class of false reports see
   closure (`ryCodeImageWrite`). A failure warns and leaves the package without an image.
 - **Identity without a second key.** A closure is named by its record's database offset plus the
   order the stream reader creates closures (`serialize::unserialize_with_closures`), which depends
-  on the record bytes alone. The image stores each record's length and FNV-1a hash and the database
-  length, so a database rewritten by another install (GNU R's, or a different version) is ignored
-  record by record; the hash is computed only for databases that have an image.
+  on the record bytes alone. The image stores each record's length and is stamped with the
+  database's length and modification time ("Lazy-load records are read in place from the code
+  image").
 - **No second copy of the source.** A code object is encoded against its closure's body: every
   language object the code points at is written as its preorder number in the body
   (`serialize::walk_source`). Nested function bodies are compiled eagerly at install
@@ -8607,6 +8607,25 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Measured** (callgrind, testthat workload, `RY_BENCH_REPEAT=2`, against main): `library(testthat)` runs no collection (one before), 314.3M to 295.6M instructions; the full run 2,824.6M to 2,813.4M with the JIT on and 2,823.6M to 2,811.9M off; `collect_keeping` 78.2M to 66.9M; minor collections 10 to 9. Peak RSS is equal with both builds freshly copied (73.7 to 74.0 MB against 73.5 to 73.9 MB); a freshly written binary has more of its file pages resident, which reads as several MB of RSS, so compare RSS only between copies made the same way.
 - **What it did not buy.** The testthat load fetches about 28k objects, a small part of what its collection traced. Counting pretenured bytes toward the nursery budget keeps the load's collection, and it then costs as much as before (18.9M against 18.8M): the flush (about 4.7M before the loops were fused) costs about what tracing those objects did, and 10.3M is tracing about 39k other objects. The win is the collection that pretenured bytes no longer trigger.
 
+## Lazy-load records are read in place from the code image
+
+- **Previous shape.** A fetch from a lazy-load database read the whole `.rdb` into an anonymous per-process buffer (`serialize::cached_record`), inflated the record with zlib on every fetch, and unserialized the result. The code image stored a 64-bit FNV hash of each record's compressed bytes to tell that the record it described was still the one in the database, so every fetch through the image also hashed the record.
+- **Weakness.** Inflate cost about 18M instructions of a testthat run (`decompress_record`, 475 fetches) and the buffer was private memory in every worker. The per-record hash was a second identity for a record that the database file already identifies.
+- **Target shape.**
+  - The `.ryc` holds each recorded fetch's uncompressed serialize stream after the code payloads (streams last, so payload offsets stay 32-bit). The file is mapped read-only (`ImageFile`), so worker processes share its pages, and `code_image::read_image_record` unserializes straight from the map.
+  - The image is stamped with the database's length and modification time (`DatabaseStamp`). Any mismatch ignores the whole image; a copy that drops modification times only loses the image, never reads a wrong one. Without a modification time no image is written.
+  - Each stream carries an FxHash checked on its first read (`Image::streams_verified`), which catches a damaged or truncated image; a mismatch falls back to the database.
+  - `ry-rcmd start-image` also writes images for the base-priority packages (`crates/rcmd/src/base.rs`, `BASE_CODE_IMAGES`): a session started from the start image fetches every record of every base `.rdx` by key (start-up forces some base and methods bindings before recording starts, so forcing bindings missed 14 records that testthat_full then inflated) and writes the images with streams only (`ryCodeImageWrite(code = FALSE)`). They carry the build stamp, so they are rewritten with every start image. Full untrained base images (compiled and machine code) measured worse: on testthat_full `jit::ahead::load` went from 0.8M to 7.5M instructions mapping native sections, and decoding code cost 7.7M more while compiling saved only 3.8M, 3M instructions net over not having base images at all, plus 25 MB on disk.
+- **Databases are numbered.** `code_image::Databases` replaces both the path-keyed `.rdb` read cache in `serialize.rs` and the path-keyed image map: one column per fact (preserved path `CHARSXP`, path, mapped `.rdb`, image slot, a recording bit), indexed by the database's number. A fetch finds the number by a pointer scan over the interned path `CHARSXP`s (a few dozen per session), then the record by binary search over the image's offset-sorted entries. The `.rdb` itself is mapped rather than read into a private buffer; a database rewritten by an install is replaced by rename, and `lazyLoadDBinsertValue` appends and then unmaps it (`serialize::forget_database`), as `lazyLoadDBflush` does.
+- **Why not map heap objects.** Mapped heap pages would need one fixed address per package or relocation of every pointer, plus fix-ups for symbols (interned per process) and for the environments the namespace refhook returns, which run R code. Unserializing from a mapped stream keeps one object layout and one allocation path.
+- **Allocation.** A fetch reads inside `serialize::pretenured`, whichever source it reads from, so what it builds is allocated old (see "Pretenuring lazy-load fetches").
+- **Key stays `c(offset, length)`.** makeLazy's promise shape is visible to R, so the record is found by binary search on the offset. Everything `do_lazy_load_fetch` spends outside `read_image_record` (database number, search, first-read stream hash) is 1.6M of its 54.2M instructions on testthat_full.
+- **Measured** (testthat_full, `RY_BENCH_REPEAT=1`, against main with each build's own start image and package installs):
+  - Callgrind: 2,236.1M to 2,207.9M instructions (-1.26%). `do_lazy_load_fetch` inclusive 80.4M to 54.2M, `decompress_record` 26.0M to 0. No `.rdb` is opened at all; main opens 13.
+  - Wall time (15 paired rounds): testthat 0.997x, empty run 1.017x, both inside the noise.
+  - Memory with the page cache dropped before each run: empty-run peak RSS 34.2 to 34.5 MB. Pss summed over 4 concurrent workers: empty run 76.3 to 74.6 MB, testthat 232.6 to 237.0 MB, of which anonymous 189.1 to 179.1 MB (the private `.rdb` buffers are gone) and file-backed 43.6 to 57.9 MB (mapped streams, which are larger than the compressed records).
+  - With a hot page cache the empty run peaks at 38.6 MB on main and 42.1 MB here. The difference is page cache: a freshly written `.ryc` sits in large folios, and touching one byte of `methods.ryc` maps 2048 kB of it, against 64 kB after `drop_caches`. Anonymous memory is 0.8 MB lower.
+  - The 14 base images take 14.5 MB on disk.
 
 ## Escalation prediction and the dense precious set
 
