@@ -5000,7 +5000,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
                     slot_eager_argument(state, symbol)
                 })?
             } else {
-                let env = state.env(Reify::Site("generic call"))?;
+                let env = state.env(Reify::Site("generic call: native entry"))?;
                 crate::base_fast_paths::native_entry_by_value(function, arguments, |symbol| {
                     effects::eager_argument(symbol, env)
                 })?
@@ -5038,7 +5038,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             nil()
         } else {
             args.clear();
-            let env = state.env(Reify::Site("generic call"))?;
+            let env = state.env(Reify::Site("generic call: arguments"))?;
             if eager {
                 eval::eager_args_into(arguments, env, &mut args)?;
             } else if plan.is_some() {
@@ -5089,7 +5089,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         {
             crate::heap().known().base_env
         } else {
-            state.env(Reify::Site("generic call"))?
+            state.env(Reify::Site("generic call: special"))?
         };
         eval::apply_call(call, function, call.cdr(), env)?
     };
@@ -5721,7 +5721,7 @@ unsafe fn slot_switch(
         Some(chosen) if chosen.kind() == SexpType::Promise => eval::force_promise(chosen).map(Some),
         // The special evaluates the alternative it chose in the frame, as `do_switch` does.
         Some(chosen) if matches!(chosen.kind(), SexpType::Language | SexpType::Symbol) => {
-            eval::eval(chosen, state.env(Reify::Site("generic call"))?).map(Some)
+            eval::eval(chosen, state.env(Reify::Site("switch alternative"))?).map(Some)
         }
         Some(chosen) => {
             interp().visible = true;
