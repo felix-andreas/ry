@@ -2084,6 +2084,16 @@ impl Compiler {
             "all" => Some(Reduction::All),
             _ => None,
         };
+        // Any other root is an operator node or nothing, and a root that is not an operator
+        // would make the whole tree one call operand.
+        let root_operator = || {
+            ARITHS.iter().any(|(_, operator)| *operator == name)
+                || math_index(&name).is_some()
+                || matches!(&*name, "(" | "&" | "|" | "!")
+        };
+        if reduction.is_none() && !root_operator() {
+            return Ok(None);
+        }
         if let Some(reduction) = reduction {
             let args = values::pairlist_items(call.cdr());
             let [(tag, argument)] = args.as_slice() else {
