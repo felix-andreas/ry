@@ -165,7 +165,7 @@ Str.join_with(loud, " ")`,
 // logarithmic, and the 1x tick sits at log(2) of the scale.
 const kernels = suite("kernels");
 const benchmarks = (kernels === undefined ? [] : measuredPrograms(kernels))
-    .filter((program) => program.measurement.ratio.ry !== undefined)
+    .filter((program) => program.measurement.ratio.ry !== undefined && program.measurement.seconds[baseline] !== undefined && program.measurement.seconds.ry !== undefined)
     .map((program) => ({
         program: program.id,
         display: program.display,
@@ -175,7 +175,7 @@ const benchmarks = (kernels === undefined ? [] : measuredPrograms(kernels))
         tooShort: isTooShort(program.measurement, "ry"),
     }))
     .sort((a, b) => b.speedup - a.speedup);
-const benchmarkScale = Math.log(1 + Math.max(...benchmarks.map((row) => row.speedup)));
+const benchmarkScale = Math.log(1 + Math.max(1, ...benchmarks.map((row) => row.speedup)));
 const benchmarkWidth = (speedup: number) => Math.log(1 + speedup) / benchmarkScale;
 
 const migrationTabs: Sample[] = [

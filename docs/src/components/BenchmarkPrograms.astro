@@ -27,6 +27,7 @@ const typed = suite?.programs.some((program) => program.typedSource !== undefine
 								{group.license ? `, ${group.license}` : ''}.
 							</>
 						)}
+						{!group.url && group.license && `Licence: ${group.license}.`}
 					</p>
 				)}
 				{typed ? (

@@ -147,7 +147,7 @@ export function flagNotes(programs: Program[]): string[] {
   const kinds = new Set(programs.flatMap((program) => program.measurement?.flags.map((flag) => flag.kind) ?? []));
   const notes: string[] = [];
   if (kinds.has('too_short')) {
-    notes.push('A program marked too short finishes in under 0.1 s on that engine, which is too little work for a stable ratio, so the geometric mean leaves that ratio out.');
+    notes.push('A program marked too short finishes in under 0.1 s on the engine the flag names, which is too little work for a stable ratio, so the geometric mean leaves it out.');
   }
   if (kinds.has('typed_refused')) notes.push('A typed version the compiler refused has no typed time; the flag gives the reason.');
   if (kinds.has('wide_interval')) notes.push("A program marked wide interval varied so much between rounds that its ratio's interval is wide; read its median with care.");
@@ -159,9 +159,14 @@ export function suiteMetadata(suite: Suite): string {
   const results = suite.results;
   if (results === undefined) return '';
   const { meta } = results;
-  const commit = meta.ryCommit === undefined ? '' : ` at ry ${meta.ryCommit.slice(0, 9)}`;
+  const commit = meta.ryCommit === undefined ? '' : ` at ry ${shortCommit(meta.ryCommit)}`;
   const sampling = meta.legacySampling ?? `${meta.rounds} paired rounds`;
   return `Measured on ${meta.date.slice(0, 10)}${commit} with GNU R ${meta.gnuR.version} on ${machine(meta)}; ${sampling}.`;
+}
+
+// A commit as its first nine hex digits, keeping a marker such as `-dirty` that follows the hash.
+export function shortCommit(commit: string): string {
+  return commit.replace(/^([0-9a-f]{9})[0-9a-f]*/, '$1');
 }
 
 export function machine(meta: Meta): string {
@@ -421,9 +426,9 @@ export function methodRows(): { columns: string[]; rows: string[][] } {
   return {
     columns: ['', ...measured.map((suite) => suite.name)],
     rows: [
-      row('Command', (suite) => `\`${meta(suite)?.command ?? `just bench ${suite.id} --write`}\``),
+      row('Command', (suite) => (meta(suite)?.command === undefined ? '' : `\`${meta(suite)?.command}\``)),
       row('Results file', (suite) => `\`${suite.results?.path ?? ''}\``),
-      row('Measured', (suite) => `${meta(suite)?.date.slice(0, 10) ?? ''}${meta(suite)?.ryCommit === undefined ? '' : ` at ry ${meta(suite)?.ryCommit?.slice(0, 9)}`}`),
+      row('Measured', (suite) => `${meta(suite)?.date.slice(0, 10) ?? ''}${meta(suite)?.ryCommit === undefined ? '' : ` at ry ${shortCommit(meta(suite)?.ryCommit ?? '')}`}`),
       row('Machine', (suite) => { const value = meta(suite); return value === undefined ? '' : machine(value); }),
       row('GNU R', (suite) => `${meta(suite)?.gnuR.version ?? ''}${meta(suite)?.gnuR.blas === undefined ? '' : `, ${meta(suite)?.gnuR.blas}`}`),
       row('Engines', (suite) => (suite.results?.engines ?? []).map(engineLabel).join('; ')),
@@ -436,7 +441,7 @@ export function methodRows(): { columns: string[]; rows: string[][] } {
 export function legacyNotes(): string[] {
   return measuredSuites()
     .filter((suite) => suite.results?.meta.legacySampling !== undefined)
-    .map((suite) => `The committed ${suite.name} results predate this method: they hold ${suite.results?.meta.legacySampling}, so each ratio divides two times and has no interval.`);
+    .map((suite) => `The committed ${suite.name} results predate this method: they hold ${suite.results?.meta.legacySampling}, so each ratio divides two times and has no interval, and a program GNU R finishes in under 0.1 s is flagged too short and left out of every geometric mean.`);
 }
 
 export function methodMarkdown(): string {
@@ -467,12 +472,12 @@ type RawResults = {
   engines: string[];
   meta: {
     date: string;
-    ry_commit?: string;
-    gnu_r: { version: string; blas?: string };
-    machine: { cpu: string; cores?: number; kernel?: string };
+    ry_commit?: string | null;
+    gnu_r: { version: string; blas?: string | null };
+    machine: { cpu: string; cores?: number | null; kernel?: string | null };
     rounds: number;
-    seed?: number;
-    command?: string;
+    seed?: number | null;
+    command?: string | null;
   };
   programs: {
     id: string;
@@ -537,13 +542,14 @@ function measurement(program: RawResults['programs'][number] | undefined): Measu
 
 function meta(raw: RawResults['meta'], legacySampling: string | undefined): Meta {
   return {
+    // A runner written in Python stores an absent value as null, which reads here as absent.
     date: raw.date,
-    ryCommit: raw.ry_commit,
-    gnuR: raw.gnu_r,
-    machine: raw.machine,
+    ryCommit: raw.ry_commit ?? undefined,
+    gnuR: { version: raw.gnu_r.version, blas: raw.gnu_r.blas ?? undefined },
+    machine: { cpu: raw.machine.cpu, cores: raw.machine.cores ?? undefined, kernel: raw.machine.kernel ?? undefined },
     rounds: raw.rounds,
-    seed: raw.seed,
-    command: raw.command,
+    seed: raw.seed ?? undefined,
+    command: raw.command ?? undefined,
     legacySampling,
   };
 }

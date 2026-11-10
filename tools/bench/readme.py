@@ -12,6 +12,7 @@ results file has no row.
 Usage: tools/bench/readme.py [--check]
 """
 import json, math, pathlib, re, statistics, sys, tomllib
+from decimal import ROUND_HALF_UP, Decimal
 
 root = pathlib.Path(__file__).resolve().parent.parent.parent
 bench = root / "tools/bench"
@@ -55,7 +56,10 @@ def load_suites():
             continue
         manifest = tomllib.loads(manifest_path.read_text())
         results = normalize(json.loads(results_path.read_text()))
-        suites.append({**manifest, "results": results})
+        twin = next((suite for suite in suites if suite["id"] == manifest["id"]), None)
+        if twin:
+            sys.exit(f"error: benchmark suite `{manifest['id']}` is defined by both {twin['directory']} and {manifest_path.parent}")
+        suites.append({**manifest, "directory": manifest_path.parent, "results": results})
     rank = lambda suite: (suite_order.index(suite["id"]) if suite["id"] in suite_order else len(suite_order), suite["id"])
     return sorted(suites, key=rank)
 
@@ -75,7 +79,8 @@ def summary_block(suites):
 def metadata(results):
     """The line `suiteMetadata` in docs/src/lib/benchmarks.ts prints under each chart."""
     meta = results["meta"]
-    commit = f" at ry {meta['ry_commit'][:9]}" if meta.get("ry_commit") else ""
+    # The first nine hex digits, keeping a marker such as `-dirty`, as `shortCommit` does.
+    commit = " at ry " + re.sub(r"^([0-9a-f]{9})[0-9a-f]*", r"\1", meta["ry_commit"]) if meta.get("ry_commit") else ""
     machine = ", ".join([meta["machine"]["cpu"]]
                         + ([f"{meta['machine']['cores']} cores"] if meta["machine"].get("cores") else [])
                         + ([meta["machine"]["kernel"]] if meta["machine"].get("kernel") else []))
@@ -86,7 +91,9 @@ def lowercase_first(text):
     return text[:1].lower() + text[1:]
 
 def ratio(value):
-    return f"{value:.0f}x" if value >= 10 else f"{value:.2f}x"
+    # Rounds half up on the exact binary value, as JavaScript's toFixed does in `formatRatio`.
+    places = Decimal(1) if value >= 10 else Decimal("0.01")
+    return f"{Decimal(value).quantize(places, rounding=ROUND_HALF_UP)}x"
 
 def normalize(results):
     if results.get("schema") == 1:

@@ -15,8 +15,8 @@ mean of ry's speed-ups over GNU R:
 
 <BenchmarkSummary />
 
-Every number on this page is rendered from the files in `tools/bench/<suite>/`, and each chart names
-the date, the ry commit, the GNU R version and the machine of its measurement.
+Every number on this page is rendered from the results files in `tools/bench/`, and each chart names
+the date, the GNU R version, the machine and, where recorded, the ry commit of its measurement.
 
 ## Numeric kernels (ours)
 
@@ -72,7 +72,8 @@ arithmetic in loops, as in `simulation`, is where ry gains.
 
 ## How it was measured
 
-Every suite runs the same way. A run measures several rounds, and each round runs every engine on
+This is the method of ry's benchmark runner, and the notes under the table name any committed
+results that predate it. A run measures several rounds, and each round runs every engine on
 every program once, in an order shuffled from a recorded seed. Each ratio is formed inside one
 round, GNU R's time over the engine's, and the reported speed-up is the median of those per-round
 ratios. Pairing matters because the measuring machines are shared cloud VMs whose effective CPU
@@ -95,5 +96,5 @@ inside the process.
 <BenchmarkMethod />
 
 To reproduce a suite, run its command from the table on a machine with GNU R and the suite's
-packages installed. The command writes the suite's `results.json`, and `tools/bench/readme.py`
-rewrites the README tables from it.
+packages installed. The command writes the suite's `results.json` and runs `tools/bench/readme.py`,
+which rewrites the README summary from it.
