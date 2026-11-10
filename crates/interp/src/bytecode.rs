@@ -2060,6 +2060,17 @@ impl Compiler {
         if head.kind() != SexpType::Symbol {
             return Ok(None);
         }
+        // A tree of two operators has one as an operand of the other, so a call without a call
+        // among its arguments, which is most calls, is ruled out before any name is read.
+        let mut arguments = call.cdr();
+        let mut nested = false;
+        while arguments.kind() == SexpType::Pairlist {
+            nested |= arguments.car().kind() == SexpType::Language;
+            arguments = arguments.cdr();
+        }
+        if !nested {
+            return Ok(None);
+        }
         let mut plan = FusionPlan {
             nodes: Vec::new(),
             leaves: Vec::new(),
