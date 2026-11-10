@@ -707,6 +707,11 @@ pub enum Op {
     /// runs whenever the fused pass declines. `program` is the integer vector [`fusion`] lays
     /// out, or `NULL` when the ordinary code did not take the expected shape.
     Fused,
+    /// `dst program target`: an [`Op::Fused`] site that gave up, which does nothing. The
+    /// compiler emits it when the ordinary code did not take the expected shape, and a fused
+    /// site rewrites its own opcode to it after [`fusion::GIVE_UP`] declines in a row, so a site
+    /// that never fuses costs one dispatch in tier 0 and no code at all in baseline code.
+    Unfused,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its last operand.
@@ -721,7 +726,7 @@ enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 46] = [
+pub const OPS: [Op; 47] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -768,6 +773,7 @@ pub const OPS: [Op; 46] = [
     Op::Resume,
     Op::Missing,
     Op::Fused,
+    Op::Unfused,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1999,8 +2005,11 @@ impl Compiler {
                 ahead.push((leaf, register));
             }
         }
-        self.hoisted
-            .extend(ahead.iter().map(|&(leaf, register)| (plan.leaves[leaf], register)));
+        self.hoisted.extend(
+            ahead
+                .iter()
+                .map(|&(leaf, register)| (plan.leaves[leaf], register)),
+        );
         let program_position = self.code.len() + 2;
         let target = self.emit_patchable(Op::Fused, &[dst, 0, 0]);
         self.sites = Some(Vec::new());
@@ -2028,7 +2037,10 @@ impl Compiler {
         }
         let program = match self.fusion_program(plan, &sites, &ahead) {
             Some(words) => values::integer_vector(&words)?,
-            None => nil(),
+            None => {
+                self.code[program_position - 2] = op_word(Op::Unfused);
+                nil()
+            }
         };
         self.code[program_position] = self.constant(program);
         if !guards.is_empty() {
@@ -2126,7 +2138,11 @@ impl Compiler {
         let name = symbol_name(head);
         // The operators are all short and start with punctuation, which rules out the table scan
         // for most of the calls the compiler sees.
-        let operator = name.len() <= 3 && name.bytes().next().is_some_and(|byte| byte.is_ascii_punctuation());
+        let operator = name.len() <= 3
+            && name
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_punctuation());
         let arith = operator
             .then(|| ARITHS.iter().find(|(_, operator)| *operator == name))
             .flatten()
@@ -2153,7 +2169,8 @@ impl Compiler {
         let Some(expected) = expected else {
             return Ok(plan.call_leaf(expression));
         };
-        plan.steps.push(FusionStep::Head(expression, head, expected));
+        plan.steps
+            .push(FusionStep::Head(expression, head, expected));
         let mut inputs = [0; 2];
         for (input, (_, argument)) in inputs.iter_mut().zip(&args) {
             match self.fusion_node(*argument, plan)? {
@@ -2862,7 +2879,11 @@ impl Compiler {
     ) -> R<()> {
         // An operator a fused expression checked before evaluating a hoisted operand must not
         // fall back to the evaluator, which would evaluate that operand a second time.
-        if self.preguarded.iter().any(|(operation, _)| *operation == call) {
+        if self
+            .preguarded
+            .iter()
+            .any(|(operation, _)| *operation == call)
+        {
             self.inline(call, primitive, dst, name, args)?;
         } else {
             let symbol = self.constant(head);
@@ -3550,7 +3571,11 @@ impl Compiler {
         // A fused expression already checked that this name finds `expected`, and looking it up
         // again could find another function after a hoisted operand ran, as R's own lookup,
         // which happens before the arguments are evaluated, would not.
-        match self.preguarded.iter().find(|(operation, _)| *operation == call) {
+        match self
+            .preguarded
+            .iter()
+            .find(|(operation, _)| *operation == call)
+        {
             Some(&(_, expected)) => {
                 let expected = self.constant(expected);
                 self.emit(Op::Constant, &[function, expected]);
@@ -3649,7 +3674,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::BranchUnlessPrimitive => 3,
         Op::BranchIfObject => 2,
         Op::DispatchSubject => 4,
-        Op::Fused => 3,
+        Op::Fused | Op::Unfused => 3,
     }
 }
 
@@ -3769,7 +3794,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::EndStatement => &[Register, Base, Base],
         Op::BranchUnlessPrimitive => &[Register, Constant, Target],
         Op::DispatchSubject => &[Register, Register, Call, Register],
-        Op::Fused => &[Register, Fusion, Target],
+        Op::Fused | Op::Unfused => &[Register, Fusion, Target],
         Op::MatchShape | Op::MatchTag | Op::Slot | Op::Construct => return None,
     })
 }
@@ -4721,6 +4746,7 @@ handlers! {
     run_replace, step_replace: Replace, true, op_replace;
     run_missing, step_missing: Missing, true, op_missing;
     run_fused, step_fused: Fused, true, op_fused;
+    run_unfused, step_unfused: Unfused, false, op_unfused;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -5267,9 +5293,6 @@ unsafe fn op_fused(state: &mut Activation<'_, '_>, instruction: Instruction) -> 
         return Ok(Flow::Next);
     }
     let words = values::ints_mut(program);
-    if words[fusion::DECLINES] >= fusion::GIVE_UP {
-        return Ok(Flow::Next);
-    }
     match fused_pass(state, instruction, words)? {
         Some(value) => {
             words[fusion::DECLINES] = 0;
@@ -5279,9 +5302,21 @@ unsafe fn op_fused(state: &mut Activation<'_, '_>, instruction: Instruction) -> 
         }
         None => {
             words[fusion::DECLINES] += 1;
+            if words[fusion::DECLINES] >= fusion::GIVE_UP {
+                // Every closure sharing this body runs the same code, so they all stop trying,
+                // and the program is garbage from here on.
+                values::ints_mut(state.machine.code.car())[instruction.at] =
+                    op_word(Op::Unfused) as i32;
+                crate::heap().set_element(state.constants, instruction.operand(1), nil());
+            }
             Ok(Flow::Next)
         }
     }
+}
+
+#[inline(always)]
+unsafe fn op_unfused(_state: &mut Activation<'_, '_>, _instruction: Instruction) -> R<Flow> {
+    Ok(Flow::Next)
 }
 
 /// Runs a fused program (laid out as [`fusion`] describes), or declines with `None` when the

@@ -953,7 +953,7 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | Tail-call dispatch, one indirect jump per handler | LuaJIT, JSC | built | the shared indirect jump; measured level with the match loop (121.4k against 120.8k per `seq()`), since handlers that call out still need a frame. The handler signature is `(activation, pc)` so that few values stay live across calls | `handlers!` in `bytecode.rs` |
 | Dense feedback storage, one slot per profiled instruction | V8 | planned | feedback is one `i32` per code word | |
 | One description of each instruction's semantics, shared by tier 0 and the baseline | Deegen (LuaJIT Remake) | planned | the baseline drifting from tier 0 | |
-| One kernel layer for vector builtins: slice kernels compiled for AVX2 and SSE2, results written into dead temporaries, and an `Op::Fused` superinstruction that evaluates an element-wise tree in 512-element chunks or declines before anything observable happens | pqR (`R_allocOrReuseVector`, task merging), Riposte | in progress | builtins 51% of `simulation`; one allocation and one pass per operator | `crates/interp/src/kernels.rs` |
+| One kernel layer for vector builtins: vectorized slice kernels, results written into dead temporaries, and an `Op::Fused` superinstruction that evaluates an element-wise tree in 512-element chunks or declines before anything observable happens | pqR (`R_allocOrReuseVector`, task merging), Riposte | in progress | builtins 51% of `simulation`; one allocation and one pass per operator | `crates/interp/src/kernels.rs` |
 | **4. Optimizing tiers** | | | | |
 | Per-argument-type native functions for scalar closures | Julia | built | recursive scalar functions | `crates/jit/src/native.rs` |
 | Baseline compiler from bytecode, no optimization | V8 Sparkplug | built, opt-in (`RY_JIT=baseline`, `RY_JIT_THRESHOLDS`); `RY_JIT=on` leaves it out | warm code under the 3000-entry threshold. Compiles in a median of 28 µs per body (at most about 0.5 ms), but a call per instruction measures level with tier 0's tail-call handlers (a scalar loop 0.53 s against 0.47 to 0.51 s), and with variable access and scalar comparisons inline it still loses on `bench-real` to the instruction-cache footprint of per-body code (9.7 MB over 972 bodies on `testthat`). `RY_JIT=baseline` runs it alone | `crates/jit/src/baseline.rs`, `assembler.rs` |
@@ -991,8 +991,9 @@ R's vector builtins share one kernel layer in `crates/interp/src/kernels.rs`, wh
 
 - **Slice kernels.** A kernel takes each operand as a slice or a scalar and writes into an output
   slice. It touches no R object, allocates nothing and raises nothing: an integer kernel returns an
-  overflow flag, and its caller warns. Each kernel is compiled for AVX2 and for the SSE2 baseline,
-  and the AVX2 copy is chosen at run time. Compiled code calls this layer directly.
+  overflow flag, and its caller warns. The loops vectorize for the baseline instruction set (SSE2
+  on x86-64). There is no separate AVX2 build: the loops are bound by memory traffic, and a second
+  copy of every kernel costs resident code. Compiled code calls this layer directly.
 - **Reuse.** An operation writes its result into an operand's buffer when the bytecode compiler
   marked the operand's register as a temporary read only by this instruction, and at run time the
   value's count is zero, it is mutable, not ALTREP, and has the result's type and length. The
@@ -1003,7 +1004,7 @@ R's vector builtins share one kernel layer in `crates/interp/src/kernels.rs`, wh
   into `x`'s buffer. Every kernel takes its destination as an argument that may be one of its
   operands, and reads that operand from the output buffer, so aliasing is exact under recycling.
   A destination of length one is never reused, because the shared `TRUE`, `FALSE` and `NA`
-  constants can look private. An input shorter than 16 elements skips the AVX2 build, and a scalar
+  constants can look private. A scalar
   operand of a math function, a comparison or unary minus is answered without the element loop.
 - **Reductions.** `sum` on integers, `any`, `all`, `min`, `max` and `range` are SIMD kernels;
   `range` finds both bounds in one pass. `prod` and the double `sum` accumulate in x87 long double

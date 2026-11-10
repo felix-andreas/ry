@@ -4,8 +4,9 @@
 //! scalar, or the output buffer itself when the result reuses an operand's storage) and writes
 //! every element of the output slice. Kernels know nothing of `SEXP` headers, attributes or
 //! dispatch, so a builtin, the bytecode's arithmetic instruction and a fused element-wise tree
-//! share them, and compiled code can call them on its own buffers. Each kernel is compiled
-//! twice, for AVX2 and for the SSE2 baseline, and picks the wider build at run time.
+//! share them, and compiled code can call them on its own buffers. The loops are written so the
+//! compiler vectorizes them for the target's baseline instruction set. A second build for AVX2
+//! measured no gain worth its code size, because the loops are bound by memory traffic.
 //!
 //! The results match GNU R on x86-64 bit for bit, NaN payloads included: an operation on two
 //! NaNs returns the first operand's payload, which is how `NA + NaN` stays `NA` and `NaN + NA`
@@ -112,7 +113,12 @@ pub unsafe fn binary(
         // through a stack buffer instead of a vector.
         let mut output = [0];
         if both_integral {
-            compare_integers(comparison, Some(integers(left)), Some(integers(right)), &mut output);
+            compare_integers(
+                comparison,
+                Some(integers(left)),
+                Some(integers(right)),
+                &mut output,
+            );
         } else {
             compare_reals(comparison, reals(left), reals(right), &mut output);
         }
@@ -135,7 +141,12 @@ pub unsafe fn binary(
             // A logical result never holds a double operand, so this destination was a
             // logical operand compared as a double: compare into a fresh vector.
             let fresh = values::alloc_uninit(SexpType::Logical, count)?;
-            compare_reals(comparison, self::reals(left), self::reals(right), values::ints_mut(fresh));
+            compare_reals(
+                comparison,
+                self::reals(left),
+                self::reals(right),
+                values::ints_mut(fresh),
+            );
             return Ok(Some(fresh));
         }
         return Ok(Some(result));
@@ -163,7 +174,12 @@ pub unsafe fn binary(
         }
         return Ok(Some(result));
     }
-    if integer_arithmetic(op, integers(left), integers(right), values::ints_mut(result)) {
+    if integer_arithmetic(
+        op,
+        integers(left),
+        integers(right),
+        values::ints_mut(result),
+    ) {
         conditions::warning_call(call, "NAs produced by integer overflow")?;
     }
     Ok(Some(result))
@@ -192,7 +208,11 @@ pub unsafe fn unary(
     // costs more than the one value.
     if count == 1 && kind == SexpType::Real {
         let value = arith::real_at(operand, 0);
-        let result = if is_na_real(value) { NA_REAL } else { arith::math_value(function, value) };
+        let result = if is_na_real(value) {
+            NA_REAL
+        } else {
+            arith::math_value(function, value)
+        };
         if result.is_nan() && !value.is_nan() {
             conditions::warning_call(call, "NaNs produced")?;
         }
@@ -206,7 +226,11 @@ pub unsafe fn unary(
     if kind == SexpType::Integer {
         let source = (!in_place).then(|| values::ints(operand));
         abs_integers(source, values::ints_mut(result));
-    } else if math(function, (!in_place).then(|| reals(operand)), values::reals_mut(result)) {
+    } else if math(
+        function,
+        (!in_place).then(|| reals(operand)),
+        values::reals_mut(result),
+    ) {
         conditions::warning_call(call, "NaNs produced")?;
     }
     Ok(Some(result))
@@ -692,7 +716,12 @@ fn apply<'a>(node: Node, view: impl Fn(usize) -> View<'a>, output: Output<'_>) -
                     if matches!(view(left), View::Integers(_))
                         && matches!(view(right), View::Integers(_)) =>
                 {
-                    compare_integers(comparison, Some(integers(left)), Some(integers(right)), output)
+                    compare_integers(
+                        comparison,
+                        Some(integers(left)),
+                        Some(integers(right)),
+                        output,
+                    )
                 }
                 Some(comparison) => compare_reals(comparison, reals(left), reals(right), output),
                 None => {
@@ -707,7 +736,12 @@ fn apply<'a>(node: Node, view: impl Fn(usize) -> View<'a>, output: Output<'_>) -
             true
         }
         (Node::Binary(operator, left, right), Output::Doubles(output)) => {
-            real_arithmetic(arithmetic_of(operator), Some(reals(left)), Some(reals(right)), output);
+            real_arithmetic(
+                arithmetic_of(operator),
+                Some(reals(left)),
+                Some(reals(right)),
+                output,
+            );
             true
         }
         (
@@ -818,211 +852,208 @@ macro_rules! integer_reader {
     };
 }
 
-// The kernels. `multiversion!` compiles each body for AVX2 and for the baseline.
+/// `left op right` element by element into `output`, as doubles. An operand that is `None`
+/// is the double vector `output` holds on entry.
+pub fn real_arithmetic(
+    op: Op,
+    left: Option<Reals<'_>>,
+    right: Option<Reals<'_>>,
+    output: &mut [f64],
+) {
+    real_operation(op, left, right, output);
+}
 
-/// The input length from which a kernel runs its AVX2 build.
-const WIDE_FROM: usize = 16;
+/// `left op right` on integers for `+`, `-`, `*`, `%%` and `%/%`, `NA` where either side is
+/// `NA`, a divisor is zero or a result leaves the integer range. Returns whether a result
+/// overflowed, which R warns about. An operand that is `None` is the vector `output` holds
+/// on entry.
+pub fn integer_arithmetic(
+    op: Op,
+    left: Option<Integers<'_>>,
+    right: Option<Integers<'_>>,
+    output: &mut [i32],
+) -> bool {
+    integer_operation(op, left, right, output)
+}
 
-macro_rules! multiversion {
-    (($length:ident) $(#[$meta:meta])* pub fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
-        $(#[$meta])*
-        pub fn $name($($arg: $ty),*) $(-> $ret)? {
-            #[inline(always)]
-            fn body($($arg: $ty),*) $(-> $ret)? $body
-            // A short input gains nothing from wide registers, and the call into the AVX2 build
-            // costs more than the work on a scalar.
-            if $length.len() < WIDE_FROM {
-                return body($($arg),*);
-            }
-            #[cfg(target_arch = "x86_64")]
-            {
-                #[target_feature(enable = "avx2")]
-                fn wide($($arg: $ty),*) $(-> $ret)? {
-                    body($($arg),*)
+/// Compares two numeric operands as doubles, `NA` wherever either side is NaN.
+pub fn compare_reals(
+    comparison: Comparison,
+    left: Reals<'_>,
+    right: Reals<'_>,
+    output: &mut [i32],
+) {
+    macro_rules! compare {
+        ($holds:expr) => {
+            input_reader!(left, |x| input_reader!(right, |y| map2(
+                x,
+                y,
+                output,
+                |a: f64, b: f64| {
+                    if a.is_nan() | b.is_nan() {
+                        NA_LOGICAL
+                    } else {
+                        $holds(a, b) as i32
+                    }
                 }
-                if std::arch::is_x86_feature_detected!("avx2") {
-                    // SAFETY: the processor supports AVX2.
-                    return unsafe { wide($($arg),*) };
+            )))
+        };
+    }
+    match comparison {
+        Comparison::Equal => compare!(|x, y| x == y),
+        Comparison::NotEqual => compare!(|x, y| x != y),
+        Comparison::Less => compare!(|x, y| x < y),
+        Comparison::Greater => compare!(|x, y| x > y),
+        Comparison::LessEqual => compare!(|x, y| x <= y),
+        Comparison::GreaterEqual => compare!(|x, y| x >= y),
+    }
+}
+
+/// Compares two integer or logical operands, `NA` wherever either side is `NA`. An operand
+/// that is `None` is the logical vector `output` holds on entry.
+pub fn compare_integers(
+    comparison: Comparison,
+    left: Option<Integers<'_>>,
+    right: Option<Integers<'_>>,
+    output: &mut [i32],
+) {
+    macro_rules! compare {
+        ($holds:expr) => {
+            integer_reader!(left, |x| integer_reader!(right, |y| map2(
+                x,
+                y,
+                output,
+                |a: i32, b: i32| {
+                    if (a == NA_INTEGER) | (b == NA_INTEGER) {
+                        NA_LOGICAL
+                    } else {
+                        $holds(a, b) as i32
+                    }
                 }
-            }
-            body($($arg),*)
-        }
-    };
-}
-
-multiversion! {
-    (output)
-    /// `left op right` element by element into `output`, as doubles. An operand that is `None`
-    /// is the double vector `output` holds on entry.
-    pub fn real_arithmetic(op: Op, left: Option<Reals<'_>>, right: Option<Reals<'_>>, output: &mut [f64]) {
-        real_operation(op, left, right, output);
+            )))
+        };
+    }
+    match comparison {
+        Comparison::Equal => compare!(|x, y| x == y),
+        Comparison::NotEqual => compare!(|x, y| x != y),
+        Comparison::Less => compare!(|x, y| x < y),
+        Comparison::Greater => compare!(|x, y| x > y),
+        Comparison::LessEqual => compare!(|x, y| x <= y),
+        Comparison::GreaterEqual => compare!(|x, y| x >= y),
     }
 }
 
-multiversion! {
-    (output)
-    /// `left op right` on integers for `+`, `-`, `*`, `%%` and `%/%`, `NA` where either side is
-    /// `NA`, a divisor is zero or a result leaves the integer range. Returns whether a result
-    /// overflowed, which R warns about. An operand that is `None` is the vector `output` holds
-    /// on entry.
-    pub fn integer_arithmetic(op: Op, left: Option<Integers<'_>>, right: Option<Integers<'_>>, output: &mut [i32]) -> bool {
-        integer_operation(op, left, right, output)
+/// `&` (`is_and`) or `|` on logicals: `FALSE & NA` is `FALSE` and `TRUE | NA` is `TRUE`.
+/// An operand that is `None` is the logical vector `output` holds on entry.
+pub fn logic(
+    is_and: bool,
+    left: Option<Integers<'_>>,
+    right: Option<Integers<'_>>,
+    output: &mut [i32],
+) {
+    logic_operation(is_and, left, right, output);
+}
+
+/// `!` on logicals; with `source` `None`, `output` holds the operand on entry.
+pub fn not(source: Option<&[i32]>, output: &mut [i32]) {
+    map1(source, output, |x| {
+        if x == NA_LOGICAL { NA_LOGICAL } else { 1 - x }
+    });
+}
+
+/// Unary minus on integers; with `source` `None`, `output` holds the operand on entry.
+pub fn negate_integers(source: Option<&[i32]>, output: &mut [i32]) {
+    map1(source, output, |x| {
+        if x == NA_INTEGER { NA_INTEGER } else { -x }
+    });
+}
+
+/// `abs` on integers or logicals; with `source` `None`, `output` holds the operand on entry.
+pub fn abs_integers(source: Option<&[i32]>, output: &mut [i32]) {
+    map1(source, output, |x| {
+        if x == NA_INTEGER { NA_INTEGER } else { x.abs() }
+    });
+}
+
+/// Unary minus on doubles; with `source` `None`, `output` holds the operand on entry.
+pub fn negate_reals(source: Option<&[f64]>, output: &mut [f64]) {
+    map1(source, output, |x: f64| -x);
+}
+
+/// A function of the `Math` group on each element, `NA` staying `NA`. With `source` `None`,
+/// `output` holds the operand on entry. Returns whether a NaN came out of a value that was not
+/// NaN, which R warns about.
+pub fn math(function: Math, source: Option<Reals<'_>>, output: &mut [f64]) -> bool {
+    // The common functions get their own loop, so the loop calls no function it cannot
+    // vectorize.
+    match function {
+        Math::Floor => math_lanes(source, output, f64::floor),
+        Math::Ceiling => math_lanes(source, output, f64::ceil),
+        Math::Trunc => math_lanes(source, output, f64::trunc),
+        Math::Abs => math_lanes(source, output, f64::abs),
+        Math::Sqrt => math_lanes(source, output, f64::sqrt),
+        Math::Exp => math_lanes(source, output, f64::exp),
+        _ => math_lanes(source, output, |x| arith::math_value(function, x)),
     }
 }
 
-multiversion! {
-    (output)
-    /// Compares two numeric operands as doubles, `NA` wherever either side is NaN.
-    pub fn compare_reals(comparison: Comparison, left: Reals<'_>, right: Reals<'_>, output: &mut [i32]) {
-        macro_rules! compare {
-            ($holds:expr) => {
-                input_reader!(left, |x| input_reader!(right, |y| map2(x, y, output, |a: f64, b: f64| {
-                    if a.is_nan() | b.is_nan() { NA_LOGICAL } else { $holds(a, b) as i32 }
-                })))
-            };
-        }
-        match comparison {
-            Comparison::Equal => compare!(|x, y| x == y),
-            Comparison::NotEqual => compare!(|x, y| x != y),
-            Comparison::Less => compare!(|x, y| x < y),
-            Comparison::Greater => compare!(|x, y| x > y),
-            Comparison::LessEqual => compare!(|x, y| x <= y),
-            Comparison::GreaterEqual => compare!(|x, y| x >= y),
-        }
+/// The total of integers or logicals in 64 bits, or `None` when one is `NA` and `na_rm` is
+/// false. With `na_rm`, an `NA` counts as nothing.
+pub fn sum_integers(values: &[i32], na_rm: bool) -> Option<i64> {
+    let mut total = 0i64;
+    let mut missing = false;
+    for &value in values {
+        let is_na = value == NA_INTEGER;
+        missing |= is_na;
+        total += if is_na { 0 } else { i64::from(value) };
     }
+    (na_rm || !missing).then_some(total)
 }
 
-multiversion! {
-    (output)
-    /// Compares two integer or logical operands, `NA` wherever either side is `NA`. An operand
-    /// that is `None` is the logical vector `output` holds on entry.
-    pub fn compare_integers(comparison: Comparison, left: Option<Integers<'_>>, right: Option<Integers<'_>>, output: &mut [i32]) {
-        macro_rules! compare {
-            ($holds:expr) => {
-                integer_reader!(left, |x| integer_reader!(right, |y| map2(x, y, output, |a: i32, b: i32| {
-                    if (a == NA_INTEGER) | (b == NA_INTEGER) { NA_LOGICAL } else { $holds(a, b) as i32 }
-                })))
-            };
-        }
-        match comparison {
-            Comparison::Equal => compare!(|x, y| x == y),
-            Comparison::NotEqual => compare!(|x, y| x != y),
-            Comparison::Less => compare!(|x, y| x < y),
-            Comparison::Greater => compare!(|x, y| x > y),
-            Comparison::LessEqual => compare!(|x, y| x <= y),
-            Comparison::GreaterEqual => compare!(|x, y| x >= y),
-        }
-    }
-}
+/// The input length below which [`any_all`] scans element by element and stops at the first
+/// decisive value, instead of a block at a time.
+const SHORT: usize = 16;
 
-multiversion! {
-    (output)
-    /// `&` (`is_and`) or `|` on logicals: `FALSE & NA` is `FALSE` and `TRUE | NA` is `TRUE`.
-    /// An operand that is `None` is the logical vector `output` holds on entry.
-    pub fn logic(is_and: bool, left: Option<Integers<'_>>, right: Option<Integers<'_>>, output: &mut [i32]) {
-        logic_operation(is_and, left, right, output);
-    }
-}
-
-multiversion! {
-    (output)
-    /// `!` on logicals; with `source` `None`, `output` holds the operand on entry.
-    pub fn not(source: Option<&[i32]>, output: &mut [i32]) {
-        map1(source, output, |x| if x == NA_LOGICAL { NA_LOGICAL } else { 1 - x });
-    }
-}
-
-multiversion! {
-    (output)
-    /// Unary minus on integers; with `source` `None`, `output` holds the operand on entry.
-    pub fn negate_integers(source: Option<&[i32]>, output: &mut [i32]) {
-        map1(source, output, |x| if x == NA_INTEGER { NA_INTEGER } else { -x });
-    }
-}
-
-multiversion! {
-    (output)
-    /// `abs` on integers or logicals; with `source` `None`, `output` holds the operand on entry.
-    pub fn abs_integers(source: Option<&[i32]>, output: &mut [i32]) {
-        map1(source, output, |x| if x == NA_INTEGER { NA_INTEGER } else { x.abs() });
-    }
-}
-
-multiversion! {
-    (output)
-    /// Unary minus on doubles; with `source` `None`, `output` holds the operand on entry.
-    pub fn negate_reals(source: Option<&[f64]>, output: &mut [f64]) {
-        map1(source, output, |x: f64| -x);
-    }
-}
-
-multiversion! {
-    (output)
-    /// A function of the `Math` group on each element, `NA` staying `NA`. With `source` `None`,
-    /// `output` holds the operand on entry. Returns whether a NaN came out of a value that was not
-    /// NaN, which R warns about.
-    pub fn math(function: Math, source: Option<Reals<'_>>, output: &mut [f64]) -> bool {
-        // The common functions get their own loop, so the loop calls no function it cannot
-        // vectorize.
-        match function {
-            Math::Floor => math_lanes(source, output, f64::floor),
-            Math::Ceiling => math_lanes(source, output, f64::ceil),
-            Math::Trunc => math_lanes(source, output, f64::trunc),
-            Math::Abs => math_lanes(source, output, f64::abs),
-            Math::Sqrt => math_lanes(source, output, f64::sqrt),
-            Math::Exp => math_lanes(source, output, f64::exp),
-            _ => math_lanes(source, output, |x| arith::math_value(function, x)),
-        }
-    }
-}
-
-multiversion! {
-    (values)
-    /// The total of integers or logicals in 64 bits, or `None` when one is `NA` and `na_rm` is
-    /// false. With `na_rm`, an `NA` counts as nothing.
-    pub fn sum_integers(values: &[i32], na_rm: bool) -> Option<i64> {
-        let mut total = 0i64;
+/// `any` (`is_any`) or `all` over logicals or integers, as R's three-valued logic gives
+/// them: a nonzero integer is `TRUE`.
+pub fn any_all(is_any: bool, values: &[i32]) -> i32 {
+    // The decisive value ends the scan: on a short input at once, on a long one a block at a
+    // time so the block's loop vectorizes.
+    if values.len() < SHORT {
         let mut missing = false;
         for &value in values {
-            let is_na = value == NA_INTEGER;
-            missing |= is_na;
-            total += if is_na { 0 } else { i64::from(value) };
-        }
-        (na_rm || !missing).then_some(total)
-    }
-}
-
-multiversion! {
-    (values)
-    /// `any` (`is_any`) or `all` over logicals or integers, as R's three-valued logic gives
-    /// them: a nonzero integer is `TRUE`.
-    pub fn any_all(is_any: bool, values: &[i32]) -> i32 {
-        // The decisive value ends the scan: on a short input at once, on a long one a block at a
-        // time so the block's loop vectorizes.
-        if values.len() < WIDE_FROM {
-            let mut missing = false;
-            for &value in values {
-                if value == NA_LOGICAL {
-                    missing = true;
-                } else if (value != 0) == is_any {
-                    return i32::from(is_any);
-                }
-            }
-            return if missing { NA_LOGICAL } else { i32::from(!is_any) };
-        }
-        let mut missing = false;
-        for block in values.chunks(1024) {
-            let mut found = false;
-            for &value in block {
-                let is_na = value == NA_LOGICAL;
-                found |= if is_any { (value != 0) & !is_na } else { value == 0 };
-                missing |= is_na;
-            }
-            if found {
+            if value == NA_LOGICAL {
+                missing = true;
+            } else if (value != 0) == is_any {
                 return i32::from(is_any);
             }
         }
-        if missing { NA_LOGICAL } else { i32::from(!is_any) }
+        return if missing {
+            NA_LOGICAL
+        } else {
+            i32::from(!is_any)
+        };
+    }
+    let mut missing = false;
+    for block in values.chunks(1024) {
+        let mut found = false;
+        for &value in block {
+            let is_na = value == NA_LOGICAL;
+            found |= if is_any {
+                (value != 0) & !is_na
+            } else {
+                value == 0
+            };
+            missing |= is_na;
+        }
+        if found {
+            return i32::from(is_any);
+        }
+    }
+    if missing {
+        NA_LOGICAL
+    } else {
+        i32::from(!is_any)
     }
 }
 
@@ -1037,88 +1068,100 @@ pub struct Extremes<T> {
     pub nan: bool,
 }
 
-multiversion! {
-    (values)
-    /// The extremes of integers or logicals, `NA` aside.
-    pub fn integer_extremes(values: &[i32]) -> Extremes<i32> {
-        let (mut least, mut greatest) = (i32::MAX, i32::MIN);
-        let mut missing = 0usize;
-        for &value in values {
-            let is_na = value == NA_INTEGER;
-            missing += usize::from(is_na);
-            least = least.min(if is_na { i32::MAX } else { value });
-            // `NA` is the least `i32`, so it never raises the maximum.
-            greatest = greatest.max(value);
-        }
-        Extremes {
-            bounds: (missing < values.len()).then_some((least, greatest)),
-            na: missing > 0,
-            nan: false,
-        }
+/// The extremes of integers or logicals, `NA` aside.
+pub fn integer_extremes(values: &[i32]) -> Extremes<i32> {
+    let (mut least, mut greatest) = (i32::MAX, i32::MIN);
+    let mut missing = 0usize;
+    for &value in values {
+        let is_na = value == NA_INTEGER;
+        missing += usize::from(is_na);
+        least = least.min(if is_na { i32::MAX } else { value });
+        // `NA` is the least `i32`, so it never raises the maximum.
+        greatest = greatest.max(value);
+    }
+    Extremes {
+        bounds: (missing < values.len()).then_some((least, greatest)),
+        na: missing > 0,
+        nan: false,
     }
 }
 
-multiversion! {
-    (values)
-    /// The extremes of doubles, NaNs aside. Of a `0` and a `-0`, which compare equal, the one
-    /// that comes first is the extreme, as GNU R's `min` and `max` keep the first of equal values.
-    pub fn real_extremes(values: &[f64]) -> Extremes<f64> {
-        const LANES: usize = 8;
-        let mut least = [f64::INFINITY; LANES];
-        let mut greatest = [f64::NEG_INFINITY; LANES];
-        let mut nan = [false; LANES];
-        let mut present = [false; LANES];
-        let blocks = values.chunks_exact(LANES);
-        let rest = blocks.remainder();
-        for block in blocks {
-            for lane in 0..LANES {
-                let value = block[lane];
-                let is_nan = value.is_nan();
-                nan[lane] |= is_nan;
-                present[lane] |= !is_nan;
-                // A NaN compares false, so it moves neither extreme.
-                least[lane] = if value < least[lane] { value } else { least[lane] };
-                greatest[lane] = if value > greatest[lane] { value } else { greatest[lane] };
-            }
-        }
-        let mut low = f64::INFINITY;
-        let mut high = f64::NEG_INFINITY;
-        let mut any_nan = false;
-        let mut any = false;
+/// The extremes of doubles, NaNs aside. Of a `0` and a `-0`, which compare equal, the one
+/// that comes first is the extreme, as GNU R's `min` and `max` keep the first of equal values.
+pub fn real_extremes(values: &[f64]) -> Extremes<f64> {
+    const LANES: usize = 8;
+    let mut least = [f64::INFINITY; LANES];
+    let mut greatest = [f64::NEG_INFINITY; LANES];
+    let mut nan = [false; LANES];
+    let mut present = [false; LANES];
+    let blocks = values.chunks_exact(LANES);
+    let rest = blocks.remainder();
+    for block in blocks {
         for lane in 0..LANES {
-            low = if least[lane] < low { least[lane] } else { low };
-            high = if greatest[lane] > high { greatest[lane] } else { high };
-            any_nan |= nan[lane];
-            any |= present[lane];
-        }
-        for &value in rest {
-            any_nan |= value.is_nan();
-            any |= !value.is_nan();
-            low = if value < low { value } else { low };
-            high = if value > high { value } else { high };
-        }
-        // NaNs are rare, so telling `NA` from other NaNs takes a second pass only when one is there.
-        let (na, nan) = if any_nan {
-            (
-                values.iter().any(|&value| is_na_real(value)),
-                values.iter().any(|&value| value.is_nan() && !is_na_real(value)),
-            )
-        } else {
-            (false, false)
-        };
-        // Lanes lose the order of equal zeros, so the first zero decides a zero's sign.
-        let first_zero = |bound: f64| {
-            if bound == 0.0 {
-                values.iter().copied().find(|&value| value == 0.0).unwrap_or(bound)
+            let value = block[lane];
+            let is_nan = value.is_nan();
+            nan[lane] |= is_nan;
+            present[lane] |= !is_nan;
+            // A NaN compares false, so it moves neither extreme.
+            least[lane] = if value < least[lane] {
+                value
             } else {
-                bound
-            }
-        };
-        Extremes {
-            bounds: any.then(|| (first_zero(low), first_zero(high))),
-            na,
-            nan,
+                least[lane]
+            };
+            greatest[lane] = if value > greatest[lane] {
+                value
+            } else {
+                greatest[lane]
+            };
         }
+    }
+    let mut low = f64::INFINITY;
+    let mut high = f64::NEG_INFINITY;
+    let mut any_nan = false;
+    let mut any = false;
+    for lane in 0..LANES {
+        low = if least[lane] < low { least[lane] } else { low };
+        high = if greatest[lane] > high {
+            greatest[lane]
+        } else {
+            high
+        };
+        any_nan |= nan[lane];
+        any |= present[lane];
+    }
+    for &value in rest {
+        any_nan |= value.is_nan();
+        any |= !value.is_nan();
+        low = if value < low { value } else { low };
+        high = if value > high { value } else { high };
+    }
+    // NaNs are rare, so telling `NA` from other NaNs takes a second pass only when one is there.
+    let (na, nan) = if any_nan {
+        (
+            values.iter().any(|&value| is_na_real(value)),
+            values
+                .iter()
+                .any(|&value| value.is_nan() && !is_na_real(value)),
+        )
+    } else {
+        (false, false)
+    };
+    // Lanes lose the order of equal zeros, so the first zero decides a zero's sign.
+    let first_zero = |bound: f64| {
+        if bound == 0.0 {
+            values
+                .iter()
+                .copied()
+                .find(|&value| value == 0.0)
+                .unwrap_or(bound)
+        } else {
+            bound
+        }
+    };
+    Extremes {
+        bounds: any.then(|| (first_zero(low), first_zero(high))),
+        na,
+        nan,
     }
 }
 
@@ -1315,9 +1358,16 @@ fn zip<O: Copy, L: Reader<O>, R: Reader<O>>(
 #[inline(always)]
 fn real_operation(op: Op, left: Option<Reals<'_>>, right: Option<Reals<'_>>, output: &mut [f64]) {
     let square = matches!(right.map(real_input), Some(Reals::Scalar(exponent)) if exponent == 2.0);
+    // Beside a scalar that is not NaN, only the other operand can be NaN, and the hardware's
+    // `+` and `*` return that operand's payload whichever order the compiler picks, so the loop
+    // needs no per-element test.
+    let number = |operand: Option<Reals<'_>>| matches!(operand.map(real_input), Some(Reals::Scalar(value)) if !value.is_nan());
+    let plain = number(left) || number(right);
     real_reader!(left, |x| real_reader!(right, |y| match op {
+        Op::Add if plain => map2(x, y, output, |a, b| a + b),
         Op::Add => map2(x, y, output, arith::add),
         Op::Subtract => map2(x, y, output, |a, b| a - b),
+        Op::Multiply if plain => map2(x, y, output, |a, b| a * b),
         Op::Multiply => map2(x, y, output, arith::multiply),
         Op::Divide => map2(x, y, output, |a, b| a / b),
         // `power` of a non-NaN base and 2 is the plain square, and gives a NaN base back
@@ -1468,4 +1518,3 @@ pub fn widen(value: i32) -> f64 {
         f64::from(value)
     }
 }
-

@@ -21,8 +21,8 @@
 use {
     crate::{
         arrays::{self, OperatorClass},
-        bytecode::Arith,
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
+        bytecode::Arith,
         coerce::{self, coerce_vector},
         conditions, interp,
         kernels::{self, Comparison, Extremes, Integers, Reals},
@@ -253,66 +253,96 @@ pub const BUILTINS: &[BuiltinDef] = &[
         })
         .map(Some)
     }),
-    builtin("abs", 1, |call| unsafe { math1(call, Math::Abs) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("sign", 1, |call| unsafe { math1(call, Math::Sign) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("sqrt", 1, |call| unsafe { math1(call, Math::Sqrt) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("floor", 1, |call| unsafe { math1(call, Math::Floor) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("ceiling", 1, |call| unsafe { math1(call, Math::Ceiling) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("trunc", -1, |call| unsafe { math1(call, Math::Trunc) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("exp", 1, |call| unsafe { math1(call, Math::Exp) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("expm1", 1, |call| unsafe { math1(call, Math::Expm1) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("log1p", 1, |call| unsafe { math1(call, Math::Log1p) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("log2", 1, |call| unsafe { math1(call, Math::Log2) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("log10", 1, |call| unsafe { math1(call, Math::Log10) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("cos", 1, |call| unsafe { math1(call, Math::Cos) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("sin", 1, |call| unsafe { math1(call, Math::Sin) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("tan", 1, |call| unsafe { math1(call, Math::Tan) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("cospi", 1, |call| unsafe { math1(call, Math::Cospi) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("sinpi", 1, |call| unsafe { math1(call, Math::Sinpi) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("tanpi", 1, |call| unsafe { math1(call, Math::Tanpi) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("acos", 1, |call| unsafe { math1(call, Math::Acos) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("asin", 1, |call| unsafe { math1(call, Math::Asin) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("atan", 1, |call| unsafe { math1(call, Math::Atan) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("cosh", 1, |call| unsafe { math1(call, Math::Cosh) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("sinh", 1, |call| unsafe { math1(call, Math::Sinh) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("tanh", 1, |call| unsafe { math1(call, Math::Tanh) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("acosh", 1, |call| unsafe { math1(call, Math::Acosh) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("asinh", 1, |call| unsafe { math1(call, Math::Asinh) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("atanh", 1, |call| unsafe { math1(call, Math::Atanh) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("gamma", 1, |call| unsafe { math1(call, Math::Gamma) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("lgamma", 1, |call| unsafe { math1(call, Math::Lgamma) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("digamma", 1, |call| unsafe { math1(call, Math::Digamma) }).generic(Generic::Math)
-    .reusing_first_argument(),
-    builtin("trigamma", 1, |call| unsafe { math1(call, Math::Trigamma) }).generic(Generic::Math)
-    .reusing_first_argument(),
+    builtin("abs", 1, |call| unsafe { math1(call, Math::Abs) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("sign", 1, |call| unsafe { math1(call, Math::Sign) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("sqrt", 1, |call| unsafe { math1(call, Math::Sqrt) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("floor", 1, |call| unsafe { math1(call, Math::Floor) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("ceiling", 1, |call| unsafe { math1(call, Math::Ceiling) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("trunc", -1, |call| unsafe { math1(call, Math::Trunc) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("exp", 1, |call| unsafe { math1(call, Math::Exp) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("expm1", 1, |call| unsafe { math1(call, Math::Expm1) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("log1p", 1, |call| unsafe { math1(call, Math::Log1p) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("log2", 1, |call| unsafe { math1(call, Math::Log2) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("log10", 1, |call| unsafe { math1(call, Math::Log10) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("cos", 1, |call| unsafe { math1(call, Math::Cos) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("sin", 1, |call| unsafe { math1(call, Math::Sin) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("tan", 1, |call| unsafe { math1(call, Math::Tan) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("cospi", 1, |call| unsafe { math1(call, Math::Cospi) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("sinpi", 1, |call| unsafe { math1(call, Math::Sinpi) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("tanpi", 1, |call| unsafe { math1(call, Math::Tanpi) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("acos", 1, |call| unsafe { math1(call, Math::Acos) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("asin", 1, |call| unsafe { math1(call, Math::Asin) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("atan", 1, |call| unsafe { math1(call, Math::Atan) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("cosh", 1, |call| unsafe { math1(call, Math::Cosh) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("sinh", 1, |call| unsafe { math1(call, Math::Sinh) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("tanh", 1, |call| unsafe { math1(call, Math::Tanh) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("acosh", 1, |call| unsafe { math1(call, Math::Acosh) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("asinh", 1, |call| unsafe { math1(call, Math::Asinh) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("atanh", 1, |call| unsafe { math1(call, Math::Atanh) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("gamma", 1, |call| unsafe { math1(call, Math::Gamma) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("lgamma", 1, |call| unsafe { math1(call, Math::Lgamma) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("digamma", 1, |call| unsafe { math1(call, Math::Digamma) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
+    builtin("trigamma", 1, |call| unsafe { math1(call, Math::Trigamma) })
+        .generic(Generic::Math)
+        .reusing_first_argument(),
     builtin("log", -1, do_log).generic(Generic::Math),
     builtin("round", -1, |call| unsafe { round_like(call, false) })
         .generic(Generic::Math)
@@ -1114,7 +1144,11 @@ unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
             SexpType::Real => return values::scalar_real(-values::reals(operand)[0]),
             SexpType::Integer => {
                 let value = values::ints(operand)[0];
-                return values::scalar_integer(if value == NA_INTEGER { NA_INTEGER } else { -value });
+                return values::scalar_integer(if value == NA_INTEGER {
+                    NA_INTEGER
+                } else {
+                    -value
+                });
             }
             _ => {}
         }
@@ -2082,7 +2116,8 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
             Ok(result)
         }
         SexpType::Logical
-            if call.reusable == Some(operand) && kernels::fits(operand, SexpType::Logical, count) =>
+            if call.reusable == Some(operand)
+                && kernels::fits(operand, SexpType::Logical, count) =>
         {
             kernels::not(None, values::ints_mut(operand));
             Ok(operand)
@@ -3062,8 +3097,16 @@ enum NumericExtremes {
 unsafe fn numeric_extremes(items: &[Sexp], kind: SexpType) -> R<NumericExtremes> {
     let integral = matches!(kind, SexpType::Integer | SexpType::Logical);
     let mut low_high: Option<(f64, f64)> = None;
-    let mut integer: Extremes<i32> = Extremes { bounds: None, na: false, nan: false };
-    let mut real: Extremes<f64> = Extremes { bounds: None, na: false, nan: false };
+    let mut integer: Extremes<i32> = Extremes {
+        bounds: None,
+        na: false,
+        nan: false,
+    };
+    let mut real: Extremes<f64> = Extremes {
+        bounds: None,
+        na: false,
+        nan: false,
+    };
     for &item in items {
         if item == nil() {
             continue;
@@ -3091,7 +3134,9 @@ unsafe fn numeric_extremes(items: &[Sexp], kind: SexpType) -> R<NumericExtremes>
             }
             SexpType::Real => kernels::real_extremes(values::reals(values::materialize(item)?)),
             _ => {
-                let reals: Vec<f64> = (0..length(item)).map(|index| real_at(item, index)).collect();
+                let reals: Vec<f64> = (0..length(item))
+                    .map(|index| real_at(item, index))
+                    .collect();
                 kernels::real_extremes(&reals)
             }
         };
@@ -3227,7 +3272,10 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
             extreme(call.call, &extremes, na_rm, true)?,
         )
     } else {
-        (summary(&inner, Summary::Min)?, summary(&inner, Summary::Max)?)
+        (
+            summary(&inner, Summary::Min)?,
+            summary(&inner, Summary::Max)?,
+        )
     };
     crate::combine::combine(&[minimum, maximum])
 }

@@ -1218,7 +1218,8 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::Missing
             | Op::SetSrcref
             | Op::Resume
-            | Op::Fused => false,
+            | Op::Fused
+            | Op::Unfused => false,
         };
         native += usize::from(counts);
         pc += 1 + count;
@@ -2321,7 +2322,7 @@ impl<'a> Builder<'a> {
             }
             // The fused pass is an interpreter shortcut: optimized code runs the ordinary code
             // after it, which computes the same value.
-            Op::Fused => Action::FallThrough,
+            Op::Fused | Op::Unfused => Action::FallThrough,
             Op::Jump | Op::Resume => {
                 self.push_edge(operand(0), state);
                 return Ok(Action::Jump);
@@ -4119,6 +4120,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
         }
         Op::Guard
         | Op::Fused
+        | Op::Unfused
         | Op::Jump
         | Op::Resume
         | Op::Invisible
