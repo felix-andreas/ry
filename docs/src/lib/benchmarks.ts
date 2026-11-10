@@ -27,6 +27,7 @@ export type Meta = {
   rounds: number;
   seed?: number;
   command?: string;
+  tooShortSeconds?: number;
   // How a file written before the paired-rounds runner was sampled. Deleted with `fromLegacy`.
   legacySampling?: string;
 };
@@ -139,15 +140,21 @@ export function ratioFlags(measurement: Measurement, engine: string): Flag[] {
   return measurement.flags.filter((flag) => flag.engine === undefined || flag.engine === engine || flag.engine === baseline);
 }
 
-export function isTooShort(measurement: Measurement, engine: string): boolean {
-  return ratioFlags(measurement, engine).some((flag) => flag.kind === 'too_short');
+// Whether a program is too short to count: GNU R, whose time measures the work, finished it under
+// the floor. A short time on a ry engine is the speed-up being measured, so it is flagged but counts.
+export function isTooShort(measurement: Measurement): boolean {
+  return measurement.flags.some((flag) => flag.kind === 'too_short' && (flag.engine === undefined || flag.engine === baseline));
 }
 
-export function flagNotes(programs: Program[]): string[] {
-  const kinds = new Set(programs.flatMap((program) => program.measurement?.flags.map((flag) => flag.kind) ?? []));
+export function flagNotes(programs: Program[], floor = 0.1): string[] {
+  const flags = programs.flatMap((program) => program.measurement?.flags ?? []);
+  const kinds = new Set(flags.map((flag) => flag.kind));
   const notes: string[] = [];
-  if (kinds.has('too_short')) {
-    notes.push('A program marked too short finishes in under 0.1 s on the engine the flag names, which is too little work for a stable ratio, so the geometric mean leaves it out.');
+  if (programs.some((program) => program.measurement !== undefined && isTooShort(program.measurement))) {
+    notes.push(`A program marked too short on GNU R finishes there in under ${floor} s, which is too little work for a stable ratio, so every geometric mean leaves it out.`);
+  }
+  if (flags.some((flag) => flag.kind === 'too_short' && flag.engine !== undefined && flag.engine !== baseline)) {
+    notes.push(`A time marked too short on a ry engine is under ${floor} s. That speed is what the suite measures, so it counts in the geometric mean.`);
   }
   if (kinds.has('typed_refused')) notes.push('A typed version the compiler refused has no typed time; the flag gives the reason.');
   if (kinds.has('wide_interval')) notes.push("A program marked wide interval varied so much between rounds that its ratio's interval is wide; read its median with care.");
@@ -229,7 +236,7 @@ export function suiteCharts(suite: Suite): Chart[] {
       caption: group === undefined ? suite.name : `${suite.name}: ${group.name}`,
       engines,
       rows,
-      notes: flagNotes(members),
+      notes: flagNotes(members, suite.results?.meta.tooShortSeconds),
       metadata: suiteMetadata(suite),
     }];
   });
@@ -253,7 +260,7 @@ function chartRow(program: Program & { measurement: Measurement }, engines: stri
         ? `${program.display}, ${engineLabel(engine)}: not measured`
         : `${program.display}, ${engineLabel(engine)}: ${formatInterval(ratio)} the speed of GNU R` +
           (time === undefined || gnuR === undefined ? '' : `, ${seconds(time)} against ${seconds(gnuR)}`);
-      return { engine, ratio, faded: isTooShort(measurement, engine), title };
+      return { engine, ratio, faded: isTooShort(measurement), title };
     }),
   };
 }
@@ -388,7 +395,7 @@ export function programRatio(program: Program): string {
   if (measurement === undefined) return 'not in the committed results';
   const ratio = measurement.ratio.ry;
   if (ratio === undefined) return '';
-  return `${formatRatio(ratio.median)}${isTooShort(measurement, 'ry') ? ' (too short)' : ''}`;
+  return `${formatRatio(ratio.median)}${isTooShort(measurement) ? ' (too short)' : ''}`;
 }
 
 // Programs listed by group, each group with its upstream source and licence.
@@ -441,7 +448,7 @@ export function methodRows(): { columns: string[]; rows: string[][] } {
 export function legacyNotes(): string[] {
   return measuredSuites()
     .filter((suite) => suite.results?.meta.legacySampling !== undefined)
-    .map((suite) => `The committed ${suite.name} results predate this method: they hold ${suite.results?.meta.legacySampling}, so each ratio divides two times and has no interval, and a program GNU R finishes in under 0.1 s is flagged too short and left out of every geometric mean.`);
+    .map((suite) => `The committed ${suite.name} results predate this method: they hold ${suite.results?.meta.legacySampling}, so each ratio divides two times and has no interval.`);
 }
 
 export function methodMarkdown(): string {
@@ -478,6 +485,7 @@ type RawResults = {
     rounds: number;
     seed?: number | null;
     command?: string | null;
+    too_short_seconds?: number | null;
   };
   programs: {
     id: string;
@@ -550,6 +558,7 @@ function meta(raw: RawResults['meta'], legacySampling: string | undefined): Meta
     rounds: raw.rounds,
     seed: raw.seed ?? undefined,
     command: raw.command ?? undefined,
+    tooShortSeconds: raw.too_short_seconds ?? undefined,
     legacySampling,
   };
 }
@@ -606,6 +615,7 @@ function fromLegacy(raw: unknown): RawResults & { legacySampling: string } {
       machine: { cpu: cpu[0], cores: Number.parseInt(cpu[1] ?? '', 10) || undefined, kernel: cpu[2] },
       rounds: legacy.repeat,
       command: kernels ? 'just bench-why --write' : 'just bench-real --write',
+      too_short_seconds: 0.1,
     },
     programs,
     geomean,

@@ -172,7 +172,7 @@ const benchmarks = (kernels === undefined ? [] : measuredPrograms(kernels))
         speedup: program.measurement.ratio.ry.median,
         gnuR: program.measurement.seconds[baseline],
         ry: program.measurement.seconds.ry,
-        tooShort: isTooShort(program.measurement, "ry"),
+        tooShort: isTooShort(program.measurement),
     }))
     .sort((a, b) => b.speedup - a.speedup);
 const benchmarkScale = Math.log(1 + Math.max(1, ...benchmarks.map((row) => row.speedup)));
@@ -840,7 +840,7 @@ const year = new Date().getFullYear();
                             </tbody>
                         </table>
                         <p class="bench-foot">
-                            Our numeric kernels, untyped, on ry and on GNU R with its bytecode compiler, bars on a logarithmic scale. A program marked too short finishes in under 0.1 s, which is too little work for a stable ratio.{" "}
+                            Our numeric kernels, untyped, on ry and on GNU R with its bytecode compiler, bars on a logarithmic scale. A program marked too short finishes in under {kernels?.results?.meta.tooShortSeconds ?? 0.1} s on GNU R, which is too little work for a stable ratio.{" "}
                             {kernels && suiteMetadata(kernels)}{" "}
                             <a href="/benchmarks">Full table, programs and method</a>
                         </p>

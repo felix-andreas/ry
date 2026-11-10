@@ -84,9 +84,11 @@ the rounds.
 The runner, not this page, judges the data:
 
 - **Checksums.** Every engine must print the same checksum for a program, or the run fails and
-  nothing is written. A failing program also fails the run, so a committed file holds no failures.
-- **Too short.** A program that an engine finishes in under 0.1 s does too little work for a stable
-  ratio, so it is flagged too short for that engine and left out of that engine's geometric mean.
+  nothing is written. A numeric checksum may differ from GNU R's by a relative 1e-10, because a
+  typed program may sum in a different order. A failing program also fails the run, so a committed file holds no failures.
+- **Too short.** A program GNU R finishes in under 0.1 s does too little work for a stable ratio, so
+  it is flagged too short and left out of every geometric mean. A ry time under 0.1 s is flagged
+  too, but it counts, because that speed is what the suite measures.
 - **Refused typed programs.** A typed program the compiler refuses in strict mode has no typed time,
   and its flag gives the compiler's reason.
 
