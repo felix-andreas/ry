@@ -251,16 +251,42 @@ impl Machine<'_> {
     pub unsafe fn assign(&self, symbol: Sexp, value: Sexp) -> R<()> {
         if let Some(slot) = self.slot_of(symbol) {
             crate::heap().store_slot(&mut *slot, value);
-            let formal = slot.offset_from(register_address(self.header)) as usize - 1;
-            if formal < 64
-                && let Some(frame) = interp().frames.last_mut()
-            {
-                frame.missing &= !(1 << formal);
-            }
+            self.clear_missing(slot);
             return Ok(());
         }
         let env = self.reify(Reify::Site("assignment"))?;
         eval::assign_symbol(symbol, value, env, false)
+    }
+
+    /// Assigns the scalar `element` of `kind` to `symbol` by storing it into the value the
+    /// variable is bound to, when that is a plain scalar of `kind` that nothing else references.
+    /// Returns that value, or `None` when the assignment needs a new one.
+    pub unsafe fn overwrite(&self, symbol: Sexp, kind: SexpType, element: f64) -> Option<Sexp> {
+        let current = match self.slot_of(symbol) {
+            Some(slot) => {
+                let current = *slot;
+                if !overwrite_scalar(current, kind, element) {
+                    return None;
+                }
+                self.clear_missing(slot);
+                return Some(current);
+            }
+            None if self.env() == values::nil() => return None,
+            None => crate::heap()
+                .frame_cell(self.env(), symbol)
+                .filter(|cell| !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED))?
+                .cdr(),
+        };
+        overwrite_scalar(current, kind, element).then_some(current)
+    }
+
+    unsafe fn clear_missing(&self, slot: *mut Sexp) {
+        let formal = slot.offset_from(register_address(self.header)) as usize - 1;
+        if formal < 64
+            && let Some(frame) = interp().frames.last_mut()
+        {
+            frame.missing &= !(1 << formal);
+        }
     }
 }
 

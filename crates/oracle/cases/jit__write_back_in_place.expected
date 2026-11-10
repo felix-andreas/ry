@@ -1,0 +1,104 @@
+[stdout]
+| round 1 
+| List of 7
+|  $ : int 3
+|  $ : num 1.5
+|  $ : logi FALSE
+|  $ :List of 2
+|   ..$ : num [1:2] 4 2
+|   ..$ : num [1:2] 8 4
+|  $ : int 9
+|  $ : num 4.5
+|  $ : logi FALSE
+| [1] 2 4 4
+| List of 3
+|  $ : int [1:2] 1 11
+|  $ : int [1:2] 12 22
+|  $ : int [1:2] 23 33
+| List of 2
+|  $ :List of 1
+|   ..$ lo: int 2
+|  $ : int 4
+| List of 5
+|  $ : logi [1:2] TRUE TRUE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : int 3
+|  $ : int 11
+| List of 5
+|  $ : logi [1:2] FALSE FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : int 3
+|  $ : int 8
+| round 2 
+| List of 7
+|  $ : int 3
+|  $ : num 1.5
+|  $ : logi FALSE
+|  $ :List of 2
+|   ..$ : num [1:2] 4 2
+|   ..$ : num [1:2] 8 4
+|  $ : int 9
+|  $ : num 4.5
+|  $ : logi FALSE
+| [1] 2 4 4
+| List of 3
+|  $ : int [1:2] 1 11
+|  $ : int [1:2] 12 22
+|  $ : int [1:2] 23 33
+| List of 2
+|  $ :List of 1
+|   ..$ lo: int 2
+|  $ : int 4
+| List of 5
+|  $ : logi [1:2] TRUE TRUE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : int 3
+|  $ : int 11
+| List of 5
+|  $ : logi [1:2] FALSE FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : int 3
+|  $ : int 8
+| round 3 
+| List of 7
+|  $ : int 3
+|  $ : num 1.5
+|  $ : logi FALSE
+|  $ :List of 2
+|   ..$ : num [1:2] 4 2
+|   ..$ : num [1:2] 8 4
+|  $ : int 9
+|  $ : num 4.5
+|  $ : logi FALSE
+| [1] 2 4 4
+| List of 3
+|  $ : int [1:2] 1 11
+|  $ : int [1:2] 12 22
+|  $ : int [1:2] 23 33
+| List of 2
+|  $ :List of 1
+|   ..$ lo: int 2
+|  $ : int 4
+| List of 5
+|  $ : logi [1:2] TRUE TRUE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : int 3
+|  $ : int 11
+| List of 5
+|  $ : logi [1:2] FALSE FALSE
+|  $ : logi FALSE
+|  $ : logi FALSE
+|  $ : int 3
+|  $ : int 8
+| [1] 87
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 87
