@@ -5,6 +5,10 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### Cheaper minor collections
+
+A minor collection checks an already marked object inline, without a function call or bounds checks, and handles a newly marked one out of line. Minor collections during `library(testthat)` take 29% fewer instructions, and the testthat workload takes 1.2% fewer in total.
+
 ### Package-specific fast paths
 
 ry runs a few package functions natively when the installed package is exactly the release the
