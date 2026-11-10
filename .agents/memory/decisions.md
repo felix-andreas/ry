@@ -1880,19 +1880,52 @@ It applies the same sharing checks as `complex_assign` (`moves::modifying`, `may
 including coercion, growth, `NULL` deletion and `x[[1]] <- x`, still takes the general path
 (oracle case `assignment__element_in_place`).
 
-**PGO is not used for the release build, because it measured slower.** An instrumented libR
-(`-Cprofile-generate` on the `interp`, `heap`, `libr` and `R` crates through a
-`RUSTC_WORKSPACE_WRAPPER`, so dependency fingerprints stay unchanged) was trained on every oracle
-case with the JIT off and on, and rebuilt with `-Cprofile-use`. On held-out scripts with the JIT
-off, best of three, it ran 1.4 to 1.9x slower than the plain release build: period.apply 2.10 s
-against 1.47 s, 300k `sd` calls 7.11 s against 4.44 s, row `apply` 1.28 s against 0.66 s, `fib(27)`
-0.55 s against 0.29 s, a 200k-record `lapply` 1.28 s against 0.79 s, and 50k S4 `new`/`slot<-` 13.9
-s against 8.7 s. The cause is unverified. The likeliest suspects are applying the profile only to
-the runtime crates under fat LTO, or a profile that went stale against the merged module, either of
-which leaves hot code optimized as cold. Retrying needs the profile applied to every crate linked
-into libR (cargo-pgo does this), a check for `-Wbackend-plugin` profile-mismatch warnings, and BOLT,
-which is not installed in the cloud environment. Until a retry measures a gain, the release workflow
-stays as it is.
+**The Linux release build is profile-guided.** `just package` on x86_64 Linux runs
+`tools/layout/optimize.sh`: an instrumented build of every crate linked into libR and `ry`
+(dependencies included) runs `tools/layout/train.py`, the release build compiles every crate with
+the merged profile, and BOLT then lays out libR from a second training run on a BOLT-instrumented
+copy. Measured against the plain release build in one sitting (4-core cloud VM, medians):
+
+| | plain | PGO | PGO + BOLT |
+| --- | --- | --- | --- |
+| testthat_full test phase, JIT on / off | 0.252 / 0.248 s | 0.228 / 0.219 s | 0.219 / 0.218 s |
+| testthat_full process wall, JIT on | 1.68 s | 1.51 s | 1.44 s |
+| testthat_full peak RSS, JIT on | 82.5 MB | 76.8 MB | 80.1 MB |
+| testthat_full callgrind instructions | 2.60 G | 2.22 G | 2.21 G |
+| period.apply 2e6, JIT on / off | 0.70 / 0.70 s | 0.56 / 0.55 s | 0.56 / 0.57 s |
+| period.apply per period: instructions, I1 misses | 185k, 5,450 | 160k, 3,360 | 160k, 3,050 |
+
+- **Why the earlier attempt lost.** An earlier attempt profiled only `interp`, `heap`, `libr` and `R`
+  and trained on the oracle cases alone, and ran 1.4 to 1.9x slower; that slowdown was not
+  reproduced, so its cause stays unconfirmed. What this pipeline found instead is a silent
+  failure: passing `-Cprofile-generate`/`-Cprofile-use` in `RUSTFLAGS` changes every crate's
+  `-C metadata` hash, which is part of every v0-mangled symbol and codegen-unit name, so the two
+  builds name each function differently and the profile matched about 1% of the functions that
+  ran. LLVM warns only on a hash mismatch, never on a function it finds no record for.
+- **The flags go through `RUSTC_WRAPPER`** (`tools/layout/rustc-wrapper.sh`, reading
+  `RY_LAYOUT_RUSTFLAGS`), applied to every rustc call with `--target`, which skips build scripts
+  and proc-macros. Both builds keep the release profile's `strip` off and use their own target
+  directory, because cargo does not rebuild when only the wrapper's flags change. `-p libr -p rcmd`
+  and `-p ry-lang` build in separate invocations as a plain release does, because feature
+  unification differs per invocation.
+- **The build fails on a stale profile.** `-pgo-warn-missing-function` reports functions without a
+  record; LTO drops a few functions the instrumented binary never calls (2 of 421k), so more than
+  1% of the record count fails the build, and any hash mismatch fails it outright. The `repl`
+  embed lookups read `EMBEDDED_RUNTIME`/`EMBEDDED_BASE` through `black_box`, because a `const None`
+  folded one arm away in the profiled build and changed control flow in the embedded one.
+- **BOLT needs LLVM 20 or newer.** BOLT 18 produced a libR on which oracle case
+  `datatable__suite_shapes` segfaults in blake3's AVX-512 assembly, called with a garbage argument,
+  and a BOLT 18 run that optimizes only a few functions writes a libR the dynamic loader rejects;
+  BOLT 20 lays out the same input correctly.
+  Instrumenting all of libR's 100 MB of text takes more than 14 GB, so only the functions the PGO
+  profile saw run are instrumented (`tools/layout/hot_functions.py`); BOLT names a local symbol
+  `name/1`, and LTO makes nearly every Rust function local. `--emit-relocs` leaves static
+  relocation sections that keep the symbol table alive through `strip`, so the script removes them
+  with `objcopy --remove-relocations` first.
+- **Benchmarks of interpreter changes keep the plain build.** The layout build writes to
+  `target/x86_64-unknown-linux-gnu/release`; `just bench-real` and the other bench recipes build
+  `target/release` with plain `cargo build --release`, so a change is measured without a profile
+  that was collected before it.
 
 **S3 dispatch caches the method lookup from the top environment on.** `lookup_method` walks the
 calling frames to their top environment uncached, because function frames gain and lose bindings
