@@ -62,7 +62,7 @@ pub fn words(ty: Type) -> SmallVec<[Machine; 2]> {
         Type::Dbl => SmallVec::from_slice(&[F64]),
         Type::I64 => SmallVec::from_slice(&[I64]),
         Type::Str => SmallVec::from_slice(&[I64, I64]),
-        Type::Null | Type::Vector { .. } | Type::List(_) | Type::Set(_) | Type::Dict { .. } => {
+        Type::Null | Type::Vector { .. } | Type::List(_) | Type::Dict { .. } => {
             SmallVec::from_slice(&[I64])
         }
     }
@@ -1018,27 +1018,6 @@ impl Emitter<'_> {
                     &[I64],
                     &[x, owned, digits],
                 )[0];
-                SmallVec::from_slice(&[list])
-            }
-            Op::Select(a, mask) => {
-                let (x, flags) = (self.one(*a)?, self.one(*mask)?);
-                let list = self.call_words(address!(values::ry_list_select), I64, &[x, flags]);
-                self.fail_if_null(list, inst)?;
-                SmallVec::from_slice(&[list])
-            }
-            Op::Unique(a) => {
-                let x = self.one(*a)?;
-                let owned = self.owned(inst, 0);
-                let list = self.call_words(address!(values::ry_list_unique), I64, &[x, owned]);
-                SmallVec::from_slice(&[list])
-            }
-            Op::Sort(a, descending) => {
-                let x = self.one(*a)?;
-                let owned = self.owned(inst, 0);
-                let descending = self.iconst(i64::from(*descending));
-                let list =
-                    self.call_words(address!(values::ry_list_sort), I64, &[x, owned, descending]);
-                self.fail_if_null(list, inst)?;
                 SmallVec::from_slice(&[list])
             }
             Op::Coerce(a, item) => {

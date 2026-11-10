@@ -1,7 +1,7 @@
-# A user's strict typed functions run on native code however they are called: from the top level,
-# again and again from an interpreted wrapper whose arguments are promises over its variables,
-# and with a record argument. `RY_TYPED_LOG` names every typed function a call of falls back to
-# the interpreter, so a kernel that left native code shows up here and not only as lost time.
+# A user's strict typed function runs on native code however it is called: from the top level,
+# or again and again from an interpreted wrapper whose arguments are promises over its variables.
+# `RY_TYPED_LOG` names every typed function a call of falls back to the interpreter, so a kernel
+# that left native code shows up here and not only as lost time.
 
 requires ry-runtime
 
@@ -16,8 +16,6 @@ file calls.R
 |   for (i in List.range(1, List.len(x))) total <- total + x[[i]] * y[[i]]
 |   total
 | }
-| alias Point = Record{x: F64, y: F64}
-| norm2 <- function(p: Point) -> F64 p$x * p$x + p$y * p$y
 | clock <- function() -> F64 Num.from_r(proc.time()[[3]])
 | x <- [1.0, 2.0, 3.0]
 | wrap <- function() {
@@ -25,13 +23,9 @@ file calls.R
 |   dot(x, x)
 | }
 | for (k in List.range(1, 4)) print(wrap())
-| point <- (x = 3.0, y = 4.0)
-| for (k in List.range(1, 2)) print(norm2(point))
 
 run ry run --runtime ry calls.R
 expect exit 0
 expect stdout "14"
-expect stdout "25"
 expect stderr "typed: `wrap` runs in the interpreter"
 expect stderr lacks "`dot` runs in the interpreter"
-expect stderr lacks "`norm2` runs in the interpreter"

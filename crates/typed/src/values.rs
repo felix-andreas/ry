@@ -1574,18 +1574,11 @@ pub unsafe extern "C" fn ry_list_reverse(a: *mut List, a_owned: u32) -> *mut Lis
     result
 }
 
-/// `List.sort_asc` (or `List.sort_desc` with `descending`) of a numeric list. The sort is
-/// stable, so `0` and `-0` keep their order. Null when an item is `NA` or NaN, which the standard
-/// library refuses to order.
-pub unsafe extern "C" fn ry_list_sort(a: *mut List, a_owned: u32, descending: u32) -> *mut List {
+/// `sort(x)` of a numeric list: `NA` and `NaN` dropped, ascending (or descending), and stable,
+/// so `0` and `-0` keep their order.
+pub unsafe extern "C" fn ry_list_sort(a: *mut List, a_owned: u32, decreasing: u32) -> *mut List {
     let kind = (*a).kind;
-    let missing = match kind {
-        DBL => items::<f64>(a).iter().any(|value| value.is_nan()),
-        INT | LGL => items::<i32>(a).contains(&NA_INTEGER),
-        I64 => false,
-        _ => true,
-    };
-    if missing {
+    if !matches!(kind, INT | LGL | DBL) {
         consume(a, a_owned);
         return null_mut();
     }
@@ -1597,54 +1590,29 @@ pub unsafe extern "C" fn ry_list_sort(a: *mut List, a_owned: u32, descending: u3
         consume(a, a_owned);
         copy
     };
-    let descending = descending != 0;
-    match kind {
-        DBL => slice_mut::<f64>((*target).data, length).sort_by(|x, y| {
-            let order = x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal);
-            if descending { order.reverse() } else { order }
-        }),
-        I64 => sort_whole(slice_mut::<i64>((*target).data, length), descending),
-        _ => sort_whole(slice_mut::<i32>((*target).data, length), descending),
-    }
-    target
-}
-
-/// Sorts integers, whose equal items are indistinguishable, so the sort need not be stable.
-fn sort_whole<T: Ord>(data: &mut [T], descending: bool) {
-    if descending {
-        data.sort_unstable_by(|x, y| y.cmp(x));
-    } else {
-        data.sort_unstable();
-    }
-}
-
-/// The items of `a` where the logical list `mask` is true: `x[mask]`. Null unless the two have
-/// the same length and `mask` holds no `NA`, the cases where R recycles or selects an `NA`.
-pub unsafe extern "C" fn ry_list_select(a: *mut List, mask: *mut List) -> *mut List {
-    let length = (*a).length as usize;
-    let flags = items::<i32>(mask);
-    if (*mask).kind != LGL || flags.len() != length || flags.contains(&NA_LOGICAL) {
-        return null_mut();
-    }
-    let count = flags.iter().filter(|&&flag| flag != 0).count();
-    let kind = (*a).kind;
-    let width = item_size(kind);
-    let result = list_alloc(kind, count, count);
-    let mut kept = 0;
-    for (index, _) in flags.iter().enumerate().filter(|&(_, &flag)| flag != 0) {
-        ptr::copy_nonoverlapping(
-            (*a).data.add(index * width),
-            (*result).data.add(kept * width),
-            width,
-        );
-        kept += 1;
-    }
-    if kind == STR {
-        for &item in items::<Str>(result) {
-            str_dup(item);
+    let kept = if kind == DBL {
+        let data = slice_mut::<f64>((*target).data, length);
+        let kept = compact(data, |value| !value.is_nan());
+        let data = &mut data[..kept];
+        if decreasing != 0 {
+            data.sort_by(|x, y| y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
+        } else {
+            data.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
         }
-    }
-    result
+        kept
+    } else {
+        let data = slice_mut::<i32>((*target).data, length);
+        let kept = compact(data, |value| value != NA_INTEGER);
+        let data = &mut data[..kept];
+        if decreasing != 0 {
+            data.sort_unstable_by(|x, y| y.cmp(x));
+        } else {
+            data.sort_unstable();
+        }
+        kept
+    };
+    (*target).length = kept as u64;
+    target
 }
 
 /// `unique(x)` in first-occurrence order. Doubles compare with `0 == -0` and `NA` distinct from
@@ -1684,15 +1652,6 @@ pub unsafe extern "C" fn ry_list_unique(a: *mut List, a_owned: u32) -> *mut List
                     str_dup(*item);
                 }
             },
-        ),
-        I64 => unique_into(
-            (*a).data as *const i64,
-            (*target).data as *mut i64,
-            length,
-            |value| hash_word(UNIQUE_SEED, *value as u64),
-            |x, y| x == y,
-            |_| {},
-            |_| {},
         ),
         _ => unique_into(
             (*a).data as *const i32,
@@ -2682,40 +2641,50 @@ unsafe fn compare(op: u32, kind: u32, a: Side, b: Side) -> *mut List {
         return null_mut();
     }
     match kind {
-        DBL => binary::<f64, i32>(a, b, LGL, length, |x, y| {
-            if x.is_nan() || y.is_nan() {
-                NA_LOGICAL
-            } else {
-                holds(op, x, y) as i32
-            }
-        }),
+        DBL => {
+            let test = |x: f64, y: f64| -> bool {
+                match op {
+                    EQ => x == y,
+                    NE => x != y,
+                    LT => x < y,
+                    LE => x <= y,
+                    GT => x > y,
+                    _ => x >= y,
+                }
+            };
+            binary::<f64, i32>(a, b, LGL, length, |x, y| {
+                if x.is_nan() || y.is_nan() {
+                    NA_LOGICAL
+                } else {
+                    test(x, y) as i32
+                }
+            })
+        }
         STR => {
             let equal = op == EQ;
             binary::<Str, i32>(a, b, LGL, length, |x, y| {
                 (str_equal(&x, &y) == equal) as i32
             })
         }
-        // An `I64` has no `NA`.
-        I64 => binary::<i64, i32>(a, b, LGL, length, |x, y| holds(op, x, y) as i32),
-        _ => binary::<i32, i32>(a, b, LGL, length, |x, y| {
-            if x == NA_INTEGER || y == NA_INTEGER {
-                NA_LOGICAL
-            } else {
-                holds(op, x, y) as i32
-            }
-        }),
-    }
-}
-
-/// Whether comparison `op` holds between two items that are not `NA`.
-fn holds<T: PartialOrd>(op: u32, x: T, y: T) -> bool {
-    match op {
-        EQ => x == y,
-        NE => x != y,
-        LT => x < y,
-        LE => x <= y,
-        GT => x > y,
-        _ => x >= y,
+        _ => {
+            let test = |x: i32, y: i32| -> bool {
+                match op {
+                    EQ => x == y,
+                    NE => x != y,
+                    LT => x < y,
+                    LE => x <= y,
+                    GT => x > y,
+                    _ => x >= y,
+                }
+            };
+            binary::<i32, i32>(a, b, LGL, length, |x, y| {
+                if x == NA_INTEGER || y == NA_INTEGER {
+                    NA_LOGICAL
+                } else {
+                    test(x, y) as i32
+                }
+            })
+        }
     }
 }
 
