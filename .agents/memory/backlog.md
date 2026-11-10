@@ -116,6 +116,10 @@ left, in order of expected gain:
 - **Nix.** `flake.nix` fetches the tarball as a fixed-output derivation and builds the base in `postInstall`; `nix build` has not been run yet.
 - **Old base trees stay in the cache after an upgrade**, as runtimes do (see below).
 
+## Open: the real-world benchmark record predates paired rounds
+
+- `tools/bench/real/results.json` holds three rounds and each engine's median time, while `run.py` needs at least five rounds and writes per-round `ratios` and `short`. Rerun `just bench-real --write` on a machine with data.table, xts, zoo, lubridate and R6 installed, then render the paired ratios and their spread in `benchmarks.ts` (`realChart`, `RealWorkloads`, the README summary) and drop the gap note in `benchmarks.mdx`.
+
 ## Open: the benchmark packages under ry's runtime
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
@@ -192,7 +196,7 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **Measure first.** Generate the suites (`python3 tools/bench/generate.py --out .bench --lines 300000 --files 500`), install the corpus library (`just corpus`; the polars R package builds from source and takes the longest), then run `just bench-compare .bench/finbench .bench/dsbench .bench/biobench` with `RY_GC_LOG=<file>` set. The report's last block gives each runtime's `gc.time()` total and share of suite time; the log gives every pause (kind, nanoseconds, young small and large bytes, old bytes), from which pause p50 and p99 and collections per second follow. Fix the largest cost the numbers show, then check each object type's allocation path against `decisions.md`, "Data-oriented design and explicit allocators" (open audit items: "Open: data-oriented layouts and explicit allocators").
 - **`gc()`'s "max used" is sampled only at collections**, so it reads below the process peak (575 MB against an 833 MB VmHWM for a loop that makes and drops large vectors; GNU R reports 1,054 MB because it counts at allocation). Updating the peak on each large-vector allocation would match GNU R's meaning (`crates/heap/src/heap.rs`, `crates/heap/tests/test_gc.rs` `released_old_vectors_leave_the_peak_at_one_vector`).
 - **`for` over a compact `1:n` expands it.** Both tiers materialize the sequence (40 MB for ten million elements) before the loop; GNU R iterates the compact form. Iterating start and step directly removes the allocation, the page faults and `loop_sum`'s peak.
-- **Builder peaks still above GNU R's by more than 10%** (fresh process per case, 2e7 doubles, peak over the inputs in MB, ry against GNU R 4.3.3): `x * 2 + 1` 305/153 (GNU R writes the result into an unshared temporary operand; ry cannot take a reference count of 0 as proof yet, because bytecode registers and JIT slots hold uncounted references, `eval::reuse_permitted`), `seq(1, n, by = 1)` 381/305, `vapply(l, function(v) v + 1, numeric(1))` over a 1e6 list 112/58, `unlist` 20/4. `resolve()` in `crates/interp/src/subset.rs` still builds a `Vec<usize>` per general subscript.
+- **Builder peaks still above GNU R's by more than 10%** (fresh process per case, 2e7 doubles, peak over the inputs in MB, ry against GNU R 4.3.3): `x * 2 + 1` 305/153 (GNU R writes the result into an unshared temporary operand; ry cannot take a reference count of 0 as proof yet, because bytecode registers and JIT slots hold uncounted references, `eval::reuse_permitted`), `seq(1, n, by = 1)` 381/305, `vapply(l, function(v) v + 1, numeric(1))` over a 1e6 list 112/58, `unlist` 20/4. `resolve()` in `crates/interp/src/subset.rs` still allocates a position list for a general subscript of more than eight positions.
 - **Collector throughput toward a tenth of today's collection time** (testthat workload: 9 minor collections, about 17 ms of pauses, `collect_keeping` 66.9M instructions). Lazy-load fetches are pretenured (`decisions.md`, "Pretenuring lazy-load fetches"), so `library(testthat)` runs no collection. Where the pauses go: a minor collection's `trace` visits tens of thousands of objects at about 260 instructions each, most of them old objects rescanned from the remembered set or the roots rather than young survivors (39k traced against 4.5k newly aged in a load's collection), so find which old objects are rescanned and why; dead returned frames are cleared one cell at a time, with a cache miss on each value's mark bit and refcount (about 7 ms over 20k frames and 110k cells); the sweep and the young string table about 3 ms (`decisions.md`, "Minor collections touch only what changed").
 - **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `development/robustness.md`).
 - **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
@@ -214,7 +218,7 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 ## Open: the package loader
 
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
-`docs/.../tutorial/runtime.mdx`). Gaps, roughly in order of how often a real package hits them:
+`docs/.../guide.mdx`, step 3). Gaps, roughly in order of how often a real package hits them:
 
 - **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
   the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
@@ -493,7 +497,7 @@ type-level function the annotation language does not have.
 ### Smaller open items
 
 - `@new` is unrestricted project-wide, so a nominal type's invariant holds only by convention. The
-  `tutorial/fully-typed.mdx` says so conditionally ("put `@new` in one constructor"). An
+  guide's step 4 says so conditionally ("put `@new` in one constructor"). An
   encapsulation modifier would make it a guarantee.
 - A narrowing failure on a field, or behind `&&`, produces a message byte-identical to the one for
   writing no guard at all. The docs know the fix, which is to lift the value into a local first. The
@@ -916,9 +920,8 @@ The rest of the inventory measured cold. The largest hash maps are the large-fra
 `Frame` (0.08 / 0.16), the `CHARSXP` table behind `install_char` (0.05 / 0.07), the string-keyed
 `primitive_formals` probe in `call_builtin_checked` (0.04 / 0.05) and `Roots.precious` (0.05 /
 0.06). `Vec<bool>` sites are below 0.1: `match_builtin_args` 0.09, the `keep` vector in
-`subset::resolve` 0.06. These are cheap clean-ups, not wins: index `primitive_formals` by builtin
-id and turn the `Vec<bool>`s into bitsets (B5), and give `precious` the dense layout of row 11
-(B2).
+`subset::resolve` 0.06. `primitive_formals` is indexed by builtin index and both `Vec<bool>`s
+are bitsets. Left: give `precious` the dense layout of row 11 (B2).
 
 **Allocations per operation against GNU R.** Loops of 20,000 and 40,000 iterations of each operation,
 differenced. GNU R (4.6.2, its loop byte-compiled) counts `allocVector3`, `CONS_NR`, `cons`,
@@ -3594,20 +3597,6 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   unresolved and the defining file reports it unused. Destructured names also lack declaration
   occurrences in `ide.rs` (goto-definition across files, inlay hints, unused-assignment fixes).
 - `Function | Null | Var` callee unions fall through to the not-callable finding.
-
-## Open: the data.table bridge
-
-`crates/interp/src/data_table.rs` declines these to data.table. Each one is a shape to accept once the engine can reproduce data.table's result exactly, checked by a new `datatable__*` oracle case.
-
-- Keyed subjects: accept them by carrying `sorted` through filters and selections the way data.table does, and binary-search `x[.("a")]` key joins.
-- Auto-indexing filters (`col == v`, `%in%`, `%chin%`): data.table adds an `index` attribute to the source on the first such filter. Accepting them means building that attribute (`setindexv`) after answering.
-- Reductions outside GForce form, and `:=` with `by` over doubles: base R sums in long double there. The engine would need a long double (or compensated, then verified) sum path.
-- `median`, `var`, `sd`, `prod` and `mean(na.rm = TRUE)` on doubles in GForce: data.table's own algorithms (long double accumulation, two-pass variance) must be mirrored first.
-- Integer sums in grouped `:=` are exact and could be accepted now; they decline because the reduction rule does not split by column type yet.
-- Joins without `on =` (key joins) and `x[]`.
-- `roll = "nearest"`: at a tie data.table takes the earlier row and Polars' as-of join the later one, so the bridge declines it. Accepting it needs a tie-break toward the earlier key.
-- `.EACHI` over a non-equi join, or with a `j` that reads a join column: data.table reports `i`'s bounds there, so these decline.
-- The benchmark code bases' data.table-heavy tests have not run under the bridge: their other dependencies (testthat, R6, purrr and more) are not installed in the default environment.
 
 ## Open: findings from the records, library and frame round
 

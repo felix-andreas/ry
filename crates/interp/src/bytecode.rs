@@ -47,7 +47,7 @@ use {
         Interp,
         arith::{MATHS, math_index},
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
-        conditions, dispatch, effects,
+        conditions, dispatch::{self, Site}, effects,
         eval::{self, Reify, SwitchSelector, as_condition},
         interp,
         kernels::{self, Element, MAX_NODES, Node, Reduction},
@@ -2115,6 +2115,7 @@ impl Compiler {
         for (index, constant) in compiler.constants.iter().enumerate() {
             heap.set_element(constants, FIRST_CONSTANT + index, *constant);
         }
+        index_slots(words, constants)?;
         let caches = values::alloc(SexpType::List, compiler.caches as usize * 2)?;
         heap.mark_weak_pairs(caches);
         let code = values::triple(SexpType::Bytecode, words, constants, caches)?;
@@ -2122,8 +2123,8 @@ impl Compiler {
     }
 
     /// The [`SLOTS`] constant: the formals take the first slots, and every other local symbol
-    /// that a `GetVar`, `SetVar` or `GetFun` names takes the next free one in code order, so the
-    /// table depends on the code alone.
+    /// that a `GetVar`, `SetVar`, `GetFun` or `ForStep` names takes the next free one in code
+    /// order, so the table depends on the code alone.
     unsafe fn slot_table(&self) -> R<Sexp> {
         let (Some(formals), Some(locals)) = (&self.slot_formals, &self.local_symbols) else {
             return Ok(nil());
@@ -2135,8 +2136,11 @@ impl Compiler {
             let op =
                 op_of(self.code[pc]).ok_or_else(|| error("compiled an invalid instruction"))?;
             let symbol_and_cache = match op {
-                Op::GetVar | Op::GetFun => Some((self.code[pc + 2], self.code[pc + 3])),
-                Op::SetVar => Some((self.code[pc + 1], self.code[pc + 3])),
+                Op::GetVar | Op::GetFun => Some((self.code[pc + 2], Some(self.code[pc + 3]))),
+                Op::SetVar => Some((self.code[pc + 1], Some(self.code[pc + 3]))),
+                // A loop variable the body never reads still needs a slot, or the first step
+                // would give the frame an environment.
+                Op::ForStep => Some((self.code[pc + 3], None)),
                 _ => None,
             };
             if let Some((constant, cache)) = symbol_and_cache {
@@ -2152,7 +2156,9 @@ impl Compiler {
                             names.len() - 1
                         }
                     };
-                    table[cache as usize] = slot as i32;
+                    if let Some(cache) = cache {
+                        table[cache as usize] = slot as i32;
+                    }
                 }
             }
             pc += 1 + operand_count(op);
@@ -2166,8 +2172,9 @@ impl Compiler {
         for (index, name) in names.iter().enumerate() {
             heap.set_element(symbols, index, *name);
         }
-        // The third element is filled by `slot_defaults` on the first call that needs it.
-        let slots = values::alloc(SexpType::List, 3)?;
+        // The third element is filled by `slot_defaults` on the first call that needs it, and
+        // the fourth by `index_slots` once the constants are in place.
+        let slots = values::alloc(SexpType::List, 4)?;
         heap.set_element(slots, 0, map);
         heap.set_element(slots, 1, symbols);
         Ok(slots)
@@ -3076,8 +3083,8 @@ impl Compiler {
     /// frame, so the compiled assignment may evaluate it before reading `target`: a variable of
     /// the frame (a formal's promise runs in the caller's frame), a numeric constant, a name,
     /// base arithmetic and comparison on those, base `$` and `[[` reading one of those, `if`
-    /// over them, or an assignment of one of them to another local variable (the growth idiom
-    /// `x[[cap <- if (cap < n) 2L * cap else cap]] <- v`).
+    /// or parentheses over them, or an assignment of one of them to another local variable (the
+    /// growth idiom `x[[cap <- if (cap < n) 2L * cap else cap]] <- v`).
     unsafe fn side_effect_free_index(&self, index: Sexp, target: Sexp, depth: u32) -> bool {
         match index.kind() {
             SexpType::Symbol => {
@@ -3133,6 +3140,7 @@ impl Compiler {
                     ("if", [(_, condition), (_, yes), (_, no)]) => {
                         operand(*condition) && operand(*yes) && operand(*no)
                     }
+                    ("(", [(_, inner)]) => operand(*inner),
                     _ => {
                         ARITHS.iter().any(|(_, name)| *name == &*operator)
                             && (1..=2).contains(&arguments.len())
@@ -4491,8 +4499,13 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
     let slots = constants.element(SLOTS);
     if slots != nil() {
         let well_formed = slots.kind() == SexpType::List
-            && length(slots) == 3
+            && length(slots) == 4
             && slots.element(2) == nil()
+            && (slots.element(3) == nil()
+                || slots.element(3).kind() == SexpType::Integer
+                    && values::ints(slots.element(3)).iter().all(|&slot| {
+                        (-1..length(slots.element(1)) as i64).contains(&i64::from(slot))
+                    }))
             && slots.element(0).kind() == SexpType::Integer
             && length(slots.element(0)) == caches
             && slots.element(1).kind() == SexpType::List
@@ -6335,7 +6348,7 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
         });
         cell = cell.cdr();
     }
-    let value = call_builtin(definition, call, function, &args, *state.header)?;
+    let value = call_builtin(definition, call, function, &args, *state.header, Some(site(state, instruction)))?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
@@ -6405,7 +6418,10 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         let per_call = plan.is_some() && sources.as_slice() == [eval::MATCH_PER_CALL];
         if let Some(id) = plan
             && !per_call
-            && let Some(value) = call_wrapper(state, function, call, id, &sources)?
+            && let Some(value) = match call_do_call(state, function, call, &sources)? {
+                Some(value) => Some(value),
+                None => call_wrapper(state, function, call, id, &sources)?,
+            }
         {
             state.record(instruction.at, value);
             instruction.output(0, value);
@@ -6451,7 +6467,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         value
     } else if state.in_slots()
         && function.kind() == SexpType::Builtin
-        && let Some(value) = slot_builtin_call(state, call, function, None)?
+        && let Some(value) = slot_builtin_call(state, Some(site(state, instruction)), call, function, None)?
     {
         value
     } else {
@@ -6516,6 +6532,9 @@ unsafe fn direct_plan(
             values::ints_mut(owner.element(FEEDBACK))[word_at] = -1;
             return Ok(None);
         }
+        // A word below every miss count is an S3 dispatch site's, which a closure call site
+        // only holds after it dispatched, so it does not plan.
+        None if word < -1 - PLAN_MISSES => return Ok(None),
         None => (-word - 1).max(0),
     };
     if misses >= PLAN_MISSES {
@@ -6771,17 +6790,163 @@ unsafe fn call_wrapper(
     } else {
         state.env(Reify::Site("wrapper call"))?
     };
-    eval::run_wrapper(
-        call,
-        function,
-        header as u32,
-        missing,
-        sys_parent,
-        &supplied,
-        body,
-        builtin,
-        &builtin_args,
-    )
+    activity::count(Counter::WrappersInlined);
+    eval::run_inlined(call, function, header as u32, missing, sys_parent, &supplied, |frame| {
+        let definition = eval::builtin_def(builtin)?;
+        let state = crate::interp();
+        let owner = state.slot_owner;
+        state.slot_owner = frame;
+        let result = call_builtin(definition, body, builtin, &builtin_args, nil(), None);
+        crate::interp().slot_owner = owner;
+        result
+    })
+    .map(Some)
+}
+
+/// Runs a call of base R's `do.call(what, args)` from the call site, without the closure's
+/// body: the frame `do.call` would have is pushed with its formals' values
+/// ([`eval::run_inlined`]), and the target is called directly with the list's elements as
+/// its arguments, from the caller of `do.call` as the body's `parent.frame()` default would
+/// have it. The body's own steps (forcing `args` for `is.list`, the `parent.frame()` promise,
+/// the `.Internal`, building the call and evaluating it in an environment the caller then
+/// needs) are what makes `do.call` cost several ordinary calls.
+///
+/// `None`, having run nothing, when the call is anything else: `quote` or `envir` given, an
+/// argument that is not a value reading runs no R code for, `args` not a list, an element
+/// that `do.call` would evaluate (a name or a call), or a target found by name that the
+/// caller's own slots may bind. A builtin target with S3 dispatch runs only from a frame with
+/// an environment, because dispatch reads the caller's environment.
+unsafe fn call_do_call(
+    state: &mut Activation<'_, '_>,
+    function: Sexp,
+    call: Sexp,
+    sources: &[i32],
+) -> R<Option<Sexp>> {
+    let interp = &*state.interp;
+    if function != interp.do_call
+        || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
+        || interp.debugger.is_some()
+        || !interp.object_systems
+        || crate::moves::tracking()
+    {
+        return Ok(None);
+    }
+    // The formals are `what`, `args`, `quote` and `envir`; the plan maps each to the argument
+    // it takes, or a negative source when it is missing.
+    let &[what_source, args_source, quote_source, envir_source] = sources else {
+        return Ok(None);
+    };
+    if what_source < 0 || args_source < 0 || quote_source >= 0 || envir_source >= 0 {
+        return Ok(None);
+    }
+    let mut supplied: SmallVec<[Arg; 2]> = SmallVec::new();
+    let mut cell = call.cdr();
+    while cell.kind() == SexpType::Pairlist {
+        let Some(value) = wrapper_argument(state, cell.car())? else {
+            return Ok(None);
+        };
+        supplied.push(Arg {
+            tag: cell.tag(),
+            value,
+        });
+        cell = cell.cdr();
+    }
+    let (Some(what), Some(list)) = (
+        supplied.get(what_source as usize),
+        supplied.get(args_source as usize),
+    ) else {
+        return Ok(None);
+    };
+    let (what, list) = (what.value, list.value);
+    if list.kind() != SexpType::List && list != nil() {
+        return Ok(None);
+    }
+    let in_slots = state.in_slots();
+    let (target, head) = match what.kind() {
+        SexpType::Closure | SexpType::Builtin => (what, what),
+        SexpType::String if length(what) == 1 && what.element(0) != values::na_string() => {
+            let symbol = values::install_charsxp(what.element(0))?;
+            let start = if in_slots {
+                if slot_index(state, symbol).is_some() {
+                    return Ok(None);
+                }
+                state.machine.function.tag()
+            } else {
+                state.env(Reify::Site("do.call"))?
+            };
+            match effects::resolve_function(symbol, start) {
+                Some(found) => (found.function, symbol),
+                None => return Ok(None),
+            }
+        }
+        _ => return Ok(None),
+    };
+    match target.kind() {
+        SexpType::Closure => {}
+        SexpType::Builtin if !in_slots || eval::builtin_def(target)?.generic == Generic::None => {}
+        _ => return Ok(None),
+    }
+    let count = length(list);
+    let names = values::names(list);
+    let mut args = eval::Args::new();
+    let mut items: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
+    items.push((nil(), head));
+    for index in 0..count {
+        let value = list.element(index);
+        if matches!(
+            value.kind(),
+            SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
+        ) {
+            return Ok(None);
+        }
+        // As the internal does: an empty name tags nothing, and `NA` tags its argument `NA`.
+        let tag = if names == nil() {
+            nil()
+        } else {
+            let name = names.element(index);
+            if name.bytes().is_empty() {
+                nil()
+            } else if name == values::na_string() {
+                values::install("NA")?
+            } else {
+                values::install_charsxp(name)?
+            }
+        };
+        items.push((tag, value));
+        args.push(Arg { tag, value });
+    }
+    let target_call = values::pairlist(&items, SexpType::Language)?;
+    let heap = crate::heap();
+    heap.root(target_call);
+    // The frame's slots hold `what` and `args`; `quote` and `envir` are missing and hold their
+    // defaults, which a reify of the frame turns into promises.
+    let slot_count = length(function.cdr().cdr().element(SLOTS).element(1));
+    let header = (*state.interp).bytecode.registers.len();
+    reserve_registers(header + 1 + slot_count)?;
+    let window = register_address(header);
+    let mut formal = function.car();
+    for index in 0..slot_count {
+        let value = match index {
+            0 => what,
+            1 => list,
+            _ if formal != nil() => formal.car(),
+            _ => unbound(),
+        };
+        value.increment_refcount();
+        *window.add(1 + index) = value;
+        if formal != nil() {
+            formal = formal.cdr();
+        }
+    }
+    let sys_parent = if in_slots {
+        nil()
+    } else {
+        state.env(Reify::Site("do.call"))?
+    };
+    activity::count(Counter::DoCallsInlined);
+    eval::run_inlined(call, function, header as u32, 0b1100, sys_parent, &supplied, |_| {
+        eval::apply(target_call, target, &args, sys_parent)
+    })
     .map(Some)
 }
 
@@ -6869,9 +7034,15 @@ unsafe fn pin_wrapper(function: Sexp) -> R<Sexp> {
     if formals.contains(&head) {
         return Ok(nil());
     }
+    // Only a builtin head runs without a body, so any other head (`{` with several statements,
+    // a closure) settles the site on the generic path for good instead of pinning lookups that
+    // every call would check and then discard.
     let Some(cell) = resolve(head, enclosure, false)? else {
         return Ok(nil());
     };
+    if cell_value(cell).is_none_or(|value| value.kind() != SexpType::Builtin) {
+        return Ok(nil());
+    }
     pinned.push((head, cell));
     // `{ f(x) }` runs as `f(x)` only while `{` is base R's.
     if body != source {
@@ -6988,11 +7159,73 @@ unsafe fn wrapper_argument(state: &Activation<'_, '_>, expression: Sexp) -> R<Op
 
 /// The slot of `symbol` in a slot frame, found by name for instructions that carry no lookup
 /// cache. Slot tables are short, so the scan costs less than a hash lookup.
+/// Fills the fourth element of a code object's [`SLOTS`] table: for each constant that a
+/// `ForStep` or `SubAssign` names as its variable, that variable's slot, so those handlers find
+/// it with one load ([`slot_at`]); -1 elsewhere. The map ends at the last such constant, and code
+/// with neither op has none, because most code has no loop or element assignment and a map over
+/// every constant of every function costs megabytes. It is derived from the code, the names and
+/// the constants, so the code image stores neither it nor anything it could disagree with.
+pub(crate) unsafe fn index_slots(words: Sexp, constants: Sexp) -> R<()> {
+    let table = constants.element(SLOTS);
+    if table == nil() {
+        return Ok(());
+    }
+    let names = table.element(1);
+    let code = values::ints(words);
+    let mut variables: SmallVec<[(usize, i32); 8]> = SmallVec::new();
+    let mut pc = 0;
+    while let Some(&word) = code.get(pc) {
+        let op =
+            op_of(word as u32).ok_or_else(|| error("the code holds an invalid instruction"))?;
+        let variable = match op {
+            Op::ForStep => code.get(pc + 3),
+            Op::SubAssign => code.get(pc + 2),
+            _ => None,
+        };
+        if let Some(&constant) = variable
+            && let constant = constant as usize
+            && constant < length(constants)
+            && let symbol = constants.element(constant)
+            && symbol.kind() == SexpType::Symbol
+            && let Some(slot) = (0..length(names)).find(|&slot| names.element(slot) == symbol)
+        {
+            variables.push((constant, slot as i32));
+        }
+        pc += 1 + operand_count(op);
+    }
+    let Some(last) = variables.iter().map(|&(constant, _)| constant).max() else {
+        return Ok(());
+    };
+    let by_constant = values::alloc(SexpType::Integer, last + 1)?;
+    let map = values::ints_mut(by_constant);
+    map.fill(-1);
+    for (constant, slot) in variables {
+        map[constant] = slot;
+    }
+    crate::heap().set_element(table, 3, by_constant);
+    Ok(())
+}
+
+/// The frame slot of the symbol at constant `constant`, as [`slot_named`] finds it.
+#[inline(always)]
+unsafe fn slot_at(state: &Activation<'_, '_>, constant: usize) -> Option<*mut Sexp> {
+    let by_constant = state.constants.element(SLOTS).element(3);
+    if by_constant == nil() {
+        return None;
+    }
+    let slot = *values::ints(by_constant).get(constant)?;
+    (slot >= 0).then(|| state.header.add(1 + slot as usize))
+}
+
 unsafe fn slot_named(state: &Activation<'_, '_>, symbol: Sexp) -> Option<*mut Sexp> {
+    slot_index(state, symbol).map(|position| state.header.add(1 + position))
+}
+
+/// The position of `symbol` in the slot frame's table of slot names. The table is a list the
+/// compiler made, never ALTREP, so the scan reads its storage directly.
+unsafe fn slot_index(state: &Activation<'_, '_>, symbol: Sexp) -> Option<usize> {
     let names = state.constants.element(SLOTS).element(1);
-    (0..length(names))
-        .find(|&index| names.element(index) == symbol)
-        .map(|position| state.header.add(1 + position))
+    names.slice::<Sexp>().iter().position(|&name| name == symbol)
 }
 
 /// `substitute(x)` of a single name in a slot frame, read from the slots without giving the
@@ -7065,9 +7298,7 @@ unsafe fn slot_special_call(
             // `UseMethod("generic", object)` dispatches on a local's value.
             "UseMethod" if argument.kind() == SexpType::String && length(argument) == 1 => {
                 match slot_operand(state, rest.car())? {
-                    Some(object) => {
-                        slot_use_method(state, instruction, call, argument, Some(object))
-                    }
+                    Some(object) => slot_use_method(state, instruction, argument, Some(object)),
                     None => Ok(None),
                 }
             }
@@ -7097,7 +7328,7 @@ unsafe fn slot_special_call(
             }
             match crate::builtins::internal_function(argument.car()) {
                 Some(internal) if internal.kind() == SexpType::Builtin => {
-                    slot_builtin_call(state, argument, internal, None)
+                    slot_builtin_call(state, None, argument, internal, None)
                 }
                 _ => Ok(None),
             }
@@ -7107,7 +7338,7 @@ unsafe fn slot_special_call(
                 && argument.kind() == SexpType::String
                 && length(argument) == 1 =>
         {
-            slot_use_method(state, instruction, call, argument, None)
+            slot_use_method(state, instruction, argument, None)
         }
         "quote" if arguments.tag() == nil() || values::symbol_name(arguments.tag()) == "expr" => {
             interp().visible = true;
@@ -7279,10 +7510,17 @@ unsafe fn slot_operand(state: &Activation<'_, '_>, expression: Sexp) -> R<Option
 
 /// `UseMethod("generic")` or `UseMethod("generic", object)` from a slot frame, when the body returns its value at once (a generic
 /// whose body is the call), dispatched without giving the frame an environment.
+/// The S3 dispatch site an instruction names: its feedback word one past the op's own.
+fn site(state: &Activation<'_, '_>, instruction: Instruction) -> Site {
+    Site {
+        constants: state.constants,
+        at: instruction.at as u32,
+    }
+}
+
 unsafe fn slot_use_method(
     state: &Activation<'_, '_>,
     instruction: Instruction,
-    call: Sexp,
     generic: Sexp,
     object: Option<Sexp>,
 ) -> R<Option<Sexp>> {
@@ -7311,7 +7549,7 @@ unsafe fn slot_use_method(
         return Ok(None);
     }
     let owner = (*state.interp).slot_owner as usize;
-    dispatch::use_method_in_slots(call, generic, owner, first, object)
+    dispatch::use_method_in_slots(site(state, instruction), generic, owner, first, object)
 }
 
 /// A builtin call from a slot frame whose arguments the slots answer: `...`, a constant, or a
@@ -7325,6 +7563,7 @@ unsafe fn slot_use_method(
 /// only reference (see [`slot_reusable`]).
 unsafe fn slot_builtin_call(
     state: &Activation<'_, '_>,
+    site: Option<Site>,
     call: Sexp,
     function: Sexp,
     target: Option<*mut Sexp>,
@@ -7372,7 +7611,7 @@ unsafe fn slot_builtin_call(
         nil()
     };
     if definition.generic != Generic::None
-        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
+        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env, site)?
     {
         return Ok(Some(value));
     }
@@ -7381,7 +7620,7 @@ unsafe fn slot_builtin_call(
             let reusable = slot_reusable(state, slot, &args);
             eval::call_builtin_reusing(definition, call, function, &args, env, reusable).map(Some)
         }
-        _ => call_builtin(definition, call, function, &args, env).map(Some),
+        _ => call_builtin(definition, call, function, &args, env, site).map(Some),
     }
 }
 
@@ -7705,9 +7944,7 @@ unsafe fn slot_promises_into(
             SexpType::Symbol => match eager.then(|| slot_eager_argument(state, expression)) {
                 Some(Some(value)) => value,
                 _ if references => {
-                    let names = state.constants.element(SLOTS).element(1);
-                    let slot = (0..length(names))
-                        .find(|&index| names.element(index) == expression)
+                    let slot = slot_index(state, expression)
                         .map_or(eval::NO_REFERENCE_SLOT, |index| index as u32);
                     eval::argument_reference(owner, slot, expression)?
                 }
@@ -7822,7 +8059,7 @@ unsafe fn op_call_builtin_rebinding(
     let value = if reusable.is_some() {
         eval::call_builtin_reusing(definition, call, function, &args, *state.header, reusable)?
     } else {
-        call_builtin(definition, call, function, &args, *state.header)?
+        call_builtin(definition, call, function, &args, *state.header, Some(site(state, instruction)))?
     };
     state.record(instruction.at, value);
     instruction.output(0, value);
@@ -7891,7 +8128,7 @@ unsafe fn op_call_rebinding(state: &mut Activation<'_, '_>, instruction: Instruc
         && let Some(slot) = slot_named(state, target)
     {
         if function.kind() == SexpType::Builtin
-            && let Some(value) = slot_builtin_call(state, call, function, Some(slot))?
+            && let Some(value) = slot_builtin_call(state, Some(site(state, instruction)), call, function, Some(slot))?
         {
             state.record(instruction.at, value);
             instruction.output(0, value);
@@ -8095,9 +8332,10 @@ unsafe fn op_dispatch_subject(state: &mut Activation<'_, '_>, instruction: Instr
         instruction.input(3),
         state.env(Reify::Site("dispatch subject"))?,
         &mut args,
+        Some(site(state, instruction)),
     )? {
         Some(value) => value,
-        None => call_builtin(definition, call, function, &args, *state.header)?,
+        None => call_builtin(definition, call, function, &args, *state.header, None)?,
     };
     state.record(instruction.at, value);
     instruction.output(0, value);
@@ -8257,7 +8495,7 @@ unsafe fn op_arithmetic(state: &mut Activation<'_, '_>, instruction: Instruction
                     value: right,
                 },
             ];
-            call_builtin(definition, call, function, &args, *state.header)?
+            call_builtin(definition, call, function, &args, *state.header, Some(site(state, instruction)))?
         }
     };
     state.record(instruction.at, value);
@@ -8572,7 +8810,7 @@ unsafe fn op_for_step(state: &mut Activation<'_, '_>, instruction: Instruction) 
     let variable = state.constant(instruction, 2);
     // A slot frame keeps its loop variable in a slot, so stepping the loop needs no environment.
     let slot = if state.in_slots() {
-        slot_named(state, variable)
+        slot_at(state, instruction.operand(2))
     } else {
         None
     };
@@ -8757,7 +8995,7 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
         _ => ElementKind::Dollar,
     };
     if state.in_slots()
-        && let Some(slot) = slot_named(state, variable)
+        && let Some(slot) = slot_at(state, instruction.operand(1))
         && let Some(index) = slot_subscript(state, instruction.input(2))
         && assign_slot_element(
             state,
@@ -9402,6 +9640,7 @@ pub(crate) unsafe fn call_builtin(
     function: Sexp,
     args: &[Arg],
     env: Sexp,
+    site: Option<Site>,
 ) -> R<Sexp> {
     if definition.generic != Generic::None {
         // Dispatch hands the frame to a method, so an unreified slot frame (a `NULL` `env`)
@@ -9411,7 +9650,7 @@ pub(crate) unsafe fn call_builtin(
         } else {
             env
         };
-        if let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, args, env)?
+        if let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, args, env, site)?
         {
             return Ok(value);
         }

@@ -763,6 +763,7 @@ pub unsafe extern "C" fn ry_handlers_enter(classes: Sexp) -> Sexp {
                     class: classes.element(index),
                     handler: runtime.nil(),
                     calling: false,
+                    calling_below: interp::conditions::calling_established(&stack),
                     parent_env: runtime.nil(),
                     target: token,
                     next: stack,

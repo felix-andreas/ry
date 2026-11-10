@@ -66,4 +66,4 @@ The extension in VS Code, Positron and VSCodium bundles ry 0.3.2-beta, which has
 server reads the project's `ry.toml`, so the editor and `ry check` report the same findings.
 [Editor settings](/reference/configuration#editor-settings) lists the extension's options.
 
-**Next:** [check your code](/tutorial/check).
+**Next:** [adopt ry](/guide) on a project, starting with `ry check`.

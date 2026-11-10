@@ -1,0 +1,35 @@
+[stdout]
+| a c d 
+| 1 3 4 
+| b c 
+| 2 3 
+| a b d 
+| 1 2 4 
+| a b c d 
+| 1 2 3 4 
+| a c d 
+| 1 3 4 
+| a c d 
+| 1 3 4 
+| named numeric(0)
+| [1] 44079
+| [1] 1
+| List of 2
+|  $ : chr "a"
+|  $ : logi TRUE
+| [1] "y" "z"
+| [1] "only 0's may be mixed with negative subscripts"
+| [1] "only 0's may be mixed with negative subscripts"
+| [1] 1 0 0 0 0
+| [1] 2.3
+| [1] 1 2 1
+| [1] "unused argument (foo = 1)"
+| [1] 1 2 3
+| [1] 1 2 3
+| [1] "unused argument (typ = \"bytes\")"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "unused argument (typ = \"bytes\")"

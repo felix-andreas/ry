@@ -42,7 +42,6 @@ pub mod combine;
 pub mod conditions;
 pub mod connections;
 pub mod console_server;
-pub mod data_table;
 pub mod dataframe;
 pub mod debugger;
 pub mod deparse;
@@ -120,7 +119,7 @@ pub mod viewer;
 pub use crate::unwind::{Jump, RError};
 use {
     crate::{
-        base_fast_paths::NativeEntry,
+        base_fast_paths::Entry,
         builtins::{Arg, BuiltinDef, Kind},
         conditions::{HandlerStack, RestartStack},
         unwind::{R, Unwind},
@@ -130,7 +129,6 @@ use {
         object::{Sexp, SexpType},
     },
     rustc_hash::FxHashMap,
-    smallvec::SmallVec,
     std::{cell::UnsafeCell, rc::Rc},
 };
 
@@ -190,6 +188,11 @@ pub struct Frame {
     pub method_vars: u32,
     /// Where this call's entries in [`Interp::frame_closures`] start.
     pub closures: usize,
+    /// The handle stack's height when the frame's body starts: [`eval::leave`] releases what
+    /// the body rooted down to it.
+    pub handle_mark: u32,
+    /// [`Interp::slot_owner`] when the frame was pushed, which [`eval::leave`] restores.
+    pub previous_owner: u32,
 }
 
 impl Frame {
@@ -373,9 +376,10 @@ pub struct Interp {
     pub srcref: Sexp,
     pub builtins: Vec<BuiltinDef>,
     pub builtin_index: FxHashMap<&'static str, u32>,
-    /// The formals `.ArgsEnv` or `.GenericArgsEnv` give each builtin, read on first use;
-    /// `None` for a builtin with `...` or with no entry, whose argument names go unchecked.
-    pub primitive_formals: FxHashMap<&'static str, Option<Box<[String]>>>,
+    /// The formals `.ArgsEnv` or `.GenericArgsEnv` give each builtin, by builtin index and read
+    /// on first use (`None` until then); an inner `None` is a builtin with `...` or with no
+    /// entry, whose argument names go unchecked.
+    pub primitive_formals: Vec<Option<Option<Box<[String]>>>>,
     pub symbols: values::Symbols,
     /// `R_Visible`: whether the value of the last top-level evaluation prints.
     pub visible: bool,
@@ -387,13 +391,17 @@ pub struct Interp {
     /// assignment, so a builtin replacement function reports its errors and warnings against
     /// `x[i] <- v`, not `` `[<-`(*tmp*, i, v) `` or the enclosing function's call.
     pub assignment_call: Option<(Sexp, Sexp, usize)>,
-    /// The base closures whose calls run natively, each with its native code
+    /// The closures whose calls run natively, each with its native code, sorted by address
     /// (`base_fast_paths::native_entry`).
-    pub native_entries: SmallVec<[(Sexp, NativeEntry); 8]>,
+    pub native_entries: Vec<(Sexp, Entry)>,
     /// Base R's `loadNamespace`, whose calls the collector treats as a namespace load
     /// (`Heap::enter_namespace_load`), or nil before base is loaded. Matched by identity and
     /// preserved, so a collected closure's address cannot be reused by another function.
     pub namespace_loader: Sexp,
+    /// Base R's `do.call`, which a call site runs without its body when it can
+    /// (`bytecode::call_do_call`), or nil before base is loaded. Matched by identity and
+    /// preserved, as [`Interp::namespace_loader`] is.
+    pub do_call: Sexp,
     /// The `*tmp*` of each complex assignment running, innermost last: the environment it runs
     /// in and the variable's value. GNU R binds `*tmp*` in that environment for the duration;
     /// ry answers a lookup that finds no binding from here instead, so an assignment neither
@@ -561,13 +569,14 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         srcref: heap.known().nil,
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
-        primitive_formals: FxHashMap::default(),
+        primitive_formals: Vec::new(),
         symbols,
         visible: true,
         returned_values: Vec::new(),
         assignment_call: None,
-        native_entries: SmallVec::new(),
+        native_entries: Vec::new(),
         namespace_loader: heap.known().nil,
+        do_call: heap.known().nil,
         tmp_values: Vec::new(),
         loops: Vec::new(),
         warnings: Vec::new(),
@@ -784,7 +793,11 @@ impl RootSource for InterpRoots {
 
     fn clear_dead(&self, liveness: &Liveness<'_>) {
         // SAFETY: as for `trace`.
-        unsafe { interp().bytecode.call_plans.clear_dead(liveness) }
+        unsafe {
+            let state = interp();
+            state.bytecode.call_plans.clear_dead(liveness);
+            state.method_cache.clear_dead(liveness);
+        }
     }
 }
 
