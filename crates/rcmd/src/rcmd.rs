@@ -425,6 +425,7 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
             link(&entry, &target)?;
         }
     }
+    refresh_start_image(sources)?;
     for entry in read_directory(&gnu_share)? {
         let name = entry.file_name().unwrap_or_default();
         if name == "make" {
@@ -557,6 +558,36 @@ exec "$cmd" $extra "$@"
              exec '{rcmd}' Rscript \"$@\"\n"
         ),
     )
+}
+
+/// Rewrites the base tree's start-up image when the runtime `libr` cannot load it: the image
+/// predates a change to its format, or another build of the runtime wrote it. A home links the
+/// base tree's image, so without this every start in the home would quietly take the slow path.
+/// A base without an image, such as a GNU R installation, is left as it is.
+fn refresh_start_image(sources: &HomeSources<'_>) -> Result<()> {
+    type Current = unsafe extern "C" fn(*const std::ffi::c_char) -> std::ffi::c_int;
+    let image = sources.base.join("library/base/R/ry-start.image");
+    if !image.is_file() {
+        return Ok(());
+    }
+    let library = front_end::load_runtime(sources.libr)?;
+    let current = unsafe { library.get::<Current>(b"ry_start_image_current\0") }
+        .map(|entry| *entry)
+        .map_err(|error| {
+            Error::Usage(format!(
+                "{} is not ry's runtime: {error}",
+                sources.libr.display()
+            ))
+        });
+    // Unloading a Rust library that may have started threads or registered thread-local
+    // destructors is unsound, and the process that assembles a home usually runs it next.
+    std::mem::forget(library);
+    let path = std::ffi::CString::new(image.to_string_lossy().into_owned())
+        .map_err(|_| Error::Usage(format!("{} contains a NUL byte", image.display())))?;
+    if unsafe { current?(path.as_ptr()) } == 1 {
+        return Ok(());
+    }
+    base::write_start_image(sources.base, sources.rcmd, sources.libr)
 }
 
 /// The toolchain with `-lblas` and `-llapack` spelled as the versioned files, `-l:libblas.so.3`
