@@ -52,6 +52,27 @@ pub unsafe fn host_environment() -> Option<Sexp> {
 
 const MAGIC: &[u8; 8] = b"RYSTART\x05";
 
+/// Whether the file at `path` is a start-up image the runtime build `identity` loads: one of this
+/// format that the same build wrote. A missing or unreadable file is not.
+pub fn is_current(path: &Path, identity: &str) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    // The magic, the header's length, then the header, which opens with the writer's identity
+    // as a length and its bytes.
+    let mut prefix = [0u8; 24];
+    if read_at(&file, &mut prefix, 0).is_err() || &prefix[..MAGIC.len()] != MAGIC {
+        return false;
+    }
+    let mut length = [0u8; 8];
+    length.copy_from_slice(&prefix[16..]);
+    if u64::from_le_bytes(length) != identity.len() as u64 {
+        return false;
+    }
+    let mut written_by = vec![0u8; identity.len()];
+    read_at(&file, &mut written_by, prefix.len() as u64).is_ok() && written_by == identity.as_bytes()
+}
+
 /// The variables that change which namespaces start-up loads or how it loads them, which the
 /// image holds as the fixed build environment loaded them.
 const LOADING_VARIABLES: &[&str] = &[
