@@ -136,7 +136,7 @@ expression in parentheses first.
 ```
 
 ```text ry run runtime=ry exact continue
-(Expr.col("price") * 2.0).alias("double")
+(col("price") * 2.0).alias("double")
 ```
 
 ## Verbs
@@ -344,9 +344,9 @@ LazyFrame.collect(plan)
 ```
 
 ```text ry run runtime=ry exact continue
-SELECT [Expr.col("region"), Expr.col("revenue")]
-  WITH_COLUMNS [(Expr.col("units") * Expr.col("price")).alias("revenue")]
-    FILTER Expr.col("region") == "eu"
+SELECT [col("region"), col("revenue")]
+  WITH_COLUMNS [(col("units") * col("price")).alias("revenue")]
+    FILTER col("region") == "eu"
       DATAFRAME 5 rows, 3 columns
    region revenue
    <char>   <num>
