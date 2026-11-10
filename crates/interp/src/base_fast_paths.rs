@@ -643,7 +643,7 @@ unsafe fn dots(frame: Sexp) -> R<Option<SmallVec<[(Sexp, Sexp); 8]>>> {
 
 /// Calls the builtin `function` with positional `args`, for a kernel that reads only its
 /// arguments.
-unsafe fn kernel(function: BuiltinFn, args: &[Sexp], env: Sexp) -> R<Sexp> {
+pub(crate) unsafe fn kernel(function: BuiltinFn, args: &[Sexp], env: Sexp) -> R<Sexp> {
     let args: SmallVec<[Arg; 9]> = args
         .iter()
         .map(|&value| Arg { tag: nil(), value })

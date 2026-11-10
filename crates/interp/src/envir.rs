@@ -1180,7 +1180,7 @@ unsafe fn options_list(names: Option<&[String]>) -> R<Sexp> {
     values::named_list(&items)
 }
 
-unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
     let mut args: Vec<Arg> = Vec::new();
     for arg in call.args {
         if arg.tag == nil() && arg.value.kind() == SexpType::List {
@@ -1191,7 +1191,7 @@ unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
                     if name.bytes().is_empty() {
                         nil()
                     } else {
-                        crate::heap().install_char(name)?
+                        values::install_charsxp(name)?
                     }
                 } else {
                     nil()
@@ -1242,6 +1242,18 @@ unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
     }
     values::set_attr(list, symbols().names, names)?;
     Ok(list)
+}
+
+/// Whether `options()` sets the option `name` to `value` without an error, a warning or any
+/// other effect than storing the value, so that a native caller can set it through
+/// [`do_options`] knowing that no condition will name the call.
+pub(crate) unsafe fn option_sets_quietly(name: &str, value: Sexp) -> bool {
+    // These warn about some values, or change output formatting as they are validated.
+    if matches!(name, "max.print" | "nwarnings" | "OutDec" | "scipen") {
+        return false;
+    }
+    // An invalid value is an error whose call is the caller's; it is only inspected here.
+    validate_option(name, value).is_ok()
 }
 
 unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {

@@ -324,7 +324,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("tzone_name", 0, |_| unsafe {
         scalar_string(&session_zone_name())
     }),
-    internal("bindtextdomain", 2, |_| Ok(nil())),
+    internal("bindtextdomain", 2, do_bindtextdomain),
     internal("gettext", 3, |call| Ok(call.arg(1))),
     internal("ngettext", 4, do_ngettext),
     internal("enc2native", 1, do_enc2native),
@@ -779,13 +779,14 @@ fn append_file(target: &str, source: &str) -> std::io::Result<()> {
 
 pub(crate) unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
     let names = call.arg(0);
-    if !values::is_string_scalar(call.arg(1)) {
+    if names.kind() != SexpType::String || !values::is_string_scalar(call.arg(1)) {
         return Err(error("wrong type for argument"));
     }
     let unset = values::first_string(call.arg(1)).map(|text| text.into_owned());
     if length(names) == 0 {
-        let mut entries: Vec<String> = std::env::vars()
-            .map(|(name, value)| format!("{name}={value}"))
+        // `vars()` panics on a variable that is not UTF-8.
+        let mut entries: Vec<String> = std::env::vars_os()
+            .map(|(name, value)| format!("{}={}", name.to_string_lossy(), value.to_string_lossy()))
             .collect();
         entries.sort();
         return string_vector(&entries);
@@ -793,10 +794,8 @@ pub(crate) unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
     let count = length(names);
     let result = alloc(SexpType::String, count)?;
     for index in 0..count {
-        let name = values::string_at(names, index)
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        let charsxp = match std::env::var(&name) {
+        let name = values::char_str(names.element(index));
+        let charsxp = match std::env::var(name.as_ref()) {
             Ok(value) => values::mkchar(&value)?,
             Err(_) => match &unset {
                 Some(unset) => values::mkchar(unset)?,
@@ -823,23 +822,39 @@ pub(crate) unsafe fn do_sys_setenv(call: &Call<'_>) -> R<Sexp> {
         // GNU R translates an `NA` element to the text "NA".
         let name = values::char_str(names.element(index)).into_owned();
         let value = values::char_str(new_values.element(index)).into_owned();
-        // SAFETY: the interpreter is single-threaded.
-        std::env::set_var(&name, &value);
-        values::ints_mut(result)[index] = 1;
+        // `setenv()` refuses a name that is empty or holds `=`, where Rust's `set_var` panics.
+        let accepted = valid_variable_name(&name) && !value.contains('\0');
+        if accepted {
+            // SAFETY: the interpreter is single-threaded.
+            std::env::set_var(&name, &value);
+        }
+        values::ints_mut(result)[index] = i32::from(accepted);
     }
     Ok(result)
 }
 
+/// A name `setenv()` and `unsetenv()` accept.
+fn valid_variable_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['=', '\0'])
+}
+
 pub(crate) unsafe fn do_sys_unsetenv(call: &Call<'_>) -> R<Sexp> {
     let names = call.arg(0);
+    if names.kind() != SexpType::String {
+        return Err(error("wrong type for argument"));
+    }
     let count = length(names);
     let result = alloc(SexpType::Logical, count)?;
     for index in 0..count {
-        if let Some(name) = values::string_at(names, index) {
+        // GNU R translates an `NA` element to the text "NA", and reports whether each variable
+        // is unset afterwards.
+        let name = values::char_str(names.element(index));
+        if valid_variable_name(&name) {
             // SAFETY: the interpreter is single-threaded.
             std::env::remove_var(name.as_ref());
         }
-        values::ints_mut(result)[index] = 1;
+        let unset = !valid_variable_name(&name) || std::env::var_os(name.as_ref()).is_none();
+        values::ints_mut(result)[index] = i32::from(unset);
     }
     Ok(result)
 }
@@ -2664,7 +2679,13 @@ unsafe fn do_file_path(call: &Call<'_>) -> R<Sexp> {
     string_vector(&paths)
 }
 
-unsafe fn do_tempfile(call: &Call<'_>) -> R<Sexp> {
+/// ry translates no messages, so binding a domain to a directory changes nothing and keeps no
+/// state, and the result is `NULL`.
+pub(crate) fn do_bindtextdomain(_: &Call<'_>) -> R<Sexp> {
+    Ok(nil())
+}
+
+pub(crate) unsafe fn do_tempfile(call: &Call<'_>) -> R<Sexp> {
     let patterns = call.arg(0);
     let directories = call.arg(1);
     let extensions = call.arg(2);

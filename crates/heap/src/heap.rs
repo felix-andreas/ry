@@ -1404,8 +1404,12 @@ impl Heap {
         self.install_char(name)
     }
 
-    /// The interned symbol whose print name is the `CHARSXP` `name`.
+    /// The interned symbol whose print name is the `CHARSXP` `name`. `NA_character_` is not the
+    /// interned "NA" string, and installs as the symbol `NA`, as GNU R's `installTrChar` does.
     pub unsafe fn install_char(&mut self, name: Sexp) -> HeapResult<Sexp> {
+        if name == self.known.na_string {
+            return self.install(b"NA");
+        }
         if let Some(&symbol) = self.symbols.get(&name) {
             return Ok(symbol);
         }
@@ -1661,7 +1665,12 @@ impl Heap {
 
     /// [`Heap::frame_cell`] through a lookup site's position hint (see [`Frame::find_hinted`]).
     #[inline(always)]
-    pub unsafe fn frame_cell_hinted(&self, env: Sexp, symbol: Sexp, hint: &mut u32) -> Option<Sexp> {
+    pub unsafe fn frame_cell_hinted(
+        &self,
+        env: Sexp,
+        symbol: Sexp,
+        hint: &mut u32,
+    ) -> Option<Sexp> {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return self.frame_cell(env, symbol);
         }
@@ -1761,7 +1770,8 @@ impl Heap {
         // young, so one barrier check covers every one. A failed allocation leaves no cell in
         // the frame, and the cells made before it are garbage.
         if let Some(&first) = cells.first() {
-            (*env.frame_ptr()).insert_formals(&cells, bindings.iter().map(|binding| binding.symbol));
+            (*env.frame_ptr())
+                .insert_formals(&cells, bindings.iter().map(|binding| binding.symbol));
             self.write_barrier(env, first);
         }
         Ok(())
