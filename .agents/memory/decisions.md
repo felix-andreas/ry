@@ -8155,6 +8155,12 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Measured.** Code: `functional` 5.94 MB to 3.36 MB, `testthat` 9.67 MB to 5.60 MB. Callgrind with cache simulation, `RY_BENCH_REPEAT=1`, baseline against JIT off: `functional` I1 misses +5.5% to +2.1% and instructions +0.8% to +1.1%; `testthat` I1 misses +15.8% to +12.1% and instructions +1.6% to +1.7%. The baseline is still behind JIT off.
 - **What is left.** The body code's own misses are small now (about 10M of `testthat`'s 193M). The rest comes from the step functions: each is a separate copy of a tier-0 handler, so a program that runs both tiers keeps both copies hot. On `testthat` the steps add more misses than `execute_code` sheds. Closing the gap needs either one copy of each handler (tier 0 dispatching through the steps) or fewer step calls (inline paths for the instructions that remain calls).
 
+## Baseline code stays out of code images, and lazy and hot-only
+
+- **Previous shape.** Baseline body code embedded the constant pool's objects, nil and the step table's address, so it could only run in the process that compiled it.
+- **Chosen shape.** Body code reads constants and symbols through `Activation.constants` and the step table through `Interp::baseline_steps` (`baseline::set_up`), so the same bytes run in any process. A code image could carry it, and does not: baseline code is compiled lazily, only for bodies that reach the baseline threshold.
+- **Why not every package closure at install.** On `testthat` baseline code averages 11.5 bytes per instruction word, 6.9 MB for the 1,401 bodies the run warms. `RY_JIT=baseline` takes 0.349 s (median) against 0.255 s with the JIT off, at about equal instruction counts (6.56G against 6.45G under callgrind), so the instruction cache decides. A call-threaded instruction needs about 24 bytes on x64 at minimum (set the pc, call through the table, test, branch), so a denser encoding cannot close the gap, and covering every closure would grow the footprint in proportion to the code that runs. Install-time machine code is native code (`crates/jit/src/native.rs`, `ahead.rs`) that replaces tier 0's work, not its dispatch.
+
 ## Tier 1 probes the frame inline for a variable load
 
 - **Previous shape.** Every tier-1 load called `jit_load`, which ran tier 0's `load_variable` (frame search, feedback recording, a validity check) at about 200 instructions a load. `SetSrcref` went back to tier 0 through `jit_step`.
