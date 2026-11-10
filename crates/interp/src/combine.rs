@@ -106,7 +106,7 @@ unsafe fn direct_c(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
     Ok(Some(result))
 }
 
-unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let recursive = values::as_logical_scalar(call.arg(1)) != 0;
     let use_names = values::as_logical_scalar(call.arg(2)) != 0;
