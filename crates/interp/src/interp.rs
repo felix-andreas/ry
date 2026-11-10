@@ -396,6 +396,10 @@ pub struct Interp {
     /// (`Heap::enter_namespace_load`), or nil before base is loaded. Matched by identity and
     /// preserved, so a collected closure's address cannot be reused by another function.
     pub namespace_loader: Sexp,
+    /// Base R's `do.call`, which a call site runs without its body when it can
+    /// (`bytecode::call_do_call`), or nil before base is loaded. Matched by identity and
+    /// preserved, as [`Interp::namespace_loader`] is.
+    pub do_call: Sexp,
     /// The `*tmp*` of each complex assignment running, innermost last: the environment it runs
     /// in and the variable's value. GNU R binds `*tmp*` in that environment for the duration;
     /// ry answers a lookup that finds no binding from here instead, so an assignment neither
@@ -571,6 +575,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         assignment_call: None,
         native_entries: SmallVec::new(),
         namespace_loader: heap.known().nil,
+        do_call: heap.known().nil,
         tmp_values: Vec::new(),
         loops: Vec::new(),
         warnings: Vec::new(),

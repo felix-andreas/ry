@@ -123,10 +123,11 @@ pub enum Counter {
     PackageCallsDirect,
     PackageCallsObserved,
     WrappersInlined,
+    DoCallsInlined,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 22] = [
+    pub const ALL: [Counter; 23] = [
         Counter::ClosureCalls,
         Counter::NativeEntries,
         Counter::BuiltinCalls,
@@ -149,6 +150,7 @@ impl Counter {
         Counter::PackageCallsDirect,
         Counter::PackageCallsObserved,
         Counter::WrappersInlined,
+        Counter::DoCallsInlined,
     ];
 
     pub fn describe(self) -> &'static str {
@@ -179,6 +181,7 @@ impl Counter {
                 "namespace calls whose frame was reified because code observed its environment"
             }
             Counter::WrappersInlined => "calls of one-builtin wrappers run without their body",
+            Counter::DoCallsInlined => "do.call calls run without its body",
         }
     }
 }
