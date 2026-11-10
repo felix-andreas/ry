@@ -76,6 +76,7 @@ pub mod methods_core;
 pub mod moves;
 pub mod native;
 pub mod numbers;
+mod package_fast_paths;
 pub mod parallel;
 pub mod parse_data;
 mod pcre;

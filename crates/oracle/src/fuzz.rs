@@ -917,3 +917,100 @@ pub fn render_divergences(report: &SeedReport) -> String {
     }
     text
 }
+
+/// The stack shapes [`trace_back_program`] nests, by the name its R preamble gives each wrapper.
+const TRACE_WRAPPERS: &[&str] = &[
+    "closure",
+    "operator",
+    "namespaced",
+    "do_call",
+    "lapply",
+    "vapply",
+    "reduce",
+    "try_catch",
+    "calling",
+    "restarts",
+    "eval",
+    "local",
+    "dispatch",
+    "recall",
+    "mark",
+];
+
+/// An R program for `seed` that builds random call stacks from [`TRACE_WRAPPERS`] and, at the
+/// bottom of each, compares rlang's `trace_back()` with the trace its own R body returns from
+/// the same frame. Every stack prints one line, `stack <n>: TRUE` when the two are identical,
+/// and the shapes and trimming of the stack otherwise. The program needs rlang; without it, it
+/// prints only `rlang is not installed`.
+pub fn trace_back_program(seed: u64) -> String {
+    let mut rng = SplitMix64(seed);
+    let mut text = format!("# trace_back fuzz program, seed {seed}\n{TRACE_PREAMBLE}");
+    for stack in 0..8 {
+        let depth = rng.below(10);
+        let kinds: Vec<String> = (0..depth)
+            .map(|_| format!("\"{}\"", TRACE_WRAPPERS[rng.below(TRACE_WRAPPERS.len())]))
+            .collect();
+        let trim = ["none", "top", "bottom"][rng.below(3)];
+        text.push_str(&format!(
+            "check({stack}, c({}), \"{trim}\")\n",
+            kinds.join(", ")
+        ));
+    }
+    text
+}
+
+const TRACE_PREAMBLE: &str = r#"if (!requireNamespace("rlang", quietly = TRUE)) {
+    cat("rlang is not installed\n")
+    quit(save = "no")
+}
+body_only <- body(rlang:::trace_back)
+if (identical(body_only[[1]], as.name("{")) && length(body_only) == 3L &&
+    is.call(body_only[[2]]) && identical(body_only[[2]][[1]], as.name(".Internal"))) {
+    body_only <- body_only[[3]]
+}
+slow_trace_back <- rlang:::trace_back
+body(slow_trace_back) <- body_only
+leaf <- function(state) {
+    marks <- state$marks
+    top <- switch(state$trim, top = marks[[length(marks)]], NULL)
+    bottom <- switch(state$trim, bottom = marks[[min(2L, length(marks))]], NULL)
+    fast <- rlang::trace_back(top = top, bottom = bottom)
+    slow <- slow_trace_back(top = top, bottom = bottom)
+    identical(fast, slow)
+}
+`%then%` <- function(state, step) step(state)
+print.marker <- function(x, ...) x$run()
+wrappers <- list(
+    closure = function(state, next_step) next_step(state),
+    operator = function(state, next_step) state %then% next_step,
+    namespaced = function(state, next_step) base::identity(next_step(state)),
+    do_call = function(state, next_step) do.call(function(a, b, c) next_step(state), list(1:3, mtcars[1:2, 1:2], sum)),
+    lapply = function(state, next_step) lapply(1L, function(i) next_step(state))[[1L]],
+    vapply = function(state, next_step) vapply(1L, function(i) next_step(state), logical(1)),
+    reduce = function(state, next_step) Reduce(function(a, b) next_step(state), 1:2),
+    try_catch = function(state, next_step) tryCatch(next_step(state), error = function(e) NULL),
+    calling = function(state, next_step) withCallingHandlers(next_step(state), warning = function(w) NULL),
+    restarts = function(state, next_step) withRestarts(next_step(state), skip = function() NULL),
+    eval = function(state, next_step) eval(quote(next_step(state))),
+    local = function(state, next_step) local(next_step(state)),
+    dispatch = function(state, next_step) print(structure(list(run = function() next_step(state)), class = "marker")),
+    recall = function(state, next_step) (function(n) if (n > 0L) Recall(n - 1L) else next_step(state))(2L),
+    mark = function(state, next_step) {
+        state$marks[[length(state$marks) + 1L]] <- environment()
+        next_step(state)
+    }
+)
+check <- function(stack, kinds, trim) {
+    step <- leaf
+    for (kind in rev(kinds)) {
+        step <- local({
+            wrapper <- wrappers[[kind]]
+            inner <- step
+            function(state) wrapper(state, inner)
+        })
+    }
+    same <- step(list(marks = list(globalenv()), trim = trim))
+    if (isTRUE(same)) cat("stack ", stack, ": TRUE\n", sep = "")
+    else cat("stack ", stack, ": differs for ", paste(kinds, collapse = " "), " trimmed ", trim, "\n", sep = "")
+}
+"#;

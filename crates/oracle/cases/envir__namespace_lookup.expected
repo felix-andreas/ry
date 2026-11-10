@@ -1,0 +1,70 @@
+[stdout]
+| [1] "a b"
+| [1] "a b"
+| [1] "a b"
+| [1] 2
+| [1] 2
+| [1] 4.5
+| [1] "a" "b"
+|               mpg cyl disp
+| Mazda RX4      21   6  160
+| Mazda RX4 Wag  21   6  160
+| [1] "error: 'no_such_function' is not an exported object from 'namespace:stats'"
+| [1] "error: object 'no_such_function' not found"
+| [1] "<function>"
+| [1] "error: object 'no_such_function' not found"
+| [1] "<function>"
+| [1] 1.414214
+| [1] TRUE
+| [1] 2 2 2
+| $ry.first
+| NULL
+| 
+| $ry.second
+| NULL
+| 
+| $digits
+| [1] 7
+| 
+| $ry.first
+| [1] 1
+| 
+| $ry.second
+| [1] "two"
+| 
+| $digits
+| [1] 9
+| 
+| [1] "two"
+| $ry.first
+| [1] 1
+| 
+| $ry.third
+| NULL
+| 
+| $ry.first
+| NULL
+| 
+| $ry.third
+| [1] TRUE
+| 
+| [1] "error: invalid 'digits' parameter, allowed 1...22"
+| [1] 9
+| $ry.first
+| NULL
+| 
+| $ry.second
+| NULL
+| 
+| $ry.third
+| NULL
+| 
+| $digits
+| [1] 7
+| 
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| list(ry.first = NULL, ry.second = NULL, ry.third = NULL, digits = 7L)
