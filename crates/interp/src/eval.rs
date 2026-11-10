@@ -2125,30 +2125,29 @@ pub unsafe fn call_with_plan(
     )
 }
 
-/// Runs a call of `function`, a closure whose body is the single call `body` of the builtin
-/// `builtin`, by calling the builtin with `builtin_args` from a frame that holds only the
-/// formals' values in a slot window at `header`, with `missing` their missing bits. The
-/// arguments are values that reading ran no R code for, so binding them where the body would
-/// have forced promises is invisible, and the frame is real: native code the builtin calls back
-/// into R from, an error it raises, `sys.call()`, `sys.function()` and `traceback()` all see the
-/// wrapper's call, and anything that asks for the frame's environment gets one made from the
-/// slots. What the body's activation would add (its registers, the lookups of the builtin and
-/// the free variables, the forcing of promises) is gone, which is most of a wrapper call.
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn run_wrapper(
+/// Runs a call of `function` without running its body: `run` does what the body would, from a
+/// frame that holds only the formals' values in a slot window at `header`, with `missing`
+/// their missing bits. The arguments are values that reading ran no R code for, so binding
+/// them where the body would have forced promises is invisible, and the frame is real: native
+/// code called back into R from, an error raised, `sys.call()`, `sys.function()` and
+/// `traceback()` all see the call, and anything that asks for the frame's environment gets one
+/// made from the slots. What the body's activation would add (its registers, its lookups, the
+/// forcing of promises) is gone, which is most of the cost of a small closure's call.
+///
+/// `run` gets the frame's index. While it runs, the slot owner is still the caller, so a call
+/// `run` makes with a `NULL` caller environment names the caller, not this frame, as its
+/// parent: what `do.call` needs, whose target's parent frame is the caller of `do.call`.
+pub unsafe fn run_inlined(
     call: Sexp,
     function: Sexp,
     header: u32,
     missing: u64,
     sys_parent: Sexp,
     args: &[Arg],
-    body: Sexp,
-    builtin: Sexp,
-    builtin_args: &[Arg],
+    run: impl FnOnce(u32) -> R<Sexp>,
 ) -> R<Sexp> {
     let _window = SlotWindow(header);
     activity::count(Counter::ClosureCalls);
-    activity::count(Counter::WrappersInlined);
     let _frame = crate::profile_summary::enter_closure(call, function);
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
@@ -2173,16 +2172,9 @@ pub unsafe fn run_wrapper(
         missing,
         caller,
     )?;
+    interp().frames[depth - 1].inlined = true;
+    let result = scope(|| run((depth - 1) as u32));
     let state = interp();
-    state.frames[depth - 1].inlined = true;
-    let owner = state.slot_owner;
-    state.slot_owner = (depth - 1) as u32;
-    let result = scope(|| {
-        let definition = builtin_def(builtin)?;
-        bytecode::call_builtin(definition, body, builtin, builtin_args, nil())
-    });
-    let state = interp();
-    state.slot_owner = owner;
     let frame = &state.frames[depth - 1];
     let result = if frame.env != nil() || !frame.on_exit.is_empty() || frame.pending != nil() {
         finish_frame(call, depth, None, result)

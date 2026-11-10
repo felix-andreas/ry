@@ -110,7 +110,7 @@ unsafe fn prepare_process() {
 /// R's start-up gives them.
 unsafe fn start_from_image(home: &str) -> R<()> {
     crate::base_fast_paths::register_native_entries(base_namespace())?;
-    mark_namespace_loader()?;
+    mark_base_closures()?;
     crate::envir::clear_options()?;
     define_process_variables()?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
@@ -213,7 +213,7 @@ unsafe fn start_slowly(
     }
     source_file(&format!("{home}/library/base/R/base"), base_namespace())?;
     crate::base_fast_paths::install_all(base_namespace())?;
-    mark_namespace_loader()?;
+    mark_base_closures()?;
     install_register_s3_methods()?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
     eval_text(".OptRequireMethods()", global_env())?;
@@ -234,13 +234,19 @@ unsafe fn start_slowly(
     Ok(warned)
 }
 
-/// Records base R's `loadNamespace` so the collector knows when a namespace load runs. A load
-/// allocates mostly what the session keeps, so collecting during it frees little.
-unsafe fn mark_namespace_loader() -> R<()> {
+/// Records the base R closures the interpreter recognizes by identity: `loadNamespace`, so the
+/// collector knows when a namespace load runs (a load allocates mostly what the session keeps,
+/// so collecting during it frees little), and `do.call`, which call sites run without its body.
+unsafe fn mark_base_closures() -> R<()> {
     let loader = eval::find_fun(values::install("loadNamespace")?, base_namespace())?;
     if loader.kind() == SexpType::Closure {
         crate::heap().preserve(loader);
         interp().namespace_loader = loader;
+    }
+    let do_call = eval::find_fun(values::install("do.call")?, base_namespace())?;
+    if do_call.kind() == SexpType::Closure {
+        crate::heap().preserve(do_call);
+        interp().do_call = do_call;
     }
     Ok(())
 }
