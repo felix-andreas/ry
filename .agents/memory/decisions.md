@@ -1895,6 +1895,22 @@ copy. Measured against the plain release build in one sitting (4-core cloud VM, 
 | period.apply 2e6, JIT on / off | 0.70 / 0.70 s | 0.56 / 0.55 s | 0.56 / 0.57 s |
 | period.apply per period: instructions, I1 misses | 185k, 5,450 | 160k, 3,360 | 160k, 3,050 |
 
+The public suites (`tools/bench/real/suites`, JIT on, median of 3, GNU R time over ry time as a
+geometric mean, so higher is better) split into the programs the training ran and the held-out
+ones the profile never saw (awfy entirely, and the odd positions of rcp and shootout):
+
+| suite | plain | PGO | PGO + BOLT |
+| --- | --- | --- | --- |
+| awfy, held out (5) | 1.96 | 2.45 | 2.48 |
+| rcp, trained (8) / held out (8) | 3.44 / 2.43 | 3.58 / 2.66 | 3.59 / 2.62 |
+| shootout, trained (16) / held out (17) | 2.19 / 2.16 | 2.57 / 2.55 | 2.56 / 2.58 |
+
+PGO accounts for nearly all the gain, and the held-out programs gain as much as the trained ones,
+so the profile generalizes. BOLT cuts instruction-cache misses by another 9% and changes wall
+time by between 4% faster and 3% slower, faster on testthat_full, at about 3 MB more peak RSS
+than PGO alone (still below the plain build) (BOLT keeps the original text and adds a
+new segment, so the file grows from 107 MB to 136 MB).
+
 - **Why the earlier attempt lost.** An earlier attempt profiled only `interp`, `heap`, `libr` and `R`
   and trained on the oracle cases alone, and ran 1.4 to 1.9x slower; that slowdown was not
   reproduced, so its cause stays unconfirmed. What this pipeline found instead is a silent
