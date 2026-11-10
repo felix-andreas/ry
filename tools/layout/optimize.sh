@@ -43,7 +43,9 @@ bolt=""
 if [ "$target" = x86_64-unknown-linux-gnu ] && [ "${RY_LAYOUT_BOLT:-}" != off ]; then
 	for candidate in "${LLVM_BOLT:-}" llvm-bolt llvm-bolt-18 /usr/lib/llvm-18/bin/llvm-bolt; do
 		if [ -n "$candidate" ] && command -v "$candidate" > /dev/null; then
-			bolt=$(command -v "$candidate")
+			# Resolved, because BOLT finds its instrumentation runtime and merge-fdata beside its
+			# real location, not beside a symlink such as /usr/bin/llvm-bolt-18.
+			bolt=$(realpath "$(command -v "$candidate")")
 			break
 		fi
 	done
