@@ -6642,6 +6642,13 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **A `CHARSXP` is aligned to 8, not 16.** Its header plus up to 7 bytes fits the 40-byte class instead of 48, which most short strings (`paste0("id", i)`, formatted numbers) are.
 - **Impact.** `formatC` at 1e7 rows spends about 0.8 s outside the collector with no live strings and with 1e7 of them, so the time no longer depends on heap state. `values::StringMemo` stays in `substr` and `formatC`, whose results repeat, because a small per-call table stays in cache where even one probe into the session-wide slot array misses it; it is not needed for the time to stay level. `test_gc.rs`'s intern fuzz test mixes in large strings so `young_large` is exercised.
 
+## Symbols intern in a slot table shaped like the string table
+
+- **Previous shape.** `Heap::symbols` was an `FxHashMap<Sexp, Sexp>` from a `CHARSXP` to its symbol. Every `install` hashed the pointer and probed a table of 16-byte entries, so symbol lookup and string interning used two different structures for one job.
+- **Shape** (`SymbolTable` in `crates/heap/src/strings.rs`). The same packed `u64` slots as the string table: the symbol's address over 8 beside a tag taken from its name's stored hash (`char_hash`, computed once when the `CHARSXP` was interned), linear probing, doubling at 7/8 load. A probe touches a symbol only on a tag match and then compares `PRINTNAME` by identity. Symbols are never removed, so there are no tombstones. The symbol is not stored in the `CHARSXP` itself, because its capacity word already holds the hash and `TRUELENGTH`, which data.table writes.
+- **Callers.** Constant names in native code (`values::symbols()`) skip `install` entirely. `values::install_charsxp_text` installs straight from an element of a character vector, so `makeLazy` and `list2env` no longer copy each name into a `String`.
+- **Impact.** 8 bytes per symbol instead of 16, one probe structure to reason about. `crates/heap/tests/test_gc.rs` (`fuzz_interning_agrees_with_a_reference_map`) compares both tables against `HashMap`s through growth and collections, also under `GcStress::EveryAllocation`.
+
 ## `gc()`, `gcinfo()` and `gc.time()` report the collector's real counters
 
 - **Previous shape.** `gc.time()` returned zeros and `gc()`'s table was made up, so collector time could not be attributed from R.
