@@ -41,8 +41,13 @@ The baseline tier, the merged SSA IR (`crates/ssa`), size-scaled tier-up and blo
 inlining are on main; shared baseline stubs and short encodings are on `perf/baseline-compact`.
 JIT on runs about 1% more instructions than JIT off on `bench-real` and is not faster in wall time;
 the baseline runs 1 to 2% more instructions and more I1 misses than JIT off and stays opt-in
-(`decisions.md`, "Baseline code calls shared stubs for variable access and comparisons"). What is
-left, in order of expected gain:
+(`decisions.md`, "Baseline code calls shared stubs for variable access and comparisons").
+Baseline code is position-independent (it reads constants and the step table through the
+activation and `Interp`), so a code image could carry it, but writing it for every package
+closure at install is not worth doing: on `testthat` it averages 11.5 bytes per instruction word
+(6.9 MB for the 1,401 bodies the run warms), and `RY_JIT=baseline` takes 0.349 s against 0.255 s
+with it off at about equal instruction counts, so the instruction cache, not dispatch, decides.
+What is left, in order of expected gain:
 
 - One copy of each instruction handler: the baseline's step functions duplicate tier 0's
   handlers, and on `testthat` they add more I1 misses than `execute_code` sheds. Sharing one
@@ -74,6 +79,11 @@ left, in order of expected gain:
   `bench-real` with the JIT off, so this and unboxing are the larger levers.
 - `conditions` deoptimizes 3000 times (an error parked in a helper) at one `stop()` call site,
   once per call.
+- The oracle case `assignment__element_in_place` was seen failing under `RY_JIT=force`, and the
+  suspect is `call_with_plan` (`eval.rs`) given an empty `sources` list. Run alone with
+  `ry run --runtime ry`, its output under `RY_JIT=force` equals its output with the JIT off, so
+  the failure may need the oracle harness's state or ordering to show. Reproduce it through
+  `test_cases` in the force mode before changing the call path.
 
 ## Open: console input in ry's runtime
 
