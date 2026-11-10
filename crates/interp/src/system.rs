@@ -929,41 +929,63 @@ fn scan_environment(names: &[&[u8]], mut visit: impl FnMut(usize, &[u8])) {
         if entry.is_null() {
             return;
         }
+        // SAFETY (for both scans): the entry is a NUL-terminated `NAME=value` string, so its
+        // second byte is readable when its first is not the terminator, and a name comparison
+        // stops at the first byte that differs, so it never reads past the terminator, which no
+        // name byte equals.
+        let matches = |start: *const u8, name: &[u8]| {
+            name.len() == 1
+                || (name[2..].iter().enumerate())
+                    .all(|(offset, &byte)| unsafe { *start.add(offset + 2) } == byte)
+                    && unsafe { *start.add(name.len()) } == b'='
+        };
+        let value_after = |start: *const u8, name: &[u8]| {
+            // SAFETY: the value runs from after the `=` to the entry's NUL terminator.
+            unsafe { std::ffi::CStr::from_ptr(start.add(name.len() + 1).cast()) }.to_bytes()
+        };
+        let key_of = |start: *const u8| {
+            let first = unsafe { *start };
+            (first != 0).then(|| u16::from_le_bytes([first, unsafe { *start.add(1) }]))
+        };
+        if let ([key], [(index, name)]) = (&*keys, &*pending) {
+            // Most calls name one variable, which this loop finds without the general bookkeeping.
+            loop {
+                // SAFETY: the array ends with a null pointer, which ends the loop.
+                let start = unsafe { *entry }.cast::<u8>();
+                if start.is_null() {
+                    return;
+                }
+                if key_of(start) == Some(*key) && matches(start, name) {
+                    visit(*index, value_after(start, name));
+                    return;
+                }
+                // SAFETY: the entry was not the array's null terminator.
+                entry = unsafe { entry.add(1) };
+            }
+        }
         loop {
             // SAFETY: the array ends with a null pointer, which ends the loop.
             let start = unsafe { *entry }.cast::<u8>();
             if start.is_null() {
-                break;
+                return;
             }
-            // SAFETY: the entry is a NUL-terminated string, so its second byte is readable when its
-            // first is not the terminator.
-            let first = unsafe { *start };
-            if first != 0 {
-                let key = u16::from_le_bytes([first, unsafe { *start.add(1) }]);
+            if let Some(key) = key_of(start) {
                 for position in 0..keys.len() {
                     if keys[position] != key {
                         continue;
                     }
                     let (index, name) = pending[position];
-                    // SAFETY: the comparison stops at the first byte that differs, so it never
-                    // reads past the entry's NUL terminator, which no name byte equals.
-                    let matched = name.len() == 1
-                        || (name[2..].iter().enumerate())
-                            .all(|(offset, &byte)| unsafe { *start.add(offset + 2) } == byte)
-                            && unsafe { *start.add(name.len()) } == b'=';
-                    if !matched {
+                    if !matches(start, name) {
                         continue;
                     }
                     // A found name's key becomes 0, which no entry's key equals because an entry's
                     // first byte is not NUL.
                     keys[position] = 0;
+                    visit(index, value_after(start, name));
                     remaining -= 1;
-                    // SAFETY: the value runs from after the `=` to the entry's NUL terminator.
-                    let value = unsafe { std::ffi::CStr::from_ptr(start.add(name.len() + 1).cast()) };
-                    visit(index, value.to_bytes());
-                }
-                if remaining == 0 {
-                    break;
+                    if remaining == 0 {
+                        return;
+                    }
                 }
             }
             // SAFETY: the entry was not the array's null terminator.
