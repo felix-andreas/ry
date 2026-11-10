@@ -11,7 +11,7 @@ use {
     oracle::{
         Engine, ProcessEngine,
         fuzz::{
-            SeedReport, check_seed, native_helpers_program, program, render_divergences,
+            SeedReport, check_seed, datatable_program, native_helpers_program, program, render_divergences,
             trace_back_program,
         },
         gnu_r_available, ry_runtime_available,
@@ -177,6 +177,43 @@ fn fuzz_native_helpers_match_their_r_bodies() {
                 outcome.stdout
             );
         }
+    }
+    std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
+}
+
+/// Random data.table queries must give the same value, attributes, tables afterwards, output and
+/// conditions whether ry's `[` bridge answers them or data.table's own code does.
+/// `FUZZ_SEED` replays a failing run; the failure prints the seed, count and index.
+#[test]
+fn fuzz_datatable_bridge_matches_datatable() {
+    if !ry_runtime_available() {
+        eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
+        return;
+    }
+    let engine = ProcessEngine::ry().with_timeout(TIMEOUT);
+    let directory = scratch_directory();
+    for seed in fuzz_seeds(2) {
+        let script = directory.join(format!("datatable_{seed}.R"));
+        std::fs::write(&script, datatable_program(seed, 400)).expect("write the fuzz program");
+        let outcome = engine
+            .run(&script)
+            .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", engine.name()));
+        if outcome.stdout.contains("data.table is not installed") {
+            eprintln!("skipped: data.table is not installed for ry");
+            break;
+        }
+        let summary = outcome
+            .stdout
+            .lines()
+            .find(|line| line.starts_with("summary:"))
+            .unwrap_or_else(|| {
+                panic!("seed {seed}: no summary\n{}\n{:?}", outcome.stdout, outcome.errors)
+            });
+        assert!(
+            summary.ends_with("mismatches=0"),
+            "seed {seed}: {summary}\n{}\nreplay with FUZZ_SEED={seed} cargo test -p oracle --test test_differential fuzz_datatable",
+            outcome.stdout
+        );
     }
     std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
 }
