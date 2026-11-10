@@ -852,7 +852,7 @@ pub enum Op {
 /// Which replacement an [`Op::SubAssign`] does, stored as its sixth operand.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
-enum ElementKind {
+pub enum ElementKind {
     /// `x[i] <- value`
     Single = 0,
     /// `x[[i]] <- value`

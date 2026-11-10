@@ -951,6 +951,45 @@ pub unsafe extern "C" fn jit_duplicate(
     }
 }
 
+/// `vector[[position]] <- value` on a plain list nothing else references, in place or appended
+/// within the list's capacity as tier 0 appends. Returns 0, having changed nothing, for anything
+/// else, which tier 0 then runs: a `NULL` value, which deletes the element, a list that must
+/// grow or be copied first, or one with attributes, which may be names to extend.
+pub unsafe extern "C" fn jit_store_list_element(
+    vector: *mut Header,
+    position: i64,
+    value: *mut Header,
+) -> i32 {
+    unsafe {
+        let (Some(vector), Some(value)) = (Sexp::from_raw(vector), Sexp::from_raw(value)) else {
+            return 0;
+        };
+        // Storing a list into itself must copy it first (`x[[2]] <- x`), which tier 0 does.
+        if vector.kind() != SexpType::List
+            || value == values::nil()
+            || value == vector
+            || vector.attrib() != values::nil()
+            || vector.is_altrep()
+            || vector.is_array()
+            || values::maybe_shared(vector)
+        {
+            return 0;
+        }
+        let length = vector.length();
+        let Ok(offset) = usize::try_from(position - 1) else {
+            return 0;
+        };
+        if position - 1 == length as i64 && heap().resize_vector(vector, length + 1).is_err() {
+            return 0;
+        }
+        if offset >= vector.length() as usize {
+            return 0;
+        }
+        values::set_elt(vector, offset, value);
+        1
+    }
+}
+
 /// An ALTREP `for` loop sequence expanded into an ordinary vector, as tier 0's `ForInit`
 /// expands it; any other value is returned as it is.
 pub unsafe extern "C" fn jit_expand_sequence(

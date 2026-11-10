@@ -16,7 +16,7 @@ use {
     crate::{
         analysis::{
             self, Action, Argument, Effect, Fold, Intrinsic, Numeric, Plan, Refusal, StateId,
-            StateRef, Ty, jump_target, status,
+            StateRef, Store, Ty, jump_target, status,
         },
         native,
         runtime::{self, Activation, Exit, offset, outcome, reason, representation},
@@ -975,6 +975,7 @@ impl<'p> Translator<'p> {
                 slot,
                 index,
                 value,
+                store,
             } => {
                 self.sub_assign(
                     position,
@@ -983,6 +984,7 @@ impl<'p> Translator<'p> {
                     slot,
                     Subscript::Vector(index),
                     value,
+                    store,
                 )?;
                 self.set_visible(&before, false);
             }
@@ -994,7 +996,8 @@ impl<'p> Translator<'p> {
                 value,
             } => {
                 let subscript = Subscript::Matrix(row, column);
-                self.sub_assign(position, &before, dst, slot, subscript, value)?;
+                let store = Store::Checked;
+                self.sub_assign(position, &before, dst, slot, subscript, value, store)?;
                 self.set_visible(&before, false);
             }
         }
@@ -2402,10 +2405,16 @@ impl<'p> Translator<'p> {
         slot: usize,
         subscript: Subscript,
         value: usize,
+        store: Store,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
-        let target = before.slots[slot].ty;
         let value_ty = before.registers[value];
+        let checked = store == Store::Checked;
+        let target = if checked {
+            Ty::Boxed
+        } else {
+            before.slots[slot].ty
+        };
         let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
         let mismatch = self.deopt(pc, before.id, None, position, reason::SPECULATION);
         // An unloaded variable is loaded first: a loop that calls a function every iteration
@@ -2449,6 +2458,11 @@ impl<'p> Translator<'p> {
         }
         let vector = self.load_slot_cell(slot);
         let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
+        if let (Store::List, Subscript::Vector(index)) = (store, subscript) {
+            return self.store_list_element(
+                position, before, dst, slot, vector, length, index, value, failed,
+            );
+        }
         // The zero-based element position and whether the store may happen in place, and for
         // a matrix whether it holds doubles, which an integer or logical value converts to.
         let (element_offset, in_range, real) = match subscript {
@@ -2462,6 +2476,10 @@ impl<'p> Translator<'p> {
                 // An Array cannot hold a missing value, so storing one is tier 0's to do: it
                 // turns the Array into an R vector.
                 let in_range = match target {
+                    Ty::Boxed => {
+                        let accepted = self.accepts_scalar(vector, value_ty);
+                        self.builder.ins().band(in_range, accepted)
+                    }
                     Ty::DblArr => {
                         let element = self.use_register(value, Ty::Dbl);
                         let present = self.builder.ins().fcmp(FloatCC::Ordered, element, element);
@@ -2478,8 +2496,15 @@ impl<'p> Translator<'p> {
                     }
                     _ => in_range,
                 };
-                let real = matches!(target, Ty::DblVec | Ty::DblArr);
-                let real = self.builder.ins().iconst(I8, i64::from(real));
+                let real = if checked {
+                    let kind = self.builder.ins().uload8(I32, flags(), vector, KIND);
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, kind, SexpType::Real as i64)
+                } else {
+                    let real = matches!(target, Ty::DblVec | Ty::DblArr);
+                    self.builder.ins().iconst(I8, i64::from(real))
+                };
                 let offset = self.builder.ins().iadd_imm_s(position_value, -1);
                 (offset, in_range, real)
             }
@@ -2491,29 +2516,12 @@ impl<'p> Translator<'p> {
                     column,
                     before.registers[column],
                 )?;
-                // A double goes only into a double matrix, an integer also into an integer one,
-                // and a logical into any of the three; anything else changes the matrix's type.
                 let kind = self.builder.ins().uload8(I32, flags(), vector, KIND);
                 let real = self
                     .builder
                     .ins()
                     .icmp_imm_s(IntCC::Equal, kind, SexpType::Real as i64);
-                let integer =
-                    self.builder
-                        .ins()
-                        .icmp_imm_s(IntCC::Equal, kind, SexpType::Integer as i64);
-                let logical =
-                    self.builder
-                        .ins()
-                        .icmp_imm_s(IntCC::Equal, kind, SexpType::Logical as i64);
-                let accepted = match value_ty {
-                    Ty::Dbl => real,
-                    Ty::Int => self.builder.ins().bor(real, integer),
-                    _ => {
-                        let either = self.builder.ins().bor(real, integer);
-                        self.builder.ins().bor(either, logical)
-                    }
-                };
+                let accepted = self.kind_accepts(kind, value_ty);
                 let in_range = self.builder.ins().band(in_range, accepted);
                 (offset, in_range, real)
             }
@@ -2584,10 +2592,31 @@ impl<'p> Translator<'p> {
             self.builder.ins().jump(join, &[]);
         }
 
-        // Out of range: write the frame back, since tier 0 may read any variable while it grows
-        // or rejects the vector, and forget the variable it rebinds.
         self.builder.switch_to_block(slow);
-        self.builder.set_cold_block(slow);
+        self.sub_assign_in_tier0(position, before, slot, failed)?;
+        self.builder.ins().jump(join, &[]);
+
+        self.builder.switch_to_block(join);
+        if value_ty.is_unboxed() {
+            let copy = self.use_register(value, value_ty);
+            self.def_register(dst, value_ty, copy);
+        }
+        Ok(())
+    }
+
+    /// The slow path of a store compiled code declines, such as one out of range: writes the
+    /// frame back, since tier 0 may read any variable while it grows or rejects the vector, has
+    /// tier 0 run the assignment, and forgets the variable it rebinds.
+    unsafe fn sub_assign_in_tier0(
+        &mut self,
+        position: usize,
+        before: &StateRef<'p>,
+        slot: usize,
+        failed: Label,
+    ) -> Result<(), Refusal> {
+        let pc = self.plan.insts[position].pc;
+        let block = self.builder.current_block().ok_or(Refusal("no current block"))?;
+        self.builder.set_cold_block(block);
         self.flush_all(before, failed);
         self.box_reads(position, before);
         let zero = self.builder.ins().iconst(I32, 0);
@@ -2599,14 +2628,121 @@ impl<'p> Translator<'p> {
         self.guard(ok, failed);
         let unloaded = self.builder.ins().iconst(I32, 0);
         self.builder.def_var(self.statuses[slot], unloaded);
+        Ok(())
+    }
+
+    /// `x[[index]] <- value` on the list `vector`: a position up to one past the end goes to
+    /// [`runtime::jit_store_list_element`], which stores in place or appends within the list's
+    /// capacity, and tier 0 runs whatever that helper declines.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn store_list_element(
+        &mut self,
+        position: usize,
+        before: &StateRef<'p>,
+        dst: usize,
+        slot: usize,
+        vector: Value,
+        length: Value,
+        index: usize,
+        value: usize,
+        failed: Label,
+    ) -> Result<(), Refusal> {
+        let value_ty = before.registers[value];
+        let bound = self.builder.ins().iadd_imm_s(length, 1);
+        let (index_value, in_range) =
+            self.subscript_position(before.registers[index], index, bound, false);
+        // A variable of an enclosing frame is copied into this frame first, which tier 0 does.
+        let status = self.builder.use_var(self.statuses[slot]);
+        let local = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::NotEqual, status, status::RUNTIME_ENCLOSING);
+        let attempt = self.builder.ins().band(in_range, local);
+        let fast = self.builder.create_block();
+        let slow = self.builder.create_block();
+        let join = self.builder.create_block();
+        self.builder.ins().brif(attempt, fast, &[], slow, &[]);
+
+        self.builder.switch_to_block(fast);
+        let element = if value_ty.is_unboxed() {
+            let unboxed = self.use_register(value, value_ty);
+            let boxed = self.box_value(value_ty, unboxed);
+            let allocated = self.builder.ins().icmp_imm_s(IntCC::NotEqual, boxed, 0);
+            self.guard(allocated, failed);
+            boxed
+        } else {
+            self.load_register(value)
+        };
+        let stored = self
+            .call(
+                runtime::jit_store_list_element as *const () as usize,
+                &[I64, I64, I64],
+                Some(I32),
+                &[vector, index_value, element],
+            )
+            .ok_or(Refusal("a helper without a result"))?;
+        let stored = self.builder.ins().icmp_imm_s(IntCC::NotEqual, stored, 0);
+        self.builder.ins().brif(stored, join, &[], slow, &[]);
+
+        self.builder.switch_to_block(slow);
+        self.sub_assign_in_tier0(position, before, slot, failed)?;
         self.builder.ins().jump(join, &[]);
 
         self.builder.switch_to_block(join);
         if value_ty.is_unboxed() {
             let copy = self.use_register(value, value_ty);
             self.def_register(dst, value_ty, copy);
+        } else {
+            let object = self.load_register(value);
+            self.store_register(dst, object);
         }
         Ok(())
+    }
+
+    /// Whether `vector` is a plain logical, integer or double vector, without attributes, that
+    /// takes a scalar of type `value_ty` without changing its type.
+    fn accepts_scalar(&mut self, vector: Value, value_ty: Ty) -> Value {
+        let kind = self.builder.ins().uload8(I32, flags(), vector, KIND);
+        let accepted = self.kind_accepts(kind, value_ty);
+        let attributes = self.builder.ins().load(I64, flags(), vector, ATTRIB);
+        let plain = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, attributes, self.nil);
+        let bits = self.builder.ins().uload8(I32, flags(), vector, FLAGS);
+        let bits = self
+            .builder
+            .ins()
+            .band_imm_u(bits, ALTREP_FLAG | ARRAY_FLAG);
+        let ordinary = self.builder.ins().icmp_imm_s(IntCC::Equal, bits, 0);
+        let accepted = self.builder.ins().band(accepted, plain);
+        self.builder.ins().band(accepted, ordinary)
+    }
+
+    /// Whether a vector of `kind` takes a scalar of type `value_ty` without changing its type: a
+    /// double goes only into a double vector, an integer also into an integer one, and a logical
+    /// into any of the three.
+    fn kind_accepts(&mut self, kind: Value, value_ty: Ty) -> Value {
+        let real = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, SexpType::Real as i64);
+        let integer = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, SexpType::Integer as i64);
+        let logical = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, SexpType::Logical as i64);
+        match value_ty {
+            Ty::Dbl => real,
+            Ty::Int => self.builder.ins().bor(real, integer),
+            _ => {
+                let either = self.builder.ins().bor(real, integer);
+                self.builder.ins().bor(either, logical)
+            }
+        }
     }
 
     /// The one-based position the subscript in register `index` names and whether it is in

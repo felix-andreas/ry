@@ -208,6 +208,49 @@ pub fn from_feedback(bits: u16) -> Ty {
     }
 }
 
+/// How compiled code stores `value` into the variable of type `target` by `x[i] <- value` or,
+/// when `double`, `x[[i]] <- value`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Store {
+    /// The target's type is known to take the scalar.
+    Typed,
+    /// The target's type is unknown or would change, as a logical vector's does when it takes
+    /// an integer, so compiled code reads the vector's kind on every store and leaves only a
+    /// conversion or anything but a plain vector to tier 0. `x <- vector(length = n)` filled by
+    /// `x[[i]] <- i` converts once and then stores in place.
+    Checked,
+    /// `x[[i]] <- value` on a list, in place or appended within the list's spare capacity, so
+    /// `x[[length(x) + 1]] <- value` in a loop leaves for tier 0 only when the list must grow.
+    List,
+}
+
+/// Whether compiled code may do the store itself, and how.
+pub fn sub_assign_store(target: Ty, value: Ty, double: bool) -> Option<Store> {
+    let typed = match target {
+        Ty::DblVec => value.is_numeric_scalar(),
+        Ty::IntVec => matches!(value, Ty::Int | Ty::Lgl),
+        Ty::LglVec => value == Ty::Lgl,
+        // An Array takes only items of its own type; anything else turns it into an R vector,
+        // which tier 0 does.
+        Ty::IntArr | Ty::DblArr | Ty::LglArr => {
+            return (value == target.element()).then_some(Store::Typed);
+        }
+        // `x[i] <- value` on a list stores the value's only element rather than the value.
+        Ty::List => {
+            return (double && !matches!(value, Ty::Num | Ty::Bottom)).then_some(Store::List);
+        }
+        Ty::Boxed | Ty::Bottom => false,
+        _ => return None,
+    };
+    if typed {
+        Some(Store::Typed)
+    } else if matches!(value, Ty::Int | Ty::Dbl | Ty::Lgl) {
+        Some(Store::Checked)
+    } else {
+        None
+    }
+}
+
 /// Slot statuses, as bits of [`Slot::status`]. At run time a slot's status is the bit's index.
 pub mod status {
     pub const NOT_LOADED: u8 = 1 << 0;
@@ -944,6 +987,7 @@ pub enum Action<'a> {
         slot: usize,
         index: usize,
         value: usize,
+        store: Store,
     },
     /// `x[i, j] <- value` in place on an ordinary matrix, with a generic path that copies or
     /// hands the assignment to tier 0.
@@ -1123,6 +1167,13 @@ pub const NOTHING_NATIVE: &str = "compiled code would run nothing natively";
 /// run natively, whatever types the profile records. Unlike [`NOTHING_NATIVE`] it is final, and
 /// it is decided before the body records anything.
 pub const NEVER_NATIVE: &str = "no instruction of the body could run natively";
+
+/// The refusal for the loop-free body of a closure with a native entry, such as `isTRUE`, which
+/// runs only for the calls the native code declines. Those are too few and too varied for
+/// compiled code to repay its compilation, and in a process that has compiled nothing else the
+/// first compile reads several megabytes of the code generator's own machine code into memory.
+/// It is final.
+pub const NATIVE_ENTRY: &str = "the closure's calls run natively";
 
 /// The refusal for a loop-free body that turned hot but runs too rarely for compiled code to
 /// repay its compilation. Like [`COLD`] it is not final: the body asks again after another
@@ -2481,16 +2532,9 @@ impl<'a> Builder<'a> {
                 let slot = self.slot(self.constant(operand(1)));
                 let (index, value) = (state.registers[operand(2)], state.registers[operand(3)]);
                 let target = state.slots[slot].ty;
-                let fits = match target {
-                    Ty::DblVec => value.is_numeric_scalar(),
-                    Ty::IntVec => matches!(value, Ty::Int | Ty::Lgl),
-                    Ty::LglVec => value == Ty::Lgl,
-                    // An Array takes only items of its own type; anything else turns it into
-                    // an R vector, which tier 0 does.
-                    Ty::IntArr | Ty::DblArr | Ty::LglArr => value == target.element(),
-                    _ => false,
-                };
-                if fits
+                let double = operand(5) == bytecode::ElementKind::Double as usize;
+                let store = sub_assign_store(target, value, double);
+                if let Some(store) = store
                     && matches!(index, Ty::Int | Ty::Dbl)
                     && state.slots[slot].may_be(status::LOADED)
                     && !(self.defaulted.contains_key(&self.slots[slot])
@@ -2501,8 +2545,20 @@ impl<'a> Builder<'a> {
                     let mut forgotten = state.slots[slot];
                     forgotten.status = status::NOT_LOADED;
                     let mut fast = state.slots[slot];
-                    fast.status |= status::DIRTY;
                     fast.status &= !status::NOT_LOADED;
+                    match store {
+                        Store::Typed => fast.status |= status::DIRTY,
+                        // A store that checks the vector's kind at run time finds whichever
+                        // kind tier 0 left there, such as the integer vector a logical one
+                        // became.
+                        Store::Checked => {
+                            fast.status |= status::DIRTY;
+                            fast.ty = Ty::Boxed;
+                        }
+                        // A list is only ever changed in place, so the variable keeps naming
+                        // the object its frame binds.
+                        Store::List => {}
+                    }
                     state.slots[slot] = fast.join(forgotten);
                     state.registers[operand(0)] = value;
                     state.visible = Some(false);
@@ -2511,6 +2567,7 @@ impl<'a> Builder<'a> {
                         slot,
                         index: operand(2),
                         value: operand(3),
+                        store,
                     }
                 } else {
                     let refine = match value {
