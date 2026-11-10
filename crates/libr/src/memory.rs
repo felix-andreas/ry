@@ -534,7 +534,11 @@ pub unsafe extern "C" fn R_resizeVector(vector: Sexp, length: R_xlen_t) {
             && length != vector.length()
             && length <= vector.capacity()
         {
-            for name in [R_DimSymbol.get(), R_DimNamesSymbol.get(), R_NamesSymbol.get()] {
+            for name in [
+                R_DimSymbol.get(),
+                R_DimNamesSymbol.get(),
+                R_NamesSymbol.get(),
+            ] {
                 remove_attribute(vector, name);
             }
         }
