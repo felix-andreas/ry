@@ -4966,6 +4966,13 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             && !effects::calling_handler_established()
             && effects::effect_free(function)?;
         let plan = direct_plan(state, instruction, function, call)?;
+        if let Some(sources) = plan
+            && let Some(value) = call_wrapper(state, instruction, function, call, sources)?
+        {
+            state.record(instruction.at, value);
+            instruction.output(0, value);
+            return Ok(Flow::Next);
+        }
         let references = (*state.interp).references_used;
         // From a slot frame, a call whose arguments need no promise over the frame leaves it
         // without an environment, and the callee finds its caller as the frame below its own.
@@ -5059,12 +5066,309 @@ unsafe fn direct_plan(
     }
     let sources = values::integer_vector(&entries)?;
     heap.root(sources);
-    let plan = values::alloc(SexpType::List, 3)?;
+    let plan = values::alloc(SexpType::List, 4)?;
     heap.set_element(plan, 0, formals);
     heap.set_element(plan, 1, body);
     heap.set_element(plan, 2, sources);
+    heap.set_element(plan, 3, unbound());
     heap.set_element(state.constants, index, plan);
     Ok((entries.len() > 1).then_some(sources))
+}
+
+/// Runs a planned call of `function` with [`eval::run_wrapper`] when the closure is a wrapper,
+/// a body that is one call of a builtin whose arguments are formals, literals and variables
+/// bound outside any function frame, and each argument of the call reads without running R
+/// code. `None` leaves the call to the generic path, with nothing changed.
+///
+/// The site pins what the body's lookups found in the plan's fourth element ([`WrapperPin`]),
+/// and a pin holds while the stamps of its symbols do: a binding of one appearing or going
+/// away anywhere outside a function frame, or any enclosure changing, moves a stamp, while a
+/// value assigned to a pinned binding is read from its cell on every call.
+unsafe fn call_wrapper(
+    state: &mut Activation<'_, '_>,
+    instruction: Instruction,
+    function: Sexp,
+    call: Sexp,
+    sources: Sexp,
+) -> R<Option<Sexp>> {
+    let interp = &*state.interp;
+    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
+        || interp.debugger.is_some()
+        || !interp.object_systems
+        || crate::moves::tracking()
+    {
+        return Ok(None);
+    }
+    let plan = state.constants.element(instruction.operand(2) + 3);
+    let mut pin = plan.element(3);
+    if pin == nil() {
+        return Ok(None);
+    }
+    if pin == unbound() || !pin_holds(pin, function) {
+        pin = pin_wrapper(function)?;
+        (*state.heap).set_element(plan, 3, pin);
+        if pin == nil() {
+            return Ok(None);
+        }
+    }
+    let Some(builtin) = cell_value(pin.element(WrapperPin::CELLS).element(0)) else {
+        return Ok(None);
+    };
+    if builtin.kind() != SexpType::Builtin {
+        return Ok(None);
+    }
+    let mut supplied: SmallVec<[Arg; 4]> = SmallVec::new();
+    let mut cell = call.cdr();
+    while cell.kind() == SexpType::Pairlist {
+        let Some(value) = wrapper_argument(state, cell.car())? else {
+            return Ok(None);
+        };
+        supplied.push(Arg {
+            tag: cell.tag(),
+            value,
+        });
+        cell = cell.cdr();
+    }
+    let sources = values::ints(sources).get(1..).unwrap_or(&[]);
+    if sources.iter().filter(|&&source| source >= 0).count() != supplied.len() {
+        return Ok(None);
+    }
+    let mut formal_values: SmallVec<[Sexp; 8]> = SmallVec::new();
+    let mut missing = 0u64;
+    let mut formal = function.car();
+    for (index, &source) in sources.iter().enumerate() {
+        let value = match supplied.get(source as usize) {
+            Some(arg) if source >= 0 => arg.value,
+            _ => {
+                let default = formal.car();
+                if default == missing_arg() {
+                    return Ok(None);
+                }
+                missing |= 1 << index;
+                default
+            }
+        };
+        formal_values.push(value);
+        formal = formal.cdr();
+    }
+    let kinds = values::ints(pin.element(WrapperPin::KINDS));
+    let payload = pin.element(WrapperPin::PAYLOAD);
+    let body = source_body(function);
+    let mut builtin_args: SmallVec<[Arg; 4]> = SmallVec::new();
+    let mut cell = body.cdr();
+    for (index, &kind) in kinds.iter().enumerate() {
+        let value = match kind {
+            WrapperPin::LITERAL => payload.element(index),
+            WrapperPin::FREE => match cell_value(payload.element(index)) {
+                Some(value) => value,
+                None => return Ok(None),
+            },
+            formal => match formal_values.get(formal as usize) {
+                Some(&value) => value,
+                None => return Ok(None),
+            },
+        };
+        builtin_args.push(Arg {
+            tag: cell.tag(),
+            value,
+        });
+        cell = cell.cdr();
+    }
+    let count = length(function.cdr().cdr().element(SLOTS).element(1));
+    let header = (*state.interp).bytecode.registers.len();
+    reserve_registers(header + 1 + count)?;
+    let window = register_address(header);
+    for index in 0..count {
+        let value = formal_values.get(index).copied().unwrap_or_else(unbound);
+        value.increment_refcount();
+        *window.add(1 + index) = value;
+    }
+    let sys_parent = if state.in_slots() { nil() } else { state.env()? };
+    eval::run_wrapper(
+        call,
+        function,
+        header as u32,
+        missing,
+        sys_parent,
+        &supplied,
+        body,
+        builtin,
+        &builtin_args,
+    )
+    .map(Some)
+}
+
+/// The layout of a call site's pin of a wrapper's lookups (see [`call_wrapper`]), a list.
+struct WrapperPin;
+
+impl WrapperPin {
+    /// The closure environment the lookups started from.
+    const ENCLOSURE: usize = 0;
+    /// Per argument of the body's builtin call, the formal it passes (its index), or
+    /// [`WrapperPin::LITERAL`] or [`WrapperPin::FREE`].
+    const KINDS: usize = 1;
+    /// Per argument, the literal, the cell of the free variable, or `NULL` for a formal.
+    const PAYLOAD: usize = 2;
+    /// The pinned symbols, the builtin's name first.
+    const SYMBOLS: usize = 3;
+    /// The cell each pinned symbol resolved to.
+    const CELLS: usize = 4;
+    /// The stamp of each pinned symbol when it was resolved, as the bits of a double.
+    const STAMPS: usize = 5;
+    const LENGTH: usize = 6;
+    const LITERAL: i32 = -1;
+    const FREE: i32 = -2;
+}
+
+/// Whether `pin` still describes `function`'s lookups: the closure has the same environment
+/// and no pinned symbol's stamp moved.
+#[inline]
+unsafe fn pin_holds(pin: Sexp, function: Sexp) -> bool {
+    if pin.element(WrapperPin::ENCLOSURE) != function.tag() {
+        return false;
+    }
+    let heap = crate::heap();
+    let symbols = pin.element(WrapperPin::SYMBOLS);
+    let stamps = values::reals(pin.element(WrapperPin::STAMPS));
+    stamps
+        .iter()
+        .enumerate()
+        .all(|(index, stamp)| stamp.to_bits() == heap.lookup_stamp(symbols.element(index)))
+}
+
+/// The pin of `function`'s lookups when the closure is a wrapper, or `NULL`. A wrapper's body
+/// is one call whose function is a name bound outside any function frame and whose arguments
+/// are formals, literals, or other such names, and it has no `...` formal.
+unsafe fn pin_wrapper(function: Sexp) -> R<Sexp> {
+    let body = source_body(function);
+    let enclosure = function.tag();
+    let constants = function.cdr().cdr();
+    if body.kind() != SexpType::Language
+        || body.car().kind() != SexpType::Symbol
+        || constants.element(SLOTS) == nil()
+    {
+        return Ok(nil());
+    }
+    let mut formals: SmallVec<[Sexp; 8]> = SmallVec::new();
+    let mut formal = function.car();
+    while formal.kind() == SexpType::Pairlist {
+        if formal.tag() == symbols().dots || formals.len() >= MAX_SLOT_FORMALS {
+            return Ok(nil());
+        }
+        let default = formal.car();
+        if !(default == missing_arg() || default == nil() || default.kind().is_atomic()) {
+            return Ok(nil());
+        }
+        formals.push(formal.tag());
+        formal = formal.cdr();
+    }
+    let mut pinned: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
+    let head = body.car();
+    if formals.contains(&head) {
+        return Ok(nil());
+    }
+    let Some(cell) = resolve(head, enclosure, false)? else {
+        return Ok(nil());
+    };
+    pinned.push((head, cell));
+    let mut kinds: SmallVec<[i32; 8]> = SmallVec::new();
+    let mut payload: SmallVec<[Sexp; 8]> = SmallVec::new();
+    let mut argument = body.cdr();
+    while argument.kind() == SexpType::Pairlist {
+        let expression = argument.car();
+        match expression.kind() {
+            SexpType::Symbol => {
+                if expression == missing_arg() || expression == symbols().dots {
+                    return Ok(nil());
+                }
+                if let Some(index) = formals.iter().position(|&name| name == expression) {
+                    kinds.push(index as i32);
+                    payload.push(nil());
+                } else {
+                    let Some(cell) = resolve(expression, enclosure, false)? else {
+                        return Ok(nil());
+                    };
+                    kinds.push(WrapperPin::FREE);
+                    payload.push(cell);
+                    pinned.push((expression, cell));
+                }
+            }
+            SexpType::Language | SexpType::Promise | SexpType::Bytecode => return Ok(nil()),
+            _ => {
+                kinds.push(WrapperPin::LITERAL);
+                payload.push(expression);
+            }
+        }
+        argument = argument.cdr();
+    }
+    let heap = crate::heap();
+    let pin = values::alloc(SexpType::List, WrapperPin::LENGTH)?;
+    heap.root(pin);
+    heap.set_element(pin, WrapperPin::ENCLOSURE, enclosure);
+    heap.set_element(pin, WrapperPin::KINDS, values::integer_vector(&kinds)?);
+    let list = values::alloc(SexpType::List, payload.len())?;
+    heap.set_element(pin, WrapperPin::PAYLOAD, list);
+    for (index, &value) in payload.iter().enumerate() {
+        heap.set_element(list, index, value);
+    }
+    let names = values::alloc(SexpType::List, pinned.len())?;
+    heap.set_element(pin, WrapperPin::SYMBOLS, names);
+    let cells = values::alloc(SexpType::List, pinned.len())?;
+    heap.set_element(pin, WrapperPin::CELLS, cells);
+    let stamps = values::alloc(SexpType::Real, pinned.len())?;
+    heap.set_element(pin, WrapperPin::STAMPS, stamps);
+    let stamp_values = values::reals_mut(stamps);
+    for (index, &(symbol, cell)) in pinned.iter().enumerate() {
+        heap.set_element(names, index, symbol);
+        heap.set_element(cells, index, cell);
+        stamp_values[index] = f64::from_bits(heap.lookup_stamp(symbol));
+    }
+    Ok(pin)
+}
+
+/// The value a pinned cell holds when reading it runs no R code.
+#[inline]
+unsafe fn cell_value(cell: Sexp) -> Option<Sexp> {
+    let value = cell.cdr();
+    if value.kind() != SexpType::Promise {
+        return (value != unbound() && value != missing_arg()).then_some(value);
+    }
+    (value.car() != unbound()).then(|| value.car())
+}
+
+/// The value of a call's argument `expression` when reading it runs no R code: a literal, or a
+/// variable bound to a value, a forced promise or a readable argument reference.
+#[inline]
+unsafe fn wrapper_argument(state: &Activation<'_, '_>, expression: Sexp) -> R<Option<Sexp>> {
+    let value = match expression.kind() {
+        SexpType::Symbol => {
+            if expression == missing_arg() || expression == symbols().dots {
+                return Ok(None);
+            }
+            let found = if state.in_slots() {
+                slot_eager_argument(state, expression)
+            } else {
+                effects::eager_argument(expression, state.env()?)
+            };
+            match found {
+                Some(value) => value,
+                None => return Ok(None),
+            }
+        }
+        SexpType::Language | SexpType::Promise | SexpType::Bytecode => return Ok(None),
+        _ => return Ok(Some(expression)),
+    };
+    if value.kind() != SexpType::Promise {
+        return Ok((value != missing_arg() && value != unbound()).then_some(value));
+    }
+    if value.car() != unbound() {
+        return Ok(Some(value.car()));
+    }
+    Ok(if eval::is_reference(value) {
+        eval::reference_value(value)
+    } else {
+        None
+    })
 }
 
 /// The slot of `symbol` in a slot frame, found by name for instructions that carry no lookup
@@ -6516,7 +6820,7 @@ unsafe fn matrix_subscript(index: Sexp, extent: i32) -> Option<usize> {
     Some(position as usize - 1)
 }
 
-unsafe fn call_builtin(
+pub(crate) unsafe fn call_builtin(
     definition: &'static BuiltinDef,
     call: Sexp,
     function: Sexp,
