@@ -81,8 +81,21 @@ struct Reader<'a> {
 /// Where a stream's bytes come from. A connection is read only as far as the object goes, so
 /// the next object on it, or a peer's next message on a socket, stays unread.
 enum Input<'a> {
-    Slice { bytes: &'a [u8], position: usize },
-    Connection { con: Rconnection, buffer: Vec<u8> },
+    Slice {
+        bytes: &'a [u8],
+        position: usize,
+    },
+    Connection {
+        con: Rconnection,
+        buffer: Vec<u8>,
+        /// The bytes the connection has read ahead (see [`crate::connections::peek`]), of which
+        /// the first `used` are taken but not yet consumed. Serving small reads from it skips a
+        /// connection dispatch per read, which made `unserialize` on a gzip file read its input
+        /// a few bytes per call. It borrows the connection's buffer, so it is valid only until
+        /// [`Reader::settle`] consumes it, which happens before anything else touches `con`.
+        window: &'static [u8],
+        used: usize,
+    },
 }
 
 impl Reader<'_> {
@@ -119,9 +132,34 @@ impl Reader<'_> {
 
     #[inline(never)]
     fn take_connection(&mut self, count: usize) -> R<&[u8]> {
-        let Input::Connection { con, buffer } = &mut self.input else {
+        if !self.window_holds(count) {
+            self.settle()?;
+            let Input::Connection { con, window, .. } = &mut self.input else {
+                return Err(error("ReadItem: unexpected end of serialized data"));
+            };
+            // SAFETY: the connection stays open while the reader runs, and the window is
+            // consumed before the connection is used any other way.
+            if let Some(peeked) = unsafe { crate::connections::peek(*con)? } {
+                *window = peeked;
+            }
+        }
+        let Input::Connection {
+            con,
+            buffer,
+            window,
+            used,
+        } = &mut self.input
+        else {
             return Err(error("ReadItem: unexpected end of serialized data"));
         };
+        if window.len() - *used >= count {
+            let start = *used;
+            *used += count;
+            return Ok(&window[start..start + count]);
+        }
+        // A read longer than what the connection has buffered goes through the connection,
+        // which hands out the buffered bytes first. Nothing of the window is used yet.
+        *window = &[];
         // The buffer grows a block at a time, so a corrupt length runs into the end of the
         // input instead of allocating it all at once.
         const BLOCK: usize = 1 << 20;
@@ -145,13 +183,40 @@ impl Reader<'_> {
                 *position += byte.is_some() as usize;
                 Ok(byte)
             }
-            Input::Connection { con, .. } => {
+            Input::Connection { .. } => {
+                self.settle()?;
+                let Input::Connection { con, .. } = &self.input else {
+                    return Ok(None);
+                };
                 let mut byte = [0u8];
                 // SAFETY: the connection stays open while the reader runs.
                 let count = unsafe { crate::connections::read_all(*con, &mut byte)? };
                 Ok((count == 1).then_some(byte[0]))
             }
         }
+    }
+
+    fn window_holds(&self, count: usize) -> bool {
+        match &self.input {
+            Input::Connection { window, used, .. } => window.len() - used >= count,
+            Input::Slice { .. } => false,
+        }
+    }
+
+    /// Moves the connection past the bytes taken from its window and drops the window, so the
+    /// connection's position is exactly after what the reader has read.
+    fn settle(&mut self) -> R<()> {
+        if let Input::Connection {
+            con, window, used, ..
+        } = &mut self.input
+            && !window.is_empty()
+        {
+            let count = std::mem::take(used);
+            *window = &[];
+            // SAFETY: the connection stays open while the reader runs.
+            unsafe { crate::connections::consume(*con, count)? };
+        }
+        Ok(())
     }
 
     /// The next whitespace-separated word of an ASCII stream, consuming the whitespace that
@@ -375,6 +440,8 @@ impl Reader<'_> {
                 let value = if self.hook == nil() {
                     return Err(error("no restore method available"));
                 } else {
+                    // The hook may read from the same connection.
+                    self.settle()?;
                     eval::apply(
                         nil(),
                         self.hook,
@@ -916,6 +983,8 @@ unsafe fn connection_reader(con: Rconnection, hook: Sexp) -> R<Reader<'static>> 
         input: Input::Connection {
             con,
             buffer: Vec::new(),
+            window: &[],
+            used: 0,
         },
         format: Format::Xdr,
         references: Vec::new(),
@@ -926,6 +995,7 @@ unsafe fn connection_reader(con: Rconnection, hook: Sexp) -> R<Reader<'static>> 
     if start == b"\nA" {
         start = vec![b'A', reader.next_byte()?.unwrap_or(0)];
     }
+    reader.settle()?;
     reader.format = stream_format(Some(&start)).ok_or_else(|| error("unknown input format"))?;
     // A text-mode connection may translate bytes, so only the ASCII format survives it.
     // SAFETY: the caller holds `con` open for the whole read.
@@ -946,10 +1016,10 @@ fn stream_format(start: Option<&[u8]>) -> Option<Format> {
 
 /// The rest of a stream after its format line: the version header, then the object.
 unsafe fn read_object(mut reader: Reader<'_>) -> R<(Sexp, Option<Vec<Sexp>>)> {
-    read_header(&mut reader)?;
     let mark = crate::heap().handle_mark();
-    let result = reader.item();
+    let result = read_header(&mut reader).and_then(|_| reader.item());
     crate::heap().release_handles(mark);
+    reader.settle()?;
     let value = result?;
     crate::heap().root(value);
     Ok((value, reader.closures))
@@ -1270,8 +1340,9 @@ unsafe fn do_unserialize_from_conn(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_serialize_info_from_conn(call: &Call<'_>) -> R<Sexp> {
     let (format, header) = crate::connections::with_binary_input(call.arg(0), |con| {
         let mut reader = connection_reader(con, nil())?;
-        let header = read_header(&mut reader)?;
-        Ok((reader.format, header))
+        let header = read_header(&mut reader);
+        reader.settle()?;
+        Ok((reader.format, header?))
     })?;
     let release = |packed: i32| {
         format!(
