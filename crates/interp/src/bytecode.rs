@@ -3078,11 +3078,13 @@ impl Compiler {
                         && !self.frame_may_bind(index.car())
                         && self.side_effect_free_index(*object, target, depth + 1);
                 }
-                if arguments.iter().any(|(tag, _)| *tag != nil()) || self.frame_may_bind(index.car())
+                if arguments.iter().any(|(tag, _)| *tag != nil())
+                    || self.frame_may_bind(index.car())
                 {
                     return false;
                 }
-                let operand = |argument: Sexp| self.side_effect_free_index(argument, target, depth + 1);
+                let operand =
+                    |argument: Sexp| self.side_effect_free_index(argument, target, depth + 1);
                 match (&*operator, arguments.as_slice()) {
                     ("<-" | "=", [(_, variable), (_, value)]) => {
                         variable.kind() == SexpType::Symbol
@@ -6962,7 +6964,10 @@ unsafe fn slot_special_call(
             }
             // `name <<- value` assigns from the enclosure outwards, so only the value reads the
             // frame.
-            "<<-" if argument.kind() == SexpType::Symbol && eval::dot_dot_index(argument).is_none() => {
+            "<<-"
+                if argument.kind() == SexpType::Symbol
+                    && eval::dot_dot_index(argument).is_none() =>
+            {
                 let Some(value) = slot_operand(state, rest.car())? else {
                     return Ok(None);
                 };
@@ -7191,7 +7196,8 @@ unsafe fn slot_use_method(
     };
     // Through R 4.3 the method sees the generic's locals, which only an environment can show.
     let names = state.constants.element(SLOTS).element(1);
-    let locals = (length(formals)..length(names)).any(|index| *state.header.add(1 + index) != unbound());
+    let locals =
+        (length(formals)..length(names)).any(|index| *state.header.add(1 + index) != unbound());
     if locals && !crate::system::r_at_least(4, 4) {
         return Ok(None);
     }
@@ -7349,8 +7355,7 @@ unsafe fn assign_slot_element(
             | SexpType::List
             | SexpType::Expression
     );
-    if !replaceable || target.is_object() || (kind == ElementKind::Dollar && length(index) != 1)
-    {
+    if !replaceable || target.is_object() || (kind == ElementKind::Dollar && length(index) != 1) {
         return Ok(false);
     }
     moves::modifying(target)?;
@@ -8229,12 +8234,19 @@ unsafe fn fused_pass(
         }
         let slot = leaf[2] as usize;
         let hint = &mut *cache.hints.add(slot);
-        let local_value = if env == nil() { local_slot(constant) } else { None };
+        let local_value = if env == nil() {
+            local_slot(constant)
+        } else {
+            None
+        };
         let (value, local) = match local_value {
             Some(value) => (value, true),
             None => {
-                let local_cell =
-                    if env == nil() { None } else { heap.frame_cell_hinted(env, constant, hint) };
+                let local_cell = if env == nil() {
+                    None
+                } else {
+                    heap.frame_cell_hinted(env, constant, hint)
+                };
                 let (cell, local) = match local_cell {
                     Some(cell) => (cell, true),
                     None => match outside_function_frames(constant, enclosure, hint) {
@@ -9082,9 +9094,10 @@ unsafe fn replace_variable(
                 item = item.cdr();
             }
             let interpreter = interp();
-            let outer = interpreter
-                .assignment_call
-                .replace((setter_call, whole, interpreter.frames.len()));
+            let outer =
+                interpreter
+                    .assignment_call
+                    .replace((setter_call, whole, interpreter.frames.len()));
             let result = eval::call_builtin(definition, setter_call, function, &arguments, env);
             interp().assignment_call = outer;
             result
@@ -9521,8 +9534,17 @@ unsafe fn lookup_function_missed(
     call: Sexp,
 ) -> R<Sexp> {
     activity::count(Counter::LookupMisses);
+    // The frames between `env` and `enclosure` do not bind `symbol`, so the cell `resolve`
+    // finds, which holds a function (forced, if it was a promise), is the answer.
     if let Some(cell) = resolve(symbol, enclosure, true)? {
         fill_cache(symbol, enclosure, cell, cache, slot);
+        let mut value = cell.cdr();
+        if value.kind() == SexpType::Promise {
+            value = value.car();
+        }
+        if values::is_function(value) {
+            return Ok(value);
+        }
     }
     eval::find_called_fun(symbol, env, call)
 }
@@ -9655,6 +9677,7 @@ unsafe fn cached_cell(
 
 unsafe fn fill_cache(symbol: Sexp, enclosure: Sexp, cell: Sexp, cache: LookupCache, slot: usize) {
     let heap = crate::heap();
+    heap.observe_environment(enclosure);
     heap.set_element(cache.caches, slot * 2, enclosure);
     heap.set_element(cache.caches, slot * 2 + 1, cell);
     *cache.epochs.add(slot) = heap.lookup_stamp(symbol);

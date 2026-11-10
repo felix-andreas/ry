@@ -2164,6 +2164,24 @@ impl Heap {
         Ok(())
     }
 
+    /// Binds a fresh function frame's locals, none of which `env` binds yet, past its formals:
+    /// [`Heap::define_unbound`] for each, without probing the frame or checking for a
+    /// collection per cell.
+    pub unsafe fn define_locals_uncollected(
+        &mut self,
+        env: Sexp,
+        bindings: &[Formal],
+    ) -> HeapResult<()> {
+        self.define_formals_uncollected(env, bindings)?;
+        for binding in bindings {
+            if binding.symbol.has_gp(gp::WATCHED) {
+                self.binding_epoch += 1;
+                bump_symbol_epoch(binding.symbol);
+            }
+        }
+        Ok(())
+    }
+
     pub unsafe fn set_binding_value(&mut self, cell: Sexp, value: Sexp) -> HeapResult<()> {
         if cell.has_gp(gp::BINDING_LOCKED) {
             return Err(HeapError::LockedBinding {
@@ -2491,6 +2509,14 @@ impl Heap {
             }
         }
         true
+    }
+
+    /// Marks `env` as the start of a cached lookup, so that replacing its enclosure moves the
+    /// stamps of what the lookup could have found (see [`Heap::set_enclosure`]). Every cache
+    /// keyed by a starting environment calls this when it fills, unless a closure or another
+    /// environment already names that environment as its own environment or enclosure.
+    pub unsafe fn observe_environment(&self, env: Sexp) {
+        mark_enclosing(env);
     }
 
     /// A stamp for lookups of `symbol` through environments other than function frames: it
@@ -4631,7 +4657,9 @@ fn process_times() -> (Duration, Duration) {
     (duration(user), duration(kernel))
 }
 
-/// Marks `env` as an environment cached lookups may walk through ([`gp::ENCLOSING`]).
+/// Marks `env` as an environment cached lookups may walk through ([`gp::ENCLOSING`]). A cache
+/// keyed by the environment a lookup started from must mark it too, because nothing else need
+/// name that environment: see [`Heap::observe_environment`].
 #[inline(always)]
 unsafe fn mark_enclosing(env: Sexp) {
     if env.kind() == SexpType::Environment {

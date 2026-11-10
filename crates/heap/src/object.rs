@@ -330,7 +330,8 @@ pub mod gp {
     /// through one.
     pub const FUNCTION_FRAME: u16 = 1 << 8;
     /// An environment that some closure or other environment names as its
-    /// environment or enclosure, so a cached lookup may have walked through it. Replacing the
+    /// environment or enclosure, or that a cached lookup started from, so a cached lookup may
+    /// have walked through it. Replacing the
     /// enclosure of an environment without the bit, such as `parent.env(e) <- p` right after
     /// `e <- new.env()`, cannot change what any cached lookup found (see
     /// `Heap::set_enclosure`).
