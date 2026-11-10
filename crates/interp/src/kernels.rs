@@ -15,14 +15,15 @@
 
 use {
     crate::{
-        arith::{self, Math, Op},
+        arith::{self, Math, Op, complex_multiply},
         bytecode::Arith,
         conditions,
         long_double::{self, LongDouble},
+        system::r_at_least,
         unwind::R,
         values,
     },
-    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real},
+    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, is_na_real},
     std::cmp::Ordering,
 };
 
@@ -33,6 +34,15 @@ pub enum Reals<'a> {
     Doubles(&'a [f64]),
     Integers(&'a [i32]),
     Scalar(f64),
+}
+
+/// A read-only operand of complex arithmetic: complex numbers, or a numeric operand whose
+/// elements become complex numbers as R coerces them (`NA` to `NA` in both parts, any other
+/// value `x` to `x+0i`).
+#[derive(Clone, Copy)]
+pub enum Complexes<'a> {
+    Values(&'a [Rcomplex]),
+    Numbers(Reals<'a>),
 }
 
 /// A read-only integer or logical operand.
@@ -81,6 +91,9 @@ pub unsafe fn binary(
     right: Sexp,
     destination: Option<Sexp>,
 ) -> R<Option<Sexp>> {
+    if left.kind() == SexpType::Complex || right.kind() == SexpType::Complex {
+        return complex_binary(operator, left, right, destination);
+    }
     if !plain(left) || !plain(right) {
         return Ok(None);
     }
@@ -185,6 +198,53 @@ pub unsafe fn binary(
     Ok(Some(result))
 }
 
+/// [`binary`] where an operand is complex: `+`, `-`, `*`, `/` and `^` give a complex result,
+/// and everything else (a comparison, `%%`, `%/%`, an operand with attributes) is left to the
+/// builtin.
+unsafe fn complex_binary(
+    operator: Arith,
+    left: Sexp,
+    right: Sexp,
+    destination: Option<Sexp>,
+) -> R<Option<Sexp>> {
+    let operand = |value: Sexp| match value.kind() {
+        SexpType::Complex => bare(value),
+        SexpType::Real => plain(value),
+        _ => plain(value) && r_at_least(4, 4),
+    };
+    if comparison_of(operator).is_some()
+        || matches!(operator, Arith::Modulo | Arith::IntegerDivide)
+        || !operand(left)
+        || !operand(right)
+    {
+        return Ok(None);
+    }
+    let (left_length, right_length) = (left.length() as usize, right.length() as usize);
+    let count = if left_length == right_length || right_length == 1 {
+        left_length
+    } else if left_length == 1 {
+        right_length
+    } else {
+        return Ok(None);
+    };
+    if count == 0 {
+        return Ok(None);
+    }
+    let result = match destination {
+        Some(destination) if fits(destination, SexpType::Complex, count) => destination,
+        _ => values::alloc_uninit(SexpType::Complex, count)?,
+    };
+    let operand = |value: Sexp| (value != result).then(|| complexes(value));
+    // `%%` and `%/%` were sent to the builtin above.
+    complex_arithmetic(
+        arithmetic_of(operator),
+        operand(left),
+        operand(right),
+        values::complexes_mut(result),
+    );
+    Ok(Some(result))
+}
+
 /// A function of the `Math` group on a plain logical, integer or double vector, or `None` when
 /// it needs the builtin (see [`binary`]). `abs` keeps integers integer, as GNU R does, and the
 /// other functions give doubles. `destination` follows [`binary`]'s rule, so `x <- exp(x)`
@@ -269,9 +329,20 @@ pub unsafe fn plain(value: Sexp) -> bool {
     matches!(
         value.kind(),
         SexpType::Logical | SexpType::Integer | SexpType::Real
-    ) && value.attrib() == values::nil()
-        && !value.is_altrep()
-        && !value.is_array()
+    ) && bare(value)
+}
+
+/// Whether a vector has no attributes and is neither ALTREP nor an Array.
+unsafe fn bare(value: Sexp) -> bool {
+    value.attrib() == values::nil() && !value.is_altrep() && !value.is_array()
+}
+
+/// A logical, integer, double or complex vector's elements as a [`Complexes`] operand.
+pub unsafe fn complexes<'a>(value: Sexp) -> Complexes<'a> {
+    match value.kind() {
+        SexpType::Complex => Complexes::Values(values::complexes(value)),
+        _ => Complexes::Numbers(reals(value)),
+    }
 }
 
 /// A plain vector's elements as a [`Reals`] operand.
@@ -817,6 +888,41 @@ macro_rules! real_reader {
     };
 }
 
+/// Binds `$reader` to a [`Reader`] of complex numbers for an `Option<Complexes>` operand and
+/// evaluates `$body` with it.
+macro_rules! complex_reader {
+    ($operand:expr, |$reader:ident| $body:expr) => {
+        match $operand {
+            None => {
+                let $reader = Own;
+                $body
+            }
+            Some(Complexes::Values([value])) => {
+                let $reader = Constant(*value);
+                $body
+            }
+            Some(Complexes::Values(values)) => {
+                let $reader = Slice(values);
+                $body
+            }
+            Some(Complexes::Numbers(operand)) => match real_input(operand) {
+                Reals::Doubles(values) => {
+                    let $reader = Lifted(Slice(values));
+                    $body
+                }
+                Reals::Scalar(value) => {
+                    let $reader = Constant(lift(value));
+                    $body
+                }
+                Reals::Integers(values) => {
+                    let $reader = Lifted(Widened(values));
+                    $body
+                }
+            },
+        }
+    };
+}
+
 /// [`real_reader`] for an operand that cannot be the output, whose type differs.
 macro_rules! input_reader {
     ($operand:expr, |$reader:ident| $body:expr) => {
@@ -866,6 +972,97 @@ pub fn real_arithmetic(
     output: &mut [f64],
 ) {
     real_operation(op, left, right, output);
+}
+
+/// `left op right` element by element into `output` for `+`, `-`, `*`, `/` and `^`, as complex
+/// numbers. An operand that is `None` is the complex vector `output` holds on entry. Returns
+/// `false`, writing nothing, for `%%` and `%/%`, which complex numbers lack.
+///
+/// `*` is C99's complex multiplication, as in GNU R: the plain formula, unless both of its
+/// parts are NaN, where an infinite operand recovers an infinite product.
+pub fn complex_arithmetic(
+    op: Op,
+    left: Option<Complexes<'_>>,
+    right: Option<Complexes<'_>>,
+    output: &mut [Rcomplex],
+) -> bool {
+    match op {
+        Op::Add => complex_reader!(left, |x| complex_reader!(right, |y| map2(
+            x,
+            y,
+            output,
+            |a, b| Rcomplex {
+                r: arith::add(a.r, b.r),
+                i: arith::add(a.i, b.i),
+            }
+        ))),
+        Op::Subtract => complex_reader!(left, |x| complex_reader!(right, |y| map2(
+            x,
+            y,
+            output,
+            |a, b| Rcomplex {
+                r: arith::subtract(a.r, b.r),
+                i: arith::subtract(a.i, b.i),
+            }
+        ))),
+        Op::Multiply => complex_reader!(left, |x| complex_reader!(right, |y| map2(
+            x,
+            y,
+            output,
+            complex_multiply
+        ))),
+        Op::Power if square_exponent(&right) => {
+            let two = Constant(Rcomplex { r: 2.0, i: 0.0 });
+            complex_reader!(left, |x| map2(x, two, output, |a, _| complex_square(a)))
+        }
+        // Both call out per element, so one loop over any operands serves them.
+        Op::Divide => complex_any(left, right, output, arith::complex_divide),
+        Op::Power => complex_any(left, right, output, arith::complex_power),
+        Op::Modulo | Op::IntegerDivide => return false,
+    }
+    true
+}
+
+/// Whether the exponent is the single value 2 + 0i, as `Z^2` writes it.
+fn square_exponent(operand: &Option<Complexes<'_>>) -> bool {
+    let two = |value: Rcomplex| value.r == 2.0 && value.i == 0.0;
+    match operand {
+        Some(Complexes::Values([value])) => two(*value),
+        Some(Complexes::Numbers(operand)) => {
+            matches!(real_input(*operand), Reals::Scalar(value) if value == 2.0)
+        }
+        _ => false,
+    }
+}
+
+/// `z^2` exactly as `arith::complex_power` computes it: `1 * (z * z)`, the products of R's
+/// integer-power loop.
+#[inline(always)]
+fn complex_square(z: Rcomplex) -> Rcomplex {
+    complex_multiply(Rcomplex { r: 1.0, i: 0.0 }, complex_multiply(z, z))
+}
+
+/// `function` of each pair of complex operand elements into `output`, reading each element
+/// through a match on the operand's form.
+fn complex_any(
+    left: Option<Complexes<'_>>,
+    right: Option<Complexes<'_>>,
+    output: &mut [Rcomplex],
+    function: fn(Rcomplex, Rcomplex) -> Rcomplex,
+) {
+    let read = |operand: Option<Complexes<'_>>, index: usize, own: Rcomplex| match operand {
+        None => own,
+        Some(Complexes::Values(values)) => values[index % values.len()],
+        Some(Complexes::Numbers(Reals::Doubles(values))) => lift(values[index % values.len()]),
+        Some(Complexes::Numbers(Reals::Integers(values))) => {
+            lift(widen(values[index % values.len()]))
+        }
+        Some(Complexes::Numbers(Reals::Scalar(value))) => lift(value),
+    };
+    for (index, element) in output.iter_mut().enumerate() {
+        let own = *element;
+        *element = function(read(left, index, own), read(right, index, own));
+    }
 }
 
 /// `left op right` on integers for `+`, `-`, `*`, `%%` and `%/%`, `NA` where either side is
@@ -1293,6 +1490,42 @@ impl<O> Reader<O> for Own {
     fn read(self, _index: usize, own: O) -> O {
         own
     }
+}
+
+/// A double reader whose elements become complex numbers.
+#[derive(Clone, Copy)]
+struct Lifted<T>(T);
+
+impl<T: Reader<Rcomplex, Item = f64>> Reader<Rcomplex> for Lifted<T> {
+    type Item = Rcomplex;
+
+    #[inline(always)]
+    fn length(self) -> Option<usize> {
+        self.0.length()
+    }
+
+    #[inline(always)]
+    fn skip(self, start: usize) -> Self {
+        Lifted(self.0.skip(start))
+    }
+
+    #[inline(always)]
+    fn cut(self, count: usize) -> Self {
+        Lifted(self.0.cut(count))
+    }
+
+    #[inline(always)]
+    fn read(self, index: usize, own: Rcomplex) -> Rcomplex {
+        lift(self.0.read(index, own))
+    }
+}
+
+/// A double as R coerces it to complex, NA included: the real part with a zero imaginary
+/// part. An integer NA lifts the same way since R 4.4.0; before it, `complex_binary` leaves
+/// integer operands to `arith`, which coerces them first.
+#[inline(always)]
+fn lift(value: f64) -> Rcomplex {
+    Rcomplex { r: value, i: 0.0 }
 }
 
 /// A [`Reals`] operand with a one-element vector read as a scalar, which is the common

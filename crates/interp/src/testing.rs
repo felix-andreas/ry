@@ -129,6 +129,10 @@ pub fn check_fused_agreement(entropy: &mut impl Entropy) {
         "c(2, -1)",
         "5",
         "-2L",
+        // Builtins only: the interpreter here has no base R closures such as `complex()`.
+        "rep(c(1.5-2i, NA, NaN+1i, Inf+0i, 0i, -1e308+1e308i), 40)",
+        "rep(c(0.5+0.5i, -1i, 2+0i), 80)",
+        "2+0i",
     ];
     let a = operands[entropy.below(operands.len())];
     let b = operands[entropy.below(operands.len())];
@@ -227,7 +231,12 @@ unsafe fn outcomes(body: &str, a: &str, b: &str) -> (String, Vec<String>) {
         // The direct run assigns its locals globally, which the closure would then read, so
         // every run starts from the same globals.
         let reset = format!("a <- {a}\nb <- {b}\ns <- 7L\nk <- 0L\ni <- 0L");
-        run(&reset);
+        // A reset that errors part way would leave the previous case's globals behind.
+        assert_ne!(
+            run(&reset),
+            "error",
+            "the operands do not evaluate: {reset}"
+        );
         let direct = run(&format!("local_value <- {{ {body} }}\nlocal_value"));
         run(&format!("f <- function(a, b) {{ {body} }}"));
         // `caller()` hands out its caller's environment, which makes a slot frame reify.
