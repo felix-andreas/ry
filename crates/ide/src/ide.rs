@@ -4787,7 +4787,7 @@ fn string_subscript_completion(
 }
 
 /// The columns a string names when it is a column argument of a DataFrame verb, such as
-/// `DataFrame.select(sales, "price")`, or the name in `DataFrame.col("price")` inside one. The verb's first
+/// `DataFrame.select(sales, "price")`, or the name in `Expr.col("price")` inside one. The verb's first
 /// argument is the frame whose columns are in scope.
 fn dataframe_columns_for<'db>(
     db: &'db dyn Db,
@@ -4806,7 +4806,7 @@ fn dataframe_columns_for<'db>(
                 })
             };
             match &hir.kind(*callee) {
-                ExpressionKind::NameRef(name) if name.as_str() == "DataFrame.col" => hir[arguments]
+                ExpressionKind::NameRef(name) if name.as_str() == "Expr.col" => hir[arguments]
                     .first()
                     .is_some_and(|argument| in_arguments(std::slice::from_ref(argument))),
                 ExpressionKind::NameRef(name) if is_dataframe_verb(name) => {

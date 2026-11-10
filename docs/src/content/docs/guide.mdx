@@ -619,9 +619,9 @@ checker follows every column through every step:
 ```r
 sales <- DataFrame(region = ["eu", "us", "eu"], units = [3L, 5L, 2L], price = [1.5, 2, 3])
 sales |>
-  DataFrame.with_columns(revenue = DataFrame.col("units") * DataFrame.col("price")) |>
+  DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price")) |>
   DataFrame.group_by("region") |>
-  GroupBy.agg(total = DataFrame.col("revenu") |> Expr.sum())
+  GroupBy.agg(total = Expr.col("revenu") |> Expr.sum())
 ```
 
 ```text ry check typing

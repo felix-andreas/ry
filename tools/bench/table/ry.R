@@ -46,8 +46,8 @@ time_question <- function(question, expr) {
 
 if (part != "joins") {
   x <- read("groupby.csv")
-  sum_of <- function(name) DataFrame.col(name) |> Expr.sum()
-  mean_of <- function(name) DataFrame.col(name) |> Expr.mean()
+  sum_of <- function(name) Expr.col(name) |> Expr.sum()
+  mean_of <- function(name) Expr.col(name) |> Expr.mean()
   by <- function(...) DataFrame.group_by(x, ...)
   time_question("groupby q1", by("id1") |> GroupBy.agg(sum_of("v1")))
   time_question("groupby q2", by("id1", "id2") |> GroupBy.agg(sum_of("v1")))
@@ -55,18 +55,18 @@ if (part != "joins") {
   time_question("groupby q4", by("id4") |> GroupBy.agg(mean_of("v1"), mean_of("v2"), mean_of("v3")))
   time_question("groupby q5", by("id6") |> GroupBy.agg(sum_of("v1"), sum_of("v2"), sum_of("v3")))
   time_question("groupby q6", by("id4", "id5") |> GroupBy.agg(
-    median_v3 = DataFrame.col("v3") |> Expr.median(),
-    sd_v3 = DataFrame.col("v3") |> Expr.std()
+    median_v3 = Expr.col("v3") |> Expr.median(),
+    sd_v3 = Expr.col("v3") |> Expr.std()
   ))
   time_question("groupby q7", by("id3") |> GroupBy.agg(
-    range_v1_v2 = (DataFrame.col("v1") |> Expr.max()) - (DataFrame.col("v2") |> Expr.min())
+    range_v1_v2 = (Expr.col("v1") |> Expr.max()) - (Expr.col("v2") |> Expr.min())
   ))
   time_question("groupby q8", DataFrame.lazy(x) |>
     LazyFrame.sort("v3", descending = TRUE) |>
     LazyFrame.group_by("id6") |>
-    LazyGroupBy.agg(largest2_v3 = DataFrame.col("v3") |> Expr.head(2L)) |>
+    LazyGroupBy.agg(largest2_v3 = Expr.col("v3") |> Expr.head(2L)) |>
     LazyFrame.collect())
-  time_question("groupby q9", by("id2", "id4") |> GroupBy.agg(r2 = Expr.cor(DataFrame.col("v1"), DataFrame.col("v2"))^2))
+  time_question("groupby q9", by("id2", "id4") |> GroupBy.agg(r2 = Expr.cor(Expr.col("v1"), Expr.col("v2"))^2))
   time_question("groupby q10", by("id1", "id2", "id3", "id4", "id5", "id6") |> GroupBy.agg(
     sum_of("v3"),
     count = Expr.len()

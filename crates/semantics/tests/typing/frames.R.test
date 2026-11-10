@@ -1119,28 +1119,28 @@ DataFrame{g: factor, v: double[]}
 #==== dataframe_verbs
 #---- select_computes_the_named_columns
 sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L), price = c(1.5, 2))
-picked <- DataFrame.select(sales, "region", revenue = DataFrame.col("units") * DataFrame.col("price"))
+picked <- DataFrame.select(sales, "region", revenue = Expr.col("units") * Expr.col("price"))
 #++++
 sales: DataFrame{region: character[], units: integer[], price: double[]}
 picked: DataFrame{region: character[], revenue: double[]}
 
 #---- unaliased_expressions_take_the_first_column_read
 sales <- DataFrame(units = c(3L, 5L), price = c(1.5, 2))
-picked <- sales |> DataFrame.select(DataFrame.col("price") * 2, DataFrame.col("units") > 1L, Expr.len())
+picked <- sales |> DataFrame.select(Expr.col("price") * 2, Expr.col("units") > 1L, Expr.len())
 #++++
 sales: DataFrame{units: integer[], price: double[]}
 picked: DataFrame{price: double[], units: logical[], len: integer[]}
 
 #---- alias_renames_an_expression
 sales <- DataFrame(units = c(3L, 5L), price = c(1.5, 2))
-picked <- sales |> DataFrame.select(DataFrame.col("price") |> Expr.alias("cost"))
+picked <- sales |> DataFrame.select(Expr.col("price") |> Expr.alias("cost"))
 #++++
 sales: DataFrame{units: integer[], price: double[]}
 picked: DataFrame{cost: double[]}
 
 #---- with_columns_replaces_or_appends
 sales <- DataFrame(units = c(3L, 5L), price = c(1.5, 2))
-wider <- sales |> DataFrame.with_columns(units = DataFrame.col("units") * 2.5, total = DataFrame.col("units") * DataFrame.col("price"))
+wider <- sales |> DataFrame.with_columns(units = Expr.col("units") * 2.5, total = Expr.col("units") * Expr.col("price"))
 #++++
 sales: DataFrame{units: integer[], price: double[]}
 wider: DataFrame{units: double[], price: double[], total: double[]}
@@ -1148,7 +1148,7 @@ wider: DataFrame{units: double[], price: double[], total: double[]}
 #---- filter_sort_and_head_keep_the_columns
 sales <- DataFrame(units = c(3L, 5L), price = c(1.5, 2))
 top <- sales |>
-  DataFrame.filter(DataFrame.col("units") > 1L) |>
+  DataFrame.filter(Expr.col("units") > 1L) |>
   DataFrame.sort("price", descending = TRUE) |>
   DataFrame.head(1L)
 #++++
@@ -1158,7 +1158,7 @@ top: DataFrame{units: integer[], price: double[]}
 #---- group_by_and_agg_give_keys_then_aggregates
 sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L), price = c(1.5, 2))
 grouped <- DataFrame.group_by(sales, "region")
-totals <- grouped |> GroupBy.agg(DataFrame.col("units") |> Expr.sum(), avg = DataFrame.col("price") |> Expr.mean(), n = Expr.len())
+totals <- grouped |> GroupBy.agg(Expr.col("units") |> Expr.sum(), avg = Expr.col("price") |> Expr.mean(), n = Expr.len())
 #++++
 sales: DataFrame{region: character[], units: integer[], price: double[]}
 grouped: GroupBy{region: character[]; units: integer[], price: double[]}
@@ -1195,7 +1195,7 @@ joined: DataFrame{time: integer[], size: double[], price: double[]}
 
 #---- head_in_agg_keeps_up_to_n_rows_per_group
 x <- DataFrame(g = c("p", "q", "p"), v = c(3, 9, 7))
-top <- x |> DataFrame.group_by("g") |> GroupBy.agg(top2 = DataFrame.col("v") |> Expr.head(2L))
+top <- x |> DataFrame.group_by("g") |> GroupBy.agg(top2 = Expr.col("v") |> Expr.head(2L))
 #++++
 x: DataFrame{g: character[], v: double[]}
 top: DataFrame{g: character[], top2: double[]}
@@ -1205,7 +1205,7 @@ sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
 plan <- sales |>
   DataFrame.lazy() |>
   LazyFrame.group_by("region") |>
-  LazyGroupBy.agg(DataFrame.col("units") |> Expr.max())
+  LazyGroupBy.agg(Expr.col("units") |> Expr.max())
 result <- LazyFrame.collect(plan)
 #++++
 sales: DataFrame{region: character[], units: integer[]}
@@ -1214,7 +1214,7 @@ result: DataFrame{region: character[], units: integer[]}
 
 #---- an_expression_in_a_variable_leaves_the_columns_unknown
 sales <- DataFrame(units = c(3L, 5L))
-doubled <- DataFrame.col("units") * 2
+doubled <- Expr.col("units") * 2
 picked <- DataFrame.select(sales, doubled)
 #++++
 sales: DataFrame{units: integer[]}
@@ -1223,22 +1223,22 @@ picked: DataFrame
 
 #---- over_keeps_one_value_per_row
 sales <- DataFrame(region = c("eu", "us", "eu"), units = c(3L, 5L, 2L))
-shares <- sales |> DataFrame.with_columns(total = Expr.over(Expr.sum(DataFrame.col("units")), "region"))
+shares <- sales |> DataFrame.with_columns(total = Expr.over(Expr.sum(Expr.col("units")), "region"))
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 shares: DataFrame{region: character[], units: integer[], total: integer[]}
 
 #---- rank_gives_integer_positions
 sales <- DataFrame(region = c("eu", "us", "eu"), price = c(1.5, 2, 0.5))
-ranked <- sales |> DataFrame.with_columns(place = Expr.over(Expr.rank(DataFrame.col("price"), descending = TRUE), "region"))
+ranked <- sales |> DataFrame.with_columns(place = Expr.over(Expr.rank(Expr.col("price"), descending = TRUE), "region"))
 #++++
 sales: DataFrame{region: character[], price: double[]}
 ranked: DataFrame{region: character[], price: double[], place: integer[]}
 
 #---- date_columns_shift_by_days
 visits <- DataFrame(id = 1:2, day = as.Date("2024-01-01") + 0:1)
-later <- visits |> DataFrame.with_columns(due = DataFrame.col("day") + 28L, waited = DataFrame.col("day") - DataFrame.col("day"))
-recent <- visits |> DataFrame.filter(DataFrame.col("day") >= as.Date("2024-01-02"))
+later <- visits |> DataFrame.with_columns(due = Expr.col("day") + 28L, waited = Expr.col("day") - Expr.col("day"))
+recent <- visits |> DataFrame.filter(Expr.col("day") >= as.Date("2024-01-02"))
 #++++
 visits: DataFrame{id: integer[], day: Date}
 later: DataFrame{id: integer[], day: Date, due: Date, waited: integer[]}
@@ -1263,7 +1263,7 @@ wide: DataFrame
 #==== dataframe_verb_errors
 #---- a_misspelled_column_is_reported_at_its_string
 sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
-picked <- DataFrame.select(sales, "regoin", DataFrame.col("unit") * 2)
+picked <- DataFrame.select(sales, "regoin", Expr.col("unit") * 2)
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 picked: Unknown
@@ -1272,7 +1272,7 @@ picked: Unknown
 
 #---- agg_needs_an_aggregation
 sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
-totals <- sales |> DataFrame.group_by("region") |> GroupBy.agg(DataFrame.col("units"))
+totals <- sales |> DataFrame.group_by("region") |> GroupBy.agg(Expr.col("units"))
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 totals: Unknown
@@ -1300,11 +1300,11 @@ joined: Unknown
 
 #---- head_cannot_be_combined_inside_agg
 x <- DataFrame(g = c("p", "q", "p"), v = c(3, 9, 7))
-bad <- x |> DataFrame.group_by("g") |> GroupBy.agg(DataFrame.col("v") |> Expr.head(2L) + 1)
+bad <- x |> DataFrame.group_by("g") |> GroupBy.agg(Expr.col("v") |> Expr.head(2L) + 1)
 #++++
 x: DataFrame{g: character[], v: double[]}
 bad: Unknown
-104..133 error[type-mismatch] `Expr.head` gives several values of `v` per group, so `agg` accepts it only as a whole item. Compute the column first, as in `(DataFrame.col("v") + 1) |> Expr.head(2L)`
+104..133 error[type-mismatch] `Expr.head` gives several values of `v` per group, so `agg` accepts it only as a whole item. Compute the column first, as in `(Expr.col("v") + 1) |> Expr.head(2L)`
 
 #---- a_key_missing_from_both_sides_is_reported_once
 left <- DataFrame(id = 1:3)
@@ -1318,7 +1318,7 @@ joined: Unknown
 
 #---- an_over_key_must_exist
 sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
-shares <- sales |> DataFrame.with_columns(total = Expr.over(Expr.sum(DataFrame.col("units")), "regoin"))
+shares <- sales |> DataFrame.with_columns(total = Expr.over(Expr.sum(Expr.col("units")), "regoin"))
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 shares: Unknown
@@ -1326,7 +1326,7 @@ shares: Unknown
 
 #---- a_date_column_does_not_multiply
 visits <- DataFrame(day = as.Date("2024-01-01") + 0:1)
-twice <- visits |> DataFrame.with_columns(x = DataFrame.col("day") * 2)
+twice <- visits |> DataFrame.with_columns(x = Expr.col("day") * 2)
 #++++
 visits: DataFrame{day: Date}
 twice: Unknown
@@ -1335,8 +1335,8 @@ twice: Unknown
 #==== dataframe_expression_types
 #---- arithmetic_on_a_string_column_is_reported
 sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))
-wider <- sales |> DataFrame.with_columns(y = DataFrame.col("region") * 2)
-negated <- sales |> DataFrame.select(-DataFrame.col("region"))
+wider <- sales |> DataFrame.with_columns(y = Expr.col("region") * 2)
+negated <- sales |> DataFrame.select(-Expr.col("region"))
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 wider: Unknown
@@ -1346,7 +1346,7 @@ negated: Unknown
 
 #---- a_negated_string_column_is_reported_once
 sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))
-wider <- sales |> DataFrame.with_columns(y = -DataFrame.col("region") * 2)
+wider <- sales |> DataFrame.with_columns(y = -Expr.col("region") * 2)
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 wider: Unknown
@@ -1354,8 +1354,8 @@ wider: Unknown
 
 #---- a_number_compared_with_a_string_column_is_reported
 sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))
-kept <- sales |> DataFrame.filter(DataFrame.col("region") > 1L)
-same <- sales |> DataFrame.filter(DataFrame.col("units") == DataFrame.col("region"))
+kept <- sales |> DataFrame.filter(Expr.col("region") > 1L)
+same <- sales |> DataFrame.filter(Expr.col("units") == Expr.col("region"))
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 kept: Unknown
@@ -1365,8 +1365,8 @@ same: Unknown
 
 #---- a_numeric_aggregation_of_strings_is_reported
 sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))
-totals <- sales |> DataFrame.group_by("units") |> GroupBy.agg(DataFrame.col("region") |> Expr.sum(), m = DataFrame.col("region") |> Expr.mean())
-paired <- sales |> DataFrame.select(DataFrame.col("units") |> Expr.cor(DataFrame.col("region")))
+totals <- sales |> DataFrame.group_by("units") |> GroupBy.agg(Expr.col("region") |> Expr.sum(), m = Expr.col("region") |> Expr.mean())
+paired <- sales |> DataFrame.select(Expr.col("units") |> Expr.cor(Expr.col("region")))
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 totals: Unknown
@@ -1377,7 +1377,7 @@ paired: Unknown
 
 #---- a_string_literal_in_arithmetic_is_reported
 sales <- DataFrame(units = c(1L, 2L))
-wider <- sales |> DataFrame.with_columns(y = DataFrame.col("units") * "2")
+wider <- sales |> DataFrame.with_columns(y = Expr.col("units") * "2")
 #++++
 sales: DataFrame{units: integer[]}
 wider: Unknown
@@ -1385,8 +1385,8 @@ wider: Unknown
 
 #---- logical_operators_and_if_else_tests_check_their_operands
 sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L))
-both <- sales |> DataFrame.filter(DataFrame.col("units") > 1L & DataFrame.col("region"))
-labels <- sales |> DataFrame.select(Expr.if_else(DataFrame.col("units"), "big", "small"))
+both <- sales |> DataFrame.filter(Expr.col("units") > 1L & Expr.col("region"))
+labels <- sales |> DataFrame.select(Expr.if_else(Expr.col("units"), "big", "small"))
 #++++
 sales: DataFrame{region: character[], units: integer[]}
 both: Unknown
@@ -1396,7 +1396,7 @@ labels: Unknown
 
 #---- a_factor_column_compares_with_labels_but_takes_no_arithmetic
 f <- DataFrame(g = factor(c("a", "b")), v = c(1, 2))
-picked <- f |> DataFrame.select(DataFrame.col("g") == "a", shifted = DataFrame.col("g") + 1)
+picked <- f |> DataFrame.select(Expr.col("g") == "a", shifted = Expr.col("g") + 1)
 #++++
 f: DataFrame{g: factor, v: double[]}
 picked: Unknown
@@ -1405,13 +1405,13 @@ picked: Unknown
 #---- well_typed_expressions_are_silent
 sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L), price = c(1.5, 2), ok = c(TRUE, FALSE))
 picked <- sales |> DataFrame.select(
-  DataFrame.col("region") == "eu",
-  big = DataFrame.col("units") > 1L & DataFrame.col("ok"),
-  flag = !DataFrame.col("units"),
-  bumped = DataFrame.col("units") + TRUE,
-  label = Expr.if_else(DataFrame.col("ok"), "yes", "no")
+  Expr.col("region") == "eu",
+  big = Expr.col("units") > 1L & Expr.col("ok"),
+  flag = !Expr.col("units"),
+  bumped = Expr.col("units") + TRUE,
+  label = Expr.if_else(Expr.col("ok"), "yes", "no")
 )
-totals <- sales |> DataFrame.group_by("region") |> GroupBy.agg(DataFrame.col("ok") |> Expr.sum(), top = DataFrame.col("region") |> Expr.max())
+totals <- sales |> DataFrame.group_by("region") |> GroupBy.agg(Expr.col("ok") |> Expr.sum(), top = Expr.col("region") |> Expr.max())
 #++++
 sales: DataFrame{region: character[], units: integer[], price: double[], ok: logical[]}
 picked: DataFrame{region: logical[], big: logical[], flag: logical[], bumped: integer[], label: character[]}
@@ -1419,19 +1419,19 @@ totals: DataFrame{region: character[], ok: integer[], top: character[]}
 
 #---- result_columns_follow_the_expression_types
 sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L), price = c(1.5, 2))
-wider <- sales |> DataFrame.with_columns(y = DataFrame.col("units") * 2L, z = DataFrame.col("units") / 2L, big = DataFrame.col("price") > 1)
+wider <- sales |> DataFrame.with_columns(y = Expr.col("units") * 2L, z = Expr.col("units") / 2L, big = Expr.col("price") > 1)
 #++++
 sales: DataFrame{region: character[], units: integer[], price: double[]}
 wider: DataFrame{region: character[], units: integer[], price: double[], y: integer[], z: double[], big: logical[]}
 
 #---- a_frame_with_unknown_columns_is_silent
-doubled <- function(frame) frame |> DataFrame.with_columns(y = DataFrame.col("region") * 2)
+doubled <- function(frame) frame |> DataFrame.with_columns(y = Expr.col("region") * 2)
 #++++
 doubled: fn(frame: DataFrame) -> DataFrame
 
 #---- min_and_max_of_a_logical_column_are_integers
 flags <- DataFrame(g = c("a", "b"), ok = c(TRUE, FALSE))
-totals <- flags |> DataFrame.group_by("g") |> GroupBy.agg(lo = DataFrame.col("ok") |> Expr.min(), first = DataFrame.col("ok") |> Expr.first())
+totals <- flags |> DataFrame.group_by("g") |> GroupBy.agg(lo = Expr.col("ok") |> Expr.min(), first = Expr.col("ok") |> Expr.first())
 #++++
 flags: DataFrame{g: character[], ok: logical[]}
 totals: DataFrame{g: character[], lo: integer[], first: logical[]}

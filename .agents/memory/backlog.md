@@ -2601,10 +2601,10 @@ The end-to-end guard rests on the corpus suites.
   `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`, `drop`,
   `unpivot`, or `when/then/otherwise` chains beyond `Expr.if_else`. None of the db-benchmark questions needs them. `LazyFrame.scan_*`
   has no parquet predicate statistics use beyond what Polars' reader does.
-- **IDE:** rename of a column (across `DataFrame.col("x")` strings and `$x`) and goto-definition from a
+- **IDE:** rename of a column (across `Expr.col("x")` strings and `$x`) and goto-definition from a
   column string to the verb or constructor argument that created it are not implemented; hover and
   completion are.
-- **Checker:** an expression held in a variable (`e <- DataFrame.col("x") * 2`) leaves a verb's columns
+- **Checker:** an expression held in a variable (`e <- Expr.col("x") * 2`) leaves a verb's columns
   unknown and its operands unchecked, because the refinement reads argument syntax. Typing `Expr`
   with its column type (`Expr<double>`) would close it. The column-error wording says "the frame
   `x`" for every table kind. Operand checks cover arithmetic, logic, comparisons, `Expr.if_else`
@@ -2617,7 +2617,7 @@ The end-to-end guard rests on the corpus suites.
   vectors: at 1e7 rows this is most of the typed modules' gap in `make_events`, `fetch_prices`
   and `enrol` (`development/design/r-runtime.md`, "Real code: the benchmark modules"). Numeric
   columns could share R's buffers once the collector can pin them for a Polars buffer's life.
-- **R precedence trap:** `DataFrame.col("a") * 2 |> Expr.alias("b")` pipes only the `2`. A lint that
+- **R precedence trap:** `Expr.col("a") * 2 |> Expr.alias("b")` pipes only the `2`. A lint that
   recognizes a pipe into an `Expr.` function whose left side is a literal would catch it.
 
 - **Query features:** a `by` that needs R code, `:=` with `by` on the R path, and a join whose `j`
@@ -3621,7 +3621,7 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 - Completion at two characters is weakest on call heads (httr2 72%, purrr 76%): a package's own functions share long prefixes (`req_`, `resp_`, `oauth_flow_`), so two characters cannot pick among them. Measured and rejected: ranking by words a candidate shares with the enclosing function (helps at half the name, hurts at two characters) and spellings before calls. A signal beyond use counts (the types the call site expects) would be needed.
 - An installed package's `exportPattern` is read with the `regex` crate, which accepts most but not every POSIX extended regular expression R allows; a pattern it rejects exports nothing (logged).
-- Semantic tokens: `DataFrame.col("name")` strings are not colored as properties (columns read inside a `DataFrame` `[` query are).
+- Semantic tokens: `Expr.col("name")` strings are not colored as properties (columns read inside a `DataFrame` `[` query are).
 - Debugger: columns come from the srcref's tab-expanded column, so they are off on lines with
   tabs.
 - The console socket and everything on it (attach, `View()`, live hover and completion) is Unix

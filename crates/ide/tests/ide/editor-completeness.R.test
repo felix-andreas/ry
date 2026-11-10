@@ -31,7 +31,7 @@ hint @5: DataFrame{region: character[], units: integer[]}
 
 #---- df_col_completion
 sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
-x <- sales |> DataFrame.select(DataFrame.col("$0"))
+x <- sales |> DataFrame.select(Expr.col("$0"))
 #++++
 hover 97..99: character
 definition: none

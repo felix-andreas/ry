@@ -7,7 +7,6 @@ as.record
 as.tag
 as.tuple
 DataFrame
-DataFrame.col
 DataFrame.columns
 DataFrame.copy
 DataFrame.filter
@@ -31,6 +30,7 @@ DataFrame.with_columns
 DataFrame.write_csv
 DataFrame.write_parquet
 Expr.alias
+Expr.col
 Expr.cor
 Expr.count
 Expr.first
@@ -39,6 +39,7 @@ Expr.if_else
 Expr.is_null
 Expr.last
 Expr.len
+Expr.lit
 Expr.max
 Expr.mean
 Expr.median
@@ -65,7 +66,6 @@ LazyFrame.sort
 LazyFrame.tail
 LazyFrame.with_columns
 LazyGroupBy.agg
-lit
 DataFrame.pivot
 Expr.over
 Expr.rank

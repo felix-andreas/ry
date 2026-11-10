@@ -200,10 +200,10 @@ sales <- DataFrame(
   price = c(1.5, 2, 3, 0.5, 4)
 )
 sales |>
-  DataFrame.filter(DataFrame.col("units") > 1L) |>
-  DataFrame.with_columns(revenue = DataFrame.col("units") * DataFrame.col("price")) |>
+  DataFrame.filter(Expr.col("units") > 1L) |>
+  DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price")) |>
   DataFrame.group_by("region") |>
-  GroupBy.agg(DataFrame.col("revenue") |> Expr.sum(), orders = Expr.len()) |>
+  GroupBy.agg(Expr.col("revenue") |> Expr.sum(), orders = Expr.len()) |>
   DataFrame.sort("revenue", descending = TRUE)
 EOF
 

@@ -3193,7 +3193,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "`{column}` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`"
         ),
         TypeErrorKind::HeadInsideExpression { column } => format!(
-            "`Expr.head` gives several values of `{column}` per group, so `agg` accepts it only as a whole item. Compute the column first, as in `(DataFrame.col(\"{column}\") + 1) |> Expr.head(2L)`"
+            "`Expr.head` gives several values of `{column}` per group, so `agg` accepts it only as a whole item. Compute the column first, as in `(Expr.col(\"{column}\") + 1) |> Expr.head(2L)`"
         ),
         TypeErrorKind::ExpressionOperand {
             operation,
