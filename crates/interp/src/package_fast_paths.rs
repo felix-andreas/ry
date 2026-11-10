@@ -75,7 +75,7 @@ unsafe fn do_trace_back(call: &Call<'_>) -> R<Sexp> {
     };
     let depth = own + 1;
     let caller = sys_parent_number(1, Some(own)).max(0) as usize;
-    let Some(bottom) = argument(frame, "bottom")? else {
+    let Some(bottom) = argument(frame, symbols().bottom)? else {
         return decline();
     };
     let count = if bottom == nil() {
@@ -125,7 +125,7 @@ unsafe fn do_trace_back(call: &Call<'_>) -> R<Sexp> {
         contexts.push(context);
     }
 
-    let top = match argument(frame, "top")? {
+    let top = match argument(frame, symbols().top)? {
         Some(value) if value != nil() => value,
         _ => get_option("rlang_trace_top_env"),
     };
@@ -194,7 +194,7 @@ unsafe fn do_trace_back(call: &Call<'_>) -> R<Sexp> {
         values::integer_vector(&[NA_INTEGER, -(kept as i32)])?
     };
     values::set_attr(trace, symbols().row_names, row_names)?;
-    values::set_attr(trace, install("version")?, values::scalar_integer(2)?)?;
+    values::set_attr(trace, symbols().version, values::scalar_integer(2)?)?;
     let class = values::string_vector(&["rlang_trace", "rlib_trace", "tbl", "data.frame"])?;
     values::set_attr(trace, symbols().class, class)?;
     finish(frame, trace, true)
@@ -279,7 +279,7 @@ unsafe fn trace_context(call: Sexp, function: Sexp) -> R<Option<TraceContext>> {
         let Some(namespace) = string_of(rest.car()) else {
             return Ok(None);
         };
-        let scope = if head.car() == install("::")? {
+        let scope = if head.car() == symbols().double_colon {
             Scope::Exported
         } else {
             Scope::Internal
@@ -384,7 +384,7 @@ unsafe fn is_exported(namespace: Sexp, name: Sexp) -> R<bool> {
         if info.kind() != SexpType::Environment {
             return Ok(false);
         }
-        let exports = eval::find_var_in_frame(install("exports")?, info)?;
+        let exports = eval::find_var_in_frame(symbols().exports, info)?;
         if exports == values::unbound() {
             return Ok(false);
         }
@@ -456,7 +456,7 @@ unsafe fn zap_call(call: Sexp, namespace: Sexp, fresh: bool) -> R<Option<Sexp>> 
         values::shallow_duplicate(call)?
     };
     crate::heap().root(call);
-    if call.car() != install("function")? {
+    if call.car() != symbols().function {
         return Ok(zap_cells(call, namespace)?.then_some(call));
     }
     let formals_cell = call.cdr();
@@ -519,7 +519,7 @@ unsafe fn zap_one(value: Sexp, namespace: Sexp) -> R<Option<Sexp>> {
 /// `call_type_sum(x)` evaluated in rlang's namespace, as rlang's C code does.
 unsafe fn type_sum(value: Sexp, namespace: Sexp) -> R<Sexp> {
     let env = values::new_env(namespace)?;
-    let x = install("x")?;
+    let x = symbols().x;
     crate::heap().define(env, x, value)?;
     let call = values::lcons(install("call_type_sum")?, values::cons(x, nil())?)?;
     let result = eval::eval(call, env)?;

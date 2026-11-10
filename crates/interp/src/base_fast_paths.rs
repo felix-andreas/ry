@@ -88,13 +88,13 @@ pub(crate) unsafe fn install_prologue(
         return Ok(false);
     }
     let prologue = values::lcons(
-        install(".Internal")?,
+        symbols().dot_internal,
         values::cons(values::lcons(install(internal_name)?, nil())?, nil())?,
     )?;
     let mut body = crate::bytecode::closure_body(function);
     let mut already = false;
     if body.kind() == SexpType::Language
-        && body.car() == install("{")?
+        && body.car() == symbols().brace
         && values::pairlist_length(body.cdr()) == 2
         && crate::sort::identical(body.cdr().car(), prologue, &IdenticalFlags::default())
     {
@@ -112,7 +112,7 @@ pub(crate) unsafe fn install_prologue(
     }
     if !already {
         let block = values::lcons(
-            install("{")?,
+            symbols().brace,
             values::cons(prologue, values::cons(body, nil())?)?,
         )?;
         crate::heap().set_cdr(function, block);
@@ -574,8 +574,7 @@ pub(crate) unsafe fn finish(frame: Sexp, value: Sexp, visible: bool) -> R<Sexp> 
 
 /// The value of the formal `name` in `frame`, supplied or defaulted, forced as evaluating the
 /// name would; `None` when it has neither a value nor a default.
-pub(crate) unsafe fn argument(frame: Sexp, name: &str) -> R<Option<Sexp>> {
-    let symbol = install(name)?;
+pub(crate) unsafe fn argument(frame: Sexp, symbol: Sexp) -> R<Option<Sexp>> {
     match crate::heap().frame_cell(frame, symbol) {
         Some(cell) if cell.cdr() != missing_arg() => {}
         _ => return Ok(None),
@@ -588,16 +587,16 @@ pub(crate) unsafe fn argument(frame: Sexp, name: &str) -> R<Option<Sexp>> {
 /// Whether the formal `name` holds its own default, untouched: no value at all, or the default
 /// the call bound because the argument was left out. An argument the caller passed on from its
 /// own missing formal is not a default, because forcing it raises an error.
-unsafe fn is_default(frame: Sexp, name: &str) -> R<bool> {
-    let Some(cell) = crate::heap().frame_cell(frame, install(name)?) else {
+unsafe fn is_default(frame: Sexp, symbol: Sexp) -> R<bool> {
+    let Some(cell) = crate::heap().frame_cell(frame, symbol) else {
         return Ok(true);
     };
     Ok(cell.cdr() == missing_arg() || cell.has_gp(gp::BINDING_MISSING))
 }
 
 /// Whether the call supplied the formal `name`, as `missing(name)` is false.
-unsafe fn is_supplied(frame: Sexp, name: &str) -> R<bool> {
-    Ok(!eval::is_missing(install(name)?, frame)?)
+unsafe fn is_supplied(frame: Sexp, symbol: Sexp) -> R<bool> {
+    Ok(!eval::is_missing(symbol, frame)?)
 }
 
 /// The elements of the frame's `...`, unforced; `None` when one is an empty argument.
@@ -663,11 +662,11 @@ unsafe fn is_ascii(text: Sexp) -> bool {
 /// the caller's frame, as the R body does through `sys.function(sys.parent())`.
 unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env;
-    if !is_default(frame, "several.ok")? {
+    if !is_default(frame, symbols().several_ok)? {
         return decline();
     }
     // The R body evaluates a missing `choices` before it forces `arg`, and a supplied one after.
-    let defaulted = if is_supplied(frame, "choices")? {
+    let defaulted = if is_supplied(frame, symbols().choices)? {
         None
     } else {
         let Some(choices) = default_choices(frame)? else {
@@ -675,7 +674,7 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
         };
         Some(choices)
     };
-    let Some(arg) = argument(frame, "arg")? else {
+    let Some(arg) = argument(frame, symbols().arg)? else {
         return decline();
     };
     if arg.kind() != SexpType::String || arg.attrib() != nil() {
@@ -683,7 +682,7 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
     }
     let choices = match defaulted {
         Some(choices) => choices,
-        None => match argument(frame, "choices")? {
+        None => match argument(frame, symbols().choices)? {
             Some(choices) => choices,
             None => return decline(),
         },
@@ -733,7 +732,7 @@ unsafe fn do_match_arg(call: &Call<'_>) -> R<Sexp> {
 /// that default is a character constant or a `c()` of character constants. It binds `choices`
 /// in the frame as the R body does, so a declined fast path does not evaluate it a second time.
 unsafe fn default_choices(frame: Sexp) -> R<Option<Sexp>> {
-    let Some(cell) = crate::heap().frame_cell(frame, install("arg")?) else {
+    let Some(cell) = crate::heap().frame_cell(frame, symbols().arg) else {
         return Ok(None);
     };
     let promise = cell.cdr();
@@ -757,7 +756,7 @@ unsafe fn default_choices(frame: Sexp) -> R<Option<Sexp>> {
     let default = formal.car();
     let is_text = |value: Sexp| value.kind() == SexpType::String && value.attrib() == nil();
     let constant = is_text(default)
-        || (default.kind() == SexpType::Language && default.car() == install("c")? && {
+        || (default.kind() == SexpType::Language && default.car() == symbols().c && {
             let mut item = default.cdr();
             let mut all = true;
             while item.kind() == SexpType::Pairlist {
@@ -771,7 +770,7 @@ unsafe fn default_choices(frame: Sexp) -> R<Option<Sexp>> {
     }
     let choices = eval::eval(default, caller)?;
     crate::heap().root(choices);
-    eval::define(install("choices")?, choices, frame)?;
+    eval::define(symbols().choices, choices, frame)?;
     Ok(Some(choices))
 }
 
@@ -779,7 +778,7 @@ unsafe fn default_choices(frame: Sexp) -> R<Option<Sexp>> {
 /// to build the error from its call.
 unsafe fn do_stopifnot(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env;
-    if is_supplied(frame, "exprs")? || is_supplied(frame, "exprObject")? {
+    if is_supplied(frame, symbols().exprs)? || is_supplied(frame, symbols().expr_object)? {
         return decline();
     }
     let Some(items) = dots(frame)? else {
@@ -806,8 +805,8 @@ unsafe fn do_stopifnot(call: &Call<'_>) -> R<Sexp> {
 /// the same call, the same `substitute()` results and the same frame variables `init` and `i`.
 unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env;
-    let missing_init = !is_supplied(frame, "init")?;
-    let Some(x) = argument(frame, "x")? else {
+    let missing_init = !is_supplied(frame, symbols().init)?;
+    let Some(x) = argument(frame, symbols().x)? else {
         return decline();
     };
     // `is.vector(x) && !is.object(x)`, and `length(x)` cannot dispatch.
@@ -828,7 +827,7 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         return decline();
     }
     // `match.fun(f)` returns a function as it is.
-    let Some(function) = argument(frame, "f")? else {
+    let Some(function) = argument(frame, symbols().f)? else {
         return decline();
     };
     if !matches!(function.kind(), SexpType::Closure | SexpType::Builtin) {
@@ -838,15 +837,15 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
     // A flag that is not TRUE or FALSE stops the R body with an error before it reads the
     // other one, so the prologue declines before forcing it.
     let (right, accumulate) = if missing_init {
-        let Some(right) = flag(frame, "right")? else {
+        let Some(right) = flag(frame, symbols().right)? else {
             return decline();
         };
-        (right, flag(frame, "accumulate")?)
+        (right, flag(frame, symbols().accumulate)?)
     } else {
-        let Some(accumulate) = flag(frame, "accumulate")? else {
+        let Some(accumulate) = flag(frame, symbols().accumulate)? else {
             return decline();
         };
-        let Some(right) = flag(frame, "right")? else {
+        let Some(right) = flag(frame, symbols().right)? else {
             return decline();
         };
         (right, Some(accumulate))
@@ -856,27 +855,27 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
     };
     let symbols = symbols();
     let heap = crate::heap();
-    let init_symbol = install("init")?;
-    let i_symbol = install("i")?;
+    let init_symbol = symbols.init;
+    let i_symbol = symbols.i;
     eval::define(
-        install("mis")?,
+        symbols.mis,
         values::scalar_logical(missing_init as i32)?,
         frame,
     )?;
     eval::define(
-        install("len")?,
+        symbols.len,
         values::scalar_integer(count as i32)?,
         frame,
     )?;
-    eval::define(install("f")?, function, frame)?;
-    let element_call = values::call(symbols.bracket2, &[install("x")?, i_symbol])?;
+    eval::define(symbols.f, function, frame)?;
+    let element_call = values::call(symbols.bracket2, &[symbols.x, i_symbol])?;
     heap.root(element_call);
     let arguments = if right {
         [element_call, init_symbol]
     } else {
         [init_symbol, element_call]
     };
-    let inner_call = values::call(install("f")?, &arguments)?;
+    let inner_call = values::call(symbols.f, &arguments)?;
     heap.root(inner_call);
     let positions = if !missing_init {
         0..count
@@ -891,7 +890,7 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         heap.root(index);
         let value = crate::subset::subset2(x, &[index], Some(true), element_call)?;
         eval::define(init_symbol, value, frame)?;
-    } else if argument(frame, "init")?.is_none() {
+    } else if argument(frame, symbols.init)?.is_none() {
         return decline();
     }
     let step = |position: usize| -> R<()> {
@@ -935,8 +934,8 @@ unsafe fn only_names(value: Sexp) -> bool {
 }
 
 /// The formal `name` forced as `if (name)` reads it, when it is a single `TRUE` or `FALSE`.
-unsafe fn flag(frame: Sexp, name: &str) -> R<Option<bool>> {
-    let Some(value) = argument(frame, name)? else {
+unsafe fn flag(frame: Sexp, symbol: Sexp) -> R<Option<bool>> {
+    let Some(value) = argument(frame, symbol)? else {
         return Ok(None);
     };
     if value.kind() != SexpType::Logical || length(value) != 1 || value.attrib() != nil() {
@@ -951,13 +950,13 @@ unsafe fn flag(frame: Sexp, name: &str) -> R<Option<bool>> {
 /// `setdiff(x, y)` of plain vectors: `unique(x)` without names, less the elements `y` has.
 unsafe fn do_setdiff(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env;
-    let Some(x) = argument(frame, "x")? else {
+    let Some(x) = argument(frame, symbols().x)? else {
         return decline();
     };
     if x == nil() {
         return finish(frame, nil(), true);
     }
-    let Some(y) = argument(frame, "y")? else {
+    let Some(y) = argument(frame, symbols().y)? else {
         return decline();
     };
     if !is_plain_atomic(x) || !(y == nil() || is_plain_atomic(y)) {
@@ -1011,7 +1010,7 @@ fn sets_unchecked(name: &[u8]) -> bool {
 /// that is a character vector without `"factor"`.
 unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env;
-    let Some(data) = argument(frame, ".Data")? else {
+    let Some(data) = argument(frame, symbols().dot_data)? else {
         return decline();
     };
     if data == nil() {
@@ -1075,16 +1074,17 @@ unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
 /// `format` internal made unchanged.
 unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env;
-    for name in [
-        "justify",
-        "big.mark",
-        "big.interval",
-        "small.mark",
-        "small.interval",
-        "zero.print",
-        "drop0trailing",
+    let symbols = symbols();
+    for symbol in [
+        symbols.justify,
+        symbols.big_mark,
+        symbols.big_interval,
+        symbols.small_mark,
+        symbols.small_interval,
+        symbols.zero_print,
+        symbols.drop0trailing,
     ] {
-        if !is_default(frame, name)? {
+        if !is_default(frame, symbol)? {
             return decline();
         }
     }
@@ -1092,7 +1092,7 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
         Some(items) if items.is_empty() => {}
         _ => return decline(),
     }
-    let Some(x) = argument(frame, "x")? else {
+    let Some(x) = argument(frame, symbols.x)? else {
         return decline();
     };
     if !matches!(
@@ -1103,8 +1103,8 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
     }
     let mut args: SmallVec<[Sexp; 9]> = SmallVec::new();
     args.push(x);
-    for name in ["trim", "digits", "nsmall", "width"] {
-        let Some(value) = argument(frame, name)? else {
+    for symbol in [symbols.trim, symbols.digits, symbols.nsmall, symbols.width] {
+        let Some(value) = argument(frame, symbol)? else {
             return decline();
         };
         args.push(value);
@@ -1112,8 +1112,8 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
     let justify_none = values::scalar_integer(3)?;
     crate::heap().root(justify_none);
     args.push(justify_none);
-    for name in ["na.encode", "scientific", "decimal.mark"] {
-        let Some(value) = argument(frame, name)? else {
+    for symbol in [symbols.na_encode, symbols.scientific, symbols.decimal_mark] {
+        let Some(value) = argument(frame, symbol)? else {
             return decline();
         };
         args.push(value);

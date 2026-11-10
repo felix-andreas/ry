@@ -79,6 +79,7 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 
 ## Long-term
 
+- **Package functions that dominate a workload run natively behind hash-guarded prologues** (`crates/interp/src/package_fast_paths.rs`, installed from `registerS3methods()` on each namespace load). rlang's `trace_back` is the first: it was about a quarter of the testthat workload's instructions. A port must decline whatever its R body could observe that the port does not model, and an oracle case compares it with the R body on the same frame (`decisions.md`, "Package code that dominates a workload runs natively").
 - **Nightly releases are normal releases with `--latest=false`, never pre-releases.** The Zed extension (`editors/zed/src/lib.rs`) installs the newest pre-release, so a pre-release nightly would be served to Zed users, while a non-pre-release with `--latest=false` is invisible to it and leaves GitHub's "latest" alone. Contract: `development/releasing.md`, "Nightly builds".
 - ry is its own R home, so GNU R's defaults for `R_LIBS_USER`/`R_LIBS_SITE` would hide packages installed for GNU R. `read_renviron` in `crates/interp/src/session.rs` appends GNU R's older-minor user libraries and site libraries to each of those variables the user left unset, skipping any library that holds `base` (a GNU R `.Library` would shadow ry's base packages). Contract: `reference/cli.md`, "How ry finds R".
 
