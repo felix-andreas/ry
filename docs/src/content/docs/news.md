@@ -5,9 +5,9 @@ description: Release announcements and project news
 
 ## Unreleased
 
-### Collections that fit what the program keeps
+### Fewer futile collections
 
-The collector skips an intermediate collection when the last one showed it would free too little, and the nursery grows while a program keeps most of what it allocates and shrinks again when its objects die young. On the `records` program of the real-world benchmark, collection takes a third fewer instructions and the whole run 10% fewer, with 7 minor and 1 intermediate collection where there were 26 and 5; its peak memory rises from 111 MB to 141 MB (GNU R: 144 MB). `R_PreserveObject` marks the object's header, so releasing a call frame no longer looks the environment up in a hash table.
+When a minor collection leaves the heap full, the collector predicts from the last escalation how much an intermediate collection would free, and goes straight to a major one when that is too little. On the `records` program of the real-world benchmark, collection takes a third fewer instructions and the whole run 9% fewer, and peak memory drops from 111 MB to 97 MB. `R_PreserveObject` marks the object's header, so releasing a call frame no longer looks the environment up in a hash table.
 
 ### Package code is allocated old
 

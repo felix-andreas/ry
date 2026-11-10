@@ -177,12 +177,6 @@ pub struct Heap {
     /// collection stress, so every allocation takes the slow path. It changes only where its
     /// inputs do: a collection and [`Heap::update_policy`].
     small_trigger: usize,
-    /// The young bytes a minor collection waits for while the old generation is small, between
-    /// the policy's `young_limit` and [`NURSERY_GROWTH`] times it. It follows the share of the
-    /// young objects each minor collection finds live: a nursery that promotes a large share
-    /// collects while a structure the program builds is still in use, which tenures it and
-    /// leaves it to a deeper collection, so the nursery doubles until the objects die young.
-    nursery: usize,
     /// Bytes of large vectors allocated since the last collection, kept apart from
     /// `young_bytes` because they have their own budget.
     young_large_bytes: usize,
@@ -568,11 +562,6 @@ impl HeapGrowth {
 
 const GROW_STEP_MIN: f64 = 80_000.0 * 8.0;
 
-/// How many times the policy's `young_limit` the nursery grows to at most. The default policy's
-/// 8 MB then reaches 64 MB, GNU R's default vector heap, which bounds how much small garbage
-/// GNU R lets pile up between its collections too.
-const NURSERY_GROWTH: usize = 8;
-
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct GcStats {
     pub minor_collections: u64,
@@ -797,7 +786,6 @@ impl Heap {
             },
             sources: Vec::new(),
             next_source_id: 0,
-            nursery: policy.young_limit,
             policy,
             young_bytes: 0,
             small_trigger: 0,
@@ -926,11 +914,7 @@ impl Heap {
     /// Changes the collection policy. The allocation fast path reads a budget derived from it,
     /// which this recomputes, so the policy has no other mutable access.
     pub fn update_policy(&mut self, change: impl FnOnce(&mut GcPolicy)) {
-        let young_limit = self.policy.young_limit;
         change(&mut self.policy);
-        if self.policy.young_limit != young_limit {
-            self.nursery = self.policy.young_limit;
-        }
         self.refresh_small_trigger();
     }
 
@@ -969,7 +953,7 @@ impl Heap {
         // otherwise let as many bytes of small garbage pile up.
         self.small_trigger = match self.policy.stress {
             GcStress::EveryAllocation => 0,
-            GcStress::Off => self.nursery.max(self.old_small_bytes / 2),
+            GcStress::Off => self.policy.young_limit.max(self.old_small_bytes / 2),
         };
     }
 
@@ -3409,24 +3393,9 @@ impl Heap {
         }
         match kind {
             Collection::Minor => {
-                let old_before = self.old_small_bytes;
                 self.strings.remove_dead_young(&self.space);
                 self.sweep_young();
                 self.stats.minor_collections += 1;
-                // A namespace load keeps nearly all it allocates, which says nothing about how
-                // long the program's own objects live. A minor collection run early, as `gc()`
-                // and a large allocation run one, sees too few objects to judge by.
-                let young = self.young_bytes;
-                if self.namespace_loads == 0 && young >= self.nursery / 2 {
-                    let promoted = self.old_small_bytes.saturating_sub(old_before);
-                    let young_limit = self.policy.young_limit;
-                    if promoted * 5 > young {
-                        self.nursery =
-                            (self.nursery * 2).min(young_limit.saturating_mul(NURSERY_GROWTH));
-                    } else if promoted * 20 < young {
-                        self.nursery = (self.nursery / 2).max(young_limit);
-                    }
-                }
             }
             Collection::Intermediate => {
                 self.strings.remove_dead(&self.space);

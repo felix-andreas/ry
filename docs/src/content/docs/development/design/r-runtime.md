@@ -405,13 +405,7 @@ allocated a limit's worth of vectors grows the vector limit too, because the wor
 promoting is larger than the survivors show. GNU R's `R_GC_MEM_GROW` and its fraction variables
 set the same numbers ([CLI reference](/reference/cli#memory)). The nursery's budget for small
 objects scales with the old small objects only, as GNU R's cons-cell trigger ignores vector memory,
-so a few big live vectors do not let as many bytes of small garbage pile up. Outside a namespace
-load, the nursery follows the survival of its own objects: it doubles, up to eight times the young
-limit, when a minor collection promotes more than a fifth of what it scanned, and halves back
-toward the young limit when it promotes less than a twentieth. A nursery that collects while the
-program still uses what it is building promotes that structure, which then waits for a deeper
-collection; a larger nursery lets it die young. The cost is resident memory: the `records` program
-of `tools/bench/real` peaks at 141 MB instead of 111 MB (GNU R: 144 MB).
+so a few big live vectors do not let as many bytes of small garbage pile up.
 
 `R_PreserveObject` sets a flag bit in the object's header and appends the object to a dense vector
 of preserved objects with their counts, so a frame release asks the header, not a hash table,
