@@ -3401,10 +3401,19 @@ impl Compiler {
                 }
             }
             match rebinding {
-                Some(target) if crate::standard_library::reuses_first_argument(&symbol_name(head)) => {
+                Some(target)
+                    if crate::standard_library::reuses_first_argument(&symbol_name(head)) =>
+                {
                     self.emit(
                         Op::CallBuiltinRebinding,
-                        &[dst, function, call_constant, base, args.len() as u32, target],
+                        &[
+                            dst,
+                            function,
+                            call_constant,
+                            base,
+                            args.len() as u32,
+                            target,
+                        ],
                     )
                 }
                 _ => self.emit(
@@ -4142,7 +4151,10 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
     let (value, local) = match machine.slot_of(symbol) {
         None if in_slots => {
             let start = machine.function.tag();
-            (lookup_outside(symbol, start, LookupCache::of(code), cache, 0..0)?, false)
+            (
+                lookup_outside(symbol, start, LookupCache::of(code), cache, 0..0)?,
+                false,
+            )
         }
         Some(slot) => {
             let value = *slot;
@@ -4157,18 +4169,27 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
                 (forced, true)
             } else if value == missing_arg() {
                 let env = machine.reify()?;
-                (lookup_variable(symbol, env, LookupCache::of(code), cache, 0..0)?, true)
+                (
+                    lookup_variable(symbol, env, LookupCache::of(code), cache, 0..0)?,
+                    true,
+                )
             } else if value != unbound() {
                 (value, true)
             } else {
                 let start = machine.function.tag();
-                (lookup_outside(symbol, start, LookupCache::of(code), cache, 0..0)?, false)
+                (
+                    lookup_outside(symbol, start, LookupCache::of(code), cache, 0..0)?,
+                    false,
+                )
             }
         }
         None => {
             let env = machine.env();
             let local = crate::heap().frame_cell(env, symbol).is_some();
-            (lookup_variable(symbol, env, LookupCache::of(code), cache, 0..0)?, local)
+            (
+                lookup_variable(symbol, env, LookupCache::of(code), cache, 0..0)?,
+                local,
+            )
         }
     };
     record_feedback(constants, pc, value);
@@ -5170,7 +5191,10 @@ unsafe fn slot_builtin_call(
 /// list still holds.
 unsafe fn slot_reusable(state: &Activation<'_, '_>, slot: *mut Sexp, args: &[Arg]) -> Option<Sexp> {
     let subject = args.first()?.value;
-    if *slot != subject || subject.refcount() != 1 || args[1..].iter().any(|arg| arg.value == subject) {
+    if *slot != subject
+        || subject.refcount() != 1
+        || args[1..].iter().any(|arg| arg.value == subject)
+    {
         return None;
     }
     let registers = &interp().bytecode.registers;
@@ -5410,7 +5434,13 @@ unsafe fn op_call_builtin_rebinding(
         cell = cell.cdr();
     }
     let reusable = if definition.reuses_first_argument {
-        rebinding_reusable(state, target, &args, first..first + count, instruction.operand(0))?
+        rebinding_reusable(
+            state,
+            target,
+            &args,
+            first..first + count,
+            instruction.operand(0),
+        )?
     } else {
         None
     };

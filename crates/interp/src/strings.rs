@@ -131,9 +131,10 @@ unsafe fn paste(
     let mut columns = Vec::with_capacity(length(list));
     for index in 0..length(list) {
         // Every element of a column is read, so a deferred column converts in one batch.
-        columns.push(values::materialize(as_character(list.element(index), || {
-            call.env()
-        })?)?);
+        columns.push(values::materialize(as_character(
+            list.element(index),
+            || call.env(),
+        )?)?);
     }
     let lengths: Vec<usize> = columns.iter().map(|&column| length(column)).collect();
     let mut count = lengths.iter().copied().max().unwrap_or(0);

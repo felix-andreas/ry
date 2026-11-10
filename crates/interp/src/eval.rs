@@ -1215,7 +1215,15 @@ pub unsafe fn apply_closure(
     }
     if let Some(frame) = bind_slots(call, function, args)? {
         let method_vars = supplied.unwrap_or(&[]);
-        return run_frame(call, function, frame, sys_parent, args, Entry::Unchecked, method_vars);
+        return run_frame(
+            call,
+            function,
+            frame,
+            sys_parent,
+            args,
+            Entry::Unchecked,
+            method_vars,
+        );
     }
     let env = bind_arguments(call, function, args, supplied)?;
     run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
@@ -1247,7 +1255,15 @@ pub unsafe fn apply_closure_owning(
     }
     if let Some(frame) = bind_slots(call, function, args)? {
         let method_vars = supplied.unwrap_or(&[]);
-        return run_frame(call, function, frame, sys_parent, args, Entry::Unchecked, method_vars);
+        return run_frame(
+            call,
+            function,
+            frame,
+            sys_parent,
+            args,
+            Entry::Unchecked,
+            method_vars,
+        );
     }
     let env = bind_arguments(call, function, args, supplied)?;
     run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
@@ -1560,7 +1576,9 @@ pub unsafe fn slot_dots(index: usize) -> Option<Sexp> {
     let mut position = 0;
     while formal.kind() == SexpType::Pairlist {
         if formal.tag() == symbols().dots {
-            return Some(*bytecode::register_address(frame.slots as usize + 1 + position));
+            return Some(*bytecode::register_address(
+                frame.slots as usize + 1 + position,
+            ));
         }
         position += 1;
         formal = formal.cdr();
@@ -1796,7 +1814,15 @@ pub unsafe fn run_closure(
     args: &[Arg],
     entry: Entry,
 ) -> R<Sexp> {
-    run_frame(call, function, CallFrame::Env(env), sys_parent, args, entry, &[])
+    run_frame(
+        call,
+        function,
+        CallFrame::Env(env),
+        sys_parent,
+        args,
+        entry,
+        &[],
+    )
 }
 
 /// Runs a closure body in `frame`, whose arguments are already bound. `sys_parent` is the
@@ -2012,7 +2038,10 @@ unsafe fn default_promises(owner: usize, function: Sexp, header: usize, missing:
                 defaults = bytecode::slot_defaults(function)?;
             }
             let promise = slot_promise(owner, defaults.element(index))?;
-            crate::heap().store_slot(&mut *bytecode::register_address(header + 1 + index), promise);
+            crate::heap().store_slot(
+                &mut *bytecode::register_address(header + 1 + index),
+                promise,
+            );
         }
         formal = formal.cdr();
         index += 1;

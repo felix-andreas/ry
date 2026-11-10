@@ -833,9 +833,7 @@ impl<'p> Translator<'p> {
                             let expand = self.builder.create_block();
                             let join = self.builder.create_block();
                             self.builder.append_block_param(join, I64);
-                            self.builder
-                                .ins()
-                                .brif(fits, join, &[value], expand, &[]);
+                            self.builder.ins().brif(fits, join, &[value], expand, &[]);
                             self.builder.switch_to_block(expand);
                             let expanded = self
                                 .call(
@@ -2540,9 +2538,7 @@ impl<'p> Translator<'p> {
         let copy = self.builder.create_block();
         let store = self.builder.create_block();
         self.builder.append_block_param(store, I64);
-        self.builder
-            .ins()
-            .brif(shared, copy, &[], store, &[vector]);
+        self.builder.ins().brif(shared, copy, &[], store, &[vector]);
         self.builder.switch_to_block(copy);
         let dirty = self
             .builder
@@ -2864,19 +2860,17 @@ impl<'p> Translator<'p> {
             .flatten()
             .unwrap_or(-1);
         if slot >= 0 {
-            let value = self.builder.ins().load(
-                I64,
-                flags(),
-                header,
-                (8 * (1 + slot as usize)) as i32,
-            );
+            let value =
+                self.builder
+                    .ins()
+                    .load(I64, flags(), header, (8 * (1 + slot as usize)) as i32);
             let local_status = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
             self.builder.ins().jump(checked, &[value, local_status]);
         } else {
-            let enclosure = self
-                .builder
-                .ins()
-                .load(I64, flags(), self.activation, offset::ENCLOSURE);
+            let enclosure =
+                self.builder
+                    .ins()
+                    .load(I64, flags(), self.activation, offset::ENCLOSURE);
             self.builder.ins().jump(enclosing, &[enclosure]);
         }
 
