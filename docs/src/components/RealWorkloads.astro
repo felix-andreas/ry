@@ -1,6 +1,6 @@
 ---
-// The call-heavy workloads from tools/bench/real/results.json with their geometric mean.
-import { formatRatio, realGeomean, realGeomeanNoJit, realWorkloadRows, seconds } from '../lib/benchmarks';
+// The application-style workloads from tools/bench/real/results.json with their geometric mean.
+import { formatRatio, realGeomean, realGeomeanNoJit, realWorkloadRows, seconds, suiteMetadata } from '../lib/benchmarks';
 
 const rows = realWorkloadRows();
 const time = seconds;
@@ -15,7 +15,7 @@ const columns = ['workload', 'GNU R', 'ry, JIT on', 'ry, JIT off', 'speed-up, JI
 		{
 			rows.map((row) => (
 				<tr>
-					<td><code>{row.workload}</code></td>
+					<td><code>{row.workload}</code>{row.tooShort && ' (too short)'}</td>
 					<td style="text-align: right">{time(row.gnuR)}</td>
 					<td style="text-align: right">{time(row.ryJit)}</td>
 					<td style="text-align: right">{time(row.ryNoJit)}</td>
@@ -32,3 +32,4 @@ const columns = ['workload', 'GNU R', 'ry, JIT on', 'ry, JIT off', 'speed-up, JI
 		</tr>
 	</tbody>
 </table>
+<p>{suiteMetadata('real')}</p>

@@ -110,7 +110,9 @@ mode. Loops and recursion gain the most; call-heavy code is slower than on GNU R
 | `fib` | 80x | 140x |
 | `drawdown` | 6.90x | 29x |
 | `vector_arith` | 1.22x | 2.09x |
-| `log_rank` | 1.54x | 0.05x |
+| `orders` | 1.13x | 0.77x |
+
+Measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v233; the best of 3 processes per engine.
 <!-- /bench-why -->
 
 [Benchmarks](https://ry-lang.org/benchmarks) has the code of each program and the method.

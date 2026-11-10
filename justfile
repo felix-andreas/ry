@@ -43,7 +43,7 @@ test *args:
     cargo test -- --nocapture {{ args }}
 
 # The pre-landing check: tests, clippy at -D warnings, fmt, and the licence notices.
-gate: battery clippy fmt-check (notices "--check")
+gate: battery clippy fmt-check (notices "--check") (bench-readme "--check")
 
 # Workspace tests; `zed_ry` needs a wasm toolchain, so it is excluded.
 battery *args:
@@ -128,6 +128,11 @@ climb *args:
 # `just bench-real --suites .bench` (adds the generated packages' tests),
 # `just bench-real --public all` (adds the vendored public programs in tools/bench/real/suites)
 # or `just bench-real --write` (stores tools/bench/real/results.json, the record behind the table in benchmarks.mdx).
+# Rewrites the benchmark blocks of the two READMEs from the committed results files; `--check` only
+# reports a README that differs.
+bench-readme *args:
+    python3 -I tools/bench/readme.py {{ args }}
+
 bench-real *args:
     cargo build --release -p ry-lang -p libr -p rcmd
     python3 -I tools/bench/real/run.py {{ args }}

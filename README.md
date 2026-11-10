@@ -68,10 +68,13 @@ The [language tour](https://ry-lang.org/ry) shows every feature.
 ry's runtime against GNU R, as the geometric mean of each suite's speed-ups:
 
 <!-- bench-summary -->
-| benchmark | programs | speed-up over GNU R |
+| benchmark | programs in the mean | speed-up over GNU R |
 | --- | ---: | ---: |
-| Real-world workloads (call-heavy R) | 7 | 0.90x |
-| Synthetic kernels (loops, recursion, vectors) | 17 | 2.70x |
+| Application-style workloads (ours) | 7 | 0.90x |
+| Synthetic kernels (ours) | 13 | 2.92x |
+
+Workloads measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores; 3 rounds.
+Kernels measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v233; the best of 3 processes per engine.
 <!-- /bench-summary -->
 
 A few of the synthetic kernels, as speed-ups over GNU R, untyped and typed in strict mode:
@@ -82,7 +85,9 @@ A few of the synthetic kernels, as speed-ups over GNU R, untyped and typed in st
 | `fib` | 80x | 140x |
 | `drawdown` | 6.90x | 29x |
 | `vector_arith` | 1.22x | 2.09x |
-| `log_rank` | 1.54x | 0.05x |
+| `orders` | 1.13x | 0.77x |
+
+Measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v233; the best of 3 processes per engine.
 <!-- /bench-why -->
 
 Loops and recursion gain the most. Call-heavy code is slower than on GNU R, and typed code built on

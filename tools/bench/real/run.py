@@ -26,7 +26,7 @@ the workload mix only.
 Usage: tools/bench/real/run.py [--ry PATH] [--baseline PATH] [--filter NAME] [--repeat N] [--seed N]
                                [--suites DIR] [--public SUITE]... [--fastr PATH] [--write]
 """
-import argparse, json, math, os, pathlib, platform, random, re, statistics, subprocess, sys, tempfile, time
+import argparse, json, math, os, pathlib, platform, random, statistics, subprocess, sys, tempfile, time
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent.parent
@@ -207,10 +207,16 @@ def main():
     if args.write:
         if args.filter:
             sys.exit("error: --write needs every workload, so it cannot be combined with --filter")
-        results = {"machine": cpu, "r": r_version, "repeat": args.repeat, "workloads": rows}
+        results = {"date": time.strftime("%Y-%m-%d"), "commit": commit(), "machine": cpu, "r": r_version, "repeat": args.repeat, "workloads": rows}
         (here / "results.json").write_text(json.dumps(results, indent=2) + "\n")
         print(f"wrote {here / 'results.json'}")
-        write_readme_block()
+        subprocess.run([sys.executable, "-I", str(root / "tools/bench/readme.py")], check=True)
+
+def commit():
+    """The ry commit measured, marked when the working tree has changes."""
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"], capture_output=True, text=True, check=True).stdout.strip()
+    return head + ("-dirty" if dirty else "")
 
 def paired(rounds, numerator, denominator):
     """The ratio of the two engines' times within each round in which both ran, sorted. Pairing
@@ -235,23 +241,6 @@ def bootstrap(per_row, seed, resamples=2000):
 
 def geomean(ratios):
     return math.exp(statistics.fmean(math.log(ratio) for ratio in ratios))
-
-def write_readme_block():
-    """Rewrites the side-by-side summary in README.md from both results files."""
-    real = json.loads((here / "results.json").read_text())["workloads"]
-    kernels = json.loads((root / "tools/bench/why/results.json").read_text())["programs"]
-    table = "\n".join([
-        "| benchmark | programs | speed-up over GNU R |",
-        "| --- | ---: | ---: |",
-        f"| Real-world workloads (call-heavy R) | {len(real)} | {geomean(r['gnu_r'] / r['ry_jit'] for r in real):.2f}x |",
-        f"| Synthetic kernels (loops, recursion, vectors) | {len(kernels)} | {geomean(k['gnu_r'] / k['ry'] for k in kernels):.2f}x |",
-    ])
-    readme = root / "README.md"
-    updated, count = re.subn(r"(<!-- bench-summary -->\n).*?(<!-- /bench-summary -->)", lambda match: match[1] + table + "\n" + match[2], readme.read_text(), flags=re.S)
-    if count != 1:
-        sys.exit(f"error: {readme} has no <!-- bench-summary --> block to rewrite")
-    readme.write_text(updated)
-    print(f"wrote {readme}")
 
 if __name__ == "__main__":
     main()
