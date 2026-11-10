@@ -1,0 +1,15 @@
+[stdout]
+| [1] 20112
+| $a
+| [1] 1 2 3
+| 
+| $b
+| [1] "seed"
+| 
+| [1] 14
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 14L

@@ -1082,14 +1082,18 @@ pub unsafe fn call_builtin(
 /// full call. The entry is skipped while a profile or activity trace is being taken, so that
 /// samples and counts name the builtin as the full call does.
 #[inline]
-pub unsafe fn call_direct(definition: &BuiltinDef, args: &[Sexp]) -> R<Option<Sexp>> {
+pub unsafe fn call_direct(
+    definition: &BuiltinDef,
+    call: Sexp,
+    args: &[Sexp],
+) -> R<Option<Sexp>> {
     let Some(direct) = definition.direct else {
         return Ok(None);
     };
     if activity::enabled() || PROFILE_TICK.load(Ordering::Relaxed) {
         return Ok(None);
     }
-    let value = scope(|| direct(args))
+    let value = scope(|| direct(call, args))
         .and_then(|value| crate::unwind::raise_parked().map(|()| value))
         .map_err(|unwind| builtin_failure(definition, unwind))?;
     if value.is_some() {
@@ -1836,20 +1840,22 @@ pub enum CallFrame {
 /// with a slot table, a debugger, a move or a type signature watches the frame, or a missing
 /// formal's default is neither a literal, a symbol, nor code compiled with its own slot table.
 pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallFrame>> {
-    let body = function.cdr();
-    if body.kind() != SexpType::Bytecode {
-        return Ok(None);
-    }
-    let constants = body.cdr();
-    let table = constants.element(bytecode::SLOTS);
     let state = interp();
-    if table == nil()
-        || state.debugger.is_some()
+    if state.debugger.is_some()
         || moves::tracking()
         || function == state.namespace_loader
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
         || crate::annotations::is_typed(function)
     {
+        return Ok(None);
+    }
+    let body = bytecode::compile_before_call(function)?;
+    if body.kind() != SexpType::Bytecode {
+        return Ok(None);
+    }
+    let constants = body.cdr();
+    let table = constants.element(bytecode::SLOTS);
+    if table == nil() {
         return Ok(None);
     }
     let _activity = activity::enter(Activity::CallSetup, 0);

@@ -54,6 +54,7 @@ pub mod envir;
 pub mod eval;
 #[cfg(unix)]
 mod fft;
+pub mod file_removal;
 pub mod fork;
 pub mod format;
 pub mod frame;
@@ -752,7 +753,7 @@ impl RootSource for InterpRoots {
                 conditions::trace_restarts(restarts, marker);
             }
             marker.mark(interp.srcref);
-            dispatch::trace_method_cache(&interp.method_cache, marker);
+            dispatch::trace_method_cache(&mut interp.method_cache, marker);
             graphics_engine::trace(marker);
             if let Some(unwind) = &interp.parked_unwind {
                 crate::unwind::trace_unwind(unwind, marker);

@@ -984,8 +984,8 @@ unsafe fn do_stopifnot(call: &Call<'_>) -> R<Sexp> {
     finish(frame, nil(), false)
 }
 
-/// `Reduce(f, x, init, right)` without `accumulate`, over a plain vector and with `f` a closure
-/// or a builtin. The R body calls `forceAndCall(2, f, init, x[[i]])` per element, which builds a
+/// `Reduce(f, x, init, right, accumulate)` over a plain vector and with `f` a closure or a
+/// builtin. The R body calls `forceAndCall(2, f, init, x[[i]])` per element, which builds a
 /// call and evaluates `x[[i]]` through the evaluator each time; this loop reads the element
 /// directly and passes both arguments as forced promises of the same expressions, so `f` sees
 /// the same call, the same `substitute()` results and the same frame variables `init` and `i`.
@@ -1036,7 +1036,7 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         };
         (right, Some(accumulate))
     };
-    let Some(false) = accumulate else {
+    let Some(accumulate) = accumulate else {
         return decline();
     };
     let symbols = symbols();
@@ -1075,11 +1075,65 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
     } else if argument(ClosureFrame::Env(frame), symbols.init)?.is_none() {
         return decline();
     }
-    let step = |position: usize| -> R<()> {
-        let index = values::scalar_integer(position as i32 + 1)?;
-        eval::define(i_symbol, index, frame)?;
-        let element = crate::subset::subset2(x, &[index], Some(true), element_call)?;
+    // With `accumulate`, `out` holds `len` slots and `out[[slot]] <- init` stores the running
+    // value. The store writes the slot directly while `out` is unshared and `init` is not NULL
+    // (which deletes the slot), and evaluates the assignment itself otherwise.
+    let out_symbol = values::install("out")?;
+    let slots = positions.len() + 1;
+    let store = |slot: usize| -> R<()> {
+        let value = eval::value_of(eval::find_var_in_frame(init_symbol, frame)?)?;
+        let out = eval::value_of(eval::find_var_in_frame(out_symbol, frame)?)?;
+        if value != nil()
+            && out.kind() == SexpType::List
+            && !out.is_altrep()
+            && !values::maybe_shared(out)
+            && slot <= length(out)
+        {
+            crate::heap().set_element(out, slot - 1, value);
+            return Ok(());
+        }
+        let slot = values::scalar_integer(slot as i32)?;
+        crate::heap().root(slot);
+        let target = values::call(symbols.bracket2, &[out_symbol, slot])?;
+        crate::heap().root(target);
+        let assignment = values::call(symbols.assign, &[target, init_symbol])?;
+        crate::heap().root(assignment);
+        eval::eval(assignment, frame).map(drop)
+    };
+    if accumulate {
+        eval::define(symbols.len, values::scalar_integer(slots as i32)?, frame)?;
+        eval::define(out_symbol, values::alloc(SexpType::List, slots)?, frame)?;
+        if right {
+            store(slots)?;
+        } else if missing_init {
+            store(1)?;
+        }
+    }
+    // `i` is bound to one integer updated in place, as `lapply` does, until `f` keeps or
+    // rebinds it (its reference count changes), and a list's elements are read directly.
+    let mut index = values::scalar_integer(0)?;
+    heap.root(index);
+    eval::define(i_symbol, index, frame)?;
+    let mut bound_refcount = index.refcount();
+    let mut step = |position: usize| -> R<()> {
+        if index.refcount() != bound_refcount {
+            index = values::scalar_integer(0)?;
+            crate::heap().root(index);
+            eval::define(i_symbol, index, frame)?;
+            bound_refcount = index.refcount();
+        }
+        index.slice_mut::<i32>()[0] = position as i32 + 1;
+        let element = if x.kind() == SexpType::List {
+            x.element(position)
+        } else {
+            crate::subset::subset2(x, &[index], Some(true), element_call)?
+        };
         crate::heap().root(element);
+        // `for (i in ind) { out[[i]] <- init; init <- f(init, x[[i]]) }` stores before calling.
+        let store_before = accumulate && !missing_init && !right;
+        if store_before {
+            store(position + 1)?;
+        }
         let init = eval::find_var_in_frame(init_symbol, frame)?;
         let init = eval::value_of(init)?;
         let values = if right {
@@ -1088,7 +1142,11 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
             [init, element]
         };
         let value = eval::call_with_values(inner_call, function, &values, frame)?;
-        eval::define(init_symbol, value, frame)
+        eval::define(init_symbol, value, frame)?;
+        if accumulate && !store_before {
+            store(position + 1)?;
+        }
+        Ok(())
     };
     if right {
         for position in positions.rev() {
@@ -1099,8 +1157,45 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
             crate::scope(|| step(position))?;
         }
     }
-    let value = eval::value_of(eval::find_var_in_frame(init_symbol, frame)?)?;
-    finish(ClosureFrame::Env(frame), value, true)
+    if !accumulate {
+        let value = eval::value_of(eval::find_var_in_frame(init_symbol, frame)?)?;
+        return finish(ClosureFrame::Env(frame), value, true);
+    }
+    if !missing_init && !right {
+        store(slots)?;
+    }
+    let out = eval::value_of(eval::find_var_in_frame(out_symbol, frame)?)?;
+    // `if (all(lengths(out) == 1L)) out <- unlist(out, recursive = FALSE)`: with no element an
+    // object (whose `length` and `unlist` could dispatch) the test reads lengths directly.
+    let plain = out.kind() == SexpType::List
+        && !out.is_object()
+        && (0..length(out)).all(|position| {
+            let element = out.element(position);
+            (element.kind().is_atomic() || element.kind() == SexpType::List)
+                && !element.is_object()
+        });
+    if !plain {
+        let tail = crate::lower::parse_text(
+            "if (all(lengths(out) == 1L)) out <- unlist(out, recursive = FALSE)\nout",
+            "<Reduce>",
+        )?;
+        crate::heap().root(tail);
+        let mut value = nil();
+        for position in 0..length(tail) {
+            value = eval::eval(tail.element(position), frame)?;
+        }
+        return finish(ClosureFrame::Env(frame), value, true);
+    }
+    if (0..length(out)).all(|position| length(out.element(position)) == 1) {
+        let no = values::scalar_bool(false)?;
+        crate::heap().root(no);
+        let yes = values::scalar_bool(true)?;
+        crate::heap().root(yes);
+        let value = kernel(crate::combine::do_unlist, &[out, no, yes], ClosureFrame::Env(frame))?;
+        eval::define(out_symbol, value, frame)?;
+        return finish(ClosureFrame::Env(frame), value, true);
+    }
+    finish(ClosureFrame::Env(frame), out, true)
 }
 
 /// Whether `value` has no attribute other than `names`, as `is.vector` requires.

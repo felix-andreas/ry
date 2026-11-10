@@ -1,0 +1,61 @@
+[stdout]
+| [1] 0
+| [1] FALSE
+| [1] 0
+| [1] 0
+| [1] 1
+| [1] 1
+| [1] 0
+| [1] 1
+| [1] TRUE
+| [1] 0
+| [1] FALSE
+| [1] 0
+| [1] FALSE FALSE
+| [1] 0
+| [1] FALSE FALSE
+| [1] 0
+| [1] FALSE FALSE
+| [1] 0
+| [1] FALSE
+| [1] 0
+| [1] FALSE
+| [1] TRUE
+| [1] 0
+| [1] FALSE  TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] 0
+| [1] FALSE  TRUE
+| [1] TRUE
+| [1] 0
+| [1] FALSE
+| [1] "target"      "target/keep"
+| [1] 0
+| [1] "[x]"         "g.csv"       "star*"       "target"      "target/keep"
+| [6] "x"          
+| [1] 0
+| [1] "[x]"         "g.csv"       "star*"       "target"      "target/keep"
+| [1] 0
+| [1] "g.csv"       "star*"       "target"      "target/keep"
+| [1] 0
+| [1] 0
+| [1] "g.csv"       "target"      "target/keep"
+| [1] 0
+| character(0)
+| [1] 0
+| [1] FALSE
+| [1] 0
+| [1] FALSE
+| [1] 0
+| [1] "invalid 'recursive' argument"
+| [1] "invalid 'force' argument"
+| [1] "invalid 'expand' argument"
+| [1] 0
+| [1] FALSE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| FALSE

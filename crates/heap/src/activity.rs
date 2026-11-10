@@ -50,10 +50,13 @@ pub enum Activity {
     JitCompile,
     /// Machine code the JIT produced.
     Compiled,
+    /// The summary's own bookkeeping that cannot be a store: counting a collection's dead
+    /// objects by type, which reads every dead object's header.
+    Profiler,
 }
 
 impl Activity {
-    pub const ALL: [Activity; 14] = [
+    pub const ALL: [Activity; 15] = [
         Activity::Other,
         Activity::Interpreter,
         Activity::Evaluator,
@@ -68,6 +71,7 @@ impl Activity {
         Activity::Collector,
         Activity::JitCompile,
         Activity::Compiled,
+        Activity::Profiler,
     ];
 
     pub fn from_word(word: u32) -> Activity {
@@ -93,6 +97,7 @@ impl Activity {
             Activity::Collector => "garbage collection",
             Activity::JitCompile => "JIT compilation",
             Activity::Compiled => "JIT-compiled code",
+            Activity::Profiler => "profile summary bookkeeping",
         }
     }
 }
@@ -290,7 +295,12 @@ pub fn package_fallbacks() -> Vec<(String, u64)> {
         .enumerate()
         .filter_map(|(id, slot)| {
             let count = slot.load(Ordering::Relaxed);
-            (count > 0).then(|| (label_name(id as u32).unwrap_or_else(|| "?".to_owned()), count))
+            (count > 0).then(|| {
+                (
+                    label_name(id as u32).unwrap_or_else(|| "?".to_owned()),
+                    count,
+                )
+            })
         })
         .collect();
     fallbacks.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));

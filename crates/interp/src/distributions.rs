@@ -58,13 +58,14 @@
 //! precision) are collected while the functions run and raised by the builtin afterwards, which
 //! keeps the functions free of interpreter state.
 
+pub use crate::random::Deviates;
 use {
     crate::{
         builtin_libraries::NativeFn,
         builtins::{Arg, BuiltinDef, internal},
         coerce::coerce_vector,
         conditions::warning,
-        random,
+        random::{self, with_deviates},
         rmath::*,
         unwind::{R, error},
         values::{
@@ -77,21 +78,28 @@ use {
 };
 
 /// Generates the `.Internal` table and the stats routine table from one list, so that both
-/// entry points vectorize every function identically.
+/// entry points vectorize every function identically. A row with a body defines its
+/// [`Kernel`] or [`Sampler`] type from the body; a row without one names a type written by
+/// hand.
 macro_rules! distributions {
-    ($($name:literal $arity:literal $glue:ident $shape:tt $function:expr;)*) => {
+    (
+        math { $($name:literal $arity:literal $vectors:literal $kernel:ident $(|$v:ident, $f:tt| $body:expr)?;)* }
+        base { $($base_name:literal $base_arity:literal $base_vectors:literal $base_kernel:ident |$base_v:ident, $base_f:tt| $base_body:expr;)* }
+        random { $($random_name:literal $random_arity:literal $shape:ident $sampler:ident $(|$s:ident, $p:ident| $random_body:expr)?;)* }
+    ) => {
+        $(distributions!(@kernel $kernel $vectors $(|$v, $f| $body)?);)*
+        $(distributions!(@kernel $base_kernel $base_vectors |$base_v, $base_f| $base_body);)*
+        $(distributions!(@sampler $sampler $(|$s, $p| $random_body)?);)*
+
         /// The `.Internal` forms, which GNU R 4.3 still keeps in base beside the stats routines,
         /// and the Bessel functions and `psigamma`, which only base has.
         #[rustfmt::skip]
         pub const BUILTINS: &[BuiltinDef] = &[
-            $(internal($name, $arity, |call| unsafe {
-                distributions!(@call $glue $shape $function, call.args, Interface::Internal)
+            $(internal($name, $arity, |call| unsafe { math::<$kernel>(call.args, Interface::Internal) }),)*
+            $(internal($base_name, $base_arity, |call| unsafe { math::<$base_kernel>(call.args, Interface::Internal) }),)*
+            $(internal($random_name, $random_arity, |call| unsafe {
+                random_vector::<$sampler>(call.args, Interface::Internal, distributions!(@integer $shape))
             }),)*
-            internal("besselJ", 2, |call| unsafe { math(call.args, Interface::Internal, 2, |v, _| bessel_j(v[0], v[1])) }),
-            internal("besselY", 2, |call| unsafe { math(call.args, Interface::Internal, 2, |v, _| bessel_y(v[0], v[1])) }),
-            internal("besselI", 3, |call| unsafe { math(call.args, Interface::Internal, 2, |v, f| bessel_i(v[0], v[1], f[0] as f64)) }),
-            internal("besselK", 3, |call| unsafe { math(call.args, Interface::Internal, 2, |v, f| bessel_k(v[0], v[1], f[0] as f64)) }),
-            internal("psigamma", 2, |call| unsafe { math(call.args, Interface::Internal, 2, |v, _| psigamma(v[0], v[1])) }),
             internal("dtukey", 5, |_| Err(error("unimplemented real function of 4 numeric arguments"))),
         ];
 
@@ -99,8 +107,9 @@ macro_rules! distributions {
         /// binds to the `C_` symbols of stats' R code.
         #[rustfmt::skip]
         pub const ROUTINES: &[(&str, NativeFn)] = &[
-            $(($name, |call| unsafe {
-                distributions!(@call $glue $shape $function, call.args, Interface::Stats)
+            $(($name, |call| unsafe { math::<$kernel>(call.args, Interface::Stats) }),)*
+            $(($random_name, |call| unsafe {
+                random_vector::<$sampler>(call.args, Interface::Stats, distributions!(@integer $shape))
             }),)*
             ("rmultinom", |call| unsafe { rmultinom_routine(call.arg(0), call.arg(1), call.arg(2)) }),
             ("signrank_free", |_| Ok(nil())),
@@ -110,116 +119,146 @@ macro_rules! distributions {
             }),
         ];
     };
-    (@call math $vectors:tt $function:expr, $args:expr, $interface:expr) => {
-        math($args, $interface, $vectors, $function)
+    (@kernel $kernel:ident $vectors:literal |$v:ident, $f:tt| $body:expr) => {
+        struct $kernel;
+
+        impl Kernel for $kernel {
+            const VECTORS: usize = $vectors;
+
+            #[inline(always)]
+            fn apply($v: &[f64; 4], $f: [i32; 2]) -> f64 {
+                $body
+            }
+        }
     };
-    (@call random integer $function:expr, $args:expr, $interface:expr) => {
-        random_vector($args, $interface, true, $function, None)
+    (@kernel $kernel:ident $vectors:literal) => {};
+    (@sampler $sampler:ident |$s:ident, $p:ident| $body:expr) => {
+        struct $sampler([f64; 3]);
+
+        impl Sampler for $sampler {
+            fn prepare(parameters: &[f64; 3]) -> Self {
+                Self(*parameters)
+            }
+
+            #[inline(always)]
+            fn draw<D: Deviates>(&mut self, $s: &mut D) -> R<f64> {
+                let $p = &self.0;
+                $body
+            }
+        }
     };
-    (@call random real $function:expr, $args:expr, $interface:expr) => {
-        random_vector($args, $interface, false, $function, None)
-    };
-    (@call random normal $function:expr, $args:expr, $interface:expr) => {
-        random_vector($args, $interface, false, $function, Some(fill_rnorm))
-    };
+    (@sampler $sampler:ident) => {};
+    (@integer integer) => { true };
+    (@integer real) => { false };
 }
 
 distributions! {
-    "dchisq" 3 math 2 |v, f| dchisq(v[0], v[1], f[0] != 0);
-    "pchisq" 4 math 2 |v, f| pchisq(v[0], v[1], f[0] != 0, f[1] != 0);
-    "qchisq" 4 math 2 |v, f| qchisq(v[0], v[1], f[0] != 0, f[1] != 0);
-    "dexp" 3 math 2 |v, f| dexp(v[0], v[1], f[0] != 0);
-    "pexp" 4 math 2 |v, f| pexp(v[0], v[1], f[0] != 0, f[1] != 0);
-    "qexp" 4 math 2 |v, f| qexp(v[0], v[1], f[0] != 0, f[1] != 0);
-    "dgeom" 3 math 2 |v, f| dgeom(v[0], v[1], f[0] != 0);
-    "pgeom" 4 math 2 |v, f| pgeom(v[0], v[1], f[0] != 0, f[1] != 0);
-    "qgeom" 4 math 2 |v, f| qgeom(v[0], v[1], f[0] != 0, f[1] != 0);
-    "dpois" 3 math 2 |v, f| dpois(v[0], v[1], f[0] != 0);
-    "ppois" 4 math 2 |v, f| ppois(v[0], v[1], f[0] != 0, f[1] != 0);
-    "qpois" 4 math 2 |v, f| qpois(v[0], v[1], f[0] != 0, f[1] != 0);
-    "dt" 3 math 2 |v, f| dt(v[0], v[1], f[0] != 0);
-    "pt" 4 math 2 |v, f| pt(v[0], v[1], f[0] != 0, f[1] != 0);
-    "qt" 4 math 2 |v, f| qt(v[0], v[1], f[0] != 0, f[1] != 0);
-    "dsignrank" 3 math 2 |v, f| dsignrank(v[0], v[1], f[0] != 0);
-    "psignrank" 4 math 2 |v, f| psignrank(v[0], v[1], f[0] != 0, f[1] != 0);
-    "qsignrank" 4 math 2 |v, f| qsignrank(v[0], v[1], f[0] != 0, f[1] != 0);
-    "dbeta" 4 math 3 |v, f| dbeta(v[0], v[1], v[2], f[0] != 0);
-    "pbeta" 5 math 3 |v, f| pbeta(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "qbeta" 5 math 3 |v, f| qbeta(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "dbinom" 4 math 3 |v, f| dbinom(v[0], v[1], v[2], f[0] != 0);
-    "pbinom" 5 math 3 |v, f| pbinom(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "qbinom" 5 math 3 |v, f| qbinom(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "dcauchy" 4 math 3 |v, f| dcauchy(v[0], v[1], v[2], f[0] != 0);
-    "pcauchy" 5 math 3 |v, f| pcauchy(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "qcauchy" 5 math 3 |v, f| qcauchy(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "df" 4 math 3 |v, f| df(v[0], v[1], v[2], f[0] != 0);
-    "pf" 5 math 3 |v, f| pf(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "qf" 5 math 3 |v, f| qf(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "dgamma" 4 math 3 |v, f| dgamma(v[0], v[1], v[2], f[0] != 0);
-    "pgamma" 5 math 3 |v, f| pgamma(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "qgamma" 5 math 3 |v, f| qgamma(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "dlnorm" 4 math 3 |v, f| dlnorm(v[0], v[1], v[2], f[0] != 0);
-    "plnorm" 5 math 3 |v, f| plnorm(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "qlnorm" 5 math 3 |v, f| qlnorm(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "dlogis" 4 math 3 |v, f| dlogis(v[0], v[1], v[2], f[0] != 0);
-    "plogis" 5 math 3 |v, f| plogis(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "qlogis" 5 math 3 |v, f| qlogis(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "dnbinom" 4 math 3 |v, f| dnbinom(v[0], v[1], v[2], f[0] != 0);
-    "pnbinom" 5 math 3 |v, f| pnbinom(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "qnbinom" 5 math 3 |v, f| qnbinom(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "dnbinom_mu" 4 math 3 |v, f| dnbinom_mu(v[0], v[1], v[2], f[0] != 0);
-    "pnbinom_mu" 5 math 3 |v, f| pnbinom_mu(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "qnbinom_mu" 5 math 3 |v, f| qnbinom_mu(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "dnorm" 4 math 3 |v, f| dnorm(v[0], v[1], v[2], f[0] != 0);
-    "pnorm" 5 math 3 |v, f| pnorm(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "qnorm" 5 math 3 |v, f| qnorm(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "dunif" 4 math 3 |v, f| dunif(v[0], v[1], v[2], f[0] != 0);
-    "punif" 5 math 3 |v, f| punif(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "qunif" 5 math 3 |v, f| qunif(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "dweibull" 4 math 3 |v, f| dweibull(v[0], v[1], v[2], f[0] != 0);
-    "pweibull" 5 math 3 |v, f| pweibull(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "qweibull" 5 math 3 |v, f| qweibull(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "dnchisq" 4 math 3 |v, f| dnchisq(v[0], v[1], v[2], f[0] != 0);
-    "pnchisq" 5 math 3 |v, f| pnchisq(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "qnchisq" 5 math 3 |v, f| qnchisq(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "dnt" 4 math 3 |v, f| dnt(v[0], v[1], v[2], f[0] != 0);
-    "pnt" 5 math 3 |v, f| pnt(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "qnt" 5 math 3 |v, f| qnt(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "dwilcox" 4 math 3 |v, f| dwilcox(v[0], v[1], v[2], f[0] != 0);
-    "pwilcox" 5 math 3 |v, f| pwilcox(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "qwilcox" 5 math 3 |v, f| qwilcox(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
-    "dhyper" 5 math 4 |v, f| dhyper(v[0], v[1], v[2], v[3], f[0] != 0);
-    "phyper" 6 math 4 |v, f| phyper(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
-    "qhyper" 6 math 4 |v, f| qhyper(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
-    "dnbeta" 5 math 4 |v, f| dnbeta(v[0], v[1], v[2], v[3], f[0] != 0);
-    "pnbeta" 6 math 4 |v, f| pnbeta(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
-    "qnbeta" 6 math 4 |v, f| qnbeta(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
-    "dnf" 5 math 4 |v, f| dnf(v[0], v[1], v[2], v[3], f[0] != 0);
-    "pnf" 6 math 4 |v, f| pnf(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
-    "qnf" 6 math 4 |v, f| qnf(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
-    "ptukey" 6 math 4 |v, f| ptukey(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
-    "qtukey" 6 math 4 |v, f| qtukey(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
-    "rchisq" 2 random real |s, v| rchisq(s, v[0]);
-    "rexp" 2 random real |s, v| rexp(s, v[0]);
-    "rgeom" 2 random integer |s, v| rgeom(s, v[0]);
-    "rpois" 2 random integer |s, v| rpois(s, v[0]);
-    "rt" 2 random real |s, v| rt(s, v[0]);
-    "rsignrank" 2 random integer |s, v| rsignrank(s, v[0]);
-    "rbeta" 3 random real |s, v| rbeta(s, v[0], v[1]);
-    "rbinom" 3 random integer |s, v| rbinom(s, v[0], v[1]);
-    "rcauchy" 3 random real |s, v| rcauchy(s, v[0], v[1]);
-    "rf" 3 random real |s, v| rf(s, v[0], v[1]);
-    "rgamma" 3 random real |s, v| rgamma(s, v[0], v[1]);
-    "rlnorm" 3 random real |s, v| rlnorm(s, v[0], v[1]);
-    "rlogis" 3 random real |s, v| rlogis(s, v[0], v[1]);
-    "rnbinom" 3 random integer |s, v| rnbinom(s, v[0], v[1]);
-    "rnbinom_mu" 3 random real |s, v| rnbinom_mu(s, v[0], v[1]);
-    "rnchisq" 3 random real |s, v| rnchisq(s, v[0], v[1]);
-    "rnorm" 3 random normal |s, v| rnorm(s, v[0], v[1]);
-    "runif" 3 random real |s, v| runif(s, v[0], v[1]);
-    "rweibull" 3 random real |s, v| rweibull(s, v[0], v[1]);
-    "rwilcox" 3 random integer |s, v| rwilcox(s, v[0], v[1]);
-    "rhyper" 4 random integer |s, v| rhyper(s, v[0], v[1], v[2]);
+    math {
+        "dchisq" 3 2 Dchisq |v, f| dchisq(v[0], v[1], f[0] != 0);
+        "pchisq" 4 2 Pchisq |v, f| pchisq(v[0], v[1], f[0] != 0, f[1] != 0);
+        "qchisq" 4 2 Qchisq |v, f| qchisq(v[0], v[1], f[0] != 0, f[1] != 0);
+        "dexp" 3 2 Dexp |v, f| dexp(v[0], v[1], f[0] != 0);
+        "pexp" 4 2 Pexp |v, f| pexp(v[0], v[1], f[0] != 0, f[1] != 0);
+        "qexp" 4 2 Qexp |v, f| qexp(v[0], v[1], f[0] != 0, f[1] != 0);
+        "dgeom" 3 2 Dgeom |v, f| dgeom(v[0], v[1], f[0] != 0);
+        "pgeom" 4 2 Pgeom |v, f| pgeom(v[0], v[1], f[0] != 0, f[1] != 0);
+        "qgeom" 4 2 Qgeom |v, f| qgeom(v[0], v[1], f[0] != 0, f[1] != 0);
+        "dpois" 3 2 Dpois |v, f| dpois(v[0], v[1], f[0] != 0);
+        "ppois" 4 2 Ppois |v, f| ppois(v[0], v[1], f[0] != 0, f[1] != 0);
+        "qpois" 4 2 Qpois |v, f| qpois(v[0], v[1], f[0] != 0, f[1] != 0);
+        "dt" 3 2 Dt |v, f| dt(v[0], v[1], f[0] != 0);
+        "pt" 4 2 Pt |v, f| pt(v[0], v[1], f[0] != 0, f[1] != 0);
+        "qt" 4 2 Qt |v, f| qt(v[0], v[1], f[0] != 0, f[1] != 0);
+        "dsignrank" 3 2 Dsignrank |v, f| dsignrank(v[0], v[1], f[0] != 0);
+        "psignrank" 4 2 Psignrank |v, f| psignrank(v[0], v[1], f[0] != 0, f[1] != 0);
+        "qsignrank" 4 2 Qsignrank |v, f| qsignrank(v[0], v[1], f[0] != 0, f[1] != 0);
+        "dbeta" 4 3 Dbeta |v, f| dbeta(v[0], v[1], v[2], f[0] != 0);
+        "pbeta" 5 3 Pbeta |v, f| pbeta(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "qbeta" 5 3 Qbeta |v, f| qbeta(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "dbinom" 4 3 Dbinom |v, f| dbinom(v[0], v[1], v[2], f[0] != 0);
+        "pbinom" 5 3 Pbinom |v, f| pbinom(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "qbinom" 5 3 Qbinom |v, f| qbinom(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "dcauchy" 4 3 Dcauchy |v, f| dcauchy(v[0], v[1], v[2], f[0] != 0);
+        "pcauchy" 5 3 Pcauchy |v, f| pcauchy(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "qcauchy" 5 3 Qcauchy |v, f| qcauchy(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "df" 4 3 Df |v, f| df(v[0], v[1], v[2], f[0] != 0);
+        "pf" 5 3 Pf |v, f| pf(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "qf" 5 3 Qf |v, f| qf(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "dgamma" 4 3 Dgamma |v, f| dgamma(v[0], v[1], v[2], f[0] != 0);
+        "pgamma" 5 3 Pgamma |v, f| pgamma(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "qgamma" 5 3 Qgamma |v, f| qgamma(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "dlnorm" 4 3 Dlnorm |v, f| dlnorm(v[0], v[1], v[2], f[0] != 0);
+        "plnorm" 5 3 Plnorm |v, f| plnorm(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "qlnorm" 5 3 Qlnorm |v, f| qlnorm(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "dlogis" 4 3 Dlogis |v, f| dlogis(v[0], v[1], v[2], f[0] != 0);
+        "plogis" 5 3 Plogis |v, f| plogis(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "qlogis" 5 3 Qlogis |v, f| qlogis(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "dnbinom" 4 3 Dnbinom |v, f| dnbinom(v[0], v[1], v[2], f[0] != 0);
+        "pnbinom" 5 3 Pnbinom |v, f| pnbinom(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "qnbinom" 5 3 Qnbinom |v, f| qnbinom(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "dnbinom_mu" 4 3 DnbinomMu |v, f| dnbinom_mu(v[0], v[1], v[2], f[0] != 0);
+        "pnbinom_mu" 5 3 PnbinomMu |v, f| pnbinom_mu(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "qnbinom_mu" 5 3 QnbinomMu |v, f| qnbinom_mu(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "dnorm" 4 3 Dnorm |v, f| dnorm(v[0], v[1], v[2], f[0] != 0);
+        "pnorm" 5 3 Pnorm |v, f| pnorm(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "qnorm" 5 3 Qnorm;
+        "dunif" 4 3 Dunif |v, f| dunif(v[0], v[1], v[2], f[0] != 0);
+        "punif" 5 3 Punif |v, f| punif(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "qunif" 5 3 Qunif |v, f| qunif(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "dweibull" 4 3 Dweibull |v, f| dweibull(v[0], v[1], v[2], f[0] != 0);
+        "pweibull" 5 3 Pweibull |v, f| pweibull(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "qweibull" 5 3 Qweibull |v, f| qweibull(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "dnchisq" 4 3 Dnchisq |v, f| dnchisq(v[0], v[1], v[2], f[0] != 0);
+        "pnchisq" 5 3 Pnchisq |v, f| pnchisq(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "qnchisq" 5 3 Qnchisq |v, f| qnchisq(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "dnt" 4 3 Dnt |v, f| dnt(v[0], v[1], v[2], f[0] != 0);
+        "pnt" 5 3 Pnt |v, f| pnt(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "qnt" 5 3 Qnt |v, f| qnt(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "dwilcox" 4 3 Dwilcox |v, f| dwilcox(v[0], v[1], v[2], f[0] != 0);
+        "pwilcox" 5 3 Pwilcox |v, f| pwilcox(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "qwilcox" 5 3 Qwilcox |v, f| qwilcox(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "dhyper" 5 4 Dhyper |v, f| dhyper(v[0], v[1], v[2], v[3], f[0] != 0);
+        "phyper" 6 4 Phyper |v, f| phyper(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
+        "qhyper" 6 4 Qhyper |v, f| qhyper(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
+        "dnbeta" 5 4 Dnbeta |v, f| dnbeta(v[0], v[1], v[2], v[3], f[0] != 0);
+        "pnbeta" 6 4 Pnbeta |v, f| pnbeta(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
+        "qnbeta" 6 4 Qnbeta |v, f| qnbeta(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
+        "dnf" 5 4 Dnf |v, f| dnf(v[0], v[1], v[2], v[3], f[0] != 0);
+        "pnf" 6 4 Pnf |v, f| pnf(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
+        "qnf" 6 4 Qnf |v, f| qnf(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
+        "ptukey" 6 4 Ptukey |v, f| ptukey(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
+        "qtukey" 6 4 Qtukey |v, f| qtukey(v[0], v[1], v[2], v[3], f[0] != 0, f[1] != 0);
+    }
+    base {
+        "besselJ" 2 2 BesselJ |v, _| bessel_j(v[0], v[1]);
+        "besselY" 2 2 BesselY |v, _| bessel_y(v[0], v[1]);
+        "besselI" 3 2 BesselI |v, f| bessel_i(v[0], v[1], f[0] as f64);
+        "besselK" 3 2 BesselK |v, f| bessel_k(v[0], v[1], f[0] as f64);
+        "psigamma" 2 2 Psigamma |v, _| psigamma(v[0], v[1]);
+    }
+    random {
+        "rchisq" 2 real Rchisq |s, v| rchisq(s, v[0]);
+        "rexp" 2 real Rexp |s, v| rexp(s, v[0]);
+        "rgeom" 2 integer Rgeom |s, v| rgeom(s, v[0]);
+        "rpois" 2 integer Poisson;
+        "rt" 2 real Rt |s, v| rt(s, v[0]);
+        "rsignrank" 2 integer Rsignrank |s, v| rsignrank(s, v[0]);
+        "rbeta" 3 real Rbeta |s, v| rbeta(s, v[0], v[1]);
+        "rbinom" 3 integer Binomial;
+        "rcauchy" 3 real Rcauchy |s, v| rcauchy(s, v[0], v[1]);
+        "rf" 3 real Rf |s, v| rf(s, v[0], v[1]);
+        "rgamma" 3 real Rgamma |s, v| rgamma(s, v[0], v[1]);
+        "rlnorm" 3 real Rlnorm |s, v| rlnorm(s, v[0], v[1]);
+        "rlogis" 3 real Rlogis |s, v| rlogis(s, v[0], v[1]);
+        "rnbinom" 3 integer Rnbinom |s, v| rnbinom(s, v[0], v[1]);
+        "rnbinom_mu" 3 real RnbinomMu |s, v| rnbinom_mu(s, v[0], v[1]);
+        "rnchisq" 3 real Rnchisq |s, v| rnchisq(s, v[0], v[1]);
+        "rnorm" 3 real NormalSampler;
+        "runif" 3 real UniformSampler;
+        "rweibull" 3 real Rweibull |s, v| rweibull(s, v[0], v[1]);
+        "rwilcox" 3 integer Rwilcox |s, v| rwilcox(s, v[0], v[1]);
+        "rhyper" 4 integer Rhyper |s, v| rhyper(s, v[0], v[1], v[2]);
+    }
 }
 
 /// Which entry point a vectorized call came through. The stats routines and the `.Internal`
@@ -229,16 +268,6 @@ distributions! {
 enum Interface {
     Internal,
     Stats,
-}
-
-/// A source of the uniform, normal and exponential deviates and the uniform indices that the
-/// random generators are built from.
-pub trait Deviates {
-    fn uniform(&mut self) -> R<f64>;
-    fn normal(&mut self) -> R<f64>;
-    fn exponential(&mut self) -> R<f64>;
-    /// A uniform integer in `0..n`, as a double.
-    fn index(&mut self, n: f64) -> R<f64>;
 }
 
 /// The session's generator, as `unif_rand`, `norm_rand`, `exp_rand` and `R_unif_index` reach it.
@@ -276,14 +305,32 @@ unsafe fn raise_warnings() -> R<()> {
 
 // Vectorization.
 
-/// GNU R's `math2` to `math4`: the first `vectors` arguments recycle, the rest are integer flags
-/// (`log`, `lower.tail`, `log.p`, Bessel's `expo`), read as `asInteger` reads them.
-unsafe fn math(
-    args: &[Arg],
-    interface: Interface,
-    vectors: usize,
-    function: fn(&[f64; 4], [i32; 2]) -> f64,
-) -> R<Sexp> {
+/// A density, distribution or quantile function of up to four recycled operands and two
+/// integer flags, as the `math` loop applies it.
+trait Kernel {
+    /// How many leading arguments recycle; the rest are flags.
+    const VECTORS: usize;
+
+    /// The function at one element, whose operands are neither NA nor NaN.
+    fn apply(values: &[f64; 4], flags: [i32; 2]) -> f64;
+
+    /// Writes the whole result when the first operand is as long as the result and every
+    /// other operand is the scalar in `rest`, with GNU R's NA and NaN handling, and returns
+    /// whether a NaN was produced. A kernel without a faster path for that case declines.
+    fn fill_first(
+        _first: &[f64],
+        _rest: &[f64; 4],
+        _flags: [i32; 2],
+        _out: &mut [f64],
+    ) -> Option<bool> {
+        None
+    }
+}
+
+/// GNU R's `math2` to `math4`: the first `K::VECTORS` arguments recycle, the rest are integer
+/// flags (`log`, `lower.tail`, `log.p`, Bessel's `expo`), read as `asInteger` reads them.
+unsafe fn math<K: Kernel>(args: &[Arg], interface: Interface) -> R<Sexp> {
+    let vectors = K::VECTORS;
     let mut originals = [nil(); 4];
     let mut operands = [nil(); 4];
     let mut lengths = [0usize; 4];
@@ -307,28 +354,28 @@ unsafe fn math(
         return alloc(SexpType::Real, 0);
     }
     let count = lengths[..vectors].iter().copied().max().unwrap_or(0);
-    let result = alloc(SexpType::Real, count)?;
-    let mut nan_produced = false;
-    let mut arguments = [0.0f64; 4];
-    for (element, slot) in reals_mut(result).iter_mut().enumerate() {
-        let mut any_na = false;
-        let mut any_nan = false;
-        for index in 0..vectors {
-            let value = reals(operands[index])[element % lengths[index]];
-            any_na |= is_na_real(value);
-            any_nan |= value.is_nan();
-            arguments[index] = value;
-        }
-        *slot = if any_na {
-            NA_REAL
-        } else if any_nan {
-            f64::NAN
-        } else {
-            let value = function(&arguments, flags);
-            nan_produced |= value.is_nan();
-            value
-        };
+    // The loop below writes every element.
+    let result = alloc_uninit(SexpType::Real, count)?;
+    // The slices are taken after the last allocation, while `operands` keeps the vectors live.
+    let mut values: [&[f64]; 4] = [&[]; 4];
+    for index in 0..vectors {
+        values[index] = reals(operands[index]);
     }
+    let out = reals_mut(result);
+    let first_only = lengths[0] == count && lengths[1..vectors].iter().all(|&length| length == 1);
+    let fast = if first_only {
+        let mut rest = [0.0f64; 4];
+        for index in 1..vectors {
+            rest[index] = values[index].first().copied().unwrap_or(f64::NAN);
+        }
+        K::fill_first(values[0], &rest, flags, out)
+    } else {
+        None
+    };
+    let nan_produced = match fast {
+        Some(nan_produced) => nan_produced,
+        None => math_loop::<K>(&values, flags, out),
+    };
     raise_warnings()?;
     if nan_produced {
         warning("NaNs produced")?;
@@ -337,6 +384,105 @@ unsafe fn math(
         copy_attributes(originals[index], result)?;
     }
     Ok(result)
+}
+
+/// The element loop of [`math`], which recycles each operand with its own wrapping position
+/// rather than a division per element. Returns whether a NaN was produced.
+#[inline(always)]
+fn math_loop<K: Kernel>(values: &[&[f64]; 4], flags: [i32; 2], out: &mut [f64]) -> bool {
+    let mut positions = [0usize; 4];
+    let mut arguments = [0.0f64; 4];
+    let mut nan_produced = false;
+    for slot in out {
+        let mut any_nan = false;
+        for index in 0..K::VECTORS {
+            let operand = values[index];
+            let value = operand[positions[index]];
+            positions[index] += 1;
+            if positions[index] == operand.len() {
+                positions[index] = 0;
+            }
+            any_nan |= value.is_nan();
+            arguments[index] = value;
+        }
+        *slot = if any_nan {
+            na_or_nan(&arguments[..K::VECTORS])
+        } else {
+            let value = K::apply(&arguments, flags);
+            nan_produced |= value.is_nan();
+            value
+        };
+    }
+    nan_produced
+}
+
+/// The result at an element with a NaN operand: `NA` when any operand is `NA`, else NaN.
+#[cold]
+fn na_or_nan(operands: &[f64]) -> f64 {
+    if operands.iter().any(|&value| is_na_real(value)) {
+        NA_REAL
+    } else {
+        f64::NAN
+    }
+}
+
+/// `qnorm`, whose central region runs across SIMD lanes when only the probabilities vary.
+struct Qnorm;
+
+impl Kernel for Qnorm {
+    const VECTORS: usize = 3;
+
+    #[inline(always)]
+    fn apply(v: &[f64; 4], f: [i32; 2]) -> f64 {
+        qnorm(v[0], v[1], v[2], f[0] != 0, f[1] != 0)
+    }
+
+    fn fill_first(
+        probabilities: &[f64],
+        rest: &[f64; 4],
+        flags: [i32; 2],
+        out: &mut [f64],
+    ) -> Option<bool> {
+        let [_, mu, sigma, _] = *rest;
+        let lower = flags[0] != 0;
+        if !mu.is_finite() || !sigma.is_finite() || sigma <= 0.0 || flags[1] != 0 {
+            return None;
+        }
+        let mut shifted = [0.0f64; QNORM_CHUNK];
+        let mut tails = [0u16; QNORM_CHUNK];
+        let mut nan_produced = false;
+        for (chunk, out) in probabilities
+            .chunks(QNORM_CHUNK)
+            .zip(out.chunks_mut(QNORM_CHUNK))
+        {
+            let shifted = &mut shifted[..chunk.len()];
+            // `R_DT_qIv`, which `qnorm` applies before it splits off the central region.
+            for (slot, &probability) in shifted.iter_mut().zip(chunk) {
+                *slot = if lower {
+                    probability
+                } else {
+                    0.5 - probability + 0.5
+                };
+            }
+            let count = qnorm_central_fill(shifted, out, &mut tails);
+            let count = qnorm_tails_fill(chunk, lower, &mut tails, count, out);
+            for slot in out.iter_mut() {
+                *slot = mu + sigma * *slot;
+            }
+            for &index in &tails[..count] {
+                let index = usize::from(index);
+                let probability = chunk[index];
+                out[index] = if probability.is_nan() {
+                    na_or_nan(&[probability])
+                } else {
+                    let value = qnorm(probability, mu, sigma, lower, false);
+                    nan_produced |= value.is_nan();
+                    value
+                };
+            }
+        }
+        Some(nan_produced)
+    }
 }
 
 fn argument(args: &[Arg], index: usize) -> Sexp {
@@ -354,37 +500,52 @@ unsafe fn is_numeric(value: Sexp) -> bool {
 /// A flag as `asInteger` reads it.
 unsafe fn flag(value: Sexp) -> R<i32> {
     let value = materialize(value)?;
-    if length(value) == 0
-        || !matches!(
-            value.kind(),
-            SexpType::Logical
-                | SexpType::Integer
-                | SexpType::Real
-                | SexpType::Complex
-                | SexpType::String
-        )
-    {
+    if length(value) == 0 {
         return Ok(NA_INTEGER);
+    }
+    match value.kind() {
+        // A logical stores its values as integers, with the same NA.
+        SexpType::Logical | SexpType::Integer => return Ok(ints(value)[0]),
+        SexpType::Real => {
+            let real = reals(value)[0];
+            if real.is_nan() {
+                return Ok(NA_INTEGER);
+            }
+            // Out of range, `asInteger` warns, so that case takes the coercion below.
+            if real > f64::from(i32::MIN) && real < f64::from(i32::MAX) + 1.0 {
+                return Ok(real as i32);
+            }
+        }
+        SexpType::Complex | SexpType::String => {}
+        _ => return Ok(NA_INTEGER),
     }
     let integer = coerce_vector(value, SexpType::Integer)?;
     Ok(ints(integer)[0])
 }
 
-/// Fills a whole result with draws at the first parameter set, or declines with `false` so the
-/// caller draws one at a time.
-type BatchFill = unsafe fn(&mut [f64], &[f64; 3]) -> bool;
+/// A random generator prepared for one parameter set, so that the work that depends only on
+/// the parameters runs once per batch and not once per draw.
+trait Sampler {
+    fn prepare(parameters: &[f64; 3]) -> Self;
+
+    /// One deviate, consuming the generator exactly as GNU R's function does.
+    fn draw<D: Deviates>(&mut self, deviates: &mut D) -> R<f64>;
+
+    /// Fills `slots` with deviates, exactly as as many calls of [`Sampler::draw`] would.
+    #[inline(always)]
+    fn fill<D: Deviates>(&mut self, deviates: &mut D, slots: &mut [f64]) -> R<()> {
+        for slot in slots {
+            *slot = self.draw(deviates)?;
+        }
+        Ok(())
+    }
+}
 
 /// GNU R's `random1` to `random3`: `n` is a count, or the length of a longer vector, and the
 /// parameters recycle over it. Missing parameters give `NA`s, and every NaN drawn raises "NAs
 /// produced". The stats routines return the discrete generators' counts as integers when they
 /// all fit.
-unsafe fn random_vector(
-    args: &[Arg],
-    interface: Interface,
-    integer: bool,
-    function: impl Fn(&mut SessionDeviates, &[f64; 3]) -> R<f64>,
-    batch: Option<BatchFill>,
-) -> R<Sexp> {
+unsafe fn random_vector<S: Sampler>(args: &[Arg], interface: Interface, integer: bool) -> R<Sexp> {
     let count = random_count(argument(args, 0))?;
     let parameters = args.len().saturating_sub(1).min(3);
     let mut operands = [nil(); 3];
@@ -408,31 +569,13 @@ unsafe fn random_vector(
         return random_result(result, integer);
     }
     if count > 0 {
-        random::get_rng_state()?;
-        let mut deviates = SessionDeviates;
-        let mut arguments = [0.0f64; 3];
-        let mut outcome = Ok(());
-        let scalar = lengths[..parameters].iter().all(|&length| length == 1);
+        let mut values: [&[f64]; 3] = [&[]; 3];
         for index in 0..parameters {
-            arguments[index] = reals(operands[index])[0];
+            values[index] = reals(operands[index]);
         }
-        let batched = scalar && batch.is_some_and(|batch| batch(drawn, &arguments));
-        if !batched {
-            for (element, slot) in drawn.iter_mut().enumerate() {
-                if !scalar {
-                    for index in 0..parameters {
-                        arguments[index] = reals(operands[index])[element % lengths[index]];
-                    }
-                }
-                match function(&mut deviates, &arguments) {
-                    Ok(value) => *slot = value,
-                    Err(failure) => {
-                        outcome = Err(failure);
-                        break;
-                    }
-                }
-            }
-        }
+        random::get_rng_state()?;
+        let outcome =
+            with_deviates!(|deviates| draw_all::<S, _>(deviates, &values[..parameters], drawn));
         random::put_rng_state()?;
         outcome?;
         raise_warnings()?;
@@ -441,6 +584,43 @@ unsafe fn random_vector(
         }
     }
     random_result(result, integer)
+}
+
+/// Fills `slots` with draws whose parameters recycle from `values`. Scalar parameters prepare
+/// the sampler once for the whole batch; recycled ones prepare it again only when a parameter
+/// set differs from the previous element's.
+fn draw_all<S: Sampler, D: Deviates>(
+    deviates: &mut D,
+    values: &[&[f64]],
+    slots: &mut [f64],
+) -> R<()> {
+    let mut arguments = [0.0f64; 3];
+    for (slot, operand) in arguments.iter_mut().zip(values) {
+        *slot = operand.first().copied().unwrap_or(f64::NAN);
+    }
+    if values.iter().all(|operand| operand.len() == 1) {
+        return S::prepare(&arguments).fill(deviates, slots);
+    }
+    let mut sampler = S::prepare(&arguments);
+    let mut prepared = arguments.map(f64::to_bits);
+    let mut positions = [0usize; 3];
+    for slot in slots {
+        for (index, operand) in values.iter().enumerate() {
+            arguments[index] = operand[positions[index]];
+            positions[index] += 1;
+            if positions[index] == operand.len() {
+                positions[index] = 0;
+            }
+        }
+        // Bit patterns, so that a NaN parameter compares equal to itself.
+        let bits = arguments.map(f64::to_bits);
+        if bits != prepared {
+            sampler = S::prepare(&arguments);
+            prepared = bits;
+        }
+        *slot = sampler.draw(deviates)?;
+    }
+    Ok(())
 }
 
 /// The number of draws `n` asks for: the value of a scalar, or the length of a longer vector.
@@ -464,28 +644,17 @@ unsafe fn random_count(value: Sexp) -> R<usize> {
     }
     let count = match value.kind() {
         SexpType::List | SexpType::Expression => f64::NAN,
+        SexpType::Logical | SexpType::Integer => match ints(value)[0] {
+            NA_INTEGER => f64::NAN,
+            count => f64::from(count),
+        },
+        SexpType::Real => reals(value)[0],
         _ => reals(coerce_vector(value, SexpType::Real)?)[0],
     };
     if count.is_nan() || !(0.0..=4.503599627370496e15).contains(&count) {
         return Err(error("invalid arguments"));
     }
     Ok(count as usize)
-}
-
-/// `rnorm`'s draws in bulk for a scalar mean and standard deviation, when [`rnorm`] would
-/// draw a deviate for every element and the generator supports bulk draws.
-unsafe fn fill_rnorm(slots: &mut [f64], arguments: &[f64; 3]) -> bool {
-    let [mu, sigma, _] = *arguments;
-    if mu.is_nan() || !sigma.is_finite() || sigma <= 0.0 || !mu.is_finite() {
-        return false;
-    }
-    if !random::fill_standard_normal(slots) {
-        return false;
-    }
-    for slot in slots.iter_mut() {
-        *slot = mu + sigma * *slot;
-    }
-    true
 }
 
 /// The drawn deviates, as integers when the routine counts and every count fits.
@@ -589,6 +758,79 @@ pub fn runif(deviates: &mut impl Deviates, a: f64, b: f64) -> R<f64> {
         if u > 0.0 && u < 1.0 {
             return Ok(a + (b - a) * u);
         }
+    }
+}
+
+/// `rnorm` for a batch, which draws all the standard normals in one pass when the parameters
+/// make every element a draw.
+struct NormalSampler {
+    mu: f64,
+    sigma: f64,
+}
+
+impl Sampler for NormalSampler {
+    fn prepare(parameters: &[f64; 3]) -> Self {
+        Self {
+            mu: parameters[0],
+            sigma: parameters[1],
+        }
+    }
+
+    #[inline(always)]
+    fn draw<D: Deviates>(&mut self, deviates: &mut D) -> R<f64> {
+        rnorm(deviates, self.mu, self.sigma)
+    }
+
+    fn fill<D: Deviates>(&mut self, deviates: &mut D, slots: &mut [f64]) -> R<()> {
+        let Self { mu, sigma } = *self;
+        // Exactly the parameters for which `rnorm` draws a deviate.
+        if !mu.is_finite() || !sigma.is_finite() || sigma <= 0.0 {
+            for slot in slots {
+                *slot = rnorm(deviates, mu, sigma)?;
+            }
+            return Ok(());
+        }
+        deviates.fill_normal(slots)?;
+        for slot in slots {
+            *slot = mu + sigma * *slot;
+        }
+        Ok(())
+    }
+}
+
+/// `runif` for a batch, which draws all the uniforms in one pass when the generator is known
+/// to stay inside (0, 1), so that `runif`'s rejection loop never repeats.
+struct UniformSampler {
+    a: f64,
+    b: f64,
+}
+
+impl Sampler for UniformSampler {
+    fn prepare(parameters: &[f64; 3]) -> Self {
+        Self {
+            a: parameters[0],
+            b: parameters[1],
+        }
+    }
+
+    #[inline(always)]
+    fn draw<D: Deviates>(&mut self, deviates: &mut D) -> R<f64> {
+        runif(deviates, self.a, self.b)
+    }
+
+    fn fill<D: Deviates>(&mut self, deviates: &mut D, slots: &mut [f64]) -> R<()> {
+        let Self { a, b } = *self;
+        // Exactly the parameters for which `runif` draws a deviate.
+        if a.is_finite() && b.is_finite() && b > a && deviates.fill_uniform(slots)? {
+            for slot in slots {
+                *slot = a + (b - a) * *slot;
+            }
+            return Ok(());
+        }
+        for slot in slots {
+            *slot = runif(deviates, a, b)?;
+        }
+        Ok(())
     }
 }
 
@@ -935,8 +1177,206 @@ pub fn rbeta(deviates: &mut impl Deviates, aa: f64, bb: f64) -> R<f64> {
 /// Poisson deviates by Ahrens and Dieter's (1982) algorithm PD: table lookup inversion for
 /// means below 10, and otherwise a normal deviate accepted outright, by a squeeze, or by
 /// quotient and hat tests against Hermite approximations to the discrete normal probabilities.
-#[allow(clippy::excessive_precision)]
 pub fn rpois(deviates: &mut impl Deviates, mu: f64) -> R<f64> {
+    Poisson::new(mu).draw(deviates)
+}
+
+/// [`rpois`] prepared for one mean, holding what GNU R keeps in static variables between calls
+/// with the same mean: the table of cumulative probabilities filled so far, and the constants
+/// of the normal approximation.
+pub struct Poisson {
+    kind: PoissonKind,
+}
+
+// The table lives inline because a sampler is a stack local built once per call (or once per
+// change of mean), and boxing it would add an allocation to every small `rpois` call.
+#[allow(clippy::large_enum_variant)]
+enum PoissonKind {
+    /// The result for every draw, without consuming the generator.
+    Constant(f64),
+    Table(PoissonTable),
+    Normal(PoissonNormal),
+}
+
+/// Inversion for a mean below 10, against the cumulative probabilities of `0..=35`, which fill
+/// in as draws need them.
+struct PoissonTable {
+    mu: f64,
+    p0: f64,
+    mode: usize,
+    probability: f64,
+    sum: f64,
+    filled: usize,
+    cumulative: [f64; 36],
+}
+
+struct PoissonNormal {
+    mu: f64,
+    s: f64,
+    d: f64,
+    big_l: f64,
+    /// The constants of the quotient and hat tests, which most draws never reach.
+    hat: Option<PoissonHat>,
+}
+
+struct PoissonHat {
+    omega: f64,
+    c0: f64,
+    c1: f64,
+    c2: f64,
+    c3: f64,
+    c: f64,
+}
+
+impl Poisson {
+    pub fn new(mu: f64) -> Self {
+        let kind = if !mu.is_finite() || mu < 0.0 {
+            PoissonKind::Constant(f64::NAN)
+        } else if mu <= 0.0 {
+            PoissonKind::Constant(0.0)
+        } else if mu < 10.0 {
+            let p0 = (-mu).exp();
+            PoissonKind::Table(PoissonTable {
+                mu,
+                p0,
+                mode: (mu as i64).max(1) as usize,
+                probability: p0,
+                sum: p0,
+                filled: 0,
+                cumulative: [0.0; 36],
+            })
+        } else {
+            PoissonKind::Normal(PoissonNormal {
+                mu,
+                s: mu.sqrt(),
+                d: 6.0 * mu * mu,
+                big_l: (mu - 1.1484).floor(),
+                hat: None,
+            })
+        };
+        Self { kind }
+    }
+
+    pub fn draw(&mut self, deviates: &mut impl Deviates) -> R<f64> {
+        match &mut self.kind {
+            PoissonKind::Constant(value) => Ok(*value),
+            PoissonKind::Table(table) => table.draw(deviates),
+            PoissonKind::Normal(normal) => normal.draw(deviates),
+        }
+    }
+}
+
+impl Sampler for Poisson {
+    fn prepare(parameters: &[f64; 3]) -> Self {
+        Self::new(parameters[0])
+    }
+
+    #[inline(always)]
+    fn draw<D: Deviates>(&mut self, deviates: &mut D) -> R<f64> {
+        Poisson::draw(self, deviates)
+    }
+}
+
+impl PoissonTable {
+    #[inline]
+    fn draw(&mut self, deviates: &mut impl Deviates) -> R<f64> {
+        loop {
+            let u = deviates.uniform()?;
+            if u <= self.p0 {
+                return Ok(0.0);
+            }
+            let filled = self.filled;
+            if filled > 0 {
+                let first = if u > 0.458 { filled.min(self.mode) } else { 1 };
+                if let Some(k) = (first..=filled).find(|&k| u <= self.cumulative[k]) {
+                    return Ok(k as f64);
+                }
+                if filled == 35 {
+                    continue;
+                }
+            }
+            for k in filled + 1..=35 {
+                self.probability *= self.mu / k as f64;
+                self.sum += self.probability;
+                self.cumulative[k] = self.sum;
+                if u <= self.sum {
+                    self.filled = k;
+                    return Ok(k as f64);
+                }
+            }
+            self.filled = 35;
+        }
+    }
+}
+
+impl PoissonNormal {
+    #[allow(clippy::excessive_precision)]
+    fn draw(&mut self, deviates: &mut impl Deviates) -> R<f64> {
+        let Self {
+            mu, s, d, big_l, ..
+        } = *self;
+        let mut count = 0.0;
+        let mut difference = 0.0;
+        let mut u = 0.0;
+        let normal = mu + s * deviates.normal()?;
+        if normal >= 0.0 {
+            count = normal.floor();
+            if count >= big_l {
+                return Ok(count);
+            }
+            difference = mu - count;
+            u = deviates.uniform()?;
+            if d * u >= difference * difference * difference {
+                return Ok(count);
+            }
+        }
+        let hat = self.hat.get_or_insert_with(|| {
+            let b1 = 1.0 / 24.0 / mu;
+            let b2 = 0.3 * b1 * b1;
+            let c3 = 1.0 / 7.0 * b1 * b2;
+            let c2 = b2 - 15.0 * c3;
+            let c1 = b1 - 6.0 * b2 + 45.0 * c3;
+            let c0 = 1.0 - b1 + 3.0 * b2 - 15.0 * c3;
+            PoissonHat {
+                omega: M_1_SQRT_2PI / s,
+                c0,
+                c1,
+                c2,
+                c3,
+                c: 0.1069 / mu,
+            }
+        });
+        if normal >= 0.0 {
+            let (px, py, fx, fy) = poisson_probabilities(mu, s, hat, count, difference);
+            if fy - u * fy <= py * (px - fx).exp() {
+                return Ok(count);
+            }
+        }
+        loop {
+            let e = deviates.exponential()?;
+            let u = 2.0 * deviates.uniform()? - 1.0;
+            let t = 1.8 + if u >= 0.0 { e } else { -e };
+            if t > -0.6744 {
+                let count = (mu + s * t).floor();
+                let difference = mu - count;
+                let (px, py, fx, fy) = poisson_probabilities(mu, s, hat, count, difference);
+                if hat.c * u.abs() <= py * (px + e).exp() - fy * (fx + e).exp() {
+                    return Ok(count);
+                }
+            }
+        }
+    }
+}
+
+/// The log Poisson probability and the discrete normal approximation at `count`.
+#[allow(clippy::excessive_precision)]
+fn poisson_probabilities(
+    mu: f64,
+    s: f64,
+    hat: &PoissonHat,
+    count: f64,
+    difference: f64,
+) -> (f64, f64, f64, f64) {
     const A0: f64 = -0.5;
     const A1: f64 = 0.3333333;
     const A2: f64 = -0.2500068;
@@ -948,138 +1388,146 @@ pub fn rpois(deviates: &mut impl Deviates, mu: f64) -> R<f64> {
     const FACTORIALS: [f64; 10] = [
         1.0, 1.0, 2.0, 6.0, 24.0, 120.0, 720.0, 5040.0, 40320.0, 362880.0,
     ];
-    if !mu.is_finite() || mu < 0.0 {
-        return Ok(f64::NAN);
-    }
-    if mu <= 0.0 {
-        return Ok(0.0);
-    }
-    if mu < 10.0 {
-        // Inversion against the cumulative probabilities of 0..=35, drawn again past them.
-        let p0 = (-mu).exp();
-        let mode = (mu as i64).max(1) as usize;
-        let mut cumulative = [0.0f64; 36];
-        let mut filled = 0usize;
-        let mut probability = p0;
-        let mut sum = p0;
-        loop {
-            let u = deviates.uniform()?;
-            if u <= p0 {
-                return Ok(0.0);
-            }
-            if filled > 0 {
-                let first = if u > 0.458 { filled.min(mode) } else { 1 };
-                if let Some(k) = (first..=filled).find(|&k| u <= cumulative[k]) {
-                    return Ok(k as f64);
-                }
-                if filled == 35 {
-                    continue;
-                }
-            }
-            for (k, slot) in cumulative.iter_mut().enumerate().skip(filled + 1) {
-                probability *= mu / k as f64;
-                sum += probability;
-                *slot = sum;
-                if u <= sum {
-                    return Ok(k as f64);
-                }
-            }
-            filled = 35;
-        }
-    }
-    let s = mu.sqrt();
-    let d = 6.0 * mu * mu;
-    let big_l = (mu - 1.1484).floor();
-    let mut count = 0.0;
-    let mut difference = 0.0;
-    let mut u = 0.0;
-    let normal = mu + s * deviates.normal()?;
-    if normal >= 0.0 {
-        count = normal.floor();
-        if count >= big_l {
-            return Ok(count);
-        }
-        difference = mu - count;
-        u = deviates.uniform()?;
-        if d * u >= difference * difference * difference {
-            return Ok(count);
-        }
-    }
-    let omega = M_1_SQRT_2PI / s;
-    let b1 = 1.0 / 24.0 / mu;
-    let b2 = 0.3 * b1 * b1;
-    let c3 = 1.0 / 7.0 * b1 * b2;
-    let c2 = b2 - 15.0 * c3;
-    let c1 = b1 - 6.0 * b2 + 45.0 * c3;
-    let c0 = 1.0 - b1 + 3.0 * b2 - 15.0 * c3;
-    let c = 0.1069 / mu;
-    // The log Poisson probability and the discrete normal approximation at `count`.
-    let probabilities = |count: f64, difference: f64| -> (f64, f64, f64, f64) {
-        let (px, py) = if count < 10.0 {
-            (-mu, mu.powf(count) / FACTORIALS[count as usize])
+    let (px, py) = if count < 10.0 {
+        (-mu, mu.powf(count) / FACTORIALS[count as usize])
+    } else {
+        let mut delta = 1.0 / 12.0 / count;
+        delta *= 1.0 - 4.8 * delta * delta;
+        let v = difference / count;
+        let px = if v.abs() <= 0.25 {
+            count
+                * v
+                * v
+                * (((((((A7 * v + A6) * v + A5) * v + A4) * v + A3) * v + A2) * v + A1) * v + A0)
+                - delta
         } else {
-            let mut delta = 1.0 / 12.0 / count;
-            delta *= 1.0 - 4.8 * delta * delta;
-            let v = difference / count;
-            let px = if v.abs() <= 0.25 {
-                count
-                    * v
-                    * v
-                    * (((((((A7 * v + A6) * v + A5) * v + A4) * v + A3) * v + A2) * v + A1) * v
-                        + A0)
-                    - delta
-            } else {
-                count * v.ln_1p() - difference - delta
-            };
-            (px, M_1_SQRT_2PI / count.sqrt())
+            count * v.ln_1p() - difference - delta
         };
-        let x = (0.5 - difference) / s;
-        let square = x * x;
-        let fx = -0.5 * square;
-        let fy = omega * (((c3 * square + c2) * square + c1) * square + c0);
-        (px, py, fx, fy)
+        (px, M_1_SQRT_2PI / count.sqrt())
     };
-    if normal >= 0.0 {
-        let (px, py, fx, fy) = probabilities(count, difference);
-        if fy - u * fy <= py * (px - fx).exp() {
-            return Ok(count);
-        }
-    }
-    loop {
-        let e = deviates.exponential()?;
-        let u = 2.0 * deviates.uniform()? - 1.0;
-        let t = 1.8 + if u >= 0.0 { e } else { -e };
-        if t > -0.6744 {
-            let count = (mu + s * t).floor();
-            let difference = mu - count;
-            let (px, py, fx, fy) = probabilities(count, difference);
-            if c * u.abs() <= py * (px + e).exp() - fy * (fx + e).exp() {
-                return Ok(count);
-            }
-        }
-    }
+    let x = (0.5 - difference) / s;
+    let square = x * x;
+    let fx = -0.5 * square;
+    let fy = hat.omega * (((hat.c3 * square + hat.c2) * square + hat.c1) * square + hat.c0);
+    (px, py, fx, fy)
 }
 
 /// Binomial deviates by Kachitvichyanukul and Schmeiser's (1988) algorithm BTPE: inversion when
 /// the mean is below 30, and otherwise a triangle, parallelogram and two exponential tails as
 /// the hat, with a squeeze and Stirling's formula in the acceptance test.
 pub fn rbinom(deviates: &mut impl Deviates, size: f64, pp: f64) -> R<f64> {
+    Binomial::new(size, pp).draw(deviates)
+}
+
+/// [`rbinom`] prepared for one size and probability, holding the setup GNU R keeps in static
+/// variables between calls with the same parameters.
+pub struct Binomial {
+    kind: BinomialKind,
+}
+
+enum BinomialKind {
+    /// The result for every draw, without consuming the generator.
+    Constant(f64),
+    /// Beyond the integer range of the algorithm, the distribution function inverted.
+    Quantile {
+        size: f64,
+        probability: f64,
+    },
+    Inversion(BinomialInversion),
+    Btpe(Btpe),
+}
+
+/// The common part of both algorithms: the size, the smaller of the two probabilities, and
+/// whether the count is of the other outcome.
+struct BinomialShape {
+    n: i64,
+    flip: bool,
+    g: f64,
+    r: f64,
+}
+
+struct BinomialInversion {
+    shape: BinomialShape,
+    qn: f64,
+}
+
+struct Btpe {
+    shape: BinomialShape,
+    nf: f64,
+    p: f64,
+    q: f64,
+    m: i64,
+    mf: f64,
+    npq: f64,
+    p1: f64,
+    xm: f64,
+    xl: f64,
+    xr: f64,
+    c: f64,
+    xll: f64,
+    xlr: f64,
+    p2: f64,
+    p3: f64,
+    p4: f64,
+}
+
+impl Binomial {
+    pub fn new(size: f64, pp: f64) -> Self {
+        Self {
+            kind: binomial_kind(size, pp),
+        }
+    }
+
+    pub fn draw(&mut self, deviates: &mut impl Deviates) -> R<f64> {
+        let (shape, draw) = match &self.kind {
+            BinomialKind::Constant(value) => return Ok(*value),
+            BinomialKind::Quantile { size, probability } => {
+                return Ok(qbinom(
+                    deviates.uniform()?,
+                    *size,
+                    *probability,
+                    false,
+                    false,
+                ));
+            }
+            BinomialKind::Inversion(inversion) => (&inversion.shape, inversion.draw(deviates)?),
+            BinomialKind::Btpe(btpe) => (&btpe.shape, btpe.draw(deviates)?),
+        };
+        let draw = if shape.flip { shape.n - draw } else { draw };
+        Ok(draw as f64)
+    }
+}
+
+impl Sampler for Binomial {
+    fn prepare(parameters: &[f64; 3]) -> Self {
+        Self::new(parameters[0], parameters[1])
+    }
+
+    #[inline(always)]
+    fn draw<D: Deviates>(&mut self, deviates: &mut D) -> R<f64> {
+        Binomial::draw(self, deviates)
+    }
+}
+
+fn binomial_kind(size: f64, pp: f64) -> BinomialKind {
     if !size.is_finite() {
-        return Ok(f64::NAN);
+        return BinomialKind::Constant(f64::NAN);
     }
     let rounded = forceint(size);
     if rounded != size || !pp.is_finite() || rounded < 0.0 || !(0.0..=1.0).contains(&pp) {
-        return Ok(f64::NAN);
+        return BinomialKind::Constant(f64::NAN);
     }
     if rounded == 0.0 || pp == 0.0 {
-        return Ok(0.0);
+        return BinomialKind::Constant(0.0);
     }
     if pp == 1.0 {
-        return Ok(rounded);
+        return BinomialKind::Constant(rounded);
     }
     if rounded >= f64::from(i32::MAX) {
-        // Beyond the integer range of the algorithm, invert the distribution function.
-        return Ok(qbinom(deviates.uniform()?, rounded, pp, false, false));
+        return BinomialKind::Quantile {
+            size: rounded,
+            probability: pp,
+        };
     }
     let n = rounded as i64;
     let nf = rounded;
@@ -1087,16 +1535,66 @@ pub fn rbinom(deviates: &mut impl Deviates, size: f64, pp: f64) -> R<f64> {
     let q = 1.0 - p;
     let np = nf * p;
     let r = p / q;
-    let g = r * (nf + 1.0);
-    let draw = if np < 30.0 {
-        let qn = q.powf(nf);
-        'outer: loop {
+    let shape = BinomialShape {
+        n,
+        flip: pp > 0.5,
+        g: r * (nf + 1.0),
+        r,
+    };
+    if np < 30.0 {
+        return BinomialKind::Inversion(BinomialInversion {
+            shape,
+            qn: q.powf(nf),
+        });
+    }
+    let mode_real = np + p;
+    let m = mode_real as i64;
+    let mf = m as f64;
+    let npq = np * q;
+    let p1 = (2.195 * npq.sqrt() - 4.6 * q).trunc() + 0.5;
+    let xm = mf + 0.5;
+    let xl = xm - p1;
+    let xr = xm + p1;
+    let c = 0.134 + 20.5 / (15.3 + mf);
+    let mut al = (mode_real - xl) / (mode_real - xl * p);
+    let xll = al * (1.0 + 0.5 * al);
+    al = (xr - mode_real) / (xr * q);
+    let xlr = al * (1.0 + 0.5 * al);
+    let p2 = p1 * (1.0 + c + c);
+    let p3 = p2 + c / xll;
+    let p4 = p3 + c / xlr;
+    BinomialKind::Btpe(Btpe {
+        shape,
+        nf,
+        p,
+        q,
+        m,
+        mf,
+        npq,
+        p1,
+        xm,
+        xl,
+        xr,
+        c,
+        xll,
+        xlr,
+        p2,
+        p3,
+        p4,
+    })
+}
+
+impl BinomialInversion {
+    #[inline]
+    fn draw(&self, deviates: &mut impl Deviates) -> R<i64> {
+        let BinomialShape { g, r, .. } = self.shape;
+        loop {
             let mut ix = 0i64;
-            let mut f = qn;
+            let mut f = self.qn;
             let mut u = deviates.uniform()?;
             loop {
                 if u < f {
-                    break 'outer ix;
+                    return Ok(ix);
                 }
                 if ix > 110 {
                     break;
@@ -1106,29 +1604,36 @@ pub fn rbinom(deviates: &mut impl Deviates, size: f64, pp: f64) -> R<f64> {
                 f *= g / ix as f64 - r;
             }
         }
-    } else {
-        let mode_real = np + p;
-        let m = mode_real as i64;
-        let mf = m as f64;
-        let npq = np * q;
-        let p1 = (2.195 * npq.sqrt() - 4.6 * q).trunc() + 0.5;
-        let xm = mf + 0.5;
-        let xl = xm - p1;
-        let xr = xm + p1;
-        let c = 0.134 + 20.5 / (15.3 + mf);
-        let mut al = (mode_real - xl) / (mode_real - xl * p);
-        let xll = al * (1.0 + 0.5 * al);
-        al = (xr - mode_real) / (xr * q);
-        let xlr = al * (1.0 + 0.5 * al);
-        let p2 = p1 * (1.0 + c + c);
-        let p3 = p2 + c / xll;
-        let p4 = p3 + c / xlr;
+    }
+}
+
+impl Btpe {
+    fn draw(&self, deviates: &mut impl Deviates) -> R<i64> {
+        let Self {
+            shape: BinomialShape { n, g, r, .. },
+            nf,
+            p,
+            q,
+            m,
+            mf,
+            npq,
+            p1,
+            xm,
+            xl,
+            xr,
+            c,
+            xll,
+            xlr,
+            p2,
+            p3,
+            p4,
+        } = *self;
         loop {
             let u = deviates.uniform()? * p4;
             let mut v = deviates.uniform()?;
             let ix;
             if u <= p1 {
-                break (xm - p1 * v + u) as i64;
+                return Ok((xm - p1 * v + u) as i64);
             }
             if u <= p2 {
                 let x = xl + (u - p1) / c;
@@ -1165,14 +1670,14 @@ pub fn rbinom(deviates: &mut impl Deviates, size: f64, pp: f64) -> R<f64> {
                     }
                 }
                 if v <= f {
-                    break ix;
+                    return Ok(ix);
                 }
             } else {
                 let amaxp = (kf / npq) * ((kf * (kf / 3.0 + 0.625) + 0.1666666666666) / npq + 0.5);
                 let ynorm = -kf * kf / (2.0 * npq);
                 let alv = v.ln();
                 if alv < ynorm - amaxp {
-                    break ix;
+                    return Ok(ix);
                 }
                 if alv <= ynorm + amaxp {
                     let x1 = ix as f64 + 1.0;
@@ -1196,14 +1701,12 @@ pub fn rbinom(deviates: &mut impl Deviates, size: f64, pp: f64) -> R<f64> {
                             + correction(x1)
                             + correction(w)
                     {
-                        break ix;
+                        return Ok(ix);
                     }
                 }
             }
         }
-    };
-    let draw = if pp > 0.5 { n - draw } else { draw };
-    Ok(draw as f64)
+    }
 }
 
 /// `log(i!)`, exactly for small `i` and by Stirling's series beyond.
@@ -1524,7 +2027,11 @@ fn two_sum_pair(high: f64, low: f64, value: f64) -> (f64, f64) {
 #[cfg(test)]
 #[allow(clippy::excessive_precision)]
 mod tests {
-    use {super::*, crate::random::SeededDeviates};
+    use {
+        super::*,
+        crate::random::SeededDeviates,
+        syntax::testing::{SplitMix64, for_each_seed},
+    };
 
     // Expected values are GNU R 4.3's, printed with `sprintf("%.17g")` from `.Internal(...)`.
 
@@ -1791,5 +2298,208 @@ mod tests {
         take_warnings();
         assert_eq!(dbinom(1.5, 3.0, 0.5, false), 0.0);
         assert_eq!(take_warnings(), ["non-integer x = 1.500000"]);
+    }
+
+    fn uniform(picks: &mut SplitMix64) -> f64 {
+        (picks.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// A probability from the central region, the tails, the boundaries, outside [0, 1], or NA.
+    fn probability(picks: &mut SplitMix64) -> f64 {
+        // `exp(-25)` and `exp(-729)` sit where the tail switches approximations (`r = 5`, `r =
+        // 27`).
+        const SPECIAL: [f64; 15] = [
+            1.388_794_386_496_402e-11,
+            1.0e-316,
+            1.0e-300,
+            0.0,
+            1.0,
+            0.5,
+            0.075,
+            0.925,
+            0.07499999999999999,
+            0.925_000_000_000_001,
+            -0.1,
+            1.1,
+            f64::NAN,
+            NA_REAL,
+            f64::INFINITY,
+        ];
+        match picks.below(5) {
+            0 => SPECIAL[picks.below(SPECIAL.len())],
+            1 => uniform(picks) * 0.08,
+            2 => 1.0 - uniform(picks) * 0.08,
+            3 => (-uniform(picks) * 800.0).exp(),
+            _ => uniform(picks),
+        }
+    }
+
+    /// The vector path of `qnorm`, with the central region across SIMD lanes, must give the
+    /// scalar function's bits at every element.
+    #[test]
+    fn qnorm_lanes_match_the_scalar_function() {
+        for_each_seed(300, |seed| {
+            let mut picks = SplitMix64(0x9a07_0000 ^ seed);
+            let length = picks.below(700);
+            let probabilities: Vec<f64> = (0..length).map(|_| probability(&mut picks)).collect();
+            let mu = (uniform(&mut picks) - 0.5) * 1e4;
+            let sigma = (uniform(&mut picks) * 20.0 - 10.0).exp();
+            let lower = picks.below(2) == 0;
+            let flags = [i32::from(lower), 0];
+            let mut out = vec![0.0; length];
+            let nan_produced =
+                Qnorm::fill_first(&probabilities, &[0.0, mu, sigma, 0.0], flags, &mut out)
+                    .expect("finite parameters take the vector path");
+            let mut expected_nan = false;
+            for (&p, &got) in probabilities.iter().zip(&out) {
+                let expected = if p.is_nan() {
+                    na_or_nan(&[p])
+                } else {
+                    let value = qnorm(p, mu, sigma, lower, false);
+                    expected_nan |= value.is_nan();
+                    value
+                };
+                assert_eq!(
+                    got.to_bits(),
+                    expected.to_bits(),
+                    "p = {p:e}, mu = {mu}, sigma = {sigma}"
+                );
+            }
+            assert_eq!(nan_produced, expected_nan);
+        });
+    }
+
+    /// The recycling loop's wrapping positions must pick the operands `element % length` picks.
+    #[test]
+    fn recycling_matches_modular_indexing() {
+        for_each_seed(300, |seed| {
+            let mut picks = SplitMix64(0x7ec7_0000 ^ seed);
+            let operands: Vec<Vec<f64>> = (0..3)
+                .map(|_| {
+                    let length = 1 + picks.below(9);
+                    (0..length)
+                        .map(|_| match picks.below(8) {
+                            0 => NA_REAL,
+                            1 => f64::NAN,
+                            2 => -1.0,
+                            _ => (uniform(&mut picks) - 0.3) * 5.0,
+                        })
+                        .collect()
+                })
+                .collect();
+            let count = operands.iter().map(Vec::len).max().unwrap_or(0);
+            let values = [
+                &operands[0][..],
+                &operands[1][..],
+                &operands[2][..],
+                &[][..],
+            ];
+            let flags = [picks.below(2) as i32, 0];
+            let mut out = vec![0.0; count];
+            let nan_produced = math_loop::<Dnorm>(&values, flags, &mut out);
+            let mut expected_nan = false;
+            for (element, &got) in out.iter().enumerate() {
+                let mut arguments = [0.0; 4];
+                for (slot, operand) in arguments.iter_mut().zip(&operands) {
+                    *slot = operand[element % operand.len()];
+                }
+                let expected = if arguments[..3].iter().any(|value| value.is_nan()) {
+                    na_or_nan(&arguments[..3])
+                } else {
+                    let value = Dnorm::apply(&arguments, flags);
+                    expected_nan |= value.is_nan();
+                    value
+                };
+                assert_eq!(got.to_bits(), expected.to_bits(), "element {element}");
+            }
+            assert_eq!(nan_produced, expected_nan);
+        });
+    }
+
+    /// A sampler prepared once and reused, for scalar or recycled parameters, must draw what a
+    /// fresh call of the generator per element draws.
+    #[test]
+    fn prepared_samplers_match_fresh_draws() {
+        for_each_seed(200, |seed| {
+            let mut picks = SplitMix64(0x5a3b_0000 ^ seed);
+            let length = picks.below(400);
+            let means: Vec<f64> = (0..1 + picks.below(4))
+                .map(|_| match picks.below(6) {
+                    0 => uniform(&mut picks) * 10.0,
+                    1 => 10.0 + uniform(&mut picks) * 1e4,
+                    2 => [0.0, -1.0, f64::NAN, f64::INFINITY, 9.999, 10.0][picks.below(6)],
+                    _ => uniform(&mut picks) * 40.0,
+                })
+                .collect();
+            let sizes: Vec<f64> = (0..1 + picks.below(3))
+                .map(|_| match picks.below(5) {
+                    0 => [0.0, 1.5, -1.0, f64::NAN, 2147483647.0][picks.below(5)],
+                    _ => picks.below(5000) as f64,
+                })
+                .collect();
+            let probabilities: Vec<f64> = (0..1 + picks.below(3))
+                .map(|_| match picks.below(5) {
+                    0 => [0.0, 1.0, 0.5, f64::NAN, 1.5][picks.below(5)],
+                    _ => uniform(&mut picks),
+                })
+                .collect();
+            let draw_seed = seed as u32;
+            let check =
+                |batched: &dyn Fn(&mut SeededDeviates, &mut [f64]) -> R<()>,
+                 single: &dyn Fn(&mut SeededDeviates, usize) -> R<f64>| {
+                    let mut deviates = SeededDeviates::new(draw_seed);
+                    let mut slots = vec![0.0; length];
+                    batched(&mut deviates, &mut slots).expect("valid draws");
+                    let mut deviates = SeededDeviates::new(draw_seed);
+                    for (element, &got) in slots.iter().enumerate() {
+                        let expected = single(&mut deviates, element).expect("valid draws");
+                        assert_eq!(got.to_bits(), expected.to_bits(), "element {element}");
+                    }
+                };
+            check(
+                &|deviates, slots| draw_all::<Poisson, _>(deviates, &[&means[..]], slots),
+                &|deviates, element| rpois(deviates, means[element % means.len()]),
+            );
+            check(
+                &|deviates, slots| Poisson::new(means[0]).fill(deviates, slots),
+                &|deviates, _| rpois(deviates, means[0]),
+            );
+            check(
+                &|deviates, slots| {
+                    draw_all::<Binomial, _>(deviates, &[&sizes[..], &probabilities[..]], slots)
+                },
+                &|deviates, element| {
+                    rbinom(
+                        deviates,
+                        sizes[element % sizes.len()],
+                        probabilities[element % probabilities.len()],
+                    )
+                },
+            );
+            check(
+                &|deviates, slots| {
+                    draw_all::<NormalSampler, _>(deviates, &[&means[..], &probabilities[..]], slots)
+                },
+                &|deviates, element| {
+                    rnorm(
+                        deviates,
+                        means[element % means.len()],
+                        probabilities[element % probabilities.len()],
+                    )
+                },
+            );
+            check(
+                &|deviates, slots| {
+                    NormalSampler::prepare(&[means[0], sizes[0], 0.0]).fill(deviates, slots)
+                },
+                &|deviates, _| rnorm(deviates, means[0], sizes[0]),
+            );
+            check(
+                &|deviates, slots| {
+                    UniformSampler::prepare(&[-means[0], sizes[0], 0.0]).fill(deviates, slots)
+                },
+                &|deviates, _| runif(deviates, -means[0], sizes[0]),
+            );
+        });
     }
 }
