@@ -395,7 +395,10 @@ tenured and takes tenured ones as roots through the remembered set. A major coll
 everything dead. The heap has two limits, as GNU R's `R_VSize` and `R_NSize` do: one on large
 vectors (at least 64 MB) and one on small objects (at least 32 MB). When a minor collection leaves
 less than a fifth of a limit's minimum free, an intermediate collection runs, then a major one if
-that is still not enough. After each major collection the limits move with GNU R's fractions: a
+that is still not enough. An intermediate collection is skipped when it would not free enough: the
+share of the younger old objects (old but not yet tenured) that the last escalation found dead
+predicts what it frees now, so a program that keeps what it builds goes straight to the major
+collection instead of tracing its young structure twice. After each major collection the limits move with GNU R's fractions: a
 limit grows by a fifth when the survivors plus that fifth fill more than 70% of it, and shrinks by
 a fifth when they fill less than 30%. A major collection that escalation forced before the program
 allocated a limit's worth of vectors grows the vector limit too, because the working set it keeps
@@ -403,6 +406,11 @@ promoting is larger than the survivors show. GNU R's `R_GC_MEM_GROW` and its fra
 set the same numbers ([CLI reference](/reference/cli#memory)). The nursery's budget for small
 objects scales with the old small objects only, as GNU R's cons-cell trigger ignores vector memory,
 so a few big live vectors do not let as many bytes of small garbage pile up.
+
+`R_PreserveObject` sets a flag bit in the object's header and appends the object to a dense vector
+of preserved objects with their counts, so a frame release asks the header, not a hash table,
+whether an environment is preserved. `R_ReleaseObject` searches the vector from its newest entry,
+as GNU R's precious list does.
 
 The write barrier is one load and one compare on the parent's header: a store into a young object,
 or into an old one that is already remembered, does nothing more. An old object that receives a
@@ -413,6 +421,17 @@ rescan visits only the dirty cards. An environment's spilled frame keeps a water
 because its bindings are only appended or compacted: the rescan marks the cells appended since the
 last scan, which keeps a namespace that is filled during a load from being rescanned whole at every
 collection.
+
+A lazy-load fetch allocates pretenured: what it reads is a package's functions and data, which live
+as long as the session, so a minor collection would trace them only to promote them. Small objects
+come from separate allocation runs whose pages hold no young objects, and no collection runs while
+a fetch reads. Their bytes stay out of the nursery's budget, which bounds young garbage, and count
+toward the small-object limit once flushed. The next collection flushes them: it makes them old and marked, and remembers each
+one that points at a young object. Stores into a pretenured object pass no barrier before that
+flush, because the object still looks young, so the flush's check of every child is what keeps the
+remembered set exact. A large object is made old when the fetch ends, with the same check. R code
+that the reader calls (a namespace or package hook) allocates young, since its temporaries are
+garbage.
 
 Vectors of 1 MB or more get an anonymous mapping each. A dead one's mapping is kept for the next
 large vector while the kept mappings fit the vector limit, and resized with `mremap`, so a loop's
@@ -592,10 +611,18 @@ compilation earlier: a namespace fetches many closures it never calls, such as e
 registers, and calls many others only once. What the image adds is what compiling cannot produce,
 the trained profile below, and the native code it reserves room for.
 
-- **Identity.** A record is identified by its offset in the database, its length and an FNV-1a hash
-  of its stored bytes; a closure within the record by the order the stream reader creates closures.
-  An image written for other bytes (a reinstall by GNU R, another version) is ignored record by
-  record. Only databases that have an image pay for the hash.
+- **Identity.** A record is identified by its offset and length in the database, and a closure
+  within the record by the order the stream reader creates closures. The image is stamped with the
+  database's length and modification time, so an image written for another database (a reinstall
+  by GNU R, another version) is ignored whole. A copy that does not keep modification times loses
+  the image, never serves a stale record.
+- **Streams.** The image also holds the serialized stream of every record the install fetched,
+  uncompressed, after the payloads. A fetch from a database with an image reads that stream in
+  place from the mapped file: it does not read the database, inflate the record or copy it, and
+  processes that load the same package share the pages. A record the install did not fetch is read
+  from the database. Each stream carries a hash that is checked the first time the stream is read
+  (`stream_hash`, a word-at-a-time hash, since only one build ever reads the image); a mismatch is
+  damage, below, and the fetch reads the database instead.
 - **No copy of the source.** A code object points into its closure's body, so the image stores those
   pointers as the preorder position of the object in the body. The body itself comes from the
   database, as without an image.
@@ -608,7 +635,7 @@ the trained profile below, and the native code it reserves room for.
   other compiles its own.
 - **Damage.** The image only saves compiling, so a damaged one never stops a package from loading.
   A file that cannot be read or parsed, a payload whose hash does not match (checked when the first
-  closure of its record is called), a record whose closures do not match the database's, or code
+  closure of its record is called), a stream whose hash does not match, a record whose closures do not match the database's, or code
   the decoder rejects each print one warning to the console (`cannot use the code image ..., so its
   functions compile as they run; reinstall the package to repair it`). The warning is not
   signalled as a condition, so neither a handler nor `options(warn = 2)` can turn the damage into
@@ -769,7 +796,9 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   (vector fusion, bounds-check elimination) are not built.
 - **Unboxing.** Integers, doubles and logicals of length one without attributes live in machine
   registers, with R's `NA` and overflow rules. Element reads and writes on integer, double and
-  logical vectors are inline, and a write copies only when the vector is shared.
+  logical vectors are inline, and a write copies only when the vector is shared. So are `m[i, j]`
+  and `m[[i, j]]` reads with scalar subscripts on an ordinary matrix; a subscript out of range,
+  `NA` or below 1 hands the read to tier 0, which raises the error.
 - **Loops over sequences.** A `for` loop over a compact sequence such as `1:n` or `seq_len(n)`
   never expands it: both tiers compute each element from the first element and the increment, so
   `for (i in 1:1e8)` runs in constant memory. The loop state carries the index, the count, the
@@ -779,7 +808,9 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   its environment. The environment object still exists, but compiled code writes a variable back
   only before something that could observe it runs (a generic call, a dispatching operation, the
   first read of a formal whose default is an expression, a return, a deoptimization) and reloads it
-  after something that could change it.
+  after something that could change it. A scalar written back goes into the box the variable
+  holds when that box is a plain scalar of the same type that nothing else references, so a loop
+  that calls a closure on every iteration does not allocate for its counters.
 - **Calls.** A call to an effect-free closure whose binding was resolved at compile time is direct:
   effect-free arguments are evaluated eagerly and passed as already forced promises, bound by
   position without the general matcher. Evaluating early is invisible only if nothing can assign
@@ -932,8 +963,11 @@ today's ratio):
 So 10x on the workloads is reachable on one thread: R code needs about 30x (tier 1 for most of it,
 row (c) below) and builtins about 10x (row (a)). `tables` and `timeseries` stop near 9x and 8x
 because of `data.table`'s and `xts`'s C code, and the geometric mean carries them. The corpus
-runs at 1.94x GNU R today (geometric mean over the 21 packages that pass on both engines, 95%
-interval 1.76x to 2.15x). Its column counts all native code as fixed, because the profile does not
+runs at 2.01x GNU R today (geometric mean over the 21 packages that pass on both engines, 95%
+interval 1.83x to 2.20x). The corpus runs offline: `run.py` drops test files that fetch URLs
+(`NETWORK_TESTS`, such as `jsonlite`'s `test-network-*.R`, whose GitHub requests cost both engines
+the same 0.2 s each) and routes both engines through a proxy that refuses every request, so a test
+that reaches for the network fails the run. Its column counts all native code as fixed, because the profile does not
 split ry's ports from CRAN code, and its single-thread ceiling is 34.4x, because I/O, waiting and
 native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.sleep`), then
 `rlang`, `withr` and `cli` at 11x to 12x (their native code and waiting).
@@ -975,7 +1009,10 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | One-argument builtins without dispatch, and native entries for small base closures: compiled code calls a builtin's `unary` function with the operand register before any dispatch, and a call to a hash-guarded base closure whose arguments are already values runs natively without a frame | ry | built | instructions per call, JIT off, before and after (GNU R): `!x` 944 to 563 (750); `length(x)` 1,002 to 772 (1,232); `is.null(x)` 754 to 575 (697); `is.na(x)` 1,128 to 641 (1,490); `is.character(x)` 754 to 574 (699); `identical(x, y)` 8,545 to 1,818 (3,149); `isTRUE(x)` 6,087 to 1,114 (5,594); `nrow(m)` 4,575 to 1,324 (4,075); `match(x, t)` 6,869 to 1,905 (2,963); `x %in% t` 11,327 to 1,745 (8,226); `x %\|\|% y` 3,293 to 1,027 (absent in GNU R 4.3.3) | `BuiltinDef::unary` in `builtins.rs`, its call in `op_call_builtin` (`bytecode.rs`); `native_entry` and `NATIVE_ENTRIES` in `base_fast_paths.rs` |
 | Getter instructions for nested complex assignment (`names(x)[2] <-`, `x$a$b <-`) | GNU R bytecode | planned | the nested levels still build their calls in `complex_assign` | |
 | **3. LLInt- and LuaJIT-grade tier 0** | | | | |
-| In-place specialization (quickening) with value profiles | CPython (PEP 659), JSC | planned | tier-0 instructions 23 to 44%; JIT-off scalar loops 0.35 to 0.41 times GNU R | |
+| In-place specialization (quickening) with value profiles | CPython (PEP 659), JSC | built for scalar integer and double arithmetic and comparisons; a comparison that a `JumpUnless` tests takes the branch itself | `while (i < n) i <- i + 1L`, JIT off: 1,123 to 406 instructions per iteration with the two rows below | `QUICK_ARITHMETIC`, `quick_arithmetic`, `arithmetic_miss` in `bytecode.rs` |
+| Frameless fast handlers: a call-free fast path per hot instruction, with the generic handler a tail jump away | LuaJIT, LLInt | built for `GetVar`, `SetVar`, `Guard`, `JumpUnless`, `Jump`, `Constant`, `SetSrcref`, `EndStatement` and the quickened arithmetic | the callee-saved spills of every handler; scalar results from `Heap::try_alloc_scalar`, which never calls | `fast_paths!`, `GENERIC_HANDLERS` in `bytecode.rs` |
+| Cold fallbacks of in-loop instructions after the back edge | LuaJIT, V8 | built | loop bodies contiguous in the code vector | `back_edge` in `bytecode.rs` |
+| Guards folded into one version check per body entry; code, registers and pc pinned as handler arguments; the visible flag set once per statement | LuaJIT | planned | the warmed loop's remaining 406 instructions: three guards (about 34 each), three `GetVar`s (about 31 each), `SetVar` (52) | |
 | Tail-call dispatch, one indirect jump per handler | LuaJIT, JSC | built | the shared indirect jump; measured level with the match loop (121.4k against 120.8k per `seq()`), since handlers that call out still need a frame. The handler signature is `(activation, pc)` so that few values stay live across calls | `handlers!` in `bytecode.rs` |
 | Dense feedback storage, one slot per profiled instruction | V8 | planned | feedback is one `i32` per code word | |
 | One description of each instruction's semantics, shared by tier 0 and the baseline | Deegen (LuaJIT Remake) | planned | the baseline drifting from tier 0 | |

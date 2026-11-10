@@ -45,15 +45,31 @@ pub enum EngineError {
     Failed(String),
 }
 
-/// Everything observable about one run.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Everything observable about one run, and the package libraries it searched.
+#[derive(Debug, Clone, Default)]
 pub struct Outcome {
     pub stdout: String,
     pub messages: Vec<String>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
     pub value: Option<Value>,
+    /// `R_LIBS` as the script saw it, when the engine reports it. It is not part of the
+    /// behavior: [`diff`] refuses to compare runs that searched different libraries, because a
+    /// package installed by one engine makes the other warn that it was built under another R.
+    pub libraries: Option<String>,
 }
+
+impl PartialEq for Outcome {
+    fn eq(&self, other: &Self) -> bool {
+        self.stdout == other.stdout
+            && self.messages == other.messages
+            && self.warnings == other.warnings
+            && self.errors == other.errors
+            && self.value == other.value
+    }
+}
+
+impl Eq for Outcome {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Value {
@@ -67,6 +83,8 @@ struct Report {
     warnings: Vec<String>,
     errors: Vec<String>,
     value: Option<Value>,
+    #[serde(default)]
+    libraries: Option<String>,
 }
 
 /// The stand-in until ry's runtime exists. It reports itself as unavailable for every file.
@@ -320,6 +338,7 @@ impl Engine for ProcessEngine {
             warnings: report.warnings,
             errors: report.errors,
             value: report.value,
+            libraries: report.libraries,
         })
     }
 }
@@ -724,6 +743,15 @@ pub fn diff(
     actual_label: &str,
     actual: &Outcome,
 ) -> Option<String> {
+    if let (Some(left), Some(right)) = (&expected.libraries, &actual.libraries)
+        && left != right
+    {
+        return Some(format!(
+            "the engines searched different package libraries, so their runs are not comparable: \
+             {expected_label} had R_LIBS={left:?} and {actual_label} had R_LIBS={right:?}; give \
+             both the same library, installed by GNU R"
+        ));
+    }
     if expected == actual {
         return None;
     }
