@@ -935,7 +935,56 @@ impl Heap {
         }
     }
 
+    /// A vector of `length` elements, as [`Heap::alloc_vector_general`] makes it. A small vector
+    /// of a common kind takes an inline path: its size class comes from a shift, the budget
+    /// check and slot bump are those of every small object, and only its data is initialized,
+    /// because the header and length words are written whole.
+    #[inline]
     pub unsafe fn alloc_vector(&mut self, kind: SexpType, length: isize) -> HeapResult<Sexp> {
+        let shift = small_vector_shift(kind);
+        // A negative length casts to a huge one and takes the general path, which refuses it.
+        if shift == NOT_SMALL_VECTOR || length as usize > SMALL_VECTOR_DATA_BYTES >> shift {
+            return self.alloc_vector_general(kind, length);
+        }
+        let data_bytes = (length as usize) << shift;
+        let size = (VECTOR_DATA_OFFSET + data_bytes + 15) & !15;
+        let class = SIZE_CLASS_BY_WORDS[size / 8] as usize;
+        let young = self.young_bytes + size;
+        if young > self.small_trigger {
+            return self.alloc_vector_general(kind, length);
+        }
+        let Some(memory) = self.space.allocate(class) else {
+            return Err(HeapError::CannotAllocate { bytes: size });
+        };
+        self.young_bytes = young;
+        let object = Sexp::from_non_null(memory.cast());
+        object.init_header(kind, class as u8, 0, self.known.nil);
+        object.set_length_and_capacity(length, length);
+        let data = object.data().cast::<u64>();
+        if holds_handles(kind) {
+            let fill = if kind == SexpType::String {
+                self.known.blank_string
+            } else {
+                self.known.nil
+            };
+            for index in 0..length as usize {
+                data.cast::<Sexp>().add(index).write(fill);
+            }
+        } else if length > 0 {
+            // Every nonempty vector's slot has at least 16 data bytes, so a scalar is zeroed by
+            // two stores instead of a `memset` call.
+            data.write(0);
+            data.add(1).write(0);
+            if size > VECTOR_DATA_OFFSET + 16 {
+                std::ptr::write_bytes(data.add(2).cast::<u8>(), 0, size - VECTOR_DATA_OFFSET - 16);
+            }
+        }
+        self.report_allocation(kind, length as usize);
+        Ok(object)
+    }
+
+    #[inline(never)]
+    unsafe fn alloc_vector_general(&mut self, kind: SexpType, length: isize) -> HeapResult<Sexp> {
         if !kind.is_vector() {
             return Err(HeapError::InvalidVectorType { kind, length });
         }
@@ -4183,5 +4232,26 @@ unsafe fn slot_kind_of(slot: Slot) -> u8 {
                 slot_kind::OTHER
             }
         },
+    }
+}
+
+/// The data bytes up to which [`Heap::alloc_vector`] takes its inline path.
+const SMALL_VECTOR_DATA_BYTES: usize = 512;
+const NOT_SMALL_VECTOR: u32 = u32::MAX;
+
+/// The log2 of `kind`'s element size, for the vector kinds [`Heap::alloc_vector`] allocates
+/// inline. A `CHARSXP` is not among them, because its size counts a terminating byte.
+#[inline(always)]
+const fn small_vector_shift(kind: SexpType) -> u32 {
+    match kind {
+        SexpType::Raw => 0,
+        SexpType::Logical | SexpType::Integer => 2,
+        SexpType::Real
+        | SexpType::I64
+        | SexpType::String
+        | SexpType::List
+        | SexpType::Expression => 3,
+        SexpType::Complex => 4,
+        _ => NOT_SMALL_VECTOR,
     }
 }
