@@ -8405,16 +8405,20 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
 - **Goal.** The 1.5x milestone holds on every bench-real suite within its 95% interval, so the next milestone is 3x. The 3x row of the roadmap table in `development/design/r-runtime.md` sets the factor each bucket needs: R code 5x, builtins 3x, ry's own ports 3x, GC and start-up 2x.
 - **Why the R code bucket needs a new tier.** Tier 1 runs under 3% of R-level time, because workload closures are called a few thousand times and the tier-up threshold is about 3000 entries. Tuning tier 0 cannot reach 5x.
-- **Owner of each bucket.**
+- **3x is a checkpoint, not the design target.** Every track designs for the 10x row (R code 30x, builtins and ry's ports 10x, GC and start-up 10x). A plan that can only reach 3x in its bucket is rewritten before it lands.
+- **Owner and 10x end shape of each bucket.**
 
-| Bucket | Plan | Owner |
+| Bucket | Owner | 10x end shape |
 | --- | --- | --- |
-| R code | Inlining tier (roadmap row (c)) | JIT track |
-| R code | Install-time compilation of 80% or more of package closures | AOT track |
-| Builtins | Builtin programs below 1.5x and data structures (B1, B2); testthat hotspots and strings (C) | B1, B2, C |
-| ry's own ports | Vector d/p/q/r* paths, SIMD across lanes with bit-identical results, batched RNG | B3 |
-| GC | Halve the bucket: tracing young survivors costs about 70 instructions per object, 44 in `Space::mark` | B2 |
-| Start-up | Mapped start-up image (image load and zlib inflate) | D |
+| R code | JIT track (inlining tier, roadmap row (c)) | Almost all R-level time runs as machine code. Callees are inlined across closures and S3/S4 dispatch, and frames, promises and environments materialize only on deoptimization |
+| R code | AOT track | 80% or more of package closures compiled at install, so package code is machine code from its first call |
+| Builtins: call machinery, subassignment, `[`/`[[`, apply family | B5 | No allocation on any fast path, arguments passed without pairlists, results written in place when unshared; faster than GNU R's C |
+| Builtins: element-wise kernels | B1 | Fused element-wise temporaries and SIMD kernels that beat GNU R's C |
+| Builtins: strings and testthat hotspots | C | Interned strings with no temporaries; the testthat profile's top entries |
+| ry's own ports | B3 | Vector d/p/q/r* paths, SIMD across lanes with bit-identical results, batched RNG with identical streams |
+| GC | B2 | Young-survivor tracing at a fraction of today's 70 instructions per object; the GC bucket at a tenth of today's |
+| Start-up | D | A mapped start-up image with no inflate and no per-object decode |
+| Corpus I/O and waiting | B4 | Fewer system calls than GNU R (testthat's `unlink`), and child processes that run ry |
 
 - **Inlining tier.**
   - Hot call sites inline their callees across closure calls, `UseMethod`/`NextMethod` and S4 dispatch, guarded by version-stamped bindings and the receiver's class.
