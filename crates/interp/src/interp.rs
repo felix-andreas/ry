@@ -189,6 +189,11 @@ pub struct Frame {
     pub method_vars: u32,
     /// Where this call's entries in [`Interp::frame_closures`] start.
     pub closures: usize,
+    /// The handle stack's height when the frame was pushed: [`eval::leave`] releases what the
+    /// body rooted down to it.
+    pub handle_mark: u32,
+    /// [`Interp::slot_owner`] when the frame was pushed, which [`eval::leave`] restores.
+    pub previous_owner: u32,
 }
 
 impl Frame {

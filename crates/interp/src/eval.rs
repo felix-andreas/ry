@@ -14,7 +14,7 @@ use {
         bytecode,
         coerce::{CoercionWarnings, real_to_int},
         conditions, deparse, dispatch, interp, moves, scope,
-        unwind::{Jump, R, Unwind, error, error_in, jump},
+        unwind::{Jump, R, Rooted, Unwind, error, error_in, jump},
         utils::{PROFILE_TICK, record_profile_sample},
         values::{
             self, alloc, cons_tagged, length, missing_arg, nil, symbol_name, symbols, triple,
@@ -440,7 +440,10 @@ unsafe fn slot_promise_value(promise: Sexp, owner: usize) -> R<Sexp> {
             }
         }
     }
-    eval(expression, frame_env(owner, Reify::Site("promise over the frame"))?)
+    eval(
+        expression,
+        frame_env(owner, Reify::Site("promise over the frame"))?,
+    )
 }
 
 /// Evaluates `symbol` from `enclosure` for the slot frame at `owner`, whose own slots do not bind
@@ -704,7 +707,10 @@ unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
         return force_promise(value);
     }
     if value == missing_arg() {
-        return eval(symbol, frame_env(owner, Reify::Site("promise over the frame"))?);
+        return eval(
+            symbol,
+            frame_env(owner, Reify::Site("promise over the frame"))?,
+        );
     }
     Ok(value)
 }
@@ -915,7 +921,10 @@ pub unsafe fn promise_env(promise: Sexp) -> R<Sexp> {
         && promise.car() == unbound()
         && reference_env(promise).is_none()
     {
-        return frame_env(reference_target(promise).0, Reify::Site("promise environment"));
+        return frame_env(
+            reference_target(promise).0,
+            Reify::Site("promise environment"),
+        );
     }
     resolved_env(promise.tag())
 }
@@ -1082,11 +1091,7 @@ pub unsafe fn call_builtin(
 /// full call. The entry is skipped while a profile or activity trace is being taken, so that
 /// samples and counts name the builtin as the full call does.
 #[inline]
-pub unsafe fn call_direct(
-    definition: &BuiltinDef,
-    call: Sexp,
-    args: &[Sexp],
-) -> R<Option<Sexp>> {
+pub unsafe fn call_direct(definition: &BuiltinDef, call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
     let Some(direct) = definition.direct else {
         return Ok(None);
     };
@@ -2186,7 +2191,7 @@ pub unsafe fn run_inlined(
     } else {
         crate::NO_SLOTS
     };
-    let (depth, caller_srcref) = push_frame(
+    let (depth, sampled) = push_frame(
         call,
         function,
         nil(),
@@ -2196,9 +2201,9 @@ pub unsafe fn run_inlined(
         header,
         missing,
         caller,
-    )?;
+    );
     interp().frames[depth - 1].inlined = true;
-    let result = scope(|| run((depth - 1) as u32));
+    let result = sampled.and_then(|()| scope(|| run((depth - 1) as u32)));
     let state = interp();
     let frame = &state.frames[depth - 1];
     let result = if frame.env != nil() || !frame.on_exit.is_empty() || frame.pending != nil() {
@@ -2206,7 +2211,7 @@ pub unsafe fn run_inlined(
     } else {
         result
     };
-    pop_frame(function, depth, args, caller_srcref, result)
+    pop_frame(function, depth, result)
 }
 
 /// The environment of the frame at `index`, made from its slots first if it is a slot frame
@@ -2236,9 +2241,23 @@ pub enum Reify {
 /// the routines packages call through it (rlang's `ffi_enquo`, `ffi_eval` and the like) read
 /// bindings there.
 pub const OBSERVING_REASONS: [&str; 17] = [
-    "eval", "evalq", "environment", "environment()", "sys.frame", "sys.frames", "parent.frame",
-    "pos = -1", "assign", "get", "get0", "exists", "mget", "native code", "as.environment",
-    "environment outliving the frame", ".External2",
+    "eval",
+    "evalq",
+    "environment",
+    "environment()",
+    "sys.frame",
+    "sys.frames",
+    "parent.frame",
+    "pos = -1",
+    "assign",
+    "get",
+    "get0",
+    "exists",
+    "mget",
+    "native code",
+    "as.environment",
+    "environment outliving the frame",
+    ".External2",
 ];
 
 /// The `...` slot of the frame at `index`, when it is a slot frame without an environment and
@@ -2596,6 +2615,149 @@ pub unsafe fn run_frame(
     entry: Entry,
     method_vars: &[(Sexp, Sexp)],
 ) -> R<Sexp> {
+    let CallFrame::Slots { header, missing } = frame else {
+        return run_frame_general(call, function, frame, sys_parent, args, entry, method_vars);
+    };
+    let entered = enter(
+        call,
+        function,
+        sys_parent,
+        args,
+        method_vars,
+        header,
+        missing,
+    )?;
+    if entered.header == crate::NO_SLOTS {
+        return Ok(entered.value);
+    }
+    let result = on_large_stack(|| bytecode::run_slots(function, entered.header as usize));
+    leave(entered.depth as usize, result)
+}
+
+/// A slot frame's call once [`enter`] has set it up. When `header` is [`crate::NO_SLOTS`] the
+/// call has already run to completion and `value` is its result. Otherwise the caller runs
+/// `value`, the closure's compiled code, on the slot frame at `header`, and hands its result
+/// to [`leave`] with `depth`.
+#[derive(Clone, Copy)]
+pub struct Entered {
+    pub value: Sexp,
+    pub header: u32,
+    pub depth: u32,
+}
+
+/// Pushes the frame of a call of `function` on the slot frame at `header`, whose arguments are
+/// already bound, without running its body, so an interpreter loop can run the body in place
+/// rather than recursing. A call that needs what only the general path does (activity
+/// counters, the debugger, the object-system refusal, a namespace load) runs whole here.
+///
+/// From a successful return until [`leave`], the frame is the slot owner. The slot frame's
+/// registers belong to the call: [`leave`] releases them, and so does `enter` itself on an
+/// error.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn enter(
+    call: Sexp,
+    function: Sexp,
+    sys_parent: Sexp,
+    args: &[Arg],
+    method_vars: &[(Sexp, Sexp)],
+    header: u32,
+    missing: u64,
+) -> R<Entered> {
+    let state = interp();
+    if activity::enabled()
+        || !state.object_systems
+        || function == state.namespace_loader
+        || (state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP))
+    {
+        let frame = CallFrame::Slots { header, missing };
+        let value = run_frame_general(
+            call,
+            function,
+            frame,
+            sys_parent,
+            args,
+            Entry::Unchecked,
+            method_vars,
+        )?;
+        return Ok(Entered {
+            value,
+            header: crate::NO_SLOTS,
+            depth: 0,
+        });
+    }
+    if state.frames.len() as u32 >= state.max_depth {
+        release_window(header);
+        return Err(error_in(
+            call,
+            "evaluation nested too deeply: infinite recursion / options(expressions=)?",
+        ));
+    }
+    // A `NULL` `sys_parent` comes from byte code running on a slot frame's slots, the caller.
+    let caller = if sys_parent == nil() {
+        state.slot_owner
+    } else {
+        crate::NO_SLOTS
+    };
+    let (depth, sampled) = push_frame(
+        call,
+        function,
+        nil(),
+        sys_parent,
+        args,
+        method_vars,
+        header,
+        missing,
+        caller,
+    );
+    match sampled.and_then(|()| default_promises(depth - 1, function, header as usize, missing)) {
+        Ok(()) => {
+            interp().slot_owner = (depth - 1) as u32;
+            Ok(Entered {
+                value: function.cdr(),
+                header,
+                depth: depth as u32,
+            })
+        }
+        Err(unwind) => leave(depth, Err(unwind)).map(|value| Entered {
+            value,
+            header: crate::NO_SLOTS,
+            depth: 0,
+        }),
+    }
+}
+
+/// Finishes the call [`enter`] pushed at `depth` once its body has ended with `result`: it
+/// releases what the body rooted, restores the slot owner, catches a `return()` aimed at the
+/// frame, runs `on.exit`, pops the frame and releases the slot frame's registers. It runs on
+/// the error path too, and it is the only way such a frame pops.
+pub unsafe fn leave(depth: usize, result: R<Sexp>) -> R<Sexp> {
+    let state = interp();
+    let frame = &state.frames[depth - 1];
+    let (call, function, header) = (frame.call, frame.function, frame.slots);
+    let (mark, owner) = (frame.handle_mark, frame.previous_owner);
+    crate::heap().release_handles(mark as usize);
+    match &result {
+        Ok(value) => value.root(),
+        Err(unwind) => unwind.root(),
+    }
+    state.slot_owner = owner;
+    let result = finish_frame(call, depth, None, result);
+    let result = pop_frame(function, depth, result);
+    release_window(header);
+    result
+}
+
+/// [`run_frame`] for a frame with an environment, and for a slot frame whose call needs more
+/// than [`enter`] and [`leave`] do.
+unsafe fn run_frame_general(
+    call: Sexp,
+    function: Sexp,
+    frame: CallFrame,
+    sys_parent: Sexp,
+    args: &[Arg],
+    entry: Entry,
+    method_vars: &[(Sexp, Sexp)],
+) -> R<Sexp> {
     let (env, slots, missing) = match frame {
         CallFrame::Env(env) => (env, crate::NO_SLOTS, 0),
         CallFrame::Slots { header, missing } => (nil(), header, missing),
@@ -2628,7 +2790,7 @@ pub unsafe fn run_frame(
         };
         refuse_object_system(call, function, sys_parent)?;
     }
-    let (depth, caller_srcref) = push_frame(
+    let (depth, sampled) = push_frame(
         call,
         function,
         env,
@@ -2638,7 +2800,10 @@ pub unsafe fn run_frame(
         slots,
         missing,
         caller,
-    )?;
+    );
+    if let Err(unwind) = sampled {
+        return pop_frame(function, depth, Err(unwind));
+    }
     let state = interp();
     if state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP) {
         function.set_gp_bits(gp::CLOSURE_STEP, false);
@@ -2687,7 +2852,7 @@ pub unsafe fn run_frame(
         Err(unwind) => (None, Err(unwind)),
     };
     let result = finish_frame(call, depth, signature, result);
-    pop_frame(function, depth, args, caller_srcref, result)
+    pop_frame(function, depth, result)
 }
 
 /// What a call returns once its body has run with `result`: a `return()` aimed at the frame, the
@@ -2702,7 +2867,11 @@ unsafe fn finish_frame(
     // A slot frame may have made its environment while the body ran; until it does, only its
     // pending environment, if it handed one out, can name the frame as a `return` target.
     let frame = &interp().frames[depth - 1];
-    let env = if frame.env == nil() { frame.pending } else { frame.env };
+    let env = if frame.env == nil() {
+        frame.pending
+    } else {
+        frame.env
+    };
     let result = if env == nil() {
         result
     } else {
@@ -2721,7 +2890,14 @@ unsafe fn finish_frame(
     } else {
         let result = run_on_exit(depth, result);
         let frame = &interp().frames[depth - 1];
-        catch_return(if frame.env == nil() { frame.pending } else { frame.env }, result)
+        catch_return(
+            if frame.env == nil() {
+                frame.pending
+            } else {
+                frame.env
+            },
+            result,
+        )
     };
     // Promises over the slots that may still be forced need the environment once the slots are
     // gone, and so does anything that kept the pending environment itself.
@@ -2792,7 +2968,12 @@ unsafe fn pending_closures_dying(index: usize, result: &R<Sexp>) -> (u32, u32) {
     };
     let frame = &state.frames[index];
     let (pending, header) = (frame.pending, frame.slots as usize);
-    let names = frame.function.cdr().cdr().element(bytecode::SLOTS).element(1);
+    let names = frame
+        .function
+        .cdr()
+        .cdr()
+        .element(bytecode::SLOTS)
+        .element(1);
     let count = values::length(names);
     let heap = crate::heap();
     let mut dying = 0;
@@ -2825,24 +3006,29 @@ struct SlotWindow(u32);
 
 impl Drop for SlotWindow {
     fn drop(&mut self) {
-        if self.0 == crate::NO_SLOTS {
-            return;
-        }
-        let header = self.0 as usize;
-        unsafe {
-            let registers = &mut interp().bytecode.registers;
-            if *registers.get_unchecked(header) == nil()
-                && let Some(slots) = registers.get_mut(header + 1..)
-            {
-                crate::heap().release_slots(slots);
-            }
-            registers.truncate(header);
-        }
+        // SAFETY: the window's header register is live until the window drops.
+        unsafe { release_window(self.0) }
     }
 }
 
+/// Releases the registers of the slot frame at `header`, and its slots' references when it
+/// never made its environment.
+unsafe fn release_window(header: u32) {
+    if header == crate::NO_SLOTS {
+        return;
+    }
+    let header = header as usize;
+    let registers = &mut interp().bytecode.registers;
+    if *registers.get_unchecked(header) == nil()
+        && let Some(slots) = registers.get_mut(header + 1..)
+    {
+        crate::heap().release_slots(slots);
+    }
+    registers.truncate(header);
+}
+
 /// Pushes the frame of a call of the closure `function`, makes the closure's srcref current,
-/// and returns the frame's depth with the srcref current before.
+/// and returns the frame's depth. On an error the frame is pushed all the same.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 unsafe fn push_frame(
@@ -2855,7 +3041,7 @@ unsafe fn push_frame(
     slots: u32,
     missing: u64,
     caller: u32,
-) -> R<(usize, Sexp)> {
+) -> (usize, R<()>) {
     let state = interp();
     let start = state.frame_args.len() as u32;
     state.frame_args.extend_from_slice(args);
@@ -2882,29 +3068,35 @@ unsafe fn push_frame(
         inlined: false,
         reified_by: crate::NOT_REIFIED,
         pending_shared: false,
+        handle_mark: crate::heap().handle_mark() as u32,
+        previous_owner: state.slot_owner,
     });
-    if PROFILE_TICK.load(Ordering::Relaxed) {
-        record_profile_sample(None)?;
-    }
-    let depth = state.frames.len();
-    let caller_srcref = state.srcref;
+    let sampled = if PROFILE_TICK.load(Ordering::Relaxed) {
+        record_profile_sample(None)
+    } else {
+        Ok(())
+    };
+    let state = interp();
     state.srcref = values::get_attr(function, symbols().srcref);
-    Ok((depth, caller_srcref))
+    (state.frames.len(), sampled)
 }
 
 /// Pops the frame at `depth` (one-based) once its call has finished with `result`, restoring
 /// the condition stacks and srcref of the caller.
 #[inline(always)]
-unsafe fn pop_frame(
-    function: Sexp,
-    depth: usize,
-    args: &[Arg],
-    caller_srcref: Sexp,
-    result: R<Sexp>,
-) -> R<Sexp> {
+unsafe fn pop_frame(function: Sexp, depth: usize, result: R<Sexp>) -> R<Sexp> {
     let state = interp();
     if activity::enabled() {
-        count_package_call(function, Some(&state.frames[depth - 1]), args);
+        let frame = &state.frames[depth - 1];
+        let end = state
+            .frames
+            .get(depth)
+            .map_or(state.frame_args.len(), |next| next.args as usize);
+        let args = state
+            .frame_args
+            .get(frame.args as usize..end)
+            .unwrap_or(&[]);
+        count_package_call(function, Some(frame), args);
     }
     crate::truncate_frames(state, depth);
     let Some(frame) = state.frames.pop() else {
@@ -2916,7 +3108,7 @@ unsafe fn pop_frame(
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = frame.handlers;
     state.restarts = frame.restarts;
-    state.srcref = caller_srcref;
+    state.srcref = frame.srcref;
     if let Ok(value) = result
         && env != nil()
     {
@@ -2943,7 +3135,10 @@ pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, a
         Some(frame) if frame.slots == crate::NO_SLOTS => Some("frame with an environment"),
         Some(frame) if frame.env != nil() => {
             let reason = activity::label_name(frame.reified_by);
-            if reason.as_deref().is_some_and(|name| OBSERVING_REASONS.contains(&name)) {
+            if reason
+                .as_deref()
+                .is_some_and(|name| OBSERVING_REASONS.contains(&name))
+            {
                 activity::count(Counter::PackageCallsObserved);
             }
             activity::count_package_fallback(match reason {
@@ -3164,7 +3359,9 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
     // Other exit code, such as the call `withr::defer` registers through `do.call`, runs in
     // the frame's pending environment, which reifies only if the code reads a binding.
     let env = if frame.env != nil()
-        || expressions.iter().all(|expression| expression.kind() == SexpType::Bytecode)
+        || expressions
+            .iter()
+            .all(|expression| expression.kind() == SexpType::Bytecode)
     {
         frame.env
     } else if frame.slots == crate::NO_SLOTS {
@@ -3622,11 +3819,20 @@ pub(crate) unsafe fn value_is_missing(value: Sexp) -> R<bool> {
 /// that order asks what its environment would answer.
 unsafe fn pending_slot_is_missing(pending: Sexp, symbol: Sexp) -> R<bool> {
     let state = interp();
-    let Some(owner) = state.frames.iter().rposition(|frame| frame.pending == pending) else {
+    let Some(owner) = state
+        .frames
+        .iter()
+        .rposition(|frame| frame.pending == pending)
+    else {
         panic!("a promise names the pending environment of a frame that has returned");
     };
     let frame = &state.frames[owner];
-    let names = frame.function.cdr().cdr().element(bytecode::SLOTS).element(1);
+    let names = frame
+        .function
+        .cdr()
+        .cdr()
+        .element(bytecode::SLOTS)
+        .element(1);
     if let Some(slot) = (0..values::length(names)).find(|&slot| names.element(slot) == symbol) {
         let value = *bytecode::register_address(frame.slots as usize + 1 + slot);
         return if value == unbound() {
@@ -4704,7 +4910,8 @@ pub unsafe fn call_with_values(call: Sexp, function: Sexp, values: &[Sexp], env:
     let definition = builtin_def(function)?;
     args.extend(values.iter().map(|&value| Arg { tag: nil(), value }));
     if definition.generic != Generic::None
-        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
+        && let Some(value) =
+            dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
     {
         return Ok(value);
     }
@@ -4916,6 +5123,8 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         inlined: false,
         reified_by: crate::NOT_REIFIED,
         pending_shared: false,
+        handle_mark: crate::heap().handle_mark() as u32,
+        previous_owner: state.slot_owner,
     });
     let depth = state.frames.len();
     let result = scope(|| match expression.kind() {
@@ -4951,8 +5160,16 @@ unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
     let outside = || call.error("'Recall' called from outside a closure");
     let own = call.frame_index().ok_or_else(outside)?;
     let caller = crate::envir::caller_index(own).ok_or_else(outside)?;
-    let (caller_call, function) = (interp().frames[caller].call, interp().frames[caller].function);
-    apply(caller_call, function, call.args, frame_sys_parent_pending(caller)?)
+    let (caller_call, function) = (
+        interp().frames[caller].call,
+        interp().frames[caller].function,
+    );
+    apply(
+        caller_call,
+        function,
+        call.args,
+        frame_sys_parent_pending(caller)?,
+    )
 }
 
 unsafe fn do_primitive(call: &Call<'_>) -> R<Sexp> {
@@ -5238,7 +5455,8 @@ unsafe fn reuse_first_argument(
     let definition = builtin_def(function)?;
     let args = evaluate_args(call.cdr(), env, definition.keep_missing, call)?;
     if definition.generic != Generic::None
-        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
+        && let Some(value) =
+            dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
     {
         return Ok(value);
     }
