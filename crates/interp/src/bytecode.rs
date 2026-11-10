@@ -5053,7 +5053,14 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
         None if in_slots => {
             let start = machine.function.tag();
             (
-                lookup_outside(symbol, start, LookupCache::of(code), cache, 0..0)?,
+                lookup_outside(
+                    symbol,
+                    start,
+                    LexicalFrame::of(machine),
+                    LookupCache::of(code),
+                    cache,
+                    0..0,
+                )?,
                 false,
             )
         }
@@ -5079,7 +5086,14 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
             } else {
                 let start = machine.function.tag();
                 (
-                    lookup_outside(symbol, start, LookupCache::of(code), cache, 0..0)?,
+                    lookup_outside(
+                    symbol,
+                    start,
+                    LexicalFrame::of(machine),
+                    LookupCache::of(code),
+                    cache,
+                    0..0,
+                )?,
                     false,
                 )
             }
@@ -6112,6 +6126,7 @@ unsafe fn slot_variable(
     lookup_outside(
         symbol,
         state.machine.function.tag(),
+        LexicalFrame::of(state.machine),
         state.cache,
         cache,
         held,
@@ -9393,7 +9408,45 @@ unsafe fn lookup_variable(
         }
         return Ok(value);
     }
-    lookup_outside(symbol, env.enclosure(), cache, slot, held)
+    lookup_outside(
+        symbol,
+        env.enclosure(),
+        LexicalFrame::Env(env),
+        cache,
+        slot,
+        held,
+    )
+}
+
+/// The frame a variable lookup runs on behalf of. A lookup that continues past the frame's own
+/// bindings starts in the enclosure, but an unbound variable is still reported against the
+/// frame's call, so the frame travels with the lookup.
+#[derive(Clone, Copy)]
+enum LexicalFrame {
+    Env(Sexp),
+    /// A slot frame without an environment, by its activation's header register.
+    Slots(usize),
+}
+
+impl LexicalFrame {
+    unsafe fn of(machine: &Machine<'_>) -> LexicalFrame {
+        match machine.env() {
+            env if env == nil() => LexicalFrame::Slots(machine.header),
+            env => LexicalFrame::Env(env),
+        }
+    }
+
+    unsafe fn call(self) -> Sexp {
+        match self {
+            LexicalFrame::Env(env) => eval::lexical_call(env),
+            LexicalFrame::Slots(header) => interp()
+                .frames
+                .iter()
+                .rev()
+                .find(|frame| frame.slots as usize == header)
+                .map_or(nil(), |frame| frame.call),
+        }
+    }
 }
 
 /// [`lookup_variable`] past a frame that does not bind `symbol`: the lookup from the frame's
@@ -9403,6 +9456,7 @@ unsafe fn lookup_variable(
 unsafe fn lookup_outside(
     symbol: Sexp,
     start: Sexp,
+    lexical: LexicalFrame,
     cache: LookupCache,
     slot: usize,
     held: Range<usize>,
@@ -9421,7 +9475,7 @@ unsafe fn lookup_outside(
                 || value == unbound()
                 || value.kind() == SexpType::Promise
             {
-                return holding(held, || eval::eval_symbol(symbol, env));
+                return holding(held, || eval::eval_symbol_reporting(symbol, env, || lexical.call()));
             }
             return Ok(value);
         }
@@ -9431,7 +9485,7 @@ unsafe fn lookup_outside(
     {
         let value = cell.cdr();
         if value.kind() == SexpType::Promise {
-            return holding(held, || eval::eval_symbol(symbol, env));
+            return holding(held, || eval::eval_symbol_reporting(symbol, env, || lexical.call()));
         }
         if value != missing_arg() && value != unbound() {
             return Ok(value);
@@ -9442,7 +9496,7 @@ unsafe fn lookup_outside(
     if let Some(cell) = resolve(symbol, enclosure, false)? {
         fill_cache(symbol, enclosure, cell, cache, slot);
     }
-    holding(held, || eval::eval_symbol(symbol, env))
+    holding(held, || eval::eval_symbol_reporting(symbol, env, || lexical.call()))
 }
 
 /// Runs `run`, which forces a promise or an active binding and so runs code. The registers
