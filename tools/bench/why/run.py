@@ -3,19 +3,15 @@
 untyped on GNU R, untyped on ry, and typed in strict mode on ry. Engines alternate per program so
 they never share the CPU. Prints the machine, the R version and a Markdown table of best warm times,
 the time of each program's first, cold run (which includes compiling it), and peak resident memory; `--write` also stores them in results.json, which the docs pages and the
-landing page render, and rewrites the short table in the two READMEs, which GitHub and the VS Code
-Marketplace show as they are.
+landing page render, and runs tools/bench/readme.py, which rewrites the benchmark blocks of the two
+READMEs from it.
 
 Usage: tools/bench/why/run.py [--ry PATH] [--filter NAME] [--repeat N] [--write]
 """
-import argparse, json, os, pathlib, platform, re, subprocess, sys, tempfile
+import argparse, json, os, pathlib, platform, subprocess, sys, tempfile, time
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent.parent
-# The READMEs show these programs: the largest gain, a typical loop, whole-vector arithmetic, which
-# gains little, and a typed program that loses.
-readme_programs = ["fib", "drawdown", "vector_arith", "log_rank"]
-readmes = [root / "README.md", root / "editors/code/README.md"]
 
 def run(command, variant, program, env):
     """The best warm time, the checksum, the peak memory and the cold time, or `None` and why it
@@ -121,33 +117,15 @@ def main():
             sys.exit("error: --write needs every program, so it cannot be combined with --filter")
         if len(rows) != len(list((here / "untyped").glob("*.R"))) - 1:
             sys.exit("error: a program failed or its engines disagree, so results.json was not written")
-        results = {"machine": cpu, "r": r_version, "repeat": args.repeat, "programs": rows}
+        results = {"date": time.strftime("%Y-%m-%d"), "commit": commit(), "machine": cpu, "r": r_version, "repeat": args.repeat, "programs": rows}
         (here / "results.json").write_text(json.dumps(results, indent=2) + "\n")
         print(f"\nwrote {here / 'results.json'}")
-        table = readme_table(rows)
-        for readme in readmes:
-            text = readme.read_text()
-            updated, count = re.subn(r"(<!-- bench-why -->\n).*?(<!-- /bench-why -->)", lambda match: match[1] + table + "\n" + match[2], text, flags=re.S)
-            if count != 1:
-                sys.exit(f"error: {readme} has no <!-- bench-why --> block to rewrite")
-            readme.write_text(updated)
-            print(f"wrote {readme}")
-        sys.path.insert(0, str(here.parent / "real"))
-        import run as real_run
-        real_run.write_readme_block()
+        subprocess.run([sys.executable, "-I", str(root / "tools/bench/readme.py")], check=True)
 
-def readme_table(rows):
-    # Speed-ups read faster than seconds, and the site's charts round them the same way.
-    by_name = {row["program"]: row for row in rows}
-    def ratio(value):
-        return f"{value:.0f}x" if value >= 10 else f"{value:.2f}x"
-    lines = [
-        "| program | ry | ry, typed |",
-        "| --- | ---: | ---: |",
-    ]
-    for name in readme_programs:
-        row = by_name[name]
-        lines.append(f"| `{name}` | {ratio(row['gnu_r'] / row['ry'])} | {ratio(row['gnu_r'] / row['ry_typed'])} |")
-    return "\n".join(lines)
+def commit():
+    """The ry commit measured, marked when the working tree has changes."""
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"], capture_output=True, text=True, check=True).stdout.strip()
+    return head + ("-dirty" if dirty else "")
 
 main()

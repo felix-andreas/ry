@@ -3,7 +3,7 @@
 // axis is logarithmic and centred on 1x, so a bar to the right means faster than GNU R and a bar
 // to the left slower, and 10x either way has the same length. Values sit in their own columns
 // beside the bars, so they stay legible on a phone, and every bar's title gives the seconds behind it.
-import { formatRatio, kernelChart, realChart } from '../lib/benchmarks';
+import { formatRatio, kernelChart, realChart, tooShortNote } from '../lib/benchmarks';
 
 interface Props {
 	name: 'real' | 'kernels';
@@ -60,8 +60,11 @@ const columns = `--series-count: ${chart.series.length}`;
 		}
 		{
 			chart.rows.map((row) => (
-				<div class:list={['row', { summary: row.summary }]}>
-					<span class="label">{row.summary ? row.label : <code>{row.label}</code>}</span>
+				<div class:list={['row', { summary: row.summary, short: row.tooShort }]}>
+					<span class="label">
+						{row.summary ? row.label : <code>{row.label}</code>}
+						{row.tooShort && <span class="flag">too short</span>}
+					</span>
 					<div class="track" aria-hidden="true">
 						{ticks.map((tick) => <span class:list={['grid', { one: tick === 1 }]} style={`left: ${position(tick)}%`} />)}
 						{row.ratios.map((ratio, index) => {
@@ -97,7 +100,11 @@ const columns = `--series-count: ${chart.series.length}`;
 			</div>
 		</div>
 	</div>
-	<p class="note">Speed relative to GNU R on a log scale: a bar to the right of 1x is faster than GNU R, to the left slower.</p>
+	<p class="note">
+		Speed relative to GNU R on a log scale: a bar to the right of 1x is faster than GNU R, to the left slower.
+		{chart.rows.some((row) => row.tooShort) && ` ${tooShortNote()}`}
+	</p>
+	<p class="note">{chart.metadata}</p>
 </figure>
 
 <style>
@@ -172,6 +179,14 @@ const columns = `--series-count: ${chart.series.length}`;
 		font-size: inherit;
 		background: none;
 		padding: 0;
+	}
+	.label .flag {
+		display: block;
+		font-size: 0.75em;
+		color: var(--sl-color-gray-3);
+	}
+	.row.short .bar {
+		opacity: 0.4;
 	}
 	.track {
 		position: relative;
