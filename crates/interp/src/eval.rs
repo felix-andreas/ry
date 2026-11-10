@@ -1057,10 +1057,12 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
         }
         SexpType::Closure => {
             if function.has_gp(gp::NATIVE_ENTRY)
-                && let Some(value) =
-                    crate::base_fast_paths::native_entry_by_value(function, arguments, false, |symbol| {
-                        crate::effects::eager_argument(symbol, env)
-                    })?
+                && let Some(value) = crate::base_fast_paths::native_entry_by_value(
+                    function,
+                    arguments,
+                    false,
+                    |symbol| crate::effects::eager_argument(symbol, env),
+                )?
             {
                 return Ok(value);
             }
@@ -1366,17 +1368,18 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
     {
         return Ok(());
     }
-    let state = interp();
-    let formals = match state.primitive_formals.get(definition.name) {
-        Some(formals) => formals,
-        None => {
+    let index = builtin_index(definition);
+    let formals = match interp().primitive_formals.get(index) {
+        Some(Some(formals)) => formals,
+        _ => {
             let Some(formals) = recorded_formals(definition.name)? else {
                 return Ok(());
             };
-            interp()
-                .primitive_formals
-                .entry(definition.name)
-                .or_insert(formals)
+            let table = &mut interp().primitive_formals;
+            if table.len() <= index {
+                table.resize(interp().builtins.len().max(index + 1), None);
+            }
+            &*table[index].insert(formals)
         }
     };
     let Some(formals) = formals else {
