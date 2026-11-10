@@ -279,8 +279,9 @@ mod imp {
     }
 
     /// Expands each pattern with the C library's `glob(3)`, marking directories with a trailing
-    /// slash when `mark` is set. `None` is the out-of-memory condition `glob` reports.
-    pub fn glob(patterns: &[String], mark: bool) -> Option<GlobMatches> {
+    /// slash when `mark` is set and keeping a pattern that matches nothing as itself when
+    /// `no_check` is set (`GLOB_NOCHECK`). `None` is the out-of-memory condition `glob` reports.
+    pub fn glob(patterns: &[String], mark: bool, no_check: bool) -> Option<GlobMatches> {
         // SAFETY: `buffer` is zeroed before the first call, extended by each call with
         // GLOB_APPEND, and freed once on every path out.
         unsafe {
@@ -292,6 +293,9 @@ mod imp {
                     continue;
                 };
                 let mut flags = if mark { libc::GLOB_MARK } else { 0 };
+                if no_check {
+                    flags |= libc::GLOB_NOCHECK;
+                }
                 if appended {
                     flags |= libc::GLOB_APPEND;
                 }
@@ -836,14 +840,18 @@ mod imp {
     }
 
     /// Expands each pattern with the `glob` crate, writing forward slashes as GNU R does on
-    /// Windows.
-    pub fn glob(patterns: &[String], mark: bool) -> Option<GlobMatches> {
+    /// Windows. With `no_check`, a pattern that matches nothing stands for itself.
+    pub fn glob(patterns: &[String], mark: bool, no_check: bool) -> Option<GlobMatches> {
         let mut paths = Vec::new();
         let mut read_error = false;
         for pattern in patterns {
             let Ok(entries) = glob::glob(pattern) else {
+                if no_check {
+                    paths.push(pattern.clone());
+                }
                 continue;
             };
+            let found = paths.len();
             for entry in entries {
                 match entry {
                     Ok(path) => {
@@ -855,6 +863,9 @@ mod imp {
                     }
                     Err(_) => read_error = true,
                 }
+            }
+            if no_check && paths.len() == found {
+                paths.push(pattern.clone());
             }
         }
         Some(GlobMatches { paths, read_error })
