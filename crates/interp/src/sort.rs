@@ -204,40 +204,93 @@ pub fn sort_strings(names: &mut [String]) {
 /// original order. Each text's collation key is built once, into one buffer shared by all texts,
 /// so a comparison is a slice comparison instead of a walk through every collation level.
 pub fn collation_order<Text: AsRef<str>>(texts: &[Text]) -> Vec<u32> {
+    order_by_collation(texts, c_collation())
+}
+
+fn order_by_collation<Text: AsRef<str>>(texts: &[Text], c: bool) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..texts.len() as u32).collect();
+    let text = |index: u32| texts[index as usize].as_ref();
+    if c {
+        order.sort_by(|&left, &right| text(left).cmp(text(right)));
+        return order;
+    }
+    if texts.iter().all(|text| text.as_ref().is_ascii()) {
+        // Names are almost always ASCII, where a key fits in bytes and compares with memcmp.
+        // An ASCII character's primary weight is unique up to case and its accent weight is
+        // zero, so a tie on the primary level means the same letters ignoring case, and the
+        // case level then settles everything the code point level would.
+        let mut keys: Vec<u8> = Vec::new();
+        let mut starts: Vec<u32> = Vec::with_capacity(texts.len() + 1);
+        for text in texts {
+            let bytes = text.as_ref().as_bytes();
+            starts.push(keys.len() as u32);
+            keys.extend(bytes.iter().map(|&byte| ASCII_RANKS[byte as usize]));
+            keys.push(0);
+            keys.extend(bytes.iter().map(|&byte| byte.is_ascii_uppercase() as u8 + 1));
+        }
+        starts.push(keys.len() as u32);
+        let key = |index: u32| {
+            let index = index as usize;
+            &keys[starts[index] as usize..starts[index + 1] as usize]
+        };
+        order.sort_by(|&left, &right| key(left).cmp(key(right)));
+        return order;
+    }
     let mut keys: Vec<u32> = Vec::new();
     let mut starts: Vec<u32> = Vec::with_capacity(texts.len() + 1);
-    let c = c_collation();
     for text in texts {
         starts.push(keys.len() as u32);
-        collation_key(text.as_ref(), c, &mut keys);
+        collation_key(text.as_ref(), &mut keys);
     }
     starts.push(keys.len() as u32);
     let key = |index: u32| {
         let index = index as usize;
         &keys[starts[index] as usize..starts[index + 1] as usize]
     };
-    let mut order: Vec<u32> = (0..texts.len() as u32).collect();
     order.sort_by(|&left, &right| key(left).cmp(key(right)));
     order
 }
+
+/// One plus the rank of each ASCII character's primary weight among all ASCII primary weights,
+/// so it orders as `primary_weight` does and leaves zero free to end a level.
+const ASCII_RANKS: [u8; 128] = {
+    let mut ranks = [0u8; 128];
+    let mut code = 0;
+    while code < 128 {
+        let (group, value) = ASCII_PRIMARY_WEIGHTS[code];
+        let mut rank = 1u8;
+        let mut other = 0;
+        while other < 128 {
+            let (other_group, other_value) = ASCII_PRIMARY_WEIGHTS[other];
+            let lower = other_group < group || (other_group == group && other_value < value);
+            // Upper and lower case letters share a weight, so count each weight once.
+            let first = !(other as u8).is_ascii_uppercase();
+            if lower && first {
+                rank += 1;
+            }
+            other += 1;
+        }
+        ranks[code] = rank;
+        code += 1;
+    }
+    ranks
+};
 
 /// Appends a key for `text` whose lexicographic order is [`collate`]'s order. A key is the
 /// sequence of each collation level's weights, every weight shifted up by one and each level
 /// ended by a zero, so a text that is a prefix of another sorts first within that level, and a
 /// tie on one level moves on to the next exactly where `collate` does. The last level is the
 /// code points, whose order is the byte order `str::cmp` breaks ties with.
-fn collation_key(text: &str, c: bool, keys: &mut Vec<u32>) {
-    if !c {
-        keys.extend(text.chars().map(|character| {
-            let (group, value) = primary_weight(character);
-            ((group as u32) << 24 | value) + 1
-        }));
-        keys.push(0);
-        keys.extend(text.chars().map(|character| base_letter(character).1 + 1));
-        keys.push(0);
-        keys.extend(text.chars().map(|character| character.is_uppercase() as u32 + 1));
-        keys.push(0);
-    }
+fn collation_key(text: &str, keys: &mut Vec<u32>) {
+    keys.extend(text.chars().map(|character| {
+        let (group, value) = primary_weight(character);
+        ((group as u32) << 24 | value) + 1
+    }));
+    keys.push(0);
+    keys.extend(text.chars().map(|character| base_letter(character).1 + 1));
+    keys.push(0);
+    keys.extend(text.chars().map(|character| character.is_uppercase() as u32 + 1));
+    keys.push(0);
     keys.extend(text.chars().map(|character| character as u32 + 1));
 }
 
@@ -2814,11 +2867,13 @@ unsafe fn do_merge(call: &Call<'_>) -> R<Sexp> {
 mod tests {
     use super::*;
 
-    /// Collation keys must order texts exactly as `root_collate` and `str::cmp` do, including
-    /// texts that are prefixes of one another and that differ only in accents or case.
+    /// The collation order must sort texts exactly as a stable sort by `root_collate` or
+    /// `str::cmp` does, including texts that are prefixes of one another and that differ only
+    /// in accents or case, on both the general and the ASCII key.
     #[test]
-    fn collation_keys_order_as_collate() {
-        const ALPHABET: [char; 14] = ['a', 'A', 'b', '_', '.', '1', ' ', 'é', 'É', 'z', 'ß', '-', '9', 'Ω'];
+    fn collation_order_matches_collate() {
+        const MIXED: &[char] = &['a', 'A', 'b', '_', '.', '1', ' ', 'é', 'É', 'z', 'ß', '-', '9', 'Ω'];
+        const ASCII: &[char] = &['a', 'A', 'b', 'B', '_', '.', '1', ' ', 'z', 'Z', '-', '9', '~', '$'];
         let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut next = || {
             state ^= state << 13;
@@ -2826,32 +2881,23 @@ mod tests {
             state ^= state << 17;
             state
         };
-        let texts: Vec<String> = (0..400)
-            .map(|_| {
-                let length = (next() % 5) as usize;
-                (0..length)
-                    .map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize])
-                    .collect()
-            })
-            .collect();
-        for c in [false, true] {
-            let keys: Vec<Vec<u32>> = texts
-                .iter()
-                .map(|text| {
-                    let mut key = Vec::new();
-                    collation_key(text, c, &mut key);
-                    key
+        for alphabet in [MIXED, ASCII] {
+            let texts: Vec<String> = (0..400)
+                .map(|_| {
+                    let length = (next() % 5) as usize;
+                    (0..length).map(|_| alphabet[(next() % alphabet.len() as u64) as usize]).collect()
                 })
                 .collect();
-            for (left_index, left) in texts.iter().enumerate() {
-                for (right_index, right) in texts.iter().enumerate() {
-                    let expected = if c { left.cmp(right) } else { root_collate(left, right) };
-                    assert_eq!(
-                        keys[left_index].cmp(&keys[right_index]),
-                        expected,
-                        "{left:?} against {right:?}, C collation {c}"
-                    );
-                }
+            for c in [false, true] {
+                let mut expected: Vec<u32> = (0..texts.len() as u32).collect();
+                expected.sort_by(|&left, &right| {
+                    let (left, right) = (&texts[left as usize], &texts[right as usize]);
+                    if c { left.cmp(right) } else { root_collate(left, right) }
+                });
+                let expected: Vec<&String> = expected.iter().map(|&index| &texts[index as usize]).collect();
+                let actual: Vec<&String> =
+                    order_by_collation(&texts, c).iter().map(|&index| &texts[index as usize]).collect();
+                assert_eq!(actual, expected, "C collation {c}");
             }
         }
     }

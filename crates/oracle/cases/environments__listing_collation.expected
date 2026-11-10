@@ -1,0 +1,27 @@
+[stdout]
+|  [1] "_x"   "A"    "a__b" "a_1"  "a_b"  "a-b"  "a.1"  "a.b"  "a1"   "ab"  
+| [11] "aB"   "Ab"   "AB"   "ab_"  "abc"  "b"    "B"    "x1"   "x10"  "x2"  
+| [21] "zeta" "Zeta"
+|  [1] "_x"   "..z"  ".y"   "A"    "a__b" "a_1"  "a_b"  "a-b"  "a.1"  "a.b" 
+| [11] "a1"   "ab"   "aB"   "Ab"   "AB"   "ab_"  "abc"  "b"    "B"    "x1"  
+| [21] "x10"  "x2"   "zeta" "Zeta"
+|  [1] "_x"   "..z"  ".y"   "A"    "a__b" "a_1"  "a_b"  "a-b"  "a.1"  "a.b" 
+| [11] "a1"   "ab"   "aB"   "Ab"   "AB"   "ab_"  "abc"  "b"    "B"    "x1"  
+| [21] "x10"  "x2"   "zeta" "Zeta"
+|  [1] "_x"   "..z"  ".y"   "A"    "a__b" "a_1"  "a_b"  "a-b"  "a.1"  "a.b" 
+| [11] "a1"   "ab"   "aB"   "Ab"   "AB"   "ab_"  "abc"  "b"    "B"    "x1"  
+| [21] "x10"  "x2"   "zeta" "Zeta"
+| [1] "e"  "E"  "é"  "ea" "éa" "Éa" "f" 
+|  [1] "..z"  ".y"   "A"    "AB"   "Ab"   "B"    "Zeta" "_x"   "a-b"  "a.1" 
+| [11] "a.b"  "a1"   "aB"   "a_1"  "a__b" "a_b"  "ab"   "ab_"  "abc"  "b"   
+| [21] "x1"   "x10"  "x2"   "zeta"
+|  [1] "..z"  ".y"   "A"    "AB"   "Ab"   "B"    "Zeta" "_x"   "a-b"  "a.1" 
+| [11] "a.b"  "a1"   "aB"   "a_1"  "a__b" "a_b"  "ab"   "ab_"  "abc"  "b"   
+| [21] "x1"   "x10"  "x2"   "zeta"
+| [1] "E"  "e"  "ea" "f"  "Éa" "é"  "éa"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("E", "e", "ea", "f", "Éa", "é", "éa")
