@@ -1,0 +1,86 @@
+[stdout]
+| [[1]]
+|  [1]  4.5  NaN   NA 20.0  4.5  NaN   NA 20.0  4.5  NaN   NA 20.0  4.5  NaN   NA
+| [16] 20.0  4.5  NaN   NA 20.0  4.5  NaN   NA 20.0  4.5  NaN   NA 20.0  4.5  NaN
+| [31]   NA 20.0  4.5  NaN   NA 20.0  4.5  NaN   NA 20.0  4.5  NaN   NA 20.0  4.5
+| [46]  NaN   NA 20.0  4.5  NaN   NA 20.0  4.5  NaN   NA 20.0  4.5  NaN   NA 20.0
+| [61]  4.5  NaN   NA 20.0
+| 
+| [[2]]
+| [1] NA
+| 
+| [[3]]
+|  [1]   1.963019        NaN         NA 989.652662   1.963019        NaN
+|  [7]         NA 989.652662   1.963019        NaN         NA 989.652662
+| [13]   1.963019        NaN         NA 989.652662   1.963019        NaN
+| [19]         NA 989.652662   1.963019        NaN         NA 989.652662
+| [25]   1.963019        NaN         NA 989.652662   1.963019        NaN
+| [31]         NA 989.652662   1.963019        NaN         NA 989.652662
+| [37]   1.963019        NaN         NA 989.652662   1.963019        NaN
+| [43]         NA 989.652662   1.963019        NaN         NA 989.652662
+| [49]   1.963019        NaN         NA 989.652662   1.963019        NaN
+| [55]         NA 989.652662   1.963019        NaN         NA 989.652662
+| [61]   1.963019        NaN         NA 989.652662
+| 
+| [[4]]
+|  [1]   3 NaN  NA  68   3 NaN  NA  68   3 NaN  NA  68   3 NaN  NA  68   3 NaN  NA
+| [20]  68   3 NaN  NA  68   3 NaN  NA  68   3 NaN  NA  68   3 NaN  NA  68   3 NaN
+| [39]  NA  68   3 NaN  NA  68   3 NaN  NA  68   3 NaN  NA  68   3 NaN  NA  68   3
+| [58] NaN  NA  68   3 NaN  NA  68
+| 
+| [1] 120
+| [1] 42
+| [1] 0
+|  [1]  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3
+| [26]  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5
+| [51] NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9
+|  [1]  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3
+| [26]  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5
+| [51] NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9
+|  [1]  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3
+| [26]  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9  3  5
+| [51] NA  9  3  5 NA  9  3  5 NA  9  3  5 NA  9
+| [1] "boom"
+| [1] NA NA
+| [1] 4
+| [1] 12
+| [1] 103
+| [1] 1003
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| forced
+| [1] 1.333333 4.769897
+| [1] NA NA NA
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(NA_real_, NA_real_, NA_real_)

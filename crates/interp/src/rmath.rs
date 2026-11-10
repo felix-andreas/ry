@@ -139,6 +139,7 @@
 
 use {
     crate::format::format_g,
+    rustc_hash::FxHashMap,
     std::{cell::RefCell, ffi::c_int, rc::Rc},
 };
 
@@ -6431,62 +6432,47 @@ pub fn dnbinom(x: f64, size: f64, prob: f64, log: bool) -> f64 {
     if nonint_warning(x) || x < 0.0 || !finite(x) {
         return d0(log);
     }
-    if crate::system::r_at_least_release(4, 4, 0) {
-        let x = forceint(x);
-        if x == 0.0 {
-            // The limit as size goes to zero is a point mass at zero.
-            if size == 0.0 {
-                return d1(log);
-            }
-            return if log {
-                size * prob.ln()
-            } else {
-                prob.powf(size)
-            };
-        }
-        let size = if finite(size) { size } else { DBL_MAX };
-        if x < 1e-10 * size {
-            // Two terms of Abramowitz and Stegun 6.1.47 in place of dbinom_raw.
-            let xx2s = x_choose_two_over(x, size);
-            return d_exp(
-                size * prob.ln() + x * (size.ln() + (-prob).ln_1p()) - lgamma1p(x) + xx2s.ln_1p(),
-                log,
-            );
-        }
-        // log(size / (size + x)) is much less accurate than log1p(-x / (size + x)) for x < size.
-        let p = if log {
-            if x < size {
-                (-x / (size + x)).ln_1p()
-            } else {
-                (size / (size + x)).ln()
-            }
-        } else {
-            size / (size + x)
-        };
-        let ans = dbinom_raw(size, x + size, prob, 1.0 - prob, log);
-        return if log { p + ans } else { p * ans };
-    }
-    if x == 0.0 && size == 0.0 {
-        return d1(log);
-    }
     let x = forceint(x);
+    if x == 0.0 {
+        // The limit as size goes to zero is a point mass at zero.
+        if size == 0.0 {
+            return d1(log);
+        }
+        return if log {
+            size * prob.ln()
+        } else {
+            prob.powf(size)
+        };
+    }
     let size = if finite(size) { size } else { DBL_MAX };
-    if x != 0.0 && x < 1e-10 * size {
+    if x < 1e-10 * size {
         // log(choose(size + x - 1, x)) is about x log(size) - lgamma(x + 1) here, which
         // dbinom_raw would lose to cancellation (Abramowitz and Stegun 6.1.47).
+        let xx2s = x_choose_two_over(x, size);
         return d_exp(
-            size * prob.ln() + x * (size.ln() + (-prob).ln_1p()) - lgamma1p(x)
-                + (x * (x - 1.0) / (2.0 * size)).ln_1p(),
+            size * prob.ln() + x * (size.ln() + (-prob).ln_1p()) - lgamma1p(x) + xx2s.ln_1p(),
             log,
         );
     }
+    // log(size / (size + x)) is much less accurate than log1p(-x / (size + x)) for x < size.
+    let p = if log {
+        if x < size {
+            (-x / (size + x)).ln_1p()
+        } else {
+            (size / (size + x)).ln()
+        }
+    } else {
+        size / (size + x)
+    };
     let ans = dbinom_raw(size, x + size, prob, 1.0 - prob, log);
-    let p = size / (size + x);
-    if log { p.ln() + ans } else { p * ans }
+    if log { p + ans } else { p * ans }
 }
 
-/// `x (x - 1) / (2 size)` without overflow for huge `x`.
+/// `x (x - 1) / (2 size)`, from R 4.5.1 on without overflow for huge `x`.
 fn x_choose_two_over(x: f64, size: f64) -> f64 {
+    if !crate::system::r_at_least_release(4, 5, 1) {
+        return x * (x - 1.0) / (2.0 * size);
+    }
     if x < f64::MAX.sqrt() {
         ldexp(x * (x - 1.0), -1) / size
     } else {
@@ -6527,32 +6513,22 @@ pub fn dnbinom_mu(x: f64, size: f64, mu: f64, log: bool) -> f64 {
         } else {
             (mu / (1.0 + mu / size)).ln()
         };
-        if crate::system::r_at_least_release(4, 4, 0) {
-            return d_exp(
-                x * p - mu - lgamma1p(x) + x_choose_two_over(x, size).ln_1p(),
-                log,
-            );
-        }
         return d_exp(
-            x * p - mu - lgammafn(x + 1.0) + (x * (x - 1.0) / (2.0 * size)).ln_1p(),
+            x * p - mu - lgamma1p(x) + x_choose_two_over(x, size).ln_1p(),
             log,
         );
     }
     let ans = dbinom_raw(size, x + size, size / (size + mu), mu / (size + mu), log);
-    if crate::system::r_at_least_release(4, 4, 0) {
-        let p = if log {
-            if x < size {
-                (-x / (size + x)).ln_1p()
-            } else {
-                (size / (size + x)).ln()
-            }
+    let p = if log {
+        if x < size {
+            (-x / (size + x)).ln_1p()
         } else {
-            size / (size + x)
-        };
-        return if log { p + ans } else { p * ans };
-    }
-    let p = size / (size + x);
-    if log { p.ln() + ans } else { p * ans }
+            (size / (size + x)).ln()
+        }
+    } else {
+        size / (size + x)
+    };
+    if log { p + ans } else { p * ans }
 }
 
 pub fn pnbinom(x: f64, size: f64, prob: f64, lower: bool, log: bool) -> f64 {
@@ -8274,8 +8250,10 @@ thread_local! {
 type WilcoxTable = ((usize, usize), Rc<[f64]>);
 
 /// The number of ways the Mann-Whitney statistic of samples of sizes `m` and `n` takes each
-/// value from 0 to `m n`: the coefficients of the Gaussian binomial `[m + n choose m]_q`,
-/// built by Pascal's rule `[N, k] = [N-1, k-1] + q^k [N-1, k]`, which only adds counts.
+/// value from 0 to `m n`, by GNU R's recursion before 4.6: `w[i][j][k] = w[i-1][j][k-j] +
+/// w[i][j-1][k]` over `i <= j` and `k <= i j / 2`, with `k < j` read as `w[i][k][k]`. Counts above
+/// 2^53 round, so only the same recursion gives GNU R's bits; it runs on an explicit stack
+/// because its depth reaches `m + n`.
 fn wilcox_counts(m: usize, n: usize) -> Rc<[f64]> {
     let key = (m.min(n), m.max(n));
     if let Some(counts) = WILCOX_CACHE.with_borrow(|cache| {
@@ -8286,24 +8264,107 @@ fn wilcox_counts(m: usize, n: usize) -> Rc<[f64]> {
     }) {
         return counts;
     }
-    let small = key.0;
-    let mut polynomials: Vec<Vec<f64>> = vec![Vec::new(); small + 1];
-    polynomials[0] = vec![1.0];
-    for total in 1..=m + n {
-        for k in (1..=small.min(total)).rev() {
-            let mut next = vec![0.0; k * (total - k) + 1];
-            for (power, count) in polynomials[k - 1].iter().enumerate() {
-                next[power] += count;
-            }
-            for (power, count) in polynomials[k].iter().enumerate() {
-                next[power + k] += count;
-            }
-            polynomials[k] = next;
-        }
-    }
-    let counts: Rc<[f64]> = polynomials.swap_remove(small).into();
+    let mut memo = WilcoxMemo {
+        cells: FxHashMap::default(),
+    };
+    let counts: Rc<[f64]> = (0..=m * n)
+        .map(|k| memo.count(k as i64, m, n))
+        .collect();
     WILCOX_CACHE.with_borrow_mut(|cache| *cache = Some((key, Rc::clone(&counts))));
     counts
+}
+
+/// GNU R's `w[i][j]` arrays for the recursion in [`wilcox_counts`], each holding `NaN` for
+/// counts not yet computed. A map, because only the pairs the recursion reaches are filled, and
+/// a dense `(m + 1) (n + 1)` index is too large when one sample is huge.
+struct WilcoxMemo {
+    cells: FxHashMap<(usize, usize), Vec<f64>>,
+}
+
+/// One step of the recursion: a count already known, or the memo cell `(i, j, k)` it is read
+/// from.
+enum WilcoxStep {
+    Known(f64),
+    Cell(usize, usize, usize),
+}
+
+impl WilcoxMemo {
+    fn count(&mut self, k: i64, m: usize, n: usize) -> f64 {
+        let (i, j, k) = match self.step(k, m, n) {
+            WilcoxStep::Known(value) => return value,
+            WilcoxStep::Cell(i, j, k) => (i, j, k),
+        };
+        let mut pending = vec![(i, j, k)];
+        while let Some(&(i, j, k)) = pending.last() {
+            if !self.cell(i, j, k).is_nan() {
+                pending.pop();
+                continue;
+            }
+            let fewer_x = self.step(k as i64 - j as i64, i - 1, j);
+            let fewer_y = self.step(k as i64, i, j - 1);
+            let mut ready = true;
+            for step in [&fewer_x, &fewer_y] {
+                if let WilcoxStep::Cell(a, b, c) = *step
+                    && self.cell(a, b, c).is_nan()
+                {
+                    pending.push((a, b, c));
+                    ready = false;
+                }
+            }
+            if ready {
+                let value = self.value(fewer_x) + self.value(fewer_y);
+                if let Some(cells) = self.cells.get_mut(&(i, j)) {
+                    cells[k] = value;
+                }
+                pending.pop();
+            }
+        }
+        self.cell(i, j, k)
+    }
+
+    /// The memo cell `(i, j, k)`, which [`WilcoxMemo::step`] allocated before naming it.
+    fn cell(&self, i: usize, j: usize, k: usize) -> f64 {
+        self.cells
+            .get(&(i, j))
+            .and_then(|cells| cells.get(k))
+            .copied()
+            .unwrap_or(f64::NAN)
+    }
+
+    /// GNU R's `cwilcox(k, m, n)` up to its memo read: the folding of `k` into the lower half,
+    /// the ordering `i <= j`, and the rewrite of `k < j` to `(k, i, k)`.
+    fn step(&mut self, k: i64, m: usize, n: usize) -> WilcoxStep {
+        let (mut k, mut m, mut n) = (k, m, n);
+        loop {
+            let total = (m * n) as i64;
+            if k < 0 || k > total {
+                return WilcoxStep::Known(0.0);
+            }
+            let half = total / 2;
+            if k > half {
+                k = total - k;
+            }
+            let (i, j) = (m.min(n), m.max(n));
+            if j == 0 {
+                return WilcoxStep::Known(if k == 0 { 1.0 } else { 0.0 });
+            }
+            if (k as usize) < j {
+                (m, n) = (i, k as usize);
+                continue;
+            }
+            self.cells
+                .entry((i, j))
+                .or_insert_with(|| vec![f64::NAN; half as usize + 1]);
+            return WilcoxStep::Cell(i, j, k as usize);
+        }
+    }
+
+    fn value(&self, step: WilcoxStep) -> f64 {
+        match step {
+            WilcoxStep::Known(value) => value,
+            WilcoxStep::Cell(i, j, k) => self.cell(i, j, k),
+        }
+    }
 }
 
 /// The sample sizes as table dimensions, or `None` (a `NaN` result) when they are not

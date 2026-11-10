@@ -16,12 +16,15 @@ use {
 };
 
 /// `x[[i]]` for a vector or list `x` that is not an object and a scalar `i` that selects an
-/// element: a position within bounds, or for a list a name one element has exactly. Anything
-/// else (out of bounds, a missing name, a recursive or matrix subscript) declines to `[[`'s
-/// full path, which owns those errors and results.
+/// element: a position within bounds, or for a list a name one element has exactly, and
+/// `x[[i, j]]` for a matrix `x` with positions `i` and `j` within its rows and columns. Anything
+/// else (out of bounds, a missing name, a recursive subscript, a name in a matrix subscript)
+/// declines to `[[`'s full path, which owns those errors and results.
 pub(crate) unsafe fn direct_subset2(args: &[Sexp]) -> R<Option<Sexp>> {
-    let &[object, index] = args else {
-        return Ok(None);
+    let (object, index, column) = match *args {
+        [object, index] => (object, index, None),
+        [object, row, column] => (object, row, Some(column)),
+        _ => return Ok(None),
     };
     let list = matches!(object.kind(), SexpType::List | SexpType::Expression);
     if !(list || object.kind().is_atomic())
@@ -29,30 +32,41 @@ pub(crate) unsafe fn direct_subset2(args: &[Sexp]) -> R<Option<Sexp>> {
         || object.is_altrep()
         || object.is_array()
         || is_native_value(object)
-        || index.is_altrep()
-        || index.attrib() != nil()
-        || length(index) != 1
     {
         return Ok(None);
     }
     let count = length(object);
+    if let Some(column) = column {
+        let dim = values::get_attr(object, values::symbols().dim);
+        if dim.kind() != SexpType::Integer || length(dim) != 2 {
+            return Ok(None);
+        }
+        let &[rows, columns] = values::ints(dim) else {
+            return Ok(None);
+        };
+        let (Some(row), Some(column)) = (
+            scalar_position(index, rows as usize),
+            scalar_position(column, columns as usize),
+        ) else {
+            return Ok(None);
+        };
+        let position = row + column * rows as usize;
+        if position >= count {
+            return Ok(None);
+        }
+        if list {
+            return Ok(Some(object.element(position)));
+        }
+        return vector_element(object, position).map(Some);
+    }
     let position = match index.kind() {
-        SexpType::Integer => {
-            let position = values::ints(index)[0];
-            if position == NA_INTEGER || position < 1 || position as usize > count {
-                return Ok(None);
-            }
-            position as usize - 1
-        }
-        SexpType::Real => {
-            // NaN fails both comparisons, and `x[[2.7]]` truncates to the second element.
-            let position = values::reals(index)[0];
-            if !(position >= 1.0 && position < count as f64 + 1.0) {
-                return Ok(None);
-            }
-            position as usize - 1
-        }
-        SexpType::String if list => {
+        SexpType::Integer | SexpType::Real => match scalar_position(index, count) {
+            Some(position) => position,
+            None => return Ok(None),
+        },
+        SexpType::String
+            if list && !index.is_altrep() && index.attrib() == nil() && length(index) == 1 =>
+        {
             let wanted = index.element(0);
             if wanted == na_string() || wanted.bytes().is_empty() {
                 return Ok(None);
@@ -75,6 +89,27 @@ pub(crate) unsafe fn direct_subset2(args: &[Sexp]) -> R<Option<Sexp>> {
         return Ok(Some(object.element(position)));
     }
     vector_element(object, position).map(Some)
+}
+
+/// The zero-based position a plain scalar integer or real subscript selects among `count`
+/// elements, or `None` when it is out of bounds, `NA`, or not such a scalar.
+unsafe fn scalar_position(index: Sexp, count: usize) -> Option<usize> {
+    if index.is_altrep() || index.attrib() != nil() || length(index) != 1 {
+        return None;
+    }
+    match index.kind() {
+        SexpType::Integer => {
+            let position = values::ints(index)[0];
+            (position != NA_INTEGER && position >= 1 && position as usize <= count)
+                .then(|| position as usize - 1)
+        }
+        // NaN fails both comparisons, and `x[[2.7]]` truncates to the second element.
+        SexpType::Real => {
+            let position = values::reals(index)[0];
+            (position >= 1.0 && position < count as f64 + 1.0).then(|| position as usize - 1)
+        }
+        _ => None,
+    }
 }
 
 /// `variable[index] <- value` updated in place, for a variable bound in `env` to a vector that is

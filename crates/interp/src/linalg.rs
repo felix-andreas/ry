@@ -16,7 +16,6 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal},
         coerce::coerce_vector,
         conditions,
-        envir::get_option,
         format::format_g,
         long_double::{self, LongDouble},
         makeconf::{expand_make, make_assignments},
@@ -262,13 +261,13 @@ unsafe fn matrix_product(call: &Call<'_>, product: Product) -> R<Sexp> {
         Product::TransposedCross => (x_rows, y_rows),
     };
     let result = alloc_matrix(mode, result_rows, result_cols)?;
-    let matprod = values::first_string(get_option("matprod")).unwrap_or_default();
-    let internal = matprod == "internal";
-    if !internal && host_blas_requested() {
-        let screen = match &*matprod {
-            "blas" => Screen::None,
-            "default.simd" => Screen::Sum,
-            _ => Screen::Pairs,
+    let options = crate::interp().product_options;
+    let internal = options.matprod == Matprod::Internal;
+    if !internal && host_blas_requested(options.host_blas) {
+        let screen = match options.matprod {
+            Matprod::Blas => Screen::None,
+            Matprod::DefaultSimd => Screen::Sum,
+            Matprod::Default | Matprod::Internal => Screen::Pairs,
         };
         let done = if mode == SexpType::Complex {
             host_complex_product(
@@ -373,6 +372,17 @@ fn real_product(
         return;
     }
     match product {
+        // A single row makes each entry one dot product, summed in the order `dgemm` uses.
+        Product::Matrix if x_rows == 1 => {
+            for (col, entry) in z.iter_mut().enumerate() {
+                let y_col = &y[col * y_rows..][..y_rows];
+                let mut sum = 0.0;
+                for (&value, &scale) in x.iter().zip(y_col) {
+                    sum += value * scale;
+                }
+                *entry = sum;
+            }
+        }
         // `dgemm("N", "N")` adds whole columns, `z[, col] += x[, inner] * y[inner, col]`, which
         // keeps each entry's order and lets the inner loop vectorize.
         Product::Matrix => {
@@ -463,13 +473,46 @@ fn long_double_product(product: Product, shape: &Shape, x: &[f64], y: &[f64], z:
 /// `crossprod` and `tcrossprod` do, so the bits are those of whatever BLAS GNU R links on this
 /// machine (OpenBLAS differs from the reference BLAS in the last bit). The option wins over the
 /// variable.
-fn host_blas_requested() -> bool {
+fn host_blas_requested(option: Option<bool>) -> bool {
     static FROM_ENVIRONMENT: OnceLock<bool> = OnceLock::new();
-    // SAFETY: `get_option` returns a live value or nil.
-    match unsafe { values::first_string(get_option("ry.blas")) } {
-        Some(choice) => choice == "host",
+    match option {
+        Some(host) => host,
         None => *FROM_ENVIRONMENT
             .get_or_init(|| std::env::var("RY_BLAS").is_ok_and(|choice| choice == "host")),
+    }
+}
+
+/// The product settings from `options(matprod =)` and `options(ry.blas =)`. A `ry.blas` that
+/// is not set leaves the choice to the `RY_BLAS` variable.
+#[derive(Clone, Copy, Default)]
+pub struct ProductOptions {
+    matprod: Matprod,
+    host_blas: Option<bool>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Matprod {
+    #[default]
+    Default,
+    Internal,
+    Blas,
+    DefaultSimd,
+}
+
+/// Records a new value of option `name` (`matprod` or `ry.blas`), which `options()` has
+/// already validated; `NULL` restores the default.
+pub(crate) unsafe fn set_product_option(options: &mut ProductOptions, name: &[u8], value: Sexp) {
+    let choice = values::first_string(value);
+    let choice = choice.as_deref();
+    if name == b"matprod" {
+        options.matprod = match choice {
+            Some("internal") => Matprod::Internal,
+            Some("blas") => Matprod::Blas,
+            Some("default.simd") => Matprod::DefaultSimd,
+            _ => Matprod::Default,
+        };
+    } else {
+        options.host_blas = choice.map(|choice| choice == "host");
     }
 }
 

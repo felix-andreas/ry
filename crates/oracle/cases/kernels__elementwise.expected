@@ -1,0 +1,494 @@
+[stdout]
+| + dd : [1]  NA NaN   1   1   0 NaN
+| + ed : [1] NaN  NA   1   1   0 NaN
+| + nn : warning: NAs produced by integer overflow 
+| [1] NA NA NA NA  0 -1
+| + dn : [1]          NA         NaN -2147483646           5           0         Inf
+| + nb : [1]          NA          NA -2147483647           8          NA          -3
+| + bb : [1]  1 NA  1  1 NA  1
+| + ds : [1]  NA NaN 3.5 0.0 2.0 Inf
+| + sd : [1] NaN  NA  NA  NA  NA  NA
+| + ns : warning: NAs produced by integer overflow 
+| [1]          NA          NA -2147483645           9           2          -1
+| + short : [1]  NA  NA 2.5  NA 1.0  NA
+| - dd : [1]  NA NaN   2  -5   0 Inf
+| - ed : [1]  NaN   NA   -2    5    0 -Inf
+| - nn : [1]          NA  2147483646 -2147483646          NA           0          -5
+| - dn : [1]         NA        NaN 2147483648         -9          0        Inf
+| - nb : [1]          NA          NA -2147483647           6          NA          -3
+| - bb : [1]  1 NA -1  1 NA -1
+| - ds : [1]   NA  NaN -0.5 -4.0 -2.0  Inf
+| - sd : [1] NA NA NA NA NA NA
+| - ns : warning: NAs produced by integer overflow 
+| [1]         NA 2147483645         NA          5         -2         -5
+| - short : [1]   NA  NaN  0.5   NA -1.0   NA
+| * dd : [1]    NA   NaN -0.75 -6.00  0.00  -Inf
+| * ed : [1]   NaN    NA -0.75 -6.00  0.00  -Inf
+| * nn : [1]         NA 2147483647 2147483647         NA          0         -6
+| * dn : [1]          NA         NaN -3221225470         -14           0        -Inf
+| * nb : [1] NA NA  0  7 NA  0
+| * bb : [1]  0 NA  0  0 NA  0
+| * ds : [1]  NA NaN   3  -4   0 Inf
+| * sd : [1] NaN  NA  NA  NA  NA  NA
+| * ns : warning: NAs produced by integer overflow 
+| [1] NA NA NA 14  0 -6
+| * short : [1]  NA  NA 1.5  NA 0.0  NA
+| / dd : [1]         NA        NaN -3.0000000 -0.6666667        NaN        NaN
+| / ed : [1]        NaN         NA -0.3333333 -1.5000000        NaN        NaN
+| / nn : [1]           NA 2147483647.0 2147483647.0           NA          NaN
+| [6]         -1.5
+| / dn : [1]            NA           NaN -6.984919e-10 -2.857143e-01           NaN
+| [6]          -Inf
+| / nb : [1]   NA   NA -Inf    7   NA -Inf
+| / bb : [1] Inf  NA   0 Inf  NA   0
+| / ds : [1]    NA   NaN  0.75 -1.00  0.00   Inf
+| / sd : [1] NA NA NA NA NA NA
+| / ns : [1]            NA  1073741823.5 -1073741823.5           3.5           0.0
+| [6]          -1.5
+| / short : [1]  NA NaN 1.5  NA 0.0  NA
+| ^ dd : [1]        NaN         NA  0.8164966 -8.0000000  1.0000000  0.0000000
+| ^ ed : [1]        NA       NaN       NaN 0.1111111 1.0000000       NaN
+| ^ nn : [1]            NA  2.147484e+09 -4.656613e-10            NA  1.000000e+00
+| [6]  9.000000e+00
+| ^ dn : [1]   NA  NaN    0 -128    1    0
+| ^ nb : [1] NA NA  1  7 NA  1
+| ^ bb : [1]  1 NA  0  1 NA  0
+| ^ ds : [1]   NA  NaN 2.25 4.00 0.00  Inf
+| ^ sd : [1] NaN  NA  NA  NA   1  NA
+| ^ ns : [1]           NA 4.611686e+18 4.611686e+18 4.900000e+01 0.000000e+00
+| [6] 9.000000e+00
+| ^ short : [1]  NA  NA 1.5  NA 0.0  NA
+| %% dd : [1]  NA  NA   0   1 NaN NaN
+| %% ed : [1]  NA  NA   1  -1 NaN NaN
+| %% nn : [1] NA  0  0 NA NA  1
+| %% dn : [1]          NA         NaN -2147483646           5         NaN         NaN
+| %% nb : [1] NA NA NA  0 NA NA
+| %% bb : [1] NA NA  0 NA NA  0
+| %% ds : [1]  NA NaN 1.5 0.0 0.0 NaN
+| %% sd : [1]  NA  NA  NA  NA NaN  NA
+| %% ns : [1] NA  1  1  1  0  1
+| %% short : [1]  NA  NA 0.5  NA 0.0  NA
+| %/% dd : [1]  NA NaN  -3  -1 NaN NaN
+| %/% ed : [1] NaN  NA  -1  -2 NaN NaN
+| %/% nn : [1]         NA 2147483647 2147483647         NA         NA         -2
+| %/% dn : [1]   NA  NaN   -1   -1  NaN -Inf
+| %/% nb : [1] NA NA NA  7 NA NA
+| %/% bb : [1] NA NA  0 NA NA  0
+| %/% ds : [1]  NA NaN   0  -1   0 Inf
+| %/% sd : [1] NA NA NA NA NA NA
+| %/% ns : [1]          NA  1073741823 -1073741824           3           0          -2
+| %/% short : [1]  NA NaN   1  NA   0  NA
+| == dd : [1]    NA    NA FALSE FALSE  TRUE FALSE
+| == ed : [1]    NA    NA FALSE FALSE  TRUE FALSE
+| == nn : [1]    NA FALSE FALSE    NA  TRUE FALSE
+| == dn : [1]    NA    NA FALSE FALSE  TRUE FALSE
+| == nb : [1]    NA    NA FALSE FALSE    NA FALSE
+| == bb : [1] FALSE    NA FALSE FALSE    NA FALSE
+| == ds : [1]    NA    NA FALSE FALSE FALSE FALSE
+| == sd : [1] NA NA NA NA NA NA
+| == ns : [1]    NA FALSE FALSE FALSE FALSE FALSE
+| == short : [1]    NA    NA FALSE    NA FALSE    NA
+| != dd : [1]    NA    NA  TRUE  TRUE FALSE  TRUE
+| != ed : [1]    NA    NA  TRUE  TRUE FALSE  TRUE
+| != nn : [1]    NA  TRUE  TRUE    NA FALSE  TRUE
+| != dn : [1]    NA    NA  TRUE  TRUE FALSE  TRUE
+| != nb : [1]   NA   NA TRUE TRUE   NA TRUE
+| != bb : [1] TRUE   NA TRUE TRUE   NA TRUE
+| != ds : [1]   NA   NA TRUE TRUE TRUE TRUE
+| != sd : [1] NA NA NA NA NA NA
+| != ns : [1]   NA TRUE TRUE TRUE TRUE TRUE
+| != short : [1]   NA   NA TRUE   NA TRUE   NA
+| < dd : [1]    NA    NA FALSE  TRUE FALSE FALSE
+| < ed : [1]    NA    NA  TRUE FALSE FALSE  TRUE
+| < nn : [1]    NA FALSE  TRUE    NA FALSE  TRUE
+| < dn : [1]    NA    NA FALSE  TRUE FALSE FALSE
+| < nb : [1]    NA    NA  TRUE FALSE    NA  TRUE
+| < bb : [1] FALSE    NA  TRUE FALSE    NA  TRUE
+| < ds : [1]    NA    NA  TRUE  TRUE  TRUE FALSE
+| < sd : [1] NA NA NA NA NA NA
+| < ns : [1]    NA FALSE  TRUE FALSE  TRUE  TRUE
+| < short : [1]    NA    NA FALSE    NA  TRUE    NA
+| > dd : [1]    NA    NA  TRUE FALSE FALSE  TRUE
+| > ed : [1]    NA    NA FALSE  TRUE FALSE FALSE
+| > nn : [1]    NA  TRUE FALSE    NA FALSE FALSE
+| > dn : [1]    NA    NA  TRUE FALSE FALSE  TRUE
+| > nb : [1]    NA    NA FALSE  TRUE    NA FALSE
+| > bb : [1]  TRUE    NA FALSE  TRUE    NA FALSE
+| > ds : [1]    NA    NA FALSE FALSE FALSE  TRUE
+| > sd : [1] NA NA NA NA NA NA
+| > ns : [1]    NA  TRUE FALSE  TRUE FALSE FALSE
+| > short : [1]    NA    NA  TRUE    NA FALSE    NA
+| <= dd : [1]    NA    NA FALSE  TRUE  TRUE FALSE
+| <= ed : [1]    NA    NA  TRUE FALSE  TRUE  TRUE
+| <= nn : [1]    NA FALSE  TRUE    NA  TRUE  TRUE
+| <= dn : [1]    NA    NA FALSE  TRUE  TRUE FALSE
+| <= nb : [1]    NA    NA  TRUE FALSE    NA  TRUE
+| <= bb : [1] FALSE    NA  TRUE FALSE    NA  TRUE
+| <= ds : [1]    NA    NA  TRUE  TRUE  TRUE FALSE
+| <= sd : [1] NA NA NA NA NA NA
+| <= ns : [1]    NA FALSE  TRUE FALSE  TRUE  TRUE
+| <= short : [1]    NA    NA FALSE    NA  TRUE    NA
+| >= dd : [1]    NA    NA  TRUE FALSE  TRUE  TRUE
+| >= ed : [1]    NA    NA FALSE  TRUE  TRUE FALSE
+| >= nn : [1]    NA  TRUE FALSE    NA  TRUE FALSE
+| >= dn : [1]    NA    NA  TRUE FALSE  TRUE  TRUE
+| >= nb : [1]    NA    NA FALSE  TRUE    NA FALSE
+| >= bb : [1]  TRUE    NA FALSE  TRUE    NA FALSE
+| >= ds : [1]    NA    NA FALSE FALSE FALSE  TRUE
+| >= sd : [1] NA NA NA NA NA NA
+| >= ns : [1]    NA  TRUE FALSE  TRUE FALSE FALSE
+| >= short : [1]    NA    NA  TRUE    NA FALSE    NA
+| [[1]]
+| [1]  NA NaN   1   1   0 NaN
+| 
+| [[2]]
+| [1]  NA NaN   2  -5   0 Inf
+| 
+| [[3]]
+| [1]    NA   NaN -0.75 -6.00  0.00  -Inf
+| 
+| [[4]]
+| [1]         NA        NaN -3.0000000 -0.6666667        NaN        NaN
+| 
+| [[5]]
+| [1]    NA    NA  TRUE FALSE FALSE  TRUE
+| 
+| [[6]]
+| [1]    NA    NA FALSE FALSE  TRUE FALSE
+| 
+| warning: NAs produced by integer overflow 
+| warning: NAs produced by integer overflow 
+| warning: NAs produced by integer overflow 
+| [[1]]
+| [1] NA NA NA NA  0 -1
+| 
+| [[2]]
+| [1]          NA  2147483646 -2147483646          NA           0          -5
+| 
+| [[3]]
+| [1]         NA 2147483647 2147483647         NA          0         -6
+| 
+| [[4]]
+| [1]           NA 2147483647.0 2147483647.0           NA          NaN
+| [6]         -1.5
+| 
+| [[5]]
+| [1]    NA  TRUE FALSE    NA FALSE FALSE
+| 
+| [[6]]
+| [1]    NA FALSE FALSE    NA  TRUE FALSE
+| 
+| [1]   NA  NaN -1.5  2.0  0.0 -Inf
+| [1]          NA -2147483647  2147483647          -7           0           3
+| [1] 2147483647         NA
+| [1] FALSE    NA FALSE FALSE    NA FALSE
+| [1] TRUE   NA TRUE TRUE   NA TRUE
+| [1] FALSE    NA  TRUE FALSE    NA  TRUE
+| [1]    NA FALSE FALSE FALSE  TRUE FALSE
+| [1]    NA    NA FALSE FALSE  TRUE FALSE
+| [1] TRUE   NA TRUE TRUE   NA TRUE
+|    x   y
+| a  2 NaN
+| b NA   5
+|    x   y
+| a  1 NaN
+| b NA   8
+|       x    y
+| a FALSE   NA
+| b    NA TRUE
+|    x   y
+| a -1 NaN
+| b NA  -4
+|       x     y
+| a FALSE    NA
+| b    NA FALSE
+|  p  q  r 
+|  2 NA  4 
+|  p  q  r 
+|  2 NA  6 
+|          p          q          r 
+| 2147483647         NA         NA 
+| warning: longer object length is not a multiple of shorter object length 
+| [1] 2 4 4
+| [1] 2 3 4 5
+| attr(,"class")
+| [1] "myclass"
+| abs : [1]  NA NaN 1.5 2.0 0.0 Inf 1.0 0.5 2.0
+| [1] "integer"
+| sign : [1]  NA NaN   1  -1   0   1  -1   1   1
+| [1] "double"
+| sqrt : warning: NaNs produced 
+| [1]        NA       NaN 1.2247449       NaN 0.0000000       Inf       NaN
+| [8] 0.7071068 1.4142136
+| warning: NaNs produced 
+| [1] "double"
+| floor : [1]  NA NaN   1  -2   0 Inf  -1   0   2
+| [1] "double"
+| ceiling : [1]  NA NaN   2  -2   0 Inf  -1   1   2
+| [1] "double"
+| trunc : [1]  NA NaN   1  -2   0 Inf  -1   0   2
+| [1] "double"
+| exp : [1]        NA       NaN 4.4816891 0.1353353 1.0000000       Inf 0.3678794
+| [8] 1.6487213 7.3890561
+| [1] "double"
+| expm1 : [1]         NA        NaN  3.4816891 -0.8646647  0.0000000        Inf -0.6321206
+| [8]  0.6487213  6.3890561
+| [1] "double"
+| log1p : warning: NaNs produced 
+| [1]        NA       NaN 0.9162907       NaN 0.0000000       Inf      -Inf
+| [8] 0.4054651 1.0986123
+| warning: NaNs produced 
+| [1] "double"
+| log2 : warning: NaNs produced 
+| [1]         NA        NaN  0.5849625        NaN       -Inf        Inf        NaN
+| [8] -1.0000000  1.0000000
+| warning: NaNs produced 
+| [1] "double"
+| log10 : warning: NaNs produced 
+| [1]         NA        NaN  0.1760913        NaN       -Inf        Inf        NaN
+| [8] -0.3010300  0.3010300
+| warning: NaNs produced 
+| [1] "double"
+| cos : warning: NaNs produced 
+| [1]         NA        NaN  0.0707372 -0.4161468  1.0000000        NaN  0.5403023
+| [8]  0.8775826 -0.4161468
+| [1] "double"
+| sin : warning: NaNs produced 
+| [1]         NA        NaN  0.9974950 -0.9092974  0.0000000        NaN -0.8414710
+| [8]  0.4794255  0.9092974
+| [1] "double"
+| tan : warning: NaNs produced 
+| [1]         NA        NaN 14.1014199  2.1850399  0.0000000        NaN -1.5574077
+| [8]  0.5463025 -2.1850399
+| [1] "double"
+| cospi : warning: NaNs produced 
+| [1]  NA NaN   0   1   1 NaN  -1   0   1
+| [1] "double"
+| sinpi : warning: NaNs produced 
+| [1]  NA NaN  -1   0   0 NaN   0   1   0
+| [1] "double"
+| tanpi : warning: NaNs produced 
+| [1]  NA NaN NaN   0   0 NaN   0 NaN   0
+| [1] "double"
+| acos : warning: NaNs produced 
+| [1]       NA      NaN      NaN      NaN 1.570796      NaN 3.141593 1.047198
+| [9]      NaN
+| warning: NaNs produced 
+| [1] "double"
+| asin : warning: NaNs produced 
+| [1]         NA        NaN        NaN        NaN  0.0000000        NaN -1.5707963
+| [8]  0.5235988        NaN
+| warning: NaNs produced 
+| [1] "double"
+| atan : [1]         NA        NaN  0.9827937 -1.1071487  0.0000000  1.5707963 -0.7853982
+| [8]  0.4636476  1.1071487
+| [1] "double"
+| cosh : [1]       NA      NaN 2.352410 3.762196 1.000000      Inf 1.543081 1.127626
+| [9] 3.762196
+| [1] "double"
+| sinh : [1]         NA        NaN  2.1292795 -3.6268604  0.0000000        Inf -1.1752012
+| [8]  0.5210953  3.6268604
+| [1] "double"
+| tanh : [1]         NA        NaN  0.9051483 -0.9640276  0.0000000  1.0000000 -0.7615942
+| [8]  0.4621172  0.9640276
+| [1] "double"
+| acosh : warning: NaNs produced 
+| [1]        NA       NaN 0.9624237       NaN       NaN       Inf       NaN
+| [8]       NaN 1.3169579
+| warning: NaNs produced 
+| [1] "double"
+| asinh : [1]         NA        NaN  1.1947632 -1.4436355  0.0000000        Inf -0.8813736
+| [8]  0.4812118  1.4436355
+| [1] "double"
+| atanh : warning: NaNs produced 
+| [1]        NA       NaN       NaN       NaN 0.0000000       NaN      -Inf
+| [8] 0.5493061       NaN
+| warning: NaNs produced 
+| [1] "double"
+| gamma : warning: NaNs produced 
+| [1]        NA       NaN 0.8862269       NaN       NaN       Inf       NaN
+| [8] 1.7724539 1.0000000
+| warning: NaNs produced 
+| [1] "double"
+| lgamma : [1]         NA        NaN -0.1207822        Inf        Inf        Inf        Inf
+| [8]  0.5723649  0.0000000
+| [1] "double"
+| digamma : warning: NaNs produced 
+| [1]          NA         NaN  0.03648997         NaN         NaN         Inf
+| [7]         NaN -1.96351003  0.42278434
+| warning: NaNs produced 
+| [1] "double"
+| trigamma : [1]        NA       NaN 0.9348022       Inf       Inf 0.0000000       Inf
+| [8] 4.9348022 0.6449341
+| [1] "double"
+| [1] NA
+| [1] NA
+| [1] TRUE
+| [1] FALSE
+| [1] Inf
+| [1] Inf
+| [1] NaN
+| [1] NA
+| [1] TRUE
+| [1] FALSE
+| [1] -Inf
+| [1] -Inf
+| [1] NA
+| [1] NA
+| [1] TRUE
+| [1] FALSE
+| [1] 4
+| [1] 0.8
+| [1] NA
+| [1] NA
+| [1] TRUE
+| [1] FALSE
+| [1] 3
+| [1] 0.6
+| [1] NA
+| [1] NA
+| [1] TRUE
+| [1] FALSE
+| [1] 2
+| [1] 0.5
+| [1] 4
+| [1] 2
+| [1] TRUE
+| [1] TRUE
+| [1] 4
+| [1] 2
+| [1] 55
+| [1] 5.5
+| [1] TRUE
+| [1] TRUE
+| [1] 55
+| [1] 5.5
+| [1] 2147483648
+| [1] 1073741824
+| [1] TRUE
+| [1] TRUE
+| [1] 2147483648
+| [1] 1073741824
+| [1] 0
+| [1] NaN
+| [1] FALSE
+| [1] TRUE
+| [1] 0
+| [1] NaN
+| [1] 0
+| [1] NaN
+| [1] FALSE
+| [1] TRUE
+| [1] 0
+| [1] NaN
+| [1] "0.599609375"
+| [1] "0.20000000000000001"
+| List of 4
+|  $ : int [1:6] 2 -2 NA 0 -1 1
+|  $ : int [1:6] -3 -3 NA 0 -2 -3
+|  $ : num [1:6] 2 -2 NA 0 -1 1
+|  $ : int [1:6] -3 -3 NA 0 -2 -3
+| List of 4
+|  $ : int [1:6] 2 -2 NA 0 -1 1
+|  $ : int [1:6] -3 -3 NA 0 -2 -3
+|  $ : num [1:6] 2 -2 NA 0 -1 1
+|  $ : int [1:6] -3 -3 NA 0 -2 -3
+| List of 4
+|  $ : int [1:6] 2 -2 NA 0 -1 1
+|  $ : int [1:6] -3 -3 NA 0 -2 -3
+|  $ : num [1:6] 2 -2 NA 0 -1 1
+|  $ : int [1:6] -3 -3 NA 0 -2 -3
+| List of 4
+|  $ : num [1:6] 1.5 -1.5 NaN NaN -1 NaN
+|  $ : num [1:6] 2 2 NaN Inf -1 ...
+|  $ : num [1:6] 1.5 -1.5 NaN NaN -1 NaN
+|  $ : num [1:6] 2 2 NaN Inf -1 ...
+| List of 4
+|  $ : num [1:6] 1.5 -1.5 NaN NaN -1 NaN
+|  $ : num [1:6] 2 2 NaN Inf -1 ...
+|  $ : num [1:6] 1.5 -1.5 NaN NaN -1 NaN
+|  $ : num [1:6] 2 2 NaN Inf -1 ...
+| List of 4
+|  $ : num [1:6] 1.5 -1.5 NaN NaN -1 NaN
+|  $ : num [1:6] 2 2 NaN Inf -1 ...
+|  $ : num [1:6] 1.5 -1.5 NaN NaN -1 NaN
+|  $ : num [1:6] 2 2 NaN Inf -1 ...
+| warning: probable complete loss of accuracy in modulus 
+| [1] 0 1
+| warning: probable complete loss of accuracy in modulus 
+| [1] 0 1
+| warning: probable complete loss of accuracy in modulus 
+| [1] 0 1
+| [[1]]
+| [1] 1 2
+| 
+| [[2]]
+| [1] 2 3
+| 
+| [1] 1 2 0
+| [[1]]
+| [1] 1 2
+| 
+| [[2]]
+| [1] 2 3
+| 
+| [1] 2 3
+| [[1]]
+| [1] 1 2
+| 
+| [[2]]
+| [1] 2 3
+| 
+| [1] 4 5
+| [1] 3 6 3 6
+| [1] 0.5 1.0
+| [1] 1.648721 2.718282
+| [1] TRUE   NA
+| [1] 1 2
+| [1] 2 3
+| [1] -1  2 NA
+| [1]  1 -2 NA
+| [1] -1  2 NA
+| [1]  1  2 NA
+| [1] FALSE  TRUE    NA
+| [1]  TRUE FALSE    NA
+| [1]  TRUE FALSE FALSE
+| [1] TRUE   NA   NA
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] 0.7071068 2.0000000
+| [1] -0.5  1.0
+| w: NaNs produced 
+| [1] NaN   2
+| a b 
+| 2 3 
+|         a         b 
+|  7.389056 20.085537 
+| w: NAs produced by integer overflow 
+| [1] NA  2
+| [1] FALSE FALSE  TRUE  TRUE
+| [1] FALSE  TRUE  TRUE FALSE
+| [1] 0.5 1.0
+| [1] 0.2 0.1
+| [[1]]
+| [1] FALSE FALSE  TRUE
+| 
+| [[2]]
+| [1] 1 2 3
+| 
+| [[1]]
+| [1] FALSE FALSE  TRUE
+| 
+| [[2]]
+| [1] 1 2 3
+| 
+[messages]
+[warnings]
+- NAs produced by integer overflow (in named * 2147483647L)
+[errors]
+[value]
+list
+| list(c(FALSE, FALSE, TRUE), c(1, 2, 3))

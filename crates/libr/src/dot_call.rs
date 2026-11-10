@@ -79,7 +79,8 @@ pub unsafe fn symbol_address(info: Sexp) -> Option<Sexp> {
     if !is_native_symbol_info(info) {
         return None;
     }
-    slot(info, ADDRESS_SLOT, symbols().address.car()).filter(|address| address.kind() == SexpType::ExternalPtr)
+    slot(info, ADDRESS_SLOT, symbols().address.car())
+        .filter(|address| address.kind() == SexpType::ExternalPtr)
 }
 
 /// The `numParameters` a `NativeSymbolInfo` list records, when it is one integer.

@@ -833,9 +833,7 @@ impl<'p> Translator<'p> {
                             let expand = self.builder.create_block();
                             let join = self.builder.create_block();
                             self.builder.append_block_param(join, I64);
-                            self.builder
-                                .ins()
-                                .brif(fits, join, &[value], expand, &[]);
+                            self.builder.ins().brif(fits, join, &[value], expand, &[]);
                             self.builder.switch_to_block(expand);
                             let expanded = self
                                 .call(
@@ -2540,9 +2538,7 @@ impl<'p> Translator<'p> {
         let copy = self.builder.create_block();
         let store = self.builder.create_block();
         self.builder.append_block_param(store, I64);
-        self.builder
-            .ins()
-            .brif(shared, copy, &[], store, &[vector]);
+        self.builder.ins().brif(shared, copy, &[], store, &[vector]);
         self.builder.switch_to_block(copy);
         let dirty = self
             .builder

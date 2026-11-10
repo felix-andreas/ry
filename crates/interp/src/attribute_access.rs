@@ -144,19 +144,6 @@ pub unsafe fn expand_row_names(value: Sexp) -> R<Sexp> {
     Ok(value)
 }
 
-/// The symbol for the attribute name `name`: an existing tag of `object` when one has that text,
-/// so setting an attribute the object already has interns nothing.
-unsafe fn attribute_symbol(object: Sexp, name: Sexp) -> R<Sexp> {
-    let mut cell = object.attrib();
-    while cell.kind() == SexpType::Pairlist {
-        if same_text(cell.tag().car(), name) {
-            return Ok(cell.tag());
-        }
-        cell = cell.cdr();
-    }
-    values::install_charsxp(name)
-}
-
 /// Whether `object` is a value the attribute builtins answer without dispatch or a refusal.
 #[inline]
 unsafe fn plain(object: Sexp) -> bool {
@@ -221,7 +208,7 @@ unsafe fn do_set_attr(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("attempt to set an attribute on NULL"));
     }
     let object = modifiable(object)?;
-    let symbol = attribute_symbol(object, which.element(0))?;
+    let symbol = values::install_charsxp(which.element(0))?;
     set_attribute_checked(object, symbol, value, call.call)?;
     Ok(object)
 }
@@ -244,7 +231,7 @@ unsafe fn direct_set_attr(args: &[Sexp]) -> R<Option<Sexp>> {
     }
     let symbols = symbols();
     let object = modifiable(object)?;
-    let symbol = attribute_symbol(object, which.element(0))?;
+    let symbol = values::install_charsxp(which.element(0))?;
     if symbol == symbols.names {
         set_names(object, value)?;
     } else if symbol == symbols.row_names {

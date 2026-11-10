@@ -23,7 +23,8 @@ use {
         lower,
         testing::{
             check_bytecode_agreement, check_code_image_file, check_code_image_load,
-            check_code_image_round_trip, check_element_access_agreement, check_lowering_input,
+            check_code_image_round_trip, check_element_access_agreement, check_fused_agreement,
+            check_lowering_input,
             check_render_drawing, check_unserialize_input, with_interpreter,
         },
         values,
@@ -143,6 +144,11 @@ fn fuzz_code_image_round_trip() {
 #[test]
 fn fuzz_code_image_file() {
     for_each_seed(400, |seed| check_code_image_file(&mut SplitMix64(seed)));
+}
+
+#[test]
+fn fuzz_fused_passes_agree_with_the_ast_evaluator() {
+    for_each_seed(300, |seed| check_fused_agreement(&mut SplitMix64(seed)));
 }
 
 /// Random drawings, with nested and dangling definitions and degenerate geometry, render to
