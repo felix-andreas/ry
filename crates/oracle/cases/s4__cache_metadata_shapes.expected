@@ -1,0 +1,71 @@
+[stdout]
+| [[1]]
+| [1] "Ops"
+| 
+| attr(,"package")
+| [1] "base"
+| [1] 2 3
+| [1] TRUE
+| [1] FALSE
+| [1] FALSE
+| [1] TRUE
+| [1] "tagged_thing"
+| attr(,"package")
+| [1] "oldonly"
+| [1] 2 4
+| [1] FALSE
+| [1] FALSE
+| [1] TRUE
+| [1] "tagged_thing"
+| attr(,"package")
+| [1] "oldonly"
+| [1] 2 4
+| [1] "norm2"
+| [1] 5
+| [1] 2
+| <Point 3 4 >
+| [1] "Point"
+| [1] "Point3"
+| [1] 5
+| [1] 2
+| <Point 3 4 >
+| [1] "Point"
+| [1] "Point3"
+| [1] 10
+| [1] "Euro"
+| attr(,"package")
+| [1] "groupmethods"
+| [1] TRUE
+| [1] "ops-fallback"
+| [1] 2
+| [1] "ANY#ANY"
+| [1] "Euro#Euro"
+| [1] "Money#Money"
+| [1] "ANY#ANY"
+| [1] "Euro#numeric"
+| [1] 10
+| [1] "Euro"
+| attr(,"package")
+| [1] "groupmethods"
+| [1] TRUE
+| [1] "ops-fallback"
+| [1] 2
+| [1] "ANY#ANY"
+| [1] "Euro#Euro"
+| [1] "Money#Money"
+| [1] "ANY#ANY"
+| [1] "Euro#numeric"
+| [1] 8
+| [1] "ANY#ANY"
+| [1] "Euro#Euro"
+| [1] "Euro#numeric"
+| character(0)
+| character(0)
+| [1] 2
+| [1] "Euro#Euro"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "Euro#Euro"
