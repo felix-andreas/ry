@@ -525,7 +525,7 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
     let position = state
         .frames
         .iter()
-        .rposition(|frame| frame.env == generic_env)
+        .rposition(|frame| frame.owns(generic_env))
         .ok_or_else(|| error("could not find the generic function's frame"))?;
     let call = state.frames[position].call;
     let sys_parent = eval::frame_sys_parent(position, eval::Reify::Site("S4 dispatch"))?;

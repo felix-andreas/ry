@@ -162,6 +162,9 @@ pub struct Frame {
     /// over it ([`Interp::pending_closures`]). When none of them can outlive the frame as it
     /// returns, the environment is never made.
     pub unforced: u32,
+    /// Whether `parent.frame` handed out [`Frame::pending`] in place of the environment, so a
+    /// read of its bindings counts as code observing the frame.
+    pub pending_shared: bool,
     /// A builtin wrapper run by [`eval::run_wrapper`]: its slots hold the values of arguments
     /// that the generic path would have bound as promises, so a reify wraps them.
     pub inlined: bool,
@@ -184,6 +187,15 @@ pub struct Frame {
     pub method_vars: u32,
     /// Where this call's entries in [`Interp::frame_closures`] start.
     pub closures: usize,
+}
+
+impl Frame {
+    /// Whether `env` is this frame's environment, or the pending environment that stands for
+    /// it while a slot frame has none: `parent.frame` hands that one out, and it becomes the
+    /// environment itself if the frame reifies.
+    pub unsafe fn owns(&self, env: Sexp) -> bool {
+        self.env == env || (self.pending == env && env.kind() == SexpType::Environment)
+    }
 }
 
 /// [`Frame::slots`] of a frame that keeps its variables in an environment.
