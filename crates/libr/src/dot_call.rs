@@ -12,7 +12,11 @@ use {
         globals::{R_ClassSymbol, R_NamesSymbol},
     },
     heap::object::{Sexp, SexpType},
-    interp::{builtins::Call, values::symbols},
+    interp::{
+        builtins::{Call, is_native_value},
+        native::foreign_context,
+        values::symbols,
+    },
     smallvec::SmallVec,
 };
 
@@ -53,6 +57,27 @@ pub unsafe fn call_registered(call: &Call<'_>) -> ApiResult<Option<Sexp>> {
         arguments.push(arg.value);
     }
     call_native(routine.function, &arguments, ".Call").map(Some)
+}
+
+/// `.Call(.NAME, ...)` with positional arguments from a compiled call, as [`call_registered`]
+/// runs it but without building the builtin's argument list: the arguments reach native code
+/// straight from the caller's registers.
+pub unsafe fn direct_call(call: Sexp, args: &[Sexp]) -> ApiResult<Option<Sexp>> {
+    let Some((&first, rest)) = args.split_first() else {
+        return Ok(None);
+    };
+    let Some(routine) = native_routine(first) else {
+        return Ok(None);
+    };
+    if rest.len() > MAX_ARGUMENTS
+        || routine
+            .arity
+            .is_some_and(|arity| arity >= 0 && arity as usize != rest.len())
+        || rest.iter().any(|&arg| is_native_value(arg))
+    {
+        return Ok(None);
+    }
+    foreign_context(call, || call_native(routine.function, rest, ".Call")).map(Some)
 }
 
 /// The native routine `name` refers to, when it is a `NativeSymbolInfo` list or a bare address
