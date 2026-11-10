@@ -519,6 +519,13 @@ unsafe fn compile_in<'a>(
         if !forced && !shape.may_run_natively() {
             return Err(Refusal(analysis::NEVER_NATIVE));
         }
+        if !forced
+            && trigger == Trigger::HotEntry
+            && !shape.loops
+            && machine.function.has_gp(gp::NATIVE_ENTRY)
+        {
+            return Err(Refusal(analysis::NATIVE_ENTRY));
+        }
         if !forced && trigger == Trigger::HotEntry && !shape.loops && !repays(machine, shape) {
             return Err(Refusal(analysis::RARE));
         }
