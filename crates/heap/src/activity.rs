@@ -118,10 +118,12 @@ pub enum Counter {
     JitEntries,
     LookupMisses,
     FramesReified,
+    PackageCalls,
+    PackageCallsDirect,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 17] = [
+    pub const ALL: [Counter; 19] = [
         Counter::ClosureCalls,
         Counter::NativeEntries,
         Counter::BuiltinCalls,
@@ -139,6 +141,8 @@ impl Counter {
         Counter::JitEntries,
         Counter::LookupMisses,
         Counter::FramesReified,
+        Counter::PackageCalls,
+        Counter::PackageCallsDirect,
     ];
 
     pub fn describe(self) -> &'static str {
@@ -160,6 +164,10 @@ impl Counter {
             Counter::JitEntries => "entries into compiled code",
             Counter::LookupMisses => "lookups past the inline caches",
             Counter::FramesReified => "slot frames turned into environments",
+            Counter::PackageCalls => "calls to closures of package namespaces",
+            Counter::PackageCallsDirect => {
+                "package calls that ran in slots, with no argument promise and no environment"
+            }
         }
     }
 }

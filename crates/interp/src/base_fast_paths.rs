@@ -209,14 +209,21 @@ pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
         .find(|(candidate, _)| *candidate == function)
     else {
         // A closure with install-time machine code carries the same mark.
-        return match crate::code_image::native_hooks() {
-            Some(hooks) => (hooks.call)(function, args).transpose(),
-            None => Ok(None),
+        let value = match crate::code_image::native_hooks() {
+            Some(hooks) => (hooks.call)(function, args).transpose()?,
+            None => None,
         };
+        if value.is_some() && activity::enabled() {
+            crate::eval::count_package_call(function, None, args);
+        }
+        return Ok(value);
     };
     let value = entry(args)?;
     if value.is_some() {
         activity::count(Counter::NativeEntries);
+        if activity::enabled() {
+            crate::eval::count_package_call(function, None, args);
+        }
         interp().visible = true;
     }
     Ok(value)

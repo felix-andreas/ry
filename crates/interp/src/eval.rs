@@ -2001,6 +2001,9 @@ pub unsafe fn run_frame(
         result
     };
     let state = interp();
+    if activity::enabled() {
+        count_package_call(function, Some(&state.frames[depth - 1]), args);
+    }
     crate::truncate_frames(state, depth);
     let Some(frame) = state.frames.pop() else {
         panic!("a closure call's frame was popped while the call ran");
@@ -2020,6 +2023,23 @@ pub unsafe fn run_frame(
     }
     state.frame_closures.truncate(closures);
     result
+}
+
+/// Counts a call to a closure of a package namespace, and whether it skipped the generic call
+/// protocol: it ran natively without a frame (`frame` is `None`) or in a slot frame that never
+/// made its environment, and no argument was a promise.
+#[cold]
+pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, args: &[Arg]) {
+    let enclosure = function.tag();
+    if enclosure == values::base_namespace() || !crate::envir::is_namespace(enclosure) {
+        return;
+    }
+    activity::count(Counter::PackageCalls);
+    if frame.is_none_or(|frame| frame.slots != crate::NO_SLOTS && frame.env == nil())
+        && args.iter().all(|arg| arg.value.kind() != SexpType::Promise)
+    {
+        activity::count(Counter::PackageCallsDirect);
+    }
 }
 
 /// Replaces each left-out formal's default that is not a literal, which the binding put in its
