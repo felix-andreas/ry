@@ -2123,18 +2123,21 @@ impl Compiler {
         if head.kind() != SexpType::Symbol {
             return Ok(plan.call_leaf(expression));
         }
-        let args = values::pairlist_items(expression.cdr());
-        if args.iter().any(|(tag, value)| {
-            *tag != nil() || *value == symbols().dots || *value == missing_arg()
-        }) {
-            return Ok(plan.call_leaf(expression));
-        }
         let name = symbol_name(head);
         let arith = ARITHS
             .iter()
             .find(|(_, operator)| *operator == name)
             .map(|(arith, _)| *arith);
         let math = MATHS.iter().position(|(_, function)| *function == name);
+        if arith.is_none() && math.is_none() && !matches!(&*name, "(" | "&" | "|" | "!") {
+            return Ok(plan.call_leaf(expression));
+        }
+        let args = values::pairlist_items(expression.cdr());
+        if args.iter().any(|(tag, value)| {
+            *tag != nil() || *value == symbols().dots || *value == missing_arg()
+        }) {
+            return Ok(plan.call_leaf(expression));
+        }
         let expected = match (&*name, args.len()) {
             ("(", 1) => self.base_primitive(head, &name)?,
             (_, 2) if arith.is_some() => self.base_primitive(head, &name)?,
@@ -5348,6 +5351,11 @@ unsafe fn fused_pass(
         } else {
             return Ok(None);
         };
+    }
+    // On scalars the ordinary instructions are cheaper than the pass and fusion saves no
+    // intermediate vector, so the pass declines and, after enough declines in a row, stops trying.
+    if leaves[..leaf_count].iter().all(|&leaf| leaf.length() <= 1) {
+        return Ok(None);
     }
     for guard in words[fusion::HEADER..guards_end].chunks_exact(fusion::GUARD) {
         let symbol = state.constants.element(guard[0] as usize);
