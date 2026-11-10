@@ -383,6 +383,35 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     }
 }
 
+/// `function`'s body, compiled first when [`run_body`] would compile it at this call. Binding the
+/// arguments calls this, so that such a call runs in a slot frame rather than in the environment
+/// the uncompiled body needs: the first call of a body with a loop, which compiles at once, is
+/// often its only call, as for a benchmark's driver. It counts nothing, so [`run_body`] counts a
+/// call that does not compile.
+pub unsafe fn compile_before_call(function: Sexp) -> R<Sexp> {
+    let body = function.cdr();
+    if !worth_compiling(body) {
+        return Ok(body);
+    }
+    let state = &mut interp().bytecode;
+    let calls = state.calls.get(&body).copied().unwrap_or(0);
+    if calls + 1 < COMPILE_AFTER_CALLS && !contains_loop(body, LOOP_SEARCH_DEPTH) {
+        return Ok(body);
+    }
+    state.calls.remove(&body);
+    if let Some(code) = crate::code_image::take_pending(function, body)? {
+        return Ok(code);
+    }
+    match compile(body, function) {
+        Ok(Some(code)) => {
+            crate::heap().set_cdr(function, code);
+            Ok(code)
+        }
+        // A body the compiler rejects runs on the AST evaluator, as in `run_body`.
+        Ok(None) | Err(_) => Ok(body),
+    }
+}
+
 /// A closure's body as source: the expression of compiled code.
 pub unsafe fn closure_body(function: Sexp) -> Sexp {
     let body = function.cdr();
@@ -8779,7 +8808,9 @@ unsafe fn lookup_variable(
 }
 
 /// [`lookup_variable`] past a frame that does not bind `symbol`: the lookup from the frame's
-/// enclosure `start`.
+/// enclosure `start`. Inlined into both callers: as a call, a free variable's read in a heap
+/// frame cost about 14 more instructions in saved registers.
+#[inline(always)]
 unsafe fn lookup_outside(
     symbol: Sexp,
     start: Sexp,
