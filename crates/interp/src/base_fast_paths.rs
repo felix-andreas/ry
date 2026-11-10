@@ -455,7 +455,7 @@ unsafe fn native_typeof(args: &[Arg]) -> R<Option<Sexp>> {
     let Some([x]) = resolved_all::<1>(args)? else {
         return Ok(None);
     };
-    values::scalar_string(crate::coerce::type_name(x)).map(Some)
+    crate::coerce::type_of(x).map(Some)
 }
 
 /// `inherits(x, what, which)` for `what` a character vector and an `x` that is not an S4
