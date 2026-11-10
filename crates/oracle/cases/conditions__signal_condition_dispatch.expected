@@ -1,0 +1,49 @@
+[stdout]
+| [1] "call" "cond" "msg" 
+| [1] "text"
+| f(1)
+| [1] TRUE
+| NULL
+| NULL
+| [1] TRUE
+| conditionMessage.custom
+| conditionCall.custom
+| [1] "from method"
+| g()
+| NULL
+| conditionMessage.custom
+| conditionCall.custom
+| NULL
+| $.dollar message 
+| $.dollar call 
+| [1] "field message"
+| NULL
+| [1] "partial"
+| p()
+| NULL
+| [1] TRUE
+| NULL
+| [1] "inner custom"    "outer condition" "exiting custom" 
+| [1] "caught"
+| inner sees other 
+| outer sees custom condition 
+| NULL
+| [1] "simpleCondition" "condition"      
+| [1] "plain text"
+| NULL
+| NULL
+| [1] "simpleError" "error"       "condition"  
+| after warning
+| [1] "(converted from warning) from f"
+| calling handler sees from f 
+| error: (converted from warning) from f 
+[messages]
+[warnings]
+- from f (in f())
+- from f (in f())
+- from f (in f())
+- from f (in f())
+[errors]
+[value]
+list
+| list(warn = 2L)
