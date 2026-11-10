@@ -1268,29 +1268,29 @@ A third round kept element assignments in slot frames: a `for` variable the body
 gets a slot, `ForStep` and `SubAssign` find their slot through a constant-to-slot map built with
 the code, a parenthesized subscript counts as side-effect free, and `x[i] <- list(v)` writes a
 list in place. Negative subscripts and builtin argument matching stopped allocating. Instructions
-per loop iteration, loop included (an empty loop costs 98 in GNU R, 248 at tier 0 and 47 under
+per loop iteration, loop included (an empty loop costs 98 in GNU R, 249 at tier 0 and 44 under
 the JIT):
 
 | Loop body | Tier 0 before | Tier 0 after | JIT before | JIT after | GNU R 4.3 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `s <- x[[i]]` | 1456 | 1179 | 70 | 67 | 617 |
-| `x[[i]] <- 5` | 1032 | 927 | 77 | 79 | 571 |
-| `x[i] <- 5` | 1030 | 930 | 72 | 72 | 571 |
-| `x[[(k %% 8L) + 1L]] <- 1` | 8660 | 1735 | 9450 | 118 | 1585 |
-| `x[(k %% 8L) + 1L] <- 1` | 8351 | 1743 | 9141 | 116 | 1585 |
-| `x[i] <- list(5)` | 5928 | 2215 | 6307 | 2532 | 2183 |
-| `s <- x[["b"]]`, a list | 1019 | 811 | 670 | 672 | 1489 |
-| `s <- x[[i, 2L]]`, a matrix | 1545 | 1282 | 968 | 969 | 723 |
-| `x$b <- k` | 1316 | 1205 | 1203 | 1147 | 989 |
-| `s <- x[-1L]`, five doubles | 2455 | 2140 | | 2164 | 2372 |
+| `s <- x[[i]]` | 1456 | 1196 | 70 | 66 | 617 |
+| `x[[i]] <- 5` | 1032 | 939 | 77 | 76 | 571 |
+| `x[i] <- 5` | 1030 | 943 | 72 | 71 | 571 |
+| `x[[(k %% 8L) + 1L]] <- 1` | 8660 | 1741 | 9450 | 118 | 1585 |
+| `x[(k %% 8L) + 1L] <- 1` | 8351 | 1749 | 9141 | 118 | 1585 |
+| `x[i] <- list(5)` | 5928 | 2229 | 6307 | 2446 | 2183 |
+| `s <- x[["b"]]`, a list | 1019 | 821 | 670 | 668 | 1489 |
+| `s <- x[[i, 2L]]`, a matrix | 1545 | 1292 | 968 | 144 | 723 |
+| `x$b <- k` | 1316 | 1219 | 1203 | 1081 | 989 |
+| `s <- x[-1L]`, five doubles | 2455 | 2149 | | 2174 | 2372 |
 
-Under the JIT the scalar element ops run at a tenth of GNU R or less. At tier 0 what is left is
+Under the JIT the scalar element ops run at a fifth of GNU R or less. At tier 0 what is left is
 dispatch around the builtin rather than the builtin: for `x[[i]]`, the function lookup, the
 primitive and object branches, the call and the jump cost about 300 instructions around a
 130-instruction read, and an assignment's two guards cost about 100. A fused tier-0 element op
-that calls `element_access::read_element` closes that gap. The matrix read and the computed
-subscript read still leave the JIT for tier 0, and `x[i] <- list(5)` costs more under the JIT than
-at tier 0.
+that calls `element_access::read_element` closes that gap. The computed-subscript read
+`x[[(k %% 8L) + 1L]]` still leaves the JIT for tier 0, and `x[i] <- list(5)` costs more under the
+JIT than at tier 0.
 
 ### How the static types feed the JIT
 
