@@ -118,7 +118,7 @@ left, in order of expected gain:
 
 ## Open: the real-world benchmark record predates paired rounds
 
-- `tools/bench/real/results.json` holds three rounds and each engine's median time, while `run.py` needs at least five rounds and writes per-round `ratios` and `short`. Rerun `just bench-real --write` on a machine with data.table, xts, zoo, lubridate and R6 installed, then render the paired ratios and their spread in `benchmarks.ts` (`realChart`, `RealWorkloads`, the README summary) and drop the gap note in `benchmarks.mdx`.
+- `tools/bench/real/results.json` holds three rounds and each engine's median time, while `run.py` needs at least five rounds and writes per-round `ratios` and `short`. Rerun `just bench-real --write` on a machine with data.table, xts, zoo, lubridate and R6 installed, then write it in schema 1 (`decisions.md`, "Benchmark suites are directories the renderers only display"), so the page and README show its intervals and `fromLegacy` can go.
 
 ## Open: the benchmark packages under ry's runtime
 
@@ -131,7 +131,7 @@ left, in order of expected gain:
 
 - **`install.packages()` with several packages installs nothing.** On ry, `install.packages(c("a", "b"), lib = ...)` returns without installing any of them and without an error; one package per call works, so the benchmark library was installed one package at a time in dependency order.
 
-- **Old runtimes and R homes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB) and builds a new `ry/home/<hash>/`, and nothing removes the previous release's directories: a home is pruned only when a newer home is built for the same runtime and front end (`rcmd::cached_home`). Prune runtime and home directories that no `ry` on the machine can name, without removing one a running session still maps.
+- **Old runtimes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB), and nothing removes the previous release's directory. R homes are pruned already (`rcmd::cached_home` removes stale homes no process holds); runtimes need the same treatment, without removing one a running session still maps.
 
 ## Open: the CRAN package corpus
 
@@ -2745,8 +2745,10 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   - POSIX (TRE) patterns still run on fancy-regex through a translation (`perl = TRUE` is PCRE2,
     `decisions.md`). A non-constant-size pattern runs on fancy-regex's backtracking VM because of
     `leftmost_longest`; linking TRE itself would give GNU R's exact POSIX semantics.
-  - `getParseData` ids are ry's own node numbers, where GNU R's are bison's internal ones, so code
-    that hard-codes an id would differ (none in the corpus does).
+  - `getParseData` columns and srcref bytes differ from GNU R on lines with non-ASCII text. GNU R
+    counts a multibyte character inside a string literal as its bytes, and whether it counts
+    columns in characters depends on the text's declared encoding (`known_to_be_utf8`); ry counts
+    characters. 26 of rlang's test-file rows differ for this reason alone.
   - lobstr's `obj_size` counts a closure's environment a few kilobytes higher than GNU R, because
     ry's environments and bytecode have their own layout. Only relative comparisons are portable.
   - Each ALTREP string or list element read through `Sexp::element` pushes a handle that lives
@@ -2755,9 +2757,6 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
     allocation.
   - The TRE matcher now compiles three regexes per pattern, which costs `grepl` in a loop with no
     matcher cache.
-  - `getParseData`'s comment parents (`comment_parent` in `crates/interp/src/lower.rs`) scan every
-    row per comment, quadratic in a heavily commented file parsed with `keep.source = TRUE`. The
-    builder knows each comment's enclosing node while it walks, so record it there.
   - Tier-1 code is freed once its enclosure dies (`compiled_for` in `crates/jit/src/jit.rs`), on
     the reasoning that a running activation keeps its closure, and so its enclosure, alive. An
     activation whose closure's environment is replaced while it runs (`environment(f) <- e`

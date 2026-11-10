@@ -1,0 +1,66 @@
+# The application workloads in the schema that `tools/bench/applications/suite.toml` uses. The docs
+# and `tools/bench/readme.py` read display names and summaries from here until the workloads move there.
+id = "applications"
+name = "Application workloads (ours)"
+summary = "call-heavy programs we wrote: conditions, S3, S4 and R6 objects, records, tables, validation"
+harness = "tools/bench/real/harness.R"
+
+[[programs]]
+id = "conditions"
+display = "Condition handling"
+summary = "Runs fallible steps inside `tryCatch` and `withCallingHandlers`, with custom condition classes, retries, `on.exit` and `try(silent = TRUE)`."
+source = "tools/bench/real/conditions.R"
+
+[[programs]]
+id = "functional"
+display = "Functional style"
+summary = "`lapply`, `vapply`, `Map`, `Filter`, `Reduce` and `do.call` over lists, the same through purrr, function factories and memoization in an environment."
+source = "tools/bench/real/functional.R"
+
+[[programs]]
+id = "objects"
+display = "Object systems"
+summary = "S3 constructors and methods with `UseMethod` and `NextMethod`, S4 classes with validity and generics, R6 classes with inheritance, environments as caches."
+source = "tools/bench/real/objects.R"
+
+[[programs]]
+id = "records"
+display = "Records as lists"
+summary = "Named lists grown and updated with `$<-` and `[[<-`, merged with `modifyList`, grouped with `split`, folded with `Reduce` and bound with `do.call(rbind, ...)`."
+source = "tools/bench/real/records.R"
+
+[[programs]]
+id = "simulation"
+display = "Simulation"
+summary = "Model code as finance and statistics packages write it: vector arithmetic in moderate loops, matrix products, `apply` over rows, quantiles and sorting."
+source = "tools/bench/real/simulation.R"
+
+[[programs]]
+id = "strings"
+display = "String handling"
+summary = "Messages built with `paste` and `sprintf`, identifiers cleaned with `gsub` and `regmatches`, splitting and padding, and the same through stringr."
+source = "tools/bench/real/strings.R"
+
+[[programs]]
+id = "tables"
+display = "Tables"
+summary = "data.table grouping, `:=` updates, keyed joins and `rbindlist` on small and medium tables, plus base `merge`, `aggregate`, `order` and `split`."
+source = "tools/bench/real/tables.R"
+
+[[programs]]
+id = "testthat"
+display = "testthat suite"
+summary = "Many small `test_that()` blocks calling validation helpers inside testthat's handlers, the way package CI runs them."
+source = "tools/bench/real/testthat.R"
+
+[[programs]]
+id = "timeseries"
+display = "Time series and dates"
+summary = "xts and zoo series merged, lagged, differenced and rolled; lubridate parsing and month arithmetic; base `Date` sequences."
+source = "tools/bench/real/timeseries.R"
+
+[[programs]]
+id = "validation"
+display = "Argument validation"
+summary = "Small functions with defaults, `...` forwarding, `match.arg`, `stopifnot`, `missing()` and `match.call()`, as packages run at every API boundary."
+source = "tools/bench/real/validation.R"
