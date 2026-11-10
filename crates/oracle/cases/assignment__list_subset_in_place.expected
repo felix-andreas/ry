@@ -1,0 +1,195 @@
+[stdout]
+| [1] "p"
+| [1] 99
+| List of 4
+|  $ : num 99
+|  $ : num 5
+|  $ : NULL
+|  $ : chr "q"
+| List of 2
+|  $ :List of 1
+|   ..$ : num 7
+|  $ : num 2
+| List of 2
+|  $ a: num 1
+|  $ b: int [1:2] 3 4
+| List of 5
+|  $ a: num 1
+|  $ b: int [1:2] 3 4
+|  $  : NULL
+|  $  : NULL
+|  $  : num 1
+| List of 4
+|  $ : num 0
+|  $ : num 9
+|  $ : num 0
+|  $ : num 9
+| [1] "number of items to replace is not a multiple of replacement length"
+| List of 4
+|  $ : num 0
+|  $ : num 9
+|  $ : num 0
+|  $ : num 9
+| a 
+| 1 
+|  a 
+| 10 
+| List of 2
+|  $ : num 1
+|  $ : chr "r"
+| List of 2
+|  $ : num 1
+|  $ : num 2
+| [1] "replacement has length zero"
+| List of 2
+|  $ : num 1
+|  $ : num 3
+| List of 2
+|  $ : num 5
+|  $ : num 2
+| List of 2
+|  $ : num 3
+|  $ : num 2
+| [[1]]
+| [1] 8
+| 
+| [[2]]
+| [1] 2
+| 
+| expression(a, c)
+| [1] "p"
+| [1] 99
+| List of 4
+|  $ : num 99
+|  $ : num 5
+|  $ : NULL
+|  $ : chr "q"
+| List of 2
+|  $ :List of 1
+|   ..$ : num 7
+|  $ : num 2
+| List of 2
+|  $ a: num 1
+|  $ b: int [1:2] 3 4
+| List of 5
+|  $ a: num 1
+|  $ b: int [1:2] 3 4
+|  $  : NULL
+|  $  : NULL
+|  $  : num 1
+| List of 4
+|  $ : num 0
+|  $ : num 9
+|  $ : num 0
+|  $ : num 9
+| [1] "number of items to replace is not a multiple of replacement length"
+| List of 4
+|  $ : num 0
+|  $ : num 9
+|  $ : num 0
+|  $ : num 9
+| a 
+| 1 
+|  a 
+| 10 
+| List of 2
+|  $ : num 1
+|  $ : chr "r"
+| List of 2
+|  $ : num 1
+|  $ : num 2
+| [1] "replacement has length zero"
+| List of 2
+|  $ : num 1
+|  $ : num 3
+| List of 2
+|  $ : num 5
+|  $ : num 2
+| List of 2
+|  $ : num 3
+|  $ : num 2
+| [[1]]
+| [1] 8
+| 
+| [[2]]
+| [1] 2
+| 
+| expression(a, c)
+| [1] "p"
+| [1] 99
+| List of 4
+|  $ : num 99
+|  $ : num 5
+|  $ : NULL
+|  $ : chr "q"
+| List of 2
+|  $ :List of 1
+|   ..$ : num 7
+|  $ : num 2
+| List of 2
+|  $ a: num 1
+|  $ b: int [1:2] 3 4
+| List of 5
+|  $ a: num 1
+|  $ b: int [1:2] 3 4
+|  $  : NULL
+|  $  : NULL
+|  $  : num 1
+| List of 4
+|  $ : num 0
+|  $ : num 9
+|  $ : num 0
+|  $ : num 9
+| [1] "number of items to replace is not a multiple of replacement length"
+| List of 4
+|  $ : num 0
+|  $ : num 9
+|  $ : num 0
+|  $ : num 9
+| a 
+| 1 
+|  a 
+| 10 
+| List of 2
+|  $ : num 1
+|  $ : chr "r"
+| List of 2
+|  $ : num 1
+|  $ : num 2
+| [1] "replacement has length zero"
+| List of 2
+|  $ : num 1
+|  $ : num 3
+| List of 2
+|  $ : num 5
+|  $ : num 2
+| List of 2
+|  $ : num 3
+|  $ : num 2
+| [[1]]
+| [1] 8
+| 
+| [[2]]
+| [1] 2
+| 
+| expression(a, c)
+| [1] "in"
+| [1] 2
+| List of 3
+|  $ : num 2
+|  $ : num 4
+|  $ : num 6
+| List of 3
+|  $ : num 2
+|  $ : num 4
+|  $ : num 6
+| List of 3
+|  $ : num 2
+|  $ : num 4
+|  $ : num 6
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

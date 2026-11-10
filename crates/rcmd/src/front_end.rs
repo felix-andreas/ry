@@ -385,7 +385,7 @@ fn write_start_image(home: &Path, path: &str) -> crate::Result<i32> {
 }
 
 /// Loads ry's runtime, the libR at `library_path`.
-fn load_runtime(library_path: &Path) -> crate::Result<libloading::Library> {
+pub(crate) fn load_runtime(library_path: &Path) -> crate::Result<libloading::Library> {
     // Loading ry's libR globally is what lets compiled packages resolve R's API from it: by
     // soname on Linux, by flat lookup on macOS. On Windows a package DLL imports from "R.dll"
     // by name, which finds the module already loaded.

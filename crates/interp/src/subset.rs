@@ -497,12 +497,15 @@ unsafe fn gather_plain(object: Sexp, index: Sexp) -> R<Option<Sexp>> {
     }
 }
 
+/// One bit per element, inline for vectors of up to 256 elements.
+type KeptMask = SmallVec<[u64; 4]>;
+
 /// The elements negative subscripts keep, as a bitset with one bit per element (set when kept):
 /// `excluded` is each subscript negated. `None` unless every subscript is negative or zero and at
 /// least one is negative, the only case the mask covers; NA, a positive subscript or all zeros
 /// take the general rules.
-fn excluded(extent: usize, excluded: impl Iterator<Item = f64>) -> Option<Vec<u64>> {
-    let mut keep = vec![u64::MAX; extent.div_ceil(64)];
+fn excluded(extent: usize, excluded: impl Iterator<Item = f64>) -> Option<KeptMask> {
+    let mut keep: KeptMask = smallvec![u64::MAX; extent.div_ceil(64)];
     if let Some(last) = keep.last_mut()
         && extent % 64 != 0
     {
@@ -531,7 +534,12 @@ fn excluded(extent: usize, excluded: impl Iterator<Item = f64>) -> Option<Vec<u6
 /// The elements of `object` whose bit in `keep` is set, streamed without a position list.
 unsafe fn gather_kept(object: Sexp, keep: &[u64]) -> R<Sexp> {
     let kept = keep.iter().map(|word| word.count_ones() as usize).sum();
-    let positions = keep.iter().enumerate().flat_map(|(index, &word)| {
+    gather_kind(object, kept_positions(keep), kept)
+}
+
+/// The zero-based positions whose bit in `keep` is set, in increasing order.
+fn kept_positions(keep: &[u64]) -> impl Iterator<Item = usize> + '_ {
+    keep.iter().enumerate().flat_map(|(index, &word)| {
         let mut remaining = word;
         std::iter::from_fn(move || {
             (remaining != 0).then(|| {
@@ -540,8 +548,7 @@ unsafe fn gather_kept(object: Sexp, keep: &[u64]) -> R<Sexp> {
                 index * 64 + bit
             })
         })
-    });
-    gather_kind(object, positions, kept)
+    })
 }
 
 /// `object[positions]` for a logical, integer, double, character or list vector that is not
@@ -631,6 +638,9 @@ pub unsafe fn dispatch_length(object: Sexp, env: Sexp) -> R<usize> {
 /// one position per element and the halved width and the lack of a conversion pass show up in
 /// vector code.
 type Position = usize;
+
+/// Resolved subscripts, which are usually few.
+type Positions = SmallVec<[Position; 8]>;
 /// An `NA` subscript.
 const NA_POSITION: Position = usize::MAX;
 /// A character subscript that matches no name, outside assignment.
@@ -645,7 +655,7 @@ unsafe fn resolve(
     names: Sexp,
     assigning: bool,
     call: Sexp,
-) -> R<(Vec<Position>, Vec<Option<Sexp>>)> {
+) -> R<(Positions, Vec<Option<Sexp>>)> {
     if index == missing_arg() {
         return Ok(((0..extent).collect(), Vec::new()));
     }
@@ -656,15 +666,15 @@ unsafe fn resolve(
         index
     };
     match index.kind() {
-        SexpType::Nil => Ok((Vec::new(), Vec::new())),
+        SexpType::Nil => Ok((Positions::new(), Vec::new())),
         SexpType::Logical => {
             let flags = values::ints(index);
             let count = flags.len();
             if count == 0 {
-                return Ok((Vec::new(), Vec::new()));
+                return Ok((Positions::new(), Vec::new()));
             }
             let total = extent.max(count);
-            let mut positions = Vec::new();
+            let mut positions = Positions::new();
             for position in 0..total {
                 match flags[position % count] {
                     1 => positions.push(position),
@@ -696,18 +706,21 @@ unsafe fn resolve(
                         "only 0's may be mixed with negative subscripts",
                     ));
                 }
-                let mut keep = vec![true; extent];
-                for position in 0..count {
-                    let value = (-numeric_element(index, position)).trunc() as usize;
-                    if value >= 1 && value <= extent {
-                        keep[value - 1] = false;
-                    }
-                }
-                let mut positions = Vec::with_capacity(extent);
-                positions.extend((0..extent).filter(|&position| keep[position]));
+                let Some(keep) = excluded(
+                    extent,
+                    (0..count).map(|position| -numeric_element(index, position)),
+                ) else {
+                    return Err(error_in(
+                        call,
+                        "only 0's may be mixed with negative subscripts",
+                    ));
+                };
+                let kept = keep.iter().map(|word| word.count_ones() as usize).sum();
+                let mut positions = Positions::with_capacity(kept);
+                positions.extend(kept_positions(&keep));
                 return Ok((positions, Vec::new()));
             }
-            let mut positions = Vec::with_capacity(count);
+            let mut positions = Positions::with_capacity(count);
             for position in 0..count {
                 let value = numeric_element(index, position);
                 if value.is_nan() {
@@ -720,7 +733,7 @@ unsafe fn resolve(
         }
         SexpType::String => {
             let count = length(index);
-            let mut positions = Vec::with_capacity(count);
+            let mut positions = Positions::with_capacity(count);
             let mut new_names: Vec<Option<Sexp>> = Vec::new();
             let mut appended: Vec<Sexp> = Vec::new();
             for position in 0..count {
@@ -865,23 +878,9 @@ pub(crate) unsafe fn direct_subset(call: Sexp, args: &[Sexp]) -> R<Option<Sexp>>
         return Ok(None);
     }
     if let [index] = indices
-        && matches!(index.kind(), SexpType::Integer | SexpType::Real)
-        && object.kind().is_atomic()
-        && !object.is_altrep()
-        && !index.is_altrep()
-        && !values::has_attributes(object)
-        && !values::has_attributes(*index)
-        && length(*index) == 1
+        && let Some(element) = crate::element_access::scalar_subset(object, *index)?
     {
-        let position = match index.kind() {
-            SexpType::Integer => f64::from(index.slice::<i32>()[0]),
-            _ => index.slice::<f64>()[0],
-        };
-        // NA_integer_ and NaN fail the lower bound, and `x[2.7]` truncates to the second
-        // element.
-        if position >= 1.0 && position < length(object) as f64 + 1.0 {
-            return vector_element(object, position as usize - 1).map(Some);
-        }
+        return Ok(Some(element));
     }
     subset(object, indices, true, call).map(Some)
 }

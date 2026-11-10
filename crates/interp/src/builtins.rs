@@ -14,6 +14,7 @@ use {
     },
     heap::object::{Sexp, SexpType},
     smallvec::{SmallVec, smallvec},
+    std::borrow::Cow,
     syntax::native_values::ACCEPTS_NATIVE,
 };
 
@@ -594,13 +595,16 @@ pub unsafe fn match_builtin_args(
             return Ok((matched, rest));
         }
     }
-    let mut used = vec![false; args.len()];
+    // One bit per argument, set once a formal has taken it.
+    let mut used: SmallVec<[u64; 1]> = smallvec![0; args.len().div_ceil(64)];
+    let is_used = |used: &[u64], index: usize| used[index / 64] & (1 << (index % 64)) != 0;
+    let mark = |used: &mut [u64], index: usize| used[index / 64] |= 1 << (index % 64);
     let dots = formals.iter().position(|formal| *formal == "...");
-    let names: Vec<Option<String>> = args
+    let names: SmallVec<[Option<Cow<'_, str>>; 8]> = args
         .iter()
         .map(|arg| {
             (arg.tag.kind() == SexpType::Symbol)
-                .then(|| values::symbol_name(arg.tag).into_owned())
+                .then(|| values::symbol_name(arg.tag))
                 .filter(|name| !name.is_empty())
         })
         .collect();
@@ -609,7 +613,7 @@ pub unsafe fn match_builtin_args(
             continue;
         }
         for (arg_index, name) in names.iter().enumerate() {
-            if !used[arg_index] && name.as_deref() == Some(*formal) {
+            if !is_used(&used, arg_index) && name.as_deref() == Some(*formal) {
                 if matched[formal_index].is_some() {
                     return Err(error_in(
                         call,
@@ -619,7 +623,7 @@ pub unsafe fn match_builtin_args(
                     ));
                 }
                 matched[formal_index] = Some(args[arg_index].value);
-                used[arg_index] = true;
+                mark(&mut used, arg_index);
             }
         }
     }
@@ -631,12 +635,12 @@ pub unsafe fn match_builtin_args(
             continue;
         }
         for (arg_index, name) in names.iter().enumerate() {
-            if !used[arg_index]
+            if !is_used(&used, arg_index)
                 && let Some(name) = name
-                && formal.starts_with(name.as_str())
+                && formal.starts_with(name.as_ref())
             {
                 matched[formal_index] = Some(args[arg_index].value);
-                used[arg_index] = true;
+                mark(&mut used, arg_index);
                 break;
             }
         }
@@ -644,7 +648,7 @@ pub unsafe fn match_builtin_args(
     let mut rest = Vec::new();
     let mut formal_index = 0;
     for (arg_index, arg) in args.iter().enumerate() {
-        if used[arg_index] {
+        if is_used(&used, arg_index) {
             continue;
         }
         if names[arg_index].is_some() {

@@ -1,6 +1,14 @@
 ---
-// The machine and GNU R version the benchmark table was measured on, from results.json.
-import { benchmarkMachine } from '../lib/benchmarks';
+// One fact about how a results file was measured: the machine and GNU R version, or how many times
+// each engine ran.
+import { benchmarkFact } from '../lib/benchmarks';
+
+interface Props {
+	suite?: 'real' | 'kernels';
+	field?: 'machine' | 'repeat';
+}
+
+const { suite = 'kernels', field = 'machine' } = Astro.props;
 ---
 
-<p>Measured on {benchmarkMachine}.</p>
+<span>{benchmarkFact(suite, field)}</span>
