@@ -23,7 +23,9 @@ use {
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    special("[", -1, do_subset).dispatch_or_eval(),
+    special("[", -1, do_subset)
+        .dispatch_or_eval()
+        .direct(direct_subset),
     special("[[", -1, do_subset2)
         .dispatch_or_eval()
         .direct(direct_subset2),
@@ -846,6 +848,42 @@ unsafe fn do_subset(call: &Call<'_>) -> R<Sexp> {
     let (object, indices, drop, _) = subset_args(call);
     let drop = drop.is_none_or(|drop| values::as_logical_scalar(drop) != 0);
     subset(object, &indices, drop, call.call)
+}
+
+/// `x[i, ...]` with positional subscripts on a subject that is not an object: the same
+/// selection as [`do_subset`] without building the argument list, and a numeric scalar
+/// position in an attribute-free atomic vector read straight out.
+pub(crate) unsafe fn direct_subset(call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
+    let [object, indices @ ..] = args else {
+        return Ok(None);
+    };
+    let object = *object;
+    if object.is_object()
+        || is_native_value(object)
+        || indices.iter().any(|&index| is_native_value(index))
+    {
+        return Ok(None);
+    }
+    if let [index] = indices
+        && matches!(index.kind(), SexpType::Integer | SexpType::Real)
+        && object.kind().is_atomic()
+        && !object.is_altrep()
+        && !index.is_altrep()
+        && !values::has_attributes(object)
+        && !values::has_attributes(*index)
+        && length(*index) == 1
+    {
+        let position = match index.kind() {
+            SexpType::Integer => f64::from(index.slice::<i32>()[0]),
+            _ => index.slice::<f64>()[0],
+        };
+        // NA_integer_ and NaN fail the lower bound, and `x[2.7]` truncates to the second
+        // element.
+        if position >= 1.0 && position < length(object) as f64 + 1.0 {
+            return vector_element(object, position as usize - 1).map(Some);
+        }
+    }
+    subset(object, indices, true, call).map(Some)
 }
 
 pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> R<Sexp> {

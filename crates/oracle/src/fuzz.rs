@@ -583,13 +583,14 @@ impl Generator {
         let recycle = if rows % 2 == 0 { "c(-1, 1)" } else { "-1" };
         let digits = self.rng.below(7) as i64 - 2;
         let kind = ["0", "0L", "FALSE"][self.rng.below(3)];
+        let subscript = ["i", "-i", "i + 0.5", "-(i + 0L)", "c(i, NA)", "i - 1L"][self.rng.below(6)];
         let fill = match kind {
             "0L" => format!("seq_len({rows})"),
             "FALSE" => format!("rep(c(TRUE, NA), length.out = {rows})"),
             _ => format!("seq_len({rows}) / 3"),
         };
         format!(
-            "sm{k} <- matrix({kind}, {rows}, {columns})\nsalias{k} <- sm{k}\nsm{k}[, {column}] <- {fill}\nprint(sm{k})\nprint(salias{k})\nsm{k}[{row}, ] <- sm{k}[{row}, ]\nsn{k} <- matrix(0, {rows}, {columns})\nsn{k}[, {column}] <- {recycle}\nprint(sn{k})\nprint(round(c(0.5, 1.5, 2.5, -0.5, -0, 0.125, 2.675, NA, NaN, Inf, {rows}.{columns}5), {digits}))\nprint(round(seq_len({rows}) / 7 * 100, {digits}))\nprint(c(a = {rows}, b = {columns}, {rows}))\n"
+            "sm{k} <- matrix({kind}, {rows}, {columns})\nsalias{k} <- sm{k}\nsm{k}[, {column}] <- {fill}\nprint(sm{k})\nprint(salias{k})\nsm{k}[{row}, ] <- sm{k}[{row}, ]\nsn{k} <- matrix(0, {rows}, {columns})\nsn{k}[, {column}] <- {recycle}\nprint(sn{k})\nprint(round(c(0.5, 1.5, 2.5, -0.5, -0, 0.125, 2.675, NA, NaN, Inf, {rows}.{columns}5), {digits}))\nprint(round(seq_len({rows}) / 7 * 100, {digits}))\nprint(c(a = {rows}, b = {columns}, {rows}))\nfor (i in seq_len({rows} + 1L)) print(list(sm{k}[{subscript}], c(p = 1, q = 2)[{subscript}], -i))\n"
         )
     }
 

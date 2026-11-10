@@ -146,7 +146,26 @@ pub const BUILTINS: &[BuiltinDef] = &[
         })
     })
     .generic(Generic::Ops)
-    .reusing_first_argument(),
+    .reusing_first_argument()
+    .unary(|operand| unsafe {
+        // `-1L` in a subscript runs on every iteration of a loop, so the attribute-free numeric
+        // scalar negates without the argument list.
+        if operand.is_altrep()
+            || operand.is_array()
+            || operand.length() != 1
+            || operand.attrib() != nil()
+        {
+            return Ok(None);
+        }
+        match operand.kind() {
+            SexpType::Integer => {
+                let value = operand.slice::<i32>()[0];
+                values::scalar_integer(if value == NA_INTEGER { value } else { -value }).map(Some)
+            }
+            SexpType::Real => values::scalar_real(-operand.slice::<f64>()[0]).map(Some),
+            _ => Ok(None),
+        }
+    }),
     builtin("*", 2, |call| unsafe {
         strict(call, OperatorClass::Arithmetic, |call| {
             arithmetic(call, Op::Multiply)
