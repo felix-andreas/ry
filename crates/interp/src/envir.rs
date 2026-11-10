@@ -816,14 +816,15 @@ pub unsafe fn list_to_env(list: Sexp, enclosure: Sexp) -> R<Sexp> {
 
 unsafe fn fill_env(env: Sexp, list: Sexp) -> R<()> {
     let names = values::names(list);
+    if names == nil() {
+        return Ok(());
+    }
     for index in 0..length(list) {
-        let Some(name) = (names != nil()).then(|| string_at(names, index)).flatten() else {
-            continue;
-        };
-        if name.is_empty() {
+        let name = names.element(index);
+        if name == values::na_string() || name.length() == 0 {
             continue;
         }
-        let symbol = values::install(&name)?;
+        let symbol = values::install_charsxp_text(name)?;
         define(symbol, list.element(index), env)?;
     }
     Ok(())

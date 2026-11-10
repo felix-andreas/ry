@@ -618,8 +618,8 @@ unsafe fn type_sum(value: Sexp, namespace: Sexp) -> R<Sexp> {
 unsafe fn do_withr_list_combine(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env;
     let (Some(rhs), Some(lhs)) = (
-        argument(frame, install("rhs")?)?,
-        argument(frame, install("lhs")?)?,
+        argument(frame, symbols().rhs)?,
+        argument(frame, symbols().lhs)?,
     ) else {
         return decline();
     };
@@ -631,8 +631,7 @@ unsafe fn do_withr_list_combine(call: &Call<'_>) -> R<Sexp> {
         return finish(frame, rhs, true);
     }
     let rhs_names = values::names(rhs);
-    let blank = values::mkchar("")?;
-    crate::heap().root(blank);
+    let blank = values::blank_string();
     let mut entries: Vec<(Sexp, Sexp)> = (0..length(rhs))
         .map(|index| {
             let name = if rhs_names == nil() {
@@ -682,7 +681,7 @@ unsafe fn do_withr_list_combine(call: &Call<'_>) -> R<Sexp> {
 /// `NA` and, of elements with the same name, only the last is kept.
 unsafe fn do_withr_as_envvars(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env;
-    let Some(envs) = argument(frame, install("envs")?)? else {
+    let Some(envs) = argument(frame, symbols().envs)? else {
         return decline();
     };
     match envvars(envs)? {
@@ -695,7 +694,7 @@ unsafe fn do_withr_as_envvars(call: &Call<'_>) -> R<Sexp> {
 /// for those unset, named by the variables.
 unsafe fn do_withr_get_envvar(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env;
-    let Some(envs) = argument(frame, install("envs")?)? else {
+    let Some(envs) = argument(frame, symbols().envs)? else {
         return decline();
     };
     // `Sys.getenv(NULL)` lists the whole environment instead.
@@ -714,13 +713,13 @@ unsafe fn do_withr_get_envvar(call: &Call<'_>) -> R<Sexp> {
 /// prefix and suffix actions, and values other than single strings, keep the R body.
 unsafe fn do_withr_set_envvar(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env;
-    let Some(envs) = argument(frame, install("envs")?)? else {
+    let Some(envs) = argument(frame, symbols().envs)? else {
         return decline();
     };
     let Some(envs) = envvars(envs)? else {
         return decline();
     };
-    let Some(action) = argument(frame, install("action")?)? else {
+    let Some(action) = argument(frame, symbols().action)? else {
         return decline();
     };
     if action.kind() != SexpType::String
@@ -790,7 +789,7 @@ unsafe fn do_withr_set_envvar(call: &Call<'_>) -> R<Sexp> {
 /// current value of each.
 unsafe fn do_withr_get_options(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env;
-    let Some(new_options) = argument(frame, install("new_options")?)? else {
+    let Some(new_options) = argument(frame, symbols().new_options)? else {
         return decline();
     };
     let vector = matches!(
@@ -816,7 +815,7 @@ unsafe fn do_withr_get_options(call: &Call<'_>) -> R<Sexp> {
 /// without a condition: `options()` with each element as a named argument.
 unsafe fn do_withr_set_options(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env;
-    let Some(new_options) = argument(frame, install("new_options")?)? else {
+    let Some(new_options) = argument(frame, symbols().new_options)? else {
         return decline();
     };
     if !settable_options(new_options) || length(new_options) == 0 {
@@ -830,7 +829,7 @@ unsafe fn do_withr_set_options(call: &Call<'_>) -> R<Sexp> {
 /// `set_options()` takes natively.
 unsafe fn do_withr_reset_options(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env;
-    let Some(old_options) = argument(frame, install("old_options")?)? else {
+    let Some(old_options) = argument(frame, symbols().old_options)? else {
         return decline();
     };
     if !settable_options(old_options) {

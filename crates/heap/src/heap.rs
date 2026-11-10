@@ -40,7 +40,7 @@ use {
         },
         records::{Layouts, slot_kind},
         space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept},
-        strings::{Encoding, StringTable},
+        strings::{Encoding, StringTable, SymbolTable},
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
@@ -117,7 +117,7 @@ pub struct Heap {
     weak_pairs: Vec<Sexp>,
     mark_stack: Vec<Sexp>,
     strings: StringTable,
-    symbols: FxHashMap<Sexp, Sexp>,
+    symbols: SymbolTable,
     /// Symbols interned and objects preserved since the last collection. A minor collection marks
     /// only these: every older entry of the symbol table and the precious set is already marked,
     /// and walking those tables touched one cold header per entry on every minor collection.
@@ -638,7 +638,7 @@ impl Heap {
             allocation_reporter: None,
             report_threshold: usize::MAX,
             strings: StringTable::default(),
-            symbols: FxHashMap::default(),
+            symbols: SymbolTable::default(),
             new_roots: Vec::new(),
             layouts: Layouts::default(),
             roots: Roots {
@@ -1432,7 +1432,7 @@ impl Heap {
         if name == self.known.na_string {
             return self.install(b"NA");
         }
-        if let Some(&symbol) = self.symbols.get(&name) {
+        if let Some(symbol) = self.symbols.get(name) {
             return Ok(symbol);
         }
         if name.length() as usize > MAX_SYMBOL_BYTES {
@@ -1441,7 +1441,7 @@ impl Heap {
         let nil = self.known.nil;
         let symbol = self.alloc_triple(SexpType::Symbol, name, nil, nil)?;
         symbol.mark_not_mutable();
-        self.symbols.insert(name, symbol);
+        self.symbols.insert(symbol);
         self.new_roots.push(symbol);
         Ok(symbol)
     }
@@ -1449,7 +1449,7 @@ impl Heap {
     /// The interned symbol named `name`, if one exists, without installing it.
     pub unsafe fn find_symbol(&self, name: &[u8]) -> Option<Sexp> {
         let name = self.find_interned(name, 0)?;
-        self.symbols.get(&name).copied()
+        self.symbols.get(name)
     }
 
     pub fn symbol_count(&self) -> usize {
@@ -2085,8 +2085,7 @@ impl Heap {
         if self.is_symbol_frame(env) {
             return self
                 .symbols
-                .values()
-                .copied()
+                .symbols()
                 .filter(|symbol| symbol.cdr().kind() == SexpType::Binding)
                 .collect();
         }
@@ -3070,7 +3069,7 @@ impl Heap {
         match kind {
             Collection::Intermediate | Collection::Major => {
                 self.roots.precious.keys().for_each(|&object| mark(object));
-                self.symbols.values().for_each(|&symbol| mark(symbol));
+                self.symbols.symbols().for_each(&mut mark);
             }
             Collection::Minor => self.new_roots.iter().for_each(|&object| mark(object)),
         }

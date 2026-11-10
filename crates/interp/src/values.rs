@@ -211,6 +211,12 @@ symbol_table! {
     decimal_mark = "decimal.mark",
     top = "top",
     bottom = "bottom",
+    envs = "envs",
+    action = "action",
+    new_options = "new_options",
+    old_options = "old_options",
+    lhs = "lhs",
+    rhs = "rhs",
 }
 
 /// Session-wide objects the builtins keep. Each is rooted for the life of the session.
@@ -499,6 +505,19 @@ pub unsafe fn install_charsxp(name: Sexp) -> R<Sexp> {
         return Ok(crate::heap().install_char(name)?);
     }
     install_bytes(name.bytes())
+}
+
+/// The symbol whose name is the text of the `CHARSXP` `name`, as GNU R's `installTrChar`
+/// gives: a string in another encoding installs under its UTF-8 text. `NA_STRING` installs as
+/// the empty name, which `install` rejects.
+pub unsafe fn install_charsxp_text(name: Sexp) -> R<Sexp> {
+    if name == na_string() {
+        return install("");
+    }
+    if name.has_gp(gp::ASCII) {
+        return install_charsxp(name);
+    }
+    install(&char_str(name))
 }
 
 pub unsafe fn scalar_logical(value: i32) -> R<Sexp> {
