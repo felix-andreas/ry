@@ -395,14 +395,28 @@ tenured and takes tenured ones as roots through the remembered set. A major coll
 everything dead. The heap has two limits, as GNU R's `R_VSize` and `R_NSize` do: one on large
 vectors (at least 64 MB) and one on small objects (at least 32 MB). When a minor collection leaves
 less than a fifth of a limit's minimum free, an intermediate collection runs, then a major one if
-that is still not enough. After each major collection the limits move with GNU R's fractions: a
+that is still not enough. An intermediate collection is skipped when it would not free enough: the
+share of the younger old objects (old but not yet tenured) that the last escalation found dead
+predicts what it frees now, so a program that keeps what it builds goes straight to the major
+collection instead of tracing its young structure twice. After each major collection the limits move with GNU R's fractions: a
 limit grows by a fifth when the survivors plus that fifth fill more than 70% of it, and shrinks by
 a fifth when they fill less than 30%. A major collection that escalation forced before the program
 allocated a limit's worth of vectors grows the vector limit too, because the working set it keeps
 promoting is larger than the survivors show. GNU R's `R_GC_MEM_GROW` and its fraction variables
 set the same numbers ([CLI reference](/reference/cli#memory)). The nursery's budget for small
 objects scales with the old small objects only, as GNU R's cons-cell trigger ignores vector memory,
-so a few big live vectors do not let as many bytes of small garbage pile up.
+so a few big live vectors do not let as many bytes of small garbage pile up. Outside a namespace
+load, the nursery follows the survival of its own objects: it doubles, up to eight times the young
+limit, when a minor collection promotes more than a fifth of what it scanned, and halves back
+toward the young limit when it promotes less than a twentieth. A nursery that collects while the
+program still uses what it is building promotes that structure, which then waits for a deeper
+collection; a larger nursery lets it die young. The cost is resident memory: the `records` program
+of `tools/bench/real` peaks at 141 MB instead of 111 MB (GNU R: 144 MB).
+
+`R_PreserveObject` sets a flag bit in the object's header and appends the object to a dense vector
+of preserved objects with their counts, so a frame release asks the header, not a hash table,
+whether an environment is preserved. `R_ReleaseObject` searches the vector from its newest entry,
+as GNU R's precious list does.
 
 The write barrier is one load and one compare on the parent's header: a store into a young object,
 or into an old one that is already remembered, does nothing more. An old object that receives a

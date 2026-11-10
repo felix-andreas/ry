@@ -5,6 +5,10 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### Collections that fit what the program keeps
+
+The collector skips an intermediate collection when the last one showed it would free too little, and the nursery grows while a program keeps most of what it allocates and shrinks again when its objects die young. On the `records` program of the real-world benchmark, collection takes a third fewer instructions and the whole run 10% fewer, with 7 minor and 1 intermediate collection where there were 26 and 5; its peak memory rises from 111 MB to 141 MB (GNU R: 144 MB). `R_PreserveObject` marks the object's header, so releasing a call frame no longer looks the environment up in a hash table.
+
 ### Package code is allocated old
 
 A lazy-load fetch, which reads a package's functions and data when they are first used, allocates them directly in the old generation, so minor collections no longer trace them only to promote them. `library(testthat)` runs no collection and 6% fewer instructions, the collector's instructions over the testthat workload drop by 14%, and peak memory is unchanged.
