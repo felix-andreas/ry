@@ -22,6 +22,7 @@ use {
         builtin_libraries::NativeCall,
         conditions, connections,
         eval::{define, find_var},
+        system::r_at_least,
         unwind::{R, current_call, error, error_in},
         values::{
             self, alloc, install, integer_vector, list_vector, nil, scalar_integer, scalar_string,
@@ -61,6 +62,7 @@ pub unsafe fn parse_rd(call: &NativeCall<'_>) -> R<Sexp> {
         expansions: 0,
         warnings: Vec::new(),
         newline_in_string: None,
+        missing_brace: None,
     };
     let parsed = parser.content(Mode::Latex, Close::EndOfInput, true);
     let end = parser.input.next_position;
@@ -254,6 +256,11 @@ enum Shape {
 fn builtin_shape(name: &str) -> Option<Shape> {
     use Mode::{Latex, RCode, RawVerbatim, Verbatim};
     Some(match name {
+        // R 4.4 added `\abbr` and `\dontdiff`, and R 4.6 gave `\linkS4class` an option and
+        // added `\linkS4methods`.
+        "abbr" | "dontdiff" if !r_at_least(4, 4) => return None,
+        "linkS4methods" if !r_at_least(4, 6) => return None,
+        "linkS4class" if !r_at_least(4, 6) => Shape::One(Latex),
         "cr" | "dots" | "ldots" | "R" | "tab" => Shape::Zero,
         "acronym" | "abbr" | "bold" | "cite" | "command" | "dfn" | "dQuote" | "email" | "emph"
         | "file" | "pkg" | "sQuote" | "strong" | "var" | "itemize" | "enumerate" | "describe" => {
@@ -392,6 +399,9 @@ struct Parser {
     /// The first line that ended inside an R string. GNU R mentions it only alongside a syntax
     /// error, since a multi-line string is legal R.
     newline_in_string: Option<i32>,
+    /// The macro whose first argument had no opening brace. GNU R's parser drops it and reports
+    /// the token after it, which its lexer already read in the argument's mode.
+    missing_brace: Option<(String, Mode)>,
 }
 
 /// Expansions beyond this many mean a macro that expands to itself.
@@ -402,8 +412,11 @@ impl Parser {
     /// from. Both go through GNU R's `yyerror`, which repeats the warning about the first
     /// multi-line string seen anywhere in the file.
     fn warn(&mut self, message: impl std::fmt::Display) {
+        self.warn_at(self.input.next_position.line, message);
+    }
+
+    fn warn_at(&mut self, line: i32, message: impl std::fmt::Display) {
         self.warn_newline_in_string();
-        let line = self.input.next_position.line;
         self.warnings
             .push(format!("{}:{line}: {message}", self.basename));
     }
@@ -428,6 +441,13 @@ impl Parser {
             return;
         };
         let text = std::mem::take(&mut run.text);
+        if self.missing_brace.take().is_some() {
+            let tag = mode.leaf_tag();
+            self.warn_at(
+                first.line,
+                format!("unexpected {tag} '{text}', expecting '{{'"),
+            );
+        }
         self.last_text.clone_from(&text);
         nodes.push(Node {
             span: Some(Span {
@@ -443,7 +463,7 @@ impl Parser {
 
     /// Content in `mode` up to `close`, which it consumes when it is a brace. `top` marks the
     /// top level, where a complete file has its sections.
-    unsafe fn content(&mut self, mode: Mode, close: Close, top: bool) -> R<Vec<Node>> {
+    unsafe fn content(&mut self, mut mode: Mode, close: Close, top: bool) -> R<Vec<Node>> {
         let mut nodes = Vec::new();
         let mut run = Run::default();
         let mut quote: Option<char> = None;
@@ -455,8 +475,19 @@ impl Parser {
         // though braces still nest.
         let mut in_comment = false;
         let mut depth = 0usize;
-        let verbatim = matches!(mode, Mode::Verbatim | Mode::RawVerbatim);
         loop {
+            // The token after a macro without its brace is markup rather than text, so it is
+            // what GNU R's parser reports.
+            if run.first.is_none()
+                && self.missing_brace.is_some()
+                && self.input.peek(0).is_none_or(|next| {
+                    matches!(next, '\\' | '%' | '}') || (next == '{' && mode == Mode::Latex)
+                })
+                && let Some((tag, _)) = self.missing_brace.take()
+            {
+                self.warn(format!("unexpected macro '{tag}' without its argument"));
+            }
+            let verbatim = matches!(mode, Mode::Verbatim | Mode::RawVerbatim);
             if self.input.at_line_start && !verbatim {
                 if self.input.starts_with("#ifdef") || self.input.starts_with("#ifndef") {
                     self.flush(&mut run, mode, &mut nodes);
@@ -524,6 +555,10 @@ impl Parser {
                             self.flush(&mut run, mode, &mut nodes);
                             if let Some(node) = self.macro_call(top)? {
                                 nodes.push(node);
+                            } else if let Some((_, argument_mode)) = &self.missing_brace {
+                                // GNU R's lexer has already switched to the argument's mode,
+                                // and nothing switches it back.
+                                mode = *argument_mode;
                             }
                         }
                         Mode::RawVerbatim => {
@@ -783,6 +818,19 @@ impl Parser {
             ("item", ItemContext::None) => None,
             _ => builtin_shape(&name),
         };
+        let first_mode = match shape {
+            Some(
+                Shape::One(mode) | Shape::Several(&[mode, ..]) | Shape::OptionalSecond(mode, _),
+            ) => Some(mode),
+            Some(Shape::OptionThenOne(mode)) if self.input.peek(0) != Some('[') => Some(mode),
+            _ => None,
+        };
+        if let Some(mode) = first_mode
+            && self.input.peek(0) != Some('{')
+        {
+            self.missing_brace = Some((tag, mode));
+            return Ok(None);
+        }
         match shape {
             Some(shape) => Ok(Some(self.macro_node(first, tag, shape)?)),
             None => {
