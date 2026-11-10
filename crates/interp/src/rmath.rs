@@ -343,6 +343,11 @@ fn warning(message: String) {
     WARNINGS.with(|warnings| warnings.borrow_mut().push(message));
 }
 
+/// Whether the functions raised a warning since the last [`take_warnings`].
+pub fn has_warnings() -> bool {
+    WARNINGS.with(|warnings| !warnings.borrow().is_empty())
+}
+
 /// The warnings the functions raised since the last call, in order.
 pub fn take_warnings() -> Vec<String> {
     WARNINGS.with(|warnings| std::mem::take(&mut *warnings.borrow_mut()))

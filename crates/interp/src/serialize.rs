@@ -1241,6 +1241,7 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
     if value.kind() == SexpType::Promise {
         return eval::force_promise(value);
     }
+    crate::base_fast_paths::recognize_routine_closure(value)?;
     Ok(value)
 }
 

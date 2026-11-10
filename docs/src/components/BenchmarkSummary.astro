@@ -1,6 +1,6 @@
 ---
-// The two untyped benchmarks side by side: what each measures and ry's geometric-mean speed against GNU R.
-import { benchmarkSummaryColumns, benchmarkSummaryRows } from '../lib/benchmarks';
+// One row per suite: what it is and ry's geometric-mean speed against GNU R, untyped and typed.
+import { benchmarkSummaryColumns, benchmarkSummaryNote, benchmarkSummaryRows, suiteMetadata } from '../lib/benchmarks';
 ---
 
 <table>
@@ -19,3 +19,8 @@ import { benchmarkSummaryColumns, benchmarkSummaryRows } from '../lib/benchmarks
 		}
 	</tbody>
 </table>
+<p>{benchmarkSummaryNote}</p>
+<ul>
+	<li>Numeric kernels {suiteMetadata('kernels').replace(/^M/, 'm')}</li>
+	<li>Application workloads {suiteMetadata('real').replace(/^M/, 'm')}</li>
+</ul>
