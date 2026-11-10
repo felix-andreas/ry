@@ -17,7 +17,7 @@ native code follows; any other release runs its own R code unchanged.
 
 ### Faster environment variables
 
-`Sys.getenv()` looks up every name it is given in one pass over the environment. `Sys.setenv()` leaves a variable alone when it already holds the new value, and `Sys.unsetenv()` skips a variable that is not set. withr's `local_envvar()` restores often hit both cases, and the testthat workload takes 1.4% fewer instructions.
+`Sys.getenv()` looks up every name it is given in one pass over the environment. `Sys.setenv()` leaves a variable alone when it already holds the new value, and `Sys.unsetenv()` skips a variable that is not set. withr's `local_envvar()` restores often hit both cases. A lookup rejects most variables after comparing one byte, as glibc does, and together these take 2.4% off the instructions the testthat workload runs.
 
 ### Faster assignment forms and kernels in the public benchmark suites
 
