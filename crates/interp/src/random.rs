@@ -51,7 +51,7 @@ use {
         unwind::{R, error},
         values::{
             alloc_uninit, as_integer_scalar, as_logical_scalar, as_real_scalar, global_env,
-            integer_vector, ints, ints_mut, is_nil, length, missing_arg, nil, real_vector, reals,
+            integer_vector, ints, ints_mut, is_nil, length, missing_arg, nil, reals,
             reals_mut, string_at, symbols, unbound,
         },
     },
@@ -410,6 +410,34 @@ impl<U: Uniform> Draws<'_, U> {
     fn index_value(&mut self, n: f64) -> f64 {
         next_index(&mut self.uniform, self.sample_kind, n)
     }
+
+    /// [`Draws::index_value`] for a whole `n` below 2^53, in integers: the rejection sampler's
+    /// candidate compares with `n` exactly either way, and integers spare the per-draw float
+    /// tests and `floor` calls.
+    #[inline]
+    fn whole_index(&mut self, n: u64) -> u64 {
+        if self.sample_kind == SampleKind::Rounding {
+            // Past the integer range one deviate's 32 bits cannot reach every index, so GNU R's
+            // `sample` combines two into 25 more bits (its `ru`).
+            let deviate = if n > i32::MAX as u64 {
+                const SCALE: f64 = 33554432.0;
+                ((SCALE * self.uniform.next()).floor() + self.uniform.next()) / SCALE
+            } else {
+                self.uniform.next()
+            };
+            // Saturating, as the double's conversion is for a negative user-supplied deviate.
+            return (n as f64 * deviate) as u64;
+        }
+        if n == 0 {
+            return 0;
+        }
+        let bits = if n <= 1 << 40 {
+            u64::BITS - (n - 1).leading_zeros()
+        } else {
+            index_bits(n as f64)
+        };
+        rejection_index(&mut self.uniform, bits, n as i64) as u64
+    }
 }
 
 impl<U: Uniform> Deviates for Draws<'_, U> {
@@ -484,6 +512,19 @@ pub trait Uniform {
     fn open(&self) -> bool {
         true
     }
+
+    /// `floor(65536 * next())`: the sixteen bits of an index draw that one deviate gives.
+    #[inline]
+    fn chunk(&mut self) -> i64 {
+        let scaled = self.next() * 65536.0;
+        // Truncation is the floor of a non-negative value, without a call to libm's `floor`;
+        // only a user-supplied generator can return a negative deviate.
+        if scaled >= 0.0 {
+            scaled as i64
+        } else {
+            scaled.floor() as i64
+        }
+    }
 }
 
 /// The Mersenne twister's state, borrowed from the session.
@@ -496,6 +537,19 @@ impl Uniform for Twister<'_> {
     #[inline]
     fn next(&mut self) -> f64 {
         fixup(mersenne_twister(self.position, self.words))
+    }
+
+    /// The deviate is the tempered word times 2^-32, exact in a double, so `floor(65536 * u)`
+    /// is the word's top sixteen bits. The fix-up only moves a zero word to a tiny positive
+    /// value, whose chunk is zero as well.
+    #[inline]
+    fn chunk(&mut self) -> i64 {
+        if !(0..TWISTER_WORDS as i32).contains(self.position) {
+            regenerate_twister(self.position, self.words);
+        }
+        let word = self.words.get(*self.position as usize).copied().unwrap_or(0);
+        *self.position += 1;
+        i64::from(temper_word(word) >> 16)
     }
 
     fn fill(&mut self, slots: &mut [f64]) {
@@ -633,29 +687,35 @@ unsafe fn do_sample2(call: &Call<'_>) -> R<Sexp> {
     if f64::from(size) > population / 2.0 {
         return Err(error("This algorithm is for size <= n/2"));
     }
+    let size = size as usize;
+    // The result is the working memory: a duplicate is detected by the set of drawn values,
+    // which is sized for the whole sample up front so that it never rehashes.
+    let integer = population <= f64::from(i32::MAX);
+    let result = if integer {
+        alloc_uninit(SexpType::Integer, size)?
+    } else {
+        alloc_uninit(SexpType::Real, size)?
+    };
+    let mut seen = FxHashSet::with_capacity_and_hasher(size, Default::default());
     get_rng_state()?;
-    let mut drawn = Vec::with_capacity(size as usize);
-    let mut seen = FxHashSet::default();
     with_deviates!(|draws| {
-        for _ in 0..size {
+        for index in 0..size {
             // GNU R gives up after 100 redraws and keeps the duplicate; with size <= n/2 a
             // redraw is needed less than half the time, so the cap is never reached in practice.
-            let mut value = 0.0;
+            let mut value = 0;
             for _ in 0..100 {
-                value = draws.index_value(population) + 1.0;
-                if seen.insert(value.to_bits()) {
+                value = draws.whole_index(population as u64) + 1;
+                if seen.insert(value) {
                     break;
                 }
             }
-            drawn.push(value);
+            if integer {
+                ints_mut(result)[index] = value as i32;
+            } else {
+                reals_mut(result)[index] = value as f64;
+            }
         }
     });
-    let result = if population > f64::from(i32::MAX) {
-        real_vector(&drawn)?
-    } else {
-        let indices: Vec<i32> = drawn.iter().map(|&value| value as i32).collect();
-        integer_vector(&indices)?
-    };
     put_rng_state()?;
     Ok(result)
 }
@@ -706,7 +766,7 @@ fn draw_uniform_sample(
 ) {
     if replace || size < 2 {
         for index in 0..size {
-            store(index, draws.index_value(count) as u64 + 1);
+            store(index, draws.whole_index(count as u64) + 1);
         }
     } else {
         // Partial Fisher-Yates over `0..count`: the drawn slot takes the value of the last
@@ -725,7 +785,7 @@ fn draw_uniform_sample(
         } else {
             let mut moved: FxHashMap<u64, u64> = FxHashMap::default();
             for index in 0..size {
-                let slot = draws.index_value(remaining as f64) as u64;
+                let slot = draws.whole_index(remaining);
                 store(index, moved.get(&slot).copied().unwrap_or(slot) + 1);
                 remaining -= 1;
                 let last = moved.get(&remaining).copied().unwrap_or(remaining);
@@ -744,7 +804,7 @@ fn shuffle_prefix<T: Copy + Into<u64>>(
     store: &mut impl FnMut(usize, u64),
 ) {
     for index in 0..size {
-        let slot = draws.index_value(slots.len() as f64) as usize;
+        let slot = draws.whole_index(slots.len() as u64) as usize;
         store(index, slots[slot].into() + 1);
         slots.swap_remove(slot);
     }
@@ -883,7 +943,7 @@ fn walker_sample(draws: &mut Draws<'_, impl Uniform>, probabilities: &[f64], dra
             let item = (scaled as usize).min(count - 1);
             (item, scaled < thresholds[item] + item as f64)
         } else {
-            let item = draws.index_value(count as f64) as usize;
+            let item = draws.whole_index(count as u64) as usize;
             (item, draws.uniform.next() < thresholds[item])
         };
         *slot = if keep {
@@ -1443,12 +1503,16 @@ fn mersenne_twister(position: &mut i32, words: &mut [u32; TWISTER_WORDS]) -> f64
 
 /// MT19937's tempering of one word, scaled to [0, 1) by 2^-32.
 #[inline(always)]
-fn temper(mut value: u32) -> f64 {
+fn temper(value: u32) -> f64 {
+    f64::from(temper_word(value)) * 2.3283064365386963e-10
+}
+
+#[inline(always)]
+fn temper_word(mut value: u32) -> u32 {
     value ^= value >> 11;
     value ^= (value << 7) & 0x9d2c_5680;
     value ^= (value << 15) & 0xefc6_0000;
-    value ^= value >> 18;
-    f64::from(value) * 2.3283064365386963e-10
+    value ^ (value >> 18)
 }
 
 /// Tempers a run of the twister's words into fixed-up deviates. The loop has no dependence
@@ -1855,20 +1919,36 @@ fn next_index(uniform: &mut impl Uniform, kind: SampleKind, n: f64) -> f64 {
     }
     let bits = index_bits(n);
     loop {
-        // Sixteen bits per uniform; GNU R's loop runs while the bit count so far is at most
-        // `bits`, which draws one chunk more than needed whenever `bits` is a multiple of 16.
-        let mut value: i64 = 0;
-        let mut drawn = 0;
-        while drawn <= bits {
-            let chunk = (uniform.next() * 65536.0).floor() as i64;
-            value = value.wrapping_mul(65536).wrapping_add(chunk);
-            drawn += 16;
+        let candidate = rejection_candidate(uniform, bits);
+        if (candidate as f64) < n {
+            return candidate as f64;
         }
-        let candidate = (value & ((1i64 << bits) - 1)) as f64;
+    }
+}
+
+/// [`next_index`]'s rejection loop for a whole `n`.
+#[inline]
+fn rejection_index(uniform: &mut impl Uniform, bits: u32, n: i64) -> i64 {
+    loop {
+        let candidate = rejection_candidate(uniform, bits);
         if candidate < n {
             return candidate;
         }
     }
+}
+
+/// One candidate of `bits` bits, sixteen per uniform. GNU R's loop runs while the bit count so
+/// far is at most `bits`, which draws one chunk more than needed whenever `bits` is a multiple
+/// of 16.
+#[inline]
+fn rejection_candidate(uniform: &mut impl Uniform, bits: u32) -> i64 {
+    let mut value: i64 = 0;
+    let mut drawn = 0;
+    while drawn <= bits {
+        value = value.wrapping_mul(65536).wrapping_add(uniform.chunk());
+        drawn += 16;
+    }
+    value & ((1i64 << bits) - 1)
 }
 
 /// `ceil(log2(n))`, the bits [`next_index`] draws. For a whole `n` up to 2^40 the count of
@@ -2084,6 +2164,59 @@ mod tests {
                 0.473176629282534122
             ]
         );
+    }
+
+    /// The integer index draws must give the float path's indices and leave the generator at
+    /// the same position: the twister's chunks taken from its words, and the generic path
+    /// through the session state, for both sample kinds and every size of population.
+    #[test]
+    fn whole_indices_match_float_indices() {
+        for_each_seed(200, |seed| {
+            let mut picks = SplitMix64(0x51de_0000 ^ seed);
+            let sample_kind = if picks.below(4) == 0 {
+                SampleKind::Rounding
+            } else {
+                SampleKind::Rejection
+            };
+            let mut integers = seeded_rng(seed as u32);
+            let mut floats = seeded_rng(seed as u32);
+            let mut generic = seeded_rng(seed as u32);
+            integers.sample_kind = sample_kind;
+            floats.sample_kind = sample_kind;
+            generic.sample_kind = sample_kind;
+            let State::MersenneTwister { position, words } = &mut integers.state else {
+                panic!("a seeded generator is the Mersenne twister");
+            };
+            let mut twister = Draws {
+                uniform: Twister { position, words },
+                normal_kind: integers.normal_kind,
+                sample_kind,
+                box_muller_saved: &mut integers.box_muller_saved,
+            };
+            for _ in 0..1 + picks.below(2000) {
+                let n = match picks.below(5) {
+                    0 => 1 + picks.below(20) as u64,
+                    1 => (1u64 << picks.below(53)) + picks.below(3) as u64,
+                    2 => (1u64 << (40 + picks.below(12))) - picks.below(3) as u64,
+                    3 => 4_500_000_000_000_000 - picks.below(1000) as u64,
+                    _ => 1 + picks.next_u64() % (1 << 32),
+                };
+                let expected = if sample_kind == SampleKind::Rounding && n > i32::MAX as u64 {
+                    let mut draws = floats.draws();
+                    let first = draws.uniform.next();
+                    let deviate = ((33554432.0 * first).floor() + draws.uniform.next()) / 33554432.0;
+                    (n as f64 * deviate).floor() as u64
+                } else {
+                    floats.draws().index_value(n as f64) as u64
+                };
+                assert_eq!(twister.whole_index(n), expected, "n = {n}, {sample_kind:?}");
+                assert_eq!(generic.draws().whole_index(n), expected, "n = {n}, {sample_kind:?}");
+            }
+            let State::MersenneTwister { position: expected, .. } = &floats.state else {
+                panic!("a seeded generator is the Mersenne twister");
+            };
+            assert_eq!(*twister.uniform.position, *expected);
+        });
     }
 
     #[test]
