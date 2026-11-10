@@ -31,3 +31,18 @@ print(df(1, 2, 3)); print(rf(2, 3, 4)); print(dweibull(1, 2)); print(rhyper(3, 5
 print(withCallingHandlers(dt(1, -1), warning = function(w) { print(conditionCall(w)); invokeRestart("muffleWarning") }))
 print(tryCatch(rexp(1, "a"), error = function(e) conditionCall(e)))
 print(dnorm(1:3)); print(rpois(3, 1:3)); print(.Random.seed[2:4])
+
+# A wrapper's formal passed on, through two levels, and a default that names itself.
+rm(dnorm)
+wrap <- function(n, s) rnorm(n, sd = s)
+wrap2 <- function(m) wrap(m, 2)
+set.seed(7); print(wrap2(3)); print(wrap(1L, 0.5))
+dwrap <- function(q) { force(q); dnorm(q) }
+print(dwrap(c(0, 1)))
+lazy <- function(n) { k <- function(v) pnorm(v); k(n) }
+print(lazy(1.5))
+loop <- function(n = n) dnorm(n)
+print(tryCatch(loop(), error = conditionMessage))
+neg <- function(v) rnorm(2, sd = v)
+print(withCallingHandlers(neg(-1), warning = function(w) { print(conditionCall(w)); invokeRestart("muffleWarning") }))
+print(tail(.Random.seed, 3))

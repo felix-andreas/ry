@@ -493,8 +493,11 @@ pub unsafe fn native_entry_by_value(
                     return Ok(None);
                 }
                 match lookup(expression) {
-                    Some(value) if value.kind() != SexpType::Promise => value,
-                    _ => return Ok(None),
+                    Some(value) => match resolved(value)? {
+                        Some(value) => value,
+                        None => return Ok(None),
+                    },
+                    None => return Ok(None),
                 }
             }
             SexpType::Language | SexpType::Promise | SexpType::Bytecode => return Ok(None),
@@ -609,9 +612,18 @@ unsafe fn reciprocal(x: Sexp) -> R<Option<Sexp>> {
 }
 
 /// The value an argument stands for when reading it runs no R code: a value, a forced promise's
-/// value, or the value of an unforced promise whose code is a constant or a variable bound to a
-/// value. Reading such a promise settles it, as forcing would.
+/// value, or the value of an unforced promise whose code is a constant or a variable bound to
+/// such an argument (a wrapper's formal passed on). Reading such a promise settles it, and every
+/// promise it reads through, as forcing would.
 unsafe fn resolved(argument: Sexp) -> R<Option<Sexp>> {
+    resolved_through(argument, MAX_PROMISE_CHAIN)
+}
+
+/// How many promises of variables [`resolved`] reads through. A chain that reaches itself
+/// (`function(n = n)`) is an error GNU R reports when it forces it, so it must decline.
+const MAX_PROMISE_CHAIN: u32 = 8;
+
+unsafe fn resolved_through(argument: Sexp, depth: u32) -> R<Option<Sexp>> {
     if argument.kind() != SexpType::Promise {
         return Ok((argument != missing_arg()).then_some(argument));
     }
@@ -634,6 +646,12 @@ unsafe fn resolved(argument: Sexp) -> R<Option<Sexp>> {
         SexpType::Symbol if code != missing_arg() && code != symbols().dots => {
             match crate::effects::eager_argument(code, argument.tag()) {
                 Some(value) if value.kind() != SexpType::Promise => value,
+                Some(inner) if inner != argument && depth > 0 => {
+                    match resolved_through(inner, depth - 1)? {
+                        Some(value) => value,
+                        None => return Ok(None),
+                    }
+                }
                 _ => return Ok(None),
             }
         }

@@ -66,9 +66,17 @@
 | [1] "masked"
 | [1] 0 2 2
 | [1]          71  -470581440 -1480046818
+| [1]  4.574494 -2.393543 -1.388585
+| [1] -0.2061465
+| [1] 0.3989423 0.2419707
+| [1] 0.9331928
+| [1] "promise already under evaluation: recursive default argument reference or earlier problems?"
+| rnorm(2, sd = v)
+| [1] NaN NaN
+| [1]   387354435  -201784699 -2141862836
 [messages]
 [warnings]
 [errors]
 [value]
 integer
-| c(71L, -470581440L, -1480046818L)
+| c(387354435L, -201784699L, -2141862836L)
