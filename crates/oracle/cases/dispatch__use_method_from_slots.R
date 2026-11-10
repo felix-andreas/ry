@@ -14,6 +14,8 @@ h.default <- function(x = 1, y) paste("h default", missing(x), if (missing(y)) "
 h.character <- function(x = 1, y) paste("h character", y)
 d <- function(...) UseMethod("d")
 d.numeric <- function(...) paste("d numeric", ...)
+# R 4.4.0 NEWS: "UseMethod() no longer forwards local variables assigned in the generic
+# function into method call environments", so the method does not see `local`.
 l <- function(x) { local <- "seen"; UseMethod("l") }
 l.default <- function(x) if (exists("local", inherits = FALSE)) local else "hidden"
 n <- function(x) { if (is.numeric(x)) UseMethod("n"); "fell through" }

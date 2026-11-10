@@ -5,7 +5,7 @@
 | h character only y
 | h character named
 | d numeric 4 5
-| seen
+| hidden
 | n default
 | fell through
 | k.a TRUE k default
