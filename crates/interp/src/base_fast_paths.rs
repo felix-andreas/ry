@@ -38,6 +38,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rySysSetenv", 0, do_sys_setenv),
     internal("ryFormatDefault", 0, do_format_default),
     internal("ryReduce", 0, do_reduce),
+    internal("ryAssignNativeRoutines", 0, do_assign_native_routines),
 ];
 
 /// The base functions that get a fast path, with the internal their prologue calls and the
@@ -55,6 +56,16 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("Reduce", "ryReduce", 0xd929e4c219983788),
 ];
 
+/// The closures that a base function defines in its own body and that get a fast path: the
+/// outer function, the inner closure's name, the internal its prologue calls and the
+/// [`stable_hash`] of the inner closure's formals and body (GNU R 4.6.2).
+const NESTED_FAST_PATHS: &[(&str, &str, &str, u64)] = &[(
+    "loadNamespace",
+    "assignNativeRoutines",
+    "ryAssignNativeRoutines",
+    0x26c985af62edd0db,
+)];
+
 /// Puts the fast paths in front of the base namespace's functions, changing each closure in
 /// place so that every reference to it gets the fast path. ry builds its bundled base R itself,
 /// so the namespace it saved already holds the prologues; on that version every fast path must
@@ -68,6 +79,12 @@ pub unsafe fn install_all(namespace: Sexp) -> R<()> {
         let function = eval::value_of(eval::find_var_in_frame(install(name)?, namespace)?)?;
         if !install_prologue(function, name, internal_name, expected, print)? {
             missed.push(name);
+        }
+    }
+    for &(outer, inner, internal_name, expected) in NESTED_FAST_PATHS {
+        let function = eval::value_of(eval::find_var_in_frame(install(outer)?, namespace)?)?;
+        if !install_nested_prologue(function, inner, internal_name, expected, print)? {
+            missed.push(inner);
         }
     }
     if bundled && !missed.is_empty() {
@@ -111,37 +128,112 @@ pub(crate) unsafe fn install_prologue(
     if function.kind() != SexpType::Closure {
         return Ok(false);
     }
+    let body = crate::bytecode::closure_body(function);
+    let Some(block) = with_prologue(function.car(), body, name, internal_name, expected, print)?
+    else {
+        return Ok(false);
+    };
+    if block != body {
+        crate::heap().set_cdr(function, block);
+    }
+    Ok(true)
+}
+
+/// `body` with `.Internal(<internal_name>())` in front when `formals` and `body` hash to
+/// `expected`, or `body` itself when it opens with that prologue already; `None` otherwise.
+unsafe fn with_prologue(
+    formals: Sexp,
+    body: Sexp,
+    name: &str,
+    internal_name: &str,
+    expected: u64,
+    print: bool,
+) -> R<Option<Sexp>> {
     let prologue = values::lcons(
         symbols().dot_internal,
         values::cons(values::lcons(install(internal_name)?, nil())?, nil())?,
     )?;
-    let mut body = crate::bytecode::closure_body(function);
-    let mut already = false;
-    if body.kind() == SexpType::Language
+    let mut original = body;
+    let already = body.kind() == SexpType::Language
         && body.car() == symbols().brace
         && values::pairlist_length(body.cdr()) == 2
-        && crate::sort::identical(body.cdr().car(), prologue, &IdenticalFlags::default())
-    {
-        body = body.cdr().cdr().car();
-        already = true;
+        && crate::sort::identical(body.cdr().car(), prologue, &IdenticalFlags::default());
+    if already {
+        original = body.cdr().cdr().car();
     }
     let mut hash = FNV_OFFSET;
-    stable_hash(function.car(), &mut hash);
-    stable_hash(body, &mut hash);
+    stable_hash(formals, &mut hash);
+    stable_hash(original, &mut hash);
     if print {
         eprintln!("{name} {hash:#018x}");
     }
     if hash != expected {
+        return Ok(None);
+    }
+    if already {
+        return Ok(Some(body));
+    }
+    Ok(Some(values::lcons(
+        symbols().brace,
+        values::cons(prologue, values::cons(original, nil())?)?,
+    )?))
+}
+
+/// Puts the prologue in front of the closure that `outer`'s body defines as
+/// `inner <- function(...) ...`, by changing that `function` expression, so every closure the
+/// outer function makes from it gets the fast path. Returns whether the expression has it.
+unsafe fn install_nested_prologue(
+    outer: Sexp,
+    inner: &str,
+    internal_name: &str,
+    expected: u64,
+    print: bool,
+) -> R<bool> {
+    if outer.kind() != SexpType::Closure {
         return Ok(false);
     }
-    if !already {
-        let block = values::lcons(
-            symbols().brace,
-            values::cons(prologue, values::cons(body, nil())?)?,
-        )?;
-        crate::heap().set_cdr(function, block);
+    let Some(definition) =
+        find_function_definition(crate::bytecode::closure_body(outer), install(inner)?)
+    else {
+        return Ok(false);
+    };
+    // `function(formals, body, srcref)`
+    let body_cell = definition.cdr().cdr();
+    let body = body_cell.car();
+    let Some(block) =
+        with_prologue(definition.cdr().car(), body, inner, internal_name, expected, print)?
+    else {
+        return Ok(false);
+    };
+    if block != body {
+        crate::heap().set_car(body_cell, block);
     }
     Ok(true)
+}
+
+/// The `function(...)` expression assigned to `name` by an `name <- function(...)` anywhere in
+/// `code`.
+unsafe fn find_function_definition(code: Sexp, name: Sexp) -> Option<Sexp> {
+    if code.kind() != SexpType::Language {
+        return None;
+    }
+    if code.car() == symbols().assign
+        && values::pairlist_length(code.cdr()) == 2
+        && code.cdr().car() == name
+    {
+        let value = code.cdr().cdr().car();
+        if value.kind() == SexpType::Language && value.car() == symbols().function {
+            return Some(value);
+        }
+    }
+    let mut rest = code.cdr();
+    while rest.kind() == SexpType::Pairlist {
+        if let Some(found) = find_function_definition(rest.car(), name) {
+            return Some(found);
+        }
+        rest = rest.cdr();
+    }
+    None
 }
 
 /// The native code for a whole call of a base closure: the result, or `None` when the closure
@@ -1541,4 +1633,119 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
         Err(other) => return Err(other),
     };
     finish(frame, result, true)
+}
+
+/// `assignNativeRoutines(dll, lib, env, nativeRoutines)`, the closure `loadNamespace()` defines
+/// to bind a package's registered native routines in its namespace (`useDynLib(pkg,
+/// .registration = TRUE)`): each routine's `NativeSymbolInfo` under its name with the
+/// registration prefix and suffix, and as the value the routine names named by those variables.
+/// The R body grows both vectors with `c()` once per routine inside two nested `lapply()`
+/// calls, about a tenth of a package's load. It declines, before any effect, where the R body
+/// warns (a name already bound, or bound twice), and when the namespace file lists symbols by
+/// name, which `getNativeSymbolInfo()` resolves.
+unsafe fn do_assign_native_routines(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    let Some(native_routines) = argument(frame, install("nativeRoutines")?)? else {
+        return decline();
+    };
+    // `parseNamespaceFile()` makes it with the class `NativeRoutineMap`, which has no methods.
+    let class = values::class_attr(native_routines);
+    if native_routines.kind() != SexpType::List
+        || (class != nil()
+            && (length(class) != 1 || class.element(0).bytes() != b"NativeRoutineMap"))
+    {
+        return decline();
+    }
+    if length(native_routines) == 0 {
+        return finish(frame, values::alloc(SexpType::String, 0)?, true);
+    }
+    let use_registration = values::list_get(native_routines, "useRegistration");
+    if use_registration.kind() != SexpType::Logical
+        || length(use_registration) != 1
+        || values::ints(use_registration)[0] == NA_LOGICAL
+        || length(values::list_get(native_routines, "symbolNames")) != 0
+    {
+        return decline();
+    }
+    let mut variables: Vec<(Sexp, Sexp)> = Vec::new();
+    let mut routine_names: Vec<Sexp> = Vec::new();
+    if values::ints(use_registration)[0] != 0 {
+        let fixes = values::list_get(native_routines, "registrationFixes");
+        if fixes.kind() != SexpType::String
+            || length(fixes) != 2
+            || (0..2).any(|index| {
+                fixes.element(index) == values::na_string()
+                    || !fixes.element(index).bytes().is_ascii()
+            })
+        {
+            return decline();
+        }
+        let Some(dll) = argument(frame, install("dll")?)? else {
+            return decline();
+        };
+        if dll.kind() != SexpType::List || !values::inherits(dll, "DLLInfo") {
+            return decline();
+        }
+        let info = values::list_get(dll, "info");
+        let Some(registered) = crate::builtins::internal_function(install("getRegisteredRoutines")?)
+        else {
+            return decline();
+        };
+        let routines = eval::call_builtin(
+            eval::builtin_def(registered)?,
+            nil(),
+            registered,
+            &[Arg { tag: nil(), value: info }],
+            values::global_env(),
+        )?;
+        crate::heap().root(routines);
+        let Some(env) = argument(frame, install("env")?)? else {
+            return decline();
+        };
+        if env.kind() != SexpType::Environment || routines.kind() != SexpType::List {
+            return decline();
+        }
+        let (prefix, suffix) = (fixes.element(0).bytes(), fixes.element(1).bytes());
+        for type_index in 0..length(routines) {
+            let routines_of_type = routines.element(type_index);
+            if routines_of_type.kind() != SexpType::List {
+                return decline();
+            }
+            for index in 0..length(routines_of_type) {
+                let symbol_info = routines_of_type.element(index);
+                let name = values::list_get(symbol_info, "name");
+                if name.kind() != SexpType::String
+                    || length(name) != 1
+                    || name.element(0) == values::na_string()
+                    || !name.element(0).bytes().is_ascii()
+                {
+                    return decline();
+                }
+                let mut variable = prefix.to_vec();
+                variable.extend_from_slice(name.element(0).bytes());
+                variable.extend_from_slice(suffix);
+                let variable = values::install_bytes(&variable)?;
+                if crate::heap().frame_cell(env, variable).is_some()
+                    || variables.iter().any(|&(bound, _)| bound == variable)
+                {
+                    return decline();
+                }
+                variables.push((variable, symbol_info));
+                routine_names.push(name.element(0));
+            }
+        }
+        for &(variable, symbol_info) in &variables {
+            eval::define(variable, symbol_info, env)?;
+        }
+    }
+    let value = values::alloc(SexpType::String, routine_names.len())?;
+    crate::heap().root(value);
+    let names = values::alloc(SexpType::String, variables.len())?;
+    crate::heap().root(names);
+    for (index, (&name, &(variable, _))) in routine_names.iter().zip(&variables).enumerate() {
+        crate::heap().set_element(value, index, name);
+        crate::heap().set_element(names, index, variable.car());
+    }
+    values::set_attr(value, symbols().names, names)?;
+    finish(frame, value, true)
 }
