@@ -427,6 +427,9 @@ pub struct Interp {
     /// The evaluator polls left before the next one that delivers a pending user interrupt
     /// (see [`crate::unwind::poll_interrupt`]).
     pub interrupt_countdown: u32,
+    /// Closure calls the session has made, wrapping: the JIT's measure of how much work ran
+    /// between two calls of a body, which does not change when a call allocates less.
+    pub calls_ever: u32,
     /// The processes `parallel::mcfork` forked, and the pipe to the master in a forked child.
     #[cfg(unix)]
     pub forks: fork::Forks,
@@ -557,6 +560,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         prelude: true,
         parked_unwind: None,
         interrupt_countdown: crate::unwind::INTERRUPT_CHECK_INTERVAL,
+        calls_ever: 0,
         #[cfg(unix)]
         forks: fork::Forks::default(),
         builtins_env: None,

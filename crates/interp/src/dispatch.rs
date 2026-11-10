@@ -1689,6 +1689,7 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
     let restarts = state.restarts.clone();
     let start = state.frame_args.len() as u32;
     state.frame_args.extend_from_slice(promised);
+    state.calls_ever = state.calls_ever.wrapping_add(1);
     state.frames.push(Frame {
         call,
         function: found.method,

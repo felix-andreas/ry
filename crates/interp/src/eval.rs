@@ -2633,6 +2633,7 @@ unsafe fn push_frame(
     state.frame_args.extend_from_slice(args);
     let method_vars_start = state.method_vars.len() as u32;
     state.method_vars.extend_from_slice(method_vars);
+    state.calls_ever = state.calls_ever.wrapping_add(1);
     state.frames.push(Frame {
         call,
         function,
@@ -4640,6 +4641,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     let caller = state.frames.last().map_or(nil(), |frame| frame.call);
     let handlers = state.handlers.clone();
     let restarts = state.restarts.clone();
+    state.calls_ever = state.calls_ever.wrapping_add(1);
     state.frames.push(Frame {
         call: caller,
         function: call.op,

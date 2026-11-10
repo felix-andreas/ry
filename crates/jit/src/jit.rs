@@ -92,17 +92,18 @@ const ENTRY_THRESHOLD: i32 = 3000;
 const COMPILE_FIXED: u64 = 2_000_000;
 const COMPILE_PER_WORD: u64 = 50_000;
 const SAVING_PER_NATIVE: u64 = 100;
-/// A body's expected calls are its call rate over its recording window, in calls per KiB the
-/// session allocated meanwhile, times this many KiB. Allocation measures how much interpreted
-/// work ran: it is deterministic, costs nothing to keep, and the code that runs between two
-/// calls of a hot callback allocates a few KiB at most. The horizon is fixed rather than taken
-/// from how long the session has run, because that undercounts callbacks that turn hot early:
-/// the functional workload's first callbacks got 13 times the calls such an estimate predicted.
-/// Its value sits between the two measured cases, with a margin of about two either side:
-/// `isTRUE` in a test suite (one call per 54 KiB, about 1400 calls after compiling, needs at
-/// least 770 MiB) and the functional workload's slowest-rate callback (one call per 3.8 KiB,
-/// 40,000 calls, needs at most 130 MiB).
-const HORIZON_KIB: u64 = 1 << 18;
+/// A body's expected calls are its share of the closure calls the session made over its
+/// recording window, times this many calls. The session's call count measures how much
+/// interpreted work ran between two calls of the body: it is deterministic and does not move
+/// when an optimization makes calls allocate less, which an allocation clock did (slot frames
+/// cut testthat's allocation per call and pushed `isTRUE` over the line). The horizon is fixed
+/// rather than taken from how long the session has run, because that undercounts callbacks that
+/// turn hot early: the functional workload's first callbacks got 13 times the calls such an
+/// estimate predicted. Its value sits between the two measured cases: `isTRUE` in a test suite
+/// (one call in 63, needs a horizon of at least 600,000) and the functional workload's
+/// slowest-rate callbacks, `x^2` and `Reduce`'s (one call in 9, need at most 390,000). Against
+/// `1 << 18`, which lost those two callbacks, it saved functional 10.8M instructions.
+const HORIZON_CALLS: u64 = 1 << 19;
 /// Backward jumps a body takes before a loop compiles, in the default mode, for the same reason.
 const BACK_EDGE_THRESHOLD: i32 = 10_000;
 /// Tier 1 compiles a body in time that grows with its length, about 10 us per instruction word,
@@ -223,14 +224,15 @@ unsafe fn repays(machine: &Machine<'_>, shape: analysis::Shape) -> bool {
         let threshold = bytecode::tier().map_or(0, |tier| tier.entry_threshold);
         let window_entries =
             u64::try_from(threshold - bytecode::recording_start(threshold)).unwrap_or(0);
-        let window_kib = u64::from(clock().wrapping_sub(profile[profile::WINDOW]) as u32).max(1);
-        let calls = window_entries * HORIZON_KIB / window_kib;
+        let window_calls =
+            u64::from(clock().wrapping_sub(profile[profile::WINDOW]) as u32).max(1);
+        let calls = window_entries * HORIZON_CALLS / window_calls;
         let words = values::ints(machine.code.car()).len() as u64;
         let cost = COMPILE_FIXED + COMPILE_PER_WORD * words;
         let saving = calls * SAVING_PER_NATIVE * shape.native as u64;
         if logging() {
             eprintln!(
-                "jit: {} expects {calls} calls ({window_entries} in {window_kib} KiB) saving {saving} against a compile of {cost}",
+                "jit: {} expects {calls} calls ({window_entries} of {window_calls} calls) saving {saving} against a compile of {cost}",
                 describe(machine.code)
             );
         }
@@ -238,9 +240,10 @@ unsafe fn repays(machine: &Machine<'_>, shape: analysis::Shape) -> bool {
     }
 }
 
-/// The session's allocation clock in KiB, wrapping, as [`profile::WINDOW`] holds it.
+/// The session's call clock ([`interp::interp::Interp::calls_ever`]), as [`profile::WINDOW`]
+/// holds it.
 fn clock() -> i32 {
-    (heap().allocated_ever() >> 10) as i32
+    interp().calls_ever as i32
 }
 
 /// Whether every formal of the running closure carries a checked annotation. Such a closure
