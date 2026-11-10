@@ -114,6 +114,7 @@ pub mod tools;
 pub mod unwind;
 pub mod utils;
 pub mod values;
+pub mod vector_math;
 pub mod viewer;
 
 pub use crate::unwind::{Jump, RError};
