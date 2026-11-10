@@ -33,7 +33,7 @@ export const benchmarkViews: BenchmarkView[] = [
   {
     label: 'CPU',
     columns: ['program', ...engines, 'speed-up'],
-    cells: (row) => [row.program, seconds(row.gnuR), seconds(row.ry), seconds(row.ryTyped), `${row.speedup.toFixed(1)}x`],
+    cells: (row) => [row.program, seconds(row.gnuR), seconds(row.ry), seconds(row.ryTyped), formatRatio(row.speedup)],
   },
   {
     label: 'Memory',
@@ -162,11 +162,11 @@ export const benchmarkRealMachine = `${realResults.machine}, against GNU R ${/\d
 // What each of the two benchmarks measures and how ry fares on it, for the side-by-side summary.
 export function benchmarkSummaryRows(): string[][] {
   return [
-    ['Real-world workloads', 'call-heavy R: closures, S3 and S4 dispatch, conditions', `${realCount}`, `${realGeomean.toFixed(2)}x`],
-    ['Synthetic kernels', 'loops, recursion and vector code', `${kernelCount}`, `${kernelGeomean.toFixed(2)}x`],
+    ['Real-world workloads', 'call-heavy R: closures, S3 and S4 dispatch, conditions', `${realCount}`, formatRatio(realGeomean)],
+    ['Synthetic kernels', 'loops, recursion and vector code', `${kernelCount}`, formatRatio(kernelGeomean)],
   ];
 }
-export const benchmarkSummaryColumns = ['benchmark', 'what it measures', 'programs', 'ry vs GNU R'];
+export const benchmarkSummaryColumns = ['benchmark', 'what it measures', 'programs', 'speed-up over GNU R'];
 
 export function realWorkloadMarkdown(): string {
   const rows = realWorkloadRows();
@@ -175,9 +175,9 @@ export function realWorkloadMarkdown(): string {
     '| --- | ---: | ---: | ---: | ---: | ---: |',
     ...rows.map(
       (row) =>
-        `| \`${row.workload}\` | ${seconds(row.gnuR)} | ${seconds(row.ryJit)} | ${seconds(row.ryNoJit)} | ${(row.gnuR / row.ryJit).toFixed(2)}x | ${(row.gnuR / row.ryNoJit).toFixed(2)}x |`,
+        `| \`${row.workload}\` | ${seconds(row.gnuR)} | ${seconds(row.ryJit)} | ${seconds(row.ryNoJit)} | ${formatRatio(row.gnuR / row.ryJit)} | ${formatRatio(row.gnuR / row.ryNoJit)} |`,
     ),
-    `| geometric mean | | | | ${realGeomean.toFixed(2)}x | ${realGeomeanNoJit.toFixed(2)}x |`,
+    `| geometric mean | | | | ${formatRatio(realGeomean)} | ${formatRatio(realGeomeanNoJit)} |`,
   ].join('\n');
 }
 
@@ -228,6 +228,16 @@ export function realChart(): SpeedChart {
   return { series: [{ label: 'ry' }], rows };
 }
 
+// The Markdown export has no bar chart, so it lists the same ratios as a table.
+export function speedChartMarkdown(name: 'real' | 'kernels'): string {
+  const chart = name === 'real' ? realChart() : kernelChart();
+  return [
+    `| ${['program', ...chart.series.map((series) => `${series.label}, speed-up over GNU R`)].join(' | ')} |`,
+    `| --- |${chart.series.map(() => ' ---: |').join('')}`,
+    ...chart.rows.map((row) => `| ${row.summary ? row.label : `\`${row.label}\``} | ${row.ratios.map(formatRatio).join(' | ')} |`),
+  ].join('\n');
+}
+
 // Whole numbers from 10x up, where a decimal adds nothing, and two decimals below, where 0.94x
 // against 1.02x is the point.
 export function formatRatio(ratio: number): string {
@@ -240,6 +250,6 @@ export const kernelRepeat = results.repeat;
 export function benchmarkFact(suite: 'real' | 'kernels', field: 'machine' | 'repeat'): string {
   if (field === 'machine') return suite === 'real' ? benchmarkRealMachine : benchmarkMachine;
   return suite === 'real'
-    ? `${realResults.repeat} rounds, each running every engine once in a shuffled order; the median round is reported`
-    : `${results.repeat} processes per engine, alternating engines; the fastest time and the largest memory peak are reported`;
+    ? `${realResults.repeat} rounds, each running every engine once in a shuffled order; each engine's median time is reported`
+    : `${results.repeat} processes per engine, the engines one after another for each program; the fastest time and the largest memory peak are reported`;
 }

@@ -241,7 +241,7 @@ def write_readme_block():
     real = json.loads((here / "results.json").read_text())["workloads"]
     kernels = json.loads((root / "tools/bench/why/results.json").read_text())["programs"]
     table = "\n".join([
-        "| benchmark | programs | ry vs GNU R |",
+        "| benchmark | programs | speed-up over GNU R |",
         "| --- | ---: | ---: |",
         f"| Real-world workloads (call-heavy R) | {len(real)} | {geomean(r['gnu_r'] / r['ry_jit'] for r in real):.2f}x |",
         f"| Synthetic kernels (loops, recursion, vectors) | {len(kernels)} | {geomean(k['gnu_r'] / k['ry'] for k in kernels):.2f}x |",

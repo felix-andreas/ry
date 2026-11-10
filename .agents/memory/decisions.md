@@ -8653,3 +8653,9 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Crashes.** A GNU R killed by a signal before writing its report is `EngineError::Crashed`, and the case is skipped with the build named: a hardened 4.6.2 build aborts with "buffer overflow detected" on four graphics cases that the reference source build runs. A crashing second engine is a failure.
 - **Impact.** Bless on the wrong R fails loudly instead of rewriting the suite, and a diff between two builds is told apart from a regression. The forced oracle still compares ry with the live GNU R, running ry on that R's base, so on a 4.3.3 host it tests ry's 4.3.3 emulation, not what users run; point `ORACLE_R` at a 4.6.2 build for that.
 
+
+## Docs information architecture: Introduction, Learn, Reference, Development
+- **Previous shape.** Supersedes "Docs information architecture: Introduction, Tutorial, Reference, Development". The Tutorial was four pages under `tutorial/`, one per adoption step, and `getting-started.mdx` repeated one example per step, so the same snippets lived in two places and a reader paged through four short pages to follow one story.
+- **Target shape.** Introduction (`getting-started.mdx` with no code example, `installation.md`, `benchmarks.mdx`), Learn (`guide.mdx`, "Adopting ry", one H2 per step; `ry.mdx`, the language tour), Reference and Development. Owner direction: one guide instead of the tutorial pages, the tour and the guide in a section of their own, and no example on getting started.
+- **Redirects.** `/tutorial/<page>` redirects to the matching `/guide#step-N-...` anchor, and `/tour` to `/ry`.
+- **Impact.** Each adoption step is one heading on one page, so links are anchors and the step names live in one file.

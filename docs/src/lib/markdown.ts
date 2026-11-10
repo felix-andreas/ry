@@ -4,7 +4,7 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
 import starlightConfig from 'virtual:starlight/user-config';
 import vennSource from '../components/Venn.astro?raw';
-import { benchmarkFact, benchmarkProgramsMarkdown, benchmarkSummaryMarkdown, benchmarkTableMarkdown, realWorkloadMarkdown } from './benchmarks';
+import { benchmarkFact, benchmarkProgramsMarkdown, benchmarkSummaryMarkdown, benchmarkTableMarkdown, realWorkloadMarkdown, speedChartMarkdown } from './benchmarks';
 
 type DocsPage = CollectionEntry<'docs'>;
 type SidebarItem = { label?: string; slug?: string; items?: SidebarItem[] };
@@ -117,7 +117,11 @@ function bodyToMarkdown(body: string): string {
       push(benchmarkProgramsMarkdown(headingLevel + 1), false);
       continue;
     }
-    if (/^<SpeedChart\b/.test(line.trim())) continue;
+    const chart = /^<SpeedChart\b[^>]*\bname="(real|kernels)"/.exec(line.trim());
+    if (chart) {
+      push(speedChartMarkdown(chart[1] as 'real' | 'kernels'), false);
+      continue;
+    }
 
     push(rewriteLinks(inlineFacts(line)), false);
   }

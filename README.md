@@ -13,8 +13,8 @@
 
 </div>
 
-ry checks, formats and runs the R code you already have, and adds static types and its own data
-types on top. Plain R stays valid, and the checker never runs your code.
+ry checks, formats and runs the R code you already have, without changes, and its checker finds
+problems without running the code.
 
 ```sh
 ry check    # report problems
@@ -41,6 +41,8 @@ balance <- function(payment: Payment) -> double {
     :Refunded(amount = a) => -a
   }
 }
+
+balance(:Paid(amount = 10))
 ```
 
 ```
@@ -54,6 +56,9 @@ non-exhaustive-match
    |   ^^^^^^^^^^^^^^^
  8 |     :Paid(amount = a) => a
   help: Add an arm for `:Pending` (`ry check --fix --unsafe-fixes` applies it)
+
+1 problem in 1 file
+1 fixable with `ry check --fix --unsafe-fixes`
 ```
 
 The [language tour](https://ry-lang.org/ry) shows every feature.
@@ -63,7 +68,7 @@ The [language tour](https://ry-lang.org/ry) shows every feature.
 ry's runtime against GNU R, as the geometric mean of each suite's speed-ups:
 
 <!-- bench-summary -->
-| benchmark | programs | ry vs GNU R |
+| benchmark | programs | speed-up over GNU R |
 | --- | ---: | ---: |
 | Real-world workloads (call-heavy R) | 7 | 0.90x |
 | Synthetic kernels (loops, recursion, vectors) | 17 | 2.70x |

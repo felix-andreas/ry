@@ -110,16 +110,17 @@ of `libr` and the crates it links, so editing the formatter or the IDE layer nev
 
 ## The docs site
 
-The sidebar (`docs/astro.config.ts`) has four sections: Introduction, Tutorial (one page per
-adoption step), Reference and Development. A moved or deleted page gets an entry in the
+The sidebar (`docs/astro.config.ts`) has four sections: Introduction (getting started,
+installation, benchmarks), Learn (the adoption guide and the language tour), Reference and
+Development. A moved or deleted page gets an entry in the
 `redirects` map there. `docs/src/components/Sidebar.astro` keeps the sidebar's scroll position
 across page loads, because the theme scrolls `.sidebar-content` rather than the element
 Starlight's own persister restores.
 
 Typed examples are tab groups inside `<Tabs syncKey="annotation-style">`, so a reader's choice
 follows them across pages: `Untyped` (the plain R a reader starts from), then `Comments` and
-`Inline`, with the form the page teaches second: `Comments` on the tutorial's types page and
-`Inline` elsewhere. An example drops `Untyped` when its plain R would not be R (records, tags,
+`Inline`, with the form the page teaches second: `Comments` in the guide's step 2 and `Inline`
+elsewhere. An example drops `Untyped` when its plain R would not be R (records, tags,
 `match`, Arrays, `DataFrame`, the standard library, nominal types) or when its subject is an
 annotation itself. Pages with tabs are `.mdx`. Use one tab group per idea, not one per snippet.
 

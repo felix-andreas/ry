@@ -1,6 +1,6 @@
 ---
 import Venn from "../components/Venn.astro";
-import { benchmarkRows } from "../lib/benchmarks";
+import { benchmarkRows, formatRatio } from "../lib/benchmarks";
 import "@fontsource/geist-sans/400.css";
 import "@fontsource/geist-sans/500.css";
 import "@fontsource/geist-sans/600.css";
@@ -820,7 +820,7 @@ const year = new Date().getFullYear();
                                             <td class="bench-axis" aria-hidden="true">
                                                 <span class="bench-bar" />
                                             </td>
-                                            <td class="num bench-ratio">{row.speedup.toFixed(1)}x</td>
+                                            <td class="num bench-ratio">{formatRatio(row.speedup)}</td>
                                             <td class="num bench-time">{row.gnuR.toFixed(3)} s</td>
                                             <td class="num bench-time">{row.ry.toFixed(3)} s</td>
                                         </tr>

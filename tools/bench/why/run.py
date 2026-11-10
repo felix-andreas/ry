@@ -12,7 +12,8 @@ import argparse, json, os, pathlib, platform, re, subprocess, sys, tempfile
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent.parent
-# The READMEs show these programs: the largest gain, a typical loop, and the two where ry gains least.
+# The READMEs show these programs: the largest gain, a typical loop, whole-vector arithmetic, which
+# gains little, and a typed program that loses.
 readme_programs = ["fib", "drawdown", "vector_arith", "log_rank"]
 readmes = [root / "README.md", root / "editors/code/README.md"]
 

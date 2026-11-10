@@ -11,14 +11,14 @@ import RealWorkloads from '../../components/RealWorkloads.astro';
 import SpeedChart from '../../components/SpeedChart.astro';
 
 Two suites measure ry's runtime against GNU R, and they answer different questions. The
-real-world workloads are call-heavy R of the kind production packages run, and there ry is on par
-with GNU R or slower. The synthetic kernels are loops, recursion and vector code, where ry's JIT
+real-world workloads are call-heavy R of the kind production packages run, and there ry is slower
+than GNU R on most of them. The synthetic kernels are loops, recursion and vector code, where ry's JIT
 compiles the hot code and ry is faster:
 
 <BenchmarkSummary />
 
-Above 1x means ry is faster. Every number on this page is read from the committed results files,
-so it matches the last measurement exactly.
+Above 1x means ry is faster. The summary, the charts and the tables of seconds are read from the
+committed results files, so they match the last measurement exactly.
 
 ## Real-world workloads
 
@@ -40,7 +40,8 @@ The code is untyped R, run unchanged on both engines:
 <SpeedChart name="real" caption="Real-world workloads, untyped R" />
 
 Most hot code here sits in closures that are called too few times to reach the JIT, so call
-setup, S3 lookup and complex assignment decide the result, and ry trails GNU R there. Two more
+setup, S3 lookup and complex assignment decide the result, and ry trails GNU R there. Only
+`simulation`, which spends its time in vector arithmetic and loops, runs faster on ry. Two more
 workloads, `functional` and `strings`, exist in the suite but are not shown, because they fail on
 the GNU R of the measuring machine.
 
@@ -57,19 +58,20 @@ the GNU R of the measuring machine.
 (`loop_sum`, `drawdown`), closures, records and dictionaries (`orders`, `report`, `validate`),
 vector arithmetic, and a few finance and biostatistics kernels (`bond_book`, `vasicek`,
 `log_rank`). Each exists twice in `tools/bench/why/`: as plain R, and typed in
-[strict mode](/guide#strict-mode). All three runs must print the same checksum, or the program is
-left out of the results.
+[strict mode](/guide#strict-mode). All three runs must print the same checksum, or `--write`
+refuses to store the results.
 
 <SpeedChart name="kernels" caption="Synthetic kernels, plain R and typed" />
 
 Recursion and loops gain the most from the JIT, while vectorized builtins already run in C on GNU R.
 Types add a second gain: a typed function in strict mode compiles to native code before its first
-call and works on native numbers and lists, so `closures` and the `array_*` kernels run tens of times
-faster typed. Whole-vector arithmetic (`vector_arith`) gains little, because each operation still
-writes a new vector. Programs built on records, tags and text (`expr_tree`, `orders`, `report`,
-`validate`, `log_rank`) run mostly in the interpreter, because the native compiler does not handle
-those types, so their typed versions gain little or lose. `log_rank` loses the most: only its small
-counting helper compiles, and the rest runs about 20 times slower than plain R.
+call and works on native numbers and lists, so typed `closures`, `array_dot`, `array_map`,
+`drawdown` and `loop_sum` run tens of times faster than GNU R. Whole-vector arithmetic
+(`vector_arith`) gains little, because each operation writes a new vector even when typed.
+Programs built on records, tags and text (`expr_tree`, `orders`, `report`, `validate`, `log_rank`)
+run mostly in the interpreter, because the native compiler does not handle those types, so typing
+gains them a few times at most, and `orders` and `log_rank` lose. `log_rank` loses the most: only
+its small counting helper compiles, and the rest runs about 20 times slower than plain R on GNU R.
 
 <details>
 <summary>The numbers: seconds and peak memory</summary>
@@ -107,6 +109,10 @@ together, so `bench-real` forms each ratio inside a round and reports the median
 ratios, with the lowest and highest round beside it: `1.62x (1.47 to 1.78)` means ry was faster in
 every round, and by 1.62x in the middle one. Each geometric mean comes with a 95% bootstrap interval
 over the rounds.
+
+The committed `tools/bench/real/results.json` predates this method: it holds three rounds and each
+engine's median time, so the ratios charted above divide two medians. Rerunning
+`just bench-real --write` on a machine with the workloads' packages installed replaces it.
 
 - At least five rounds (`--repeat`), because with 25% swings three samples cannot tell a 10% change
   from noise.

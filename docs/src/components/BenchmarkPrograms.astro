@@ -2,10 +2,10 @@
 // Each benchmark program, folded, with tabs between its plain R and its typed version. The tabs share
 // a sync key, so choosing "Typed" once shows every program typed.
 import { Code, TabItem, Tabs } from '@astrojs/starlight/components';
-import { benchmarkProgram, benchmarkRows } from '../lib/benchmarks';
+import { benchmarkProgram, benchmarkRows, formatRatio } from '../lib/benchmarks';
 
 const programs = [
-	...benchmarkRows().map((row) => ({ name: row.program, note: `${row.speedup.toFixed(1)}x` })),
+	...benchmarkRows().map((row) => ({ name: row.program, note: formatRatio(row.speedup) })),
 	{ name: 'harness', note: 'measure()' },
 ].map((entry) => ({ ...entry, ...benchmarkProgram(entry.name) }));
 ---

@@ -3,10 +3,10 @@ title: Language tour
 description: Everything about ry on one page, code first, for people and agents; also served as Markdown at /ry.md
 ---
 
-ry is a type checker and a fast runtime for R, written in Rust. Plain R stays valid, and ry adds
-static types, records, tagged unions, a typed table and a standard library on top. This page shows
-every feature once, with real output, and links to the rules. It is also served as Markdown at
-[`/ry.md`](/ry.md).
+ry is a type checker and a fast runtime for R, written in Rust. This page shows every feature once,
+code first and with real output, in the order you meet them: the commands, checking and typing R
+code, ry's own data types, strict mode, and the tooling around them. Each section links to its
+rules, and the page is also served as Markdown at [`/ry.md`](/ry.md).
 
 ## Commands
 
@@ -113,6 +113,14 @@ fn(x: double) -> double                # a function
 <T: numeric> fn(x: T) -> T             # a generic function
 Any                                    # a deliberate opt-out
 Unknown                                # what ry could not infer
+
+I64, F64, Bool, Str                    # ry's own scalars, never NA
+Record{x: F64, y: F64}                 # a record
+Tuple{I64, Str}                        # a tuple
+List<F64>                              # a list of one item type
+:Open | :Closed(code: I64)             # a union of tags
+Result<I64, :InvalidNumStr>            # :Ok(I64) or :Err(:InvalidNumStr)
+Dict<Str, I64>                         # also Set<T>
 ```
 
 A field that does not exist is an error, and `is.null()` narrows a union:
@@ -130,13 +138,15 @@ type-mismatch
   x field `nmae` does not exist in `list{name: character, retries: integer}`. Did you mean `name`?
 ```
 
-A `double` accepts an `integer` or `logical`, but a number never passes for a `character`. The
-[type system](/reference/type-system) has every rule.
+A `double` accepts an `integer` or `logical`, but a number never passes for a `character`. Where
+inference gives up, `#: @if-unknown TYPE` fills in a type the checker could not find, and
+`#: @trust TYPE` overrides the one it found. The [type system](/reference/type-system) has every
+rule.
 
 ## Records, tuples and lists
 
-The next five sections show ry's own data types, which run only on ry's runtime. A record has named fields and
-value semantics, a tuple has positions, and a `List` holds items of one type with no `NA`, no names
+Records, tuples, lists, tags and `DataFrame` are ry's own data types, and code that uses them runs
+only on ry's runtime. A record has named fields and value semantics, a tuple has positions, and a `List` holds items of one type with no `NA`, no names
 and no recycling:
 
 ```r ry run runtime=ry strict
@@ -204,7 +214,8 @@ Result.with_default(parse_sum("1", "two"), 0)
 
 `I64`, `F64`, `Bool` and `Str` are ry's own scalars, which never hold `NA`. The standard library has
 seven modules, `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` and `Set`, called by qualified names.
-[Standard library](/reference/standard-library) lists every function.
+[Standard library](/reference/standard-library) lists every function, and
+[Typed ry](/reference/language) tours the part of ry written only in these types.
 
 ## Nominal types
 

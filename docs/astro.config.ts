@@ -109,10 +109,12 @@ export default defineConfig({
 					items: [
 						{ slug: 'getting-started' },
 						{ slug: 'installation' },
-						{ slug: 'guide' },
-						{ slug: 'ry' },
 						{ slug: 'benchmarks' },
 					],
+				},
+				{
+					label: 'Learn',
+					items: [{ slug: 'guide' }, { slug: 'ry' }],
 				},
 				{
 					label: 'Reference',
