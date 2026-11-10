@@ -442,16 +442,17 @@ pub(crate) fn gnu_r_program() -> String {
 }
 
 /// The R home ry's runtime loads base R from when it is compared with GNU R: the home of
-/// `ORACLE_R` when that is set, and otherwise the home of the GNU R on `PATH` when it is a
-/// different release from the base R ry runs on by default. ry emulates the release it loads base R from,
-/// so comparing two releases would report every behavior GNU R changed between them as a
-/// failure. `None` keeps ry on its bundled base R, which is what a user runs.
+/// `ORACLE_R` when that is set, and otherwise the home of the GNU R on `PATH` unless ry's default
+/// base R is known to be the same release. ry emulates the release it loads base R from, so
+/// comparing two releases would report every behavior GNU R changed between them as a failure,
+/// and a default release that cannot be read (a slow or failing start) must not be taken to
+/// match. `None` keeps ry on its bundled base R, which is what a user runs.
 pub fn gnu_r_home() -> Option<String> {
     static HOME: OnceLock<Option<String>> = OnceLock::new();
     HOME.get_or_init(|| {
         if std::env::var_os("ORACLE_R").is_none() {
             let gnu_r = gnu_r_version()?;
-            if ry_default_version().is_none_or(|default| default == gnu_r) {
+            if ry_default_version().is_some_and(|default| default == gnu_r) {
                 return None;
             }
         }
