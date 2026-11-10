@@ -23,15 +23,16 @@ the JIT compiles.
 `just bench-real` times the workloads below. They are shaped like production R: S3 classes and
 dispatch, S4 and R6 objects, `tryCatch` and condition handlers, validation helpers, `lapply`
 pipelines, list records, tables, xts and zoo time series, and scalar simulation. Each workload runs
-in a fresh process per engine, three times, and the table reports the median seconds.
+in a fresh process per engine, in five or more rounds, and the table reports the median seconds
+([how it was measured](#timing-the-real-world-workloads)).
 
 <RealWorkloads />
 
 A ratio above 1 means ry is faster. Most hot code in these workloads sits in closures called too
 few times to reach the JIT, so call setup, S3 lookup and complex assignment decide the result, and
 ry trails GNU R there. The `functional` and `strings` workloads are missing from the table because
-they fail on the GNU R of the measuring machine. GNU R's own times vary by up to 25% between runs on
-this machine, so read small differences as noise. The workloads will be recalibrated against
+they fail on the GNU R of the measuring machine. A single run on the measuring machine varies by up
+to 25%, so read a ratio together with its spread, not alone. The workloads will be recalibrated against
 [profile summaries](/reference/cli#profile-summary) from real code bases.
 
 `just bench-real --write` regenerates `tools/bench/real/results.json`, which this page reads.
@@ -60,6 +61,37 @@ Each program exists in `tools/bench/why/` as plain R and typed.
 
 Each program times its own work with the harness above, so startup and the static check are left
 out. The harness runs once to warm up, then three times, and keeps the fastest run.
+
+### Timing the real-world workloads
+
+`just bench-real` (`tools/bench/real/run.py`) times every engine in rounds. A round runs each
+engine once, in a fresh process and in an order shuffled per round, and the ratio of two engines is
+taken within each round. The table reports the median of those per-round ratios with the lowest and
+highest round beside it, so `1.62x (1.47 to 1.78)` means the second engine was faster in every one
+of the rounds and by 1.62x in the middle one. Each suite's geometric mean comes with a 95% bootstrap
+interval over rounds.
+
+The method follows from where the noise comes from. The measuring machines are shared cloud VMs
+whose effective CPU speed drifts with the load of other tenants, and that drift does not show up as
+steal time or load average. A fixed loop of integer arithmetic in C took between 0.30 and 0.39 s
+across processes on a quiet VM, and pinning the process to one core or turning address-space
+randomization off did not narrow that. A slow drift moves both engines of one round together, which
+is why each ratio is formed inside a round:
+
+| Choice | Why |
+| --- | --- |
+| At least 5 rounds (`--repeat`, default 5) | With 25% swings per process, 3 samples cannot tell a 10% change from noise. |
+| Engines shuffled within each round (`--seed`) | A fixed order lets a drift favour whichever engine runs second. |
+| Two ry builds in the same rounds (`--baseline PATH`) | Each build is compared with the same GNU R samples. Comparing two runs that each timed GNU R separately once turned one program's 1.53x into 1.12x, because GNU R's own time moved by 31% between the two runs while ry's moved by 4%. |
+| Rows under 0.1 s on any engine are marked too short and left out of the geometric mean | A run that short mostly measures start-up and the timer. |
+
+A workload in the representative mix reports the median of `RY_BENCH_REPEAT` warm runs inside its
+process (`harness.R`), after one cold run. A program from the public suites (`--public`) runs once
+per process, so its time includes GNU R's byte compilation and ry's tier-up, as a script run from
+the command line would. Neither number includes process start-up, which is 0.18 s for GNU R and
+0.05 s for ry on the measuring machine.
+
+NOISE_TABLE
 
 ### Comparing two builds of ry on testthat
 
