@@ -29,7 +29,7 @@ use {
     bzip2::{read::MultiBzDecoder, write::BzEncoder},
     flate2::{Compression, read::MultiGzDecoder, write::GzEncoder},
     heap::{
-        object::{NA_INTEGER, NA_LOGICAL, Rcomplex, Sexp, SexpType, gp},
+        object::{NA_INTEGER, NA_LOGICAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
         strings::Encoding,
     },
     lzma_rust2::{CheckType, XzOptions, XzReader, XzWriter},
@@ -2221,7 +2221,7 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
                 let item = values::materialize(item)?;
                 (0..values::length(item))
                     .map(|index| cat_element(item, index, settings))
-                    .collect()
+                    .collect::<R<_>>()?
             }
             SexpType::List
                 if (0..values::length(item)).all(|index| {
@@ -2231,7 +2231,7 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
             {
                 (0..values::length(item))
                     .map(|index| cat_element(item.element(index), 0, settings))
-                    .collect()
+                    .collect::<R<_>>()?
             }
             SexpType::Language => vec![crate::deparse::deparse_one_line(item)],
             kind => {
@@ -2305,10 +2305,11 @@ pub unsafe fn stderr_connection() -> R<Sexp> {
 }
 
 /// One element as `cat` prints it: numbers with up to 7 significant digits.
-unsafe fn cat_element(vector: Sexp, index: usize, settings: crate::format::Settings) -> String {
-    match vector.kind() {
+unsafe fn cat_element(vector: Sexp, index: usize, settings: crate::format::Settings) -> R<String> {
+    Ok(match vector.kind() {
         SexpType::Real => {
             let value = values::reals(vector)[index];
+            crate::format::warn_decimal_width(1)?;
             if values::is_na(value) {
                 "NA".into()
             } else {
@@ -2322,10 +2323,13 @@ unsafe fn cat_element(vector: Sexp, index: usize, settings: crate::format::Setti
         SexpType::String => {
             values::string_at(vector, index).map_or_else(|| "NA".into(), |text| text.into_owned())
         }
-        SexpType::Complex => crate::format::localize_decimal(crate::format::format_complex_alone(
-            values::complexes(vector)[index],
-            7,
-        )),
+        SexpType::Complex => {
+            let value = values::complexes(vector)[index];
+            if !is_na_real(value.r) && !is_na_real(value.i) {
+                crate::format::warn_decimal_width(2)?;
+            }
+            crate::format::localize_decimal(crate::format::format_complex_alone(value, 7))
+        }
         _ => crate::coerce::element_as_charsxp(vector, index)
             .map(|charsxp| {
                 if charsxp == values::na_string() {
@@ -2335,7 +2339,7 @@ unsafe fn cat_element(vector: Sexp, index: usize, settings: crate::format::Setti
                 }
             })
             .unwrap_or_default(),
-    }
+    })
 }
 
 // The table and the connection objects.

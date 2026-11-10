@@ -441,6 +441,30 @@ pub fn set_output_decimal(mark: &str) {
     OUTPUT_DECIMAL.with(|decimal| *decimal.borrow_mut() = mark.to_owned());
 }
 
+/// GNU R 4.5.0 and later warn each time a double is written with a decimal mark that is not one
+/// column wide, so a complex number warns once per part and an integer never warns. `count` is
+/// the number of doubles about to be written.
+pub(crate) unsafe fn warn_decimal_width(count: usize) -> R<()> {
+    let width = OUTPUT_DECIMAL.with(|decimal| {
+        let decimal = decimal.borrow();
+        (decimal.as_str() != ".").then(|| display_width(&decimal))
+    });
+    let Some(width) = width.filter(|&width| width != 1) else {
+        return Ok(());
+    };
+    if !crate::system::r_at_least(4, 5) {
+        return Ok(());
+    }
+    let message = format!(
+        "the decimal mark is {} than one character wide; this will become an error",
+        if width > 1 { "more" } else { "less" }
+    );
+    for _ in 0..count {
+        crate::conditions::warning(message.as_str())?;
+    }
+    Ok(())
+}
+
 /// `text`, a formatted number, with `options(OutDec)` as its decimal mark.
 pub fn localize_decimal(text: String) -> String {
     OUTPUT_DECIMAL.with(|decimal| {
@@ -747,6 +771,7 @@ pub unsafe fn format_vector(
                 ..settings
             };
             let format = format_real_common(data, settings);
+            warn_decimal_width(data.len())?;
             // The common width can exceed every element's own: a negative mantissa and a
             // three-digit exponent each widen it, even when they occur in different elements.
             let items: Vec<String> = data
@@ -761,6 +786,11 @@ pub unsafe fn format_vector(
         SexpType::Complex => {
             let data = values::complexes(vector);
             let (real, imaginary) = format_complex_common(data, settings);
+            let written = data
+                .iter()
+                .filter(|value| !is_na_real(value.r) && !is_na_real(value.i))
+                .count();
+            warn_decimal_width(2 * written)?;
             let items: Vec<String> = data
                 .iter()
                 .map(|&value| {
@@ -1066,6 +1096,10 @@ unsafe fn format_numbers(
         }
         let text = if trim { text.trim_start() } else { &text };
         values::set_mkchar(result, index, &pad(text, min_width, true))?;
+    }
+    // Warned only once the result is final: the general path warns for itself.
+    if real_format.is_some() {
+        warn_decimal_width(count)?;
     }
     Ok(Some(result))
 }

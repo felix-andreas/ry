@@ -1561,12 +1561,13 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
         args.push(value);
     }
     let decimal_mark = args[8];
-    // `prettyNum()` warns when the decimal mark equals the empty big mark.
+    // A mark other than one column warns, and the warning names `prettyNum()`'s call, which only
+    // the R body has. An empty mark also makes `prettyNum()` warn that it equals the big mark.
     if decimal_mark.kind() != SexpType::String
         || decimal_mark.is_object()
         || length(decimal_mark) != 1
         || decimal_mark.element(0) == values::na_string()
-        || decimal_mark.element(0).bytes().is_empty()
+        || crate::format::display_width(&values::char_str(decimal_mark.element(0))) != 1
     {
         return decline();
     }
