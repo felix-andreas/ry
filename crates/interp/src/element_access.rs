@@ -117,7 +117,8 @@ unsafe fn scalar_position(index: Sexp, count: usize) -> Option<usize> {
 /// or real) or a logical index as long as the vector, and a value without attributes whose type
 /// the vector holds without widening and whose length divides the number of positions. Returns
 /// whether it assigned; anything else (an index that grows, drops or names elements, `NA`, a
-/// value that widens the vector or recycles with a warning, a list) declines to the full `[<-`.
+/// value that widens the vector or recycles with a warning, an atomic value for a list target)
+/// declines to the full `[<-`. A list target takes a list value's elements, counted as stored.
 pub(crate) unsafe fn assign_subset_in_place(
     env: Sexp,
     variable: Sexp,
@@ -131,12 +132,12 @@ pub(crate) unsafe fn assign_subset_in_place(
     let target = cell.cdr();
     if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED)
         || target == value
-        || !target.kind().is_atomic()
+        || !(target.kind().is_atomic() || target.kind() == SexpType::List)
         || target.is_object()
         || target.is_altrep()
         || index.is_altrep()
         || index.attrib() != nil()
-        || !value.kind().is_atomic()
+        || !(value.kind().is_atomic() || value.kind() == SexpType::List)
         || value.is_altrep()
         || value.attrib() != nil()
     {
@@ -148,6 +149,7 @@ pub(crate) unsafe fn assign_subset_in_place(
             SexpType::Real | SexpType::Integer | SexpType::Logical
         ),
         SexpType::Integer => matches!(value.kind(), SexpType::Integer | SexpType::Logical),
+        // A list target takes the elements of a list value; an atomic value would need boxing.
         kind => value.kind() == kind,
     };
     let supply = length(value);

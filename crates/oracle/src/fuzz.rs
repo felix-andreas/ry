@@ -217,7 +217,7 @@ impl Generator {
         let size = 1 + self.rng.below(12);
         let scope = vec![("i".to_owned(), Kind::Integer)];
         let element = self.scalar_in(Kind::Double, 2, &scope);
-        let (allocate, write) = match self.rng.below(5) {
+        let (allocate, write) = match self.rng.below(7) {
             0 => ("numeric(n)", format!("v[i] <- {element}")),
             1 => ("integer(n)", "v[i] <- i * 2L".to_owned()),
             2 => (
@@ -225,6 +225,8 @@ impl Generator {
                 format!("v[i] <- v[max(1L, i - 1L)] + {element}"),
             ),
             3 => ("logical(n)", "v[[i]] <- i %% 2L == 0L".to_owned()),
+            4 => ("vector(\"list\", n)", format!("v[i] <- list({element})")),
+            5 => ("numeric(n)", format!("v[[(i %% n) + 1L]] <- {element}")),
             _ => ("character(n)", "v[i] <- paste0(\"s\", i)".to_owned()),
         };
         let read = match self.rng.below(4) {
@@ -558,14 +560,22 @@ impl Generator {
             "c(a = \"x\")" => "as.character(i)",
             _ => "i * 0.5",
         };
-        let name = ["paste0(\"k\", i %% 3)", "\"a\"", "letters[i]", "NA_character_"]
-            [self.rng.below(4)];
+        let name = [
+            "paste0(\"k\", i %% 3)",
+            "\"a\"",
+            "letters[i]",
+            "NA_character_",
+        ][self.rng.below(4)];
         let form = match self.rng.below(3) {
             0 => format!("x[[{name}]] <- {value}"),
             1 => format!("x[{name}] <- {value}"),
             _ => format!("x$k <- {value}"),
         };
-        let share = if self.rng.chance(1, 2) { "kept <- x\n    " } else { "" };
+        let share = if self.rng.chance(1, 2) {
+            "kept <- x\n    "
+        } else {
+            ""
+        };
         let size = 1 + self.rng.below(6);
         format!(
             "ap{k} <- function(x, n) {{\n  for (i in seq_len(n)) {{\n    {share}{form}\n  }}\n  x\n}}\nbase{k} <- {start}\nstr(ap{k}(base{k}, {size}))\nstr(base{k})\nstr(Reduce(function(acc, i) {{ acc[[paste0(\"r\", i %% 2)]] <- i; acc }}, seq_len({size}), {start}))\n"
@@ -583,7 +593,8 @@ impl Generator {
         let recycle = if rows % 2 == 0 { "c(-1, 1)" } else { "-1" };
         let digits = self.rng.below(7) as i64 - 2;
         let kind = ["0", "0L", "FALSE"][self.rng.below(3)];
-        let subscript = ["i", "-i", "i + 0.5", "-(i + 0L)", "c(i, NA)", "i - 1L"][self.rng.below(6)];
+        let subscript =
+            ["i", "-i", "i + 0.5", "-(i + 0L)", "c(i, NA)", "i - 1L"][self.rng.below(6)];
         let fill = match kind {
             "0L" => format!("seq_len({rows})"),
             "FALSE" => format!("rep(c(TRUE, NA), length.out = {rows})"),

@@ -2698,12 +2698,7 @@ unsafe fn grow(vector: Sexp, new_length: usize, final_step: bool) -> R<Sexp> {
 /// whose only attribute is `names`, and `value` a list element or a scalar of `vector`'s type. An
 /// unnamed `vector` gets blank names before the new one. The vector grows in place when it has
 /// room, as [`grow`] does, and otherwise the result is a copy with room to grow.
-pub(crate) unsafe fn append_named(
-    vector: Sexp,
-    name: Sexp,
-    value: Sexp,
-    reuse: bool,
-) -> R<Sexp> {
+pub(crate) unsafe fn append_named(vector: Sexp, name: Sexp, value: Sexp, reuse: bool) -> R<Sexp> {
     let heap = crate::heap();
     let count = length(vector);
     let names = values::names(vector);
@@ -3252,8 +3247,7 @@ unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
             call.call,
             &args,
             call.env()?,
-        )?
-        {
+        )? {
             return Ok(result);
         }
     }
