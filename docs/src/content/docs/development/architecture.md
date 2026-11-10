@@ -609,8 +609,9 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   time, and nothing keys it on the run-time environment. `ry-rcmd start-image BASE --libr FILE`
   (`just start-image`) writes it again over a built tree.
 - **Base code images.** Right after the start image, the same step starts a session from it,
-  fetches every binding the base-priority packages still keep lazy, and writes their images
-  (`R/<package>.ryc`) with the uncompressed records alone, so those fetches read them in place
+  fetches every record of every lazy-load database of the base-priority packages by its key
+  (start-up has already forced some bindings, so forcing bindings would miss their records), and
+  writes the images (`R/<package>.ryc`, `R/sysdata.ryc`) with the uncompressed records alone, so those fetches read them in place
   instead of inflating them. They hold no compiled or machine code: for untrained base code,
   decoding it and mapping a native section cost more than compiling the closures a session
   calls. They are written for the same build as the start image.
