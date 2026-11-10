@@ -116,6 +116,10 @@ left, in order of expected gain:
 - **Nix.** `flake.nix` fetches the tarball as a fixed-output derivation and builds the base in `postInstall`; `nix build` has not been run yet.
 - **Old base trees stay in the cache after an upgrade**, as runtimes do (see below).
 
+## Open: the real-world benchmark record predates paired rounds
+
+- `tools/bench/real/results.json` holds three rounds and each engine's median time, while `run.py` needs at least five rounds and writes per-round `ratios` and `short`. Rerun `just bench-real --write` on a machine with data.table, xts, zoo, lubridate and R6 installed, then render the paired ratios and their spread in `benchmarks.ts` (`realChart`, `RealWorkloads`, the README summary) and drop the gap note in `benchmarks.mdx`.
+
 ## Open: the benchmark packages under ry's runtime
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
@@ -214,7 +218,7 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 ## Open: the package loader
 
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
-`docs/.../tutorial/runtime.mdx`). Gaps, roughly in order of how often a real package hits them:
+`docs/.../guide.mdx`, step 3). Gaps, roughly in order of how often a real package hits them:
 
 - **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
   the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
@@ -493,7 +497,7 @@ type-level function the annotation language does not have.
 ### Smaller open items
 
 - `@new` is unrestricted project-wide, so a nominal type's invariant holds only by convention. The
-  `tutorial/fully-typed.mdx` says so conditionally ("put `@new` in one constructor"). An
+  guide's step 4 says so conditionally ("put `@new` in one constructor"). An
   encapsulation modifier would make it a guarantee.
 - A narrowing failure on a field, or behind `&&`, produces a message byte-identical to the one for
   writing no guard at all. The docs know the fix, which is to lift the value into a local first. The

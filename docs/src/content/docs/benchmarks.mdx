@@ -1,6 +1,6 @@
 ---
 title: Benchmarks
-description: The same programs run untyped on GNU R, untyped on ry, and typed in strict mode on ry, with the code of each
+description: How fast untyped and typed R run on ry against GNU R, on real-world workloads and on synthetic kernels, with every program and the method
 ---
 
 import BenchmarkMachine from '../../components/BenchmarkMachine.astro';
@@ -8,122 +8,135 @@ import BenchmarkPrograms from '../../components/BenchmarkPrograms.astro';
 import BenchmarkSummary from '../../components/BenchmarkSummary.astro';
 import BenchmarkTable from '../../components/BenchmarkTable.astro';
 import RealWorkloads from '../../components/RealWorkloads.astro';
+import SpeedChart from '../../components/SpeedChart.astro';
 
-Two benchmarks measure different code, and neither speed-up describes the other. Untyped R on ry is
-faster than GNU R on tight loops and slower on call-heavy code:
+Two suites measure ry's runtime against GNU R, and they answer different questions. The
+real-world workloads are call-heavy R of the kind production packages run, and there ry is slower
+than GNU R on most of them. The synthetic kernels are loops, recursion and vector code, where ry's JIT
+compiles the hot code and ry is faster:
 
 <BenchmarkSummary />
 
-The [real-world workloads](#untyped-r-on-call-heavy-real-world-workloads) are shaped like the code
-in the benchmark code bases. The [synthetic kernels](#synthetic-kernels) are small programs that
-the JIT compiles.
+Above 1x means ry is faster. The summary, the charts and the tables of seconds are read from the
+committed results files, so they match the last measurement exactly.
 
-## Untyped R on call-heavy real-world workloads
+## Real-world workloads
 
-`just bench-real` times the workloads below. They are shaped like production R: S3 classes and
-dispatch, S4 and R6 objects, `tryCatch` and condition handlers, validation helpers, `lapply`
-pipelines, list records, tables, xts and zoo time series, and scalar simulation. Each workload runs
-in a fresh process per engine, in five or more rounds, and the table reports the median seconds
-([how it was measured](#timing-the-real-world-workloads)).
+`just bench-real` runs seven workloads written the way production R is written. Each one is a file
+in `tools/bench/real/` that exercises one kind of code for 0.3 to 1.2 seconds on GNU R:
+
+| Workload | What it runs |
+| --- | --- |
+| `conditions` | `tryCatch`, `withCallingHandlers`, custom condition classes, retries, `on.exit` |
+| `objects` | S3 constructors and methods, S4 classes and generics, R6 classes, environments as caches |
+| `records` | named lists grown and updated with `$<-`, `modifyList`, `split`, `Reduce`, `do.call(rbind, ...)` |
+| `simulation` | vectorized arithmetic in moderate loops, matrix products, `apply`, quantiles |
+| `tables` | data.table grouping, `:=`, keyed joins and `rbindlist`; base `merge` and `aggregate` |
+| `timeseries` | xts and zoo series, lubridate parsing and month arithmetic, `Date` sequences |
+| `validation` | small functions with defaults, `...` forwarding, `match.arg`, `stopifnot`, `match.call` |
+
+The code is untyped R, run unchanged on both engines:
+
+<SpeedChart name="real" caption="Real-world workloads, untyped R" />
+
+Most hot code here sits in closures that are called too few times to reach the JIT, so call
+setup, S3 lookup and complex assignment decide the result, and ry trails GNU R there. Only
+`simulation`, which spends its time in vector arithmetic and loops, runs faster on ry. Two more
+workloads, `functional` and `strings`, exist in the suite but are not shown, because they fail on
+the GNU R of the measuring machine.
+
+<details>
+<summary>The numbers, with ry's JIT on and off</summary>
 
 <RealWorkloads />
 
-A ratio above 1 means ry is faster. Most hot code in these workloads sits in closures called too
-few times to reach the JIT, so call setup, S3 lookup and complex assignment decide the result, and
-ry trails GNU R there. The `functional` and `strings` workloads are missing from the table because
-they fail on the GNU R of the measuring machine. A single run on the measuring machine varies by up
-to 25%, so read a ratio together with its spread, not alone. The workloads will be recalibrated against
-[profile summaries](/reference/cli#profile-summary) from real code bases.
-
-`just bench-real --write` regenerates `tools/bench/real/results.json`, which this page reads.
+</details>
 
 ## Synthetic kernels
 
-Each program runs as plain R on GNU R, as the same plain R on ry, and typed in
-[strict mode](/tutorial/fully-typed#strict-mode) on ry. All three compute the same result.
+`just bench-why` runs seventeen small programs: recursion (`fib`, `expr_tree`), scalar loops
+(`loop_sum`, `drawdown`), closures, records and dictionaries (`orders`, `report`, `validate`),
+vector arithmetic, and a few finance and biostatistics kernels (`bond_book`, `vasicek`,
+`log_rank`). Each exists twice in `tools/bench/why/`: as plain R, and typed in
+[strict mode](/guide#strict-mode). All three runs must print the same checksum, or `--write`
+refuses to store the results.
+
+<SpeedChart name="kernels" caption="Synthetic kernels, plain R and typed" />
+
+Recursion and loops gain the most from the JIT, while vectorized builtins already run in C on GNU R.
+Types add a second gain: a typed function in strict mode compiles to native code before its first
+call and works on native numbers and lists, so typed `closures`, `array_dot`, `array_map`,
+`drawdown` and `loop_sum` run tens of times faster than GNU R. Whole-vector arithmetic
+(`vector_arith`) gains little, because each operation writes a new vector even when typed.
+Programs built on records, tags and text (`expr_tree`, `orders`, `report`, `validate`, `log_rank`)
+run mostly in the interpreter, because the native compiler does not handle those types, so typing
+gains them a few times at most, and `orders` and `log_rank` lose. `log_rank` loses the most: only
+its small counting helper compiles, and the rest runs about 20 times slower than plain R on GNU R.
+
+<details>
+<summary>The numbers: seconds and peak memory</summary>
 
 <BenchmarkTable />
 
-Recursion and loops gain the most, while vectorized builtins already run in C on GNU R. Types add
-a second gain: a typed function in strict mode compiles to native code before its first call and
-works on native numbers, strings and lists, so `closures`, `report` and `expr_tree` run between 60
-and 120 times faster typed than on GNU R. Whole-vector arithmetic (`vector_arith`) gains little,
-because each operation still writes a new vector, and the typed functions over `Result` and
-dictionaries (`validate`) run about twice as fast as untyped code.
+</details>
 
-## The programs
+### The programs
 
-Each program exists in `tools/bench/why/` as plain R and typed.
+Each program as plain R and typed. The number beside the name is ry's speed-up on the plain R.
 
 <BenchmarkPrograms />
 
 ## How it was measured
 
-Each program times its own work with the harness above, so startup and the static check are left
-out. The harness runs once to warm up, then three times, and keeps the fastest run.
-
-### Timing the real-world workloads
-
-`just bench-real` (`tools/bench/real/run.py`) times every engine in rounds. A round runs each
-engine once, in a fresh process and in an order shuffled per round, and the ratio of two engines is
-taken within each round. The table reports the median of those per-round ratios with the lowest and
-highest round beside it, so `1.62x (1.47 to 1.78)` means the second engine was faster in every one
-of the rounds and by 1.62x in the middle one. Each suite's geometric mean comes with a 95% bootstrap
-interval over rounds.
-
-The method follows from where the noise comes from. The measuring machines are shared cloud VMs
-whose effective CPU speed drifts with the load of other tenants, and that drift does not show up as
-steal time or load average. A fixed loop of integer arithmetic in C took between 0.30 and 0.39 s
-across processes on a quiet VM, and pinning the process to one core or turning address-space
-randomization off did not narrow that. A slow drift moves both engines of one round together, which
-is why each ratio is formed inside a round:
-
-| Choice | Why |
-| --- | --- |
-| At least 5 rounds (`--repeat`, default 5) | With 25% swings per process, 3 samples cannot tell a 10% change from noise. |
-| Engines shuffled within each round (`--seed`) | A fixed order lets a drift favour whichever engine runs second. |
-| Two ry builds in the same rounds (`--baseline PATH`) | Each build is compared with the same GNU R samples. Comparing two runs that each timed GNU R separately once turned one program's 1.53x into 1.12x, because GNU R's own time moved by 31% between the two runs while ry's moved by 4%. |
-| Rows under 0.1 s on any engine are marked too short and left out of the geometric mean | A run that short mostly measures start-up and the timer. |
-
-A workload in the representative mix reports the median of `RY_BENCH_REPEAT` warm runs inside its
-process (`harness.R`), after one cold run. A program from the public suites (`--public`) runs once
-per process, so its time includes GNU R's byte compilation and ry's tier-up, as a script run from
-the command line would. Neither number includes process start-up, which is 0.18 s for GNU R and
-0.05 s for ry on the measuring machine.
-
-One sitting of 5 rounds on a 4-core cloud VM, timing GNU R, ry and an older ry build together,
-gave these 95% intervals. The last column compares two ry builds with nearly the same runtime, so
-it shows the smallest change between builds that one sitting can resolve:
-
-| Suite | Rows in the mean | GNU R / ry, JIT on | Older build / ry, JIT on |
-| --- | ---: | --- | --- |
-| Representative mix | 10 | 1.59x (1.52 to 1.63) | 1.02x (0.97 to 1.04) |
-| awfy | 5 | 1.87x (1.78 to 1.98) | 0.99x (0.92 to 1.07) |
-| rcp | 14 (empty-while and scalar-while too short) | 2.36x (2.22 to 2.44) | 1.01x (0.95 to 1.06) |
-| shootout | 31 (spectralnorm and spectralnorm_naive too short) | 1.94x (1.89 to 1.97) | 1.00x (0.98 to 1.03) |
-
-A difference between two builds smaller than about 5% on a suite, or 10% on a single program,
-needs more rounds or an instruction count (`valgrind --tool=callgrind`) to show.
-
-### Comparing two builds of ry on testthat
-
-The testthat workload (`tools/bench/real/testthat.R`) gives two different wall times, and they
-answer different questions:
-
-| Number | What it covers | Command |
+| | Real-world workloads | Synthetic kernels |
 | --- | --- | --- |
-| Test phase | One warm run of the tests, the median of `RY_BENCH_REPEAT` runs | field 3 of the output of `RY_JIT=on RY_BENCH_REPEAT=5 ry run --runtime ry testthat_full.R` |
-| Process wall | Start-up, loading testthat, one cold run and five warm runs | `time` around the same command |
-| Load | Start-up and loading testthat only | `time ry run --runtime ry load.R`, where `load.R` holds only `suppressPackageStartupMessages(library(testthat))` |
+| Command | `just bench-real --write` | `just bench-why --write` |
+| Results file | `tools/bench/real/results.json` | `tools/bench/why/results.json` |
+| Machine | <BenchmarkMachine suite="real" /> | <BenchmarkMachine suite="kernels" /> |
+| Repetitions | <BenchmarkMachine suite="real" field="repeat" /> | <BenchmarkMachine suite="kernels" field="repeat" /> |
+| Engines | GNU R (`Rscript --vanilla`), ry with the JIT on, ry with the JIT off | GNU R, ry, ry on the typed program in strict mode |
+| One sample | one process: a cold run, then the median of five warm runs | one process: a cold run, then the fastest of three warm runs |
 
-`testthat_full.R` is `harness.R` followed by `testthat.R`, and its checksum is `27:22821`. Both
-builds use the same `R_LIBS`, a library that ry itself installed testthat into, and each number is
-the median of five fresh processes. On the Linux release build with the JIT on, the test phase
-measured 0.219 s and the process wall 1.44 s, which is how one workload can be quoted as both. The
-comment at the top of `tools/bench/real/harness.R` gives the full environment of each command.
+Neither suite includes process start-up, which is 0.18 s for GNU R and 0.05 s for ry on the
+measuring machine, or ry's static check.
 
-`just bench-why --write` runs every program twice per engine, alternating engines, and stores the
-fastest time and the largest memory peak in `tools/bench/why/results.json`, which every table on
-this site reads.
+### Why the real-world suite pairs its rounds
 
-<BenchmarkMachine />
+The measuring machines are shared cloud VMs, and their effective CPU speed drifts with the load of
+other tenants. A fixed loop of integer arithmetic in C took between 0.30 and 0.39 s across processes
+on a quiet VM, so a single run can be off by up to 25%. A slow drift moves both engines of one round
+together, so `bench-real` forms each ratio inside a round and reports the median of those per-round
+ratios, with the lowest and highest round beside it: `1.62x (1.47 to 1.78)` means ry was faster in
+every round, and by 1.62x in the middle one. Each geometric mean comes with a 95% bootstrap interval
+over the rounds.
+
+The committed `tools/bench/real/results.json` predates this method: it holds three rounds and each
+engine's median time, so the ratios charted above divide two medians. Rerunning
+`just bench-real --write` on a machine with the workloads' packages installed replaces it.
+
+- At least five rounds (`--repeat`), because with 25% swings three samples cannot tell a 10% change
+  from noise.
+- Engines shuffled within each round (`--seed`), because a fixed order lets a drift favor whichever
+  engine runs second.
+- A second ry build in the same rounds (`--baseline PATH`) to compare two builds against the same
+  GNU R samples.
+- Rows under 0.1 s on any engine are marked too short and left out of the geometric mean, because
+  at that length the time mostly measures start-up and the timer.
+
+`just bench-real --public all` adds 54 public R benchmark programs (are-we-fast-yet, the Benchmarks
+Game and the rcp micro-benchmarks, vendored in `tools/bench/real/suites/`), which run once per
+process, so their time includes GNU R's byte compilation and ry's tier-up. One sitting of five
+rounds on a 4-core cloud VM gave these geometric means. The last column times two nearly identical
+ry builds, so it shows the smallest change between builds that one sitting can resolve:
+
+| Suite | Programs in the mean | ry vs GNU R | Older ry build vs ry |
+| --- | ---: | ---: | ---: |
+| workload mix | 10 | 1.59x (1.52 to 1.63) | 1.02x (0.97 to 1.04) |
+| awfy | 5 | 1.87x (1.78 to 1.98) | 0.99x (0.92 to 1.07) |
+| rcp | 14 | 2.36x (2.22 to 2.44) | 1.01x (0.95 to 1.06) |
+| shootout | 31 | 1.94x (1.89 to 1.97) | 1.00x (0.98 to 1.03) |
+
+A difference between two builds smaller than about 5% on a suite, or 10% on a single program, needs
+more rounds or an instruction count (`valgrind --tool=callgrind`) to show.
+[Testing](/development/testing#comparing-two-builds-on-testthat) explains how to time two builds of
+ry on a testthat suite.
