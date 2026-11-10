@@ -437,7 +437,10 @@ pub fn bundled_base() -> Result<PathBuf, ReplError> {
         }
         return Ok(base);
     }
-    match &EMBEDDED_BASE {
+    // Read through `black_box` so this function compiles to the same control flow whether or not
+    // a base R is embedded: the release build embeds one into a binary whose profile was
+    // collected without it (tools/layout/optimize.sh), and a profile fails on a changed function.
+    match std::hint::black_box(&EMBEDDED_BASE) {
         Some(base) => extract_base(base),
         None => Err(ReplError(
             "this ry has no base R: it was built without RY_EMBED_BASE, and no base-r directory \
@@ -488,7 +491,8 @@ fn ry_runtime_library() -> Result<(PathBuf, bool), ReplError> {
             return Ok((candidate, false));
         }
     }
-    if let Some(runtime) = &EMBEDDED_RUNTIME {
+    // Through `black_box` for the reason `bundled_base` gives.
+    if let Some(runtime) = std::hint::black_box(&EMBEDDED_RUNTIME) {
         return extract_runtime(runtime).map(|path| (path, true));
     }
     Err(ReplError(format!(
