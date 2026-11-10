@@ -153,9 +153,6 @@ const IDLE_CURSOR: Cursor = Cursor {
 #[derive(Default)]
 pub(crate) struct Swept {
     pub freed: u64,
-    /// The freed objects by type code, counted only while the profile summary is on, because
-    /// reading each dead slot's header costs a load per object.
-    pub by_kind: Option<[u64; 32]>,
 }
 
 impl Space {
@@ -323,44 +320,58 @@ impl Space {
 
     /// Marks `object` and says whether it was unmarked. A newly marked object ages: it gets
     /// [`Space::promote_bits`] if it was already old, and `OLD` if it was young.
-    #[inline]
+    ///
+    /// A minor collection finds most children old and marked already, so that test is inlined
+    /// into every tracing loop, and the work for a newly marked object is out of line.
+    #[inline(always)]
     pub unsafe fn mark(&mut self, object: Sexp) -> bool {
-        let location = self.locate(object);
-        let unmarked = match location {
-            Some((page, word, bit)) => {
-                let marks = &mut self.marks[page][word];
-                let unmarked = *marks & bit == 0;
-                *marks |= bit;
-                unmarked
-            }
-            None => unsafe {
-                let unmarked = object.gc_bits() & gc_bits::MARK == 0;
-                object.set_gc_bit(gc_bits::MARK, true);
-                unmarked
-            },
+        let Some((page, word, bit)) = self.locate(object) else {
+            return unsafe { self.mark_large(object) };
         };
-        if unmarked {
-            let bits = unsafe { object.gc_bits() };
-            let promote = if bits & gc_bits::OLD == 0 {
-                gc_bits::OLD
-            } else {
-                self.promote_bits
-            };
-            // A major collection marks every live object again, so the test keeps it from
-            // storing into the header of each one that is already promoted.
-            if bits & promote != promote {
-                unsafe { object.set_gc_bit(promote, true) };
-            }
-            let cells = unsafe { vector_cells(object) };
-            self.marked_vector_cells += cells;
-            if promote & gc_bits::TENURED != 0 {
-                self.tenured_vector_cells += cells;
-                if let Some((page, word, bit)) = location {
-                    self.tenured[page][word] |= bit;
-                }
+        // `locate` found `page` in `page_class`, which every bitmap matches in length, and a
+        // slot of the smallest class at the end of a page still has its bit in the last word.
+        let marks = unsafe { self.marks.get_unchecked_mut(page).get_unchecked_mut(word) };
+        if *marks & bit != 0 {
+            return false;
+        }
+        *marks |= bit;
+        unsafe { self.age(object, Some((page, word, bit))) };
+        true
+    }
+
+    #[inline(never)]
+    unsafe fn mark_large(&mut self, object: Sexp) -> bool {
+        if unsafe { object.gc_bits() } & gc_bits::MARK != 0 {
+            return false;
+        }
+        unsafe {
+            object.set_gc_bit(gc_bits::MARK, true);
+            self.age(object, None);
+        }
+        true
+    }
+
+    #[inline(never)]
+    unsafe fn age(&mut self, object: Sexp, location: Option<(usize, usize, u64)>) {
+        let bits = unsafe { object.gc_bits() };
+        let promote = if bits & gc_bits::OLD == 0 {
+            gc_bits::OLD
+        } else {
+            self.promote_bits
+        };
+        // A major collection marks every live object again, so the test keeps it from storing
+        // into the header of each one that is already promoted.
+        if bits & promote != promote {
+            unsafe { object.set_gc_bit(promote, true) };
+        }
+        let cells = unsafe { vector_cells(object) };
+        self.marked_vector_cells += cells;
+        if promote & gc_bits::TENURED != 0 {
+            self.tenured_vector_cells += cells;
+            if let Some((page, word, bit)) = location {
+                self.tenured[page][word] |= bit;
             }
         }
-        unmarked
     }
 
     /// Whether `object`, which this collection has marked, is tenured.
@@ -372,7 +383,8 @@ impl Space {
         }
     }
 
-    /// Records that `object`, an environment in this space, owns a frame to drop when it dies.
+    /// Records that `object`, an environment in this space, has a frame that owns memory, which
+    /// the sweep drops when the environment dies.
     pub fn set_finalizable(&mut self, object: Sexp) {
         if let Some((page, word, bit)) = self.locate(object) {
             self.finalizable[page][word] |= bit;
@@ -571,14 +583,6 @@ impl Space {
                     unsafe { drop_frame(object) };
                 }
                 self.finalizable[page][word] &= !dead;
-                if let Some(by_kind) = &mut swept.by_kind {
-                    for bit in set_bits(dead) {
-                        let kind = unsafe { *page_base.add((word * 64 + bit) * slot_size) };
-                        if let Some(count) = by_kind.get_mut(usize::from(kind & 31)) {
-                            *count += 1;
-                        }
-                    }
-                }
                 // Poisoning makes a use after free fail loudly, but costs a store per byte of
                 // every dead slot, so only debug builds pay for it. The kind byte stays
                 // meaningful: a freed slot reads as `FREESXP`.
@@ -653,6 +657,34 @@ impl Space {
         }
     }
 
+    /// Adds the objects the coming sweep frees to `by_kind`, by type code: those of the pages
+    /// allocated into since the last collection, or with `all`, of every page. Reading each
+    /// dead object's header costs a cache miss per object, so only the profile summary asks.
+    pub fn count_dead_by_kind(&self, all: bool, by_kind: &mut [u64; 32]) {
+        let mut count_page = |page: usize| {
+            let slot_size = SLOT_SIZES[self.page_class[page] as usize];
+            let page_base = self.base.as_ptr().wrapping_add(page * PAGE_SIZE);
+            for word in 0..BITMAP_WORDS {
+                for bit in set_bits(self.allocated[page][word] & !self.marks[page][word]) {
+                    // SAFETY: an allocated slot of a committed page starts with its kind byte.
+                    let kind = unsafe { *page_base.add((word * 64 + bit) * slot_size) };
+                    if let Some(count) = by_kind.get_mut(usize::from(kind & 31)) {
+                        *count += 1;
+                    }
+                }
+            }
+        };
+        if all {
+            (0..self.page_count)
+                .filter(|&page| self.page_class[page] != EMPTY_PAGE)
+                .for_each(&mut count_page);
+        } else {
+            self.touched
+                .iter()
+                .for_each(|&page| count_page(page as usize));
+        }
+    }
+
     pub fn live_slots(&self) -> usize {
         self.total_live_slots
     }
@@ -692,7 +724,8 @@ impl Space {
         self.release_cursors();
         self.cursors = [IDLE_CURSOR; CLASS_COUNT];
         out.u32(self.page_count as u32);
-        out.bytes.extend_from_slice(&self.page_class[..self.page_count]);
+        out.bytes
+            .extend_from_slice(&self.page_class[..self.page_count]);
         for &live in &self.live_slots[..self.page_count] {
             out.u16(live);
         }
@@ -1039,8 +1072,7 @@ pub(crate) mod virtual_memory {
         let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE;
         // SAFETY: as in `reserve`; without `MAP_FIXED` the address is a hint, and a mapping
         // placed elsewhere is returned to the system below.
-        let mapping =
-            unsafe { libc::mmap(start.cast(), bytes, libc::PROT_NONE, flags, -1, 0) };
+        let mapping = unsafe { libc::mmap(start.cast(), bytes, libc::PROT_NONE, flags, -1, 0) };
         if mapping == libc::MAP_FAILED {
             return None;
         }

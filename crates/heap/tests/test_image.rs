@@ -25,18 +25,27 @@ static IMAGE_ADDRESS: Mutex<()> = Mutex::new(());
 
 #[test]
 fn images_round_trip_random_graphs() {
-    let _turn = IMAGE_ADDRESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _turn = IMAGE_ADDRESS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     for_each_seed(32, |seed| unsafe { round_trip(seed) });
 }
 
 #[test]
 fn damaged_or_mismatched_images_leave_the_heap_alone() {
-    let _turn = IMAGE_ADDRESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _turn = IMAGE_ADDRESS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {
         let (image, _, _) = written(7, &[]);
         for cut in [0, 7, 8, 12] {
             let mut target = fresh_heap();
-            let result = load(&mut target, &image, &image.metadata[..cut], &Relocation::default());
+            let result = load(
+                &mut target,
+                &image,
+                &image.metadata[..cut],
+                &Relocation::default(),
+            );
             assert!(
                 matches!(result, Err(ImageError::Invalid(_))),
                 "an image cut at {cut} bytes loads"
@@ -60,7 +69,9 @@ fn damaged_or_mismatched_images_leave_the_heap_alone() {
 
 #[test]
 fn relocation_moves_paths_under_a_prefix() {
-    let _turn = IMAGE_ADDRESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _turn = IMAGE_ADDRESS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {
         let texts = [
             "/build/home",
@@ -80,7 +91,12 @@ fn relocation_moves_paths_under_a_prefix() {
                     .expect("mk_char");
                 source.set_element(vector, index, string);
             }
-            write(&mut source, precondition, &[vector], &[b"/build/home".to_vec()])
+            write(
+                &mut source,
+                precondition,
+                &[vector],
+                &[b"/build/home".to_vec()],
+            )
         };
         let mut target = fresh_heap();
         let relocation = Relocation {
@@ -335,8 +351,15 @@ unsafe fn write(
     prefixes: &[Vec<u8>],
 ) -> HeapImage {
     unsafe {
-        heap.write_image(&fixed(), precondition, roots, prefixes, &|_| None, &mut encode)
-            .unwrap_or_else(|error| panic!("the image does not write: {error}"))
+        heap.write_image(
+            &fixed(),
+            precondition,
+            roots,
+            prefixes,
+            &|_| None,
+            &mut encode,
+        )
+        .unwrap_or_else(|error| panic!("the image does not write: {error}"))
     }
 }
 
@@ -414,7 +437,8 @@ unsafe fn describe(heap: &Heap, roots: &[Sexp], names: &[String]) -> Vec<String>
                 let symbol = heap.find_symbol(name.as_bytes()).expect("installed");
                 if let Some(cell) = heap.frame_cell(environment, symbol) {
                     let value = walk.visit(cell.cdr());
-                    walk.lines.push(format!("{environment_name} binds {name} to {value}"));
+                    walk.lines
+                        .push(format!("{environment_name} binds {name} to {value}"));
                 }
             }
         }
@@ -475,8 +499,8 @@ impl Walk<'_> {
                     format!("{} {elements:?}", object.kind().name())
                 }
                 SexpType::Pairlist | SexpType::Binding => {
-                    let fields = [object.car(), object.cdr(), object.tag()]
-                        .map(|field| self.visit(field));
+                    let fields =
+                        [object.car(), object.cdr(), object.tag()].map(|field| self.visit(field));
                     format!("{} {fields:?}", object.kind().name())
                 }
                 SexpType::Environment => {
@@ -515,7 +539,8 @@ impl Walk<'_> {
                 }
                 kind => panic!("the generator made no {}", kind.name()),
             };
-            self.lines.push(format!("{name} {line} attributes {attrib}"));
+            self.lines
+                .push(format!("{name} {line} attributes {attrib}"));
             name
         }
     }

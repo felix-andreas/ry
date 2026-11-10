@@ -274,8 +274,11 @@ impl Heap {
         let large = self.move_large_objects(&mut roots)?;
         out.u64(IMAGE_LARGE_BASE as u64);
         out.u64(large.len() as u64 * 8);
-        let mut large_objects: Vec<u64> =
-            self.large.iter().map(|object| object.as_ptr() as u64).collect();
+        let mut large_objects: Vec<u64> = self
+            .large
+            .iter()
+            .map(|object| object.as_ptr() as u64)
+            .collect();
         large_objects.sort_unstable();
         out.u64s(&large_objects);
 
@@ -328,9 +331,11 @@ impl Heap {
             Frame::write_empty(copy.add(offset).cast(), 0);
         }
         for &(object, _) in &external {
-            let offset = object.as_ptr() as usize - base
-                + std::mem::offset_of!(ExternalPtrObject, address);
-            copy.add(offset).cast::<*mut c_void>().write_unaligned(std::ptr::null_mut());
+            let offset =
+                object.as_ptr() as usize - base + std::mem::offset_of!(ExternalPtrObject, address);
+            copy.add(offset)
+                .cast::<*mut c_void>()
+                .write_unaligned(std::ptr::null_mut());
         }
 
         for value in [
@@ -430,11 +435,7 @@ impl Heap {
     }
 
     /// Points `roots` and the heap's root tables at what `forward` returns for their entries.
-    unsafe fn forward_roots(
-        &mut self,
-        roots: &mut [Sexp],
-        forward: &dyn Fn(Sexp) -> Option<Sexp>,
-    ) {
+    unsafe fn forward_roots(&mut self, roots: &mut [Sexp], forward: &dyn Fn(Sexp) -> Option<Sexp>) {
         let moved = |object: Sexp| forward(object).unwrap_or(object);
         for root in roots.iter_mut() {
             *root = moved(*root);
@@ -586,7 +587,9 @@ impl Heap {
             return Err(invalid("it does not start with the heap image signature"));
         }
         if input.u64()? != self.image_precondition(fixed) {
-            return mismatch("the heap before start-up differs from the one the image was written from");
+            return mismatch(
+                "the heap before start-up differs from the one the image was written from",
+            );
         }
         if !self.space.at_image_base() {
             return mismatch("the heap does not start at the image address");
@@ -631,8 +634,11 @@ impl Heap {
             let saved: Vec<Vec<u8>> = kept
                 .iter()
                 .map(|&(object, size)| {
-                    std::slice::from_raw_parts(object.as_ptr().cast::<u8>().add(header), size - header)
-                        .to_vec()
+                    std::slice::from_raw_parts(
+                        object.as_ptr().cast::<u8>().add(header),
+                        size - header,
+                    )
+                    .to_vec()
                 })
                 .collect();
             pages(memory)?;
@@ -825,7 +831,10 @@ unsafe fn keeps_contents(object: Sexp) -> bool {
 }
 
 fn addresses(objects: &[Sexp]) -> Vec<u64> {
-    objects.iter().map(|object| object.as_ptr() as u64).collect()
+    objects
+        .iter()
+        .map(|object| object.as_ptr() as u64)
+        .collect()
 }
 
 /// The handle at `address`, which the image's writer recorded and which the loader trusts as
@@ -836,7 +845,10 @@ unsafe fn handle(address: u64) -> Result<Sexp, ImageError> {
 }
 
 unsafe fn handles(addresses: &[u64]) -> Result<Vec<Sexp>, ImageError> {
-    addresses.iter().map(|&address| unsafe { handle(address) }).collect()
+    addresses
+        .iter()
+        .map(|&address| unsafe { handle(address) })
+        .collect()
 }
 
 #[cold]
@@ -952,7 +964,11 @@ impl<'a> Reader<'a> {
 
     pub fn u64s(&mut self) -> Result<Vec<u64>, ImageError> {
         let count = usize::try_from(self.u64()?).map_err(|_| invalid("a length is too large"))?;
-        let bytes = self.take(count.checked_mul(8).ok_or_else(|| invalid("a length is too large"))?)?;
+        let bytes = self.take(
+            count
+                .checked_mul(8)
+                .ok_or_else(|| invalid("a length is too large"))?,
+        )?;
         Ok(bytes
             .chunks_exact(8)
             .map(|word| {

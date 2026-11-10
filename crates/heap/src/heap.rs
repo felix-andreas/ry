@@ -120,7 +120,6 @@ pub struct Heap {
     remembered: Vec<Sexp>,
     /// While a deeper collection traces a tenured object: whether one of its children seen so
     /// far is younger, which puts the object in the remembered set.
-    tracing_tenured: bool,
     younger_child: bool,
     /// The vector cells of the tenured objects, as of the last intermediate or major collection,
     /// to which an intermediate one adds what it tenures.
@@ -316,6 +315,8 @@ pub struct Marker<'a> {
     /// `None` while the zero-count table is reconciled: every object a source names is then
     /// collected into `stack` as a root, without marking or tracing.
     space: Option<&'a mut Space>,
+    /// Whether a minor collection is marking ([`Marker::is_minor`]).
+    minor: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -676,7 +677,6 @@ impl Heap {
             escalating: false,
             large_allocated_since_major: 0,
             remembered: Vec::new(),
-            tracing_tenured: false,
             younger_child: false,
             tenured_vector_cells: 0,
             escaped: Vec::new(),
@@ -1331,7 +1331,9 @@ impl Heap {
         // Every field is written below, so zeroing the slot first would store it twice.
         let object = self.allocate_uncollected(SexpType::Environment, ENVIRONMENT_BYTES, 0)?;
         Frame::write_empty(object.frame_ptr(), bindings);
-        self.space.set_finalizable(object);
+        if (*object.frame_ptr()).owns_memory() {
+            self.space.set_finalizable(object);
+        }
         object.set_enclosure_unbarriered(enclosure);
         enclosure.increment_refcount();
         Ok(object)
@@ -1929,7 +1931,12 @@ impl Heap {
             symbol.set_cdr_unbarriered(cell);
         } else {
             self.write_barrier(env, cell);
-            (*bindings(env)).insert(symbol, cell);
+            let frame = &mut *bindings(env);
+            let owned = frame.owns_memory();
+            frame.insert(symbol, cell);
+            if !owned && frame.owns_memory() {
+                self.space.set_finalizable(env);
+            }
         }
         Ok(())
     }
@@ -1977,8 +1984,12 @@ impl Heap {
         // young, so one barrier check covers every one. A failed allocation leaves no cell in
         // the frame, and the cells made before it are garbage.
         if let Some(&first) = cells.first() {
-            (*env.frame_ptr())
-                .insert_formals(&cells, bindings.iter().map(|binding| binding.symbol));
+            let frame = &mut *env.frame_ptr();
+            let owned = frame.owns_memory();
+            frame.insert_formals(&cells, bindings.iter().map(|binding| binding.symbol));
+            if !owned && frame.owns_memory() {
+                self.space.set_finalizable(env);
+            }
             self.write_barrier(env, first);
         }
         Ok(())
@@ -2319,6 +2330,7 @@ impl Heap {
     pub unsafe fn set_frame_hashed(&mut self, env: Sexp, size: i32) {
         if !self.is_symbol_frame(env) && env != self.known.empty_env {
             (*bindings(env)).set_hashed(size);
+            self.space.set_finalizable(env);
         }
     }
 
@@ -2915,6 +2927,7 @@ impl Heap {
             source.trace(&mut Marker {
                 stack: &mut roots,
                 space: None,
+                minor: false,
             });
         }
         self.sources = sources;
@@ -3052,12 +3065,10 @@ impl Heap {
                         parent.clear_cards();
                     }
                 } else if parent.is_carded() {
-                    self.tracing_tenured = true;
                     self.younger_child = false;
-                    self.mark(parent.attrib());
+                    self.mark_child::<true>(parent.attrib());
                     let attrib_younger = self.younger_child;
                     let cards_younger = self.scan_cards(parent, Collection::Intermediate);
-                    self.tracing_tenured = false;
                     if attrib_younger || cards_younger {
                         self.remember(parent);
                     }
@@ -3278,12 +3289,20 @@ impl Heap {
         self.inhibit -= 1;
     }
 
-    #[inline]
+    #[inline(always)]
     unsafe fn mark(&mut self, object: Sexp) {
+        self.mark_child::<false>(object);
+    }
+
+    /// Marks a child of an object being traced. `TENURED` says whether that object is tenured
+    /// in a deeper collection, which must notice a younger child; a minor collection never
+    /// traces one, so its loops carry no test for it.
+    #[inline(always)]
+    unsafe fn mark_child<const TENURED: bool>(&mut self, object: Sexp) {
         if self.space.mark(object) && !is_leaf(object, self.known.nil) {
             self.mark_stack.push(object);
         }
-        if self.tracing_tenured && !self.younger_child && !self.space.is_tenured(object) {
+        if TENURED && !self.younger_child && !self.space.is_tenured(object) {
             self.younger_child = true;
         }
     }
@@ -3335,6 +3354,7 @@ impl Heap {
             let mut marker = Marker {
                 stack: &mut self.mark_stack,
                 space: Some(&mut self.space),
+                minor: kind == Collection::Minor,
             };
             source.trace(&mut marker);
         }
@@ -3362,30 +3382,33 @@ impl Heap {
         // Collection ages each survivor by one generation, so a deeper collection can leave a
         // tenured object pointing at a child it aged only to the younger old generation; the
         // write barrier never saw that pointer, so tracing remembers the parent instead.
-        self.tracing_tenured = self.space.promote_bits & gc_bits::TENURED != 0
-            && object.gc_bits() & gc_bits::TENURED != 0;
+        if self.space.promote_bits & gc_bits::TENURED == 0
+            || object.gc_bits() & gc_bits::TENURED == 0
+        {
+            self.trace_children::<false>(object);
+            return;
+        }
         self.younger_child = false;
-        self.trace_children(object);
+        self.trace_children::<true>(object);
         if self.younger_child && object.gc_bits() & gc_bits::REMEMBERED == 0 {
             object.set_gc_bit(gc_bits::REMEMBERED, true);
             self.remembered.push(object);
         }
-        self.tracing_tenured = false;
     }
 
-    unsafe fn trace_children(&mut self, object: Sexp) {
-        self.mark(object.attrib());
+    unsafe fn trace_children<const TENURED: bool>(&mut self, object: Sexp) {
+        self.mark_child::<TENURED>(object.attrib());
         if object.is_altrep() {
-            self.mark(object.car());
-            self.mark(object.cdr());
-            self.mark(object.tag());
+            self.mark_child::<TENURED>(object.car());
+            self.mark_child::<TENURED>(object.cdr());
+            self.mark_child::<TENURED>(object.tag());
             return;
         }
         match object.kind().shape() {
             Shape::Vector => {
                 if object.flags() & flag_bits::WEAK_PAIRS != 0 {
                     self.weak_pairs.push(object);
-                } else if self.tracing_tenured && object.is_carded() {
+                } else if TENURED && object.is_carded() {
                     // A deeper collection derives each card of a tenured vector from scratch:
                     // dirty exactly where an element is younger than the vector.
                     let attrib_younger = self.younger_child;
@@ -3396,7 +3419,7 @@ impl Heap {
                         self.younger_child = false;
                         let start = card * CARD_ELEMENTS;
                         for index in start..(start + CARD_ELEMENTS).min(length) {
-                            self.mark(object.stored_element(index));
+                            self.mark_child::<TENURED>(object.stored_element(index));
                         }
                         *cards.add(card) = if self.younger_child {
                             CARD_UNTENURED
@@ -3406,11 +3429,16 @@ impl Heap {
                         any |= self.younger_child;
                     }
                     self.younger_child = attrib_younger || any;
+                } else if object.kind() == SexpType::String && object.length() <= 16 {
+                    for &element in object.slice::<Sexp>() {
+                        self.mark_child::<TENURED>(element);
+                    }
                 } else if object.kind() == SexpType::String {
                     // A character vector usually repeats a few strings, like a column of
                     // categories, and marking one again only finds it marked. A small table of
                     // the addresses this vector already marked skips the repeats. Its elements
                     // are CHARSXPs, which hold no references, so a skipped repeat loses nothing.
+                    // A short vector has too few repeats to pay for clearing the table.
                     let mut marked = [0usize; 64];
                     for &element in object.slice::<Sexp>() {
                         let address = element.as_ptr() as usize;
@@ -3419,33 +3447,33 @@ impl Heap {
                             continue;
                         }
                         marked[slot] = address;
-                        self.mark(element);
+                        self.mark_child::<TENURED>(element);
                     }
                 } else if matches!(object.kind(), SexpType::List | SexpType::Expression) {
                     for index in 0..object.length() as usize {
-                        self.mark(object.element(index));
+                        self.mark_child::<TENURED>(object.element(index));
                     }
                 }
             }
             Shape::Triple => {
-                self.mark(object.car());
-                self.mark(object.cdr());
-                self.mark(object.tag());
+                self.mark_child::<TENURED>(object.car());
+                self.mark_child::<TENURED>(object.cdr());
+                self.mark_child::<TENURED>(object.tag());
             }
             Shape::Environment => {
-                self.mark(object.enclosure());
+                self.mark_child::<TENURED>(object.enclosure());
                 for cell in (*object.frame_ptr()).cells() {
-                    self.mark(cell);
+                    self.mark_child::<TENURED>(cell);
                 }
             }
             Shape::ExternalPtr => {
-                self.mark(object.external_tag());
-                self.mark(object.external_protected());
+                self.mark_child::<TENURED>(object.external_tag());
+                self.mark_child::<TENURED>(object.external_protected());
             }
             Shape::Record => {
                 for index in 0..object.record_slot_count() {
                     if let Some(handle) = object.record_handle(index) {
-                        self.mark(handle);
+                        self.mark_child::<TENURED>(handle);
                     }
                 }
             }
@@ -3479,7 +3507,12 @@ impl Heap {
             self.younger_child = false;
             let start = card * CARD_ELEMENTS;
             for index in start..(start + CARD_ELEMENTS).min(length) {
-                self.mark(vector.stored_element(index));
+                match kind {
+                    Collection::Minor => self.mark(vector.stored_element(index)),
+                    Collection::Intermediate | Collection::Major => {
+                        self.mark_child::<true>(vector.stored_element(index))
+                    }
+                }
             }
             *cards.add(card) = match kind {
                 Collection::Minor => after_minor,
@@ -3771,10 +3804,8 @@ impl Heap {
     }
 
     unsafe fn sweep_young(&mut self) {
-        let mut swept = Swept {
-            by_kind: crate::activity::enabled().then_some([0; 32]),
-            ..Swept::default()
-        };
+        self.count_dead_by_kind(false);
+        let mut swept = Swept::default();
         let change = self.space.sweep_young(&mut swept);
         self.old_small_bytes = self.old_small_bytes.saturating_add_signed(change);
         let young_large = std::mem::take(&mut self.young_large);
@@ -3789,15 +3820,12 @@ impl Heap {
         self.young_large = young_large;
         self.young_large.clear();
         self.stats.objects_freed += swept.freed;
-        self.count_freed_kinds(&swept);
         self.refresh_live_stats();
     }
 
     unsafe fn sweep_all(&mut self) {
-        let mut swept = Swept {
-            by_kind: crate::activity::enabled().then_some([0; 32]),
-            ..Swept::default()
-        };
+        self.count_dead_by_kind(true);
+        let mut swept = Swept::default();
         self.old_small_bytes = self.space.sweep_all(&mut swept);
         let mut old_large_bytes = 0;
         let large: Vec<Sexp> = self.large.iter().copied().collect();
@@ -3812,15 +3840,16 @@ impl Heap {
         self.young_large.clear();
         self.old_large_bytes = old_large_bytes;
         self.stats.objects_freed += swept.freed;
-        self.count_freed_kinds(&swept);
         self.refresh_live_stats();
     }
 
-    fn count_freed_kinds(&mut self, swept: &Swept) {
-        if let Some(by_kind) = &swept.by_kind {
-            for (total, count) in self.stats.freed_by_kind.iter_mut().zip(by_kind) {
-                *total += count;
-            }
+    /// Counts the small objects the coming sweep frees by type, for the profile summary, as
+    /// its own activity so that the summary does not charge its bookkeeping to the collector.
+    fn count_dead_by_kind(&mut self, all: bool) {
+        if activity::enabled() {
+            let _activity = activity::enter(activity::Activity::Profiler, 0);
+            self.space
+                .count_dead_by_kind(all, &mut self.stats.freed_by_kind);
         }
     }
 
@@ -4169,6 +4198,19 @@ impl RootStack {
 }
 
 impl Marker<'_> {
+    /// Whether this marker serves a minor collection. Every object that survived an earlier
+    /// collection stays marked through a minor one, so a source that knows which objects it
+    /// stored since the last collection may mark only those.
+    pub fn is_minor(&self) -> bool {
+        self.minor
+    }
+
+    /// Whether this marker serves a collection rather than a reconcile's scan of the roots.
+    /// A source that logs its stores clears the log only after a collection has marked it.
+    pub fn is_collecting(&self) -> bool {
+        self.space.is_some()
+    }
+
     pub unsafe fn mark(&mut self, object: Sexp) {
         match &mut self.space {
             Some(space) => {
