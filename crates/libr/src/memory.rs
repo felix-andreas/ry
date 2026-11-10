@@ -4,7 +4,9 @@
 use {
     crate::{
         R_len_t, R_xlen_t, Rboolean, SEXPTYPE,
+        attributes::remove_attribute,
         boundary::{ApiResult, enter, error, run_pending_finalizers},
+        globals::{R_DimNamesSymbol, R_DimSymbol, R_NamesSymbol},
         runtime,
         strings::c_bytes,
         vectors::{set_names_from, sexp_type},
@@ -522,7 +524,22 @@ pub unsafe extern "C" fn R_allocResizableVector(kind: SEXPTYPE, capacity: R_xlen
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_resizeVector(vector: Sexp, length: R_xlen_t) {
-    enter(|| Ok(runtime().heap.resize_vector(vector, length)?))
+    enter(|| {
+        // GNU R removes the attributes that describe the old length, so one set afterwards goes
+        // to the end of the attribute list: data.table relies on that order. A resize that is
+        // about to fail leaves them alone.
+        let runtime = runtime();
+        if runtime.heap.is_resizable(vector)
+            && length >= 0
+            && length != vector.length()
+            && length <= vector.capacity()
+        {
+            for name in [R_DimSymbol.get(), R_DimNamesSymbol.get(), R_NamesSymbol.get()] {
+                remove_attribute(vector, name);
+            }
+        }
+        Ok(runtime.heap.resize_vector(vector, length)?)
+    })
 }
 
 #[unsafe(no_mangle)]
