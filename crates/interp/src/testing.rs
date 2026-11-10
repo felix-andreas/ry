@@ -567,6 +567,9 @@ const IMAGE_BODIES: &[&str] = &[
     "h <- function(n) { total <- 0; for (i in seq_len(n)) total <- total + i; total }; h(3L) + a",
     "s <- list(x = a, y = \"text\", z = NULL); is.null(s$z) && !is.null(s$x)",
     "k <- 0L; repeat { k <- k + 1L; if (k >= 3L) break }; k * b",
+    // Calling `g` compiles its argument `one()` into promise code, which has no statement record
+    // and no argument after the call, so the call site's three constants end that code's table.
+    "one <- function() a; g <- function(x) x; g(one())",
 ];
 
 /// A compiled closure survives the code image's encoding: decoding its code against the same
@@ -584,6 +587,19 @@ pub fn check_code_image_round_trip(entropy: &mut impl Entropy) {
     let mutations: Vec<(usize, u8)> = (0..8)
         .map(|_| (entropy.below(1 << 16), entropy.below(256) as u8))
         .collect();
+    code_image_round_trip(&body, a, b, &mutations);
+}
+
+/// Every body of the image battery survives the round trip of
+/// [`check_code_image_round_trip`], so a shape the battery pins is checked on every run rather
+/// than only on the seeds that draw it.
+pub fn check_image_bodies_round_trip() {
+    for body in IMAGE_BODIES {
+        code_image_round_trip(body, "3L", "-2.5", &[]);
+    }
+}
+
+fn code_image_round_trip(body: &str, a: &str, b: &str, mutations: &[(usize, u8)]) {
     with_interpreter(|| {
         // SAFETY: the interpreter is installed, and every object it reads is rooted by the
         // global environment or the handle scope.
@@ -634,7 +650,7 @@ pub fn check_code_image_round_trip(entropy: &mut impl Entropy) {
                     "`{body}` with a = {a}, b = {b}: the decoded code must compute what the \
                      evaluator does (trained: {trained})"
                 );
-                for &(position, value) in &mutations {
+                for &(position, value) in mutations {
                     let mut mutated = bytes.clone();
                     let at = position % mutated.len().max(1);
                     match mutated.get_mut(at) {
