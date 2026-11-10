@@ -6196,9 +6196,15 @@ unsafe fn pin_wrapper(function: Sexp) -> R<Sexp> {
     if formals.contains(&head) {
         return Ok(nil());
     }
+    // Only a builtin head runs without a body, so any other head (`{` with several statements,
+    // a closure) settles the site on the generic path for good instead of pinning lookups that
+    // every call would check and then discard.
     let Some(cell) = resolve(head, enclosure, false)? else {
         return Ok(nil());
     };
+    if cell_value(cell).is_none_or(|value| value.kind() != SexpType::Builtin) {
+        return Ok(nil());
+    }
     pinned.push((head, cell));
     // `{ f(x) }` runs as `f(x)` only while `{` is base R's.
     if body != source {
@@ -6316,10 +6322,14 @@ unsafe fn wrapper_argument(state: &Activation<'_, '_>, expression: Sexp) -> R<Op
 /// The slot of `symbol` in a slot frame, found by name for instructions that carry no lookup
 /// cache. Slot tables are short, so the scan costs less than a hash lookup.
 unsafe fn slot_named(state: &Activation<'_, '_>, symbol: Sexp) -> Option<*mut Sexp> {
+    slot_index(state, symbol).map(|position| state.header.add(1 + position))
+}
+
+/// The position of `symbol` in the slot frame's table of slot names. The table is a list the
+/// compiler made, never ALTREP, so the scan reads its storage directly.
+unsafe fn slot_index(state: &Activation<'_, '_>, symbol: Sexp) -> Option<usize> {
     let names = state.constants.element(SLOTS).element(1);
-    (0..length(names))
-        .find(|&index| names.element(index) == symbol)
-        .map(|position| state.header.add(1 + position))
+    names.slice::<Sexp>().iter().position(|&name| name == symbol)
 }
 
 /// `substitute(x)` of a single name in a slot frame, read from the slots without giving the
@@ -7022,9 +7032,7 @@ unsafe fn slot_promises_into(
             SexpType::Symbol => match eager.then(|| slot_eager_argument(state, expression)) {
                 Some(Some(value)) => value,
                 _ if references => {
-                    let names = state.constants.element(SLOTS).element(1);
-                    let slot = (0..length(names))
-                        .find(|&index| names.element(index) == expression)
+                    let slot = slot_index(state, expression)
                         .map_or(eval::NO_REFERENCE_SLOT, |index| index as u32);
                     eval::argument_reference(owner, slot, expression)?
                 }
