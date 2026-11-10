@@ -5697,7 +5697,7 @@ unsafe fn slot_args_into(
         let value = match expression.kind() {
             _ if expression == missing => expression,
             SexpType::Symbol if expression == symbols().dots => {
-                if !slot_dots_into(state, args) {
+                if !slot_dots_into(state, false, args)? {
                     return Ok(false);
                 }
                 cell = cell.cdr();
@@ -5761,7 +5761,7 @@ unsafe fn slot_promises_into(
         let value = match expression.kind() {
             _ if expression == missing => expression,
             SexpType::Symbol if expression == symbols().dots => {
-                slot_dots_into(state, args);
+                slot_dots_into(state, references, args)?;
                 cell = cell.cdr();
                 continue;
             }
@@ -5797,24 +5797,35 @@ unsafe fn forwardable_dots(value: Sexp) -> bool {
 
 /// Appends the arguments the slot frame's `...` collected, which are its caller's promises and
 /// values and pass on unchanged, so forwarding `...` never needs the frame's environment.
-/// `false`, appending nothing, when the frame has no `...` slot or it holds something else.
-unsafe fn slot_dots_into(state: &Activation<'_, '_>, args: &mut eval::Args) -> bool {
+/// Without `references`, for a callee that may keep its arguments past the call, an argument
+/// reference among them becomes the ordinary promise it stands for first
+/// ([`eval::detach_reference`]). `false`, appending nothing, when the frame has no `...` slot
+/// or it holds something else.
+unsafe fn slot_dots_into(
+    state: &Activation<'_, '_>,
+    references: bool,
+    args: &mut eval::Args,
+) -> R<bool> {
     let Some(slot) = slot_named(state, symbols().dots) else {
-        return false;
+        return Ok(false);
     };
     let mut item = *slot;
     if !forwardable_dots(item) {
-        return false;
+        return Ok(false);
     }
     activity::count(Counter::DotsCalls);
     while item.kind() == SexpType::Dots {
+        let value = item.car();
+        if !references && eval::is_reference(value) {
+            eval::detach_reference(value)?;
+        }
         args.push(Arg {
             tag: item.tag(),
-            value: item.car(),
+            value,
         });
         item = item.cdr();
     }
-    true
+    Ok(true)
 }
 
 /// [`effects::eager_argument`] in a slot frame: the slot's value when `symbol` has a bound

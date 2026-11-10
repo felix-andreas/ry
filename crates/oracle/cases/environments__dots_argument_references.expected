@@ -1,0 +1,13 @@
+[stdout]
+| 3 1 a  v k + 1 2 2 1 2 1 1 2 4 5 3 2 mc(v, b = 2) 2 
+| 3 2 a  v k + 1 2 2 1 2 1 1 2 4 10 3 2 mc(v, b = 2) 2 
+| 3 3 a  v k + 1 2 2 1 2 1 1 2 4 15 3 2 mc(v, b = 2) 2 
+| 9 
+| 9 
+| 9 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

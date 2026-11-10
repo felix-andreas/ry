@@ -700,12 +700,11 @@ unsafe fn reference_is_missing(reference: Sexp) -> R<bool> {
     value_is_missing(value)
 }
 
-/// Replaces the argument references the frame at `index` was called with, in its arguments
-/// and in its slots alike, with ordinary promises over the frames they name: a forced one
-/// becomes a forced promise of its name, an unforced one a promise of its name in that frame.
-/// Every path that hands a frame's arguments or variables to code that may keep them past the
-/// call (its environment, dispatch to a method) runs this first, since a reference is reused
-/// once the call returns.
+/// Turns the argument references the frame at `index` was called with into ordinary promises
+/// over the frames they name ([`detach_reference`]), wherever the frame holds them: its
+/// arguments, its slots and the `...` it collected. Every path that hands a frame's arguments
+/// or variables to code that may keep them past the call (its environment, dispatch to a
+/// method) runs this first, since a reference is reused once the call returns.
 pub unsafe fn materialize_references(index: usize) -> R<()> {
     let state = interp();
     let Some(frame) = state.frames.get(index) else {
@@ -721,25 +720,43 @@ pub unsafe fn materialize_references(index: usize) -> R<()> {
         .map_or(state.frame_args.len(), |next| next.args as usize);
     for position in start..end {
         let reference = interp().frame_args[position].value;
-        if !is_reference(reference) {
-            continue;
-        }
-        let promise = reference_promise(reference)?;
-        interp().frame_args[position].value = promise;
-        let frame = &interp().frames[index];
-        if frame.env == nil() {
-            let header = frame.slots as usize;
-            let formals = values::length(frame.function.car());
-            for slot in 0..formals {
-                let register = bytecode::register_address(header + 1 + slot);
-                if *register == reference {
-                    promise.increment_refcount();
-                    reference.decrement_refcount();
-                    *register = promise;
-                }
-            }
+        if is_reference(reference) {
+            detach_reference(reference)?;
         }
     }
+    Ok(())
+}
+
+/// Makes `reference` the ordinary promise that stands for it ([`reference_promise`]), in place,
+/// and gives its place in the pool to a fresh reference. Forwarding `...` hands the same
+/// reference to several frames, so converting it in place is what keeps it one promise that
+/// forces once for all of them.
+pub unsafe fn detach_reference(reference: Sexp) -> R<()> {
+    let promise = reference_promise(reference)?;
+    let state = interp();
+    let used = state.references_used as usize;
+    let Some(index) = state.references[..used]
+        .iter()
+        .position(|&pooled| pooled == reference)
+    else {
+        panic!("an argument reference outlived the call it was made for");
+    };
+    let heap = crate::heap();
+    heap.root(promise);
+    heap.set_car(reference, promise.car());
+    heap.set_cdr(reference, promise.cdr());
+    heap.set_tag(reference, promise.tag());
+    heap.set_attrib(reference, promise.attrib());
+    reference.set_gp_bits(gp::ARGUMENT_REFERENCE, false);
+    let target = values::integer_vector(&[0, 0, 0])?;
+    heap.root(target);
+    let fresh = heap.alloc_compiled_promise(unbound(), nil(), nil(), target)?;
+    fresh.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
+    fresh.increment_refcount();
+    target.increment_refcount();
+    let state = interp();
+    state.references[index] = fresh;
+    state.reference_targets[index] = target;
     Ok(())
 }
 
@@ -1767,11 +1784,16 @@ pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<C
     }))
 }
 
+/// The source [`direct_sources`] gives a `...` formal, whose arguments follow the formals'.
+pub const DOTS_SOURCE: i32 = -2;
+
 /// The direct-call plan of the call `call` for closures with `function`'s formals and body:
-/// for each formal, the position of the argument that fills its slot or -1 when the site
-/// supplies none. `None` when such calls need [`bind_slots`] or a heap frame: the body has no slot table that names the formals, a formal is `...`, the call passes
-/// `...` or `..N`, its arguments do not match, or a formal the site leaves out has a default
-/// whose promise would capture the frame.
+/// for each formal, the position of the argument that fills its slot, -1 when the site
+/// supplies none, or [`DOTS_SOURCE`] for `...`, followed by the positions of the arguments
+/// `...` collects, in order. `None` when such calls need [`bind_slots`] or a heap frame: the
+/// body has no slot table that names the formals, the call passes `...` or `..N`, its
+/// arguments do not match, or a formal the site leaves out has a default whose promise would
+/// capture the frame.
 pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<SmallVec<[i32; 8]>>> {
     let body = function.cdr();
     if body.kind() != SexpType::Bytecode
@@ -1787,13 +1809,15 @@ pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<SmallVec<[i
     let names = table.element(1);
     let formals = function.car();
     let mut formal_count = 0;
+    let mut dots_index = None;
     let mut formal = formals;
     while formal.kind() == SexpType::Pairlist {
-        if formal_count >= values::length(names)
-            || names.element(formal_count) != formal.tag()
-            || formal.tag() == symbols().dots
+        if formal_count >= values::length(names) || names.element(formal_count) != formal.tag()
         {
             return Ok(None);
+        }
+        if formal.tag() == symbols().dots {
+            dots_index = Some(formal_count);
         }
         formal_count += 1;
         formal = formal.cdr();
@@ -1818,14 +1842,19 @@ pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<SmallVec<[i
         return Ok(None);
     };
     let mut sources: SmallVec<[i32; 8]> = smallvec![-1; formal_count];
+    if let Some(index) = dots_index {
+        sources[index] = DOTS_SOURCE;
+    }
     for (position, &target) in plan.iter().enumerate() {
-        if args[position].value != missing_value {
+        if Some(target as usize) == dots_index {
+            sources.push(position as i32);
+        } else if args[position].value != missing_value {
             sources[target as usize] = position as i32;
         }
     }
     let mut defaults = None;
     let mut formal = formals;
-    for (index, &source) in sources.iter().enumerate() {
+    for (index, &source) in sources[..formal_count].iter().enumerate() {
         let default = formal.car();
         if source < 0
             && default != missing_value
@@ -1876,19 +1905,12 @@ pub unsafe fn call_with_plan(
         || moves::tracking()
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
     {
-        let mut promises = Args::new();
         for arg in args {
-            let value = if is_reference(arg.value) {
-                reference_promise(arg.value)?
-            } else {
-                arg.value
-            };
-            promises.push(Arg {
-                tag: arg.tag,
-                value,
-            });
+            if is_reference(arg.value) {
+                detach_reference(arg.value)?;
+            }
         }
-        return apply_closure(call, function, &promises, sys_parent, None);
+        return apply_closure(call, function, args, sys_parent, None);
     }
     let count = values::length(constants.element(bytecode::SLOTS).element(1));
     let header = state.bytecode.registers.len();
@@ -1896,12 +1918,21 @@ pub unsafe fn call_with_plan(
     bytecode::reserve_registers(header + 1 + count + register_count)?;
     let registers = bytecode::register_address(header);
     let missing_value = missing_arg();
+    let formal_count = values::length(function.car());
+    let (sources, dots_sources) = sources.split_at(formal_count.min(sources.len()));
+    let mut dots = missing_value;
+    for &source in dots_sources.iter().rev() {
+        if let Some(arg) = args.get(source as usize) {
+            dots = values::triple(SexpType::Dots, arg.value, if dots == missing_value { nil() } else { dots }, arg.tag)?;
+        }
+    }
     let mut missing = 0u64;
     let mut formal = function.car();
     for (index, &source) in sources.iter().enumerate() {
         let default = formal.car();
         let value = match args.get(source as usize) {
             Some(arg) if source >= 0 => arg.value,
+            _ if source == DOTS_SOURCE => dots,
             _ if default != missing_value => {
                 missing |= 1 << index;
                 default
@@ -2070,7 +2101,8 @@ unsafe fn reify(index: usize) -> R<Sexp> {
     {
         let header = frame.slots as usize;
         let call = frame.call;
-        for (slot, &source) in sources.iter().enumerate() {
+        let formal_count = values::length(frame.function.car());
+        for (slot, &source) in sources.iter().take(formal_count).enumerate() {
             if source < 0 {
                 continue;
             }

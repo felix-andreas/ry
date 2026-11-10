@@ -223,18 +223,26 @@ environment and the AST evaluator is what runs uncompiled package code.
   from the expression, and
   `promise_env` reifies the caller. The package-call counter does not count a reference as a
   promise.
+- **Dots.** A callee with a `...` formal gets a plan too: the formal's source is
+  `DOTS_SOURCE`, and the positions of the arguments `...` collects follow the formals' sources,
+  so `call_with_plan` builds the `...` list from them. Forwarding `...` from a slot frame passes
+  its items unchanged, which hands the same reference to a second frame.
 - **Escape.** Before anything could keep a reference past the call, `materialize_references`
-  turns the callee's references, in its arguments and its slots alike, into ordinary promises
-  over the caller: a forced one into a forced promise of its name, an unforced one into a
-  promise over the caller's environment or pending environment. `reify` runs it, as do S3 and
-  S4 dispatch, which hand the arguments to a method, and `call_with_plan` when a debugger or
-  move tracking sends the call down the generic path.
+  turns the callee's references into ordinary promises over the caller (`detach_reference`): a
+  forced one into a forced promise of its name, an unforced one into a promise over the
+  caller's environment or pending environment. The conversion happens in place, and a fresh
+  object takes the reference's place in the pool, so every frame that holds it, through its
+  slots or a forwarded `...`, holds the same promise, which forces once. `reify` runs it, as do
+  S3 and S4 dispatch, which hand the arguments to a method, and `call_with_plan` when a debugger
+  or move tracking sends the call down the generic path. Forwarding `...` to a callee without a
+  plan detaches the references among its items first.
 - **Scope.** Every argument to a planned callee becomes a reference except a `..N` symbol and a
-  value that is already a promise, and compiled code passes constants as they are. A callee with a
-  `...` formal or a call that passes `...` gets no plan, so it gets promises.
+  value that is already a promise, and compiled code passes constants as they are. A call
+  that passes `...` or `..N` gets no plan, so its other arguments become promises.
 
-`crates/oracle/cases/environments__argument_references.R` and
-`environments__code_argument_references.R` pin these rules.
+`crates/oracle/cases/environments__argument_references.R`,
+`environments__code_argument_references.R` and `environments__dots_argument_references.R` pin
+these rules.
 
 ## Builtin wrappers
 
