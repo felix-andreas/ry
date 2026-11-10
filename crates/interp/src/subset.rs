@@ -1697,8 +1697,9 @@ unsafe fn single_position(
                     index,
                 ));
             }
-            // A matrix subscript never counts from the end, so a negative one selects nothing.
-            let matrix = bounds.dimension.is_some();
+            // Before 4.6.2 a matrix subscript never counts from the end, so a negative one
+            // selects nothing; 4.6.2 applies the vector rule to each extent (PR#19116).
+            let matrix = bounds.dimension.is_some() && !crate::system::r_at_least_release(4, 6, 2);
             if value < 0 && extent == 2 && value >= -2 && !matrix {
                 return Ok(if value == -1 { 1 } else { 0 });
             }
@@ -1735,7 +1736,9 @@ unsafe fn single_position(
             }
             let value = value.trunc();
             if value < 0.0 {
-                if extent == 2 && value >= -2.0 && bounds.dimension.is_none() {
+                let matrix =
+                    bounds.dimension.is_some() && !crate::system::r_at_least_release(4, 6, 2);
+                if extent == 2 && value >= -2.0 && !matrix {
                     return Ok(if value == -1.0 { 1 } else { 0 });
                 }
                 return Err(error_in(
@@ -3533,32 +3536,41 @@ unsafe fn do_set_dim(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("invalid first argument, must be vector (list or atomic)"));
     }
     let dims = coerce_vector(dims, SexpType::Integer)?;
-    if length(dims) == 0 {
-        return Err(call.error("length-0 dimension vector is invalid"));
-    }
-    // The first offending extent names the problem.
-    if let Some(&bad) = values::ints(dims)
-        .iter()
-        .find(|&&value| value == NA_INTEGER || value < 0)
-    {
-        return Err(call.error(if bad == NA_INTEGER {
-            "the dims contain missing values"
-        } else {
-            "the dims contain negative values"
-        }));
-    }
-    let product = values::ints(dims).iter().fold(1i64, |product, &extent| {
-        product.saturating_mul(extent as i64)
-    });
     let object_length = length(object) as i64;
-    if product != object_length {
-        // GNU R prints the extents only when both fit in an `int`.
-        if product > i32::MAX as i64 || object_length > i32::MAX as i64 {
-            return Err(call.error("dims do not match the length of object"));
+    if crate::system::r_at_least_release(4, 6, 2) {
+        let product = dims_total(call, dims)?;
+        if product != object_length {
+            return Err(call.error(format!(
+                "dims [product {product}] do not match the length of object [{object_length}]"
+            )));
         }
-        return Err(call.error(format!(
-            "dims [product {product}] do not match the length of object [{object_length}]"
-        )));
+    } else {
+        if length(dims) == 0 {
+            return Err(call.error("length-0 dimension vector is invalid"));
+        }
+        // The first offending extent names the problem.
+        if let Some(&bad) = values::ints(dims)
+            .iter()
+            .find(|&&value| value == NA_INTEGER || value < 0)
+        {
+            return Err(call.error(if bad == NA_INTEGER {
+                "the dims contain missing values"
+            } else {
+                "the dims contain negative values"
+            }));
+        }
+        let product = values::ints(dims).iter().fold(1i64, |product, &extent| {
+            product.saturating_mul(extent as i64)
+        });
+        if product != object_length {
+            // GNU R before 4.6.2 prints the extents only when both fit in an `int`.
+            if product > i32::MAX as i64 || object_length > i32::MAX as i64 {
+                return Err(call.error("dims do not match the length of object"));
+            }
+            return Err(call.error(format!(
+                "dims [product {product}] do not match the length of object [{object_length}]"
+            )));
+        }
     }
     values::remove_attr(object, symbols().names);
     values::remove_attr(object, symbols().dimnames);
@@ -3907,10 +3919,14 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
     let data = values::materialize(call.arg(0))?;
     let dims = coerce_vector(call.arg(1), SexpType::Integer)?;
     let dimnames = call.arg(2);
-    let total: usize = values::ints(dims)
-        .iter()
-        .map(|&value| value.max(0) as usize)
-        .product();
+    let total: usize = if crate::system::r_at_least_release(4, 6, 2) {
+        dims_total(call, dims)? as usize
+    } else {
+        values::ints(dims)
+            .iter()
+            .map(|&value| value.max(0) as usize)
+            .product()
+    };
     let count = length(data);
     let kind = if data == nil() {
         SexpType::Logical
@@ -3933,6 +3949,36 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
         set_dimnames(result, dimnames, crate::heap().known().unbound)?;
     }
     Ok(result)
+}
+
+/// The number of elements an integer `dim` vector describes, checked in the order GNU R's
+/// `dim2total` (4.6.2 and later) checks it: an empty vector, then each extent for `NA` and
+/// sign, then a product beyond the longest vector. The product is a double, as there, so a
+/// zero extent still lets the later extents be checked.
+unsafe fn dims_total(call: &Call<'_>, dims: Sexp) -> R<i64> {
+    const LONGEST_VECTOR: f64 = 4_503_599_627_370_496.0;
+    let extents = values::ints(dims);
+    if extents.is_empty() {
+        return Err(call.error("'dim' cannot be of length 0"));
+    }
+    let mut product = 1.0f64;
+    for &extent in extents {
+        if extent == NA_INTEGER {
+            return Err(call.error("the dims contain missing values"));
+        }
+        if extent < 0 {
+            return Err(call.error("the dims contain negative values"));
+        }
+        product = if extent == 0 {
+            0.0
+        } else {
+            product * f64::from(extent)
+        };
+    }
+    if product > LONGEST_VECTOR {
+        return Err(call.error("too many elements specified"));
+    }
+    Ok(product as i64)
 }
 
 unsafe fn do_transpose(call: &Call<'_>) -> R<Sexp> {
