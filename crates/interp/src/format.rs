@@ -774,14 +774,22 @@ pub unsafe fn format_vector(
             warn_decimal_width(data.len())?;
             // The common width can exceed every element's own: a negative mantissa and a
             // three-digit exponent each widen it, even when they occur in different elements.
+            // GNU R measures the common width with a one-column decimal mark, so a wider mark
+            // lengthens a number without widening the rest.
             let items: Vec<String> = data
                 .iter()
                 .map(|&value| {
-                    let text = format_real_with(value, format, na_string);
-                    localize_decimal(pad(&text, format.width, true))
+                    pad(
+                        &format_real_with(value, format, na_string),
+                        format.width,
+                        true,
+                    )
                 })
                 .collect();
             justify(items, true)
+                .into_iter()
+                .map(localize_decimal)
+                .collect()
         }
         SexpType::Complex => {
             let data = values::complexes(vector);
@@ -797,16 +805,14 @@ pub unsafe fn format_vector(
                     if is_na_real(value.r) || is_na_real(value.i) {
                         na_string.to_owned()
                     } else {
-                        localize_decimal(format_complex_with(
-                            value,
-                            real,
-                            imaginary,
-                            settings.digits,
-                        ))
+                        format_complex_with(value, real, imaginary, settings.digits)
                     }
                 })
                 .collect();
             justify(items, true)
+                .into_iter()
+                .map(localize_decimal)
+                .collect()
         }
         SexpType::String => {
             let items: Vec<String> = (0..count)
