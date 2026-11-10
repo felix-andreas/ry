@@ -929,14 +929,16 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
 
 /// `UseMethod(generic)` from the slot frame at `position`, as the call its body returns,
 /// without giving the frame an environment: GNU R's dispatch reads only the frame's first
-/// argument, its supplied promises and its call. `first` is the first formal's slot, or nil when
-/// the function has no formals. The generic must have bound no local the method would see
-/// (through R 4.3, the method sees them).
+/// argument, its supplied promises and its call. `first` is the first formal's slot, or null
+/// when the function has no formals, and `explicit` the object `UseMethod(generic, object)`
+/// names. Through R 4.3 the method sees the generic's locals, so the caller checks there are
+/// none.
 pub(crate) unsafe fn use_method_in_slots(
     site: Sexp,
     generic: Sexp,
     position: usize,
     first: *mut Sexp,
+    explicit: Option<Sexp>,
 ) -> R<Option<Sexp>> {
     activity::count(Counter::S3Dispatches);
     let dispatching = activity::enter(Activity::S3Dispatch, 0);
@@ -953,7 +955,9 @@ pub(crate) unsafe fn use_method_in_slots(
     let promargs: eval::Args = crate::frame_args(interp(), position).into();
     let value = if first.is_null() { nil() } else { *first };
     // As in `dispatch_object`: a missing first formal dispatches on the first supplied argument.
-    let object = if first.is_null() {
+    let object = if let Some(object) = explicit {
+        object
+    } else if first.is_null() {
         nil()
     } else if value.kind() == SexpType::Dots {
         value_of(value.car())?

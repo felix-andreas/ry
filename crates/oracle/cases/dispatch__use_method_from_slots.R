@@ -51,3 +51,36 @@ for (i in 1:60) {
   )
 }
 cat(r, side, sep = "\n")
+
+# An explicit dispatch object, and a lazy argument that defines a function.
+as_thing <- function(x, ...) UseMethod("as_thing", x)
+as_thing.default <- function(x, ...) paste("default", x)
+as_thing.character <- function(x, ...) paste("chr", x, ...)
+wrap <- function(v) as_thing(v, "!")
+print(wrap("a"))
+print(wrap(1))
+explicit <- function(x, y) UseMethod("as_thing", y)
+print(explicit(1, "b"))
+`%or%` <- function(a, b) if (is.null(a)) b else a
+lazy_fn <- function(x) x %or% tryCatch(stop("no"), error = function(e) conditionMessage(e))
+print(lazy_fn(NULL))
+print(lazy_fn(3))
+
+# Superassignment from a frame without an environment.
+counter <- function() {
+  count <- 0
+  handled <- FALSE
+  bump <- function(by) {
+    count <<- count + by
+    handled <<- TRUE
+    seen <<- by
+  }
+  bump(2)
+  bump(3)
+  c(count, handled, seen)
+}
+print(counter())
+print(exists("seen"))
+set_global <- function(v) fresh_global <<- v
+print(withVisible(set_global(7))$visible)
+print(fresh_global)

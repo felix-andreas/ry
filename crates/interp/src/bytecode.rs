@@ -5530,11 +5530,38 @@ unsafe fn slot_special_call(
     call: Sexp,
 ) -> R<Option<Sexp>> {
     let arguments = call.cdr();
-    if arguments == nil() || arguments.cdr() != nil() {
+    if arguments == nil() {
         return Ok(None);
     }
     let argument = arguments.car();
-    match eval::builtin_def(function)?.name {
+    let name = eval::builtin_def(function)?.name;
+    if arguments.cdr() != nil() {
+        let rest = arguments.cdr();
+        if rest.cdr() != nil() || arguments.tag() != nil() || rest.tag() != nil() {
+            return Ok(None);
+        }
+        return match name {
+            // `UseMethod("generic", object)` dispatches on a local's value.
+            "UseMethod" if argument.kind() == SexpType::String && length(argument) == 1 => {
+                match slot_operand(state, rest.car())? {
+                    Some(object) => slot_use_method(state, instruction, call, argument, Some(object)),
+                    None => Ok(None),
+                }
+            }
+            // `name <<- value` assigns from the enclosure outwards, so only the value reads the
+            // frame.
+            "<<-" if argument.kind() == SexpType::Symbol && eval::dot_dot_index(argument).is_none() => {
+                let Some(value) = slot_operand(state, rest.car())? else {
+                    return Ok(None);
+                };
+                eval::set_var(argument, value, state.machine.function.tag())?;
+                interp().visible = false;
+                Ok(Some(value))
+            }
+            _ => Ok(None),
+        };
+    }
+    match name {
         ".Internal" if arguments.tag() == nil() => {
             if argument.kind() != SexpType::Language || argument.car().kind() != SexpType::Symbol {
                 return Ok(None);
@@ -5551,7 +5578,7 @@ unsafe fn slot_special_call(
                 && argument.kind() == SexpType::String
                 && length(argument) == 1 =>
         {
-            slot_use_method(state, instruction, call, argument)
+            slot_use_method(state, instruction, call, argument, None)
         }
         "quote" if arguments.tag() == nil() || values::symbol_name(arguments.tag()) == "expr" => {
             interp().visible = true;
@@ -5561,13 +5588,44 @@ unsafe fn slot_special_call(
     }
 }
 
-/// `UseMethod("generic")` from a slot frame, when the body returns its value at once (a generic
+/// The value of `expression`, an argument of a special called from a slot frame, when the slots
+/// answer it without an environment: a constant, or a local holding a value or a promise.
+/// `None` also when forcing the promise gave the frame its environment; the generic path then
+/// evaluates the argument again and finds the promise forced already.
+unsafe fn slot_operand(state: &Activation<'_, '_>, expression: Sexp) -> R<Option<Sexp>> {
+    let value = match expression.kind() {
+        SexpType::Symbol if eval::dot_dot_index(expression).is_none() => {
+            match slot_named(state, expression) {
+                Some(slot) => *slot,
+                None => return Ok(None),
+            }
+        }
+        SexpType::Symbol
+        | SexpType::Language
+        | SexpType::Promise
+        | SexpType::Bytecode
+        | SexpType::Dots => return Ok(None),
+        _ if expression == missing_arg() => return Ok(None),
+        _ => return Ok(Some(expression)),
+    };
+    if value == missing_arg() || value == unbound() || value.kind() == SexpType::Dots {
+        return Ok(None);
+    }
+    if value.kind() != SexpType::Promise {
+        return Ok(Some(value));
+    }
+    let value = eval::force_promise(value)?;
+    Ok(state.in_slots().then_some(value))
+}
+
+/// `UseMethod("generic")` or `UseMethod("generic", object)` from a slot frame, when the body returns its value at once (a generic
 /// whose body is the call), dispatched without giving the frame an environment.
 unsafe fn slot_use_method(
     state: &Activation<'_, '_>,
     instruction: Instruction,
     call: Sexp,
     generic: Sexp,
+    object: Option<Sexp>,
 ) -> R<Option<Sexp>> {
     // `UseMethod` does not return to the body, so the path is only exact when the body would
     // return the call's value anyway.
@@ -5593,7 +5651,7 @@ unsafe fn slot_use_method(
         return Ok(None);
     }
     let owner = (*state.interp).slot_owner as usize;
-    dispatch::use_method_in_slots(call, generic, owner, first)
+    dispatch::use_method_in_slots(call, generic, owner, first, object)
 }
 
 /// A builtin call from a slot frame whose arguments the slots answer: `...`, a constant, or a
@@ -5882,7 +5940,7 @@ unsafe fn slot_promises_into(
             }
             SexpType::Symbol => eval::dot_dot_index(expression).is_none(),
             SexpType::Bytecode => expression.cdr().element(SLOTS) != nil(),
-            SexpType::Language | SexpType::Promise => false,
+            SexpType::Promise => false,
             _ => true,
         };
         if !fits {
@@ -5914,7 +5972,9 @@ unsafe fn slot_promises_into(
                 _ => eval::slot_promise(owner, expression)?,
             },
             SexpType::Bytecode if references => eval::code_reference(owner, expression)?,
-            SexpType::Bytecode => eval::slot_promise(owner, expression)?,
+            // Code the compiler rejected (it defines a function, say) runs uncompiled over the
+            // pending environment, so the frame gets one only if the callee forces it.
+            SexpType::Bytecode | SexpType::Language => eval::slot_promise(owner, expression)?,
             _ => expression,
         };
         args.push(Arg {
