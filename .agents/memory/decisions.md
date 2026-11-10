@@ -8400,3 +8400,26 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Rejected.** Pinning cores and disabling ASLR (no effect on this noise). The fastest of N runs as the estimator: within a sitting it varied as much as the median of paired ratios (about ±3% across sittings on awfy), and it cannot be paired.
 - **Measured noise after the change** (5 rounds, one sitting, 95% interval of an old build against main, JIT on): representative mix 0.97 to 1.04, awfy 0.92 to 1.07, rcp 0.95 to 1.06, shootout 0.98 to 1.03. Short rows: rcp empty-while and scalar-while, shootout spectralnorm and spectralnorm_naive.
 - **Docs.** `benchmarks.mdx`, "Timing the real-world workloads", carries the measured noise per suite.
+
+## The road to 3x
+
+- **Goal.** The 1.5x milestone holds on every bench-real suite within its 95% interval, so the next milestone is 3x. The 3x row of the roadmap table in `development/design/r-runtime.md` sets the factor each bucket needs: R code 5x, builtins 3x, ry's own ports 3x, GC and start-up 2x.
+- **Why the R code bucket needs a new tier.** Tier 1 runs under 3% of R-level time, because workload closures are called a few thousand times and the tier-up threshold is about 3000 entries. Tuning tier 0 cannot reach 5x.
+- **Owner of each bucket.**
+
+| Bucket | Plan | Owner |
+| --- | --- | --- |
+| R code | Inlining tier (roadmap row (c)) | JIT track |
+| R code | Install-time compilation of 80% or more of package closures | AOT track |
+| Builtins | Builtin programs below 1.5x and data structures (B1, B2); testthat hotspots and strings (C) | B1, B2, C |
+| ry's own ports | Vector d/p/q/r* paths, SIMD across lanes with bit-identical results, batched RNG | B3 |
+| GC | Halve the bucket: tracing young survivors costs about 70 instructions per object, 44 in `Space::mark` | B2 |
+| Start-up | Mapped start-up image (image load and zlib inflate) | D |
+
+- **Inlining tier.**
+  - Hot call sites inline their callees across closure calls, `UseMethod`/`NextMethod` and S4 dispatch, guarded by version-stamped bindings and the receiver's class.
+  - Escape analysis and allocation sinking remove the inlined frames, promises, environments and scalar boxes.
+  - Deoptimization rebuilds the frames, promises, `sys.calls` and `on.exit` that GNU R would show. An observation such as `sys.function`, `parent.frame`, `environment()`, `eval`, `substitute` or `missing` either deoptimizes or is answered from the deoptimization metadata.
+  - Thresholds drop to the hundreds.
+  - Target: the tier-1 share of R-level time goes over 60%. This follows the adopted method-JIT direction in `prior-art.md`; trace compilation stays rejected.
+- **Progress tracking.** Each merge reports the bench-real suites with their intervals, and the bucket shares from `ry run --profile-summary`, against the 3x row.
