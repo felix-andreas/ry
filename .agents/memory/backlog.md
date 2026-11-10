@@ -900,7 +900,7 @@ The rest of the inventory measured cold. The largest hash maps are the large-fra
 id and turn the `Vec<bool>`s into bitsets (B5), and give `precious` the dense layout of row 11
 (B2).
 
-**Allocations per operation against GNU R.** `ops.R`-style loops of 20,000 and 40,000 iterations,
+**Allocations per operation against GNU R.** Loops of 20,000 and 40,000 iterations of each operation,
 differenced. GNU R (4.6.2, its loop byte-compiled) counts `allocVector3`, `CONS_NR`, `cons`,
 `mkPROMISE` and `NewEnvironment` calls under callgrind; ry counts heap objects freed by kind from
 `--profile-summary` and Rust allocator calls under callgrind. Bytes per operation were not
