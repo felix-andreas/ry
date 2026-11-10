@@ -223,6 +223,39 @@ either.
 
 `crates/oracle/cases/environments__argument_references.R` pins these rules.
 
+## Builtin wrappers
+
+Package code is full of closures whose body is one builtin call, such as rlang's
+`node_car <- function(x) { .Call(ffi_node_car, x) }`. A planned call of such a wrapper runs the
+builtin directly (`call_wrapper` in `bytecode.rs`, `eval::run_wrapper`), with no body to
+execute, no promises and no environment.
+
+- **Which bodies.** A slot-table body that is `f(...)` or `{ f(...) }`, where `f` is a builtin
+  found from the closure's environment, and every argument of `f` is a formal, a literal or a
+  variable bound outside any function frame. The closure has no `...` formal, and every default
+  is missing, `NULL` or a constant.
+- **Pin.** The site's plan keeps a pin (the plan's fourth element): the enclosure, each
+  argument's source, and the cell and lookup stamp of each looked-up symbol, `f` first and `{`
+  when the body has braces. A rebinding of any of them changes its stamp, so the next call
+  re-pins. A body that does not qualify is pinned as `NULL` and never analyzed again.
+- **Which calls.** Each argument the call passes must read without running code: a literal, a
+  slot or variable holding a value, a forced promise, or an argument reference that resolves
+  without code. A call argument (`-1` included) or an unforced promise sends the call down the
+  generic path, so laziness is unchanged. A formal the call does not supply takes its constant
+  default. Debugged, stepped or traced closures, the debugger and move tracking also take the
+  generic path.
+- **Frame.** The call still pushes a slot frame for the wrapper, holding the argument values,
+  so `sys.call`, `sys.calls`, `sys.function`, `conditionCall` and native code that calls back
+  into R see the wrapper exactly as they would through the generic path. The builtin gets the
+  inner call (`log(x)`, not the `{` around it) as its call.
+- **Known gap.** Formals hold values rather than promises. Only code that reifies the wrapper's
+  frame and inspects a formal as a promise (`substitute` on that environment from native code)
+  can tell the difference.
+
+`crates/oracle/cases/functions__builtin_wrappers.R` pins these rules with the JIT off, on and
+forced. Measured on a `node_car` loop: 7,751 instructions per call through the generic path,
+6,258 inlined.
+
 ## Checking it
 
 Behind `syntax::testing::enable_invariants()`, reification cross-checks itself: it compares the
