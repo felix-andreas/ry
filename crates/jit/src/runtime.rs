@@ -101,6 +101,9 @@ pub mod outcome {
     pub const OK: i32 = 0;
     pub const FAILED: i32 = 1;
     pub const INVALIDATED: i32 = 2;
+    /// The instruction returned from the activation, leaving the value in its destination
+    /// register: a finished [`interp::bytecode::Op::Prologue`].
+    pub const RETURNED: i32 = 3;
     /// Load results: the slot's new status, or one of these.
     pub const LOAD_FAILED: i32 = 0;
     pub const LOAD_INVALIDATED: i32 = 4;
@@ -458,10 +461,11 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
                     park(activation, unwind);
                     outcome::FAILED
                 }
-                Ok(()) if validate != 0 && !still_valid(compiled(activation), machine, epoch) => {
+                Ok(Some(_)) => outcome::RETURNED,
+                Ok(None) if validate != 0 && !still_valid(compiled(activation), machine, epoch) => {
                     outcome::INVALIDATED
                 }
-                Ok(()) => outcome::OK,
+                Ok(None) => outcome::OK,
             }
         })
     }

@@ -7139,6 +7139,29 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Impact.** The `vapply` case runs at tier 0's speed under `RY_JIT=force` (about 15 µs per
   call of ten elements), and base R's `pmin`, whose body makes such a closure, is no slower with
   the JIT on than off.
+- **Code lives with the body, not in a table.** A closure's body slot holds its compiled code
+  once compiled, and a closure copy (`duplicate`, `environment<-`) takes that code as its body
+  (`body_to_copy`), so copies share compiled code without a body-to-code hash table. `compile` returns `R<Sexp>`: the only
+  by-design refusal is a body that is not a call (`Uncompilable::NotACall`), and anything else is a
+  typed error, never a silent fallback. Closures that the AST evaluator makes from a `function`
+  expression get a fresh body each time and still compile once per closure.
+
+## Fast-path prologues return through an op, not an unwind
+
+- **Previous shape.** A native prologue (`.Internal(ryX())` as a body's first statement) finished
+  the call by raising `Jump::Return`. On a slot frame that materialised a pending environment for
+  the unwind target, and in tier 1 it was a failed step and a deopt: about 11.5k deopts per two
+  repeats of the testthat workload.
+- **Target shape.** The compiler emits `Op::Prologue dst function call` for a zero-argument
+  builtin marked `BuiltinDef::prologue` (not inside promise code). The op sets
+  `interp().prologue` to the running frame (`ClosureFrame::running`), calls the builtin, and
+  `base_fast_paths::finish` returns the value instead of jumping when the frame matches, clearing
+  the marker. The op then returns `Flow::Done`, `step_one` reports `Some(value)` and tier 1 sees
+  `outcome::RETURNED` and returns `dst`. The outer marker is saved and restored, so a prologue
+  inside a prologue's argument works. Prologue builtins use `Visibility::Keep`, because `finish`
+  sets visibility itself.
+- **Impact.** Deopts on the testthat workload fall from about 11.5k to about 2.6k per two repeats;
+  the rest are real condition unwinds (`invokeRestart`, `signalCondition`, `doTryCatch`).
 
 ## Bodies that would mostly hand back to tier 0 compile only for loops
 

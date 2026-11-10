@@ -78,8 +78,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
         crate::heap().root(closure);
         // `cmpfun` compiles at once, as GNU R's does, rather than on the second call: compiled
         // code passes constant arguments as values, which native code such as rlang observes.
-        // A body the compiler rejects stays an expression, as in `run_body`.
-        if let Ok(Some(code)) = compile(closure.cdr(), closure) {
+        if worth_compiling(closure.cdr()) {
+            let code = compile(closure.cdr(), closure)?;
             crate::heap().set_cdr(closure, code);
         }
         Ok(closure)
@@ -103,13 +103,6 @@ pub struct State {
     /// Calls seen per uncompiled body. Keys are only compared, never dereferenced, so a body
     /// that died and whose address was reused merely compiles one call early.
     calls: FxHashMap<Sexp, u32>,
-    /// The code each compiled expression body became, keyed by a structural hash of its formals
-    /// and body. A closure whose formals and body are identical to an entry's (each R6 object's
-    /// copy of a method, each closure an AST-evaluated `function` expression makes, a body rlang
-    /// copied when it captured the expression) adopts the entry's code, so the body compiles
-    /// once and its copies share one profile and one tier-1 compilation. Weak: an entry goes
-    /// when its code or formals die ([`State::clear_dead`]).
-    codes: FxHashMap<u64, Compiled>,
     tier: Option<Tier>,
     pub(crate) call_plans: CallPlans,
 }
@@ -119,7 +112,6 @@ impl Default for State {
         State {
             registers: Vec::with_capacity(REGISTER_FILE_CAPACITY),
             calls: FxHashMap::default(),
-            codes: FxHashMap::default(),
             tier: None,
             call_plans: CallPlans::default(),
         }
@@ -136,10 +128,6 @@ impl State {
 
     pub(crate) unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
         self.call_plans.clear_dead(liveness);
-        let live = |object: Sexp| object == nil() || liveness.is_live(object);
-        self.codes.retain(|_, compiled| {
-            live(compiled.code) && live(compiled.formals) && live(compiled.body)
-        });
     }
 }
 
@@ -383,61 +371,31 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
         return eval::eval(body, env);
     }
     state.calls.remove(&body);
-    match install_code(function, body)? {
-        Some(code) => run(function, code, env),
-        None => eval::eval(body, env),
-    }
+    let code = install_code(function, body)?;
+    run(function, code, env)
 }
 
-/// Gives `function`, whose body `body` is an expression, its compiled code: the code another
-/// closure with this body and these formals already has, else the code its package's image
-/// holds, else a fresh compile. `None` when the compiler rejects the body (an error is its way
-/// of saying so, such as for a `break` outside a loop), which then runs on the AST evaluator.
-unsafe fn install_code(function: Sexp, body: Sexp) -> R<Option<Sexp>> {
-    let formals = function.car();
-    let mut hash = crate::session::FNV_OFFSET;
-    crate::session::stable_hash(formals, &mut hash);
-    crate::session::stable_hash(body, &mut hash);
-    if let Some(&compiled) = interp().bytecode.codes.get(&hash) {
-        // The hash leaves srcrefs out, and the code reports the srcrefs of the body it was
-        // compiled from, so a copy must match them too.
-        let flags = crate::sort::IdenticalFlags {
-            ignore_srcref: false,
-            ..crate::sort::IdenticalFlags::default()
-        };
-        if (compiled.body == body || crate::sort::identical(compiled.body, body, &flags))
-            && (compiled.formals == formals
-                || crate::sort::identical(compiled.formals, formals, &flags))
-        {
-            crate::heap().set_cdr(function, compiled.code);
-            return Ok(Some(compiled.code));
-        }
-    }
+/// Gives `function`, whose body `body` is an expression, its compiled code: the code its
+/// package's image holds, else a fresh compile.
+unsafe fn install_code(function: Sexp, body: Sexp) -> R<Sexp> {
     // A package's code image replaces compiling, at the same call, rather than running code from
     // the first call: decoding costs about as much as compiling, and many closures run only once.
-    let code = match crate::code_image::take_pending(function, body)? {
-        Some(code) => code,
-        None => match compile(body, function) {
-            Ok(Some(code)) => {
-                crate::heap().set_cdr(function, code);
-                code
-            }
-            Ok(None) | Err(_) => return Ok(None),
-        },
-    };
-    interp()
-        .bytecode
-        .codes
-        .insert(hash, Compiled { body, formals, code });
-    Ok(Some(code))
+    if let Some(code) = crate::code_image::take_pending(function, body)? {
+        return Ok(code);
+    }
+    let code = compile(body, function)?;
+    crate::heap().set_cdr(function, code);
+    Ok(code)
 }
 
-/// An entry of [`State::codes`].
-#[derive(Clone, Copy)]
-struct Compiled {
-    body: Sexp,
-    formals: Sexp,
-    code: Sexp,
+/// Why a closure body runs on the AST evaluator rather than as compiled code. It is a property
+/// of the body, not a failure: the compiler takes every call, sending a construct it does not
+/// compile (such as a `break` outside a loop) to the AST evaluator from inside the code, so a
+/// compile that fails is an error.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Uncompilable {
+    /// The body is a constant or a symbol, which evaluating costs less than entering code.
+    NotACall,
 }
 
 /// `function`'s body, compiled first when [`run_body`] would compile it at this call. Binding the
@@ -456,7 +414,8 @@ pub unsafe fn compile_before_call(function: Sexp) -> R<Sexp> {
         return Ok(body);
     }
     state.calls.remove(&body);
-    Ok(install_code(function, body)?.unwrap_or(body))
+    let code = install_code(function, body)?;
+    Ok(code)
 }
 
 /// A closure's body as source: the expression of compiled code.
@@ -469,13 +428,25 @@ pub unsafe fn closure_body(function: Sexp) -> Sexp {
 }
 
 /// A closure's body compiled to byte code, compiling it now if it has not run often enough to
-/// compile yet. A body the compiler cannot handle stays an expression.
-pub unsafe fn compiled_body(function: Sexp) -> R<Sexp> {
+/// compile yet, or why the body stays an expression.
+pub unsafe fn compiled_body(function: Sexp) -> R<Result<Sexp, Uncompilable>> {
     let body = function.cdr();
     if body.kind() == SexpType::Bytecode {
-        return Ok(body);
+        return Ok(Ok(body));
     }
-    Ok(install_code(function, body)?.unwrap_or(body))
+    if !worth_compiling(body) {
+        return Ok(Err(Uncompilable::NotACall));
+    }
+    install_code(function, body).map(Ok)
+}
+
+/// The body a copy of the closure `function` gets: its compiled code, compiled now if it has
+/// none yet, so that the original and all its copies share one code object, one profile and
+/// one tier-1 compilation however many copies run it. R6 copies every method into each object
+/// it creates, and a replacement call such as `environment(f) <- env` duplicates `f` first. A
+/// body that stays an expression is copied as one.
+pub unsafe fn body_to_copy(function: Sexp) -> R<Sexp> {
+    Ok(compiled_body(function)?.unwrap_or(function.cdr()))
 }
 
 /// Compiles, ahead of their first call, the functions `code` defines with `function(...)`
@@ -512,11 +483,9 @@ pub unsafe fn compile_nested_functions(code: Sexp, env: Sexp) -> R<()> {
                     env,
                 )?;
                 crate::heap().root(closure);
-                let compiled = compile(source, closure).ok().flatten();
-                if let Some(compiled) = compiled {
-                    crate::heap().set_element(constants, body, compiled);
-                }
-                compiled
+                let compiled = compile(source, closure)?;
+                crate::heap().set_element(constants, body, compiled);
+                Some(compiled)
             } else {
                 None
             };
@@ -678,6 +647,7 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         srcref: nil(),
         rebinding: None,
         tail_updates: (Vec::new(), nil()),
+        argument: true,
         summary: nil(),
         // Promise code runs on the slots of the frame that made it, so it shares that frame's
         // slot table instead of building its own.
@@ -966,6 +936,10 @@ pub enum Op {
     /// `symbol src`: `symbol <<- src`, which assigns in the first enclosing frame that binds
     /// `symbol`, or in the global environment.
     SuperAssign,
+    /// `dst function call`: the fast-path prologue `.Internal(call)` that opens a body
+    /// (`base_fast_paths.rs`), calling the internal `function`. When the prologue finishes the
+    /// call, the activation returns its value; otherwise `dst` gets `NULL` and the R body runs.
+    Prologue,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its sixth operand.
@@ -980,7 +954,7 @@ pub enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 49] = [
+pub const OPS: [Op; 50] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -1030,6 +1004,7 @@ pub const OPS: [Op; 49] = [
     Op::Fused,
     Op::Unfused,
     Op::SuperAssign,
+    Op::Prologue,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1164,6 +1139,9 @@ struct Compiler {
     cold: Vec<Cold>,
     /// The stored half of the effect-free fact, `NULL` for an argument's code.
     summary: Sexp,
+    /// Whether the code is an argument's rather than a closure's body, which an instruction
+    /// returning from the activation would return from the wrong frame.
+    argument: bool,
     /// The formals in order, when the body's calls keep their variables in slots: the body's
     /// local symbols are known and the formals have no `...`.
     slot_formals: Option<Vec<Sexp>>,
@@ -1288,14 +1266,14 @@ mod fusion {
 
 /// Compiles a closure body, or reports that it is better left to the AST evaluator. The
 /// compiler's vectors are not allocations the R code asked for, so `Rprofmem` does not see them.
-unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
+unsafe fn compile(body: Sexp, function: Sexp) -> R<Sexp> {
     let threshold = crate::heap().swap_report_threshold(usize::MAX);
     let compiled = compile_unreported(body, function);
     crate::heap().swap_report_threshold(threshold);
     compiled
 }
 
-unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
+unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Sexp> {
     let mut formal_symbols = FxHashSet::default();
     let mut formal = function.car();
     while formal.kind() == SexpType::Pairlist {
@@ -1318,6 +1296,7 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         bound: None,
         tail_updates: tail_updates(body, function),
         cold: Vec::new(),
+        argument: false,
         summary: nil(),
         slot_formals: None,
         slots_fixed: false,
@@ -1342,7 +1321,7 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
     let slot = compiler.cache();
     compiler.summary =
         effects::summarize(function.car(), body, compiler.local_symbols.as_ref(), slot)?;
-    compiler.assemble(body).map(Some)
+    compiler.assemble(body)
 }
 
 /// The symbols a call frame of a closure with `formals` and `body` can bind, or `None` when the
@@ -3509,6 +3488,12 @@ impl Compiler {
                     return self.fallback(call, dst);
                 };
                 let inner_args = values::pairlist_items(inner.cdr());
+                if eval::builtin_def(function)?.prologue && inner_args.is_empty() && !self.argument {
+                    let function = self.constant(function);
+                    let inner = self.constant(inner);
+                    self.emit(Op::Prologue, &[dst, function, inner]);
+                    return Ok(());
+                }
                 let mark = self.next_register;
                 let function_register = self.allocate();
                 let constant = self.constant(function);
@@ -4234,7 +4219,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::Guard => 5,
         Op::Jump | Op::Resume => 1,
         Op::Missing | Op::SuperAssign => 2,
-        Op::JumpUnless => 3,
+        Op::JumpUnless | Op::Prologue => 3,
         Op::Arithmetic => 7,
         Op::Return => 1,
         Op::ForInit => 3,
@@ -4395,6 +4380,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::Return | Op::ForEnd => &[Register],
         Op::Missing => &[Register, Symbol],
         Op::SuperAssign => &[Symbol, Register],
+        Op::Prologue => &[Register, Constant, Call],
         Op::ForInit => &[Loop, Register, Constant],
         Op::ForStep => &[Loop, Register, Symbol, Target],
         Op::Invisible | Op::Visible => &[],
@@ -5043,9 +5029,14 @@ unsafe fn loop_target(loops: Sexp, pc: usize, is_break: bool) -> Option<usize> {
 }
 
 /// Runs the one instruction at `pc` for the optimizing tier, which calls it for instructions it
-/// does not specialize. It must not be a jump, a branch, `Return` or a loop instruction.
-pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<()> {
-    interpret::<true>(machine, pc).0.map(|_| ())
+/// does not specialize. It must not be a jump, a branch, `Return` or a loop instruction. Answers
+/// the value the activation returns when the instruction returns from it, as a finished
+/// [`Op::Prologue`] does.
+pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> {
+    match interpret::<true>(machine, pc) {
+        (Ok(value), STOP) => Ok(Some(value)),
+        (result, _) => result.map(|_| None),
+    }
 }
 
 /// Where an activation stands after [`step`] ran one of its instructions.
@@ -5589,6 +5580,7 @@ handlers! {
     run_logic_left, step_logic_left: LogicLeft, true, op_logic_left;
     run_logic_right, step_logic_right: LogicRight, true, op_logic_right;
     run_closure, step_closure: Closure, true, op_closure;
+    run_prologue, step_prologue: Prologue, true, op_prologue;
     run_sub_assign, step_sub_assign: SubAssign, true, op_sub_assign;
     run_sub_assign_matrix, step_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
     run_replace, step_replace: Replace, true, op_replace;
@@ -6279,6 +6271,27 @@ unsafe fn positional_arguments(mut cell: Sexp) -> bool {
         cell = cell.cdr();
     }
     true
+}
+
+#[inline(always)]
+unsafe fn op_prologue(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let function = state.constant(instruction, 1);
+    let call = state.constant(instruction, 2);
+    let env = *state.header;
+    let frame = crate::base_fast_paths::ClosureFrame::running(env, interp().slot_owner);
+    // The prologue may run R code that runs other prologues, each of which puts back the frame
+    // it found.
+    let outer = interp().prologue.replace(frame);
+    let result = call_builtin(eval::builtin_def(function)?, call, function, &[], env);
+    let finished = interp().prologue.is_none();
+    interp().prologue = outer;
+    let value = result?;
+    instruction.output(0, value);
+    Ok(if finished {
+        Flow::Done(value)
+    } else {
+        Flow::Next
+    })
 }
 
 #[inline(always)]
@@ -8623,12 +8636,9 @@ unsafe fn op_closure(state: &mut Activation<'_, '_>, instruction: Instruction) -
     // every other call. The code depends on the formals and body only: its inline caches and the
     // optimizing tier both check the enclosure they were filled for.
     if body.kind() != SexpType::Bytecode && worth_compiling(body) {
-        // A body the compiler rejects (an error is its way of saying so, such as for a `break`
-        // outside a loop) stays source, which the AST evaluator runs.
-        if let Ok(Some(code)) = compile(body, closure) {
-            (*state.heap).set_element(state.constants, instruction.operand(2), code);
-            (*state.heap).set_cdr(closure, code);
-        }
+        let code = compile(body, closure)?;
+        (*state.heap).set_element(state.constants, instruction.operand(2), code);
+        (*state.heap).set_cdr(closure, code);
     }
     instruction.output(0, closure);
     (*state.interp).visible = true;

@@ -1346,7 +1346,8 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
             list
         }
         SexpType::Closure => {
-            let copy = triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?;
+            let body = crate::bytecode::body_to_copy(object)?;
+            let copy = triple(SexpType::Closure, object.car(), body, object.tag())?;
             // The copy captures the same frame, so a move must count it as it counts the original.
             crate::moves::created_closure(copy)?;
             copy

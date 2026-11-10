@@ -888,6 +888,11 @@ pub enum Action<'a> {
         args: &'a [Argument],
         dst: usize,
     },
+    /// Runs a fast-path prologue in tier 0 as an opaque step, returning its value from compiled
+    /// code when it finishes the call.
+    Prologue {
+        dst: usize,
+    },
     /// Runs the instruction in tier 0, then refines its destination register.
     Step {
         effect: Effect,
@@ -1276,7 +1281,8 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::SetSrcref
             | Op::Resume
             | Op::Fused
-            | Op::Unfused => false,
+            | Op::Unfused
+            | Op::Prologue => false,
         };
         native += usize::from(counts);
         pc += 1 + count;
@@ -2254,6 +2260,10 @@ impl<'a> Builder<'a> {
                 Effect::Opaque,
             ),
             Op::CallBuiltin => self.call_builtin(&inst, state)?,
+            Op::Prologue => {
+                self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Opaque);
+                Action::Prologue { dst: operand(0) }
+            }
             // Only tier 0 decides whether the binding owns the value it updates in place.
             Op::CallBuiltinRebinding => self.opaque_step(
                 state,
@@ -4170,9 +4180,13 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
     let kill = |register: usize, live: &mut [u64]| set_bit(live, register, false);
     let gen_ = |register: usize, live: &mut [u64]| set_bit(live, register, true);
     match inst.op {
-        Op::Constant | Op::GetVar | Op::GetFun | Op::Ast | Op::Closure | Op::Missing => {
-            kill(operand(0), live)
-        }
+        Op::Constant
+        | Op::GetVar
+        | Op::GetFun
+        | Op::Ast
+        | Op::Closure
+        | Op::Missing
+        | Op::Prologue => kill(operand(0), live),
         Op::SetVar | Op::SuperAssign => gen_(operand(1), live),
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             gen_(operand(0), live)

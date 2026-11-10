@@ -42,6 +42,7 @@ use {
         values,
     },
     runtime::{Activation, Compiled, MAX_COLD_REFUSALS, MAX_COMPILES},
+    smallvec::{SmallVec, smallvec},
     std::{
         cell::{Cell, RefCell},
         ffi::c_void,
@@ -745,7 +746,9 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         }
         std::slice::from_raw_parts_mut(bytecode::register_address(cells), compiled.slots.len())
             .fill(values::nil());
-        let mut loops = vec![0i64; runtime::LOOP_WORDS * compiled.loops];
+        // Most compiled bodies have at most a few loops, so their state lives on the stack.
+        let mut loops: SmallVec<[i64; 4 * runtime::LOOP_WORDS]> =
+            smallvec![0; runtime::LOOP_WORDS * compiled.loops];
         for (words, state) in loops
             .chunks_exact_mut(runtime::LOOP_WORDS)
             .zip(machine.loops.iter())

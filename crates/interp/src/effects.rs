@@ -235,7 +235,7 @@ pub unsafe fn effect_free(function: Sexp) -> R<bool> {
 /// symbol's stamp.
 pub unsafe fn effect_free_lookups(function: Sexp) -> R<Option<Vec<Speculation>>> {
     let mut found = Vec::new();
-    if bytecode::compiled_body(function)?.kind() != SexpType::Bytecode
+    if bytecode::compiled_body(function)?.is_err()
         || !resolve(function, &mut found, &mut SmallVec::new())?
     {
         return Ok(None);
@@ -443,7 +443,7 @@ unsafe fn resolve(
         };
         let callee = speculation.function;
         let safe = if callee.kind() == SexpType::Closure {
-            bytecode::compiled_body(callee)?.kind() == SexpType::Bytecode
+            bytecode::compiled_body(callee)?.is_ok()
                 && resolve(callee, found, visiting)?
         } else {
             match base_builtin(callee, symbol) {

@@ -963,8 +963,9 @@ unsafe fn compiled_code(closure: Sexp, body: Sexp, trained: bool) -> Result<Vec<
         return Err(Unencodable("a body replaced after loading"));
     }
     let code = match bytecode::compiled_body(closure) {
-        Ok(code) if code.kind() == SexpType::Bytecode => code,
-        _ => return Err(Unencodable("a body the compiler declines")),
+        Ok(Ok(code)) => code,
+        Ok(Err(_)) => return Err(Unencodable("a body the compiler declines")),
+        Err(_) => return Err(Unencodable("a body whose compile raised an error")),
     };
     if bytecode::compile_nested_functions(code, closure.tag()).is_err() {
         return Err(Unencodable("a nested function the compiler declines"));

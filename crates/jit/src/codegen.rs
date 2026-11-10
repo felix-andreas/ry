@@ -632,6 +632,34 @@ impl<'p> Translator<'p> {
                 objects,
                 dst,
             } => self.step(position, &before, effect, objects, dst)?,
+            Action::Prologue { dst } => {
+                self.box_reads(position, &before);
+                let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
+                self.flush_all(&before, failed);
+                let validate = self.builder.ins().iconst(I32, 1);
+                let result = self.call_step(pc, validate)?;
+                let after = self.after_with_boxed(position, Some(dst))?;
+                let next = self.next_pc(position)?;
+                let invalidated =
+                    self.deopt(next, after.0, after.1, position + 1, reason::SPECULATION);
+                let returned = self.builder.create_block();
+                let declined = self.builder.create_block();
+                let finished =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, result, outcome::RETURNED as i64);
+                self.builder
+                    .ins()
+                    .brif(finished, returned, &[], declined, &[]);
+                self.builder.switch_to_block(returned);
+                let value = self.load_register(dst);
+                self.builder.ins().return_(&[value]);
+                self.builder.switch_to_block(declined);
+                let continued = self.builder.create_block();
+                self.branch_on_outcome(result, continued, failed, invalidated);
+                self.builder.switch_to_block(continued);
+                self.forget_slots();
+            }
             Action::Branch => {
                 let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
                 let label = self.edge(position, target)?;
