@@ -610,8 +610,10 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   (`just start-image`) writes it again over a built tree, and so does assembling an R home
   (`ry-rcmd assemble`) when the given `libR` cannot load the base tree's image: the home links
   that image, so a stale one would make every start in the home slow. `libR` exports
-  `ry_start_image_current`, which applies the loader's own format and identity checks, and a
-  lock file in the base tree (`.start-image.lock`) makes homes assembled at once take turns.
+  `ry_start_image_current`, which applies the loader's own format and identity checks. A current
+  image is only read, so a home assembles over a read-only base tree. A stale one is rewritten
+  under a lock file in the base tree (`.start-image.lock`), so homes assembled at once take
+  turns, and over a base tree that cannot be written, assembly fails and names `just start-image`.
 - **Base code images.** Right after the start image, the same step starts a session from it,
   fetches every record of every lazy-load database of the base-priority packages by its key
   (start-up has already forced some bindings, so forcing bindings would miss their records), and
