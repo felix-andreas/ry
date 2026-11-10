@@ -445,20 +445,6 @@ pub unsafe fn slot_promise(owner: usize, expression: Sexp) -> R<Sexp> {
     Ok(promise)
 }
 
-/// The pending environment of the slot frame at `owner`, made bare on first use: it gets the
-/// frame's bindings only if the frame reifies, and is the frame's environment from then on.
-unsafe fn pending_env(owner: usize) -> R<Sexp> {
-    let env = interp().frames[owner].pending;
-    if env != nil() {
-        return Ok(env);
-    }
-    let function = interp().frames[owner].function;
-    let env = frame_environment(function, function.car())?;
-    env.set_gp_bits(gp::PENDING_FRAME, true);
-    interp().frames[owner].pending = env;
-    Ok(env)
-}
-
 /// A closure of `formals` and `body` defined in the slot frame whose header register is
 /// `header`, which has no environment yet. The closure's environment is the frame's pending
 /// one, so defining it leaves the frame in its slots: anything that reads the environment's
