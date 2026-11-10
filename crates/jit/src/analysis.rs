@@ -1344,13 +1344,15 @@ fn native(action: &Action<'_>) -> bool {
 /// Builds the plan for `code`, a closure body whose environment's enclosure is `enclosure`, in
 /// `arena`. A `patient` plan refuses as [`COLD`] when an instruction whose result type matters
 /// has never run, because code compiled without that type runs the instruction in tier 0 for
-/// as long as it lives.
+/// as long as it lives. A `shared` plan speculates only on lookups that every enclosure resolves
+/// the same way (see `runtime::SHARED`).
 pub unsafe fn plan<'a>(
     arena: Arena<'a>,
     code: Sexp,
     formals: Sexp,
     enclosure: Sexp,
     patient: bool,
+    shared: bool,
 ) -> Result<Plan<'a>, Refusal> {
     let constants = code.cdr();
     let source = constants.element(bytecode::SOURCE);
@@ -1365,6 +1367,7 @@ pub unsafe fn plan<'a>(
         arena,
         code,
         enclosure,
+        shared,
         feedback: values::ints(constants.element(FEEDBACK)),
         insts,
         slot_of: Map::with_hasher_in(FxBuildHasher, arena),
@@ -1598,6 +1601,7 @@ struct Builder<'a> {
     arena: Arena<'a>,
     code: Sexp,
     enclosure: Sexp,
+    shared: bool,
     feedback: &'a [i32],
     insts: List<'a, Inst<'a>>,
     slot_of: Map<'a, Sexp, usize>,
@@ -2791,7 +2795,8 @@ impl<'a> Builder<'a> {
                 if symbol.kind() != SexpType::Symbol || self.locals.contains(&symbol) {
                     return None;
                 }
-                let found = resolve_variable(symbol, self.enclosure)?;
+                let found =
+                    resolve_variable(symbol, self.enclosure).filter(|found| self.portable(found))?;
                 let function = found.function;
                 expected = Some((callback, function));
                 speculation = Some(found);
@@ -3531,7 +3536,8 @@ impl<'a> Builder<'a> {
             None => self.speculate(symbol),
             Some(env) if env == self.enclosure => self.speculate(symbol),
             Some(env) => {
-                let speculation = resolve_function(symbol, env)?;
+                let speculation =
+                    resolve_function(symbol, env).filter(|found| self.portable(found))?;
                 let function = speculation.function;
                 self.speculations.push(speculation);
                 Some(function)
@@ -3785,14 +3791,23 @@ impl<'a> Builder<'a> {
             return safe;
         }
         let safe = match effects::effect_free_lookups(function) {
-            Ok(Some(lookups)) => {
+            Ok(Some(lookups)) if lookups.iter().all(|lookup| self.portable(lookup)) => {
                 self.speculations.extend(lookups);
                 true
             }
-            Ok(None) | Err(_) => false,
+            Ok(_) | Err(_) => false,
         };
         self.frame_safe.insert(function, safe);
         safe
+    }
+
+    /// Whether a shared plan may keep `speculation`: the lookup starts from the enclosure or a
+    /// long-lived environment and ends in a long-lived one, so it resolves the same way from
+    /// every enclosure that shares the code. A plan that is not shared keeps every speculation.
+    unsafe fn portable(&self, speculation: &Speculation) -> bool {
+        !self.shared
+            || ((speculation.env == self.enclosure || crate::long_lived(speculation.env))
+                && crate::owner(speculation).is_some_and(|env| crate::long_lived(env)))
     }
 
     /// Whether the activation's own frame may bind `symbol`.
@@ -3806,7 +3821,8 @@ impl<'a> Builder<'a> {
         if let Some(found) = self.speculated.get(&symbol) {
             return *found;
         }
-        let found = resolve_function(symbol, self.enclosure);
+        let found = resolve_function(symbol, self.enclosure)
+            .filter(|speculation| self.portable(speculation));
         let function = found.as_ref().map(|speculation| speculation.function);
         if let Some(speculation) = found {
             self.speculations.push(speculation);

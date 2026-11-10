@@ -100,9 +100,13 @@ pub struct State {
     /// Allocated once at [`REGISTER_FILE_CAPACITY`] and never grown past it, so a register
     /// window's address is stable for as long as the window exists.
     pub(crate) registers: Vec<Sexp>,
-    /// Calls seen per uncompiled body. Keys are only compared, never dereferenced, so a body
-    /// that died and whose address was reused merely compiles one call early.
-    calls: FxHashMap<Sexp, u32>,
+    /// Each expression body a closure has run: its calls until it compiles, then its code.
+    /// The closures one `function` expression makes each time the AST evaluator runs it share
+    /// that body, and finding the code here gives each the same code object, profile and
+    /// tier-1 compilation instead of compiling the body again. Keys are only compared, never
+    /// dereferenced, so a body that died and whose address was reused merely compiles one call
+    /// early.
+    bodies: FxHashMap<Sexp, Body>,
     tier: Option<Tier>,
     pub(crate) call_plans: CallPlans,
 }
@@ -111,7 +115,7 @@ impl Default for State {
     fn default() -> State {
         State {
             registers: Vec::with_capacity(REGISTER_FILE_CAPACITY),
-            calls: FxHashMap::default(),
+            bodies: FxHashMap::default(),
             tier: None,
             call_plans: CallPlans::default(),
         }
@@ -123,12 +127,34 @@ impl State {
         for &register in &self.registers {
             marker.mark(register);
         }
+        for body in self.bodies.values() {
+            if let Body::Code { pair, formals, srcref } = *body {
+                marker.mark(pair);
+                marker.mark(formals);
+                marker.mark(srcref);
+            }
+        }
         self.call_plans.trace(marker);
     }
 
     pub(crate) unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
         self.call_plans.clear_dead(liveness);
+        self.bodies.retain(|_, body| match *body {
+            Body::Calls(_) => true,
+            Body::Code { pair, .. } => unsafe { liveness.is_live(pair.weak_key()) },
+        });
     }
+}
+
+#[derive(Clone, Copy)]
+enum Body {
+    Calls(u32),
+    /// `pair` is a weak reference from the body to its code, which keeps the code while the
+    /// body lives although no closure runs it, as between two runs of a test block, and does
+    /// not keep the body alive through the code's reference to its source. Compiling reads the
+    /// formals and the srcref, so a closure over the same body with other formals (from
+    /// `as.function`, say) compiles its own code.
+    Code { pair: Sexp, formals: Sexp, srcref: Sexp },
 }
 
 /// The register file holds this many registers across all active frames. Deep recursion runs
@@ -357,20 +383,24 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
         return eval::eval(body, env);
     }
     let state = &mut interp().bytecode;
-    let calls = state.calls.entry(body).or_insert(0);
-    *calls += 1;
+    let calls = match state.bodies.entry(body).or_insert(Body::Calls(0)) {
+        Body::Calls(calls) => {
+            *calls += 1;
+            *calls
+        }
+        Body::Code { .. } => COMPILE_AFTER_CALLS,
+    };
     // A body with a loop pays for compiling within its first call, as GNU R's JIT assumes, and
     // so does a typed one, whose signature lets the JIT compile it at that call too.
-    if *calls < COMPILE_AFTER_CALLS
+    if calls < COMPILE_AFTER_CALLS
         && !contains_loop(body, LOOP_SEARCH_DEPTH)
         && !crate::annotations::is_typed(function)
     {
-        if state.calls.len() > MAX_TRACKED_BODIES {
-            state.calls.clear();
+        if state.bodies.len() > MAX_TRACKED_BODIES {
+            state.bodies.retain(|_, body| matches!(body, Body::Code { .. }));
         }
         return eval::eval(body, env);
     }
-    state.calls.remove(&body);
     let code = install_code(function, body)?;
     run(function, code, env)
 }
@@ -378,13 +408,31 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
 /// Gives `function`, whose body `body` is an expression, its compiled code: the code its
 /// package's image holds, else a fresh compile.
 unsafe fn install_code(function: Sexp, body: Sexp) -> R<Sexp> {
-    // A package's code image replaces compiling, at the same call, rather than running code from
-    // the first call: decoding costs about as much as compiling, and many closures run only once.
-    if let Some(code) = crate::code_image::take_pending(function, body)? {
+    let heap = crate::heap();
+    let formals = function.car();
+    let srcref = values::get_attr(function, symbols().srcref);
+    if let Some(&Body::Code { pair, formals: compiled_formals, srcref: compiled_srcref }) =
+        interp().bytecode.bodies.get(&body)
+        && compiled_formals == formals
+        && compiled_srcref == srcref
+    {
+        let code = pair.weak_value();
+        heap.set_cdr(function, code);
         return Ok(code);
     }
-    let code = compile(body, function)?;
-    crate::heap().set_cdr(function, code);
+    // A package's code image replaces compiling, at the same call, rather than running code from
+    // the first call: decoding costs about as much as compiling, and many closures run only once.
+    let code = match crate::code_image::take_pending(function, body)? {
+        Some(code) => code,
+        None => {
+            let code = compile(body, function)?;
+            heap.set_cdr(function, code);
+            code
+        }
+    };
+    let pair = heap
+        .alloc_weak_ref(body, code, values::nil(), 0, false)?;
+    interp().bytecode.bodies.insert(body, Body::Code { pair, formals, srcref });
     Ok(code)
 }
 
@@ -408,12 +456,14 @@ pub unsafe fn compile_before_call(function: Sexp) -> R<Sexp> {
     if !worth_compiling(body) {
         return Ok(body);
     }
-    let state = &mut interp().bytecode;
-    let calls = state.calls.get(&body).copied().unwrap_or(0);
+    let calls = match interp().bytecode.bodies.get(&body) {
+        Some(Body::Calls(calls)) => *calls,
+        Some(Body::Code { .. }) => COMPILE_AFTER_CALLS,
+        None => 0,
+    };
     if calls + 1 < COMPILE_AFTER_CALLS && !contains_loop(body, LOOP_SEARCH_DEPTH) {
         return Ok(body);
     }
-    state.calls.remove(&body);
     let code = install_code(function, body)?;
     Ok(code)
 }
@@ -5282,7 +5332,10 @@ type Handler = unsafe fn(&mut Activation<'_, '_>, usize);
 #[inline(always)]
 unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) -> (R<Sexp>, usize) {
     let constants = machine.code.cdr();
-    let feedback = if values::ints(constants.element(PROFILE))[profile::RECORDING] != 0 {
+    // An instruction compiled code hands back runs here one at a time, and its result is what a
+    // failed speculation on it saw. Recording it always lets the recompile see that type, which
+    // the deoptimized activation resuming after the instruction never records.
+    let feedback = if SINGLE || values::ints(constants.element(PROFILE))[profile::RECORDING] != 0 {
         values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
     } else {
         std::ptr::null_mut()

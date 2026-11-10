@@ -7143,8 +7143,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   once compiled, and a closure copy (`duplicate`, `environment<-`) takes that code as its body
   (`body_to_copy`), so copies share compiled code without a body-to-code hash table. `compile` returns `R<Sexp>`: the only
   by-design refusal is a body that is not a call (`Uncompilable::NotACall`), and anything else is a
-  typed error, never a silent fallback. Closures that the AST evaluator makes from a `function`
-  expression get a fresh body each time and still compile once per closure.
+  typed error, never a silent fallback. Closures that the AST evaluator makes from one `function`
+  expression share their body object, and find its code through the entry the call counter
+  already keeps per body (see "Tier 1 compile throughput" below).
 
 ## Fast-path prologues return through an op, not an unwind
 
@@ -8706,3 +8707,44 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Target shape.** `docs/src/lib/benchmarks.ts` (site) and `tools/bench/readme.py` (READMEs) render every number, with the same rules: one too-short floor (GNU R under 0.1 s, left out of every geometric mean), only `kind == "workload"` rows count as application workloads, and every chart, table, summary and README block carries the metadata line (date, ry commit, GNU R version, machine, rounds). `just bench-readme --check` in `just gate` catches drift. The suites are named "Numeric kernels" and "Application workloads", both marked "(ours)", and typed is a column, not a suite.
 - **Why GNU R's time.** It measures how much work a program does. A short ry time is the speed-up being measured, so flagging it would drop `fib` and every typed loop for being fast.
 - **Impact.** Prose names categories rather than figures, so a fresh `--write` cannot leave the text contradicting the charts.
+
+## Tier 1 compile throughput: linear SSA construction and one compile per body
+
+- **Measured on the testthat workload** (`RY_JIT=force`, two warm repeats): 799 compiles and
+  about 4.0 s of codegen before, 709 compiles and 3.1 s after. Bodies under 250 words cost about
+  10 µs per word, almost all of it Cranelift's fixed cost per function; bodies over 3,000 words
+  cost about 17 µs per word and are 12 compiles taking 1.8 s.
+- **SSA construction was superlinear.** `ssa::Builder` resolves variables only when
+  `seal_all_blocks` runs, and every block between a use and its definition got a parameter that
+  trivial-parameter removal then deleted. For `[<-.data.frame` (14,819 words, 10k blocks) that
+  was 420k parameters created for 3.9k kept. `read_variable` now walks single-predecessor chains
+  once the predecessors are known, which creates 99k and keeps the same 3.9k; translation went
+  from 95 to 54 ms.
+- **Cranelift is the rest.** For the same body (70k instructions) it spends 0.22 s: register
+  allocation 0.14, e-graph 0.04, lowering 0.02. Its cost per instruction grows from about 1 µs
+  at 7k instructions to 2 µs at 70k, in register allocation. The IR is dominated by variable
+  loads (253 `GetVar` sites, about 100 instructions each from the inline lookup and its deopt
+  paths) and deopt exits (1,209 at about 20 instructions each). No size cap: shrinking those two
+  is the next lever.
+- **Why one body compiled up to four times**, each fixed at its source:
+  - A failed speculation on an instruction compiled code steps through tier 0 was never recorded
+    as feedback, so each recompile made the same bet. `interpret::<SINGLE>` records always.
+  - `long_lived` counted any environment whose parent is the base namespace, which includes every
+    call frame of a base function, so code speculating on `tryCatch`'s local functions was
+    portable and failed its proof in every other frame. It now needs the `name` attribute an
+    imports environment has.
+  - The slot check of a closure a slot frame made compared the closure's environment with the
+    frame's, which is nil until the frame reifies; the closure holds the frame's pending
+    environment (`eval::pending_env_of`).
+  - Code that speculates on a function local to its enclosure dies with that enclosure. The
+    first time a body's code meets a second enclosure, the tier state gets `runtime::SHARED`, and
+    its compiles keep only speculations that every enclosure resolves the same way, so one
+    portable compile serves every call of `tryCatch` and friends. A body that only one long call
+    runs keeps its per-enclosure speculations.
+  - Closures the AST evaluator makes from one `function` expression share the body object, and
+    `bytecode::State::bodies` (the per-body call counter) holds that body's code once compiled,
+    through a weak reference keyed on the body, so the code lives exactly as long as its source.
+    Formals and srcref must match too, since compiling reads them. Residual: rlang's argument
+    capture (`expect_equal(f(vapply(..., function(r) ...)))`) hands back a copied expression, so
+    such a lambda still compiles once per test block (73 small compiles, about 40 ms).
+

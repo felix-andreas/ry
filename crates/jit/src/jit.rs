@@ -349,11 +349,26 @@ unsafe fn compiled_for<'a>(
                 }
                 return Some(compiled);
             }
+            let counters = values::ints_mut(constants.element(PROFILE));
             if tier1.external_protected().weak_key() != values::nil() {
                 let compiled = &*(tier1.external_address() as *const Compiled);
                 // Closures made by one `function` expression share their body but not their
-                // enclosure, which the compiled lookups are specialized to.
-                return (compiled.enclosure == machine.enclosure()).then_some(compiled);
+                // enclosure, which the compiled lookups are specialized to. The first time
+                // another enclosure runs the body, the code gives way to a portable compile.
+                if compiled.enclosure == machine.enclosure() {
+                    return Some(compiled);
+                }
+                if counters[profile::TIER_STATE] < 0
+                    || counters[profile::TIER_STATE] & runtime::SHARED != 0
+                {
+                    return None;
+                }
+                counters[profile::TIER_STATE] |= runtime::SHARED;
+                runtime::invalidate(machine.code);
+                return None;
+            }
+            if counters[profile::TIER_STATE] >= 0 {
+                counters[profile::TIER_STATE] |= runtime::SHARED;
             }
             // The enclosure the code was compiled for died, and no activation can still run the
             // code, because a running one keeps its enclosure reachable. The address is cleared
@@ -531,12 +546,14 @@ unsafe fn compile_in<'a>(
             return Err(Refusal(analysis::RARE));
         }
         let started = Instant::now();
+        let state = values::ints(machine.code.cdr().element(PROFILE))[profile::TIER_STATE];
         let plan = analysis::plan(
             analysis::Arena(arena),
             machine.code,
             machine.function.car(),
             enclosure,
             patient,
+            state >= 0 && state & runtime::SHARED != 0,
         )?;
         let planned = started.elapsed();
         // Forced compilation keeps such bodies, so the differential tests cover the code that
@@ -693,12 +710,16 @@ unsafe fn compile_in<'a>(
 
 /// Whether `env` lives as long as the session normally does: the global and base environments,
 /// a namespace, a namespace's imports, or an environment on the search path.
-unsafe fn long_lived(env: Sexp) -> bool {
+pub(crate) unsafe fn long_lived(env: Sexp) -> bool {
     unsafe {
         let known = heap().known();
+        // A namespace's imports environment has the base namespace as its parent and a `name`
+        // attribute. A call frame of a base function has the same parent but no attributes,
+        // and holds a fresh binding of each local function on every call.
         if env == known.global_env
             || env == known.base_env
-            || env.enclosure() == known.base_namespace
+            || (env.enclosure() == known.base_namespace
+                && values::get_attr(env, values::symbols().name) != values::nil())
             || interp::envir::is_namespace(env)
         {
             return true;
@@ -715,7 +736,7 @@ unsafe fn long_lived(env: Sexp) -> bool {
 }
 
 /// The environment whose frame holds the binding a speculation found.
-unsafe fn owner(speculation: &analysis::Speculation) -> Option<Sexp> {
+pub(crate) unsafe fn owner(speculation: &analysis::Speculation) -> Option<Sexp> {
     unsafe {
         let heap = heap();
         let empty = heap.known().empty_env;

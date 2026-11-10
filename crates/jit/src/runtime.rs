@@ -332,6 +332,12 @@ pub const SIZE_WAITED: i32 = 1 << 17;
 /// in four bits from here, so each attempt can wait twice as long as the one before.
 pub const RARE_REFUSAL: i32 = 1 << 18;
 
+/// A tier state flag: the body's code, compiled for one enclosure, met another, as the
+/// functions one `function` expression makes on each call of its parent do. Its compiles then
+/// speculate only on lookups every such enclosure resolves the same way, so that one portable
+/// compilation serves them all instead of one per enclosure.
+pub const SHARED: i32 = 1 << 22;
+
 pub fn rare_refusals(state: i32) -> i32 {
     (state / RARE_REFUSAL) & 0xf
 }
@@ -631,9 +637,16 @@ pub unsafe extern "C" fn jit_closure_matches(
             ) else {
                 return 0;
             };
+            let machine = machine(activation);
+            // A closure a slot frame makes holds the frame's pending environment, which becomes
+            // the frame's environment, as the same object, once something reads it.
+            let env = match machine.env() {
+                env if env == values::nil() => eval::pending_env_of(machine.header),
+                env => env,
+            };
             let matches = value.kind() == SexpType::Closure
                 && value.car() == formals
-                && value.tag() == machine(activation).env()
+                && value.tag() == env
                 && bytecode::closure_body(value) == body;
             matches as i32
         })

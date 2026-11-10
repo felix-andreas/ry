@@ -2398,6 +2398,16 @@ pub unsafe fn slot_frame_env(header: usize, cause: Reify) -> R<Sexp> {
     frame_env(index, cause)
 }
 
+/// The environment that stands for the slot frame whose header register is `header` while it
+/// has none: the pending one its closures hold, or `nil` when it made none.
+pub unsafe fn pending_env_of(header: usize) -> Sexp {
+    let frames = &interp().frames;
+    frames
+        .iter()
+        .rposition(|frame| frame.slots as usize == header)
+        .map_or(nil(), |index| frames[index].pending)
+}
+
 /// Gives the slot frame at `index` its environment: one binding cell per bound slot, formals
 /// first and with their missing flags, exactly as [`bind_arguments`] and the assignments since
 /// would have bound them. The environment is the frame's from then on, so the slots give up

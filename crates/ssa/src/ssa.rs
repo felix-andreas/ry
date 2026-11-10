@@ -493,6 +493,8 @@ pub struct Builder {
     /// A zero of each type at the top of the entry block, which a variable read before any
     /// definition yields.
     zeros: FxHashMap<Type, Value>,
+    /// Each block's incoming edges, known once [`Builder::seal_all_blocks`] starts.
+    predecessors: Vec<SmallVec<[(Inst, u8); 2]>>,
 }
 
 impl Builder {
@@ -503,6 +505,7 @@ impl Builder {
             variables: Vec::new(),
             definitions: FxHashMap::default(),
             zeros: FxHashMap::default(),
+            predecessors: Vec::new(),
         }
     }
 
@@ -626,8 +629,9 @@ impl Builder {
     /// Resolves every variable read into a definition or a block parameter, then removes the
     /// parameters that always receive the same value. Call it once, after the last instruction.
     pub fn seal_all_blocks(&mut self) {
-        let mut predecessors: Vec<SmallVec<[(Inst, u8); 2]>> =
-            vec![SmallVec::new(); self.function.blocks.len()];
+        let mut predecessors = std::mem::take(&mut self.predecessors);
+        predecessors.clear();
+        predecessors.resize(self.function.blocks.len(), SmallVec::new());
         for block in &self.function.blocks {
             let Some(&last) = block.insts.last() else {
                 continue;
@@ -638,6 +642,7 @@ impl Builder {
                 }
             }
         }
+        self.predecessors = predecessors;
         let mut pending: Vec<(Block, usize)> = Vec::new();
         for (index, block) in self.function.blocks.iter().enumerate() {
             pending
@@ -655,7 +660,11 @@ impl Builder {
             else {
                 continue;
             };
-            let edges = predecessors.get(block.index()).cloned().unwrap_or_default();
+            let edges = self
+                .predecessors
+                .get(block.index())
+                .cloned()
+                .unwrap_or_default();
             for (branch, edge) in edges {
                 let Some(&owner) = self.function.owners.get(branch.index()) else {
                     continue;
@@ -674,6 +683,7 @@ impl Builder {
                 }
             }
         }
+        let predecessors = std::mem::take(&mut self.predecessors);
         self.remove_trivial_params(&predecessors);
     }
 
@@ -683,6 +693,7 @@ impl Builder {
         self.current = None;
         self.definitions.clear();
         self.zeros.clear();
+        self.predecessors.clear();
         std::mem::replace(&mut self.function, Function::new(signature))
     }
 
@@ -705,25 +716,59 @@ impl Builder {
 
     /// The value `variable` holds at the end of `block`, adding a parameter to `block` when no
     /// definition there decides it. A new parameter goes on `pending` for its arguments.
+    ///
+    /// Once the predecessors are known, a block with a single predecessor takes the value from
+    /// it instead of getting a parameter. Without that walk every block between a use and its
+    /// definition gets a parameter that trivial-parameter removal deletes again, which makes
+    /// construction cost grow with blocks times variables instead of with the merges.
     fn read_variable(
         &mut self,
         variable: Variable,
         block: Block,
         pending: &mut Vec<(Block, usize)>,
     ) -> Value {
-        if let Some(&value) = self.definitions.get(&(variable, block)) {
-            return value;
-        }
         let ty = self
             .variables
             .get(variable.index())
             .copied()
             .unwrap_or(Type::I64);
-        if Some(block) == self.function.entry {
-            let zero = self.zero(ty);
-            self.definitions.insert((variable, block), zero);
-            return zero;
+        let mut path: SmallVec<[Block; 16]> = SmallVec::new();
+        let mut block = block;
+        let value = loop {
+            if let Some(&value) = self.definitions.get(&(variable, block)) {
+                break value;
+            }
+            if Some(block) == self.function.entry || path.len() > self.function.blocks.len() {
+                break self.zero(ty);
+            }
+            let single = match self.predecessors.get(block.index()).map(|edges| &edges[..]) {
+                Some([(branch, _)]) => self.function.owners.get(branch.index()).copied(),
+                Some([]) => {
+                    path.push(block);
+                    break self.zero(ty);
+                }
+                _ => None,
+            };
+            let Some(predecessor) = single else {
+                path.push(block);
+                break self.add_variable_param(variable, ty, block, pending);
+            };
+            path.push(block);
+            block = predecessor;
+        };
+        for block in path {
+            self.definitions.insert((variable, block), value);
         }
+        value
+    }
+
+    fn add_variable_param(
+        &mut self,
+        variable: Variable,
+        ty: Type,
+        block: Block,
+        pending: &mut Vec<(Block, usize)>,
+    ) -> Value {
         let value = self.new_value(ty, Definition::Own);
         if let Some(data) = self.function.blocks.get_mut(block.index()) {
             pending.push((block, data.variable_params.len()));
@@ -733,7 +778,6 @@ impl Builder {
                 live: true,
             });
         }
-        self.definitions.insert((variable, block), value);
         value
     }
 
