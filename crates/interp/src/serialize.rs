@@ -2266,7 +2266,7 @@ impl Decoder<'_, '_> {
             let constant = self.value(depth + 1)?;
             heap.set_element(constants, FIRST_CONSTANT + index, constant);
         }
-        crate::bytecode::index_slots(constants)?;
+        crate::bytecode::index_slots(words, constants)?;
         let inline_caches = alloc(SexpType::List, caches * 2)?;
         heap.root(inline_caches);
         heap.mark_weak_pairs(inline_caches);

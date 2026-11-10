@@ -2069,7 +2069,7 @@ impl Compiler {
         for (index, constant) in compiler.constants.iter().enumerate() {
             heap.set_element(constants, FIRST_CONSTANT + index, *constant);
         }
-        index_slots(constants)?;
+        index_slots(words, constants)?;
         let caches = values::alloc(SexpType::List, compiler.caches as usize * 2)?;
         heap.mark_weak_pairs(caches);
         let code = values::triple(SexpType::Bytecode, words, constants, caches)?;
@@ -6378,36 +6378,61 @@ unsafe fn wrapper_argument(state: &Activation<'_, '_>, expression: Sexp) -> R<Op
 
 /// The slot of `symbol` in a slot frame, found by name for instructions that carry no lookup
 /// cache. Slot tables are short, so the scan costs less than a hash lookup.
-/// Fills the fourth element of a code object's [`SLOTS`] table: each constant's slot, or -1
-/// for a constant the frame keeps in no slot, so that handlers naming their variable by a
-/// constant operand find its slot with one load ([`slot_at`]). It is derived from the names
-/// and the constants, so the code image stores neither it nor anything it could disagree with.
-pub(crate) unsafe fn index_slots(constants: Sexp) -> R<()> {
+/// Fills the fourth element of a code object's [`SLOTS`] table: for each constant that a
+/// `ForStep` or `SubAssign` names as its variable, that variable's slot, so those handlers find
+/// it with one load ([`slot_at`]); -1 elsewhere. The map ends at the last such constant, and code
+/// with neither op has none, because most code has no loop or element assignment and a map over
+/// every constant of every function costs megabytes. It is derived from the code, the names and
+/// the constants, so the code image stores neither it nor anything it could disagree with.
+pub(crate) unsafe fn index_slots(words: Sexp, constants: Sexp) -> R<()> {
     let table = constants.element(SLOTS);
     if table == nil() {
         return Ok(());
     }
-    let heap = crate::heap();
     let names = table.element(1);
-    let count = length(constants);
-    let by_constant = values::alloc(SexpType::Integer, count)?;
-    values::ints_mut(by_constant).fill(-1);
-    for index in FIRST_CONSTANT..count {
-        let constant = constants.element(index);
-        if constant.kind() == SexpType::Symbol
-            && let Some(slot) = (0..length(names)).find(|&slot| names.element(slot) == constant)
+    let code = values::ints(words);
+    let mut variables: SmallVec<[(usize, i32); 8]> = SmallVec::new();
+    let mut pc = 0;
+    while let Some(&word) = code.get(pc) {
+        let op =
+            op_of(word as u32).ok_or_else(|| error("the code holds an invalid instruction"))?;
+        let variable = match op {
+            Op::ForStep => code.get(pc + 3),
+            Op::SubAssign => code.get(pc + 2),
+            _ => None,
+        };
+        if let Some(&constant) = variable
+            && let constant = constant as usize
+            && constant < length(constants)
+            && let symbol = constants.element(constant)
+            && symbol.kind() == SexpType::Symbol
+            && let Some(slot) = (0..length(names)).find(|&slot| names.element(slot) == symbol)
         {
-            values::ints_mut(by_constant)[index] = slot as i32;
+            variables.push((constant, slot as i32));
         }
+        pc += 1 + operand_count(op);
     }
-    heap.set_element(table, 3, by_constant);
+    let Some(last) = variables.iter().map(|&(constant, _)| constant).max() else {
+        return Ok(());
+    };
+    let by_constant = values::alloc(SexpType::Integer, last + 1)?;
+    let map = values::ints_mut(by_constant);
+    map.fill(-1);
+    for (constant, slot) in variables {
+        map[constant] = slot;
+    }
+    crate::heap().set_element(table, 3, by_constant);
     Ok(())
 }
 
 /// The frame slot of the symbol at constant `constant`, as [`slot_named`] finds it.
 #[inline(always)]
 unsafe fn slot_at(state: &Activation<'_, '_>, constant: usize) -> Option<*mut Sexp> {
-    let slot = *values::ints(state.constants.element(SLOTS).element(3)).get(constant)?;
+    let by_constant = state.constants.element(SLOTS).element(3);
+    if by_constant == nil() {
+        return None;
+    }
+    let slot = *values::ints(by_constant).get(constant)?;
     (slot >= 0).then(|| state.header.add(1 + slot as usize))
 }
 
