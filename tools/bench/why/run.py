@@ -3,8 +3,8 @@
 untyped on GNU R, untyped on ry, and typed in strict mode on ry. Engines alternate per program so
 they never share the CPU. Prints the machine, the R version and a Markdown table of best warm times,
 the time of each program's first, cold run (which includes compiling it), and peak resident memory; `--write` also stores them in results.json, which the docs pages and the
-landing page render, and rewrites the short table in the two READMEs, which GitHub and the VS Code
-Marketplace show as they are.
+landing page render, and runs tools/bench/readme.py, which rewrites the benchmark blocks of the two
+READMEs from it.
 
 Usage: tools/bench/why/run.py [--ry PATH] [--filter NAME] [--repeat N] [--write]
 """

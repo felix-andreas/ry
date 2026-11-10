@@ -128,14 +128,14 @@ climb *args:
 # `just bench-real --suites .bench` (adds the generated packages' tests),
 # `just bench-real --public all` (adds the vendored public programs in tools/bench/real/suites)
 # or `just bench-real --write` (stores tools/bench/real/results.json, the record behind the table in benchmarks.mdx).
+bench-real *args:
+    cargo build --release -p ry-lang -p libr -p rcmd
+    python3 -I tools/bench/real/run.py {{ args }}
+
 # Rewrites the benchmark blocks of the two READMEs from the committed results files; `--check` only
 # reports a README that differs.
 bench-readme *args:
     python3 -I tools/bench/readme.py {{ args }}
-
-bench-real *args:
-    cargo build --release -p ry-lang -p libr -p rcmd
-    python3 -I tools/bench/real/run.py {{ args }}
 
 # Times the test suites of real CRAN packages, pinned in tools/bench/packages/lock.tsv, on GNU R and ry's runtime:
 # `just bench-packages install` fetches and installs the corpus from the rrepo CRAN mirror into .corpus/packages,

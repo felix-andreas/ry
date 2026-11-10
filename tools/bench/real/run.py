@@ -6,12 +6,12 @@ the median of its warm runs (see harness.R).
 A round runs every engine once, in an order shuffled per round from `--seed`. The table shows each
 engine's median seconds over the rounds and, for each pair of engines compared, the median of the
 per-round ratios with the lowest and highest round beside it. Pairing within a round cancels a drift
-of the machine's speed that lasts longer than one round. A row whose median on any engine is under
-0.1 s is marked too short and left out of the geometric means, which are printed with a 95%
+of the machine's speed that lasts longer than one round. A row whose median on GNU R is under 0.1 s
+is marked too short and left out of the geometric means, which are printed with a 95%
 bootstrap interval over rounds. `--baseline PATH` times a second ry build (JIT on and off) in the
 same rounds, so both builds are compared with the same GNU R samples and with each other.
-`--write` stores the results in results.json, which the tables on the docs site render, and
-rewrites the summary table in README.md.
+`--write` stores the results in results.json, which the tables on the docs site render, and runs
+tools/bench/readme.py, which rewrites the benchmark blocks of the READMEs from it.
 
 With `--suites DIR`, the generated benchmark packages under DIR (finbench, dsbench, biobench, from
 `just bench-gen`) are timed too: their testthat suite end to end, once per engine and round.
@@ -177,7 +177,8 @@ def main():
         samples = {key: [r[key] for r in rounds if key in r] for key, _, _, _ in table}
         medians = {key: statistics.median(values) if values else None for key, values in samples.items()}
         ratios = {f"{numerator}/{key}": paired(rounds, numerator, key) for numerator, key in compared}
-        short = any(value is not None and value < SHORT for value in medians.values())
+        # GNU R's time measures how much work the program does; a short ry time is the speed-up itself.
+        short = medians.get("gnu_r") is not None and medians["gnu_r"] < SHORT
         cells = [f"{medians[key]:.3f} s" if medians[key] else f"fails ({failure.get(key, '')[:50]})" for key, _, _, _ in table]
         cells += [spread(ratios[f"{numerator}/{key}"]) for numerator, key in compared]
         agree = kind == "suite" or len(set(checks.values())) <= 1

@@ -68,16 +68,18 @@ The [language tour](https://ry-lang.org/ry) shows every feature.
 ry's runtime against GNU R, as the geometric mean of each suite's speed-ups:
 
 <!-- bench-summary -->
-| benchmark | programs in the mean | speed-up over GNU R |
-| --- | ---: | ---: |
-| Application-style workloads (ours) | 7 | 0.90x |
-| Synthetic kernels (ours) | 13 | 2.92x |
+| Suite | What it is | ry vs GNU R | ry typed |
+| --- | --- | ---: | ---: |
+| Numeric kernels (ours) | 17 small programs we wrote: loops, recursion and vector code | 2.92x | 10x |
+| Application workloads (ours) | 7 call-heavy programs we wrote: conditions, S3 and S4 objects, records, validation, simulation | 0.90x | not typed |
 
-Workloads measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores; 3 rounds.
-Kernels measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v233; the best of 3 processes per engine.
+Geometric means; programs that finish in under 0.1 s are left out of them.
+
+- Numeric kernels measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v233; the best of 3 processes per engine.
+- Application workloads measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores; 3 rounds.
 <!-- /bench-summary -->
 
-A few of the synthetic kernels, as speed-ups over GNU R, untyped and typed in strict mode:
+A few of the numeric kernels, as speed-ups over GNU R, untyped and typed in strict mode:
 
 <!-- bench-why -->
 | program | ry | ry, typed |

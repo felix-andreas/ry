@@ -5,8 +5,9 @@ Marketplace show a README as it is, so these blocks are generated text, and `--c
 README differs from what this script would write.
 
 The rules match `docs/src/lib/benchmarks.ts`, which renders the same files on the site: a program
-too short to time is left out of every geometric mean, and a ratio has two decimals below 10x and
-none from 10x up.
+that GNU R finishes in under 0.1 s is too short and left out of every geometric mean, only rows of
+kind `workload` count as application workloads, and a ratio has two decimals below 10x and none from
+10x up.
 
 Usage: tools/bench/readme.py [--check]
 """
@@ -57,23 +58,32 @@ def main():
         sys.exit(f"error: the benchmark blocks of {names} differ from the results files; run `just bench-readme`")
 
 def summary_block(real, kernels):
-    timed_real = [row for row in real["workloads"] if min(row["gnu_r"], row["ry_jit"], row["ry_nojit"]) >= too_short_seconds]
+    workloads = [row for row in real["workloads"] if row.get("kind", "workload") == "workload"]
+    timed_real = [row for row in workloads if row["gnu_r"] >= too_short_seconds]
     timed_kernels = [row for row in kernels["programs"] if row["gnu_r"] >= too_short_seconds]
+    # The same rows as `benchmarkSummaryRows` in docs/src/lib/benchmarks.ts.
     return "\n".join([
-        "| benchmark | programs in the mean | speed-up over GNU R |",
-        "| --- | ---: | ---: |",
-        f"| Application-style workloads (ours) | {len(timed_real)} | {ratio(geomean(row['gnu_r'] / row['ry_jit'] for row in timed_real))} |",
-        f"| Synthetic kernels (ours) | {len(timed_kernels)} | {ratio(geomean(row['gnu_r'] / row['ry'] for row in timed_kernels))} |",
+        "| Suite | What it is | ry vs GNU R | ry typed |",
+        "| --- | --- | ---: | ---: |",
+        f"| Numeric kernels (ours) | {len(kernels['programs'])} small programs we wrote: loops, recursion and vector code"
+        f" | {ratio(geomean(row['gnu_r'] / row['ry'] for row in timed_kernels))}"
+        f" | {ratio(geomean(row['gnu_r'] / row['ry_typed'] for row in timed_kernels))} |",
+        f"| Application workloads (ours) | {len(workloads)} call-heavy programs we wrote: conditions, S3 and S4 objects,"
+        f" records, validation, simulation | {ratio(geomean(row['gnu_r'] / row['ry_jit'] for row in timed_real))} | not typed |",
         "",
-        "Workloads " + lowercase_first(metadata(real, "real")),
-        "Kernels " + lowercase_first(metadata(kernels, "kernels")),
+        f"Geometric means; programs that finish in under {too_short_seconds} s are left out of them.",
+        "",
+        "- Numeric kernels " + lowercase_first(metadata(kernels, "kernels")),
+        "- Application workloads " + lowercase_first(metadata(real, "real")),
     ])
 
 def kernel_block(kernels):
     by_name = {row["program"]: row for row in kernels["programs"]}
     lines = ["| program | ry | ry, typed |", "| --- | ---: | ---: |"]
     for name in readme_programs:
-        row = by_name[name]
+        row = by_name.get(name)
+        if row is None:
+            sys.exit(f"error: `{name}` is not in {kernel_results.relative_to(root)}; update `readme_programs`")
         if row["gnu_r"] < too_short_seconds:
             sys.exit(f"error: `{name}` is too short to show in the README; pick another program")
         lines.append(f"| `{name}` | {ratio(row['gnu_r'] / row['ry'])} | {ratio(row['gnu_r'] / row['ry_typed'])} |")

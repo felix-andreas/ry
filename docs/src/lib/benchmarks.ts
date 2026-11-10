@@ -25,8 +25,10 @@ export type BenchmarkProgram = { description: string; untyped: string; typed: st
 // One view of the measurement, shown as one tab of every benchmark table.
 export type BenchmarkView = { label: string; columns: string[]; cells: (row: BenchmarkRow) => string[]; note?: string };
 
-// The same floor `tools/bench/real/run.py` applies: a row this short is marked and left out of
-// every geometric mean.
+// A program that GNU R finishes in under this many seconds does too little work for a stable ratio,
+// so it is marked and left out of every geometric mean. GNU R's time measures the work; a short ry
+// time is the speed-up itself. `tools/bench/real/run.py` and `tools/bench/readme.py` apply the same
+// floor.
 export const TOO_SHORT_SECONDS = 0.1;
 
 export const benchmarkMachine = `${results.machine}, against GNU R ${rVersion(results.r)}`;
@@ -144,13 +146,14 @@ function mebibytes(value: number): string {
 export type RealWorkloadRow = { workload: string; gnuR: number; ryJit: number; ryNoJit: number; tooShort: boolean };
 
 // The call-heavy workloads of `tools/bench/real/results.json`, which `just bench-real --write` regenerates.
+// A run with `--public` or `--suites` also stores rows of other kinds, which are not our workloads.
 export function realWorkloadRows(): RealWorkloadRow[] {
-  return realResults.workloads.map((row) => ({
+  return realResults.workloads.filter((row) => (row.kind ?? 'workload') === 'workload').map((row) => ({
     workload: row.workload,
     gnuR: row.gnu_r,
     ryJit: row.ry_jit,
     ryNoJit: row.ry_nojit,
-    tooShort: Math.min(row.gnu_r, row.ry_jit, row.ry_nojit) < TOO_SHORT_SECONDS,
+    tooShort: row.gnu_r < TOO_SHORT_SECONDS,
   }));
 }
 
@@ -178,14 +181,16 @@ export function suiteMetadata(suite: 'real' | 'kernels'): string {
   return `Measured on ${source.date}${commit === undefined ? '' : ` at ry ${commit}`} with GNU R ${rVersion(source.r)} on ${source.machine}; ${samples}.`;
 }
 
-// What each of the two benchmarks measures and how ry fares on it, for the side-by-side summary.
+// One row per suite in the summary: what it is and ry's geometric-mean speed against GNU R, untyped
+// and typed in strict mode. tools/bench/readme.py writes the same rows into the READMEs.
 export function benchmarkSummaryRows(): string[][] {
   return [
-    ['Application-style workloads (ours)', 'call-heavy R: closures, S3 and S4 dispatch, conditions', `${realCount}`, formatRatio(realGeomean)],
-    ['Synthetic kernels (ours)', 'loops, recursion and vector code', `${kernelCount}`, formatRatio(kernelGeomean)],
+    ['Numeric kernels (ours)', `${results.programs.length} small programs we wrote: loops, recursion and vector code`, formatRatio(kernelGeomean), formatRatio(kernelTypedGeomean)],
+    ['Application workloads (ours)', `${realWorkloadRows().length} call-heavy programs we wrote: conditions, S3 and S4 objects, records, validation, simulation`, formatRatio(realGeomean), 'not typed'],
   ];
 }
-export const benchmarkSummaryColumns = ['benchmark', 'what it measures', 'programs in the mean', 'speed-up over GNU R'];
+export const benchmarkSummaryColumns = ['Suite', 'What it is', 'ry vs GNU R', 'ry typed'];
+export const benchmarkSummaryNote = `Geometric means; programs that finish in under ${TOO_SHORT_SECONDS} s are left out of them.`;
 
 export function realWorkloadMarkdown(): string {
   const rows = realWorkloadRows();
@@ -207,6 +212,11 @@ export function benchmarkSummaryMarkdown(): string {
     `| ${benchmarkSummaryColumns.join(' | ')} |`,
     '| --- | --- | ---: | ---: |',
     ...benchmarkSummaryRows().map((row) => `| ${row.join(' | ')} |`),
+    '',
+    benchmarkSummaryNote,
+    '',
+    `- Numeric kernels ${suiteMetadata('kernels').replace(/^M/, 'm')}`,
+    `- Application workloads ${suiteMetadata('real').replace(/^M/, 'm')}`,
   ].join('\n');
 }
 
@@ -231,7 +241,7 @@ export function kernelChart(): SpeedChart {
   rows.push({
     label: 'geometric mean',
     ratios: [kernelGeomean, kernelTypedGeomean],
-    details: ['geometric mean over all programs, ry', 'geometric mean over all programs, ry typed and strict'],
+    details: ['geometric mean over the programs timed long enough, ry', 'geometric mean over the programs timed long enough, ry typed and strict'],
     summary: true,
   });
   return { series: [{ label: 'ry' }, { label: 'ry, typed and strict' }], rows, metadata: suiteMetadata('kernels') };
@@ -246,7 +256,7 @@ export function realChart(): SpeedChart {
       tooShort: row.tooShort,
       details: [`${row.workload}: ${seconds(row.ryJit)} on ry against ${seconds(row.gnuR)} on GNU R`],
     }));
-  rows.push({ label: 'geometric mean', ratios: [realGeomean], details: ['geometric mean over all workloads'], summary: true });
+  rows.push({ label: 'geometric mean', ratios: [realGeomean], details: ['geometric mean over the workloads timed long enough'], summary: true });
   return { series: [{ label: 'ry' }], rows, metadata: suiteMetadata('real') };
 }
 
@@ -260,7 +270,7 @@ export function speedChartMarkdown(name: 'real' | 'kernels'): string {
       (row) => `| ${row.summary ? row.label : `\`${row.label}\`${row.tooShort ? ' (too short)' : ''}`} | ${row.ratios.map(formatRatio).join(' | ')} |`,
     ),
     '',
-    chart.metadata + (chart.rows.some((row) => row.tooShort) ? ` ${tooShortNote(name)}` : ''),
+    chart.metadata + (chart.rows.some((row) => row.tooShort) ? ` ${tooShortNote()}` : ''),
   ].join('\n');
 }
 
@@ -270,9 +280,8 @@ export function formatRatio(ratio: number): string {
   return ratio >= 10 ? `${ratio.toFixed(0)}x` : `${ratio.toFixed(2)}x`;
 }
 
-export function tooShortNote(suite: 'real' | 'kernels'): string {
-  const where = suite === 'real' ? 'on at least one engine' : 'on GNU R';
-  return `A program marked too short takes under ${TOO_SHORT_SECONDS} s ${where}, so its speed-up mostly measures the timer, and the geometric mean leaves it out.`;
+export function tooShortNote(): string {
+  return `A program marked too short takes under ${TOO_SHORT_SECONDS} s on GNU R, which is too little work for a stable ratio, so the geometric mean leaves it out.`;
 }
 
 function rVersion(text: string): string {

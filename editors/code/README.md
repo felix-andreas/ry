@@ -101,7 +101,7 @@ non-exhaustive-match
 
 ## Speed
 
-ry's runtime against GNU R on a few synthetic kernels, as speed-ups, untyped and typed in strict
+ry's runtime against GNU R on a few numeric kernels, as speed-ups, untyped and typed in strict
 mode. Loops and recursion gain the most; call-heavy code is slower than on GNU R:
 
 <!-- bench-why -->

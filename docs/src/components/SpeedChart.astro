@@ -102,7 +102,7 @@ const columns = `--series-count: ${chart.series.length}`;
 	</div>
 	<p class="note">
 		Speed relative to GNU R on a log scale: a bar to the right of 1x is faster than GNU R, to the left slower.
-		{chart.rows.some((row) => row.tooShort) && ` ${tooShortNote(name)}`}
+		{chart.rows.some((row) => row.tooShort) && ` ${tooShortNote()}`}
 	</p>
 	<p class="note">{chart.metadata}</p>
 </figure>
