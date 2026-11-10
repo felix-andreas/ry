@@ -1,0 +1,17 @@
+[stdout]
+|      total missing_by 
+|          3          1 
+|      total missing_by 
+|          8          0 
+| List of 3
+|  $ call  : language observe(2)
+|  $ local : chr [1:2] "i" "n"
+|  $ parent: logi TRUE
+| [1] "[1] 2"
+| [1] 6
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 6

@@ -1,0 +1,73 @@
+[stdout]
+| round 1 
+| [1] 20
+| [1] 25
+| [1] NA
+| [1] 6.0 3.5  NA
+| [1]  6 NA
+| [1]  4  8  8  8 12  8
+| error: subscript out of bounds | call: m[[i, j]] 
+| error: subscript out of bounds | call: m[[i, j]] 
+| error: subscript out of bounds | call: m[[i, j]] 
+| error: subscript out of bounds | call: m[[i, j]] 
+| error: attempt to select less than one element in integerOneIndex | call: m[[i, j]] 
+| error: attempt to select less than one element in get1index <real> | call: m[[i, j]] 
+| error: subscript out of bounds | call: m[i, j] 
+| error: subscript out of bounds | call: m[[rows[[k]], cols[[k]]]] 
+| error: subscript out of bounds | call: m[[rows[[k]], cols[[k]]]] 
+| error: attempt to select less than one element in get1index <real> | call: m[[rows[[k]], cols[[k]]]] 
+| [1] NA
+| error: incorrect number of subscripts | call: m[[i, j]] 
+| error: incorrect number of subscripts | call: m[[i, j]] 
+| [1] 20
+| [1] "tagged 1 2"
+| round 2 
+| [1] 20
+| [1] 25
+| [1] NA
+| [1] 6.0 3.5  NA
+| [1]  6 NA
+| [1]  4  8  8  8 12  8
+| error: subscript out of bounds | call: m[[i, j]] 
+| error: subscript out of bounds | call: m[[i, j]] 
+| error: subscript out of bounds | call: m[[i, j]] 
+| error: subscript out of bounds | call: m[[i, j]] 
+| error: attempt to select less than one element in integerOneIndex | call: m[[i, j]] 
+| error: attempt to select less than one element in get1index <real> | call: m[[i, j]] 
+| error: subscript out of bounds | call: m[i, j] 
+| error: subscript out of bounds | call: m[[rows[[k]], cols[[k]]]] 
+| error: subscript out of bounds | call: m[[rows[[k]], cols[[k]]]] 
+| error: attempt to select less than one element in get1index <real> | call: m[[rows[[k]], cols[[k]]]] 
+| [1] NA
+| error: incorrect number of subscripts | call: m[[i, j]] 
+| error: incorrect number of subscripts | call: m[[i, j]] 
+| [1] 20
+| [1] "tagged 1 2"
+| round 3 
+| [1] 20
+| [1] 25
+| [1] NA
+| [1] 6.0 3.5  NA
+| [1]  6 NA
+| [1]  4  8  8  8 12  8
+| error: subscript out of bounds | call: m[[i, j]] 
+| error: subscript out of bounds | call: m[[i, j]] 
+| error: subscript out of bounds | call: m[[i, j]] 
+| error: subscript out of bounds | call: m[[i, j]] 
+| error: attempt to select less than one element in integerOneIndex | call: m[[i, j]] 
+| error: attempt to select less than one element in get1index <real> | call: m[[i, j]] 
+| error: subscript out of bounds | call: m[i, j] 
+| error: subscript out of bounds | call: m[[rows[[k]], cols[[k]]]] 
+| error: subscript out of bounds | call: m[[rows[[k]], cols[[k]]]] 
+| error: attempt to select less than one element in get1index <real> | call: m[[rows[[k]], cols[[k]]]] 
+| [1] NA
+| error: incorrect number of subscripts | call: m[[i, j]] 
+| error: incorrect number of subscripts | call: m[[i, j]] 
+| [1] 20
+| [1] "tagged 1 2"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
