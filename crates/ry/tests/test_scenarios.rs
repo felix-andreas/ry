@@ -72,12 +72,26 @@ fn scenarios_hold() {
 
 /// The typed benchmark programs whose kernels do not run on native code yet, with what the
 /// typed core refuses in each. Every other program in `tools/bench/why/typed` must run natively.
-const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 5] = [
+const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 7] = [
     ("expr_tree", "tagged unions (`.ry_tag`)"),
     ("log_rank", "a record parameter"),
-    ("orders", "records built in the kernel (`.ry_record`, `.ry_tag`)"),
+    (
+        "orders",
+        "records built in the kernel (`.ry_record`, `.ry_tag`)",
+    ),
     ("report", "text building (`.ry_text`)"),
-    ("validate", "`Result.with_default` and a mapped non-local function"),
+    (
+        "sales",
+        "a `DataFrame` parameter, which the table engine runs",
+    ),
+    (
+        "validate",
+        "`Result.with_default` and a mapped non-local function",
+    ),
+    (
+        "vasicek",
+        "R's random number generator (`set.seed`, `stats::rnorm`)",
+    ),
 ];
 
 /// The harness's own typed functions, which read R's clock and so run in the interpreter.
@@ -133,13 +147,18 @@ fn typed_benchmarks_run_natively() {
         }
         let interpreted: Vec<&str> = stderr
             .lines()
-            .filter_map(|line| line.strip_prefix("typed: `")?.strip_suffix("` runs in the interpreter"))
+            .filter_map(|line| {
+                line.strip_prefix("typed: `")?
+                    .strip_suffix("` runs in the interpreter")
+            })
             .filter(|function| !TYPED_HARNESS_INTERPRETED.contains(function))
             .collect();
         if !interpreted.is_empty() {
             let refusals: Vec<&str> = stderr
                 .lines()
-                .filter(|line| line.starts_with("typed: no code") || line.starts_with("typed: refusing"))
+                .filter(|line| {
+                    line.starts_with("typed: no code") || line.starts_with("typed: refusing")
+                })
                 .collect();
             failures.push(format!(
                 "{name}: {} ran in the interpreter\n{}",
@@ -150,10 +169,63 @@ fn typed_benchmarks_run_natively() {
     }
     for (listed, _) in TYPED_BENCHMARKS_NOT_NATIVE {
         if !names.iter().any(|name| name == listed) {
-            failures.push(format!("{listed} is listed as not native but is not a benchmark"));
+            failures.push(format!(
+                "{listed} is listed as not native but is not a benchmark"
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A base closure with a native entry runs without a frame when the caller runs in a slot frame
+/// too: every call of `Sys.unsetenv` here passes a promise of a global variable from a function
+/// that runs in a slot frame, which the entry reads without forcing.
+#[test]
+fn native_entries_hold_in_slot_frames() {
+    const CALLS: u64 = 20_000;
+    if let Some(reason) = missing_requirement(&["ry-runtime".to_owned()]) {
+        eprintln!("native entries: skipped, {reason}");
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let script = directory.path().join("entries.R");
+    fs::write(
+        &script,
+        format!(
+            "name <- \"RY_SCENARIO_UNSET\"\n\
+             measure <- function(run) for (i in seq_len({CALLS})) run()\n\
+             measure(function() Sys.unsetenv(name))\n"
+        ),
+    )
+    .expect("write the script");
+    let summary = directory.path().join("summary.md");
+    let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+        .args(["run", "--runtime", "ry", "--profile-summary"])
+        .arg(&summary)
+        .arg(&script)
+        .current_dir(directory.path())
+        .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+        .output()
+        .expect("run ry");
+    assert!(
+        output.status.success(),
+        "the script failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = fs::read_to_string(&summary).expect("read the profile summary");
+    let native: u64 = text
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("| closure calls run natively, without a frame | ")?
+                .strip_suffix(" |")?
+                .parse()
+                .ok()
+        })
+        .unwrap_or_else(|| panic!("the summary counts no native entries:\n{text}"));
+    assert!(
+        native >= CALLS,
+        "{native} closure calls ran natively, fewer than the script's {CALLS} calls of `Sys.unsetenv`"
+    );
 }
 
 enum Outcome {
