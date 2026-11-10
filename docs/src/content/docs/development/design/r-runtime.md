@@ -779,7 +779,9 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   its environment. The environment object still exists, but compiled code writes a variable back
   only before something that could observe it runs (a generic call, a dispatching operation, the
   first read of a formal whose default is an expression, a return, a deoptimization) and reloads it
-  after something that could change it.
+  after something that could change it. A scalar written back goes into the box the variable
+  holds when that box is a plain scalar of the same type that nothing else references, so a loop
+  that calls a closure on every iteration does not allocate for its counters.
 - **Calls.** A call to an effect-free closure whose binding was resolved at compile time is direct:
   effect-free arguments are evaluated eagerly and passed as already forced promises, bound by
   position without the general matcher. Evaluating early is invisible only if nothing can assign
