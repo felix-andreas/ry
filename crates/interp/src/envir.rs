@@ -362,10 +362,14 @@ unsafe fn do_sys(call: &Call<'_>, kind: SysKind) -> R<Sexp> {
             let on_exit = interp().frames[index].on_exit.clone();
             match on_exit.as_slice() {
                 [] => Ok(nil()),
-                [single] => Ok(*single),
+                // A slot frame's list may hold the expression compiled for its slots.
+                [single] => Ok(crate::bytecode::source_of_body(*single)),
                 many => {
                     let mut items = vec![(nil(), symbols().brace)];
-                    items.extend(many.iter().map(|&expression| (nil(), expression)));
+                    items.extend(
+                        many.iter()
+                            .map(|&expression| (nil(), crate::bytecode::source_of_body(expression))),
+                    );
                     values::pairlist(&items, SexpType::Language)
                 }
             }

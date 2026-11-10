@@ -1,0 +1,29 @@
+[stdout]
+| before 2 
+| first 2 
+| second 2 
+| kept
+| [1] "value"
+| x is 10 
+| [1] 1
+| {
+|     close_it(1)
+|     close_it(2)
+| }
+| close_it(1)
+| cleanup after error
+| [1] "boom"
+| [1] "from exit"
+| exit sees caller_of_exit() 
+| leaving 0 
+| leaving 1 
+| leaving 2 
+| arg was 21 
+| [1] 42
+| [1] FALSE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| FALSE

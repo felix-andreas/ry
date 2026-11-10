@@ -5549,6 +5549,9 @@ unsafe fn slot_special_call(
     }
     let argument = arguments.car();
     let name = eval::builtin_def(function)?.name;
+    if name == "on.exit" {
+        return slot_on_exit(state, instruction, call);
+    }
     if arguments.cdr() != nil() {
         let rest = arguments.cdr();
         if rest.cdr() != nil() || arguments.tag() != nil() || rest.tag() != nil() {
@@ -5603,6 +5606,77 @@ unsafe fn slot_special_call(
     }
 }
 
+/// The call site's arguments compiled as promise code for the running function's slots, which
+/// a special called from a slot frame runs there. The site's promise-code entry serves this:
+/// it is otherwise read only when the site calls a closure, and `compile_promise_arguments`
+/// builds the same list for that.
+unsafe fn site_promise_code(state: &Activation<'_, '_>, instruction: Instruction, call: Sexp) -> R<Sexp> {
+    let mut compiled = state.constants.element(instruction.operand(2) + 1);
+    if compiled == unbound() {
+        compiled = compile_promise_arguments(state.machine.function, call.cdr())?;
+        (*state.heap).set_element(state.constants, instruction.operand(2) + 1, compiled);
+    }
+    Ok(compiled)
+}
+
+/// `on.exit(expr, add, after)` from a slot frame, with `add` and `after` given as logical
+/// constants or left out. The frame's exit list keeps the expression compiled for its slots
+/// when it compiles, so running it at exit needs no environment either.
+unsafe fn slot_on_exit(
+    state: &Activation<'_, '_>,
+    instruction: Instruction,
+    call: Sexp,
+) -> R<Option<Sexp>> {
+    if state.machine.function == nil() {
+        return Ok(None);
+    }
+    const NAMES: [&str; 3] = ["expr", "add", "after"];
+    let mut expression = missing_arg();
+    let (mut add, mut after) = (false, true);
+    for (position, (tag, value)) in values::pairlist_items(call.cdr()).into_iter().enumerate() {
+        if position >= NAMES.len() || (tag != nil() && symbol_name(tag) != NAMES[position]) {
+            return Ok(None);
+        }
+        if position == 0 {
+            expression = value;
+            continue;
+        }
+        if value == missing_arg() {
+            continue;
+        }
+        if value.kind() != SexpType::Logical || length(value) != 1 {
+            return Ok(None);
+        }
+        let flag = values::as_logical_scalar(value);
+        if flag == NA_LOGICAL {
+            return Ok(None);
+        }
+        if position == 1 {
+            add = flag == 1;
+        } else {
+            after = flag != 0;
+        }
+    }
+    let registered = match site_promise_code(state, instruction, call)?.car() {
+        code if code.kind() == SexpType::Bytecode => code,
+        _ => expression,
+    };
+    let owner = (*state.interp).slot_owner as usize;
+    let frame = &mut interp().frames[owner];
+    if !add {
+        frame.on_exit.clear();
+    }
+    if expression != missing_arg() && expression != nil() {
+        if after {
+            frame.on_exit.push(registered);
+        } else {
+            frame.on_exit.insert(0, registered);
+        }
+    }
+    interp().visible = false;
+    Ok(Some(nil()))
+}
+
 /// `switch(selector, ...)` from a slot frame, choosing among the alternatives its `...` holds.
 /// They are its caller's promises, so only the selector reads the frame, and it runs as promise
 /// code on the slots, compiled once per call site.
@@ -5620,14 +5694,7 @@ unsafe fn slot_switch(
         return Ok(None);
     }
     let value = if selector.kind() == SexpType::Language {
-        // The site's promise-code entry is free: it serves calls that turn out to be closures,
-        // and `compile_promise_arguments` builds the same list for them.
-        let mut compiled = state.constants.element(instruction.operand(2) + 1);
-        if compiled == unbound() {
-            compiled = compile_promise_arguments(function, call.cdr())?;
-            (*state.heap).set_element(state.constants, instruction.operand(2) + 1, compiled);
-        }
-        let code = compiled.car();
+        let code = site_promise_code(state, instruction, call)?.car();
         if code.kind() != SexpType::Bytecode {
             return Ok(None);
         }

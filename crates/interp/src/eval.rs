@@ -3056,7 +3056,14 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         return result;
     }
     let expressions = std::mem::take(&mut frame.on_exit);
-    let env = frame_env(depth - 1, Reify::Site("on.exit"))?;
+    // A slot frame keeps exit code compiled for its slots, which runs there without an
+    // environment; only an expression that did not compile needs one.
+    let (function, header) = (frame.function, frame.slots);
+    let env = if expressions.iter().all(|expression| expression.kind() == SexpType::Bytecode) {
+        frame.env
+    } else {
+        frame_env(depth - 1, Reify::Site("on.exit"))?
+    };
     let visible = interp().visible;
     let mark = crate::heap().handle_mark();
     for &expression in &expressions {
@@ -3077,7 +3084,11 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         // A handler stack that a condition left in place must not run the exit code.
         let saved_handlers = interp().handlers.clone();
         interp().handlers = interp().frames[depth - 1].handlers.clone();
-        let exit = eval(expression, env);
+        let exit = if expression.kind() == SexpType::Bytecode {
+            bytecode::run_promise_on_slots(expression, function, depth - 1, header as usize)
+        } else {
+            eval(expression, env)
+        };
         interp().handlers = saved_handlers;
         match exit {
             // `on.exit(return(x))` makes `x` the frame's value, even over an error unwinding
