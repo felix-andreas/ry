@@ -41,3 +41,15 @@ for (k in 1:3) {
     label(gv + 1), label(5), twice(gv * 3), eval(quote(nested())), local(label(k * 2)),
     eval(quote(label(gv - 1)), list(gv = 1)), "\n")
 }
+# Code arguments with side effects: they run in the order the callee forces them, each at most
+# once, and not at all when the callee never forces them, whatever tier runs the caller.
+second_first <- function(a, b) { b; a; b; NULL }
+order <- function() { log <- character(); second_first(log <- c(log, "a"), log <- c(log, "b")); paste(log, collapse = "") }
+count <- function() { n <- 0; for (i in 1:4) twice({ n <- n + 1; n }); n }
+skip <- function(a, b) a
+skipped <- function() { n <- 0; m <- 0; skip(n <- n + 1, m <- m + 1); c(n, m) }
+add <- function(a, b) a + b
+summed <- function() { n <- 1; s <- add({ n <- n * 2; n }, { n <- n + 1; n }); c(s, n) }
+for (k in 1:4) {
+  cat(order(), count(), skipped(), summed(), "\n")
+}

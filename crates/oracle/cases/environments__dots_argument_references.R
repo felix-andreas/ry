@@ -36,3 +36,28 @@ for (k in 1:3) {
 }
 f <- function() { yy <- 7; count(yy, yy + 1) + first(yy) }
 for (k in 1:3) cat(f(), "\n")
+# Calls that pass `...` on match their arguments on every call, since what `...` holds decides
+# which argument fills which formal.
+pick <- function(a, b = 10, ...) c(a, b, length(list(...)))
+fwd <- function(...) pick(...)
+fwd_first <- function(x, ...) pick(x, ...)
+chain <- function(...) fwd(...)
+side_chain <- function() {
+  n <- 0
+  bump <- function() { n <<- n + 1; n }
+  r <- chain(bump(), bump())
+  c(r, n)
+}
+over <- function(...) vapply(1:2, function(i, ...) i + sum(...), numeric(1), ...)
+unused <- function(...) tryCatch(pick2(...), error = function(e) conditionMessage(e))
+pick2 <- function(a) a
+miss <- function(...) is_missing(...)
+is_missing <- function(a) missing(a)
+env_fwd <- function(...) { environment(); pick(...) }
+lazy_fwd <- function(...) lazy(...)
+for (k in 1:3) {
+  v <- k
+  cat(fwd(v), fwd(v, 2), fwd(b = v, a = 1), fwd(v, 2, 3, 4), fwd_first(v, b = v * 2),
+    side_chain(), over(v, 1), unused(1, 2), miss(), miss(v), env_fwd(v, 5), chain(v, k),
+    lazy_fwd(v, stop("no")), "\n")
+}

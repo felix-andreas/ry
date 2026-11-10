@@ -464,11 +464,7 @@ pub unsafe fn argument_reference(owner: usize, slot: u32, symbol: Sexp) -> R<Sex
     let reference = pooled_reference(symbol)?;
     let header = interp().frames[owner].slots;
     values::ints_mut(interp().reference_targets[interp().references_used as usize - 1])
-        .copy_from_slice(&[
-        owner as i32,
-        slot as i32,
-        header as i32,
-    ]);
+        .copy_from_slice(&[owner as i32, slot as i32, header as i32]);
     Ok(reference)
 }
 
@@ -727,6 +723,17 @@ pub unsafe fn materialize_references(index: usize) -> R<()> {
     Ok(())
 }
 
+/// [`detach_reference`] for each argument reference in `args`, before they go to a call that
+/// may keep them past its return.
+pub unsafe fn detach_references(args: &[Arg]) -> R<()> {
+    for arg in args {
+        if is_reference(arg.value) {
+            detach_reference(arg.value)?;
+        }
+    }
+    Ok(())
+}
+
 /// Makes `reference` the ordinary promise that stands for it ([`reference_promise`]), in place,
 /// and gives its place in the pool to a fresh reference. Forwarding `...` hands the same
 /// reference to several frames, so converting it in place is what keeps it one promise that
@@ -900,7 +907,11 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
             {
                 let references = interp().references_used;
                 closure_args_into::<EVALUATOR_REFERENCES>(arguments, env, &mut args)?;
-                let result = call_with_plan(call, function, &sources, &args, env);
+                let result = if sources[..] == [MATCH_PER_CALL] {
+                    call_matching(call, function, &args, env)
+                } else {
+                    call_with_plan(call, function, &sources, &args, env)
+                };
                 if interp().references_used != references {
                     release_references(references);
                 }
@@ -1787,50 +1798,33 @@ pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<C
 /// The source [`direct_sources`] gives a `...` formal, whose arguments follow the formals'.
 pub const DOTS_SOURCE: i32 = -2;
 
+/// The plan [`direct_sources`] gives a call that passes `...`: which argument fills which slot
+/// depends on what `...` holds at each call, so [`matched_sources`] matches the call's
+/// arguments once they are collected.
+pub const MATCH_PER_CALL: i32 = -3;
+
 /// The direct-call plan of the call `call` for closures with `function`'s formals and body:
 /// for each formal, the position of the argument that fills its slot, -1 when the site
 /// supplies none, or [`DOTS_SOURCE`] for `...`, followed by the positions of the arguments
-/// `...` collects, in order. `None` when such calls need [`bind_slots`] or a heap frame: the
-/// body has no slot table that names the formals, the call passes `...` or `..N`, its
-/// arguments do not match, or a formal the site leaves out has a default whose promise would
-/// capture the frame.
+/// `...` collects, in order. A call that passes `...` gets the one entry [`MATCH_PER_CALL`].
+/// `None` when such calls need [`bind_slots`] or a heap frame: the body has no slot table that
+/// names the formals, the call passes `..N`, its arguments do not match, or a formal the site
+/// leaves out has a default whose promise would capture the frame.
 pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<SmallVec<[i32; 8]>>> {
-    let body = function.cdr();
-    if body.kind() != SexpType::Bytecode
-        || function == interp().namespace_loader
-        || crate::annotations::is_typed(function)
-    {
+    let Some((formal_count, dots_index)) = plannable(function) else {
         return Ok(None);
-    }
-    let table = body.cdr().element(bytecode::SLOTS);
-    if table == nil() {
-        return Ok(None);
-    }
-    let names = table.element(1);
-    let formals = function.car();
-    let mut formal_count = 0;
-    let mut dots_index = None;
-    let mut formal = formals;
-    while formal.kind() == SexpType::Pairlist {
-        if formal_count >= values::length(names) || names.element(formal_count) != formal.tag()
-        {
-            return Ok(None);
-        }
-        if formal.tag() == symbols().dots {
-            dots_index = Some(formal_count);
-        }
-        formal_count += 1;
-        formal = formal.cdr();
-    }
-    let missing_value = missing_arg();
+    };
     let mut args = Args::new();
+    let mut forwards_dots = false;
     let mut cell = call.cdr();
     while cell.kind() == SexpType::Pairlist {
         let expression = cell.car();
-        if expression.kind() == SexpType::Symbol
-            && (expression == symbols().dots || dot_dot_index(expression).is_some())
-        {
-            return Ok(None);
+        if expression.kind() == SexpType::Symbol {
+            if expression == symbols().dots {
+                forwards_dots = true;
+            } else if dot_dot_index(expression).is_some() {
+                return Ok(None);
+            }
         }
         args.push(Arg {
             tag: cell.tag(),
@@ -1838,9 +1832,71 @@ pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<SmallVec<[i
         });
         cell = cell.cdr();
     }
-    let Ok(plan) = match_plan(formals, &args, call) else {
+    if forwards_dots {
+        return Ok(Some(smallvec![MATCH_PER_CALL]));
+    }
+    plan_sources(function, formal_count, dots_index, &args, call)
+}
+
+/// The plan of a call whose site plans per call ([`MATCH_PER_CALL`]), from `args`, the
+/// arguments it collected with `...` spread out. `None` when they do not match, which the
+/// generic path then reports, or a default does not fit a slot.
+pub unsafe fn matched_sources(
+    function: Sexp,
+    args: &[Arg],
+    call: Sexp,
+) -> R<Option<SmallVec<[i32; 8]>>> {
+    let Some((formal_count, dots_index)) = plannable(function) else {
         return Ok(None);
     };
+    plan_sources(function, formal_count, dots_index, args, call)
+}
+
+/// How many formals `function` has and which is `...`, when calls of it can take their
+/// arguments straight into slots: its body is compiled with a slot table whose first names
+/// are its formals.
+unsafe fn plannable(function: Sexp) -> Option<(usize, Option<usize>)> {
+    let body = function.cdr();
+    if body.kind() != SexpType::Bytecode
+        || function == interp().namespace_loader
+        || crate::annotations::is_typed(function)
+    {
+        return None;
+    }
+    let table = body.cdr().element(bytecode::SLOTS);
+    if table == nil() {
+        return None;
+    }
+    let names = table.element(1);
+    let mut formal_count = 0;
+    let mut dots_index = None;
+    let mut formal = function.car();
+    while formal.kind() == SexpType::Pairlist {
+        if formal_count >= values::length(names) || names.element(formal_count) != formal.tag() {
+            return None;
+        }
+        if formal.tag() == symbols().dots {
+            dots_index = Some(formal_count);
+        }
+        formal_count += 1;
+        formal = formal.cdr();
+    }
+    Some((formal_count, dots_index))
+}
+
+/// The sources of [`direct_sources`] for `args` matched to `function`'s formals.
+unsafe fn plan_sources(
+    function: Sexp,
+    formal_count: usize,
+    dots_index: Option<usize>,
+    args: &[Arg],
+    call: Sexp,
+) -> R<Option<SmallVec<[i32; 8]>>> {
+    let formals = function.car();
+    let Ok(plan) = match_plan(formals, args, call) else {
+        return Ok(None);
+    };
+    let missing_value = missing_arg();
     let mut sources: SmallVec<[i32; 8]> = smallvec![-1; formal_count];
     if let Some(index) = dots_index {
         sources[index] = DOTS_SOURCE;
@@ -1887,6 +1943,19 @@ unsafe fn slot_default_fits(
     Ok(defaults != nil() && defaults.element(index) != nil())
 }
 
+/// Calls `function` for a call whose site plans per call ([`MATCH_PER_CALL`]): in a slot frame
+/// when `args` match its formals, and down the generic path, which reports the mismatch,
+/// otherwise.
+pub unsafe fn call_matching(call: Sexp, function: Sexp, args: &[Arg], sys_parent: Sexp) -> R<Sexp> {
+    match matched_sources(function, args, call)? {
+        Some(sources) => call_with_plan(call, function, &sources, args, sys_parent),
+        None => {
+            detach_references(args)?;
+            apply_closure_owning(call, function, args, sys_parent, None)
+        }
+    }
+}
+
 /// Calls `function` in a slot frame for a call whose plan `sources` ([`direct_sources`], which
 /// `bytecode::direct_plan` keeps per site) matched `args` to its formals already: the arguments go straight into the slots, with no
 /// matching and none of [`apply_closure`]'s checks, which the plan settled for the closure's
@@ -1905,11 +1974,7 @@ pub unsafe fn call_with_plan(
         || moves::tracking()
         || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
     {
-        for arg in args {
-            if is_reference(arg.value) {
-                detach_reference(arg.value)?;
-            }
-        }
+        detach_references(args)?;
         return apply_closure(call, function, args, sys_parent, None);
     }
     let count = values::length(constants.element(bytecode::SLOTS).element(1));
@@ -1923,7 +1988,12 @@ pub unsafe fn call_with_plan(
     let mut dots = missing_value;
     for &source in dots_sources.iter().rev() {
         if let Some(arg) = args.get(source as usize) {
-            dots = values::triple(SexpType::Dots, arg.value, if dots == missing_value { nil() } else { dots }, arg.tag)?;
+            dots = values::triple(
+                SexpType::Dots,
+                arg.value,
+                if dots == missing_value { nil() } else { dots },
+                arg.tag,
+            )?;
         }
     }
     let mut missing = 0u64;
@@ -1999,7 +2069,15 @@ pub unsafe fn run_wrapper(
         crate::NO_SLOTS
     };
     let (depth, caller_srcref) = push_frame(
-        call, function, nil(), sys_parent, args, &[], header, missing, caller,
+        call,
+        function,
+        nil(),
+        sys_parent,
+        args,
+        &[],
+        header,
+        missing,
+        caller,
     )?;
     let state = interp();
     state.frames[depth - 1].inlined = true;

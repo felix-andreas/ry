@@ -4966,7 +4966,10 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             && !effects::calling_handler_established()
             && effects::effect_free(function)?;
         let plan = direct_plan(state, instruction, function, call)?;
+        let per_call = plan
+            .is_some_and(|sources| values::ints(sources).get(1..) == Some(&[eval::MATCH_PER_CALL]));
         if let Some(sources) = plan
+            && !per_call
             && let Some(value) = call_wrapper(state, instruction, function, call, sources)?
         {
             state.record(instruction.at, value);
@@ -4994,6 +4997,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             env
         };
         let result = match plan {
+            Some(_) if per_call => eval::call_matching(call, function, &args, sys_parent),
             // The plan's first entry counts the plans its site made.
             Some(sources) => eval::call_with_plan(
                 call,
@@ -5192,7 +5196,11 @@ unsafe fn call_wrapper(
         value.increment_refcount();
         *window.add(1 + index) = value;
     }
-    let sys_parent = if state.in_slots() { nil() } else { state.env()? };
+    let sys_parent = if state.in_slots() {
+        nil()
+    } else {
+        state.env()?
+    };
     eval::run_wrapper(
         call,
         function,

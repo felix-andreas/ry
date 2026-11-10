@@ -1081,6 +1081,10 @@ struct Lowering<'a> {
     /// The environment of the closure being inlined when it is not this activation's, in
     /// which case its body sees only its formals and the functions of that environment.
     closed: Option<Sexp>,
+    /// Whether the code being lowered is the body of an inlined closure, whose assignments bind
+    /// its own locals, rather than this activation's code (a call's arguments), whose
+    /// assignments write this frame's variables.
+    inlined: bool,
 }
 
 impl Lowering<'_> {
@@ -2636,6 +2640,7 @@ impl<'a> Builder<'a> {
             next: self.registers,
             scope: SmallVec::new(),
             closed: None,
+            inlined: false,
         };
         let result = self.lower_call(&mut lowering, call, formals, body, closed, 0)?;
         let ty = lowering.state.registers[result];
@@ -2745,6 +2750,7 @@ impl<'a> Builder<'a> {
             next: self.registers,
             scope: SmallVec::new(),
             closed,
+            inlined: true,
         };
         let mut accumulator = None;
         if let Some(initial) = initial {
@@ -2984,6 +2990,7 @@ impl<'a> Builder<'a> {
             next: self.registers,
             scope: SmallVec::new(),
             closed: None,
+            inlined: false,
         };
         let mut args = List::new_in(self.arena);
         for (tag, expression) in values::pairlist_items(call.cdr()) {
@@ -3121,9 +3128,11 @@ impl<'a> Builder<'a> {
             .map(|&(_, register)| lowering.state.registers[register].storage())
             .collect();
         let outer_closed = std::mem::replace(&mut lowering.closed, closed);
+        let outer_inlined = std::mem::replace(&mut lowering.inlined, true);
         let result = self.lower_expression(lowering, body, depth);
         lowering.scope = outer;
         lowering.closed = outer_closed;
+        lowering.inlined = outer_inlined;
         let result = result?;
         // Inlined code has no frame to check annotations in, so a typed closure is inlined only
         // when its checks are known to pass; tier 0 runs any other call and reports the failure.
@@ -3342,6 +3351,11 @@ impl<'a> Builder<'a> {
     ) -> Option<usize> {
         let symbols = values::symbols();
         let (last, init) = statements.split_last()?;
+        // An assignment in this activation's own code writes one of its variables, which the
+        // scope of an inlined body cannot stand for, so tier 0 runs it.
+        if !lowering.inlined && !init.is_empty() {
+            return None;
+        }
         for &statement in init {
             let assignment = statement.kind() == SexpType::Language
                 && (statement.car() == symbols.assign || statement.car() == symbols.assign_eq);

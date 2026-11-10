@@ -90,10 +90,11 @@ describes it, and the open gaps are marked.
 - **Direct calls.** A call site keeps a plan for the closure it calls (`direct_plan` in
   `bytecode.rs`): which argument fills each formal's slot. The site marks the body on its first
   call, builds the plan on the second, and from then on `eval::call_with_plan` writes the arguments
-  into the slots without matching. A site stops planning after eight different bodies. The plan
-  is refused when matching could depend on more than the argument names: a `...` formal, a `...`
-  or `..N` argument, or a left-out formal whose default is not a literal. Those calls bind through
-  `bind_slots`. `call_with_plan` checks per call what can change after planning (machine code for the
+  into the slots without matching. A site stops planning after eight different bodies. A call
+  that passes `...` has a plan of one entry, `MATCH_PER_CALL`, because what `...` holds differs
+  per call: `call_matching` matches the expanded arguments each time (`matched_sources`) and then
+  writes them like any plan. The plan is refused for a `..N` argument or a left-out formal whose
+  default is not a literal, and those calls bind through `bind_slots`. `call_with_plan` checks per call what can change after planning (machine code for the
   body, the debugger, move tracking), and takes the generic path when any holds.
 - **Forwarding `...`.** A call that passes `...` appends the promises the frame's `...` slot holds,
   to a closure (`slot_dots_into`) or, forced, to a builtin (`slot_builtin_call`, when every other
@@ -238,7 +239,9 @@ environment and the AST evaluator is what runs uncompiled package code.
   plan detaches the references among its items first.
 - **Scope.** Every argument to a planned callee becomes a reference except a `..N` symbol and a
   value that is already a promise, and compiled code passes constants as they are. A call
-  that passes `...` or `..N` gets no plan, so its other arguments become promises.
+  that passes `..N` gets no plan, so its other arguments become promises. When per-call matching
+  of a call that passes `...` fails (an unused argument, a default that is not a literal), the
+  call detaches its references and takes the generic path.
 
 `crates/oracle/cases/environments__argument_references.R`,
 `environments__code_argument_references.R` and `environments__dots_argument_references.R` pin
