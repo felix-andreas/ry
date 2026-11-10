@@ -3238,20 +3238,18 @@ first lines R had already read, leaving R mid-command.
   one, and otherwise forks the table (cheap: Arrow buffers are shared) and rebinds the variable the
   call named, searching enclosing scopes, so a global updated inside a function is rebound where
   it lives. An alias taken before the update keeps the old columns, as the checker models.
-  `setkey` always forks and rebinds.
+  `DataFrame.set_key` always forks and rebinds.
 - **`ry` is a registered namespace attached as `package:ry` at position 2** (`frame.rs`,
   `NAMESPACE`, `PACKAGE`, `ATTACH`), built in the shape `loadNamespace` gives an installed package,
-  so `ry::setkey` and `ry::List.map` work after another package masks the bare name. It is the one
+  so `ry::DataFrame` and `ry::List.map` work after another package masks the bare name. It is the one
   home of the standard library and the frame functions: the builtins bind the standard library in
   a `package:ry` just above base, and session startup moves those bindings into the namespace and
-  replaces that environment with the full package in front of the default packages, so `frame`
-  masks `graphics::frame`. It holds the user-facing functions;
-  `.frame_*` builtins do the work. `setkey`, `setkeyv`, `key` and `copy`
-  delegate to data.table for anything that is not a frame. S3 methods for other packages' generics
+  replaces that environment with the full package in front of the default packages. It holds the
+  user-facing functions; `.frame_*` builtins do the work. S3 methods for other packages' generics
   are registered in the generic's methods table, as an installed package's `S3method()`
   directives are; `as.data.table.frame` is registered from a data.table `onLoad` hook, because
   data.table is not loaded at startup. The checker's stubs are `types/ry.Rtypes`
-  and `types/ry.exports` (the names the checker types itself or that delegate to data.table), and
+  and `types/ry.exports`, and
   `test_standard_library.rs` keeps both equal to what the runtime binds.
 
 # Decision record: the JIT tier
@@ -8718,3 +8716,10 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Target shape.** A suite is `tools/bench/<suite>/` with `suite.toml` (id, name, summary, optional groups and harness, and per program a display name, summary, `source` and optional `typed_source`) and a schema-1 `results.json` (meta, engines, per-program ratios with intervals, flags and geometric means). The page and the README list suites by globbing those directories, in the fixed order public, packages, kernels, applications; a suite without results gets no row and no page section, so the page never announces a suite it cannot show. `suite.toml` is the only source of labels.
 - **The runner judges, the renderers display.** Too-short, refused-typed and failure flags and the geometric means come from the runner, so the site and the README cannot disagree about which programs count. This supersedes the renderer-side GNU R floor of "Published benchmark numbers come only from the results files". The runner flags a too-short time per engine, but only a GNU R time under `meta.too_short_seconds` removes a program from the geometric means, so the renderers fade a bar and print "too short" beside a ratio only for that case (`isTooShort`); a fast ry time is the speed-up being measured.
 - **Temporary.** `fromLegacy` (`docs/src/lib/benchmarks.ts`) and `from_legacy` (`tools/bench/readme.py`) map the older `why/` and `real/` files into schema 1, keeping the GNU R floor those files were measured under. Delete both, and `why/suite.toml` and `real/suite.toml`, with those directories.
+
+## package:ry attaches no bare name another package exports
+
+- **Previous shape.** `package:ry` attached bare `setkey`, `setkeyv`, `key` and `copy` for DataFrames. A hook copied them into `package:data.table` so they could delegate for data.tables; once data.table became an ordinary package with no special case, the hook went, and `library(data.table)` printed "The following objects are masked from 'package:ry'", which GNU R does not print. Six oracle cases failed on that one line.
+- **Why bare names mask.** `package:ry` sits at position 2, so any package attached later that exports the same name reports the mask, and code that calls the bare name gets whichever was attached last.
+- **Target shape.** Every DataFrame function is qualified: `DataFrame.set_key(df, cols)` (one function for both `setkey` forms, taking a character vector), `DataFrame.key(df)` and `DataFrame.copy(df)`. The bare exports are `DataFrame`, `col` and `lit`, plus the `as.*`/`is.*` conversions. `col` is the one name that masks (base R's `col`), and it calls `base::col` for anything but a column name; base is never attached after `package:ry`, so no message results.
+- **Enforced** by `no_shipped_package_exports_a_library_name` in `crates/interp/tests/test_standard_library.rs`, which checks the standard library and `package:ry`'s functions against every `types/*.exports` manifest (base R, the recommended packages and the benchmark dependency set).

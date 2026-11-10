@@ -241,6 +241,25 @@ DataFrame.join_asof(trades, quotes, on = "time", by = "ticker")
 3:      a     1    30    NA
 ```
 
+### Keys
+
+`DataFrame.set_key(df, cols)` sorts `df` by the columns `cols` names and records them as its key,
+and `x[y]` with no `on` joins on the key of `x`. It rebinds the variable it is given, so a reference
+taken earlier keeps the old order and no key. `DataFrame.key(df)` gives the key, or `NULL`, and
+`DataFrame.copy(df)` gives an independent copy.
+
+```r
+keyed <- sales
+DataFrame.set_key(keyed, "region")
+DataFrame.key(keyed)
+DataFrame.key(sales)
+```
+
+```text ry run runtime=ry exact continue
+[1] "region"
+NULL
+```
+
 ### Windows and ranks
 
 `Expr.over(expr, "key")` computes `expr` within each group of the key columns and gives every row

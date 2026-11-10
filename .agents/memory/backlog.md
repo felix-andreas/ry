@@ -2636,8 +2636,6 @@ The end-to-end guard rests on the corpus suites.
   evaluated eagerly during lowering, and if a sibling then falls back to R, the whole `i` or `j`
   runs again in the data mask. An `i` or `j` that updates the queried frame during lowering
   leaves the IR built against the old schema.
-- **data.table masks `setkey`, `setkeyv`, `key` and `copy`** when attached after ry; its versions
-  reject a frame, so users call `ry::setkey`.
 - **Checker:** `.SDcols` as positions or `patterns()`, `(cols) := ...` through a variable, and
   `c(.N, lapply(.SD, f))` as `j` give a frame with unknown columns.
 - **Checker nits:** `x < "b"` on a factor gives the generic comparison message, and `factor == 1` is
