@@ -259,10 +259,18 @@ pub fn calling_handler_established() -> bool {
 /// epoch or stamp: only the binding found is watched.
 pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation> {
     let heap = crate::heap();
+    let known = heap.known();
     let mut env = start;
-    let empty = heap.known().empty_env;
-    while env != empty {
-        if let Some(cell) = heap.frame_cell(env, symbol) {
+    while env != known.empty_env {
+        // From the global environment on, the walk is the search path, whose first binding the
+        // heap keeps per symbol under a stamp: walking the attached packages' frames costs about
+        // 2,000 instructions, and the typed core's argument reads resolve a head on every call.
+        let cell = if env == known.global_env {
+            Some(heap.global_cell(symbol)?.0)
+        } else {
+            heap.frame_cell(env, symbol)
+        };
+        if let Some(cell) = cell {
             if cell.has_gp(gp::ACTIVE_BINDING) {
                 return None;
             }
