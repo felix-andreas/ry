@@ -27,6 +27,7 @@ target_root=$(mkdir -p "${CARGO_TARGET_DIR:-target}" && cd "${CARGO_TARGET_DIR:-
 work="$target_root/layout/$target"
 build="$target_root/$target/release"
 instrumented="$work/instrumented/$target/release"
+optimized="$work/optimized/$target/release"
 host=$(rustc -vV | sed -n 's/^host: //p')
 tools="$(rustc --print sysroot)/lib/rustlib/$host/bin"
 profdata="$tools/llvm-profdata"
@@ -52,7 +53,7 @@ merge_fdata="$(dirname "${bolt:-/nonexistent}")/merge-fdata"
 
 # Prints the warnings LLVM gives for a profile that does not match the code, from a build log.
 profile_warnings() {
-	grep -E 'hash mismatch|profile data may be (out of date|corrupt)|function control flow change|-Wbackend-plugin' "$1" || true
+	grep -E 'hash mismatch|profile data may be (out of date|corrupt)|function control flow change|no profile data available|-Wbackend-plugin' "$1" || true
 }
 
 # Sets up base R for RUNTIME (a libR) in DIRECTORY, built with RCMD or copied from
@@ -68,16 +69,22 @@ base_r() {
 	fi
 }
 
-rm -rf "$work/pgo-raw" "$work/bolt-raw" "$work/runtime" "$work/build.log"
+rm -rf "$work/pgo-raw" "$work/bolt-raw" "$work/runtime" "$work/bolt-instrumented" "$work/build.log"
 mkdir -p "$work/pgo-raw" "$work/bolt-raw" "$work/runtime"
 
 # Builds the runtime (libR, ry-rcmd) and then ry, each in its own cargo invocation exactly as a
 # plain release build does, so the instrumented and the optimized build compile the same units.
+# The profile flags go in RY_LAYOUT_RUSTFLAGS, which tools/layout/rustc-wrapper.sh adds, because
+# RUSTFLAGS would change every crate's symbol names between the two builds. Both builds keep the
+# release profile's strip off for the same reason: the two must differ in the profile flags only.
+# Each build has its own target directory, since a change of the wrapper's flags does not make
+# cargo rebuild.
 # Cargo unifies features per invocation, and `interp` and `jit` compile differently when built
 # beside `ry-lang`, so a profile collected from a combined build would not match the shipped
 # runtime. Separate invocations also keep the two fat-LTO links, about 14 GB for `ry` alone with
 # instrumentation, from running at once.
 build() {
+	export RUSTC_WRAPPER="$root/tools/layout/rustc-wrapper.sh" CARGO_PROFILE_RELEASE_STRIP=false
 	cargo build --release --locked --target "$target" -p libr -p rcmd 2> >(tee -a "$work/build.log" >&2)
 	cargo build --release --locked --target "$target" -p ry-lang 2> >(tee -a "$work/build.log" >&2)
 }
@@ -94,7 +101,7 @@ check_profile() {
 }
 
 echo "optimize: instrumented build" >&2
-RUSTFLAGS="-Cprofile-generate=$work/pgo-raw" CARGO_TARGET_DIR="$work/instrumented" build
+RY_LAYOUT_RUSTFLAGS="-Cprofile-generate=$work/pgo-raw" CARGO_TARGET_DIR="$work/instrumented" build
 # `%4m` merges each binary's counters into a pool of four files as processes exit, instead of
 # one file per process.
 export LLVM_PROFILE_FILE="$work/pgo-raw/%4m.profraw"
@@ -105,47 +112,62 @@ RY_BASE_R="$work/instrumented/$target/base-r" RY_LIBR="$instrumented/$library" \
 unset LLVM_PROFILE_FILE
 "$profdata" merge -o "$work/pgo.profdata" "$work/pgo-raw"
 
-flags="-Cprofile-use=$work/pgo.profdata"
+# A function the profile has no record for means the two builds compiled different code, so
+# LLVM's warning for it fails the build like a hash mismatch does.
+flags="-Cprofile-use=$work/pgo.profdata -Cllvm-args=-pgo-warn-missing-function"
 # BOLT moves functions only in a binary that keeps its relocations, and needs the symbol table,
-# so the release profile's strip is deferred to after it.
+# so stripping waits until after it.
 [ -z "$bolt" ] || flags="$flags -Clink-arg=-Wl,--emit-relocs"
-export RUSTFLAGS="$flags" CARGO_PROFILE_RELEASE_STRIP=false
+export RY_LAYOUT_RUSTFLAGS="$flags" CARGO_TARGET_DIR="$work/optimized"
 echo "optimize: profile-guided release build" >&2
 : > "$work/build.log"
 build
 check_profile
 
 runtime="$work/runtime/$library"
-cp "$build/$library" "$runtime"
+cp "$optimized/$library" "$runtime"
 for sibling in libRblas.so libRlapack.so; do
-	[ ! -e "$build/$sibling" ] || cp "$build/$sibling" "$work/runtime/"
+	[ ! -e "$optimized/$sibling" ] || cp "$optimized/$sibling" "$work/runtime/"
 done
 base="$target_root/$target/base-r"
 if [ -z "${RY_LAYOUT_BASE:-}" ]; then
 	RY_LAYOUT_BASE="$work/instrumented/$target/base-r"
 fi
-base_r "$base" "$build/$rcmd" "$build/$library"
+base_r "$base" "$optimized/$rcmd" "$optimized/$library"
 
 if [ -n "$bolt" ]; then
 	echo "optimize: BOLT instrumentation and training" >&2
 	mkdir -p "$work/bolt-instrumented"
 	cp "$work/runtime/"* "$work/bolt-instrumented/"
-	"$bolt" "$build/$library" -o "$work/bolt-instrumented/$library" -instrument \
+	# Instrumenting all of libR's 100 MB of code takes more than 14 GB, so BOLT instruments only
+	# the functions the PGO training ran. Its final pass lays out only profiled functions anyway.
+	python3 -I tools/layout/hot_functions.py "$profdata" "$work/pgo.profdata" "$optimized/$library" > "$work/hot.txt"
+	"$bolt" "$optimized/$library" -o "$work/bolt-instrumented/$library" -instrument \
+		-funcs-file-no-regex="$work/hot.txt" \
 		-instrumentation-file="$work/bolt-raw/libR.fdata" -instrumentation-file-append-pid
 	# The image is tied to the runtime's identity, not its layout, so the base R tree's image
 	# serves the instrumented copy too.
-	RY_BASE_R="$base" RY_LIBR="$work/bolt-instrumented/$library" python3 -I tools/layout/train.py "$build/$ry"
+	RY_BASE_R="$base" RY_LIBR="$work/bolt-instrumented/$library" python3 -I tools/layout/train.py "$optimized/$ry"
 	"$merge_fdata" "$work/bolt-raw/"*.fdata > "$work/libR.fdata"
-	"$bolt" "$build/$library" -o "$runtime" -data="$work/libR.fdata" \
+	"$bolt" "$optimized/$library" -o "$runtime" -data="$work/libR.fdata" \
 		-reorder-blocks=ext-tsp -reorder-functions=hfsort+ -split-functions -split-all-cold \
 		-split-eh -icf=1 -use-gnu-stack -dyno-stats
 fi
+# `--emit-relocs` leaves static relocation sections, which keep the symbol table alive through a
+# plain strip and double the file. Only those go: the dynamic relocations stay.
+objcopy --remove-relocations='*' "$runtime"
 strip --strip-unneeded "$runtime"
-"$build/$rcmd" start-image "$base" --libr "$runtime" > /dev/null
+"$optimized/$rcmd" start-image "$base" --libr "$runtime" > /dev/null
 
 echo "optimize: ry with the runtime and base R embedded" >&2
 RY_EMBED_RUNTIME="$runtime" RY_EMBED_BASE="$base" \
 	cargo build --release --locked --target "$target" -p ry-lang 2> >(tee -a "$work/build.log" >&2)
 check_profile
-strip "$build/$ry"
+strip "$optimized/$ry"
+# `just package` and the bench recipes read the release directory, so the optimized binaries
+# replace whatever a plain build left there.
+mkdir -p "$build"
+cp "$optimized/$ry" "$build/$ry"
+cp "$runtime" "$build/$library"
+cp "$optimized/$rcmd" "$build/$rcmd"
 echo "$build/$ry"
