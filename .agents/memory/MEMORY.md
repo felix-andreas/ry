@@ -144,6 +144,7 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 
 ### Performance traps
 
+- **Compare peak `RssFile` only from the same page-cache state.** A file mapping's resident size depends on the folios the page cache holds: a freshly installed `.ryc` or a just-copied `libR.so` sits in large folios, so one fault maps a whole block, while a file read back after eviction maps 16 pages at a time. Two identical builds staged an hour apart differed by 5 MB of `RssFile` (528 against 32 pages of `testthat.ryc` after `library(testthat)`). Evict both builds' files with `posix_fadvise(POSIX_FADV_DONTNEED)` before measuring, and read `/proc/PID/pagemap` per mapping when a gap remains.
 - **A per-item query must never scan a per-file or per-project list.** Compute once per file in a memoized query and probe per item. `item_spans` is the single source of top-level item identity, so never re-derive the classification. Such a quadratic has two factors (items times names looked up), so vary both axes when measuring, because either axis alone looks linear.
 - **A per-item read that joins over a project-wide list needs a cap**, not just memoization (`CONDITIONAL_SLOT_JOIN_CAP`, widening to `Unknown`).
 - **A check reads per-name firewalls, never a project-wide map** (`package_name`, `interface_group`, `frame_binder`). `crates/semantics/tests/test_incremental.rs` pins it by counting query executions.

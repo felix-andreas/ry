@@ -19,6 +19,10 @@ native code follows; any other release runs its own R code unchanged.
 
 `Sys.getenv()` looks up every name it is given in one pass over the environment. `Sys.setenv()` leaves a variable alone when it already holds the new value, and `Sys.unsetenv()` skips a variable that is not set. withr's `local_envvar()` restores often hit both cases. A lookup rejects most variables after comparing one byte, as glibc does, and together these take 2.4% off the instructions the testthat workload runs.
 
+### Faster partial matching and name lookups
+
+`pmatch()` and `charmatch()` compare each input with the table in place, without copying the strings, and mark the table entries already used in a bitset. Native code that reads an argument or option by name uses a symbol installed at startup instead of interning the name on every call, and reading the text of a string the heap has already validated as UTF-8 is inlined at each call site. The testthat workload runs 1.2% fewer instructions, and 2.25% fewer together with the environment-variable lookups above.
+
 ### Faster assignment forms and kernels in the public benchmark suites
 
 `<<-`, array slab writes such as `a[i, 2, ] <- v`, matrix `m[[i, j]]`, vector growth, `attr<-`,
