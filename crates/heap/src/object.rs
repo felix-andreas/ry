@@ -418,6 +418,10 @@ pub(crate) mod flag_bits {
     /// A list of `(key, value)` pairs that keeps neither alive: a collection that finds either
     /// dead sets both slots of its pair to `NULL`.
     pub const WEAK_PAIRS: u8 = 1 << 5;
+    /// An interned `CHARSXP` whose bytes are valid UTF-8, checked once when it was interned.
+    /// Interned bytes never change, and C code cannot reach this byte, so unlike the `ASCII`
+    /// general-purpose bit it is a fact rather than a hint.
+    pub const VALID_UTF8: u8 = 1 << 6;
 }
 
 /// The reference count saturates here, and a saturated count is sticky, as in GNU R.
@@ -721,6 +725,12 @@ impl Sexp {
     /// `flag_bits::UNTRACKED`).
     pub unsafe fn tracks_references(self) -> bool {
         unsafe { self.header().flags.get() & flag_bits::UNTRACKED == 0 }
+    }
+
+    /// Whether this is an interned string whose bytes are known to be valid UTF-8
+    /// (`flag_bits::VALID_UTF8`).
+    pub unsafe fn is_valid_utf8(self) -> bool {
+        unsafe { self.header().flags.get() & flag_bits::VALID_UTF8 != 0 }
     }
 
     pub unsafe fn is_array(self) -> bool {

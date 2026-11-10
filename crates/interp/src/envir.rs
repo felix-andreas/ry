@@ -15,6 +15,7 @@ use {
         },
     },
     heap::object::{NA_INTEGER, Sexp, SexpType, gp},
+    smallvec::SmallVec,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -109,9 +110,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     crate::builtins::special("::", 2, |call| unsafe { namespace_value(call, true) }),
     crate::builtins::special(":::", 2, |call| unsafe { namespace_value(call, false) }),
     internal("getNamespaceValue", 3, |call| unsafe {
-        let name = values::require_string(call.arg(1), "name")?;
+        values::require_string(call.arg(1), "name")?;
+        let symbol = values::install_charsxp(call.arg(1).element(0))?;
         let exported = values::as_logical_scalar(call.arg(2)) == 1;
-        namespace_lookup(call.arg(0), &name, exported)
+        namespace_lookup(call.arg(0), symbol, exported)
     }),
     internal("formals", 1, do_formals),
     internal("body", 1, do_body),
@@ -247,7 +249,7 @@ pub(crate) unsafe fn sys_parent_of(env: Sexp) -> R<Option<(Sexp, Sexp)>> {
 }
 
 /// `R_sysparent`: the frame number of the parent of frame `n` counted back from `context`.
-unsafe fn sys_parent_number(mut n: i64, context: Option<usize>) -> i64 {
+pub(crate) unsafe fn sys_parent_number(mut n: i64, context: Option<usize>) -> i64 {
     let frames = &interp().frames;
     let Some(mut index) = context else {
         return 0;
@@ -1126,16 +1128,15 @@ pub unsafe fn get_option(name: &str) -> Sexp {
     nil()
 }
 
-/// Sets option `name`, removing it for `NULL`, and returns the old value.
-pub unsafe fn set_option(name: &str, value: Sexp) -> R<Sexp> {
-    if name == "expressions" {
+/// Sets the option `symbol` names, removing it for `NULL`, and returns the old value.
+pub unsafe fn set_option(symbol: Sexp, value: Sexp) -> R<Sexp> {
+    if symbol.car().bytes() == b"expressions" {
         let depth = values::as_integer_scalar(value);
         if depth > 0 {
             interp().max_depth = depth.min(500_000) as u32;
         }
     }
     let heap = crate::heap();
-    let symbol = values::install(name)?;
     let mut cell = options();
     let mut previous = nil();
     while cell.kind() == SexpType::Pairlist {
@@ -1229,20 +1230,21 @@ unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
         return options_list(None);
     }
     let mut changed = false;
-    let mut entries: Vec<(String, Sexp)> = Vec::new();
+    // Each entry is an option's name as a CHARSXP and its old or current value.
+    let mut entries: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
     for arg in &args {
         if arg.tag != nil() {
-            let name = symbol_name(arg.tag).into_owned();
-            let value = validate_option(&name, arg.value)?;
-            let old = set_option(&name, value)?;
-            entries.push((name, old));
+            let value = validate_option(&symbol_name(arg.tag), arg.value)?;
+            let old = set_option(arg.tag, value)?;
+            entries.push((arg.tag.car(), old));
             changed = true;
         } else if arg.value.kind() == SexpType::String {
             for index in 0..length(arg.value) {
-                let name = string_at(arg.value, index)
-                    .map(|text| text.into_owned())
-                    .unwrap_or_default();
-                let value = get_option(&name);
+                let name = arg.value.element(index);
+                let value = get_option(&char_str(name));
+                // A later argument may remove the option, which leaves the value reachable only
+                // from here.
+                crate::heap().root(value);
                 entries.push((name, value));
             }
         } else if arg.value == nil() {
@@ -1252,11 +1254,14 @@ unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
         }
     }
     interp().visible = !changed;
-    let items: Vec<(&str, Sexp)> = entries
-        .iter()
-        .map(|(name, value)| (name.as_str(), *value))
-        .collect();
-    values::named_list(&items)
+    let list = alloc(SexpType::List, entries.len())?;
+    let names = alloc(SexpType::String, entries.len())?;
+    for (index, &(name, value)) in entries.iter().enumerate() {
+        values::set_elt(list, index, value);
+        values::set_elt(names, index, name);
+    }
+    values::set_attr(list, symbols().names, names)?;
+    Ok(list)
 }
 
 unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
@@ -1447,7 +1452,7 @@ pub unsafe fn install_default_options() -> R<()> {
         ("catch.script.errors", scalar_bool(false)?),
     ];
     for (name, value) in defaults {
-        set_option(name, value)?;
+        set_option(values::install(name)?, value)?;
     }
     Ok(())
 }
@@ -2269,107 +2274,125 @@ pub unsafe fn present_or_nil(value: Option<Sexp>) -> Sexp {
 }
 
 /// The package or variable name of `pkg::name`: a symbol or a string.
-unsafe fn colon_name(value: Sexp) -> R<String> {
+/// The symbol a side of `::` names: a symbol as written, or a one-element string.
+unsafe fn colon_symbol(value: Sexp) -> R<Sexp> {
     match value.kind() {
-        SexpType::Symbol => Ok(symbol_name(value).into_owned()),
-        SexpType::String if length(value) == 1 => {
-            Ok(values::string_at(value, 0).unwrap_or_default().into_owned())
-        }
+        SexpType::Symbol => Ok(value),
+        SexpType::String if length(value) == 1 => values::install_charsxp(value.element(0)),
         _ => Err(error("bad namespace name")),
     }
 }
 
 /// `pkg::name` (exported only) and `pkg:::name`.
 unsafe fn namespace_value(call: &Call<'_>, exported: bool) -> R<Sexp> {
-    let package = colon_name(call.arg(0))?;
-    let name = colon_name(call.arg(1))?;
-    let package_value = values::scalar_string(&package)?;
-    namespace_lookup(package_value, &name, exported)
+    let package = colon_symbol(call.arg(0))?;
+    let symbol = colon_symbol(call.arg(1))?;
+    namespace_lookup(package, symbol, exported)
 }
 
-/// Looks `name` up in a package's namespace (a namespace environment or a package name),
-/// loading it if needed. An exported name is looked up through the namespace's export table,
-/// which maps it to the internal name, from the namespace outward, because a package may export
-/// a function it imports, as graphics does with base's `plot`; lazy data comes last. An
-/// internal name (`:::`) must be bound in the namespace itself.
-unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool) -> R<Sexp> {
-    let symbol = values::install(name)?;
+/// Looks `symbol` up in a package's namespace (a namespace environment, or a package name as a
+/// symbol or a string), loading it if needed. An exported name is looked up through the
+/// namespace's export table, which maps it to the internal name, from the namespace outward,
+/// because a package may export a function it imports, as graphics does with base's `plot`; lazy
+/// data comes last. An internal name (`:::`) must be bound in the namespace itself.
+unsafe fn namespace_lookup(package: Sexp, symbol: Sexp, exported: bool) -> R<Sexp> {
+    let symbols = symbols();
     let namespace = if package.kind() == SexpType::Environment {
         package
-    } else if values::first_string(package).is_some_and(|package_name| package_name == "base") {
-        base_namespace()
-    } else if let Some(loaded) = loaded_namespace(package)? {
-        loaded
     } else {
-        // GNU R evaluates `loadNamespace(x)` with `x` bound to the name, so an error from a
-        // missing package names that call.
-        let frame = values::new_env(base_namespace())?;
-        let x = values::install("x")?;
-        eval::define(x, package, frame)?;
-        eval::eval(
-            values::call(values::install("loadNamespace")?, &[x])?,
-            frame,
-        )?
+        let package_symbol = package_symbol(package)?;
+        if package_symbol == Some(symbols.base) {
+            base_namespace()
+        } else if let Some(loaded) = match package_symbol {
+            Some(symbol) => loaded_namespace(symbol)?,
+            None => None,
+        } {
+            loaded
+        } else {
+            // GNU R evaluates `loadNamespace(x)` with `x` bound to the name, so an error from a
+            // missing package names that call.
+            let name = match package_symbol {
+                Some(symbol) if package.kind() == SexpType::Symbol => {
+                    let name = values::alloc(SexpType::String, 1)?;
+                    values::set_elt(name, 0, symbol.car());
+                    name
+                }
+                _ => package,
+            };
+            let frame = values::new_env(base_namespace())?;
+            eval::define(symbols.x, name, frame)?;
+            eval::eval(values::call(symbols.load_namespace, &[symbols.x])?, frame)?
+        }
     };
+    let not_found = || error(format!("object '{}' not found", symbol_name(symbol)));
     if namespace == base_namespace() || !exported {
         let value = find_var_in_frame(symbol, namespace)?;
         if value == unbound() {
-            return Err(error(format!("object '{name}' not found")));
+            return Err(not_found());
         }
         return value_of(value);
     }
-    let info = find_var_in_frame(values::install(".__NAMESPACE__.")?, namespace)?;
-    let table = |field: &str| -> R<Sexp> {
+    let info = find_var_in_frame(symbols.dot_namespace, namespace)?;
+    let table = |field: Sexp| -> R<Sexp> {
         if info.kind() != SexpType::Environment {
             return Ok(unbound());
         }
-        let table = find_var_in_frame(values::install(field)?, info)?;
+        let table = find_var_in_frame(field, info)?;
         if table.kind() != SexpType::Environment {
             return Ok(unbound());
         }
         find_var_in_frame(symbol, table)
     };
-    let internal_name = table("exports")?;
+    let internal_name = table(symbols.exports)?;
     if internal_name != unbound() {
-        let internal_symbol = match values::first_string(internal_name) {
-            Some(internal) => values::install(&internal)?,
-            None => symbol,
+        let internal_symbol = match internal_name.kind() {
+            SexpType::String if length(internal_name) > 0 => {
+                values::install_charsxp(internal_name.element(0))?
+            }
+            _ => symbol,
         };
         let value = eval::find_var(internal_symbol, namespace)?;
         if value == unbound() {
-            return Err(error(format!("object '{name}' not found")));
+            return Err(not_found());
         }
         return value_of(value);
     }
-    let data = table("lazydata")?;
+    let data = table(symbols.lazydata)?;
     if data != unbound() {
         return value_of(data);
     }
     let package_name = if info.kind() == SexpType::Environment {
-        let spec = find_var_in_frame(symbols().spec, info)?;
+        let spec = find_var_in_frame(symbols.spec, info)?;
         values::first_string(spec)
             .map(|text| text.into_owned())
             .unwrap_or_default()
     } else {
-        values::first_string(package)
-            .map(|text| text.into_owned())
+        package_symbol(package)?
+            .map(|package| symbol_name(package).into_owned())
             .unwrap_or_default()
     };
     Err(error(format!(
-        "'{name}' is not an exported object from 'namespace:{package_name}'"
+        "'{}' is not an exported object from 'namespace:{package_name}'",
+        symbol_name(symbol)
     )))
 }
 
-/// The namespace registered for a package name, without calling `asNamespace`, which costs
-/// several microseconds per `pkg::name` and would dominate a hot loop that uses one.
+/// The symbol of a package named by a symbol or by the first element of a string vector.
+unsafe fn package_symbol(package: Sexp) -> R<Option<Sexp>> {
+    match package.kind() {
+        SexpType::Symbol => Ok(Some(package)),
+        SexpType::String if length(package) > 0 => {
+            values::install_charsxp(package.element(0)).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The namespace registered for the package named by the symbol `package`, without calling
+/// `asNamespace`, which costs several microseconds per `pkg::name` and would dominate a hot loop
+/// that uses one.
 unsafe fn loaded_namespace(package: Sexp) -> R<Option<Sexp>> {
-    let Some(package_name) = values::first_string(package) else {
-        return Ok(None);
-    };
     let registry = crate::heap().known().namespace_registry;
-    let namespace = value_of(find_var_in_frame(
-        values::install(&package_name)?,
-        registry,
-    )?)?;
+    let namespace = value_of(find_var_in_frame(package, registry)?)?;
     Ok((namespace.kind() == SexpType::Environment).then_some(namespace))
 }

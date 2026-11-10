@@ -1,0 +1,151 @@
+[stdout]
+| same as the R body: TRUE 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 6 
+| call <list>: show(f()) | cat("attributes:", names(attributes(trace)), "\n") | f() | g() | h(1) | both()
+| parent <integer>: 0 | 1 | 0 | 3 | 4 | 5
+| visible <logical>: TRUE | TRUE | TRUE | TRUE | TRUE | TRUE
+| namespace <character>: NA | base | NA | NA | NA | NA
+| scope <character>: global | :: | global | global | global | global
+| same as the R body: TRUE 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 4 
+| call <list>: f() | g() | h(1) | both()
+| parent <integer>: 0 | 1 | 2 | 3
+| visible <logical>: TRUE | TRUE | TRUE | TRUE
+| namespace <character>: NA | NA | NA | NA
+| scope <character>: global | global | global | global
+| same as the R body: TRUE 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 10 
+| call <list>: show(base::identity(local(both()))) | cat("attributes:", names(attributes(trace)), "\n") | base::identity(local(both())) | local(both()) | eval.parent(substitute(eval(quote(expr), envir))) | eval(expr, p) | eval(expr, p) | eval(quote(both()), new.env()) | eval(quote(both()), new.env()) | both()
+| parent <integer>: 0 | 1 | 0 | 0 | 4 | 5 | 6 | 0 | 8 | 9
+| visible <logical>: TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE
+| namespace <character>: NA | base | base | base | base | base | base | base | base | NA
+| scope <character>: global | :: | :: | :: | :: | :: | :: | :: | :: | global
+| same as the R body: TRUE 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 5 
+| call <list>: show(eval(quote(both()))) | cat("attributes:", names(attributes(trace)), "\n") | eval(quote(both())) | eval(quote(both())) | both()
+| parent <integer>: 0 | 1 | 0 | 3 | 0
+| visible <logical>: TRUE | TRUE | TRUE | TRUE | TRUE
+| namespace <character>: NA | base | base | base | NA
+| scope <character>: global | :: | :: | :: | global
+| same as the R body: TRUE 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 4 
+| call <list>: show((function() both())()) | cat("attributes:", names(attributes(trace)), "\n") | (function() both())() | both()
+| parent <integer>: 0 | 1 | 0 | 3
+| visible <logical>: TRUE | TRUE | TRUE | TRUE
+| namespace <character>: NA | base | NA | NA
+| scope <character>: global | :: | NA | global
+| same as the R body: TRUE 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 5 
+| call <list>: show(do.call(function(x, y, z) both(), list(1:3, data.frame(a = 1),      sum))) | cat("attributes:", names(attributes(trace)), "\n") | do.call(function(x, y, z) both(), list(1:3, data.frame(a = 1),      sum)) | `<fn>`(`<int>`, `<data.frame>`, `<fn>`) | both()
+| parent <integer>: 0 | 1 | 0 | 0 | 4
+| visible <logical>: TRUE | TRUE | TRUE | TRUE | TRUE
+| namespace <character>: NA | base | base | NA | NA
+| scope <character>: global | :: | :: | global | global
+| same as the R body: TRUE 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 5 
+| call <list>: show(lapply(1, function(i) both())[[1]]) | cat("attributes:", names(attributes(trace)), "\n") | lapply(1, function(i) both()) | FUN(X[[i]], ...) | both()
+| parent <integer>: 0 | 1 | 0 | 3 | 4
+| visible <logical>: TRUE | TRUE | TRUE | TRUE | TRUE
+| namespace <character>: NA | base | base | NA | NA
+| scope <character>: global | :: | :: | global | global
+| same as the R body: TRUE 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 4 
+| call <list>: show(1 %op% 2) | cat("attributes:", names(attributes(trace)), "\n") | 1 %op% 2 | both()
+| parent <integer>: 0 | 1 | 0 | 3
+| visible <logical>: TRUE | TRUE | TRUE | TRUE
+| namespace <character>: NA | base | NA | NA
+| scope <character>: global | :: | NA | global
+| same as the R body: TRUE 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 5 
+| call <list>: show(Reduce(function(a, b) both(), 1:2)) | cat("attributes:", names(attributes(trace)), "\n") | Reduce(function(a, b) both(), 1:2) | f(init, x[[i]]) | both()
+| parent <integer>: 0 | 1 | 0 | 3 | 4
+| visible <logical>: TRUE | TRUE | TRUE | TRUE | TRUE
+| namespace <character>: NA | base | base | NA | NA
+| scope <character>: global | :: | :: | global | global
+| same as the R body: TRUE 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 7 
+| call <list>: show(tryCatch(stop("x"), error = function(e) both())) | cat("attributes:", names(attributes(trace)), "\n") | tryCatch(stop("x"), error = function(e) both()) | tryCatchList(expr, classes, parentenv, handlers) | tryCatchOne(expr, names, parentenv, handlers[[1L]]) | value[[3L]](cond) | both()
+| parent <integer>: 0 | 1 | 0 | 3 | 4 | 5 | 6
+| visible <logical>: TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE
+| namespace <character>: NA | base | base | base | base | NA | NA
+| scope <character>: global | :: | :: | local | local | NA | global
+| same as the R body: TRUE 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 10 
+| call <list>: withCallingHandlers(warning("w"), warning = function(w) {     show(both())     invokeRestart("muffleWarning") }) | warning("w") | .signalSimpleWarning("w", base::quote(withCallingHandlers(warning("w"),      warning = function(w) {         show(both())         invokeRestart("muffleWarning")     }))) | withRestarts({     .Internal(.signalCondition(simpleWarning(msg, call), msg,          call))     .Internal(.dfltWarn(msg, call)) }, muffleWarning = function() NULL) | withOneRestart(expr, restarts[[1L]]) | doWithOneRestart(return(expr), restart) | `<fn>`(`<S3: simpleWarning>`) | show(both()) | cat("attributes:", names(attributes(trace)), "\n") | both()
+| parent <integer>: 0 | 0 | 0 | 3 | 4 | 5 | 0 | 7 | 8 | 7
+| visible <logical>: TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE
+| namespace <character>: base | base | base | base | base | base | NA | NA | base | NA
+| scope <character>: :: | :: | :: | :: | local | local | global | global | :: | global
+| same as the R body: TRUE 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 3 
+| call <list>: m() | n() | both(top = e)
+| parent <integer>: 0 | 1 | 2
+| visible <logical>: TRUE | TRUE | TRUE
+| namespace <character>: NA | NA | NA
+| scope <character>: NA | NA | global
+| same as the R body: TRUE 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 2 
+| call <list>: inner() | both()
+| parent <integer>: 0 | 1
+| visible <logical>: TRUE | TRUE
+| namespace <character>: NA | NA
+| scope <character>: global | global
+| same as the R body: TRUE 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 3 
+| call <list>: show(b1()) | cat("attributes:", names(attributes(trace)), "\n") | b1()
+| parent <integer>: 0 | 1 | 0
+| visible <logical>: TRUE | TRUE | TRUE
+| namespace <character>: NA | base | NA
+| scope <character>: global | :: | global
+| same as the R body: TRUE 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 0 
+| call <list>: 
+| parent <integer>: 
+| visible <logical>: 
+| namespace <character>: 
+| scope <character>: 
+| attributes: names row.names version class 
+| class: rlang_trace rlib_trace tbl data.frame  version: 2 
+| rows: 5 
+| call <list>: withRestarts(entraced(), abort_here = function() cat("aborted\n")) | withOneRestart(expr, restarts[[1L]]) | doWithOneRestart(return(expr), restart) | entraced() | withCallingHandlers(stop("boom"), error = function(cnd) {     cnd <- rlang::cnd_entrace(cnd)     show(cnd$trace)     invokeRestart("abort_here") })
+| parent <integer>: 0 | 1 | 2 | 0 | 4
+| visible <logical>: TRUE | TRUE | TRUE | TRUE | TRUE
+| namespace <character>: base | base | base | NA | base
+| scope <character>: :: | local | local | global | ::
+| aborted
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
