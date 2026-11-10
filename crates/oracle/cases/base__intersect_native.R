@@ -1,0 +1,16 @@
+# intersect of plain vectors keeps the unique elements of x that y has, without names, in the
+# type c() gives x and y together; other inputs go through as.vector or their own methods.
+print(intersect(1:5, c(2, 4, 9))); print(intersect(c(2, 4, 9), 1:5))
+print(intersect(c(TRUE, NA), c(NA, 1L))); print(intersect(c(1L, NA), c(TRUE, NA)))
+print(intersect(c(a = 1, b = 2, a = 1), c(z = 2, 1)))
+print(intersect(NULL, 1:3)); print(intersect(1:3, NULL)); print(intersect(NULL, NULL))
+print(intersect(c("a", NA, "b", "a"), c(NA, "a"))); print(intersect("x", character(0)))
+print(intersect(1:3, c("1", "2"))); print(intersect(c("1", "2"), 2:3))
+print(intersect(c(1i, 2i, 1i), 2i)); print(intersect(1, c(1+0i, 2i)))
+print(intersect(c(NaN, NA, 1), c(NA, NaN))); print(intersect(integer(0), 1:3))
+print(intersect(factor(c("a", "b")), "a")); print(intersect(matrix(1:4, 2), 2:5))
+print(intersect(list(1, 2, "a"), list(2, "a"))); print(intersect(as.raw(1:3), as.raw(2)))
+print(intersect(structure(1:3, foo = "bar"), 2:3)); print(intersect(1:3, structure(2L, foo = 1)))
+x <- c(k = 1, l = 2); y <- intersect(x, 2); print(x); print(y)
+print(tryCatch(intersect(1:3), error = conditionMessage))
+f <- function(a, b) intersect(a, b); print(f(c(3L, 3L, 1L), c(1, 3)))

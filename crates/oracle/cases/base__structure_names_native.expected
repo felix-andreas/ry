@@ -1,0 +1,57 @@
+[stdout]
+| a b c 
+| 1 2 3 
+| [1] 1 2
+|    a    b <NA> 
+|    1    2    3 
+| 1 2 3 
+| 1 2 3 
+| [1] "'names' attribute [3] must be the same length as the vector [2]"
+| $a
+| [1] 1
+| 
+| $<NA>
+| [1] 2
+| 
+| p q 
+| 1 2 
+| attr(,"class")
+| [1] "foo"
+| $dim
+| [1] 2 2
+| 
+| $names
+| [1] "a" "b" "c" "d"
+| 
+| $dim
+| [1] 2 2
+| 
+| $names
+| [1] "a" "b" "c" "d"
+| 
+| $foo
+| [1] 1
+| 
+| $names
+| [1] "a" "b"
+| 
+| f(b = x)
+|  r  s 
+| 01 02 
+|   b 
+| "x" 
+| p q 
+| u v 
+| Levels: u v
+| [1] 1 2
+| a b 
+| 1 2 
+| c d 
+| 1 2 
+| expression(e = 1, f = 2)
+[messages]
+[warnings]
+[errors]
+[value]
+expression
+| expression(e = 1, f = 2)

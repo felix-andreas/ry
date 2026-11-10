@@ -1014,3 +1014,238 @@ check <- function(stack, kinds, trim) {
     else cat("stack ", stack, ": differs for ", paste(kinds, collapse = " "), " trimmed ", trim, "\n", sep = "")
 }
 "#;
+
+/// An R program for `seed` that calls withr 3.0.3's environment-variable and option helpers and
+/// base R's `Sys.getenv()`, `Sys.setenv()`, `Sys.unsetenv()`, `intersect()` and `structure()`,
+/// which ry runs natively, with random arguments: names that repeat, are empty or `NA`, values
+/// that are `NULL`, `NA`, empty, non-ASCII or not strings, and invalid options. Each call runs
+/// once natively and once through the function's own R body from the same state, and prints
+/// `check <n>: TRUE` when the two agree by `identical()` on the value, its visibility, the
+/// condition raised, and the environment variables and options afterwards. Without withr
+/// 3.0.3, the program prints only `withr 3.0.3 is not installed`.
+pub fn native_helpers_program(seed: u64) -> String {
+    fn pick(table: &[&str], rng: &mut SplitMix64) -> String {
+        table[rng.below(table.len())].to_owned()
+    }
+    /// A vector or list of up to three of `values`, usually named from `names`.
+    fn named(values: &[&str], names: &[&str], rng: &mut SplitMix64, list: bool) -> String {
+        let count = rng.below(4);
+        let items: Vec<String> = (0..count).map(|_| pick(values, rng)).collect();
+        let body = match (items.is_empty(), list) {
+            (true, true) => "list()".to_owned(),
+            (true, false) => "character(0)".to_owned(),
+            (false, true) => format!("list({})", items.join(", ")),
+            (false, false) => format!("c({})", items.join(", ")),
+        };
+        if count == 0 || rng.chance(1, 6) {
+            return body;
+        }
+        let tags: Vec<String> = (0..count).map(|_| pick(names, rng)).collect();
+        format!("setNames({body}, c({}))", tags.join(", "))
+    }
+    const NAMES: &[&str] = &["\"A\"", "\"B\"", "\"C\"", "\"\"", "NA", "\"\\u00e9\""];
+    const ENV_VALUES: &[&str] = &[
+        "\"a\"",
+        "\"\"",
+        "NA",
+        "NA_character_",
+        "\"\\u00e9t\\u00e9\"",
+        "\"x y\"",
+        "NULL",
+        "NA_real_",
+        "TRUE",
+        "1",
+        "c(\"p\", \"q\")",
+        "list(\"n\")",
+        "structure(\"s\", note = 1)",
+    ];
+    const OPTION_NAMES: &[&str] = &[
+        "\"ry.fuzz.a\"",
+        "\"ry.fuzz.b\"",
+        "\"width\"",
+        "\"digits\"",
+        "\"warn\"",
+        "\"\"",
+        "NA",
+    ];
+    const OPTION_VALUES: &[&str] = &[
+        "1", "\"x\"", "NULL", "80L", "5", "30", "\"wide\"", "TRUE", "NA", "list(1)", "0L",
+    ];
+    const ACTIONS: &[&str] = &[
+        "\"replace\"",
+        "\"prefix\"",
+        "\"suffix\"",
+        "\"rep\"",
+        "c(\"replace\", \"prefix\")",
+        "1",
+    ];
+    const VECTORS: &[&str] = &[
+        "c(3L, 1L, 3L)",
+        "c(1, NA, 2.5)",
+        "c(b = 2, a = 1)",
+        "c(TRUE, NA)",
+        "c(\"a\", NA, \"b\")",
+        "character(0)",
+        "NULL",
+        "c(1i, 2i)",
+        "factor(c(\"u\", \"v\"))",
+        "list(1, \"a\")",
+        "matrix(1:4, 2)",
+        "c(NaN, NA)",
+    ];
+    let mut rng = SplitMix64(seed);
+    let mut text = format!("# native helper fuzz program, seed {seed}\n{NATIVE_HELPERS_PREAMBLE}");
+    for check in 0..12 {
+        let call = match rng.below(12) {
+            0 => format!(
+                "withr:::list_combine({}, {})",
+                named(OPTION_VALUES, NAMES, &mut rng, true),
+                named(OPTION_VALUES, NAMES, &mut rng, true)
+            ),
+            1 => {
+                let list = rng.chance(1, 2);
+                format!(
+                    "withr:::as_envvars({})",
+                    named(ENV_VALUES, NAMES, &mut rng, list)
+                )
+            }
+            2 => {
+                let list = rng.chance(1, 2);
+                format!(
+                    "withr:::get_envvar({})",
+                    named(ENV_VALUES, NAMES, &mut rng, list)
+                )
+            }
+            3 => {
+                let list = rng.chance(1, 2);
+                let envs = named(ENV_VALUES, NAMES, &mut rng, list);
+                format!(
+                    "withr:::set_envvar({envs}, action = {})",
+                    pick(ACTIONS, &mut rng)
+                )
+            }
+            4 => format!(
+                "withr:::get_options({})",
+                named(OPTION_VALUES, OPTION_NAMES, &mut rng, true)
+            ),
+            5 => format!(
+                "withr:::set_options({})",
+                named(OPTION_VALUES, OPTION_NAMES, &mut rng, true)
+            ),
+            6 => format!(
+                "withr:::reset_options({})",
+                named(OPTION_VALUES, OPTION_NAMES, &mut rng, true)
+            ),
+            7 => "withr:::reset_gettext_cache()".to_owned(),
+            8 => format!(
+                "Sys.getenv({}, unset = {}, names = {})",
+                named(NAMES, NAMES, &mut rng, false),
+                pick(&["\"\"", "NA", "\"u\"", "c(\"u\", \"v\")", "1"], &mut rng),
+                pick(&["NA", "TRUE", "FALSE", "\"yes\""], &mut rng)
+            ),
+            9 => {
+                let count = rng.below(3);
+                let items: Vec<String> = (0..count)
+                    .map(|_| {
+                        let value = pick(ENV_VALUES, &mut rng);
+                        if rng.chance(1, 8) {
+                            value
+                        } else {
+                            format!("{} = {value}", pick(&["A", "B", "C", "`\u{e9}`"], &mut rng))
+                        }
+                    })
+                    .collect();
+                format!("Sys.setenv({})", items.join(", "))
+            }
+            10 => format!("Sys.unsetenv({})", named(NAMES, NAMES, &mut rng, false)),
+            _ => match rng.below(2) {
+                0 => format!(
+                    "intersect({}, {})",
+                    pick(VECTORS, &mut rng),
+                    pick(VECTORS, &mut rng)
+                ),
+                _ => format!(
+                    "structure({}, names = {})",
+                    pick(VECTORS, &mut rng),
+                    pick(
+                        &[
+                            "c(\"p\", \"q\")",
+                            "NULL",
+                            "c(\"p\", NA)",
+                            "\"p\"",
+                            "1:2",
+                            "c(\"p\", \"q\", \"r\")"
+                        ],
+                        &mut rng
+                    )
+                ),
+            },
+        };
+        text.push_str(&format!("check({check}, quote({call}))\n"));
+    }
+    text
+}
+
+const NATIVE_HELPERS_PREAMBLE: &str = r#"if (!requireNamespace("withr", quietly = TRUE) || format(packageVersion("withr")) != "3.0.3") {
+    cat("withr 3.0.3 is not installed\n")
+    quit(save = "no")
+}
+r_body <- function(f) {
+    code <- body(f)
+    if (is.call(code) && identical(code[[1]], as.name("{")) && length(code) == 3L &&
+        is.call(code[[2]]) && identical(code[[2]][[1]], as.name(".Internal"))) {
+        code <- code[[3]]
+    }
+    # A fresh closure, which a native entry does not recognize.
+    body(f) <- code
+    f
+}
+variables <- c("A", "B", "C", "\u00e9", "NA")
+watched <- c("ry.fuzz.a", "ry.fuzz.b", "width", "digits", "warn", "NA")
+Sys.setenv(A = "start", C = "")
+options(ry.fuzz.b = "start")
+state <- function() list(Sys.getenv(variables, unset = NA), sapply(watched, getOption, simplify = FALSE))
+restore <- function(saved) {
+    values <- saved[[1]]
+    for (name in variables) {
+        if (is.na(values[[name]])) Sys.unsetenv(name)
+        else do.call(Sys.setenv, setNames(list(values[[name]]), name))
+    }
+    options(saved[[2]])
+}
+run <- function(call, env) {
+    value <- tryCatch(
+        withVisible(eval(call, env)),
+        error = function(e) list(error = conditionMessage(e), call = conditionCall(e)),
+        warning = function(w) list(warning = conditionMessage(w), call = conditionCall(w))
+    )
+    list(value, state())
+}
+check <- function(index, call) {
+    function_name <- call[[1]]
+    target <- eval(function_name)
+    slow <- new.env()
+    fast <- new.env()
+    local_name <- if (is.call(function_name)) as.character(function_name[[3]]) else as.character(function_name)
+    assign(local_name, target, envir = fast)
+    assign(local_name, r_body(target), envir = slow)
+    call[[1]] <- as.name(local_name)
+    before <- state()
+    native <- run(call, fast)
+    restore(before)
+    reference <- run(call, slow)
+    restore(before)
+    # reset_gettext_cache() binds a fresh path each time.
+    if (identical(local_name, "reset_gettext_cache") && is.character(native[[1]]$value)) {
+        same <- is.character(reference[[1]]$value)
+    } else {
+        same <- identical(native, reference)
+    }
+    if (isTRUE(same)) cat("check ", index, ": TRUE\n", sep = "")
+    else {
+        cat("check ", index, ": differs for ", deparse(call), "\n", sep = "")
+        str(native)
+        str(reference)
+    }
+}
+"#;

@@ -141,6 +141,7 @@ symbol_table! {
     drop = "drop",
     exact = "exact",
     x = "x",
+    unset = "unset",
     object = "object",
     package = "package",
     dot_data = ".Data",
