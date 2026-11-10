@@ -118,7 +118,7 @@ pub fn check_bytecode_agreement(entropy: &mut impl Entropy) {
 /// entries, agrees with the AST evaluator, whose calls take the full builtins.
 pub fn check_element_access_agreement(entropy: &mut impl Entropy) {
     let body = element_program(entropy);
-    let a = ELEMENT_VALUES[entropy.below(ELEMENT_VALUES.len())];
+    let a = ELEMENT_ARGUMENTS[entropy.below(ELEMENT_ARGUMENTS.len())];
     let b = ELEMENT_INDICES[entropy.below(ELEMENT_INDICES.len())];
     with_interpreter(|| {
         // SAFETY: the interpreter is installed.
@@ -684,6 +684,19 @@ const ELEMENT_INDICES: &[&str] = &[
     "3",
 ];
 
+/// The values `a` is called with: every element value that does not name a variable, since the
+/// reset assigns `a` before any program variable exists.
+const ELEMENT_ARGUMENTS: &[&str] = &[
+    "1",
+    "\"s\"",
+    "NULL",
+    "list(1)",
+    "c(u = 2L)",
+    "NA",
+    "TRUE",
+    "3:1",
+];
+
 const ELEMENT_VALUES: &[&str] = &[
     "1",
     "\"s\"",
@@ -717,9 +730,10 @@ fn element_program(entropy: &mut impl Entropy) -> String {
     let mut statements = vec![
         format!("x <- {}", pick(entropy, ELEMENT_SUBJECTS)),
         "v <- NULL".to_owned(),
+        "i <- c(3L, 1L)".to_owned(),
     ];
     for _ in 0..entropy.below(5) + 1 {
-        let statement = match entropy.below(11) {
+        let statement = match entropy.below(13) {
             0 => format!(
                 "attr(x, {}) <- {}",
                 pick(entropy, ATTRIBUTE_NAMES),
@@ -769,6 +783,39 @@ fn element_program(entropy: &mut impl Entropy) -> String {
                 pick(entropy, &["TRUE", "FALSE"])
             ),
             9 => "v <- names(x)".to_owned(),
+            10 | 11 => format!(
+                "x[{}] <- {}",
+                pick(
+                    entropy,
+                    &[
+                        "c(1L, 3L)",
+                        "2:3",
+                        "c(TRUE, FALSE, TRUE)",
+                        "c(1, 1)",
+                        "-1",
+                        "c(0, 2)",
+                        "c(NA, 1)",
+                        "4:6",
+                        "TRUE",
+                        "c(2.9, 1)",
+                        "i",
+                        "2L",
+                        "\"a\"",
+                    ]
+                ),
+                pick(
+                    entropy,
+                    &[
+                        "c(9, 8)",
+                        "7L",
+                        "c(TRUE, NA)",
+                        "\"z\"",
+                        "NULL",
+                        "c(1L, 2L, 3L)",
+                        "2+0i"
+                    ]
+                )
+            ),
             _ => format!(
                 "x[[{}]] <- x[[{}]]",
                 pick(entropy, ELEMENT_INDICES),

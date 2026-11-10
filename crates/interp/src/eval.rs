@@ -1913,6 +1913,7 @@ pub unsafe fn run_wrapper(
         call, function, nil(), sys_parent, args, &[], header, missing, caller,
     )?;
     let state = interp();
+    state.frames[depth - 1].inlined = true;
     let owner = state.slot_owner;
     state.slot_owner = (depth - 1) as u32;
     let result = scope(|| {
@@ -2002,6 +2003,34 @@ pub unsafe fn slot_frame_env(header: usize) -> R<Sexp> {
 #[inline(never)]
 unsafe fn reify(index: usize) -> R<Sexp> {
     materialize_references(index)?;
+    let frame = &interp().frames[index];
+    // A variable the caller passed to an inlined wrapper sits in its slot as the value; the
+    // generic path would have bound a promise of the variable, forced by the builtin call, and
+    // `substitute` reads the variable from it. Constants bind as themselves either way.
+    if frame.inlined
+        && let Some(sources) = direct_sources(frame.function, frame.call)?
+    {
+        let header = frame.slots as usize;
+        let call = frame.call;
+        for (slot, &source) in sources.iter().enumerate() {
+            if source < 0 {
+                continue;
+            }
+            let mut cell = call.cdr();
+            for _ in 0..source {
+                cell = cell.cdr();
+            }
+            let expression = cell.car();
+            if expression.kind() != SexpType::Symbol {
+                continue;
+            }
+            let register = bytecode::register_address(header + 1 + slot);
+            let promise = forced_promise(expression, *register)?;
+            promise.increment_refcount();
+            (*register).decrement_refcount();
+            *register = promise;
+        }
+    }
     let frame = &interp().frames[index];
     let (function, header, missing) = (frame.function, frame.slots as usize, frame.missing);
     let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
@@ -2412,6 +2441,7 @@ unsafe fn push_frame(
         caller,
         pending: nil(),
         unforced: 0,
+        inlined: false,
     });
     if PROFILE_TICK.load(Ordering::Relaxed) {
         record_profile_sample(None)?;
@@ -4335,6 +4365,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         caller: crate::NO_SLOTS,
         pending: nil(),
         unforced: 0,
+        inlined: false,
     });
     let depth = state.frames.len();
     let result = scope(|| match expression.kind() {

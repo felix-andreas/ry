@@ -5155,7 +5155,7 @@ unsafe fn call_wrapper(
     }
     let kinds = values::ints(pin.element(WrapperPin::KINDS));
     let payload = pin.element(WrapperPin::PAYLOAD);
-    let body = source_body(function);
+    let body = wrapper_call(source_body(function));
     let mut builtin_args: SmallVec<[Arg; 4]> = SmallVec::new();
     let mut cell = body.cdr();
     for (index, &kind) in kinds.iter().enumerate() {
@@ -6456,7 +6456,11 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
     }
     let env = state.env()?;
     let done = match subscript_value(env, instruction.input(2))? {
-        Some(index) => assign_element_in_place(env, variable, index, value, kind)?,
+        Some(index) => {
+            assign_element_in_place(env, variable, index, value, kind)?
+                || (kind == ElementKind::Single
+                    && crate::element_access::assign_subset_in_place(env, variable, index, value)?)
+        }
         None => false,
     };
     if !done {
