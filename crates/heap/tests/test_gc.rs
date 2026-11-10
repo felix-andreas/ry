@@ -182,7 +182,30 @@ fn run_checked(seed: u64, steps: usize, stress: bool, verify_reconcile: bool) {
                 .symbols
                 .push(heap.install(name.as_bytes()).expect("install"));
         }
+        // Pretenured objects are built and stored into like young ones, and old ones point at
+        // them, so the barrier check at each collection proves the flush remembered exactly
+        // the pretenured parents of young children.
+        let mut pretenuring = 0u32;
+        let mut suspended = None;
         for _ in 0..steps {
+            if rng.chance(1, 8) {
+                match (rng.below(4), suspended) {
+                    (_, Some(depth)) => {
+                        heap.resume_pretenuring(depth);
+                        suspended = None;
+                    }
+                    (0, None) if pretenuring > 0 => suspended = Some(heap.suspend_pretenuring()),
+                    (1 | 2, None) if pretenuring < 2 => {
+                        heap.begin_pretenuring();
+                        pretenuring += 1;
+                    }
+                    (_, None) if pretenuring > 0 => {
+                        heap.end_pretenuring();
+                        pretenuring -= 1;
+                    }
+                    _ => {}
+                }
+            }
             let live = model.live();
             sync_roots(&mut heap, &model);
             // Without the extra handles, a live node the roots reach only through a counted
@@ -356,6 +379,12 @@ fn run_checked(seed: u64, steps: usize, stress: bool, verify_reconcile: bool) {
                     verify(&mut heap, &mut model);
                 }
             }
+        }
+        if let Some(depth) = suspended {
+            heap.resume_pretenuring(depth);
+        }
+        for _ in 0..pretenuring {
+            heap.end_pretenuring();
         }
         sync_roots(&mut heap, &model);
         heap.collect(Collection::Minor);
@@ -734,6 +763,39 @@ fn the_write_barrier_keeps_young_objects_stored_into_old_ones() {
         assert_eq!(old.element(0).kind(), SexpType::Integer);
         assert_eq!(old.element(0).slice::<i32>(), &[42]);
         assert_eq!(young.refcount(), 1, "a store counts as one reference");
+    }
+}
+
+#[test]
+fn pretenured_objects_are_old_and_keep_the_young_objects_they_hold() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.verify = true);
+    unsafe {
+        heap.collect(Collection::Minor);
+        let young = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        *young.slice_mut::<i32>().first_mut().expect("one element") = 7;
+        heap.root(young);
+        heap.begin_pretenuring();
+        // Built by unbarriered stores, as a reader fills what it allocates.
+        let holder = heap.alloc_vector(SexpType::List, 2).expect("alloc");
+        let inner = heap.alloc_vector(SexpType::List, 1).expect("alloc");
+        heap.set_element(inner, 0, young);
+        heap.set_element(holder, 0, inner);
+        let suspended = heap.suspend_pretenuring();
+        let fresh = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        *fresh.slice_mut::<i32>().first_mut().expect("one element") = 8;
+        heap.resume_pretenuring(suspended);
+        heap.set_element(holder, 1, fresh);
+        heap.end_pretenuring();
+        heap.add_global_root(holder);
+        let collections = heap.stats().minor_collections;
+        heap.collect(Collection::Minor);
+        assert_eq!(heap.stats().minor_collections, collections + 1);
+        heap.collect(Collection::Minor);
+        heap.collect(Collection::Intermediate);
+        heap.collect(Collection::Minor);
+        assert_eq!(holder.element(0).element(0).slice::<i32>(), &[7]);
+        assert_eq!(holder.element(1).slice::<i32>(), &[8]);
     }
 }
 
