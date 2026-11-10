@@ -8468,7 +8468,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 | ry's own ports | B3 | Vector d/p/q/r* paths, SIMD across lanes with bit-identical results, batched RNG with identical streams |
 | GC | B2 | Young-survivor tracing at a fraction of today's 70 instructions per object; the GC bucket at a tenth of today's |
 | Start-up | D | A mapped start-up image with no inflate and no per-object decode |
-| Corpus I/O and waiting (0.5% and 6% of ry's corpus time) | B4, done | `unlink()` leaves `rmdir` to a background thread; children already run ry. The rest of the waiting is the suites' own `Sys.sleep`, which GNU R pays too ("unlink() leaves rmdir to a background thread", "The corpus's waiting is the suites' own sleeps") |
+| Corpus I/O and waiting (0.7% and 9.5% of ry's corpus time) | B4, done | `unlink()` leaves `rmdir` to a background thread; children already run ry. The rest of the waiting is the suites' own `Sys.sleep`, which GNU R pays too ("unlink() leaves rmdir to a background thread", "The corpus's waiting is the suites' own sleeps") |
 
 - **Inlining tier.**
   - Hot call sites inline their callees across closure calls, `UseMethod`/`NextMethod` and S4 dispatch, guarded by version-stamped bindings and the receiver's class.
@@ -8491,4 +8491,4 @@ Each one trades a narrow class of missed errors for a class of false reports see
 ## The corpus's waiting is the suites' own sleeps, and child R processes run ry
 
 - callr and processx start `R.home()`'s `bin/R` or `bin/Rscript`. In ry's R home these are scripts that exec `bin/exec/ry-rcmd`, so children run ry's runtime (`exists(".ry_view", baseenv())` is `TRUE` in a child). `Rscript -e` starts in about 32 ms against GNU R's 140 ms, and one `callr::r()` round trip takes 0.17 s against 0.25 s.
-- In the main process of the corpus suites, waiting is `Sys.sleep` called by the tests themselves (foreach 77% of its run, lgr 22%, cachem 10%), which costs GNU R the same. rlang and purrr do not wait in the main process. Their callr session child sits in processx's `poll` while the parent runs tests, and that child's own profile summary counts the idle time as native code: that is where a 90% waiting share for them came from.
+- In the main process of the corpus suites, waiting is `Sys.sleep` called by the tests themselves (foreach 77% of its run, lgr 22%, cachem 10%), which costs GNU R the same. rlang and purrr set `Config/testthat/parallel: true`, so testthat runs their tests in one callr worker even with `TESTTHAT_CPUS=1`, and the main process sits in processx's `poll` waiting for it: that is where a 90% waiting share for them came from. The worker is a ry process doing the real work, so this time speeds up with ry; profile such suites with `RY_PROFILE_SUMMARY_DIR` (one summary per process) and read the worker's.

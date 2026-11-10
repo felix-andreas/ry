@@ -889,11 +889,14 @@ child processes (`processx`). Shares are of one run with the JIT on.
 | timeseries | 59% | 24% | 0% | 13% (`xts`) | 3% | 0% | 0% | 1% |
 | validation | 71% | 24% | 0% | 0% | 3% | 0% | 0% | 2% |
 | **workload mean** | **56%** | **28%** | **5%** | **3%** | **5%** | **0%** | **0%** | **3%** |
-| **corpus mean** (26 packages) | **41%** | **28%** | | **10%** (all native) | **8%** | **1.5%** | **4%** | **7%** |
+| **corpus mean** (26 packages) | **45%** | **30%** | | **4%** (all native) | **8%** | **1.5%** | **4%** | **7%** |
 
 The corpus row is the mean of per-package shares; the corpus profile does not split native code
-by owner. Weighted by time instead, native code is 40% of the corpus (`data.table` and `rlang`
-dominate), I/O 0.5% and waiting 6%. Most I/O is `unlink` (1.7 s of a 158 s corpus run), and most
+by owner. `rlang` and `purrr` set `Config/testthat/parallel: true`, so testthat runs their tests in
+a callr worker even on one CPU, and their row comes from the worker's profile
+(`RY_PROFILE_SUMMARY_DIR` writes one summary per process): the main process only waits for the
+worker in `processx`'s native code. Weighted by time, R code is 53% of the corpus, builtins 23%,
+native code 5%, I/O 0.7% and waiting 9.5%. Most I/O is `unlink` (1.7 s of a 158 s corpus run), and most
 of that removes single files, such as the `verify_exec_*` files testthat writes around each
 snapshot test in `cli`, which cost GNU R the same system call. Removing a directory tree costs more,
 because `rmdir` waits on the ext4 journal (0.1 ms on an idle disk, 2 to 4 ms under writes), so
@@ -921,19 +924,20 @@ today's ratio):
 
 | Plan | R code | builtins | ry ports | GC, start-up | workloads | corpus |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1.5x milestone | 2x | 1.5x | 1x | 1x | 1.43x | 2.85x |
-| corpus 1.5x | 3x | 2x | 1x | 2x | | 4.01x |
-| 3x milestone | 5x | 3x | 3x | 2x | 3.08x | 5.24x |
-| 10x target | 30x | 10x | 10x | 10x | 10.96x | 13.14x |
-| ceiling: only the fixed buckets left | | | | | `tables` 8.9x, `timeseries` 8.1x | 27.9x |
+| 1.5x milestone | 2x | 1.5x | 1x | 1x | 1.43x | 2.96x |
+| corpus 1.5x | 3x | 2x | 1x | 2x | | 4.28x |
+| 3x milestone | 5x | 3x | 3x | 2x | 3.08x | 5.74x |
+| 10x target | 30x | 10x | 10x | 10x | 10.96x | 15.52x |
+| ceiling: only the fixed buckets left | | | | | `tables` 8.9x, `timeseries` 8.1x | 34.4x |
 
 So 10x on the workloads is reachable on one thread: R code needs about 30x (tier 1 for most of it,
 row (c) below) and builtins about 10x (row (a)). `tables` and `timeseries` stop near 9x and 8x
 because of `data.table`'s and `xts`'s C code, and the geometric mean carries them. The corpus
 runs at 1.94x GNU R today (geometric mean over the 21 packages that pass on both engines, 95%
 interval 1.76x to 2.15x). Its column counts all native code as fixed, because the profile does not
-split ry's ports from CRAN code, and its single-thread ceiling is 27.9x: I/O and waiting are too
-small to bound it, and the packages heavy in native code (`data.table`, `rlang`) set it.
+split ry's ports from CRAN code, and its single-thread ceiling is 34.4x, because I/O, waiting and
+native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.sleep`), then
+`rlang`, `withr` and `cli` at 11x to 12x (their native code and waiting).
 
 | Target row | Status | What it needs |
 | --- | --- | --- |
