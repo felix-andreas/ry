@@ -191,11 +191,13 @@ as the callee runs. A slot frame passes such a variable as an argument reference
 (`eval::argument_reference`, from `slot_promises_into`), and a caller that has an environment
 passes a reference to the name in that environment (`eval::env_reference`, from
 `referenced_args_into`), so calls from test code and from reified frames allocate no promise
-either.
+either. A slot frame passes compiled argument code the same way, as a code reference
+(`eval::code_reference`).
 
 - **Shape.** A reference is a promise with `gp::ARGUMENT_REFERENCE`: its expression is the
   variable's name. A reference into an environment keeps that environment in its environment
-  field. A reference into a slot frame has nil there, and its attribute is an integer vector
+  field. A code reference keeps the compiled code there and the code's source as its
+  expression. A reference to a slot frame's variable has nil there, and its attribute is an integer vector
   holding the caller's frame position, the variable's slot (`NO_REFERENCE_SLOT` when the caller
   keeps the variable in no slot) and the caller's header register, which `reference_target`
   checks so a reference that outlived its frame panics. References come from `Interp.references`, a pool
@@ -204,11 +206,14 @@ either.
 - **Forcing.** `force_promise` forces a reference once, reading the caller's slot at that moment:
   a value as it is, a promise (or another reference) by forcing it, an unbound slot from the
   caller's enclosure, and anything once the caller has an environment from that environment.
-  A reference into an environment forces as a promise of the name in it would.
+  A reference into an environment forces as a promise of the name in it would, and a code
+  reference runs its code on the caller's slots (`run_promise_on_slots`), as a promise over the
+  pending environment would.
   A write the caller's frame takes before the force is therefore visible, and one after it is
   not, exactly as for a promise of the name.
-- **Readers.** `missing()` follows a reference into the caller (`reference_is_missing`),
-  `substitute`, `match.call` and `sys.call` read the name from the expression, and
+- **Readers.** `missing()` follows a reference into the caller (`reference_is_missing`) and is
+  false for a code reference, `substitute`, `match.call` and `sys.call` read the name or source
+  from the expression, and
   `promise_env` reifies the caller. The package-call counter does not count a reference as a
   promise.
 - **Escape.** Before anything could keep a reference past the call, `materialize_references`
@@ -217,11 +222,13 @@ either.
   promise over the caller's environment or pending environment. `reify` runs it, as do S3 and
   S4 dispatch, which hand the arguments to a method, and `call_with_plan` when a debugger or
   move tracking sends the call down the generic path.
-- **Scope.** Only names become references. Compiled argument code still becomes a promise over
-  the pending environment, and a callee with a `...` formal or a call that passes `...` gets no
-  plan, so it gets promises.
+- **Scope.** Names and compiled code from a slot frame, and names from a caller with an
+  environment, become references. Code from a caller with an environment and code that was not
+  compiled still become promises, and a callee with a `...` formal or a call that passes `...`
+  gets no plan, so it gets promises.
 
-`crates/oracle/cases/environments__argument_references.R` pins these rules.
+`crates/oracle/cases/environments__argument_references.R` and
+`environments__code_argument_references.R` pin these rules.
 
 ## Checking it
 

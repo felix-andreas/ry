@@ -1,0 +1,10 @@
+[stdout]
+| 1 12 6 FALSE 6 6 0 yy + 1 matched(z = yy * 2) no 1 
+| 1 12 6 FALSE 6 6 0 yy + 1 matched(z = yy * 2) no 1 
+| 1 12 6 FALSE 6 6 0 yy + 1 matched(z = yy * 2) no 1 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

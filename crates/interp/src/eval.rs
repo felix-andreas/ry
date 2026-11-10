@@ -482,6 +482,31 @@ pub unsafe fn env_reference(env: Sexp, symbol: Sexp) -> R<Sexp> {
     Ok(reference)
 }
 
+/// An argument reference to the compiled argument `code` of the slot frame at `owner`, for a
+/// callee that takes its arguments straight into slots: it forces as [`slot_promise`] of the
+/// code would, by running the code on the frame's slots, without a promise or an environment.
+/// It keeps the code in its environment field and the code's source as its expression, so
+/// `substitute` sees the source.
+pub unsafe fn code_reference(owner: usize, code: Sexp) -> R<Sexp> {
+    let reference = argument_reference(owner, NO_REFERENCE_SLOT, bytecode::source_of(code))?;
+    crate::heap().set_tag(reference, code);
+    Ok(reference)
+}
+
+/// The environment an environment reference ([`env_reference`]) reads its variable in.
+#[inline]
+unsafe fn reference_env(reference: Sexp) -> Option<Sexp> {
+    let tag = reference.tag();
+    (tag.kind() == SexpType::Environment).then_some(tag)
+}
+
+/// The compiled code a code reference ([`code_reference`]) runs.
+#[inline]
+unsafe fn reference_code(reference: Sexp) -> Option<Sexp> {
+    let tag = reference.tag();
+    (tag.kind() == SexpType::Bytecode).then_some(tag)
+}
+
 /// The next free reference of [`Interp::references`], naming `symbol`, with its target left
 /// for the caller to fill in.
 unsafe fn pooled_reference(symbol: Sexp) -> R<Sexp> {
@@ -561,11 +586,14 @@ unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
 /// as a promise of the variable's name in that frame would read it.
 unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
     let symbol = reference.cdr();
-    if reference.tag() != nil() {
-        return eval(symbol, reference.tag());
+    if let Some(env) = reference_env(reference) {
+        return eval(symbol, env);
     }
     let (owner, slot) = reference_target(reference);
     let frame = &interp().frames[owner];
+    if let Some(code) = reference_code(reference) {
+        return bytecode::run_promise_on_slots(code, frame.function, owner, frame.slots as usize);
+    }
     if frame.env != nil() {
         return eval(symbol, frame.env);
     }
@@ -588,9 +616,12 @@ unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
 /// The value an unforced argument reference stands for when reading it runs no code: its
 /// variable's slot holds a value or a forced promise.
 pub unsafe fn reference_value(reference: Sexp) -> Option<Sexp> {
-    if reference.tag() != nil() {
-        return crate::effects::eager_argument(reference.cdr(), reference.tag())
+    if let Some(env) = reference_env(reference) {
+        return crate::effects::eager_argument(reference.cdr(), env)
             .filter(|value| value.kind() != SexpType::Promise);
+    }
+    if reference_code(reference).is_some() {
+        return None;
     }
     let (owner, slot) = reference_target(reference);
     let frame = &interp().frames[owner];
@@ -610,9 +641,12 @@ pub unsafe fn reference_value(reference: Sexp) -> Option<Sexp> {
 /// Whether the variable an unforced argument reference names is a missing argument in its
 /// frame, as [`value_is_missing`] asks of a promise of a name.
 unsafe fn reference_is_missing(reference: Sexp) -> R<bool> {
+    if reference_code(reference).is_some() {
+        return Ok(false);
+    }
     let symbol = reference.cdr();
-    let env = if reference.tag() != nil() {
-        reference.tag()
+    let env = if let Some(env) = reference_env(reference) {
+        env
     } else {
         let (owner, _) = reference_target(reference);
         interp().frames[owner].env
@@ -685,15 +719,20 @@ unsafe fn reference_promise(reference: Sexp) -> R<Sexp> {
     if reference.car() != unbound() {
         return forced_promise(symbol, reference.car());
     }
-    if reference.tag() != nil() {
-        return make_promise(symbol, reference.tag());
+    if let Some(env) = reference_env(reference) {
+        return make_promise(symbol, env);
     }
     let (owner, _) = reference_target(reference);
     let caller = &interp().frames[owner];
+    let expression = reference_code(reference).unwrap_or(symbol);
     if caller.env != nil() {
-        return make_promise(symbol, caller.env);
+        return if expression.kind() == SexpType::Bytecode {
+            compiled_promise(expression, caller.env)
+        } else {
+            make_promise(symbol, caller.env)
+        };
     }
-    slot_promise(owner, symbol)
+    slot_promise(owner, expression)
 }
 
 /// The environment of an unforced `promise`, made first when it is a slot frame's pending one
@@ -702,7 +741,7 @@ unsafe fn reference_promise(reference: Sexp) -> R<Sexp> {
 pub unsafe fn promise_env(promise: Sexp) -> R<Sexp> {
     if promise.has_gp(gp::ARGUMENT_REFERENCE)
         && promise.car() == unbound()
-        && promise.tag() == nil()
+        && reference_env(promise).is_none()
     {
         return frame_env(reference_target(promise).0);
     }

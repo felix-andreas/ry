@@ -5717,9 +5717,9 @@ unsafe fn slot_args_into(
 /// [`slot_args_into`] for a call whose arguments need promises: a name or compiled code
 /// becomes a promise over the frame's slots ([`eval::slot_promise`]), and `...` passes on what
 /// it collected. With `references`, for a callee that takes its arguments straight into slots,
-/// a name becomes an argument reference ([`eval::argument_reference`]) instead, which needs no
-/// allocation and no environment. `false`, with `args` cleared, when an argument needs the frame's environment
-/// itself: `..N`, code that was not compiled, or code that uses a local the frame keeps in no
+/// a name becomes an argument reference ([`eval::argument_reference`]) and compiled code a code
+/// reference ([`eval::code_reference`]) instead, which need no allocation and no environment.
+/// `false`, with `args` cleared, when an argument needs the frame's environment itself: `..N`, code that was not compiled, or code that uses a local the frame keeps in no
 /// slot.
 unsafe fn slot_promises_into(
     state: &Activation<'_, '_>,
@@ -5769,6 +5769,7 @@ unsafe fn slot_promises_into(
                 }
                 _ => eval::slot_promise(owner, expression)?,
             },
+            SexpType::Bytecode if references => eval::code_reference(owner, expression)?,
             SexpType::Bytecode => eval::slot_promise(owner, expression)?,
             _ => expression,
         };
