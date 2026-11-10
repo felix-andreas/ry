@@ -16,6 +16,8 @@ Each file is the upstream file unchanged, followed by a driver block that calls 
 
 The sizes were chosen so that GNU R 4.3 takes about 0.5 to 2.5 seconds per program, which means most differ from the upstream defaults. `knucleotide*`, `regexdna` and `reversecomplement*` read `../fasta/fasta<n>.txt`. Instead of the upstream input files (up to 5 MB), their driver writes that input with `fasta.R` into a temporary directory before the timed region and runs from there, so the input text differs from the upstream files though its format is the same.
 
+A program that runs under 0.1 s on some engine is marked too short in `run.py`'s table and left out of its suite's geometric mean, because at that length the time mostly measures start-up and the timer. With the JIT on, ry runs `rcp/empty-while`, `rcp/scalar-while`, `shootout/spectralnorm` and `shootout/spectralnorm_naive` that fast. Their sizes stay at the GNU R calibration, so their rows remain comparable with earlier tables.
+
 ## Left out
 
 | program | why |
