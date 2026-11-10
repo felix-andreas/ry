@@ -1,0 +1,29 @@
+[stdout]
+| [1]  1.00+ 0i  1.75- 6i -3.75- 2i -7.00+24i
+| [1]  1.0+1.0i -2.0+2.5i  0.5-1.0i  3.0+5.0i
+| [1] -1.0+2.0i  2.0+0.5i -0.5+4.0i -3.0-2.0i
+| [1]  0.50-0.50i -0.25+1.75i -0.75-1.25i  3.50+0.50i
+| [1]  1.00+ 0i  1.75- 6i -3.75- 2i -7.00+24i
+| [1] 1.000000+0.000000i 0.500000+1.500000i 1.131714-0.883616i 2.000000+1.000000i
+| [1]  1.0+0i -4.0+3i  0.5-2i  6.0+8i
+| [1] 2.0+0i     NA 3.5-2i 7.0+4i
+| [1] 1+0i 0+0i   NA 3+4i
+| [1] NA NA NA NA
+| complex(0)
+| complex(0)
+| warning: longer object length is not a multiple of shorter object length 
+| [1]  1.0+1.0i -2.0+3.5i  0.5+1.0i  3.0+5.0i
+| [1]  Inf+Infi  NaN+NaNi -Inf+NaNi  Inf+NaNi
+| [1]  Inf+Infi  NaN+NaNi  NaN+NaNi -Inf+NaNi
+| [1]  Inf+Infi  NaN+NaNi -Inf+NaNi  Inf+NaNi
+| [1] -0.5163422+0.4719238i  0.1567281+0.3124837i -1.0000000+1.0000000i
+| [4]  0.0000000+0.0000000i
+|      [,1]  [,2]
+| [1,] 1+0i  9+0i
+| [2,] 4+0i 16+0i
+[messages]
+[warnings]
+[errors]
+[value]
+complex
+| structure(c(1+0i, 4+0i, 9+0i, 16+0i), dim = c(2L, 2L))

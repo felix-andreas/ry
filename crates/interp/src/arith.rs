@@ -44,6 +44,7 @@ unsafe extern "C" {
     // two doubles, which `Rcomplex` is.
     fn csqrt(z: Rcomplex) -> Rcomplex;
     fn cexp(z: Rcomplex) -> Rcomplex;
+    fn cpow(x: Rcomplex, y: Rcomplex) -> Rcomplex;
     fn ccos(z: Rcomplex) -> Rcomplex;
     fn csin(z: Rcomplex) -> Rcomplex;
     fn ctan(z: Rcomplex) -> Rcomplex;
@@ -1670,22 +1671,51 @@ unsafe fn integer_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp, count:
     Ok(result)
 }
 
-/// Smith's algorithm, which scales by the larger part of the divisor so that neither the squared
-/// modulus nor the products overflow.
-fn complex_divide(a: Rcomplex, b: Rcomplex) -> Rcomplex {
-    if b.r.abs() >= b.i.abs() {
-        let ratio = b.i / b.r;
-        let denominator = b.r + ratio * b.i;
+/// C99 complex division as libgcc's `__divdc3` does it, which is what GNU R's `/` compiles to:
+/// Smith's algorithm scales by the larger part of the divisor so that neither the squared
+/// modulus nor the products overflow, and when both parts come out NaN the infinities and zeros
+/// of C11 Annex G.5.1 are recovered, so `(Inf+1i) / 0` is `Inf+Infi` and
+/// `complex(real = -Inf, imaginary = NA) / 2` is `-Inf+NaNi`.
+fn complex_divide(x: Rcomplex, y: Rcomplex) -> Rcomplex {
+    let (mut a, mut b, mut c, mut d) = (x.r, x.i, y.r, y.i);
+    let (real, imaginary) = if c.abs() < d.abs() {
+        let ratio = c / d;
+        let denominator = c * ratio + d;
+        ((a * ratio + b) / denominator, (b * ratio - a) / denominator)
+    } else {
+        let ratio = d / c;
+        let denominator = d * ratio + c;
+        ((b * ratio + a) / denominator, (b - a * ratio) / denominator)
+    };
+    if !(real.is_nan() && imaginary.is_nan()) {
+        return Rcomplex {
+            r: real,
+            i: imaginary,
+        };
+    }
+    let unit = |value: f64| (if value.is_infinite() { 1.0f64 } else { 0.0 }).copysign(value);
+    if c == 0.0 && d == 0.0 && (!a.is_nan() || !b.is_nan()) {
+        let infinity = f64::INFINITY.copysign(c);
         Rcomplex {
-            r: (a.r + a.i * ratio) / denominator,
-            i: (a.i - a.r * ratio) / denominator,
+            r: infinity * a,
+            i: infinity * b,
+        }
+    } else if (a.is_infinite() || b.is_infinite()) && c.is_finite() && d.is_finite() {
+        (a, b) = (unit(a), unit(b));
+        Rcomplex {
+            r: f64::INFINITY * (a * c + b * d),
+            i: f64::INFINITY * (b * c - a * d),
+        }
+    } else if (c.is_infinite() || d.is_infinite()) && a.is_finite() && b.is_finite() {
+        (c, d) = (unit(c), unit(d));
+        Rcomplex {
+            r: 0.0 * (a * c + b * d),
+            i: 0.0 * (b * c - a * d),
         }
     } else {
-        let ratio = b.r / b.i;
-        let denominator = b.i + ratio * b.r;
         Rcomplex {
-            r: (a.r * ratio + a.i) / denominator,
-            i: (a.i * ratio - a.r) / denominator,
+            r: real,
+            i: imaginary,
         }
     }
 }
@@ -1693,6 +1723,7 @@ fn complex_divide(a: Rcomplex, b: Rcomplex) -> Rcomplex {
 /// C99 complex multiplication, which GNU R uses: when the plain formula gives NaN in both parts
 /// but an operand is infinite, the product is recovered as an infinity (C11 Annex G.5.1), so
 /// `1i * complex(real = NaN, imaginary = Inf)` is `-Inf+NaNi`, not `NaN+NaNi`.
+#[inline]
 fn complex_multiply(x: Rcomplex, y: Rcomplex) -> Rcomplex {
     let (mut a, mut b, mut c, mut d) = (x.r, x.i, y.r, y.i);
     let (ac, bd, ad, bc) = (a * c, b * d, a * d, b * c);
@@ -1773,15 +1804,8 @@ fn complex_power(x: Rcomplex, y: Rcomplex) -> Rcomplex {
             };
         }
     }
-    let log_modulus = x.r.hypot(x.i).ln();
-    let argument = x.i.atan2(x.r);
-    let real = y.r * log_modulus - y.i * argument;
-    let imaginary = y.i * log_modulus + y.r * argument;
-    let scale = real.exp();
-    Rcomplex {
-        r: scale * imaginary.cos(),
-        i: scale * imaginary.sin(),
-    }
+    // SAFETY: `cpow` is a pure C99 function on two values.
+    unsafe { cpow(x, y) }
 }
 
 unsafe fn complex_at(vector: Sexp, index: usize) -> Rcomplex {
@@ -1803,28 +1827,61 @@ unsafe fn complex_at(vector: Sexp, index: usize) -> Rcomplex {
 
 unsafe fn complex_arithmetic(op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
     let result = alloc(SexpType::Complex, count)?;
-    let left_length = length(left);
-    let right_length = length(right);
-    for index in 0..count {
-        let a = complex_at(left, index % left_length);
-        let b = complex_at(right, index % right_length);
-        let value = match op {
-            Op::Add => Rcomplex {
-                r: a.r + b.r,
-                i: a.i + b.i,
-            },
-            Op::Subtract => Rcomplex {
-                r: a.r - b.r,
-                i: a.i - b.i,
-            },
-            Op::Multiply => complex_multiply(a, b),
-            Op::Divide => complex_divide(a, b),
-            Op::Power => complex_power(a, b),
-            _ => return Err(error("invalid operation on complex numbers")),
-        };
-        values::complexes_mut(result)[index] = value;
+    let left_values = complex_operand(left);
+    let right_values = complex_operand(right);
+    let out = values::complexes_mut(result);
+    match op {
+        Op::Add => combine_complex(out, &left_values, &right_values, |a, b| Rcomplex {
+            r: a.r + b.r,
+            i: a.i + b.i,
+        }),
+        Op::Subtract => combine_complex(out, &left_values, &right_values, |a, b| Rcomplex {
+            r: a.r - b.r,
+            i: a.i - b.i,
+        }),
+        Op::Multiply => combine_complex(out, &left_values, &right_values, complex_multiply),
+        Op::Divide => combine_complex(out, &left_values, &right_values, complex_divide),
+        Op::Power => combine_complex(out, &left_values, &right_values, complex_power),
+        _ => return Err(error("invalid operation on complex numbers")),
     }
     Ok(result)
+}
+
+/// The elements of an arithmetic operand as complex numbers: a complex vector's own storage, or
+/// the converted values of a real, integer or logical one.
+unsafe fn complex_operand<'a>(vector: Sexp) -> std::borrow::Cow<'a, [Rcomplex]> {
+    if vector.kind() == SexpType::Complex {
+        return std::borrow::Cow::Borrowed(values::complexes(vector));
+    }
+    std::borrow::Cow::Owned((0..length(vector)).map(|index| complex_at(vector, index)).collect())
+}
+
+/// Writes `operation` of the recycled operands into `out`, with the equal-length and scalar
+/// cases free of the per-element remainder.
+#[inline(always)]
+fn combine_complex(
+    out: &mut [Rcomplex],
+    left: &[Rcomplex],
+    right: &[Rcomplex],
+    operation: impl Fn(Rcomplex, Rcomplex) -> Rcomplex,
+) {
+    if left.len() == out.len() && right.len() == out.len() {
+        for ((slot, &a), &b) in out.iter_mut().zip(left).zip(right) {
+            *slot = operation(a, b);
+        }
+    } else if let ([a], true) = (left, right.len() == out.len()) {
+        for (slot, &b) in out.iter_mut().zip(right) {
+            *slot = operation(*a, b);
+        }
+    } else if let ([b], true) = (right, left.len() == out.len()) {
+        for (slot, &a) in out.iter_mut().zip(left) {
+            *slot = operation(a, *b);
+        }
+    } else if !left.is_empty() && !right.is_empty() {
+        for (index, slot) in out.iter_mut().enumerate() {
+            *slot = operation(left[index % left.len()], right[index % right.len()]);
+        }
+    }
 }
 
 // Comparison.

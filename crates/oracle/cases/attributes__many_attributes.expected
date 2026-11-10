@@ -1,0 +1,16 @@
+[stdout]
+| [1] -150
+| [1] 1
+| [1] "new"
+| NULL
+| [1] 300
+| [1] "key1" "key3" "key4" "key5"
+| [1] "key299" "key300" "fresh" 
+| gg ta ac  g 
+|  3  2  1  4 
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| c(gg = 3L, ta = 2L, ac = 1L, g = 4L)
