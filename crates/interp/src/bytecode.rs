@@ -689,6 +689,10 @@ pub enum Op {
     /// `dst function call base count`: calls a builtin with the values in registers
     /// `base..base + count`, tagged as in `call`.
     CallBuiltin,
+    /// `dst function call base count target`: [`Op::CallBuiltin`] for `target <- f(target, ...)`
+    /// with `f` a builtin that may update its first argument in place, which it may when
+    /// `target`'s binding holds the value's only reference.
+    CallBuiltinRebinding,
     /// `dst function call`: any other call, with the AST evaluator's argument handling. The
     /// constant after `call` holds the arguments a closure's promises are made from
     /// ([`Compiler::call_site`]).
@@ -819,13 +823,14 @@ enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 45] = [
+pub const OPS: [Op; 46] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
     Op::GetFun,
     Op::BranchUnlessBuiltin,
     Op::CallBuiltin,
+    Op::CallBuiltinRebinding,
     Op::CallGeneric,
     Op::Ast,
     Op::Guard,
@@ -2539,6 +2544,15 @@ impl Compiler {
             self.cold_fallback(&[guard], call, dst)?;
             return Ok(());
         }
+        let rebinding = match self.rebinding {
+            Some((value, target)) if value == call => {
+                self.rebinding = None;
+                eval::builtin_def(function)?
+                    .reuses_first_argument
+                    .then(|| self.constant(target))
+            }
+            _ => None,
+        };
         let base = self.next_register;
         for _ in args {
             self.allocate();
@@ -2546,16 +2560,17 @@ impl Compiler {
         for (index, (_, value)) in args.iter().enumerate() {
             self.expression(*value, base + index as u32)?;
         }
-        self.emit(
-            Op::CallBuiltin,
-            &[
-                dst,
-                function_register,
-                call_constant,
-                base,
-                args.len() as u32,
-            ],
-        );
+        let count = args.len() as u32;
+        match rebinding {
+            Some(target) => self.emit(
+                Op::CallBuiltinRebinding,
+                &[dst, function_register, call_constant, base, count, target],
+            ),
+            None => self.emit(
+                Op::CallBuiltin,
+                &[dst, function_register, call_constant, base, count],
+            ),
+        };
         self.release_to(mark);
         self.cold_fallback(&[guard], call, dst)?;
         Ok(())
@@ -3245,9 +3260,7 @@ impl Compiler {
         let args = values::pairlist_items(call.cdr());
         // A register holds an argument's value without counting as a reference, so a later
         // argument that modifies a variable in place would change an earlier argument's value.
-        let simple = !(rebinding.is_some()
-            && crate::standard_library::reuses_first_argument(&symbol_name(head)))
-            && args.iter().all(|(_, value)| *value != symbols().dots)
+        let simple = args.iter().all(|(_, value)| *value != symbols().dots)
             && !args
                 .iter()
                 .skip(1)
@@ -3266,10 +3279,18 @@ impl Compiler {
                     self.expression(*value, base + index as u32)?;
                 }
             }
-            self.emit(
-                Op::CallBuiltin,
-                &[dst, function, call_constant, base, args.len() as u32],
-            );
+            match rebinding {
+                Some(target) if crate::standard_library::reuses_first_argument(&symbol_name(head)) => {
+                    self.emit(
+                        Op::CallBuiltinRebinding,
+                        &[dst, function, call_constant, base, args.len() as u32, target],
+                    )
+                }
+                _ => self.emit(
+                    Op::CallBuiltin,
+                    &[dst, function, call_constant, base, args.len() as u32],
+                ),
+            };
             let done = self.emit_patchable(Op::Jump, &[0]);
             self.patch(generic);
             self.generic_call(dst, function, call_constant, rebinding);
@@ -3305,6 +3326,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::SetVar => 3,
         Op::BranchUnlessBuiltin => 2,
         Op::CallBuiltin => 5,
+        Op::CallBuiltinRebinding => 6,
         Op::CallGeneric => 3,
         Op::CallRebinding | Op::CallTailUpdate => 4,
         Op::Field | Op::Item => 5,
@@ -3415,6 +3437,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::GetFun => &[Register, Symbol, Cache, Call],
         Op::BranchUnlessBuiltin | Op::BranchIfObject => &[Register, Target],
         Op::CallBuiltin => &[Register, Register, Call, Base, Count],
+        Op::CallBuiltinRebinding => &[Register, Register, Call, Base, Count, Symbol],
         Op::CallGeneric => &[Register, Register, CallSite],
         Op::CallRebinding | Op::CallTailUpdate => &[Register, Register, Call, Symbol],
         Op::Field => &[Register, Register, Symbol, Call, Shape],
@@ -4422,6 +4445,7 @@ handlers! {
     run_get_fun, step_get_fun: GetFun, true, op_get_fun;
     run_branch_unless_builtin, step_branch_unless_builtin: BranchUnlessBuiltin, false, op_branch_unless_builtin;
     run_call_builtin, step_call_builtin: CallBuiltin, true, op_call_builtin;
+    run_call_builtin_rebinding, step_call_builtin_rebinding: CallBuiltinRebinding, true, op_call_builtin_rebinding;
     run_call_generic, step_call_generic: CallGeneric, true, op_call_generic;
     run_call_rebinding, step_call_rebinding: CallRebinding, true, op_call_rebinding;
     run_call_tail_update, step_call_tail_update: CallTailUpdate, true, op_call_tail_update;
@@ -5238,6 +5262,90 @@ unsafe fn slot_eager_argument(state: &Activation<'_, '_>, symbol: Sexp) -> Optio
         }
     }
     effects::eager_argument(symbol, state.machine.function.tag())
+}
+
+#[inline(always)]
+unsafe fn op_call_builtin_rebinding(
+    state: &mut Activation<'_, '_>,
+    instruction: Instruction,
+) -> R<Flow> {
+    let function = instruction.input(1);
+    let call = state.constant(instruction, 2);
+    let first = instruction.operand(3);
+    let count = instruction.operand(4);
+    let target = state.constant(instruction, 5);
+    let definition = eval::builtin_def(function)?;
+    let mut args = eval::Args::new();
+    let mut cell = call.cdr();
+    for index in 0..count {
+        if cell.car() == missing_arg() && !definition.keep_missing {
+            return Err(error_in(call, format!("argument {} is empty", index + 1)));
+        }
+        args.push(Arg {
+            tag: cell.tag(),
+            value: instruction.register(first + index),
+        });
+        cell = cell.cdr();
+    }
+    let reusable = if definition.reuses_first_argument {
+        rebinding_reusable(state, target, &args, first..first + count, instruction.operand(0))?
+    } else {
+        None
+    };
+    let value = if reusable.is_some() {
+        eval::call_builtin_reusing(definition, call, function, &args, *state.header, reusable)?
+    } else {
+        call_builtin(definition, call, function, &args, *state.header)?
+    };
+    state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+/// The first argument of `target <- f(target, ...)` when `f` may update it in place: `target`'s
+/// binding (its slot, or its cell once the frame has an environment) holds the value with the
+/// only reference, no other argument is the same object, and no register of the frame's
+/// expressions holds it uncounted. `arguments` are the call's own argument registers and `dst`
+/// its result register, which a previous run of the same assignment may have left holding it.
+unsafe fn rebinding_reusable(
+    state: &Activation<'_, '_>,
+    target: Sexp,
+    args: &[Arg],
+    arguments: Range<usize>,
+    dst: usize,
+) -> R<Option<Sexp>> {
+    let Some(subject) = args.first().map(|arg| arg.value) else {
+        return Ok(None);
+    };
+    if subject.refcount() != 1 || args[1..].iter().any(|arg| arg.value == subject) {
+        return Ok(None);
+    }
+    let bound = if state.in_slots() {
+        slot_named(state, target).is_some_and(|slot| *slot == subject)
+    } else {
+        crate::heap()
+            .frame_cell(*state.header, target)
+            .is_some_and(|cell| {
+                !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED) && cell.cdr() == subject
+            })
+    };
+    if !bound {
+        return Ok(None);
+    }
+    let registers = &interp().bytecode.registers;
+    let start = state.header.offset_from(registers.as_ptr()) as usize
+        + 1
+        + length(state.constants.element(SLOTS).element(1));
+    let base = state.registers.offset_from(registers.as_ptr()) as usize;
+    let arguments = base + arguments.start..base + arguments.end;
+    let held = registers
+        .iter()
+        .enumerate()
+        .skip(start)
+        .any(|(index, &value)| {
+            value == subject && !arguments.contains(&index) && index != base + dst
+        });
+    Ok((!held).then_some(subject))
 }
 
 #[inline(always)]

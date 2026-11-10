@@ -1173,6 +1173,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::SubAssignMatrix
             | Op::CallGeneric
             | Op::CallRebinding
+            | Op::CallBuiltinRebinding
             | Op::Field
             | Op::Item
             | Op::Slot
@@ -2195,6 +2196,13 @@ impl<'a> Builder<'a> {
                 Effect::Opaque,
             ),
             Op::CallBuiltin => self.call_builtin(&inst, state)?,
+            // Only tier 0 decides whether the binding owns the value it updates in place.
+            Op::CallBuiltinRebinding => self.opaque_step(
+                state,
+                Some((operand(0), self.feedback_at(inst.pc))),
+                &[],
+                Effect::Opaque,
+            ),
             Op::CallGeneric | Op::CallRebinding => {
                 let call = self.constant(operand(2));
                 // `x <- f(x, ...)` may move a ry dictionary or set into the call to update it in
@@ -3989,7 +3997,7 @@ fn vector_arithmetic(arith: Arith, a: Ty, b: Ty) -> Option<Ty> {
 pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
     let operand = |index: usize| inst.operand(index);
     match inst.op {
-        Op::CallBuiltin => std::iter::once(operand(1))
+        Op::CallBuiltin | Op::CallBuiltinRebinding => std::iter::once(operand(1))
             .chain(operand(3)..operand(3) + operand(4))
             .collect(),
         Op::CallGeneric
@@ -4076,7 +4084,7 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
             gen_(operand(1), live);
             gen_(operand(3), live);
         }
-        Op::CallBuiltin => {
+        Op::CallBuiltin | Op::CallBuiltinRebinding => {
             kill(operand(0), live);
             gen_(operand(1), live);
             for register in operand(3)..operand(3) + operand(4) {

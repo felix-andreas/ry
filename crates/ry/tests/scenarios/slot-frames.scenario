@@ -55,6 +55,15 @@ file frames.R
 | pick <- function(type = c("gzip", "xz", "none")) match(match.arg(type), c("none", "gzip", "xz"))
 | for (t in c("gzip", "xz", "none", "xz")) cat(pick(t), "")
 | cat("\n")
+| # `x <- Dict.insert(x, ...)` updates the slot's dictionary in place when nothing else holds
+| # it, and copies it when a second binding or a pending argument does.
+| grow <- function(n) { d <- Dict.empty(); for (i in seq_len(n)) d <- Dict.insert(d, as.character(i), i); Num.to_r(Dict.len(d)) }
+| for (k in 1:3) cat(grow(50), "")
+| cat("\n")
+| shared <- function() { a <- Dict.insert(Dict.empty(), "k", 1); b <- a; a <- Dict.insert(a, "j", 2); c(Num.to_r(Dict.len(a)), Num.to_r(Dict.len(b))) }
+| pending <- function() { a <- Dict.insert(Dict.empty(), "k", 1); r <- list(a, { a <- Dict.insert(a, "j", 2); 0 }); c(Num.to_r(Dict.len(r[[1]])), Num.to_r(Dict.len(a))) }
+| for (k in 1:3) cat(shared(), pending(), "")
+| cat("\n")
 
 run ry run --runtime ry frames.R
 expect exit 0
@@ -77,3 +86,5 @@ expect stdout "[1] 9"
 expect stdout "[1] 5050"
 expect stdout "[1] \"boom\""
 expect stdout "2 3 1 3"
+expect stdout "50 50 50"
+expect stdout "2 1 1 2 2 1 1 2 2 1 1 2"
