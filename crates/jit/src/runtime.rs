@@ -815,6 +815,20 @@ pub unsafe extern "C" fn jit_flush(
             let machine = machine(activation);
             let symbol = compiled(activation).slots[slot as usize];
             let cell = slot_cell(activation, slot);
+            let element = match kind {
+                representation::INTEGER => Some((SexpType::Integer, f64::from(bits as i32))),
+                representation::LOGICAL => Some((SexpType::Logical, f64::from(bits as i32))),
+                representation::DOUBLE => Some((SexpType::Real, f64::from_bits(bits as u64))),
+                _ => None,
+            };
+            // A loop writes the same variables back on every iteration, so reusing the box the
+            // variable holds saves an allocation each time.
+            if let Some((kind, element)) = element
+                && let Some(value) = machine.overwrite(symbol, kind, element)
+            {
+                *cell = value;
+                return 1;
+            }
             let result = scoped(|| -> R<()> {
                 let value = match kind {
                     representation::INTEGER => values::scalar_integer(bits as i32)?,

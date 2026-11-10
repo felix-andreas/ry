@@ -113,6 +113,177 @@ pub fn check_bytecode_agreement(entropy: &mut impl Entropy) {
     });
 }
 
+/// One compiled arithmetic site, called with a seeded sequence of operand pairs of changing
+/// kinds, agrees with the AST evaluator on every call. Tier 0 specializes the site to the kinds
+/// it sees and must undo the specialization when they change, give up after repeated undos,
+/// and leave an NA or overflowing integer result and every operand that is not a plain scalar
+/// to the generic instruction.
+pub fn check_quickening_agreement(entropy: &mut impl Entropy) {
+    syntax::testing::enable_invariants();
+    const OPERANDS: &[&str] = &[
+        "3L",
+        "-7L",
+        "2147483647L",
+        "-2147483647L",
+        "NA_integer_",
+        "0L",
+        "2.5",
+        "-0.0",
+        "NaN",
+        "NA_real_",
+        "Inf",
+        "1e308",
+        "TRUE",
+        "NA",
+        "c(1L, 2L)",
+        "c(a = 1)",
+        "c(x = 2L)",
+        "[3L]",
+        "[1.5]",
+    ];
+    const OPERATORS: &[&str] = &[
+        "+", "-", "*", "/", "==", "!=", "<", ">", "<=", ">=", "^", "%%",
+    ];
+    let operator = OPERATORS[entropy.below(OPERATORS.len())];
+    let body = match entropy.below(3) {
+        0 => format!("a {operator} b"),
+        1 => format!("r <- a; j <- 0L; while (j < 3L) {{ r <- r {operator} b; j <- j + 1L }}; r"),
+        _ => format!("x <- a {operator} b; y <- b {operator} a; c(x, y)"),
+    };
+    let mut calls: Vec<(&str, &str)> = Vec::new();
+    for _ in 0..2 + entropy.below(10) {
+        // Runs of one kind let a site specialize before the kind changes.
+        let a = OPERANDS[entropy.below(OPERANDS.len())];
+        let b = OPERANDS[entropy.below(OPERANDS.len())];
+        for _ in 0..1 + entropy.below(3) {
+            calls.push((a, b));
+        }
+    }
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            run(&format!("f <- function(a, b) {{ {body} }}"));
+            for (call, &(a, b)) in calls.iter().enumerate() {
+                let direct = run(&format!("a <- {a}\nb <- {b}\n{{ {body} }}"));
+                let compiled = run(&format!("f({a}, {b})"));
+                assert_eq!(
+                    direct,
+                    compiled,
+                    "call {}: `{body}` with a = {a}, b = {b}, after {:?}",
+                    call + 1,
+                    &calls[..call]
+                );
+            }
+        }
+    });
+}
+
+/// Tier 0 resumes an activation at any pc it reaches, as it does when the optimizing tier
+/// deoptimizes there. A test tier takes every activation of a random closure over at entry,
+/// single-steps it through `k` instructions, and hands it back through the same
+/// [`bytecode::TierExit::Resume`] path compiled code exits by. For every `k` up to the number
+/// of instructions the call runs, the result must equal tier 0's alone.
+pub fn check_resume_at_every_pc(entropy: &mut impl Entropy) {
+    use {
+        bytecode::{Machine, Stepped, Tier, TierExit},
+        std::cell::Cell,
+    };
+    thread_local! {
+        static TARGET: Cell<Option<Sexp>> = const { Cell::new(None) };
+        static BUDGET: Cell<Option<usize>> = const { Cell::new(None) };
+        static STEPS: Cell<usize> = const { Cell::new(0) };
+    }
+    unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
+        if TARGET.get() != Some(machine.function) {
+            return None;
+        }
+        // Only the outermost activation is taken over, so a recursive call runs in tier 0.
+        let budget = BUDGET.take()?;
+        let mut pc = 0;
+        for taken in 0..budget {
+            match unsafe { bytecode::step(machine, pc) } {
+                Ok(Stepped::At(next)) => pc = next,
+                Ok(Stepped::Returned(value)) => {
+                    STEPS.set(taken + 1);
+                    return Some(TierExit::Finished(Ok(value)));
+                }
+                Err(unwind) => {
+                    STEPS.set(taken + 1);
+                    return Some(TierExit::Finished(Err(unwind)));
+                }
+            }
+        }
+        STEPS.set(budget);
+        Some(TierExit::Resume { pc, pending: None })
+    }
+    syntax::testing::enable_invariants();
+    let body = program(entropy);
+    let arguments = [
+        "3L",
+        "-2.5",
+        "NA",
+        "TRUE",
+        "2147483647L",
+        "0",
+        "[3L]",
+        "[-2.5, 1]",
+    ];
+    let a = arguments[entropy.below(arguments.len())];
+    let b = arguments[entropy.below(arguments.len())];
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed, and the test tier is removed before returning.
+        unsafe {
+            // Restores the tier even when an assertion fails, so later tests sharing the
+            // interpreter do not run under the test tier.
+            struct Restore(Option<Tier>);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    TARGET.set(None);
+                    bytecode::set_tier(self.0);
+                }
+            }
+            let _restore = Restore(bytecode::tier().copied());
+            // Installed before `f` exists, so its first entry already schedules the tier.
+            bytecode::set_tier(Some(Tier {
+                enter,
+                entry_threshold: 1,
+                worth_recording: |_| false,
+                back_edge: |_, _| None,
+                back_edge_threshold: bytecode::NEVER,
+                baseline: |_| {},
+                baseline_threshold: bytecode::NEVER,
+                call: |_, _| None,
+            }));
+            let reset = format!("a <- {a}\nb <- {b}\ns <- 7L\nk <- 0L\ni <- 0L");
+            run(&reset);
+            run(&format!("f <- function(a, b) {{ {body} }}"));
+            let function = values::install("f")
+                .and_then(|symbol| eval::eval(symbol, values::global_env()))
+                .ok();
+            TARGET.set(function);
+            let call = format!("f({a}, {b})");
+            // With no budget the test tier declines, so this call runs in tier 0 alone.
+            let alone = run(&call);
+            let mut budget = 0;
+            loop {
+                run(&reset);
+                BUDGET.set(Some(budget));
+                STEPS.set(0);
+                let resumed = run(&call);
+                assert_eq!(
+                    alone, resumed,
+                    "resumed after {budget} instructions: `{body}` with a = {a}, b = {b}"
+                );
+                assert!(BUDGET.take().is_none(), "the test tier never took `f` over");
+                if STEPS.get() < budget {
+                    break;
+                }
+                budget += 1;
+            }
+        }
+    });
+}
+
 /// A random element-wise tree over vector operands, the shape the tier-0 compiler fuses into
 /// one pass, gives the same value from the fused pass as from the AST evaluator: the same NA
 /// and NaN payloads, the same NA on integer overflow, the same recycling and reductions.
@@ -481,54 +652,82 @@ pub fn check_code_image_round_trip(entropy: &mut impl Entropy) {
     });
 }
 
-/// An image file's record table reads back as it was written, an image of another build or
-/// database reads as absent, and a corrupted file reads as absent or fails with a message, never
-/// panics or names a payload outside the file.
+/// An image file's record table and streams read back as they were written, an image of another
+/// build or another version of its database reads as absent, and a corrupted file reads as absent
+/// or fails with a message, never panics or names a payload or stream outside the file.
 pub fn check_code_image_file(entropy: &mut impl Entropy) {
     let count = entropy.below(6);
     let mut offset = 0u64;
     let mut records = Vec::new();
+    let mut streams = Vec::new();
     let mut payloads = Vec::new();
     for _ in 0..count {
         offset += 1 + entropy.below(1000) as u64;
-        records.push((offset, entropy.below(5000) as u32, entropy.next_u64()));
+        records.push((offset, entropy.below(5000) as u32));
+        streams.push(
+            (0..entropy.below(60))
+                .map(|_| entropy.below(256) as u8)
+                .collect::<Vec<u8>>(),
+        );
         payloads.push(
             (0..entropy.below(40))
                 .map(|_| entropy.below(256) as u8)
                 .collect::<Vec<u8>>(),
         );
     }
-    let database_length = offset + entropy.below(100) as u64;
+    let stamp = code_image::DatabaseStamp {
+        length: offset + entropy.below(100) as u64,
+        modified: entropy.next_u64(),
+    };
+    let table: Vec<(u64, u32, &[u8])> = records
+        .iter()
+        .zip(&streams)
+        .map(|(&(offset, length), stream)| (offset, length, &stream[..]))
+        .collect();
     let build = "fuzz-build";
     let trained = entropy.below(2) == 0;
     let mutations: Vec<(usize, u8)> = (0..1 + entropy.below(4))
         .map(|_| (entropy.below(1 << 16), entropy.below(256) as u8))
         .collect();
     with_interpreter(|| {
-        let bytes =
-            code_image::image_bytes(build, trained, database_length, &records, &payloads, None)
-                .unwrap_or_else(|_| panic!("a small image must write"));
-        let entries = code_image::parse(&bytes, build, database_length)
+        let bytes = code_image::image_bytes(build, trained, stamp, &table, &payloads, None)
+            .unwrap_or_else(|_| panic!("a small image must write"));
+        let entries = code_image::parse(&bytes, build, stamp)
             .unwrap_or_else(|message| panic!("a written image must parse: {message}"))
             .unwrap_or_else(|| panic!("a written image must belong to its build"))
             .entries;
         assert_eq!(entries.len(), records.len());
-        for ((entry, record), payload) in entries.iter().zip(&records).zip(&payloads) {
-            assert_eq!((entry.offset, entry.length, entry.hash), *record);
-            let start = entry.payload_offset as usize;
+        let at = |offset: u64, length: u32| {
+            let start = offset as usize;
+            bytes.get(start..start + length as usize)
+        };
+        for (entry, (record, (stream, payload))) in entries
+            .iter()
+            .zip(records.iter().zip(streams.iter().zip(&payloads)))
+        {
+            assert_eq!((entry.offset, entry.length), *record);
             assert_eq!(
-                bytes.get(start..start + entry.payload_length as usize),
+                at(entry.payload_offset, entry.payload_length),
                 Some(&payload[..])
             );
+            assert_eq!(
+                at(entry.stream_offset, entry.stream_length),
+                Some(&stream[..])
+            );
         }
-        assert_eq!(
-            code_image::parse(&bytes, "another-build", database_length),
-            Ok(None)
-        );
-        assert_eq!(
-            code_image::parse(&bytes, build, database_length + 1),
-            Ok(None)
-        );
+        assert_eq!(code_image::parse(&bytes, "another-build", stamp), Ok(None));
+        for other in [
+            code_image::DatabaseStamp {
+                length: stamp.length + 1,
+                ..stamp
+            },
+            code_image::DatabaseStamp {
+                modified: stamp.modified ^ 1,
+                ..stamp
+            },
+        ] {
+            assert_eq!(code_image::parse(&bytes, build, other), Ok(None));
+        }
         let mut mutated = bytes.clone();
         for &(position, value) in &mutations {
             let at = position % mutated.len().max(1);
@@ -537,7 +736,7 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
                 _ => mutated.truncate(at),
             }
         }
-        if let Ok(Some(parsed)) = code_image::parse(&mutated, build, database_length) {
+        if let Ok(Some(parsed)) = code_image::parse(&mutated, build, stamp) {
             assert!(
                 parsed.native_offset + parsed.native_length <= mutated.len() as u64,
                 "a parsed image must not name a native section outside the file"
@@ -546,6 +745,10 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
                 assert!(
                     entry.payload_offset + u64::from(entry.payload_length) <= mutated.len() as u64,
                     "a parsed image must not name a payload outside the file"
+                );
+                assert!(
+                    entry.stream_offset + u64::from(entry.stream_length) <= mutated.len() as u64,
+                    "a parsed image must not name a stream outside the file"
                 );
             }
         }
@@ -653,12 +856,24 @@ pub fn check_code_image_load(entropy: &mut impl Entropy) {
                 }
                 _ => {}
             }
+            std::fs::create_dir_all(&directory).unwrap_or_else(|failure| {
+                panic!("cannot create {}: {failure}", directory.display())
+            });
+            let database = directory.join("fuzz.rdb");
+            let database = database
+                .to_str()
+                .unwrap_or_else(|| panic!("a temporary path is text"));
+            std::fs::write(database, vec![0u8; stream.len()])
+                .unwrap_or_else(|failure| panic!("cannot write {database}: {failure}"));
+            let stamp = code_image::DatabaseStamp::of(database)
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .unwrap_or_else(|| panic!("a temporary file has a modification time"));
             let build = "fuzz-build";
             let mut image = code_image::image_bytes(
                 build,
                 trained,
-                stream.len() as u64,
-                &[(offset, stream.len() as u32, code_image::hash(&stream))],
+                stamp,
+                &[(offset, stream.len() as u32, &stream[..])],
                 &[payload],
                 None,
             )
@@ -673,25 +888,20 @@ pub fn check_code_image_load(entropy: &mut impl Entropy) {
                     }
                 }
             }
-            std::fs::create_dir_all(&directory).unwrap_or_else(|failure| {
-                panic!("cannot create {}: {failure}", directory.display())
-            });
-            let database = directory.join("fuzz.rdb");
-            let database = database
-                .to_str()
-                .unwrap_or_else(|| panic!("a temporary path is text"));
-            std::fs::write(database, vec![0u8; stream.len()])
-                .unwrap_or_else(|failure| panic!("cannot write {database}: {failure}"));
             std::fs::write(code_image::path(database), &image)
                 .unwrap_or_else(|failure| panic!("cannot write the image: {failure}"));
             let previous = std::mem::replace(&mut crate::interp().code_image.build, build);
             let show = std::mem::replace(&mut crate::interp().show_error_messages, false);
             let loaded = (|| -> Result<Option<Sexp>, Unwind> {
-                if !code_image::wants(database)? {
-                    return Ok(None);
-                }
-                let record = code_image::Record::of(0, &stream);
-                let value = code_image::read_record(database, record, &stream, values::nil())?;
+                // The database holds zeros, so a record the image does not hold is read from the
+                // stream directly, as decompressing it from the database would give it.
+                let number = code_image::database(values::mkchar(database)?);
+                let value = match code_image::source(number, 0, stream.len())? {
+                    code_image::Source::Image(record) => {
+                        code_image::read_image_record(number, &record, values::nil())?
+                    }
+                    _ => serialize::unserialize(&stream, values::nil())?,
+                };
                 Ok(Some(value))
             })();
             if let Ok(Some(value)) = loaded {

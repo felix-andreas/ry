@@ -2282,7 +2282,13 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
     if newline_separator || (fill_width > 0 && !output.ends_with('\n') && !output.is_empty()) {
         output.push('\n');
     }
-    print(file, output.as_bytes())?;
+    cat_text(file, output.as_bytes())?;
+    Ok(nil())
+}
+
+/// Writes text to a connection as `cat(text, file = file, sep = "")` does.
+pub unsafe fn cat_text(file: Sexp, text: &[u8]) -> R<()> {
+    print(file, text)?;
     // GNU R flushes the connection after `cat`, so a reader opened on the same file sees the
     // text at once, although `writeLines` stays buffered. A connection `print` opened is
     // closed again, which flushed it already.
@@ -2290,7 +2296,12 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
     if (*con).isopen != 0 {
         method_fflush(con)?;
     }
-    Ok(nil())
+    Ok(())
+}
+
+/// The connection object `stderr()` returns.
+pub unsafe fn stderr_connection() -> R<Sexp> {
+    connection_object(2)
 }
 
 /// One element as `cat` prints it: numbers with up to 7 significant digits.

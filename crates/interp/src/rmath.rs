@@ -2917,59 +2917,11 @@ pub fn qnorm(p: f64, mu: f64, sigma: f64, lower: bool, log: bool) -> f64 {
         } else {
             (if q > 0.0 { dt_civ(p, lower, log) } else { p_ }).ln()
         };
-        let mut r = (-lp).sqrt();
+        let r = (-lp).sqrt();
         if r <= 5.0 {
-            r -= 1.6;
-            value = (((((((r * 7.7454501427834140764e-4 + 0.0227238449892691845833) * r
-                + 0.24178072517745061177)
-                * r
-                + 1.27045825245236838258)
-                * r
-                + 3.64784832476320460504)
-                * r
-                + 5.7694972214606914055)
-                * r
-                + 4.6303378461565452959)
-                * r
-                + 1.42343711074968357734)
-                / (((((((r * 1.05075007164441684324e-9 + 5.475938084995344946e-4) * r
-                    + 0.0151986665636164571966)
-                    * r
-                    + 0.14810397642748007459)
-                    * r
-                    + 0.68976733498510000455)
-                    * r
-                    + 1.6763848301838038494)
-                    * r
-                    + 2.05319162663775882187)
-                    * r
-                    + 1.0);
+            value = qnorm_tail_near(r - 1.6);
         } else if r <= 27.0 {
-            r -= 5.0;
-            value = (((((((r * 2.01033439929228813265e-7 + 2.71155556874348757815e-5) * r
-                + 0.0012426609473880784386)
-                * r
-                + 0.026532189526576123093)
-                * r
-                + 0.29656057182850489123)
-                * r
-                + 1.7848265399172913358)
-                * r
-                + 5.4637849111641143699)
-                * r
-                + 6.6579046435011037772)
-                / (((((((r * 2.04426310338993978564e-15 + 1.4215117583164458887e-7) * r
-                    + 1.8463183175100546818e-5)
-                    * r
-                    + 7.868691311456132591e-4)
-                    * r
-                    + 0.0148753612908506148525)
-                    * r
-                    + 0.13692988092273580531)
-                    * r
-                    + 0.59983220655588793769)
-                    * r
-                    + 1.0);
+            value = qnorm_tail_far(r - 5.0);
         } else if r >= 6.4e8 {
             value = r * M_SQRT2;
         } else {
@@ -3008,15 +2960,262 @@ pub fn qnorm(p: f64, mu: f64, sigma: f64, lower: bool, log: bool) -> f64 {
     mu + sigma * value
 }
 
-/// The quantile of the standard normal at `p` in (0, 1), as `qnorm(p, 0, 1)` computes it, for
-/// a caller that turns uniforms into normal deviates in bulk.
-#[inline]
-pub fn qnorm_standard(p: f64) -> f64 {
-    let q = p - 0.5;
-    if q.abs() <= 0.425 {
-        qnorm_central(q)
-    } else {
-        qnorm(p, 0.0, 1.0, true, false)
+/// `qnorm(p, 0, 1)` in place for every probability in `values`, bit for bit. The central
+/// region's rational approximation runs across SIMD lanes for a whole chunk, and only the
+/// tails, which need `log`, go one at a time.
+pub fn qnorm_standard_fill(values: &mut [f64]) {
+    let mut probabilities = [0.0f64; QNORM_CHUNK];
+    let mut tails = [0u16; QNORM_CHUNK];
+    for chunk in values.chunks_mut(QNORM_CHUNK) {
+        let probabilities = &mut probabilities[..chunk.len()];
+        probabilities.copy_from_slice(chunk);
+        let count = qnorm_central_fill(probabilities, chunk, &mut tails);
+        let count = qnorm_tails_fill(probabilities, true, &mut tails, count, chunk);
+        for &index in &tails[..count] {
+            let index = usize::from(index);
+            chunk[index] = qnorm(probabilities[index], 0.0, 1.0, true, false);
+        }
+    }
+}
+
+/// The chunk length of the batched quantiles, which keeps a chunk's probabilities, results and
+/// tail positions in L1.
+pub const QNORM_CHUNK: usize = 256;
+
+/// Writes `qnorm_central(p - 0.5)` for every probability `p` into `out`, which is as long, and
+/// lists at the front of `tails` the positions outside the central region (`|p - 0.5| >
+/// 0.425`, or NaN), whose `out` value is meaningless. Returns how many it listed. Every lane
+/// runs the scalar algorithm's exact operations in the same order, without contraction into
+/// fused multiply-adds, so a lane's result is the scalar result.
+pub fn qnorm_central_fill(probabilities: &[f64], out: &mut [f64], tails: &mut [u16]) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx") {
+        // SAFETY: the CPU supports AVX, as just checked.
+        return unsafe { qnorm_central_avx(probabilities, out, tails) };
+    }
+    qnorm_central_lanes(probabilities, out);
+    qnorm_tail_positions(probabilities, 0, tails, 0)
+}
+
+/// Lists at `tails[count..]` the positions, offset by `offset`, of the probabilities outside
+/// the central region, and returns the new count. The compaction is branch-free: every
+/// position is written, and the count advances only past the tails.
+fn qnorm_tail_positions(
+    probabilities: &[f64],
+    offset: usize,
+    tails: &mut [u16],
+    mut count: usize,
+) -> usize {
+    for (index, &probability) in probabilities.iter().enumerate() {
+        if let Some(slot) = tails.get_mut(count) {
+            *slot = (offset + index) as u16;
+        }
+        count += usize::from(!((probability - 0.5).abs() <= 0.425));
+    }
+    count
+}
+
+/// The central region across AVX lanes, and the tail positions from a comparison mask per four
+/// probabilities, so a block of central values costs one test.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+fn qnorm_central_avx(probabilities: &[f64], out: &mut [f64], tails: &mut [u16]) -> usize {
+    use std::arch::x86_64::{
+        _CMP_LE_OQ, _mm256_andnot_pd, _mm256_cmp_pd, _mm256_loadu_pd, _mm256_movemask_pd,
+        _mm256_set1_pd, _mm256_sub_pd,
+    };
+    const LANES: usize = 4;
+    qnorm_central_lanes(probabilities, out);
+    let blocks = probabilities.len() / LANES * LANES;
+    let half = _mm256_set1_pd(0.5);
+    let limit = _mm256_set1_pd(0.425);
+    let sign = _mm256_set1_pd(-0.0);
+    let mut count = 0;
+    for start in (0..blocks).step_by(LANES) {
+        // SAFETY: `start + LANES <= probabilities.len()`.
+        let probability = unsafe { _mm256_loadu_pd(probabilities.as_ptr().add(start)) };
+        // `!(|p - 0.5| <= 0.425)`, where the ordered comparison is false for NaN.
+        let distance = _mm256_andnot_pd(sign, _mm256_sub_pd(probability, half));
+        let central = _mm256_movemask_pd(_mm256_cmp_pd::<_CMP_LE_OQ>(distance, limit));
+        let mut outside = !central & 0b1111;
+        while outside != 0 {
+            if let Some(slot) = tails.get_mut(count) {
+                *slot = (start + outside.trailing_zeros() as usize) as u16;
+            }
+            count += 1;
+            outside &= outside - 1;
+        }
+    }
+    qnorm_tail_positions(&probabilities[blocks..], blocks, tails, count)
+}
+
+/// Writes `qnorm(p, 0, 1, lower)` into `out` for the tail positions listed in `tails[..count]`
+/// whose `p` lies in (0, 1) and whose quantile comes from one of the two tail approximations
+/// (`r <= 27`), and moves the other positions to the front of `tails`, returning how many
+/// remain for the scalar function. The logarithms run first as independent calls to the same
+/// `log` the scalar function uses, so they overlap in the pipeline, and the square roots and
+/// rational approximations then run across SIMD lanes. Every lane computes both
+/// approximations and selects one, which yields the bits of the branch the scalar code takes.
+pub fn qnorm_tails_fill(
+    probabilities: &[f64],
+    lower: bool,
+    tails: &mut [u16],
+    count: usize,
+    out: &mut [f64],
+) -> usize {
+    let mut logs = [0.0f64; QNORM_CHUNK];
+    let mut values = [0.0f64; QNORM_CHUNK];
+    let count = count.min(tails.len()).min(QNORM_CHUNK);
+    for (log, &index) in logs.iter_mut().zip(&tails[..count]) {
+        let probability = probabilities
+            .get(usize::from(index))
+            .copied()
+            .unwrap_or(f64::NAN);
+        // `R_DT_qIv` and `R_DT_CIv`: the lower-tail probability and its complement.
+        let (lower_tail, complement) = if lower {
+            (probability, 0.5 - probability + 0.5)
+        } else {
+            (0.5 - probability + 0.5, probability)
+        };
+        let argument = if lower_tail - 0.5 > 0.0 {
+            complement
+        } else {
+            lower_tail
+        };
+        // Positions outside (0, 1) and NaN go to the scalar function; any finite logarithm
+        // keeps their lanes harmless.
+        *log = if probability > 0.0 && probability < 1.0 {
+            argument.ln()
+        } else {
+            0.0
+        };
+    }
+    qnorm_tail_lanes_dispatch(&logs[..count], &mut values[..count]);
+    let mut remaining = 0;
+    for position in 0..count {
+        let Some(&index) = tails.get(position) else {
+            break;
+        };
+        let index_usize = usize::from(index);
+        let probability = probabilities.get(index_usize).copied().unwrap_or(f64::NAN);
+        let value = values.get(position).copied().unwrap_or(f64::NAN);
+        if probability > 0.0 && probability < 1.0 && !value.is_nan() {
+            let lower_tail = if lower {
+                probability
+            } else {
+                0.5 - probability + 0.5
+            };
+            if let Some(slot) = out.get_mut(index_usize) {
+                *slot = if lower_tail - 0.5 < 0.0 {
+                    -value
+                } else {
+                    value
+                };
+            }
+        } else {
+            if let Some(slot) = tails.get_mut(remaining) {
+                *slot = index;
+            }
+            remaining += 1;
+        }
+    }
+    remaining
+}
+
+fn qnorm_tail_lanes_dispatch(logs: &[f64], values: &mut [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx") {
+        // SAFETY: the CPU supports AVX, as just checked.
+        return unsafe { qnorm_tail_lanes_avx(logs, values) };
+    }
+    qnorm_tail_lanes(logs, values);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+fn qnorm_tail_lanes_avx(logs: &[f64], values: &mut [f64]) {
+    qnorm_tail_lanes(logs, values);
+}
+
+#[inline(always)]
+fn qnorm_tail_lanes(logs: &[f64], values: &mut [f64]) {
+    for (value, &log) in values.iter_mut().zip(logs) {
+        let r = (-log).sqrt();
+        let near = qnorm_tail_near(r - 1.6);
+        let far = qnorm_tail_far(r - 5.0);
+        // NaN marks the far tail, `r > 27`, which the scalar function handles.
+        *value = if r <= 5.0 {
+            near
+        } else if r <= 27.0 {
+            far
+        } else {
+            f64::NAN
+        };
+    }
+}
+
+/// The rational approximation for `1.6 <= r + 1.6 <= 5`, as `qnorm` evaluates it.
+#[inline(always)]
+fn qnorm_tail_near(r: f64) -> f64 {
+    (((((((r * 7.7454501427834140764e-4 + 0.0227238449892691845833) * r
+        + 0.24178072517745061177)
+        * r
+        + 1.27045825245236838258)
+        * r
+        + 3.64784832476320460504)
+        * r
+        + 5.7694972214606914055)
+        * r
+        + 4.6303378461565452959)
+        * r
+        + 1.42343711074968357734)
+        / (((((((r * 1.05075007164441684324e-9 + 5.475938084995344946e-4) * r
+            + 0.0151986665636164571966)
+            * r
+            + 0.14810397642748007459)
+            * r
+            + 0.68976733498510000455)
+            * r
+            + 1.6763848301838038494)
+            * r
+            + 2.05319162663775882187)
+            * r
+            + 1.0)
+}
+
+/// The rational approximation for `5 < r + 5 <= 27`, as `qnorm` evaluates it.
+#[inline(always)]
+fn qnorm_tail_far(r: f64) -> f64 {
+    (((((((r * 2.01033439929228813265e-7 + 2.71155556874348757815e-5) * r
+        + 0.0012426609473880784386)
+        * r
+        + 0.026532189526576123093)
+        * r
+        + 0.29656057182850489123)
+        * r
+        + 1.7848265399172913358)
+        * r
+        + 5.4637849111641143699)
+        * r
+        + 6.6579046435011037772)
+        / (((((((r * 2.04426310338993978564e-15 + 1.4215117583164458887e-7) * r
+            + 1.8463183175100546818e-5)
+            * r
+            + 7.868691311456132591e-4)
+            * r
+            + 0.0148753612908506148525)
+            * r
+            + 0.13692988092273580531)
+            * r
+            + 0.59983220655588793769)
+            * r
+            + 1.0)
+}
+
+#[inline(always)]
+fn qnorm_central_lanes(probabilities: &[f64], out: &mut [f64]) {
+    for (slot, &probability) in out.iter_mut().zip(probabilities) {
+        *slot = qnorm_central(probability - 0.5);
     }
 }
 
@@ -8332,9 +8531,7 @@ fn wilcox_counts(m: usize, n: usize) -> Rc<[f64]> {
     let mut memo = WilcoxMemo {
         cells: FxHashMap::default(),
     };
-    let counts: Rc<[f64]> = (0..=m * n)
-        .map(|k| memo.count(k as i64, m, n))
-        .collect();
+    let counts: Rc<[f64]> = (0..=m * n).map(|k| memo.count(k as i64, m, n)).collect();
     WILCOX_CACHE.with_borrow_mut(|cache| *cache = Some((key, Rc::clone(&counts))));
     counts
 }

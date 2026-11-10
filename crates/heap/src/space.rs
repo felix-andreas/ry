@@ -115,6 +115,15 @@ pub(crate) struct Space {
     /// would cost 8 bytes per new string.
     interned: Vec<Bitmap>,
     cursors: [Cursor; CLASS_COUNT],
+    /// The cursors allocation is not using: the pretenuring ones while young objects are
+    /// allocated, and the young ones while pretenuring.
+    parked_cursors: [Cursor; CLASS_COUNT],
+    /// Whether `cursors` are the pretenuring ones ([`Space::set_pretenuring`]).
+    pretenuring: bool,
+    /// Pages a pretenuring cursor entered since the last flush. They hold old objects and the
+    /// pretenured ones, never a young object, so their allocated and unmarked slots are exactly
+    /// the pretenured objects not yet flushed.
+    pretenured_pages: Vec<u32>,
     /// Pages of each class with free slots, which no cursor is on.
     available: [Vec<u32>; CLASS_COUNT],
     empty_pages: Vec<u32>,
@@ -153,6 +162,9 @@ const IDLE_CURSOR: Cursor = Cursor {
 #[derive(Default)]
 pub(crate) struct Swept {
     pub freed: u64,
+    /// Bytes of the dead objects outside the oldest generation, which an intermediate
+    /// collection would have freed too.
+    pub untenured_bytes: usize,
 }
 
 impl Space {
@@ -197,6 +209,9 @@ impl Space {
             finalizable: Vec::new(),
             interned: Vec::new(),
             cursors: [IDLE_CURSOR; CLASS_COUNT],
+            parked_cursors: [IDLE_CURSOR; CLASS_COUNT],
+            pretenuring: false,
+            pretenured_pages: Vec::new(),
             available: Default::default(),
             empty_pages: Vec::new(),
             touched: Vec::new(),
@@ -220,6 +235,22 @@ impl Space {
             return Some(unsafe { NonNull::new_unchecked(slot) });
         }
         self.refill(class)
+    }
+
+    /// [`Space::allocate`] without the refill: the next slot of the cursor's current run, or
+    /// `None` when the run is used up. It makes no call, so an interpreter fast path that
+    /// allocates through it needs no stack frame and leaves the refill to its slow path.
+    #[inline(always)]
+    pub fn allocate_from_run(&mut self, class: usize) -> Option<NonNull<u8>> {
+        let cursor = &mut self.cursors[class];
+        let slot = cursor.next;
+        if slot == cursor.end {
+            return None;
+        }
+        // SAFETY: as in `allocate`.
+        cursor.next = unsafe { slot.add(SLOT_SIZES[class]) };
+        // SAFETY: as in `allocate`.
+        Some(unsafe { NonNull::new_unchecked(slot) })
     }
 
     /// Claims the cursor's next run of free slots, moving to another page when its page has
@@ -260,7 +291,11 @@ impl Space {
                     page
                 }
             };
-            self.touched.push(page);
+            if self.pretenuring {
+                self.pretenured_pages.push(page);
+            } else {
+                self.touched.push(page);
+            }
             self.cursors[class] = Cursor {
                 page,
                 ..IDLE_CURSOR
@@ -374,13 +409,24 @@ impl Space {
         }
     }
 
-    /// Whether `object`, which this collection has marked, is tenured.
-    #[inline]
-    pub unsafe fn is_tenured(&self, object: Sexp) -> bool {
-        match self.locate(object) {
-            Some((page, word, bit)) => self.tenured[page][word] & bit != 0,
-            None => unsafe { object.gc_bits() & gc_bits::TENURED != 0 },
+    /// [`Space::mark`] for a child of a tenured object in a deeper collection, which must also
+    /// learn whether the child is tenured once marked. Reading that bit beside the mark saves
+    /// locating the slot a second time.
+    #[inline(always)]
+    pub unsafe fn mark_beside_tenured(&mut self, object: Sexp) -> (bool, bool) {
+        let Some((page, word, bit)) = self.locate(object) else {
+            let newly = unsafe { self.mark_large(object) };
+            return (newly, unsafe { object.gc_bits() } & gc_bits::TENURED != 0);
+        };
+        // The bounds hold for the reason `Space::mark` gives.
+        let marks = unsafe { self.marks.get_unchecked_mut(page).get_unchecked_mut(word) };
+        let newly = *marks & bit == 0;
+        if newly {
+            *marks |= bit;
+            unsafe { self.age(object, Some((page, word, bit))) };
         }
+        let tenured = unsafe { *self.tenured.get_unchecked(page).get_unchecked(word) } & bit != 0;
+        (newly, tenured)
     }
 
     /// Records that `object`, an environment in this space, has a frame that owns memory, which
@@ -493,6 +539,24 @@ impl Space {
         }
     }
 
+    /// Bytes of the old objects outside the oldest generation, which outside a collection are
+    /// the marked slots that are not tenured: what an intermediate collection can free.
+    pub fn younger_old_bytes(&self) -> usize {
+        let mut bytes = 0;
+        for page in 0..self.page_count {
+            let Some(&slot_size) = SLOT_SIZES.get(self.page_class[page] as usize) else {
+                continue;
+            };
+            let slots: u32 = self.marks[page]
+                .iter()
+                .zip(&self.tenured[page])
+                .map(|(marks, tenured)| (marks & !tenured).count_ones())
+                .sum();
+            bytes += slots as usize * slot_size;
+        }
+        bytes
+    }
+
     /// Whether `object`, a small object, is in the tenured bitmap; `None` for a large object.
     pub fn is_tenured_slot(&self, object: Sexp) -> Option<bool> {
         self.locate(object)
@@ -597,6 +661,8 @@ impl Space {
                     }
                 }
                 swept.freed += u64::from(dead.count_ones());
+                swept.untenured_bytes +=
+                    (dead & !self.tenured[page][word]).count_ones() as usize * slot_size;
             }
             self.allocated[page][word] = marks;
             self.interned[page][word] &= marks;
@@ -628,19 +694,7 @@ impl Space {
     /// Gives back the slots each cursor claimed but never handed out, so the sweep neither
     /// counts them as freed objects nor reads them.
     fn release_cursors(&mut self) {
-        for (class, cursor) in self.cursors.iter_mut().enumerate() {
-            if cursor.page != NO_PAGE && cursor.next != cursor.end {
-                let page = cursor.page as usize;
-                let page_base = self.base.as_ptr() as usize + page * PAGE_SIZE;
-                let slot_size = SLOT_SIZES[class];
-                let from = (cursor.next as usize - page_base) / slot_size;
-                let to = (cursor.end as usize - page_base) / slot_size;
-                if let Some(allocated) = self.allocated.get_mut(page) {
-                    release_run(allocated, from, to);
-                }
-                cursor.end = cursor.next;
-            }
-        }
+        release_runs(&mut self.cursors, &mut self.allocated, self.base);
     }
 
     /// Restarts each cursor at the beginning of its page, whose free slots the sweep changed,
@@ -692,6 +746,83 @@ impl Space {
     /// The address of the first page.
     pub fn base(&self) -> usize {
         self.base.as_ptr() as usize
+    }
+
+    /// Switches allocation between young objects and pretenured ones, which are old from the
+    /// next flush on ([`Space::flush_pretenured`]). Each has its own cursors, so the inline
+    /// allocation path is the same for both, and a pretenured object never shares a page with
+    /// a young one.
+    pub fn set_pretenuring(&mut self, on: bool) {
+        if self.pretenuring != on {
+            std::mem::swap(&mut self.cursors, &mut self.parked_cursors);
+            self.pretenuring = on;
+        }
+    }
+
+    pub fn has_pretenured(&self) -> bool {
+        !self.pretenured_pages.is_empty()
+    }
+
+    /// Ends the pretenuring cursors' runs and gives each pretenured object not yet flushed the
+    /// `OLD` header bit. Returns their vector cells. The objects stay unmarked until
+    /// [`Space::flush_pretenured`], so [`Space::for_each_pretenured`] still visits them.
+    pub unsafe fn age_pretenured(&mut self) -> u64 {
+        debug_assert!(!self.pretenuring);
+        release_runs(&mut self.parked_cursors, &mut self.allocated, self.base);
+        self.parked_cursors = [IDLE_CURSOR; CLASS_COUNT];
+        let mut cells = 0;
+        self.for_each_pretenured(|object| {
+            // SAFETY: an allocated slot of a committed page holds an object.
+            unsafe {
+                object.set_gc_bit(gc_bits::OLD, true);
+                cells += vector_cells(object);
+            }
+        });
+        cells
+    }
+
+    /// Calls `visit` on each pretenured object not yet flushed.
+    pub fn for_each_pretenured(&self, mut visit: impl FnMut(Sexp)) {
+        for &page in &self.pretenured_pages {
+            let page = page as usize;
+            let slot_size = SLOT_SIZES[self.page_class[page] as usize];
+            let page_base = page * PAGE_SIZE;
+            for word in 0..BITMAP_WORDS {
+                let mut bits = self.allocated[page][word] & !self.marks[page][word];
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    let offset = page_base + (word * 64 + bit) * slot_size;
+                    // SAFETY: an allocated slot of a committed page holds an object.
+                    visit(unsafe { Sexp::from_non_null(self.base.add(offset).cast()) });
+                }
+            }
+        }
+    }
+
+    /// Marks the pretenured objects, which [`Space::age_pretenured`] made old, and puts their
+    /// pages back where the allocator finds them. Returns the bytes they take.
+    pub fn flush_pretenured(&mut self) -> usize {
+        let pages = std::mem::take(&mut self.pretenured_pages);
+        let mut bytes = 0;
+        for &page in &pages {
+            let index = page as usize;
+            let mut live = 0;
+            for word in 0..BITMAP_WORDS {
+                self.marks[index][word] |= self.allocated[index][word];
+                live += self.marks[index][word].count_ones();
+            }
+            let added = live as usize - self.live_slots[index] as usize;
+            self.live_slots[index] = live as u16;
+            self.total_live_slots += added;
+            bytes += added * SLOT_SIZES[self.page_class[index] as usize];
+        }
+        for &page in &pages {
+            self.file_page(page);
+        }
+        self.pretenured_pages = pages;
+        self.pretenured_pages.clear();
+        bytes
     }
 
     /// Whether the space starts at [`IMAGE_BASE`], where an image's pages belong.
@@ -974,6 +1105,23 @@ fn claim_run(allocated: &mut Bitmap, slots: usize, from: usize) -> Option<(usize
 }
 
 /// Clears the allocated bits of slots `from..to`.
+/// Gives back the slots each of `cursors` claimed but never handed out.
+fn release_runs(cursors: &mut [Cursor; CLASS_COUNT], allocated: &mut [Bitmap], base: NonNull<u8>) {
+    for (class, cursor) in cursors.iter_mut().enumerate() {
+        if cursor.page != NO_PAGE && cursor.next != cursor.end {
+            let page = cursor.page as usize;
+            let page_base = base.as_ptr() as usize + page * PAGE_SIZE;
+            let slot_size = SLOT_SIZES[class];
+            let from = (cursor.next as usize - page_base) / slot_size;
+            let to = (cursor.end as usize - page_base) / slot_size;
+            if let Some(allocated) = allocated.get_mut(page) {
+                release_run(allocated, from, to);
+            }
+            cursor.end = cursor.next;
+        }
+    }
+}
+
 fn release_run(allocated: &mut Bitmap, from: usize, to: usize) {
     let mut slot = from;
     while slot < to {
