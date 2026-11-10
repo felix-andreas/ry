@@ -6738,7 +6738,10 @@ unsafe fn lookup_function(
 }
 
 /// [`lookup_function`] from `enclosure`, the first environment outward from `env` that is not
-/// a function frame, when nothing before it binds `symbol`.
+/// a function frame, when nothing before it binds `symbol`. The cache hit is inlined into every
+/// function lookup: it is two loads and a compare, and a call to it cost about as much again in
+/// saved registers. A cached cell is never active (see [`op_guard`]).
+#[inline(always)]
 unsafe fn lookup_function_outside(
     symbol: Sexp,
     env: Sexp,
@@ -6747,9 +6750,7 @@ unsafe fn lookup_function_outside(
     slot: usize,
     call: Sexp,
 ) -> R<Sexp> {
-    if let Some(cell) = cached_cell(symbol, enclosure, cache, slot)
-        && !cell.has_gp(gp::ACTIVE_BINDING)
-    {
+    if let Some(cell) = cached_cell(symbol, enclosure, cache, slot) {
         let mut value = cell.cdr();
         if value.kind() == SexpType::Promise && value.car() != unbound() {
             value = value.car();
@@ -6758,6 +6759,19 @@ unsafe fn lookup_function_outside(
             return Ok(value);
         }
     }
+    lookup_function_missed(symbol, env, enclosure, cache, slot, call)
+}
+
+#[cold]
+#[inline(never)]
+unsafe fn lookup_function_missed(
+    symbol: Sexp,
+    env: Sexp,
+    enclosure: Sexp,
+    cache: LookupCache,
+    slot: usize,
+    call: Sexp,
+) -> R<Sexp> {
     activity::count(Counter::LookupMisses);
     if let Some(cell) = resolve(symbol, enclosure, true)? {
         fill_cache(symbol, enclosure, cell, cache, slot);
