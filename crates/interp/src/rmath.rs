@@ -8267,9 +8267,7 @@ fn wilcox_counts(m: usize, n: usize) -> Rc<[f64]> {
     let mut memo = WilcoxMemo {
         cells: FxHashMap::default(),
     };
-    let counts: Rc<[f64]> = (0..=m * n)
-        .map(|k| memo.count(k as i64, m, n))
-        .collect();
+    let counts: Rc<[f64]> = (0..=m * n).map(|k| memo.count(k as i64, m, n)).collect();
     WILCOX_CACHE.with_borrow_mut(|cache| *cache = Some((key, Rc::clone(&counts))));
     counts
 }

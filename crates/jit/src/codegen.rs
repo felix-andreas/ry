@@ -322,8 +322,14 @@ impl<'p> Translator<'p> {
             let words = (8 * runtime::LOOP_WORDS * index) as i32;
             let loop_index = self.builder.ins().load(I64, flags(), self.loops, words);
             let count = self.builder.ins().load(I64, flags(), self.loops, words + 8);
-            let first = self.builder.ins().load(F64, flags(), self.loops, words + 16);
-            let step = self.builder.ins().load(F64, flags(), self.loops, words + 24);
+            let first = self
+                .builder
+                .ins()
+                .load(F64, flags(), self.loops, words + 16);
+            let step = self
+                .builder
+                .ins()
+                .load(F64, flags(), self.loops, words + 24);
             self.builder.def_var(self.loop_indexes[index], loop_index);
             self.builder.def_var(self.loop_counts[index], count);
             self.builder.def_var(self.loop_firsts[index], first);
@@ -884,9 +890,16 @@ impl<'p> Translator<'p> {
                                 )
                                 .ok_or(Refusal("a helper without a result"))?;
                             let words = (8 * runtime::LOOP_WORDS * index) as i32;
-                            let length = self.builder.ins().load(I64, flags(), self.loops, words + 8);
-                            let first = self.builder.ins().load(F64, flags(), self.loops, words + 16);
-                            let step = self.builder.ins().load(F64, flags(), self.loops, words + 24);
+                            let length =
+                                self.builder.ins().load(I64, flags(), self.loops, words + 8);
+                            let first =
+                                self.builder
+                                    .ins()
+                                    .load(F64, flags(), self.loops, words + 16);
+                            let step =
+                                self.builder
+                                    .ins()
+                                    .load(F64, flags(), self.loops, words + 24);
                             let fits = self.check(prepared, expected);
                             let compact = self.compact_sequence_fits(prepared, expected, step);
                             let fits = self.builder.ins().bor(fits, compact);
@@ -894,7 +907,9 @@ impl<'p> Translator<'p> {
                                 self.deopt(pc, before.id, None, position, reason::SPECULATION);
                             self.guard(fits, failed);
                             self.store_register(src, prepared);
-                            self.builder.ins().jump(join, &[prepared, length, first, step]);
+                            self.builder
+                                .ins()
+                                .jump(join, &[prepared, length, first, step]);
                             self.builder.switch_to_block(join);
                             let params = self.builder.block_params(join).to_vec();
                             self.builder.def_var(self.loop_firsts[index], params[2]);
@@ -2694,7 +2709,10 @@ impl<'p> Translator<'p> {
         failed: Label,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
-        let block = self.builder.current_block().ok_or(Refusal("no current block"))?;
+        let block = self
+            .builder
+            .current_block()
+            .ok_or(Refusal("no current block"))?;
         self.builder.set_cold_block(block);
         self.flush_all(before, failed);
         self.box_reads(position, before);
@@ -2732,10 +2750,10 @@ impl<'p> Translator<'p> {
             self.subscript_position(before.registers[index], index, bound, false);
         // A variable of an enclosing frame is copied into this frame first, which tier 0 does.
         let status = self.builder.use_var(self.statuses[slot]);
-        let local = self
-            .builder
-            .ins()
-            .icmp_imm_s(IntCC::NotEqual, status, status::RUNTIME_ENCLOSING);
+        let local =
+            self.builder
+                .ins()
+                .icmp_imm_s(IntCC::NotEqual, status, status::RUNTIME_ENCLOSING);
         let attempt = self.builder.ins().band(in_range, local);
         let fast = self.builder.create_block();
         let slow = self.builder.create_block();

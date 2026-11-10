@@ -367,8 +367,9 @@ unsafe fn do_sys(call: &Call<'_>, kind: SysKind) -> R<Sexp> {
                 many => {
                     let mut items = vec![(nil(), symbols().brace)];
                     items.extend(
-                        many.iter()
-                            .map(|&expression| (nil(), crate::bytecode::source_of_body(expression))),
+                        many.iter().map(|&expression| {
+                            (nil(), crate::bytecode::source_of_body(expression))
+                        }),
                     );
                     values::pairlist(&items, SexpType::Language)
                 }
@@ -404,7 +405,9 @@ unsafe fn do_environment(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(0);
     match function.kind() {
         SexpType::Nil => match call.frame_index() {
-            Some(index) => crate::eval::frame_sys_parent(index, crate::eval::Reify::Site("environment()")),
+            Some(index) => {
+                crate::eval::frame_sys_parent(index, crate::eval::Reify::Site("environment()"))
+            }
             None => Ok(global_env()),
         },
         SexpType::Closure => Ok(function.tag()),
@@ -835,23 +838,35 @@ pub unsafe fn list_to_env(list: Sexp, enclosure: Sexp) -> R<Sexp> {
         base_env()
     };
     let env = new_env(enclosure)?;
-    fill_env(env, list)?;
+    fill_env(env, list, EmptyName::Skip)?;
     Ok(env)
 }
 
-unsafe fn fill_env(env: Sexp, list: Sexp) -> R<()> {
+/// GNU R's `list2env` rejects an empty name, while `eval` and `substitute` over a list skip
+/// one, so the caller says which.
+unsafe fn fill_env(env: Sexp, list: Sexp, empty_name: EmptyName) -> R<()> {
     let names = values::names(list);
+    if names == nil() {
+        return Ok(());
+    }
     for index in 0..length(list) {
-        let Some(name) = (names != nil()).then(|| string_at(names, index)).flatten() else {
-            continue;
-        };
-        if name.is_empty() {
-            continue;
+        let name = names.element(index);
+        if name.length() == 0 && name != values::na_string() {
+            match empty_name {
+                EmptyName::Skip => continue,
+                EmptyName::Reject => return Err(error("attempt to use zero-length variable name")),
+            }
         }
-        let symbol = values::install(&name)?;
+        let symbol = values::install_charsxp_text(name)?;
         define(symbol, list.element(index), env)?;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum EmptyName {
+    Skip,
+    Reject,
 }
 
 unsafe fn do_list2env(call: &Call<'_>) -> R<Sexp> {
@@ -863,7 +878,7 @@ unsafe fn do_list2env(call: &Call<'_>) -> R<Sexp> {
     if length(list) > 0 && values::names(list) == nil() {
         return Err(call.error("names(x) must be a character vector of the same length as x"));
     }
-    fill_env(env, list)?;
+    fill_env(env, list, EmptyName::Reject)?;
     Ok(env)
 }
 
@@ -992,7 +1007,10 @@ pub unsafe fn as_environment(value: Sexp) -> R<Sexp> {
                 // The calling environment.
                 return match interp().frames.len() {
                     0 => Ok(global_env()),
-                    count => crate::eval::frame_sys_parent(count - 1, crate::eval::Reify::Site("pos = -1")),
+                    count => crate::eval::frame_sys_parent(
+                        count - 1,
+                        crate::eval::Reify::Site("pos = -1"),
+                    ),
                 };
             }
             if position < 1 || position as usize > path.len() {
@@ -1050,7 +1068,7 @@ unsafe fn do_attach(call: &Call<'_>) -> R<Sexp> {
     // namespace leaves its own parent, the imports, in place.
     let env = new_env(empty_env())?;
     if what.kind() == SexpType::List {
-        fill_env(env, what)?;
+        fill_env(env, what, EmptyName::Skip)?;
     } else if what.kind() == SexpType::Environment {
         let heap = crate::heap();
         for symbol in env_symbols(what, true, false) {

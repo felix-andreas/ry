@@ -725,7 +725,11 @@ fn report(
         let direct = activity::counter(Counter::PackageCallsDirect);
         let observed = activity::counter(Counter::PackageCallsObserved);
         let share = |part: u64, whole: u64| {
-            if whole == 0 { 0.0 } else { 100.0 * part as f64 / whole as f64 }
+            if whole == 0 {
+                0.0
+            } else {
+                100.0 * part as f64 / whole as f64
+            }
         };
         writeln!(out, "\n## Namespace calls\n")?;
         writeln!(

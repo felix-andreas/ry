@@ -136,7 +136,9 @@ fn fuzz_element_access_agrees_with_the_ast_evaluator() {
 
 #[test]
 fn fuzz_environment_variables_agree_with_the_c_library() {
-    for_each_seed(200, |seed| check_environment_agreement(&mut SplitMix64(seed)));
+    for_each_seed(200, |seed| {
+        check_environment_agreement(&mut SplitMix64(seed))
+    });
 }
 
 #[test]

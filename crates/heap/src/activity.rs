@@ -290,7 +290,12 @@ pub fn package_fallbacks() -> Vec<(String, u64)> {
         .enumerate()
         .filter_map(|(id, slot)| {
             let count = slot.load(Ordering::Relaxed);
-            (count > 0).then(|| (label_name(id as u32).unwrap_or_else(|| "?".to_owned()), count))
+            (count > 0).then(|| {
+                (
+                    label_name(id as u32).unwrap_or_else(|| "?".to_owned()),
+                    count,
+                )
+            })
         })
         .collect();
     fallbacks.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));

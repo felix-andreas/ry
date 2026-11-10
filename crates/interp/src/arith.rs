@@ -28,6 +28,7 @@ use {
         kernels::{self, Comparison, Extremes, Integers, Reals},
         long_double::{self, LongDouble},
         rmath,
+        system::r_at_least,
         unwind::{R, error},
         values::{
             self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
@@ -51,6 +52,7 @@ unsafe extern "C" {
     fn cacos(z: Rcomplex) -> Rcomplex;
     fn casin(z: Rcomplex) -> Rcomplex;
     fn catan(z: Rcomplex) -> Rcomplex;
+    fn clog(z: Rcomplex) -> Rcomplex;
     fn ccosh(z: Rcomplex) -> Rcomplex;
     fn csinh(z: Rcomplex) -> Rcomplex;
 }
@@ -1471,6 +1473,15 @@ pub fn multiply(a: f64, b: f64) -> f64 {
     if a.is_nan() { quiet(a) } else { product }
 }
 
+/// `a - b` where a `NaN` first operand's payload wins, as for [`add`]. Subtraction does not
+/// commute, but LLVM still rewrites it (into an add of the negation, say) when it may pick any
+/// payload for a `NaN` result.
+#[inline(always)]
+pub fn subtract(a: f64, b: f64) -> f64 {
+    let difference = a - b;
+    if a.is_nan() { quiet(a) } else { difference }
+}
+
 /// `a` with the quiet bit set, which is what the hardware returns for a `NaN` operand. R's `NA` is
 /// a signalling `NaN` whose low word marks it, and setting the quiet bit leaves that mark intact.
 #[inline(always)]
@@ -1672,21 +1683,63 @@ unsafe fn integer_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp, count:
     Ok(result)
 }
 
-/// C99 complex division as libgcc's `__divdc3` does it, which is what GNU R's `/` compiles to:
-/// Smith's algorithm scales by the larger part of the divisor so that neither the squared
-/// modulus nor the products overflow, and when both parts come out NaN the infinities and zeros
-/// of C11 Annex G.5.1 are recovered, so `(Inf+1i) / 0` is `Inf+Infi` and
-/// `complex(real = -Inf, imaginary = NA) / 2` is `-Inf+NaNi`.
-fn complex_divide(x: Rcomplex, y: Rcomplex) -> Rcomplex {
+/// C99 complex division as GCC compiles it for GNU R: libgcc's `__divdc3`, Smith's algorithm
+/// with scaling against overflow and underflow and the recovery of infinite and zero quotients.
+/// Rust's runtime links compiler-rt's `__divdc3` instead, which scales differently, so this is a
+/// port.
+pub fn complex_divide(x: Rcomplex, y: Rcomplex) -> Rcomplex {
+    const BIG: f64 = f64::MAX / 2.0;
+    const SMALLEST: f64 = f64::MIN_POSITIVE;
+    const EPSILON: f64 = f64::EPSILON;
+    const SCALE: f64 = 1.0 / f64::EPSILON;
+    const LARGE: f64 = BIG * EPSILON;
     let (mut a, mut b, mut c, mut d) = (x.r, x.i, y.r, y.i);
-    let (real, imaginary) = if c.abs() < d.abs() {
+    // Scale by the larger part of the divisor, so the denominator neither overflows nor, for
+    // tiny operands, underflows.
+    let by_imaginary = c.abs() < d.abs();
+    let larger = |c: f64, d: f64| if by_imaginary { d.abs() } else { c.abs() };
+    if larger(c, d) >= BIG {
+        (a, b, c, d) = (a / 2.0, b / 2.0, c / 2.0, d / 2.0);
+    }
+    let key = larger(c, d);
+    if key < EPSILON
+        || (a.abs() < SMALLEST && b.abs() < LARGE && key < LARGE)
+        || (b.abs() < SMALLEST && a.abs() < LARGE && key < LARGE)
+    {
+        (a, b, c, d) = (a * SCALE, b * SCALE, c * SCALE, d * SCALE);
+    }
+    // The operand order of each step is the compiled `__divdc3`'s, through `add` and `multiply`
+    // where the compiler could swap them, because it decides which NaN payload wins. A NaN ratio
+    // fails the subnormal test, so NaN operands take the second order.
+    let (real, imaginary) = if by_imaginary {
         let ratio = c / d;
-        let denominator = c * ratio + d;
-        ((a * ratio + b) / denominator, (b * ratio - a) / denominator)
+        let denominator = add(multiply(c, ratio), d);
+        // A subnormal ratio loses digits, so the other order of operations is taken.
+        if ratio.abs() > SMALLEST {
+            (
+                add(multiply(a, ratio), b) / denominator,
+                subtract(multiply(ratio, b), a) / denominator,
+            )
+        } else {
+            (
+                add(multiply(a / d, c), b) / denominator,
+                subtract(multiply(b / d, c), a) / denominator,
+            )
+        }
     } else {
         let ratio = d / c;
-        let denominator = d * ratio + c;
-        ((b * ratio + a) / denominator, (b - a * ratio) / denominator)
+        let denominator = add(multiply(d, ratio), c);
+        if ratio.abs() > SMALLEST {
+            (
+                add(multiply(b, ratio), a) / denominator,
+                subtract(b, multiply(ratio, a)) / denominator,
+            )
+        } else {
+            (
+                add(multiply(b / c, d), a) / denominator,
+                subtract(b, multiply(a / c, d)) / denominator,
+            )
+        }
     };
     if !(real.is_nan() && imaginary.is_nan()) {
         return Rcomplex {
@@ -1694,7 +1747,7 @@ fn complex_divide(x: Rcomplex, y: Rcomplex) -> Rcomplex {
             i: imaginary,
         };
     }
-    let unit = |value: f64| (if value.is_infinite() { 1.0f64 } else { 0.0 }).copysign(value);
+    let boxed = |value: f64| (if value.is_infinite() { 1.0f64 } else { 0.0 }).copysign(value);
     if c == 0.0 && d == 0.0 && (!a.is_nan() || !b.is_nan()) {
         let infinity = f64::INFINITY.copysign(c);
         Rcomplex {
@@ -1702,13 +1755,13 @@ fn complex_divide(x: Rcomplex, y: Rcomplex) -> Rcomplex {
             i: infinity * b,
         }
     } else if (a.is_infinite() || b.is_infinite()) && c.is_finite() && d.is_finite() {
-        (a, b) = (unit(a), unit(b));
+        let (a, b) = (boxed(a), boxed(b));
         Rcomplex {
             r: f64::INFINITY * (a * c + b * d),
             i: f64::INFINITY * (b * c - a * d),
         }
     } else if (c.is_infinite() || d.is_infinite()) && a.is_finite() && b.is_finite() {
-        (c, d) = (unit(c), unit(d));
+        let (c, d) = (boxed(c), boxed(d));
         Rcomplex {
             r: 0.0 * (a * c + b * d),
             i: 0.0 * (b * c - a * d),
@@ -1721,24 +1774,56 @@ fn complex_divide(x: Rcomplex, y: Rcomplex) -> Rcomplex {
     }
 }
 
-/// C99 complex multiplication, which GNU R uses: when the plain formula gives NaN in both parts
-/// but an operand is infinite, the product is recovered as an infinity (C11 Annex G.5.1), so
-/// `1i * complex(real = NaN, imaginary = Inf)` is `-Inf+NaNi`, not `NaN+NaNi`.
-#[inline]
-fn complex_multiply(x: Rcomplex, y: Rcomplex) -> Rcomplex {
-    let (mut a, mut b, mut c, mut d) = (x.r, x.i, y.r, y.i);
-    let (ac, bd, ad, bc) = (a * c, b * d, a * d, b * c);
-    let real = ac - bd;
-    let imaginary = ad + bc;
-    if !(real.is_nan() && imaginary.is_nan()) {
-        return Rcomplex {
+/// C99 complex multiplication as GCC compiles it for GNU R: the plain formula, and libgcc's
+/// `__muldc3` where that gave NaN in both parts, which recovers an infinite product (C11 Annex
+/// G.5.1), so `1i * complex(real = NaN, imaginary = Inf)` is `-Inf+NaNi`. The operand order of
+/// each operation is GCC's, which decides which NaN payload wins: `NA_complex_ * NaN` is `NA`.
+/// Only a NaN part depends on that order, so the plain formula, which vectorizes, serves every
+/// product without one and the ordered one is recomputed out of line.
+#[inline(always)]
+pub fn complex_multiply(x: Rcomplex, y: Rcomplex) -> Rcomplex {
+    let real = y.r * x.r - y.i * x.i;
+    let imaginary = y.r * x.i + x.r * y.i;
+    if real.is_nan() || imaginary.is_nan() {
+        nan_product(x, y, real.is_nan() && imaginary.is_nan())
+    } else {
+        Rcomplex {
             r: real,
             i: imaginary,
-        };
+        }
     }
-    let box_infinity =
-        |value: f64| (if value.is_infinite() { 1.0f64 } else { 0.0 }).copysign(value);
-    let zero_nan = |value: f64| {
+}
+
+/// [`complex_multiply`] for a product with a NaN part. Whether a part is NaN does not depend on
+/// the operand order, so a recovered infinity is decided first; a NaN part that remains is the
+/// hardware's default NaN unless an operand is NaN, and only then is the payload order computed.
+#[cold]
+#[inline(never)]
+fn nan_product(x: Rcomplex, y: Rcomplex, both_nan: bool) -> Rcomplex {
+    if both_nan && let Some(product) = infinite_product(x.r, x.i, y.r, y.i) {
+        return product;
+    }
+    if x.r.is_nan() || x.i.is_nan() || y.r.is_nan() || y.i.is_nan() {
+        Rcomplex {
+            r: subtract(multiply(y.r, x.r), multiply(y.i, x.i)),
+            i: add(multiply(y.r, x.i), multiply(x.r, y.i)),
+        }
+    } else {
+        Rcomplex {
+            r: y.r * x.r - y.i * x.i,
+            i: y.r * x.i + x.r * y.i,
+        }
+    }
+}
+
+/// libgcc's `__muldc3` past its plain formula, for `(a + bi) * (c + di)` whose plain product is
+/// NaN in both parts: the infinite product it recovers, or `None` where it keeps the plain one.
+/// Rust's runtime links compiler-rt's `__muldc3` instead, whose recovery differs, so this is a
+/// port.
+#[inline(always)]
+fn infinite_product(mut a: f64, mut b: f64, mut c: f64, mut d: f64) -> Option<Rcomplex> {
+    let boxed = |value: f64| (if value.is_infinite() { 1.0f64 } else { 0.0 }).copysign(value);
+    let zeroed = |value: f64| {
         if value.is_nan() {
             0.0f64.copysign(value)
         } else {
@@ -1747,142 +1832,112 @@ fn complex_multiply(x: Rcomplex, y: Rcomplex) -> Rcomplex {
     };
     let mut recalculate = false;
     if a.is_infinite() || b.is_infinite() {
-        (a, b) = (box_infinity(a), box_infinity(b));
-        (c, d) = (zero_nan(c), zero_nan(d));
+        (a, b, c, d) = (boxed(a), boxed(b), zeroed(c), zeroed(d));
         recalculate = true;
     }
     if c.is_infinite() || d.is_infinite() {
-        (c, d) = (box_infinity(c), box_infinity(d));
-        (a, b) = (zero_nan(a), zero_nan(b));
+        (a, b, c, d) = (zeroed(a), zeroed(b), boxed(c), boxed(d));
         recalculate = true;
     }
-    if !recalculate && [ac, bd, ad, bc].iter().any(|product| product.is_infinite()) {
-        (a, b, c, d) = (zero_nan(a), zero_nan(b), zero_nan(c), zero_nan(d));
+    if !recalculate
+        && ((a * c).is_infinite()
+            || (b * d).is_infinite()
+            || (a * d).is_infinite()
+            || (b * c).is_infinite())
+    {
+        (a, b, c, d) = (zeroed(a), zeroed(b), zeroed(c), zeroed(d));
         recalculate = true;
     }
-    if !recalculate {
-        return Rcomplex {
-            r: real,
-            i: imaginary,
-        };
-    }
-    Rcomplex {
+    recalculate.then(|| Rcomplex {
         r: f64::INFINITY * (a * c - b * d),
         i: f64::INFINITY * (a * d + b * c),
-    }
+    })
 }
 
-/// `x ^ y` with GNU R's special cases: real powers of zero and of non-negative reals stay real,
-/// and a small integer power is repeated multiplication, so `(1+2i)^2` is exact.
-fn complex_power(x: Rcomplex, y: Rcomplex) -> Rcomplex {
-    if y.r == 0.0 && y.i == 0.0 {
-        return Rcomplex { r: 1.0, i: 0.0 };
-    }
-    if y.i == 0.0 {
-        if x.i == 0.0 && (x.r == 0.0 || x.r >= 0.0) {
-            return Rcomplex {
-                r: power(x.r, y.r),
+/// `x ^ y` as GNU R's `mycpow`: a power of zero is real (or NaN for a complex exponent), an
+/// integer exponent up to 65536 in size is repeated C99 multiplication (`R_cpow_n`), so
+/// `(1+2i)^2` is exact, and any other power is the C library's `cpow`.
+pub fn complex_power(x: Rcomplex, y: Rcomplex) -> Rcomplex {
+    let one = Rcomplex { r: 1.0, i: 0.0 };
+    if x.r == 0.0 && x.i == 0.0 {
+        return if y.i == 0.0 {
+            Rcomplex {
+                r: power(0.0, y.r),
                 i: 0.0,
-            };
-        }
-        if y.r == y.r.trunc() && y.r.abs() <= 65536.0 {
-            let mut exponent = y.r.abs() as u32;
-            let mut base = x;
-            let mut result = Rcomplex { r: 1.0, i: 0.0 };
-            while exponent > 0 {
-                if exponent & 1 == 1 {
-                    result = complex_multiply(result, base);
-                }
-                exponent >>= 1;
-                if exponent > 0 {
+            }
+        } else {
+            Rcomplex {
+                r: f64::NAN,
+                i: f64::NAN,
+            }
+        };
+    }
+    let exponent = y.r as i32;
+    if y.i == 0.0 && y.r == exponent as f64 && exponent.unsigned_abs() <= 65536 {
+        let mut count = exponent.unsigned_abs();
+        let result = match count {
+            0 => return one,
+            1 => x,
+            _ => {
+                let (mut base, mut result) = (x, one);
+                loop {
+                    if count & 1 == 1 {
+                        result = complex_multiply(result, base);
+                    }
+                    if count == 1 {
+                        break result;
+                    }
+                    count >>= 1;
                     base = complex_multiply(base, base);
                 }
             }
-            return if y.r < 0.0 {
-                complex_divide(Rcomplex { r: 1.0, i: 0.0 }, result)
-            } else {
-                result
-            };
-        }
+        };
+        return if exponent < 0 {
+            complex_divide(one, result)
+        } else {
+            result
+        };
     }
-    // SAFETY: `cpow` is a pure C99 function on two values.
+    // SAFETY: a pure function of two complex values.
     unsafe { cpow(x, y) }
 }
 
 unsafe fn complex_at(vector: Sexp, index: usize) -> Rcomplex {
     match vector.kind() {
         SexpType::Complex => values::complexes(vector)[index],
-        _ => {
-            let value = real_at(vector, index);
-            if is_na_real(value) {
-                Rcomplex {
-                    r: NA_REAL,
-                    i: NA_REAL,
-                }
-            } else {
-                Rcomplex { r: value, i: 0.0 }
-            }
-        }
+        _ => Rcomplex {
+            r: real_at(vector, index),
+            i: 0.0,
+        },
     }
 }
 
 unsafe fn complex_arithmetic(op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
-    let result = alloc(SexpType::Complex, count)?;
-    let left_values = complex_operand(left);
-    let right_values = complex_operand(right);
-    let out = values::complexes_mut(result);
-    match op {
-        Op::Add => combine_complex(out, &left_values, &right_values, |a, b| Rcomplex {
-            r: a.r + b.r,
-            i: a.i + b.i,
-        }),
-        Op::Subtract => combine_complex(out, &left_values, &right_values, |a, b| Rcomplex {
-            r: a.r - b.r,
-            i: a.i - b.i,
-        }),
-        Op::Multiply => combine_complex(out, &left_values, &right_values, complex_multiply),
-        Op::Divide => combine_complex(out, &left_values, &right_values, complex_divide),
-        Op::Power => combine_complex(out, &left_values, &right_values, complex_power),
-        _ => return Err(error("invalid operation on complex numbers")),
+    // Before R 4.4.0 an integer or logical NA became NA in both parts, which the kernels' lift
+    // of a widened integer does not give, so such an operand is coerced first.
+    let lifted = |value: Sexp| -> R<Sexp> {
+        match value.kind() {
+            SexpType::Integer | SexpType::Logical if !r_at_least(4, 4) => {
+                let lifted = coerce_vector(value, SexpType::Complex)?;
+                crate::heap().root(lifted);
+                Ok(lifted)
+            }
+            _ => Ok(value),
+        }
+    };
+    let (left, right) = (lifted(left)?, lifted(right)?);
+    let result = values::alloc_uninit(SexpType::Complex, count)?;
+    if count > 0
+        && !kernels::complex_arithmetic(
+            op,
+            Some(kernels::complexes(left)),
+            Some(kernels::complexes(right)),
+            values::complexes_mut(result),
+        )
+    {
+        return Err(error("invalid operation on complex numbers"));
     }
     Ok(result)
-}
-
-/// The elements of an arithmetic operand as complex numbers: a complex vector's own storage, or
-/// the converted values of a real, integer or logical one.
-unsafe fn complex_operand<'a>(vector: Sexp) -> std::borrow::Cow<'a, [Rcomplex]> {
-    if vector.kind() == SexpType::Complex {
-        return std::borrow::Cow::Borrowed(values::complexes(vector));
-    }
-    std::borrow::Cow::Owned((0..length(vector)).map(|index| complex_at(vector, index)).collect())
-}
-
-/// Writes `operation` of the recycled operands into `out`, with the equal-length and scalar
-/// cases free of the per-element remainder.
-#[inline(always)]
-fn combine_complex(
-    out: &mut [Rcomplex],
-    left: &[Rcomplex],
-    right: &[Rcomplex],
-    operation: impl Fn(Rcomplex, Rcomplex) -> Rcomplex,
-) {
-    if left.len() == out.len() && right.len() == out.len() {
-        for ((slot, &a), &b) in out.iter_mut().zip(left).zip(right) {
-            *slot = operation(a, b);
-        }
-    } else if let ([a], true) = (left, right.len() == out.len()) {
-        for (slot, &b) in out.iter_mut().zip(right) {
-            *slot = operation(*a, b);
-        }
-    } else if let ([b], true) = (right, left.len() == out.len()) {
-        for (slot, &a) in out.iter_mut().zip(left) {
-            *slot = operation(a, *b);
-        }
-    } else if !left.is_empty() && !right.is_empty() {
-        for (index, slot) in out.iter_mut().enumerate() {
-            *slot = operation(left[index % left.len()], right[index % right.len()]);
-        }
-    }
 }
 
 // Comparison.
@@ -2380,19 +2435,32 @@ unsafe fn math1(call: &Call<'_>, function: Math) -> R<Sexp> {
     }
 }
 
+/// A math function of a complex vector, as GNU R's `complex_math1` and `do_cmathfuns` compute
+/// it: `abs` is the modulus, `NA` in either part gives `NA`, and a NaN from numbers warns.
 unsafe fn complex_math(call: &Call<'_>, function: Math, operand: Sexp) -> R<Sexp> {
     let count = length(operand);
     if function == Math::Abs {
-        let result = alloc(SexpType::Real, count)?;
-        for index in 0..count {
-            let value = values::complexes(operand)[index];
-            values::reals_mut(result)[index] = value.r.hypot(value.i);
+        let result = values::alloc_uninit(SexpType::Real, count)?;
+        for (slot, value) in values::reals_mut(result)
+            .iter_mut()
+            .zip(values::complexes(operand))
+        {
+            *slot = value.r.hypot(value.i);
         }
+        values::copy_most_attributes(operand, result, true)?;
         return Ok(result);
     }
-    let result = alloc(SexpType::Complex, count)?;
+    let result = values::alloc_uninit(SexpType::Complex, count)?;
+    let mut produced_nan = false;
     for index in 0..count {
         let z = values::complexes(operand)[index];
+        if is_na_real(z.r) || is_na_real(z.i) {
+            values::complexes_mut(result)[index] = Rcomplex {
+                r: NA_REAL,
+                i: NA_REAL,
+            };
+            continue;
+        }
         let value = match function {
             Math::Sqrt => csqrt(z),
             Math::Exp => cexp(z),
@@ -2410,9 +2478,19 @@ unsafe fn complex_math(call: &Call<'_>, function: Math, operand: Sexp) -> R<Sexp
             Math::Atanh => times_minus_i(complex_atan(times_i(z))),
             _ => return Err(call.error("unimplemented complex function")),
         };
+        produced_nan |= (value.r.is_nan() || value.i.is_nan()) && !(z.r.is_nan() || z.i.is_nan());
         values::complexes_mut(result)[index] = value;
     }
     values::copy_most_attributes(operand, result, true)?;
+    if produced_nan {
+        conditions::warning_call(
+            call.call,
+            format!(
+                "NaNs produced in function \"{}\"",
+                MATHS[function as usize].1
+            ),
+        )?;
+    }
     Ok(result)
 }
 
@@ -2478,8 +2556,10 @@ unsafe fn complex_atan(z: Rcomplex) -> Rcomplex {
             -std::f64::consts::FRAC_PI_2
         };
         let imaginary = 0.25 * (((1.0 + y) * (1.0 + y)) / ((1.0 - y) * (1.0 - y))).ln();
+        // GNU R returns `real + imaginary * I`, a full complex product, so the real part picks up
+        // `imaginary * 0`: an infinite `y` makes the imaginary part NaN, and then both are NaN.
         return Rcomplex {
-            r: real,
+            r: real + imaginary * 0.0,
             i: imaginary,
         };
     }
@@ -2520,20 +2600,33 @@ unsafe fn do_log(call: &Call<'_>) -> R<Sexp> {
             }
             Ok(result)
         }
+        // GNU R takes `clog` for one argument and `clog(x) / clog(base)` for two, and only the
+        // first passes `NA` through.
         SexpType::Complex => {
             let count = length(operand);
-            let result = alloc(SexpType::Complex, count)?;
+            let result = values::alloc_uninit(SexpType::Complex, count)?;
+            let divisor = base.map(|base| clog(Rcomplex { r: base, i: 0.0 }));
+            let mut produced_nan = false;
             for index in 0..count {
                 let z = values::complexes(operand)[index];
-                let mut value = Rcomplex {
-                    r: z.r.hypot(z.i).ln(),
-                    i: z.i.atan2(z.r),
-                };
-                if let Some(base) = base {
-                    value.r /= base.ln();
-                    value.i /= base.ln();
+                if divisor.is_none() && (is_na_real(z.r) || is_na_real(z.i)) {
+                    values::complexes_mut(result)[index] = Rcomplex {
+                        r: NA_REAL,
+                        i: NA_REAL,
+                    };
+                    continue;
                 }
+                let value = match divisor {
+                    Some(divisor) => complex_divide(clog(z), divisor),
+                    None => clog(z),
+                };
+                produced_nan |=
+                    (value.r.is_nan() || value.i.is_nan()) && !(z.r.is_nan() || z.i.is_nan());
                 values::complexes_mut(result)[index] = value;
+            }
+            values::copy_most_attributes(operand, result, true)?;
+            if produced_nan {
+                conditions::warning_call(call.call, "NaNs produced in function \"log\"")?;
             }
             Ok(result)
         }

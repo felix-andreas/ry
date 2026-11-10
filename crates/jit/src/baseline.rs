@@ -370,9 +370,9 @@ pub fn set_up(arch: Arch) -> Result<(), &'static str> {
 }
 
 /// The stubs' code and the offset each starts at. A stub is a leaf that takes its arguments in
-/// `T4` to `T6` and answers in the accumulator, zero when the caller must run the step.
+/// `T4` and `T6` and answers in the accumulator, zero when the caller must run the step.
 ///
-/// `GetVar` takes the symbol, its frame filter bit and its lookup slot, and answers the value
+/// `GetVar` takes the symbol in `T4` and its lookup slot in `T6`, and answers the value
 /// of a variable the activation's own frame binds to a plain value or a forced promise, which
 /// is what most lookups in a function body find. Everything else (a binding in an enclosing
 /// frame, an active binding, a promise still to force, a body recording type feedback) answers
@@ -690,7 +690,12 @@ fn variable_arguments(asm: &mut Assembler, symbol: usize, slot: u32) {
 /// `to = ` constant `index` of the activation's code. Body code reads every object it uses from
 /// the constants rather than holding its address, so it runs unchanged in another process.
 fn load_constant(asm: &mut Assembler, to: Reg, index: usize) {
-    asm.load(Width::W64, to, Reg::Activation, baseline_layout::CONSTANTS as u32);
+    asm.load(
+        Width::W64,
+        to,
+        Reg::Activation,
+        baseline_layout::CONSTANTS as u32,
+    );
     asm.load(Width::W64, to, to, (VECTOR_DATA_OFFSET + index * 8) as u32);
 }
 

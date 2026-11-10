@@ -3145,8 +3145,7 @@ unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
             call.call,
             &args,
             call.env()?,
-        )?
-        {
+        )? {
             return Ok(result);
         }
     }

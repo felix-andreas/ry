@@ -884,7 +884,14 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
             object => object,
         }
     };
-    let found = generic_method(call.call, generic, object, env.enclosure(), sys_parent, sys_parent)?;
+    let found = generic_method(
+        call.call,
+        generic,
+        object,
+        env.enclosure(),
+        sys_parent,
+        sys_parent,
+    )?;
     let mut vars = found.vars;
     let dispatch_vars = vars.len();
     // Through R 4.3, local variables the generic defined before dispatching are visible to the
@@ -917,7 +924,14 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     // its environment from the start.
     let result = if vars.len() > dispatch_vars && found.method.kind() == SexpType::Closure {
         let env = eval::bind_arguments(new_call, found.method, &args, Some(&vars))?;
-        eval::run_closure(new_call, found.method, env, sys_parent, &args, Entry::Unchecked)?
+        eval::run_closure(
+            new_call,
+            found.method,
+            env,
+            sys_parent,
+            &args,
+            Entry::Unchecked,
+        )?
     } else {
         apply_method(new_call, found.method, &args, sys_parent, &vars, false)?
     };
@@ -967,11 +981,25 @@ pub(crate) unsafe fn use_method_in_slots(
         value_of(value)?
     };
     let Some((owner, enclosure)) = caller else {
-        let found = generic_method(site, generic, object, function.tag(), sys_parent, sys_parent)?;
+        let found = generic_method(
+            site,
+            generic,
+            object,
+            function.tag(),
+            sys_parent,
+            sys_parent,
+        )?;
         let new_call = renamed_call(frame_call, found.method_name)?;
         drop(dispatching);
-        return apply_method(new_call, found.method, &promargs, sys_parent, &found.vars, false)
-            .map(Some);
+        return apply_method(
+            new_call,
+            found.method,
+            &promargs,
+            sys_parent,
+            &found.vars,
+            false,
+        )
+        .map(Some);
     };
     // The caller is a slot frame without an environment. Methods are looked up from its
     // enclosure (`lazy_caller` checked that its own slots bind none of the names probed), the
@@ -983,8 +1011,15 @@ pub(crate) unsafe fn use_method_in_slots(
     drop(dispatching);
     if found.method.kind() != SexpType::Closure {
         let sys_parent = eval::frame_env(owner, eval::Reify::Site("method dispatch"))?;
-        return apply_method(new_call, found.method, &promargs, sys_parent, &found.vars, false)
-            .map(Some);
+        return apply_method(
+            new_call,
+            found.method,
+            &promargs,
+            sys_parent,
+            &found.vars,
+            false,
+        )
+        .map(Some);
     }
     let state = interp();
     let previous_owner = state.slot_owner;
@@ -1011,7 +1046,11 @@ unsafe fn lazy_caller(position: usize, generic: Sexp) -> R<Option<(usize, Sexp)>
         return Ok(None);
     }
     let function = caller.function;
-    let names = function.cdr().cdr().element(crate::bytecode::SLOTS).element(1);
+    let names = function
+        .cdr()
+        .cdr()
+        .element(crate::bytecode::SLOTS)
+        .element(1);
     let prefix = generic.element(0).bytes();
     let probed = (0..length(names)).any(|index| {
         let name = names.element(index).car().bytes();
