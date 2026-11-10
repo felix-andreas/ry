@@ -1023,17 +1023,10 @@ fn a_body_that_could_run_nothing_natively_never_records() {
             values::ints(code.cdr().element(PROFILE)).to_vec()
         };
         run("wrap <- function(x) is.null(x)\ntwice <- function(x) x * 2");
-        let ran = run(&format!(
-            "for (i in 1:{}) {{ wrap(i); twice(i) }}",
-            window + 1
-        ));
+        let ran = run(&format!("for (i in 1:{}) {{ wrap(i); twice(i) }}", window + 1));
         assert_eq!(ran, "NULL");
         let (wrap, twice) = (profile_of("wrap"), profile_of("twice"));
-        assert_eq!(
-            wrap[profile::TIER_STATE],
-            -1,
-            "wrap was not refused: {wrap:?} {twice:?} {window}"
-        );
+        assert_eq!(wrap[profile::TIER_STATE], -1, "wrap was not refused: {wrap:?} {twice:?} {window}");
         assert_eq!(wrap[profile::RECORDING], 0, "wrap records");
         assert_eq!(twice[profile::RECORDING], 1, "twice does not record");
         run(&format!("for (i in 1:{threshold}) {{ wrap(i); twice(i) }}"));
@@ -1066,14 +1059,8 @@ fn a_hot_body_that_runs_rarely_waits_to_compile() {
         ));
         let counters = profile_of();
         assert!(!has_compiled_code("rare"), "rare compiled: {counters:?}");
-        assert!(
-            counters[profile::TIER_STATE] >= 0,
-            "rare was refused for good: {counters:?}"
-        );
-        assert!(
-            counters[profile::ENTRIES] < 10,
-            "rare's count went on: {counters:?}"
-        );
+        assert!(counters[profile::TIER_STATE] >= 0, "rare was refused for good: {counters:?}");
+        assert!(counters[profile::ENTRIES] < 10, "rare's count went on: {counters:?}");
         run(&format!(
             "for (i in 1:{}) {{ big <- (1:20000) * 1.5; rare(i) }}",
             threshold + 1
@@ -1085,11 +1072,7 @@ fn a_hot_body_that_runs_rarely_waits_to_compile() {
             "a second refusal did not double rare's wait: {counters:?}"
         );
         run(&format!("for (i in 1:{}) rare(i)", 2 * threshold));
-        assert!(
-            has_compiled_code("rare"),
-            "rare did not compile: {:?}",
-            profile_of()
-        );
+        assert!(has_compiled_code("rare"), "rare did not compile: {:?}", profile_of());
         jit::install_mode(Mode::Off);
     });
 }
@@ -1347,8 +1330,9 @@ fn fuzz_argument_expressions_agree_with_tier_zero() {
             } else {
                 ""
             };
-            let body =
-                format!("{{ {shadow}s <- 0\nfor (k in 1:30) s <- s + nf({first}, {second})\ns }}");
+            let body = format!(
+                "{{ {shadow}s <- 0\nfor (k in 1:30) s <- s + nf({first}, {second})\ns }}"
+            );
             let text = format!("(function() {body})()");
             jit::install_mode(Mode::Off);
             let reference = run(&text);
@@ -1367,18 +1351,7 @@ fn fuzz_argument_expressions_agree_with_tier_zero() {
 /// that must be left to the promise.
 fn argument_expression(rng: &mut SplitMix64, depth: usize) -> String {
     let leaves = [
-        "1",
-        "-2.5",
-        "3L",
-        "NA",
-        "NA_integer_",
-        "TRUE",
-        "w",
-        "i",
-        "big",
-        "cls",
-        "NaN",
-        "1e308",
+        "1", "-2.5", "3L", "NA", "NA_integer_", "TRUE", "w", "i", "big", "cls", "NaN", "1e308",
     ];
     if depth > 3 || rng.chance(1, 3) {
         return leaves[rng.below(leaves.len())].to_owned();
@@ -2815,7 +2788,10 @@ fn typed_core_keeps_tier_zero_semantics_at_scope_and_na_edges() {
         // when its own branches agree.
         (
             "function(x: character) (if (x == \"a\") (if (x == \"b\") 1 else 0L) else (if (x == \"b\") 1 else 0L))",
-            &["{ a <- \"a\"; FUNCTION(a) }", "{ a <- \"c\"; FUNCTION(a) }"],
+            &[
+                "{ a <- \"a\"; FUNCTION(a) }",
+                "{ a <- \"c\"; FUNCTION(a) }",
+            ],
         ),
         (
             "function(b: logical) if (b) (if (b) 1 else 0L)",
