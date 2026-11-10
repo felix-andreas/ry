@@ -343,93 +343,6 @@ impl StringTable {
     }
 }
 
-/// The symbol table behind `Rf_install`, shaped like [`StringTable`]: one dense array of 8-byte
-/// slots, each packing a symbol's address with a tag of its print name's hash, which the name
-/// already caches. A lookup reads one slot and dereferences only a symbol whose tag matches, to
-/// compare its print name by pointer. Symbols live as long as the heap, so the table never
-/// removes an entry and needs no tombstones.
-pub(crate) struct SymbolTable {
-    /// A power-of-two count of slots: 0 for empty, otherwise a symbol's print name packed as
-    /// [`pack`] packs a string, tagged with the name's hash. A probe compares whole slots, so a
-    /// lookup never reads the symbol or the name.
-    names: Vec<u64>,
-    /// The symbol of the name in the same slot of `names`, `None` beside an empty slot.
-    symbols: Vec<Option<Sexp>>,
-    len: usize,
-}
-
-impl Default for SymbolTable {
-    fn default() -> SymbolTable {
-        SymbolTable {
-            names: vec![EMPTY; INITIAL_SLOTS],
-            symbols: vec![None; INITIAL_SLOTS],
-            len: 0,
-        }
-    }
-}
-
-impl SymbolTable {
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    /// The symbol whose print name is the interned string `name`.
-    #[inline]
-    pub unsafe fn get(&self, name: Sexp) -> Option<Sexp> {
-        let key = pack_unchecked(name, unsafe { name.char_hash() });
-        let mask = self.names.len() - 1;
-        let mut index = symbol_home(key, mask);
-        loop {
-            let slot = self.names[index];
-            if slot == key {
-                return self.symbols[index];
-            }
-            if slot == EMPTY {
-                return None;
-            }
-            index = (index + 1) & mask;
-        }
-    }
-
-    /// Adds `symbol`, whose print name the table must not hold yet.
-    pub unsafe fn insert(&mut self, symbol: Sexp) {
-        if (self.len + 1) * 8 > self.names.len() * 7 {
-            let slots = self.names.len() * 2;
-            let names = std::mem::replace(&mut self.names, vec![EMPTY; slots]);
-            let symbols = std::mem::replace(&mut self.symbols, vec![None; slots]);
-            for (key, symbol) in names.into_iter().zip(symbols).filter(|&(key, _)| key != EMPTY) {
-                self.place(key, symbol);
-            }
-        }
-        let name = unsafe { symbol.car() };
-        self.place(pack(name, unsafe { name.char_hash() }), Some(symbol));
-        self.len += 1;
-    }
-
-    fn place(&mut self, key: u64, symbol: Option<Sexp>) {
-        let mask = self.names.len() - 1;
-        let mut index = symbol_home(key, mask);
-        while self.names[index] != EMPTY {
-            index = (index + 1) & mask;
-        }
-        self.names[index] = key;
-        self.symbols[index] = symbol;
-    }
-
-    /// Every symbol, in no particular order.
-    pub fn symbols(&self) -> impl Iterator<Item = Sexp> + '_ {
-        self.symbols.iter().filter_map(|&symbol| symbol)
-    }
-}
-
-/// The first slot to probe for a symbol table key. It reads only the hash tag inside the key,
-/// so growing the table re-places every key without touching a name; the tag's bits cover
-/// tables up to `1 << TAG_BITS` slots.
-#[inline]
-fn symbol_home(key: u64, mask: usize) -> usize {
-    home((key >> ADDRESS_BITS) as u32, mask)
-}
-
 /// The first slot to probe for a hash. The bits above the tag pick it, after a multiply spreads
 /// all 32 hash bits into them.
 #[inline]
@@ -442,24 +355,18 @@ fn tag(hash: u32) -> u64 {
     (u64::from(hash) & ((1 << TAG_BITS) - 1)) << ADDRESS_BITS
 }
 
-/// [`pack`] without its check, for a lookup key: an address that does not fit matches no slot.
 #[inline]
-fn pack_unchecked(object: Sexp, hash: u32) -> u64 {
-    (object.as_ptr() as u64 >> 3) | tag(hash)
-}
-
-#[inline]
-fn pack(object: Sexp, hash: u32) -> u64 {
-    let address = object.as_ptr() as u64;
+fn pack(string: Sexp, hash: u32) -> u64 {
+    let address = string.as_ptr() as u64;
     assert!(
         address & 7 == 0 && address >> (ADDRESS_BITS + 3) == 0,
-        "an object's address {address:#x} does not fit an intern table's slot"
+        "a string's address {address:#x} does not fit the intern table's slot"
     );
     (address >> 3) | tag(hash)
 }
 
 /// # Safety
-/// `slot` must hold an object, neither empty nor a tombstone.
+/// `slot` must hold a string, neither empty nor a tombstone.
 #[inline]
 unsafe fn unpack(slot: u64) -> Sexp {
     let pointer = ((slot & ADDRESS_MASK) << 3) as *mut Header;

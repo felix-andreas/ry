@@ -172,7 +172,7 @@ impl Heap {
                 stack.push(object);
             }
         };
-        let mut start: Vec<Sexp> = self.symbols.symbols().collect();
+        let mut start: Vec<Sexp> = self.symbols.values().copied().collect();
         start.extend(self.roots.precious.keys().copied());
         start.extend(self.roots.globals.entries.iter().copied());
         start.extend(roots.iter().copied());
@@ -479,7 +479,7 @@ impl Heap {
                 }
                 ORIGIN_SYMBOL => {
                     let name = lookup(&objects, input.u32()?)?;
-                    let existed = self.symbols.get(name).is_some();
+                    let existed = self.symbols.contains_key(&name);
                     (self.install_char(name)?, existed)
                 }
                 ORIGIN_BASE_CELL => {
@@ -648,7 +648,7 @@ impl Heap {
         if !input.bytes.is_empty() {
             return Err(invalid("it has bytes past its end"));
         }
-        for symbol in self.symbols.symbols() {
+        for symbol in self.symbols.values() {
             symbol.reset_symbol_caches();
         }
         self.binding_epoch += 1;
@@ -664,7 +664,7 @@ impl Heap {
         Ok(match object.kind() {
             SexpType::Char if object.has_gp(gp::CACHED) => Origin::String,
             SexpType::Symbol => {
-                if self.symbols.get(object.car()) != Some(object) {
+                if self.symbols.get(&object.car()) != Some(&object) {
                     return Err(ImageError::Unsupported(
                         "an uninterned symbol is reachable".to_owned(),
                     ));
