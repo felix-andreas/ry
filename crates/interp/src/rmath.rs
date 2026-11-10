@@ -138,7 +138,7 @@
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 use {
-    crate::format::format_g,
+    crate::{format::format_g, vector_math},
     rustc_hash::FxHashMap,
     std::{cell::RefCell, ffi::c_int, rc::Rc},
 };
@@ -2971,10 +2971,13 @@ pub fn pnorm_standard_fill(values: &mut [f64], lower: bool) {
 /// The chunk length of [`pnorm_standard_fill`], which keeps a chunk's operands in L1.
 pub const PNORM_CHUNK: usize = 256;
 
-/// `exp` of every value in place, as the scalar `f64::exp` computes it.
+/// `exp` of every value in place, bit for bit as the scalar `f64::exp` computes it: the
+/// shared vector kernel when the machine has it, the scalar loop otherwise.
 fn exp_batch(values: &mut [f64]) {
-    for value in values {
-        *value = value.exp();
+    if !vector_math::exp(None, values, &mut f64::exp) {
+        for value in values {
+            *value = value.exp();
+        }
     }
 }
 
@@ -3169,13 +3172,18 @@ pub fn qnorm_tails_fill(
         } else {
             lower_tail
         };
-        // Positions outside (0, 1) and NaN go to the scalar function; any finite logarithm
-        // keeps their lanes harmless.
+        // The argument of the logarithm, taken below in one batch. Positions outside (0, 1)
+        // and NaN go to the scalar function; any finite logarithm keeps their lanes harmless.
         *log = if probability > 0.0 && probability < 1.0 {
-            argument.ln()
+            argument
         } else {
-            0.0
+            1.0
         };
+    }
+    if !vector_math::log(None, &mut logs[..count], &mut f64::ln) {
+        for log in &mut logs[..count] {
+            *log = log.ln();
+        }
     }
     qnorm_tail_lanes_dispatch(&logs[..count], &mut values[..count]);
     let mut remaining = 0;
