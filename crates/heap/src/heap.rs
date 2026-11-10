@@ -1475,6 +1475,7 @@ impl Heap {
             self.space.set_finalizable(object);
         }
         object.set_enclosure_unbarriered(enclosure);
+        mark_enclosing(enclosure);
         enclosure.increment_refcount();
         Ok(object)
     }
@@ -1821,6 +1822,9 @@ impl Heap {
     }
 
     pub unsafe fn set_tag(&mut self, cell: Sexp, value: Sexp) {
+        if cell.kind() == SexpType::Closure {
+            mark_enclosing(value);
+        }
         self.store(cell, cell.tag(), value);
         cell.set_tag_unbarriered(value);
     }
@@ -1923,9 +1927,34 @@ impl Heap {
         }
     }
 
+    /// Replaces `env`'s enclosure. A cached lookup is keyed by the environment its walk starts
+    /// from, which is a closure's environment or an environment's enclosure and so carries
+    /// [`gp::ENCLOSING`], and symbol stamps cover that environment and its ancestors.
+    ///
+    /// When the walk through `env` changes from the old chain of enclosures to the new one,
+    /// only symbols bound in a frame the two chains do not share can resolve differently, so
+    /// the stamps of those symbols move instead of every stamp (see
+    /// [`Heap::bump_symbols_between`]). Lazy loading makes an environment and sets its parent
+    /// for every closure environment a package serialized, and moving every stamp each time
+    /// made every lookup cache in the process miss once. An environment outside every cached
+    /// chain moves nothing: one without the bit, or an empty frame whose enclosure is the empty
+    /// environment (a walk that reached it found nothing there or beyond), as long as it is
+    /// neither a function frame nor a top environment (the global environment, or one with
+    /// bindings or attributes, such as a namespace or a package environment).
     pub unsafe fn set_enclosure(&mut self, env: Sexp, value: Sexp) {
-        self.binding_epoch += 1;
-        self.enclosure_epoch += 1;
+        let unobserved = !env.has_gp(gp::FUNCTION_FRAME)
+            && (!env.has_gp(gp::ENCLOSING) || env.enclosure() == self.known.empty_env)
+            && env != self.known.global_env
+            && !self.is_symbol_frame(env)
+            && env.attrib() == self.known.nil
+            && (*bindings(env)).is_empty();
+        if !unobserved {
+            self.binding_epoch += 1;
+            if !self.bump_symbols_between(env, env.enclosure(), value) {
+                self.enclosure_epoch += 1;
+            }
+        }
+        mark_enclosing(value);
         self.store(env, env.enclosure(), value);
         env.set_enclosure_unbarriered(value);
     }
@@ -2409,9 +2438,65 @@ impl Heap {
         cell.set_cdr_unbarriered(unbound);
     }
 
+    /// Moves the stamp of every symbol bound in a frame on one of the enclosure chains from
+    /// `old` and from `new`, `env`'s enclosure before and after, but not on both, which are the only symbols a walk that switches
+    /// from one chain to the other can resolve differently. Fails, moving nothing a caller can
+    /// rely on, when such a frame keeps its bindings outside the stamps (a function frame, or a
+    /// base frame whose bindings live on the symbols), a chain passes `env` itself (so the
+    /// chains after the change are not the ones walked here), or the chains are too long or
+    /// bind too many symbols for this to beat moving every stamp.
+    unsafe fn bump_symbols_between(&mut self, env: Sexp, old: Sexp, new: Sexp) -> bool {
+        const MAX_CHAIN: usize = 64;
+        const MAX_SYMBOLS: usize = 1 << 14;
+        let empty = self.known.empty_env;
+        let reparented = env;
+        let mut old_chain: SmallVec<[Sexp; 16]> = SmallVec::new();
+        let mut env = old;
+        while env != empty {
+            if old_chain.len() == MAX_CHAIN || env == reparented {
+                return false;
+            }
+            old_chain.push(env);
+            env = env.enclosure();
+        }
+        let mut new_segment: SmallVec<[Sexp; 16]> = SmallVec::new();
+        let mut env = new;
+        let join = loop {
+            if env == empty {
+                break old_chain.len();
+            }
+            if let Some(position) = old_chain.iter().position(|&shared| shared == env) {
+                break position;
+            }
+            if new_segment.len() == MAX_CHAIN || env == reparented {
+                return false;
+            }
+            new_segment.push(env);
+            env = env.enclosure();
+        };
+        let differing = || old_chain[..join].iter().chain(&new_segment).copied();
+        let mut symbols = 0;
+        for env in differing() {
+            if env.has_gp(gp::FUNCTION_FRAME) || self.is_symbol_frame(env) {
+                return false;
+            }
+            symbols += (*bindings(env)).len();
+        }
+        if symbols > MAX_SYMBOLS {
+            return false;
+        }
+        for env in differing() {
+            for symbol in (*bindings(env)).symbols() {
+                bump_symbol_epoch(symbol);
+            }
+        }
+        true
+    }
+
     /// A stamp for lookups of `symbol` through environments other than function frames: it
     /// changes whenever a binding of `symbol` appears or disappears in such an environment, a
-    /// watched binding of it is assigned, or any enclosure is replaced, so a cell cached under an
+    /// watched binding of it is assigned, or an enclosure is replaced in a way that can change
+    /// what a walk for `symbol` finds (see [`Heap::set_enclosure`]), so a cell cached under an
     /// unchanged stamp is still the one a fresh walk would find.
     pub unsafe fn lookup_stamp(&self, symbol: Sexp) -> u64 {
         symbol.symbol_payload().epoch.get() + self.enclosure_epoch
@@ -4546,6 +4631,14 @@ fn process_times() -> (Duration, Duration) {
     (duration(user), duration(kernel))
 }
 
+/// Marks `env` as an environment cached lookups may walk through ([`gp::ENCLOSING`]).
+#[inline(always)]
+unsafe fn mark_enclosing(env: Sexp) {
+    if env.kind() == SexpType::Environment {
+        env.set_gp_bits(gp::ENCLOSING, true);
+    }
+}
+
 unsafe fn bump_symbol_epoch(symbol: Sexp) {
     let epoch = &symbol.symbol_payload().epoch;
     epoch.set(epoch.get() + 1);
@@ -4561,6 +4654,9 @@ unsafe fn fill_triple(object: Sexp, kind: SexpType, first: Sexp, second: Sexp, t
     first.increment_refcount();
     second.increment_refcount();
     third.increment_refcount();
+    if kind == SexpType::Closure {
+        mark_enclosing(third);
+    }
     if kind == SexpType::Symbol {
         let symbol = object.as_ptr().cast::<SymbolObject>();
         std::ptr::addr_of_mut!((*symbol).epoch).write(Cell::new(0));
