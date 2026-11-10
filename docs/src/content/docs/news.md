@@ -19,6 +19,15 @@ native code follows; any other release runs its own R code unchanged.
 
 `Sys.getenv()` looks up every name it is given in one pass over the environment. `Sys.setenv()` leaves a variable alone when it already holds the new value, and `Sys.unsetenv()` skips a variable that is not set. withr's `local_envvar()` restores often hit both cases, and the testthat workload takes 1.4% fewer instructions.
 
+### Faster assignment forms and kernels in the public benchmark suites
+
+`<<-`, array slab writes such as `a[i, 2, ] <- v`, matrix `m[[i, j]]`, vector growth, `attr<-`,
+`%*%` on small matrices and complex vector arithmetic run on compiled or direct paths. With the
+JIT on, the geometric mean speed-up over GNU R rises from 1.58x to 1.90x on the awfy programs,
+from 2.27x to 2.78x on rcp and from 1.53x to 2.04x on shootout (`tools/bench/real/run.py
+--public all --repeat 3`). Complex division and non-integer powers follow C99, so special values
+such as `(Inf+1i) / 0` match GNU R.
+
 ## ry 0.4.3-beta, Linux only
 
 *Released in November 2026 as a pre-release.*

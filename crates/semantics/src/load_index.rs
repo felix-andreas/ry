@@ -12,8 +12,8 @@ use {
         hir::Symbol,
         item_naming, item_spans,
         metadata::{
-            Call, CallArgument, NamespaceSpec, call_parts, description_field, parse_description_depends,
-            parse_namespace_spec, string_content,
+            Call, CallArgument, NamespaceSpec, call_parts, description_field,
+            parse_description_depends, parse_namespace_spec, string_content,
         },
         parse,
         top_level::{TopLevel, item_effect_free, item_super_assigned_names, item_top_level},
@@ -836,8 +836,8 @@ fn registrations(node: &SyntaxNode) -> Vec<Registration> {
     };
     // The S4 functions match their arguments as R does. Other callees take a name, then the
     // unnamed arguments in order.
-    let matched = s4_formals(&callee)
-        .map(|formals| (formals, match_arguments(&arguments, formals)));
+    let matched =
+        s4_formals(&callee).map(|formals| (formals, match_arguments(&arguments, formals)));
     let argument = |position: usize, name: &str| -> Option<&SyntaxNode> {
         if let Some((formals, matched)) = &matched {
             let index = formals.iter().position(|formal| *formal == name)?;
@@ -860,9 +860,7 @@ fn registrations(node: &SyntaxNode) -> Vec<Registration> {
         "setClass" | "setRefClass" => {
             string_argument(0, "Class").map(|class| Registration::S4Class { class })
         }
-        "setClassUnion" => {
-            string_argument(0, "name").map(|class| Registration::S4Class { class })
-        }
+        "setClassUnion" => string_argument(0, "name").map(|class| Registration::S4Class { class }),
         "setGeneric" => {
             string_argument(0, "name").map(|generic| Registration::S4Generic { generic })
         }
@@ -1022,8 +1020,8 @@ fn match_arguments<'a>(
         if used[index] {
             continue;
         }
-        let mut candidates = (0..before_dots)
-            .filter(|&formal| !exact[formal] && formals[formal].starts_with(name));
+        let mut candidates =
+            (0..before_dots).filter(|&formal| !exact[formal] && formals[formal].starts_with(name));
         match (candidates.next(), candidates.next()) {
             (Some(formal), None) => {
                 if matched[formal].is_some() {
