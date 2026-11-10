@@ -905,21 +905,32 @@ pub(crate) unsafe fn do_sys_unsetenv(call: &Call<'_>) -> R<Sexp> {
 fn scan_environment(names: &[&[u8]], mut visit: impl FnMut(usize, &[u8])) {
     #[cfg(unix)]
     {
-        // Each name still to find, keyed by its first two bytes as `getenv()` does: the `=` that
-        // ends a one-byte name stands in for its second byte. Most entries differ from every name
-        // in that key, so the scan does one comparison per entry and name. The keys sit in their
-        // own array, so that comparison is a plain slice scan.
-        let (mut keys, pending): (SmallVec<[u16; 4]>, SmallVec<[(usize, &[u8]); 4]>) = names
-            .iter()
-            .enumerate()
-            .filter(|(_, name)| !name.is_empty() && !name.contains(&0))
-            .map(|(index, name)| {
-                let second = name.get(1).copied().unwrap_or(b'=');
-                (u16::from_le_bytes([name[0], second]), (index, *name))
-            })
-            .unzip();
-        let keys = keys.as_mut_slice();
-        let mut remaining = keys.len();
+        // Most calls name one variable, which needs none of the bookkeeping below.
+        if let [name] = names {
+            if let Some(value) = find_variable(name) {
+                visit(0, value);
+            }
+            return;
+        }
+        // Each name still to find is keyed by its first two bytes as `getenv()` does, with 0 for
+        // a name that is found or can never be defined: no entry's key is 0, because an entry's
+        // first byte is not NUL. A bitset of the names' first bytes rejects most entries after
+        // one byte load, before any key is built.
+        let mut first_bytes = [0u64; 4];
+        let mut keys: SmallVec<[u16; 8]> = SmallVec::with_capacity(names.len());
+        let mut remaining = 0;
+        for name in names {
+            let key = match variable_key(name) {
+                Some(key) => {
+                    let [first, _] = key.to_le_bytes();
+                    first_bytes[usize::from(first >> 6)] |= 1 << (first & 63);
+                    remaining += 1;
+                    key
+                }
+                None => 0,
+            };
+            keys.push(key);
+        }
         if remaining == 0 {
             return;
         }
@@ -929,59 +940,25 @@ fn scan_environment(names: &[&[u8]], mut visit: impl FnMut(usize, &[u8])) {
         if entry.is_null() {
             return;
         }
-        // SAFETY (for both scans): the entry is a NUL-terminated `NAME=value` string, so its
-        // second byte is readable when its first is not the terminator, and a name comparison
-        // stops at the first byte that differs, so it never reads past the terminator, which no
-        // name byte equals.
-        let matches = |start: *const u8, name: &[u8]| {
-            name.len() == 1
-                || (name[2..].iter().enumerate())
-                    .all(|(offset, &byte)| unsafe { *start.add(offset + 2) } == byte)
-                    && unsafe { *start.add(name.len()) } == b'='
-        };
-        let value_after = |start: *const u8, name: &[u8]| {
-            // SAFETY: the value runs from after the `=` to the entry's NUL terminator.
-            unsafe { std::ffi::CStr::from_ptr(start.add(name.len() + 1).cast()) }.to_bytes()
-        };
-        let key_of = |start: *const u8| {
-            let first = unsafe { *start };
-            (first != 0).then(|| u16::from_le_bytes([first, unsafe { *start.add(1) }]))
-        };
-        if let ([key], [(index, name)]) = (&*keys, &*pending) {
-            // Most calls name one variable, which this loop finds without the general bookkeeping.
-            loop {
-                // SAFETY: the array ends with a null pointer, which ends the loop.
-                let start = unsafe { *entry }.cast::<u8>();
-                if start.is_null() {
-                    return;
-                }
-                if key_of(start) == Some(*key) && matches(start, name) {
-                    visit(*index, value_after(start, name));
-                    return;
-                }
-                // SAFETY: the entry was not the array's null terminator.
-                entry = unsafe { entry.add(1) };
-            }
-        }
         loop {
             // SAFETY: the array ends with a null pointer, which ends the loop.
             let start = unsafe { *entry }.cast::<u8>();
             if start.is_null() {
                 return;
             }
-            if let Some(key) = key_of(start) {
-                for position in 0..keys.len() {
-                    if keys[position] != key {
+            // SAFETY: an entry is a NUL-terminated string, so its first byte is readable, and its
+            // second is readable when the first is in the bitset, which never holds NUL.
+            let first = unsafe { *start };
+            if first_bytes[usize::from(first >> 6)] & (1 << (first & 63)) != 0 {
+                let key = u16::from_le_bytes([first, unsafe { *start.add(1) }]);
+                for (position, (slot, name)) in keys.iter_mut().zip(names).enumerate() {
+                    // SAFETY: the entry's first two bytes equal the name's key.
+                    if *slot != key || !unsafe { entry_matches(start, name) } {
                         continue;
                     }
-                    let (index, name) = pending[position];
-                    if !matches(start, name) {
-                        continue;
-                    }
-                    // A found name's key becomes 0, which no entry's key equals because an entry's
-                    // first byte is not NUL.
-                    keys[position] = 0;
-                    visit(index, value_after(start, name));
+                    *slot = 0;
+                    // SAFETY: the entry matched the name.
+                    visit(position, unsafe { entry_value(start, name) });
                     remaining -= 1;
                     if remaining == 0 {
                         return;
@@ -1004,6 +981,67 @@ fn scan_environment(names: &[&[u8]], mut visit: impl FnMut(usize, &[u8])) {
             visit(index, value.to_string_lossy().as_bytes());
         }
     }
+}
+
+/// The value `getenv(name)` returns, found the way glibc finds it: an entry is rejected after one
+/// byte load unless its first byte matches, which keeps the scan as cheap per entry as glibc's.
+#[cfg(unix)]
+fn find_variable<'environment>(name: &[u8]) -> Option<&'environment [u8]> {
+    let [first, second] = variable_key(name)?.to_le_bytes();
+    // SAFETY: as in `scan_environment`.
+    let mut entry = unsafe { environment_entries() };
+    if entry.is_null() {
+        return None;
+    }
+    loop {
+        // SAFETY: the array ends with a null pointer, which ends the loop. An entry's second
+        // byte is readable once its first matched `first`, which is not NUL.
+        let start = unsafe { *entry }.cast::<u8>();
+        if start.is_null() {
+            return None;
+        }
+        if unsafe { *start == first && *start.add(1) == second && entry_matches(start, name) } {
+            // SAFETY: the entry matched the name.
+            return Some(unsafe { entry_value(start, name) });
+        }
+        // SAFETY: the entry was not the array's null terminator.
+        entry = unsafe { entry.add(1) };
+    }
+}
+
+/// A name's first two bytes as one key, the way `getenv()` compares them: the `=` that ends a
+/// one-byte name stands in for its second byte. `None` for a name no entry can define.
+#[cfg(unix)]
+fn variable_key(name: &[u8]) -> Option<u16> {
+    let (&first, rest) = name.split_first()?;
+    if name.contains(&0) {
+        return None;
+    }
+    Some(u16::from_le_bytes([first, rest.first().copied().unwrap_or(b'=')]))
+}
+
+/// Whether the entry at `start` defines `name`.
+///
+/// # Safety
+/// `start` is a NUL-terminated `NAME=value` entry whose first two bytes equal `name`'s key. The
+/// comparison stops at the first byte that differs, so it never reads past the terminator,
+/// which no name byte equals.
+#[cfg(unix)]
+unsafe fn entry_matches(start: *const u8, name: &[u8]) -> bool {
+    name.len() == 1
+        || (name[2..].iter().enumerate())
+            .all(|(offset, &byte)| unsafe { *start.add(offset + 2) } == byte)
+            && unsafe { *start.add(name.len()) } == b'='
+}
+
+/// The value of the entry at `start`, which defines `name`.
+///
+/// # Safety
+/// `entry_matches(start, name)` holds, so the value runs from after the `=` to the entry's NUL
+/// terminator.
+#[cfg(unix)]
+unsafe fn entry_value<'environment>(start: *const u8, name: &[u8]) -> &'environment [u8] {
+    unsafe { std::ffi::CStr::from_ptr(start.add(name.len() + 1).cast()) }.to_bytes()
 }
 
 /// The process environment as the C library keeps it: a null-terminated array of `NAME=value`
