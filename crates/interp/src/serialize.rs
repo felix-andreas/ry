@@ -1751,7 +1751,14 @@ impl Encoder<'_> {
                 .map_or(0, |&count| count as u32 as u64),
         );
         self.value(constants.element(SUMMARY), depth + 1)?;
-        self.value(constants.element(SLOTS), depth + 1)?;
+        // The slot table's third element caches compiled defaults against the closure's
+        // formals, so only the map and the names belong in the image.
+        let slots = constants.element(SLOTS);
+        self.out.push(u8::from(slots != nil()));
+        if slots != nil() {
+            self.value(slots.element(0), depth + 1)?;
+            self.value(slots.element(1), depth + 1)?;
+        }
         let trained = self.trained
             && values::ints(constants.element(PROFILE))[..profile::SERIALIZED]
                 .iter()
@@ -2078,7 +2085,20 @@ impl Decoder<'_, '_> {
         )?;
         let summary = self.value(depth + 1)?;
         heap.root(summary);
-        let slots = self.value(depth + 1)?;
+        let slots = match self.input.byte()? {
+            0 => nil(),
+            1 => {
+                let map = self.value(depth + 1)?;
+                heap.root(map);
+                let names = self.value(depth + 1)?;
+                heap.root(names);
+                let slots = alloc(SexpType::List, 3)?;
+                heap.set_element(slots, 0, map);
+                heap.set_element(slots, 1, names);
+                slots
+            }
+            _ => return Err(error("the code image holds a malformed slot table")),
+        };
         heap.root(slots);
         let epochs = alloc(SexpType::Real, caches)?;
         heap.root(epochs);

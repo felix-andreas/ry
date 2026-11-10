@@ -1313,7 +1313,7 @@ pub enum CallFrame {
 /// returns `None` when the call needs an environment from the start: the body is not compiled
 /// with a slot table, a debugger, a move or a type signature watches the frame, or a missing
 /// formal's default is not a literal (its promise would capture the frame).
-unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallFrame>> {
+pub(crate) unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallFrame>> {
     let body = function.cdr();
     if body.kind() != SexpType::Bytecode {
         return Ok(None);
@@ -1343,6 +1343,7 @@ unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallF
     let missing_value = missing_arg();
     let mut bound: SmallVec<[Sexp; 12]> = SmallVec::new();
     let mut missing = 0u64;
+    let mut defaults = None;
     let mut formal = formals;
     while formal.kind() == SexpType::Pairlist {
         let index = bound.len();
@@ -1357,7 +1358,7 @@ unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallF
         };
         let default = formal.car();
         if actual == missing_value && default != missing_value {
-            if !(default.kind().is_atomic() || default == nil()) {
+            if !slot_default_fits(function, default, index, &mut defaults)? {
                 return Ok(None);
             }
             missing |= 1 << index;
@@ -1441,17 +1442,39 @@ pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<SmallVec<[i
             sources[target as usize] = position as i32;
         }
     }
+    let mut defaults = None;
     let mut formal = formals;
-    for &source in &sources {
+    for (index, &source) in sources.iter().enumerate() {
         let default = formal.car();
         if source < 0
-            && !(default == missing_value || default == nil() || default.kind().is_atomic())
+            && default != missing_value
+            && !slot_default_fits(function, default, index, &mut defaults)?
         {
             return Ok(None);
         }
         formal = formal.cdr();
     }
     Ok(Some(sources))
+}
+
+/// Whether a slot frame of `function` can hold the default of the formal at `index` for a call
+/// that leaves it out: a literal goes in the slot as it is, and anything else as a promise of
+/// its code over the slots ([`bytecode::slot_defaults`], which `defaults` keeps once read), which
+/// [`run_frame`] makes once the frame is on the stack.
+unsafe fn slot_default_fits(
+    function: Sexp,
+    default: Sexp,
+    index: usize,
+    defaults: &mut Option<Sexp>,
+) -> R<bool> {
+    if default.kind().is_atomic() || default == nil() {
+        return Ok(true);
+    }
+    let defaults = match *defaults {
+        Some(defaults) => defaults,
+        None => *defaults.insert(bytecode::slot_defaults(function)?),
+    };
+    Ok(defaults != nil() && defaults.element(index) != nil())
 }
 
 /// Calls `function` in a slot frame from a site whose plan `sources` (the vector
@@ -1865,7 +1888,9 @@ pub unsafe fn run_frame(
     }
     let signature = match entry {
         // A slot frame's closure is never typed (`bind_slots`).
-        Entry::Unchecked if slots != crate::NO_SLOTS => Ok(None),
+        _ if slots != crate::NO_SLOTS => {
+            default_promises(depth - 1, function, slots as usize, missing).map(|()| None)
+        }
         Entry::Unchecked => crate::annotations::enter(call, function, env, depth),
         Entry::Checked(signature) => Ok(signature),
     };
@@ -1928,7 +1953,11 @@ pub unsafe fn run_frame(
     // Promises over the slots that may still be forced need the environment once the slots are
     // gone.
     let frame = &state.frames[depth - 1];
-    let result = if frame.env == nil() && frame.pending != nil() && frame.unforced > 0 {
+    let result = if frame.env == nil()
+        && frame.pending != nil()
+        && frame.unforced > 0
+        && frame.unforced > unforced_defaults(frame)
+    {
         match reify(depth - 1) {
             Ok(_) => result,
             Err(unwind) => Err(unwind),
@@ -1955,6 +1984,53 @@ pub unsafe fn run_frame(
     }
     state.frame_closures.truncate(closures);
     result
+}
+
+/// Replaces each left-out formal's default that is not a literal, which the binding put in its
+/// slot as the bare expression, with a promise of its code over the slot frame at `owner`.
+unsafe fn default_promises(owner: usize, function: Sexp, header: usize, missing: u64) -> R<()> {
+    if missing == 0 {
+        return Ok(());
+    }
+    let mut defaults = nil();
+    let mut formal = function.car();
+    let mut index = 0;
+    while formal.kind() == SexpType::Pairlist {
+        let default = formal.car();
+        if missing & (1 << index) != 0 && !(default.kind().is_atomic() || default == nil()) {
+            if defaults == nil() {
+                defaults = bytecode::slot_defaults(function)?;
+            }
+            let promise = slot_promise(owner, defaults.element(index))?;
+            crate::heap().store_slot(&mut *bytecode::register_address(header + 1 + index), promise);
+        }
+        formal = formal.cdr();
+        index += 1;
+    }
+    Ok(())
+}
+
+/// How many of the frame's unforced promises are its own defaults that nothing but their slot
+/// holds. They die with the slots, so they need no environment once the frame returns.
+unsafe fn unforced_defaults(frame: &Frame) -> u32 {
+    let mut count = 0;
+    let mut formal = frame.function.car();
+    let mut index = 0;
+    while formal.kind() == SexpType::Pairlist && frame.missing >> index != 0 {
+        if frame.missing & (1 << index) != 0 {
+            let value = *bytecode::register_address(frame.slots as usize + 1 + index);
+            if value.kind() == SexpType::Promise
+                && value.car() == unbound()
+                && value.tag() == frame.pending
+                && value.refcount() == 1
+            {
+                count += 1;
+            }
+        }
+        formal = formal.cdr();
+        index += 1;
+    }
+    count
 }
 
 /// The stack a closure body may use before the interpreter moves to a fresh segment.
@@ -3701,6 +3777,11 @@ pub unsafe fn force_and_call_with(
         }
         _ => Entry::Unchecked,
     };
+    if !matches!(entry, Entry::Checked(Some(_)))
+        && let Some(frame) = bind_slots(call, function, &args)?
+    {
+        return run_frame(call, function, frame, env, &args, entry);
+    }
     let frame = bind_arguments(call, function, &args, None)?;
     run_closure(call, function, frame, env, &args, entry)
 }

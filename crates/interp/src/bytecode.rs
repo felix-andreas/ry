@@ -612,6 +612,44 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
     Ok(list)
 }
 
+/// The promise code of `function`'s formal defaults over its slot frame, one element per formal:
+/// a code object compiled against the body's slot table, a symbol, or `NULL` when the default
+/// is a literal or cannot run on the slots (so a call that leaves that formal out needs a heap
+/// frame), or `NULL` itself when there is nowhere to keep the list. `function`'s body must be
+/// compiled with a slot table. The list is built on the first
+/// call that needs it and kept in the table with the formals it was built for, because a closure
+/// whose formals were replaced keeps the body's code.
+pub unsafe fn slot_defaults(function: Sexp) -> R<Sexp> {
+    let table = function.cdr().cdr().element(SLOTS);
+    let formals = function.car();
+    let kept = table.element(2);
+    if kept != nil() && kept.car() == formals {
+        return Ok(kept.cdr());
+    }
+    let compiled = compile_promise_arguments(function, formals)?;
+    let heap = crate::heap();
+    heap.root(compiled);
+    let defaults = values::alloc(SexpType::List, length(formals))?;
+    heap.root(defaults);
+    for (index, (_, default)) in values::pairlist_items(compiled).iter().enumerate() {
+        let fits = match default.kind() {
+            SexpType::Bytecode => default.cdr().element(SLOTS) != nil(),
+            SexpType::Symbol => {
+                *default != symbols().dots
+                    && *default != missing_arg()
+                    && eval::dot_dot_index(*default).is_none()
+            }
+            _ => false,
+        };
+        if fits {
+            heap.set_element(defaults, index, *default);
+        }
+    }
+    let kept = values::cons(formals, defaults)?;
+    heap.set_element(table, 2, kept);
+    Ok(defaults)
+}
+
 /// The slot table names of `body`, when it is compiled with one.
 unsafe fn slot_names(body: Sexp) -> Option<Vec<Sexp>> {
     if body.kind() != SexpType::Bytecode {
@@ -1646,7 +1684,12 @@ unsafe fn reuses_first_argument(expression: Sexp) -> bool {
         ))
 }
 
-/// Adds the symbols `expression` assigns locally; `false` when it reflects on its frame.
+/// Adds the symbols `expression` assigns locally; `false` when it may bind a name the code does
+/// not show in its own frame, or hands that frame to code that may. A call that names another
+/// frame or a new one explicitly (`eval(e, envir)`, `assign(x, v, envir = e)`, `do.call(f, args)`
+/// with `f` a function) binds nothing here; `environment()` itself is what would hand this frame
+/// over, and it is refused wherever it appears. The call inside `.Internal(...)` names an
+/// internal, which binds only in the environments its arguments give it.
 unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> bool {
     if expression.kind() != SexpType::Language {
         return true;
@@ -1654,30 +1697,7 @@ unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> boo
     let head = expression.car();
     if head.kind() == SexpType::Symbol {
         let name = symbol_name(head);
-        if matches!(
-            &*name,
-            "assign"
-                | "eval"
-                | "evalq"
-                | "delayedAssign"
-                | "makeActiveBinding"
-                | "local"
-                | "sys.function"
-                | "environment"
-                | "list2env"
-                | "sys.frame"
-                | "sys.frames"
-                | "attach"
-                | "with"
-                | "within"
-                | "source"
-                | "rm"
-                | "remove"
-                | "lockBinding"
-                | "on.exit"
-                | "Recall"
-                | "do.call"
-        ) {
+        if binds_in_caller(&name, expression.cdr()) {
             return false;
         }
         // A `match` arm binds its pattern's names in the frame.
@@ -1702,8 +1722,17 @@ unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> boo
         if &*name == "function" {
             return true;
         }
+        if &*name == ".Internal" {
+            let inner = expression.cdr().car();
+            if inner.kind() == SexpType::Language {
+                return collect_arguments(inner.cdr(), found);
+            }
+        }
     }
-    let mut cell = expression;
+    collect_arguments(expression, found)
+}
+
+unsafe fn collect_arguments(mut cell: Sexp, found: &mut FxHashSet<Sexp>) -> bool {
     while cell.kind() == SexpType::Pairlist || cell.kind() == SexpType::Language {
         if !collect_bindings(cell.car(), found) {
             return false;
@@ -1711,6 +1740,82 @@ unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> boo
         cell = cell.cdr();
     }
     true
+}
+
+/// Whether the call of `name` with `arguments` may bind in the frame that makes it, or return
+/// that frame: by default `eval`, `assign` and their kin act on their caller's frame.
+unsafe fn binds_in_caller(name: &str, arguments: Sexp) -> bool {
+    let given = |position: usize, tag: &str| {
+        let mut cell = arguments;
+        let mut index = 0;
+        while cell.kind() == SexpType::Pairlist {
+            let cell_tag = cell.tag();
+            if cell_tag != nil() {
+                if &*symbol_name(cell_tag) == tag {
+                    return true;
+                }
+            } else {
+                if index == position {
+                    return true;
+                }
+                index += 1;
+            }
+            cell = cell.cdr();
+        }
+        false
+    };
+    match name {
+        "eval" | "evalq" => !given(1, "envir"),
+        "assign" => !(given(2, "pos") || given(3, "envir")),
+        "delayedAssign" => !given(3, "assign.env"),
+        "rm" | "remove" => !(given(usize::MAX, "envir") || given(usize::MAX, "pos")),
+        "environment" => {
+            let argument = arguments.car();
+            arguments == nil() || argument == nil()
+        }
+        "sys.frame" => {
+            let argument = arguments.car();
+            arguments == nil()
+                || (argument.kind() == SexpType::Language
+                    && argument.car().kind() == SexpType::Symbol
+                    && &*symbol_name(argument.car()) == "sys.nframe")
+        }
+        "do.call" => {
+            let what = arguments.car();
+            arguments == nil()
+                || match what.kind() {
+                    SexpType::String if length(what) == 1 => {
+                        refused_callee(&values::char_str(values::string_elt(what, 0)))
+                    }
+                    SexpType::Symbol => refused_callee(&symbol_name(what)),
+                    _ => false,
+                }
+        }
+        "makeActiveBinding" | "list2env" | "local" | "with" | "within" | "lockBinding"
+        | "sys.function" | "on.exit" => false,
+        _ => refused_callee(name),
+    }
+}
+
+/// The functions that bind in or hand over their caller's frame however they are called.
+fn refused_callee(name: &str) -> bool {
+    matches!(
+        name,
+        "eval"
+            | "evalq"
+            | "assign"
+            | "delayedAssign"
+            | "rm"
+            | "remove"
+            | "environment"
+            | "sys.frame"
+            | "sys.frames"
+            | "attach"
+            | "source"
+            | "Recall"
+            | "do.call"
+            | "sys.function"
+    )
 }
 
 impl Compiler {
@@ -1821,7 +1926,8 @@ impl Compiler {
         for (index, name) in names.iter().enumerate() {
             heap.set_element(symbols, index, *name);
         }
-        let slots = values::alloc(SexpType::List, 2)?;
+        // The third element is filled by `slot_defaults` on the first call that needs it.
+        let slots = values::alloc(SexpType::List, 3)?;
         heap.set_element(slots, 0, map);
         heap.set_element(slots, 1, symbols);
         Ok(slots)
@@ -3543,7 +3649,8 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
     let slots = constants.element(SLOTS);
     if slots != nil() {
         let well_formed = slots.kind() == SexpType::List
-            && length(slots) == 2
+            && length(slots) == 3
+            && slots.element(2) == nil()
             && slots.element(0).kind() == SexpType::Integer
             && length(slots.element(0)) == caches
             && slots.element(1).kind() == SexpType::List
