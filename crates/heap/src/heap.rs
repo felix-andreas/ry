@@ -115,6 +115,11 @@ pub struct Heap {
     young_large: Vec<Sexp>,
     /// Whether the collections running are the deeper ones of an escalation.
     escalating: bool,
+    /// The share of the younger old generation the last escalation found dead, which predicts
+    /// what an intermediate collection would free ([`Heap::escalate_if_full`]).
+    younger_dead_share: f64,
+    /// Bytes of objects outside the oldest generation the last intermediate or major sweep freed.
+    untenured_freed: usize,
     /// Bytes of large vectors allocated since the last major collection.
     large_allocated_since_major: usize,
     remembered: Vec<Sexp>,
@@ -252,7 +257,7 @@ pub struct WellKnown {
 
 pub struct Roots {
     pub protect: ProtectStack,
-    precious: FxHashMap<Sexp, u32>,
+    pub(crate) precious: Precious,
     /// Objects kept alive for the rest of the current scope. A foreign call truncates it on
     /// return, which gives native code its handle scope.
     handles: RootStack,
@@ -261,6 +266,67 @@ pub struct Roots {
     /// [`Heap::hand_out`]), so a loop's dropped temporaries can be collected before it returns.
     handouts: RootStack,
     globals: RootStack,
+}
+
+/// The multiset behind `R_PreserveObject`: each preserved object once, with the releases it
+/// still needs. Membership is the object's `PRECIOUS` flag, which a frame release tests on every
+/// call from a header it already has in cache. A release finds its entry by scanning from the
+/// end, where the most recent preserve is, as GNU R's precious list is searched from its newest
+/// entry; code that preserves many objects at once keeps its own list under one preserve, as
+/// Rcpp and cpp11 do.
+#[derive(Default)]
+pub(crate) struct Precious {
+    pub(crate) objects: Vec<Sexp>,
+    pub(crate) counts: Vec<u32>,
+}
+
+impl Precious {
+    pub(crate) fn contains(&self, object: Sexp) -> bool {
+        unsafe { object.flags() & flag_bits::PRECIOUS != 0 }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.objects.len()
+    }
+
+    /// Adds `count` preserves of `object`.
+    pub(crate) fn add(&mut self, object: Sexp, count: u32) {
+        if let Some(index) = self.position(object) {
+            self.counts[index] += count;
+            return;
+        }
+        unsafe { object.set_flag(flag_bits::PRECIOUS, true) };
+        self.objects.push(object);
+        self.counts.push(count);
+    }
+
+    /// Takes away one preserve of `object`, if it has one.
+    pub(crate) fn remove(&mut self, object: Sexp) {
+        let Some(index) = self.position(object) else {
+            return;
+        };
+        self.counts[index] -= 1;
+        if self.counts[index] == 0 {
+            unsafe { object.set_flag(flag_bits::PRECIOUS, false) };
+            self.objects.swap_remove(index);
+            self.counts.swap_remove(index);
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        for &object in &self.objects {
+            unsafe { object.set_flag(flag_bits::PRECIOUS, false) };
+        }
+        self.objects.clear();
+        self.counts.clear();
+    }
+
+    fn position(&self, object: Sexp) -> Option<usize> {
+        if !self.contains(object) {
+            return None;
+        }
+        self.objects.iter().rposition(|&entry| entry == object)
+    }
 }
 
 /// How many of a native call's most recent handouts stay rooted at least. Code that is correct
@@ -681,6 +747,8 @@ impl Heap {
             mapped: MappedPool::new(policy.heap_limit),
             young_large: Vec::new(),
             escalating: false,
+            younger_dead_share: 1.0,
+            untenured_freed: 0,
             large_allocated_since_major: 0,
             remembered: Vec::new(),
             younger_child: false,
@@ -711,7 +779,7 @@ impl Heap {
                     limit: DEFAULT_PROTECT_LIMIT,
                     base: 0,
                 },
-                precious: FxHashMap::default(),
+                precious: Precious::default(),
                 handles: RootStack::default(),
                 handouts: RootStack::default(),
                 globals: RootStack::default(),
@@ -1067,6 +1135,25 @@ impl Heap {
         let data = object.data().cast::<[u64; 2]>();
         data.write(payload);
         Ok(object)
+    }
+
+    /// [`Heap::alloc_scalar`] when the young generation has room and its pool a free slot,
+    /// and `None` otherwise, without collecting. An interpreter fast path that holds unrooted
+    /// values takes this and leaves the collecting case to its generic path.
+    #[inline(always)]
+    pub unsafe fn try_alloc_scalar(&mut self, kind: SexpType, payload: [u64; 2]) -> Option<Sexp> {
+        const SIZE: usize = VECTOR_DATA_OFFSET + 16;
+        const CLASS: u8 = SIZE_CLASS_BY_WORDS[SIZE / 8];
+        let young = self.young_bytes + SIZE;
+        if young > self.small_trigger {
+            return None;
+        }
+        let memory = self.space.allocate_from_run(CLASS as usize)?;
+        self.young_bytes = young;
+        let object = self.init_small(memory, kind, CLASS as usize, VECTOR_DATA_OFFSET);
+        object.set_length_and_capacity(1, 1);
+        object.data().cast::<[u64; 2]>().write(payload);
+        Some(object)
     }
 
     /// Reports every vector allocation whose size, as GNU R counts it, exceeds `threshold`
@@ -2164,7 +2251,7 @@ impl Heap {
         // counts nothing, such as native state that keeps an R callback, so at return only
         // promises count as the frame's own cycles.
         if count as usize == self.frame_cycles(env, result, false) {
-            if !self.roots.precious.contains_key(&env) {
+            if !self.roots.precious.contains(env) {
                 self.clear_frame(env);
             }
             return;
@@ -2253,6 +2340,22 @@ impl Heap {
         *slot = value;
     }
 
+    /// [`Heap::store_slot`] when giving up the old value needs no bookkeeping, answering
+    /// whether it stored. An interpreter fast path stores this way and leaves the old value
+    /// that a reconcile could reclaim to the full form.
+    #[inline(always)]
+    pub unsafe fn try_store_slot(&mut self, slot: &mut Sexp, value: Sexp) -> bool {
+        let old = *slot;
+        if old.refcount() == 1 && (old.kind() == SexpType::List || old.size_class() == LARGE_CLASS)
+        {
+            return false;
+        }
+        value.increment_refcount();
+        old.release_reference();
+        *slot = value;
+        true
+    }
+
     /// Gives up the references a returning call's slot frame holds, as [`Heap::clear_frame`]
     /// does for a frame's bindings: an argument's promise that only its slot holds gives up its
     /// value and environment too.
@@ -2303,7 +2406,7 @@ impl Heap {
     /// is not `result`: an environment a call made for itself, such as a dispatch context, is
     /// garbage then, and its enclosure may be a frame that can be released.
     pub unsafe fn release_enclosure(&mut self, env: Sexp, result: Sexp) {
-        if env != result && env.refcount() == 0 && !self.roots.precious.contains_key(&env) {
+        if env != result && env.refcount() == 0 && !self.roots.precious.contains(env) {
             self.drop_enclosure(env);
         }
     }
@@ -2524,12 +2627,12 @@ impl Heap {
 
     /// Whether `R_PreserveObject` holds `object`.
     pub fn is_preserved(&self, object: Sexp) -> bool {
-        self.roots.precious.contains_key(&object)
+        self.roots.precious.contains(object)
     }
 
     /// `R_PreserveObject`. Preserving twice needs two releases.
     pub fn preserve(&mut self, object: Sexp) {
-        *self.roots.precious.entry(object).or_insert(0) += 1;
+        self.roots.precious.add(object, 1);
         // An old object keeps its mark, so a minor collection would skip it anyway. The caller
         // is preserving the object, so it is live.
         if unsafe { object.gc_bits() } & gc_bits::OLD == 0 {
@@ -2539,12 +2642,7 @@ impl Heap {
 
     /// `R_ReleaseObject`. Releasing an object that is not preserved does nothing, as in GNU R.
     pub fn release(&mut self, object: Sexp) {
-        if let Some(count) = self.roots.precious.get_mut(&object) {
-            *count -= 1;
-            if *count == 0 {
-                self.roots.precious.remove(&object);
-            }
-        }
+        self.roots.precious.remove(object);
     }
 
     pub fn add_root_source(&mut self, source: Rc<dyn RootSource>) -> u64 {
@@ -2786,13 +2884,21 @@ impl Heap {
 
     /// A minor collection keeps every old object, so the temporaries it found live and promoted
     /// stay until a deeper one. Escalate, as GNU R does, when what is left would not hold the
-    /// request and a fifth of the smallest limit: first to an intermediate collection, which
-    /// frees the temporaries promoted since the last deeper one without tracing the tenured
-    /// heap, and only if that leaves the heap still full to a major one. Without the margin,
-    /// every large vector allocated just below the limit would run a collection that frees
-    /// nothing, and only a major one moves the limit.
+    /// request and a fifth of the smallest limit: to an intermediate collection, which frees the
+    /// objects promoted since the last deeper one without tracing the tenured heap, and if that
+    /// leaves the heap still full, to a major one. Without the margin, every large vector
+    /// allocated just below the limit would run a collection that frees nothing, and only a
+    /// major one moves the limit.
+    ///
+    /// An intermediate collection that cannot free enough only adds its tracing to the major
+    /// collection after it, which happens whenever the objects promoted since the last deeper
+    /// collection are a structure the program is still building. The share of them the last
+    /// escalation found dead predicts what an intermediate collection would free now, and
+    /// when that is short of what the small objects need, the escalation goes straight to a
+    /// major collection.
     unsafe fn escalate_if_full(&mut self, keep: &[Sexp], request: usize) {
-        for kind in [Collection::Intermediate, Collection::Major] {
+        let mut kind = Collection::Intermediate;
+        loop {
             let policy = &self.policy;
             let vectors_full =
                 self.old_large_bytes + request + policy.min_heap_limit / 5 > policy.heap_limit;
@@ -2805,9 +2911,17 @@ impl Heap {
             } else {
                 policy.node_limit
             };
-            let nodes_full = self.old_small_bytes + policy.min_node_limit / 5 > node_limit;
+            let margin = policy.min_node_limit / 5;
+            let nodes_full = self.old_small_bytes + margin > node_limit;
             if !vectors_full && !nodes_full {
-                break;
+                return;
+            }
+            let younger = self.space.younger_old_bytes();
+            if kind == Collection::Intermediate && !vectors_full {
+                let expected = (younger as f64 * self.younger_dead_share) as usize;
+                if self.old_small_bytes.saturating_sub(expected) + margin > node_limit {
+                    kind = Collection::Major;
+                }
             }
             if kind == Collection::Major {
                 self.stress_counter = 0;
@@ -2815,6 +2929,15 @@ impl Heap {
             self.escalating = true;
             self.collect_keeping(kind, keep, request);
             self.escalating = false;
+            // Right after an intermediate collection the younger old generation is nearly
+            // empty, and a share of a few objects predicts nothing.
+            if younger > self.policy.min_node_limit / 20 {
+                self.younger_dead_share = (self.untenured_freed as f64 / younger as f64).min(1.0);
+            }
+            if kind == Collection::Major {
+                return;
+            }
+            kind = Collection::Major;
         }
     }
 
@@ -3042,7 +3165,7 @@ impl Heap {
         for stack in [&stacks.globals, &stacks.protect.stack, &stacks.handouts] {
             roots.extend_from_slice(&stack.entries);
         }
-        roots.extend(stacks.precious.keys().copied());
+        roots.extend_from_slice(&stacks.precious.objects);
         let sources = std::mem::take(&mut self.sources);
         for (_, source) in &sources {
             source.trace(&mut Marker {
@@ -3421,11 +3544,15 @@ impl Heap {
     /// traces one, so its loops carry no test for it.
     #[inline(always)]
     unsafe fn mark_child<const TENURED: bool>(&mut self, object: Sexp) {
-        if self.space.mark(object) && !is_leaf(object, self.known.nil) {
+        let newly = if TENURED {
+            let (newly, tenured) = self.space.mark_beside_tenured(object);
+            self.younger_child |= !tenured;
+            newly
+        } else {
+            self.space.mark(object)
+        };
+        if newly && !is_leaf(object, self.known.nil) {
             self.mark_stack.push(object);
-        }
-        if TENURED && !self.younger_child && !self.space.is_tenured(object) {
-            self.younger_child = true;
         }
     }
 
@@ -3464,7 +3591,11 @@ impl Heap {
         };
         match kind {
             Collection::Intermediate | Collection::Major => {
-                self.roots.precious.keys().for_each(|&object| mark(object));
+                self.roots
+                    .precious
+                    .objects
+                    .iter()
+                    .for_each(|&object| mark(object));
                 self.symbols.values().for_each(|&symbol| mark(symbol));
             }
             Collection::Minor => self.new_roots.iter().for_each(|&object| mark(object)),
@@ -3950,6 +4081,7 @@ impl Heap {
         self.count_dead_by_kind(true);
         let mut swept = Swept::default();
         self.old_small_bytes = self.space.sweep_all(&mut swept);
+        self.untenured_freed = swept.untenured_bytes;
         let mut old_large_bytes = 0;
         let large: Vec<Sexp> = self.large.iter().copied().collect();
         for object in large {

@@ -1,0 +1,76 @@
+[stdout]
+| message: hello 1 2.5 TRUE
+| message("hello ", 1L, " ", 2.5, " ", TRUE)
+| [1] "simpleMessage" "message"       "condition"    
+|  [1] "local"               "eval.parent"         "eval"               
+|  [4] "eval"                "eval"                "eval"               
+|  [7] "withCallingHandlers" "tryCatch"            "tryCatchList"       
+| [10] "tryCatchOne"         "doTryCatch"          "withVisible"        
+| [13] "eval"                "eval"                "withCallingHandlers"
+| [16] "message"             "withRestarts"        "withOneRestart"     
+| [19] "doWithOneRestart"    "signalCondition"     "<fn>"               
+| [22] "show_frames"         "print"              
+| [1] "muffleMessage" "abort"        
+| [1] "name"        "exit"        "handler"     "description" "test"       
+| [6] "interactive"
+| [1] "restart"
+| [1] ""
+| NULL
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| message : ... appendLF call cond defaultHandler domain msg 
+| withRestarts : ... docall expr makeRestart makeRestartList restarts withOneRestart withRestartList 
+| withOneRestart : doWithOneRestart expr restart 
+| doWithOneRestart : expr restart 
+| <simpleMessage in message("x"): x
+| >
+| [1] "x\n"
+| message("x")
+| [1] 1
+| NULL
+| [1] "muffleMessage"
+| [1] "inner one\n" "inner two\n" "outer two\n" "body"       
+| [1] "caught\n"
+| on.exit f
+| [1] "after"
+| on.exit g
+| [1] "g done"
+| [1] "\n"
+| [1] "ab"
+| [1] "NANANA\n"
+| [1] "0.3333333333333331e-201e+05100000.10123\n"
+| [1] "level2024-01-02\n"
+| [1] "  padded  \t\n"
+| [1] "été 日本\n"
+| [1] "abx2\n"
+| [1] "domain NA\n"
+| [1] "custom text\n"
+| [1] "myMessage in h(x): custom text\n\nignored\n"
+| [1] FALSE
+| [1] 3
+| [1] "a description"
+| [1] 10
+| [1] "first"  "second" "third" 
+| plain body
+| [1] "value"
+| [1] FALSE
+| [1] 1
+| [1] FALSE
+| [1] "by object"
+| on.exit h
+| on.exit added from the restart body
+| [1] "left"
+| [1] "skipped inner"
+| NULL
+| [1] 1
+[messages]
+- from handler
+- to stderr 42
+- no newline
+- 
+[warnings]
+[errors]
+[value]
+double
+| 1
