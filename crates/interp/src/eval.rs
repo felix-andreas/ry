@@ -3844,22 +3844,18 @@ pub unsafe fn complex_assign(
             // in place stays uniquely referenced for the next update.
             let value_promise = forced_promise(value_code, replacement)?;
             crate::heap().untrack_references(value_promise);
-            let mut call_items: SmallVec<[(Sexp, Sexp); 6]> =
-                smallvec![(nil(), setter), (nil(), tmp_symbol)];
-            let mut argument_items: SmallVec<[(Sexp, Sexp); 6]> =
-                smallvec![(nil(), object_promise)];
+            // The call `` `f<-`(`*tmp*`, ..., value = v) `` and the argument list it is applied
+            // with differ only in their first argument, so they share the cells after it.
+            let mut tail_items: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
             let mut rest = getter.cdr().cdr();
             while matches!(rest.kind(), SexpType::Pairlist | SexpType::Language) {
-                call_items.push((rest.tag(), rest.car()));
-                argument_items.push((rest.tag(), rest.car()));
+                tail_items.push((rest.tag(), rest.car()));
                 rest = rest.cdr();
             }
-            call_items.push((symbols.value, value_promise));
-            argument_items.push((symbols.value, value_promise));
-            let setter_call = values::pairlist(&call_items, SexpType::Language)?;
-            crate::heap().root(setter_call);
-            let arguments = values::pairlist(&argument_items, SexpType::Pairlist)?;
-            crate::heap().root(arguments);
+            tail_items.push((symbols.value, value_promise));
+            let tail = values::pairlist(&tail_items, SexpType::Pairlist)?;
+            let setter_call = values::lcons(setter, values::cons(tmp_symbol, tail)?)?;
+            let arguments = values::cons(object_promise, tail)?;
             let function = call_head_function(setter, env)?;
             // A closure reports its errors against its own call, `` `f<-`(`*tmp*`, value = v) ``,
             // as GNU R's does, so only a builtin replacement names the assignment.

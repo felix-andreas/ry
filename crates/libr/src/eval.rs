@@ -91,6 +91,12 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
             }))
         },
         altrep_dataptr: |object| unsafe { crate::altrep::readable_dataptr(object) },
+        altrep_int_elt: |object, index| unsafe {
+            Ok(crate::altrep::int_elt(object, index as crate::R_xlen_t)?)
+        },
+        altrep_real_elt: |object, index| unsafe {
+            Ok(crate::altrep::real_elt(object, index as crate::R_xlen_t)?)
+        },
         defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
         run_exit_finalizers: || unsafe {

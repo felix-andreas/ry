@@ -6074,6 +6074,13 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   was killed for memory. Short sequences stay plain because reading one through ALTREP dispatch
   costs more than filling it once, and the evaluator's and the JIT's fast paths read plain
   integer data directly. Pinned by `base__long_sequences`.
+- **Indexing a compact sequence reads elements, never the whole vector.** A compact sequence's
+  `DATAPTR` expands it, so `x[[i]]` and a sparse `x[i]` read through `values::int_elt` and
+  `real_elt`, which call the `altrep_int_elt`/`altrep_real_elt` host hooks that libr answers with
+  the class's `Elt` method. `x[i]` takes the sparse path when the vector has at least 2^16
+  elements and the index selects at most an eighth of them; a denser index materializes once,
+  which is cheaper than one dispatch per element. `x <- seq_len(2^31 - 1); x[c(1, 2^31 - 1)]`
+  peaked at 8.4 GB before; `base__long_sequences` asserts the peak resident set stays under 1 GB.
 
 ## utils' sockets, internal downloads and allocation profiling
 
@@ -8157,6 +8164,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   - A one-string constant is a side-effect-free subscript at the top level of an element assignment; the in-place assignment rejects `""` and `NA`, which match no name.
 - **Why not a per-builtin cache.** Every gain comes from not doing work (no interning, no pairlist, no second evaluation), so nothing has to be invalidated.
 - **Impact.** Instructions per call (JIT off, callgrind, GNU R 4.3.3 in parentheses): `attributes` on an xts object 4,183 to 1,786 (2,692); `c(1:3, 4.5)` 4,262 to 2,131 (2,731); `x[[2L]]` 1,150 to 698 (709); `x[["net"]] <- 3` 4,910 to 987 (2,011); `forceAndCall(2, f, x, y)` 5,520 to 4,232 (5,198); `Reduce(f, x)` over 100 elements 748.7k to 423.1k (688.8k). `crates/oracle/cases/builtins__fast_paths.R` pins the edge cases.
+- **Names the runtime asks for by text are interned once.** `typeof` answers from `symbols().type_names`, one CHARSXP per `SEXPTYPE` code filled at start; internal dispatch on `$`, `@`, `$<-`, `@<-` and `seq` passes the generic's symbol from `symbols()` instead of installing it per call; `lapply`/`vapply` bind `X`, `FUN` and `i` through the same table; and a replacement call shares one tail pairlist between its getter and setter calls. `options(c("a", "b"))` reads only `a`, as GNU R does, and `options(character())` is an "invalid argument" error. Pinned by `crates/oracle/cases/strings__interned_names.R`.
 - **Not yet done.** The closure call inside `vapply` and `lapply` still allocates `i` and a promise per element; `$<-` and `[[<-` with a new name still take `complex_assign`; `[<-` with a scalar costs 813 instructions against GNU R's 497, almost all of it tier-0 guards and frame lookups.
 
 ## One-argument builtins and small base closures skip dispatch when their arguments are values
