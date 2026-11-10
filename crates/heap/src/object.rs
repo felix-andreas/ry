@@ -620,8 +620,37 @@ const _: () = assert!(std::mem::offset_of!(TripleObject, second) == 24);
 const _: () = assert!(std::mem::offset_of!(TripleObject, third) == 32);
 const _: () = assert!(RECORD_DATA_OFFSET == 32);
 
+/// The size class of an object too large for the small-object pages, which gets an allocation
+/// of its own.
+pub(crate) const LARGE_CLASS: u8 = u8::MAX;
+const LARGEST_SMALL_BYTES: usize = 2048;
+
+/// The elements one card of a large handle vector covers. A large character vector, list or
+/// expression vector keeps one card byte per this many elements after its data, and a store of
+/// a younger child into it while it is old marks the child's card dirty. A minor collection then
+/// rescans only the dirty cards of a remembered vector instead of all its elements: a list grown
+/// one element per iteration to a million elements is remembered on every iteration's store,
+/// and rescanning it whole made each minor collection cost time proportional to the old list.
+pub(crate) const CARD_ELEMENTS: usize = 128;
+/// A card whose elements are no younger than its vector.
+pub(crate) const CARD_CLEAN: u8 = 0;
+/// A card of a tenured vector that may hold children of the younger old generation but no young
+/// ones, as a minor collection leaves the cards it rescanned: only an intermediate collection,
+/// which can free those children, needs to read it.
+pub(crate) const CARD_UNTENURED: u8 = 1;
+/// A card that may hold a young child, which every collection reads.
+pub(crate) const CARD_YOUNG: u8 = 2;
+
+pub(crate) fn holds_handles(kind: SexpType) -> bool {
+    matches!(
+        kind,
+        SexpType::String | SexpType::List | SexpType::Expression
+    )
+}
+
 /// The bytes an object of `kind` with `length` elements occupies, header included. `CHARSXP`
-/// keeps a terminating NUL after its bytes, as `R_CHAR` promises.
+/// keeps a terminating NUL after its bytes, as `R_CHAR` promises, and a large handle vector its
+/// card bytes ([`CARD_ELEMENTS`]).
 pub fn object_size(kind: SexpType, length: usize) -> Option<usize> {
     match kind.shape() {
         Shape::Vector => {
@@ -631,7 +660,10 @@ pub fn object_size(kind: SexpType, length: usize) -> Option<usize> {
             } else {
                 length
             };
-            let data = elements.checked_mul(element)?;
+            let mut data = elements.checked_mul(element)?;
+            if holds_handles(kind) && VECTOR_DATA_OFFSET + data > LARGEST_SMALL_BYTES {
+                data = data.checked_add(length.div_ceil(CARD_ELEMENTS))?;
+            }
             // A string's bytes need no alignment, so a string of up to seven bytes fits the
             // 40-byte slot class, a sixth smaller than the 48 bytes 16-byte rounding gives it.
             let align = if kind == SexpType::Char { 7 } else { 15 };
@@ -900,6 +932,36 @@ impl Sexp {
                 None => *(self.data() as *const Sexp).add(index),
             }
         }
+    }
+
+    /// Whether the vector keeps card bytes after its data ([`CARD_ELEMENTS`]). A list of weak
+    /// pairs has them but does not use them, because its elements must not be marked through
+    /// a card: the collector clears its dead pairs instead.
+    #[inline]
+    pub(crate) unsafe fn is_carded(self) -> bool {
+        unsafe {
+            self.size_class() == LARGE_CLASS
+                && holds_handles(self.kind())
+                && self.flags() & (flag_bits::ALTREP | flag_bits::WEAK_PAIRS) == 0
+        }
+    }
+
+    /// The card bytes of a carded vector, one per [`CARD_ELEMENTS`] elements of its capacity.
+    #[inline]
+    pub(crate) unsafe fn cards(self) -> *mut u8 {
+        unsafe {
+            self.data()
+                .cast::<u8>()
+                .add(self.capacity() as usize * size_of::<Sexp>())
+        }
+    }
+
+    pub(crate) unsafe fn card_count(self) -> usize {
+        unsafe { (self.capacity() as usize).div_ceil(CARD_ELEMENTS) }
+    }
+
+    pub(crate) unsafe fn clear_cards(self) {
+        unsafe { std::ptr::write_bytes(self.cards(), 0, self.card_count()) }
     }
 
     /// An element of a vector the caller knows is not ALTREP.

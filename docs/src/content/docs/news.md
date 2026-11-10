@@ -15,6 +15,10 @@ native code follows; any other release runs its own R code unchanged.
 | rlang | `trace_back()` | 1.3.0 | 0.16 ms instead of 9 ms at a depth of 200 frames, so every `expect_error()` and `expect_warning()` is cheaper; the testthat workload takes 31% fewer instructions |
 | withr | the helpers behind `local_envvar()`, `with_envvar()`, `local_options()`, `with_options()` and `local_language()` | 3.0.3 | the testthat workload takes 23% fewer instructions, and every test skips creating and deleting a temporary directory, so its wall time halves together with the base fast paths below |
 
+### Faster environment variables
+
+`Sys.getenv()` looks up every name it is given in one pass over the environment. `Sys.setenv()` leaves a variable alone when it already holds the new value, and `Sys.unsetenv()` skips a variable that is not set. withr's `local_envvar()` restores often hit both cases, and the testthat workload takes 1.4% fewer instructions.
+
 ### Faster assignment forms and kernels in the public benchmark suites
 
 `<<-`, array slab writes such as `a[i, 2, ] <- v`, matrix `m[[i, j]]`, vector growth, `attr<-`,
@@ -23,6 +27,24 @@ JIT on, the geometric mean speed-up over GNU R rises from 1.58x to 1.90x on the 
 from 2.27x to 2.78x on rcp and from 1.53x to 2.04x on shootout (`tools/bench/real/run.py
 --public all --repeat 3`). Complex division and non-integer powers follow C99, so special values
 such as `(Inf+1i) / 0` match GNU R.
+
+### Cheaper minor collections and package metadata reads
+
+Large lists and character vectors record stores in cards, so a minor collection rescans only the
+parts that changed, and growing a list with `[[<-` moves its elements instead of copying them.
+rcp's list-for drops from 1.54 s to 0.73 s and list-while from 1.20 s to 0.73 s, which takes both
+past GNU R (1.63x and 1.58x), and the rcp geometric mean rises from 2.64x to 2.80x.
+`unserialize()` and `readRDS()` on a connection read from its buffer, which takes a third off
+their cost during `library(testthat)`.
+
+### Faster `attr()` lookups, large matrix products and small vector allocation
+
+`attr(x, which)` finds a full or partial match in one pass over the attributes, which takes
+shootout's knucleotide_brute_2 from 1.38x to 2.08x of GNU R. `%*%` computes four result columns
+per pass over its left operand, with each entry summed in the same order as before, so results
+are unchanged and spectralnorm_math rises from 1.27x to 1.44x.
+Small vectors are allocated inline at the call site, which takes 2.2% off the instructions of
+the testthat workload.
 
 ## ry 0.4.3-beta, Linux only
 

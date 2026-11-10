@@ -61,6 +61,23 @@ Each program exists in `tools/bench/why/` as plain R and typed.
 Each program times its own work with the harness above, so startup and the static check are left
 out. The harness runs once to warm up, then three times, and keeps the fastest run.
 
+### Comparing two builds of ry on testthat
+
+The testthat workload (`tools/bench/real/testthat.R`) gives two different wall times, and they
+answer different questions:
+
+| Number | What it covers | Command |
+| --- | --- | --- |
+| Test phase | One warm run of the tests, the median of `RY_BENCH_REPEAT` runs | field 3 of the output of `RY_JIT=on RY_BENCH_REPEAT=5 ry run --runtime ry testthat_full.R` |
+| Process wall | Start-up, loading testthat, one cold run and five warm runs | `time` around the same command |
+| Load | Start-up and loading testthat only | `time ry run --runtime ry load.R`, where `load.R` holds only `suppressPackageStartupMessages(library(testthat))` |
+
+`testthat_full.R` is `harness.R` followed by `testthat.R`, and its checksum is `27:22821`. Both
+builds use the same `R_LIBS`, a library that ry itself installed testthat into, and each number is
+the median of five fresh processes. On the Linux release build with the JIT on, the test phase
+measured 0.219 s and the process wall 1.44 s, which is how one workload can be quoted as both. The
+comment at the top of `tools/bench/real/harness.R` gives the full environment of each command.
+
 `just bench-why --write` runs every program twice per engine, alternating engines, and stores the
 fastest time and the largest memory peak in `tools/bench/why/results.json`, which every table on
 this site reads.

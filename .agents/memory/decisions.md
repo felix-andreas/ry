@@ -1880,19 +1880,70 @@ It applies the same sharing checks as `complex_assign` (`moves::modifying`, `may
 including coercion, growth, `NULL` deletion and `x[[1]] <- x`, still takes the general path
 (oracle case `assignment__element_in_place`).
 
-**PGO is not used for the release build, because it measured slower.** An instrumented libR
-(`-Cprofile-generate` on the `interp`, `heap`, `libr` and `R` crates through a
-`RUSTC_WORKSPACE_WRAPPER`, so dependency fingerprints stay unchanged) was trained on every oracle
-case with the JIT off and on, and rebuilt with `-Cprofile-use`. On held-out scripts with the JIT
-off, best of three, it ran 1.4 to 1.9x slower than the plain release build: period.apply 2.10 s
-against 1.47 s, 300k `sd` calls 7.11 s against 4.44 s, row `apply` 1.28 s against 0.66 s, `fib(27)`
-0.55 s against 0.29 s, a 200k-record `lapply` 1.28 s against 0.79 s, and 50k S4 `new`/`slot<-` 13.9
-s against 8.7 s. The cause is unverified. The likeliest suspects are applying the profile only to
-the runtime crates under fat LTO, or a profile that went stale against the merged module, either of
-which leaves hot code optimized as cold. Retrying needs the profile applied to every crate linked
-into libR (cargo-pgo does this), a check for `-Wbackend-plugin` profile-mismatch warnings, and BOLT,
-which is not installed in the cloud environment. Until a retry measures a gain, the release workflow
-stays as it is.
+**The Linux release build is profile-guided.** `just package` on x86_64 Linux runs
+`tools/layout/optimize.sh`: an instrumented build of every crate linked into libR and `ry`
+(dependencies included) runs `tools/layout/train.py`, the release build compiles every crate with
+the merged profile, and BOLT then lays out libR from a second training run on a BOLT-instrumented
+copy. Measured against the plain release build in one sitting (4-core cloud VM, medians):
+
+| | plain | PGO | PGO + BOLT |
+| --- | --- | --- | --- |
+| testthat_full test phase, JIT on / off | 0.252 / 0.248 s | 0.228 / 0.219 s | 0.219 / 0.218 s |
+| testthat_full process wall, JIT on | 1.68 s | 1.51 s | 1.44 s |
+| testthat_full peak RSS, JIT on (the two optimized builds interleaved in a second sitting) | 82.5 MB | 76.3 MB | 76.1 MB |
+| testthat_full callgrind instructions | 2.60 G | 2.22 G | 2.21 G |
+| period.apply 2e6, JIT on / off | 0.70 / 0.70 s | 0.56 / 0.55 s | 0.56 / 0.57 s |
+| period.apply per period: instructions, I1 misses | 185k, 5,450 | 160k, 3,360 | 160k, 3,050 |
+
+The public suites (`tools/bench/real/suites`, JIT on, median of 3, GNU R time over ry time as a
+geometric mean, so higher is better) split into the programs the training ran and the held-out
+ones the profile never saw (awfy entirely, and the odd positions of rcp and shootout):
+
+| suite | plain | PGO | PGO + BOLT |
+| --- | --- | --- | --- |
+| awfy, held out (5) | 1.96 | 2.45 | 2.48 |
+| rcp, trained (8) / held out (8) | 3.44 / 2.43 | 3.58 / 2.66 | 3.59 / 2.62 |
+| shootout, trained (16) / held out (17) | 2.19 / 2.16 | 2.57 / 2.55 | 2.56 / 2.58 |
+
+PGO accounts for nearly all the gain, and the held-out programs gain as much as the trained ones,
+so the profile generalizes. BOLT cuts instruction-cache misses by another 9%. It changes the
+public suites by between 4% faster and 3% slower, and testthat_full's process wall time by 1 to
+13% faster in each of five interleaved batches of five runs, with JIT on and off. Peak RSS
+matches PGO alone: BOLT moves the hot functions into a new 6.6 MB text segment and leaves the
+original text mostly unread, so libR's resident pages total 15.6 MB against 16.0 MB. The file
+grows from 107 MB to 136 MB, because the original text stays in it.
+
+- **Why the earlier attempt lost.** An earlier attempt profiled only `interp`, `heap`, `libr` and `R`
+  and trained on the oracle cases alone, and ran 1.4 to 1.9x slower; that slowdown was not
+  reproduced, so its cause stays unconfirmed. What this pipeline found instead is a silent
+  failure: passing `-Cprofile-generate`/`-Cprofile-use` in `RUSTFLAGS` changes every crate's
+  `-C metadata` hash, which is part of every v0-mangled symbol and codegen-unit name, so the two
+  builds name each function differently and the profile matched about 1% of the functions that
+  ran. By default LLVM warns only on a hash mismatch, never on a function it finds no record for.
+- **The flags go through `RUSTC_WRAPPER`** (`tools/layout/rustc-wrapper.sh`, reading
+  `RY_LAYOUT_RUSTFLAGS`), applied to every rustc call with `--target`, which skips build scripts
+  and proc-macros. Both builds keep the release profile's `strip` off and use their own target
+  directory, because cargo does not rebuild when only the wrapper's flags change. `-p libr -p rcmd`
+  and `-p ry-lang` build in separate invocations as a plain release does, because feature
+  unification differs per invocation.
+- **The build fails on a stale profile.** `-pgo-warn-missing-function` reports functions without a
+  record; LTO drops a few functions the instrumented binary never calls (2 of 421k), so more than
+  1% of the record count fails the build, and any hash mismatch fails it outright. The `repl`
+  embed lookups read `EMBEDDED_RUNTIME`/`EMBEDDED_BASE` through `black_box`, because a `const None`
+  folded one arm away in the profiled build and changed control flow in the embedded one.
+- **BOLT needs LLVM 20 or newer.** BOLT 18 produced a libR on which oracle case
+  `datatable__suite_shapes` segfaults in blake3's AVX-512 assembly, called with a garbage argument,
+  and a BOLT 18 run that optimizes only a few functions writes a libR the dynamic loader rejects;
+  BOLT 20 lays out the same input correctly.
+  Instrumenting all of libR's 100 MB of text takes more than 14 GB, so only the functions the PGO
+  profile saw run are instrumented (`tools/layout/hot_functions.py`); BOLT names a local symbol
+  `name/1`, and LTO makes nearly every Rust function local. `--emit-relocs` leaves static
+  relocation sections that keep the symbol table alive through `strip`, so the script removes them
+  with `objcopy --remove-relocations` first.
+- **Benchmarks of interpreter changes keep the plain build.** The layout build writes to
+  `target/x86_64-unknown-linux-gnu/release`; `just bench-real` and the other bench recipes build
+  `target/release` with plain `cargo build --release`, so a change is measured without a profile
+  that was collected before it.
 
 **S3 dispatch caches the method lookup from the top environment on.** `lookup_method` walks the
 calling frames to their top environment uncached, because function frames gain and lose bindings
@@ -8189,7 +8240,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   - Together these measure small: 8,174 to 8,140 instructions per closure call on the testthat workload (callgrind, load subtracted), because the cost they remove was already spread thin.
 - **Namespace loads defer major collections.** `run_closure` recognises `loadNamespace` by identity (`Interp::namespace_loader`, preserved, recorded by `session::mark_namespace_loader` on every start, the image start included), not by a gp bit: closure gp bits are scarce, and one shared with `NATIVE_ENTRY` once made every declined native-entry call count as a load (`gp::CLOSURE_BITS` and `closure_gp_bits_do_not_overlap` in `crates/heap/tests/test_frames.rs` guard against a repeat). A drop guard ends the load on any exit. While any call of it runs, `escalate_if_full` doubles the small-object limit instead of escalating, because almost everything a load allocates survives it. When the outermost load returns, the limit is rebased on the old and young bytes kept, so the next ordinary collection does not immediately escalate. Load of testthat, xts, data.table and a 40,744-object package: 2 major collections to 0, GC from 15.7% to about 5% of the time. Pinned by `a_namespace_load_defers_major_collections_until_it_ends` in `crates/heap/tests/test_gc.rs`.
 - **Lazy-load records.** The record reader inlines its slice path for integers, reals and strings, borrows string bytes instead of copying them, and reads a pairlist's cells in a loop. `makeLazy` builds GNU R's promise (the key spliced into a copy of the expression, one shared evaluation environment) instead of a new environment per binding. `registerS3methods` asks whether each local generic is an S4 generic; a generic still in its database whose record header says a closure without a class or S4 bit is answered without fetching it (`serialize::lazy_record_header`, which inflates only the first 64 bytes), and each generic is answered once per call. `library()` of 11 packages: 914 records fetched to 651, 1,197.8M instructions to 1,133.0M.
-- **Left open.** Minor collections during a load cost about 24M instructions each, most of it re-marking the children of remembered old objects (namespace frames being filled); card marking would bound that. `unserializeFromConn` (`readRDS` of package metadata) reads the connection a few bytes at a time and costs 93M of the same load.
+- **Left open.** Minor collections during a load cost about 30M instructions each. Re-marking remembered namespace frames was the suspected cause, but a frame watermark removed only 1.3M of 90M on `library(testthat)`: the cost is tracing the young survivors themselves (about 360k objects per collection at about 70 instructions each, `Space::mark` 44 of them). See "Card marking, frame watermarks and moved list growth". `unserializeFromConn` reads through the connection's buffer (same entry).
 
 ## Install-time machine code from whole-program facts, beside the JIT
 
@@ -8309,7 +8360,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Evidence.** `crates/oracle/cases/conditions__rlang_trace_back.R` (hand-written stack shapes) and `conditions__rlang_trace_back_generated.R` (150 seeded random stacks of closures, operators, `::`, `do.call`, `lapply`, `tryCatch`, calling handlers, `eval`, `local`, S3 dispatch and trimming) compare the native trace with GNU R and with trace_back's own R body on the same frame.
 - **Interned strings carry a validity fact.** `flag_bits::VALID_UTF8` is set in `Heap::intern_new` when the bytes are valid UTF-8, and `char_str` borrows such a string unchecked unless it is marked Latin-1 or bytes. The header flag byte is unreachable from `SETLEVELS`, and interned bytes never change, so unlike the gp `ASCII` bit it is a fact.
 - **Names stay symbols.** `pkg::name`, `getNamespaceValue`, `options()` and the base and package fast paths used to turn symbols into `String`s and intern them again on every call (`Heap::install` was 1.6% of the workload). They take symbols and `CHARSXP`s throughout, and the fixed names they read come from `Symbols`, which one macro now generates (struct and installer) so a name is listed once. `crates/oracle/cases/envir__namespace_lookup.R` pins `::`, `:::`, their errors and multi-option `options()` against GNU R.
-- **Not changed.** libc `setenv`, `unsetenv` and `getenv` scan `environ` linearly (0.8% of the workload in a 172-variable environment, from `withr::local_envvar`); GNU R pays the same, and a private copy of the environment would hide changes from C code.
+- **Environment variables.** See "Environment variable calls read `environ` once" below.
 - **Impact.** testthat workload under callgrind, `RY_BENCH_REPEAT=2`, main and this change in one sitting: 6,787M to 4,690M instructions with the JIT on (−30.9%), 6,781M to 4,686M with it off. The load phase (`library(testthat)` alone) goes from 423M to 408M and the test phase from 6,364M to 4,282M (−32.7%). Measured step by step on an earlier main, `trace_back` is about 2,076M, the validity bit about 45M and symbol names about 99M. Warm wall time (median of three medians of five runs) goes from 0.78 s to 0.60 s, and peak RSS from 77.6 MB to 74.1 MB.
 
 ## withr's environment and option helpers run natively; defer() stays in R
@@ -8331,6 +8382,14 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Closures with native entries never tier on hot entry.** `isTRUE` and the other `NATIVE_ENTRIES` run their body only for the calls the native code declines; compiling that body bought nothing and its first compile read about 3.7 MB of the code generator's machine code into memory (`analysis::NATIVE_ENTRY`, final). On the testthat workload peak RSS is 77 MiB with the JIT on and off alike.
 - **Impact.** vector-for 3.45 s to about 0.4 s with the JIT on (2.7 to 3.0 s off). list-for under callgrind: 7.00G instructions on against 8.84G off. `crates/oracle/cases/assignment__element_store_kinds.R` pins every store kind, including the declines, against GNU R in all three JIT modes.
 
+## Environment variable calls read `environ` once
+
+- **Before.** `Sys.getenv`, `Sys.setenv` and `Sys.unsetenv` called libc once per name through `std::env`, which takes a lock, allocates a C string, and scans all of `environ` each time. withr's `local_envvar()` restores every variable on exit, so most `setenv` calls wrote the value already there and most `unsetenv` calls removed a name that was absent. In a 172-variable environment where 64 names start with `CL`, glibc's two-byte prefix check fails often enough to cost a `strncmp` per entry.
+- **Shape.** `scan_environment` (`crates/interp/src/system.rs`) walks `environ` once for all names of a call. Each name is keyed by its first two bytes as glibc does (a one-byte name uses `=` as the second byte). The keys sit in a plain slice, a found name's key becomes 0 (no entry's key is, because an entry's first byte is not NUL), and the walk stops once every name is found. A call with one name, which is most of them, takes a separate loop without that bookkeeping. A `SmallVec` deref or a shrinking list in the per-entry loop costs more than glibc's whole lookup. `Sys.getenv` fills every element from that one walk; `Sys.setenv` skips a name whose current value equals the new one, unless the name repeats an earlier element of the same call; `Sys.unsetenv` skips an absent name. Writes still go through libc, so C code sees every change, and nothing is copied or cached.
+- **Exactness.** Empty names, names with a NUL byte, `NA` (the text `"NA"`), values containing `=`, empty against unset, repeated names, and non-UTF-8 values (marked native) behave as before. `fuzz_environment_variables_agree_with_the_c_library` (`crates/interp/tests/test_fuzz.rs`) checks every `Sys.getenv` result against `std::env::var_os` after random sets and unsets from both R and Rust, and `crates/oracle/cases/system__sys_env_round_trips.R` compares set, unset and save-and-restore round trips with GNU R.
+- **Impact.** On the testthat workload under callgrind (`RY_BENCH_REPEAT=2`), measured against main in the same sitting, total instructions go from 3,274M to 3,228M with the JIT on (−1.4%) and from 3,260M to 3,213M with it off. The three calls together cost 126M before and 82M after. `Sys.getenv` alone costs 44M against main's 36M, because its scan touches every entry for a name that is absent, while glibc spends about 15 instructions per entry. The savings come from skipping redundant writes and the `strncmp` they caused. The test phase (warm median, `RY_BENCH_REPEAT=5`) and the load phase (`library(testthat)` alone) do not change beyond noise. Peak RSS is unchanged (86.6 MB with the JIT on for both) once both builds' staged files are written at the same time and warmed. Staging them hours apart showed a false gap of several MB: a freshly written code image sits whole in the page cache, so fault-around maps more of it.
+- **Rejected.** A private copy or index of the environment would make lookups cheaper, but C code that calls `setenv()` would then go unseen, and it would be a cache by this project's rules.
+
 ## Builtin and assignment hotspots of the public suites
 
 - **Measured.** Profiling every program of the vendored public suites (`tools/bench/real/suites/{awfy,rcp,shootout}`) against GNU R in one sitting put the slow ones' time in assignment forms and small kernels, not in one builtin: `<<-` went through a builtin call, `x[i, j, ] <- v` copied the whole array, `m[[i, j]]` took the general subset path, `%*%` walked the options list twice per call, and growing a vector copied it element by element.
@@ -8347,3 +8406,27 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Measured impact** (wall, ry JIT on against GNU R on the same machine): `m[[3L, 7L]]` 2M reads 0.233 s to 0.120 s (GNU R 0.100 s); 200k 5x5 `%*%` 0.070 s to 0.042 s (0.040 s). Per-program numbers are in the pull request that landed this.
 - **Left for other owners.** Closure call overhead (`rev.default`, `rep_int`, `as.vector`, `get` are closures), `:` and `rep` (arith), and unboxed scalar loops in the JIT dominate the remaining slow programs (fannkuchredux, nbody, spectralnorm_alt_3).
 - **Evidence.** `crates/oracle/cases/assignment__superassign_compiled.R`, `assignment__array_subassign_compiled.R`, `builtins__grow_copies.R`, `builtins__matrix_element.R`, `assignment__assigning_index_compiled.R`, `arith__complex_vectors.R` and `attributes__many_attributes.R` match GNU R with the JIT on and off.
+
+## Card marking, frame watermarks and moved list growth
+
+- **Previous shape.** The remembered set held whole objects: an old list or character vector that received a young child was rescanned element by element at every minor collection, and so was a remembered spilled frame. Growing a list by `[[<-` copied it and counted every element into the copy, and the sweep counted each one back out of the dead original through a temporary buffer. `unserializeFromConn` read its connection through the read method once per item, a few bytes per call.
+- **Cards for large handle vectors.** A list, expression or character vector too large for the small-object pages keeps one card byte per 128 elements of its capacity after its data (`CARD_ELEMENTS`, `Sexp::cards` in `object.rs`). The element barrier (`Heap::element_barrier`) stays one load and one compare for a young or already remembered small parent; a large old parent reaches the slow path on every store while remembered, so the card of each store is dirtied. A minor collection marks only `CARD_YOUNG` cards and downgrades them to `CARD_UNTENURED` for a tenured vector, which only an intermediate collection reads (`scan_cards`). `RY_GC_VERIFY` checks that every younger child sits in a dirty card.
+- **Frame watermarks.** A spilled frame keeps `Spilled::scanned`, the number of bindings a minor collection has already marked. Frames only append or compact (`retain` resets it to 0), so a minor collection marks the appended cells and moves the watermark (`Frame::unscanned_cells`, `mark_scanned`). The verifier checks that every cell below the watermark is marked.
+- **Moved growth.** `[[<-` that grows an unshared, non-ALTREP list as its final step moves the element pointers into the grown list (`Heap::move_elements`) and empties the old one, so neither counting pass runs. Growth by `[<-` and growth followed by work that can fail still copy, because the original must stay intact on error. `release_swept_lists` releases a dead list's elements in one pass without a buffer.
+- **Peeked connection reads.** `connections::peek` lends out the bytes a gzip file, raw, loaded or `gzcon` connection has buffered, and `consume` advances past what was used. The unserialize reader serves small reads from that window and consumes it before a `refhook` call, before an ASCII byte read and when the read ends, so the connection stays exactly after the object (`Reader::settle`). A read longer than the window goes through the connection.
+- **Measured** (callgrind, `library(testthat)` and the testthat workload, JIT on; wall best of three for the rcp programs):
+  - rcp/list-for 1.146 s to 0.557 s (minor GC 356 ms to 64 ms), list-while 1.036 s to 0.529 s, lapply 0.957 s to 0.843 s; most of the gain is moved growth, because each 5% regrowth makes a young copy that cards cannot help.
+  - Load 720.3M to 701.7M instructions: `do_unserialize_from_conn` 53.5M to 34.8M, `collect_keeping` 90.3M to 89.0M. Full workload 3,564M to 3,529M, GC 194M to 186M. Peak RSS per worker 80.7 MB to 78.6 MB.
+- **Evidence.** `crates/heap/tests/test_gc.rs` (`a_frame_filled_across_minor_collections_keeps_every_young_binding`, `moved_elements_keep_their_counts_and_survive_in_the_new_vector`, the card test and the fuzzers); oracle cases `builtins__list_growth_moves.R` and `serialize__connection_reads.R`.
+
+## One-pass attribute lookup and the blocked matrix product
+
+- **Attribute lookup.** `attribute_access::attribute` finds a full and a partial match in one walk of the attribute pairlist. Only a tag strictly longer than the wanted name can be a partial match, so a vector used as a map from fixed-width keys (shootout's knucleotide programs store thousands of attributes on one vector) costs one pointer compare per tag instead of a second walk with a `memcmp` per tag. knucleotide_brute_2 went from 0.69 s to 0.48 s (GNU R about 0.95 s).
+- **Matrix product.** `%*%` computes `dgemm("N", "N")` itself, adding `x[, inner] * y[inner, col]` into each result column in ascending `inner`, which is the reference BLAS order and keeps results bit-identical to GNU R. Four result columns share each pass over `x`, so a large `x` streams from memory a quarter as often without changing any entry's summation order. Do not reorder the sum (blocking over `inner`, pairwise or FMA kernels): results would differ from GNU R in the last bits. The 1000 by 1000 product in spectralnorm_math went from 0.29 s to 0.17 s. The remaining time there is `eigen` in the reference LAPACK, which GNU R uses too.
+- **Evidence.** Oracle cases `attributes__partial_lookup.R` and `numerics__matrix_product_blocks.R` (every remainder of four result columns, and non-finite entries).
+
+## Inline small-vector allocation
+
+- **Shape.** `Heap::alloc_vector` is `#[inline]` and allocates a vector of up to 512 data bytes of a common kind (raw, logical, integer, double, `I64`, complex, character, list, expression) without leaving its caller: the element shift comes from `small_vector_shift`, the size class from `SIZE_CLASS_BY_WORDS`, then the young budget check and the slot bump every small object takes. It writes the header and length words whole and initializes only the data: handles to `""` or `NULL`, numbers to zero with two stores for a scalar. Everything else (`CHARSXP`, larger vectors, a collection) goes to `alloc_vector_general`.
+- **Why.** The general path called `object_size` through the PLT, and `memset` zeroed the 32 header bytes that the header writes overwrite anyway: about 140 instructions per call, 381k calls in the testthat workload, mostly one-element character vectors from `scalar_string_charsxp`.
+- **Measured** (callgrind, testthat workload): 3,528M to 3,450M instructions with the JIT on, 3,514M to 3,435M off; `library(testthat)` 700.7M to 694.2M. `memset` 31.6M to 26.8M.

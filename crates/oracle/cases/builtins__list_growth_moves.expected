@@ -1,0 +1,42 @@
+[stdout]
+| [1] 3000
+| [1] 2999 2999
+| List of 2
+|  $ : num 1
+|  $ : chr "a"
+| List of 2
+|  $ : num 0
+|  $ : chr "a"
+| List of 2
+|  $ p: num 1
+|  $ q:List of 1
+|   ..$ : num 2
+| List of 4
+|  $ p: num 1
+|  $ q:List of 1
+|   ..$ : num 2
+|  $  : NULL
+|  $  : chr "new"
+| List of 5
+|  $ a: num 1
+|  $ c: num 3
+|  $  : NULL
+|  $  : NULL
+|  $  : num 5
+| [1] 2
+| [1] 10
+| [1] "no value"
+| List of 2
+|  $ : num 1
+|  $ : num 2
+| [1] 60
+| [1] 1
+| [1] TRUE
+| expression(a + 1, NULL, b)
+| [1] 1000050000
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 1000050000

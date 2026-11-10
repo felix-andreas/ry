@@ -384,10 +384,42 @@ fn real_product(
             }
         }
         // `dgemm("N", "N")` adds whole columns, `z[, col] += x[, inner] * y[inner, col]`, which
-        // keeps each entry's order and lets the inner loop vectorize.
+        // keeps each entry's order and lets the inner loop vectorize. Four result columns share
+        // each pass over `x`, so a large `x` streams from memory a quarter as often; every entry
+        // still sums over `inner` in ascending order, as `dgemm` does.
         Product::Matrix => {
-            for (col, z_col) in z.chunks_exact_mut(x_rows).enumerate() {
+            let done = z.len() / (4 * x_rows) * 4;
+            let mut blocks = z.chunks_exact_mut(4 * x_rows);
+            for (block, z_block) in (&mut blocks).enumerate() {
+                z_block.fill(0.0);
+                let (z0, rest) = z_block.split_at_mut(x_rows);
+                let (z1, rest) = rest.split_at_mut(x_rows);
+                let (z2, z3) = rest.split_at_mut(x_rows);
+                let (z0, z1, z2, z3) = (
+                    &mut z0[..x_rows],
+                    &mut z1[..x_rows],
+                    &mut z2[..x_rows],
+                    &mut z3[..x_rows],
+                );
+                let col = 4 * block;
+                for (inner, x_col) in x.chunks_exact(x_rows).enumerate() {
+                    let x_col = &x_col[..x_rows];
+                    let s0 = y[inner + col * y_rows];
+                    let s1 = y[inner + (col + 1) * y_rows];
+                    let s2 = y[inner + (col + 2) * y_rows];
+                    let s3 = y[inner + (col + 3) * y_rows];
+                    for row in 0..x_rows {
+                        let value = x_col[row];
+                        z0[row] += value * s0;
+                        z1[row] += value * s1;
+                        z2[row] += value * s2;
+                        z3[row] += value * s3;
+                    }
+                }
+            }
+            for (offset, z_col) in blocks.into_remainder().chunks_exact_mut(x_rows).enumerate() {
                 z_col.fill(0.0);
+                let col = done + offset;
                 for (inner, x_col) in x.chunks_exact(x_rows).enumerate() {
                     let scale = y[inner + col * y_rows];
                     for (entry, &value) in z_col.iter_mut().zip(x_col) {

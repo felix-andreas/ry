@@ -404,6 +404,16 @@ set the same numbers ([CLI reference](/reference/cli#memory)). The nursery's bud
 objects scales with the old small objects only, as GNU R's cons-cell trigger ignores vector memory,
 so a few big live vectors do not let as many bytes of small garbage pile up.
 
+The write barrier is one load and one compare on the parent's header: a store into a young object,
+or into an old one that is already remembered, does nothing more. An old object that receives a
+younger child joins the remembered set, and a minor collection rescans only what in it can point at
+young objects. A list or character vector too large for the small-object pages (2 KB) keeps one card byte per 128
+elements after its data, so its stores keep reaching the barrier while it is remembered and the
+rescan visits only the dirty cards. An environment's spilled frame keeps a watermark instead,
+because its bindings are only appended or compacted: the rescan marks the cells appended since the
+last scan, which keeps a namespace that is filled during a load from being rescanned whole at every
+collection.
+
 Vectors of 1 MB or more get an anonymous mapping each. A dead one's mapping is kept for the next
 large vector while the kept mappings fit the vector limit, and resized with `mremap`, so a loop's
 temporaries reuse resident pages instead of page-faulting in fresh ones. Keeping them never raises

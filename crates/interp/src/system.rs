@@ -19,6 +19,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
         strings::Encoding,
     },
+    smallvec::SmallVec,
     std::{
         borrow::Cow,
         path::{Path, PathBuf},
@@ -782,7 +783,6 @@ pub(crate) unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
     if names.kind() != SexpType::String || !values::is_string_scalar(call.arg(1)) {
         return Err(error("wrong type for argument"));
     }
-    let unset = values::first_string(call.arg(1)).map(|text| text.into_owned());
     if length(names) == 0 {
         // `vars()` panics on a variable that is not UTF-8.
         let mut entries: Vec<String> = std::env::vars_os()
@@ -791,20 +791,42 @@ pub(crate) unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
         entries.sort();
         return string_vector(&entries);
     }
+    let unset = call.arg(1).element(0);
     let count = length(names);
     let result = alloc(SexpType::String, count)?;
-    for index in 0..count {
-        let name = values::char_str(names.element(index));
-        let charsxp = match std::env::var(name.as_ref()) {
-            Ok(value) => values::mkchar(&value)?,
-            Err(_) => match &unset {
-                Some(unset) => values::mkchar(unset)?,
-                None => values::na_string(),
-            },
-        };
-        values::set_elt(result, index, charsxp);
+    crate::heap().root(result);
+    let texts: SmallVec<[Cow<'_, str>; 4]> =
+        (0..count).map(|index| values::char_str(names.element(index))).collect();
+    let keys: SmallVec<[&[u8]; 4]> = texts.iter().map(|text| text.as_bytes()).collect();
+    let mut found: SmallVec<[bool; 4]> = smallvec::smallvec![false; count];
+    let mut failure = None;
+    scan_environment(&keys, |index, value| {
+        if failure.is_some() {
+            return;
+        }
+        found[index] = true;
+        match environment_charsxp(value) {
+            Ok(charsxp) => values::set_elt(result, index, charsxp),
+            Err(unwind) => failure = Some(unwind),
+        }
+    });
+    if let Some(unwind) = failure {
+        return Err(unwind);
+    }
+    for (index, &present) in found.iter().enumerate() {
+        if !present {
+            values::set_elt(result, index, unset);
+        }
     }
     Ok(result)
+}
+
+/// A variable's value as a CHARSXP: UTF-8 when it is valid UTF-8, and the native bytes otherwise.
+unsafe fn environment_charsxp(value: &[u8]) -> R<Sexp> {
+    match std::str::from_utf8(value) {
+        Ok(text) => values::mkchar(text),
+        Err(_) => values::mkchar_bytes(value, Encoding::Native),
+    }
 }
 
 pub(crate) unsafe fn do_sys_setenv(call: &Call<'_>) -> R<Sexp> {
@@ -818,15 +840,29 @@ pub(crate) unsafe fn do_sys_setenv(call: &Call<'_>) -> R<Sexp> {
     }
     let count = length(names);
     let result = alloc(SexpType::Logical, count)?;
+    // GNU R translates an `NA` element to the text "NA".
+    let texts: SmallVec<[Cow<'_, str>; 4]> =
+        (0..count).map(|index| values::char_str(names.element(index))).collect();
+    let keys: SmallVec<[&[u8]; 4]> = texts.iter().map(|text| text.as_bytes()).collect();
+    let replacements: SmallVec<[Cow<'_, str>; 4]> = (0..count)
+        .map(|index| values::char_str(new_values.element(index)))
+        .collect();
+    // A variable that already holds its new value is left alone: `setenv()` would scan the
+    // environment again and allocate a fresh `NAME=value` entry to change nothing.
+    let mut unchanged: SmallVec<[bool; 4]> = smallvec::smallvec![false; count];
+    scan_environment(&keys, |index, value| {
+        unchanged[index] = value == replacements[index].as_bytes();
+    });
     for index in 0..count {
-        // GNU R translates an `NA` element to the text "NA".
-        let name = values::char_str(names.element(index)).into_owned();
-        let value = values::char_str(new_values.element(index)).into_owned();
+        let name = texts[index].as_ref();
+        let value = replacements[index].as_ref();
         // `setenv()` refuses a name that is empty or holds `=`, where Rust's `set_var` panics.
-        let accepted = valid_variable_name(&name) && !value.contains('\0');
-        if accepted {
+        let accepted = valid_variable_name(name) && !value.contains('\0');
+        // A name repeated in the call was written by an earlier element after the scan.
+        let repeated = texts[..index].iter().any(|earlier| earlier == name);
+        if accepted && (repeated || !unchanged[index]) {
             // SAFETY: the interpreter is single-threaded.
-            std::env::set_var(&name, &value);
+            std::env::set_var(name, value);
         }
         values::ints_mut(result)[index] = i32::from(accepted);
     }
@@ -845,18 +881,148 @@ pub(crate) unsafe fn do_sys_unsetenv(call: &Call<'_>) -> R<Sexp> {
     }
     let count = length(names);
     let result = alloc(SexpType::Logical, count)?;
-    for index in 0..count {
-        // GNU R translates an `NA` element to the text "NA", and reports whether each variable
-        // is unset afterwards.
-        let name = values::char_str(names.element(index));
-        if valid_variable_name(&name) {
+    // GNU R translates an `NA` element to the text "NA", and reports whether each variable is
+    // unset afterwards, which `unsetenv()` guarantees for every name it accepts.
+    let texts: SmallVec<[Cow<'_, str>; 4]> =
+        (0..count).map(|index| values::char_str(names.element(index))).collect();
+    let keys: SmallVec<[&[u8]; 4]> = texts.iter().map(|text| text.as_bytes()).collect();
+    let mut present: SmallVec<[bool; 4]> = smallvec::smallvec![false; count];
+    scan_environment(&keys, |index, _| present[index] = true);
+    for (index, name) in texts.iter().enumerate() {
+        if present[index] && valid_variable_name(name) {
             // SAFETY: the interpreter is single-threaded.
             std::env::remove_var(name.as_ref());
         }
-        let unset = !valid_variable_name(&name) || std::env::var_os(name.as_ref()).is_none();
-        values::ints_mut(result)[index] = i32::from(unset);
+        values::ints_mut(result)[index] = 1;
     }
     Ok(result)
+}
+
+/// Calls `visit(index, value)` for each name in `names` that the process environment defines,
+/// with the value `getenv(names[index])` returns, reading the environment once for all names.
+/// A name repeated in `names` is visited at each of its positions. An empty name, or one
+/// holding a NUL byte, is never defined.
+fn scan_environment(names: &[&[u8]], mut visit: impl FnMut(usize, &[u8])) {
+    #[cfg(unix)]
+    {
+        // Each name still to find, keyed by its first two bytes as `getenv()` does: the `=` that
+        // ends a one-byte name stands in for its second byte. Most entries differ from every name
+        // in that key, so the scan does one comparison per entry and name. The keys sit in their
+        // own array, so that comparison is a plain slice scan.
+        let (mut keys, pending): (SmallVec<[u16; 4]>, SmallVec<[(usize, &[u8]); 4]>) = names
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| !name.is_empty() && !name.contains(&0))
+            .map(|(index, name)| {
+                let second = name.get(1).copied().unwrap_or(b'=');
+                (u16::from_le_bytes([name[0], second]), (index, *name))
+            })
+            .unzip();
+        let keys = keys.as_mut_slice();
+        let mut remaining = keys.len();
+        if remaining == 0 {
+            return;
+        }
+        // SAFETY: the interpreter thread is the only one that changes the environment, so the
+        // array and its strings stay valid and unchanged for the duration of the scan.
+        let mut entry = unsafe { environment_entries() };
+        if entry.is_null() {
+            return;
+        }
+        // SAFETY (for both scans): the entry is a NUL-terminated `NAME=value` string, so its
+        // second byte is readable when its first is not the terminator, and a name comparison
+        // stops at the first byte that differs, so it never reads past the terminator, which no
+        // name byte equals.
+        let matches = |start: *const u8, name: &[u8]| {
+            name.len() == 1
+                || (name[2..].iter().enumerate())
+                    .all(|(offset, &byte)| unsafe { *start.add(offset + 2) } == byte)
+                    && unsafe { *start.add(name.len()) } == b'='
+        };
+        let value_after = |start: *const u8, name: &[u8]| {
+            // SAFETY: the value runs from after the `=` to the entry's NUL terminator.
+            unsafe { std::ffi::CStr::from_ptr(start.add(name.len() + 1).cast()) }.to_bytes()
+        };
+        let key_of = |start: *const u8| {
+            let first = unsafe { *start };
+            (first != 0).then(|| u16::from_le_bytes([first, unsafe { *start.add(1) }]))
+        };
+        if let ([key], [(index, name)]) = (&*keys, &*pending) {
+            // Most calls name one variable, which this loop finds without the general bookkeeping.
+            loop {
+                // SAFETY: the array ends with a null pointer, which ends the loop.
+                let start = unsafe { *entry }.cast::<u8>();
+                if start.is_null() {
+                    return;
+                }
+                if key_of(start) == Some(*key) && matches(start, name) {
+                    visit(*index, value_after(start, name));
+                    return;
+                }
+                // SAFETY: the entry was not the array's null terminator.
+                entry = unsafe { entry.add(1) };
+            }
+        }
+        loop {
+            // SAFETY: the array ends with a null pointer, which ends the loop.
+            let start = unsafe { *entry }.cast::<u8>();
+            if start.is_null() {
+                return;
+            }
+            if let Some(key) = key_of(start) {
+                for position in 0..keys.len() {
+                    if keys[position] != key {
+                        continue;
+                    }
+                    let (index, name) = pending[position];
+                    if !matches(start, name) {
+                        continue;
+                    }
+                    // A found name's key becomes 0, which no entry's key equals because an entry's
+                    // first byte is not NUL.
+                    keys[position] = 0;
+                    visit(index, value_after(start, name));
+                    remaining -= 1;
+                    if remaining == 0 {
+                        return;
+                    }
+                }
+            }
+            // SAFETY: the entry was not the array's null terminator.
+            entry = unsafe { entry.add(1) };
+        }
+    }
+    #[cfg(not(unix))]
+    for (index, name) in names.iter().enumerate() {
+        let Ok(name) = std::str::from_utf8(name) else {
+            continue;
+        };
+        if name.is_empty() || name.contains('\0') {
+            continue;
+        }
+        if let Some(value) = std::env::var_os(name) {
+            visit(index, value.to_string_lossy().as_bytes());
+        }
+    }
+}
+
+/// The process environment as the C library keeps it: a null-terminated array of `NAME=value`
+/// strings.
+#[cfg(all(unix, not(target_os = "macos")))]
+unsafe fn environment_entries() -> *const *const libc::c_char {
+    unsafe extern "C" {
+        static environ: *const *const libc::c_char;
+    }
+    // SAFETY: reading the pointer itself; see the caller for the array's validity.
+    unsafe { environ }
+}
+
+/// The process environment as the C library keeps it. A shared library on macOS cannot link
+/// against `environ` directly, so it asks for its address.
+#[cfg(target_os = "macos")]
+unsafe fn environment_entries() -> *const *const libc::c_char {
+    // SAFETY: `_NSGetEnviron` has no preconditions and returns the address of `environ`.
+    unsafe { *libc::_NSGetEnviron() as *const *const libc::c_char }
 }
 
 unsafe fn do_proc_time(_call: &Call<'_>) -> R<Sexp> {
