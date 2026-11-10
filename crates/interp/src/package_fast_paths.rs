@@ -807,14 +807,11 @@ unsafe fn do_withr_get_options(call: &Call<'_>) -> R<Sexp> {
     if !vector || new_options.is_object() || names == nil() || length(names) == 0 {
         return decline();
     }
-    // Each name is its own argument, as `do.call()` passes them: `options()` reads only the first
-    // element of a character vector.
-    let mut arguments: SmallVec<[Sexp; 8]> = SmallVec::new();
+    // `do.call(options, as.list(names))` passes each name as its own argument; one character
+    // vector would make `options()` read only its first name.
+    let mut arguments = Vec::with_capacity(length(names));
     for index in 0..length(names) {
-        let name = values::alloc(SexpType::String, 1)?;
-        crate::heap().root(name);
-        values::set_elt(name, 0, names.element(index));
-        arguments.push(name);
+        arguments.push(values::scalar_string_charsxp(values::string_elt(names, index))?);
     }
     let old = kernel(envir::do_options, &arguments, frame)?;
     finish(frame, old, interp().visible)
