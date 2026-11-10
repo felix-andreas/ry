@@ -889,13 +889,23 @@ child processes (`processx`). Shares are of one run with the JIT on.
 | timeseries | 59% | 24% | 0% | 13% (`xts`) | 3% | 0% | 0% | 1% |
 | validation | 71% | 24% | 0% | 0% | 3% | 0% | 0% | 2% |
 | **workload mean** | **56%** | **28%** | **5%** | **3%** | **5%** | **0%** | **0%** | **3%** |
-| **corpus mean** (26 packages) | **27%** | **18%** | **0%** | **2%** | **4%** | **27%** | **10%** | **12%** |
+| **corpus mean** (26 packages) | **45%** | **30%** | | **4%** (all native) | **8%** | **1.5%** | **4%** | **7%** |
 
-The corpus differs in kind. Its I/O is mostly `unlink`: testthat removes a temporary directory
-around each test, and `rmdir` takes 1 to 4 ms on the measuring machine's ext4 volume, for GNU R as
-much as for ry (94 s over the corpus). Its waiting is `rlang` and `purrr` (about 90% each) and
-`foreach` (68%) waiting on child R processes. Start-up dominates the smallest suites (`abind` 74%,
-`zoo` 81%). Averaged over the nine workloads, the builtins that take the most time are `[<-` and
+The corpus row is the mean of per-package shares; the corpus profile does not split native code
+by owner. `rlang` and `purrr` set `Config/testthat/parallel: true`, so testthat runs their tests in
+a callr worker even on one CPU, and their row comes from the worker's profile
+(`RY_PROFILE_SUMMARY_DIR` writes one summary per process): the main process only waits for the
+worker in `processx`'s native code. Weighted by time, R code is 53% of the corpus, builtins 23%,
+native code 5%, I/O 0.7% and waiting 9.5%. Most I/O is `unlink` (1.7 s of a 158 s corpus run), and most
+of that removes single files, such as the `verify_exec_*` files testthat writes around each
+snapshot test in `cli`, which cost GNU R the same system call. Removing a directory tree costs
+more, because `rmdir` waits on the ext4 journal (0.1 ms on an idle disk, 2 to 4 ms under writes),
+and GNU R pays that wait too: a testthat-shaped tree takes about 0.35 ms on both idle and 2.6 ms on
+both under write load (`decisions.md`, "unlink() follows GNU R's R_unlink"). The waiting is the suites' own `Sys.sleep`
+(`foreach` 77%, `lgr` 22%, `cachem` 10%), which GNU R pays too. Child R processes started through
+`callr` and `processx` run ry, because `R.home()`'s `bin/R` and `bin/Rscript` start ry, and
+`Rscript -e` starts in 32 ms against GNU R's 140 ms. Start-up dominates the smallest suites
+(`abind` 74%, `zoo` 81%). Averaged over the nine workloads, the builtins that take the most time are `[<-` and
 `exp` (1.8% each, all on `simulation`'s 30,000-element vectors, where ry already runs twice as fast
 as GNU R), then `vapply` (1.2%), `ryStructure`, `.Call`, `<-`, `[`, `lapply`, `list`,
 `ryFormatDefault` and `forceAndCall` (0.7 to 1.0% each). On the corpus they are `as.POSIXlt`, `[[`,
@@ -913,23 +923,24 @@ today's ratio):
 
 | Plan | R code | builtins | ry ports | GC, start-up | workloads | corpus |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1.5x milestone | 2x | 1.5x | 1x | 1x | 1.43x | 1.31x |
-| corpus 1.5x | 3x | 2x | 1x | 2x | | 1.60x |
-| 3x milestone | 5x | 3x | 3x | 2x | 3.08x | 1.79x |
-| 10x target | 30x | 10x | 10x | 10x | 10.96x | 2.58x |
-| ceiling: only the fixed buckets left | | | | | `tables` 8.9x, `timeseries` 8.1x | 3.50x |
+| 1.5x milestone | 2x | 1.5x | 1x | 1x | 1.43x | 2.96x |
+| corpus 1.5x | 3x | 2x | 1x | 2x | | 4.28x |
+| 3x milestone | 5x | 3x | 3x | 2x | 3.08x | 5.74x |
+| 10x target | 30x | 10x | 10x | 10x | 10.96x | 15.52x |
+| ceiling: only the fixed buckets left | | | | | `tables` 8.9x, `timeseries` 8.1x | 34.4x |
 
 So 10x on the workloads is reachable on one thread: R code needs about 30x (tier 1 for most of it,
 row (c) below) and builtins about 10x (row (a)). `tables` and `timeseries` stop near 9x and 8x
-because of `data.table`'s and `xts`'s C code, and the geometric mean carries them. On the corpus the
-single-thread ceiling on this machine is 3.5x, because I/O and child-process waits take 37% of its
-time and cost GNU R the same. Two things move that ceiling: child processes that run ry speed up
-with it (callr starts `R.home()`'s R; which engine the corpus's children run is unverified), and
-I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone needs one of them.
+because of `data.table`'s and `xts`'s C code, and the geometric mean carries them. The corpus
+runs at 1.94x GNU R today (geometric mean over the 21 packages that pass on both engines, 95%
+interval 1.76x to 2.15x). Its column counts all native code as fixed, because the profile does not
+split ry's ports from CRAN code, and its single-thread ceiling is 34.4x, because I/O, waiting and
+native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.sleep`), then
+`rlang`, `withr` and `cli` at 11x to 12x (their native code and waiting).
 
 | Target row | Status | What it needs |
 | --- | --- | --- |
-| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | in progress | builtins from 28% (workloads) and 18% (corpus) to 10x faster; the top of the ranking above first. Built: `attributes`, `c`, `[[` and `[[<-` with constant subscripts, `forceAndCall`, a builtin `FUN` in the apply family, `Reduce`, the one-argument builtins `!`, `length`, `is.null`, `is.na`, `is.character`, `is.logical` and `is.function` in compiled calls, and native entries for `identical`, `isTRUE`, `isFALSE`, `nrow`, `ncol`, `match`, `%in%` and `%||%` (the "Builtin fast paths" rows below), a tier-0 op for `missing()`, `lapply` and `vapply` that reuse `i` and read `X[[i]]` directly per element, `structure()` that sets attributes in place, tier-0 `%%` and `%/%`, element assignments indexed by `$` and `[[` reads, a `.Call` that resolves its routine from the address pointer, `x[i] <- v` written in place, direct entries for `[`, `.Call` and `round` (the entry takes the call, so builtins that name it in errors qualify), names appended in place by `$<-` and `[[<-`, `m[, j] <- v` as contiguous block copies, scalar `-x`, and a native `Reduce(accumulate = TRUE)`. Per call, `[` with a negative, logical or character subscript, `round`, `m[, j] <- v`, name appends and `Reduce` match or beat GNU R (the second table under "Builtin fast paths"). Next: what is left is closure frame setup inside `structure()`, `format.default` and `Reduce`'s callee, which is the frames and call convention of row (c), and `.Call`'s loop and JIT call sequence |
+| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | in progress | builtins from 28% (workloads and corpus) to 10x faster; the top of the ranking above first. Built: `attributes`, `c`, `[[` and `[[<-` with constant subscripts, `forceAndCall`, a builtin `FUN` in the apply family, `Reduce`, the one-argument builtins `!`, `length`, `is.null`, `is.na`, `is.character`, `is.logical` and `is.function` in compiled calls, and native entries for `identical`, `isTRUE`, `isFALSE`, `nrow`, `ncol`, `match`, `%in%` and `%||%` (the "Builtin fast paths" rows below), a tier-0 op for `missing()`, `lapply` and `vapply` that reuse `i` and read `X[[i]]` directly per element, `structure()` that sets attributes in place, tier-0 `%%` and `%/%`, element assignments indexed by `$` and `[[` reads, a `.Call` that resolves its routine from the address pointer, `x[i] <- v` written in place, direct entries for `[`, `.Call` and `round` (the entry takes the call, so builtins that name it in errors qualify), names appended in place by `$<-` and `[[<-`, `m[, j] <- v` as contiguous block copies, scalar `-x`, and a native `Reduce(accumulate = TRUE)`. Per call, `[` with a negative, logical or character subscript, `round`, `m[, j] <- v`, name appends and `Reduce` match or beat GNU R (the second table under "Builtin fast paths"). Next: what is left is closure frame setup inside `structure()`, `format.default` and `Reduce`'s callee, which is the frames and call convention of row (c), and `.Call`'s loop and JIT call sequence |
 | (b) Automatic parallelism for effect-free apply-family calls and long element-wise operations, deterministic, with bit-identical reductions | deferred, architecture-ready | the effect-free fact per function and the invariants in `decisions.md`; package native code stays single-threaded. Deferred because the target users already run their test suites in parallel across processes and are CPU bound, so every core is busy and threads inside one process would only compete with the other workers. Single-core speed is the goal, and every cost paid per process (warm-up, compile time, package loading, resident memory) is paid once per worker |
 | (c) Tier-1 compilation of most R-level time | planned | R code from 56% (workloads) to 30x faster; tier 1 today runs under 3% of the time on eight of nine workloads |
 | (d) Native code shrinks only through ry-native replacements or parallelism | planned | ry's own ports (`stats`: 40% of `simulation`) are ry's to speed up; third-party C stays: `data.table` and `xts` on the workloads, `data.table` and `rlang` on the corpus |

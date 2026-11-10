@@ -2921,32 +2921,57 @@ pub(crate) unsafe fn do_tempfile(call: &Call<'_>) -> R<Sexp> {
     string_vector(&paths)
 }
 
+/// `unlink(x, recursive, force, expand)`, as GNU R's `do_unlink`: an `NA` path is a failure, `~`
+/// alone is skipped, and with `expand` each path is a `glob(3)` pattern that stands for itself
+/// when it matches nothing. The removal itself is [`crate::file_removal::unlink`].
 unsafe fn do_unlink(call: &Call<'_>) -> R<Sexp> {
     let paths = call.arg(0);
-    let recursive = values::as_logical_scalar(call.arg(1)) == 1;
-    let mut failed = 0;
-    for index in 0..length(paths) {
+    let count = length(paths);
+    if count == 0 {
+        return scalar_integer(0);
+    }
+    if paths.kind() != SexpType::String {
+        return Err(call.error("invalid 'x' argument"));
+    }
+    let flag = |index: usize, name: &str| -> R<bool> {
+        match values::as_logical_scalar(call.arg(index)) {
+            NA_LOGICAL => Err(call.error(format!("invalid '{name}' argument"))),
+            value => Ok(value != 0),
+        }
+    };
+    let recursive = flag(1, "recursive")?;
+    let force = flag(2, "force")?;
+    let expand = flag(3, "expand")?;
+    let mut failures = 0;
+    for index in 0..count {
         let Some(path) = values::string_at(paths, index) else {
+            failures += 1;
             continue;
         };
+        if path == "~" {
+            continue;
+        }
+        if !expand {
+            failures += crate::file_removal::unlink(&path, recursive, force)?;
+            continue;
+        }
         let path = crate::connections::expand_path(&path);
-        let target = Path::new(&path);
-        let outcome = if target.is_dir() {
-            if recursive {
-                std::fs::remove_dir_all(target)
-            } else {
-                std::fs::remove_dir(target)
-            }
-        } else if target.exists() {
-            std::fs::remove_file(target)
-        } else {
-            Ok(())
-        };
-        if outcome.is_err() {
-            failed = 1;
+        // A path without wildcards or escapes is its own only match, so it skips the directory
+        // reads `glob` would do.
+        if !path.contains(['*', '?', '[', '\\']) {
+            failures += crate::file_removal::unlink(&path, recursive, force)?;
+            continue;
+        }
+        let matches = crate::platform::glob(std::slice::from_ref(&path), false, true)
+            .ok_or_else(|| error("internal out-of-memory condition"))?;
+        if matches.read_error {
+            crate::conditions::warning(format!("read error on '{path}'"))?;
+        }
+        for matched in &matches.paths {
+            failures += crate::file_removal::unlink(matched, recursive, force)?;
         }
     }
-    scalar_integer(failed)
+    scalar_integer(i32::from(failures != 0))
 }
 
 /// `file.rename(from, to)`: FALSE for an `NA` path, and a warning that names the reason for each
@@ -4699,7 +4724,7 @@ unsafe fn do_sys_glob(call: &Call<'_>) -> R<Sexp> {
         .filter_map(|index| values::string_at(patterns, index))
         .map(|pattern| crate::connections::expand_path(&pattern))
         .collect();
-    let matches = crate::platform::glob(&expanded, dirmark != 0)
+    let matches = crate::platform::glob(&expanded, dirmark != 0, false)
         .ok_or_else(|| error("internal out-of-memory condition"))?;
     if matches.read_error {
         crate::conditions::warning("read error on directory")?;

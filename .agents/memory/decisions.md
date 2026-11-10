@@ -8529,7 +8529,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 | ry's own ports | B3 | Vector d/p/q/r* paths, SIMD across lanes with bit-identical results, batched RNG with identical streams |
 | GC | B2 | Young-survivor tracing at a fraction of today's 70 instructions per object; the GC bucket at a tenth of today's |
 | Start-up | D | A mapped start-up image with no inflate and no per-object decode |
-| Corpus I/O and waiting | B4 | Fewer system calls than GNU R (testthat's `unlink`), and child processes that run ry |
+| Corpus I/O and waiting (0.7% and 9.5% of ry's corpus time) | B4, done | `unlink()` follows GNU R's `R_unlink`; children already run ry. Neither bucket bounds the corpus: most I/O is single-file `unlink`, which costs GNU R the same system call, and the waiting is the suites' own `Sys.sleep` ("unlink() follows GNU R's R_unlink", "The corpus's waiting is the suites' own sleeps") |
 
 - **Inlining tier.**
   - Hot call sites inline their callees across closure calls, `UseMethod`/`NextMethod` and S4 dispatch, guarded by version-stamped bindings and the receiver's class.
@@ -8538,6 +8538,20 @@ Each one trades a narrow class of missed errors for a class of false reports see
   - Thresholds drop to the hundreds.
   - Target: the tier-1 share of R-level time goes over 60%. This follows the adopted method-JIT direction in `prior-art.md`; trace compilation stays rejected.
 - **Progress tracking.** Each merge reports the bench-real suites with their intervals, and the bucket shares from `ry run --profile-summary`, against the 3x row.
+
+## unlink() follows GNU R's R_unlink, with directory descriptors
+
+- **Previous shape.** `do_unlink` called `is_dir` (which follows links) and `std::fs::remove_dir_all`, ignored `force` and `expand`, counted `NA` as success, and removed an empty directory without `recursive`.
+- **Shape.** `crates/interp/src/file_removal.rs`. The walk is GNU R's `R_unlink` on directory descriptors: `openat`, `readdir` with `d_type`, and `unlinkat` relative to the parent, so only `force` or an unknown entry type costs a `stat`, and each subdirectory is removed as soon as it is empty, children before parents. The path length is tracked as a number, so the walk allocates nothing per entry.
+- **GNU R's quirks kept.** `lstat`, so a link to a directory is removed as a link; `force` uses `chmod`, which follows a link; the directory test is the bit test `st_mode & S_IFDIR`, so sockets and block devices are walked as directories and fail; `NA` counts as a failure, `"~"` is skipped, `expand` globs with `GLOB_NOCHECK`; a path of 4096 bytes or more inside the walk is the error "path too long".
+- **Rejected: handing `rmdir` to a background thread.** `rmdir` on ext4 waits for the journal (about 0.1 ms idle, 2 to 4 ms under writes), and renaming the emptied skeleton away for a helper thread to remove cut a testthat-shaped tree from 2.0 to 3.7 ms to 0.27 to 0.46 ms under write load. The corpus did not move (base over new 1.013x, 95% interval 0.973 to 1.048), because most of its `unlink()` calls remove single files (`cli`'s snapshot tests remove testthat's `verify_exec_*` files), and the thread cost 0.28 MiB of peak RSS plus a join before every fork and at exit.
+- **Effect.** Single-threaded, a testthat-shaped tree (two files, two nested directories) takes 0.29 to 0.39 ms (median 0.35) against 0.37 to 0.49 ms on the previous shape and 0.31 to 0.42 ms on GNU R; under fsynced background writes all three take 2.3 to 3.3 ms, because the `rmdir` wait dominates. The change is for correctness, not speed.
+- **Coverage.** `interp` `test_file_removal` compares generated trees removed by a port of `R_unlink` and by `file_removal::unlink`; the `io__unlink` and `io__unlink_fork` oracle cases.
+
+## The corpus's waiting is the suites' own sleeps, and child R processes run ry
+
+- callr and processx start `R.home()`'s `bin/R` or `bin/Rscript`. In ry's R home these are scripts that exec `bin/exec/ry-rcmd`, so children run ry's runtime (`exists(".ry_view", baseenv())` is `TRUE` in a child). `Rscript -e` starts in about 32 ms against GNU R's 140 ms, and one `callr::r()` round trip takes 0.17 s against 0.25 s.
+- In the main process of the corpus suites, waiting is `Sys.sleep` called by the tests themselves (foreach 77% of its run, lgr 22%, cachem 10%), which costs GNU R the same. rlang and purrr set `Config/testthat/parallel: true`, so testthat runs their tests in one callr worker even with `TESTTHAT_CPUS=1`, and the main process sits in processx's `poll` waiting for it: that is where a 90% waiting share for them came from. The worker is a ry process doing the real work, so this time speeds up with ry; profile such suites with `RY_PROFILE_SUMMARY_DIR` (one summary per process) and read the worker's.
 
 ## Inline marking for minor collections
 
