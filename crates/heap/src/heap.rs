@@ -1376,6 +1376,9 @@ impl Heap {
         let object = self.new_char(bytes, bits)?;
         object.set_capacity((u64::from(hash) << 32) as isize);
         object.set_gp_bits(gp::CACHED, true);
+        if bits & gp::ASCII != 0 || std::str::from_utf8(bytes).is_ok() {
+            object.set_flag(flag_bits::VALID_UTF8, true);
+        }
         self.strings.insert(hash, object, &mut self.space);
         Ok(object)
     }
