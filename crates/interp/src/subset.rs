@@ -2287,7 +2287,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     {
         let index = indices.first().copied().unwrap_or(missing_arg());
         let object = if logical_stretch(index) > length(object) {
-            grow(object, logical_stretch(index))?
+            grow(object, logical_stretch(index), false)?
         } else {
             object
         };
@@ -2312,7 +2312,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             .unwrap_or(0)
             .max(stretch);
         let object = if needed > count {
-            grow(object, needed)?
+            grow(object, needed, false)?
         } else {
             object
         };
@@ -2472,7 +2472,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         .map_or(0, |max| max + 1)
         .max(stretch);
     if needed > count {
-        result = grow(result, needed)?;
+        result = grow(result, needed, false)?;
         // `grow` keeps the names, padded with blanks, in a vector with room to grow, so only
         // the appended names are written.
         if !new_names.is_empty() {
@@ -2584,7 +2584,11 @@ unsafe fn logical_stretch(index: Sexp) -> usize {
 ///
 /// A copy reserves room past `new_length`, by GNU R's factor of 1.05, and an unshared vector with
 /// room grows in place, so a loop that appends one element at a time runs in linear time.
-unsafe fn grow(vector: Sexp, new_length: usize) -> R<Sexp> {
+///
+/// `final_step` says that nothing after the growth can fail, so an unshared list's elements may
+/// move into the copy instead of being counted into it and back out of the original when the
+/// collector sweeps it. An error after a move would leave the variable holding an empty list.
+unsafe fn grow(vector: Sexp, new_length: usize, final_step: bool) -> R<Sexp> {
     let count = length(vector);
     if grows_in_place(vector, new_length) {
         let names = values::names(vector);
@@ -2600,7 +2604,15 @@ unsafe fn grow(vector: Sexp, new_length: usize) -> R<Sexp> {
         }
     }
     let result = alloc_with_room(vector.kind(), new_length)?;
-    copy_prefix(values::materialize(vector)?, result, count)?;
+    if final_step
+        && matches!(vector.kind(), SexpType::List | SexpType::Expression)
+        && !vector.is_altrep()
+        && !values::maybe_shared(vector)
+    {
+        crate::heap().move_elements(result, vector);
+    } else {
+        copy_prefix(values::materialize(vector)?, result, count)?;
+    }
     for position in count..new_length {
         set_na(result, position);
     }
@@ -2971,7 +2983,7 @@ unsafe fn subassign2_one(
     }
     let mut result = list;
     if position >= count {
-        result = grow(list, position + 1)?;
+        result = grow(list, position + 1, true)?;
         if matches!(slot, Slot::Named) {
             let names_now = values::names(result);
             let new_names = if names_now == nil() {
