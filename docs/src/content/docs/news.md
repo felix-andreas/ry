@@ -5,6 +5,10 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### Fewer futile collections
+
+When a minor collection leaves the heap full, the collector predicts from the last escalation how much an intermediate collection would free, and goes straight to a major one when that is too little. On the `records` program of the real-world benchmark, collection takes a third fewer instructions and the whole run 9% fewer, and peak memory drops from 111 MB to 97 MB. `R_PreserveObject` marks the object's header, so releasing a call frame no longer looks the environment up in a hash table.
+
 ### Package code is allocated old
 
 A lazy-load fetch, which reads a package's functions and data when they are first used, allocates them directly in the old generation, so minor collections no longer trace them only to promote them. `library(testthat)` runs no collection and 6% fewer instructions, the collector's instructions over the testthat workload drop by 14%, and peak memory is unchanged.

@@ -162,6 +162,9 @@ const IDLE_CURSOR: Cursor = Cursor {
 #[derive(Default)]
 pub(crate) struct Swept {
     pub freed: u64,
+    /// Bytes of the dead objects outside the oldest generation, which an intermediate
+    /// collection would have freed too.
+    pub untenured_bytes: usize,
 }
 
 impl Space {
@@ -406,13 +409,24 @@ impl Space {
         }
     }
 
-    /// Whether `object`, which this collection has marked, is tenured.
-    #[inline]
-    pub unsafe fn is_tenured(&self, object: Sexp) -> bool {
-        match self.locate(object) {
-            Some((page, word, bit)) => self.tenured[page][word] & bit != 0,
-            None => unsafe { object.gc_bits() & gc_bits::TENURED != 0 },
+    /// [`Space::mark`] for a child of a tenured object in a deeper collection, which must also
+    /// learn whether the child is tenured once marked. Reading that bit beside the mark saves
+    /// locating the slot a second time.
+    #[inline(always)]
+    pub unsafe fn mark_beside_tenured(&mut self, object: Sexp) -> (bool, bool) {
+        let Some((page, word, bit)) = self.locate(object) else {
+            let newly = unsafe { self.mark_large(object) };
+            return (newly, unsafe { object.gc_bits() } & gc_bits::TENURED != 0);
+        };
+        // The bounds hold for the reason `Space::mark` gives.
+        let marks = unsafe { self.marks.get_unchecked_mut(page).get_unchecked_mut(word) };
+        let newly = *marks & bit == 0;
+        if newly {
+            *marks |= bit;
+            unsafe { self.age(object, Some((page, word, bit))) };
         }
+        let tenured = unsafe { *self.tenured.get_unchecked(page).get_unchecked(word) } & bit != 0;
+        (newly, tenured)
     }
 
     /// Records that `object`, an environment in this space, has a frame that owns memory, which
@@ -525,6 +539,24 @@ impl Space {
         }
     }
 
+    /// Bytes of the old objects outside the oldest generation, which outside a collection are
+    /// the marked slots that are not tenured: what an intermediate collection can free.
+    pub fn younger_old_bytes(&self) -> usize {
+        let mut bytes = 0;
+        for page in 0..self.page_count {
+            let Some(&slot_size) = SLOT_SIZES.get(self.page_class[page] as usize) else {
+                continue;
+            };
+            let slots: u32 = self.marks[page]
+                .iter()
+                .zip(&self.tenured[page])
+                .map(|(marks, tenured)| (marks & !tenured).count_ones())
+                .sum();
+            bytes += slots as usize * slot_size;
+        }
+        bytes
+    }
+
     /// Whether `object`, a small object, is in the tenured bitmap; `None` for a large object.
     pub fn is_tenured_slot(&self, object: Sexp) -> Option<bool> {
         self.locate(object)
@@ -629,6 +661,8 @@ impl Space {
                     }
                 }
                 swept.freed += u64::from(dead.count_ones());
+                swept.untenured_bytes +=
+                    (dead & !self.tenured[page][word]).count_ones() as usize * slot_size;
             }
             self.allocated[page][word] = marks;
             self.interned[page][word] &= marks;
