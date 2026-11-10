@@ -184,6 +184,12 @@ pub struct Heap {
     old_large_bytes: usize,
     stats: GcStats,
     inhibit: u32,
+    /// How many [`Heap::begin_pretenuring`] calls are open.
+    pretenure_depth: u32,
+    /// The young bytes and young large objects when pretenuring started; what is allocated while
+    /// it lasts is not young.
+    pretenure_young_bytes: usize,
+    pretenure_young_large: usize,
     stress_counter: u64,
     known: WellKnown,
     /// Bumped whenever the set of bindings outside function frames changes (a binding created or
@@ -721,6 +727,9 @@ impl Heap {
             old_large_bytes: 0,
             stats: GcStats::default(),
             inhibit: 1,
+            pretenure_depth: 0,
+            pretenure_young_bytes: 0,
+            pretenure_young_large: 0,
             stress_counter: 0,
             pause_log: open_pause_log(),
             namespace_loads: 0,
@@ -888,6 +897,118 @@ impl Heap {
 
     pub fn allow_collection(&mut self) {
         self.inhibit = self.inhibit.saturating_sub(1);
+    }
+
+    /// Allocates every object in the old generation until the matching
+    /// [`Heap::end_pretenuring`], for a reader that builds objects which live as long as the
+    /// session, such as a lazy-load fetch's closures. A minor collection would trace each of
+    /// them only to promote it.
+    ///
+    /// Collection waits until pretenuring ends. Pretenured bytes stay out of the nursery's
+    /// budget, which bounds young garbage, and count toward the old generation's limit once
+    /// flushed. The next collection flushes the pretenured objects: it marks them old and
+    /// remembers each one that points at a young object, which keeps the write barrier exact
+    /// without a barrier on the stores that built them.
+    pub fn begin_pretenuring(&mut self) {
+        self.pretenure_depth += 1;
+        if self.pretenure_depth == 1 {
+            self.start_pretenuring();
+        }
+    }
+
+    pub unsafe fn end_pretenuring(&mut self) {
+        if self.pretenure_depth == 0 {
+            return;
+        }
+        self.pretenure_depth -= 1;
+        if self.pretenure_depth == 0 {
+            self.stop_pretenuring();
+        }
+    }
+
+    /// Allocates young objects again until [`Heap::resume_pretenuring`] gets the returned depth,
+    /// for a reader that calls R code, whose temporaries are garbage the old generation would
+    /// keep until an intermediate collection.
+    pub unsafe fn suspend_pretenuring(&mut self) -> u32 {
+        let depth = self.pretenure_depth;
+        if depth > 0 {
+            self.pretenure_depth = 0;
+            self.stop_pretenuring();
+        }
+        depth
+    }
+
+    pub fn resume_pretenuring(&mut self, depth: u32) {
+        if depth > 0 && self.pretenure_depth == 0 {
+            self.pretenure_depth = depth;
+            self.start_pretenuring();
+        }
+    }
+
+    fn start_pretenuring(&mut self) {
+        self.inhibit += 1;
+        self.space.set_pretenuring(true);
+        self.pretenure_young_bytes = self.young_bytes;
+        self.pretenure_young_large = self.young_large.len();
+    }
+
+    /// Switches back to young allocation. A large object is promoted here rather than at the
+    /// flush, because the young large list is all that finds it; it may point at pretenured
+    /// small objects that are not flushed yet and so still look young, which only remembers it
+    /// without need.
+    unsafe fn stop_pretenuring(&mut self) {
+        self.space.set_pretenuring(false);
+        self.young_bytes = self.pretenure_young_bytes;
+        let start = self.pretenure_young_large.min(self.young_large.len());
+        let large: SmallVec<[Sexp; 4]> = self.young_large.drain(start..).collect();
+        for object in large {
+            let size = self.size_of(object);
+            self.young_large_bytes = self.young_large_bytes.saturating_sub(size);
+            self.old_large_bytes += size;
+            object.set_gc_bit(gc_bits::MARK | gc_bits::OLD, true);
+            self.stats.live_vector_cells += crate::space::vector_cells(object);
+            if object.is_carded() {
+                let mut any = false;
+                for index in 0..object.length() as usize {
+                    let child = object.stored_element(index);
+                    if younger(object, child) {
+                        dirty_card(object, index, child);
+                        any = true;
+                    }
+                }
+                if any || younger(object, object.attrib()) {
+                    self.remember(object);
+                }
+            } else if has_younger_child(object) {
+                self.remember(object);
+            }
+        }
+        self.inhibit -= 1;
+    }
+
+    /// Makes the pretenured small objects old, as a collection starts. They are aged before any
+    /// is checked, so a pointer between two of them is not younger.
+    unsafe fn flush_pretenured(&mut self) {
+        if !self.space.has_pretenured() {
+            return;
+        }
+        // Tracing skips a leaf, which points at nothing but nil, so an old leaf must never point
+        // at a young nil. Only a heap that has not collected yet has one, and nil points only
+        // at itself, so marking it is enough.
+        let nil = self.known.nil;
+        if nil.gc_bits() & gc_bits::OLD == 0 {
+            self.space.mark(nil);
+        }
+        let cells = self.space.age_pretenured();
+        let remembered = &mut self.remembered;
+        self.space.for_each_pretenured(|object| {
+            if has_younger_child(object) {
+                object.set_gc_bit(gc_bits::REMEMBERED, true);
+                remembered.push(object);
+            }
+        });
+        self.old_small_bytes += self.space.flush_pretenured();
+        self.stats.live_vector_cells += cells;
     }
 
     // Allocation.
@@ -3056,6 +3177,7 @@ impl Heap {
         if self.inhibit > 0 {
             return;
         }
+        self.flush_pretenured();
         self.inhibit += 1;
         let _activity = activity::enter(activity::Activity::Collector, 0);
         let started = self
@@ -3811,6 +3933,7 @@ impl Heap {
         if self.inhibit > 0 {
             return;
         }
+        self.flush_pretenured();
         self.inhibit += 1;
         let mut cells = self.space.tenure_all();
         for &object in &self.large {
@@ -4071,6 +4194,44 @@ unsafe fn dirty_card(vector: Sexp, index: usize, child: Sexp) {
     };
     if *card < level {
         *card = level;
+    }
+}
+
+/// Whether `parent`, an old object that is not carded, points at a younger child.
+unsafe fn has_younger_child(parent: Sexp) -> bool {
+    if younger(parent, parent.attrib()) {
+        return true;
+    }
+    if parent.is_altrep() {
+        return younger(parent, parent.car())
+            || younger(parent, parent.cdr())
+            || younger(parent, parent.tag());
+    }
+    match parent.kind().shape() {
+        Shape::Vector => {
+            matches!(
+                parent.kind(),
+                SexpType::String | SexpType::List | SexpType::Expression
+            ) && (0..parent.length() as usize)
+                .any(|index| younger(parent, parent.stored_element(index)))
+        }
+        Shape::Triple => {
+            younger(parent, parent.car())
+                || younger(parent, parent.cdr())
+                || younger(parent, parent.tag())
+        }
+        Shape::Environment => {
+            let frame = parent.frame_ptr();
+            younger(parent, parent.enclosure())
+                || (!frame.is_null() && (*frame).cells().any(|cell| younger(parent, cell)))
+        }
+        Shape::ExternalPtr => {
+            younger(parent, parent.external_tag()) || younger(parent, parent.external_protected())
+        }
+        Shape::Record => (0..parent.record_slot_count())
+            .filter_map(|slot| parent.record_handle(slot))
+            .any(|handle| younger(parent, handle)),
+        Shape::WeakRef | Shape::Primitive => false,
     }
 }
 

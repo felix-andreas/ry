@@ -414,6 +414,17 @@ because its bindings are only appended or compacted: the rescan marks the cells 
 last scan, which keeps a namespace that is filled during a load from being rescanned whole at every
 collection.
 
+A lazy-load fetch allocates pretenured: what it reads is a package's functions and data, which live
+as long as the session, so a minor collection would trace them only to promote them. Small objects
+come from separate allocation runs whose pages hold no young objects, and no collection runs while
+a fetch reads. Their bytes stay out of the nursery's budget, which bounds young garbage, and count
+toward the small-object limit once flushed. The next collection flushes them: it makes them old and marked, and remembers each
+one that points at a young object. Stores into a pretenured object pass no barrier before that
+flush, because the object still looks young, so the flush's check of every child is what keeps the
+remembered set exact. A large object is made old when the fetch ends, with the same check. R code
+that the reader calls (a namespace or package hook) allocates young, since its temporaries are
+garbage.
+
 Vectors of 1 MB or more get an anonymous mapping each. A dead one's mapping is kept for the next
 large vector while the kept mappings fit the vector limit, and resized with `mremap`, so a loop's
 temporaries reuse resident pages instead of page-faulting in fresh ones. Keeping them never raises

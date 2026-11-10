@@ -4517,11 +4517,11 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
                 Call => constant(value)?.kind() == SexpType::Language,
                 CallSite => {
                     let arguments = constant(value + 1)?;
+                    let eager = constant(value + 2)?;
                     constant(value)?.kind() == SexpType::Language
                         && (arguments == unbound()
                             || matches!(arguments.kind(), SexpType::Nil | SexpType::Pairlist))
-                        && constant(value + 2).is_ok()
-                        && constant(value + 3).is_ok()
+                        && (eager == nil() || eager.kind() == SexpType::Logical)
                 }
                 Formals => matches!(constant(value)?.kind(), SexpType::Nil | SexpType::Pairlist),
                 Shape => {
