@@ -155,8 +155,9 @@ pub type NativeEntry = unsafe fn(&[Arg]) -> R<Option<Sexp>>;
 /// How a registered closure's native code reads the call's arguments.
 #[derive(Clone, Copy)]
 pub enum Entry {
-    /// As the closure would receive them, untagged.
-    Whole(NativeEntry),
+    /// As the closure would receive them, untagged. `inlined` marks a closure GNU R's
+    /// compiler inlines (see [`NATIVE_ENTRIES`]).
+    Whole { code: NativeEntry, inlined: bool },
     /// Matched to the closure's formals, with the defaults filled in, and passed to the
     /// routine as the closure's body passes them ([`recognize_routine_closure`]).
     Routine(NativeEntry, RoutinePlan),
@@ -168,23 +169,43 @@ pub enum Entry {
 /// testthat-style code `identical`, `isTRUE`, `nrow`, `%in%` and `%||%` each take 1 to 2.5% of
 /// the run, and `typeof`, `inherits`, `is.factor`, `is.vector` and `isNamespace` are among the
 /// closures called most often.
-const NATIVE_ENTRIES: &[(&str, u64, NativeEntry)] = &[
-    ("identical", 0x53ecb73e41a5f29e, native_identical),
-    ("isTRUE", 0x092932cb0d38b378, native_is_true),
-    ("isFALSE", 0x02a0aba295284434, native_is_false),
-    ("nrow", 0xaf2f11bd0294734b, native_nrow),
-    ("ncol", 0xcf3f0da3fff33d98, native_ncol),
-    ("match", 0x8dee99370571e93c, native_match),
-    ("%in%", 0x2fb6d82723e3191f, native_in),
-    ("%||%", 0x3f61ec71bc0d9992, native_or_else),
-    ("typeof", 0x6fcb4f267ff82404, native_typeof),
-    ("inherits", 0x5adef86a3b8a8d6a, native_inherits),
-    ("is.factor", 0x31be66479af8cf70, native_is_factor),
-    ("is.data.frame", 0x7c700cf6459e2410, native_is_data_frame),
-    ("is.vector", 0xf347f791e9374052, native_is_vector),
-    ("isNamespace", 0x9dbd26992b319771, native_is_namespace),
-    ("Sys.unsetenv", 0x3bf70db0fa5a60ee, native_sys_unsetenv),
-    ("getOption", 0x2778de423545af25, native_get_option),
+///
+/// The last column marks the closures GNU R's byte-code compiler inlines into their `.Internal`
+/// call (its "safe base internals"): compiled code evaluates their arguments in the caller and
+/// calls the builtin, so no frame of theirs exists while an argument is forced, and
+/// [`native_entry_by_value`] forces them from compiled code too.
+const NATIVE_ENTRIES: &[(&str, u64, NativeEntry, bool)] = &[
+    ("identical", 0x53ecb73e41a5f29e, native_identical, true),
+    ("isTRUE", 0x092932cb0d38b378, native_is_true, false),
+    ("isFALSE", 0x02a0aba295284434, native_is_false, false),
+    ("nrow", 0xaf2f11bd0294734b, native_nrow, false),
+    ("ncol", 0xcf3f0da3fff33d98, native_ncol, false),
+    ("match", 0x8dee99370571e93c, native_match, true),
+    ("%in%", 0x2fb6d82723e3191f, native_in, false),
+    ("%||%", 0x3f61ec71bc0d9992, native_or_else, false),
+    ("typeof", 0x6fcb4f267ff82404, native_typeof, true),
+    ("inherits", 0x5adef86a3b8a8d6a, native_inherits, true),
+    ("is.factor", 0x31be66479af8cf70, native_is_factor, false),
+    (
+        "is.data.frame",
+        0x7c700cf6459e2410,
+        native_is_data_frame,
+        false,
+    ),
+    ("is.vector", 0xf347f791e9374052, native_is_vector, true),
+    (
+        "isNamespace",
+        0x9dbd26992b319771,
+        native_is_namespace,
+        false,
+    ),
+    (
+        "Sys.unsetenv",
+        0x3bf70db0fa5a60ee,
+        native_sys_unsetenv,
+        false,
+    ),
+    ("getOption", 0x2778de423545af25, native_get_option, false),
 ];
 
 /// Marks the closures of [`NATIVE_ENTRIES`] whose code matches and records them in
@@ -196,7 +217,7 @@ pub unsafe fn register_native_entries(namespace: Sexp) -> R<()> {
         crate::system::r_version().number() == crate::methods_core::BUNDLED_VERSION.trim();
     let mut missed = Vec::new();
     interp().native_entries.clear();
-    for &(name, expected, code) in NATIVE_ENTRIES {
+    for &(name, expected, code, inlined) in NATIVE_ENTRIES {
         let function = eval::value_of(eval::find_var_in_frame(install(name)?, namespace)?)?;
         if function.kind() != SexpType::Closure {
             missed.push(name);
@@ -212,7 +233,7 @@ pub unsafe fn register_native_entries(namespace: Sexp) -> R<()> {
             missed.push(name);
             continue;
         }
-        register(function, Entry::Whole(code));
+        register(function, Entry::Whole { code, inlined });
     }
     if bundled && !missed.is_empty() {
         return Err(crate::unwind::error(format!(
@@ -427,21 +448,27 @@ pub unsafe fn register_routine_entries() -> R<()> {
 /// Runs the call of `function`, a closure marked [`gp::NATIVE_ENTRY`], natively when its
 /// native code accepts the arguments. The closure's frame is never built, which is
 /// unobservable because the native code only reads arguments that are already values: a
-/// promise is read only when it is forced or when its code is a constant or a variable bound
-/// to a value, so nothing runs that could see the missing frame (`sys.calls()`, a handler, a
-/// traceback). A closure being debugged or traced runs as usual.
+/// promise is read only when it is forced or when reading it runs no code
+/// ([`eval::settled_without_code`]), so nothing runs that could see the missing frame
+/// (`sys.calls()`, a handler, a traceback). A closure being debugged or traced runs as usual.
 pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
         return Ok(None);
     }
+    enter(function, registered(function), args)
+}
+
+/// [`native_entry`] for a closure that is not being debugged or traced, whose registered entry
+/// the caller has already looked up.
+unsafe fn enter(function: Sexp, entry: Option<Entry>, args: &[Arg]) -> R<Option<Sexp>> {
     let tagged = args.iter().any(|arg| arg.tag != nil());
-    let value = match registered(function) {
-        Some(Entry::Whole(code)) if !tagged => {
+    let value = match entry {
+        Some(Entry::Whole { code, .. }) if !tagged => {
             // An entry whose closure returns invisibly clears the flag itself.
             interp().visible = true;
             code(args)?
         }
-        Some(Entry::Whole(_)) => return Ok(None),
+        Some(Entry::Whole { .. }) => return Ok(None),
         Some(Entry::Routine(code, plan)) => {
             let Some(matched) = routine_arguments(function, plan, args)? else {
                 return Ok(None);
@@ -472,36 +499,69 @@ pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
 }
 
 /// Runs the call of `function`, a closure marked [`gp::NATIVE_ENTRY`], natively from its
-/// unevaluated `arguments` when each is a constant or a variable bound to a value, so the call
-/// builds no promise at all. Reading such an argument runs no R code, so reading it now gives
-/// the value forcing its promise would give, and the native code reads only values; when it
-/// declines, nothing has changed and the caller builds the promises as usual. `lookup` gives a
-/// variable's value when reading it runs no R code ([`crate::effects::eager_argument`] in the
-/// caller's environment, or the slots of a caller that has none).
+/// unevaluated `arguments` when each is a constant or a variable, so the call builds no promise
+/// at all. `lookup` gives a variable's binding when reading it runs no R code
+/// ([`crate::effects::eager_argument`] in the caller's environment, or the slots of a caller
+/// that has none), and the entry reads a promise bound there only when its R body would read
+/// the argument and reading runs no code ([`resolved`]). When the native code declines, the
+/// caller builds the promises as usual.
+///
+/// From `compiled` code, the arguments of a closure GNU R's compiler inlines (see
+/// [`NATIVE_ENTRIES`]) are forced here, in order, whatever code that runs, because compiled GNU
+/// R forces them in the caller before the builtin runs.
 pub unsafe fn native_entry_by_value(
     function: Sexp,
     arguments: Sexp,
+    compiled: bool,
     lookup: impl Fn(Sexp) -> Option<Sexp>,
 ) -> R<Option<Sexp>> {
+    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
+        return Ok(None);
+    }
+    let mut tagged = false;
+    let mut cell = arguments;
+    while cell.kind() == SexpType::Pairlist {
+        let expression = cell.car();
+        tagged |= cell.tag() != nil();
+        if expression == missing_arg()
+            || expression == symbols().dots
+            || matches!(
+                expression.kind(),
+                SexpType::Language | SexpType::Promise | SexpType::Bytecode
+            )
+        {
+            return Ok(None);
+        }
+        cell = cell.cdr();
+    }
+    let entry = registered(function);
+    let forcing = compiled && !tagged && matches!(entry, Some(Entry::Whole { inlined: true, .. }));
     let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
         let expression = cell.car();
-        let value = match expression.kind() {
-            SexpType::Symbol => {
-                if expression == missing_arg() || expression == symbols().dots {
-                    return Ok(None);
-                }
-                match lookup(expression) {
-                    Some(value) => match resolved(value)? {
+        let value = if expression.kind() == SexpType::Symbol {
+            match lookup(expression) {
+                Some(value)
+                    if forcing
+                        && value.kind() == SexpType::Promise
+                        && value.car() == values::unbound() =>
+                {
+                    // A chain that ends without code settles to what forcing would give, and
+                    // far more cheaply than an evaluation.
+                    match eval::settled_without_code(value)? {
                         Some(value) => value,
-                        None => return Ok(None),
-                    },
-                    None => return Ok(None),
+                        None => eval::force_promise(value)?,
+                    }
                 }
+                // Otherwise the binding goes through as it is: each entry resolves only the
+                // arguments its R body would read, so an argument it skips (`getOption`'s
+                // `default` when the option is set) stays an unsettled promise.
+                Some(value) if value != missing_arg() => value,
+                _ => return Ok(None),
             }
-            SexpType::Language | SexpType::Promise | SexpType::Bytecode => return Ok(None),
-            _ => expression,
+        } else {
+            expression
         };
         args.push(Arg {
             tag: cell.tag(),
@@ -509,7 +569,7 @@ pub unsafe fn native_entry_by_value(
         });
         cell = cell.cdr();
     }
-    native_entry(function, &args)
+    enter(function, entry, &args)
 }
 
 /// The routine's arguments for a call of `function`, a closure with an [`Entry::Routine`]: the
@@ -550,7 +610,9 @@ unsafe fn routine_arguments(
         *slot = Some(arg.value);
     }
     if let Some(absent) = plan.absent
-        && matched.get(usize::from(absent)).is_some_and(Option::is_some)
+        && matched
+            .get(usize::from(absent))
+            .is_some_and(Option::is_some)
     {
         return Ok(None);
     }
@@ -612,55 +674,15 @@ unsafe fn reciprocal(x: Sexp) -> R<Option<Sexp>> {
 }
 
 /// The value an argument stands for when reading it runs no R code: a value, a forced promise's
-/// value, or the value of an unforced promise whose code is a constant or a variable bound to
-/// such an argument (a wrapper's formal passed on). Reading such a promise settles it, and every
-/// promise it reads through, as forcing would.
+/// value, or what [`eval::settled_without_code`] reads from an unforced promise.
 unsafe fn resolved(argument: Sexp) -> R<Option<Sexp>> {
-    resolved_through(argument, MAX_PROMISE_CHAIN)
-}
-
-/// How many promises of variables [`resolved`] reads through. A chain that reaches itself
-/// (`function(n = n)`) is an error GNU R reports when it forces it, so it must decline.
-const MAX_PROMISE_CHAIN: u32 = 8;
-
-unsafe fn resolved_through(argument: Sexp, depth: u32) -> R<Option<Sexp>> {
     if argument.kind() != SexpType::Promise {
         return Ok((argument != missing_arg()).then_some(argument));
     }
     if argument.car() != values::unbound() {
         return Ok(Some(argument.car()));
     }
-    if eval::is_reference(argument) {
-        return match eval::reference_value(argument) {
-            Some(value) => eval::settle_promise(argument, value).map(Some),
-            None => Ok(None),
-        };
-    }
-    // A promise over a slot frame without an environment names a placeholder that binds
-    // nothing yet, so a lookup there would find the enclosure's variable instead.
-    if argument.has_gp(gp::CHECKED_PROMISE) || argument.tag().has_gp(gp::PENDING_FRAME) {
-        return Ok(None);
-    }
-    let code = argument.cdr();
-    let value = match code.kind() {
-        SexpType::Symbol if code != missing_arg() && code != symbols().dots => {
-            match crate::effects::eager_argument(code, argument.tag()) {
-                Some(value) if value.kind() != SexpType::Promise => value,
-                Some(inner) if inner != argument && depth > 0 => {
-                    match resolved_through(inner, depth - 1)? {
-                        Some(value) => value,
-                        None => return Ok(None),
-                    }
-                }
-                _ => return Ok(None),
-            }
-        }
-        SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode => {
-            return Ok(None);
-        }
-        _ => code,
-    };
-    eval::settle_promise(argument, value).map(Some)
+    eval::settled_without_code(argument)
 }
 
 /// The values of exactly `N` arguments, all [`resolved`].

@@ -6403,14 +6403,20 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         };
         if function.has_gp(gp::NATIVE_ENTRY)
             && let Some(value) = if state.in_slots() {
-                crate::base_fast_paths::native_entry_by_value(function, arguments, |symbol| {
-                    slot_eager_argument(state, symbol)
-                })?
+                crate::base_fast_paths::native_entry_by_value(
+                    function,
+                    arguments,
+                    true,
+                    |symbol| slot_eager_argument(state, symbol),
+                )?
             } else {
                 let env = state.env(Reify::Site("generic call: native entry"))?;
-                crate::base_fast_paths::native_entry_by_value(function, arguments, |symbol| {
-                    effects::eager_argument(symbol, env)
-                })?
+                crate::base_fast_paths::native_entry_by_value(
+                    function,
+                    arguments,
+                    true,
+                    |symbol| effects::eager_argument(symbol, env),
+                )?
             }
         {
             state.record(instruction.at, value);
@@ -7137,7 +7143,7 @@ unsafe fn cell_value(cell: Sexp) -> Option<Sexp> {
 }
 
 /// The value of a call's argument `expression` when reading it runs no R code: a literal, or a
-/// variable bound to a value, a forced promise or a readable argument reference.
+/// variable bound to a value or to a promise that reading settles without running code.
 #[inline]
 unsafe fn wrapper_argument(state: &Activation<'_, '_>, expression: Sexp) -> R<Option<Sexp>> {
     let value = match expression.kind() {
@@ -7164,11 +7170,7 @@ unsafe fn wrapper_argument(state: &Activation<'_, '_>, expression: Sexp) -> R<Op
     if value.car() != unbound() {
         return Ok(Some(value.car()));
     }
-    Ok(if eval::is_reference(value) {
-        eval::reference_value(value)
-    } else {
-        None
-    })
+    eval::settled_without_code(value)
 }
 
 /// The slot of `symbol` in a slot frame, found by name for instructions that carry no lookup
