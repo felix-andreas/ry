@@ -3221,10 +3221,9 @@ unsafe fn do_set_dim(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("invalid first argument, must be vector (list or atomic)"));
     }
     let dims = coerce_vector(dims, SexpType::Integer)?;
-    let product: i64 = values::ints(dims)
-        .iter()
-        .map(|&value| value as i64)
-        .product();
+    if length(dims) == 0 {
+        return Err(call.error("length-0 dimension vector is invalid"));
+    }
     // The first offending extent names the problem.
     if let Some(&bad) = values::ints(dims)
         .iter()
@@ -3236,10 +3235,17 @@ unsafe fn do_set_dim(call: &Call<'_>) -> R<Sexp> {
             "the dims contain negative values"
         }));
     }
-    if product != length(object) as i64 {
+    let product = values::ints(dims).iter().fold(1i64, |product, &extent| {
+        product.saturating_mul(extent as i64)
+    });
+    let object_length = length(object) as i64;
+    if product != object_length {
+        // GNU R prints the extents only when both fit in an `int`.
+        if product > i32::MAX as i64 || object_length > i32::MAX as i64 {
+            return Err(call.error("dims do not match the length of object"));
+        }
         return Err(call.error(format!(
-            "dims [product {product}] do not match the length of object [{}]",
-            length(object)
+            "dims [product {product}] do not match the length of object [{object_length}]"
         )));
     }
     values::remove_attr(object, symbols().names);

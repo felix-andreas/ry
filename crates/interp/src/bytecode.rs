@@ -6455,7 +6455,11 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
     }
     let env = state.env()?;
     let done = match subscript_value(env, instruction.input(2))? {
-        Some(index) => assign_element_in_place(env, variable, index, value, kind)?,
+        Some(index) => {
+            assign_element_in_place(env, variable, index, value, kind)?
+                || (kind == ElementKind::Single
+                    && crate::element_access::assign_subset_in_place(env, variable, index, value)?)
+        }
         None => false,
     };
     if !done {

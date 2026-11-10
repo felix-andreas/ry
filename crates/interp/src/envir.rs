@@ -3,6 +3,7 @@
 
 use {
     crate::{
+        apply_results::VapplyResults,
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         eval::{self, define, find_var, find_var_in_frame, value_of},
         interp,
@@ -1874,74 +1875,15 @@ unsafe fn atomic_elements(list: Sexp) -> Option<eval::KnownFirst> {
 }
 
 unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
-    let env = call.env()?;
-    let symbols = symbols();
     let list = call.arg(0);
-    let template = call.arg(2);
-    let use_names = values::as_logical_scalar(call.arg(3)) == 1;
     let count = length(list);
-    let template_length = length(template);
-    let kind = template.kind();
-    if !kind.is_vector() {
-        return Err(call.error("'FUN.VALUE' must be a vector"));
-    }
-    let result = alloc(kind, count * template_length)?;
-    // `FUN.VALUE`'s names name the rows; without them, the first result's names do.
-    let mut row_names = values::names(template);
-    let mut calls = ElementCalls::new(list, env)?;
+    let mut results = VapplyResults::new(call.arg(2), count, call.arg(3))?;
+    let mut calls = ElementCalls::new(list, call.env()?)?;
     for index in 0..count {
         let value = calls.call(index)?;
-        if length(value) != template_length {
-            return Err(error(format!(
-                "values must be length {template_length},\n but FUN(X[[{}]]) result is length {}",
-                index + 1,
-                length(value)
-            )));
-        }
-        let compatible = value.kind() == kind
-            || (kind == SexpType::Real
-                && matches!(value.kind(), SexpType::Integer | SexpType::Logical))
-            || (kind == SexpType::Integer && value.kind() == SexpType::Logical)
-            || (kind == SexpType::List);
-        if !compatible {
-            return Err(error(format!(
-                "values must be type '{}',\n but FUN(X[[{}]]) result is type '{}'",
-                kind.name(),
-                index + 1,
-                value.kind().name()
-            )));
-        }
-        let value = if value.kind() != kind && kind != SexpType::List {
-            crate::coerce::coerce_vector(value, kind)?
-        } else {
-            value
-        };
-        if index == 0 && template_length > 1 && row_names == nil() {
-            row_names = values::names(value);
-        }
-        for offset in 0..template_length {
-            crate::subset::copy_element(value, offset, result, index * template_length + offset)?;
-        }
+        results.push(index, value)?;
     }
-    if template_length != 1 {
-        let dim = values::integer_vector(&[template_length as i32, count as i32])?;
-        values::set_attr(result, symbols.dim, dim)?;
-    }
-    if use_names {
-        let mut names = values::names(list);
-        if names == nil() && list.kind() == SexpType::String {
-            names = list;
-        }
-        if template_length == 1 {
-            if names != nil() {
-                values::set_attr(result, symbols.names, names)?;
-            }
-        } else if names != nil() || row_names != nil() {
-            let dimnames = values::list_vector(&[row_names, names])?;
-            values::set_attr(result, symbols.dimnames, dimnames)?;
-        }
-    }
-    Ok(result)
+    results.finish(list)
 }
 
 unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
