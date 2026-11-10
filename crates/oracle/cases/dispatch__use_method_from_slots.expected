@@ -1,0 +1,21 @@
+[stdout]
+| a TRUE 0 extra
+| b a FALSE 2 z
+| default g.default(lazy(5), 1, 2) 2
+| h character only y
+| h character named
+| d numeric 4 5
+| seen
+| n default
+| fell through
+| k.a TRUE k default
+| k.b TRUE 8
+| local k.a
+| 5
+| 60
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

@@ -4966,7 +4966,12 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         let mut compiled = state.constants.element(instruction.operand(2) + 1);
         if compiled == unbound() {
             compiled = compile_promise_arguments(state.machine.function, call.cdr())?;
-            (*state.heap).set_element(state.constants, instruction.operand(2) + 1, compiled);
+            // Promise code forced in a frame that has an environment runs for no function, so
+            // it has no slot table to compile against; the site stays undecided until it runs on
+            // a slot frame.
+            if state.machine.function != nil() {
+                (*state.heap).set_element(state.constants, instruction.operand(2) + 1, compiled);
+            }
         }
         let arguments = if compiled == nil() {
             call.cdr()
@@ -5045,6 +5050,11 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         result?
     } else if state.in_slots()
         && let Some(value) = slot_substitute(state, function, call)?
+    {
+        value
+    } else if state.in_slots()
+        && function.kind() == SexpType::Special
+        && let Some(value) = slot_special_call(state, instruction, function, call)?
     {
         value
     } else if state.in_slots()
@@ -5507,6 +5517,83 @@ unsafe fn slot_substitute(
     };
     interp().visible = true;
     Ok(Some(result))
+}
+
+/// A call of a special from a slot frame that the slots answer, so the frame keeps going without
+/// an environment. Base wrappers call these on hot paths: `.Internal(f(x, ...))` (the internals
+/// the compiler leaves to the special because they dispatch or take `...`), a generic's
+/// `UseMethod("name")`, and `quote()` of an empty argument.
+unsafe fn slot_special_call(
+    state: &Activation<'_, '_>,
+    instruction: Instruction,
+    function: Sexp,
+    call: Sexp,
+) -> R<Option<Sexp>> {
+    let arguments = call.cdr();
+    if arguments == nil() || arguments.cdr() != nil() {
+        return Ok(None);
+    }
+    let argument = arguments.car();
+    match eval::builtin_def(function)?.name {
+        ".Internal" if arguments.tag() == nil() => {
+            if argument.kind() != SexpType::Language || argument.car().kind() != SexpType::Symbol {
+                return Ok(None);
+            }
+            match crate::builtins::internal_function(argument.car()) {
+                Some(internal) if internal.kind() == SexpType::Builtin => {
+                    slot_builtin_call(state, argument, internal, None)
+                }
+                _ => Ok(None),
+            }
+        }
+        "UseMethod"
+            if arguments.tag() == nil()
+                && argument.kind() == SexpType::String
+                && length(argument) == 1 =>
+        {
+            slot_use_method(state, instruction, call, argument)
+        }
+        "quote" if arguments.tag() == nil() || values::symbol_name(arguments.tag()) == "expr" => {
+            interp().visible = true;
+            Ok(Some(argument))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `UseMethod("generic")` from a slot frame, when the body returns its value at once (a generic
+/// whose body is the call), dispatched without giving the frame an environment.
+unsafe fn slot_use_method(
+    state: &Activation<'_, '_>,
+    instruction: Instruction,
+    call: Sexp,
+    generic: Sexp,
+) -> R<Option<Sexp>> {
+    // `UseMethod` does not return to the body, so the path is only exact when the body would
+    // return the call's value anyway.
+    let next = instruction.at + 1 + operand_count(Op::CallGeneric);
+    if op_of(*state.code.add(next) as u32) != Some(Op::Return)
+        || *state.code.add(next + 1) as usize != instruction.operand(0)
+    {
+        return Ok(None);
+    }
+    let formals = state.machine.function.car();
+    let first = if formals.kind() == SexpType::Pairlist {
+        match slot_named(state, formals.tag()) {
+            Some(slot) => slot,
+            None => return Ok(None),
+        }
+    } else {
+        std::ptr::null_mut()
+    };
+    // Through R 4.3 the method sees the generic's locals, which only an environment can show.
+    let names = state.constants.element(SLOTS).element(1);
+    let locals = (length(formals)..length(names)).any(|index| *state.header.add(1 + index) != unbound());
+    if locals && !crate::system::r_at_least(4, 4) {
+        return Ok(None);
+    }
+    let owner = (*state.interp).slot_owner as usize;
+    dispatch::use_method_in_slots(call, generic, owner, first)
 }
 
 /// A builtin call from a slot frame whose arguments the slots answer: `...`, a constant, or a

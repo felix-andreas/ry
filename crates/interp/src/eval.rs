@@ -435,13 +435,7 @@ unsafe fn slot_promise_value(promise: Sexp, owner: usize) -> R<Sexp> {
 /// `owner`. It names the frame's pending environment, which is made bare on the first such
 /// promise and gets its bindings only if the frame reifies.
 pub unsafe fn slot_promise(owner: usize, expression: Sexp) -> R<Sexp> {
-    let mut env = interp().frames[owner].pending;
-    if env == nil() {
-        let function = interp().frames[owner].function;
-        env = frame_environment(function, function.car())?;
-        env.set_gp_bits(gp::PENDING_FRAME, true);
-        interp().frames[owner].pending = env;
-    }
+    let env = pending_env(owner)?;
     let promise = if expression.kind() == SexpType::Bytecode {
         compiled_promise(expression, env)?
     } else {
@@ -792,13 +786,7 @@ unsafe fn reference_promise(reference: Sexp) -> R<[Sexp; 4]> {
         if frame.env != nil() {
             (frame.env, expression)
         } else {
-            let mut env = frame.pending;
-            if env == nil() {
-                let function = frame.function;
-                env = frame_environment(function, function.car())?;
-                env.set_gp_bits(gp::PENDING_FRAME, true);
-                interp().frames[owner].pending = env;
-            }
+            let env = pending_env(owner)?;
             interp().frames[owner].unforced += 1;
             (env, expression)
         }
@@ -809,6 +797,31 @@ unsafe fn reference_promise(reference: Sexp) -> R<[Sexp; 4]> {
     } else {
         [unbound(), symbol, env, nil()]
     })
+}
+
+/// The pending environment of the slot frame at `owner`, made bare on first use: the value that
+/// stands for the frame's environment until something reads it, which [`resolved_env`] then
+/// makes real.
+pub unsafe fn pending_env(owner: usize) -> R<Sexp> {
+    let env = interp().frames[owner].pending;
+    if env != nil() {
+        return Ok(env);
+    }
+    let function = interp().frames[owner].function;
+    let env = frame_environment(function, function.car())?;
+    env.set_gp_bits(gp::PENDING_FRAME, true);
+    interp().frames[owner].pending = env;
+    Ok(env)
+}
+
+/// `value`, or the environment it stands for when it is a slot frame's pending one: what a
+/// binding gets for a value that may be pending (a method's `.GenericCallEnv`).
+pub unsafe fn resolved_value(value: Sexp) -> R<Sexp> {
+    if value.kind() == SexpType::Environment {
+        resolved_env(value)
+    } else {
+        Ok(value)
+    }
 }
 
 /// The environment of an unforced `promise`, made first when it is a slot frame's pending one
@@ -1719,7 +1732,7 @@ pub unsafe fn bind_arguments(
     if let Some(supplied) = supplied {
         for &(symbol, value) in supplied {
             if heap.frame_cell(env, symbol).is_none() {
-                heap.define(env, symbol, value)?;
+                heap.define(env, symbol, resolved_value(value)?)?;
             }
         }
     }
@@ -2276,7 +2289,7 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
     let method_vars: SmallVec<[(Sexp, Sexp); 6]> = crate::method_vars(interp(), index).into();
     for (symbol, value) in method_vars {
         if heap.frame_cell(env, symbol).is_none() {
-            heap.define(env, symbol, value)?;
+            heap.define(env, symbol, resolved_value(value)?)?;
         }
     }
     let nil = nil();
