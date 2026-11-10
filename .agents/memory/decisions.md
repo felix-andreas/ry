@@ -8730,11 +8730,22 @@ Each one trades a narrow class of missed errors for a class of false reports see
     redefined all of them. Statuses now live in a stack array of 4-byte cells
     (`Translator::statuses`): 8.6k parameters, and seal time fell from 24 to 5 ms. A reset
     touches only the slots the state may have loaded, behind a cold branch.
-  - Tier 1 compiles with Cranelift's single-pass register allocator (`ssa::Allocator`), which
-    is linear; the backtracking one took 100 ms of a 38k-instruction body's 160. Tier 1 code is
-    mostly helper calls, so the extra spills do not show in run time. The typed tier and native
-    code keep the backtracking allocator, each allocator having its own module pool because
-    Cranelift fixes it per module.
+  - A tier 1 body without a loop compiles with Cranelift's single-pass register allocator
+    (`ssa::Allocator`), and one with a loop with the backtracking allocator. Measured after the
+    status change, on testthat's forced codegen and the untyped `bench-why` kernels (best warm
+    time, `TMPX` override, not committed):
+
+    | Policy | testthat codegen | Loop kernels vs backtracking |
+    |---|---|---|
+    | Single-pass everywhere | 1.14 s | 1.5 to 2.4x slower (`loop_sum` 2.4, `array_filter` 2.0) |
+    | Backtracking everywhere | 1.67 s | 1.0 |
+    | By loop (chosen) | 1.44 s | 1.0 |
+
+    Call-heavy kernels (`report`, `validate`, `orders`) ran the same under both. Both allocators
+    are linear in body size after the status change (7.0 and 7.5 µs per word for small and big
+    bodies under backtracking). Cranelift fixes the allocator per module, so each has its own
+    pool. If big cold bodies with loops turn out to matter, the next step is compiling them
+    single-pass and recompiling with backtracking once their loops get hot, not a size cap.
   - A deopt exit writes only the loops around its pc, since tier 0 reads a loop's words only
     inside that loop. Writing every loop made each exit grow with the body's loop count and kept
     every loop variable live everywhere.
