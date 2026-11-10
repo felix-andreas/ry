@@ -225,6 +225,25 @@ of `NA^NaN` depends on the compiler. glibc's `mktime` starts its search from the
 found, so a repeated wall-clock time with unknown daylight saving depends on what ran before; the
 cases that print one convert a summer time first.
 
+`crates/oracle/cases/gnu-r.txt` names the build the suite was recorded with: its release, and its
+BLAS and LAPACK libraries by file name. Every `verify`, `record` and `compare` report starts with the
+build of the GNU R it ran, and a comparison against recorded outcomes names the recorded build.
+`verify`, `record` and the `recorded_outcomes_match_gnu_r` test check the build file before they run
+a case:
+
+| GNU R at hand | `verify` | `record`, `RY_BLESS=1` | `recorded_outcomes_match_gnu_r` |
+|---|---|---|---|
+| same release and libraries | runs | runs | runs |
+| other BLAS or LAPACK | warns, runs | warns, runs | warns, runs |
+| other release | refuses (exit 2) | refuses (exit 2) | skips, naming both builds |
+| no build file | warns, runs | writes the file | fails (bless writes it) |
+
+On a machine whose `PATH` has another release, set `ORACLE_R` to a 4.6.2 build. To move the suite
+to a new release, delete `gnu-r.txt` and record every case. A GNU R killed by a signal before it
+writes its report skips the case with `skip ... this GNU R crashed`, because some hardened builds
+abort with "buffer overflow detected" in graphics cases that the reference build runs; a crash of
+the second engine stays a failure.
+
 Record with `ORACLE_R=<that R> oracle record crates/oracle/cases` and review every changed
 `.expected` file.
 
