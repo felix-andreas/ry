@@ -7996,9 +7996,9 @@ Each one trades a narrow class of missed errors for a class of false reports see
   closure (`ryCodeImageWrite`). A failure warns and leaves the package without an image.
 - **Identity without a second key.** A closure is named by its record's database offset plus the
   order the stream reader creates closures (`serialize::unserialize_with_closures`), which depends
-  on the record bytes alone. The image stores each record's length and FNV-1a hash and the database
-  length, so a database rewritten by another install (GNU R's, or a different version) is ignored
-  record by record; the hash is computed only for databases that have an image.
+  on the record bytes alone. The image stores each record's length and is stamped with the
+  database's length and modification time ("Lazy-load records are read in place from the code
+  image").
 - **No second copy of the source.** A code object is encoded against its closure's body: every
   language object the code points at is written as its preorder number in the body
   (`serialize::walk_source`). Nested function bodies are compiled eagerly at install

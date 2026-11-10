@@ -370,7 +370,8 @@ runs again with one job, reusing the objects already built.
 
 An install on ry's runtime also writes the package's code image, `R/<package>.ryc` beside its
 lazy-load database: the compiled code of every closure, which a later session takes instead of
-compiling the closure itself. `--train tests`, `--train examples` or `--train SCRIPT` (`R CMD
+compiling the closure itself, and the package's lazy-load records uncompressed, which a later
+session reads in place instead of inflating them. `--train tests`, `--train examples` or `--train SCRIPT` (`R CMD
 INSTALL --ry-train=...`) first runs the package's tests, its help-page examples or a script, and
 the image then keeps the profile of that run, so a function that ran hot there is handed to the
 optimizing tier as soon as a new session compiles it. `R CMD INSTALL --ry-no-code-image` writes no

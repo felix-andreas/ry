@@ -9,11 +9,19 @@
 //! about as much as compiling, so it pays only where compiling would happen: a namespace fetches
 //! many closures it never calls (every S3 method it registers) and calls many only once.
 //!
+//! An image also holds the stream of every record it lists, uncompressed, so a fetch reads the
+//! record straight from the mapped image: it neither reads the database nor inflates the record,
+//! and every process that loads the package shares the image's pages. Records the install did not
+//! fetch are read from the database as usual.
+//!
 //! An image is build output, never a cache. It is stamped with the runtime build that wrote it,
-//! and a different build ignores it, so nothing ever checks whether its code is still current.
-//! Each record carries the length and hash of the database record it was compiled from, so an
-//! image that does not match its database (a package reinstalled by GNU R over ry's install, say)
-//! is ignored record by record rather than trusted.
+//! and a different build ignores it, so nothing ever checks whether its code is still current. It
+//! is also stamped with the length and modification time of the database it was written beside,
+//! so an image that does not match its database (a package reinstalled by GNU R over ry's install,
+//! say) is ignored whole rather than trusted. A copy that does not keep modification times only
+//! costs the image, never a stale record. A record's stream is checked against its hash
+//! ([`stream_hash`]) the first time it is read, so a damaged stream gives the database's record
+//! instead of a different value.
 //!
 //! A record's closures are named by the order the stream reader makes them
 //! ([`serialize::unserialize_with_closures`]), which depends on the record's bytes alone, and a
@@ -36,10 +44,12 @@
 //! | build | the runtime's identity, as a length-prefixed blob |
 //! | flags | `u32`, bit 0 set when the image was trained |
 //! | database length | `u64`, the size of the `.rdb` file the image was written for |
+//! | database time | `u64`, that file's modification time in nanoseconds since 1970 |
 //! | record count | `u32` |
-//! | records | per record: database offset `u64`, record length `u32`, record hash `u64`, payload offset `u64`, payload length `u32`, payload hash `u64`; sorted by database offset |
+//! | records | per record: database offset `u64`, record length `u32`, stream offset `u64`, stream length `u32`, stream hash `u64`, payload offset `u64`, payload length `u32`, payload hash `u64`; sorted by database offset |
 //! | native code | offset `u64` and length `u64` of the native section, both 0 for none |
 //! | payloads | per record: the closure count, then per closure the length of its code (0 for none) and the code |
+//! | streams | per record: its serialized stream, as decompressing the database's record gives it |
 //! | native section | install-time machine code (`ssa::section`), its code at a multiple of 16 KiB in the file |
 //!
 //! The native section holds machine code an install compiled for closures whose facts need no
@@ -165,7 +175,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
 const MAGIC: &[u8; 8] = b"RYCODE\x00\x02";
 
 /// The bytes of one record table entry.
-const ENTRY_SIZE: usize = 40;
+const ENTRY_SIZE: usize = 52;
 
 /// The flag bit of an image written after a training run.
 const TRAINED: u32 = 1;
@@ -197,6 +207,8 @@ struct Image {
     native: Cell<NativeSection>,
     /// One bit per entry, set once its payload's hash has been checked.
     verified: Vec<Cell<u64>>,
+    /// One bit per entry, set once its stream's hash has been checked.
+    streams_verified: Vec<Cell<u64>>,
 }
 
 /// Where the code of a fetched closure lies: `start..end` of the image's bytes, inside the
@@ -236,7 +248,9 @@ pub struct Parsed {
 pub struct Entry {
     pub offset: u64,
     pub length: u32,
-    pub hash: u64,
+    pub stream_offset: u64,
+    pub stream_length: u32,
+    pub stream_hash: u64,
     pub payload_offset: u64,
     pub payload_length: u32,
     pub payload_hash: u64,
@@ -246,15 +260,40 @@ struct Recording {
     /// Only databases under this directory are recorded: the package being installed, not its
     /// imports.
     directory: String,
-    /// Per database, per record offset: the record's length and hash, and a list holding each
+    /// Per database, per record offset: the record's length and stream, and a list holding each
     /// closure the record made followed by the body it was read with.
     records: BTreeMap<String, BTreeMap<u64, Recorded>>,
 }
 
 struct Recorded {
     length: u32,
-    hash: u64,
+    stream: Vec<u8>,
     closures: Sexp,
+}
+
+/// The length and modification time of a database, which an image must have been written for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DatabaseStamp {
+    pub length: u64,
+    pub modified: u64,
+}
+
+impl DatabaseStamp {
+    /// The stamp of `database` as it is on disk, `None` where the file system keeps no
+    /// modification time, which leaves the database without a usable image.
+    pub fn of(database: &str) -> Result<Option<DatabaseStamp>, String> {
+        let metadata = std::fs::metadata(database)
+            .map_err(|failure| format!("cannot read {database}: {failure}"))?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|since| u64::try_from(since.as_nanos()).ok());
+        Ok(modified.map(|modified| DatabaseStamp {
+            length: metadata.len(),
+            modified,
+        }))
+    }
 }
 
 /// Forgets the image of `database` and the code waiting in it, which `lazyLoadDBflush` calls when
@@ -298,41 +337,39 @@ fn report_damage(message: &str) {
     crate::write_console(format!("Warning: {message}\n").as_bytes(), true);
 }
 
-/// A lazy-load record as the image identifies it: where it starts in its database, and the length
-/// and hash of its bytes as stored.
-#[derive(Clone, Copy)]
-pub struct Record {
-    offset: u64,
-    length: usize,
-    hash: u64,
+/// Where a fetch from a lazy-load database reads its record.
+pub enum Source {
+    /// The database's image, which holds the record's stream.
+    Image(ImageRecord),
+    /// The database, noting the fetch for the image an install is about to write.
+    Recording,
+    /// The database alone.
+    Database,
 }
 
-impl Record {
-    pub fn of(offset: u64, bytes: &[u8]) -> Record {
-        Record {
-            offset,
-            length: bytes.len(),
-            hash: hash(bytes),
-        }
-    }
+/// A record the image of its database holds.
+pub struct ImageRecord {
+    image: Rc<Image>,
+    entry: usize,
 }
 
-/// Whether a fetch from `database` goes through [`read_record`]: the database has an image this
-/// build can use, or an install is recording it. Every other fetch skips hashing its record.
+/// Where a fetch of the record at `offset` of `database`, `length` bytes long there, reads it:
+/// the database's image when this build wrote one for this version of the database with this
+/// record in it, otherwise the database.
 ///
 /// # Safety
 /// Runs on the interpreter's thread.
-pub unsafe fn wants(database: &str) -> R<bool> {
+pub unsafe fn source(database: &str, offset: u64, length: usize) -> R<Source> {
     let state = &mut interp().code_image;
     if state.build.is_empty() {
-        return Ok(false);
+        return Ok(Source::Database);
     }
     if state
         .recording
         .as_ref()
         .is_some_and(|recording| Path::new(database).starts_with(&recording.directory))
     {
-        return Ok(true);
+        return Ok(Source::Recording);
     }
     if !state.images.contains_key(database) {
         match open(database, state.build) {
@@ -342,37 +379,88 @@ pub unsafe fn wants(database: &str) -> R<bool> {
             Err(message) => give_up(database, &message),
         }
     }
-    Ok(matches!(
-        interp().code_image.images.get(database),
-        Some(Some(_))
-    ))
+    let Some(Some(image)) = interp().code_image.images.get(database) else {
+        return Ok(Source::Database);
+    };
+    let Ok(entry) = image
+        .entries
+        .binary_search_by_key(&offset, |entry| entry.offset)
+    else {
+        return Ok(Source::Database);
+    };
+    if image.entries[entry].length as usize != length {
+        return Ok(Source::Database);
+    }
+    let record = ImageRecord {
+        image: Rc::clone(image),
+        entry,
+    };
+    let word = &record.image.streams_verified[entry / 64];
+    let bit = 1u64 << (entry % 64);
+    if word.get() & bit == 0 {
+        if stream_hash(stream(&record)) != record.image.entries[entry].stream_hash {
+            give_up(database, "a stream's hash does not match");
+            return Ok(Source::Database);
+        }
+        word.set(word.get() | bit);
+    }
+    Ok(Source::Image(record))
 }
 
-/// Reads one lazy-load record of `database` that [`wants`] accepted: `data` is the decompressed
-/// stream of `record`. The closures the record makes get their compiled code from the database's
-/// image, when it has code for exactly this record.
+/// The serialized stream of `record`, read in place from the mapped image. [`parse`] checked that
+/// every stream lies inside the file.
+pub fn stream(record: &ImageRecord) -> &[u8] {
+    let entry = &record.image.entries[record.entry];
+    let start = entry.stream_offset as usize;
+    record
+        .image
+        .file
+        .bytes()
+        .get(start..start + entry.stream_length as usize)
+        .unwrap_or_default()
+}
+
+/// The hash a stream is checked against. Streams are much larger than payloads, so this hashes a
+/// word at a time rather than a byte at a time like [`hash`]; it need only agree within one build,
+/// because another build ignores the image.
+pub fn stream_hash(bytes: &[u8]) -> u64 {
+    let mut hasher = rustc_hash::FxHasher::default();
+    std::hash::Hasher::write(&mut hasher, bytes);
+    std::hash::Hasher::finish(&hasher)
+}
+
+/// Reads `record` of `database` from its image. The closures it makes get their compiled code
+/// and machine code from the image.
 ///
 /// # Safety
 /// Runs on the interpreter's thread.
-pub unsafe fn read_record(database: &str, record: Record, data: &[u8], hook: Sexp) -> R<Sexp> {
-    let state = &mut interp().code_image;
-    if let Some(recording) = &state.recording
-        && Path::new(database).starts_with(&recording.directory)
-    {
-        let (value, closures) = serialize::unserialize_with_closures(data, hook)?;
-        crate::heap().root(value);
-        record_fetch(database, record, &closures)?;
-        return Ok(value);
-    }
-    let Some((image, entry)) = matching_entry(database, record) else {
-        return serialize::unserialize(data, hook);
-    };
-    let (value, closures) = serialize::unserialize_with_closures(data, hook)?;
+pub unsafe fn read_image_record(database: &str, record: &ImageRecord, hook: Sexp) -> R<Sexp> {
+    // `record` holds the image, so its pages stay mapped while the hook runs, even if the hook
+    // flushes the database.
+    let (value, closures) = serialize::unserialize_with_closures(stream(record), hook)?;
     crate::heap().root(value);
-    if let Err(message) = note_pending(&image, entry, database, &closures) {
+    if let Err(message) = note_pending(&record.image, record.entry, database, &closures) {
         give_up(database, &message);
     }
-    attach_native(&image, entry, database, &closures)?;
+    attach_native(&record.image, record.entry, database, &closures)?;
+    Ok(value)
+}
+
+/// Reads the record at `offset` of `database`, `length` bytes long there, from its decompressed
+/// `stream`, and notes it for the image the install is recording.
+///
+/// # Safety
+/// Runs on the interpreter's thread.
+pub unsafe fn read_recorded(
+    database: &str,
+    offset: u64,
+    length: usize,
+    stream: Vec<u8>,
+    hook: Sexp,
+) -> R<Sexp> {
+    let (value, closures) = serialize::unserialize_with_closures(&stream, hook)?;
+    crate::heap().root(value);
+    record_fetch(database, offset, length, stream, &closures)?;
     Ok(value)
 }
 
@@ -411,21 +499,6 @@ pub unsafe fn take_pending(function: Sexp, body: Sexp) -> R<Option<Sexp>> {
             Ok(None)
         }
     }
-}
-
-/// The image of `database` and the index of its entry for `record`, when it was written for
-/// exactly this record.
-fn matching_entry(database: &str, record: Record) -> Option<(Rc<Image>, usize)> {
-    let Some(Some(image)) = interp().code_image.images.get(database) else {
-        return None;
-    };
-    let position = image
-        .entries
-        .binary_search_by_key(&record.offset, |entry| entry.offset)
-        .ok()?;
-    let entry = image.entries[position];
-    (entry.length as usize == record.length && entry.hash == record.hash)
-        .then(|| (Rc::clone(image), position))
 }
 
 /// Notes, for each closure in `closures` the payload of `entry` holds code for, where that code
@@ -595,19 +668,23 @@ fn open(database: &str, build: &str) -> Result<Option<Rc<Image>>, String> {
         Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(failure) => return Err(failure.to_string()),
     };
-    let database_length = std::fs::metadata(database)
-        .map_err(|failure| format!("cannot read {database}: {failure}"))?
-        .len();
-    Ok(parse(file.bytes(), build, database_length)?.map(|parsed| {
+    let Some(stamp) = DatabaseStamp::of(database)? else {
+        return Ok(None);
+    };
+    Ok(parse(file.bytes(), build, stamp)?.map(|parsed| {
         let native = if parsed.native_length == 0 {
             NativeSection::Absent
         } else {
             NativeSection::Waiting(parsed.native_offset, parsed.native_length)
         };
-        Rc::new(Image {
-            verified: (0..parsed.entries.len().div_ceil(64))
+        let bits = || {
+            (0..parsed.entries.len().div_ceil(64))
                 .map(|_| Cell::new(0))
-                .collect(),
+                .collect()
+        };
+        Rc::new(Image {
+            verified: bits(),
+            streams_verified: bits(),
             file,
             path: path(database),
             entries: parsed.entries,
@@ -618,7 +695,7 @@ fn open(database: &str, build: &str) -> Result<Option<Rc<Image>>, String> {
 
 /// The record table of an image, or `None` when it was written by another build or for another
 /// version of the database.
-pub fn parse(bytes: &[u8], build: &str, database_length: u64) -> Result<Option<Parsed>, String> {
+pub fn parse(bytes: &[u8], build: &str, stamp: DatabaseStamp) -> Result<Option<Parsed>, String> {
     let mut input = Reader { bytes };
     let failed = |failure: heap::ImageError| failure.to_string();
     if input.take(MAGIC.len()).map_err(failed)? != MAGIC {
@@ -629,7 +706,9 @@ pub fn parse(bytes: &[u8], build: &str, database_length: u64) -> Result<Option<P
         return Ok(None);
     }
     let _flags = input.u32().map_err(failed)?;
-    if input.u64().map_err(failed)? != database_length {
+    let length = input.u64().map_err(failed)?;
+    let modified = input.u64().map_err(failed)?;
+    if (DatabaseStamp { length, modified }) != stamp {
         return Ok(None);
     }
     let count = input.u32().map_err(failed)? as usize;
@@ -641,7 +720,9 @@ pub fn parse(bytes: &[u8], build: &str, database_length: u64) -> Result<Option<P
         let entry = Entry {
             offset: input.u64().map_err(failed)?,
             length: input.u32().map_err(failed)?,
-            hash: input.u64().map_err(failed)?,
+            stream_offset: input.u64().map_err(failed)?,
+            stream_length: input.u32().map_err(failed)?,
+            stream_hash: input.u64().map_err(failed)?,
             payload_offset: input.u64().map_err(failed)?,
             payload_length: input.u32().map_err(failed)?,
             payload_hash: input.u64().map_err(failed)?,
@@ -652,11 +733,16 @@ pub fn parse(bytes: &[u8], build: &str, database_length: u64) -> Result<Option<P
         {
             return Err("the record table is not sorted".to_owned());
         }
-        let end = entry
-            .payload_offset
-            .checked_add(u64::from(entry.payload_length));
-        if end.is_none_or(|end| end > bytes.len() as u64) {
+        let outside = |offset: u64, length: u32| {
+            offset
+                .checked_add(u64::from(length))
+                .is_none_or(|end| end > bytes.len() as u64)
+        };
+        if outside(entry.payload_offset, entry.payload_length) {
             return Err("a payload lies outside the file".to_owned());
+        }
+        if outside(entry.stream_offset, entry.stream_length) {
+            return Err("a stream lies outside the file".to_owned());
         }
         entries.push(entry);
     }
@@ -685,13 +771,19 @@ pub fn hash(bytes: &[u8]) -> u64 {
     hash
 }
 
-unsafe fn record_fetch(database: &str, record: Record, closures: &[Sexp]) -> R<()> {
+unsafe fn record_fetch(
+    database: &str,
+    offset: u64,
+    length: usize,
+    stream: Vec<u8>,
+    closures: &[Sexp],
+) -> R<()> {
     let heap = crate::heap();
     let Some(recording) = &mut interp().code_image.recording else {
         return Ok(());
     };
     let records = recording.records.entry(database.to_owned()).or_default();
-    if records.contains_key(&record.offset) {
+    if records.contains_key(&offset) {
         return Ok(());
     }
     let list = values::alloc(SexpType::List, closures.len() * 2)?;
@@ -699,14 +791,15 @@ unsafe fn record_fetch(database: &str, record: Record, closures: &[Sexp]) -> R<(
         heap.set_element(list, index * 2, closure);
         heap.set_element(list, index * 2 + 1, closure.cdr());
     }
-    let length = u32::try_from(record.length)
-        .map_err(|_| error(format!("a record of {database} is larger than 4GB")))?;
+    let too_large = || error(format!("a record of {database} is larger than 4GB"));
+    let length = u32::try_from(length).map_err(|_| too_large())?;
+    u32::try_from(stream.len()).map_err(|_| too_large())?;
     heap.preserve(list);
     records.insert(
-        record.offset,
+        offset,
         Recorded {
             length,
-            hash: record.hash,
+            stream,
             closures: list,
         },
     );
@@ -805,9 +898,9 @@ unsafe fn write_image(
     explain: bool,
     summary: &mut Summary,
 ) -> R<()> {
-    let database_length = std::fs::metadata(database)
-        .map_err(|failure| error(format!("cannot read {database}: {failure}")))?
-        .len();
+    let Some(stamp) = DatabaseStamp::of(database).map_err(error)? else {
+        return Ok(());
+    };
     let mut payloads = Vec::with_capacity(records.len());
     for recorded in records.values() {
         let closures: Vec<(Sexp, Sexp)> = (0..length(recorded.closures) / 2)
@@ -837,14 +930,14 @@ unsafe fn write_image(
     if let Some(native) = &native {
         summary.native += native.functions;
     }
-    let table: Vec<(u64, u32, u64)> = records
+    let table: Vec<(u64, u32, &[u8])> = records
         .iter()
-        .map(|(offset, recorded)| (*offset, recorded.length, recorded.hash))
+        .map(|(offset, recorded)| (*offset, recorded.length, &recorded.stream[..]))
         .collect();
     let bytes = image_bytes(
         build,
         trained,
-        database_length,
+        stamp,
         &table,
         &payloads,
         native.as_ref().map(|native| &*native.encode),
@@ -910,14 +1003,14 @@ pub unsafe fn record_payload(
     payload
 }
 
-/// The bytes of an image for a database of `database_length` bytes: `records` holds each
-/// record's offset, length and hash, sorted by offset, `payloads` the payload of each, and
-/// `native` the native section's bytes for the offset it is written at.
+/// The bytes of an image for the database `stamp` describes: `records` holds each record's
+/// offset, length and stream, sorted by offset, `payloads` the payload of each, and `native` the
+/// native section's bytes for the offset it is written at.
 pub fn image_bytes(
     build: &str,
     trained: bool,
-    database_length: u64,
-    records: &[(u64, u32, u64)],
+    stamp: DatabaseStamp,
+    records: &[(u64, u32, &[u8])],
     payloads: &[Vec<u8>],
     native: Option<&dyn Fn(u64) -> Vec<u8>>,
 ) -> R<Vec<u8>> {
@@ -925,23 +1018,34 @@ pub fn image_bytes(
     out.bytes.extend_from_slice(MAGIC);
     out.blob(build.as_bytes());
     out.u32(if trained { TRAINED } else { 0 });
-    out.u64(database_length);
+    out.u64(stamp.length);
+    out.u64(stamp.modified);
     out.u32(u32::try_from(records.len()).map_err(|_| error("an image holds too many records"))?);
+    let too_large = |what: &str| error(format!("{what} is larger than 4GB"));
     let mut payload_offset = (out.bytes.len() + records.len() * ENTRY_SIZE + 16) as u64;
-    for (&(offset, length, hash_value), payload) in records.iter().zip(payloads) {
+    // Streams follow every payload, so the payloads, which pending code addresses with 32 bits,
+    // stay at the front of the file.
+    let mut stream_offset = payload_offset + payloads.iter().map(|p| p.len() as u64).sum::<u64>();
+    for (&(offset, length, stream), payload) in records.iter().zip(payloads) {
         out.u64(offset);
         out.u32(length);
-        out.u64(hash_value);
+        out.u64(stream_offset);
+        out.u32(u32::try_from(stream.len()).map_err(|_| too_large("a stream"))?);
+        out.u64(stream_hash(stream));
         out.u64(payload_offset);
-        out.u32(u32::try_from(payload.len()).map_err(|_| error("a payload is larger than 4GB"))?);
+        out.u32(u32::try_from(payload.len()).map_err(|_| too_large("a payload"))?);
         out.u64(hash(payload));
         payload_offset += payload.len() as u64;
+        stream_offset += stream.len() as u64;
     }
     let native_at = out.bytes.len();
     out.u64(0);
     out.u64(0);
     for payload in payloads {
         out.bytes.extend_from_slice(payload);
+    }
+    for (_, _, stream) in records {
+        out.bytes.extend_from_slice(stream);
     }
     if let Some(native) = native {
         let offset = out.bytes.len() as u64;
