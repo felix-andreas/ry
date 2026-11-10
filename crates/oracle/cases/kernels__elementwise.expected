@@ -419,10 +419,76 @@
 | [1] 0 1
 | warning: probable complete loss of accuracy in modulus 
 | [1] 0 1
+| [[1]]
+| [1] 1 2
+| 
+| [[2]]
+| [1] 2 3
+| 
+| [1] 1 2 0
+| [[1]]
+| [1] 1 2
+| 
+| [[2]]
+| [1] 2 3
+| 
+| [1] 2 3
+| [[1]]
+| [1] 1 2
+| 
+| [[2]]
+| [1] 2 3
+| 
+| [1] 4 5
+| [1] 3 6 3 6
+| [1] 0.5 1.0
+| [1] 1.648721 2.718282
+| [1] TRUE   NA
+| [1] 1 2
+| [1] 2 3
+| [1] -1  2 NA
+| [1]  1 -2 NA
+| [1] -1  2 NA
+| [1]  1  2 NA
+| [1] FALSE  TRUE    NA
+| [1]  TRUE FALSE    NA
+| [1]  TRUE FALSE FALSE
+| [1] TRUE   NA   NA
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] 0.7071068 2.0000000
+| [1] -0.5  1.0
+| w: NaNs produced 
+| [1] NaN   2
+| a b 
+| 2 3 
+|         a         b 
+|  7.389056 20.085537 
+| w: NAs produced by integer overflow 
+| [1] NA  2
+| [1] FALSE FALSE  TRUE  TRUE
+| [1] FALSE  TRUE  TRUE FALSE
+| [1] 0.5 1.0
+| [1] 0.2 0.1
+| [[1]]
+| [1] FALSE FALSE  TRUE
+| 
+| [[2]]
+| [1] 1 2 3
+| 
+| [[1]]
+| [1] FALSE FALSE  TRUE
+| 
+| [[2]]
+| [1] 1 2 3
+| 
 [messages]
 [warnings]
 - NAs produced by integer overflow (in named * 2147483647L)
 [errors]
 [value]
-NULL
-| NULL
+list
+| list(c(FALSE, FALSE, TRUE), c(1, 2, 3))

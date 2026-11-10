@@ -172,6 +172,18 @@ pub fn check_element_access_agreement(entropy: &mut impl Entropy) {
 fn fused_expression(entropy: &mut impl Entropy, depth: usize) -> String {
     if depth == 0 || entropy.below(4) == 0 {
         let leaves = ["a", "b", "a", "b", "2", "1L", "0.5", "NA", "TRUE"];
+        // Calls the pass cannot compute, which it evaluates ahead into registers: some with
+        // side effects whose order against the variable reads shows in the value.
+        let calls = [
+            "rev(a)",
+            "mean(b)",
+            "{ k <<- k + 1L; k }",
+            "{ assign(\"a\", rev(a)); 2 }",
+            "`-`(b)",
+        ];
+        if entropy.below(5) == 0 {
+            return calls[entropy.below(calls.len())].to_owned();
+        }
         return leaves[entropy.below(leaves.len())].to_owned();
     }
     match entropy.below(8) {

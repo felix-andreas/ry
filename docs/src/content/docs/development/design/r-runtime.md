@@ -995,7 +995,15 @@ R's vector builtins share one kernel layer in `crates/interp/src/kernels.rs`, wh
   value's count is zero, it is mutable, not ALTREP, and has the result's type and length. The
   compiler's mark is needed because registers hold uncounted references, so a zero count alone does
   not prove the value dead. This is pqR's `R_allocOrReuseVector` rule, restricted to what the
-  compiler proves.
+  compiler proves. The evaluator offers a second destination: in `x <- f(x, ...)`, where `f` is an
+  element-wise builtin and `x`'s binding holds the only reference to its value, the result goes
+  into `x`'s buffer. Every kernel takes its destination as an argument that may be one of its
+  operands, and reads that operand from the output buffer, so aliasing is exact under recycling.
+  A destination of length one is never reused, because the shared `TRUE`, `FALSE` and `NA`
+  constants can look private.
+- **Reductions.** `sum` on integers, `any`, `all`, `min`, `max` and `range` are SIMD kernels;
+  `range` finds both bounds in one pass. `prod` and the double `sum` accumulate in x87 long double
+  as GNU R does, so they keep scalar loops.
 - **Fusion.** For an element-wise tree such as `a * b + c` or `sum(x > 0)` whose leaves are
   constants and variables, the compiler emits `Op::Fused` in front of the ordinary code. The
   instruction reads the leaves in the ordinary code's order (forcing an argument's promise as a
@@ -1005,6 +1013,13 @@ R's vector builtins share one kernel layer in `crates/interp/src/kernels.rs`, wh
   that a math function produced), so fused and unfused evaluation cannot be told apart. Otherwise
   it runs the tree in 512-element chunks, writes only the root, and records the type feedback of
   the instructions it skipped, so the JIT, which compiles the ordinary code, sees the same types.
+  A leaf may also be a call the pass cannot compute, such as `mean(x)` in `sum(x - mean(x) > 0)`,
+  as long as no operator of the tree runs before it. The compiler first checks the guards of the
+  operators R looks up before the call, then evaluates the call and the variables read before it
+  into registers, in R's order, and both the fused pass and the ordinary code read those
+  registers, so the call runs exactly once. If one of those guards fails (an operator redefined
+  in the frame), the whole expression goes to the evaluator before anything ran. A call that may
+  modify a variable in place (an assignment, `eval`, a replacement call) stays unfused.
 
 NaN results match GNU R 4.3.3 on x86-64, where an operation on two NaNs returns the first
 operand's payload. GNU R's compiled loops swap the operands of `+` and `*` on two doubles when the
