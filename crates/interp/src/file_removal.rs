@@ -28,9 +28,16 @@ pub fn unlink(path: &str, recursive: bool, force: bool) -> R<u32> {
 }
 
 /// Waits for the background removals to finish and removes the holding directory. A session
-/// calls it once, as it ends.
+/// calls it as it ends, and `mcfork` before it forks, so that no helper thread runs while the
+/// process is copied; the next deferred removal starts a new thread.
 pub fn finish() {
     imp::finish();
+}
+
+/// Runs in a forked child, which removes everything on its own thread: it ends with `_exit`,
+/// which would cut a background removal short and leave its holding directory behind.
+pub fn in_forked_child() {
+    imp::disable();
 }
 
 /// The longest path GNU R builds while it walks a tree (`R_PATH_MAX`).
@@ -332,9 +339,6 @@ mod imp {
 
     /// The background removal of emptied directory skeletons.
     struct Reaper {
-        /// The process that started the thread. A forked child inherits this record but not the
-        /// thread, so it removes everything itself.
-        owner: u32,
         /// Where skeletons wait for removal: a directory beside the session's temporary
         /// directory, so a rename into it stays on the same file system for the paths tests
         /// remove, and nothing in `tempdir()` changes.
@@ -345,13 +349,14 @@ mod imp {
     }
 
     /// `None` until the first deferred removal, then the reaper, or `Err` when it cannot start
-    /// (no temporary directory, no thread), in which case every removal runs on the R thread.
+    /// (no temporary directory, no thread) or the process is a forked child, in which case every
+    /// removal runs on the R thread.
     static REAPER: Mutex<Option<Result<Reaper, ()>>> = Mutex::new(None);
 
     fn reaper_available() -> bool {
         let mut reaper = lock();
         let reaper = reaper.get_or_insert_with(start_reaper);
-        matches!(reaper, Ok(reaper) if reaper.owner == std::process::id())
+        reaper.is_ok()
     }
 
     fn start_reaper() -> Result<Reaper, ()> {
@@ -381,7 +386,6 @@ mod imp {
             return Err(());
         };
         Ok(Reaper {
-            owner: std::process::id(),
             holding,
             next: 0,
             sender,
@@ -419,9 +423,6 @@ mod imp {
             Some(Ok(reaper)) => reaper,
             _ => return,
         };
-        if reaper.owner != std::process::id() {
-            return;
-        }
         drop(reaper.sender);
         if reaper.thread.join().is_err() {
             eprintln!("ry: the background removal of emptied directories panicked");
@@ -429,6 +430,10 @@ mod imp {
         if let Err(failure) = std::fs::remove_dir_all(&reaper.holding) {
             eprintln!("ry: cannot remove '{}': {failure}", reaper.holding.display());
         }
+    }
+
+    pub fn disable() {
+        *lock() = Some(Err(()));
     }
 
     fn lock() -> std::sync::MutexGuard<'static, Option<Result<Reaper, ()>>> {
@@ -469,4 +474,6 @@ mod imp {
     }
 
     pub fn finish() {}
+
+    pub fn disable() {}
 }
