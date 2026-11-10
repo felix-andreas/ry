@@ -111,7 +111,8 @@ These are the reads that need the environment as an object. Each one reifies the
 | A promise made in the frame that the slot-promise path does not cover (see below), default promises, `delayedAssign` | `make_promise`, `compiled_promise`, `formal_binding` in `eval.rs`; `NextMethod`'s promises in `dispatch.rs` |
 | A closure created in the frame, past the frame's 16 tracked closures (see below) | `slot_closure` in `eval.rs`; `make_closure` for an uncompiled `function`; `~` (the formula's environment) |
 | A closure made in the frame that may outlive it | `finish_frame` in `eval.rs` |
-| Reflection that returns the environment | `environment()`, `sys.frame(s)`, `parent.frame`, `as.environment(-1)`, `sys.function` with its environment, `eval`'s numeric `envir` |
+| Reflection that returns the environment | `environment()`, `sys.frame(s)`, `as.environment(-1)`, `sys.function` with its environment, `eval`'s numeric `envir` |
+| A read of the bindings of the pending environment `parent.frame()` handed out, or that environment kept past the frame's return | `eval::resolve_pending_read`, `finish_frame` in `eval.rs` |
 | Code that the compiler did not translate and that runs in the frame | `Op::Ast` (`<<-` targets, `...` forms), `BoundEval`, the debugger and `browser()` |
 | S3 and S4 dispatch reading the generic's frame | `UseMethod` and `NextMethod` (`dispatch.rs`); `standardGeneric`, which reads the signature arguments from the generic's frame and evaluates the method in a frame derived from it (`do_standard_generic` passes `call.env` to `dispatch_generic`), and `exec_method` and `callNextMethod` (`methods.rs`) |
 | Condition handlers and restarts that record a frame | `.addCondHands`, `.addRestart` (`conditions.rs`) |
@@ -123,10 +124,17 @@ These are the reads that need the environment as an object. Each one reifies the
 A builtin that receives `call.env` and only reads a frame property (`missing`, `nargs`, `on.exit`,
 `sys.call`, `match.call`) gets the frame reference instead and does not reify.
 
-`parent.frame()` and `sys.frame()` called from a callee reify the caller's frame, not their own. That
-makes `match.arg` (which evaluates the caller's formals through `sys.frame(sys.parent())`) and
-`eval(expr, parent.frame())` the most common triggers in package code. The instrumented build counts
-them apart from other reflection, so the second step can tell whether they need a cheaper route.
+`sys.frame()` called from a callee reifies the caller's frame, not the callee's own, which makes
+`match.arg` (it evaluates the caller's formals through `sys.frame(sys.parent())`) a common trigger
+in package code. `parent.frame()` instead hands out the caller's pending environment
+(`eval::frame_sys_parent_pending`), because most package code only passes that frame on or
+compares it: `do.call(f, args, envir = parent.frame())`, `tryCatch`'s handler frame, and
+`withr::defer(expr, envir = parent.frame())`, which registers exit code on the caller. The caller
+reifies only when code reads or writes its bindings through that environment (counted as
+`parent.frame`, an observing cause), or when the environment outlives the frame (see "Exit code
+and returns" below). Every lookup of a frame by its environment goes through `Frame::owns`, which
+also matches the pending environment, so `on.exit`, `sys.function`, `Recall`, `UseMethod` and the
+`parent.frame` chain find a frame that has handed out its pending environment.
 
 ### Reads that must not reify
 
@@ -138,6 +146,10 @@ These are hot in package code and work from the slots and the frame reference al
   the caller's frame and reads its slot's missing bit.
 - `...length()`, `..1` and `...elt(n)`, which read the `...` slot.
 - `nargs()`, `sys.call()`, `match.call()` and `on.exit()`, which read the frame record.
+- `UseMethod(generic)` and `UseMethod(generic, object)`, `.Internal(...)`, `quote(...)`,
+  `x <<- value` and `switch(selector, ...)` over the frame's `...`, which `slot_special_call` in
+  `bytecode.rs` runs on the slots.
+- `parent.frame()` that is only passed on or compared (see above).
 
 ### The C API
 
@@ -211,6 +223,24 @@ callback that never escapes costs no environment.
   (the profile reason "closure outliving the frame"), so the escaped closure sees the values its
   variables held at return. A frame that returns
   through an error keeps none of its closures as dead.
+
+## Exit code and returns
+
+- **Registering.** `on.exit(expr, add, after)` with constant `add` and `after` registers on the
+  frame's exit list (`Frame.on_exit`) without an environment (`slot_on_exit` in `bytecode.rs`).
+  The entry is `expr` compiled as promise code against the frame's slot table, or the expression
+  itself when it does not compile.
+- **Running.** `run_on_exit` in `eval.rs` runs a compiled entry on the slots
+  (`run_promise_on_slots`) and evaluates any other entry in the frame's pending environment, so
+  exit code registered through `do.call(on.exit, ..., envir = parent.frame())` reifies the frame
+  only if it reads a binding. `sys.on.exit()` shows the source of a compiled entry.
+- **Return.** A `return()` evaluated in the pending environment targets that environment, which
+  `finish_frame` catches for an unreified frame.
+- **Escape.** A frame that returns while anything but its dying closures and its unforced default
+  promises holds its pending environment reifies first, with the profile reason "environment
+  outliving the frame" (`pending_env_kept`). The check reads the environment's reference count,
+  so an environment that is the result, is held by `R_PreserveObject`, or is stored in a binding,
+  a list or another environment's enclosure is kept.
 
 ## Subassignment and replacement in slots
 
@@ -342,7 +372,7 @@ builtin that asked, or a named site such as `"function definition"` or `"method 
 | Class | Meaning |
 |---|---|
 | direct | the frame never reified and was passed no promise |
-| a reify cause | the frame reified for that reason; `eval::OBSERVING_REASONS` marks the causes where code observed the environment itself (`eval`, `environment()`, `sys.frame`, `parent.frame`, `assign`, `get`, native code) |
+| a reify cause | the frame reified for that reason; `eval::OBSERVING_REASONS` marks the causes where code observed the environment itself (`eval`, `environment()`, `sys.frame`, `parent.frame`, `assign`, `get`, native code, `environment outliving the frame`) |
 | `promise argument: variable`, `call`, `other` | the frame stayed unreified but was passed a real promise of that kind |
 | `frame with an environment` | the callee has no slot table and always gets a heap frame |
 

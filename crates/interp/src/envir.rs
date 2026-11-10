@@ -139,7 +139,7 @@ unsafe fn environment_arg(value: Sexp, what: &str) -> R<Sexp> {
 
 /// The frame of the closure whose environment is `env`, as a stack index.
 pub(crate) unsafe fn frame_of(env: Sexp) -> Option<usize> {
-    interp().frames.iter().rposition(|frame| frame.env == env)
+    interp().frames.iter().rposition(|frame| frame.owns(env))
 }
 
 /// GNU R's `cptr` for the `sys.*` functions: the frame the `sys.*` closure was called from.
@@ -159,7 +159,7 @@ pub(crate) unsafe fn caller_index(own: usize) -> Option<usize> {
         let caller = frames[own].caller;
         return (caller != crate::NO_SLOTS).then_some(caller as usize);
     }
-    (0..=own).rev().find(|&index| frames[index].env == target)
+    (0..=own).rev().find(|&index| frames[index].owns(target))
 }
 
 /// `framedepth`: how many frames from `context` down to the top level.
@@ -233,7 +233,7 @@ pub unsafe fn call_with_srcref(frame: &crate::Frame) -> R<Sexp> {
 /// sees them through `sys.function(sys.parent())` and `sys.frame(sys.parent())`; `None` when it
 /// was called from the top level.
 pub(crate) unsafe fn sys_parent_of(env: Sexp) -> R<Option<(Sexp, Sexp)>> {
-    let Some(own) = interp().frames.iter().rposition(|frame| frame.env == env) else {
+    let Some(own) = interp().frames.iter().rposition(|frame| frame.owns(env)) else {
         return Ok(None);
     };
     let context = Some(own);
@@ -276,7 +276,7 @@ pub(crate) unsafe fn sys_parent_number(mut n: i64, context: Option<usize>) -> i6
     let mut found = n;
     for position in (0..=index).rev() {
         count += 1;
-        if frames[position].env == parent {
+        if frames[position].owns(parent) {
             found = count;
         }
     }
@@ -386,13 +386,14 @@ unsafe fn do_parent_frame(call: &Call<'_>) -> R<Sexp> {
         return Ok(global_env());
     };
     // Each step moves to the frame the current one was called from, as GNU R's `parent.frame`
-    // does through `sys_parent`; handing out that frame's environment reifies it.
+    // does through `sys_parent`. A slot frame without an environment hands out its pending one,
+    // so code that only passes the frame on or compares it leaves the frame in its slots.
     loop {
         let Some(caller) = caller_index(index) else {
             return Ok(global_env());
         };
         if n == 1 {
-            return crate::eval::frame_sys_parent(caller, crate::eval::Reify::Site("parent.frame"));
+            return crate::eval::frame_sys_parent_pending(caller);
         }
         n -= 1;
         index = caller;

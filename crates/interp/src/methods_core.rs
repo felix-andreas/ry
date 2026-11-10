@@ -5438,7 +5438,7 @@ unsafe fn default_where(frame: Sexp, promise: Sexp) -> R<Option<Sexp>> {
         }
     }
     let frames = &interp().frames;
-    let Some(position) = frames.iter().rposition(|record| record.env == frame) else {
+    let Some(position) = frames.iter().rposition(|record| record.owns(frame)) else {
         return Ok(None);
     };
     let caller = crate::eval::frame_sys_parent(position, crate::eval::Reify::Site("S4 dispatch"))?;

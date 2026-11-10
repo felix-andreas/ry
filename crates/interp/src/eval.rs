@@ -178,7 +178,7 @@ pub unsafe fn cell_value(cell: Sexp) -> R<Sexp> {
 /// the innermost call.
 unsafe fn lexical_call(env: Sexp) -> Sexp {
     let frames = &interp().frames;
-    if let Some(frame) = frames.iter().rev().find(|frame| frame.env == env) {
+    if let Some(frame) = frames.iter().rev().find(|frame| frame.owns(env)) {
         return frame.call;
     }
     if env == values::global_env() {
@@ -490,9 +490,15 @@ pub unsafe fn resolve_pending_read(env: Sexp) {
     else {
         panic!("the bindings of a slot frame's environment were read after the frame returned");
     };
+    // Bindings read through an environment `parent.frame` handed out are the frame observed.
+    let cause = if interp().frames[owner].pending_shared {
+        Reify::Site("parent.frame")
+    } else {
+        Reify::Site("environment read")
+    };
     let heap = crate::heap();
     heap.inhibit_collection();
-    let result = reify(owner, Reify::Site("environment read"));
+    let result = reify(owner, cause);
     crate::heap().allow_collection();
     if let Err(unwind) = result {
         panic!("a slot frame failed to make its environment: {unwind:?}");
@@ -2206,9 +2212,10 @@ pub enum Reify {
 /// The reasons that observe a frame's environment: they evaluate code in it, hand it out as a
 /// value, or read or write its bindings by name. Every other reason is a mechanism a slot
 /// frame could serve without one.
-pub const OBSERVING_REASONS: [&str; 15] = [
+pub const OBSERVING_REASONS: [&str; 16] = [
     "eval", "evalq", "environment", "environment()", "sys.frame", "sys.frames", "parent.frame",
     "pos = -1", "assign", "get", "get0", "exists", "mget", "native code", "as.environment",
+    "environment outliving the frame",
 ];
 
 /// The `...` slot of the frame at `index`, when it is a slot frame without an environment and
@@ -2249,6 +2256,25 @@ pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
         return Ok(frame.sys_parent);
     }
     frame_env(frame.caller as usize, cause)
+}
+
+/// The environment the frame at `index` was called from, as `parent.frame` hands it out: a
+/// slot frame that has none gives its pending environment instead of reifying, and reifies
+/// only once code reads its bindings ([`resolve_pending_read`]) or keeps the environment past
+/// the frame's return ([`finish_frame`]).
+pub unsafe fn frame_sys_parent_pending(index: usize) -> R<Sexp> {
+    let frame = &interp().frames[index];
+    if frame.sys_parent != nil() || frame.caller == crate::NO_SLOTS {
+        return Ok(frame.sys_parent);
+    }
+    let owner = frame.caller as usize;
+    let target = &interp().frames[owner];
+    if target.env != nil() || target.slots == crate::NO_SLOTS {
+        return Ok(target.env);
+    }
+    let env = pending_env(owner)?;
+    interp().frames[owner].pending_shared = true;
+    Ok(env)
 }
 
 /// The environment of the slot frame whose header register is `header`, which must be live.
@@ -2629,9 +2655,10 @@ unsafe fn finish_frame(
     signature: Option<Sexp>,
     result: R<Sexp>,
 ) -> R<Sexp> {
-    // A slot frame may have made its environment while the body ran; until it does, nothing
-    // can name the frame as a `return` or loop target.
-    let env = interp().frames[depth - 1].env;
+    // A slot frame may have made its environment while the body ran; until it does, only its
+    // pending environment, if it handed one out, can name the frame as a `return` target.
+    let frame = &interp().frames[depth - 1];
+    let env = if frame.env == nil() { frame.pending } else { frame.env };
     let result = if env == nil() {
         result
     } else {
@@ -2649,18 +2676,25 @@ unsafe fn finish_frame(
         result
     } else {
         let result = run_on_exit(depth, result);
-        catch_return(interp().frames[depth - 1].env, result)
+        let frame = &interp().frames[depth - 1];
+        catch_return(if frame.env == nil() { frame.pending } else { frame.env }, result)
     };
     // Promises over the slots that may still be forced need the environment once the slots are
-    // gone.
+    // gone, and so does anything that kept the pending environment itself.
     let frame = &state.frames[depth - 1];
-    if frame.env == nil() && frame.pending != nil() && frame.unforced > 0 {
-        let (closures, dying) = pending_closures_dying(depth - 1, &result);
+    if frame.env == nil() && frame.pending != nil() {
+        let (closures, dying) = if frame.unforced > 0 {
+            pending_closures_dying(depth - 1, &result)
+        } else {
+            (0, 0)
+        };
         let frame = &interp().frames[depth - 1];
         if closures > dying {
             reify(depth - 1, Reify::Site("closure outliving the frame"))?;
         } else if frame.unforced > unforced_defaults(frame) + closures {
             reify(depth - 1, Reify::Site("promise outliving the frame"))?;
+        } else if pending_env_kept(depth - 1, &result) {
+            reify(depth - 1, Reify::Site("environment outliving the frame"))?;
         } else if closures > 0 {
             interp()
                 .pending_closures
@@ -2668,6 +2702,29 @@ unsafe fn finish_frame(
         }
     }
     result
+}
+
+/// Whether something other than what dies with the slot frame at `index` holds its pending
+/// environment as the frame returns `result`: the counted references to it must all come from
+/// the frame's dying closures and the unforced default promises in its slots, the environment
+/// must not be the value returned, and `R_PreserveObject` must not hold it. An error
+/// return keeps it, since the unwind may carry it.
+unsafe fn pending_env_kept(index: usize, result: &R<Sexp>) -> bool {
+    let Ok(value) = *result else {
+        return true;
+    };
+    let state = interp();
+    let frame = &state.frames[index];
+    let pending = frame.pending;
+    if value == pending || crate::heap().is_preserved(pending) {
+        return true;
+    }
+    let closures = state
+        .pending_closures
+        .iter()
+        .filter(|&&(owner, closure)| owner as usize == index && closure.tag() == pending)
+        .count() as u32;
+    u32::from(pending.refcount()) > unforced_defaults(frame) + closures
 }
 
 /// How many closures the slot frame at `index` made over its pending environment, and how many
@@ -2780,6 +2837,7 @@ unsafe fn push_frame(
         unforced: 0,
         inlined: false,
         reified_by: crate::NOT_REIFIED,
+        pending_shared: false,
     });
     if PROFILE_TICK.load(Ordering::Relaxed) {
         record_profile_sample(None)?;
@@ -3059,10 +3117,16 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
     // A slot frame keeps exit code compiled for its slots, which runs there without an
     // environment; only an expression that did not compile needs one.
     let (function, header) = (frame.function, frame.slots);
-    let env = if expressions.iter().all(|expression| expression.kind() == SexpType::Bytecode) {
+    // Other exit code, such as the call `withr::defer` registers through `do.call`, runs in
+    // the frame's pending environment, which reifies only if the code reads a binding.
+    let env = if frame.env != nil()
+        || expressions.iter().all(|expression| expression.kind() == SexpType::Bytecode)
+    {
         frame.env
-    } else {
+    } else if frame.slots == crate::NO_SLOTS {
         frame_env(depth - 1, Reify::Site("on.exit"))?
+    } else {
+        pending_env(depth - 1)?
     };
     let visible = interp().visible;
     let mark = crate::heap().handle_mark();
@@ -4807,6 +4871,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         unforced: 0,
         inlined: false,
         reified_by: crate::NOT_REIFIED,
+        pending_shared: false,
     });
     let depth = state.frames.len();
     let result = scope(|| match expression.kind() {
@@ -4838,7 +4903,7 @@ unsafe fn do_with_visible(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
     let env = call.env()?;
     let state = interp();
-    let Some(own) = state.frames.iter().rposition(|frame| frame.env == env) else {
+    let Some(own) = state.frames.iter().rposition(|frame| frame.owns(env)) else {
         return Err(call.error("'Recall' called from outside a closure"));
     };
     let Some(caller) = crate::envir::caller_index(own) else {

@@ -853,7 +853,7 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     let dispatching = activity::enter(Activity::S3Dispatch, 0);
     let env = call.env()?;
     let state = interp();
-    let Some(position) = state.frames.iter().rposition(|frame| frame.env == env) else {
+    let Some(position) = state.frames.iter().rposition(|frame| frame.owns(env)) else {
         return Err(call.error("UseMethod called from outside a function"));
     };
     if call.is_empty() {
@@ -1187,7 +1187,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     let state = interp();
     // The NextMethod closure's frame is `env`; the method frame is the one it was called from.
     // Errors name the `NextMethod(...)` closure call, as GNU R's do.
-    let Some(own) = state.frames.iter().rposition(|frame| frame.env == env) else {
+    let Some(own) = state.frames.iter().rposition(|frame| frame.owns(env)) else {
         return Err(error("'NextMethod' called from outside a function"));
     };
     let Some(position) = crate::envir::caller_index(own) else {
@@ -1829,6 +1829,7 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
         unforced: 0,
         inlined: false,
         reified_by: crate::NOT_REIFIED,
+        pending_shared: false,
     });
     let depth = state.frames.len();
     let result = apply_method(new_call, found.method, promised, env, &found.vars, true);

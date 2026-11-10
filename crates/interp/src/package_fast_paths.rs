@@ -92,7 +92,7 @@ unsafe fn do_trace_back(call: &Call<'_>) -> R<Sexp> {
     } else if bottom.kind() == SexpType::Environment {
         match interp().frames[..depth]
             .iter()
-            .position(|entry| entry.env == bottom)
+            .position(|entry| entry.owns(bottom))
         {
             Some(index) => index + 1,
             None if bottom == global_env() => 0,
@@ -146,7 +146,7 @@ unsafe fn do_trace_back(call: &Call<'_>) -> R<Sexp> {
     } else {
         interp().frames[..count]
             .iter()
-            .rposition(|entry| entry.env == top)
+            .rposition(|entry| entry.owns(top))
             .map_or(0, |index| index + 1)
     };
 
