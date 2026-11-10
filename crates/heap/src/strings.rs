@@ -349,16 +349,20 @@ impl StringTable {
 /// compare its print name by pointer. Symbols live as long as the heap, so the table never
 /// removes an entry and needs no tombstones.
 pub(crate) struct SymbolTable {
-    /// A power-of-two count of slots: 0 for empty, otherwise a symbol packed as [`pack`] packs a
-    /// string, tagged with its print name's hash.
-    slots: Vec<u64>,
+    /// A power-of-two count of slots: 0 for empty, otherwise a symbol's print name packed as
+    /// [`pack`] packs a string, tagged with the name's hash. A probe compares whole slots, so a
+    /// lookup never reads the symbol or the name.
+    names: Vec<u64>,
+    /// The symbol of the name in the same slot of `names`, `None` beside an empty slot.
+    symbols: Vec<Option<Sexp>>,
     len: usize,
 }
 
 impl Default for SymbolTable {
     fn default() -> SymbolTable {
         SymbolTable {
-            slots: vec![EMPTY; INITIAL_SLOTS],
+            names: vec![EMPTY; INITIAL_SLOTS],
+            symbols: vec![None; INITIAL_SLOTS],
             len: 0,
         }
     }
@@ -372,20 +376,16 @@ impl SymbolTable {
     /// The symbol whose print name is the interned string `name`.
     #[inline]
     pub unsafe fn get(&self, name: Sexp) -> Option<Sexp> {
-        let hash = unsafe { name.char_hash() };
-        let mask = self.slots.len() - 1;
-        let tag = tag(hash);
-        let mut index = home(hash, mask);
+        let key = pack_unchecked(name, unsafe { name.char_hash() });
+        let mask = self.names.len() - 1;
+        let mut index = symbol_home(key, mask);
         loop {
-            let slot = self.slots[index];
+            let slot = self.names[index];
+            if slot == key {
+                return self.symbols[index];
+            }
             if slot == EMPTY {
                 return None;
-            }
-            if slot & !ADDRESS_MASK == tag {
-                let symbol = unsafe { unpack(slot) };
-                if unsafe { symbol.car() } == name {
-                    return Some(symbol);
-                }
             }
             index = (index + 1) & mask;
         }
@@ -393,34 +393,41 @@ impl SymbolTable {
 
     /// Adds `symbol`, whose print name the table must not hold yet.
     pub unsafe fn insert(&mut self, symbol: Sexp) {
-        if (self.len + 1) * 8 > self.slots.len() * 7 {
-            let doubled = vec![EMPTY; self.slots.len() * 2];
-            let old = std::mem::replace(&mut self.slots, doubled);
-            for slot in old.into_iter().filter(|&slot| slot != EMPTY) {
-                unsafe { self.place(slot) };
+        if (self.len + 1) * 8 > self.names.len() * 7 {
+            let slots = self.names.len() * 2;
+            let names = std::mem::replace(&mut self.names, vec![EMPTY; slots]);
+            let symbols = std::mem::replace(&mut self.symbols, vec![None; slots]);
+            for (key, symbol) in names.into_iter().zip(symbols).filter(|&(key, _)| key != EMPTY) {
+                self.place(key, symbol);
             }
         }
-        unsafe { self.place(pack(symbol, symbol.car().char_hash())) };
+        let name = unsafe { symbol.car() };
+        self.place(pack(name, unsafe { name.char_hash() }), Some(symbol));
         self.len += 1;
     }
 
-    unsafe fn place(&mut self, slot: u64) {
-        let mask = self.slots.len() - 1;
-        let mut index = home(unsafe { unpack(slot).car().char_hash() }, mask);
-        while self.slots[index] != EMPTY {
+    fn place(&mut self, key: u64, symbol: Option<Sexp>) {
+        let mask = self.names.len() - 1;
+        let mut index = symbol_home(key, mask);
+        while self.names[index] != EMPTY {
             index = (index + 1) & mask;
         }
-        self.slots[index] = slot;
+        self.names[index] = key;
+        self.symbols[index] = symbol;
     }
 
     /// Every symbol, in no particular order.
     pub fn symbols(&self) -> impl Iterator<Item = Sexp> + '_ {
-        self.slots
-            .iter()
-            .filter(|&&slot| slot != EMPTY)
-            // SAFETY: a slot that is not empty holds a symbol.
-            .map(|&slot| unsafe { unpack(slot) })
+        self.symbols.iter().filter_map(|&symbol| symbol)
     }
+}
+
+/// The first slot to probe for a symbol table key. It reads only the hash tag inside the key,
+/// so growing the table re-places every key without touching a name; the tag's bits cover
+/// tables up to `1 << TAG_BITS` slots.
+#[inline]
+fn symbol_home(key: u64, mask: usize) -> usize {
+    home((key >> ADDRESS_BITS) as u32, mask)
 }
 
 /// The first slot to probe for a hash. The bits above the tag pick it, after a multiply spreads
@@ -433,6 +440,12 @@ fn home(hash: u32, mask: usize) -> usize {
 #[inline]
 fn tag(hash: u32) -> u64 {
     (u64::from(hash) & ((1 << TAG_BITS) - 1)) << ADDRESS_BITS
+}
+
+/// [`pack`] without its check, for a lookup key: an address that does not fit matches no slot.
+#[inline]
+fn pack_unchecked(object: Sexp, hash: u32) -> u64 {
+    (object.as_ptr() as u64 >> 3) | tag(hash)
 }
 
 #[inline]

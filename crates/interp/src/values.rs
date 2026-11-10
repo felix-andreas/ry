@@ -835,12 +835,19 @@ pub unsafe fn refuse_bytes(strings: Sexp) -> R<()> {
 
 /// A `CHARSXP` as text. A byte that is not valid UTF-8 becomes its private-use stand-in (see
 /// [`escape_invalid_bytes`]), which [`mkchar`] turns back into the byte.
+#[inline]
 pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
-    let bytes = charsxp.bytes();
     if charsxp.is_valid_utf8() && !charsxp.has_gp(gp::LATIN1 | gp::BYTES) {
         // SAFETY: the heap validated these bytes when it interned them, and they never change.
-        return Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(bytes) });
+        return Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(charsxp.bytes()) });
     }
+    unsafe { char_str_decoded(charsxp) }
+}
+
+/// [`char_str`] for a string the heap has not validated as UTF-8 text.
+#[cold]
+unsafe fn char_str_decoded<'a>(charsxp: Sexp) -> Cow<'a, str> {
+    let bytes = charsxp.bytes();
     // Strict validation runs a word at a time over ASCII, where the lossy decoder steps through
     // chunks. The bit is only a hint, since native code can set any of a string's flags.
     if charsxp.has_gp(gp::ASCII)
