@@ -455,8 +455,14 @@ pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
         return Ok(None);
     }
+    enter(function, registered(function), args)
+}
+
+/// [`native_entry`] for a closure that is not being debugged or traced, whose registered entry
+/// the caller has already looked up.
+unsafe fn enter(function: Sexp, entry: Option<Entry>, args: &[Arg]) -> R<Option<Sexp>> {
     let tagged = args.iter().any(|arg| arg.tag != nil());
-    let value = match registered(function) {
+    let value = match entry {
         Some(Entry::Whole { code, .. }) if !tagged => {
             // An entry whose closure returns invisibly clears the flag itself.
             interp().visible = true;
@@ -509,9 +515,14 @@ pub unsafe fn native_entry_by_value(
     compiled: bool,
     lookup: impl Fn(Sexp) -> Option<Sexp>,
 ) -> R<Option<Sexp>> {
+    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
+        return Ok(None);
+    }
+    let mut tagged = false;
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
         let expression = cell.car();
+        tagged |= cell.tag() != nil();
         if expression == missing_arg()
             || expression == symbols().dots
             || matches!(
@@ -523,13 +534,8 @@ pub unsafe fn native_entry_by_value(
         }
         cell = cell.cdr();
     }
-    let forcing = compiled
-        && !function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
-        && matches!(
-            registered(function),
-            Some(Entry::Whole { inlined: true, .. })
-        )
-        && arguments_untagged(arguments);
+    let entry = registered(function);
+    let forcing = compiled && !tagged && matches!(entry, Some(Entry::Whole { inlined: true, .. }));
     let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
@@ -541,7 +547,12 @@ pub unsafe fn native_entry_by_value(
                         && value.kind() == SexpType::Promise
                         && value.car() == values::unbound() =>
                 {
-                    eval::force_promise(value)?
+                    // A chain that ends without code settles to what forcing would give, and
+                    // far more cheaply than an evaluation.
+                    match eval::settled_without_code(value)? {
+                        Some(value) => value,
+                        None => eval::force_promise(value)?,
+                    }
                 }
                 // Otherwise the binding goes through as it is: each entry resolves only the
                 // arguments its R body would read, so an argument it skips (`getOption`'s
@@ -558,19 +569,7 @@ pub unsafe fn native_entry_by_value(
         });
         cell = cell.cdr();
     }
-    native_entry(function, &args)
-}
-
-/// Whether no argument of a call is named, so a [`Entry::Whole`] entry takes the call.
-unsafe fn arguments_untagged(arguments: Sexp) -> bool {
-    let mut cell = arguments;
-    while cell.kind() == SexpType::Pairlist {
-        if cell.tag() != nil() {
-            return false;
-        }
-        cell = cell.cdr();
-    }
-    true
+    enter(function, entry, &args)
 }
 
 /// The routine's arguments for a call of `function`, a closure with an [`Entry::Routine`]: the
