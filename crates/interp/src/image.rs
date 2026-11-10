@@ -173,27 +173,7 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
                     "its pages differ in size from their memory".to_owned(),
                 ));
             }
-            #[cfg(unix)]
-            if std::env::var_os("RY_IMAGE_MAP").is_some() && !memory.is_empty() {
-                use std::os::fd::AsRawFd;
-                let mapped = unsafe {
-                    libc::mmap(
-                        memory.as_mut_ptr().cast(),
-                        memory.len(),
-                        libc::PROT_READ | libc::PROT_WRITE,
-                        libc::MAP_PRIVATE | libc::MAP_FIXED,
-                        file.as_raw_fd(),
-                        offset as libc::off_t,
-                    )
-                };
-                if mapped == libc::MAP_FAILED {
-                    return Err(ImageError::Invalid("cannot map".to_owned()));
-                }
-                return Ok(());
-            }
-            read_at(file, memory, offset).map_err(|failure| {
-                ImageError::Invalid(format!("its pages cannot be read: {failure}"))
-            })
+            fill_from(file, memory, offset)
         }
     };
     let roots = heap()
@@ -221,6 +201,50 @@ fn section_start(offset: u64) -> u64 {
 }
 
 const SECTION_ALIGNMENT: u64 = 64 * 1024;
+
+/// Puts the bytes of `file` at `offset` into `memory`, which lies inside the heap's
+/// reservation. On Unix the file is mapped privately over `memory`: pages that start-up never
+/// writes stay the page cache's, shared by every process that loads the image, and a page is
+/// copied only when it is first written. On an empty start that halves the image's share of
+/// memory across concurrent workers and costs less than reading, because reading first has the
+/// kernel zero the huge pages it then overwrites. The writer replaces the file by renaming, so a
+/// mapped image never shrinks under a running process.
+fn fill_from(file: &std::fs::File, memory: &mut [u8], offset: u64) -> Result<(), ImageError> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if memory.is_empty() {
+            return Ok(());
+        }
+        let offset = libc::off_t::try_from(offset)
+            .map_err(|_| ImageError::Invalid("its pages lie past the end of a file".to_owned()))?;
+        // SAFETY: `memory` is committed address space the heap owns and holds no live object
+        // while the load fills it; a fixed private mapping replaces it in place.
+        let mapped = unsafe {
+            libc::mmap(
+                memory.as_mut_ptr().cast(),
+                memory.len(),
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_FIXED,
+                file.as_raw_fd(),
+                offset,
+            )
+        };
+        if mapped == libc::MAP_FAILED {
+            return Err(ImageError::Invalid(format!(
+                "its pages cannot be mapped: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        read_at(file, memory, offset).map_err(|failure| {
+            ImageError::Invalid(format!("its pages cannot be read: {failure}"))
+        })
+    }
+}
 
 /// Fills `memory` with the bytes of `file` at `offset`.
 fn read_at(file: &std::fs::File, memory: &mut [u8], offset: u64) -> std::io::Result<()> {
@@ -357,8 +381,12 @@ pub(crate) unsafe fn write(
     let large_offset = section_start(out.bytes.len() as u64);
     out.bytes.resize(large_offset as usize, 0);
     out.bytes.extend_from_slice(image.large());
-    std::fs::write(path, &out.bytes)
-        .map_err(|failure| format!("cannot write {}: {failure}", path.display()))
+    // A process that has the old image mapped keeps its pages: renaming replaces the name,
+    // where writing in place would truncate the mapped file under it.
+    let partial = path.with_extension("image.partial");
+    let cannot_write = |failure: std::io::Error| format!("cannot write {}: {failure}", path.display());
+    std::fs::write(&partial, &out.bytes).map_err(cannot_write)?;
+    std::fs::rename(&partial, path).map_err(cannot_write)
 }
 
 /// Every primitive by index, which both processes create the same way before start-up.
