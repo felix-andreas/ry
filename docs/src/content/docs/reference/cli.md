@@ -260,8 +260,8 @@ A value outside a variable's range is ignored, as on GNU R.
 
 ry's base R tree ships an image of the session as it stands once base R and the default packages
 have loaded (`library/base/R/ry-start.image`), and a start loads it instead of running base R's
-start-up code. On Linux an empty `ry run` script takes about 60 ms from the image and about 120 ms
-without it. The image is written when ry is built and never at run time.
+start-up code. On Linux an empty `ry run` script takes about 30 ms from the image and about 90 ms
+without it (`RY_IMAGE=0`). The image is written when ry is built and never at run time.
 
 Each start still runs the steps that read the environment: the C-level options, base R's profile,
 and the `.onLoad` hooks of utils, grDevices and stats. So `EDITOR`, `R_LIBS`, `_R_RNG_VERSION_`
