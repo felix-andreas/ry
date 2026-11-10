@@ -727,10 +727,10 @@ fn report(
         let share = |part: u64, whole: u64| {
             if whole == 0 { 0.0 } else { 100.0 * part as f64 / whole as f64 }
         };
-        writeln!(out, "\n## Package calls\n")?;
+        writeln!(out, "\n## Namespace calls\n")?;
         writeln!(
             out,
-            "{direct} of {calls} calls to package closures skipped the generic call protocol \
+            "{direct} of {calls} calls to namespace closures (base included) skipped the generic call protocol \
              ({:.1}%), and {:.1}% of the {} whose environment no code observed.\n",
             share(direct, calls),
             share(direct, calls - observed),

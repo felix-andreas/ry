@@ -2906,19 +2906,20 @@ unsafe fn pop_frame(
     result
 }
 
-/// Counts a call to a closure of a package namespace, and whether it skipped the generic call
-/// protocol: it ran natively without a frame (`frame` is `None`) or in a slot frame that never
+/// Counts a call to a closure of a namespace, base included, and whether it skipped the generic
+/// call protocol: it ran natively without a frame (`frame` is `None`) or in a slot frame that never
 /// made its environment, and no argument was a promise. A call that did not is counted under
 /// the reason: what reified its frame, a frame that had an environment from the start, or the
 /// kind of its first promise argument's code.
 #[cold]
 pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, args: &[Arg]) {
     let enclosure = function.tag();
-    if enclosure == values::base_namespace() || !crate::envir::is_namespace(enclosure) {
+    if enclosure != values::base_namespace() && !crate::envir::is_namespace(enclosure) {
         return;
     }
     activity::count(Counter::PackageCalls);
     let reason = match frame {
+        Some(_) if function.cdr().kind() != SexpType::Bytecode => Some("body not compiled"),
         Some(frame) if frame.slots == crate::NO_SLOTS => Some("frame with an environment"),
         Some(frame) if frame.env != nil() => {
             let reason = activity::label_name(frame.reified_by);

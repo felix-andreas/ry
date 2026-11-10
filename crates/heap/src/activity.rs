@@ -171,12 +171,12 @@ impl Counter {
             Counter::JitEntries => "entries into compiled code",
             Counter::LookupMisses => "lookups past the inline caches",
             Counter::FramesReified => "slot frames turned into environments",
-            Counter::PackageCalls => "calls to closures of package namespaces",
+            Counter::PackageCalls => "calls to closures of namespaces, base included",
             Counter::PackageCallsDirect => {
-                "package calls that ran in slots, with no argument promise and no environment"
+                "namespace calls that ran in slots, with no argument promise and no environment"
             }
             Counter::PackageCallsObserved => {
-                "package calls whose frame was reified because code observed its environment"
+                "namespace calls whose frame was reified because code observed its environment"
             }
             Counter::WrappersInlined => "calls of one-builtin wrappers run without their body",
         }
