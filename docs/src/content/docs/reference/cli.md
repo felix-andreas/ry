@@ -213,13 +213,18 @@ your code and no data. It lists:
 - the time split after start-up: tier-0 bytecode, the AST evaluator, closure call setup, variable
   lookups past the inline caches, builtins, S3 and S4 method lookup, native code, condition
   handling, frame introspection (`sys.call`, `parent.frame`, `match.call`), garbage collection,
-  JIT compilation and JIT-compiled code;
+  JIT compilation and JIT-compiled code. The summary's own work, counting each collection's freed
+  objects by type, is listed apart as "profile summary bookkeeping" rather than in garbage
+  collection;
 - base R's builtins by time and by number of calls;
 - native code (`.Call`, `.External`, `.C`) by package. A package outside R's own, its
   recommended packages and the common CRAN dependencies ry benchmarks against is printed as
   `private-` and a hash of its name;
 - event counts: closure calls, promises created and forced, S3 and S4 dispatches, conditions
-  signalled, JIT compilations and deoptimizations, collections and the peak memory in use.
+  signalled, JIT compilations and deoptimizations, collections and the peak memory in use;
+- calls to closures of package namespaces other than base, and how many of them skipped the
+  generic call protocol: the call ran natively or in a slot frame that never made its
+  environment, and no argument was a promise.
 
 The time split comes from sampling what the runtime is doing once a millisecond, so a share below
 about 1% of a short run is noise. Collecting it slows a run by up to about 7% (1% on the fastest
@@ -260,8 +265,8 @@ A value outside a variable's range is ignored, as on GNU R.
 
 ry's base R tree ships an image of the session as it stands once base R and the default packages
 have loaded (`library/base/R/ry-start.image`), and a start loads it instead of running base R's
-start-up code. On Linux an empty `ry run` script takes about 60 ms from the image and about 120 ms
-without it. The image is written when ry is built and never at run time.
+start-up code. On Linux an empty `ry run` script takes about 30 ms from the image and about 90 ms
+without it (`RY_IMAGE=0`). The image is written when ry is built and never at run time.
 
 Each start still runs the steps that read the environment: the C-level options, base R's profile,
 and the `.onLoad` hooks of utils, grDevices and stats. So `EDITOR`, `R_LIBS`, `_R_RNG_VERSION_`

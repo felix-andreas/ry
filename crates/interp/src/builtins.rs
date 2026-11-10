@@ -67,10 +67,46 @@ pub struct Call<'a> {
     /// The primitive object being called.
     pub op: Sexp,
     pub args: &'a [Arg],
-    pub env: Sexp,
+    /// The environment the call was made from, or `NULL` when it was made from the slot frame
+    /// at `frame`, which has no environment yet. Read it through [`Call::env`] to hand the
+    /// environment on, or [`Call::frame_index`] to read the calling frame's record.
+    pub rho: Sexp,
+    /// The calling frame's position in the frame stack when `rho` is `NULL`.
+    pub frame: u32,
     /// The first argument when the binding this call's result is assigned to holds its only
     /// reference, as in `d <- Dict.insert(d, k, v)`: the builtin may then update it in place.
     pub reusable: Option<Sexp>,
+}
+
+impl Call<'_> {
+    /// The environment the call was made from, made from the calling slot frame's slots first
+    /// if it has none (`docs/src/content/docs/development/design/slot-frames.md`).
+    #[inline]
+    pub unsafe fn env(&self) -> R<Sexp> {
+        if self.rho != nil() || self.frame == crate::NO_SLOTS {
+            return Ok(self.rho);
+        }
+        crate::eval::frame_env(self.frame as usize, crate::eval::Reify::Builtin(self.op))
+    }
+
+    /// What the calling slot frame's `...` slot holds, when the call was made from a slot frame
+    /// that has no environment and a `...` formal; `None` otherwise, and then the caller's
+    /// environment answers.
+    pub unsafe fn slot_dots(&self) -> Option<Sexp> {
+        if self.rho != nil() || self.frame == crate::NO_SLOTS {
+            return None;
+        }
+        crate::eval::slot_dots(self.frame as usize)
+    }
+
+    /// The position in the frame stack of the closure frame the call was made from, without
+    /// giving a slot frame its environment; `None` when it was made from no closure frame.
+    pub unsafe fn frame_index(&self) -> Option<usize> {
+        if self.rho == nil() {
+            return (self.frame != crate::NO_SLOTS).then_some(self.frame as usize);
+        }
+        crate::envir::frame_of(self.rho)
+    }
 }
 
 pub type BuiltinFn = unsafe fn(&Call<'_>) -> R<Sexp>;
@@ -85,10 +121,11 @@ pub unsafe fn is_native_value(value: Sexp) -> bool {
 /// handle scope, or `None` for the full call (see [`BuiltinDef::unary`]).
 pub type UnaryFn = unsafe fn(Sexp) -> R<Option<Sexp>>;
 
-/// A builtin's result for its argument values in formal order when that takes no dispatch, no
-/// checks and no handle scope of its own, or `None` for the full call (see
-/// [`BuiltinDef::direct`]).
-pub type DirectFn = unsafe fn(&[Sexp]) -> R<Option<Sexp>>;
+/// A builtin's result for the call and its argument values in formal order when that takes no
+/// dispatch, no checks and no handle scope of its own, or `None` for the full call (see
+/// [`BuiltinDef::direct`]). Most entries ignore the call, which only names the builtin's
+/// context, as `.Call` needs for its traceback.
+pub type DirectFn = unsafe fn(Sexp, &[Sexp]) -> R<Option<Sexp>>;
 
 pub struct BuiltinDef {
     pub name: &'static str,

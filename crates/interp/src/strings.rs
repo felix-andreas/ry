@@ -33,6 +33,7 @@ use {
     memchr::memmem,
     regex_automata::{Anchored, Input, MatchKind, meta, util::syntax},
     rustc_hash::{FxHashMap, FxHashSet},
+    smallvec::{SmallVec, smallvec},
     std::{
         borrow::Cow,
         cell::{OnceCell, RefCell},
@@ -133,7 +134,7 @@ unsafe fn paste(
         // Every element of a column is read, so a deferred column converts in one batch.
         columns.push(values::materialize(as_character(
             list.element(index),
-            call.env,
+            || call.env(),
         )?)?);
     }
     let lengths: Vec<usize> = columns.iter().map(|&column| length(column)).collect();
@@ -702,7 +703,7 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
         {
             let argument = &mut arguments[conversion.argument];
             if argument.text.is_none() && argument.value.is_object() {
-                let text = as_character(argument.value, call.env)?;
+                let text = as_character(argument.value, || call.env())?;
                 argument.text = Some(text);
                 argument.length = length(text);
             }
@@ -729,7 +730,7 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
                         conversion,
                         &mut arguments,
                         row,
-                        call.env,
+                        call.env()?,
                     )?);
                 }
             }
@@ -938,7 +939,7 @@ unsafe fn format_conversion(
         let text = match argument.text {
             Some(text) => text,
             None => {
-                let text = as_character(value, env)?;
+                let text = as_character(value, || Ok(env))?;
                 argument.text = Some(text);
                 text
             }
@@ -2013,75 +2014,92 @@ unsafe fn do_raw_to_char(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_pmatch(call: &Call<'_>) -> R<Sexp> {
-    let targets = match_strings(call.arg(0))?;
-    let table = match_strings(call.arg(1))?;
+    let targets = match_texts(call.arg(0))?;
+    let table = match_texts(call.arg(1))?;
     let no_match = values::as_integer_scalar(call.arg(2));
     let duplicates = flag(call.arg(3));
-    let mut matched: Vec<Option<usize>> = vec![None; targets.len()];
-    let mut used = vec![false; table.len()];
+    // A match is its 1-based table position, so 0 marks a target without one.
+    let mut matched: SmallVec<[i32; 8]> = smallvec![0; targets.len()];
+    let mut used: SmallVec<[u64; 2]> = smallvec![0; table.len().div_ceil(64)];
+    let is_free = |used: &[u64], position: usize| {
+        duplicates || used[position / 64] & (1 << (position % 64)) == 0
+    };
+    let claim = |used: &mut [u64], slot: &mut i32, position: usize| {
+        *slot = position as i32 + 1;
+        if !duplicates {
+            used[position / 64] |= 1 << (position % 64);
+        }
+    };
     for (target, slot) in targets.iter().zip(matched.iter_mut()) {
         if target.is_empty() {
             continue;
         }
         if let Some(position) = (0..table.len())
-            .find(|&position| (duplicates || !used[position]) && table[position] == *target)
+            .find(|&position| is_free(&used, position) && table[position] == *target)
         {
-            *slot = Some(position);
-            used[position] = !duplicates;
+            claim(&mut used, slot, position);
         }
     }
     for (target, slot) in targets.iter().zip(matched.iter_mut()) {
-        if target.is_empty() || slot.is_some() {
+        if target.is_empty() || *slot != 0 {
             continue;
         }
         let mut candidates = (0..table.len()).filter(|&position| {
-            (duplicates || !used[position]) && table[position].starts_with(target.as_str())
+            is_free(&used, position) && table[position].starts_with(target.as_ref())
         });
         if let (Some(position), None) = (candidates.next(), candidates.next()) {
-            *slot = Some(position);
-            used[position] = !duplicates;
+            claim(&mut used, slot, position);
         }
     }
-    let indices: Vec<i32> = matched
-        .into_iter()
-        .map(|slot| slot.map_or(no_match, |position| position as i32 + 1))
-        .collect();
-    values::integer_vector(&indices)
+    for slot in &mut matched {
+        if *slot == 0 {
+            *slot = no_match;
+        }
+    }
+    values::integer_vector(&matched)
 }
 
 unsafe fn do_charmatch(call: &Call<'_>) -> R<Sexp> {
-    let targets = match_strings(call.arg(0))?;
-    let table = match_strings(call.arg(1))?;
+    let targets = match_texts(call.arg(0))?;
+    let table = match_texts(call.arg(1))?;
     let no_match = values::as_integer_scalar(call.arg(2));
-    let indices: Vec<i32> = targets
+    let indices: SmallVec<[i32; 8]> = targets
         .iter()
         .map(|target| {
-            let exact: Vec<usize> = (0..table.len())
-                .filter(|&position| table[position] == *target)
-                .collect();
-            let partial: Vec<usize> = (0..table.len())
-                .filter(|&position| table[position].starts_with(target.as_str()))
-                .collect();
-            match (exact.as_slice(), partial.as_slice()) {
-                ([position], _) => *position as i32 + 1,
-                ([_, _, ..], _) => 0,
-                ([], [position]) => *position as i32 + 1,
-                ([], [_, _, ..]) => 0,
-                ([], []) => no_match,
+            let (mut exact, mut exact_count, mut partial, mut partial_count) = (0, 0, 0, 0);
+            for (position, entry) in table.iter().enumerate() {
+                if entry.starts_with(target.as_ref()) {
+                    partial = position as i32 + 1;
+                    partial_count += 1;
+                    if entry.len() == target.len() {
+                        exact = partial;
+                        exact_count += 1;
+                    }
+                }
+            }
+            match (exact_count, partial_count) {
+                (1, _) => exact,
+                (0, 1) => partial,
+                (0, 0) => no_match,
+                _ => 0,
             }
         })
         .collect();
     values::integer_vector(&indices)
 }
 
-/// The strings of a matching argument, with `NA` read as the text `"NA"`, as GNU R does.
-unsafe fn match_strings(value: Sexp) -> R<Vec<String>> {
+/// The strings of a matching argument, with `NA` read as the text `"NA"`, as GNU R does. Text
+/// that is already UTF-8 is borrowed from its `CHARSXP`, which the call's arguments keep alive.
+unsafe fn match_texts<'a>(value: Sexp) -> R<SmallVec<[Cow<'a, str>; 8]>> {
     if value.kind() != SexpType::String && value != nil() {
         return Err(error("argument is not of mode character"));
     }
-    Ok(strings(value)
-        .into_iter()
-        .map(|text| text.unwrap_or_else(|| "NA".to_owned()))
+    let na = na_string();
+    Ok((0..length(value))
+        .map(|index| match value.element(index) {
+            charsxp if charsxp == na => Cow::Borrowed("NA"),
+            charsxp => values::char_str(charsxp),
+        })
         .collect())
 }
 
@@ -4015,12 +4033,14 @@ pub(crate) unsafe fn flag(value: Sexp) -> bool {
 
 /// `as.character(value)`, dispatching for objects, as `paste` and `sprintf` convert their
 /// arguments. A classed character vector is already text and is used as it is, which matters
-/// for vctrs, whose `as.character` method refuses a class with no cast to character.
-unsafe fn as_character(value: Sexp, env: Sexp) -> R<Sexp> {
+/// for vctrs, whose `as.character` method refuses a class with no cast to character. Only that
+/// dispatch needs the caller's environment, so `env` is asked for then, and a slot frame keeps
+/// its slots otherwise.
+unsafe fn as_character(value: Sexp, env: impl FnOnce() -> R<Sexp>) -> R<Sexp> {
     if value.is_object() && value.kind() != SexpType::String {
         let function = values::install("as.character")?;
         let call = values::call(function, &[eval::quote_value(value)?])?;
-        let converted = eval::eval(call, env)?;
+        let converted = eval::eval(call, env()?)?;
         if converted.kind() != SexpType::String {
             return coerce_vector(converted, SexpType::String);
         }

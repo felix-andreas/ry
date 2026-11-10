@@ -1,0 +1,17 @@
+[stdout]
+| 1 12 6 FALSE 6 6 0 yy + 1 matched(z = yy * 2) no 1 
+| 1 12 6 FALSE 6 6 0 yy + 1 matched(z = yy * 2) no 1 
+| 1 12 6 FALSE 6 6 0 yy + 1 matched(z = yy * 2) no 1 
+| 1 12 yy + 1 FALSE FALSE 6 gv + 1 5 3 6 k * 2 gv - 1 
+| 1 12 yy + 1 FALSE FALSE 6 gv + 1 5 6 6 k * 2 gv - 1 
+| 1 12 yy + 1 FALSE FALSE 6 gv + 1 5 9 6 k * 2 gv - 1 
+| ba 4 1 0 5 3 
+| ba 4 1 0 5 3 
+| ba 4 1 0 5 3 
+| ba 4 1 0 5 3 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

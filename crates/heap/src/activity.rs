@@ -50,10 +50,13 @@ pub enum Activity {
     JitCompile,
     /// Machine code the JIT produced.
     Compiled,
+    /// The summary's own bookkeeping that cannot be a store: counting a collection's dead
+    /// objects by type, which reads every dead object's header.
+    Profiler,
 }
 
 impl Activity {
-    pub const ALL: [Activity; 14] = [
+    pub const ALL: [Activity; 15] = [
         Activity::Other,
         Activity::Interpreter,
         Activity::Evaluator,
@@ -68,6 +71,7 @@ impl Activity {
         Activity::Collector,
         Activity::JitCompile,
         Activity::Compiled,
+        Activity::Profiler,
     ];
 
     pub fn from_word(word: u32) -> Activity {
@@ -93,6 +97,7 @@ impl Activity {
             Activity::Collector => "garbage collection",
             Activity::JitCompile => "JIT compilation",
             Activity::Compiled => "JIT-compiled code",
+            Activity::Profiler => "profile summary bookkeeping",
         }
     }
 }
@@ -105,6 +110,7 @@ pub enum Counter {
     NativeEntries,
     BuiltinCalls,
     PromisesCreated,
+    ArgumentReferences,
     PromisesForced,
     FormalsMatchedByName,
     DotsCalls,
@@ -117,14 +123,20 @@ pub enum Counter {
     JitDeoptimizations,
     JitEntries,
     LookupMisses,
+    FramesReified,
+    PackageCalls,
+    PackageCallsDirect,
+    PackageCallsObserved,
+    WrappersInlined,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 16] = [
+    pub const ALL: [Counter; 22] = [
         Counter::ClosureCalls,
         Counter::NativeEntries,
         Counter::BuiltinCalls,
         Counter::PromisesCreated,
+        Counter::ArgumentReferences,
         Counter::PromisesForced,
         Counter::FormalsMatchedByName,
         Counter::DotsCalls,
@@ -137,6 +149,11 @@ impl Counter {
         Counter::JitDeoptimizations,
         Counter::JitEntries,
         Counter::LookupMisses,
+        Counter::FramesReified,
+        Counter::PackageCalls,
+        Counter::PackageCallsDirect,
+        Counter::PackageCallsObserved,
+        Counter::WrappersInlined,
     ];
 
     pub fn describe(self) -> &'static str {
@@ -145,6 +162,7 @@ impl Counter {
             Counter::NativeEntries => "closure calls run natively, without a frame",
             Counter::BuiltinCalls => "builtin calls (outside inline fast paths)",
             Counter::PromisesCreated => "promises created",
+            Counter::ArgumentReferences => "arguments passed as references to a caller's slot",
             Counter::PromisesForced => "promises forced",
             Counter::FormalsMatchedByName => "calls matched by name or partially",
             Counter::DotsCalls => "calls passing `...`",
@@ -157,6 +175,15 @@ impl Counter {
             Counter::JitDeoptimizations => "JIT deoptimizations",
             Counter::JitEntries => "entries into compiled code",
             Counter::LookupMisses => "lookups past the inline caches",
+            Counter::FramesReified => "slot frames turned into environments",
+            Counter::PackageCalls => "calls to closures of package namespaces",
+            Counter::PackageCallsDirect => {
+                "package calls that ran in slots, with no argument promise and no environment"
+            }
+            Counter::PackageCallsObserved => {
+                "package calls whose frame was reified because code observed its environment"
+            }
+            Counter::WrappersInlined => "calls of one-builtin wrappers run without their body",
         }
     }
 }
@@ -164,12 +191,16 @@ impl Counter {
 /// The most builtins [`count_builtin`] keeps a count for; ry defines fewer than this.
 pub const BUILTIN_SLOTS: usize = 4096;
 
+/// The most [`label`]s [`count_package_fallback`] keeps a count for.
+pub const LABEL_SLOTS: usize = 1024;
+
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static CURRENT: AtomicU32 = AtomicU32::new(0);
 static COUNTERS: [AtomicU64; Counter::ALL.len()] =
     [const { AtomicU64::new(0) }; Counter::ALL.len()];
 static BUILTINS: [AtomicU64; BUILTIN_SLOTS] = [const { AtomicU64::new(0) }; BUILTIN_SLOTS];
 static LABELS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static PACKAGE_FALLBACKS: [AtomicU64; LABEL_SLOTS] = [const { AtomicU64::new(0) }; LABEL_SLOTS];
 static FRAME_OWNERS: [AtomicU32; FRAME_SLOTS] = [const { AtomicU32::new(0) }; FRAME_SLOTS];
 static FRAME_NAMES: [AtomicUsize; FRAME_SLOTS] = [const { AtomicUsize::new(0) }; FRAME_SLOTS];
 static FRAME_DEPTH: AtomicU32 = AtomicU32::new(0);
@@ -248,6 +279,32 @@ pub fn count_builtin(index: usize) {
 #[inline(always)]
 fn bump(counter: &AtomicU64) {
     counter.store(counter.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+}
+
+/// Counts a package call that took the generic call protocol, under the [`label`] of the reason.
+pub fn count_package_fallback(reason: u32) {
+    if let Some(slot) = PACKAGE_FALLBACKS.get(reason as usize) {
+        bump(slot);
+    }
+}
+
+/// The package calls [`count_package_fallback`] counted under each reason, largest first.
+pub fn package_fallbacks() -> Vec<(String, u64)> {
+    let mut fallbacks: Vec<(String, u64)> = PACKAGE_FALLBACKS
+        .iter()
+        .enumerate()
+        .filter_map(|(id, slot)| {
+            let count = slot.load(Ordering::Relaxed);
+            (count > 0).then(|| {
+                (
+                    label_name(id as u32).unwrap_or_else(|| "?".to_owned()),
+                    count,
+                )
+            })
+        })
+        .collect();
+    fallbacks.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    fallbacks
 }
 
 pub fn counter(counter: Counter) -> u64 {

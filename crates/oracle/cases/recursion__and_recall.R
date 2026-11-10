@@ -11,3 +11,10 @@ ackermann(2, 3)
 depth <- function(x) if (is.list(x) && length(x)) 1 + max(sapply(x, depth)) else 0
 depth(list(1, list(2, list(3))))
 tryCatch((function(n) sys.function()(n))(1), error = function(e) "infinite")
+# The recalled call's parent is the caller of the function that called `Recall`, and its call is
+# that function's call.
+up <- function(n) if (n <= 0) parent.frame() else Recall(n - 1)
+home <- function() { e <- environment(); identical(up(2), e) }
+home()
+called <- function(n) if (n <= 1) sys.call() else Recall(n - 1)
+called(3)

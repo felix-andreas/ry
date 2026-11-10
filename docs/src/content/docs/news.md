@@ -5,6 +5,14 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### Cheaper minor collections
+
+A minor collection checks an already marked object inline, without a function call or bounds checks, and handles a newly marked one out of line. Minor collections during `library(testthat)` take 29% fewer instructions, and the testthat workload takes 1.2% fewer in total.
+
+### Collections skip what did not change
+
+A minor collection no longer reads dead call frames that own no memory, and it marks only the method-cache entries stored since the last collection instead of the whole S3 and S4 cache. The garbage collection share of `--profile-summary` on the testthat workload halves, from 0.046 s to 0.021 s, and the collection pauses take 35% less time; part of that is the summary's own counting of freed objects, which the summary lists apart as "profile summary bookkeeping".
+
 ### Package-specific fast paths
 
 ry runs a few package functions natively when the installed package is exactly the release the
@@ -17,7 +25,11 @@ native code follows; any other release runs its own R code unchanged.
 
 ### Faster environment variables
 
-`Sys.getenv()` looks up every name it is given in one pass over the environment. `Sys.setenv()` leaves a variable alone when it already holds the new value, and `Sys.unsetenv()` skips a variable that is not set. withr's `local_envvar()` restores often hit both cases, and the testthat workload takes 1.4% fewer instructions.
+`Sys.getenv()` looks up every name it is given in one pass over the environment. `Sys.setenv()` leaves a variable alone when it already holds the new value, and `Sys.unsetenv()` skips a variable that is not set. withr's `local_envvar()` restores often hit both cases. A lookup rejects most variables after comparing one byte, as glibc does, and together these take 2.4% off the instructions the testthat workload runs.
+
+### Faster partial matching and name lookups
+
+`pmatch()` and `charmatch()` compare each input with the table in place, without copying the strings, and mark the table entries already used in a bitset. Native code that reads an argument or option by name uses a symbol installed at startup instead of interning the name on every call, and reading the text of a string the heap has already validated as UTF-8 is inlined at each call site. The testthat workload runs 1.2% fewer instructions, and 2.25% fewer together with the environment-variable lookups above.
 
 ### Faster assignment forms and kernels in the public benchmark suites
 

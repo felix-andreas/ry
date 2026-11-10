@@ -172,7 +172,7 @@ unsafe fn do_attr(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `attr(x, which)` and `attr(x, which, exact)` for one name and a logical `exact`.
-unsafe fn direct_attr(args: &[Sexp]) -> R<Option<Sexp>> {
+unsafe fn direct_attr(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
     let (object, which) = match args {
         [object, which] | [object, which, _] => (*object, *which),
         _ => return Ok(None),
@@ -218,7 +218,7 @@ unsafe fn do_set_attr(call: &Call<'_>) -> R<Sexp> {
 /// `attr(x, which) <- value` from a complex assignment, whose target is already unshared, for
 /// any attribute but the dims, which need `dim<-`'s checks, and a class the full call would
 /// refuse.
-unsafe fn direct_set_attr(args: &[Sexp]) -> R<Option<Sexp>> {
+unsafe fn direct_set_attr(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
     let &[object, which, value] = args else {
         return Ok(None);
     };
@@ -343,7 +343,7 @@ unsafe fn do_set_names(call: &Call<'_>) -> R<Sexp> {
     {
         crate::heap().root(object);
         let function = values::install("as.character")?;
-        eval::eval(values::call(function, &[names])?, call.env)?
+        eval::eval(values::call(function, &[names])?, call.env()?)?
     } else {
         names
     };
@@ -353,7 +353,7 @@ unsafe fn do_set_names(call: &Call<'_>) -> R<Sexp> {
 
 /// `names(x) <- value` from a complex assignment for a plain vector and a plain character
 /// `value` or `NULL`, which need no conversion.
-unsafe fn direct_set_names(args: &[Sexp]) -> R<Option<Sexp>> {
+unsafe fn direct_set_names(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
     let &[object, names] = args else {
         return Ok(None);
     };

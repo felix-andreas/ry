@@ -23,7 +23,9 @@ use {
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    special("[", -1, do_subset).dispatch_or_eval(),
+    special("[", -1, do_subset)
+        .dispatch_or_eval()
+        .direct(direct_subset),
     special("[[", -1, do_subset2)
         .dispatch_or_eval()
         .direct(direct_subset2),
@@ -848,6 +850,42 @@ unsafe fn do_subset(call: &Call<'_>) -> R<Sexp> {
     subset(object, &indices, drop, call.call)
 }
 
+/// `x[i, ...]` with positional subscripts on a subject that is not an object: the same
+/// selection as [`do_subset`] without building the argument list, and a numeric scalar
+/// position in an attribute-free atomic vector read straight out.
+pub(crate) unsafe fn direct_subset(call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
+    let [object, indices @ ..] = args else {
+        return Ok(None);
+    };
+    let object = *object;
+    if object.is_object()
+        || is_native_value(object)
+        || indices.iter().any(|&index| is_native_value(index))
+    {
+        return Ok(None);
+    }
+    if let [index] = indices
+        && matches!(index.kind(), SexpType::Integer | SexpType::Real)
+        && object.kind().is_atomic()
+        && !object.is_altrep()
+        && !index.is_altrep()
+        && !values::has_attributes(object)
+        && !values::has_attributes(*index)
+        && length(*index) == 1
+    {
+        let position = match index.kind() {
+            SexpType::Integer => f64::from(index.slice::<i32>()[0]),
+            _ => index.slice::<f64>()[0],
+        };
+        // NA_integer_ and NaN fail the lower bound, and `x[2.7]` truncates to the second
+        // element.
+        if position >= 1.0 && position < length(object) as f64 + 1.0 {
+            return vector_element(object, position as usize - 1).map(Some);
+        }
+    }
+    subset(object, indices, true, call).map(Some)
+}
+
 pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> R<Sexp> {
     if object.is_array() {
         return crate::arrays::subset(object, indices, call);
@@ -1178,7 +1216,7 @@ fn gather_row<T: Copy>(target: &mut [T], matrix: &[T], row: usize, rows: usize) 
 
 /// `[<-` for `m[i, ] <- value` or `a[i, j, ] <- value` (see [`slab`]), called without
 /// building the general call's arguments; any other shape answers `None` and takes the builtin.
-pub(crate) unsafe fn direct_subassign(args: &[Sexp]) -> R<Option<Sexp>> {
+pub(crate) unsafe fn direct_subassign(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
     let [object, indices @ .., value] = args else {
         return Ok(None);
     };
@@ -1265,14 +1303,35 @@ fn scatter_slab<T: Copy>(array: &mut [T], value: &[T], dims: &[usize], fixed: &[
         }
         stride *= extent;
     }
-    let mut counters: SmallVec<[usize; 4]> = smallvec![0; free.len()];
-    for &element in value.iter().cycle() {
-        if let Some(slot) = array.get_mut(offset) {
-            *slot = element;
+    if value.is_empty() {
+        return;
+    }
+    // A free first dimension makes the slab a sequence of contiguous runs (a whole column for
+    // `m[, j] <- v`), each copied as a block from the recycled value.
+    let (run, outer) = match free.first() {
+        Some(&(1, extent)) => (extent, &free[1..]),
+        _ => (1, &free[..]),
+    };
+    let mut counters: SmallVec<[usize; 4]> = smallvec![0; outer.len()];
+    let mut source = 0;
+    loop {
+        let mut filled = 0;
+        while filled < run {
+            let chunk = (run - filled).min(value.len() - source);
+            if let Some(target) = array.get_mut(offset + filled..offset + filled + chunk)
+                && let Some(from) = value.get(source..source + chunk)
+            {
+                target.copy_from_slice(from);
+            }
+            filled += chunk;
+            source += chunk;
+            if source == value.len() {
+                source = 0;
+            }
         }
         let mut dimension = 0;
         loop {
-            let Some(&(stride, extent)) = free.get(dimension) else {
+            let Some(&(stride, extent)) = outer.get(dimension) else {
                 return;
             };
             counters[dimension] += 1;
@@ -1781,9 +1840,9 @@ unsafe fn do_dollar(call: &Call<'_>) -> R<Sexp> {
             call.len()
         )));
     }
-    let object = eval::eval(call.arg(0), call.env)?;
+    let object = eval::eval(call.arg(0), call.env()?)?;
     let name = name_argument(call.arg(1))?;
-    dollar_value(object, name, call.call, call.env)
+    dollar_value(object, name, call.call, call.env()?)
 }
 
 /// `object$name` once the subject is evaluated: an object dispatches with the name as a string.
@@ -1886,7 +1945,7 @@ unsafe fn slot_symbol(value: Sexp) -> R<Sexp> {
 /// `object@name`. Only S4 objects have slots: on any other object `@` reads `.Data` (the
 /// object itself) or dispatches an S3 `@` method, and otherwise is an error.
 unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
-    let object = eval::eval(call.arg(0), call.env)?;
+    let object = eval::eval(call.arg(0), call.env()?)?;
     let symbol = slot_symbol(call.arg(1))?;
     // Since R 4.3 `@` is an internal generic for S3 objects, which is how S7 reads properties.
     if object.is_object() && !object.has_gp(gp::S4_OBJECT) {
@@ -1901,7 +1960,7 @@ unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
             },
         ];
         if let Some(value) =
-            crate::dispatch::dispatch_builtin(symbols().at, call.call, &args, call.env)?
+            crate::dispatch::dispatch_builtin(symbols().at, call.call, &args, call.env()?)?
         {
             return Ok(value);
         }
@@ -2093,9 +2152,9 @@ unsafe fn interp_methods_function(name: &str) -> R<Option<Sexp>> {
 }
 
 unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
-    let object = eval::eval(call.arg(0), call.env)?;
+    let object = eval::eval(call.arg(0), call.env()?)?;
     let symbol = slot_symbol(call.arg(1))?;
-    let value = eval::eval(call.arg(2), call.env)?;
+    let value = eval::eval(call.arg(2), call.env()?)?;
     if object.is_object() && !object.has_gp(gp::S4_OBJECT) {
         let args = [
             Arg {
@@ -2112,7 +2171,7 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
             },
         ];
         if let Some(result) =
-            crate::dispatch::dispatch_builtin(symbols().at_assign, call.call, &args, call.env)?
+            crate::dispatch::dispatch_builtin(symbols().at_assign, call.call, &args, call.env()?)?
         {
             return Ok(result);
         }
@@ -2634,6 +2693,54 @@ unsafe fn grow(vector: Sexp, new_length: usize, final_step: bool) -> R<Sexp> {
     Ok(result)
 }
 
+/// `vector` with `value` appended as a new last element named `name`, a CHARSXP: `x$name <- value`
+/// or `x[["name"]] <- value` for a name `x` lacks. `vector` is an unshared list or atomic vector
+/// whose only attribute is `names`, and `value` a list element or a scalar of `vector`'s type. An
+/// unnamed `vector` gets blank names before the new one. The vector grows in place when it has
+/// room, as [`grow`] does, and otherwise the result is a copy with room to grow.
+pub(crate) unsafe fn append_named(
+    vector: Sexp,
+    name: Sexp,
+    value: Sexp,
+    reuse: bool,
+) -> R<Sexp> {
+    let heap = crate::heap();
+    let count = length(vector);
+    let names = values::names(vector);
+    let result = if reuse
+        && grows_in_place(vector, count + 1)
+        && (names == nil() || grows_in_place(names, count + 1))
+    {
+        heap.resize_vector(vector, count as isize + 1)?;
+        vector
+    } else {
+        let result = alloc_with_room(vector.kind(), count + 1)?;
+        copy_prefix(vector, result, count)?;
+        result
+    };
+    let names = if names == nil() || result != vector {
+        let grown = alloc_with_room(SexpType::String, count + 1)?;
+        if names != nil() {
+            heap.copy_elements(grown, 0, names, 0, count);
+        }
+        values::set_attr(result, symbols().names, grown)?;
+        grown
+    } else {
+        heap.resize_vector(names, count as isize + 1)?;
+        names
+    };
+    heap.set_element(names, count, name);
+    match result.kind() {
+        SexpType::Real => values::reals_mut(result)[count] = value.slice::<f64>()[0],
+        SexpType::Integer | SexpType::Logical => {
+            values::ints_mut(result)[count] = value.slice::<i32>()[0]
+        }
+        SexpType::String => heap.set_element(result, count, value.element(0)),
+        _ => heap.set_element(result, count, value),
+    }
+    Ok(result)
+}
+
 /// Whether `vector` can take `new_length` elements without a copy: it is a resizable vector
 /// with that much room that nothing else references, and it has no dims for growth to drop.
 unsafe fn grows_in_place(vector: Sexp, new_length: usize) -> bool {
@@ -3121,9 +3228,9 @@ unsafe fn missing_subscript(call: Sexp, fields: &[(&str, Sexp)]) -> Unwind {
 }
 
 unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
-    let object = eval::eval(call.arg(0), call.env)?;
+    let object = eval::eval(call.arg(0), call.env()?)?;
     let name = name_argument(call.arg(1))?;
-    let value = eval::eval(call.arg(2), call.env)?;
+    let value = eval::eval(call.arg(2), call.env()?)?;
     if object.is_object() {
         let name_string = values::scalar_string_charsxp(name)?;
         let args = [
@@ -3140,8 +3247,12 @@ unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
                 value,
             },
         ];
-        if let Some(result) =
-            crate::dispatch::dispatch_builtin(symbols().dollar_assign, call.call, &args, call.env)?
+        if let Some(result) = crate::dispatch::dispatch_builtin(
+            symbols().dollar_assign,
+            call.call,
+            &args,
+            call.env()?,
+        )?
         {
             return Ok(result);
         }
@@ -3294,7 +3405,7 @@ unsafe fn do_lengths(call: &Call<'_>) -> R<Sexp> {
             // A classed element answers with its own `length` method, S4 ones included
             // (Matrix's sparse vectors).
             SexpType::List | SexpType::Expression => {
-                dispatch_length(object.element(index), call.env)?
+                dispatch_length(object.element(index), call.env()?)?
             }
             _ => 1,
         };
@@ -3570,7 +3681,8 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
             call,
             op: function,
             args: &args,
-            env: values::global_env(),
+            rho: values::global_env(),
+            frame: crate::NO_SLOTS,
             reusable: None,
         };
         let result = do_set_dim(&context)?;
@@ -4100,14 +4212,14 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
         return Err(call.error("argument \"deparse.level\" is missing"));
     };
     let level_missing =
-        level.value.kind() == SexpType::Symbol && eval::is_missing(level.value, call.env)?;
-    let level_value = eval::eval(level.value, call.env)?;
+        level.value.kind() == SexpType::Symbol && eval::is_missing(level.value, call.env()?)?;
+    let level_value = eval::eval(level.value, call.env()?)?;
     let deparse_level = values::as_integer_scalar(level_value);
     let mut items: Vec<Arg> = Vec::with_capacity(rest.len());
     let mut expressions: Vec<Sexp> = Vec::with_capacity(rest.len());
     for arg in rest {
         if arg.value == symbols().dots {
-            let dots = eval::find_var(symbols().dots, call.env)?;
+            let dots = eval::find_var(symbols().dots, call.env()?)?;
             let mut cell = dots;
             while matches!(cell.kind(), SexpType::Dots | SexpType::Pairlist) {
                 let item = cell.car();
@@ -4125,7 +4237,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
         } else {
             items.push(Arg {
                 tag: arg.tag,
-                value: eval::eval(arg.value, call.env)?,
+                value: eval::eval(arg.value, call.env()?)?,
             });
             expressions.push(arg.value);
         }
@@ -4143,7 +4255,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             let symbol =
                 values::install(&format!("{generic}.{}", char_str(classes.element(index))))?;
             if let Some(method) =
-                crate::dispatch::lookup_method(symbol, call.env, values::base_namespace())?
+                crate::dispatch::lookup_method(symbol, call.env()?, values::base_namespace())?
             {
                 // The method sees promises, so `data.frame` inside `cbind.data.frame` names a
                 // column after its argument expression.
@@ -4160,7 +4272,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                         value: eval::forced_promise(expression, item.value)?,
                     });
                 }
-                return eval::apply(call.call, method, &arguments, call.env);
+                return eval::apply(call.call, method, &arguments, call.env()?);
             }
         }
     }
@@ -4187,7 +4299,7 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                         value: eval::forced_promise(expression, item.value)?,
                     });
                 }
-                return eval::apply(call.call, function, &arguments, call.env);
+                return eval::apply(call.call, function, &arguments, call.env()?);
             }
         }
     }
@@ -4227,9 +4339,8 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     let mut warned = false;
     // The warning names the `rbind` or `cbind` closure call, not the internal.
     let frames = &crate::interp().frames;
-    let closure_call = frames
-        .iter()
-        .rposition(|frame| frame.env == call.env)
+    let closure_call = call
+        .frame_index()
         .map_or(call.call, |position| frames[position].call);
     for (arg, &position) in items.iter().zip(&positions) {
         match values::dims(arg.value).filter(|dims| dims.len() == 2) {

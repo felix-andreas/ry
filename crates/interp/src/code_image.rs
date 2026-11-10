@@ -162,7 +162,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryCodeImageWrite", 2, do_write),
 ];
 
-const MAGIC: &[u8; 8] = b"RYCODE\x00\x01";
+const MAGIC: &[u8; 8] = b"RYCODE\x00\x02";
 
 /// The bytes of one record table entry.
 const ENTRY_SIZE: usize = 40;
@@ -590,7 +590,7 @@ fn open(database: &str, build: &str) -> Result<Option<Rc<Image>>, String> {
     if std::env::var_os("RY_CODE_IMAGE").is_some_and(|value| value == "0") {
         return Ok(None);
     }
-    let file = match ImageFile::open(&path(database), false) {
+    let file = match ImageFile::open(&path(database)) {
         Ok(file) => file,
         Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(failure) => return Err(failure.to_string()),
