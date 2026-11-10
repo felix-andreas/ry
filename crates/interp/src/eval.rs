@@ -1312,8 +1312,8 @@ pub enum CallFrame {
 /// Binds `args` to `function`'s formals in a slot frame pushed onto the register file, or
 /// returns `None` when the call needs an environment from the start: the body is not compiled
 /// with a slot table, a debugger, a move or a type signature watches the frame, or a missing
-/// formal's default is not a literal (its promise would capture the frame).
-pub(crate) unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallFrame>> {
+/// formal's default is neither a literal, a symbol, nor code compiled with its own slot table.
+pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallFrame>> {
     let body = function.cdr();
     if body.kind() != SexpType::Bytecode {
         return Ok(None);

@@ -257,6 +257,8 @@ unsafe fn sys_parent_number(mut n: i64, context: Option<usize>) -> i64 {
     if parent == global_env() {
         return 0;
     }
+    // A slot frame that called with no environment is recorded by position, which is not the
+    // frame below when promise code on its slots made the call from deeper frames.
     if parent == nil() {
         let caller = frames[index].caller;
         return if caller == crate::NO_SLOTS {

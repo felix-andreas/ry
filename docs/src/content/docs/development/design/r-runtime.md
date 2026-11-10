@@ -1058,8 +1058,14 @@ at. Leaving boxes the machine values, writes them into their slots, restores the
 jumps into tier 0's loop; it makes no environment, because only a trigger does. A callee can give
 the frame its environment while machine code waits on the call, and then the slots are dead, so
 machine code checks the header after every call that can reify and leaves for tier 0 when it is
-set. Today tier-1 and baseline bodies take heap frames instead, because their code reads
-variables through the environment (`decisions.md`, "Slot frames"); closing that gap is this map.
+set.
+
+Baseline and tier-1 code run in slot frames today. Both read the header register on every
+variable probe: while it is `NULL`, a variable the slot table numbers loads straight from its slot
+at an index fixed when the code compiles, and a name the table does not number is looked up from
+the closure's environment. Tier 1 keeps its own copies of the variables it loaded and writes a
+changed one back through the frame (`Machine::assign`), into the slot or, once a callee made the
+environment, into its binding, so it needs no exit when the frame reifies under it.
 
 **Boxing.** A length-1 double, integer or logical without attributes stays in a machine register
 while compiled code uses it, with R's `NA` and overflow rules. It is boxed when it escapes: written
