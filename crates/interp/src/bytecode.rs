@@ -6715,15 +6715,26 @@ unsafe fn slot_reusable(state: &Activation<'_, '_>, slot: *mut Sexp, args: &[Arg
 }
 
 /// Whether a value a slot of the frame holds directly is that slot's alone: its only reference
-/// is the slot's, and no register of the frame's expressions holds it uncounted.
+/// is the slot's, and no register of the frame's expressions holds it uncounted. The body of the
+/// innermost frame trusts its compiler as `eval::reuse_permitted` does for a heap frame: a
+/// register it left holding the value, such as the `m` read for `m[, t]` in
+/// `m[, t + 1] <- m[, t] * k`, is dead. Promise code and a frame below the innermost one may
+/// run while registers of other code still hold the value as an argument, so they scan.
 unsafe fn slot_owns(state: &Activation<'_, '_>, value: Sexp) -> bool {
     if value.refcount() != 1 {
         return false;
     }
     let registers = &interp().bytecode.registers;
-    let start = state.header.offset_from(registers.as_ptr()) as usize
-        + 1
-        + length(state.constants.element(SLOTS).element(1));
+    let header = state.header.offset_from(registers.as_ptr()) as usize;
+    if state.machine.function != nil()
+        && interp()
+            .frames
+            .last()
+            .is_some_and(|frame| frame.slots as usize == header && frame.function == state.machine.function)
+    {
+        return true;
+    }
+    let start = header + 1 + length(state.constants.element(SLOTS).element(1));
     registers
         .get(start..)
         .is_some_and(|registers| !registers.contains(&value))
