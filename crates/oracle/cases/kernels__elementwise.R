@@ -52,3 +52,12 @@ for (v in list(d, e, n, o, b, c(1.5, 2.5), 1:10, c(2147483647L, 1L), numeric(), 
 }
 print(sprintf("%.17g", sum(c(0.1, 0.2, 0.3, 1e16, -1e16))))
 print(sprintf("%.17g", mean(c(0.1, 0.2, 0.3))))
+
+# `%%` and `%/%` on vectors keep integers integer, and a double `%%` that loses accuracy warns
+# even when its result reuses an operand.
+mod <- function(a, b) list(a %% b, a %/% b, (a * 1) %% b, (a + 0L) %/% b)
+for (i in 1:3) str(mod(c(-7L, 7L, NA, 0L, 5L, -5L), c(3L, -3L, 2L)))
+for (i in 1:3) str(mod(c(5.5, -5.5, NaN, Inf, 1, 0), c(2, -2, 0)))
+loses <- function(x) withCallingHandlers((x * 1) %% 3,
+  warning = function(w) { cat("warning:", conditionMessage(w), "\n"); invokeRestart("muffleWarning") })
+for (i in 1:3) print(loses(c(1e300, 7)))

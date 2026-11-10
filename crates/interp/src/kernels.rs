@@ -114,7 +114,7 @@ pub unsafe fn binary(
         return Ok(Some(result));
     }
     let op = arithmetic_of(operator);
-    let kind = if both_integral && matches!(op, Op::Add | Op::Subtract | Op::Multiply) {
+    let kind = if both_integral && !matches!(op, Op::Divide | Op::Power) {
         SexpType::Integer
     } else {
         SexpType::Real
@@ -136,6 +136,15 @@ pub unsafe fn binary(
     } else {
         (values::alloc_uninit(kind, count)?, None)
     };
+    // Checked before the result is written, since the result may be an operand.
+    let loses_accuracy = kind == SexpType::Real
+        && op == Op::Modulo
+        && (0..count).any(|index| {
+            arith::modulus_loses_accuracy(
+                arith::real_at(left, index % left_length),
+                arith::real_at(right, index % right_length),
+            )
+        });
     if kind == SexpType::Real {
         let output = values::reals_mut(result);
         let has_integer = left.kind() == SexpType::Integer || right.kind() == SexpType::Integer;
@@ -151,6 +160,9 @@ pub unsafe fn binary(
             None => real_arithmetic(op, reals(left), reals(right), output),
             Some(Side::Left) => real_arithmetic_into(op, Side::Left, reals(right), output),
             Some(Side::Right) => real_arithmetic_into(op, Side::Right, reals(left), output),
+        }
+        if loses_accuracy {
+            conditions::warning("probable complete loss of accuracy in modulus")?;
         }
         return Ok(Some(result));
     }
@@ -226,6 +238,8 @@ pub fn arithmetic_of(operator: Arith) -> Op {
         Arith::Subtract => Op::Subtract,
         Arith::Multiply => Op::Multiply,
         Arith::Divide => Op::Divide,
+        Arith::Modulo => Op::Modulo,
+        Arith::IntegerDivide => Op::IntegerDivide,
         _ => Op::Power,
     }
 }
@@ -326,11 +340,17 @@ pub unsafe fn fused(
             Node::Binary(operator, _, _) if comparison_of(operator).is_some() => {
                 Some(Element::Logical)
             }
-            Node::Binary(Arith::Add | Arith::Subtract | Arith::Multiply, left, right)
-                if integral(left) && integral(right) =>
-            {
-                Some(Element::Integer)
-            }
+            Node::Binary(
+                Arith::Add
+                | Arith::Subtract
+                | Arith::Multiply
+                | Arith::Modulo
+                | Arith::IntegerDivide,
+                left,
+                right,
+            ) if integral(left) && integral(right) => Some(Element::Integer),
+            // A double `%%` may warn about lost accuracy, which only the binary kernel checks.
+            Node::Binary(Arith::Modulo, ..) => None,
             Node::Binary(..) => Some(Element::Double),
             Node::Logic { left, right, .. } => {
                 (logical(left) && logical(right)).then_some(Element::Logical)

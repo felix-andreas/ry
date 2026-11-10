@@ -383,10 +383,46 @@
 | [1] NaN
 | [1] "0.599609375"
 | [1] "0.20000000000000001"
+| List of 4
+|  $ : int [1:6] 2 -2 NA 0 -1 1
+|  $ : int [1:6] -3 -3 NA 0 -2 -3
+|  $ : num [1:6] 2 -2 NA 0 -1 1
+|  $ : int [1:6] -3 -3 NA 0 -2 -3
+| List of 4
+|  $ : int [1:6] 2 -2 NA 0 -1 1
+|  $ : int [1:6] -3 -3 NA 0 -2 -3
+|  $ : num [1:6] 2 -2 NA 0 -1 1
+|  $ : int [1:6] -3 -3 NA 0 -2 -3
+| List of 4
+|  $ : int [1:6] 2 -2 NA 0 -1 1
+|  $ : int [1:6] -3 -3 NA 0 -2 -3
+|  $ : num [1:6] 2 -2 NA 0 -1 1
+|  $ : int [1:6] -3 -3 NA 0 -2 -3
+| List of 4
+|  $ : num [1:6] 1.5 -1.5 NaN NaN -1 NaN
+|  $ : num [1:6] 2 2 NaN Inf -1 ...
+|  $ : num [1:6] 1.5 -1.5 NaN NaN -1 NaN
+|  $ : num [1:6] 2 2 NaN Inf -1 ...
+| List of 4
+|  $ : num [1:6] 1.5 -1.5 NaN NaN -1 NaN
+|  $ : num [1:6] 2 2 NaN Inf -1 ...
+|  $ : num [1:6] 1.5 -1.5 NaN NaN -1 NaN
+|  $ : num [1:6] 2 2 NaN Inf -1 ...
+| List of 4
+|  $ : num [1:6] 1.5 -1.5 NaN NaN -1 NaN
+|  $ : num [1:6] 2 2 NaN Inf -1 ...
+|  $ : num [1:6] 1.5 -1.5 NaN NaN -1 NaN
+|  $ : num [1:6] 2 2 NaN Inf -1 ...
+| warning: probable complete loss of accuracy in modulus 
+| [1] 0 1
+| warning: probable complete loss of accuracy in modulus 
+| [1] 0 1
+| warning: probable complete loss of accuracy in modulus 
+| [1] 0 1
 [messages]
 [warnings]
 - NAs produced by integer overflow (in named * 2147483647L)
 [errors]
 [value]
-character
-| "0.20000000000000001"
+NULL
+| NULL
