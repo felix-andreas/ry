@@ -1,11 +1,11 @@
 ---
 // The call-heavy workloads from tools/bench/real/results.json with their geometric mean.
-import { realGeomean, realGeomeanNoJit, realWorkloadRows } from '../lib/benchmarks';
+import { realGeomean, realGeomeanNoJit, realWorkloadRows, seconds } from '../lib/benchmarks';
 
 const rows = realWorkloadRows();
-const time = (value: number) => `${value.toFixed(3)} s`;
+const time = seconds;
 const ratio = (value: number) => `${value.toFixed(2)}x`;
-const columns = ['workload', 'GNU R', 'ry, JIT on', 'ry, JIT off', 'GNU R / ry, JIT on', 'GNU R / ry, JIT off'];
+const columns = ['workload', 'GNU R', 'ry, JIT on', 'ry, JIT off', 'speed-up, JIT on', 'speed-up, JIT off'];
 ---
 
 <table>

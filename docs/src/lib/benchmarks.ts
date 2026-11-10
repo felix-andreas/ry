@@ -126,12 +126,12 @@ function source(variant: 'untyped' | 'typed', program: string): string {
   return text;
 }
 
-function seconds(value: number): string {
-  return `${value.toFixed(3)} s`;
+export function seconds(value: number): string {
+  return `${value.toFixed(3)}\u00a0s`;
 }
 
 function mebibytes(value: number): string {
-  return `${value.toFixed(0)} MiB`;
+  return `${value.toFixed(0)}\u00a0MiB`;
 }
 
 export type RealWorkloadRow = { workload: string; gnuR: number; ryJit: number; ryNoJit: number };
@@ -162,16 +162,16 @@ export const benchmarkRealMachine = `${realResults.machine}, against GNU R ${/\d
 // What each of the two benchmarks measures and how ry fares on it, for the side-by-side summary.
 export function benchmarkSummaryRows(): string[][] {
   return [
-    ['Real-world workloads', 'call-heavy R: closures, S3 and S4 dispatch, conditions, environments, strings, lists', `${realCount}`, `${realGeomean.toFixed(2)}x`],
-    ['Synthetic kernels', 'tight loops, recursion and vector kernels, where the JIT applies', `${kernelCount}`, `${kernelGeomean.toFixed(2)}x`],
+    ['Real-world workloads', 'call-heavy R: closures, S3 and S4 dispatch, conditions', `${realCount}`, `${realGeomean.toFixed(2)}x`],
+    ['Synthetic kernels', 'loops, recursion and vector code', `${kernelCount}`, `${kernelGeomean.toFixed(2)}x`],
   ];
 }
-export const benchmarkSummaryColumns = ['untyped R on ry', 'what it measures', 'programs', 'speed vs GNU R (geometric mean)'];
+export const benchmarkSummaryColumns = ['benchmark', 'what it measures', 'programs', 'ry vs GNU R'];
 
 export function realWorkloadMarkdown(): string {
   const rows = realWorkloadRows();
   return [
-    '| workload | GNU R | ry, JIT on | ry, JIT off | GNU R / ry, JIT on | GNU R / ry, JIT off |',
+    '| workload | GNU R | ry, JIT on | ry, JIT off | speed-up, JIT on | speed-up, JIT off |',
     '| --- | ---: | ---: | ---: | ---: | ---: |',
     ...rows.map(
       (row) =>
@@ -187,4 +187,59 @@ export function benchmarkSummaryMarkdown(): string {
     '| --- | --- | ---: | ---: |',
     ...benchmarkSummaryRows().map((row) => `| ${row.join(' | ')} |`),
   ].join('\n');
+}
+
+// A bar chart of speed relative to GNU R: one row per program, one bar per ry configuration, on a
+// logarithmic axis centred on 1x, so 10x faster and 10x slower are bars of the same length.
+export type SpeedSeries = { label: string };
+export type SpeedRow = { label: string; ratios: number[]; details: string[]; summary?: boolean };
+export type SpeedChart = { series: SpeedSeries[]; rows: SpeedRow[] };
+
+export function kernelChart(): SpeedChart {
+  const rows = benchmarkRows()
+    .sort((a, b) => b.speedup - a.speedup)
+    .map((row) => ({
+      label: row.program,
+      ratios: [row.gnuR / row.ry, row.gnuR / row.ryTyped],
+      details: [
+        `${row.program}, ry: ${seconds(row.ry)} against ${seconds(row.gnuR)} on GNU R`,
+        `${row.program}, ry typed and strict: ${seconds(row.ryTyped)} against ${seconds(row.gnuR)} on GNU R`,
+      ],
+    }));
+  const typedGeomean = geomean(results.programs.map((row) => row.gnu_r / row.ry_typed));
+  rows.push({
+    label: 'geometric mean',
+    ratios: [kernelGeomean, typedGeomean],
+    details: ['geometric mean over all programs, ry', 'geometric mean over all programs, ry typed and strict'],
+    summary: true,
+  });
+  return { series: [{ label: 'ry' }, { label: 'ry, typed and strict' }], rows };
+}
+
+export function realChart(): SpeedChart {
+  const rows: SpeedRow[] = realWorkloadRows()
+    .sort((a, b) => b.gnuR / b.ryJit - a.gnuR / a.ryJit)
+    .map((row) => ({
+      label: row.workload,
+      ratios: [row.gnuR / row.ryJit],
+      details: [`${row.workload}: ${seconds(row.ryJit)} on ry against ${seconds(row.gnuR)} on GNU R`],
+    }));
+  rows.push({ label: 'geometric mean', ratios: [realGeomean], details: ['geometric mean over all workloads'], summary: true });
+  return { series: [{ label: 'ry' }], rows };
+}
+
+// Whole numbers from 10x up, where a decimal adds nothing, and two decimals below, where 0.94x
+// against 1.02x is the point.
+export function formatRatio(ratio: number): string {
+  return ratio >= 10 ? `${ratio.toFixed(0)}x` : `${ratio.toFixed(2)}x`;
+}
+
+export const benchmarkRounds = realResults.repeat;
+export const kernelRepeat = results.repeat;
+
+export function benchmarkFact(suite: 'real' | 'kernels', field: 'machine' | 'repeat'): string {
+  if (field === 'machine') return suite === 'real' ? benchmarkRealMachine : benchmarkMachine;
+  return suite === 'real'
+    ? `${realResults.repeat} rounds, each running every engine once in a shuffled order; the median round is reported`
+    : `${results.repeat} processes per engine, alternating engines; the fastest time and the largest memory peak are reported`;
 }
