@@ -2,7 +2,9 @@
 # exercises one rule that promise must keep: it is forced once, it sees writes the caller's
 # frame takes before it is forced, it carries missingness through a chain of calls, it outlives
 # the call when the callee keeps it, and `substitute` and its kin see the name. Each runs a few
-# times so that its call site settles on its fastest calling convention.
+# times so that its call site settles on its fastest calling convention. The last loop runs the
+# same rules from callers that have an environment: `environment()` gives one to a function, and
+# the global loop body has one.
 forced_once <- function(x) { x; assign("y", 2, parent.frame()); x }
 force_first <- function() { y <- 1; forced_once(y) }
 written_first <- function(x) { assign("y", 2, parent.frame()); x }
@@ -40,4 +42,14 @@ called <- function(z) sys.call()
 call_called <- function() { yy <- 3; called(yy) }
 for (k in 1:3) {
   cat(labelled(), deparse(call_matched()), deparse(call_called()), "\n")
+}
+env_force_first <- function() { y <- 1; environment(); forced_once(y) }
+env_write_first <- function() { y <- 1; environment(); written_first(y) }
+env_missing <- function(c) { environment(); pass_missing(c) }
+env_kept <- function() { yy <- 4; environment(); get_z <- keep(yy); yy <- 5; get_z() }
+env_label <- function() { yy <- 3; environment(); label(yy) }
+for (k in 1:3) {
+  gv <- k
+  cat(env_force_first(), env_write_first(), env_missing(), env_missing(1), env_kept(),
+    env_label(), double(gv), is_missing(gv), "\n")
 }

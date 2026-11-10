@@ -187,19 +187,24 @@ The second step is built (`slot_promise`, `force_slot_promise` and `resolved_env
 
 A variable passed to a callee that has a direct-call plan needs neither a promise allocation nor
 the caller's pending environment, because the callee's frame is above the caller's for as long
-as the callee runs. `slot_promises_into` passes such a variable as an argument reference
-(`eval::argument_reference`).
+as the callee runs. A slot frame passes such a variable as an argument reference to its slot
+(`eval::argument_reference`, from `slot_promises_into`), and a caller that has an environment
+passes a reference to the name in that environment (`eval::env_reference`, from
+`referenced_args_into`), so calls from test code and from reified frames allocate no promise
+either.
 
 - **Shape.** A reference is a promise with `gp::ARGUMENT_REFERENCE`: its expression is the
-  variable's name, its environment is nil, and its attribute is an integer vector holding the
-  caller's frame position, the variable's slot (`NO_REFERENCE_SLOT` when the caller keeps the
-  variable in no slot) and the caller's header register, which `reference_target` checks so a
-  reference that outlived its frame panics. References come from `Interp.references`, a pool
+  variable's name. A reference into an environment keeps that environment in its environment
+  field. A reference into a slot frame has nil there, and its attribute is an integer vector
+  holding the caller's frame position, the variable's slot (`NO_REFERENCE_SLOT` when the caller
+  keeps the variable in no slot) and the caller's header register, which `reference_target`
+  checks so a reference that outlived its frame panics. References come from `Interp.references`, a pool
   that the calling instruction releases when the call returns, so a call allocates none once
   the pool has grown.
 - **Forcing.** `force_promise` forces a reference once, reading the caller's slot at that moment:
   a value as it is, a promise (or another reference) by forcing it, an unbound slot from the
   caller's enclosure, and anything once the caller has an environment from that environment.
+  A reference into an environment forces as a promise of the name in it would.
   A write the caller's frame takes before the force is therefore visible, and one after it is
   not, exactly as for a promise of the name.
 - **Readers.** `missing()` follows a reference into the caller (`reference_is_missing`),

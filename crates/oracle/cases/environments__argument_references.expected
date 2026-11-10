@@ -5,6 +5,9 @@
 | yy matched(z = yy) called(yy) 
 | yy matched(z = yy) called(yy) 
 | yy matched(z = yy) called(yy) 
+| 1 2 TRUE FALSE 5 yy 2 FALSE 
+| 1 2 TRUE FALSE 5 yy 4 FALSE 
+| 1 2 TRUE FALSE 5 yy 6 FALSE 
 [messages]
 [warnings]
 [errors]

@@ -4979,6 +4979,8 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             let env = state.env()?;
             if eager {
                 eval::eager_args_into(arguments, env, &mut args)?;
+            } else if plan.is_some() {
+                eval::referenced_args_into(arguments, env, &mut args)?;
             } else {
                 eval::compiled_args_into(arguments, env, &mut args)?;
             }
@@ -5197,17 +5199,84 @@ unsafe fn slot_builtin_call(
 /// list still holds.
 unsafe fn slot_reusable(state: &Activation<'_, '_>, slot: *mut Sexp, args: &[Arg]) -> Option<Sexp> {
     let subject = args.first()?.value;
-    if *slot != subject
-        || subject.refcount() != 1
-        || args[1..].iter().any(|arg| arg.value == subject)
-    {
+    if *slot != subject || args[1..].iter().any(|arg| arg.value == subject) {
         return None;
+    }
+    slot_owns(state, subject).then_some(subject)
+}
+
+/// Whether a value a slot of the frame holds directly is that slot's alone: its only reference
+/// is the slot's, and no register of the frame's expressions holds it uncounted.
+unsafe fn slot_owns(state: &Activation<'_, '_>, value: Sexp) -> bool {
+    if value.refcount() != 1 {
+        return false;
     }
     let registers = &interp().bytecode.registers;
     let start = state.header.offset_from(registers.as_ptr()) as usize
         + 1
         + length(state.constants.element(SLOTS).element(1));
-    (!registers.get(start..)?.contains(&subject)).then_some(subject)
+    registers
+        .get(start..)
+        .is_some_and(|registers| !registers.contains(&value))
+}
+
+/// [`assign_element_in_place`] on a slot frame's slot, without making its environment. The
+/// slot's value changes in place when the slot owns it, under the rule `x <- f(x, ...)` follows
+/// (see [`slot_reusable`]); a value the slot shares, such as a formal's forced argument, is
+/// copied into the slot first, as the replacement function would copy it.
+unsafe fn assign_slot_element(
+    state: &Activation<'_, '_>,
+    slot: *mut Sexp,
+    index: Sexp,
+    value: Sexp,
+    kind: ElementKind,
+) -> R<bool> {
+    let current = *slot;
+    let target = if current.kind() == SexpType::Promise {
+        let target = eval::force_promise(current)?;
+        // Forcing ran code that may have given the frame its environment, which then holds
+        // the variable instead of the slot.
+        if *state.header != nil() {
+            return Ok(false);
+        }
+        target
+    } else {
+        current
+    };
+    if target == unbound() || target == missing_arg() || target.kind() == SexpType::Promise {
+        return Ok(false);
+    }
+    if current == target && slot_owns(state, target) {
+        return assign_element(target, index, value, kind, |_| true);
+    }
+    // What `assign_element` refuses on the copy, it refuses on the value, without the copy.
+    if target.is_object() || target.is_array() || target.is_altrep() {
+        return Ok(false);
+    }
+    let copy = values::shallow_duplicate(target)?;
+    let heap = &mut *state.heap;
+    heap.root(copy);
+    if !assign_element(copy, index, value, kind, |_| true)? {
+        return Ok(false);
+    }
+    heap.store_slot(&mut *slot, copy);
+    Ok(true)
+}
+
+/// The value of a compiled assignment's subscript register in a slot frame, read without
+/// making the environment: `None` when it is a formal whose slot holds no value yet.
+unsafe fn slot_subscript(state: &Activation<'_, '_>, index: Sexp) -> Option<Sexp> {
+    if index.kind() != SexpType::Symbol {
+        return Some(index);
+    }
+    let value = *slot_named(state, index)?;
+    let value = if value.kind() == SexpType::Promise {
+        value.car()
+    } else {
+        value
+    };
+    (value != unbound() && value != missing_arg() && value.kind() != SexpType::Promise)
+        .then_some(value)
 }
 
 /// The values of [`slot_builtin_call`]'s arguments, each counted as referenced and rooted.
@@ -6035,7 +6104,6 @@ unsafe fn op_closure(state: &mut Activation<'_, '_>, instruction: Instruction) -
 
 #[inline(always)]
 unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
-    let env = state.env()?;
     let call = state.constant(instruction, 4);
     let value = instruction.input(3);
     let variable = state.constant(instruction, 1);
@@ -6044,6 +6112,16 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
         1 => ElementKind::Double,
         _ => ElementKind::Dollar,
     };
+    if state.in_slots()
+        && let Some(slot) = slot_named(state, variable)
+        && let Some(index) = slot_subscript(state, instruction.input(2))
+        && assign_slot_element(state, slot, index, value, kind)?
+    {
+        instruction.output(0, value);
+        (*state.interp).visible = false;
+        return Ok(Flow::Next);
+    }
+    let env = state.env()?;
     let done = match subscript_value(env, instruction.input(2))? {
         Some(index) => assign_element_in_place(env, variable, index, value, kind)?,
         None => false,
@@ -6196,13 +6274,33 @@ unsafe fn assign_element_in_place(
     value: Sexp,
     kind: ElementKind,
 ) -> R<bool> {
-    let heap = crate::heap();
-    let Some(cell) = heap.frame_cell(env, variable) else {
+    let Some(cell) = crate::heap().frame_cell(env, variable) else {
         return Ok(false);
     };
-    let target = cell.cdr();
-    if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED)
-        || target == value
+    if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED) {
+        return Ok(false);
+    }
+    let done = assign_element(cell.cdr(), index, value, kind, |target| {
+        !values::maybe_shared(target) && eval::reuse_permitted(env, target)
+    })?;
+    if done {
+        cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
+    }
+    Ok(done)
+}
+
+/// The update [`assign_element_in_place`] does on the value `target` a variable holds, when
+/// `owned` says nothing else can see the change.
+unsafe fn assign_element(
+    target: Sexp,
+    index: Sexp,
+    value: Sexp,
+    kind: ElementKind,
+    owned: impl FnOnce(Sexp) -> bool,
+) -> R<bool> {
+    let heap = crate::heap();
+    if target == value
+        || target.kind() == SexpType::Promise
         || target.is_object()
         || target.is_array()
         || target.is_altrep()
@@ -6269,7 +6367,7 @@ unsafe fn assign_element_in_place(
     let position = position as usize - 1;
     // The conditions under which `complex_assign` updates the variable's value in place.
     moves::modifying(target)?;
-    if values::maybe_shared(target) || !eval::reuse_permitted(env, target) {
+    if !owned(target) {
         return Ok(false);
     }
     if appends {
@@ -6283,7 +6381,6 @@ unsafe fn assign_element_in_place(
         SexpType::String => heap.set_element(target, position, value.element(0)),
         _ => heap.set_element(target, position, value),
     }
-    cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
     Ok(true)
 }
 

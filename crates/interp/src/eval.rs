@@ -461,6 +461,30 @@ pub unsafe fn slot_promise(owner: usize, expression: Sexp) -> R<Sexp> {
 /// arguments to code that could keep them ([`materialize_references`]) turns them into
 /// ordinary promises first.
 pub unsafe fn argument_reference(owner: usize, slot: u32, symbol: Sexp) -> R<Sexp> {
+    let reference = pooled_reference(symbol)?;
+    let header = interp().frames[owner].slots;
+    values::ints_mut(reference.attrib()).copy_from_slice(&[
+        owner as i32,
+        slot as i32,
+        header as i32,
+    ]);
+    Ok(reference)
+}
+
+/// An argument reference to the variable `symbol` of a caller that has the environment `env`,
+/// for a callee that takes its arguments straight into slots: it forces as a promise of the
+/// name in `env` would, and like a slot frame's reference it allocates nothing and is
+/// released when the call returns. The reference keeps `env` in its environment field, where
+/// a slot frame's reference keeps nil.
+pub unsafe fn env_reference(env: Sexp, symbol: Sexp) -> R<Sexp> {
+    let reference = pooled_reference(symbol)?;
+    crate::heap().set_tag(reference, env);
+    Ok(reference)
+}
+
+/// The next free reference of [`Interp::references`], naming `symbol`, with its target left
+/// for the caller to fill in.
+unsafe fn pooled_reference(symbol: Sexp) -> R<Sexp> {
     let state = interp();
     let heap = crate::heap();
     let used = state.references_used as usize;
@@ -480,12 +504,6 @@ pub unsafe fn argument_reference(owner: usize, slot: u32, symbol: Sexp) -> R<Sex
             reference
         }
     };
-    let header = state.frames[owner].slots;
-    values::ints_mut(reference.attrib()).copy_from_slice(&[
-        owner as i32,
-        slot as i32,
-        header as i32,
-    ]);
     state.references_used += 1;
     activity::count(Counter::ArgumentReferences);
     Ok(reference)
@@ -509,6 +527,9 @@ pub unsafe fn release_references(mark: u32) {
     {
         if reference.car() != unbound {
             heap.set_car(reference, unbound);
+        }
+        if reference.tag() != nil() {
+            heap.set_tag(reference, nil());
         }
     }
     state.references_used = mark;
@@ -539,8 +560,11 @@ unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
 /// Forces an unforced argument reference: what its variable holds in the frame it names, read
 /// as a promise of the variable's name in that frame would read it.
 unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
-    let (owner, slot) = reference_target(reference);
     let symbol = reference.cdr();
+    if reference.tag() != nil() {
+        return eval(symbol, reference.tag());
+    }
+    let (owner, slot) = reference_target(reference);
     let frame = &interp().frames[owner];
     if frame.env != nil() {
         return eval(symbol, frame.env);
@@ -564,6 +588,10 @@ unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
 /// The value an unforced argument reference stands for when reading it runs no code: its
 /// variable's slot holds a value or a forced promise.
 pub unsafe fn reference_value(reference: Sexp) -> Option<Sexp> {
+    if reference.tag() != nil() {
+        return crate::effects::eager_argument(reference.cdr(), reference.tag())
+            .filter(|value| value.kind() != SexpType::Promise);
+    }
     let (owner, slot) = reference_target(reference);
     let frame = &interp().frames[owner];
     if frame.env != nil() || slot == NO_REFERENCE_SLOT {
@@ -582,15 +610,21 @@ pub unsafe fn reference_value(reference: Sexp) -> Option<Sexp> {
 /// Whether the variable an unforced argument reference names is a missing argument in its
 /// frame, as [`value_is_missing`] asks of a promise of a name.
 unsafe fn reference_is_missing(reference: Sexp) -> R<bool> {
-    let (owner, slot) = reference_target(reference);
     let symbol = reference.cdr();
-    let frame = &interp().frames[owner];
-    if frame.env != nil() {
-        if crate::heap().frame_cell(frame.env, symbol).is_none() {
+    let env = if reference.tag() != nil() {
+        reference.tag()
+    } else {
+        let (owner, _) = reference_target(reference);
+        interp().frames[owner].env
+    };
+    if env != nil() {
+        if crate::heap().frame_cell(env, symbol).is_none() {
             return Ok(false);
         }
-        return symbol_is_missing(symbol, frame.env, false);
+        return symbol_is_missing(symbol, env, false);
     }
+    let (owner, slot) = reference_target(reference);
+    let frame = &interp().frames[owner];
     if slot == NO_REFERENCE_SLOT {
         return Ok(false);
     }
@@ -651,6 +685,9 @@ unsafe fn reference_promise(reference: Sexp) -> R<Sexp> {
     if reference.car() != unbound() {
         return forced_promise(symbol, reference.car());
     }
+    if reference.tag() != nil() {
+        return make_promise(symbol, reference.tag());
+    }
     let (owner, _) = reference_target(reference);
     let caller = &interp().frames[owner];
     if caller.env != nil() {
@@ -663,7 +700,10 @@ unsafe fn reference_promise(reference: Sexp) -> R<Sexp> {
 /// or the frame an argument reference names. Anything that reads a promise's environment other
 /// than to force it reads it here.
 pub unsafe fn promise_env(promise: Sexp) -> R<Sexp> {
-    if promise.has_gp(gp::ARGUMENT_REFERENCE) && promise.car() == unbound() {
+    if promise.has_gp(gp::ARGUMENT_REFERENCE)
+        && promise.car() == unbound()
+        && promise.tag() == nil()
+    {
         return frame_env(reference_target(promise).0);
     }
     resolved_env(promise.tag())
@@ -1258,6 +1298,13 @@ pub unsafe fn compiled_args_into(arguments: Sexp, env: Sexp, args: &mut Args) ->
     closure_args_into::<COMPILED>(arguments, env, args)
 }
 
+/// [`compiled_args_into`] for a callee that takes its arguments straight into slots
+/// ([`call_with_plan`]): a variable is passed as an argument reference to it in `env`, which
+/// the calling instruction releases when the call returns.
+pub unsafe fn referenced_args_into(arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
+    closure_args_into::<REFERENCES>(arguments, env, args)
+}
+
 /// [`compiled_args_into`] for a call of an effect-free closure (see [`crate::effects`]) whose
 /// other arguments cannot assign a variable, made while no calling handler is established: a
 /// variable argument is bound to its value, or to the caller's own promise for it, instead of a
@@ -1273,6 +1320,8 @@ const PROMISES: u8 = 0;
 const COMPILED: u8 = 1;
 /// A constant or a variable as its value.
 const EAGER: u8 = 2;
+/// A constant as its own value and a variable as an argument reference ([`env_reference`]).
+const REFERENCES: u8 = 3;
 
 unsafe fn closure_args_into<const MODE: u8>(
     mut arguments: Sexp,
@@ -1316,6 +1365,11 @@ unsafe fn closure_args_into<const MODE: u8>(
                 value
             } else if expression == missing_arg() || (MODE != PROMISES && constant) {
                 expression
+            } else if MODE == REFERENCES
+                && expression.kind() == SexpType::Symbol
+                && dot_dot_index(expression).is_none()
+            {
+                env_reference(env, expression)?
             } else if expression.kind() == SexpType::Bytecode {
                 compiled_promise(expression, env)?
             } else {
