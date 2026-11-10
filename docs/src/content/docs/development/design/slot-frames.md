@@ -91,9 +91,15 @@ describes it, and the open gaps are marked.
 - **Release.** A frame that was never reified drops its slots' references on return instead of
   `release_frame` and `clear_frame`.
 - **Direct calls.** A call site keeps a plan for the closure it calls (`direct_plan` in
-  `bytecode.rs`): which argument fills each formal's slot. The site marks the body on its first
+  `bytecode.rs`): which argument fills each formal's slot. The site marks itself seen on its first
   call, builds the plan on the second, and from then on `eval::call_with_plan` writes the arguments
-  into the slots without matching. A site stops planning after eight different bodies. A call
+  into the slots without matching. A site stops planning after eight misses (a closure with other
+  formals or body than its plan's, or one it cannot plan for). Plans live outside the heap, in
+  `CallPlans`, columns indexed by plan id; the site keeps the id in the unused feedback word of its
+  call instruction's first operand, so a site without a plan costs nothing. The table holds its
+  keys (the site's code, the closure's formals and body) weakly: after marking, the collector calls
+  `RootSource::clear_dead`, which frees every plan with a dead key before its address can be
+  reused. A closure without formals gets no plan. A call
   that passes `...` has a plan of one entry, `MATCH_PER_CALL`, because what `...` holds differs
   per call: `call_matching` matches the expanded arguments each time (`matched_sources`) and then
   writes them like any plan. The plan is refused for a `..N` argument or a left-out formal whose
@@ -334,7 +340,9 @@ execute, no promises and no environment.
   found from the closure's environment, and every argument of `f` is a formal, a literal or a
   variable bound outside any function frame. The closure has no `...` formal, and every default
   is missing, `NULL` or a constant.
-- **Pin.** The site's plan keeps a pin (the plan's fourth element): the enclosure, each
+- **Pin.** The site's plan keeps a pin (`CallPlans::pins`, the one heap object a plan holds
+  strongly, and dropped at every major collection because the enclosure it holds can reach the
+  plan's own keys): the enclosure, each
   argument's source, and the cell and lookup stamp of each looked-up symbol, `f` first and `{`
   when the body has braces. A rebinding of any of them changes its stamp, so the next call
   re-pins. A body that does not qualify is pinned as `NULL` and never analyzed again.

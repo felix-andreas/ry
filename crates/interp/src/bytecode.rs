@@ -53,7 +53,7 @@ use {
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
     heap::{
-        Heap, Marker,
+        Heap, Liveness, Marker,
         activity::{self, Activity, Counter},
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
     },
@@ -101,6 +101,7 @@ pub struct State {
     /// that died and whose address was reused merely compiles one call early.
     calls: FxHashMap<Sexp, u32>,
     tier: Option<Tier>,
+    pub(crate) call_plans: CallPlans,
 }
 
 impl Default for State {
@@ -109,6 +110,7 @@ impl Default for State {
             registers: Vec::with_capacity(REGISTER_FILE_CAPACITY),
             calls: FxHashMap::default(),
             tier: None,
+            call_plans: CallPlans::default(),
         }
     }
 }
@@ -118,6 +120,7 @@ impl State {
         for &register in &self.registers {
             marker.mark(register);
         }
+        self.call_plans.trace(marker);
     }
 }
 
@@ -1954,9 +1957,8 @@ impl Compiler {
     /// are made from: the unbound marker when an argument is worth compiling, which
     /// [`Op::CallGeneric`] replaces with the compiled arguments the first time it calls a
     /// closure here, or `NULL` when none is. A third constant is `TRUE` when a call of an
-    /// effect-free closure may bind symbol arguments to their values (see [`eager_site`]). A
-    /// fourth holds the site's direct-call plan ([`direct_plan`]), unbound until the site first
-    /// calls a closure.
+    /// effect-free closure may bind symbol arguments to their values (see [`eager_site`]). The
+    /// site's direct-call plan lives outside the code ([`CallPlans`]).
     unsafe fn call_site(&mut self, call: Sexp) -> R<u32> {
         let index = self.constant(call);
         let arguments = values::pairlist_items(call.cdr());
@@ -1976,7 +1978,6 @@ impl Compiler {
             nil()
         };
         self.constant(flag);
-        self.constant(unbound());
         Ok(index)
     }
 
@@ -5018,11 +5019,14 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             && !effects::calling_handler_established()
             && effects::effect_free(function)?;
         let plan = direct_plan(state, instruction, function, call)?;
-        let per_call = plan
-            .is_some_and(|sources| values::ints(sources).get(1..) == Some(&[eval::MATCH_PER_CALL]));
-        if let Some(sources) = plan
+        // Copied out of the table, which a nested call may grow.
+        let sources: SmallVec<[i32; 8]> = plan
+            .map(|id| SmallVec::from_slice((*state.interp).bytecode.call_plans.sources(id)))
+            .unwrap_or_default();
+        let per_call = plan.is_some() && sources.as_slice() == [eval::MATCH_PER_CALL];
+        if let Some(id) = plan
             && !per_call
-            && let Some(value) = call_wrapper(state, instruction, function, call, sources)?
+            && let Some(value) = call_wrapper(state, function, call, id, &sources)?
         {
             state.record(instruction.at, value);
             instruction.output(0, value);
@@ -5050,14 +5054,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         };
         let result = match plan {
             Some(_) if per_call => eval::call_matching(call, function, &args, sys_parent),
-            // The plan's first entry counts the plans its site made.
-            Some(sources) => eval::call_with_plan(
-                call,
-                function,
-                values::ints(sources).get(1..).unwrap_or(&[]),
-                &args,
-                sys_parent,
-            ),
+            Some(_) => eval::call_with_plan(call, function, &sources, &args, sys_parent),
             None => eval::apply_closure_owning(call, function, &args, sys_parent, None),
         };
         if (*state.interp).references_used != references {
@@ -5098,62 +5095,190 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
     Ok(Flow::Next)
 }
 
-/// How many different closures a call site may plan for before it stops planning and always
-/// takes the generic call path: a site that calls a new closure on every call would otherwise
-/// pay for matching and an allocation each time.
+/// How many times a call site may fail to plan, by meeting a closure with other formals or
+/// body than its plan's or one it cannot plan for, before it stops planning and always takes
+/// the generic call path: a site that calls a new closure on every call would otherwise pay
+/// for matching each time.
 const PLAN_MISSES: i32 = 8;
 
 /// The direct-call plan of a call site for `function` (see [`eval::call_with_plan`]): which
 /// argument fills each of its formals' slots, or `None` when calls of it here take the
 /// generic path. A plan holds for every closure with the same formals and body, so the
-/// closures one `function` expression makes on each run share it. The site keeps the plan as
-/// a list of the formals, the body, and an integer vector of how many plans the site has made
-/// followed by the sources, which [`eval::direct_sources`] leaves out when it finds none.
+/// closures one `function` expression makes on each run share it.
+///
+/// The site keeps its state in the feedback word of its instruction's first operand, which no
+/// recording uses: `0` before its first call of a closure, a plan's id plus one, or minus one
+/// plus the times it failed to plan. Most sites run once, so a site plans on its second call.
 unsafe fn direct_plan(
     state: &Activation<'_, '_>,
     instruction: Instruction,
     function: Sexp,
     call: Sexp,
-) -> R<Option<Sexp>> {
-    let index = instruction.operand(2) + 3;
-    let plan = state.constants.element(index);
+) -> R<Option<u32>> {
     let (formals, body) = (function.car(), function.cdr());
-    if plan == nil() || body.kind() != SexpType::Bytecode {
+    if body.kind() != SexpType::Bytecode {
         return Ok(None);
     }
-    // Most sites run once, so a site plans on its second call of the same body: the first
-    // leaves the body as the mark.
-    if plan != body && plan.kind() != SexpType::List {
-        (*state.heap).set_element(state.constants, index, body);
+    let owner = state.constants;
+    let word_at = instruction.at + 1;
+    let Some(&word) = values::ints(owner.element(FEEDBACK)).get(word_at) else {
         return Ok(None);
-    }
-    let made = if plan == body {
-        0
-    } else if plan.element(0) == formals && plan.element(1) == body {
-        let sources = plan.element(2);
-        return Ok((length(sources) > 1).then_some(sources));
-    } else {
-        values::ints(plan.element(2))[0]
     };
-    let heap = &mut *state.heap;
-    if made >= PLAN_MISSES {
-        heap.set_element(state.constants, index, nil());
+    let plans = &mut (*state.interp).bytecode.call_plans;
+    let existing = (word > 0)
+        .then(|| plans.owned(word as u32 - 1, owner, instruction.at))
+        .flatten();
+    let misses = match existing {
+        Some(id) if plans.formals[id] == formals && plans.bodies[id] == body => {
+            return Ok(Some(id as u32));
+        }
+        Some(id) => i32::from(plans.misses[id]),
+        None if word == 0 => {
+            values::ints_mut(owner.element(FEEDBACK))[word_at] = -1;
+            return Ok(None);
+        }
+        None => (-word - 1).max(0),
+    };
+    if misses >= PLAN_MISSES {
         return Ok(None);
     }
-    let mut entries: SmallVec<[i32; 9]> = SmallVec::new();
-    entries.push(made + 1);
-    if let Some(sources) = eval::direct_sources(function, call)? {
-        entries.extend_from_slice(&sources);
+    // A closure without formals has nothing to plan.
+    let sources = eval::direct_sources(function, call)?.filter(|sources| !sources.is_empty());
+    let plans = &mut (*state.interp).bytecode.call_plans;
+    // Matching allocates, and a collection frees a plan whose closure died.
+    let existing = existing.and_then(|id| plans.owned(id as u32, owner, instruction.at));
+    // Replacing a plan made for another closure counts as a miss, as does a closure the site
+    // cannot plan for.
+    let misses = misses + i32::from(existing.is_some() || sources.is_none());
+    let word = match (sources, existing) {
+        (Some(sources), _) => {
+            let id = plans.store(existing, owner, instruction.at, formals, body, &sources);
+            plans.misses[id] = misses as u8;
+            values::ints_mut(owner.element(FEEDBACK))[word_at] = id as i32 + 1;
+            return Ok(Some(id as u32));
+        }
+        (None, Some(id)) => {
+            plans.misses[id] = misses as u8;
+            return Ok(None);
+        }
+        (None, None) => -1 - misses,
+    };
+    values::ints_mut(owner.element(FEEDBACK))[word_at] = word;
+    Ok(None)
+}
+
+/// The direct-call plans of the session's call sites ([`direct_plan`]), as columns indexed by
+/// plan id. A site with no plan has no entry. The table holds its keys weakly: the code of the
+/// site, and the formals and body of the closures the plan is for. A collection that finds one
+/// of them dead frees the plan before the address can be reused, so no site matches a plan
+/// made for an object that has since died.
+#[derive(Default)]
+pub struct CallPlans {
+    /// The constants of the code holding the site, or `NULL` for a free id.
+    owners: Vec<Sexp>,
+    /// The position of the site's call instruction in that code.
+    sites: Vec<u32>,
+    formals: Vec<Sexp>,
+    bodies: Vec<Sexp>,
+    /// How many times the site failed to plan ([`PLAN_MISSES`]).
+    misses: Vec<u8>,
+    /// Where the plan's sources start in [`CallPlans::pool`], how many there are, and how many
+    /// the range can hold, so a site that plans again reuses it.
+    sources_at: Vec<u32>,
+    sources_len: Vec<u32>,
+    sources_capacity: Vec<u32>,
+    /// The site's pin of a wrapper's lookups ([`WrapperPin`]): unbound until the site calls the
+    /// wrapper, `NULL` for a closure that is not one. The one heap object a plan refers to
+    /// strongly.
+    pins: Vec<Sexp>,
+    pool: Vec<i32>,
+    free: Vec<u32>,
+}
+
+impl CallPlans {
+    /// The plan `id` when it belongs to the site at `at` in the code whose constants are
+    /// `owner`. A site's word can name an id that was freed and reused, or come from a session
+    /// that saved the code.
+    fn owned(&self, id: u32, owner: Sexp, at: usize) -> Option<usize> {
+        let id = id as usize;
+        (self.owners.get(id) == Some(&owner) && self.sites[id] as usize == at).then_some(id)
     }
-    let sources = values::integer_vector(&entries)?;
-    heap.root(sources);
-    let plan = values::alloc(SexpType::List, 4)?;
-    heap.set_element(plan, 0, formals);
-    heap.set_element(plan, 1, body);
-    heap.set_element(plan, 2, sources);
-    heap.set_element(plan, 3, unbound());
-    heap.set_element(state.constants, index, plan);
-    Ok((entries.len() > 1).then_some(sources))
+
+    pub fn sources(&self, id: u32) -> &[i32] {
+        let id = id as usize;
+        let at = self.sources_at[id] as usize;
+        &self.pool[at..at + self.sources_len[id] as usize]
+    }
+
+    /// Stores a plan for the site, in `existing`'s place when it has one.
+    fn store(
+        &mut self,
+        existing: Option<usize>,
+        owner: Sexp,
+        at: usize,
+        formals: Sexp,
+        body: Sexp,
+        sources: &[i32],
+    ) -> usize {
+        let id = match existing.or_else(|| self.free.pop().map(|id| id as usize)) {
+            Some(id) => id,
+            None => {
+                self.owners.push(nil());
+                self.sites.push(0);
+                self.formals.push(nil());
+                self.bodies.push(nil());
+                self.misses.push(0);
+                self.sources_at.push(0);
+                self.sources_len.push(0);
+                self.sources_capacity.push(0);
+                self.pins.push(nil());
+                self.owners.len() - 1
+            }
+        };
+        self.owners[id] = owner;
+        self.sites[id] = at as u32;
+        self.formals[id] = formals;
+        self.bodies[id] = body;
+        self.pins[id] = unbound();
+        let length = sources.len() as u32;
+        if length > self.sources_capacity[id] {
+            self.sources_at[id] = self.pool.len() as u32;
+            self.sources_capacity[id] = length;
+            self.pool.extend_from_slice(sources);
+        } else {
+            let start = self.sources_at[id] as usize;
+            self.pool[start..start + sources.len()].copy_from_slice(sources);
+        }
+        self.sources_len[id] = length;
+        id
+    }
+
+    unsafe fn trace(&self, marker: &mut Marker<'_>) {
+        for &pin in &self.pins {
+            marker.mark(pin);
+        }
+    }
+
+    /// Frees every plan with a dead key. A major collection also drops every pin: a pin holds
+    /// the closure's environment, which can reach the very code and body that key the plan,
+    /// and would otherwise keep the plan alive forever.
+    pub unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
+        let live = |object: Sexp| object == nil() || liveness.is_live(object);
+        for id in 0..self.owners.len() {
+            if self.owners[id] == nil() {
+                continue;
+            }
+            if !live(self.owners[id]) || !live(self.formals[id]) || !live(self.bodies[id]) {
+                self.owners[id] = nil();
+                self.formals[id] = nil();
+                self.bodies[id] = nil();
+                self.pins[id] = nil();
+                self.free.push(id as u32);
+            } else if liveness.is_major() {
+                self.pins[id] = unbound();
+            }
+        }
+    }
 }
 
 /// Runs a planned call of `function` with [`eval::run_wrapper`] when the closure is a wrapper,
@@ -5161,16 +5286,16 @@ unsafe fn direct_plan(
 /// bound outside any function frame, and each argument of the call reads without running R
 /// code. `None` leaves the call to the generic path, with nothing changed.
 ///
-/// The site pins what the body's lookups found in the plan's fourth element ([`WrapperPin`]),
+/// The site pins what the body's lookups found in its plan ([`WrapperPin`]),
 /// and a pin holds while the stamps of its symbols do: a binding of one appearing or going
 /// away anywhere outside a function frame, or any enclosure changing, moves a stamp, while a
 /// value assigned to a pinned binding is read from its cell on every call.
 unsafe fn call_wrapper(
     state: &mut Activation<'_, '_>,
-    instruction: Instruction,
     function: Sexp,
     call: Sexp,
-    sources: Sexp,
+    plan: u32,
+    sources: &[i32],
 ) -> R<Option<Sexp>> {
     let interp = &*state.interp;
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
@@ -5180,14 +5305,13 @@ unsafe fn call_wrapper(
     {
         return Ok(None);
     }
-    let plan = state.constants.element(instruction.operand(2) + 3);
-    let mut pin = plan.element(3);
+    let mut pin = interp.bytecode.call_plans.pins[plan as usize];
     if pin == nil() {
         return Ok(None);
     }
     if pin == unbound() || !pin_holds(pin, function) {
         pin = pin_wrapper(function)?;
-        (*state.heap).set_element(plan, 3, pin);
+        (&mut (*state.interp).bytecode.call_plans.pins)[plan as usize] = pin;
         if pin == nil() {
             return Ok(None);
         }
@@ -5210,7 +5334,6 @@ unsafe fn call_wrapper(
         });
         cell = cell.cdr();
     }
-    let sources = values::ints(sources).get(1..).unwrap_or(&[]);
     if sources.iter().filter(|&&source| source >= 0).count() != supplied.len() {
         return Ok(None);
     }

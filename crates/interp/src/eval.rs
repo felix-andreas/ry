@@ -2047,7 +2047,7 @@ pub unsafe fn call_matching(call: Sexp, function: Sexp, args: &[Arg], sys_parent
 }
 
 /// Calls `function` in a slot frame for a call whose plan `sources` ([`direct_sources`], which
-/// `bytecode::direct_plan` keeps per site) matched `args` to its formals already: the arguments go straight into the slots, with no
+/// `bytecode::CallPlans` keeps per site) matched `args` to its formals already: the arguments go straight into the slots, with no
 /// matching and none of [`apply_closure`]'s checks, which the plan settled for the closure's
 /// formals and body. What can change between calls (a debugger, a move) sends the call down
 /// the generic path.

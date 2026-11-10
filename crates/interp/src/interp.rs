@@ -123,7 +123,7 @@ use {
         unwind::{R, Unwind},
     },
     heap::{
-        Heap, Marker, RootSource,
+        Heap, Liveness, Marker, RootSource,
         object::{Sexp, SexpType},
     },
     rustc_hash::FxHashMap,
@@ -769,6 +769,11 @@ impl RootSource for InterpRoots {
             interp.moves.trace(marker);
             interp.library_tags.trace(marker);
         }
+    }
+
+    fn clear_dead(&self, liveness: &Liveness<'_>) {
+        // SAFETY: as for `trace`.
+        unsafe { interp().bytecode.call_plans.clear_dead(liveness) }
     }
 }
 

@@ -283,6 +283,28 @@ struct RootStack {
 /// frame stack or a JIT's stack maps.
 pub trait RootSource {
     fn trace(&self, marker: &mut Marker<'_>);
+
+    /// Drops what the source holds weakly and the collection found dead. Runs after marking,
+    /// before anything is freed, so a dead object's address cannot yet be reused.
+    fn clear_dead(&self, _liveness: &Liveness<'_>) {}
+}
+
+/// What a finished mark found live, for [`RootSource::clear_dead`].
+pub struct Liveness<'a> {
+    space: &'a Space,
+    major: bool,
+}
+
+impl Liveness<'_> {
+    /// Whether `object` survives this collection.
+    pub unsafe fn is_live(&self, object: Sexp) -> bool {
+        self.space.is_marked(object)
+    }
+
+    /// Whether this collection traced the whole heap.
+    pub fn is_major(&self) -> bool {
+        self.major
+    }
 }
 
 pub struct Marker<'a> {
@@ -2921,6 +2943,13 @@ impl Heap {
         self.drain();
         self.process_weak_refs();
         self.clear_dead_weak_pairs();
+        let liveness = Liveness {
+            space: &self.space,
+            major: kind == Collection::Major,
+        };
+        for (_, source) in &self.sources {
+            source.clear_dead(&liveness);
+        }
         // Before the sweep, while a mark still means "survives". A returned frame the sweep frees
         // gives up its bindings first: sweeping decrements nothing, and those bindings may be the
         // only counted references left to its caller's frame, which also waits to be released.
