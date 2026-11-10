@@ -1004,8 +1004,7 @@ R's vector builtins share one kernel layer in `crates/interp/src/kernels.rs`, wh
   into `x`'s buffer. Every kernel takes its destination as an argument that may be one of its
   operands, and reads that operand from the output buffer, so aliasing is exact under recycling.
   A destination of length one is never reused, because the shared `TRUE`, `FALSE` and `NA`
-  constants can look private. A scalar
-  operand of a math function, a comparison or unary minus is answered without the element loop.
+  constants can look private. A scalar operand of a math function, a comparison or unary minus is answered without the element loop.
 - **Reductions.** `sum` on integers, `any`, `all`, `min`, `max` and `range` are SIMD kernels;
   `range` finds both bounds in one pass. `prod` and the double `sum` accumulate in x87 long double
   as GNU R does, so they keep scalar loops.
@@ -1025,13 +1024,18 @@ R's vector builtins share one kernel layer in `crates/interp/src/kernels.rs`, wh
   into registers, in R's order, and both the fused pass and the ordinary code read those
   registers, so the call runs exactly once. If one of those guards fails (an operator redefined
   in the frame), the whole expression goes to the evaluator before anything ran. A call that may
-  modify a variable in place (an assignment, `eval`, a replacement call) stays unfused.
+  modify a variable in place (an assignment, `eval`, a replacement call) stays unfused. A site
+  that declines 16 times in a row rewrites its opcode to `Op::Unfused`, which does nothing, and
+  drops its program, so a site that never fuses costs one dispatch in tier 0, no code in baseline
+  code, and no heap.
 
 NaN results match GNU R 4.3.3 on x86-64, where an operation on two NaNs returns the first
 operand's payload. GNU R's compiled loops swap the operands of `+` and `*` on two doubles when the
 left one is a scalar beside a longer vector or when both recycle, so `NA_real_ + c(NaN, 1)` is
 `NaN` while `c(NA, 1) + NaN` is `NA`; with an integer operand, and for `-`, `/` and `%/%`, the
-first operand's payload wins. The kernels reproduce each case.
+first operand's payload wins. The kernels reproduce each case. Beside a scalar that is not NaN,
+only the vector's element can be NaN and the hardware's `+` and `*` return its payload in either
+operand order, so those loops carry no per-element NaN test.
 
 ### Builtin fast paths
 
