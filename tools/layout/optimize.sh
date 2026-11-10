@@ -68,12 +68,33 @@ base_r() {
 	fi
 }
 
-rm -rf "$work/pgo-raw" "$work/bolt-raw" "$work/runtime"
+rm -rf "$work/pgo-raw" "$work/bolt-raw" "$work/runtime" "$work/build.log"
 mkdir -p "$work/pgo-raw" "$work/bolt-raw" "$work/runtime"
 
+# Builds the runtime (libR, ry-rcmd) and then ry, each in its own cargo invocation exactly as a
+# plain release build does, so the instrumented and the optimized build compile the same units.
+# Cargo unifies features per invocation, and `interp` and `jit` compile differently when built
+# beside `ry-lang`, so a profile collected from a combined build would not match the shipped
+# runtime. Separate invocations also keep the two fat-LTO links, about 14 GB for `ry` alone with
+# instrumentation, from running at once.
+build() {
+	cargo build --release --locked --target "$target" -p libr -p rcmd 2> >(tee -a "$work/build.log" >&2)
+	cargo build --release --locked --target "$target" -p ry-lang 2> >(tee -a "$work/build.log" >&2)
+}
+
+# Fails when the build log holds a profile mismatch warning.
+check_profile() {
+	local mismatches
+	mismatches=$(profile_warnings "$work/build.log")
+	if [ -n "$mismatches" ]; then
+		printf '%s\n' "$mismatches" >&2
+		echo "error: the profile does not match the code it was applied to (see above)" >&2
+		exit 1
+	fi
+}
+
 echo "optimize: instrumented build" >&2
-RUSTFLAGS="-Cprofile-generate=$work/pgo-raw" CARGO_TARGET_DIR="$work/instrumented" \
-	cargo build --release --locked --target "$target" -p libr -p rcmd -p ry-lang
+RUSTFLAGS="-Cprofile-generate=$work/pgo-raw" CARGO_TARGET_DIR="$work/instrumented" build
 # `%4m` merges each binary's counters into a pool of four files as processes exit, instead of
 # one file per process.
 export LLVM_PROFILE_FILE="$work/pgo-raw/%4m.profraw"
@@ -90,13 +111,9 @@ flags="-Cprofile-use=$work/pgo.profdata"
 [ -z "$bolt" ] || flags="$flags -Clink-arg=-Wl,--emit-relocs"
 export RUSTFLAGS="$flags" CARGO_PROFILE_RELEASE_STRIP=false
 echo "optimize: profile-guided release build" >&2
-cargo build --release --locked --target "$target" -p libr -p rcmd -p ry-lang 2> >(tee "$work/build.log" >&2)
-mismatches=$(profile_warnings "$work/build.log")
-if [ -n "$mismatches" ]; then
-	printf '%s\n' "$mismatches" >&2
-	echo "error: the profile does not match the code it was applied to (see above)" >&2
-	exit 1
-fi
+: > "$work/build.log"
+build
+check_profile
 
 runtime="$work/runtime/$library"
 cp "$build/$library" "$runtime"
@@ -117,7 +134,6 @@ if [ -n "$bolt" ]; then
 		-instrumentation-file="$work/bolt-raw/libR.fdata" -instrumentation-file-append-pid
 	# The image is tied to the runtime's identity, not its layout, so the base R tree's image
 	# serves the instrumented copy too.
-	cargo build --release --locked --target "$target" -p libr -p rcmd -p ry-lang 2> >(tee -a "$work/build.log" >&2)
 	RY_BASE_R="$base" RY_LIBR="$work/bolt-instrumented/$library" python3 -I tools/layout/train.py "$build/$ry"
 	"$merge_fdata" "$work/bolt-raw/"*.fdata > "$work/libR.fdata"
 	"$bolt" "$build/$library" -o "$runtime" -data="$work/libR.fdata" \
@@ -129,12 +145,7 @@ strip --strip-unneeded "$runtime"
 
 echo "optimize: ry with the runtime and base R embedded" >&2
 RY_EMBED_RUNTIME="$runtime" RY_EMBED_BASE="$base" \
-	cargo build --release --locked --target "$target" -p libr -p rcmd -p ry-lang 2> >(tee -a "$work/build.log" >&2)
-mismatches=$(profile_warnings "$work/build.log")
-if [ -n "$mismatches" ]; then
-	printf '%s\n' "$mismatches" >&2
-	echo "error: the profile does not match the code it was applied to (see above)" >&2
-	exit 1
-fi
+	cargo build --release --locked --target "$target" -p ry-lang 2> >(tee -a "$work/build.log" >&2)
+check_profile
 strip "$build/$ry"
 echo "$build/$ry"
