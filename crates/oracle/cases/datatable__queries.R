@@ -1,6 +1,6 @@
 # oracle: requires data.table
-# data.table queries that ry's runtime answers on its own engine. The output, attributes and
-# keys must be exactly data.table's.
+# data.table queries under ry's runtime. The output, attributes and keys must be exactly
+# data.table's.
 library(data.table)
 set.seed(42)
 n <- 40L
