@@ -91,7 +91,19 @@ per process, so its time includes GNU R's byte compilation and ry's tier-up, as 
 the command line would. Neither number includes process start-up, which is 0.18 s for GNU R and
 0.05 s for ry on the measuring machine.
 
-NOISE_TABLE
+One sitting of 5 rounds on a 4-core cloud VM, timing GNU R, ry and an older ry build together,
+gave these 95% intervals. The last column compares two ry builds with nearly the same runtime, so
+it shows the smallest change between builds that one sitting can resolve:
+
+| Suite | Rows in the mean | GNU R / ry, JIT on | Older build / ry, JIT on |
+| --- | ---: | --- | --- |
+| Representative mix | 10 | 1.59x (1.52 to 1.63) | 1.02x (0.97 to 1.04) |
+| awfy | 5 | 1.87x (1.78 to 1.98) | 0.99x (0.92 to 1.07) |
+| rcp | 14 (empty-while and scalar-while too short) | 2.36x (2.22 to 2.44) | 1.01x (0.95 to 1.06) |
+| shootout | 31 (spectralnorm and spectralnorm_naive too short) | 1.94x (1.89 to 1.97) | 1.00x (0.98 to 1.03) |
+
+A difference between two builds smaller than about 5% on a suite, or 10% on a single program,
+needs more rounds or an instruction count (`valgrind --tool=callgrind`) to show.
 
 ### Comparing two builds of ry on testthat
 
