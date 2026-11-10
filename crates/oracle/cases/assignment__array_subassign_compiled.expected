@@ -1,0 +1,51 @@
+[stdout]
+| , , 1
+| 
+|      [,1] [,2] [,3]
+| [1,]   10   10   10
+| [2,]   20   20   20
+| [3,]   30   30   30
+| 
+| , , 2
+| 
+|      [,1] [,2] [,3]
+| [1,]   10   20   30
+| [2,]   10   20   30
+| [3,]   10   20   30
+| 
+|     x   y   z
+| a 101 102 103
+| b 102 104 106
+|      [,1] [,2]
+| [1,]    2    3
+| [2,]    2    4
+| List of 2
+|  $ : int [1:2, 1:2] 0 0 0 0
+|  $ : int [1:2, 1:2] 1 2 3 4
+| List of 1
+|  $ a: int [1:2, 1:2] -1 -1 -2 -2
+| method
+| method
+|      [,1] [,2]
+| [1,]    0    0
+| [2,]    0    0
+|      [,1] [,2]
+| [1,] "p"  "q" 
+| [2,] "p"  "q" 
+| Error: subscript out of bounds 
+|      [,1] [,2]
+| [1,]    1    3
+| [2,]    2    4
+| List of 4
+|  $ : int [1:2, 1:3, 1:4] 0 0 0 0 5 6 0 0 0 0 ...
+|  $ : logi [1:2, 1:2, 1:2] FALSE NA TRUE TRUE FALSE NA ...
+|  $ : num [1:3, 1:2, 1:2] 0 0.5 0 0 1 0 0 1.5 0 0 ...
+|  $ : num[1:2, 0 , 1:2] 
+| Error: subscript out of bounds 
+| Error: number of items to replace is not a multiple of replacement length 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

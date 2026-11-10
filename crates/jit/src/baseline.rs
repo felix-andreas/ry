@@ -193,6 +193,7 @@ pub unsafe fn assemble(arch: Arch, code: heap::object::Sexp) -> Result<Vec<u8>, 
                     );
                     cold.push((slow, op, pc, next));
                 }
+                Op::Unfused => {}
                 Op::Visible => asm.store_interp_byte(visible, 1),
                 Op::Invisible => asm.store_interp_byte(visible, 0),
                 Op::SetSrcref if operand(1) == 0 => {

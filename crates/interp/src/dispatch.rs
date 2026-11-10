@@ -1788,12 +1788,7 @@ unsafe fn promise_of_missing(value: Sexp) -> R<bool> {
     eval::argument_is_missing(value.cdr(), eval::promise_env(value)?)
 }
 
-unsafe fn internal_dispatch(
-    generic: Sexp,
-    call: Sexp,
-    args: &[Arg],
-    env: Sexp,
-) -> R<Option<Sexp>> {
+unsafe fn internal_dispatch(generic: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
     let object = args[0].value;
     let Some(found) = find_s3_method(Some(call), generic, object, env, values::base_namespace())?
     else {

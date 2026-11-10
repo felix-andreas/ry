@@ -1113,6 +1113,7 @@ pub unsafe fn options() -> Sexp {
 
 /// Removes every option, for a start that sets them again from the C-level defaults.
 pub(crate) unsafe fn clear_options() -> R<()> {
+    interp().product_options = crate::linalg::ProductOptions::default();
     set_options(nil())
 }
 
@@ -1135,11 +1136,17 @@ pub unsafe fn get_option(name: &str) -> Sexp {
 
 /// Sets the option `symbol` names, removing it for `NULL`, and returns the old value.
 pub unsafe fn set_option(symbol: Sexp, value: Sexp) -> R<Sexp> {
-    if symbol.car().bytes() == b"expressions" {
-        let depth = values::as_integer_scalar(value);
-        if depth > 0 {
-            interp().max_depth = depth.min(500_000) as u32;
+    match symbol.car().bytes() {
+        b"expressions" => {
+            let depth = values::as_integer_scalar(value);
+            if depth > 0 {
+                interp().max_depth = depth.min(500_000) as u32;
+            }
         }
+        name @ (b"matprod" | b"ry.blas") => {
+            crate::linalg::set_product_option(&mut interp().product_options, name, value)
+        }
+        _ => {}
     }
     let heap = crate::heap();
     let mut cell = options();

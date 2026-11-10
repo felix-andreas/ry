@@ -2060,9 +2060,17 @@ fn install_source(
             "installing the R code of package '{name}' failed\n{error}"
         ))
     })?;
-    let code_image = options
-        .code_image
-        .then(|| write_code_image(home, staging, &build, name, &staged_library, &r_libs, options));
+    let code_image = options.code_image.then(|| {
+        write_code_image(
+            home,
+            staging,
+            &build,
+            name,
+            &staged_library,
+            &r_libs,
+            options,
+        )
+    });
     if options.test_load {
         let check = staging.join("test-load.R");
         write(
