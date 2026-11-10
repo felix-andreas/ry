@@ -33,6 +33,7 @@ use {
         values::{
             self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
         },
+        vector_math,
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
     smallvec::SmallVec,
@@ -1511,6 +1512,10 @@ pub fn power(base: f64, exponent: f64) -> f64 {
     if base == 1.0 || exponent == 0.0 {
         return 1.0;
     }
+    // GNU R squares with `x * x` before any other case (`R_POW`), which also quiets `NA`.
+    if exponent == 2.0 {
+        return base * base;
+    }
     if base == 0.0 {
         return if exponent > 0.0 {
             0.0
@@ -1521,9 +1526,7 @@ pub fn power(base: f64, exponent: f64) -> f64 {
         };
     }
     if base.is_finite() && exponent.is_finite() {
-        return if exponent == 2.0 {
-            base * base
-        } else if let Some(product) = small_power_product(base, exponent) {
+        return if let Some(product) = small_power_product(base, exponent) {
             product
         } else {
             base.powf(exponent)
@@ -1533,7 +1536,9 @@ pub fn power(base: f64, exponent: f64) -> f64 {
         // GNU R's result carries the exponent's payload when both are NaN, so `NA^NaN` is
         // `NaN` and `NaN^NA` is `NA`. Choosing explicitly keeps that independent of which
         // payload the compiled addition happens to propagate.
-        return if exponent.is_nan() { exponent } else { base };
+        // GNU R returns `x + y`, which also quiets a signalling NaN such as `NA`.
+        let nan = if exponent.is_nan() { exponent } else { base };
+        return f64::from_bits(nan.to_bits() | 1 << 51);
     }
     if base.is_infinite() {
         if base > 0.0 {
@@ -2576,6 +2581,19 @@ unsafe fn do_log(call: &Call<'_>) -> R<Sexp> {
         SexpType::Integer | SexpType::Logical | SexpType::Real => {
             let count = length(operand);
             let result = alloc(SexpType::Real, count)?;
+            if base.is_none() && operand.kind() == SexpType::Real {
+                let source = Reals::Doubles(values::reals(operand));
+                let output = values::reals_mut(result);
+                if let Some(produced_nan) =
+                    kernels::vector_lanes(vector_math::log, Some(source), output, f64::ln)
+                {
+                    values::copy_most_attributes(operand, result, true)?;
+                    if produced_nan {
+                        conditions::warning_call(call.call, "NaNs produced")?;
+                    }
+                    return Ok(result);
+                }
+            }
             let mut produced_nan = false;
             for index in 0..count {
                 let x = real_at(operand, index);
