@@ -7,6 +7,7 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         eval::{self, define, find_var, find_var_in_frame, value_of},
         interp,
+        sort::collation_order,
         unwind::{R, error},
         values::{
             self, alloc, base_env, base_namespace, char_str, empty_env, get_attr, global_env,
@@ -783,8 +784,11 @@ pub unsafe fn env_symbols(env: Sexp, all: bool, sorted: bool) -> Vec<Sexp> {
         symbols.retain(|symbol| symbol.car().bytes().first() != Some(&b'.'));
     }
     if sorted {
-        symbols
-            .sort_by(|left, right| crate::sort::collate(&symbol_name(*left), &symbol_name(*right)));
+        let names: Vec<_> = symbols.iter().map(|symbol| symbol_name(*symbol)).collect();
+        symbols = collation_order(&names)
+            .into_iter()
+            .map(|index| symbols[index as usize])
+            .collect();
     }
     symbols
 }
@@ -1212,9 +1216,11 @@ unsafe fn options_list(names: Option<&[String]>) -> R<Sexp> {
             })
             .collect(),
         None => {
-            let mut sorted = entries;
-            sorted.sort_by(|a, b| crate::sort::collate(&a.0, &b.0));
-            sorted
+            let names: Vec<&str> = entries.iter().map(|(name, _)| name.as_str()).collect();
+            collation_order(&names)
+                .into_iter()
+                .map(|index| entries[index as usize].clone())
+                .collect()
         }
     };
     let items: Vec<(&str, Sexp)> = entries
