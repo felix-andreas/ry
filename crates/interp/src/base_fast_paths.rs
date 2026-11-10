@@ -55,8 +55,8 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("Sys.setenv", "rySysSetenv", 0xb3ad8ec3b2915ce0),
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
     ("Reduce", "ryReduce", 0xd929e4c219983788),
-    ("message", "ryMessage", 0x0),
-    ("signalCondition", "rySignalCondition", 0x0),
+    ("message", "ryMessage", 0x9b452884cddd7ceb),
+    ("signalCondition", "rySignalCondition", 0xfb659fdee977c35c),
 ];
 
 /// Puts the fast paths in front of the base namespace's functions, changing each closure in
@@ -174,7 +174,7 @@ const NATIVE_ENTRIES: &[(&str, u64, NativeEntry)] = &[
     ("is.vector", 0xf347f791e9374052, native_is_vector),
     ("isNamespace", 0x9dbd26992b319771, native_is_namespace),
     ("Sys.unsetenv", 0x3bf70db0fa5a60ee, native_sys_unsetenv),
-    ("getOption", 0x0, native_get_option),
+    ("getOption", 0xc9a334d664d4af4b, native_get_option),
 ];
 
 /// Marks the closures of [`NATIVE_ENTRIES`] whose code matches and records them in
