@@ -6,6 +6,8 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
+        conditions::warning,
+        system::r_at_least,
         unwind::{R, error},
         values::{self, alloc, length, nil, symbols},
     },
@@ -509,7 +511,7 @@ pub fn format_complex_common(values: &[Rcomplex], settings: Settings) -> (RealFo
     let imaginary = format_real_common(&imaginaries, settings);
     // From R 4.4 on, each part chooses its notation on its own, and only the space an `NA`
     // needs is shared.
-    if crate::system::r_at_least(4, 4) {
+    if r_at_least(4, 4) {
         let has_na = rounded.len() < values.len();
         if has_na && real.width + imaginary.width + 2 < settings.na_width {
             real.width = settings.na_width - imaginary.width - 2;
@@ -567,7 +569,7 @@ pub fn format_complex_alone(value: Rcomplex, digits: usize) -> String {
 /// `z_prec_r` rounds before printing through R 4.3: a part far smaller than the other one
 /// prints as zero. From R 4.4 on, each part formats on its own, so nothing is rounded.
 fn round_complex(value: Rcomplex, digits: usize) -> Rcomplex {
-    if crate::system::r_at_least(4, 4) {
+    if r_at_least(4, 4) {
         return value;
     }
     let magnitude = [value.r.abs(), value.i.abs()]
@@ -885,6 +887,9 @@ pub(crate) unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
     let decimal_mark = call.arg(8);
     if decimal_mark.kind() != SexpType::String || length(decimal_mark) != 1 {
         return Err(error("invalid 'decimal.mark' argument"));
+    }
+    if r_at_least(4, 6) && decimal_mark.element(0).bytes().is_empty() {
+        warning("the decimal mark is less than one character wide; this will become an error")?;
     }
     let items: Vec<Option<String>> = match vector.kind() {
         SexpType::String => {
