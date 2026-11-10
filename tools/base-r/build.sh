@@ -20,7 +20,10 @@ mkdir -p "$cache"
 tarball=${R_SOURCE_TARBALL:-$cache/$name}
 if [ ! -f "$tarball" ]; then
 	major=${version%%.*}
-	curl -fL --retry 4 -o "$tarball.part" "https://cran.r-project.org/src/base/R-$major/$name"
+	# The mirror is a fallback for networks that reset connections to the primary host; the
+	# checksum below holds either way.
+	curl -fL --retry 4 -o "$tarball.part" "https://cran.r-project.org/src/base/R-$major/$name" ||
+		curl -fL --retry 4 -o "$tarball.part" "https://cloud.r-project.org/src/base/R-$major/$name"
 	mv "$tarball.part" "$tarball"
 fi
 if command -v sha256sum > /dev/null; then
