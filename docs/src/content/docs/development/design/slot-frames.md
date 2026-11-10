@@ -191,24 +191,31 @@ as the callee runs. A slot frame passes such a variable as an argument reference
 (`eval::argument_reference`, from `slot_promises_into`), and a caller that has an environment
 passes a reference to the name in that environment (`eval::env_reference`, from
 `referenced_args_into`), so calls from test code and from reified frames allocate no promise
-either. A slot frame passes compiled argument code the same way, as a code reference
-(`eval::code_reference`).
+either. Compiled argument code is passed the same way, as a code reference (`eval::code_reference`
+from a slot frame, `eval::env_code_reference` from a caller with an environment). The AST evaluator plans its
+calls too: `apply_call` asks `direct_sources` for the callee's plan at each call and binds the
+references it builds with `call_with_plan`, as the bytecode call instruction does. It passes
+constants as references as well, because lazyeval-style native code reads a promise's
+environment and the AST evaluator is what runs uncompiled package code.
 
 - **Shape.** A reference is a promise with `gp::ARGUMENT_REFERENCE`: its expression is the
   variable's name. A reference into an environment keeps that environment in its environment
-  field. A code reference keeps the compiled code there and the code's source as its
-  expression. A reference to a slot frame's variable has nil there, and its attribute is an integer vector
+  field. A code reference from a slot frame keeps the compiled code there and the code's
+  source as its expression, and one from a caller with an environment keeps the environment
+  there, the source as its expression and the code in its attribute. A reference to a slot frame's variable has nil there, and its attribute is an integer vector
   holding the caller's frame position, the variable's slot (`NO_REFERENCE_SLOT` when the caller
   keeps the variable in no slot) and the caller's header register, which `reference_target`
   checks so a reference that outlived its frame panics. References come from `Interp.references`, a pool
   that the calling instruction releases when the call returns, so a call allocates none once
-  the pool has grown.
+  the pool has grown. Each pooled reference owns its attribute vector, held in
+  `Interp.reference_targets` beside it, and release puts that vector back in place when a code
+  reference borrowed the attribute.
 - **Forcing.** `force_promise` forces a reference once, reading the caller's slot at that moment:
   a value as it is, a promise (or another reference) by forcing it, an unbound slot from the
   caller's enclosure, and anything once the caller has an environment from that environment.
   A reference into an environment forces as a promise of the name in it would, and a code
-  reference runs its code on the caller's slots (`run_promise_on_slots`), as a promise over the
-  pending environment would.
+  reference runs its code on the caller's slots (`run_promise_on_slots`) or in the caller's
+  environment (`run_promise`), as a promise over that code would. A constant forces to itself.
   A write the caller's frame takes before the force is therefore visible, and one after it is
   not, exactly as for a promise of the name.
 - **Readers.** `missing()` follows a reference into the caller (`reference_is_missing`) and is
@@ -222,10 +229,9 @@ either. A slot frame passes compiled argument code the same way, as a code refer
   promise over the caller's environment or pending environment. `reify` runs it, as do S3 and
   S4 dispatch, which hand the arguments to a method, and `call_with_plan` when a debugger or
   move tracking sends the call down the generic path.
-- **Scope.** Names and compiled code from a slot frame, and names from a caller with an
-  environment, become references. Code from a caller with an environment and code that was not
-  compiled still become promises, and a callee with a `...` formal or a call that passes `...`
-  gets no plan, so it gets promises.
+- **Scope.** Every argument to a planned callee becomes a reference except a `..N` symbol and a
+  value that is already a promise, and compiled code passes constants as they are. A callee with a
+  `...` formal or a call that passes `...` gets no plan, so it gets promises.
 
 `crates/oracle/cases/environments__argument_references.R` and
 `environments__code_argument_references.R` pin these rules.

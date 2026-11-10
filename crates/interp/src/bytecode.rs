@@ -4994,7 +4994,14 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
             env
         };
         let result = match plan {
-            Some(sources) => eval::call_with_plan(call, function, sources, &args, sys_parent),
+            // The plan's first entry counts the plans its site made.
+            Some(sources) => eval::call_with_plan(
+                call,
+                function,
+                values::ints(sources).get(1..).unwrap_or(&[]),
+                &args,
+                sys_parent,
+            ),
             None => eval::apply_closure_owning(call, function, &args, sys_parent, None),
         };
         if (*state.interp).references_used != references {

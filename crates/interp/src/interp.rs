@@ -306,6 +306,10 @@ pub struct Interp {
     /// The argument references calls have made and may reuse ([`eval::argument_reference`]):
     /// the first [`Interp::references_used`] are live, the rest wait for the next call.
     pub references: Vec<Sexp>,
+    /// Each reference's frame target, the integer vector a reference to a slot frame's variable
+    /// keeps as its attribute. A reference to compiled code in an environment keeps the code
+    /// there instead until it is released ([`eval::release_references`]).
+    pub reference_targets: Vec<Sexp>,
     pub references_used: u32,
     /// The closures each running call created in its own frame, at most
     /// [`FRAME_CLOSURES`] each, which the heap needs to release the frame when the call returns
@@ -498,6 +502,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         frame_args: Vec::new(),
         method_vars: Vec::new(),
         references: Vec::new(),
+        reference_targets: Vec::new(),
         references_used: 0,
         frame_closures: Vec::new(),
         foreign_calls: Vec::new(),
@@ -675,6 +680,9 @@ impl RootSource for InterpRoots {
             }
             for &reference in &interp.references {
                 marker.mark(reference);
+            }
+            for &target in &interp.reference_targets {
+                marker.mark(target);
             }
             for &closure in &interp.frame_closures {
                 marker.mark(closure);

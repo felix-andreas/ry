@@ -463,7 +463,8 @@ pub unsafe fn slot_promise(owner: usize, expression: Sexp) -> R<Sexp> {
 pub unsafe fn argument_reference(owner: usize, slot: u32, symbol: Sexp) -> R<Sexp> {
     let reference = pooled_reference(symbol)?;
     let header = interp().frames[owner].slots;
-    values::ints_mut(reference.attrib()).copy_from_slice(&[
+    values::ints_mut(interp().reference_targets[interp().references_used as usize - 1])
+        .copy_from_slice(&[
         owner as i32,
         slot as i32,
         header as i32,
@@ -471,14 +472,23 @@ pub unsafe fn argument_reference(owner: usize, slot: u32, symbol: Sexp) -> R<Sex
     Ok(reference)
 }
 
-/// An argument reference to the variable `symbol` of a caller that has the environment `env`,
-/// for a callee that takes its arguments straight into slots: it forces as a promise of the
-/// name in `env` would, and like a slot frame's reference it allocates nothing and is
+/// An argument reference to `expression`, a variable, uncompiled code or a constant, of a
+/// caller that has the environment `env`, for a callee that takes its arguments straight into
+/// slots: it forces as a promise of the expression in `env` would, and like a slot frame's reference it allocates nothing and is
 /// released when the call returns. The reference keeps `env` in its environment field, where
 /// a slot frame's reference keeps nil.
-pub unsafe fn env_reference(env: Sexp, symbol: Sexp) -> R<Sexp> {
-    let reference = pooled_reference(symbol)?;
+pub unsafe fn env_reference(env: Sexp, expression: Sexp) -> R<Sexp> {
+    let reference = pooled_reference(expression)?;
     crate::heap().set_tag(reference, env);
+    Ok(reference)
+}
+
+/// An argument reference to the compiled argument `code` of a caller that has the environment
+/// `env`: [`env_reference`] of the code's source, which keeps the code as its attribute in
+/// place of its frame target and runs it when forced, as a compiled promise would.
+pub unsafe fn env_code_reference(env: Sexp, code: Sexp) -> R<Sexp> {
+    let reference = env_reference(env, bytecode::source_of(code))?;
+    crate::heap().set_attrib(reference, code);
     Ok(reference)
 }
 
@@ -523,9 +533,12 @@ unsafe fn pooled_reference(symbol: Sexp) -> R<Sexp> {
             heap.root(target);
             let reference = heap.alloc_compiled_promise(unbound(), symbol, nil(), target)?;
             reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
-            // The pool's own count keeps a reference that a slot releases from being freed.
+            // The pool's own counts keep a reference that a slot releases, and a target that a
+            // code reference displaced, from being freed.
             reference.increment_refcount();
+            target.increment_refcount();
             state.references.push(reference);
+            state.reference_targets.push(target);
             reference
         }
     };
@@ -545,16 +558,22 @@ pub unsafe fn release_references(mark: u32) {
     let state = interp();
     let heap = crate::heap();
     let unbound = unbound();
-    for &reference in state
+    let live = mark as usize..state.references_used as usize;
+    for (&reference, &target) in state
         .references
-        .get(mark as usize..state.references_used as usize)
+        .get(live.clone())
         .unwrap_or(&[])
+        .iter()
+        .zip(state.reference_targets.get(live).unwrap_or(&[]))
     {
         if reference.car() != unbound {
             heap.set_car(reference, unbound);
         }
         if reference.tag() != nil() {
             heap.set_tag(reference, nil());
+        }
+        if reference.attrib() != target {
+            heap.set_attrib(reference, target);
         }
     }
     state.references_used = mark;
@@ -587,6 +606,10 @@ unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
 unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
     let symbol = reference.cdr();
     if let Some(env) = reference_env(reference) {
+        let code = reference.attrib();
+        if code.kind() == SexpType::Bytecode {
+            return bytecode::run_promise(code, env);
+        }
         return eval(symbol, env);
     }
     let (owner, slot) = reference_target(reference);
@@ -617,8 +640,16 @@ unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
 /// variable's slot holds a value or a forced promise.
 pub unsafe fn reference_value(reference: Sexp) -> Option<Sexp> {
     if let Some(env) = reference_env(reference) {
-        return crate::effects::eager_argument(reference.cdr(), env)
-            .filter(|value| value.kind() != SexpType::Promise);
+        let expression = reference.cdr();
+        if reference.attrib().kind() == SexpType::Bytecode {
+            return None;
+        }
+        return match expression.kind() {
+            SexpType::Symbol => crate::effects::eager_argument(expression, env)
+                .filter(|value| value.kind() != SexpType::Promise),
+            SexpType::Language => None,
+            _ => Some(expression),
+        };
     }
     if reference_code(reference).is_some() {
         return None;
@@ -641,10 +672,10 @@ pub unsafe fn reference_value(reference: Sexp) -> Option<Sexp> {
 /// Whether the variable an unforced argument reference names is a missing argument in its
 /// frame, as [`value_is_missing`] asks of a promise of a name.
 unsafe fn reference_is_missing(reference: Sexp) -> R<bool> {
-    if reference_code(reference).is_some() {
+    let symbol = reference.cdr();
+    if reference_code(reference).is_some() || symbol.kind() != SexpType::Symbol {
         return Ok(false);
     }
-    let symbol = reference.cdr();
     let env = if let Some(env) = reference_env(reference) {
         env
     } else {
@@ -720,6 +751,10 @@ unsafe fn reference_promise(reference: Sexp) -> R<Sexp> {
         return forced_promise(symbol, reference.car());
     }
     if let Some(env) = reference_env(reference) {
+        let code = reference.attrib();
+        if code.kind() == SexpType::Bytecode {
+            return compiled_promise(code, env);
+        }
         return make_promise(symbol, env);
     }
     let (owner, _) = reference_target(reference);
@@ -841,6 +876,19 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
                 return Ok(value);
             }
             let mut args = Args::new();
+            // Matching here replaces the matching the generic call would do, so a call the
+            // plan covers costs no more, and its arguments become references, not promises.
+            if arguments == call.cdr()
+                && let Some(sources) = direct_sources(function, call)?
+            {
+                let references = interp().references_used;
+                closure_args_into::<EVALUATOR_REFERENCES>(arguments, env, &mut args)?;
+                let result = call_with_plan(call, function, &sources, &args, env);
+                if interp().references_used != references {
+                    release_references(references);
+                }
+                return result;
+            }
             promise_args_into(arguments, env, &mut args)?;
             apply_closure_owning(call, function, &args, env, None)
         }
@@ -1361,6 +1409,9 @@ const COMPILED: u8 = 1;
 const EAGER: u8 = 2;
 /// A constant as its own value and a variable as an argument reference ([`env_reference`]).
 const REFERENCES: u8 = 3;
+/// [`REFERENCES`] for the AST evaluator, which also passes a constant as a reference, so that
+/// the callee sees a promise for it as it does from GNU R's AST evaluator.
+const EVALUATOR_REFERENCES: u8 = 4;
 
 unsafe fn closure_args_into<const MODE: u8>(
     mut arguments: Sexp,
@@ -1402,13 +1453,22 @@ unsafe fn closure_args_into<const MODE: u8>(
             };
             let value = if let Some(value) = eager {
                 value
-            } else if expression == missing_arg() || (MODE != PROMISES && constant) {
-                expression
-            } else if MODE == REFERENCES
-                && expression.kind() == SexpType::Symbol
-                && dot_dot_index(expression).is_none()
+            } else if expression == missing_arg()
+                || (MODE != PROMISES && MODE != EVALUATOR_REFERENCES && constant)
             {
-                env_reference(env, expression)?
+                expression
+            } else if (MODE == REFERENCES || MODE == EVALUATOR_REFERENCES)
+                && match expression.kind() {
+                    SexpType::Symbol => dot_dot_index(expression).is_none(),
+                    SexpType::Promise => false,
+                    _ => true,
+                }
+            {
+                if expression.kind() == SexpType::Bytecode {
+                    env_code_reference(env, expression)?
+                } else {
+                    env_reference(env, expression)?
+                }
             } else if expression.kind() == SexpType::Bytecode {
                 compiled_promise(expression, env)?
             } else {
@@ -1798,15 +1858,15 @@ unsafe fn slot_default_fits(
     Ok(defaults != nil() && defaults.element(index) != nil())
 }
 
-/// Calls `function` in a slot frame from a site whose plan `sources` (the vector
-/// `bytecode::direct_plan` keeps, of [`direct_sources`]) matched `args` to its formals already: the arguments go straight into the slots, with no
+/// Calls `function` in a slot frame for a call whose plan `sources` ([`direct_sources`], which
+/// `bytecode::direct_plan` keeps per site) matched `args` to its formals already: the arguments go straight into the slots, with no
 /// matching and none of [`apply_closure`]'s checks, which the plan settled for the closure's
 /// formals and body. What can change between calls (a debugger, a move) sends the call down
 /// the generic path.
 pub unsafe fn call_with_plan(
     call: Sexp,
     function: Sexp,
-    sources: Sexp,
+    sources: &[i32],
     args: &[Arg],
     sys_parent: Sexp,
 ) -> R<Sexp> {
@@ -1838,8 +1898,6 @@ pub unsafe fn call_with_plan(
     let missing_value = missing_arg();
     let mut missing = 0u64;
     let mut formal = function.car();
-    // The plan's first entry counts the plans its site made.
-    let sources = values::ints(sources).get(1..).unwrap_or(&[]);
     for (index, &source) in sources.iter().enumerate() {
         let default = formal.car();
         let value = match args.get(source as usize) {
