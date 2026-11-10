@@ -1777,12 +1777,14 @@ pub fn complex_divide(x: Rcomplex, y: Rcomplex) -> Rcomplex {
 /// `__muldc3` where that gave NaN in both parts, which recovers an infinite product (C11 Annex
 /// G.5.1), so `1i * complex(real = NaN, imaginary = Inf)` is `-Inf+NaNi`. The operand order of
 /// each operation is GCC's, which decides which NaN payload wins: `NA_complex_ * NaN` is `NA`.
+/// Only a NaN part depends on that order, so the plain formula, which vectorizes, serves every
+/// product without one and the ordered one is recomputed out of line.
 #[inline(always)]
 pub fn complex_multiply(x: Rcomplex, y: Rcomplex) -> Rcomplex {
-    let real = subtract(multiply(y.r, x.r), multiply(y.i, x.i));
-    let imaginary = add(multiply(y.r, x.i), multiply(x.r, y.i));
-    if real.is_nan() && imaginary.is_nan() {
-        infinite_product(x.r, x.i, y.r, y.i, real, imaginary)
+    let real = y.r * x.r - y.i * x.i;
+    let imaginary = y.r * x.i + x.r * y.i;
+    if real.is_nan() || imaginary.is_nan() {
+        nan_product(x, y, real.is_nan() && imaginary.is_nan())
     } else {
         Rcomplex {
             r: real,
@@ -1791,19 +1793,34 @@ pub fn complex_multiply(x: Rcomplex, y: Rcomplex) -> Rcomplex {
     }
 }
 
-/// libgcc's `__muldc3` past its plain formula, for `(a + bi) * (c + di)` whose plain product is
-/// `(real, imaginary)`, both NaN. Rust's runtime links compiler-rt's `__muldc3` instead, whose
-/// recovery differs, so this is a port.
+/// [`complex_multiply`] for a product with a NaN part. Whether a part is NaN does not depend on
+/// the operand order, so a recovered infinity is decided first; a NaN part that remains is the
+/// hardware's default NaN unless an operand is NaN, and only then is the payload order computed.
 #[cold]
 #[inline(never)]
-fn infinite_product(
-    mut a: f64,
-    mut b: f64,
-    mut c: f64,
-    mut d: f64,
-    real: f64,
-    imaginary: f64,
-) -> Rcomplex {
+fn nan_product(x: Rcomplex, y: Rcomplex, both_nan: bool) -> Rcomplex {
+    if both_nan && let Some(product) = infinite_product(x.r, x.i, y.r, y.i) {
+        return product;
+    }
+    if x.r.is_nan() || x.i.is_nan() || y.r.is_nan() || y.i.is_nan() {
+        Rcomplex {
+            r: subtract(multiply(y.r, x.r), multiply(y.i, x.i)),
+            i: add(multiply(y.r, x.i), multiply(x.r, y.i)),
+        }
+    } else {
+        Rcomplex {
+            r: y.r * x.r - y.i * x.i,
+            i: y.r * x.i + x.r * y.i,
+        }
+    }
+}
+
+/// libgcc's `__muldc3` past its plain formula, for `(a + bi) * (c + di)` whose plain product is
+/// NaN in both parts: the infinite product it recovers, or `None` where it keeps the plain one.
+/// Rust's runtime links compiler-rt's `__muldc3` instead, whose recovery differs, so this is a
+/// port.
+#[inline(always)]
+fn infinite_product(mut a: f64, mut b: f64, mut c: f64, mut d: f64) -> Option<Rcomplex> {
     let boxed = |value: f64| (if value.is_infinite() { 1.0f64 } else { 0.0 }).copysign(value);
     let zeroed = |value: f64| {
         if value.is_nan() {
@@ -1830,17 +1847,10 @@ fn infinite_product(
         (a, b, c, d) = (zeroed(a), zeroed(b), zeroed(c), zeroed(d));
         recalculate = true;
     }
-    if recalculate {
-        Rcomplex {
-            r: f64::INFINITY * (a * c - b * d),
-            i: f64::INFINITY * (a * d + b * c),
-        }
-    } else {
-        Rcomplex {
-            r: real,
-            i: imaginary,
-        }
-    }
+    recalculate.then(|| Rcomplex {
+        r: f64::INFINITY * (a * c - b * d),
+        i: f64::INFINITY * (a * d + b * c),
+    })
 }
 
 /// `x ^ y` as GNU R's `mycpow`: a power of zero is real (or NaN for a complex exponent), an
