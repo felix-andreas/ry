@@ -1015,7 +1015,8 @@ R's vector builtins share one kernel layer in `crates/interp/src/kernels.rs`, wh
   and falls through to the ordinary code on anything observable (an active binding, an attribute,
   an object, ALTREP, recycling other than scalar against equal lengths, integer overflow, a NaN
   that a math function produced), so fused and unfused evaluation cannot be told apart. It also
-  declines when every leaf is a scalar, where the ordinary instructions are cheaper. Otherwise
+  declines when every leaf is a scalar or the tree's vectors are shorter than 64 elements, where
+  the ordinary instructions are cheaper because a short vector saves little allocation. Otherwise
   it runs the tree in 512-element chunks, writes only the root, and records the type feedback of
   the instructions it skipped, so the JIT, which compiles the ordinary code, sees the same types.
   A leaf may also be a call the pass cannot compute, such as `mean(x)` in `sum(x - mean(x) > 0)`,
