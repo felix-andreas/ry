@@ -48,7 +48,7 @@
 | attributes: names row.names version class 
 | class: rlang_trace rlib_trace tbl data.frame  version: 2 
 | rows: 5 
-| call <list>: show(do.call(function(x, y, z) both(), list(1:3, data.frame(a = 1),      sum))) | cat("attributes:", names(attributes(trace)), "\n") | do.call(function(x, y, z) both(), list(1:3, data.frame(a = 1),      sum)) | `<fn>`(`<int>`, `<data.frame>`, `<fn>`) | both()
+| call <list>: show(do.call(function(x, y, z) both(), list(1:3, data.frame(a = 1),      sum))) | cat("attributes:", names(attributes(trace)), "\n") | do.call(function(x, y, z) both(), list(1:3, data.frame(a = 1),      sum)) | <inlined>(<inlined>, <inlined>, <inlined>) | both()
 | parent <integer>: 0 | 1 | 0 | 0 | 4
 | visible <logical>: TRUE | TRUE | TRUE | TRUE | TRUE
 | namespace <character>: NA | base | base | NA | NA
@@ -93,7 +93,7 @@
 | attributes: names row.names version class 
 | class: rlang_trace rlib_trace tbl data.frame  version: 2 
 | rows: 10 
-| call <list>: withCallingHandlers(warning("w"), warning = function(w) {     show(both())     invokeRestart("muffleWarning") }) | warning("w") | .signalSimpleWarning("w", base::quote(withCallingHandlers(warning("w"),      warning = function(w) {         show(both())         invokeRestart("muffleWarning")     }))) | withRestarts({     .Internal(.signalCondition(simpleWarning(msg, call), msg,          call))     .Internal(.dfltWarn(msg, call)) }, muffleWarning = function() NULL) | withOneRestart(expr, restarts[[1L]]) | doWithOneRestart(return(expr), restart) | `<fn>`(`<S3: simpleWarning>`) | show(both()) | cat("attributes:", names(attributes(trace)), "\n") | both()
+| call <list>: withCallingHandlers(warning("w"), warning = function(w) {     show(both())     invokeRestart("muffleWarning") }) | warning("w") | .signalSimpleWarning("w", base::quote(withCallingHandlers(warning("w"),      warning = function(w) {         show(both())         invokeRestart("muffleWarning")     }))) | withRestarts({     .Internal(.signalCondition(simpleWarning(msg, call), msg,          call))     .Internal(.dfltWarn(msg, call)) }, muffleWarning = function() NULL) | withOneRestart(expr, restarts[[1L]]) | doWithOneRestart(return(expr), restart) | <inlined>(<inlined>) | show(both()) | cat("attributes:", names(attributes(trace)), "\n") | both()
 | parent <integer>: 0 | 0 | 0 | 3 | 4 | 5 | 0 | 7 | 8 | 7
 | visible <logical>: TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE
 | namespace <character>: base | base | base | base | base | base | NA | NA | base | NA
