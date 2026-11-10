@@ -769,7 +769,9 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   (vector fusion, bounds-check elimination) are not built.
 - **Unboxing.** Integers, doubles and logicals of length one without attributes live in machine
   registers, with R's `NA` and overflow rules. Element reads and writes on integer, double and
-  logical vectors are inline, and a write copies only when the vector is shared.
+  logical vectors are inline, and a write copies only when the vector is shared. So are `m[i, j]`
+  and `m[[i, j]]` reads with scalar subscripts on an ordinary matrix; a subscript out of range,
+  `NA` or below 1 hands the read to tier 0, which raises the error.
 - **Loops over sequences.** A `for` loop over a compact sequence such as `1:n` or `seq_len(n)`
   never expands it: both tiers compute each element from the first element and the increment, so
   `for (i in 1:1e8)` runs in constant memory. The loop state carries the index, the count, the
@@ -779,7 +781,9 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   its environment. The environment object still exists, but compiled code writes a variable back
   only before something that could observe it runs (a generic call, a dispatching operation, the
   first read of a formal whose default is an expression, a return, a deoptimization) and reloads it
-  after something that could change it.
+  after something that could change it. A scalar written back goes into the box the variable
+  holds when that box is a plain scalar of the same type that nothing else references, so a loop
+  that calls a closure on every iteration does not allocate for its counters.
 - **Calls.** A call to an effect-free closure whose binding was resolved at compile time is direct:
   effect-free arguments are evaluated eagerly and passed as already forced promises, bound by
   position without the general matcher. Evaluating early is invisible only if nothing can assign

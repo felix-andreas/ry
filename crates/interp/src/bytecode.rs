@@ -254,16 +254,42 @@ impl Machine<'_> {
     pub unsafe fn assign(&self, symbol: Sexp, value: Sexp) -> R<()> {
         if let Some(slot) = self.slot_of(symbol) {
             crate::heap().store_slot(&mut *slot, value);
-            let formal = slot.offset_from(register_address(self.header)) as usize - 1;
-            if formal < 64
-                && let Some(frame) = interp().frames.last_mut()
-            {
-                frame.missing &= !(1 << formal);
-            }
+            self.clear_missing(slot);
             return Ok(());
         }
         let env = self.reify(Reify::Site("assignment"))?;
         eval::assign_symbol(symbol, value, env, false)
+    }
+
+    /// Assigns the scalar `element` of `kind` to `symbol` by storing it into the value the
+    /// variable is bound to, when that is a plain scalar of `kind` that nothing else references.
+    /// Returns that value, or `None` when the assignment needs a new one.
+    pub unsafe fn overwrite(&self, symbol: Sexp, kind: SexpType, element: f64) -> Option<Sexp> {
+        let current = match self.slot_of(symbol) {
+            Some(slot) => {
+                let current = *slot;
+                if !overwrite_scalar(current, kind, element) {
+                    return None;
+                }
+                self.clear_missing(slot);
+                return Some(current);
+            }
+            None if self.env() == values::nil() => return None,
+            None => crate::heap()
+                .frame_cell(self.env(), symbol)
+                .filter(|cell| !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED))?
+                .cdr(),
+        };
+        overwrite_scalar(current, kind, element).then_some(current)
+    }
+
+    unsafe fn clear_missing(&self, slot: *mut Sexp) {
+        let formal = slot.offset_from(register_address(self.header)) as usize - 1;
+        if formal < 64
+            && let Some(frame) = interp().frames.last_mut()
+        {
+            frame.missing &= !(1 << formal);
+        }
     }
 }
 
@@ -354,6 +380,35 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
             run(function, code, env)
         }
         Ok(None) | Err(_) => eval::eval(body, env),
+    }
+}
+
+/// `function`'s body, compiled first when [`run_body`] would compile it at this call. Binding the
+/// arguments calls this, so that such a call runs in a slot frame rather than in the environment
+/// the uncompiled body needs: the first call of a body with a loop, which compiles at once, is
+/// often its only call, as for a benchmark's driver. It counts nothing, so [`run_body`] counts a
+/// call that does not compile.
+pub unsafe fn compile_before_call(function: Sexp) -> R<Sexp> {
+    let body = function.cdr();
+    if !worth_compiling(body) {
+        return Ok(body);
+    }
+    let state = &mut interp().bytecode;
+    let calls = state.calls.get(&body).copied().unwrap_or(0);
+    if calls + 1 < COMPILE_AFTER_CALLS && !contains_loop(body, LOOP_SEARCH_DEPTH) {
+        return Ok(body);
+    }
+    state.calls.remove(&body);
+    if let Some(code) = crate::code_image::take_pending(function, body)? {
+        return Ok(code);
+    }
+    match compile(body, function) {
+        Ok(Some(code)) => {
+            crate::heap().set_cdr(function, code);
+            Ok(code)
+        }
+        // A body the compiler rejects runs on the AST evaluator, as in `run_body`.
+        Ok(None) | Err(_) => Ok(body),
     }
 }
 
@@ -8797,7 +8852,9 @@ unsafe fn lookup_variable(
 }
 
 /// [`lookup_variable`] past a frame that does not bind `symbol`: the lookup from the frame's
-/// enclosure `start`.
+/// enclosure `start`. Inlined into both callers: as a call, a free variable's read in a heap
+/// frame cost about 14 more instructions in saved registers.
+#[inline(always)]
 unsafe fn lookup_outside(
     symbol: Sexp,
     start: Sexp,
