@@ -14,10 +14,17 @@ if (identical(body_only[[1]], as.name("{")) && length(body_only) == 3L &&
 slow_trace_back <- rlang:::trace_back
 body(slow_trace_back) <- body_only
 
+# The runner may evaluate this file inside frames of its own, so traces drop the leading rows that
+# are the runner's calls and renumber their parents.
+harness <- sys.calls()
 describe <- function(trace) {
-    calls <- vapply(trace$call, function(call) paste(deparse(call), collapse = " "), "")
-    paste(nrow(trace), typeof(trace$namespace), typeof(trace$scope),
-        paste(calls, trace$parent, trace$visible, trace$namespace, trace$scope, sep = "/", collapse = ";"))
+    n <- 0L
+    while (n < length(harness) && n < nrow(trace) && identical(trace$call[[n + 1L]], harness[[n + 1L]])) n <- n + 1L
+    keep <- seq_len(nrow(trace)) > n
+    calls <- vapply(trace$call[keep], function(call) paste(deparse(call), collapse = " "), "")
+    paste(sum(keep), typeof(trace$namespace), typeof(trace$scope),
+        paste(calls, pmax(trace$parent[keep] - n, 0L), trace$visible[keep], trace$namespace[keep], trace$scope[keep],
+            sep = "/", collapse = ";"))
 }
 
 leaf <- function(state) {

@@ -5,14 +5,27 @@
 # what the R body of trace_back() returns from the same frame.
 library(rlang)
 
+# The runner may evaluate this file inside frames of its own, so traces drop the leading rows that
+# are the runner's calls and renumber their parents.
+harness <- sys.calls()
+strip_harness <- function(trace) {
+    n <- 0L
+    while (n < length(harness) && n < nrow(trace) && identical(trace$call[[n + 1L]], harness[[n + 1L]])) n <- n + 1L
+    keep <- seq_len(nrow(trace)) > n
+    columns <- lapply(unclass(trace), function(values) values[keep])
+    columns$parent <- pmax(columns$parent - n, 0L)
+    columns
+}
+
 show <- function(trace) {
     cat("attributes:", names(attributes(trace)), "\n")
     cat("class:", class(trace), " version:", attr(trace, "version"), "\n")
-    cat("row.names:", attr(trace, "row.names"), "\n")
-    for (column in names(trace)) {
-        values <- trace[[column]]
+    columns <- strip_harness(trace)
+    cat("rows:", length(columns$call), "\n")
+    for (column in names(columns)) {
+        values <- columns[[column]]
         if (is.list(values)) values <- vapply(values, function(call) paste(deparse(call), collapse = " "), "")
-        cat(column, " <", typeof(trace[[column]]), ">: ", paste(values, collapse = " | "), "\n", sep = "")
+        cat(column, " <", typeof(columns[[column]]), ">: ", paste(values, collapse = " | "), "\n", sep = "")
     }
     invisible(trace)
 }
