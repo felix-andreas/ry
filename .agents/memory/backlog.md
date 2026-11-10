@@ -122,7 +122,7 @@ left, in order of expected gain:
 
 ## Open: the real-world benchmark record predates paired rounds
 
-- `tools/bench/real/results.json` holds three rounds and each engine's median time, while `run.py` needs at least five rounds and writes per-round `ratios` and `short`. Rerun `just bench-real --write` on a machine with data.table, xts, zoo, lubridate and R6 installed, then render the paired ratios and their spread in `benchmarks.ts` (`realChart`, `RealWorkloads`, the README summary) and drop the gap note in `benchmarks.mdx`.
+- `tools/bench/real/results.json` holds three rounds and each engine's median time, while `run.py` needs at least five rounds and writes per-round `ratios` and `short`. Rerun `just bench-real --write` on a machine with data.table, xts, zoo, lubridate and R6 installed, then write it in schema 1 (`decisions.md`, "Benchmark suites are directories the renderers only display"), so the page and README show its intervals and `fromLegacy` can go.
 
 ## Open: the benchmark packages under ry's runtime
 

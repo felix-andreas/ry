@@ -17,6 +17,7 @@
     "@tailwindcss/vite": "^4.0.7",
     "astro": "^7.3.2",
     "sharp": "^0.35.5",
+    "smol-toml": "1.9.1",
     "starlight-theme-black": "^0.7.1",
     "tailwindcss": "^4.0.7"
   }

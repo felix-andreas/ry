@@ -23,6 +23,11 @@ use {
 };
 
 pub type HandlerStack = Option<Rc<Handler>>;
+
+/// Whether `stack` holds a calling handler anywhere.
+pub fn calling_established(stack: &HandlerStack) -> bool {
+    stack.as_ref().is_some_and(|handler| handler.calling_below)
+}
 pub type RestartStack = Option<Rc<RestartEntry>>;
 
 pub struct Handler {
@@ -30,6 +35,9 @@ pub struct Handler {
     pub class: Sexp,
     pub handler: Sexp,
     pub calling: bool,
+    /// Whether this entry or any below it is a calling handler, so asking whether one is
+    /// established reads the top entry instead of walking the stack on every call.
+    pub calling_below: bool,
     pub parent_env: Sexp,
     /// For an exiting handler, the frame environment that receives the result.
     pub target: Sexp,
@@ -172,6 +180,7 @@ pub unsafe fn quietly(body: impl FnOnce() -> R<Sexp>) -> R<Option<Sexp>> {
         class: values::mkchar("condition")?,
         handler: nil(),
         calling: false,
+        calling_below: calling_established(&saved),
         parent_env: nil(),
         target,
         next: saved.clone(),
@@ -679,6 +688,7 @@ unsafe fn do_add_cond_hands(call: &Call<'_>) -> R<Sexp> {
             class: classes.element(index),
             handler: handlers.element(index),
             calling,
+            calling_below: calling || calling_established(&stack),
             parent_env,
             target,
             next: stack,

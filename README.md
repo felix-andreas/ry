@@ -65,36 +65,21 @@ The [language tour](https://ry-lang.org/ry) shows every feature.
 
 ## Speed
 
-ry's runtime against GNU R, as the geometric mean of each suite's speed-ups:
+ry's runtime against GNU R, as the geometric mean of each benchmark suite's speed-ups:
 
 <!-- bench-summary -->
 | Suite | What it is | ry vs GNU R | ry typed |
 | --- | --- | ---: | ---: |
-| Numeric kernels (ours) | 17 small programs we wrote: loops, recursion and vector code | 2.92x | 10x |
-| Application workloads (ours) | 7 call-heavy programs we wrote: conditions, S3 and S4 objects, records, validation, simulation | 0.90x | not typed |
+| Numeric kernels (ours) | 17 small programs we wrote: loops, recursion, vector code and records | 2.92x | 10x |
+| Application workloads (ours) | 7 call-heavy programs we wrote: conditions, S3, S4 and R6 objects, records, tables, validation | 0.90x | not typed |
 
-Geometric means; programs that finish in under 0.1 s are left out of them.
+Geometric means of the speed-ups over GNU R; above 1x means ry is faster.
 
-- Numeric kernels measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v233; the best of 3 processes per engine.
-- Application workloads measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores; 3 rounds.
+- Numeric kernels (ours): measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v233; each engine's best time over 3 processes, run one engine after another.
+- Application workloads (ours): measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores; each engine's median time over 3 rounds.
+
+[Benchmarks](https://ry-lang.org/benchmarks) explains how each suite is built and measured, and shows every program.
 <!-- /bench-summary -->
-
-A few of the numeric kernels, as speed-ups over GNU R, untyped and typed in strict mode:
-
-<!-- bench-why -->
-| program | ry | ry, typed |
-| --- | ---: | ---: |
-| `fib` | 80x | 140x |
-| `drawdown` | 6.90x | 29x |
-| `vector_arith` | 1.22x | 2.09x |
-| `orders` | 1.13x | 0.77x |
-
-Measured on 2026-11-04 with GNU R 4.3.3 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v233; the best of 3 processes per engine.
-<!-- /bench-why -->
-
-Loops and recursion gain the most. Call-heavy code is slower than on GNU R, and typed code built on
-records runs mostly in the interpreter. [Benchmarks](https://ry-lang.org/benchmarks) has every
-program and the method.
 
 ## Features
 
