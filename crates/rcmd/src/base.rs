@@ -380,21 +380,22 @@ fn run_image_writer(front_end: &Path, root: &Path, work: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Fetches every lazy-loaded binding of the base packages still left in their lazy-load
-/// databases once the start-up image is loaded, and writes each database's image with the
-/// records' streams alone, so a session reads those records uncompressed and in place instead of
-/// inflating them. Recommended packages get full images when they are installed, so they are
-/// left alone here.
+/// Fetches every record of the base packages' lazy-load databases and writes each database's
+/// image with the records' streams alone, so a session reads those records uncompressed and in
+/// place instead of inflating them. The records are fetched by key rather than by forcing the
+/// namespaces' bindings because start-up has already forced some of them in this process.
+/// Recommended packages get full images when they are installed, so they are left alone here.
 const BASE_CODE_IMAGES: &str = r#"
 library <- file.path(R.home(), "library")
 packages <- rownames(utils::installed.packages(library, priority = "base"))
 .Internal(ryCodeImageRecord(library))
+hook <- function(name) new.env()
 for (package in packages) {
-    namespace <- tryCatch(loadNamespace(package), error = function(condition) NULL)
-    if (is.null(namespace)) next
-    for (name in ls(namespace, all.names = TRUE)) {
-        if (!bindingIsActive(name, namespace)) {
-            tryCatch(get(name, envir = namespace, inherits = FALSE), error = function(condition) NULL)
+    for (index_file in list.files(file.path(library, package, "R"), "\\.rdx$", full.names = TRUE)) {
+        database <- sub("\\.rdx$", ".rdb", index_file)
+        index <- readRDS(index_file)
+        for (key in c(index$variables, index$references)) {
+            tryCatch(lazyLoadDBfetch(key, database, index$compressed, hook), error = function(condition) NULL)
         }
     }
 }
