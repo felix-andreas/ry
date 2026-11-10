@@ -5,6 +5,10 @@ description: Release announcements and project news
 
 ## Unreleased
 
+### Package code is read without decompressing it
+
+A package's code image holds each lazy-loaded record uncompressed, and ry maps the image and reads records from it in place instead of inflating them from the `.rdb`. The base packages get such images when the start image is built. On the testthat workload no `.rdb` is opened, fetches take 33% fewer instructions, the whole run takes 1.3% fewer, and four workers together hold 10 MB less private memory.
+
 ### Package code is allocated old
 
 A lazy-load fetch, which reads a package's functions and data when they are first used, allocates them directly in the old generation, so minor collections no longer trace them only to promote them. `library(testthat)` runs no collection and 6% fewer instructions, the collector's instructions over the testthat workload drop by 14%, and peak memory is unchanged.
