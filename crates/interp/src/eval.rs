@@ -867,6 +867,31 @@ unsafe fn reference_promise(reference: Sexp) -> R<[Sexp; 4]> {
     })
 }
 
+/// The pending environment of the slot frame at `owner`, made bare on first use: the value that
+/// stands for the frame's environment until something reads it, which [`resolved_env`] then
+/// makes real.
+pub unsafe fn pending_env(owner: usize) -> R<Sexp> {
+    let env = interp().frames[owner].pending;
+    if env != nil() {
+        return Ok(env);
+    }
+    let function = interp().frames[owner].function;
+    let env = frame_environment(function, function.car())?;
+    env.set_gp_bits(gp::PENDING_FRAME, true);
+    interp().frames[owner].pending = env;
+    Ok(env)
+}
+
+/// `value`, or the environment it stands for when it is a slot frame's pending one: what a
+/// binding gets for a value that may be pending (a method's `.GenericCallEnv`).
+pub unsafe fn resolved_value(value: Sexp) -> R<Sexp> {
+    if value.kind() == SexpType::Environment {
+        resolved_env(value)
+    } else {
+        Ok(value)
+    }
+}
+
 /// The environment of an unforced `promise`, made first when it is a slot frame's pending one
 /// or the frame an argument reference names. Anything that reads a promise's environment other
 /// than to force it reads it here.
@@ -1775,7 +1800,7 @@ pub unsafe fn bind_arguments(
     if let Some(supplied) = supplied {
         for &(symbol, value) in supplied {
             if heap.frame_cell(env, symbol).is_none() {
-                heap.define(env, symbol, value)?;
+                heap.define(env, symbol, resolved_value(value)?)?;
             }
         }
     }
@@ -2332,7 +2357,7 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
     let method_vars: SmallVec<[(Sexp, Sexp); 6]> = crate::method_vars(interp(), index).into();
     for (symbol, value) in method_vars {
         if heap.frame_cell(env, symbol).is_none() {
-            heap.define(env, symbol, value)?;
+            heap.define(env, symbol, resolved_value(value)?)?;
         }
     }
     let nil = nil();
@@ -4210,10 +4235,25 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
             alternatives.push(*arg);
         }
     }
-    let alternatives = &alternatives[..];
-    let selector = switch_selector(selector, call.call)?;
+    match switch_alternative(selector, call.call, &alternatives)? {
+        Some(chosen) => eval(chosen, call.env()?),
+        None => {
+            interp().visible = false;
+            Ok(nil())
+        }
+    }
+}
+
+/// The alternative `switch(selector, ...)` evaluates, given the selector's value, or `None`
+/// when it returns an invisible `NULL`. `call` is the `switch` call, which a warning names.
+pub(crate) unsafe fn switch_alternative(
+    selector: Sexp,
+    call: Sexp,
+    alternatives: &[Arg],
+) -> R<Option<Sexp>> {
+    let selector = switch_selector(selector, call)?;
     if alternatives.is_empty() {
-        crate::conditions::warning_call(call.call, "'switch' with no alternatives")?;
+        crate::conditions::warning_call(call, "'switch' with no alternatives")?;
     }
     let missing = missing_arg();
     let text = match selector {
@@ -4224,10 +4264,9 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
                 if arg.value == missing {
                     return Err(error("empty alternative in numeric switch"));
                 }
-                return eval(arg.value, call.env()?);
+                return Ok(Some(arg.value));
             }
-            interp().visible = false;
-            return Ok(nil());
+            return Ok(None);
         }
     };
     // GNU R rejects a second default before it looks for a match, naming the calling function
@@ -4249,22 +4288,16 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
         if arg.tag.kind() == SexpType::Symbol && arg.tag.car().bytes() == text.bytes() {
             // Fall through empty alternatives to the next non-empty one, and to an invisible
             // NULL when every later one is empty.
-            for later in &alternatives[position..] {
-                if later.value != missing {
-                    return eval(later.value, call.env()?);
-                }
-            }
-            interp().visible = false;
-            return Ok(nil());
+            return Ok(alternatives[position..]
+                .iter()
+                .find(|later| later.value != missing)
+                .map(|later| later.value));
         }
     }
     match defaults.first() {
         Some(default) if default.value == missing => Err(error(SWITCH_EMPTY_DEFAULT)),
-        Some(default) => eval(default.value, call.env()?),
-        None => {
-            interp().visible = false;
-            Ok(nil())
-        }
+        Some(default) => Ok(Some(default.value)),
+        None => Ok(None),
     }
 }
 

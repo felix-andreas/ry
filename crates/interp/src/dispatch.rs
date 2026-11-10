@@ -863,7 +863,6 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     if generic.kind() != SexpType::String || length(generic) != 1 {
         return Err(call.error("'generic' argument must be a character string"));
     }
-    let generic_symbol = values::install_charsxp(generic.element(0))?;
     let (frame_call, function) = {
         let frame: &Frame = &interp().frames[position];
         (frame.call, frame.function)
@@ -885,26 +884,7 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
             object => object,
         }
     };
-    let def_env = match lookup_generic_definition(generic_symbol, env, sys_parent)? {
-        Some(definition) if definition.kind() == SexpType::Closure => definition.tag(),
-        _ => values::base_namespace(),
-    };
-    let Some(found) = find_s3_method(Some(call.call), generic_symbol, object, sys_parent, def_env)?
-    else {
-        let generic_name = char_str(generic.element(0));
-        let class = implicit_class(object)?;
-        let classes: Vec<String> = (0..length(class))
-            .map(|index| char_str(class.element(index)).into_owned())
-            .collect();
-        let shown = if classes.len() == 1 {
-            format!("\"{}\"", classes[0])
-        } else {
-            format!("\"c('{}')\"", classes.join("', '"))
-        };
-        return Err(error(format!(
-            "no applicable method for '{generic_name}' applied to an object of class {shown}"
-        )));
-    };
+    let found = generic_method(call.call, generic, object, env.enclosure(), sys_parent, sys_parent)?;
     let mut vars = found.vars;
     let dispatch_vars = vars.len();
     // Through R 4.3, local variables the generic defined before dispatching are visible to the
@@ -947,9 +927,149 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     }))
 }
 
-/// The generic function named `name` as seen from the generic's frame.
-unsafe fn lookup_generic_definition(symbol: Sexp, env: Sexp, caller: Sexp) -> R<Option<Sexp>> {
-    for start in [env.enclosure(), caller] {
+/// `UseMethod(generic)` from the slot frame at `position`, as the call its body returns,
+/// without giving the frame an environment: GNU R's dispatch reads only the frame's first
+/// argument, its supplied promises and its call. `first` is the first formal's slot, or null
+/// when the function has no formals, and `explicit` the object `UseMethod(generic, object)`
+/// names. Through R 4.3 the method sees the generic's locals, so the caller checks there are
+/// none.
+pub(crate) unsafe fn use_method_in_slots(
+    site: Sexp,
+    generic: Sexp,
+    position: usize,
+    first: *mut Sexp,
+    explicit: Option<Sexp>,
+) -> R<Option<Sexp>> {
+    activity::count(Counter::S3Dispatches);
+    let dispatching = activity::enter(Activity::S3Dispatch, 0);
+    let (frame_call, function, missing) = {
+        let frame: &Frame = &interp().frames[position];
+        (frame.call, frame.function, frame.missing)
+    };
+    let caller = lazy_caller(position, generic)?;
+    let sys_parent = match caller {
+        Some(_) => nil(),
+        None => eval::frame_sys_parent(position, eval::Reify::Site("method dispatch"))?,
+    };
+    eval::materialize_references(position)?;
+    let promargs: eval::Args = crate::frame_args(interp(), position).into();
+    let value = if first.is_null() { nil() } else { *first };
+    // As in `dispatch_object`: a missing first formal dispatches on the first supplied argument.
+    let object = if let Some(object) = explicit {
+        object
+    } else if first.is_null() {
+        nil()
+    } else if value.kind() == SexpType::Dots {
+        value_of(value.car())?
+    } else if missing & 1 != 0 || value == unbound() || eval::value_is_missing(value)? {
+        first_supplied(&promargs)?
+    } else {
+        value_of(value)?
+    };
+    let Some((owner, enclosure)) = caller else {
+        let found = generic_method(site, generic, object, function.tag(), sys_parent, sys_parent)?;
+        let new_call = renamed_call(frame_call, found.method_name)?;
+        drop(dispatching);
+        return apply_method(new_call, found.method, &promargs, sys_parent, &found.vars, false)
+            .map(Some);
+    };
+    // The caller is a slot frame without an environment. Methods are looked up from its
+    // enclosure (`lazy_caller` checked that its own slots bind none of the names probed), the
+    // method finds it as its caller by position, and `.GenericCallEnv` holds its pending
+    // environment, which whoever reads the variable makes real.
+    let pending = eval::pending_env(owner)?;
+    let found = generic_method(site, generic, object, function.tag(), enclosure, pending)?;
+    let new_call = renamed_call(frame_call, found.method_name)?;
+    drop(dispatching);
+    if found.method.kind() != SexpType::Closure {
+        let sys_parent = eval::frame_env(owner, eval::Reify::Site("method dispatch"))?;
+        return apply_method(new_call, found.method, &promargs, sys_parent, &found.vars, false)
+            .map(Some);
+    }
+    let state = interp();
+    let previous_owner = state.slot_owner;
+    state.slot_owner = owner as u32;
+    let result = apply_method(new_call, found.method, &promargs, nil(), &found.vars, false);
+    interp().slot_owner = previous_owner;
+    result.map(Some)
+}
+
+/// For the slot frame at `position` whose caller is a slot frame still without an environment,
+/// the caller's position and enclosure, when `UseMethod(generic)` may look methods up from that
+/// enclosure: the caller binds no slot named `generic` or `generic.<class>`.
+unsafe fn lazy_caller(position: usize, generic: Sexp) -> R<Option<(usize, Sexp)>> {
+    let frames = &interp().frames;
+    let frame = &frames[position];
+    if frame.sys_parent != nil() || frame.caller == crate::NO_SLOTS {
+        return Ok(None);
+    }
+    let owner = frame.caller as usize;
+    let Some(caller) = frames.get(owner) else {
+        return Ok(None);
+    };
+    if caller.env != nil() || caller.slots == crate::NO_SLOTS {
+        return Ok(None);
+    }
+    let function = caller.function;
+    let names = function.cdr().cdr().element(crate::bytecode::SLOTS).element(1);
+    let prefix = generic.element(0).bytes();
+    let probed = (0..length(names)).any(|index| {
+        let name = names.element(index).car().bytes();
+        name.starts_with(prefix) && (name.len() == prefix.len() || name[prefix.len()] == b'.')
+    });
+    Ok((!probed).then(|| (owner, function.tag())))
+}
+
+/// The method `UseMethod` calls for `object`, or the error GNU R gives when there is none.
+/// `enclosure` is the generic's enclosure, where the generic's own definition is looked up first;
+/// methods are looked up from `lookup`, the caller's environment or, for a caller without one,
+/// its enclosure; `call_env` is what the method's `.GenericCallEnv` holds.
+unsafe fn generic_method(
+    site: Sexp,
+    generic: Sexp,
+    object: Sexp,
+    enclosure: Sexp,
+    lookup: Sexp,
+    call_env: Sexp,
+) -> R<Found> {
+    let generic_symbol = values::install_charsxp(generic.element(0))?;
+    let def_env = match lookup_generic_definition(generic_symbol, enclosure, lookup)? {
+        Some(definition) if definition.kind() == SexpType::Closure => definition.tag(),
+        _ => values::base_namespace(),
+    };
+    if let Some(mut found) = find_s3_method(Some(site), generic_symbol, object, lookup, def_env)? {
+        if call_env != lookup {
+            for (symbol, value) in found.vars.iter_mut() {
+                if *symbol == symbols().dot_generic_call_env {
+                    *value = call_env;
+                }
+            }
+        }
+        return Ok(found);
+    }
+    let generic_name = char_str(generic.element(0));
+    let class = implicit_class(object)?;
+    let classes: Vec<String> = (0..length(class))
+        .map(|index| char_str(class.element(index)).into_owned())
+        .collect();
+    let shown = if classes.len() == 1 {
+        format!("\"{}\"", classes[0])
+    } else {
+        format!("\"c('{}')\"", classes.join("', '"))
+    };
+    Err(error(format!(
+        "no applicable method for '{generic_name}' applied to an object of class {shown}"
+    )))
+}
+
+/// The generic function named `name` as seen from the generic's frame, whose enclosure is
+/// `enclosure`.
+unsafe fn lookup_generic_definition(
+    symbol: Sexp,
+    enclosure: Sexp,
+    caller: Sexp,
+) -> R<Option<Sexp>> {
+    for start in [enclosure, caller] {
         let mut frame = start;
         while frame != values::empty_env() {
             if let Some(function) = function_in_frame(symbol, frame)? {
@@ -1143,7 +1263,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         if value == unbound() {
             sys_parent
         } else {
-            value
+            eval::resolved_value(value)?
         }
     };
     let def_env = {

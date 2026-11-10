@@ -4980,7 +4980,12 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         let mut compiled = state.constants.element(instruction.operand(2) + 1);
         if compiled == unbound() {
             compiled = compile_promise_arguments(state.machine.function, call.cdr())?;
-            (*state.heap).set_element(state.constants, instruction.operand(2) + 1, compiled);
+            // Promise code forced in a frame that has an environment runs for no function, so
+            // it has no slot table to compile against; the site stays undecided until it runs on
+            // a slot frame.
+            if state.machine.function != nil() {
+                (*state.heap).set_element(state.constants, instruction.operand(2) + 1, compiled);
+            }
         }
         let arguments = if compiled == nil() {
             call.cdr()
@@ -5059,6 +5064,11 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         result?
     } else if state.in_slots()
         && let Some(value) = slot_substitute(state, function, call)?
+    {
+        value
+    } else if state.in_slots()
+        && function.kind() == SexpType::Special
+        && let Some(value) = slot_special_call(state, instruction, function, call)?
     {
         value
     } else if state.in_slots()
@@ -5523,6 +5533,204 @@ unsafe fn slot_substitute(
     Ok(Some(result))
 }
 
+/// A call of a special from a slot frame that the slots answer, so the frame keeps going without
+/// an environment. Base wrappers call these on hot paths: `.Internal(f(x, ...))` (the internals
+/// the compiler leaves to the special because they dispatch or take `...`), a generic's
+/// `UseMethod("name")`, and `quote()` of an empty argument.
+unsafe fn slot_special_call(
+    state: &Activation<'_, '_>,
+    instruction: Instruction,
+    function: Sexp,
+    call: Sexp,
+) -> R<Option<Sexp>> {
+    let arguments = call.cdr();
+    if arguments == nil() {
+        return Ok(None);
+    }
+    let argument = arguments.car();
+    let name = eval::builtin_def(function)?.name;
+    if arguments.cdr() != nil() {
+        let rest = arguments.cdr();
+        if rest.cdr() != nil() || arguments.tag() != nil() || rest.tag() != nil() {
+            return Ok(None);
+        }
+        return match name {
+            // `UseMethod("generic", object)` dispatches on a local's value.
+            "UseMethod" if argument.kind() == SexpType::String && length(argument) == 1 => {
+                match slot_operand(state, rest.car())? {
+                    Some(object) => slot_use_method(state, instruction, call, argument, Some(object)),
+                    None => Ok(None),
+                }
+            }
+            // `name <<- value` assigns from the enclosure outwards, so only the value reads the
+            // frame.
+            "<<-" if argument.kind() == SexpType::Symbol && eval::dot_dot_index(argument).is_none() => {
+                let Some(value) = slot_operand(state, rest.car())? else {
+                    return Ok(None);
+                };
+                eval::set_var(argument, value, state.machine.function.tag())?;
+                interp().visible = false;
+                Ok(Some(value))
+            }
+            "switch" if rest.car() == symbols().dots => slot_switch(state, instruction, call, argument),
+            _ => Ok(None),
+        };
+    }
+    match name {
+        ".Internal" if arguments.tag() == nil() => {
+            if argument.kind() != SexpType::Language || argument.car().kind() != SexpType::Symbol {
+                return Ok(None);
+            }
+            match crate::builtins::internal_function(argument.car()) {
+                Some(internal) if internal.kind() == SexpType::Builtin => {
+                    slot_builtin_call(state, argument, internal, None)
+                }
+                _ => Ok(None),
+            }
+        }
+        "UseMethod"
+            if arguments.tag() == nil()
+                && argument.kind() == SexpType::String
+                && length(argument) == 1 =>
+        {
+            slot_use_method(state, instruction, call, argument, None)
+        }
+        "quote" if arguments.tag() == nil() || values::symbol_name(arguments.tag()) == "expr" => {
+            interp().visible = true;
+            Ok(Some(argument))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `switch(selector, ...)` from a slot frame, choosing among the alternatives its `...` holds.
+/// They are its caller's promises, so only the selector reads the frame, and it runs as promise
+/// code on the slots, compiled once per call site.
+unsafe fn slot_switch(
+    state: &Activation<'_, '_>,
+    instruction: Instruction,
+    call: Sexp,
+    selector: Sexp,
+) -> R<Option<Sexp>> {
+    let function = state.machine.function;
+    let Some(dots) = slot_named(state, symbols().dots) else {
+        return Ok(None);
+    };
+    if function == nil() || !forwardable_dots(*dots) {
+        return Ok(None);
+    }
+    let value = if selector.kind() == SexpType::Language {
+        // The site's promise-code entry is free: it serves calls that turn out to be closures,
+        // and `compile_promise_arguments` builds the same list for them.
+        let mut compiled = state.constants.element(instruction.operand(2) + 1);
+        if compiled == unbound() {
+            compiled = compile_promise_arguments(function, call.cdr())?;
+            (*state.heap).set_element(state.constants, instruction.operand(2) + 1, compiled);
+        }
+        let code = compiled.car();
+        if code.kind() != SexpType::Bytecode {
+            return Ok(None);
+        }
+        let owner = (*state.interp).slot_owner as usize;
+        run_promise_on_slots(code, function, owner, state.machine.header)?
+    } else {
+        match slot_operand(state, selector)? {
+            Some(value) => value,
+            None => return Ok(None),
+        }
+    };
+    let dots = *dots;
+    let alternatives: Vec<Arg> = if dots.kind() == SexpType::Dots {
+        values::pairlist_items(dots)
+            .into_iter()
+            .map(|(tag, value)| Arg { tag, value })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    match eval::switch_alternative(value, call, &alternatives)? {
+        Some(chosen) if chosen.kind() == SexpType::Promise => eval::force_promise(chosen).map(Some),
+        // The special evaluates the alternative it chose in the frame, as `do_switch` does.
+        Some(chosen) if matches!(chosen.kind(), SexpType::Language | SexpType::Symbol) => {
+            eval::eval(chosen, state.env(Reify::Site("generic call"))?).map(Some)
+        }
+        Some(chosen) => {
+            interp().visible = true;
+            Ok(Some(chosen))
+        }
+        None => {
+            interp().visible = false;
+            Ok(Some(nil()))
+        }
+    }
+}
+
+/// The value of `expression`, an argument of a special called from a slot frame, when the slots
+/// answer it without an environment: a constant, or a local holding a value or a promise.
+/// `None` also when forcing the promise gave the frame its environment; the generic path then
+/// evaluates the argument again and finds the promise forced already.
+unsafe fn slot_operand(state: &Activation<'_, '_>, expression: Sexp) -> R<Option<Sexp>> {
+    let value = match expression.kind() {
+        SexpType::Symbol if eval::dot_dot_index(expression).is_none() => {
+            match slot_named(state, expression) {
+                Some(slot) => *slot,
+                None => return Ok(None),
+            }
+        }
+        SexpType::Symbol
+        | SexpType::Language
+        | SexpType::Promise
+        | SexpType::Bytecode
+        | SexpType::Dots => return Ok(None),
+        _ if expression == missing_arg() => return Ok(None),
+        _ => return Ok(Some(expression)),
+    };
+    if value == missing_arg() || value == unbound() || value.kind() == SexpType::Dots {
+        return Ok(None);
+    }
+    if value.kind() != SexpType::Promise {
+        return Ok(Some(value));
+    }
+    let value = eval::force_promise(value)?;
+    Ok(state.in_slots().then_some(value))
+}
+
+/// `UseMethod("generic")` or `UseMethod("generic", object)` from a slot frame, when the body returns its value at once (a generic
+/// whose body is the call), dispatched without giving the frame an environment.
+unsafe fn slot_use_method(
+    state: &Activation<'_, '_>,
+    instruction: Instruction,
+    call: Sexp,
+    generic: Sexp,
+    object: Option<Sexp>,
+) -> R<Option<Sexp>> {
+    // `UseMethod` does not return to the body, so the path is only exact when the body would
+    // return the call's value anyway.
+    let next = instruction.at + 1 + operand_count(Op::CallGeneric);
+    if op_of(*state.code.add(next) as u32) != Some(Op::Return)
+        || *state.code.add(next + 1) as usize != instruction.operand(0)
+    {
+        return Ok(None);
+    }
+    let formals = state.machine.function.car();
+    let first = if formals.kind() == SexpType::Pairlist {
+        match slot_named(state, formals.tag()) {
+            Some(slot) => slot,
+            None => return Ok(None),
+        }
+    } else {
+        std::ptr::null_mut()
+    };
+    // Through R 4.3 the method sees the generic's locals, which only an environment can show.
+    let names = state.constants.element(SLOTS).element(1);
+    let locals = (length(formals)..length(names)).any(|index| *state.header.add(1 + index) != unbound());
+    if locals && !crate::system::r_at_least(4, 4) {
+        return Ok(None);
+    }
+    let owner = (*state.interp).slot_owner as usize;
+    dispatch::use_method_in_slots(call, generic, owner, first, object)
+}
+
 /// A builtin call from a slot frame whose arguments the slots answer: `...`, a constant, or a
 /// local whose slot holds a value or a promise. `list(...)` and `c(x, ...)` then leave the frame
 /// without an environment. `None` when an argument needs one, or when forcing an argument gave
@@ -5888,7 +6096,7 @@ unsafe fn slot_promises_into(
             }
             SexpType::Symbol => eval::dot_dot_index(expression).is_none(),
             SexpType::Bytecode => expression.cdr().element(SLOTS) != nil(),
-            SexpType::Language | SexpType::Promise => false,
+            SexpType::Promise => false,
             _ => true,
         };
         if !fits {
@@ -5920,7 +6128,9 @@ unsafe fn slot_promises_into(
                 _ => eval::slot_promise(owner, expression)?,
             },
             SexpType::Bytecode if references => eval::code_reference(owner, expression)?,
-            SexpType::Bytecode => eval::slot_promise(owner, expression)?,
+            // Code the compiler rejected (it defines a function, say) runs uncompiled over the
+            // pending environment, so the frame gets one only if the callee forces it.
+            SexpType::Bytecode | SexpType::Language => eval::slot_promise(owner, expression)?,
             _ => expression,
         };
         args.push(Arg {
