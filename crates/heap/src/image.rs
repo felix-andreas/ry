@@ -358,7 +358,8 @@ impl Heap {
         }
         out.u64s(&symbols);
         out.u32(self.roots.precious.len() as u32);
-        for (&object, &count) in &self.roots.precious {
+        let precious = &self.roots.precious;
+        for (&object, &count) in precious.objects.iter().zip(&precious.counts) {
             out.u64(object.as_ptr() as u64);
             out.u32(count);
         }
@@ -440,9 +441,8 @@ impl Heap {
         for root in roots.iter_mut() {
             *root = moved(*root);
         }
-        let precious = std::mem::take(&mut self.roots.precious);
-        for (object, count) in precious {
-            *self.roots.precious.entry(moved(object)).or_insert(0) += count;
+        for object in &mut self.roots.precious.objects {
+            *object = moved(*object);
         }
         for entry in &mut self.roots.globals.entries {
             *entry = moved(*entry);
@@ -706,7 +706,7 @@ impl Heap {
         for _ in 0..input.u32()? {
             let object = handle(input.u64()?)?;
             let count = input.u32()?;
-            self.roots.precious.insert(object, count);
+            self.roots.precious.add(object, count);
         }
         self.roots.globals.entries = handles(&input.u64s()?)?;
         self.roots.globals.scanned = 0;

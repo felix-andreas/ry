@@ -652,54 +652,82 @@ pub fn check_code_image_round_trip(entropy: &mut impl Entropy) {
     });
 }
 
-/// An image file's record table reads back as it was written, an image of another build or
-/// database reads as absent, and a corrupted file reads as absent or fails with a message, never
-/// panics or names a payload outside the file.
+/// An image file's record table and streams read back as they were written, an image of another
+/// build or another version of its database reads as absent, and a corrupted file reads as absent
+/// or fails with a message, never panics or names a payload or stream outside the file.
 pub fn check_code_image_file(entropy: &mut impl Entropy) {
     let count = entropy.below(6);
     let mut offset = 0u64;
     let mut records = Vec::new();
+    let mut streams = Vec::new();
     let mut payloads = Vec::new();
     for _ in 0..count {
         offset += 1 + entropy.below(1000) as u64;
-        records.push((offset, entropy.below(5000) as u32, entropy.next_u64()));
+        records.push((offset, entropy.below(5000) as u32));
+        streams.push(
+            (0..entropy.below(60))
+                .map(|_| entropy.below(256) as u8)
+                .collect::<Vec<u8>>(),
+        );
         payloads.push(
             (0..entropy.below(40))
                 .map(|_| entropy.below(256) as u8)
                 .collect::<Vec<u8>>(),
         );
     }
-    let database_length = offset + entropy.below(100) as u64;
+    let stamp = code_image::DatabaseStamp {
+        length: offset + entropy.below(100) as u64,
+        modified: entropy.next_u64(),
+    };
+    let table: Vec<(u64, u32, &[u8])> = records
+        .iter()
+        .zip(&streams)
+        .map(|(&(offset, length), stream)| (offset, length, &stream[..]))
+        .collect();
     let build = "fuzz-build";
     let trained = entropy.below(2) == 0;
     let mutations: Vec<(usize, u8)> = (0..1 + entropy.below(4))
         .map(|_| (entropy.below(1 << 16), entropy.below(256) as u8))
         .collect();
     with_interpreter(|| {
-        let bytes =
-            code_image::image_bytes(build, trained, database_length, &records, &payloads, None)
-                .unwrap_or_else(|_| panic!("a small image must write"));
-        let entries = code_image::parse(&bytes, build, database_length)
+        let bytes = code_image::image_bytes(build, trained, stamp, &table, &payloads, None)
+            .unwrap_or_else(|_| panic!("a small image must write"));
+        let entries = code_image::parse(&bytes, build, stamp)
             .unwrap_or_else(|message| panic!("a written image must parse: {message}"))
             .unwrap_or_else(|| panic!("a written image must belong to its build"))
             .entries;
         assert_eq!(entries.len(), records.len());
-        for ((entry, record), payload) in entries.iter().zip(&records).zip(&payloads) {
-            assert_eq!((entry.offset, entry.length, entry.hash), *record);
-            let start = entry.payload_offset as usize;
+        let at = |offset: u64, length: u32| {
+            let start = offset as usize;
+            bytes.get(start..start + length as usize)
+        };
+        for (entry, (record, (stream, payload))) in entries
+            .iter()
+            .zip(records.iter().zip(streams.iter().zip(&payloads)))
+        {
+            assert_eq!((entry.offset, entry.length), *record);
             assert_eq!(
-                bytes.get(start..start + entry.payload_length as usize),
+                at(entry.payload_offset, entry.payload_length),
                 Some(&payload[..])
             );
+            assert_eq!(
+                at(entry.stream_offset, entry.stream_length),
+                Some(&stream[..])
+            );
         }
-        assert_eq!(
-            code_image::parse(&bytes, "another-build", database_length),
-            Ok(None)
-        );
-        assert_eq!(
-            code_image::parse(&bytes, build, database_length + 1),
-            Ok(None)
-        );
+        assert_eq!(code_image::parse(&bytes, "another-build", stamp), Ok(None));
+        for other in [
+            code_image::DatabaseStamp {
+                length: stamp.length + 1,
+                ..stamp
+            },
+            code_image::DatabaseStamp {
+                modified: stamp.modified ^ 1,
+                ..stamp
+            },
+        ] {
+            assert_eq!(code_image::parse(&bytes, build, other), Ok(None));
+        }
         let mut mutated = bytes.clone();
         for &(position, value) in &mutations {
             let at = position % mutated.len().max(1);
@@ -708,7 +736,7 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
                 _ => mutated.truncate(at),
             }
         }
-        if let Ok(Some(parsed)) = code_image::parse(&mutated, build, database_length) {
+        if let Ok(Some(parsed)) = code_image::parse(&mutated, build, stamp) {
             assert!(
                 parsed.native_offset + parsed.native_length <= mutated.len() as u64,
                 "a parsed image must not name a native section outside the file"
@@ -717,6 +745,10 @@ pub fn check_code_image_file(entropy: &mut impl Entropy) {
                 assert!(
                     entry.payload_offset + u64::from(entry.payload_length) <= mutated.len() as u64,
                     "a parsed image must not name a payload outside the file"
+                );
+                assert!(
+                    entry.stream_offset + u64::from(entry.stream_length) <= mutated.len() as u64,
+                    "a parsed image must not name a stream outside the file"
                 );
             }
         }
@@ -824,12 +856,24 @@ pub fn check_code_image_load(entropy: &mut impl Entropy) {
                 }
                 _ => {}
             }
+            std::fs::create_dir_all(&directory).unwrap_or_else(|failure| {
+                panic!("cannot create {}: {failure}", directory.display())
+            });
+            let database = directory.join("fuzz.rdb");
+            let database = database
+                .to_str()
+                .unwrap_or_else(|| panic!("a temporary path is text"));
+            std::fs::write(database, vec![0u8; stream.len()])
+                .unwrap_or_else(|failure| panic!("cannot write {database}: {failure}"));
+            let stamp = code_image::DatabaseStamp::of(database)
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .unwrap_or_else(|| panic!("a temporary file has a modification time"));
             let build = "fuzz-build";
             let mut image = code_image::image_bytes(
                 build,
                 trained,
-                stream.len() as u64,
-                &[(offset, stream.len() as u32, code_image::hash(&stream))],
+                stamp,
+                &[(offset, stream.len() as u32, &stream[..])],
                 &[payload],
                 None,
             )
@@ -844,25 +888,20 @@ pub fn check_code_image_load(entropy: &mut impl Entropy) {
                     }
                 }
             }
-            std::fs::create_dir_all(&directory).unwrap_or_else(|failure| {
-                panic!("cannot create {}: {failure}", directory.display())
-            });
-            let database = directory.join("fuzz.rdb");
-            let database = database
-                .to_str()
-                .unwrap_or_else(|| panic!("a temporary path is text"));
-            std::fs::write(database, vec![0u8; stream.len()])
-                .unwrap_or_else(|failure| panic!("cannot write {database}: {failure}"));
             std::fs::write(code_image::path(database), &image)
                 .unwrap_or_else(|failure| panic!("cannot write the image: {failure}"));
             let previous = std::mem::replace(&mut crate::interp().code_image.build, build);
             let show = std::mem::replace(&mut crate::interp().show_error_messages, false);
             let loaded = (|| -> Result<Option<Sexp>, Unwind> {
-                if !code_image::wants(database)? {
-                    return Ok(None);
-                }
-                let record = code_image::Record::of(0, &stream);
-                let value = code_image::read_record(database, record, &stream, values::nil())?;
+                // The database holds zeros, so a record the image does not hold is read from the
+                // stream directly, as decompressing it from the database would give it.
+                let number = code_image::database(values::mkchar(database)?);
+                let value = match code_image::source(number, 0, stream.len())? {
+                    code_image::Source::Image(record) => {
+                        code_image::read_image_record(number, &record, values::nil())?
+                    }
+                    _ => serialize::unserialize(&stream, values::nil())?,
+                };
                 Ok(Some(value))
             })();
             if let Ok(Some(value)) = loaded {
