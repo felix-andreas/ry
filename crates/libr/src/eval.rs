@@ -665,10 +665,6 @@ unsafe fn dot_c(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
     native_call(call, kind, false)
 }
 
-fn tagged_values(call: &Call<'_>) -> Vec<(Sexp, Sexp)> {
-    call.args.iter().map(|arg| (arg.tag, arg.value)).collect()
-}
-
 /// A native routine through `.Call`, `.External`, `.C` or `.Fortran`, with `external2` for an
 /// `.External` routine that `.External2` calls. The first argument is `.NAME`.
 unsafe fn native_call(
@@ -677,15 +673,16 @@ unsafe fn native_call(
     external2: bool,
 ) -> ApiResult<Sexp> {
     let call = builtin_call.call;
-    let arguments = &tagged_values(builtin_call);
     let what = kind.interface();
-    let Some(((_, name), rest)) = arguments.split_first() else {
+    let Some((first, rest)) = builtin_call.args.split_first() else {
         return Err(error_in(call, "'.NAME' is missing"));
     };
+    let name = &first.value;
     let mut package = None;
     let mut na_ok = false;
-    let mut values = Vec::new();
-    for &(tag, value) in rest {
+    let mut values = Vec::with_capacity(rest.len());
+    for arg in rest {
+        let (tag, value) = (arg.tag, arg.value);
         // Most arguments are untagged, so the names are compared only for a tagged one, which
         // keeps a `.Call` from interning four symbols on every call.
         let name = if tag.kind() == SexpType::Symbol {
@@ -713,41 +710,28 @@ unsafe fn native_call(
             values.push((tag, value));
         }
     }
-    let (function, arity, routine_name) = match name.kind() {
+    let (function, arity) = match name.kind() {
         SexpType::String if xlength(*name)? >= 1 => {
-            let routine_name = utf8_text(crate::vectors::sexp_elt(*name, 0)?)?.into_owned();
-            let (function, arity) = find_routine(&routine_name, package.as_deref(), kind).map_err(
-                |unwind| match unwind {
+            let routine_name = utf8_text(crate::vectors::sexp_elt(*name, 0)?)?;
+            find_routine(&routine_name, package.as_deref(), kind).map_err(|unwind| {
+                match unwind {
                     Unwind::Error(error) => error_in(call, error.message),
                     other => other,
-                },
-            )?;
-            (function, arity, routine_name)
+                }
+            })?
         }
         // A `NativeSymbolInfo` list carries the routine's address in its `address` element.
-        SexpType::List if native_symbol_address(*name)?.is_some() => {
-            let address = native_symbol_address(*name)?
-                .unwrap_or(*name)
-                .external_address();
+        SexpType::List if let Some(address) = native_symbol_address(*name)? => {
+            let address = address.external_address();
             if address.is_null() {
                 return Err(error_in(call, "NULL value passed as symbol address"));
             }
-            let arity = crate::attributes::get_attrib(*name, R_NamesSymbol.get())
-                .ok()
-                .and_then(|_| list_element(*name, "numParameters"))
+            let arity = list_element(*name, "numParameters")
                 .filter(|value| value.kind() == SexpType::Integer && value.length() == 1)
                 .map(|value| value.slice::<i32>()[0]);
             (
                 std::mem::transmute::<*mut std::ffi::c_void, crate::boundary::DlFunc>(address),
                 arity,
-                list_element(*name, "name")
-                    .filter(|value| value.kind() == SexpType::String)
-                    .and_then(|value| {
-                        utf8_text(value.element(0))
-                            .ok()
-                            .map(|text| text.into_owned())
-                    })
-                    .unwrap_or_default(),
             )
         }
         SexpType::ExternalPtr => {
@@ -758,7 +742,6 @@ unsafe fn native_call(
             (
                 std::mem::transmute::<*mut std::ffi::c_void, crate::boundary::DlFunc>(address),
                 None,
-                String::new(),
             )
         }
         _ => {
@@ -767,6 +750,22 @@ unsafe fn native_call(
                 "first argument must be a string (of length 1) or native symbol reference",
             ));
         }
+    };
+    // The routine's name is read only for the arity error, so a call that passes the check
+    // converts no strings.
+    let arity_error = |count: usize, arity: i32| -> ApiResult<Sexp> {
+        let routine_name = match name.kind() {
+            SexpType::String => utf8_text(crate::vectors::sexp_elt(*name, 0)?)?.into_owned(),
+            SexpType::List => list_element(*name, "name")
+                .filter(|value| value.kind() == SexpType::String)
+                .and_then(|value| utf8_text(value.element(0)).ok().map(|text| text.into_owned()))
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        Err(error_in(
+            call,
+            format!("Incorrect number of arguments ({count}), expecting {arity} for '{routine_name}'"),
+        ))
     };
     match kind {
         RoutineKind::Call => {
@@ -777,13 +776,7 @@ unsafe fn native_call(
                 && arity >= 0
                 && arity as usize != values.len()
             {
-                return Err(error_in(
-                    call,
-                    format!(
-                        "Incorrect number of arguments ({}), expecting {arity} for '{routine_name}'",
-                        values.len()
-                    ),
-                ));
+                return arity_error(values.len(), arity);
             }
             let args: Vec<Sexp> = values.iter().map(|(_, value)| *value).collect();
             call_native(function, &args, what)
@@ -819,13 +812,7 @@ unsafe fn native_call(
                 && arity >= 0
                 && arity as usize != values.len()
             {
-                return Err(error_in(
-                    call,
-                    format!(
-                        "Incorrect number of arguments ({}), expecting {arity} for '{routine_name}'",
-                        values.len()
-                    ),
-                ));
+                return arity_error(values.len(), arity);
             }
             c_call(call, function, &values, kind, na_ok)
         }
@@ -1226,6 +1213,7 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
         user_profile: false,
         interactive: false,
         image: None,
+        build: env!("RY_RUNTIME_ID"),
     };
     match interp::session::start(options) {
         Ok(()) => 0,
@@ -1393,6 +1381,7 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
         user_profile: flags & RUN_FLAG_USER_PROFILE != 0,
         interactive: false,
         image: Some(IMAGE_HOST),
+        build: env!("RY_RUNTIME_ID"),
     };
     if let Err(unwind) = interp::session::start(options) {
         interp::session::report_toplevel(unwind);
@@ -1611,6 +1600,7 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         user_profile: true,
         interactive: true,
         image: Some(IMAGE_HOST),
+        build: env!("RY_RUNTIME_ID"),
     };
     if let Err(unwind) = interp::session::start(options) {
         interp::session::report_toplevel(unwind);
@@ -1623,11 +1613,6 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         return 2;
     }
     install_interrupt_handler();
-    if let Some(startup) = &startup {
-        // `run_text` reports an error itself, and a failed startup load still leaves a console
-        // the user can fix the package from.
-        interp::session::run_text(startup, "<startup>");
-    }
     let mut buffer = vec![0u8; 64 * 1024];
     // The reader runs on the console's input thread, so the interpreter's thread answers an
     // editor's requests while the user types.
@@ -1664,6 +1649,13 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
     };
     interp::console_server::install_reader(Box::new(reader));
     interp::console_server::start();
+    // The reader is installed first so that `readline()` and `menu()` in the startup text read
+    // the terminal, as they do in GNU R's `R -i`.
+    if let Some(startup) = &startup {
+        // `run_text` reports an error itself, and a failed startup load still leaves a console
+        // the user can fix the package from.
+        interp::session::run_text(startup, "<startup>");
+    }
     interp::session::run_console(
         // SAFETY: the console reads on the interpreter's thread, at its top level.
         |prompt| unsafe { interp::console_server::read_line(prompt) },

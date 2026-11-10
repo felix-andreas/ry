@@ -41,10 +41,15 @@ use {
         SyntaxKind::{self, *},
         SyntaxNode, SyntaxToken, TextRange, TextSize, TokenAtOffset,
         ast::BinaryExpr,
+        highlight::{
+            classify_r_name, classify_ry_token, classify_type_token, is_tag_node, tag_node_of,
+        },
         is_inline_annotation, is_syntactic_name,
         kind::KEYWORDS,
     },
 };
+
+pub use syntax::highlight::SemanticClass;
 
 mod fields;
 mod refactor;
@@ -1409,36 +1414,6 @@ fn spells_its_type(hir: &Module, item_node: &SyntaxNode, value: ExprId) -> bool 
         )
 }
 
-/// What a highlighted token is. R grammars already color R's own tokens, so plain R gets a class
-/// only where the grammar cannot know it: a function parameter wherever it is read, a called or
-/// defined function, a namespace, and member names. ry's own syntax is classified in full:
-/// annotation and type-definition bodies, tags, `match` and its arms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SemanticClass {
-    Type,
-    TypeParameter,
-    /// A field or parameter name inside a type, or a function's parameter and its reads.
-    Parameter,
-    Operator,
-    /// An `@` directive or the `@` of a nominal constructor.
-    Decorator,
-    Keyword,
-    Tag,
-    /// A called name, or a name assigned a function literal.
-    Function,
-    /// A called function that comes from a package or base R rather than the project: the
-    /// function half of `pkg::name`, or a call head that resolves only to a stub. Editors render
-    /// it as a function with the `defaultLibrary` modifier.
-    LibraryFunction,
-    /// The package of `pkg::name`.
-    Namespace,
-    /// A member name: the field of `x$field` or `x@slot`, a record literal's or pattern's field,
-    /// a non-function R6 member, or an S4 slot.
-    Property,
-    /// A called member, `x$method()`, or an R6 member defined as a function.
-    Method,
-}
-
 pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, SemanticClass)> {
     let root = semantics::parse(db, file).syntax_node();
     let mut spans = Vec::new();
@@ -1665,106 +1640,6 @@ fn namespace_of(token: &SyntaxToken) -> Option<String> {
         .then(|| child_node(&namespace, NAME))
         .flatten()
         .map(|package| package.text().to_string())
-}
-
-/// A token of type syntax, classified from its place in the tree alone; stub files, which have no
-/// project tree, use this directly.
-pub fn classify_type_token(token: &SyntaxToken) -> Option<SemanticClass> {
-    if tag_node_of(token).is_some() {
-        return Some(SemanticClass::Tag);
-    }
-    // A name may sit in its own `NAME` node; what it names is decided one level up.
-    let owner_kind = token.parent().and_then(|parent| {
-        if parent.kind() == NAME {
-            parent.parent().map(|grandparent| grandparent.kind())
-        } else {
-            Some(parent.kind())
-        }
-    });
-    match token.kind() {
-        IDENT => match owner_kind {
-            Some(TYPE_BINDER) => Some(SemanticClass::TypeParameter),
-            // The only name a function type owns directly is its `fn`.
-            Some(TYPE_FUNCTION) => Some(SemanticClass::Keyword),
-            Some(TYPE_FIELD | TYPE_PARAMETER) => Some(SemanticClass::Parameter),
-            Some(ANNOTATION_DIRECTIVE) => Some(SemanticClass::Decorator),
-            _ => Some(SemanticClass::Type),
-        },
-        COMMA | PIPE | COLON | L_BRACKET | R_BRACKET | L_PAREN | R_PAREN | L_BRACE | R_BRACE
-        | LESS | GREATER | DOTS | MINUS_GREATER | FAT_ARROW => Some(SemanticClass::Operator),
-        AT => Some(SemanticClass::Decorator),
-        NULL_KW => Some(SemanticClass::Type),
-        _ => None,
-    }
-}
-
-/// ry's own syntax outside a type: `match`, its `=>`, and tags in values and patterns.
-fn classify_ry_token(token: &SyntaxToken) -> Option<SemanticClass> {
-    if tag_node_of(token).is_some() {
-        return Some(SemanticClass::Tag);
-    }
-    let parent = token.parent()?;
-    match token.kind() {
-        FAT_ARROW => Some(SemanticClass::Operator),
-        IDENT if parent.kind() == MATCH_EXPR && parent.first_token().as_ref() == Some(token) => {
-            Some(SemanticClass::Keyword)
-        }
-        _ => None,
-    }
-}
-
-/// The classes the syntax decides on its own: a parameter's declaration, a call's head, a name
-/// assigned a function literal, both halves of `pkg::name`, the member of `x$name` and `x@name`,
-/// and the field names of record literals and patterns.
-fn classify_r_name(token: &SyntaxToken) -> Option<SemanticClass> {
-    if token.kind() != IDENT {
-        return None;
-    }
-    let parent = token.parent()?;
-    if parent.kind() == PARAMETER {
-        return Some(SemanticClass::Parameter);
-    }
-    if parent.kind() != NAME {
-        return None;
-    }
-    let holder = parent.parent()?;
-    let is_first_child = holder.first_child().as_ref() == Some(&parent);
-    match holder.kind() {
-        NAMESPACE_EXPR if is_first_child => Some(SemanticClass::Namespace),
-        NAMESPACE_EXPR => holder
-            .parent()
-            .filter(|call| call.kind() == CALL_EXPR && call.first_child().as_ref() == Some(&holder))
-            .map(|_| SemanticClass::LibraryFunction),
-        CALL_EXPR if is_first_child => Some(SemanticClass::Function),
-        DOLLAR_EXPR | AT_EXPR if !is_first_child => {
-            let called = holder.parent().is_some_and(|call| {
-                call.kind() == CALL_EXPR && call.first_child().as_ref() == Some(&holder)
-            });
-            Some(if called {
-                SemanticClass::Method
-            } else {
-                SemanticClass::Property
-            })
-        }
-        PATTERN_FIELD if is_first_child => Some(SemanticClass::Property),
-        ARGUMENT if is_first_child => holder
-            .parent()
-            .and_then(|list| list.parent())
-            .filter(|record| record.kind() == RECORD_EXPR)
-            .map(|_| SemanticClass::Property),
-        BINARY_EXPR if is_first_child => {
-            let binary = BinaryExpr::cast(holder)?;
-            let assigns = binary
-                .operator()
-                .is_some_and(|operator| matches!(operator.kind(), LESS_MINUS | EQ | COLON_EQ));
-            (assigns
-                && binary
-                    .rhs()
-                    .is_some_and(|value| value.kind() == FUNCTION_DEF))
-            .then_some(SemanticClass::Function)
-        }
-        _ => None,
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4552,21 +4427,6 @@ fn tag_at(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<(String, Te
         Some(name.text().to_string()).zip(Some(name.text_range()))
     })?;
     Some(token)
-}
-
-/// The tag node a token spells: its `:` or its name.
-fn tag_node_of(token: &SyntaxToken) -> Option<SyntaxNode> {
-    let parent = token.parent()?;
-    let node = match token.kind() {
-        COLON => parent,
-        IDENT if parent.kind() == NAME => parent.parent()?,
-        _ => return None,
-    };
-    is_tag_node(node.kind()).then_some(node)
-}
-
-fn is_tag_node(kind: SyntaxKind) -> bool {
-    matches!(kind, TAG_EXPR | PATTERN_TAG | TYPE_TAG)
 }
 
 fn tag_occurrences(db: &dyn Db, files: ProjectFiles, name: &str) -> Vec<Occurrence> {

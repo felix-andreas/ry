@@ -33,8 +33,11 @@ struct ReplSession {
     _lock: std::sync::MutexGuard<'static, ()>,
     _pair: portable_pty::PtyPair,
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    chunks: mpsc::Receiver<Vec<u8>>,
-    writer: Box<dyn Write + Send>,
+    /// When each chunk arrived, so a test can see how evenly output streamed.
+    chunks: mpsc::Receiver<(Instant, Vec<u8>)>,
+    /// Input goes through a thread of its own: a write larger than the pty buffers would
+    /// otherwise block while the console blocks writing output nobody reads.
+    writer: mpsc::Sender<Vec<u8>>,
     seen: String,
     /// So a terminal query split over a read boundary is still recognized.
     raw_carry: Vec<u8>,
@@ -72,17 +75,32 @@ impl ReplSession {
         }
         let child = pair.slave.spawn_command(command).expect("spawn repl");
         let mut reader = pair.master.try_clone_reader().expect("pty reader");
-        let writer = pair.master.take_writer().expect("pty writer");
+        let mut pty_writer = pair.master.take_writer().expect("pty writer");
+        let (writer, inputs) = mpsc::channel::<Vec<u8>>();
+        thread::spawn(move || {
+            for input in inputs {
+                if let Err(error) = pty_writer
+                    .write_all(&input)
+                    .and_then(|()| pty_writer.flush())
+                {
+                    eprintln!("writing to the pty failed: {error}");
+                    break;
+                }
+            }
+        });
         // The pty read blocks with no timeout, so it gets its own thread and a silent
         // session fails instead of hanging.
-        let (sender, chunks) = mpsc::channel::<Vec<u8>>();
+        let (sender, chunks) = mpsc::channel::<(Instant, Vec<u8>)>();
         thread::spawn(move || {
             let mut buffer = [0u8; 4096];
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) | Err(_) => break,
                     Ok(read) => {
-                        if sender.send(buffer[..read].to_vec()).is_err() {
+                        if sender
+                            .send((Instant::now(), buffer[..read].to_vec()))
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -101,16 +119,20 @@ impl ReplSession {
     }
 
     fn send(&mut self, text: &str) {
-        self.writer.write_all(text.as_bytes()).expect("pty write");
-        self.writer.flush().expect("pty flush");
+        self.writer
+            .send(text.as_bytes().to_vec())
+            .expect("the pty writer is running");
     }
 
     /// Answers terminal queries: the editor asks for the cursor position before
     /// drawing its prompt and blocks until the reply comes.
     fn drain(&mut self, wait: Duration) {
-        let Ok(chunk) = self.chunks.recv_timeout(wait) else {
-            return;
-        };
+        self.drain_chunk(wait);
+    }
+
+    /// Like [`ReplSession::drain`], and returns when the chunk it read arrived.
+    fn drain_chunk(&mut self, wait: Duration) -> Option<Instant> {
+        let (arrived, chunk) = self.chunks.recv_timeout(wait).ok()?;
         self.raw_carry.extend_from_slice(&chunk);
         const CURSOR_QUERY: &[u8] = b"\x1b[6n";
         let queries = self
@@ -118,16 +140,14 @@ impl ReplSession {
             .windows(CURSOR_QUERY.len())
             .filter(|window| *window == CURSOR_QUERY)
             .count();
-        for _ in 0..queries {
-            self.writer.write_all(b"\x1b[1;1R").expect("query reply");
-        }
         if queries > 0 {
-            self.writer.flush().expect("query flush");
+            self.send(&"\x1b[1;1R".repeat(queries));
         }
         let keep = self.raw_carry.len().saturating_sub(CURSOR_QUERY.len() - 1);
         self.raw_carry.drain(..keep);
         self.seen
             .push_str(&strip_ansi(&String::from_utf8_lossy(&chunk)));
+        Some(arrived)
     }
 
     /// A bare sleep would leave the editor's terminal handshake unanswered, so
@@ -173,6 +193,39 @@ impl ReplSession {
             );
             self.drain(Duration::from_millis(100));
         }
+    }
+
+    /// Pastes `lines` the way a terminal does, each line ending in `\r`, and waits until a last
+    /// command printed `{marker}_done`. A `bracketed` paste comes wrapped in the markers a
+    /// terminal adds once the editor turns bracketed paste on, followed by Enter. Returns how
+    /// long the paste took to run and the longest silence in the console's output meanwhile.
+    fn paste(&mut self, lines: &[String], bracketed: bool, marker: &str) -> (Duration, Duration) {
+        let mut text = String::new();
+        for line in lines {
+            text.push_str(line);
+            text.push('\r');
+        }
+        text.push_str(&format!("cat('{marker}', 'done', sep = '_')\r"));
+        if bracketed {
+            text = format!("\x1b[200~{text}\x1b[201~\r");
+        }
+        let needle = format!("{marker}_done");
+        let start = Instant::now();
+        self.send(&text);
+        let (mut last, mut silence) = (start, Duration::ZERO);
+        let deadline = start + Duration::from_secs(120);
+        while !self.seen.contains(&needle) {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {needle:?}; output so far:\n{}",
+                self.seen
+            );
+            if let Some(arrived) = self.drain_chunk(Duration::from_millis(100)) {
+                silence = silence.max(arrived - last);
+                last = arrived;
+            }
+        }
+        (last - start, silence)
     }
 
     fn quit(mut self) {
@@ -461,6 +514,161 @@ fn multiline_input_continues_and_defines() {
     session.send("f(21)\r");
     session.expect("[1] 42");
     session.quit();
+}
+
+/// A paste costs time linear in its length, as under GNU R: 5,000 lines take about ten times as
+/// long as 500, not a hundred times, and no line waits on the terminal. The editor asks for
+/// bracketed paste, so a paste at its prompt arrives as one insertion; a terminal without it, or a
+/// paste while a command runs, sends the lines raw. `Sys.time()` is spelled like a standard
+/// library call but is plain R, so it must not switch the console to analyzing every command.
+#[test]
+fn a_paste_runs_in_linear_time() {
+    let block = |count: usize| -> Vec<String> {
+        (0..count)
+            .map(|index| format!("x{index} <- {index}"))
+            .collect()
+    };
+    for runtime in runtimes() {
+        let mut session = ReplSession::start_with(None, &[runtime_command(runtime)]);
+        session.expect_prompt();
+        session.send("started <- Sys.time(); cat('clock', 'read', sep = '_')\r");
+        session.expect("clock_read");
+        for (bracketed, name) in [(false, "raw"), (true, "bracketed")] {
+            let (small, _) = session.paste(&block(500), bracketed, &format!("{name}_small"));
+            let (large, silence) = session.paste(&block(5000), bracketed, &format!("{name}_large"));
+            // A line that waits on the terminal stalls for crossterm's two-second timeout.
+            assert!(
+                silence < Duration::from_millis(1500),
+                "{runtime}, {name}: the console went silent for {silence:?} during a paste"
+            );
+            assert!(
+                large < small * 30,
+                "{runtime}, {name}: 500 lines took {small:?} but 5,000 took {large:?}"
+            );
+        }
+        session.quit();
+    }
+}
+
+/// A typed paste is linear too: each command is checked against the interface of the commands
+/// before it, never by re-checking the session, so 2,000 annotated lines take about ten times
+/// as long as 200.
+#[test]
+fn a_typed_paste_runs_in_linear_time() {
+    let block = |count: usize| -> Vec<String> {
+        (0..count)
+            .map(|index| format!("x{index}: integer <- {index}L"))
+            .collect()
+    };
+    for runtime in runtimes() {
+        let mut session = ReplSession::start_with(None, &[runtime_command(runtime)]);
+        session.expect_prompt();
+        for (bracketed, name) in [(false, "raw"), (true, "bracketed")] {
+            let (small, _) = session.paste(&block(200), bracketed, &format!("{name}_small"));
+            let (large, _) = session.paste(&block(2000), bracketed, &format!("{name}_large"));
+            assert!(
+                large < small * 30,
+                "{runtime}, {name}: 200 typed lines took {small:?} but 2,000 took {large:?}"
+            );
+        }
+        session.quit();
+    }
+}
+
+/// An error in a paste stops only its own line, as when the lines are typed: R discards the rest
+/// of its input buffer on an error, so the console hands it one line at a time and no later line
+/// runs from the middle.
+#[test]
+fn an_error_in_a_paste_stops_only_its_line() {
+    for runtime in runtimes() {
+        for bracketed in [false, true] {
+            let mut session = ReplSession::start_with(None, &[runtime_command(runtime)]);
+            session.expect_prompt();
+            let lines: Vec<String> = (0..300)
+                .map(|index| match index {
+                    5 => "stop('boom')".to_owned(),
+                    _ => format!("cat('E{index:03}', '\\n')"),
+                })
+                .collect();
+            session.paste(&lines, bracketed, "pasted");
+            for index in (0..300).filter(|&index| index != 5) {
+                assert!(
+                    session.seen.contains(&format!("E{index:03} ")),
+                    "{runtime}, bracketed {bracketed}: line {index} did not run:\n{}",
+                    session.seen
+                );
+            }
+            assert!(
+                session.seen.contains("boom") && !session.seen.contains("unexpected"),
+                "{runtime}, bracketed {bracketed}: {}",
+                session.seen
+            );
+            session.quit();
+        }
+    }
+}
+
+/// Ctrl-C while a pasted line runs cancels the rest of the paste, as GNU R's flush of its
+/// input buffer does, so none of the later lines run.
+#[test]
+fn ctrl_c_cancels_the_rest_of_a_paste() {
+    for runtime in runtimes() {
+        for bracketed in [false, true] {
+            let mut session = ReplSession::start_with(None, &[runtime_command(runtime)]);
+            session.expect_prompt();
+            let mut text = "cat('SLEEP', 'ING', sep = '_'); Sys.sleep(5)\r".to_owned();
+            for index in 0..20 {
+                text.push_str(&format!("cat('P{index:02}', '\\n')\r"));
+            }
+            if bracketed {
+                text = format!("\x1b[200~{text}\x1b[201~\r");
+            }
+            session.send(&text);
+            session.expect("SLEEP_ING");
+            session.settle(Duration::from_millis(500));
+            session.send("\u{3}");
+            session.settle(Duration::from_millis(1000));
+            session.send("cat('AFTER', 'MARK', sep = '_')\r");
+            session.expect("AFTER_MARK");
+            assert!(
+                (0..20).all(|index| !session.seen.contains(&format!("P{index:02} "))),
+                "{runtime}, bracketed {bracketed}: a line after the interrupt ran:\n{}",
+                session.seen
+            );
+            session.quit();
+        }
+    }
+}
+
+/// The lines Ctrl-C cancels never ran, so the strict check of later commands does not see
+/// what they bind, while what ran before the interrupt stays bound.
+#[test]
+fn ctrl_c_rolls_the_strict_session_back_to_what_ran() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(directory.path().join("ry.toml"), "[check]\nstrict = true\n").expect("write config");
+    for runtime in runtimes() {
+        for bracketed in [false, true] {
+            let mut session =
+                ReplSession::start_with(Some(directory.path()), &[runtime_command(runtime)]);
+            session.expect_prompt();
+            let mut text = "a: integer <- 1L; cat('SLEEP', 'ING', sep = '_'); Sys.sleep(5)\r\
+                            b: integer <- 2L\r"
+                .to_owned();
+            if bracketed {
+                text = format!("\x1b[200~{text}\x1b[201~\r");
+            }
+            session.send(&text);
+            session.expect("SLEEP_ING");
+            session.settle(Duration::from_millis(500));
+            session.send("\u{3}");
+            session.settle(Duration::from_millis(1000));
+            session.send("cat(a + 1L, 'RAN', sep = '_')\r");
+            session.expect("2_RAN");
+            session.send("c: integer <- b\r");
+            session.expect("strict mode found 1 error");
+            session.quit();
+        }
+    }
 }
 
 #[test]
@@ -1779,4 +1987,85 @@ fn browser_stops_at_a_prompt_an_editor_can_take_over() {
     assert!(status.success(), "{stdout}");
     assert!(stdout.contains("an editor attached"), "{stdout}");
     assert!(stdout.contains("still running"), "{stdout}");
+}
+
+#[test]
+fn console_input_functions_read_the_console_on_both_runtimes() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let input = "choice <- menu(c('foo', 'bar'))\nx\n5\n2\nprint(choice)\n\
+                 name <- readline('who? ')\nada\nprint(name)\n\
+                 f <- function() { invisible(readline('go ')); 7 }\nf()\n\n\
+                 print(utils::askYesNo('ok?'))\ny\n\
+                 print(select.list(c('a', 'b'), graphics = FALSE))\n1\n\
+                 print(scan(n = 2, quiet = TRUE))\n3 4\n\
+                 print(readLines(stdin(), n = 1))\nabc\n";
+    for runtime in runtimes() {
+        let (status, stdout, stderr) =
+            ry_with_input(directory.path(), &[runtime_command(runtime)], &[], input);
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        for expected in [
+            "Enter an item from the menu, or 0 to exit",
+            "[1] 2",
+            "[1] \"ada\"",
+            "[1] 7",
+            "[1] TRUE",
+            "[1] \"a\"",
+            "[1] 3 4",
+            "[1] \"abc\"",
+        ] {
+            assert!(
+                stdout.contains(expected),
+                "{runtime} lacks {expected:?}: {stdout}{stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn console_input_in_the_interactive_script_reads_the_console_on_both_runtimes() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        directory.path().join("ask.R"),
+        "print(interactive())\nname <- readline('who? ')\nprint(name)\nprint(menu(c('a', 'b')))\n",
+    )
+    .expect("write script");
+    for runtime in runtimes() {
+        let (status, stdout, stderr) = ry_with_input(
+            directory.path(),
+            &[runtime_command(runtime), "-i", "ask.R"],
+            &[],
+            "ada\n2\nprint(name)\n",
+        );
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        for expected in ["[1] TRUE", "[1] \"ada\"", "1: a", "[1] 2"] {
+            assert!(
+                stdout.contains(expected),
+                "{runtime} lacks {expected:?}: {stdout}{stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn console_input_functions_in_a_script_behave_as_in_rscript_on_both_runtimes() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        directory.path().join("script.R"),
+        "print(interactive())\nname <- readline('who? ')\nprint(name)\n\
+         print(tryCatch(menu('a'), error = conditionMessage))\n",
+    )
+    .expect("write script");
+    for runtime in runtimes() {
+        let (status, stdout, stderr) = ry_with_input(
+            directory.path(),
+            &[runtime_command(runtime), "script.R"],
+            &[],
+            "ignored\n",
+        );
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        assert_eq!(
+            stdout, "[1] FALSE\nwho? \n[1] \"\"\n[1] \"menu() cannot be used non-interactively\"\n",
+            "{runtime}: {stderr}"
+        );
+    }
 }

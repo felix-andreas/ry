@@ -147,9 +147,7 @@ fn run_hinted(seed: u64) {
                     heap.remove_binding(env, symbols[which]).expect("remove");
                 }
                 // A second cell for a bound symbol, as duplicate formals bind one.
-                6 => heap
-                    .define_unbound(env, symbols[which], nil)
-                    .expect("bind"),
+                6 => heap.define_unbound(env, symbols[which], nil).expect("bind"),
                 _ => hints[which] = rng.below(64) as u32,
             }
             for (index, &symbol) in symbols.iter().enumerate() {
@@ -164,4 +162,14 @@ fn run_hinted(seed: u64) {
 #[test]
 fn fuzz_hinted_lookups_match_plain_lookups() {
     for_each_seed(60, run_hinted);
+}
+
+#[test]
+fn closure_gp_bits_do_not_overlap() {
+    let mut seen = 0u16;
+    for bit in heap::object::gp::CLOSURE_BITS {
+        assert_eq!(bit.count_ones(), 1, "{bit:#06x} is not a single bit");
+        assert_eq!(seen & bit, 0, "{bit:#06x} is used twice on closures");
+        seen |= bit;
+    }
 }

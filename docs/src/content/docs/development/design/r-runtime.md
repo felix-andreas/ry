@@ -560,13 +560,89 @@ Bytecode is build output, never a cache, so nothing checks whether a stored copy
 - **Installed packages.** `ry install` and `R CMD INSTALL` compile every closure of the package and
   write the bytecode beside its lazy-load database, stamped with the ry build that wrote it. A
   different ry build ignores a stamp it did not write and compiles at first call instead, which is
-  always correct; reinstalling refreshes it.
+  always correct; reinstalling refreshes it. This is the code image, described below.
 - **Base R.** The base and recommended packages are compiled when the base image is built and live
   in a section of the image beside the heap arenas, keyed by the same runtime hash that keys the
   image (`base-image.md`).
 - **Code under development.** `ry load` and scripts compile each closure at its first call. That
   first tier must be cheap enough that compiling a session's working set costs less than reading a
   cache would, which is the bar `ry load`'s lazy loading sets.
+
+### Code images of installed packages
+
+`R CMD INSTALL` writes `R/<package>.ryc` beside `R/<package>.rdb` (`crates/interp/src/code_image.rs`).
+After the R code is installed, a fresh session loads the namespace, fetches every binding from the
+lazy-load database, and compiles each closure the fetches made, nested function bodies included.
+When a later session fetches the same record, it notes where each closure's code lies in the image,
+and the call that would compile the closure (its second, or its first when the body has a loop)
+decodes that code instead. Decoding costs about as much as compiling, so the image does not move
+compilation earlier: a namespace fetches many closures it never calls, such as every S3 method it
+registers, and calls many others only once. What the image adds is what compiling cannot produce,
+the trained profile below, and the native code it reserves room for.
+
+- **Identity.** A record is identified by its offset in the database, its length and an FNV-1a hash
+  of its stored bytes; a closure within the record by the order the stream reader creates closures.
+  An image written for other bytes (a reinstall by GNU R, another version) is ignored record by
+  record. Only databases that have an image pay for the hash.
+- **No copy of the source.** A code object points into its closure's body, so the image stores those
+  pointers as the preorder position of the object in the body. The body itself comes from the
+  database, as without an image.
+- **Stamp.** The file starts with a layout magic and the runtime build's identity; any other build
+  reads the image as absent and compiles at the second call as usual.
+- **Formals.** The compiler's output depends on the closure's formals as well as its body (which
+  names the frame can bind, which call updates its first parameter in place), and `formals<-` or
+  `as.function` makes a closure that shares a fetched body under other formals. Each noted closure
+  therefore keeps its formals, and only a closure with those same formals takes the code; any
+  other compiles its own.
+- **Damage.** The image only saves compiling, so a damaged one never stops a package from loading.
+  A file that cannot be read or parsed, a payload whose hash does not match (checked when the first
+  closure of its record is called), a record whose closures do not match the database's, or code
+  the decoder rejects each print one warning to the console (`cannot use the code image ..., so its
+  functions compile as they run; reinstall the package to repair it`). The warning is not
+  signalled as a condition, so neither a handler nor `options(warn = 2)` can turn the damage into
+  an error. The image is then ignored for the rest of the session, and its waiting code is
+  dropped.
+- **Verified code.** Tier 0 reads instruction operands, registers, inline-cache slots and jump
+  targets without bounds checks, so decoded code passes a linear verifier (`verify` in
+  `crates/interp/src/bytecode.rs`) before it runs: every opcode is known, every operand is below its
+  table's size, every jump lands on an instruction start, the last instruction cannot fall through,
+  and the side tables (loops, feedback, hints, profile) have the lengths the code implies. The
+  payload hash is FNV-1a, which catches damage but not a crafted file, so the verifier is what keeps
+  a bad image from reading out of bounds. It checks tier 0's assumptions only: an instruction's
+  register dataflow is guarded at run time where that is cheap, and the optimizing tier trusts the
+  shape the compiler produces. Record instructions carry process-local layout ids, so code that
+  holds one is not written, and field and item shape caches are written empty. The decoder also
+  keeps only the object bits the encoder can write (the S4 bit) of each constant.
+- **Lifetime.** Waiting code holds its body, its formals and the mapped file. `lazyLoadDBflush`,
+  which `unloadNamespace` calls, drops all three for its database.
+- **Writing.** The image is written to `R/<package>.ryc.partial`, synced to disk, and renamed over
+  the old image, so a crash leaves the old image or the new one. It is never rewritten in place: a
+  process that maps the old file would see its pages change under it, or die with `SIGBUS` once
+  the file shrank. A failed write removes the staging file.
+- **Off switches.** `RY_CODE_IMAGE=0` ignores images when loading; `R CMD INSTALL
+  --ry-no-code-image` writes none. A failure while writing an image warns and installs the package
+  without one.
+- **Native code.** The native section after the payloads holds install-time machine code
+  (`crates/jit/src/ahead.rs`). The install compiles each recorded closure with the native-function
+  compiler (`crates/jit/src/native.rs`) for up to four argument-type guesses, taken from its
+  annotations and constant defaults and otherwise from double, integer and logical scalars and
+  vectors. The code goes through `crates/ssa` and `cranelift-object`, and `ssa::section` links it
+  into position-independent code, with helper addresses in a link table filled when the section
+  is mapped. The section is mapped read-only and executable straight from the file when its
+  offset is page-aligned, so processes share the pages. A manifest in the section names each
+  function's record entry and ordinal, its argument types, and the names it looks up: a base
+  builtin, or a sibling closure that calls are compiled against directly. A call tests its
+  arguments' types on entry; when none match, or a lookup no longer finds what the code was
+  compiled against, it runs in tier 0, so the code needs no deoptimization metadata. A passed
+  check is kept until any binding is unlocked (`interp::code_image::unlocks`), once every binding
+  it read is locked. Records, whose layouts each process numbers anew, keep a function in the
+  interpreter. Two gaps remain. The checker's inferred types are not used yet, so the types are
+  guesses. And arguments are read only when they are values, constants or variables, as for the
+  JIT's native entry, so `f(-1)` runs in the interpreter.
+
+The image is uncompressed and about six times the size of the compressed database (MASS: 706 KB
+against 120 KB). It is mapped, not read, so a session pays only for the pages of the records it
+fetches.
 
 ### Tiers
 
@@ -654,7 +730,14 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 
 - **When it compiles.** Tier 0 counts entries and backward jumps per body. A body compiles on its
   3000th entry, and a running loop compiles after 10,000 backward jumps and continues in compiled
-  code at the loop header (on-stack replacement). The thresholds are high because Cranelift is an
+  code at the loop header (on-stack replacement). A body waits one more threshold per 250
+  instruction words before it compiles, because compile cost grows with size (about 10 µs per
+  word, 200 ms for `rbind`) and the saving per entry does not, and the wait doubles with each
+  recompile. Tier 0 records type feedback
+  only over the last eighth of the entry threshold, from half the back-edge threshold, after a
+  body's compiled code is discarded, and in the first activation of a body with a loop; a body
+  with compiled code records nothing. Each call compares its entry count with the one at which
+  the next tier decision is due, so a call with no decision due costs one comparison. The thresholds are high because Cranelift is an
   optimizing compiler: a lower one compiled the methods package's code that a package load runs
   only a few dozen times, which made the load slower, and on a test suite, whose bodies mostly run
   a few hundred to a few thousand times, 1000 entries cost more to compile than it saved. A fully typed closure, one with an inline
@@ -667,9 +750,11 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   is declined without counting against the body, which then follows the thresholds.
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
-  register's and variable's type and where each variable's value lives. Cranelift's frontend builds
-  the SSA form from that plan. There is no separate R-level IR yet, so the optimizations that need
-  one (vector fusion, bounds-check elimination, inlining) are not built.
+  register's and variable's type and where each variable's value lives. The translator builds the
+  plan into the mid-level SSA IR of `crates/ssa`, which the typed core builds too, and that crate's
+  one lowering emits it through Cranelift. A guard in the IR is an instruction whose failure
+  branches to a cold deoptimization block. The optimizations that need an R-level IR above it
+  (vector fusion, bounds-check elimination) are not built.
 - **Unboxing.** Integers, doubles and logicals of length one without attributes live in machine
   registers, with R's `NA` and overflow rules. Element reads and writes on integer, double and
   logical vectors are inline, and a write copies only when the vector is shared.
@@ -686,8 +771,12 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   fixed list of base builtins and other effect-free closures, and assign only its own locals.
   When a calling handler is established, a handler could run R code in between, so compiled code
   then runs tier 0's call instruction, which makes the call lazily, and continues after it. A test
-  harness always has handlers, so leaving the body for tier 0 there would interpret most of it. A call of a small closure defined in the same body, which computes a scalar
-  from scalars without effects, is inlined on unboxed registers. A closure whose whole body is
+  harness always has handlers, so leaving the body for tier 0 there would interpret most of it. A call of a closure that computes a scalar from scalars without
+  effects is inlined on unboxed registers, whether the closure is made in the same body or bound
+  globally (then guarded by the binding epoch), and whether its body is one expression or a block
+  of local assignments ending in a value or `return(value)`. A failed guard inside the inlined
+  body hands the whole call back to tier 0, which reruns it lazily; nothing is lost, because the
+  body has no effects. A closure whose whole body is
   such a computation, branches, locals and calls of itself or other such closures included, is
   compiled once per argument type to a native function on unboxed values with no frame
   (`crates/jit/src/native.rs`), so a recursive scalar function runs entirely in machine code. It
@@ -711,6 +800,25 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 - **The C API and the collector.** Every boxed value compiled code holds is stored in the register
   window or a slot's root cell, which the collector scans, so every object is a valid `SEXP` at every
   allocation and every helper call.
+- **Baseline code.** Below tier 1, a body can get baseline machine code
+  (`crates/jit/src/baseline.rs`): per instruction, a call to tier 0's step for it and one test of
+  its answer, emitted by ry's own x86-64 and aarch64 assembler. `GetVar` and `SetVar` of the
+  activation's own frame and comparisons of two plain scalars call shared stubs that every body
+  uses. It keeps tier 0's activation, so it needs no deoptimization metadata. `RY_JIT=on` leaves
+  it out, because it runs more instruction-cache misses than tier 0 alone: the step functions are
+  separate copies of tier 0's handlers. `RY_JIT=baseline` runs every body in it alone,
+  `RY_JIT=force` installs it on the first entry, and the third field of
+  `RY_JIT_THRESHOLDS=entries,back_edges,baseline` sets its threshold.
+- **Planned: baseline code in the code image.** This waits until the baseline beats tier 0,
+  because before that, writing it at install time only moves a loss to disk. The install would
+  emit each recorded closure's baseline code into the image's native section beside the native
+  functions. Baseline code would reach steps and stubs only through
+  `call [table + index * 8]`, never through an absolute or relative address. The steps' order then
+  becomes an ABI: each index names one tier-0 step or stub, and the table is filled when the
+  section is mapped. The image stamp would carry a hash of that index list, so a build whose step
+  set differs reads the baseline code as absent, as it does today for a build with another layout.
+  Because the code keeps tier 0's activation and calls the same steps, it needs no
+  deoptimization metadata and no relocations beyond the table base.
 - **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
   call still enters through tier 0's call path and allocates a frame and forced promises), result
   types for multi-index subscripts such as `m[i, ]`, and freeing the machine code of invalidated
@@ -804,8 +912,8 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 
 | Target row | Status | What it needs |
 | --- | --- | --- |
-| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | in progress | builtins from 28% (workloads) and 18% (corpus) to 10x faster; the top of the ranking above first. Built: `attributes`, `c`, `[[` and `[[<-` with constant subscripts, `forceAndCall`, a builtin `FUN` in the apply family, `Reduce`, the one-argument builtins `!`, `length`, `is.null`, `is.na`, `is.character`, `is.logical` and `is.function` in compiled calls, and native entries for `identical`, `isTRUE`, `isFALSE`, `nrow`, `ncol`, `match`, `%in%` and `%||%` (the "Builtin fast paths" rows below). Next: `missing`, the closure call inside `vapply` and `lapply` (rebinding `i` and building a promise per element), `$<-` and `[[<-` that append a name, `ryStructure`, `round` |
-| (b) Automatic parallelism for effect-free apply-family calls and long element-wise operations, deterministic, with bit-identical reductions | deferred, architecture-ready | the effect-free fact per function and the invariants in `decisions.md`; package native code stays single-threaded |
+| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | in progress | builtins from 28% (workloads) and 18% (corpus) to 10x faster; the top of the ranking above first. Built: `attributes`, `c`, `[[` and `[[<-` with constant subscripts, `forceAndCall`, a builtin `FUN` in the apply family, `Reduce`, the one-argument builtins `!`, `length`, `is.null`, `is.na`, `is.character`, `is.logical` and `is.function` in compiled calls, and native entries for `identical`, `isTRUE`, `isFALSE`, `nrow`, `ncol`, `match`, `%in%` and `%||%` (the "Builtin fast paths" rows below), a tier-0 op for `missing()`, `lapply` and `vapply` that reuse `i` and read `X[[i]]` directly per element, `structure()` that sets attributes in place, tier-0 `%%` and `%/%`, element assignments indexed by `$` and `[[` reads, and a `.Call` that resolves its routine without allocating. Next: the `.Call` boundary itself (about 1.5x GNU R per call), `$<-` and `[[<-` that append a name, `ryStructure`, `round`. `exp` and `[<-` on plain vectors already run at GNU R's speed |
+| (b) Automatic parallelism for effect-free apply-family calls and long element-wise operations, deterministic, with bit-identical reductions | deferred, architecture-ready | the effect-free fact per function and the invariants in `decisions.md`; package native code stays single-threaded. Deferred because the target users already run their test suites in parallel across processes and are CPU bound, so every core is busy and threads inside one process would only compete with the other workers. Single-core speed is the goal, and every cost paid per process (warm-up, compile time, package loading, resident memory) is paid once per worker |
 | (c) Tier-1 compilation of most R-level time | planned | R code from 56% (workloads) to 30x faster; tier 1 today runs under 3% of the time on eight of nine workloads |
 | (d) Native code shrinks only through ry-native replacements or parallelism | planned | ry's own ports (`stats`: 40% of `simulation`) are ry's to speed up; third-party C stays: `data.table` and `xts` on the workloads, `data.table` and `rlang` on the corpus |
 
@@ -825,6 +933,8 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | Untyped closures skip the signature lookup; `on.exit` handling only when an exit expression exists | ry | built | part of the 3.1k above | `signature_of` in `crates/interp/src/annotations.rs`, `run_closure` in `eval.rs` |
 | Frames as slot arrays, environment reified on demand | Ř, V8 | rejected for now, measured | binding cells cost about 420 of a closure call's 3,968 instructions (defining formals 100, `Frame::insert` 114, clearing 97, lookups 110); values held inline would save 100 to 150 of them, about 3%, while about 180 call sites read cells and reifying a frame would need allocation behind shared references. A closure call already costs less than on GNU R | |
 | Promise elision for strict, effect-free arguments | Ř | done in tier 0 (`crates/interp/src/effects.rs`) | `closure_args_into` 3.8% of a call microbenchmark | `f(i, 1)` 3,968 to 3,411 instructions per call; `seq()` unchanged, its helpers are not effect-free |
+| Cheaper promises: created lazily, held inline in the frame slot, or allocated from a per-call arena | Ř, GNU R | rejected, measured | a closure call on the testthat workload costs about 8,100 instructions with 1.2 promises; allocating a promise is a nursery bump, and promises are 1.4 of the 7.4 objects freed per call. None of the three designs saves more than that allocation, and each changes what `PRCODE`, `PRENV`, `substitute` and `delayedAssign` see | |
+| Formals bound in one pass; a forced promise settled with one barrier; the stack check against a cached floor | ry | built | defining formals 270, settling 87 and `stacker`'s thread-local lookup per call; 8,174 to 8,140 instructions per closure call on the testthat workload | `Frame::insert_formals` in `crates/heap/src/env.rs`, `Heap::settle_promise`, `on_large_stack` in `eval.rs` |
 | The promargs pairlist built only when asked for | GNU R | planned | `args_pairlist` 2.7% of a call microbenchmark | |
 | Argument-match caches, one entry per closure body | V8, JSC | done (`eval::match_args_cached`) | `match_args` 2.8k, `bind_arguments` 2.8k per `seq()` call | matching in `seq()` 3.6k to 1.0k instructions; 1.0 to 1.2 million named calls per `bench-real` workload |
 | Polymorphic inline caches for S3 and S4, keyed on the class vector | Self, V8 | built | S3 method lookup up to 17% (`timeseries`); instructions per dispatch: `UseMethod` 8.75k to 7.69k (GNU R 9.82k), with `NextMethod` 23.14k to 19.04k (GNU R 19.03k), `standardGeneric` 14.26k to 8.69k (GNU R 11.68k) | `resolve_s3`, `site_hit` in `crates/interp/src/dispatch.rs`; `S4Cache`, `dispatch_generic` in `crates/interp/src/methods.rs` |
@@ -843,18 +953,23 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | One kernel layer for vector builtins: slice kernels compiled for AVX2 and SSE2, results written into dead temporaries, and an `Op::Fused` superinstruction that evaluates an element-wise tree in 512-element chunks or declines before anything observable happens | pqR (`R_allocOrReuseVector`, task merging), Riposte | in progress | builtins 51% of `simulation`; one allocation and one pass per operator | `crates/interp/src/kernels.rs` |
 | **4. Optimizing tiers** | | | | |
 | Per-argument-type native functions for scalar closures | Julia | built | recursive scalar functions | `crates/jit/src/native.rs` |
-| Baseline compiler from bytecode, no optimization | V8 Sparkplug | planned | warm code under the 3000-entry threshold | |
+| Baseline compiler from bytecode, no optimization | V8 Sparkplug | built, opt-in (`RY_JIT=baseline`, `RY_JIT_THRESHOLDS`); `RY_JIT=on` leaves it out | warm code under the 3000-entry threshold. Compiles in a median of 28 µs per body (at most about 0.5 ms), but a call per instruction measures level with tier 0's tail-call handlers (a scalar loop 0.53 s against 0.47 to 0.51 s), and with variable access and scalar comparisons inline it still loses on `bench-real` to the instruction-cache footprint of per-body code (9.7 MB over 972 bodies on `testthat`). `RY_JIT=baseline` runs it alone | `crates/jit/src/baseline.rs`, `assembler.rs` |
 | Lazy basic block versioning as the baseline's second stage | YJIT | planned | type checks left inside handlers in warm code | |
-| A lower Cranelift threshold once the baseline tier exists | HotSpot, .NET tiering | planned | tier 1 under 3% of the time on eight of nine workloads | |
-| Cross-closure inlining with deoptimization | Ř (PIR) | planned | calls from compiled code re-enter tier 0 | |
+| A lower Cranelift threshold once the baseline tier exists | HotSpot, .NET tiering | measured, kept at 3000 entries; large bodies wait in proportion to their size, and a loop-free body compiles only when its call rate over the recording window (calls per KiB allocated) promises enough calls to repay the compile | tier 1 under 3% of the time on eight of nine workloads. Callgrind geomean against JIT off: 1000 entries 1.015, 2000 1.016, 3000 1.013, 6000 1.010, 10,000 1.010, so the threshold does not decide on against off. The rate check took testthat's JIT-on cost over JIT off from 17.6M to 5.6M instructions and kept every functional callback compiling | `SIZE_WAIT_WORDS` and `repays` in `crates/jit/src/jit.rs` |
+| Cross-closure inlining with deoptimization | Ř (PIR) | partly built: effect-free closures, single-expression or block bodies, guarded on callee identity; a failed guard reruns the whole call in tier 0. Callees with effects, which need frame materialization, are planned | calls from compiled code re-enter tier 0 | `inline`, `lower_block` in `crates/jit/src/analysis.rs` |
 | Escape analysis, scalar replacement, vector fusion | Graal, goose | planned | scalar and intermediate vector allocation | |
 | Per-signature numeric specialization of vector code | Julia | planned | | |
 | Effect-free `lapply`, `vapply`, `Map` and long element-wise operations across cores; reductions stay sequential | Bend | planned | wall time of independent per-element work | |
 | **5. Memory and start-up** | | | | |
 | A start-up image mapped read-only and shared | V8 snapshots, Bun | planned | stats-only start-up peak | |
-| Per-package images compiled at install time | Bun | planned | package load and warm-up | |
-| One SSA IR for tier 1 and the typed core: typed facts unguarded, untyped speculations guarded with deoptimization exits; install-time code through the typed AOT pipeline, with its deoptimization metadata and watched bindings in the code file | Ř (PIR), Graal | planned, with the first of the install-time images and the baseline tier | two SSA forms and two lowerings to Cranelift | `crates/jit`, `crates/typed` |
-| Profiles from a training run (the package's tests and examples) stored in the per-package image | HHVM Jump-Start, Project Leyden | planned | hot closures that never reach tier 1's thresholds | |
+| No major collection while a namespace loads; the limit is rebased when the outermost load returns | ry | built | 2 major collections to 0 loading testthat, xts, data.table and a 40,744-object package; GC 15.7% to about 5% of the load | `enter_namespace_load` in `crates/heap/src/heap.rs` |
+| Lazy-load records read with borrowed strings, bulk vectors and iterative pairlists; `makeLazy` with GNU R's shared environment; S4-generic checks answered from a record's header | GNU R | built | `library()` of 11 packages: 1,197.8M to 1,133.0M instructions, 914 records fetched to 651 | `crates/interp/src/serialize.rs`, `do_local_s4_generics` in `envir.rs` |
+| Card marking for remembered old objects | V8, HotSpot | planned | minor collections during a load cost about 24M instructions each, mostly re-marking namespace frames being filled | |
+| A buffered `unserializeFromConn` | GNU R | planned | it reads a few bytes per call: 93M instructions of the 11-package `library()` | |
+| Per-package code images written at install time, beside the lazy-load database | Bun | built, no speedup yet | package load and warm-up; decoding a closure costs about what compiling it does, so untrained images cost 1.3% more instructions on `library(survival)` | `crates/interp/src/code_image.rs` |
+| Install-time machine code from whole-program facts (checker types, closed namespace bindings, effect-free functions), values from outside tested once where they enter, no profiles; tier 0 keeps `eval` and non-standard evaluation, the JIT keeps hot loops; `ry install --explain` lists what stayed in the interpreter and what each native function tests and looks up | Bun (`--aot`) | built for scalar numeric closures with guessed argument types; checker types and arguments that are calls are open (`backlog.md`, "Install-time native code: the gaps") | callgrind, images on against `RY_CODE_IMAGE=0`, JIT off: testthat workload 7.850G against 7.834G, `library()` of six packages 1.546G against 1.536G, because few of their functions are scalar numeric; a top-level loop of 300,000 calls to a package's scalar functions runs 4.78G against 7.22G instructions, and 4.78G against 7.27G with the JIT on | `crates/jit/src/ahead.rs`, `crates/ssa/src/section.rs` |
+| One SSA IR for tier 1 and the typed core: typed facts unguarded, untyped speculations guarded with deoptimization exits; install-time code through the typed AOT pipeline, with its deoptimization metadata and watched bindings in the code file | Ř (PIR), Graal | IR built; install-time code planned | two SSA forms and two lowerings to Cranelift | `crates/ssa` |
+| Profiles from a training run (the package's tests and examples) stored in the per-package image | HHVM Jump-Start, Project Leyden | built, no speedup yet: loops tier up within their first call anyway, and a training run on other types makes the JIT refuse to recompile | hot closures that never reach tier 1's thresholds | |
 | Images shared across worker processes | Bun | planned | resident memory per `parallel` worker | |
 | Concurrent tracing and Immix line reuse | LXR | planned, after collector pauses are measured | collector pauses, fragmentation | |
 | A stackless tier 0 | Bend | planned, on the tail-call handlers | Rust frame setup per R call | |
@@ -896,6 +1011,44 @@ operand's payload. GNU R's compiled loops swap the operands of `+` and `*` on tw
 left one is a scalar beside a longer vector or when both recycle, so `NA_real_ + c(NaN, 1)` is
 `NaN` while `c(NA, 1) + NaN` is `NA`; with an integer operand, and for `-`, `/` and `%/%`, the
 first operand's payload wins. The kernels reproduce each case.
+
+### Builtin fast paths
+
+Row (a) of the roadmap goes builtin by builtin, starting from the top of the Amdahl ranking:
+attribute access, `c`, `[[` and `[[<-`, then `[` and `[<-`, the apply family and `.Call`. Each
+builtin gets one implementation in its end shape, in its own module, which the full call and the
+fast entry both use, so there is no second copy of the semantics to drift.
+
+- **Direct entries.** A builtin may register a `direct` function that takes its argument values
+  in formal order and returns `None` to decline. Compiled code calls it when no argument is
+  tagged or empty, before it builds an argument vector, runs the call checks or opens a handle
+  scope. A replacement called from a complex assignment (`attr(x, "a") <- v`) uses it too, with
+  the trailing `value` argument. The entry declines whatever the full call treats differently:
+  an object that dispatches, ALTREP, a ry native value, and any argument the full call reports an
+  error for.
+- **Strings by identity.** Attribute names, class names and list names are interned `CHARSXP`s,
+  and interned ASCII strings are equal exactly when they are the same object. A lookup compares
+  pointers and reads bytes only when a string is not ASCII or a partial match is asked for.
+- **No intermediate structures.** `c()` and `unlist()` follow GNU R's two passes: the first
+  finds the result type, the length and whether any name exists, and the second writes elements
+  and names straight into the result. When every argument is an atomic vector without
+  attributes, no name can arise, so `c()` skips the naming walk entirely.
+
+Instructions per call at tier 0, measured with callgrind net of the loop:
+
+| Call | Before | After | GNU R 4.3 |
+| --- | ---: | ---: | ---: |
+| `attr(x, "a")` | 1006 | 590 | 1814 |
+| `attr(x, "a") <- v` | 3174 | 992 | 2520 |
+| `names(x) <- v` | 1668 | 1191 | 1520 |
+| `inherits(x, "c")` | 1266 | 795 | 1469 |
+| `c(a, 4.5)` | 1782 | 863 | 1877 |
+| `c(a, a, a)` | 2315 | 1351 | 2050 |
+| `c(list(1, 2), list(3))` | 3425 | 3032 | 2700 |
+| `x[[i]]`, double vector | 1155 | 925 | 223 |
+
+The remaining cost of `x[[i]]` is call machinery shared by every compiled call (the function
+lookup and its guard, two frame lookups, the scalar result's allocation), not `[[` itself.
 
 ### How the static types feed the JIT
 

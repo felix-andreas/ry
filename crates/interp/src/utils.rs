@@ -63,9 +63,7 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("setStatusBar", |_| Ok(nil())),
     ("shortpath", |call| Ok(call.arg(0))),
     ("nsl", do_nsl),
-    ("menu", |_| {
-        Err(error("menu() cannot be used non-interactively"))
-    }),
+    ("menu", do_menu),
     ("hashtab_Ext", do_hashtab),
     ("gethash_Ext", do_gethash),
     ("sethash_Ext", do_sethash),
@@ -114,6 +112,54 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
         Err(call.error("select.list() cannot be used non-interactively"))
     }),
 ];
+
+/// The console half of `menu(choices)`, which R code calls only when `interactive()` is true:
+/// reads one line after "Selection: " and returns the number it starts with. A line that is not a
+/// number in `0:length(choices)` answers one past the last choice, which makes `menu()` print its
+/// hint and ask again. The end of the input answers 0, so the menu ends instead of looping.
+unsafe fn do_menu(call: &NativeCall<'_>) -> R<Sexp> {
+    let choices = call.arg(0);
+    if choices.kind() != SexpType::String {
+        return Err(error("invalid 'choices' argument"));
+    }
+    let count = length(choices) as i32;
+    let Some(line) = (unsafe { crate::console_server::prompt("Selection: ") }) else {
+        return values::scalar_integer(0);
+    };
+    let chosen = leading_number(&line).filter(|number| (0.0..=f64::from(count)).contains(number));
+    values::scalar_integer(chosen.map_or(count + 1, |number| number as i32))
+}
+
+/// The number a line starts with after any white space, read as C's `strtod` reads decimal text.
+fn leading_number(line: &str) -> Option<f64> {
+    let text = line.trim_start();
+    let bytes = text.as_bytes();
+    let digits = |from: usize| {
+        bytes[from.min(bytes.len())..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count()
+    };
+    let mut end = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    let whole = digits(end);
+    end += whole;
+    let mut fraction = 0;
+    if bytes.get(end) == Some(&b'.') {
+        fraction = digits(end + 1);
+        end += 1 + fraction;
+    }
+    if whole + fraction == 0 {
+        return None;
+    }
+    if matches!(bytes.get(end), Some(b'e' | b'E')) {
+        let sign = usize::from(matches!(bytes.get(end + 1), Some(b'+' | b'-')));
+        let exponent = digits(end + 1 + sign);
+        if exponent > 0 {
+            end += 1 + sign + exponent;
+        }
+    }
+    text[..end].parse().ok()
+}
 
 /// `edit(name, file, title, editor)`: writes the object's deparse to the file, runs the editor
 /// on it, and returns what the file then evaluates to. Nothing here needs a console, so an
@@ -757,7 +803,7 @@ unsafe fn do_scan(call: &Call<'_>) -> R<Sexp> {
         decimal,
         na_strings: &na_strings,
     };
-    let outcome = crate::connections::with_input(file, |input, position| {
+    let mut read = |input: &[u8], position: &mut usize| {
         let mut scanner = Scanner::new(input, *position, &syntax);
         scanner.skip_lines(skip);
         let limits = Limits {
@@ -782,7 +828,11 @@ unsafe fn do_scan(call: &Call<'_>) -> R<Sexp> {
         };
         *position = scanner.position;
         result.map(|count| (count, scanner.eof_in_quote))
-    })?;
+    };
+    let outcome = match crate::connections::console_scan_text(file, max_items)? {
+        Some(text) => read(&text, &mut 0),
+        None => crate::connections::with_input(file, read)?,
+    };
     let (count, eof_in_quote) = outcome?;
     if eof_in_quote {
         warning("EOF within quoted string")?;

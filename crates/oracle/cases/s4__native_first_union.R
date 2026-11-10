@@ -1,0 +1,38 @@
+# The first class union of a session, which leaves `initialize`'s dispatch caches as the R code's
+# `new()` of the union's representation would.
+info <- new.env(hash = TRUE, parent = baseenv())
+imports <- new.env(hash = TRUE, parent = .BaseNamespaceEnv)
+attr(imports, "name") <- "imports:s4first"
+ns <- new.env(hash = TRUE, parent = imports)
+assign(".__NAMESPACE__.", info, envir = ns)
+info$spec <- c(name = "s4first", version = "1.0")
+info$exports <- new.env(hash = TRUE, parent = baseenv())
+info$imports <- list(base = TRUE)
+info$path <- tempdir()
+info$dynlibs <- character()
+info$S3methods <- matrix(NA_character_, 0L, 4L)
+assign(".packageName", "s4first", envir = ns)
+invisible(.Internal(registerNamespace("s4first", ns)))
+
+all_table <- function() methods:::.getMethodsTable(getGeneric("initialize"), inherited = TRUE)
+"ClassUnionRepresentation" %in% names(all_table())
+setClass("Base", representation(x = "numeric"), where = ns)
+setClassUnion("BaseOrNULL", c("Base", "NULL"), where = ns)
+"ClassUnionRepresentation" %in% names(all_table())
+target <- all_table()[["ClassUnionRepresentation"]]
+class(target)
+as.character(target@target)
+as.character(target@defined)
+def <- getClass("BaseOrNULL", where = ns)
+class(def)
+isVirtualClass("BaseOrNULL", where = ns)
+names(def@subclasses)
+setClass("Holder", representation(b = "BaseOrNULL"), where = ns)
+h <- new("Holder", b = NULL)
+is.null(h@b)
+h@b <- new("Base", x = 1)
+h@b@x
+is(NULL, "BaseOrNULL")
+is(new("Base", x = 2), "BaseOrNULL")
+setClassUnion("NumOrChar", c("numeric", "character"), where = ns)
+names(getClass("NumOrChar", where = ns)@subclasses)

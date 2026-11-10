@@ -38,6 +38,12 @@ use {
 #[derive(Clone, Copy, Debug)]
 pub struct Refusal(pub &'static str);
 
+impl From<ssa::Error> for Refusal {
+    fn from(error: ssa::Error) -> Self {
+        Refusal(error.0)
+    }
+}
+
 /// A closure compiled for one list of argument types.
 pub struct Compiled {
     pub code: Code,

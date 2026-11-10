@@ -7,6 +7,7 @@ use {
         Diagnostic, GraphicalReportHandler, GraphicalTheme, LabeledSpan, NamedSource, SourceCode,
         SourceSpan,
     },
+    repl::highlight::{Palette, Style, parse_style},
     semantics::lints::{LintConfig, LintLevel, NameStyle, lint_levels_mut},
     serde::{
         Deserialize,
@@ -39,6 +40,7 @@ pub struct Config {
     pub format: format::Config,
     pub lint: LintConfig,
     pub check: CheckConfig,
+    pub console: ConsoleConfig,
     /// Anchor for relative patterns like `[check] exclude`; `None` for the built-in default.
     pub source_directory: Option<PathBuf>,
     /// Keys this version does not know, in file order: they warn rather than fail, for
@@ -85,6 +87,74 @@ impl Default for CheckConfig {
             prelude: true,
             exclude: Vec::new(),
         }
+    }
+}
+
+/// The console's editor, read by the consoles of `ry run` and `ry R`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ConsoleConfig {
+    /// Syntax highlighting of the input. The `NO_COLOR` environment variable turns it off too.
+    pub highlight: bool,
+    /// Styles that replace the default palette's, by class (`keyword = "blue bold"`).
+    pub colors: ConsoleColors,
+}
+
+impl Default for ConsoleConfig {
+    fn default() -> ConsoleConfig {
+        ConsoleConfig {
+            highlight: true,
+            colors: ConsoleColors::default(),
+        }
+    }
+}
+
+/// `[console.colors]`, checked as it loads, so a misspelled class or color is an error with
+/// its place in the file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConsoleColors(pub Palette);
+
+impl<'de> Deserialize<'de> for ConsoleColors {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<ConsoleColors, D::Error> {
+        // The name and the style are read as their own values, so a mistake in either is
+        // reported at its line in `ry.toml` rather than at the table's header.
+        struct ColorName(String);
+        impl<'de> Deserialize<'de> for ColorName {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<ColorName, D::Error> {
+                let name = String::deserialize(deserializer)?;
+                Palette::default()
+                    .set(&name, Style::new())
+                    .map_err(de::Error::custom)?;
+                Ok(ColorName(name))
+            }
+        }
+        struct ColorStyle(Style);
+        impl<'de> Deserialize<'de> for ColorStyle {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<ColorStyle, D::Error> {
+                let spec = String::deserialize(deserializer)?;
+                parse_style(&spec)
+                    .map(ColorStyle)
+                    .map_err(de::Error::custom)
+            }
+        }
+        struct ColorsVisitor;
+        impl<'de> de::Visitor<'de> for ColorsVisitor {
+            type Value = ConsoleColors;
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a table of console color styles")
+            }
+            fn visit_map<A: de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<ConsoleColors, A::Error> {
+                let mut palette = Palette::default();
+                while let Some((ColorName(name), ColorStyle(style))) = map.next_entry()? {
+                    palette.set(&name, style).map_err(de::Error::custom)?;
+                }
+                Ok(ConsoleColors(palette))
+            }
+        }
+        deserializer.deserialize_map(ColorsVisitor)
     }
 }
 
@@ -176,6 +246,7 @@ impl Config {
             format: toml.format,
             lint: toml.lint,
             check: toml.check,
+            console: toml.console,
             source_directory: None,
             unknown_keys,
             lintr_problems: Vec::new(),
@@ -644,6 +715,7 @@ pub fn suggested_table(unknown_key: &str) -> Option<&'static str> {
         ("format", field_names::<format::Config>()),
         ("lint", field_names::<LintConfig>()),
         ("check", field_names::<CheckConfig>()),
+        ("console", field_names::<ConsoleConfig>()),
     ]
     .into_iter()
     .find(|(_, keys)| keys.contains(&unknown_key))
@@ -728,6 +800,7 @@ struct ConfigToml {
     format: format::Config,
     lint: LintConfig,
     check: CheckConfig,
+    console: ConsoleConfig,
 }
 
 #[cfg(test)]
@@ -754,6 +827,30 @@ mod tests {
         assert_eq!(config.lint.assignment_operator, LintLevel::Off);
         assert_eq!(config.lint.boolean_shorthand, LintLevel::Error);
         assert_eq!(config.lint.trailing_comma, LintLevel::Default);
+    }
+
+    #[test]
+    fn console_colors() {
+        let config = parse(indoc! {r#"
+            [console.colors]
+            keyword = "bright-blue bold"
+        "#});
+        assert!(config.console.highlight);
+        let mut expected = Palette::default();
+        let style = parse_style("bright-blue bold");
+        assert_eq!(
+            style.and_then(|style| expected.set("keyword", style)),
+            Ok(())
+        );
+        assert_eq!(config.console.colors.0, expected);
+        assert!(!parse("[console]\nhighlight = false\n").console.highlight);
+        let error = parse_error("[console.colors]\nkeyword = \"purple\"\n");
+        assert!(error.contains("unknown style word `purple`"), "{error}");
+        let error = parse_error("[console.colors]\nkeywords = \"red\"\n");
+        assert!(
+            error.contains("unknown console color `keywords`"),
+            "{error}"
+        );
     }
 
     #[test]

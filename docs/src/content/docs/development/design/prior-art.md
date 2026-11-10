@@ -167,7 +167,7 @@ refers to its steps.
 | Escape analysis, inspired by Bend's share inference | Bend | **Adopt, scoped** | Temporaries in compiled code that native code never sees |
 | Call-site specialization of known closures, inspired by lambda sets | Roc | **Adopt, scoped** | `lapply`, `vapply`, `Map`, `Reduce` in compiled code |
 | One IR feeding several backends | Roc | **Adopt** | Bytecode feeds the interpreter, the baseline tier and the Cranelift tier |
-| A fast dev backend beside an optimizing one | Roc | **Adopt, planned** (step 4) | The Sparkplug-style baseline tier |
+| A fast dev backend beside an optimizing one | Roc | **Adopt, built** (step 4) | The Sparkplug-style baseline tier, with its own x86-64 and aarch64 assembler |
 | Static dispatch only | Roc | **Reject** | S3, S4 and R6 are dynamic; ry speculates on the class instead |
 | A top level that cannot perform effects | Roc | **Adopt, planned for strict mode** | A strict library file's top level holds only definitions and pure constants |
 | Purity inference: effectful types use `=>`, effectful names end in `!` | Roc | **Reject** | Freedom from effects stays a runtime body fact the JIT reads, outside the type |
@@ -189,7 +189,7 @@ refers to its steps.
 | Whole-program value tracking | Bun | **Adopt per namespace** | The typed core of a locked namespace or strict file; untyped code keeps profiles |
 | Closed bindings per locked namespace: the bindings are closed though their values are not | Bun | **Adopt** (step 2) | Direct calls to sibling namespace functions and imports, invalidated by `unlockBinding` and `assignInNamespace` |
 | Freezing built-ins instead of deoptimizing | Bun | **Adopt for ry's standard library only** | R bindings get invalidation on `unlockBinding`, because mocking rebinds them |
-| Ahead-of-time compilation, applied to untyped code at install time | Bun | **Adopt, planned; measure warm-up and start-up before building machine code** | `ry install` writes each package's bytecode, argument-match plans and resolved namespace call targets into a read-only file mapped at load |
+| Ahead-of-time machine code from whole-program facts, no profiles, values tested once where they enter | Bun (`--aot`) | **Adopt as a hybrid, planned** | `ry install` compiles from checker, closed-namespace and effect-free facts into the code image's native section; tier 0 keeps `eval` and NSE, the JIT keeps hot loops |
 | Machine code mapped read-only from the file and shared between processes | Bun | **Adopt** | Typed code files in installed packages and executables |
 | Mapped images shared across worker processes | Bun | **Adopt, planned** (step 5) | callr, parallel and doParallel workers map the same package images; measured as resident memory per worker |
 | A report of code compiled to a slow path, worst first, with fixes | Bun | **Adopt** | `ry check --explain` |
@@ -210,7 +210,7 @@ refers to its steps.
 | Trace compilation | LuaJIT | **Reject** | Promises and dispatch make traces fragile; Cranelift is a method JIT |
 | Dense feedback slots, allocated lazily | V8 | **Adopt** (lazy half built) | Feedback only for value-producing instructions |
 | Fast mid tier on feedback | V8 (Maglev) | **Adopt, scoped** | Tier 1, compiled off the main thread, with lower thresholds |
-| Baseline compiler reusing the interpreter's frame | V8 (Sparkplug) | **Adopt, planned** (step 4), preferred over copy-and-patch | Per instruction, a call to tier 0's handler with immediate operands and native jumps |
+| Baseline compiler reusing the interpreter's frame | V8 (Sparkplug) | **Adopt, built** (step 4), preferred over copy-and-patch; not on by default | Per instruction, a call to tier 0's handler with immediate operands and native jumps (`crates/jit/src/baseline.rs`). Against tail-call tier-0 handlers that alone measures level, so the baseline pays off only once it inlines the fast paths of variable access and arithmetic |
 | Accumulator bytecode | V8 (Ignition) | **Reject** | Tier 0 keeps named registers |
 | Sea-of-nodes optimizer, a fourth tier | V8, JavaScriptCore | **Reject** | Tier 1 is the top tier |
 | In-place instruction specialization (quickening), de-specialized on a miss | CPython (PEP 659)[^pep-659] | **Adopt the idea** (step 3) | Tier 0 instructions rewrite themselves to a specialized form and back; CPython is not the performance bar, JavaScriptCore is |
@@ -299,9 +299,9 @@ into the host through the C ABI.
   higher-order functions, which ry implements itself. `purrr::map` runs its loop in purrr's own C
   code, so the JIT cannot specialize it.
 - **One IR for every tier.** ry's bytecode feeds the tier 0 interpreter, and tier 1 compiles from
-  the same bytecode (through its own SSA form) to Cranelift, as Roc's backends share their
-  lower-level IR. Roc's fast dev backend corresponds to the planned Sparkplug-style baseline tier
-  (see V8 below).
+  the same bytecode through the mid-level SSA IR of `crates/ssa`, which the typed core shares, as
+  Roc's backends share their lower-level IR. Roc's fast dev backend corresponds to the
+  Sparkplug-style baseline tier (see V8 below).
 
 **What ry rejects.**
 
@@ -566,6 +566,22 @@ run fast without trusting values that arrive from untyped code.
 - **The test matrix.** Each test runs under `bun run`, compiled, and compiled with every annotation
   erased, and all three must match in output and exit status. Programs are also compiled with every
   guess forced to fail, and a mode checks every fact the executable relies on at run time.[^bun-aot]
+- **No profiles and no deoptimization.** Hotness is estimated from loops and the call graph, a failed
+  check takes a slow path instead of discarding code, and `eval`, `new Function` and `node:vm` run in
+  JavaScriptCore's interpreter on the same objects.[^bun-aot-pr]
+
+**What it measured.** The pull request that added it reports these numbers:[^bun-aot-pr]
+
+| Program | Under Bun's JIT | Compiled ahead of time |
+| --- | ---: | ---: |
+| TypeScript 6 compiler on a 370,839-line project | 14.00 s, 29.2 s CPU, 2,581 MB peak | 4.25 s, 5.3 s CPU, 963 MB peak |
+| A CLI, time to its first prompt | 318 ms, 5,530M instructions | 141 ms, 1,117M instructions |
+| Web servers, requests in the first second | 1x | 1.03x to 1.93x |
+| The same servers once warm | 1x | Hono, `Bun.serve` and `node:http` within 3%; Express, Elysia, Fastify and Koa 7% to 23% slower |
+| 1,814 untyped idioms, instructions per iteration | 1x | median 0.94x in a small program and 1.44x in a large one, where 1,229 idioms are slower |
+
+So ahead-of-time code wins start-up, short runs and memory by a wide margin, and loses to the JIT on
+long-running untyped code, where run-time feedback knows more than whole-program analysis can prove.
 
 **What ry adopts.** All six, fitted to R (`typed-runtime.md` holds the design), and two more
 that apply Bun's closed-world reasoning to untyped packages:
@@ -593,10 +609,17 @@ that apply Bun's closed-world reasoning to untyped packages:
   `ry build --exe`, which writes a standalone executable as `bun compile` does. Worker processes
   started by callr, parallel and doParallel load the same packages, so mapping each package's image
   read-only lets them share it (planned as step 5, measured as resident memory per worker).
-- **Ahead-of-time compilation, applied to untyped code at install time** (planned). `ry install`
-  writes each package's bytecode, argument-match plans and resolved namespace call targets into a
-  read-only file that the loader maps, one image per package, which extends the start-up image.
-  Warm-up and start-up are measured with these images before any machine code is written into them.
+- **Ahead-of-time machine code at install time, as one tier of a hybrid** (planned). `ry install`
+  compiles each package to machine code from facts it can prove without running anything: ry's
+  checker and inferred types, the closed bindings of the locked namespace, and the effect-free fact
+  per function. A value from outside the package (an argument from user code, a result of `.Call`)
+  is tested once where it enters, and a failed test takes the tier-0 path for that call. The code
+  goes through the one SSA IR and `cranelift-object` into the native section of the package's code
+  image, mapped read-only so the test processes of one CI machine share it. Tier 0 keeps `eval` and
+  non-standard evaluation, and the JIT keeps hot loops, because Bun's numbers show ahead-of-time
+  code losing to a JIT once warm. `ry check --explain` lists the operations that compiled to a
+  by-name lookup or an unproven test. It is measured on the testthat workload and on package load
+  time.
 - **`ry check --explain`** for the slow-path report. With no profile, it ranks by loop depth.
 - **The test matrix** for typed differential tests and the typed fuzzer.
 
@@ -1024,6 +1047,7 @@ source with a footnote keyed to a `sources` entry. The docs site does not render
 footnote also carries the source's link.
 
 [^bun-aot]: Bun documentation: the ahead-of-time compiler, and its internals page, <https://bun.sh/docs/compiler/aot>, <https://bun.sh/docs/compiler/internals>
+[^bun-aot-pr]: Bun pull request 45631, "Compile TypeScript to machine code ahead of time: `bun build --compile --aot`", <https://github.com/oven-sh/bun/pull/45631>
 [^okf]: Open Knowledge Format v0.2, <https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md>
 [^roc]: Roc repository: docs/langref, design.md, design/lambda-set-specialization.md, <https://github.com/roc-lang/roc>
 [^perceus]: Reinking, Xie, de Moura and Leijen: Perceus, Garbage Free Reference Counting with Reuse, <https://www.microsoft.com/en-us/research/wp-content/uploads/2020/11/perceus-tr-v4.pdf>

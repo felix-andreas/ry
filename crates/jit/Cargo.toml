@@ -1,6 +1,6 @@
 [package]
 name = "jit"
-description = "ry's optimizing tier: compiles hot tier-0 bytecode to machine code with Cranelift"
+description = "ry's optimizing tier: compiles hot tier-0 bytecode to machine code, through a baseline tier and the shared SSA IR"
 edition = "2024"
 version.workspace = true
 license = "GPL-2.0-or-later"
@@ -17,11 +17,8 @@ interp = { path = "../interp" }
 typed = { path = "../typed" }
 rustc-hash.workspace = true
 smallvec = "1.15"
-cranelift-codegen = "0.136"
-cranelift-frontend = "0.136"
-cranelift-jit = "0.136"
-cranelift-module = "0.136"
-cranelift-native = "0.136"
+ssa = { path = "../ssa" }
+libc = "0.2"
 
 [dev-dependencies]
 syntax = { path = "../syntax" }

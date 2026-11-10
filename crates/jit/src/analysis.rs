@@ -731,6 +731,8 @@ pub enum Action<'a> {
         register: usize,
         range: (usize, usize),
     },
+    /// Makes `srcref` the current srcref, for a statement no debugger stops at.
+    Srcref(Sexp),
     Constant {
         dst: usize,
         value: Sexp,
@@ -1097,6 +1099,12 @@ const UNUSED: usize = usize::MAX;
 #[derive(Clone, Copy, Debug)]
 pub struct Refusal(pub &'static str);
 
+impl From<ssa::Error> for Refusal {
+    fn from(error: ssa::Error) -> Self {
+        Refusal(error.0)
+    }
+}
+
 /// The refusal for a body that has not run far enough to have the type feedback it needs,
 /// which a later attempt may well get past.
 pub const COLD: &str = "the body has no type feedback yet";
@@ -1106,6 +1114,120 @@ pub const COLD: &str = "the body has no type feedback yet";
 /// tier 0 only its dispatch, which repays the compilation after far more calls than most such
 /// bodies ever get.
 pub const NOTHING_NATIVE: &str = "compiled code would run nothing natively";
+
+/// The refusal for a body without a loop none of whose instructions compiled code could ever
+/// run natively, whatever types the profile records. Unlike [`NOTHING_NATIVE`] it is final, and
+/// it is decided before the body records anything.
+pub const NEVER_NATIVE: &str = "no instruction of the body could run natively";
+
+/// The refusal for a loop-free body that turned hot but runs too rarely for compiled code to
+/// repay its compilation. Like [`COLD`] it is not final: the body asks again after another
+/// threshold of entries, with its call rate measured afresh.
+pub const RARE: &str = "the body runs too rarely to repay compiling it";
+
+/// What the instructions of a body allow compiled code to do, whatever its profile records.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Shape {
+    /// The body loops, or holds bytecode the scan cannot read, which counts as a loop because
+    /// nothing bounds what it runs.
+    pub loops: bool,
+    /// The instructions the plan may turn into native work. A call of a builtin counts when it
+    /// names one the plan has a native form for; a builtin reached through another name is
+    /// missed, which costs only the compiled code, not correctness.
+    pub native: usize,
+}
+
+impl Shape {
+    /// Whether some profile could make [`Plan::runs_natively`] true.
+    pub fn may_run_natively(self) -> bool {
+        self.loops || self.native > 0
+    }
+}
+
+pub unsafe fn shape(code: Sexp) -> Shape {
+    let words = values::ints(code.car());
+    let constants = code.cdr();
+    let unbounded = Shape {
+        loops: true,
+        native: 0,
+    };
+    if values::length(constants.element(bytecode::LOOPS)) > 0 {
+        return unbounded;
+    }
+    let mut native = 0;
+    let mut pc = 0;
+    while pc < words.len() {
+        let Some(op) = bytecode::op_of(words[pc] as u32) else {
+            return unbounded;
+        };
+        let count = operand_count(op);
+        let Some(operands) = words.get(pc + 1..pc + 1 + count) else {
+            return unbounded;
+        };
+        let operand = |index: usize| operands[index] as usize;
+        let counts = match op {
+            Op::Arithmetic
+            | Op::LogicLeft
+            | Op::LogicRight
+            | Op::SubAssign
+            | Op::SubAssignMatrix
+            | Op::CallGeneric
+            | Op::CallRebinding
+            | Op::Field
+            | Op::Item
+            | Op::Slot
+            | Op::ForInit
+            | Op::ForStep
+            | Op::ForEnd => true,
+            Op::Jump if operand(0) <= pc => return unbounded,
+            Op::Jump => false,
+            Op::CallBuiltin => {
+                let function = constants.element(operand(2)).car();
+                function.kind() != SexpType::Symbol || {
+                    let name = values::symbol_name(function);
+                    name == "[" || Traversal::of(&name).is_some() || has_intrinsic(&name)
+                }
+            }
+            Op::Constant
+            | Op::GetVar
+            | Op::SetVar
+            | Op::GetFun
+            | Op::BranchUnlessBuiltin
+            | Op::BranchUnlessPrimitive
+            | Op::BranchIfObject
+            | Op::Ast
+            | Op::Guard
+            | Op::JumpUnless
+            | Op::Return
+            | Op::Invisible
+            | Op::Visible
+            | Op::Closure
+            | Op::DispatchSubject
+            | Op::EndStatement
+            | Op::CallTailUpdate
+            | Op::MatchShape
+            | Op::MatchTag
+            | Op::MatchLiteral
+            | Op::MatchFail
+            | Op::Construct
+            | Op::Move
+            | Op::BoundEval
+            | Op::MatchCondition
+            | Op::SwitchArm
+            | Op::Replace
+            | Op::Missing
+            | Op::SetSrcref
+            | Op::Resume
+            | Op::Fused => false,
+        };
+        native += usize::from(counts);
+        pc += 1 + count;
+    }
+    Shape {
+        loops: false,
+        native,
+    }
+}
 
 impl Plan<'_> {
     /// Whether compiled code would do some of the body's work itself: a loop, or arithmetic,
@@ -1551,10 +1673,17 @@ impl<'a> Builder<'a> {
     /// before it has read anything, the type the closure's signature declares for that formal.
     fn load_ty(&self, pc: usize, slot: usize) -> Ty {
         if self.never_ran(pc) {
-            self.declared[slot]
-        } else {
-            self.feedback_at(pc)
+            return self.declared[slot];
         }
+        // A variable that has held both an integer and a double scalar, such as the argument
+        // of a closure shared by `make_scaler(2)` and `make_scaler(0.5)`, loads as `Num`, which
+        // its arithmetic reads unboxed, rather than as a boxed value every reader hands back to
+        // tier 0.
+        let bits = self.feedback.get(pc).map_or(0, |&bits| bits as u16);
+        if bits == feedback::INTEGER_SCALAR | feedback::DOUBLE_SCALAR {
+            return Ty::Num;
+        }
+        from_feedback(bits)
     }
 
     /// Splits the instructions into blocks and finds each block's successors and the loop
@@ -1809,18 +1938,15 @@ impl<'a> Builder<'a> {
                         ty,
                     };
                     // Code generation writes the variables back before the load and forgets them
-                    // after it, but only when the load really happens.
+                    // after it, but only when the load reaches the runtime: a load the inline
+                    // frame probe answers leaves the variables as they were.
                     let mut forced = state.clone();
                     forced.flushed();
                     forced.forget_slots();
                     forced.slots[slot] = loaded;
                     state.slots[slot] = loaded;
                     if forcing {
-                        if current.may_be(status::LOADED) {
-                            state.join(&forced);
-                        } else {
-                            *state = forced;
-                        }
+                        state.join(&forced);
                     }
                 }
                 state.registers[operand(0)] = state.slots[slot].ty;
@@ -2121,7 +2247,8 @@ impl<'a> Builder<'a> {
                 &[],
                 Effect::PureUnlessObserved,
             ),
-            Op::Ast => self.opaque_step(
+            // `missing` reads the frame's bindings, so the variables must be written back first.
+            Op::Ast | Op::Missing => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
                 &[],
@@ -2298,7 +2425,9 @@ impl<'a> Builder<'a> {
                     is_and: operand(4) == 1,
                 }
             }
-            // The interpreter's own step sets the current srcref; it touches no register.
+            Op::SetSrcref if operand(1) == 0 => Action::Srcref(self.constant(operand(0))),
+            // A statement a debugger may stop at runs the interpreter's own step, which asks the
+            // debugger; it touches no register.
             Op::SetSrcref => Action::Step {
                 effect: Effect::Pure,
                 objects: &[],
@@ -2434,13 +2563,24 @@ impl<'a> Builder<'a> {
                     state.registers[inst.operand(3)],
                 );
                 let scalar = |ty: Ty| ty.is_numeric_scalar() || ty == Ty::Num;
+                // `%%` and `%/%` compile only through an intrinsic, which takes no `Num` operand;
+                // otherwise they run the tier-0 handler, which reads boxed operands.
+                let remainder = matches!(
+                    ARITHS[inst.operand(0)].0,
+                    Arith::Modulo | Arith::IntegerDivide
+                );
                 // An integer flag would make `+`, `-` and `*` integer arithmetic unless the other
                 // operand is a double; every other operator converts to double anyway.
                 scalar(a)
                     && scalar(b)
+                    && !(remainder && (a == Ty::Num || b == Ty::Num))
                     && (!matches!(
                         ARITHS[inst.operand(0)].0,
-                        Arith::Add | Arith::Subtract | Arith::Multiply
+                        Arith::Add
+                            | Arith::Subtract
+                            | Arith::Multiply
+                            | Arith::Modulo
+                            | Arith::IntegerDivide
                     ) || a == Ty::Dbl
                         || b == Ty::Dbl)
             }
@@ -2970,13 +3110,14 @@ impl<'a> Builder<'a> {
             .map(|(symbol, _)| *symbol)
             .zip(scope)
             .collect();
-        let outer_closed = std::mem::replace(&mut lowering.closed, closed);
-        let result = self.lower_expression(lowering, body, depth);
+        // The body may rebind a formal, so the argument types are read before it runs.
         let arguments: SmallVec<[Option<SexpType>; 4]> = lowering
             .scope
             .iter()
             .map(|&(_, register)| lowering.state.registers[register].storage())
             .collect();
+        let outer_closed = std::mem::replace(&mut lowering.closed, closed);
+        let result = self.lower_expression(lowering, body, depth);
         lowering.scope = outer;
         lowering.closed = outer_closed;
         let result = result?;
@@ -3087,6 +3228,9 @@ impl<'a> Builder<'a> {
                     );
                 }
                 let name = base_builtin(function, head)?;
+                if name == "{" {
+                    return self.lower_block(lowering, &args, depth);
+                }
                 let registers = args
                     .iter()
                     .map(|&arg| self.lower_expression(lowering, arg, depth))
@@ -3096,13 +3240,14 @@ impl<'a> Builder<'a> {
                     .map(|&register| lowering.state.registers[register])
                     .collect();
                 match (name, registers.as_slice()) {
-                    ("(" | "{", [inner]) => Some(*inner),
+                    ("(", [inner]) => Some(*inner),
                     ("if", [condition, then, otherwise]) if types[0] == Ty::Lgl => {
                         self.select(lowering, *condition, *then, *otherwise)
                     }
                     (operator, [left, right])
                         if let Some(&(arith, _)) =
-                            ARITHS.iter().find(|(_, symbol)| *symbol == operator) =>
+                            ARITHS.iter().find(|(_, symbol)| *symbol == operator)
+                            && !remainder_operator(arith) =>
                     {
                         let (a, b) = (types[0], types[1]);
                         let dst = lowering.temporary()?;
@@ -3178,6 +3323,72 @@ impl<'a> Builder<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Lowers the statements of a `{` block in an inlined call. An assignment to a name binds
+    /// the name in the inlined scope, because the frame it would write is the callee's own,
+    /// which no code outside the inlined body can see before the call returns; later statements
+    /// read the binding. The block's value is its last statement's, which must not be an
+    /// assignment (its value is invisible) and may be `return(value)`.
+    unsafe fn lower_block(
+        &mut self,
+        lowering: &mut Lowering<'a>,
+        statements: &[Sexp],
+        depth: usize,
+    ) -> Option<usize> {
+        let symbols = values::symbols();
+        let (last, init) = statements.split_last()?;
+        for &statement in init {
+            let assignment = statement.kind() == SexpType::Language
+                && (statement.car() == symbols.assign || statement.car() == symbols.assign_eq);
+            if !assignment {
+                // Any other statement before the last only matters for its effect, and an
+                // inlined body has none.
+                return None;
+            }
+            let [target, value] = values::pairlist_items(statement.cdr())[..] else {
+                return None;
+            };
+            let (target, value) = (target.1, value.1);
+            if target.kind() != SexpType::Symbol
+                || !self.resolves_to_base(lowering, statement.car())
+            {
+                return None;
+            }
+            let register = self.lower_expression(lowering, value, depth)?;
+            match lowering.scope.iter_mut().find(|(symbol, _)| *symbol == target) {
+                Some(entry) => entry.1 = register,
+                None => lowering.scope.push((target, register)),
+            }
+        }
+        let mut last = *last;
+        if last.kind() == SexpType::Language
+            && last.car() == symbols.return_
+            && self.resolves_to_base(lowering, symbols.return_)
+        {
+            let [(tag, value)] = values::pairlist_items(last.cdr())[..] else {
+                return None;
+            };
+            if tag != values::nil() {
+                return None;
+            }
+            last = value;
+        }
+        if last.kind() == SexpType::Language
+            && (last.car() == symbols.assign || last.car() == symbols.assign_eq)
+        {
+            return None;
+        }
+        self.lower_expression(lowering, last, depth)
+    }
+
+    /// Whether `symbol` in inlined code calls the base function of that name, as `<-` and
+    /// `return` must for a block to mean what it says.
+    unsafe fn resolves_to_base(&mut self, lowering: &Lowering<'a>, symbol: Sexp) -> bool {
+        !lowering.scope.iter().any(|(name, _)| *name == symbol)
+            && self
+                .resolve_head(lowering, symbol)
+                .is_some_and(|function| base_builtin(function, symbol).is_some())
     }
 
     /// Makes sure `symbol`'s slot is loaded in inlined code, peeking at it when it may not be,
@@ -3272,8 +3483,20 @@ impl<'a> Builder<'a> {
         let (dst, left, right) = (operand(1), operand(2), operand(3));
         let (a, b) = (state.registers[left], state.registers[right]);
         state.visible = Some(true);
+        if remainder_operator(arith)
+            && let Some((intrinsic, result)) = intrinsic_for(ARITHS[operand(0)].1, &[a, b])
+        {
+            state.registers[dst] = result;
+            state.visible = Some(true);
+            return Ok(Action::Intrinsic {
+                intrinsic,
+                dst,
+                args: self.slice([left, right]),
+                result,
+            });
+        }
         let scalar = |ty: Ty| ty.is_numeric_scalar() || ty == Ty::Num;
-        if scalar(a) && scalar(b) {
+        if scalar(a) && scalar(b) && !remainder_operator(arith) {
             let integers = !matches!(a, Ty::Dbl | Ty::Num) && !matches!(b, Ty::Dbl | Ty::Num);
             let comparison = matches!(
                 arith,
@@ -3526,6 +3749,9 @@ pub(crate) unsafe fn constant_type(value: Sexp) -> Ty {
 
 /// The intrinsic for a call of builtin `name` with arguments of these types, and its result.
 fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
+    if !has_intrinsic(name) {
+        return None;
+    }
     let numeric = |ty: Ty| {
         if ty == Ty::Dbl {
             Numeric::Dbl
@@ -3630,6 +3856,36 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
     })
 }
 
+/// Whether [`intrinsic_for`] has an intrinsic for builtin `name` given some argument types. It
+/// gates that function, so the two cannot disagree.
+fn has_intrinsic(name: &str) -> bool {
+    matches!(
+        name,
+        "Dict.len"
+            | "Set.len"
+            | "Dict.is_empty"
+            | "Set.is_empty"
+            | "Dict.contains"
+            | "Set.contains"
+            | "Dict.get"
+            | "["
+            | "[["
+            | "length"
+            | "List.len"
+            | "-"
+            | "!"
+            | "is.na"
+            | "sqrt"
+            | "exp"
+            | "log"
+            | "abs"
+            | "floor"
+            | "ceiling"
+            | "%%"
+            | "%/%"
+    )
+}
+
 /// The type a base builtin returns for plain arguments of these types, for a call that has not
 /// returned yet. A guess can be wrong (`max` of an empty integer vector is the double `-Inf`,
 /// `1.5:3` makes doubles), which the check after the call catches.
@@ -3699,6 +3955,12 @@ fn builtin_result(name: &str, types: &[Ty]) -> Option<Ty> {
     })
 }
 
+/// Whether `arith` is `%%` or `%/%`, which compiled code computes as the intrinsic their
+/// builtin calls lower to, with GNU R's rounding and its loss-of-accuracy warning.
+fn remainder_operator(arith: Arith) -> bool {
+    matches!(arith, Arith::Modulo | Arith::IntegerDivide)
+}
+
 /// The type of an element-wise operation that has not run yet on plain operands, at least one of
 /// them a vector: plain operands carry no attributes, so neither does the result.
 fn vector_arithmetic(arith: Arith, a: Ty, b: Ty) -> Option<Ty> {
@@ -3714,7 +3976,15 @@ fn vector_arithmetic(arith: Arith, a: Ty, b: Ty) -> Option<Ty> {
         | Arith::Greater
         | Arith::LessEqual
         | Arith::GreaterEqual => Ty::LglVec,
-        Arith::Add | Arith::Subtract | Arith::Multiply if !doubles => Ty::IntVec,
+        Arith::Add
+        | Arith::Subtract
+        | Arith::Multiply
+        | Arith::Modulo
+        | Arith::IntegerDivide
+            if !doubles =>
+        {
+            Ty::IntVec
+        }
         _ => Ty::DblVec,
     })
 }
@@ -3798,7 +4068,9 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
     let kill = |register: usize, live: &mut [u64]| set_bit(live, register, false);
     let gen_ = |register: usize, live: &mut [u64]| set_bit(live, register, true);
     match inst.op {
-        Op::Constant | Op::GetVar | Op::GetFun | Op::Ast | Op::Closure => kill(operand(0), live),
+        Op::Constant | Op::GetVar | Op::GetFun | Op::Ast | Op::Closure | Op::Missing => {
+            kill(operand(0), live)
+        }
         Op::SetVar => gen_(operand(1), live),
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             gen_(operand(0), live)

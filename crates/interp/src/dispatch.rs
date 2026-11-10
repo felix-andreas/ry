@@ -26,12 +26,9 @@ use {
 pub const BUILTINS: &[BuiltinDef] = &[
     special("UseMethod", -1, do_usemethod).keep_visibility(),
     internal("NextMethod", -1, do_nextmethod).keep_visibility(),
-    builtin("class", 1, do_class),
-    builtin("oldClass", 1, do_old_class),
     builtin("oldClass<-", 2, do_set_old_class),
     builtin("class<-", 2, do_set_class),
     builtin("unclass", 1, do_unclass),
-    internal("inherits", 3, do_inherits),
     builtin(".class2", 1, |call| unsafe { implicit_class(call.arg(0)) }),
     builtin(".cache_class", 2, |call| unsafe { do_cache_class(call) }),
     builtin(".isMethodsDispatchOn", -1, do_is_methods_dispatch_on),
@@ -148,7 +145,7 @@ unsafe fn do_cache_class(call: &Call<'_>) -> R<Sexp> {
     Ok(extends)
 }
 
-unsafe fn basic_class(object: Sexp, for_dispatch: bool) -> &'static str {
+pub(crate) unsafe fn basic_class(object: Sexp, for_dispatch: bool) -> &'static str {
     match object.kind() {
         SexpType::Closure | SexpType::Special | SexpType::Builtin => "function",
         SexpType::Integer => "integer",
@@ -2108,14 +2105,6 @@ unsafe fn do_set_s4_object(call: &Call<'_>) -> R<Sexp> {
 
 // The class builtins.
 
-unsafe fn do_class(call: &Call<'_>) -> R<Sexp> {
-    class_of(call.arg(0))
-}
-
-unsafe fn do_old_class(call: &Call<'_>) -> R<Sexp> {
-    Ok(get_attr(call.arg(0), symbols().class))
-}
-
 unsafe fn modifiable(object: Sexp) -> R<Sexp> {
     if values::maybe_shared(object) {
         values::shallow_duplicate(object)
@@ -2253,66 +2242,8 @@ unsafe fn do_unclass(call: &Call<'_>) -> R<Sexp> {
     Ok(copy)
 }
 
-unsafe fn do_inherits(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let what = call.arg(1);
-    let which = values::as_logical_scalar(call.arg(2)) == 1;
-    // As in GNU R, an S4 object inherits from every class it extends, and anything else from
-    // what `class()` reports, which is not the implicit class `UseMethod` dispatches on. The
-    // names are byte strings, so an object without a class attribute allocates no R vector.
-    let class = values::class_attr(object);
-    let dim = get_attr(object, symbols().dim);
-    let class_vector;
-    let class_names: Vec<&[u8]> = if object.has_gp(gp::S4_OBJECT) || length(class) > 0 {
-        class_vector = if object.has_gp(gp::S4_OBJECT) {
-            s4_class_with_superclasses(object)?
-        } else {
-            class
-        };
-        (0..length(class_vector))
-            .map(|index| class_vector.element(index).bytes())
-            .collect()
-    } else if dim != nil() {
-        if length(dim) == 2 {
-            vec![b"matrix", b"array"]
-        } else {
-            vec![b"array"]
-        }
-    } else {
-        vec![basic_class(object, false).as_bytes()]
-    };
-    // A class generator (an R6 or S4 generator, say) names its class through `nameOfClass()`.
-    let what = if what.kind() == SexpType::String {
-        what
-    } else {
-        let generic = values::install("nameOfClass")?;
-        let quoted = values::call(symbols().quote, &[what])?;
-        let name_call = values::call(generic, &[quoted])?;
-        let name = eval::eval(name_call, values::base_namespace())?;
-        if name.kind() != SexpType::String {
-            return Err(call.error(
-                "'what' must be a character vector or an object with a nameOfClass() method",
-            ));
-        }
-        name
-    };
-    if which {
-        let result = values::alloc(SexpType::Integer, length(what))?;
-        for index in 0..length(what) {
-            let wanted = what.element(index).bytes();
-            values::ints_mut(result)[index] = class_names
-                .iter()
-                .position(|class| *class == wanted)
-                .map_or(0, |position| position as i32 + 1);
-        }
-        return Ok(result);
-    }
-    let found = (0..length(what)).any(|index| class_names.contains(&what.element(index).bytes()));
-    values::scalar_bool(found)
-}
-
 /// For an S4 object, its class and every class it extends, as `is()` would list them.
-unsafe fn s4_class_with_superclasses(object: Sexp) -> R<Sexp> {
+pub(crate) unsafe fn s4_class_with_superclasses(object: Sexp) -> R<Sexp> {
     let class = values::class_attr(object);
     let methods = interp().globals.methods_namespace;
     if methods == nil() || class == nil() {

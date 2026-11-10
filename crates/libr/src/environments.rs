@@ -441,6 +441,7 @@ pub unsafe extern "C" fn R_LockBinding(symbol: Sexp, env: Sexp) {
 pub unsafe extern "C" fn R_unLockBinding(symbol: Sexp, env: Sexp) {
     enter(|| {
         binding(symbol, env)?.set_gp_bits(gp::BINDING_LOCKED, false);
+        interp::code_image::invalidate_checks();
         Ok(())
     })
 }

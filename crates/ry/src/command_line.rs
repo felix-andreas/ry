@@ -240,6 +240,15 @@ pub enum Command {
         /// The library to install into
         #[arg(long, short)]
         library: Option<PathBuf>,
+        /// Train the package's compiled code image on `tests`, `examples` or a script before
+        /// writing it, so that code that ran hot starts optimized in every session
+        #[arg(long, value_name = "WORKLOAD")]
+        train: Option<String>,
+        /// List the package's functions that stay in the interpreter, largest first, with what
+        /// kept each from machine code, and for those that compiled, the lookups and argument
+        /// tests their code checks
+        #[arg(long)]
+        explain: bool,
         /// `gnu-r` installs with GNU R instead of ry's runtime
         #[arg(long, value_enum, hide = true)]
         runtime: Option<Runtime>,

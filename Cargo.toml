@@ -6,6 +6,8 @@ default-members = ["crates/ry"]
 # zig cross-links macOS without an Apple SDK, and the real crate links CoreFoundation.
 [patch.crates-io]
 iana-time-zone = { path = "patches/iana-time-zone" }
+# crossterm drains the terminal before it returns an event, or a paste stalls (patches/crossterm).
+crossterm = { path = "patches/crossterm" }
 
 [workspace.package]
 version = "0.4.3-beta"

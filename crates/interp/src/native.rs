@@ -166,34 +166,25 @@ pub unsafe fn call_base_routine(call: &Call<'_>, interface: Interface) -> R<Opti
         return Ok(None);
     };
     let known = values::symbols();
-    let package_symbol = known.package_arg;
-    let na_ok_symbol = known.na_ok;
-    let ignored = [known.dup, known.encoding];
-    let mut package = None;
-    let mut na_ok = false;
-    let mut args: Vec<Arg> = Vec::with_capacity(rest.len());
-    for arg in rest {
-        if arg.tag == package_symbol {
-            package = values::first_string(arg.value).map(|text| text.into_owned());
-        } else if arg.tag == na_ok_symbol {
-            na_ok = values::as_logical_scalar(arg.value) == 1;
-        } else if !ignored.contains(&arg.tag) {
-            args.push(*arg);
-        }
-    }
+    // `.NAME` is resolved before the arguments are collected, so a call into a package's
+    // routine, the common case, declines without allocating.
     let name = match first.value.kind() {
-        SexpType::String if package.as_deref().is_none_or(|package| package == "base") => {
-            values::first_string(first.value).map(|text| text.into_owned())
+        SexpType::String => {
+            let package = rest
+                .iter()
+                .find(|arg| arg.tag == known.package_arg)
+                .and_then(|arg| values::first_string(arg.value));
+            if package.is_some_and(|package| package != "base") {
+                return Ok(None);
+            }
+            values::first_string(first.value)
         }
         SexpType::List => {
             let dll = values::list_get(first.value, "dll");
-            let dll_name = values::first_string(values::list_get(dll, "name"));
-            if dll_name.as_deref() == Some("base") {
-                values::first_string(values::list_get(first.value, "name"))
-                    .map(|text| text.into_owned())
-            } else {
-                None
+            if values::first_string(values::list_get(dll, "name")).as_deref() != Some("base") {
+                return Ok(None);
             }
+            values::first_string(values::list_get(first.value, "name"))
         }
         _ => None,
     };
@@ -204,6 +195,16 @@ pub unsafe fn call_base_routine(call: &Call<'_>, interface: Interface) -> R<Opti
     }) else {
         return Ok(None);
     };
+    let ignored = [known.package_arg, known.dup, known.encoding];
+    let mut na_ok = false;
+    let mut args: Vec<Arg> = Vec::with_capacity(rest.len());
+    for arg in rest {
+        if arg.tag == known.na_ok {
+            na_ok = values::as_logical_scalar(arg.value) == 1;
+        } else if !ignored.contains(&arg.tag) {
+            args.push(*arg);
+        }
+    }
     if args.len() != routine.arity {
         return Err(call.error(format!(
             "Incorrect number of arguments ({}), expecting {} for '{}'",

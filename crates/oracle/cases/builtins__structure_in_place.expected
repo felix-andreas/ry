@@ -1,0 +1,31 @@
+[stdout]
+|  NULL
+| List of 2
+|  $ foo  : chr "a"
+|  $ class: chr "bar"
+| List of 2
+|  $ dim: int [1:2] 2 2
+|  $ foo: num 1
+| List of 3
+|  $ dim: int [1:2] 2 2
+|  $ foo: num 1
+|  $ bar: num 2
+| structure(1:4, dim = c(2L, 2L), foo = 1, bar = 2)
+| structure(c(a = 1, b = 2), j = 3)
+| structure(c(a = 1, b = 2), k = "u")
+| structure(list(p = 1), class = c("one", "two"), extra = TRUE)
+| List of 4
+|  $ names    : chr "u"
+|  $ class    : chr "data.frame"
+|  $ row.names: int [1:3] 1 2 3
+|  $ note     : chr "hi"
+|  chr "m"
+|  num 1
+| [1] TRUE
+| [1] 2
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 2

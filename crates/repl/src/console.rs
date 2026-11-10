@@ -5,6 +5,7 @@
 use {
     crate::{
         ConsoleHooks, Filtered, InputFilter, Keybindings, ReplError, RunOptions, SessionCompleter,
+        highlight::SyntaxHighlighter,
         libr::{self, CallRoutine, RApi, Sexp},
     },
     crossterm::{
@@ -14,10 +15,10 @@ use {
     nu_ansi_term::{Color, Style},
     reedline::{
         ColumnarMenu, Completer, DefaultHinter, EditCommand, EditMode, Emacs, FileBackedHistory,
-        Highlighter, HistoryItem, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch,
-        PromptHistorySearchStatus, Reedline, ReedlineEvent, ReedlineMenu, Signal, StyledText,
-        Suggestion, ValidationResult, Validator, Vi, default_emacs_keybindings,
-        default_vi_insert_keybindings, default_vi_normal_keybindings,
+        HistoryItem, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch,
+        PromptHistorySearchStatus, Reedline, ReedlineEvent, ReedlineMenu, Signal, Suggestion,
+        ValidationResult, Validator, Vi, default_emacs_keybindings, default_vi_insert_keybindings,
+        default_vi_normal_keybindings,
     },
     std::{
         borrow::Cow,
@@ -34,10 +35,7 @@ use {
         },
         time::Duration,
     },
-    syntax::{
-        SyntaxKind::{self, *},
-        input_is_unfinished, lex, parse,
-    },
+    syntax::{input_is_unfinished, parse},
 };
 
 pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
@@ -118,12 +116,33 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
             Box::new(Vi::new(insert, default_vi_normal_keybindings()))
         }
     };
+    // Without a palette the hint, the history search and the completion menu use attributes
+    // only, so `NO_COLOR` leaves no color on screen.
+    let colored = options.palette.is_some();
+    let hint = match colored {
+        true => Style::new().fg(Color::DarkGray),
+        false => Style::new().dimmed(),
+    };
+    let mut menu = ColumnarMenu::default().with_name("completion_menu");
+    if !colored {
+        let plain = Style::new();
+        menu = menu
+            .with_text_style(plain)
+            .with_selected_text_style(plain.reverse())
+            .with_description_text_style(plain.dimmed())
+            .with_match_text_style(plain.underline())
+            .with_selected_match_text_style(plain.reverse().underline());
+    }
     let mut editor = Reedline::create()
-        .with_highlighter(Box::new(LexerHighlighter))
-        .with_hinter(Box::new(
-            DefaultHinter::default().with_style(Style::new().fg(Color::DarkGray)),
-        ))
+        .with_highlighter(Box::new(SyntaxHighlighter {
+            palette: options.palette,
+        }))
+        .with_hinter(Box::new(DefaultHinter::default().with_style(hint)))
+        .with_ansi_colors(colored)
         .with_validator(Box::new(LexerValidator))
+        // A paste arrives as one insertion with one repaint, and runs on Enter as under
+        // GNU R's readline, instead of a repaint and a terminal round trip per pasted line.
+        .use_bracketed_paste(true)
         .with_edit_mode(edit_mode);
     let completer = options
         .completer
@@ -131,9 +150,7 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
     if let Some(shared) = &completer {
         editor = editor
             .with_completer(Box::new(EditorCompleter(shared.clone())))
-            .with_menu(ReedlineMenu::EngineCompleter(Box::new(
-                ColumnarMenu::default().with_name("completion_menu"),
-            )));
+            .with_menu(ReedlineMenu::EngineCompleter(Box::new(menu)));
     }
     if let Some(history) = history_file()
         && let Ok(history) = FileBackedHistory::with_file(1000, history)
@@ -185,11 +202,11 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
     }
     {
         *lock_console() = Some(Console {
+            unit_bytes: pending.len(),
             editor,
             pending,
             typeahead: Typeahead::default(),
             keys: KeyDecoder::default(),
-            hook_bytes: 0,
             batch: options.batch,
             completer,
             hooks: options.hooks,
@@ -234,10 +251,12 @@ struct Console {
     /// Decodes the bytes typed while the editor did not hold the terminal. It lives across
     /// reads, so a key or a CRLF split between two reads still decodes as one.
     keys: KeyDecoder,
-    /// How many bytes at the front of `pending` are a hook's code, which R must receive as a
-    /// chunk of its own: ry's runtime parses a chunk whole, so a syntax error in the typed line
-    /// would otherwise cancel the hook's code too, and shift the line's error position.
-    hook_bytes: usize,
+    /// How many bytes at the front of `pending` are one unit, a hook's code or the input and
+    /// script queued at start-up, which R receives in chunks of its own rather than line by line.
+    /// ry's runtime parses a chunk whole, so a syntax error in the typed line would otherwise
+    /// cancel the hook's code too and shift the line's error position, and a script read whole
+    /// leaves nothing queued for its `readline()` to take.
+    unit_bytes: usize,
     /// End the session (EOF) once `pending` is exhausted instead of prompting.
     batch: bool,
     completer: Option<SharedSessionCompleter>,
@@ -299,7 +318,37 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
         let Some(console) = slot.as_mut() else {
             return 0;
         };
-        while console.pending.is_empty() {
+        // Input for `readline()`, `menu()` or the browser must reach them untouched, and comes
+        // from the console: `pending` holds the rest of a top-level script or paste, which runs
+        // once they return, so it must not answer them.
+        let at_top_level = console.ry_runtime || libr::at_top_level();
+        // Ctrl-C while a command ran flushed the terminal's input, so it cancels the input
+        // this console holds the same way, the rest of a paste included.
+        if !console.piped && take_interrupt(console.ry_runtime) {
+            // Past the hook's unit, `pending` holds the rest of the last input the filter
+            // released, so its lines are the ones that never ran. A script queued at start-up
+            // is one unit too, and its interrupted rest is not reported.
+            let dropped = console
+                .pending
+                .range(console.unit_bytes.min(console.pending.len())..)
+                .filter(|&&byte| byte == b'\n')
+                .count();
+            if dropped > 0
+                && let Some(filter) = console.filter.as_mut()
+            {
+                filter.discard(dropped);
+            }
+            console.pending.clear();
+            console.unit_bytes = 0;
+            console.typeahead.clear();
+            console.keys.clear();
+        }
+        let mut answer: Option<Vec<u8>> = None;
+        while if at_top_level {
+            console.pending.is_empty()
+        } else {
+            answer.is_none()
+        } {
             if console.batch {
                 return 0;
             }
@@ -311,11 +360,7 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                 true => "+ ".to_owned(),
                 false => unsafe { libr::prompt_text(prompt) },
             };
-            // Input for `readline()`, `menu()` or the browser must reach them untouched.
-            let at_top_level = console.ry_runtime || libr::at_top_level();
             if !console.piped {
-                // Ctrl-C while a command ran flushed the terminal's input, so it cancels the
-                // input this console holds the same way.
                 if take_interrupt(console.ry_runtime) {
                     console.typeahead.clear();
                     console.keys.clear();
@@ -386,7 +431,7 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                         && let Some(hooks) = console.hooks.as_mut()
                         && let Some(code) = hooks.before_command()
                     {
-                        console.hook_bytes = code.len() + 1;
+                        console.unit_bytes = code.len() + 1;
                         console.pending.extend(code.into_bytes());
                         console.pending.push_back(b'\n');
                     }
@@ -396,8 +441,14 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                             .unwrap_or_else(PoisonError::into_inner)
                             .accept(&line);
                     }
-                    console.pending.extend(line.into_bytes());
-                    console.pending.push_back(b'\n');
+                    if at_top_level {
+                        console.pending.extend(line.into_bytes());
+                        console.pending.push_back(b'\n');
+                    } else {
+                        let mut bytes = line.into_bytes();
+                        bytes.push(b'\n');
+                        answer = Some(bytes);
+                    }
                 }
                 Ok(Signal::CtrlC) if console.held => {
                     console.held = false;
@@ -412,19 +463,31 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
         }
         // SAFETY: R's buffer holds `length` bytes, and `capacity` leaves room for the NUL.
         let chunk = unsafe { slice::from_raw_parts_mut(buffer, capacity) };
-        let written = take_chunk(&mut console.pending, &mut console.hook_bytes, chunk);
+        let written = match answer {
+            // R reads an answer as one line, so one longer than its buffer is cut short.
+            Some(answer) => {
+                let written = answer.len().min(chunk.len());
+                chunk[..written].copy_from_slice(&answer[..written]);
+                written
+            }
+            None => take_chunk(&mut console.pending, &mut console.unit_bytes, chunk),
+        };
         unsafe { *buffer.add(written) = 0 };
         1
     }
 }
 
-/// Moves the next chunk of accepted input into `buffer` and returns its length. A hook's code,
-/// the first `hook_bytes` of `pending`, goes in chunks of its own.
-pub fn take_chunk(pending: &mut VecDeque<u8>, hook_bytes: &mut usize, buffer: &mut [u8]) -> usize {
+/// Moves the next chunk of accepted input into `buffer` and returns its length. A unit, the
+/// first `unit_bytes` of `pending`, goes in chunks of its own. Other input goes one line at a
+/// time, as a typed line would: an error makes R discard the rest of its buffer, so a chunk cut
+/// mid-line would leave the next chunk starting with a fragment of a line.
+pub fn take_chunk(pending: &mut VecDeque<u8>, unit_bytes: &mut usize, buffer: &mut [u8]) -> usize {
     let mut written = buffer.len().min(pending.len());
-    if *hook_bytes > 0 {
-        written = written.min(*hook_bytes);
-        *hook_bytes -= written;
+    if *unit_bytes > 0 {
+        written = written.min(*unit_bytes);
+        *unit_bytes -= written;
+    } else if let Some(newline) = pending.range(..written).position(|&byte| byte == b'\n') {
+        written = newline + 1;
     }
     for (slot, byte) in buffer.iter_mut().zip(pending.drain(..written)) {
         *slot = byte;
@@ -856,41 +919,6 @@ impl Prompt for RPrompt {
 
     fn get_prompt_right_color(&self) -> reedline::Color {
         reedline::Color::Reset
-    }
-}
-
-struct LexerHighlighter;
-
-impl Highlighter for LexerHighlighter {
-    fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
-        let mut styled = StyledText::new();
-        let (tokens, _) = lex(line);
-        let mut offset = 0;
-        for token in tokens {
-            let end = offset + usize::from(token.len);
-            styled.push((token_style(token.kind), line[offset..end].to_string()));
-            offset = end;
-        }
-        if styled.buffer.is_empty() {
-            styled.push((Style::new(), String::new()));
-        }
-        styled
-    }
-}
-
-fn token_style(kind: SyntaxKind) -> Style {
-    match kind {
-        FUNCTION_KW | IF_KW | ELSE_KW | FOR_KW | WHILE_KW | REPEAT_KW | BREAK_KW | NEXT_KW
-        | IN_KW => Style::new().fg(Color::Blue).bold(),
-        TRUE_KW | FALSE_KW | NULL_KW | NA_KW | NA_INTEGER_KW | NA_REAL_KW | NA_COMPLEX_KW
-        | NA_CHARACTER_KW | INF_KW | NAN_KW => Style::new().fg(Color::Purple),
-        STRING | RAW_STRING | FSTRING_START | FSTRING_TEXT | FSTRING_END => {
-            Style::new().fg(Color::Green)
-        }
-        INTEGER | DOUBLE | COMPLEX | SUFFIXED_NUMBER => Style::new().fg(Color::Cyan),
-        COMMENT | ANNOTATION_MARKER => Style::new().fg(Color::DarkGray),
-        ERROR_TOKEN => Style::new().fg(Color::Red).underline(),
-        _ => Style::new(),
     }
 }
 

@@ -363,7 +363,7 @@ definition 11..18
 references: 11..18*
 rename: 1 edit(s)
 signature: none
-completion (108): checked, check.options, checkAtAssignment, checkCRAN, checkSlotAssignment, cacheGenericsMetaData, cacheMetaData, cacheMethod
+completion (99): checked, check.options, checkAtAssignment, checkCRAN, checkSlotAssignment, cacheGenericsMetaData, cacheMetaData, cacheMethod
 
 #---- if_unknown_annotation
 frame <- data.frame(a = 1)

@@ -1,0 +1,132 @@
+[stdout]
+| [1] 1
+| [1] 1
+| [1] "x"
+| [1] "x"
+| [1] 2
+| [1] 2
+| [1] 2
+| NULL
+| [1] 1
+| NULL
+| [1] 1
+| [1] "subscript out of bounds"
+| [1] "attempt to select less than one element in get1index <real>"
+| [1] "invalid negative subscript in get1index <real>"
+| [1] "invalid negative subscript in get1index <real>"
+| NULL
+| NULL
+| NULL
+| NULL
+| [1] "subscript out of bounds"
+| [1] 1
+| [1] "invalid subscript type 'list'"
+| [1] "missing subscript"
+| [1] "subscript out of bounds"
+| [1] "subscript out of bounds"
+| [1] 2
+| [1] "invalid negative subscript in get1index <real>"
+| NULL
+| NULL
+| [1] 2
+| [1] 3
+| [1] "subscript out of bounds"
+| [1] "subscript out of bounds"
+| [1] "attempt to select less than one element in get1index <real>"
+| [1] 2
+| [1] "invalid negative subscript in get1index <real>"
+| [1] "subscript out of bounds"
+| [1] "subscript out of bounds"
+| [1] 3
+| [1] 3
+| [1] "z"
+| [1] NA
+| [1] 02
+| [1] 0+2i
+| [1] "object of type 'builtin' is not subsettable"
+| x
+| f
+| [1] 2
+| b + 1
+| [1] 42
+| NULL
+| [1] "wrong arguments for subsetting an environment"
+| [1] 6
+| [1] 3
+| [1] 5
+| [1] "subscript out of bounds"
+| [1] "u" "v"
+| [1] 2
+| [1] 1 2
+| List of 4
+|  $ a: num 1
+|  $ b: num 2
+|  $  : NULL
+|  $  : num 4
+| List of 3
+|  $ b: num 2
+|  $  : NULL
+|  $  : num 4
+| [1] 3
+| List of 3
+|  $ b:List of 1
+|   ..$ : num 9
+|  $  : NULL
+|  $  : num 4
+| List of 3
+|  $ b: list()
+|  $  : NULL
+|  $  : num 4
+| [1]  1 10  3
+| [1] "integer"
+| [1] 1.0 2.5 3.0
+| [1] "double"
+| [1] 1.0 2.5 3.0  NA 1.0
+|                       n 
+| 1.0 2.5 3.0  NA 1.0 7.0 
+|                                   n 
+|   "a" "2.5"   "3"    NA   "1"   "7" 
+| [1] "more elements supplied than there are to replace"
+| [1] "attempt to select less than one element in OneIndex <real>"
+| [1] "attempt to select more than one element in OneIndex <real>"
+| [1] "attempt to select more than one element in integerOneIndex"
+| [1] TRUE   NA
+| [1]  3 NA
+| [1] "integer"
+|    a    b 
+| 1+0i 0+1i
+| [[1]]
+| [1] 5
+| 
+| $a
+| [1] "x"
+| 
+| List of 2
+|  $ : NULL
+|  $ :List of 1
+|   ..$ : num 1
+| List of 1
+|  $ p:List of 1
+|   ..$ q: num 2
+| List of 1
+|  $ p:List of 1
+|   ..$ q: num 3
+| [1] 1
+| f(y)
+| f(y, 1)
+| [1] 1
+| [1] "wrong args for environment subassignment"
+|      [,1] [,2]
+| [1,]    0    5
+| [2,]    0    0
+| [1] "get a"
+| [1] "a"
+| [1] v
+| Levels: u v
+| [1] "invalid factor level, NA generated"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "invalid factor level, NA generated"

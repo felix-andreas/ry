@@ -316,6 +316,20 @@ fn seeds_agree_across_tiers() {
             "(n = 8L)",
             true,
         ),
+        // Closures whose bodies are blocks inline: locals, a rebound formal, a free variable a
+        // local shadows without touching the outer binding, and a trailing `return()`.
+        (
+            "y <- 100\nscale <- function(x, k) { a <- x * k; b <- a + 1; return(b - 0.5) }\nbump <- function(x) { x <- x + 1L; x * 2L }\nfree <- function(x) { y <- y + x; y }\ns <- 0\nt <- 0L\nfor (i in 1:n) { s <- s + scale(i, 0.5) + free(i); t <- t + bump(i) }\nlist(s, t, y)",
+            "(n = 40L)",
+            false,
+        ),
+        // An inlined block whose local turns from integer to double fails its speculation in
+        // the middle of the block, and tier 0 reruns the whole call.
+        (
+            "step <- function(x) { a <- x + x; b <- a * 3L; b - x }\ns <- 0\nfor (i in 1:n) s <- s + step(if (i > 20L) i + 0.5 else i)\ns",
+            "(n = 40L)",
+            false,
+        ),
         // An inlined typed closure keeps its checks: a call reached only after the loop compiled
         // fails on its argument, or on its value, exactly as in tier 0.
         (
@@ -914,6 +928,62 @@ fn closures_from_one_site_share_code_but_not_lookups() {
     });
 }
 
+/// Compiled code loads a variable inline when it sits in the activation's frame or an enclosing
+/// function frame and holds a value or a forced promise, and hands every other load to the
+/// runtime. These calls cross each case: a forced argument, an enclosing binding whose type
+/// changes under the code (the inline load must deoptimize), an active binding, and an argument
+/// that is an integer in one closure and a double in another of the same code, which loads as
+/// `Num`.
+#[test]
+fn inline_variable_loads_agree_with_tier_zero() {
+    let calls = [
+        "g(1L)",
+        "g(2L)",
+        "g(1.5)",
+        "g(3L)",
+        "assign('k', 2.5, envir = environment(g))",
+        "g(1L)",
+        "g(2L)",
+        "assign('k', 'a', envir = environment(g))",
+        "g(1L)",
+        "makeActiveBinding('j', function() 4L, environment(g))",
+        "h <- local({ j <- 1L; function(x) { s <- 0; for (i in 1:3) s <- s + x * j; s } })",
+        "h(1L)",
+        "h(2L)",
+        "environment(h) <- environment(g)",
+        "h(1L)",
+        "h(2L)",
+        "p <- make(2)",
+        "q <- make(0.5)",
+        "p(1L)",
+        "q(1.5)",
+        "p(2L)",
+        "q(2.5)",
+        "typeof(p(3L))",
+        "q(NA_integer_)",
+        "p(NA)",
+        "typeof(q(4L))",
+    ];
+    let mut outcomes = Vec::new();
+    with_interpreter(|| unsafe {
+        for mode in [Mode::Off, Mode::Force] {
+            jit::install_mode(mode);
+            run("make <- function(k) function(x) { s <- 0; for (i in 1:3) s <- s + x * k; s }");
+            run("g <- make(2L)");
+            let mut results = vec![run("g(1L)")];
+            // A body the code generator rejects would run in tier 0 and agree trivially.
+            assert!(
+                mode == Mode::Off || has_compiled_code("g"),
+                "g did not compile, so nothing probed"
+            );
+            results.extend(calls.iter().map(|call| run(call)));
+            outcomes.push(results);
+        }
+        jit::install_mode(Mode::Off);
+    });
+    assert_eq!(outcomes[0], outcomes[1]);
+}
+
 #[test]
 fn formal_shadows_enclosing_function() {
     // `sum` names a base function, but the call must reach the function passed in its place.
@@ -931,11 +1001,89 @@ fn formal_shadows_enclosing_function() {
 }
 
 #[test]
+fn a_body_that_could_run_nothing_natively_never_records() {
+    // `is.null` has no native form, so whatever its profile, compiled code for `wrap` would hand
+    // its only call back to tier 0. It is refused when its recording window would open, and
+    // never records; `twice` does arithmetic, so it records and then compiles.
+    with_interpreter(|| unsafe {
+        use interp::bytecode::{PROFILE, profile};
+        jit::install_mode(Mode::On);
+        let threshold = interp::bytecode::tier().map_or(0, |tier| tier.entry_threshold);
+        let window = interp::bytecode::recording_start(threshold);
+        let profile_of = |name: &str| {
+            let function = values::install(name)
+                .and_then(|symbol| eval::eval(symbol, values::global_env()))
+                .unwrap_or_else(|_| panic!("{name} is not defined"));
+            let code = function.cdr();
+            assert_eq!(
+                code.kind(),
+                heap::object::SexpType::Bytecode,
+                "{name} has no byte code"
+            );
+            values::ints(code.cdr().element(PROFILE)).to_vec()
+        };
+        run("wrap <- function(x) is.null(x)\ntwice <- function(x) x * 2");
+        let ran = run(&format!("for (i in 1:{}) {{ wrap(i); twice(i) }}", window + 1));
+        assert_eq!(ran, "NULL");
+        let (wrap, twice) = (profile_of("wrap"), profile_of("twice"));
+        assert_eq!(wrap[profile::TIER_STATE], -1, "wrap was not refused: {wrap:?} {twice:?} {window}");
+        assert_eq!(wrap[profile::RECORDING], 0, "wrap records");
+        assert_eq!(twice[profile::RECORDING], 1, "twice does not record");
+        run(&format!("for (i in 1:{threshold}) {{ wrap(i); twice(i) }}"));
+        assert!(has_compiled_code("twice"), "twice did not compile");
+        assert!(!has_compiled_code("wrap"), "wrap compiled");
+        jit::install_mode(Mode::Off);
+    });
+}
+
+#[test]
+fn a_hot_body_that_runs_rarely_waits_to_compile() {
+    // `rare` reaches the entry threshold, but each call comes with 160 KiB of other allocation,
+    // so its expected calls cannot repay a compile: it is refused, not for good, and its count
+    // starts over. A second refusal doubles the wait. Called back to back, the same body then
+    // compiles.
+    with_interpreter(|| unsafe {
+        use interp::bytecode::{PROFILE, profile};
+        jit::install_mode(Mode::On);
+        let threshold = interp::bytecode::tier().map_or(0, |tier| tier.entry_threshold);
+        let profile_of = || {
+            let function = values::install("rare")
+                .and_then(|symbol| eval::eval(symbol, values::global_env()))
+                .unwrap_or_else(|_| panic!("rare is not defined"));
+            values::ints(function.cdr().cdr().element(PROFILE)).to_vec()
+        };
+        run("rare <- function(x) x * 3");
+        run(&format!(
+            "for (i in 1:{}) {{ big <- (1:20000) * 1.5; rare(i) }}",
+            threshold + 1
+        ));
+        let counters = profile_of();
+        assert!(!has_compiled_code("rare"), "rare compiled: {counters:?}");
+        assert!(counters[profile::TIER_STATE] >= 0, "rare was refused for good: {counters:?}");
+        assert!(counters[profile::ENTRIES] < 10, "rare's count went on: {counters:?}");
+        run(&format!(
+            "for (i in 1:{}) {{ big <- (1:20000) * 1.5; rare(i) }}",
+            threshold + 1
+        ));
+        let counters = profile_of();
+        assert!(!has_compiled_code("rare"), "rare compiled: {counters:?}");
+        assert!(
+            counters[profile::ENTRIES] < 10 - threshold,
+            "a second refusal did not double rare's wait: {counters:?}"
+        );
+        run(&format!("for (i in 1:{}) rare(i)", 2 * threshold));
+        assert!(has_compiled_code("rare"), "rare did not compile: {:?}", profile_of());
+        jit::install_mode(Mode::Off);
+    });
+}
+
+#[test]
 fn fully_typed_closure_compiles_at_its_first_call() {
     // The signature stands in for the profile, so a first call runs compiled code: a typed
     // scalar function runs as a native function from its first call, whose values fix the
-    // argument types, unless an argument is a promise of a computation (`c(1, 2.5)`), which
-    // only the frame may force; a straight-line body then waits until it is hot. A call whose
+    // argument types. An argument that computes is evaluated first when that is pure
+    // (`c(1, 2.5)`), and otherwise stays a promise only the frame may force (`abs(...)`); a
+    // straight-line body then waits until it is hot. A call whose
     // values the declared types do not predict still gets tier 0's answer.
     with_interpreter(|| unsafe {
         jit::install_mode(Mode::On);
@@ -955,6 +1103,12 @@ fn fully_typed_closure_compiles_at_its_first_call() {
             (
                 "fv <- function(v: double[], k: integer) -> double v[2L] * k",
                 "fv(c(1, 2.5), 2L)",
+                "5",
+                Some(true),
+            ),
+            (
+                "fw <- function(v: double[], k: integer) -> double v[2L] * k",
+                "fw(abs(c(-1, 2.5)), 2L)",
                 "5",
                 Some(false),
             ),
@@ -981,7 +1135,7 @@ fn fully_typed_closure_compiles_at_its_first_call() {
         for (index, (definition, call, _, _)) in cases.iter().enumerate() {
             run(definition);
             let outcome = run(call);
-            let name = format!("f{}", ["t", "i", "v", "e", "u", "l"][index]);
+            let name = format!("f{}", ["t", "i", "v", "w", "e", "u", "l"][index]);
             let compiled = has_compiled_code(&name);
             outcomes.push((outcome, compiled));
         }
@@ -1154,6 +1308,104 @@ fn typed_natives_keep_tier_zero_semantics_at_their_edges() {
 }
 
 #[test]
+fn fuzz_argument_expressions_agree_with_tier_zero() {
+    // A native call evaluates a pure argument expression before the call instead of building
+    // its promise. Random expressions over constants, variables, `NA`, integer overflow, a
+    // classed value and a shadowed operator must give the same value, warnings and errors as
+    // tier 0. The JIT calls only a typed closure natively, so `nf` is typed; an argument that
+    // evaluates to a logical or an integer reaches it as one, which is how `NA` meets `NaN`.
+    with_interpreter(|| unsafe {
+        run("nf <- function(x: double, y: double) -> double x * 2 + y
+             big <- 2147483647L
+             w <- 2.5
+             i <- 3L
+             cls <- structure(1, class = \"tagged\")
+             Ops.tagged <- function(e1, e2) 99");
+        for_each_seed(300, |seed| {
+            let mut rng = SplitMix64(seed);
+            let first = argument_expression(&mut rng, 0);
+            let second = argument_expression(&mut rng, 0);
+            let shadow = if rng.chance(1, 8) {
+                "`-` <- function(e1, e2) 42\n"
+            } else {
+                ""
+            };
+            let body = format!(
+                "{{ {shadow}s <- 0\nfor (k in 1:30) s <- s + nf({first}, {second})\ns }}"
+            );
+            let text = format!("(function() {body})()");
+            jit::install_mode(Mode::Off);
+            let reference = run(&text);
+            jit::install_mode(Mode::Force);
+            let compiled = run(&text);
+            jit::install_mode(Mode::Off);
+            assert_eq!(
+                reference, compiled,
+                "seed {seed}: nf({first}, {second}) {shadow}"
+            );
+        });
+    });
+}
+
+/// A random argument expression: mostly the shapes evaluated before a native call, with some
+/// that must be left to the promise.
+fn argument_expression(rng: &mut SplitMix64, depth: usize) -> String {
+    let leaves = [
+        "1", "-2.5", "3L", "NA", "NA_integer_", "TRUE", "w", "i", "big", "cls", "NaN", "1e308",
+    ];
+    if depth > 3 || rng.chance(1, 3) {
+        return leaves[rng.below(leaves.len())].to_owned();
+    }
+    let left = argument_expression(rng, depth + 1);
+    match rng.below(5) {
+        0 => format!("-{left}"),
+        1 => format!("({left})"),
+        2 => format!("c({left})"),
+        _ => {
+            let operators = ["+", "-", "*", "/"];
+            let right = argument_expression(rng, depth + 1);
+            format!("{left} {} {right}", operators[rng.below(operators.len())])
+        }
+    }
+}
+
+#[test]
+fn break_and_next_route_through_nested_steps() {
+    // A stepped instruction can run a closure that tier 1 also compiled, which steps instructions
+    // of its own. A `break` or `next` forced inside the inner body must still resume the outer
+    // loop after the inner step returns, rather than the inner one or the step's caller. The
+    // `break` in `outer` also makes the optimizing tier hand back a resume at the loop's exit,
+    // the instruction right after the backward `Jump`, which baseline code must take as such.
+    let definitions = [
+        "inner <- function(n, v) { t <- 0; for (j in seq_len(n)) { if (j == 2) next; t <- t + j }; t + v }",
+        "outer <- function(m) { s <- 0; for (i in 1:m) { s <- s + inner(i, if (i == 4) break else if (i == 2) next else i) }; s }",
+        "through <- function(m) { s <- 0; for (i in 1:m) { s <- s + sum(vapply(seq_len(i), function(k) inner(k, k), 0)); if (i == 3) next; if (s > 40) break }; s }",
+    ];
+    let calls = [
+        "outer(6)",
+        "outer(6)",
+        "outer(3)",
+        "outer(1)",
+        "through(8)",
+        "through(8)",
+        "through(2)",
+        "outer(6)",
+    ];
+    let mut outcomes = Vec::new();
+    with_interpreter(|| unsafe {
+        for mode in [Mode::Off, Mode::Force] {
+            jit::install_mode(mode);
+            for definition in definitions {
+                run(definition);
+            }
+            outcomes.push(calls.iter().map(|call| run(call)).collect::<Vec<_>>());
+        }
+        jit::install_mode(Mode::Off);
+    });
+    assert_eq!(outcomes[0], outcomes[1]);
+}
+
+#[test]
 fn fuzz_typed_closures_agree_with_tier_zero() {
     with_interpreter(|| {
         let (mut runs, mut eager) = (0, 0);
@@ -1291,9 +1543,9 @@ unsafe fn has_compiled_code(name: &str) -> bool {
     }
 }
 
-/// The outcome of four calls of a closure with `body` under tier 0, and of four calls of a
-/// fresh closure with the same body under the forced JIT. Each closure is new, so the JIT's run
-/// starts from its own profile and compiles from the second call on.
+/// The outcome of four calls of a closure with `body` under tier 0, then of four calls of a
+/// fresh closure with the same body under the forced JIT and four under the baseline tier alone.
+/// Each closure is new, so each run starts from its own profile.
 unsafe fn outcomes(case: usize, body: &str, call: &str) -> (String, Vec<String>) {
     unsafe {
         let formals = "a = 1L, b = 2, v = c(1, 2), n = 5L, k = total * 2L, d = (s <- 100)";
@@ -1310,7 +1562,13 @@ unsafe fn outcomes(case: usize, body: &str, call: &str) -> (String, Vec<String>)
         jit::install_mode(Mode::Force);
         let compiled_name = format!("compiled_{case}");
         define(&compiled_name);
-        let compiled = calls(&compiled_name);
+        let mut compiled = calls(&compiled_name);
+        // The baseline tier compiles at the first entry and never tiers up in this mode, so
+        // every call after the first runs its machine code.
+        jit::install_mode(Mode::Baseline);
+        let baseline_name = format!("baseline_{case}");
+        define(&baseline_name);
+        compiled.extend(calls(&baseline_name));
         jit::install_mode(Mode::Off);
         for outcome in &reference[1..] {
             assert_eq!(
@@ -2525,6 +2783,26 @@ fn typed_core_keeps_tier_zero_semantics_at_scope_and_na_edges() {
         (
             "function(b: logical) -> integer | NULL if (b) 1L",
             &["{ x <- FALSE; FUNCTION(x) }"],
+        ),
+        // An `if` whose branches are such `if`s has a value nothing may read either, even
+        // when its own branches agree.
+        (
+            "function(x: character) (if (x == \"a\") (if (x == \"b\") 1 else 0L) else (if (x == \"b\") 1 else 0L))",
+            &[
+                "{ a <- \"a\"; FUNCTION(a) }",
+                "{ a <- \"c\"; FUNCTION(a) }",
+            ],
+        ),
+        (
+            "function(b: logical) if (b) (if (b) 1 else 0L)",
+            &["{ x <- TRUE; FUNCTION(x) }", "{ x <- FALSE; FUNCTION(x) }"],
+        ),
+        (
+            "function(b: logical, c: logical) if (b) (if (c) 1 else 0L) else return(2L)",
+            &[
+                "{ x <- TRUE; y <- FALSE; FUNCTION(x, y) }",
+                "{ x <- FALSE; y <- FALSE; FUNCTION(x, y) }",
+            ],
         ),
         // A local function sees the names where it is defined, and the latest value of each.
         (

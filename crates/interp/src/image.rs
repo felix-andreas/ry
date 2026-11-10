@@ -93,7 +93,7 @@ pub(crate) enum LoadError {
 /// the runtime wrote it, and the caller starts the slow way.
 pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadError> {
     let path = &path(home);
-    let bytes = match ImageFile::open(path) {
+    let bytes = match ImageFile::open(path, true) {
         Ok(bytes) => bytes,
         Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(failure) => {
@@ -478,7 +478,7 @@ unsafe fn restore_state(
 /// The image file's bytes. On Unix the file is mapped read-only (and populated in one call on
 /// Linux), which shares the page cache's pages instead of faulting in and filling a private copy
 /// of every page.
-enum ImageFile {
+pub(crate) enum ImageFile {
     #[cfg(unix)]
     Mapped {
         start: *mut libc::c_void,
@@ -488,7 +488,8 @@ enum ImageFile {
 }
 
 impl ImageFile {
-    fn open(path: &Path) -> std::io::Result<ImageFile> {
+    /// Opens `path`. `populate` faults every page in at once, which suits a file read whole.
+    pub(crate) fn open(path: &Path, populate: bool) -> std::io::Result<ImageFile> {
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
@@ -499,9 +500,16 @@ impl ImageFile {
                 return Ok(ImageFile::Read(Vec::new()));
             }
             #[cfg(any(target_os = "linux", target_os = "android"))]
-            let flags = libc::MAP_PRIVATE | libc::MAP_POPULATE;
+            let flags = if populate {
+                libc::MAP_PRIVATE | libc::MAP_POPULATE
+            } else {
+                libc::MAP_PRIVATE
+            };
             #[cfg(not(any(target_os = "linux", target_os = "android")))]
-            let flags = libc::MAP_PRIVATE;
+            let flags = {
+                let _ = populate;
+                libc::MAP_PRIVATE
+            };
             // SAFETY: a read-only private mapping of an open file. The base tree is build
             // output that nothing rewrites in place, so the bytes do not change under the map.
             let start = unsafe {
@@ -525,7 +533,7 @@ impl ImageFile {
         }
     }
 
-    fn bytes(&self) -> &[u8] {
+    pub(crate) fn bytes(&self) -> &[u8] {
         match self {
             // SAFETY: the mapping is `length` readable bytes and lives until `self` drops.
             #[cfg(unix)]
@@ -544,7 +552,7 @@ impl Drop for ImageFile {
             // SAFETY: the mapping was made by `open` and nothing borrows it past `self`.
             if unsafe { libc::munmap(start, length) } != 0 {
                 panic!(
-                    "cannot unmap the start-up image: {}",
+                    "cannot unmap an image file: {}",
                     std::io::Error::last_os_error()
                 );
             }

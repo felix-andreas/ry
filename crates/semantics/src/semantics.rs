@@ -8,6 +8,7 @@ pub mod lints;
 pub mod load_index;
 pub mod metadata;
 pub mod naming;
+pub mod session;
 pub mod sorted;
 pub mod stubs;
 pub mod testing;
@@ -143,6 +144,10 @@ pub struct SourceFile {
     #[returns(deref)]
     pub text: String,
     pub kind: DocumentKind,
+    /// The file's index in a console session, whose earlier commands it reads (see
+    /// [`session`]).
+    #[default]
+    pub command: Option<u32>,
 }
 
 pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
@@ -585,7 +590,8 @@ pub fn comment_annotation<'db>(
     annotations.get(index).map(|(_, annotation)| annotation)
 }
 
-fn is_ry_syntax(kind: SyntaxKind) -> bool {
+/// Whether a node of `kind` builds a ry value: a record, tuple, list, tag or `match`.
+pub fn is_ry_syntax(kind: SyntaxKind) -> bool {
     matches!(
         kind,
         SyntaxKind::RECORD_EXPR
@@ -1211,6 +1217,7 @@ pub fn file_holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
     sites.any(SiteRole::RySyntax)
         || sites.any(SiteRole::InlineSite)
         || sites.any(SiteRole::InlineAnnotation)
+        || session::holds_ry_values(db, file)
 }
 
 /// One rewrite the code ry's runtime runs needs, because R would read the text with a type other
@@ -1467,7 +1474,9 @@ pub enum TypingMode {
 
 #[salsa::tracked]
 pub fn file_typing_mode(db: &dyn Db, file: SourceFile) -> Option<TypingMode> {
-    file_typing_directives(db, file).0
+    file_typing_directives(db, file)
+        .0
+        .or_else(|| session::typing_mode(db, file))
 }
 
 /// The mode plus the `typing:` comments with an unrecognized value.
@@ -2819,6 +2828,7 @@ struct SalsaGlobals<'db, 'a> {
     // Read once: a body looks up hundreds of names, and each salsa read of an input field or a
     // memo records a dependency edge.
     kind: DocumentKind,
+    command: Option<u32>,
     sources_files: OnceCell<bool>,
     definitions: TypeDefinitions<'db>,
     library: Option<&'db stubs::StubLibrary<'db>>,
@@ -2841,6 +2851,7 @@ struct SalsaGlobals<'db, 'a> {
 #[derive(Clone, Copy)]
 pub struct TypeDefinitions<'db> {
     file: SourceFile,
+    command: Option<u32>,
     package_file: bool,
     files: Option<ProjectFiles>,
     library: Option<&'db stubs::StubLibrary<'db>>,
@@ -2861,6 +2872,7 @@ impl<'db> TypeDefinitions<'db> {
     pub fn of(db: &'db dyn Db, file: SourceFile) -> Self {
         Self {
             file,
+            command: *file.command(db),
             package_file: *file.kind(db) == DocumentKind::Package,
             files: ProjectFiles::try_get(db),
             library: stubs::stubs(db),
@@ -2882,6 +2894,11 @@ impl<'db> TypeDefinitions<'db> {
                 .iter()
                 .rev()
                 .find(|definition| definition.name == name)
+        {
+            return Some(definition);
+        }
+        if let Some(command) = self.command
+            && let Some(definition) = session::type_definition(db, command, name)
         {
             return Some(definition);
         }
@@ -3085,6 +3102,7 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
             files: ProjectFiles::try_get(db),
             file: *item.file(db),
             kind: *item.file(db).kind(db),
+            command: *item.file(db).command(db),
             sources_files: OnceCell::new(),
             definitions: TypeDefinitions::of(db, *item.file(db)),
             library: stubs::stubs(db),
@@ -3162,6 +3180,14 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
     }
 
     fn frame_definition(&self, name: types::Name<'db>, deferred: bool) -> Option<Item<'db>> {
+        let own = self.own_frame_definition(name, deferred);
+        match self.command {
+            Some(command) => session::binder(self.db, command, name.symbol(), deferred, own),
+            None => own,
+        }
+    }
+
+    fn own_frame_definition(&self, name: types::Name<'db>, deferred: bool) -> Option<Item<'db>> {
         if deferred && self.kind == DocumentKind::Package {
             return None;
         }

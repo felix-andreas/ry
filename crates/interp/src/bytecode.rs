@@ -1,6 +1,7 @@
 //! The tier-0 bytecode interpreter.
 //!
-//! A closure body compiles to bytecode on its second call. The code replaces the body as a
+//! A closure body compiles to bytecode on its second call, or takes its code from its package's
+//! code image then. The code replaces the body as a
 //! `BCODESXP`, as GNU R stores compiled closures, so it lives and dies with the closure and
 //! everything that reads a body as source (`body()`, `deparse`, `identical`, serialization)
 //! goes through [`closure_body`], which returns the expression.
@@ -22,8 +23,9 @@
 //!   number of registers the code uses, the sixth the profile counters (an integer vector, see
 //!   [`profile`]) the seventh the optimizing tier's compiled code, `NULL` until it exists, the eighth the
 //!   slot hints (an integer vector, one per lookup site), the ninth the stored half of the
-//!   effect-free fact (see [`crate::effects`]), and the tenth the last argument-match plan of a
-//!   closure body (see `eval::match_args_cached`).
+//!   effect-free fact (see [`crate::effects`]), the tenth the last argument-match plan of a
+//!   closure body (see `eval::match_args_cached`), and the eleventh the baseline tier's machine
+//!   code (an external pointer whose address is a [`BaselineCode`]), `NULL` until it exists.
 //! - `tag`: the inline caches, a list with two slots per cache: the enclosure the lookup started
 //!   from and the binding cell it found. The list holds them weakly, because closures that share
 //!   a body share its code, and a strong cache would keep the last caller's environment alive.
@@ -126,6 +128,10 @@ impl State {
 /// out of C stack or `expressions` long before it runs out of registers.
 const REGISTER_FILE_CAPACITY: usize = 1 << 21;
 
+/// A threshold no counter is compared against. Counters saturate at `i32::MAX`, so a
+/// threshold of that value would otherwise fire once a counter saturates.
+pub const NEVER: i32 = i32::MAX;
+
 /// The optimizing tier's entry points.
 #[derive(Clone, Copy)]
 pub struct Tier {
@@ -136,10 +142,19 @@ pub struct Tier {
     pub enter: unsafe fn(&mut Machine<'_>) -> Option<TierExit>,
     /// Entries after which a body without optimized code asks [`Tier::enter`] to compile it.
     pub entry_threshold: i32,
+    /// Called when a body without optimized code reaches the entry that starts its recording
+    /// window. Returns `false` to skip recording because the body will never compile, in which
+    /// case it also marks the body refused.
+    pub worth_recording: unsafe fn(&Machine<'_>) -> bool,
     /// Called on a backward jump to `target` once the code's back-edge counter crosses
     /// [`Tier::back_edge_threshold`]. Returns `None` to keep interpreting at `target`.
     pub back_edge: unsafe fn(&mut Machine<'_>, target: usize) -> Option<TierExit>,
     pub back_edge_threshold: i32,
+    /// Called once a body without baseline code reaches [`Tier::baseline_threshold`] entries or
+    /// backward jumps. It stores the body's [`BaselineCode`] in its `BASELINE` constant, or
+    /// leaves the constant `NULL` when the body does not compile.
+    pub baseline: unsafe fn(&Machine<'_>),
+    pub baseline_threshold: i32,
     /// Called before a typed closure gets a frame, with its arguments matched by position or by
     /// exact name. Returns `None` to let the call proceed as usual, or the value a native
     /// function computed without a frame, promises or annotation checks.
@@ -176,8 +191,8 @@ pub fn set_tier(tier: Option<Tier>) {
     interp().bytecode.tier = tier;
 }
 
-pub fn tier() -> Option<Tier> {
-    interp().bytecode.tier
+pub fn tier() -> Option<&'static Tier> {
+    interp().bytecode.tier.as_ref()
 }
 
 /// The address of register `index` of the file. Valid while the window that holds it exists.
@@ -187,7 +202,16 @@ pub fn register_address(index: usize) -> *mut Sexp {
 }
 
 /// Grows the register file to `length` registers, filling new ones with `NULL`.
+#[inline]
 pub fn reserve_registers(length: usize) -> R<()> {
+    if length <= interp().bytecode.registers.len() {
+        return Ok(());
+    }
+    grow_registers(length)
+}
+
+#[cold]
+fn grow_registers(length: usize) -> R<()> {
     let registers = &mut interp().bytecode.registers;
     if length > registers.capacity() {
         return Err(error(
@@ -229,6 +253,11 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
         return eval::eval(body, env);
     }
     state.calls.remove(&body);
+    // A package's code image replaces compiling, at the same call, rather than running code from
+    // the first call: decoding costs about as much as compiling, and many closures run only once.
+    if let Some(code) = crate::code_image::take_pending(function, body)? {
+        return run(function, code, env);
+    }
     // A body the compiler rejects (an error is its way of saying so, such as for a `break`
     // outside a loop) still runs correctly on the AST evaluator.
     match compile(body, function) {
@@ -256,6 +285,9 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Sexp> {
     if body.kind() == SexpType::Bytecode {
         return Ok(body);
     }
+    if let Some(code) = crate::code_image::take_pending(function, body)? {
+        return Ok(code);
+    }
     match compile(body, function)? {
         Some(code) => {
             crate::heap().set_cdr(function, code);
@@ -263,6 +295,57 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Sexp> {
         }
         None => Ok(body),
     }
+}
+
+/// Compiles, ahead of their first call, the functions `code` defines with `function(...)`
+/// expressions, as [`Op::Closure`] would at the first run of each, and the functions those
+/// define in turn. `env` stands in for the frame such a function closes over, which compiling
+/// reads only to resolve names it then guards at run time, so any frame below the enclosure gives
+/// correct code. Installing a package calls this, so that a package's nested functions (R6
+/// methods, callbacks) are written with its top-level ones.
+///
+/// # Safety
+/// `code` is a live code object made by this module.
+pub unsafe fn compile_nested_functions(code: Sexp, env: Sexp) -> R<()> {
+    let words = values::ints(code.car()).to_vec();
+    let constants = code.cdr();
+    let mut pc = 0;
+    while pc < words.len() {
+        let word = words[pc] as u32;
+        let Some(op) = op_of(word) else {
+            return Err(error("compiled code holds an invalid instruction"));
+        };
+        let operand = |index: usize| words.get(pc + 1 + index).map(|&word| word as usize);
+        if op == Op::Closure
+            && let (Some(formals), Some(body), Some(srcref)) = (operand(1), operand(2), operand(3))
+            && body < length(constants)
+        {
+            let source = constants.element(body);
+            let nested = if source.kind() == SexpType::Bytecode {
+                Some(source)
+            } else if worth_compiling(source) {
+                let closure = eval::make_closure(
+                    constants.element(formals),
+                    source,
+                    constants.element(srcref),
+                    env,
+                )?;
+                crate::heap().root(closure);
+                let compiled = compile(source, closure).ok().flatten();
+                if let Some(compiled) = compiled {
+                    crate::heap().set_element(constants, body, compiled);
+                }
+                compiled
+            } else {
+                None
+            };
+            if let Some(nested) = nested {
+                compile_nested_functions(nested, env)?;
+            }
+        }
+        pc += 1 + operand_count(op);
+    }
+    Ok(())
 }
 
 pub unsafe fn is_compiled(function: Sexp) -> bool {
@@ -288,7 +371,8 @@ pub const TIER1: usize = 6;
 pub const HINTS: usize = 7;
 pub const SUMMARY: usize = 8;
 pub const MATCHES: usize = 9;
-pub const FIRST_CONSTANT: usize = 10;
+pub const BASELINE: usize = 10;
+pub const FIRST_CONSTANT: usize = 11;
 
 /// The profile counters, positions in the `PROFILE` integer vector.
 pub mod profile {
@@ -298,7 +382,35 @@ pub mod profile {
     pub const BACK_EDGES: usize = 1;
     /// The optimizing tier's state for this code, which only that tier interprets.
     pub const TIER_STATE: usize = 2;
-    pub const LENGTH: usize = 3;
+    /// Nonzero while tier 0 records type feedback for this code, which only happens with the
+    /// optimizing tier installed and while the code has no optimized code: during the first
+    /// activation of a body with a loop, over the last eighth of the entry threshold
+    /// ([`super::recording_start`]), from half the back-edge threshold, and after its optimized
+    /// code was discarded until it compiles again. Recording costs a type test and a store per
+    /// value, and most bodies never get near a threshold, so recording from the first entry
+    /// made every call of cold package code slower with the optimizing tier installed than
+    /// without it. Recording from half the entry threshold still cost a test suite 10M
+    /// instructions, in warm bodies that never reach it; a type the window misses costs one
+    /// deoptimization and a recompile. A loop can turn hot inside a body's only activation,
+    /// so a loop that reaches half its threshold starts recording in the running activation, and
+    /// the first activation records the instructions before the loop, which that would miss.
+    /// Optimized code records nothing, and what tier 0 would record beside it is read only by a
+    /// recompile, which follows a discard that turns recording back on.
+    pub const RECORDING: usize = 3;
+    /// The entry count at which the next entry of this code asks [`super::entry_event`] what to
+    /// do, or `i32::MIN` to ask at the very next entry. Every tier decision at entry (recording,
+    /// the first-call compile, the entry-threshold compile, baseline code, running optimized
+    /// code) happens at a known count, so one comparison per call stands in for testing each
+    /// of them, which cost about 30 instructions per call of every body. Whatever changes a
+    /// count or a state those decisions read outside an entry sets this to `i32::MIN`.
+    pub const NEXT: usize = 4;
+    /// The session's allocation clock ([`heap::Heap::allocated_ever`], in KiB, wrapping) when the
+    /// recording window opened, which the optimizing tier reads to estimate how often the body
+    /// runs.
+    pub const WINDOW: usize = 5;
+    pub const LENGTH: usize = 6;
+    /// The counters a code image keeps. The next event is derived from them when it is read.
+    pub const SERIALIZED: usize = 4;
 }
 
 /// The body `function` was defined with, which a compiled closure keeps beside its code.
@@ -584,6 +696,9 @@ pub enum Op {
     /// `target`: a guard fallback laid out after the body returning to it. Unlike a backward
     /// `Jump`, it is never a loop's back edge.
     Resume,
+    /// `dst symbol`: `missing(symbol)` for a plain symbol, read from the frame without building
+    /// the special's call.
+    Missing,
     /// `dst program target`: an element-wise expression such as `exp(a * b + c)` or
     /// `sum(x > 0)` computed in one pass by `kernels::fused`, without intermediate vectors,
     /// after which execution goes on at `target`. The expression's ordinary code follows, and
@@ -604,7 +719,7 @@ enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 45] = [
+pub const OPS: [Op; 46] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -649,6 +764,7 @@ pub const OPS: [Op; 45] = [
     Op::SubAssignMatrix,
     Op::Replace,
     Op::Resume,
+    Op::Missing,
     Op::Fused,
 ];
 
@@ -666,9 +782,11 @@ pub enum Arith {
     Greater,
     LessEqual,
     GreaterEqual,
+    Modulo,
+    IntegerDivide,
 }
 
-pub const ARITHS: [(Arith, &str); 11] = [
+pub const ARITHS: [(Arith, &str); 13] = [
     (Arith::Add, "+"),
     (Arith::Subtract, "-"),
     (Arith::Multiply, "*"),
@@ -680,6 +798,8 @@ pub const ARITHS: [(Arith, &str); 11] = [
     (Arith::Greater, ">"),
     (Arith::LessEqual, "<="),
     (Arith::GreaterEqual, ">="),
+    (Arith::Modulo, "%%"),
+    (Arith::IntegerDivide, "%/%"),
 ];
 
 /// Type feedback: the kinds of value an instruction produced, one bit per kind. A scalar is a
@@ -1564,8 +1684,12 @@ impl Compiler {
         heap.set_element(constants, FEEDBACK, feedback);
         let profile = values::alloc(SexpType::Integer, profile::LENGTH)?;
         values::ints_mut(profile).fill(0);
+        values::ints_mut(profile)[profile::RECORDING] =
+            i32::from(!compiler.loops.is_empty() && interp().bytecode.tier.is_some());
+        values::ints_mut(profile)[profile::NEXT] = i32::MIN;
         heap.set_element(constants, PROFILE, profile);
         heap.set_element(constants, TIER1, nil());
+        heap.set_element(constants, BASELINE, nil());
         heap.set_element(constants, SUMMARY, compiler.summary);
         let loops = values::alloc(SexpType::Integer, compiler.loops.len() * 4)?;
         for (index, entry) in compiler.loops.iter().enumerate() {
@@ -2081,6 +2205,21 @@ impl Compiler {
                 ".ry_match" if supported_match(&args)? => {
                     return self.compiled_match(call, head, primitive, dst, &args);
                 }
+                "missing" => {
+                    return match args.as_slice() {
+                        [(tag, symbol)]
+                            if *tag == nil()
+                                && symbol.kind() == SexpType::Symbol
+                                && *symbol != symbols().dots
+                                && *symbol != missing_arg()
+                                && eval::dot_dot_index(*symbol).is_none()
+                                && self.bound.is_none() =>
+                        {
+                            self.missing(call, head, primitive, dst, *symbol)
+                        }
+                        _ => self.general_call(call, head, dst),
+                    };
+                }
                 _ => {}
             }
             // Dispatch on an evaluated subject evaluates the other arguments in the frame.
@@ -2322,8 +2461,8 @@ impl Compiler {
 
     /// Whether evaluating the subscript `index` cannot change a variable of the frame, so the
     /// compiled assignment may evaluate it before reading the target: a variable of the frame (a
-    /// formal's promise runs in the caller's frame), a numeric constant, a name, or base
-    /// arithmetic on variables and numbers.
+    /// formal's promise runs in the caller's frame), a numeric constant, a name, base arithmetic
+    /// on variables and numbers, or base `$` and `[[` reading one of those.
     unsafe fn side_effect_free_index(&self, index: Sexp, depth: u32) -> bool {
         match index.kind() {
             SexpType::Symbol => {
@@ -2344,6 +2483,24 @@ impl Compiler {
             SexpType::Language if depth < 8 && index.car().kind() == SexpType::Symbol => {
                 let operator = symbol_name(index.car());
                 let arguments = values::pairlist_items(index.cdr());
+                let name = |value: Sexp| {
+                    value.kind() == SexpType::String
+                        && length(value) == 1
+                        && !values::has_attributes(value)
+                };
+                if let ("$" | "[[", [(nil_tag, object), (key_tag, key)]) =
+                    (&*operator, arguments.as_slice())
+                {
+                    let key_free = match &*operator {
+                        "$" => key.kind() == SexpType::Symbol && *key != symbols().dots,
+                        _ => name(*key) || self.side_effect_free_index(*key, depth + 1),
+                    };
+                    return *nil_tag == nil()
+                        && *key_tag == nil()
+                        && key_free
+                        && !self.frame_may_bind(index.car())
+                        && self.side_effect_free_index(*object, depth + 1);
+                }
                 ARITHS[..5].iter().any(|(_, name)| *name == &*operator)
                     && (1..=2).contains(&arguments.len())
                     && !self.frame_may_bind(index.car())
@@ -2447,6 +2604,7 @@ impl Compiler {
                 | ".ry_tag"
                 | ".ry_match"
                 | "switch"
+                | "missing"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -2579,6 +2737,26 @@ impl Compiler {
             self.temporary = Some((dst, self.here()));
         }
         Ok(())
+    }
+
+    /// `missing(symbol)`, guarded by `missing`: [`Op::Missing`] reads the frame's binding of
+    /// `symbol`, which is what the special does once it has matched its one argument.
+    unsafe fn missing(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        dst: u32,
+        symbol: Sexp,
+    ) -> R<()> {
+        let name = self.constant(head);
+        let expected = self.constant(primitive);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
+        let symbol = self.constant(symbol);
+        self.emit(Op::Missing, &[dst, symbol]);
+        self.cold_fallback(&[guard], call, dst)
     }
 
     unsafe fn inline(
@@ -3303,6 +3481,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::Ast => 2,
         Op::Guard => 5,
         Op::Jump | Op::Resume => 1,
+        Op::Missing => 2,
         Op::JumpUnless => 3,
         Op::Arithmetic => 7,
         Op::Return => 1,
@@ -3352,6 +3531,362 @@ const _: () = {
     }
     assert!(OPS.len() <= OP_MASK as usize);
 };
+
+/// What an operand of an instruction is, as far as [`verify`] checks it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Operand {
+    Register,
+    /// The first of a run of registers, whose length the next operand gives.
+    Base,
+    /// The length of the run of registers the previous operand starts.
+    Count,
+    /// [`Operand::Count`] for a run that holds at least one register.
+    CountAtLeastOne,
+    /// Any constant.
+    Constant,
+    Symbol,
+    /// A call, which the handler takes apart.
+    Call,
+    /// A call followed by the constants [`Compiler::call_site`] puts after it.
+    CallSite,
+    /// A pairlist of formals, or `NULL`.
+    Formals,
+    /// A [`Op::Field`] or [`Op::Item`] site's shape cache, still empty.
+    Shape,
+    /// The constant index of an [`Op::Item`]: one string or number.
+    Index,
+    /// A list of symbols, at least as long as the run of registers after it.
+    Names,
+    /// A [`switch_table`].
+    Switch,
+    Cache,
+    Target,
+    Loop,
+    /// An operator of [`ARITHS`].
+    Operator,
+    /// A number the handler reads without indexing anything with it.
+    Immediate,
+    /// A fused program ([`fusion`]), checked by [`valid_fusion_program`].
+    Fusion,
+}
+
+/// The operands of `op`, or `None` for an instruction a code image never holds: a record
+/// instruction names a record layout by the number this process interned it under, which
+/// means nothing in another process.
+fn operands(op: Op) -> Option<&'static [Operand]> {
+    use Operand::*;
+    Some(match op {
+        Op::Constant | Op::Ast => &[Register, Constant],
+        Op::GetVar => &[Register, Symbol, Cache],
+        Op::SetVar => &[Symbol, Register, Cache],
+        Op::GetFun => &[Register, Symbol, Cache, Call],
+        Op::BranchUnlessBuiltin | Op::BranchIfObject => &[Register, Target],
+        Op::CallBuiltin => &[Register, Register, Call, Base, Count],
+        Op::CallGeneric => &[Register, Register, CallSite],
+        Op::CallRebinding | Op::CallTailUpdate => &[Register, Register, Call, Symbol],
+        Op::Field => &[Register, Register, Symbol, Call, Shape],
+        Op::Item => &[Register, Register, Index, Shape, Target],
+        Op::MatchLiteral => &[Register, Constant, Target],
+        Op::MatchFail => &[Register, Constant],
+        Op::Move => &[Register, Register],
+        Op::BoundEval => &[Register, Constant, Names, Base, Count],
+        Op::MatchCondition => &[Register, Register, Constant, Constant],
+        Op::SwitchArm => &[Register, Register, Switch],
+        Op::Guard => &[Symbol, Constant, Cache, Immediate, Target],
+        Op::Jump | Op::Resume => &[Target],
+        Op::JumpUnless => &[Register, Constant, Target],
+        Op::Arithmetic => &[Operator, Register, Register, Register, Call, Constant],
+        Op::Return | Op::ForEnd => &[Register],
+        Op::Missing => &[Register, Symbol],
+        Op::ForInit => &[Loop, Register, Constant],
+        Op::ForStep => &[Loop, Register, Symbol, Target],
+        Op::Invisible | Op::Visible => &[],
+        Op::LogicLeft => &[Register, Register, Constant, Immediate, Target],
+        Op::LogicRight => &[Register, Register, Register, Constant, Immediate],
+        Op::Closure => &[Register, Formals, Constant, Constant],
+        Op::SubAssign => &[Register, Symbol, Register, Register, Call, Immediate],
+        Op::SubAssignMatrix => &[Register, Symbol, Register, Register, Register, Call],
+        Op::Replace => &[
+            Register,
+            Symbol,
+            Symbol,
+            Cache,
+            Call,
+            Base,
+            CountAtLeastOne,
+            Call,
+        ],
+        Op::SetSrcref => &[Constant, Immediate],
+        Op::EndStatement => &[Register, Base, Base],
+        Op::BranchUnlessPrimitive => &[Register, Constant, Target],
+        Op::DispatchSubject => &[Register, Register, Call, Register],
+        Op::Fused => &[Register, Fusion, Target],
+        Op::MatchShape | Op::MatchTag | Op::Slot | Op::Construct => return None,
+    })
+}
+
+/// Checks that `code`, a code object read from a file rather than made by the compiler, is one
+/// the interpreter can run without reading or writing outside its tables. The interpreter reads
+/// operands unchecked, so a code image's code must pass this before it runs: every word is a
+/// valid instruction or one of its operands, execution cannot run off the end, every register,
+/// constant, cache slot, loop and jump target an operand names exists, and every constant a
+/// handler takes apart has the type it expects. Code objects among the constants are checked
+/// where they are decoded.
+///
+/// # Safety
+/// `code` is a live object.
+pub unsafe fn verify(code: Sexp) -> Result<(), String> {
+    use Operand::*;
+    if code.kind() != SexpType::Bytecode
+        || code.car().kind() != SexpType::Integer
+        || code.cdr().kind() != SexpType::List
+        || code.tag().kind() != SexpType::List
+    {
+        return Err("not a code object".to_owned());
+    }
+    let words = values::ints(code.car());
+    let constants = code.cdr();
+    let constant_count = length(constants);
+    if constant_count < FIRST_CONSTANT {
+        return Err("a code object without its fixed constants".to_owned());
+    }
+    let table = |slot: usize, kind: SexpType, length_is: Option<usize>| {
+        let value = constants.element(slot);
+        value.kind() == kind && length_is.is_none_or(|expected| length(value) == expected)
+    };
+    let epochs = constants.element(EPOCHS);
+    if epochs.kind() != SexpType::Real {
+        return Err("a malformed inline cache table".to_owned());
+    }
+    let caches = length(epochs);
+    let registers = constants.element(REGISTERS);
+    if !table(HINTS, SexpType::Integer, Some(caches))
+        || length(code.tag()) != caches * 2
+        || !table(FEEDBACK, SexpType::Integer, Some(words.len()))
+        || !table(PROFILE, SexpType::Integer, Some(profile::LENGTH))
+        || !table(LOOPS, SexpType::Integer, None)
+        || length(constants.element(LOOPS)) % 4 != 0
+        || !table(REGISTERS, SexpType::Integer, Some(1))
+        || values::ints(registers)[0] < 0
+        || constants.element(TIER1) != nil()
+        || constants.element(MATCHES) != nil()
+    {
+        return Err("a code object whose tables disagree".to_owned());
+    }
+    let registers = values::ints(registers)[0] as usize;
+    let summary = constants.element(SUMMARY);
+    if summary != nil()
+        && (summary.kind() != SexpType::List
+            || length(summary) == 0
+            || summary.element(0).kind() != SexpType::Integer
+            || length(summary.element(0)) != 1
+            || !(0..caches as i64).contains(&i64::from(values::ints(summary.element(0))[0]))
+            || (1..length(summary)).any(|index| summary.element(index).kind() != SexpType::Symbol))
+    {
+        return Err("a malformed effect summary".to_owned());
+    }
+    let mut starts = vec![0u64; words.len().div_ceil(64)];
+    let mut pc = 0;
+    while pc < words.len() {
+        let op = op_of(words[pc] as u32).ok_or("an invalid instruction")?;
+        operands(op).ok_or("a record instruction")?;
+        starts[pc / 64] |= 1 << (pc % 64);
+        let next = pc + 1 + operand_count(op);
+        if next > words.len() {
+            return Err("an instruction runs past the end of the code".to_owned());
+        }
+        if next == words.len() && !matches!(op, Op::Return | Op::Jump | Op::Resume) {
+            return Err("execution runs past the end of the code".to_owned());
+        }
+        pc = next;
+    }
+    if words.is_empty() {
+        return Err("empty code".to_owned());
+    }
+    let is_start =
+        |target: usize| target < words.len() && starts[target / 64] & (1 << (target % 64)) != 0;
+    let loop_table = values::ints(constants.element(LOOPS));
+    for entry in loop_table.as_chunks::<4>().0 {
+        let [start, end, exit, step] = entry.map(|word| word as usize);
+        if start > end || end > words.len() || !is_start(exit) || !is_start(step) {
+            return Err("a malformed loop table".to_owned());
+        }
+    }
+    let loops = loop_table.len() / 4;
+    let constant = |index: usize| {
+        (FIRST_CONSTANT..constant_count)
+            .contains(&index)
+            .then(|| constants.element(index))
+            .ok_or("a constant index out of range")
+    };
+    let mut pc = 0;
+    while pc < words.len() {
+        let op = op_of(words[pc] as u32).ok_or("an invalid instruction")?;
+        let roles = operands(op).ok_or("a record instruction")?;
+        let operand = |index: usize| words[pc + 1 + index] as u32 as usize;
+        for (index, &role) in roles.iter().enumerate() {
+            let value = operand(index);
+            let valid = match role {
+                Register => value < registers,
+                Base => value <= registers,
+                Count | CountAtLeastOne => {
+                    value <= registers - operand(index - 1) && (role == Count || value >= 1)
+                }
+                Constant => constant(value).is_ok(),
+                Symbol => constant(value)?.kind() == SexpType::Symbol,
+                Call => constant(value)?.kind() == SexpType::Language,
+                CallSite => {
+                    let arguments = constant(value + 1)?;
+                    constant(value)?.kind() == SexpType::Language
+                        && (arguments == unbound()
+                            || matches!(arguments.kind(), SexpType::Nil | SexpType::Pairlist))
+                        && constant(value + 2).is_ok()
+                }
+                Formals => matches!(constant(value)?.kind(), SexpType::Nil | SexpType::Pairlist),
+                Shape => {
+                    let shape = constant(value)?;
+                    shape.kind() == SexpType::Integer
+                        && values::ints(shape) == [crate::records::NO_LAYOUT, 0]
+                }
+                Index => {
+                    let index = constant(value)?;
+                    matches!(
+                        index.kind(),
+                        SexpType::String | SexpType::Integer | SexpType::Real
+                    ) && length(index) == 1
+                }
+                Names => {
+                    let names = constant(value)?;
+                    names.kind() == SexpType::List
+                        && length(names) >= operand(index + 2)
+                        && (0..length(names))
+                            .all(|name| names.element(name).kind() == SexpType::Symbol)
+                }
+                Switch => valid_switch_table(constant(value)?),
+                Cache => value < caches,
+                Target => is_start(value),
+                Loop => value < loops,
+                Operator => value < ARITHS.len(),
+                Immediate => true,
+                Fusion => valid_fusion_program(constant(value)?, &constant, caches, words.len()),
+            };
+            if !valid {
+                return Err(format!("an invalid operand {index} of {op:?} at {pc}"));
+            }
+        }
+        if op == Op::EndStatement && operand(1) > operand(2) {
+            return Err(format!("an invalid register range at {pc}"));
+        }
+        pc += 1 + operand_count(op);
+    }
+    Ok(())
+}
+
+/// Whether `program` is `NULL` or has the layout [`fusion`] describes, with every constant,
+/// cache slot, feedback site and node input in range, which [`fused_pass`] reads unchecked.
+/// Nodes are in evaluation order, so a node's inputs come before it and the root is last.
+unsafe fn valid_fusion_program(
+    program: Sexp,
+    constant: &impl Fn(usize) -> Result<Sexp, &'static str>,
+    caches: usize,
+    sites: usize,
+) -> bool {
+    if program == nil() {
+        return true;
+    }
+    if program.kind() != SexpType::Integer || length(program) < fusion::HEADER {
+        return false;
+    }
+    let words = values::ints(program);
+    let count = |index: usize| usize::try_from(words[index]).ok();
+    let (Some(nodes), Some(leaves), Some(guards)) = (
+        count(fusion::NODES),
+        count(fusion::LEAVES),
+        count(fusion::GUARDS),
+    ) else {
+        return false;
+    };
+    let guards_end = fusion::HEADER + guards * fusion::GUARD;
+    let leaves_end = guards_end + leaves * fusion::LEAF;
+    if nodes == 0
+        || nodes > MAX_NODES
+        || leaves > MAX_NODES
+        || guards > MAX_NODES
+        || words.len() != leaves_end + nodes * fusion::NODE
+        || !(-1..=2).contains(&words[fusion::REDUCTION])
+        || count(fusion::REDUCTION_SITE).is_none_or(|site| site >= sites)
+    {
+        return false;
+    }
+    let below = |word: i32, limit: usize| usize::try_from(word).is_ok_and(|value| value < limit);
+    let symbol = |word: i32| {
+        usize::try_from(word)
+            .ok()
+            .and_then(|index| constant(index).ok())
+            .is_some_and(|value| value.kind() == SexpType::Symbol)
+    };
+    let any_constant = |word: i32| {
+        usize::try_from(word)
+            .ok()
+            .is_some_and(|index| constant(index).is_ok())
+    };
+    let guards_valid = words[fusion::HEADER..guards_end]
+        .chunks_exact(fusion::GUARD)
+        .all(|guard| symbol(guard[0]) && any_constant(guard[1]) && below(guard[2], caches));
+    let leaves_valid = words[guards_end..leaves_end]
+        .chunks_exact(fusion::LEAF)
+        .all(|leaf| match leaf[0] {
+            0 => any_constant(leaf[1]),
+            1 => symbol(leaf[1]) && below(leaf[2], caches) && below(leaf[3], sites),
+            _ => false,
+        });
+    let nodes_valid = words[leaves_end..]
+        .chunks_exact(fusion::NODE)
+        .enumerate()
+        .all(|(index, node)| {
+            let input = |word: i32| below(word, index);
+            let site = below(node[4], sites);
+            match node[0] {
+                0 => below(node[1], leaves),
+                1 => site && below(node[1], ARITHS.len()) && input(node[2]) && input(node[3]),
+                2 => site && input(node[2]) && input(node[3]),
+                3 | 4 => site && input(node[1]),
+                5 => site && below(node[1], MATHS.len()) && input(node[2]),
+                _ => false,
+            }
+        });
+    guards_valid && leaves_valid && nodes_valid
+}
+
+/// Whether `table` has the shape [`switch_table`] gives it, which [`switch_arm`] reads unchecked.
+unsafe fn valid_switch_table(table: Sexp) -> bool {
+    if table.kind() != SexpType::List || length(table) != SWITCH_CALL + 1 {
+        return false;
+    }
+    let names = table.element(SWITCH_NAMES);
+    let name_arms = table.element(SWITCH_NAME_ARMS);
+    let position_arms = table.element(SWITCH_POSITION_ARMS);
+    let numbers = table.element(SWITCH_NUMBERS);
+    if names.kind() != SexpType::String
+        || name_arms.kind() != SexpType::Integer
+        || length(name_arms) != length(names)
+        || position_arms.kind() != SexpType::Integer
+        || length(position_arms) == 0
+        || numbers.kind() != SexpType::List
+        || table.element(SWITCH_CALL).kind() != SexpType::Language
+    {
+        return false;
+    }
+    let arms = length(numbers) as i64;
+    // A name's arm indexes the numbers directly, while a negative position arm is an error
+    // `switch_arm` raises before indexing.
+    values::ints(name_arms)
+        .iter()
+        .all(|&arm| (0..arms).contains(&i64::from(arm)))
+        && values::ints(position_arms)
+            .iter()
+            .all(|&arm| (-1..arms).contains(&i64::from(arm)))
+}
 
 // The interpreter.
 
@@ -3466,17 +4001,10 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
         mark,
         loops: &mut loops,
     };
-    // Most bodies never compile, and asking the tier about every call of every body cost more
-    // than the compiled code saved on a test suite.
-    let entered = match interp().bytecode.tier {
-        Some(tier)
-            if constants.element(TIER1) != nil()
-                || ((entries == 1 || entries >= tier.entry_threshold)
-                    && profile[profile::TIER_STATE] >= 0) =>
-        {
-            (tier.enter)(&mut machine)
-        }
-        _ => None,
+    let entered = if entries >= profile[profile::NEXT] {
+        entry_event(&mut machine, entries)
+    } else {
+        None
     };
     let result = match entered {
         Some(TierExit::Finished(result)) => result,
@@ -3493,6 +4021,81 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
         Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
         other => other,
     }
+}
+
+/// The entry count at which a body without optimized code starts recording type feedback
+/// for a compile at `threshold` entries: the last eighth of the way, and at least the entry
+/// before a compile at the second entry.
+pub fn recording_start(threshold: i32) -> i32 {
+    threshold - (threshold / 8).max(threshold.min(1))
+}
+
+/// What the tiers do at an entry of `machine`'s code numbered `entries`, the decisions
+/// [`profile::NEXT`] schedules. Returns the optimizing tier's exit when it ran the activation.
+#[inline(never)]
+unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExit> {
+    let constants = machine.code.cdr();
+    let Some(tier) = tier() else {
+        let profile = values::ints_mut(constants.element(PROFILE));
+        profile[profile::RECORDING] = 0;
+        // Code that ran without a tier asks again now and then, so a tier installed later still
+        // reaches it, at one call in this many.
+        profile[profile::NEXT] = entries.saturating_add(1 << 12);
+        return None;
+    };
+    let profile = values::ints_mut(constants.element(PROFILE));
+    let optimized = constants.element(TIER1) != nil();
+    if !optimized {
+        if entries == recording_start(tier.entry_threshold) && profile[profile::TIER_STATE] >= 0 {
+            let worth = (tier.worth_recording)(machine);
+            values::ints_mut(constants.element(PROFILE))[profile::RECORDING] = i32::from(worth);
+        } else if entries == 2 && entries < recording_start(tier.entry_threshold) {
+            profile[profile::RECORDING] = 0;
+        }
+    }
+    // Most bodies never compile, and asking the tier about every call of every body cost more
+    // than the compiled code saved on a test suite.
+    let entered = if optimized
+        || ((entries == 1 || entries >= tier.entry_threshold) && profile[profile::TIER_STATE] >= 0)
+    {
+        (tier.enter)(machine)
+    } else {
+        None
+    };
+    if entered.is_none()
+        && entries == tier.baseline_threshold
+        && tier.baseline_threshold != NEVER
+        && constants.element(BASELINE) == nil()
+    {
+        (tier.baseline)(machine);
+    }
+    // The tier may have compiled, refused, or moved the counters, so the schedule is derived
+    // from what they hold now.
+    let profile = values::ints_mut(constants.element(PROFILE));
+    let entries = profile[profile::ENTRIES];
+    let state = profile[profile::TIER_STATE];
+    profile[profile::NEXT] = if constants.element(TIER1) != nil()
+        || (state >= 0 && entries >= tier.entry_threshold)
+    {
+        i32::MIN
+    } else {
+        let start = recording_start(tier.entry_threshold);
+        let baseline = (tier.baseline_threshold != NEVER && constants.element(BASELINE) == nil())
+            .then_some(tier.baseline_threshold);
+        [
+            (state >= 0).then_some(1),
+            (2 < start).then_some(2),
+            (state >= 0).then_some(start),
+            (state >= 0).then_some(tier.entry_threshold),
+            baseline,
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|&count| count > entries)
+        .min()
+        .unwrap_or(NEVER)
+    };
+    entered
 }
 
 unsafe fn execute_code(machine: &mut Machine<'_>, pc: usize) -> R<Sexp> {
@@ -3539,6 +4142,17 @@ unsafe fn loop_target(loops: Sexp, pc: usize, is_break: bool) -> Option<usize> {
 /// does not specialize. It must not be a jump, a branch, `Return` or a loop instruction.
 pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<()> {
     interpret::<true>(machine, pc).map(|_| ())
+}
+
+/// The frame-position hints of `code`'s lookup slots, one `u32` per slot, which compiled code
+/// reads to probe a frame without a search. The vector is never resized.
+pub unsafe fn lookup_hints(code: Sexp) -> *mut u32 {
+    LookupCache::of(code).hints
+}
+
+/// Records `value`'s kind as type feedback for the instruction at `pc`.
+pub unsafe fn record_value(code: Sexp, pc: usize, value: Sexp) {
+    record_feedback(code.cdr(), pc, value);
 }
 
 /// What `GetVar` at `pc` reads, and whether the binding is in the activation's own frame.
@@ -3592,21 +4206,6 @@ impl Activation<'_, '_> {
             *self.feedback.add(pc) |= i32::from(value_kind(value));
         }
     }
-}
-
-/// Whether tier 0 records type feedback for this code: always for a body with a loop, and for
-/// any other once it has optimized code or is halfway to the entry threshold. Recording costs a
-/// type test and a store per value, and most bodies never get near a threshold, so recording
-/// from the first entry made every call of cold package code slower with the optimizing tier
-/// installed than without it. Half a threshold of activations still sees every type a compile
-/// would specialize on. A loop is different: it can turn hot inside a body's only activation,
-/// and compiling it needs the types of the instructions that ran before it, once.
-unsafe fn warm(constants: Sexp, tier: &Tier) -> bool {
-    if constants.element(TIER1) != nil() || length(constants.element(LOOPS)) > 0 {
-        return true;
-    }
-    let profile = values::ints(constants.element(PROFILE));
-    profile[profile::TIER_STATE] >= 0 && profile[profile::ENTRIES] >= tier.entry_threshold / 2
 }
 
 /// The instruction an op handler runs: its position in the code and the register window.
@@ -3667,11 +4266,10 @@ type Handler = unsafe fn(&mut Activation<'_, '_>, usize);
 #[inline(always)]
 unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) -> R<Sexp> {
     let constants = machine.code.cdr();
-    let feedback = match interp().bytecode.tier {
-        Some(tier) if warm(constants, &tier) => {
-            values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
-        }
-        _ => std::ptr::null_mut(),
+    let feedback = if values::ints(constants.element(PROFILE))[profile::RECORDING] != 0 {
+        values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
+    } else {
+        std::ptr::null_mut()
     };
     let code = values::ints(machine.code.car()).as_ptr();
     let registers = register_address(machine.base);
@@ -3695,9 +4293,108 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
     };
     if !SINGLE {
         release(&state);
+        if let Some(baseline) = baseline_code(constants) {
+            run_baseline(&mut state, baseline, pc);
+            return state.exit;
+        }
     }
     (*handlers.as_ptr().add(op_index(code, pc)))(&mut state, pc);
     state.exit
+}
+
+/// The machine code the baseline tier compiled for these constants' code, if any.
+#[inline(always)]
+unsafe fn baseline_code(constants: Sexp) -> Option<BaselineCode> {
+    let holder = constants.element(BASELINE);
+    if holder.kind() != SexpType::ExternalPtr {
+        return None;
+    }
+    let address = holder.external_address();
+    // SAFETY: the baseline tier stores only addresses of functions with this signature.
+    (!address.is_null())
+        .then(|| std::mem::transmute::<*mut std::ffi::c_void, BaselineCode>(address))
+}
+
+/// Runs baseline machine code for the activation from `pc` until the activation returns. A
+/// panic inside an instruction is parked while the machine code returns (unwinding through it
+/// is undefined) and resumed here.
+#[inline(never)]
+unsafe fn run_baseline(state: &mut Activation<'_, '_>, baseline: BaselineCode, pc: usize) {
+    baseline((state as *mut Activation<'_, '_>).cast(), pc);
+    if let Some(payload) = PARKED_PANIC.take() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+thread_local! {
+    /// A panic raised inside a baseline step, carried past the machine code that called it.
+    static PARKED_PANIC: std::cell::Cell<Option<Box<dyn std::any::Any + Send>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The baseline tier's machine code for one body: called with the activation and the pc to
+/// start at, it runs instructions until one answers [`STOP`], leaving the result where the
+/// interpreter's handler chain leaves it.
+pub type BaselineCode = unsafe extern "C" fn(*mut std::ffi::c_void, usize);
+
+/// One instruction run for baseline machine code: it takes the activation and the
+/// instruction's pc and answers where to continue, encoded by [`baseline_answer`].
+pub type BaselineStep = unsafe extern "C" fn(*mut std::ffi::c_void, usize) -> usize;
+
+/// What a [`BaselineStep`] answers when the activation is done.
+pub const BASELINE_STOP: usize = STOP;
+
+/// Encodes the pc a step continues at for baseline code: 0 for the next instruction, the pc
+/// plus one for any other, and [`STOP`] as itself. Almost every instruction falls through, and
+/// a zero answer lets the code after each call be one test and one branch instead of a compare
+/// against the next pc, which keeps the per-instruction code short.
+#[inline(always)]
+pub fn baseline_answer(pc: usize, next: usize) -> usize {
+    if pc == next {
+        0
+    } else if pc == STOP {
+        STOP
+    } else {
+        pc + 1
+    }
+}
+
+/// Where baseline machine code finds what it reads directly instead of calling a step.
+pub mod baseline_layout {
+    use super::Activation;
+    /// The activation's register window pointer.
+    pub const REGISTERS: usize = std::mem::offset_of!(Activation<'static, 'static>, registers);
+    /// The activation's `Interp` pointer.
+    pub const INTERP: usize = std::mem::offset_of!(Activation<'static, 'static>, interp);
+    /// The activation's environment.
+    pub const ENV: usize = std::mem::offset_of!(Activation<'static, 'static>, env);
+    /// The pointer to the code's frame-slot hints, one `u32` per lookup slot.
+    pub const HINTS: usize = std::mem::offset_of!(Activation<'static, 'static>, cache)
+        + std::mem::offset_of!(super::LookupCache, hints);
+    /// The feedback pointer, null while nothing records type feedback.
+    pub const FEEDBACK: usize = std::mem::offset_of!(Activation<'static, 'static>, feedback);
+    /// The visibility flag inside `Interp`.
+    pub const VISIBLE: usize = std::mem::offset_of!(crate::Interp, visible);
+    /// The current srcref inside `Interp`.
+    pub const SRCREF: usize = std::mem::offset_of!(crate::Interp, srcref);
+}
+
+/// Runs one step for baseline code, parking a panic instead of unwinding into machine code.
+#[inline(always)]
+unsafe fn guarded(
+    state: *mut std::ffi::c_void,
+    at: usize,
+    step: impl FnOnce(&mut Activation<'_, '_>, usize) -> usize,
+) -> usize {
+    let state = &mut *state.cast::<Activation<'_, '_>>();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step(&mut *state, at))) {
+        Ok(pc) => pc,
+        Err(payload) => {
+            PARKED_PANIC.set(Some(payload));
+            state.exit = Ok(nil());
+            STOP
+        }
+    }
 }
 
 /// The handler table position of the instruction at `pc`.
@@ -3730,7 +4427,30 @@ const STOP: usize = usize::MAX;
 /// activation's result in [`Activation::exit`], so that few values stay live across the calls
 /// an instruction makes. A failure goes to [`failed`].
 macro_rules! handlers {
-    ($($name:ident: $op:ident, $roots:literal, $body:ident;)*) => {
+    ($($name:ident, $step:ident: $op:ident, $roots:literal, $body:ident;)*) => {
+        $(
+            unsafe extern "C" fn $step(state: *mut std::ffi::c_void, at: usize) -> usize {
+                guarded(state, at, |state, at| {
+                    let instruction =
+                        Instruction { code: state.code, at, registers: state.registers };
+                    let flow = $body(state, instruction);
+                    let next = at + 1 + operand_count(Op::$op);
+                    let pc = advance::<false>(state, at, next, flow);
+                    if $roots && pc != STOP {
+                        release(state);
+                    }
+                    baseline_answer(pc, next)
+                })
+            }
+        )*
+
+        /// The step each op runs as in baseline machine code, indexed like [`OPS`].
+        pub static BASELINE_STEPS: [BaselineStep; OPS.len()] = {
+            let mut table: [BaselineStep; OPS.len()] = [step_jump; OPS.len()];
+            $(table[Op::$op as usize] = $step;)*
+            table
+        };
+
         $(
             unsafe fn $name<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
                 let instruction = Instruction { code: state.code, at, registers: state.registers };
@@ -3799,50 +4519,51 @@ static RUN_HANDLERS: [Handler; OPS.len()] = handler_table::<false>();
 static STEP_HANDLERS: [Handler; OPS.len()] = handler_table::<true>();
 
 handlers! {
-    run_constant: Constant, false, op_constant;
-    run_get_var: GetVar, true, op_get_var;
-    run_set_var: SetVar, true, op_set_var;
-    run_get_fun: GetFun, true, op_get_fun;
-    run_branch_unless_builtin: BranchUnlessBuiltin, false, op_branch_unless_builtin;
-    run_call_builtin: CallBuiltin, true, op_call_builtin;
-    run_call_generic: CallGeneric, true, op_call_generic;
-    run_call_rebinding: CallRebinding, true, op_call_rebinding;
-    run_call_tail_update: CallTailUpdate, true, op_call_tail_update;
-    run_field: Field, true, op_field;
-    run_item: Item, true, op_item;
-    run_match_shape: MatchShape, false, op_match_shape;
-    run_match_tag: MatchTag, false, op_match_tag;
-    run_match_literal: MatchLiteral, true, op_match_literal;
-    run_slot: Slot, true, op_slot;
-    run_match_fail: MatchFail, true, op_match_fail;
-    run_construct: Construct, true, op_construct;
-    run_move: Move, false, op_move;
-    run_switch_arm: SwitchArm, true, op_switch_arm;
-    run_bound_eval: BoundEval, true, op_bound_eval;
-    run_match_condition: MatchCondition, true, op_match_condition;
-    run_branch_unless_primitive: BranchUnlessPrimitive, false, op_branch_unless_primitive;
-    run_branch_if_object: BranchIfObject, false, op_branch_if_object;
-    run_dispatch_subject: DispatchSubject, true, op_dispatch_subject;
-    run_ast: Ast, true, op_ast;
-    run_guard: Guard, true, op_guard;
-    run_resume: Resume, false, op_resume;
-    run_jump_unless: JumpUnless, true, op_jump_unless;
-    run_arithmetic: Arithmetic, true, op_arithmetic;
-    run_return: Return, false, op_return;
-    run_for_init: ForInit, true, op_for_init;
-    run_for_step: ForStep, true, op_for_step;
-    run_for_end: ForEnd, false, op_for_end;
-    run_invisible: Invisible, false, op_invisible;
-    run_visible: Visible, false, op_visible;
-    run_set_srcref: SetSrcref, true, op_set_srcref;
-    run_end_statement: EndStatement, false, op_end_statement;
-    run_logic_left: LogicLeft, true, op_logic_left;
-    run_logic_right: LogicRight, true, op_logic_right;
-    run_closure: Closure, true, op_closure;
-    run_sub_assign: SubAssign, true, op_sub_assign;
-    run_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
-    run_replace: Replace, true, op_replace;
-    run_fused: Fused, true, op_fused;
+    run_constant, step_constant: Constant, false, op_constant;
+    run_get_var, step_get_var: GetVar, true, op_get_var;
+    run_set_var, step_set_var: SetVar, true, op_set_var;
+    run_get_fun, step_get_fun: GetFun, true, op_get_fun;
+    run_branch_unless_builtin, step_branch_unless_builtin: BranchUnlessBuiltin, false, op_branch_unless_builtin;
+    run_call_builtin, step_call_builtin: CallBuiltin, true, op_call_builtin;
+    run_call_generic, step_call_generic: CallGeneric, true, op_call_generic;
+    run_call_rebinding, step_call_rebinding: CallRebinding, true, op_call_rebinding;
+    run_call_tail_update, step_call_tail_update: CallTailUpdate, true, op_call_tail_update;
+    run_field, step_field: Field, true, op_field;
+    run_item, step_item: Item, true, op_item;
+    run_match_shape, step_match_shape: MatchShape, false, op_match_shape;
+    run_match_tag, step_match_tag: MatchTag, false, op_match_tag;
+    run_match_literal, step_match_literal: MatchLiteral, true, op_match_literal;
+    run_slot, step_slot: Slot, true, op_slot;
+    run_match_fail, step_match_fail: MatchFail, true, op_match_fail;
+    run_construct, step_construct: Construct, true, op_construct;
+    run_move, step_move: Move, false, op_move;
+    run_switch_arm, step_switch_arm: SwitchArm, true, op_switch_arm;
+    run_bound_eval, step_bound_eval: BoundEval, true, op_bound_eval;
+    run_match_condition, step_match_condition: MatchCondition, true, op_match_condition;
+    run_branch_unless_primitive, step_branch_unless_primitive: BranchUnlessPrimitive, false, op_branch_unless_primitive;
+    run_branch_if_object, step_branch_if_object: BranchIfObject, false, op_branch_if_object;
+    run_dispatch_subject, step_dispatch_subject: DispatchSubject, true, op_dispatch_subject;
+    run_ast, step_ast: Ast, true, op_ast;
+    run_guard, step_guard: Guard, true, op_guard;
+    run_resume, step_resume: Resume, false, op_resume;
+    run_jump_unless, step_jump_unless: JumpUnless, true, op_jump_unless;
+    run_arithmetic, step_arithmetic: Arithmetic, true, op_arithmetic;
+    run_return, step_return: Return, false, op_return;
+    run_for_init, step_for_init: ForInit, true, op_for_init;
+    run_for_step, step_for_step: ForStep, true, op_for_step;
+    run_for_end, step_for_end: ForEnd, false, op_for_end;
+    run_invisible, step_invisible: Invisible, false, op_invisible;
+    run_visible, step_visible: Visible, false, op_visible;
+    run_set_srcref, step_set_srcref: SetSrcref, true, op_set_srcref;
+    run_end_statement, step_end_statement: EndStatement, false, op_end_statement;
+    run_logic_left, step_logic_left: LogicLeft, true, op_logic_left;
+    run_logic_right, step_logic_right: LogicRight, true, op_logic_right;
+    run_closure, step_closure: Closure, true, op_closure;
+    run_sub_assign, step_sub_assign: SubAssign, true, op_sub_assign;
+    run_sub_assign_matrix, step_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
+    run_replace, step_replace: Replace, true, op_replace;
+    run_missing, step_missing: Missing, true, op_missing;
+    run_fused, step_fused: Fused, true, op_fused;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -3854,8 +4575,10 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
     if target < at {
         if let Err(unwind) = crate::unwind::poll_interrupt() {
             pc = failed::<SINGLE>(state, at, unwind);
-        } else if let Some(tier) = (*state.interp).bytecode.tier {
-            match back_edge(state.machine, &tier, pc) {
+        } else if let Some(tier) = &(*state.interp).bytecode.tier
+            && back_edge_due(state, tier)
+        {
+            match back_edge(state, tier, pc) {
                 BackEdge::Continue(resume) => pc = resume,
                 BackEdge::Finished(result) => {
                     state.exit = result;
@@ -3871,7 +4594,46 @@ unsafe fn jump<const SINGLE: bool>(state: &mut Activation<'_, '_>, at: usize) {
         return;
     }
     release(state);
+    // A body whose baseline code appeared while this activation looped in tier 0 moves over
+    // at the back edge, so its loop does not finish in the slower tier.
+    if target < at
+        && let Some(baseline) = baseline_code(state.constants)
+    {
+        run_baseline(state, baseline, pc);
+        return;
+    }
     become (*RUN_HANDLERS.as_ptr().add(op_index(state.code, pc)))(state, pc)
+}
+
+/// `Jump` for baseline code, which jumps forward by itself and calls this only for a backward
+/// jump: it polls for an interrupt and counts the back edge for the optimizing tier.
+unsafe extern "C" fn step_jump(state: *mut std::ffi::c_void, at: usize) -> usize {
+    guarded(state, at, |state, at| {
+        let target = *state.code.add(at + 1) as usize;
+        let mut pc = target;
+        if target < at {
+            if let Err(unwind) = crate::unwind::poll_interrupt() {
+                pc = failed::<false>(state, at, unwind);
+            } else if let Some(tier) = &(*state.interp).bytecode.tier
+                && back_edge_due(state, tier)
+            {
+                match back_edge(state, tier, pc) {
+                    BackEdge::Continue(resume) => pc = resume,
+                    BackEdge::Finished(result) => {
+                        state.exit = result;
+                        return STOP;
+                    }
+                    BackEdge::Unwound { pc: resume, unwind } => {
+                        pc = failed::<false>(state, resume, unwind);
+                    }
+                }
+            }
+        }
+        if pc != STOP {
+            release(state);
+        }
+        baseline_answer(pc, at + 1 + operand_count(Op::Jump))
+    })
 }
 
 #[inline(always)]
@@ -3944,6 +4706,17 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
         instruction.output(0, value);
         return Ok(Flow::Next);
     }
+    if definition.direct.is_some()
+        && !definition.checks.replacement
+        && positional_arguments(call.cdr())
+    {
+        let values = std::slice::from_raw_parts(instruction.registers.add(first), count);
+        if let Some(value) = eval::call_direct(definition, values)? {
+            state.record(instruction.at, value);
+            instruction.output(0, value);
+            return Ok(Flow::Next);
+        }
+    }
     let mut args = eval::Args::new();
     let mut cell = call.cdr();
     for index in 0..count {
@@ -3965,6 +4738,19 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
     Ok(Flow::Next)
 }
 
+/// Whether every argument cell of a call is untagged and not empty, as a
+/// [`BuiltinDef::direct`] entry requires.
+#[inline]
+unsafe fn positional_arguments(mut cell: Sexp) -> bool {
+    while cell != nil() {
+        if cell.tag() != nil() || cell.car() == missing_arg() {
+            return false;
+        }
+        cell = cell.cdr();
+    }
+    true
+}
+
 #[inline(always)]
 unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let function = instruction.input(1);
@@ -3980,6 +4766,14 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         } else {
             compiled
         };
+        if function.has_gp(gp::NATIVE_ENTRY)
+            && let Some(value) =
+                crate::base_fast_paths::native_entry_by_value(function, arguments, state.env)?
+        {
+            state.record(instruction.at, value);
+            instruction.output(0, value);
+            return Ok(Flow::Next);
+        }
         let mut args = eval::Args::new();
         // Binding a variable's value instead of a promise for it is invisible when the callee
         // cannot assign anything before forcing it, nor look at the promise (`substitute`,
@@ -4194,6 +4988,16 @@ unsafe fn op_ast(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<
     let expression = state.constant(instruction, 1);
     let value = eval::eval(expression, state.env)?;
     state.record(instruction.at, value);
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_missing(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let symbol = state.constant(instruction, 1);
+    let value = values::scalar_bool(eval::is_missing(symbol, state.env)?)?;
+    state.record(instruction.at, value);
+    (*state.interp).visible = true;
     instruction.output(0, value);
     Ok(Flow::Next)
 }
@@ -4465,7 +5269,12 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
     sequence.increment_refcount();
     state.record(instruction.at, sequence);
     instruction.output(1, sequence);
-    state.machine.loops[instruction.operand(0)] = LoopState {
+    // Promise code runs without loop states, so only code read from a file could name one here.
+    *state
+        .machine
+        .loops
+        .get_mut(instruction.operand(0))
+        .ok_or_else(|| error("compiled code names a loop it does not have"))? = LoopState {
         index: 0,
         count,
         cell: Some(sequence),
@@ -4477,11 +5286,20 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
 unsafe fn op_for_step(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let env = state.env;
     let variable = state.constant(instruction, 2);
-    let loop_state = &mut state.machine.loops[instruction.operand(0)];
+    let loop_state = state
+        .machine
+        .loops
+        .get_mut(instruction.operand(0))
+        .ok_or_else(|| error("compiled code names a loop it does not have"))?;
     if loop_state.index >= loop_state.count {
         return Ok(Flow::Goto(instruction.operand(3)));
     }
     let sequence = instruction.input(1);
+    // The compiler steps the register its `ForInit` filled, which keeps the index in bounds;
+    // code read from a file is only verified operand by operand.
+    if sequence.kind().is_vector() && loop_state.index >= sequence.length() as usize {
+        return Err(error("compiled code steps a loop over another sequence"));
+    }
     let index = loop_state.index;
     loop_state.index += 1;
     if !overwrite_loop_variable(sequence, index, variable, env) {
@@ -4558,7 +5376,12 @@ unsafe fn op_logic_left(state: &mut Activation<'_, '_>, instruction: Instruction
 unsafe fn op_logic_right(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let call = state.constant(instruction, 3);
     let is_and = instruction.operand(4) == 1;
-    let left = values::ints(instruction.input(1))[0];
+    let left = instruction.input(1);
+    // `LogicLeft` stored a logical scalar there, unless the code was read from a file and lies.
+    if left.kind() != SexpType::Logical || left.length() != 1 {
+        return Err(error("compiled code holds a malformed `&&` or `||`"));
+    }
+    let left = values::ints(left)[0];
     let right = eval::logical_operand_of(
         instruction.input(2),
         call,
@@ -4679,15 +5502,45 @@ enum BackEdge {
     Unwound { pc: usize, unwind: Unwind },
 }
 
+/// Counts a backward jump and answers whether it reaches a count [`back_edge`] acts on. Every
+/// backward jump of every loop pays this, so it is one increment and three comparisons, inlined
+/// into the jump; the rest waits in [`back_edge`] for the counts that need it.
+#[inline(always)]
+unsafe fn back_edge_due(state: &mut Activation<'_, '_>, tier: &Tier) -> bool {
+    let profile = values::ints_mut(state.constants.element(PROFILE));
+    let count = profile[profile::BACK_EDGES].saturating_add(1);
+    profile[profile::BACK_EDGES] = count;
+    count >= tier.back_edge_threshold
+        || count == tier.back_edge_threshold / 2
+        || count == tier.baseline_threshold
+}
+
 #[inline(never)]
-unsafe fn back_edge(machine: &mut Machine<'_>, tier: &Tier, pc: usize) -> BackEdge {
+#[cold]
+unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> BackEdge {
+    let machine = &mut *state.machine;
     let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
-    profile[profile::BACK_EDGES] = profile[profile::BACK_EDGES].saturating_add(1);
+    if profile[profile::BACK_EDGES] == tier.back_edge_threshold / 2
+        && machine.code.cdr().element(TIER1) == nil()
+    {
+        profile[profile::RECORDING] = 1;
+        state.feedback = values::ints_mut(machine.code.cdr().element(FEEDBACK)).as_mut_ptr();
+    }
+    if profile[profile::BACK_EDGES] == tier.baseline_threshold
+        && tier.baseline_threshold != NEVER
+        && machine.code.cdr().element(BASELINE) == nil()
+    {
+        (tier.baseline)(machine);
+    }
+    let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
     if profile[profile::BACK_EDGES] < tier.back_edge_threshold {
         return BackEdge::Continue(pc);
     }
     profile[profile::BACK_EDGES] = 0;
-    match (tier.back_edge)(machine, pc) {
+    let exit = (tier.back_edge)(machine, pc);
+    // The tier may have compiled the body or moved its entry count.
+    values::ints_mut(machine.code.cdr().element(PROFILE))[profile::NEXT] = i32::MIN;
+    match exit {
         Some(TierExit::Finished(result)) => BackEdge::Finished(result),
         Some(TierExit::Resume {
             pc,
@@ -4894,8 +5747,16 @@ unsafe fn replace_variable(
     heap.count_transient_binding(env, symbols().tmp);
     let state = interp();
     state.tmp_values.push((env, target));
-    let result = match builtin {
-        Some(definition) => {
+    let direct = match builtin {
+        Some(definition) if definition.direct.is_some() && replacement_arguments(setter_call) => {
+            eval::call_direct(definition, args)
+        }
+        _ => Ok(None),
+    };
+    let result = match (direct, builtin) {
+        (Ok(Some(value)), _) => Ok(value),
+        (Err(unwind), _) => Err(unwind),
+        (Ok(None), Some(definition)) => {
             let mut arguments = eval::Args::new();
             let mut item = setter_call.cdr();
             for &value in args.iter() {
@@ -4912,11 +5773,26 @@ unsafe fn replace_variable(
             interp().assignment_call = outer;
             result
         }
-        None => replace_with_closure(function, setter, whole, target, args[1], env),
+        (Ok(None), None) => replace_with_closure(function, setter, whole, target, args[1], env),
     };
     interp().tmp_values.pop();
     eval::assign_local(variable, result?, env, Some(cell))?;
     Ok(true)
+}
+
+/// Whether a replacement call's arguments are untagged but for the trailing `value`, the shape
+/// `complex_assign` builds and a [`BuiltinDef::direct`] entry takes in formal order.
+unsafe fn replacement_arguments(setter_call: Sexp) -> bool {
+    let mut cell = setter_call.cdr();
+    while cell != nil() {
+        let last = cell.cdr() == nil();
+        let expected = if last { symbols().value } else { nil() };
+        if cell.tag() != expected || cell.car() == missing_arg() {
+            return false;
+        }
+        cell = cell.cdr();
+    }
+    true
 }
 
 /// Calls the replacement closure `function` as `` `f<-`(`*tmp*`, value = <promise>) ``, with
@@ -5097,6 +5973,12 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
             Arith::Greater => comparison((!na).then_some(a > b)),
             Arith::LessEqual => comparison((!na).then_some(a <= b)),
             Arith::GreaterEqual => comparison((!na).then_some(a >= b)),
+            Arith::Modulo => Ok(Some(values::scalar_integer(crate::arith::integer_modulo(
+                a, b,
+            ))?)),
+            Arith::IntegerDivide => Ok(Some(values::scalar_integer(
+                crate::arith::integer_divide(a, b),
+            )?)),
             _ => Ok(None),
         };
     }
@@ -5104,9 +5986,9 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
     let real = |value: f64| -> R<Option<Sexp>> { Ok(Some(values::scalar_real(value)?)) };
     let nan = a.is_nan() || b.is_nan();
     match operator {
-        Arith::Add => real(a + b),
+        Arith::Add => real(crate::arith::add(a, b)),
         Arith::Subtract => real(a - b),
-        Arith::Multiply => real(a * b),
+        Arith::Multiply => real(crate::arith::multiply(a, b)),
         Arith::Divide => real(a / b),
         // R_pow's special cases (1^y, x^0, NA handling) differ from powf; the builtin has them.
         Arith::Power => {
@@ -5122,6 +6004,12 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
         Arith::Greater => comparison((!nan).then_some(a > b)),
         Arith::LessEqual => comparison((!nan).then_some(a <= b)),
         Arith::GreaterEqual => comparison((!nan).then_some(a >= b)),
+        // The builtin warns when the remainder loses all accuracy.
+        Arith::Modulo if !crate::arith::modulus_loses_accuracy(a, b) => {
+            real(crate::arith::real_modulo(a, b))
+        }
+        Arith::Modulo => Ok(None),
+        Arith::IntegerDivide => real(crate::arith::real_integer_divide(a, b)),
     }
 }
 

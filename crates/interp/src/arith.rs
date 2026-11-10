@@ -1314,14 +1314,39 @@ unsafe fn numbers<'a>(vector: Sexp) -> Reals<'a> {
 #[inline]
 pub fn real_op(op: Op, a: f64, b: f64) -> f64 {
     match op {
-        Op::Add => a + b,
+        Op::Add => add(a, b),
         Op::Subtract => a - b,
-        Op::Multiply => a * b,
+        Op::Multiply => multiply(a, b),
         Op::Divide => a / b,
         Op::Power => power(a, b),
         Op::Modulo => real_modulo(a, b),
         Op::IntegerDivide => real_integer_divide(a, b),
     }
+}
+
+/// `a + b` where a `NaN` first operand's payload wins, as with x86's `addsd`, which is what GNU R
+/// gives: `NaN + NA` is `NaN` and `NA + NaN` is `NA`. Plain `+` lets the compiler swap the
+/// operands of a commutative operation, and LLVM treats any `NaN` result's payload as free, so it
+/// also folds `a + a` back into `a + b`. Building the result from `a`'s bits keeps the payload,
+/// and computing the sum before the test leaves a select, which vectorizes, instead of a branch.
+#[inline(always)]
+pub fn add(a: f64, b: f64) -> f64 {
+    let sum = a + b;
+    if a.is_nan() { quiet(a) } else { sum }
+}
+
+/// `a * b` where a `NaN` first operand's payload wins, as for [`add`].
+#[inline(always)]
+pub fn multiply(a: f64, b: f64) -> f64 {
+    let product = a * b;
+    if a.is_nan() { quiet(a) } else { product }
+}
+
+/// `a` with the quiet bit set, which is what the hardware returns for a `NaN` operand. R's `NA` is
+/// a signalling `NaN` whose low word marks it, and setting the quiet bit leaves that mark intact.
+#[inline(always)]
+fn quiet(a: f64) -> f64 {
+    f64::from_bits(a.to_bits() | 0x0008_0000_0000_0000)
 }
 
 /// R 4.6's `R_pow` multiplies out a cube or a fourth power of a base in [-11, 11] instead of
@@ -1416,6 +1441,29 @@ pub fn real_modulo(a: f64, b: f64) -> f64 {
     (rough - (rough / divisor).floor() * divisor).to_f64()
 }
 
+/// `a %% b` on integers: `NA` for an `NA` operand or a zero divisor, and otherwise a remainder
+/// whose sign follows the divisor.
+pub fn integer_modulo(a: i32, b: i32) -> i32 {
+    if a == NA_INTEGER || b == NA_INTEGER || b == 0 {
+        return NA_INTEGER;
+    }
+    let remainder = a.rem_euclid(b);
+    if b < 0 && remainder != 0 {
+        remainder + b
+    } else {
+        remainder
+    }
+}
+
+/// `a %/% b` on integers, with `integer_modulo`'s `NA` cases. The quotient of two non-`NA`
+/// integers always fits, since `NA` is the only one whose negation does not.
+pub fn integer_divide(a: i32, b: i32) -> i32 {
+    if a == NA_INTEGER || b == NA_INTEGER || b == 0 {
+        return NA_INTEGER;
+    }
+    (a as f64 / b as f64).floor() as i32
+}
+
 /// `a %/% b`, consistent with `real_modulo`: `a == (a %/% b) * b + a %% b` up to rounding.
 pub fn real_integer_divide(a: f64, b: f64) -> f64 {
     // GNU R divides first, so a NaN operand passes through with the payload of the division.
@@ -1471,8 +1519,6 @@ fn beyond_divisor(a: f64, b: f64) -> Option<(f64, f64)> {
     })
 }
 
-/// Whether `a %% b` has a quotient beyond what extended precision holds, which GNU R warns
-/// about.
 /// Whether `a %% b` warns that its result has lost all accuracy, as R does when the
 /// quotient is too large for the remainder to mean anything.
 pub fn modulus_loses_accuracy(a: f64, b: f64) -> bool {
@@ -2988,7 +3034,7 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
     let mut args = if items.iter().any(|arg| arg.value.kind() == SexpType::List) {
         vec![Arg {
             tag: nil(),
-            value: crate::subset::combine_args(&items, &[], true, false)?,
+            value: crate::combine::combine_args(&items, true, false)?,
         }]
     } else {
         items
@@ -3030,7 +3076,7 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
     };
     let minimum = summary(&inner, Summary::Min)?;
     let maximum = summary(&inner, Summary::Max)?;
-    crate::subset::combine(&[minimum, maximum])
+    crate::combine::combine(&[minimum, maximum])
 }
 
 unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {

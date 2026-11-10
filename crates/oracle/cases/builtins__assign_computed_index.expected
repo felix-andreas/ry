@@ -1,0 +1,25 @@
+[stdout]
+| List of 2
+|  $ a: num 56
+|  $ b: num 20
+| List of 2
+|  $ a: num 56
+|  $ b: num 20
+| List of 2
+|  $ p: num 2
+|  $ q: num 1
+| dispatched any 
+| List of 1
+|  $ a: num 5
+| List of 1
+|  $ z: num 1
+| [1] "attempt to select less than one element in OneIndex"
+| List of 2
+|  $ a: num 1
+|  $ b: num 9
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

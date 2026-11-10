@@ -244,10 +244,18 @@ fn main() -> ExitCode {
     if let Command::Install {
         path,
         library,
+        train,
+        explain,
         runtime,
     } = &cli.command
     {
-        return run_install(path, library.as_deref(), *runtime);
+        return run_install(
+            path,
+            library.as_deref(),
+            train.as_deref(),
+            *explain,
+            *runtime,
+        );
     }
 
     if let Command::DebugAdapter = &cli.command {
@@ -513,6 +521,10 @@ fn run_console(
         }
         None => String::new(),
     };
+    let console_config = &preflight.config().console;
+    // NO_COLOR (no-color.org) turns color off when it is set to anything but the empty string.
+    let no_color = env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+    let palette = (console_config.highlight && !no_color).then(|| console_config.colors.0.clone());
     let flags = runtime_flags(preflight.config());
     let keybindings = match keybindings {
         Keybindings::Emacs => repl::Keybindings::Emacs,
@@ -536,6 +548,7 @@ fn run_console(
                     filter: Some(filter),
                     completer,
                     package,
+                    palette,
                     ..repl::RunOptions::default()
                 },
                 flags,
@@ -555,6 +568,7 @@ fn run_console(
                 completer,
                 hooks: Some(Box::new(load::ReloadWatcher)),
                 filter: Some(filter),
+                palette,
                 ..repl::RunOptions::default()
             }))
         }
@@ -670,7 +684,13 @@ fn run_build(
 
 /// `ry install`: builds the package into a private directory without rebuilding its vignettes,
 /// as `devtools::install()` does, and installs the tarball with the home's `R CMD INSTALL`.
-fn run_install(path: &Path, library: Option<&Path>, runtime: Option<Runtime>) -> ExitCode {
+fn run_install(
+    path: &Path,
+    library: Option<&Path>,
+    train: Option<&str>,
+    explain: bool,
+    runtime: Option<Runtime>,
+) -> ExitCode {
     let installed = load::package_root(path)
         .map_err(|error| error.to_string())
         .and_then(|root| {
@@ -685,6 +705,19 @@ fn run_install(path: &Path, library: Option<&Path>, runtime: Option<Runtime>) ->
                     fs::create_dir_all(library)
                         .map_err(|error| format!("cannot create {}: {error}", library.display()))?;
                     command.arg("-l").arg(library);
+                }
+                if let Some(train) = train {
+                    let workload = match train {
+                        "tests" | "examples" | "none" => train.to_owned(),
+                        script => std::path::absolute(script)
+                            .map_err(|error| format!("cannot resolve {script}: {error}"))?
+                            .display()
+                            .to_string(),
+                    };
+                    command.arg(format!("--ry-train={workload}"));
+                }
+                if explain {
+                    command.arg("--ry-explain");
                 }
                 let status = command
                     .arg(&tarball)

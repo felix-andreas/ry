@@ -46,6 +46,10 @@ pub struct Activation {
     pub visible: *mut bool,
     /// Where execution starts: 0 for a call, or the loop header on-stack replacement enters.
     pub entry_pc: i64,
+    /// The activation's environment, whose frame compiled code probes for its variables.
+    pub env: Sexp,
+    /// The code's lookup-slot hints ([`bytecode::lookup_hints`]).
+    pub hints: *mut u32,
     pub machine: *mut c_void,
     pub compiled: *const Compiled,
     pub pending: Option<Unwind>,
@@ -59,7 +63,12 @@ pub mod offset {
     pub const LOOPS: i32 = 8;
     pub const VISIBLE: i32 = 16;
     pub const ENTRY_PC: i32 = 24;
+    pub const ENV: i32 = 32;
+    pub const HINTS: i32 = 40;
 }
+
+const _: () = assert!(std::mem::offset_of!(Activation, env) == offset::ENV as usize);
+const _: () = assert!(std::mem::offset_of!(Activation, hints) == offset::HINTS as usize);
 
 /// What compiled code returns when on-stack replacement declined to enter, because a value
 /// tier 0 left in a register is not of the type the compiled loop expects.
@@ -166,7 +175,20 @@ impl Exit {
 /// `thorough` walks them anyway, for an activation whose frame may have bound a watched name
 /// before the name was watched. Portable code running for an enclosure other than the checked
 /// one or its siblings walks, and leaves the epoch and stamps to the checked enclosure.
+#[inline]
 pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
+    // Every entry asks, and almost every time nothing moved the epoch since the last proof.
+    if !thorough
+        && heap().binding_epoch() == compiled.epoch.get()
+        && (!compiled.portable || compiled.checked.get().weak_key() == frame.enclosure())
+    {
+        return true;
+    }
+    unsafe { prove(compiled, frame, thorough) }
+}
+
+#[inline(never)]
+unsafe fn prove(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
     let heap = heap();
     let epoch = heap.binding_epoch();
     let enclosure = frame.enclosure();
@@ -175,12 +197,11 @@ pub unsafe fn valid(compiled: &Compiled, frame: Sexp, thorough: bool) -> bool {
     if !thorough && (checked || sibling) {
         // The epoch moves on any binding outside a function frame, which a test suite or a
         // package load makes all the time, so most moves concern names no speculation uses.
-        let proven = epoch == compiled.epoch.get()
-            || compiled
-                .speculations
-                .iter()
-                .zip(&compiled.stamps)
-                .all(|(speculation, stamp)| heap.lookup_stamp(speculation.symbol) == stamp.get());
+        let proven =
+            epoch == compiled.epoch.get()
+                || compiled.speculations.iter().zip(&compiled.stamps).all(
+                    |(speculation, stamp)| heap.lookup_stamp(speculation.symbol) == stamp.get(),
+                );
         if proven {
             compiled.epoch.set(epoch);
             // A sibling's lookups pass through its own frame and then the checked enclosure's
@@ -293,6 +314,19 @@ pub fn cold_refusals(state: i32) -> i32 {
 /// so calls no longer compile it and only a hot loop in it does.
 pub const LOOPS_ONLY: i32 = 1 << 16;
 
+/// A tier state flag: the body was long enough that it waited for extra entries or backward
+/// jumps before its next compile (see `jit::SIZE_WAIT_WORDS`), and it has waited. Invalidation
+/// clears it, so every recompile waits again.
+pub const SIZE_WAITED: i32 = 1 << 17;
+
+/// The profile's tier state counts the body's refusals as too rarely called (`analysis::RARE`)
+/// in four bits from here, so each attempt can wait twice as long as the one before.
+pub const RARE_REFUSAL: i32 = 1 << 18;
+
+pub fn rare_refusals(state: i32) -> i32 {
+    (state / RARE_REFUSAL) & 0xf
+}
+
 /// The entry count of a body that calls must not compile. Counting up from here never reaches
 /// the entry threshold, so tier 0 stops asking the tier about the body's calls, and stops
 /// recording type feedback for them unless the body has a loop that may still compile.
@@ -314,18 +348,26 @@ pub unsafe fn invalidate(code: Sexp) {
     heap.set_element(constants, TIER1, values::nil());
     let counters = values::ints_mut(constants.element(PROFILE));
     let state = counters[profile::TIER_STATE];
-    // Halfway to the threshold, tier 0 keeps recording type feedback, so the activation that
-    // just deoptimized records the type that broke the speculation and the recompile sees it.
-    // A body that compiles only for its loop records through its loop anyway, and its calls
-    // must never ask the tier again, so it keeps the entry count that stops them asking.
-    counters[profile::ENTRIES] = if state >= 0 && state & LOOPS_ONLY != 0 {
+    // Within the recording window before the threshold, tier 0 records type feedback, so the
+    // activation that just deoptimized records the type that broke the speculation and the
+    // recompile sees it.
+    // A body that compiles only for its loop records through its loop, from half the back-edge
+    // threshold, and its calls must never ask the tier again, so it keeps the entry count that
+    // stops them asking.
+    let loops_only = state >= 0 && state & LOOPS_ONLY != 0;
+    counters[profile::ENTRIES] = if loops_only {
         NEVER_HOT
     } else {
-        bytecode::tier().map_or(0, |tier| tier.entry_threshold / 2)
+        bytecode::tier().map_or(0, |tier| bytecode::recording_start(tier.entry_threshold))
     };
     counters[profile::BACK_EDGES] = 0;
+    counters[profile::NEXT] = i32::MIN;
     if compiles(state) >= MAX_COMPILES {
         counters[profile::TIER_STATE] = -1;
+        counters[profile::RECORDING] = 0;
+    } else if state >= 0 {
+        counters[profile::TIER_STATE] = state & !SIZE_WAITED;
+        counters[profile::RECORDING] = i32::from(!loops_only);
     }
 }
 
@@ -410,7 +452,9 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
                     park(activation, unwind);
                     outcome::FAILED
                 }
-                Ok(()) if validate != 0 && !still_valid(compiled(activation), machine.env, epoch) => {
+                Ok(())
+                    if validate != 0 && !still_valid(compiled(activation), machine.env, epoch) =>
+                {
                     outcome::INVALIDATED
                 }
                 Ok(()) => outcome::OK,
@@ -428,6 +472,17 @@ pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i6
             let loaded = scoped(|| bytecode::load_variable(machine.code, machine.env, pc as usize));
             finish_load(activation, slot, loaded, epoch)
         })
+    }
+}
+
+/// Records the type of a value compiled code loaded inline and found to be of a type it did not
+/// speculate on, so that the recompile after the deoptimization sees it. The inline load skips
+/// recording otherwise, because a value of the speculated type adds nothing to the profile.
+pub unsafe extern "C" fn jit_record(activation: *mut Activation, pc: i64, value: *mut Header) {
+    unsafe {
+        if let Some(value) = Sexp::from_raw(value) {
+            bytecode::record_value(machine(&*activation).code, pc as usize, value);
+        }
     }
 }
 
@@ -1350,17 +1405,10 @@ pub extern "C" fn jit_real_integer_divide(a: f64, b: f64) -> f64 {
 
 /// `%%` on integers: `NA` for an `NA` operand or a zero divisor, else the sign of the divisor.
 pub extern "C" fn jit_integer_modulo(a: i32, b: i32) -> i32 {
-    if a == NA_INTEGER || b == NA_INTEGER || b == 0 {
-        return NA_INTEGER;
-    }
-    let remainder = a.rem_euclid(b);
-    remainder + if b < 0 && remainder != 0 { b } else { 0 }
+    arith::integer_modulo(a, b)
 }
 
 /// `%/%` on integers.
 pub extern "C" fn jit_integer_divide(a: i32, b: i32) -> i32 {
-    if a == NA_INTEGER || b == NA_INTEGER || b == 0 {
-        return NA_INTEGER;
-    }
-    (a as f64 / b as f64).floor() as i32
+    arith::integer_divide(a, b)
 }

@@ -11,6 +11,7 @@ token "f" Function
 token "x" Parameter
 token "sum" LibraryFunction
 token "x" Parameter
+token "na.rm" Parameter
 lens references "f"
 select "TRUE"
 select "na.rm = TRUE"
@@ -113,6 +114,8 @@ token "beta" Parameter
 token "alpha" Parameter
 token "beta" Parameter
 token "f" Function
+token "alpah" Parameter
+token "beta" Parameter
 fix Change to `alpha` (unsafe): "alpah" -> "alpha"
 lens references "f"
 lens run file at line 1
@@ -127,6 +130,7 @@ symbol x (Value) at "x"
 symbol T (Value) at "T"
 symbol y (Value) at "y"
 token "list" LibraryFunction
+token "T" Parameter
 token "T" Property
 token "f" Function
 fix Change to `FALSE`: "F" -> "FALSE"
@@ -142,6 +146,8 @@ token "`my value`" Parameter
 token "beta" Parameter
 token "beta" Parameter
 token "f" Function
+token "`my valeu`" Parameter
+token "beta" Parameter
 fix Change to `my value` (unsafe): "my valeu" -> "my value"
 lens references "f"
 lens run file at line 1
@@ -321,12 +327,16 @@ symbol sales (Value) at "sales"
 symbol limit (Value) at "limit"
 symbol totals (Value) at "totals"
 token "DataFrame" LibraryFunction
+token "team" Parameter
 token "c" LibraryFunction
+token "amount" Parameter
 token "c" LibraryFunction
 token "amount" Property
 token "." Function
+token "total" Parameter
 token "sum" Function
 token "amount" Property
+token "by" Parameter
 token "team" Property
 token "tax" Property
 token "amount" Property

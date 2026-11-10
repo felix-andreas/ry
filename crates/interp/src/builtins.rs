@@ -85,6 +85,11 @@ pub unsafe fn is_native_value(value: Sexp) -> bool {
 /// handle scope, or `None` for the full call (see [`BuiltinDef::unary`]).
 pub type UnaryFn = unsafe fn(Sexp) -> R<Option<Sexp>>;
 
+/// A builtin's result for its argument values in formal order when that takes no dispatch, no
+/// checks and no handle scope of its own, or `None` for the full call (see
+/// [`BuiltinDef::direct`]).
+pub type DirectFn = unsafe fn(&[Sexp]) -> R<Option<Sexp>>;
+
 pub struct BuiltinDef {
     pub name: &'static str,
     pub kind: Kind,
@@ -112,6 +117,13 @@ pub struct BuiltinDef {
     /// full call would treat differently (an object that dispatches, a ry value the builtin
     /// refuses, an ALTREP vector), and its result is visible.
     pub unary: Option<UnaryFn>,
+    /// The result for untagged, non-empty arguments in the common case, which a compiled call
+    /// tries before the full call, and a complex assignment tries for a replacement whose only
+    /// tag is the trailing `value`: set by [`BuiltinDef::direct`]. Like `unary`, it must decline
+    /// every value the full call treats differently (an object that dispatches, ALTREP, a ry
+    /// value, an argument the full call reports an error for), and its result is visible unless
+    /// the builtin is invisible. The caller releases the handles it roots.
+    pub direct: Option<DirectFn>,
     pub object: Option<Sexp>,
 }
 
@@ -188,6 +200,7 @@ pub const fn builtin(name: &'static str, arity: i32, function: BuiltinFn) -> Bui
         checks: Checks::UNDERIVED,
         function,
         unary: None,
+        direct: None,
         object: None,
     }
 }
@@ -235,6 +248,13 @@ impl BuiltinDef {
     pub const fn unary(self, unary: UnaryFn) -> BuiltinDef {
         BuiltinDef {
             unary: Some(unary),
+            ..self
+        }
+    }
+
+    pub const fn direct(self, direct: DirectFn) -> BuiltinDef {
+        BuiltinDef {
+            direct: Some(direct),
             ..self
         }
     }
@@ -298,6 +318,7 @@ impl BuiltinDef {
             checks: self.checks,
             function: self.function,
             unary: self.unary,
+            direct: self.direct,
             object: self.object,
         }
     }
@@ -318,6 +339,8 @@ pub(crate) unsafe fn install_all() {
         crate::linalg::BUILTINS,
         crate::coerce::BUILTINS,
         crate::subset::BUILTINS,
+        crate::attribute_access::BUILTINS,
+        crate::combine::BUILTINS,
         crate::strings::BUILTINS,
         crate::approximate::BUILTINS,
         crate::print::BUILTINS,
@@ -333,6 +356,7 @@ pub(crate) unsafe fn install_all() {
         crate::system::BUILTINS,
         crate::lower::BUILTINS,
         crate::bytecode::BUILTINS,
+        crate::code_image::BUILTINS,
         crate::session::BUILTINS,
         crate::native::BUILTINS,
         crate::utils::BUILTINS,

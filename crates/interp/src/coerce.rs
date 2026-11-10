@@ -159,7 +159,7 @@ pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
             } else if element.kind() == SexpType::Symbol {
                 Ok(element.car())
             } else {
-                values::mkchar(&deparse::deparse_one_line(element))
+                values::mkchar(&deparse::deparse_one_line_checked(element)?)
             }
         }
         _ => Err(error(format!(
@@ -297,7 +297,7 @@ unsafe fn coerce_pairlist(list: Sexp, kind: SexpType, warnings: &mut CoercionWar
                 } else if value.kind().is_atomic() && length(*value) == 1 {
                     element_as_charsxp(*value, 0)?
                 } else {
-                    values::mkchar(&deparse::deparse_one_line(*value))?
+                    values::mkchar(&deparse::deparse_one_line_checked(*value)?)?
                 };
                 values::set_elt(result, index, charsxp);
             }
@@ -1120,7 +1120,7 @@ unsafe fn do_set_storage_mode(call: &Call<'_>) -> R<Sexp> {
     coerce_vector(object, kind)
 }
 
-unsafe fn do_is_vector(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_is_vector(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let mode = values::require_string(call.arg(1), "mode")?;
     let kind = object.kind();

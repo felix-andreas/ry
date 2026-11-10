@@ -153,11 +153,11 @@ fn dormant_exports(
 /// bare unless `[check] prelude` is off, and always as `std::Name`.
 pub const STANDARD_LIBRARY: &str = "std";
 
-/// The namespaces whose functions are written for ry's records, tuples and tags: the standard
-/// library and ry's runtime package (the DataFrame API and Arrays). Passing a ry value to them is
-/// not the boundary error it is for an R function, and the types they declare (`Dict`, `Set`,
-/// `Array`) are native values.
-pub const NATIVE_NAMESPACES: &[&str] = &["ry", STANDARD_LIBRARY];
+/// Whether `name` is a function a native namespace declares, such as `List.map`. R's own
+/// dotted names (`Sys.time`) and S3 methods (`Ops.money`) share the spelling but are not.
+pub fn is_native_function(name: &str) -> bool {
+    NATIVE_FUNCTIONS.binary_search(&name).is_ok()
+}
 
 /// Whether `[check] prelude` keeps the bare `name` out of scope: the standard library exports it
 /// and the prelude is off. The setting is read only for a standard library name, so turning the

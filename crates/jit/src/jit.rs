@@ -12,10 +12,19 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
+mod ahead;
 mod analysis;
+mod assembler;
+mod baseline;
 mod codegen;
 mod native;
 pub use native::has_native;
+
+/// Whether the body of `code` has baseline machine code.
+pub fn has_baseline(code: Sexp) -> bool {
+    // SAFETY: a code object's constants always have the baseline slot.
+    unsafe { baseline::has_baseline(code) }
+}
 mod runtime;
 
 use {
@@ -48,6 +57,9 @@ pub enum Mode {
     Off,
     On,
     Force,
+    /// Every body gets baseline code at its first entry and nothing compiles further, which is
+    /// what the differential tests use to run everything through the baseline tier alone.
+    Baseline,
 }
 
 impl Mode {
@@ -56,6 +68,7 @@ impl Mode {
         match std::env::var("RY_JIT").as_deref() {
             Ok("off" | "0" | "false") => Mode::Off,
             Ok("force") => Mode::Force,
+            Ok("baseline") => Mode::Baseline,
             _ => Mode::On,
         }
     }
@@ -69,8 +82,38 @@ impl Mode {
 /// instructions than not compiling at all and 3000 calls cost 1.5%; a sweep from 300 to 10,000
 /// had its minimum at 3000. Code that is really hot passes 3000 calls within milliseconds.
 const ENTRY_THRESHOLD: i32 = 3000;
+/// The model that decides whether a loop-free body repays compiling at its entry threshold.
+/// Such a body saves a bounded amount per call, so it compiles only when its expected calls
+/// times that saving exceed the compilation's cost. Calibrated with callgrind on the benchmark
+/// workloads: compiling costs about 2M instructions plus 50k per bytecode word (a 50-word body
+/// costs 4.5M, `isTRUE`'s 188 words 11M), and compiled code saves at least 100 instructions per
+/// call for each instruction it runs natively (delaying the functional workload's callbacks from
+/// 3000 to 10,000 calls cost 19M instructions).
+const COMPILE_FIXED: u64 = 2_000_000;
+const COMPILE_PER_WORD: u64 = 50_000;
+const SAVING_PER_NATIVE: u64 = 100;
+/// A body's expected calls are its call rate over its recording window, in calls per KiB the
+/// session allocated meanwhile, times this many KiB. Allocation measures how much interpreted
+/// work ran: it is deterministic, costs nothing to keep, and the code that runs between two
+/// calls of a hot callback allocates a few KiB at most. The horizon is fixed rather than taken
+/// from how long the session has run, because that undercounts callbacks that turn hot early:
+/// the functional workload's first callbacks got 13 times the calls such an estimate predicted.
+/// Its value sits between the two measured cases, with a margin of about two either side:
+/// `isTRUE` in a test suite (one call per 54 KiB, about 1400 calls after compiling, needs at
+/// least 770 MiB) and the functional workload's slowest-rate callback (one call per 3.8 KiB,
+/// 40,000 calls, needs at most 130 MiB).
+const HORIZON_KIB: u64 = 1 << 18;
 /// Backward jumps a body takes before a loop compiles, in the default mode, for the same reason.
 const BACK_EDGE_THRESHOLD: i32 = 10_000;
+/// Tier 1 compiles a body in time that grows with its length, about 10 us per instruction word,
+/// while a hot body's saving per entry depends on how much of it runs, not on how long it is.
+/// So in the default mode a body longer than this many words, on turning hot, waits for one more
+/// threshold of entries or backward jumps per this many words before it compiles, the way V8
+/// scales its tier-up budget by bytecode length. Base R's `rbind` body (9731 words, 200 ms to
+/// compile) then compiles only after about 120,000 calls; a 250-word body does not wait. The wait
+/// doubles with each compile the body already had, because a body that deoptimized and recompiled
+/// (base `Reduce`, called with a new callback type from each site) pays the whole compile again.
+const SIZE_WAIT_WORDS: usize = 250;
 
 thread_local! {
     static MODE: Cell<Mode> = const { Cell::new(Mode::On) };
@@ -85,24 +128,51 @@ pub fn install() {
 }
 
 pub fn install_mode(mode: Mode) {
-    let (entries, back_edges) = match mode {
+    // Install-time machine code runs whether or not the run-time JIT is on.
+    ahead::install();
+    let (entries, back_edges, baseline) = match mode {
         Mode::Off => {
             bytecode::set_tier(None);
             return;
         }
-        Mode::On => (ENTRY_THRESHOLD, BACK_EDGE_THRESHOLD),
+        // Baseline code calls tier 0's step for every instruction, which saves instructions but
+        // spreads a hot path over more code than tier 0's shared handlers: with bodies getting it
+        // at 200 entries, `validation` ran 1% fewer instructions with 8% more instruction-cache
+        // misses and 5% more mispredicted branches, and more wall time. The default leaves it out
+        // until it inlines the common instructions' fast paths.
+        Mode::On => (ENTRY_THRESHOLD, BACK_EDGE_THRESHOLD, bytecode::NEVER),
         // Compiling on the second run rather than the first gives the compiled code the type
         // feedback of one interpreted run, so forced compilation exercises the specialized paths.
-        Mode::Force => (2, 1),
+        Mode::Force => (2, 1, 1),
+        Mode::Baseline => (i32::MAX, i32::MAX, 1),
     };
+    let (entries, back_edges, baseline) =
+        thresholds_override().unwrap_or((entries, back_edges, baseline));
     MODE.with(|current| current.set(mode));
     bytecode::set_tier(Some(Tier {
         enter,
         entry_threshold: entries,
+        worth_recording,
         back_edge,
         back_edge_threshold: back_edges,
+        baseline: baseline::compile,
+        baseline_threshold: baseline,
         call: native::call,
     }));
+}
+
+/// `RY_JIT_THRESHOLDS=ENTRIES,BACK_EDGES,BASELINE` replaces the mode's thresholds, for sweeping
+/// them; `0` stands for never.
+fn thresholds_override() -> Option<(i32, i32, i32)> {
+    let text = std::env::var("RY_JIT_THRESHOLDS").ok()?;
+    let mut parts = text
+        .split(',')
+        .map(|part| match part.trim().parse::<i32>() {
+            Ok(0) => Some(bytecode::NEVER),
+            Ok(value) => Some(value),
+            Err(_) => None,
+        });
+    Some((parts.next()??, parts.next()??, parts.next()??))
 }
 
 unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
@@ -119,6 +189,57 @@ unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
         };
         run(machine, compiled, 0)
     }
+}
+
+/// Refuses a body for good, before it records, when no profile could give its compiled code
+/// anything to run natively. Forced compilation keeps such bodies, as [`compile_in`] does.
+unsafe fn worth_recording(machine: &Machine<'_>) -> bool {
+    unsafe {
+        let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
+        profile[profile::WINDOW] = clock();
+        if MODE.with(Cell::get) == Mode::Force || analysis::shape(machine.code).may_run_natively() {
+            return true;
+        }
+        if logging() {
+            eprintln!(
+                "jit: not recording {}: {}",
+                describe(machine.code),
+                analysis::NEVER_NATIVE
+            );
+        }
+        profile[profile::TIER_STATE] = -1;
+        false
+    }
+}
+
+/// Whether a loop-free body that just turned hot is expected to repay its compilation, by the
+/// model at [`COMPILE_FIXED`]. A body that compiled before passed this once already.
+unsafe fn repays(machine: &Machine<'_>, shape: analysis::Shape) -> bool {
+    unsafe {
+        let profile = values::ints(machine.code.cdr().element(PROFILE));
+        if runtime::compiles(profile[profile::TIER_STATE]) > 0 {
+            return true;
+        }
+        let threshold = bytecode::tier().map_or(0, |tier| tier.entry_threshold);
+        let window_entries = u64::try_from(threshold - bytecode::recording_start(threshold)).unwrap_or(0);
+        let window_kib = u64::from(clock().wrapping_sub(profile[profile::WINDOW]) as u32).max(1);
+        let calls = window_entries * HORIZON_KIB / window_kib;
+        let words = values::ints(machine.code.car()).len() as u64;
+        let cost = COMPILE_FIXED + COMPILE_PER_WORD * words;
+        let saving = calls * SAVING_PER_NATIVE * shape.native as u64;
+        if logging() {
+            eprintln!(
+                "jit: {} expects {calls} calls ({window_entries} in {window_kib} KiB) saving {saving} against a compile of {cost}",
+                describe(machine.code)
+            );
+        }
+        saving >= cost
+    }
+}
+
+/// The session's allocation clock in KiB, wrapping, as [`profile::WINDOW`] holds it.
+fn clock() -> i32 {
+    (heap().allocated_ever() >> 10) as i32
 }
 
 /// Whether every formal of the running closure carries a checked annotation. Such a closure
@@ -165,6 +286,7 @@ unsafe fn first_call<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
                     && reason != analysis::BRIEF
                 {
                     counters[profile::TIER_STATE] = -1;
+                    counters[profile::RECORDING] = 0;
                 }
                 None
             }
@@ -245,7 +367,33 @@ unsafe fn compiled_for<'a>(
         }
         if runtime::compiles(state) >= MAX_COMPILES {
             counters[profile::TIER_STATE] = -1;
+            counters[profile::RECORDING] = 0;
             return None;
+        }
+        if state & runtime::SIZE_WAITED == 0 && MODE.with(Cell::get) == Mode::On {
+            let rounds = (values::ints(machine.code.car()).len() / SIZE_WAIT_WORDS)
+                << runtime::compiles(state);
+            if rounds > 0 {
+                counters[profile::TIER_STATE] = state | runtime::SIZE_WAITED;
+                let wait = |threshold: i32| {
+                    i32::try_from(rounds)
+                        .unwrap_or(i32::MAX)
+                        .saturating_mul(threshold)
+                        .min(i32::MAX / 2)
+                };
+                // The counters climb back to the threshold before the tier is asked again.
+                // Recording stops for the wait and restarts when a counter nears its threshold
+                // again, so the compile still sees fresh feedback without a large body
+                // recording through every round of its wait.
+                if let Some(tier) = bytecode::tier() {
+                    counters[profile::ENTRIES] = counters[profile::ENTRIES]
+                        .min(tier.entry_threshold)
+                        .saturating_sub(wait(tier.entry_threshold));
+                    counters[profile::BACK_EDGES] = -wait(tier.back_edge_threshold);
+                    counters[profile::RECORDING] = 0;
+                }
+                return None;
+            }
         }
         let patient = !in_loop && runtime::cold_refusals(state) < MAX_COLD_REFUSALS;
         let trigger = if in_loop {
@@ -265,9 +413,30 @@ unsafe fn compiled_for<'a>(
                 if logging() {
                     eprintln!("jit: not compiling {}: {reason}", describe(machine.code));
                 }
+                // A body the tier gave up on, or that now compiles only for its loop, stops
+                // recording at entry: nothing reads that feedback, and refused bodies are often
+                // the hot ones, so recording on every call of them was most of what the tier
+                // cost a test suite. A loop starts recording again halfway to its threshold.
                 if reason == analysis::MOSTLY_TIER0 {
                     counters[profile::TIER_STATE] = state | runtime::LOOPS_ONLY;
                     counters[profile::ENTRIES] = runtime::NEVER_HOT;
+                    counters[profile::RECORDING] = 0;
+                    // The loop restarts recording when its counter reaches half the threshold
+                    // again, which a counter already past that point would never do.
+                    counters[profile::BACK_EDGES] = 0;
+                } else if reason == analysis::RARE {
+                    // Each attempt records a window of feedback, so a body that keeps turning out
+                    // rare waits twice as many entries each time, the way doubling bounds the
+                    // cost of waiting against the cost of attempts. The window reopens on the way
+                    // back to the threshold, so the next attempt measures the rate afresh.
+                    let refusals = runtime::rare_refusals(state);
+                    let threshold = bytecode::tier().map_or(0, |tier| tier.entry_threshold);
+                    let wait = threshold.saturating_mul(1 << refusals.min(12));
+                    counters[profile::ENTRIES] = threshold.saturating_sub(wait);
+                    counters[profile::RECORDING] = 0;
+                    if refusals < 0xf {
+                        counters[profile::TIER_STATE] = state + runtime::RARE_REFUSAL;
+                    }
                 } else if reason == analysis::COLD {
                     // The next attempt waits for as many entries or backward jumps as this one did,
                     // so the body runs long enough to record the types it is missing.
@@ -276,6 +445,7 @@ unsafe fn compiled_for<'a>(
                     counters[profile::BACK_EDGES] = 0;
                 } else {
                     counters[profile::TIER_STATE] = -1;
+                    counters[profile::RECORDING] = 0;
                 }
                 None
             }
@@ -303,7 +473,7 @@ pub(crate) unsafe fn describe(code: Sexp) -> String {
 
 /// What asked for a compilation, which decides how much the compiled code must save to pay
 /// for itself.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Trigger {
     /// A fully typed closure's first call, before anything shows the body is hot.
     FirstCall,
@@ -340,6 +510,14 @@ unsafe fn compile_in<'a>(
 ) -> Result<&'a Compiled, Refusal> {
     unsafe {
         let enclosure = machine.env.enclosure();
+        let forced = MODE.with(Cell::get) == Mode::Force;
+        let shape = analysis::shape(machine.code);
+        if !forced && !shape.may_run_natively() {
+            return Err(Refusal(analysis::NEVER_NATIVE));
+        }
+        if !forced && trigger == Trigger::HotEntry && !shape.loops && !repays(machine, shape) {
+            return Err(Refusal(analysis::RARE));
+        }
         let started = Instant::now();
         let plan = analysis::plan(
             analysis::Arena(arena),
@@ -351,7 +529,7 @@ unsafe fn compile_in<'a>(
         let planned = started.elapsed();
         // Forced compilation keeps such bodies, so the differential tests cover the code that
         // glues tier 0's steps together.
-        if MODE.with(Cell::get) != Mode::Force {
+        if !forced {
             if !plan.runs_natively() {
                 return Err(Refusal(analysis::NOTHING_NATIVE));
             }
@@ -401,14 +579,19 @@ unsafe fn compile_in<'a>(
                 })
                 .collect();
             eprintln!(
-                "jit: compiled {} in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations{}; {} native, {} loops; tier 0 runs: {})",
+                "jit: compiled {} ({trigger:?}, {} words) in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations{}; {} native, {} inlined, {} loops; tier 0 runs: {})",
                 describe(machine.code),
+                values::ints(machine.code.car()).len(),
                 (planned + generated).as_micros(),
                 planned.as_micros(),
                 generated.as_micros(),
                 plan.speculations.len(),
                 if portable { ", portable" } else { "" },
                 plan.native_actions(),
+                plan.actions
+                    .iter()
+                    .filter(|action| matches!(action, analysis::Action::Inline { .. }))
+                    .count(),
                 plan.loop_headers.len(),
                 if steps.is_empty() {
                     "nothing".to_string()
@@ -487,6 +670,11 @@ unsafe fn compile_in<'a>(
         heap.release_handles(mark);
         let pointer = built.map_err(|_| Refusal("out of memory"))?;
         heap.set_element(machine.code.cdr(), TIER1, pointer);
+        // Optimized code records nothing, and tier 0 stops too: only a recompile reads the
+        // feedback, and discarding the code turns recording back on before that.
+        let counters = values::ints_mut(machine.code.cdr().element(PROFILE));
+        counters[profile::RECORDING] = 0;
+        counters[profile::NEXT] = i32::MIN;
         Ok(&*(pointer.external_address() as *const Compiled))
     }
 }
@@ -544,9 +732,8 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         if bytecode::reserve_registers(cells + compiled.slots.len()).is_err() {
             return None;
         }
-        for slot in 0..compiled.slots.len() {
-            *bytecode::register_address(cells + slot) = values::nil();
-        }
+        std::slice::from_raw_parts_mut(bytecode::register_address(cells), compiled.slots.len())
+            .fill(values::nil());
         let mut loops = vec![0i64; 2 * compiled.loops];
         for (index, state) in machine.loops.iter().enumerate().take(compiled.loops) {
             loops[2 * index] = state.index as i64;
@@ -557,6 +744,8 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             loops: loops.as_mut_ptr(),
             visible: &mut interp().visible,
             entry_pc: entry_pc as i64,
+            env: machine.env,
+            hints: bytecode::lookup_hints(machine.code),
             machine: machine as *mut Machine<'_> as *mut c_void,
             compiled,
             pending: None,

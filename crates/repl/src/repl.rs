@@ -3,6 +3,7 @@
 
 pub mod console;
 mod gnu_r_home;
+pub mod highlight;
 pub mod libr;
 
 // Re-exported so hosts implement `SessionCompleter` against the same reedline version.
@@ -53,6 +54,9 @@ pub trait InputFilter: Send {
     fn filter(&mut self, input: &str) -> Filtered;
     /// Ctrl-C at the console drops the input the filter holds.
     fn interrupt(&mut self) {}
+    /// Ctrl-C dropped the last `lines` lines of the last input this filter released to run,
+    /// unread.
+    fn discard(&mut self, _lines: usize) {}
 }
 
 /// What an [`InputFilter`] does with a piece of input.
@@ -89,6 +93,8 @@ pub struct RunOptions {
     /// The package `startup` loads. ry's runtime starts analyzing it while base R loads; GNU R
     /// ignores it.
     pub package: Option<PathBuf>,
+    /// Colors for the editor's syntax highlighting; `None` leaves input uncolored.
+    pub palette: Option<highlight::Palette>,
 }
 
 /// Returns only when R ends. R assumes it owns the thread it initializes on, so

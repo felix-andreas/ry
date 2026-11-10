@@ -1140,9 +1140,9 @@ fn zip<O: Copy, L: Reader<O>, R: Reader<O>>(
 fn real_operation(op: Op, left: Option<Reals<'_>>, right: Option<Reals<'_>>, output: &mut [f64]) {
     let square = matches!(right.map(real_input), Some(Reals::Scalar(exponent)) if exponent == 2.0);
     real_reader!(left, |x| real_reader!(right, |y| match op {
-        Op::Add => map2(x, y, output, |a, b| first_nan(a, b, a + b)),
+        Op::Add => map2(x, y, output, arith::add),
         Op::Subtract => map2(x, y, output, |a, b| a - b),
-        Op::Multiply => map2(x, y, output, |a, b| first_nan(a, b, a * b)),
+        Op::Multiply => map2(x, y, output, arith::multiply),
         Op::Divide => map2(x, y, output, |a, b| a / b),
         // `power` of a non-NaN base and 2 is the plain square, and gives a NaN base back
         // untouched, payload and all.
@@ -1293,16 +1293,3 @@ pub fn widen(value: i32) -> f64 {
     }
 }
 
-/// `result`, or the first NaN operand quieted: the payload x86-64's SSE instructions give
-/// `x op y` when the operands stay in order.
-#[inline(always)]
-fn first_nan(x: f64, y: f64, result: f64) -> f64 {
-    const QUIET: u64 = 1 << 51;
-    if x.is_nan() {
-        f64::from_bits(x.to_bits() | QUIET)
-    } else if y.is_nan() {
-        f64::from_bits(y.to_bits() | QUIET)
-    } else {
-        result
-    }
-}

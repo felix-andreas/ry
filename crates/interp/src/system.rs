@@ -50,6 +50,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("readRenviron", 1, do_read_renviron).invisible(),
     internal("debug", 3, |call| unsafe {
         debugged_function(call)?.set_gp_bits(gp::CLOSURE_DEBUG, true);
+        crate::code_image::invalidate_checks();
         Ok(nil())
     })
     .invisible(),
@@ -64,6 +65,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     .invisible(),
     internal("debugonce", 3, |call| unsafe {
         debugged_function(call)?.set_gp_bits(gp::CLOSURE_STEP, true);
+        crate::code_image::invalidate_checks();
         Ok(nil())
     })
     .invisible(),

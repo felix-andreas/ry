@@ -22,23 +22,15 @@ use {
         lower::SELF,
         values,
     },
-    cranelift_codegen::{
-        ir::{
-            AbiParam, Block, FuncRef, InstBuilder, MemFlagsData, Signature, StackSlotData,
-            StackSlotKind, Type as Machine, Value,
-            condcodes::{FloatCC, IntCC},
-            types::{F64, I32, I64},
-        },
-        isa::CallConv,
-        settings::{self, Configurable},
-    },
-    cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable},
-    cranelift_jit::{JITBuilder, JITModule},
-    cranelift_module::{Module, default_libcall_names},
     heap::object::NA_REAL_BITS,
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
-    std::{cell::RefCell, sync::atomic::AtomicBool},
+    ssa::{
+        AbiParam, Block, Builder, CallConv, FloatCC, FuncId, FuncRef, IntCC, MemFlagsData, SigRef,
+        Signature, StackSlotData, StackSlotKind, Type as Machine, Value, Variable,
+        types::{F64, I32, I64},
+    },
+    std::sync::atomic::AtomicBool,
 };
 
 /// A compiled function another one may call: its code's address and its machine signature.
@@ -62,10 +54,6 @@ pub type Trampoline = unsafe extern "C" fn(i64, *const u64, *mut u64) -> i64;
 const NA_INTEGER: i64 = i32::MIN as i64;
 const LENGTH_OFFSET: i32 = std::mem::offset_of!(values::List, length) as i32;
 const DATA_OFFSET: i32 = std::mem::offset_of!(values::List, data) as i32;
-
-thread_local! {
-    static MODULE: RefCell<Option<JITModule>> = const { RefCell::new(None) };
-}
 
 /// The machine words a value of `ty` occupies.
 pub fn words(ty: Type) -> SmallVec<[Machine; 2]> {
@@ -98,68 +86,18 @@ fn signature(params: &[Type], result: Type) -> Signature {
 
 /// Compiles `function`, whose calls of other functions index `callees`.
 pub fn compile(function: &Function, callees: &[Callee]) -> Result<Code, Refusal> {
-    MODULE.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(new_module()?);
-        }
-        let module = slot.as_mut().ok_or(Refusal("no code module"))?;
-        compile_in(module, function, callees)
-    })
-}
-
-fn new_module() -> Result<JITModule, Refusal> {
-    let mut flags = settings::builder();
-    let configure = |flags: &mut settings::Builder| -> Result<(), settings::SetError> {
-        flags.set("opt_level", "speed")?;
-        flags.set("use_colocated_libcalls", "false")?;
-        flags.set("is_pic", "false")?;
-        // The verifier costs as much as the rest of compilation, so only debug builds, where
-        // the tests run, pay for it.
-        flags.set(
-            "enable_verifier",
-            if cfg!(debug_assertions) {
-                "true"
-            } else {
-                "false"
-            },
-        )?;
-        Ok(())
-    };
-    configure(&mut flags).map_err(|_| Refusal("Cranelift rejected the settings"))?;
-    let isa = cranelift_native::builder()
-        .map_err(|_| Refusal("this host has no Cranelift backend"))?
-        .finish(settings::Flags::new(flags))
-        .map_err(|_| Refusal("Cranelift could not configure the host"))?;
-    Ok(JITModule::new(JITBuilder::with_isa(
-        isa,
-        default_libcall_names(),
-    )))
-}
-
-fn compile_in(
-    module: &mut JITModule,
-    function: &Function,
-    callees: &[Callee],
-) -> Result<Code, Refusal> {
-    let params = &function.locals[..function.params];
-    let own_signature = signature(params, function.result);
-    let id = module
-        .declare_anonymous_function(&own_signature)
-        .map_err(|_| Refusal("Cranelift rejected the function declaration"))?;
-    let mut context = module.make_context();
-    context.func.signature = own_signature.clone();
-    let host = module.isa().default_call_conv();
-    let mut function_context = FunctionBuilderContext::new();
-    {
-        let own = module.declare_func_in_func(id, &mut context.func);
-        let builder = FunctionBuilder::new(&mut context.func, &mut function_context);
+    ssa::with_module(|module| -> Result<Code, Refusal> {
+        let params = &function.locals[..function.params];
+        let own_signature = signature(params, function.result);
+        let id = module.declare(&own_signature)?;
+        let mut builder = Builder::new(own_signature.clone());
+        let own = builder.import_function(id, own_signature);
         let mut emitter = Emitter {
             builder,
             function,
             callees,
             own,
-            host,
+            host: CallConv::Host,
             variables: Vec::new(),
             blocks: Vec::new(),
             signatures: FxHashMap::default(),
@@ -167,96 +105,80 @@ fn compile_in(
         };
         emitter.emit_function()?;
         emitter.builder.seal_all_blocks();
-        let config = module.isa().frontend_config();
-        emitter.builder.finalize(config);
-    }
-    if std::env::var_os("RY_TYPED_DUMP").is_some() {
-        eprintln!("{}", context.func.display());
-    }
-    module
-        .define_function(id, &mut context)
-        .map_err(|_| Refusal("Cranelift rejected the function"))?;
-    module.clear_context(&mut context);
-    let trampoline = trampoline(module, id, params)?;
-    module
-        .finalize_definitions()
-        .map_err(|_| Refusal("Cranelift could not finalize the code"))?;
-    Ok(Code {
-        address: module.get_finalized_function(id) as usize,
-        trampoline: module.get_finalized_function(trampoline) as usize,
+        let compiled = emitter.builder.finalize();
+        if std::env::var_os("RY_TYPED_DUMP").is_some() {
+            eprintln!("{compiled}");
+        }
+        module.define(id, &compiled)?;
+        let trampoline = trampoline(module, id, params, function.result)?;
+        module.finalize()?;
+        Ok(Code {
+            address: module.address(id),
+            trampoline: module.address(trampoline),
+        })
     })
 }
 
 /// A function in the host's convention that calls the compiled function `inner` with
 /// arguments read from an array of words and stores its value's words.
 fn trampoline(
-    module: &mut JITModule,
-    inner: cranelift_module::FuncId,
+    module: &mut ssa::Module,
+    inner: FuncId,
     params: &[Type],
-) -> Result<cranelift_module::FuncId, Refusal> {
-    let mut outer = Signature::new(module.isa().default_call_conv());
+    result: Type,
+) -> Result<FuncId, Refusal> {
+    let mut outer = Signature::new(CallConv::Host);
     outer.params.extend([AbiParam::new(I64); 3]);
     outer.returns.push(AbiParam::new(I64));
-    let id = module
-        .declare_anonymous_function(&outer)
-        .map_err(|_| Refusal("Cranelift rejected the trampoline declaration"))?;
-    let mut context = module.make_context();
-    context.func.signature = outer;
-    let mut function_context = FunctionBuilderContext::new();
-    {
-        let callee = module.declare_func_in_func(inner, &mut context.func);
-        let mut builder = FunctionBuilder::new(&mut context.func, &mut function_context);
-        let entry = builder.create_block();
-        builder.append_block_params_for_function_params(entry);
-        builder.switch_to_block(entry);
-        let &[budget, input, output] = builder.block_params(entry) else {
-            return Err(Refusal("a trampoline without its parameters"));
-        };
-        let mut arguments: SmallVec<[Value; 8]> = SmallVec::new();
-        arguments.push(budget);
-        let mut offset = 0;
-        for &param in params {
-            for machine in words(param) {
-                arguments.push(
-                    builder
-                        .ins()
-                        .load(machine, MemFlagsData::trusted(), input, offset),
-                );
-                offset += 8;
-            }
+    let id = module.declare(&outer)?;
+    let mut builder = Builder::new(outer);
+    let callee = builder.import_function(inner, signature(params, result));
+    let entry = builder.create_block();
+    builder.append_block_params_for_function_params(entry);
+    builder.switch_to_block(entry);
+    let &[budget, input, output] = builder.block_params(entry) else {
+        return Err(Refusal("a trampoline without its parameters"));
+    };
+    let mut arguments: SmallVec<[Value; 8]> = SmallVec::new();
+    arguments.push(budget);
+    let mut offset = 0;
+    for &param in params {
+        for machine in words(param) {
+            arguments.push(
+                builder
+                    .ins()
+                    .load(machine, MemFlagsData::trusted(), input, offset),
+            );
+            offset += 8;
         }
-        let call = builder.ins().call(callee, &arguments);
-        let results: SmallVec<[Value; 4]> = builder.inst_results(call).iter().copied().collect();
-        let Some((&status, value)) = results.split_first() else {
-            return Err(Refusal("a typed call without a status"));
-        };
-        for (index, &word) in value.iter().enumerate() {
-            builder
-                .ins()
-                .store(MemFlagsData::trusted(), word, output, 8 * index as i32);
-        }
-        builder.ins().return_(&[status]);
-        builder.seal_all_blocks();
-        builder.finalize(module.isa().frontend_config());
     }
-    module
-        .define_function(id, &mut context)
-        .map_err(|_| Refusal("Cranelift rejected the trampoline"))?;
-    module.clear_context(&mut context);
+    let call = builder.ins().call(callee, &arguments);
+    let results: SmallVec<[Value; 4]> = builder.inst_results(call).iter().copied().collect();
+    let Some((&status, value)) = results.split_first() else {
+        return Err(Refusal("a typed call without a status"));
+    };
+    for (index, &word) in value.iter().enumerate() {
+        builder
+            .ins()
+            .store(MemFlagsData::trusted(), word, output, 8 * index as i32);
+    }
+    builder.ins().return_(&[status]);
+    builder.seal_all_blocks();
+    module.define(id, &builder.finalize())?;
     Ok(id)
 }
 
 type SignatureKey = (SmallVec<[Machine; 8]>, SmallVec<[Machine; 3]>);
 
-struct Emitter<'a, 'b> {
-    builder: FunctionBuilder<'b>,
+struct Emitter<'a> {
+    builder: Builder,
     function: &'a Function,
     callees: &'a [Callee],
     own: FuncRef,
     host: CallConv,
     variables: Vec<SmallVec<[Variable; 2]>>,
     blocks: Vec<Block>,
-    signatures: FxHashMap<SignatureKey, cranelift_codegen::ir::SigRef>,
+    signatures: FxHashMap<SignatureKey, SigRef>,
     budget: Option<Variable>,
 }
 
@@ -267,7 +189,7 @@ macro_rules! address {
     };
 }
 
-impl Emitter<'_, '_> {
+impl Emitter<'_> {
     fn emit_function(&mut self) -> Result<(), Refusal> {
         let entry = self.builder.create_block();
         self.builder.append_block_params_for_function_params(entry);
@@ -488,7 +410,7 @@ impl Emitter<'_, '_> {
     fn call_words(&mut self, address: usize, returns: Machine, arguments: &[Value]) -> Value {
         let params: SmallVec<[Machine; 8]> = arguments
             .iter()
-            .map(|&argument| self.builder.func.dfg.value_type(argument))
+            .map(|&argument| self.builder.value_type(argument))
             .collect();
         let results = self.call(address, &params, &[returns], arguments);
         results[0]
@@ -500,7 +422,7 @@ impl Emitter<'_, '_> {
 
     /// A 32-bit integer as a sign-extended 64-bit word, and an `I64` as itself.
     fn wide(&mut self, value: Value) -> Value {
-        if self.builder.func.dfg.value_type(value) == I64 {
+        if self.builder.value_type(value) == I64 {
             return value;
         }
         self.builder.ins().sextend(I64, value)
@@ -1628,14 +1550,14 @@ impl Emitter<'_, '_> {
         self.builder.append_block_param(done, I64);
         self.builder
             .ins()
-            .brif(alone, done, &[pointer.into()], copy, &[]);
+            .brif(alone, done, &[pointer], copy, &[]);
         self.builder.switch_to_block(copy);
         let copied = self.call_words(
             address!(values::ry_list_unshare),
             I64,
             &[pointer, owned_flag],
         );
-        self.builder.ins().jump(done, &[copied.into()]);
+        self.builder.ins().jump(done, &[copied]);
         self.builder.switch_to_block(done);
         self.builder.block_params(done)[0]
     }
