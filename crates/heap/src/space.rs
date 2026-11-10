@@ -308,44 +308,58 @@ impl Space {
 
     /// Marks `object` and says whether it was unmarked. A newly marked object ages: it gets
     /// [`Space::promote_bits`] if it was already old, and `OLD` if it was young.
-    #[inline]
+    ///
+    /// A minor collection finds most children old and marked already, so that test is inlined
+    /// into every tracing loop, and the work for a newly marked object is out of line.
+    #[inline(always)]
     pub unsafe fn mark(&mut self, object: Sexp) -> bool {
-        let location = self.locate(object);
-        let unmarked = match location {
-            Some((page, word, bit)) => {
-                let marks = &mut self.marks[page][word];
-                let unmarked = *marks & bit == 0;
-                *marks |= bit;
-                unmarked
-            }
-            None => unsafe {
-                let unmarked = object.gc_bits() & gc_bits::MARK == 0;
-                object.set_gc_bit(gc_bits::MARK, true);
-                unmarked
-            },
+        let Some((page, word, bit)) = self.locate(object) else {
+            return unsafe { self.mark_large(object) };
         };
-        if unmarked {
-            let bits = unsafe { object.gc_bits() };
-            let promote = if bits & gc_bits::OLD == 0 {
-                gc_bits::OLD
-            } else {
-                self.promote_bits
-            };
-            // A major collection marks every live object again, so the test keeps it from
-            // storing into the header of each one that is already promoted.
-            if bits & promote != promote {
-                unsafe { object.set_gc_bit(promote, true) };
-            }
-            let cells = unsafe { vector_cells(object) };
-            self.marked_vector_cells += cells;
-            if promote & gc_bits::TENURED != 0 {
-                self.tenured_vector_cells += cells;
-                if let Some((page, word, bit)) = location {
-                    self.tenured[page][word] |= bit;
-                }
+        // `locate` found `page` in `page_class`, which every bitmap matches in length, and a
+        // slot of the smallest class at the end of a page still has its bit in the last word.
+        let marks = unsafe { self.marks.get_unchecked_mut(page).get_unchecked_mut(word) };
+        if *marks & bit != 0 {
+            return false;
+        }
+        *marks |= bit;
+        unsafe { self.age(object, Some((page, word, bit))) };
+        true
+    }
+
+    #[inline(never)]
+    unsafe fn mark_large(&mut self, object: Sexp) -> bool {
+        if unsafe { object.gc_bits() } & gc_bits::MARK != 0 {
+            return false;
+        }
+        unsafe {
+            object.set_gc_bit(gc_bits::MARK, true);
+            self.age(object, None);
+        }
+        true
+    }
+
+    #[inline(never)]
+    unsafe fn age(&mut self, object: Sexp, location: Option<(usize, usize, u64)>) {
+        let bits = unsafe { object.gc_bits() };
+        let promote = if bits & gc_bits::OLD == 0 {
+            gc_bits::OLD
+        } else {
+            self.promote_bits
+        };
+        // A major collection marks every live object again, so the test keeps it from storing
+        // into the header of each one that is already promoted.
+        if bits & promote != promote {
+            unsafe { object.set_gc_bit(promote, true) };
+        }
+        let cells = unsafe { vector_cells(object) };
+        self.marked_vector_cells += cells;
+        if promote & gc_bits::TENURED != 0 {
+            self.tenured_vector_cells += cells;
+            if let Some((page, word, bit)) = location {
+                self.tenured[page][word] |= bit;
             }
         }
-        unmarked
     }
 
     /// Whether `object`, which this collection has marked, is tenured.
