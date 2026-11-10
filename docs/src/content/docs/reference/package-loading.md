@@ -251,7 +251,7 @@ default packages at start, then each imported namespace. A warm load spends most
 there. The runtime registers each namespace's S3 methods natively, in place of the loops in GNU R
 4.3.3's `registerS3methods()`, and keeps the installed function wherever it differs from that one.
 The same step gives a few package functions a native implementation, such as rlang's
-`trace_back()`. Each one applies only while the function's formals and body hash to the release it
+`trace_back()` and the helpers behind withr's `local_envvar()` and `local_options()`. Each one applies only while the function's formals and body hash to the release it
 was written from, so another release of the package runs its own R code.
 
 ## Limits

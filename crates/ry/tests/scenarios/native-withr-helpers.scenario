@@ -1,0 +1,58 @@
+# A package author whose tests set environment variables and options with withr runs them on ry:
+# withr's helpers behind `local_envvar()`, `with_envvar()`, `local_options()` and
+# `local_language()` run natively, while `defer()` and the `local_*()` functions keep their R
+# bodies so the restore registers as an ordinary exit handler. The fast paths are installed when
+# withr's namespace loads, through a script and `ry load` alike, and only for the exact code of
+# the release they were ported from: a changed copy of a helper keeps its R body. The first check
+# fails when the installed withr is another release, so an update that drops the fast paths shows
+# up here.
+
+requires ry-runtime r-package:withr
+
+file check.R
+| library(withr)
+| helpers <- c(list_combine = "ryWithrListCombine", as_envvars = "ryWithrAsEnvvars",
+|     get_envvar = "ryWithrGetEnvvar", set_envvar = "ryWithrSetEnvvar",
+|     get_options = "ryWithrGetOptions", set_options = "ryWithrSetOptions",
+|     reset_options = "ryWithrResetOptions", reset_gettext_cache = "ryWithrResetGettextCache")
+| native <- function(f, internal) identical(body(f)[[2]], call(".Internal", call(internal)))
+| namespace <- asNamespace("withr")
+| cat("withr", format(packageVersion("withr")), "native helpers:",
+|     all(mapply(function(name, internal) native(namespace[[name]], internal), names(helpers), helpers)), "\n")
+| r_body <- body(namespace$set_envvar)[[3]]
+| exact <- new.env()
+| exact$set_envvar <- namespace$set_envvar
+| body(exact$set_envvar) <- r_body
+| changed <- new.env()
+| changed$set_envvar <- namespace$set_envvar
+| body(changed$set_envvar) <- call("{", quote(invisible(NULL)), r_body)
+| .Internal(ryPackageFastPaths("withr", exact))
+| .Internal(ryPackageFastPaths("withr", changed))
+| cat("exact copy:", native(exact$set_envvar, "ryWithrSetEnvvar"),
+|     "changed copy:", native(changed$set_envvar, "ryWithrSetEnvvar"), "\n")
+| f <- function() {
+|     local_envvar(RY_SCENARIO = "inside")
+|     Sys.getenv("RY_SCENARIO")
+| }
+| cat("inside:", f(), "after:", Sys.getenv("RY_SCENARIO", "unset"), "\n")
+file DESCRIPTION
+| Package: ledger
+| Version: 0.1.0
+| Imports: withr
+file NAMESPACE
+| importFrom(withr, local_envvar)
+file R/ledger.R
+| with_currency <- function(code, expr) {
+|     local_envvar(LEDGER_CURRENCY = code)
+|     expr
+| }
+
+run ry run --runtime ry check.R
+expect exit 0
+expect stdout "withr 3.0.3 native helpers: TRUE"
+expect stdout "exact copy: TRUE changed copy: FALSE"
+expect stdout "inside: inside after: unset"
+
+run ry load --runtime ry -e "cat('loaded:', identical(body(withr:::set_envvar)[[2]], quote(.Internal(ryWithrSetEnvvar()))), '\\n')"
+expect exit 0
+expect stdout "loaded: TRUE"

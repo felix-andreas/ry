@@ -1,0 +1,47 @@
+[stdout]
+|  chr "one"
+|  Named chr [1:3] "one" "" ""
+|  - attr(*, "names")= chr [1:3] "RY_ORACLE_T1" "RY_ORACLE_T2" "RY_ORACLE_NONE"
+|  Named chr [1:2] "one" NA
+|  - attr(*, "names")= chr [1:2] "RY_ORACLE_T1" "RY_ORACLE_NONE"
+|  Named chr NA
+|  - attr(*, "names")= chr "RY_ORACLE_NONE"
+|  chr [1:2] "one" ""
+|  Named chr "one"
+|  - attr(*, "names")= Named chr "RY_ORACLE_T1"
+|   ..- attr(*, "names")= chr "a"
+|  chr "one"
+|  chr "error: wrong type for argument"
+|  chr "5"
+|  chr "one"
+|  chr "one"
+|  logi TRUE
+|  logi [1:2] TRUE TRUE
+|  Named chr [1:2] "été" "2"
+|  - attr(*, "names")= chr [1:2] "RY_ORACLE_T3" "RY_ORACLE_T4"
+|  chr "error: all arguments must be named"
+|  chr "error: all arguments must be named"
+|  chr "error: wrong length for argument"
+|  logi [1:2] TRUE TRUE
+|  Named chr [1:2] "1" "1"
+|  - attr(*, "names")= chr [1:2] "RY_ORACLE_T5" "RY_ORACLE_T6"
+|  logi TRUE
+|  chr "NA"
+|  logi TRUE
+|  chr "v"
+|  chr "pq"
+|  logi [1:2] TRUE TRUE
+|  logi [1:2] TRUE TRUE
+|  Named chr [1:2] NA NA
+|  - attr(*, "names")= chr [1:2] "RY_ORACLE_T1" "RY_ORACLE_T7"
+|  logi(0) 
+|  logi TRUE
+| [1] FALSE
+| [1] FALSE
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| c(TRUE, TRUE, TRUE, TRUE, TRUE, TRUE)
