@@ -377,6 +377,10 @@ pub struct Interp {
     pub symbols: values::Symbols,
     /// `R_Visible`: whether the value of the last top-level evaluation prints.
     pub visible: bool,
+    /// The table baseline machine code calls its steps through, 0 until the baseline tier is
+    /// set up. Code reads it at entry rather than holding its address, so the same code runs in
+    /// any process, which is what lets code images carry it.
+    pub baseline_steps: usize,
     /// `returnValue()` for the `on.exit` code running innermost: the value its function
     /// returns, or `None` when the function is being left by an error or a jump past it.
     pub returned_values: Vec<Option<Sexp>>,
@@ -562,6 +566,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         primitive_formals: FxHashMap::default(),
         symbols,
         visible: true,
+        baseline_steps: 0,
         returned_values: Vec::new(),
         assignment_call: None,
         native_entries: SmallVec::new(),

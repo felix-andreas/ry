@@ -69,13 +69,16 @@ pub enum Condition {
 pub enum Reg {
     Activation,
     Window,
+    /// The `Interp`, for fields machine code reads and writes directly.
+    Interp,
+    /// The step table.
+    Steps,
     Accumulator,
     T0,
     T1,
     T2,
     T3,
     T4,
-    T5,
     T6,
 }
 
@@ -84,13 +87,14 @@ impl Reg {
         match self {
             Reg::Activation => 3,
             Reg::Window => 12,
+            Reg::Interp => 15,
+            Reg::Steps => 13,
             Reg::Accumulator => 0,
             Reg::T0 => 2,
             Reg::T1 => 6,
             Reg::T2 => 7,
             Reg::T3 => 8,
             Reg::T4 => 9,
-            Reg::T5 => 10,
             Reg::T6 => 11,
         }
     }
@@ -99,13 +103,14 @@ impl Reg {
         match self {
             Reg::Activation => 19,
             Reg::Window => 20,
+            Reg::Interp => 23,
+            Reg::Steps => 21,
             Reg::Accumulator => 0,
             Reg::T0 => 10,
             Reg::T1 => 11,
             Reg::T2 => 12,
             Reg::T3 => 13,
             Reg::T4 => 14,
-            Reg::T5 => 15,
             Reg::T6 => 3,
         }
     }
@@ -175,7 +180,7 @@ impl Assembler {
 
     /// Saves the pinned registers and loads them from the activation, which arrives as the
     /// first argument. The second argument, the pc to start at, is left in the accumulator.
-    pub fn prologue(&mut self, steps: u64, registers_offset: u32, interp_offset: u32) {
+    pub fn prologue(&mut self, steps_offset: u32, registers_offset: u32, interp_offset: u32) {
         match self.arch {
             Arch::X64 => {
                 // Five pushes after the return address leave the stack 16-byte aligned for calls.
@@ -188,9 +193,9 @@ impl Assembler {
                 // mov r15, [rbx + interp]
                 self.bytes(&[0x4C, 0x8B, 0xBB]);
                 self.u32(interp_offset);
-                // mov r13, steps
-                self.bytes(&[0x49, 0xBD]);
-                self.u64(steps);
+                // mov r13, [r15 + steps]
+                self.bytes(&[0x4D, 0x8B]);
+                self.x64_memory(5, 15, steps_offset);
                 // lea r14, [rip + table]
                 self.bytes(&[0x4C, 0x8D, 0x35]);
                 self.fixups.push(Fixup::Table {
@@ -212,7 +217,7 @@ impl Assembler {
                 self.a64_mov(19, 0);
                 self.a64_load(20, 19, registers_offset);
                 self.a64_load(23, 19, interp_offset);
-                self.a64_constant(21, steps);
+                self.a64_load(21, 23, steps_offset);
                 // adr x22, table
                 self.fixups.push(Fixup::Table {
                     at: self.code.len() as u32,
@@ -402,37 +407,6 @@ impl Assembler {
         self.store_scratch_register(to);
     }
 
-    /// Stores the 64-bit `value` into register `to` of the window.
-    pub fn store_register_constant(&mut self, to: u32, value: u64) {
-        match self.arch {
-            Arch::X64 => {
-                // mov rax, value
-                self.bytes(&[0x48, 0xB8]);
-                self.u64(value);
-            }
-            Arch::A64 => self.a64_constant(16, value),
-        }
-        self.store_scratch_register(to);
-    }
-
-    /// Stores the 64-bit `value` at `offset` in the `Interp`.
-    pub fn store_interp_constant(&mut self, offset: u32, value: u64) {
-        match self.arch {
-            Arch::X64 => {
-                // mov rax, value; mov [r15 + offset], rax
-                self.bytes(&[0x48, 0xB8]);
-                self.u64(value);
-                self.bytes(&[0x49, 0x89]);
-                self.x64_memory(0, 15, offset);
-            }
-            Arch::A64 => {
-                self.a64_constant(16, value);
-                self.a64_address(17, 23, offset);
-                self.word(0xF900_0000 | (17 << 5) | 16);
-            }
-        }
-    }
-
     /// Stores the byte `value` at `offset` in the `Interp`.
     pub fn store_interp_byte(&mut self, offset: u32, value: u8) {
         match self.arch {
@@ -551,22 +525,17 @@ impl Assembler {
     }
 
     /// Branches to `label` when the loaded object is (`Equal`) or is not (`NotEqual`) the
-    /// object at `address`.
-    pub fn branch_object_is(&mut self, address: u64, condition: Condition, label: Label) {
+    /// object in `register`.
+    pub fn branch_object_is_register(&mut self, register: Reg, condition: Condition, label: Label) {
         match self.arch {
-            Arch::X64 => {
-                // mov rcx, address; cmp rax, rcx
-                self.bytes(&[0x48, 0xB9]);
-                self.u64(address);
-                self.bytes(&[0x48, 0x39, 0xC8]);
-                self.x64_jcc(condition, label);
-            }
-            Arch::A64 => {
-                self.a64_constant(17, address);
-                // cmp x16, x17
-                self.word(0xEB00_001F | (17 << 16) | (16 << 5));
-                self.a64_branch_if(condition, label);
-            }
+            // cmp rax, register
+            Arch::X64 => self.x64_register_op(0x39, register.x64(), 0),
+            // cmp x16, register
+            Arch::A64 => self.word(0xEB00_001F | (register.a64() << 16) | (16 << 5)),
+        }
+        match self.arch {
+            Arch::X64 => self.x64_jcc(condition, label),
+            Arch::A64 => self.a64_branch_if(condition, label),
         }
     }
 

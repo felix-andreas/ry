@@ -5187,6 +5187,10 @@ pub mod baseline_layout {
         + std::mem::offset_of!(super::LookupCache, hints);
     /// The feedback pointer, null while nothing records type feedback.
     pub const FEEDBACK: usize = std::mem::offset_of!(Activation<'static, 'static>, feedback);
+    /// The activation's constants vector.
+    pub const CONSTANTS: usize = std::mem::offset_of!(Activation<'static, 'static>, constants);
+    /// The step table pointer inside `Interp`.
+    pub const STEPS: usize = std::mem::offset_of!(crate::Interp, baseline_steps);
     /// The visibility flag inside `Interp`.
     pub const VISIBLE: usize = std::mem::offset_of!(crate::Interp, visible);
     /// The current srcref inside `Interp`.
