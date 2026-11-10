@@ -582,12 +582,47 @@ fn refresh_start_image(sources: &HomeSources<'_>) -> Result<()> {
     // Unloading a Rust library that may have started threads or registered thread-local
     // destructors is unsound, and the process that assembles a home usually runs it next.
     std::mem::forget(library);
+    let current = current?;
     let path = std::ffi::CString::new(image.to_string_lossy().into_owned())
         .map_err(|_| Error::Usage(format!("{} contains a NUL byte", image.display())))?;
-    if unsafe { current?(path.as_ptr()) } == 1 {
+    rewrite_stale_image(
+        &image,
+        sources.base,
+        || unsafe { current(path.as_ptr()) } == 1,
+        || base::write_start_image(sources.base, sources.rcmd, sources.libr),
+    )
+}
+
+/// Runs `write` when `is_current` says the start-up image at `image` is stale. A current image
+/// is only read, so a home can be assembled over a base tree it cannot write, such as an
+/// installed release or a shared cache. The writer relinks `lib` and `bin/exec` inside the base
+/// tree, so homes assembled at once over the same stale image take turns under a lock in the
+/// base tree, and the later ones find the image current.
+fn rewrite_stale_image(
+    image: &Path,
+    base: &Path,
+    is_current: impl Fn() -> bool,
+    write: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if is_current() {
         return Ok(());
     }
-    base::write_start_image(sources.base, sources.rcmd, sources.libr)
+    let lock_path = base.join(".start-image.lock");
+    let lock = fs::File::create(&lock_path).map_err(|error| {
+        Error::Usage(format!(
+            "the start-up image {} was written by another build of ry, and its base R tree \
+             cannot be written to replace it ({}: {error}); run `just start-image` with write \
+             access to {}",
+            image.display(),
+            lock_path.display(),
+            base.display()
+        ))
+    })?;
+    lock.lock().map_err(io_error(&lock_path))?;
+    if is_current() {
+        return Ok(());
+    }
+    write()
 }
 
 /// The toolchain with `-lblas` and `-llapack` spelled as the versioned files, `-l:libblas.so.3`
@@ -2548,6 +2583,51 @@ fn user_makevars() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_image_needs_no_write_access_to_the_base_tree() {
+        let base = std::env::temp_dir().join(format!("ry-read-only-base-{}", std::process::id()));
+        fs::create_dir_all(&base).expect("temporary base tree");
+        let image = base.join("ry-start.image");
+        let mut permissions = fs::metadata(&base).expect("base metadata").permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&base, permissions.clone()).expect("read-only base");
+        let result =
+            rewrite_stale_image(&image, &base, || true, || panic!("wrote a current image"));
+        let lock_created = base.join(".start-image.lock").exists();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&base, permissions).expect("writable base");
+        fs::remove_dir_all(&base).expect("remove temporary base tree");
+        assert!(result.is_ok());
+        assert!(!lock_created, "checking a current image created the lock");
+    }
+
+    #[test]
+    fn stale_image_is_rewritten_once_under_the_lock() {
+        let base = std::env::temp_dir().join(format!("ry-stale-base-{}", std::process::id()));
+        fs::create_dir_all(&base).expect("temporary base tree");
+        let image = base.join("ry-start.image");
+        let checks = std::cell::Cell::new(0);
+        let mut writes = 0;
+        let result = rewrite_stale_image(
+            &image,
+            &base,
+            || {
+                checks.set(checks.get() + 1);
+                false
+            },
+            || {
+                writes += 1;
+                Ok(())
+            },
+        );
+        let lock_created = base.join(".start-image.lock").exists();
+        fs::remove_dir_all(&base).expect("remove temporary base tree");
+        assert!(result.is_ok());
+        assert_eq!((checks.get(), writes), (2, 1));
+        assert!(lock_created);
+    }
 
     #[test]
     fn descriptions_parse_continuations_and_dependencies() {

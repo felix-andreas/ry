@@ -241,10 +241,10 @@ def write_readme_block():
     real = json.loads((here / "results.json").read_text())["workloads"]
     kernels = json.loads((root / "tools/bench/why/results.json").read_text())["programs"]
     table = "\n".join([
-        "| untyped R on ry | what it measures | programs | speed vs GNU R (geometric mean) |",
-        "| --- | --- | ---: | ---: |",
-        f"| Real-world workloads | call-heavy R: closures, S3 and S4 dispatch, conditions, environments, strings, lists | {len(real)} | {geomean(r['gnu_r'] / r['ry_jit'] for r in real):.2f}x |",
-        f"| Synthetic kernels | tight loops, recursion and vector kernels, where the JIT applies | {len(kernels)} | {geomean(k['gnu_r'] / k['ry'] for k in kernels):.2f}x |",
+        "| benchmark | programs | speed-up over GNU R |",
+        "| --- | ---: | ---: |",
+        f"| Real-world workloads (call-heavy R) | {len(real)} | {geomean(r['gnu_r'] / r['ry_jit'] for r in real):.2f}x |",
+        f"| Synthetic kernels (loops, recursion, vectors) | {len(kernels)} | {geomean(k['gnu_r'] / k['ry'] for k in kernels):.2f}x |",
     ])
     readme = root / "README.md"
     updated, count = re.subn(r"(<!-- bench-summary -->\n).*?(<!-- /bench-summary -->)", lambda match: match[1] + table + "\n" + match[2], readme.read_text(), flags=re.S)

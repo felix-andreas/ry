@@ -377,9 +377,10 @@ pub struct Interp {
     pub srcref: Sexp,
     pub builtins: Vec<BuiltinDef>,
     pub builtin_index: FxHashMap<&'static str, u32>,
-    /// The formals `.ArgsEnv` or `.GenericArgsEnv` give each builtin, read on first use;
-    /// `None` for a builtin with `...` or with no entry, whose argument names go unchecked.
-    pub primitive_formals: FxHashMap<&'static str, Option<Box<[String]>>>,
+    /// The formals `.ArgsEnv` or `.GenericArgsEnv` give each builtin, by builtin index and read
+    /// on first use (`None` until then); an inner `None` is a builtin with `...` or with no
+    /// entry, whose argument names go unchecked.
+    pub primitive_formals: Vec<Option<Option<Box<[String]>>>>,
     pub symbols: values::Symbols,
     /// `R_Visible`: whether the value of the last top-level evaluation prints.
     pub visible: bool,
@@ -569,7 +570,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         srcref: heap.known().nil,
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
-        primitive_formals: FxHashMap::default(),
+        primitive_formals: Vec::new(),
         symbols,
         visible: true,
         returned_values: Vec::new(),
