@@ -1829,7 +1829,6 @@ fn refused_callee(name: &str) -> bool {
             | "sys.frames"
             | "attach"
             | "source"
-            | "Recall"
             | "do.call"
             | "sys.function"
     )

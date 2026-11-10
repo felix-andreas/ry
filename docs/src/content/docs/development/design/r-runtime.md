@@ -1049,7 +1049,8 @@ refuses it a slot table. Some of those refusals are permanent and some only wait
 | `environment()`, `sys.frame(s)`, `lockBinding` | heap | they hand out the frame itself, so a slot frame would make its environment on entry |
 | `...` formals | slots (built) | the `...` slot holds the collected arguments |
 | a formal with a non-literal default, left out | heap (slot path planned) | the default's promise needs an environment; it can be a promise over the slots instead, compiled with the body's slot table |
-| `sys.function`, `Recall` | heap (slot path planned) | both read `Frame.function`, not the environment |
+| `sys.function` | heap (slot path planned) | reads `Frame.function`, not the environment |
+| `Recall` | slots | reads `Frame.function` and `Frame.call` of its caller, and hands the recalled frame its caller's pending environment as parent |
 | `on.exit` | heap (slot path planned) | the exit expressions run in the frame; they can run on the slots, making the environment only if they need it |
 | `match.arg` | slots, reified when called | it reads its caller through `sys.function` and `parent.frame`; a slot path reads the formal's default from the closure and its value from the slot |
 | `do.call` | heap (slot path planned) | with a function value and no `envir`, the call needs no frame |
