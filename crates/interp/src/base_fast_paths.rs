@@ -32,7 +32,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryMatchArg", 0, do_match_arg),
     internal("ryStopifnot", 0, do_stopifnot),
     internal("rySetdiff", 0, do_setdiff),
+    internal("ryIntersect", 0, do_intersect),
     internal("ryStructure", 0, do_structure),
+    internal("rySysGetenv", 0, do_sys_getenv),
+    internal("rySysSetenv", 0, do_sys_setenv),
     internal("ryFormatDefault", 0, do_format_default),
     internal("ryReduce", 0, do_reduce),
 ];
@@ -44,7 +47,10 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("match.arg", "ryMatchArg", 0x0d569925082b596e),
     ("stopifnot", "ryStopifnot", 0x036d82929ad9613c),
     ("setdiff", "rySetdiff", 0x9f92f07db3152727),
+    ("intersect", "ryIntersect", 0xa759f096d9e1805d),
     ("structure", "ryStructure", 0xe1de236049200229),
+    ("Sys.getenv", "rySysGetenv", 0xe91342790fcd5c16),
+    ("Sys.setenv", "rySysSetenv", 0xb3ad8ec3b2915ce0),
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
     ("Reduce", "ryReduce", 0xd929e4c219983788),
 ];
@@ -165,6 +171,7 @@ const NATIVE_ENTRIES: &[(&str, u64, NativeEntry)] = &[
     ("is.data.frame", 0x7c700cf6459e2410, native_is_data_frame),
     ("is.vector", 0xf347f791e9374052, native_is_vector),
     ("isNamespace", 0x9dbd26992b319771, native_is_namespace),
+    ("Sys.unsetenv", 0x3bf70db0fa5a60ee, native_sys_unsetenv),
 ];
 
 /// Marks the closures of [`NATIVE_ENTRIES`] whose code matches and records them in
@@ -235,13 +242,14 @@ pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
         }
         return Ok(value);
     };
+    // An entry whose closure returns invisibly clears the flag itself.
+    interp().visible = true;
     let value = entry(args)?;
     if value.is_some() {
         activity::count(Counter::NativeEntries);
         if activity::enabled() {
             crate::eval::count_package_call(function, None, args);
         }
-        interp().visible = true;
     }
     Ok(value)
 }
@@ -602,6 +610,19 @@ unsafe fn native_or_else(args: &[Arg]) -> R<Option<Sexp>> {
     resolved(y.value)
 }
 
+/// `Sys.unsetenv(x)` of a character vector, which `as.character()` would leave as it is.
+unsafe fn native_sys_unsetenv(args: &[Arg]) -> R<Option<Sexp>> {
+    let Some([x]) = resolved_all::<1>(args)? else {
+        return Ok(None);
+    };
+    if x.kind() != SexpType::String || x.is_object() {
+        return Ok(None);
+    }
+    let value = kernel(crate::system::do_sys_unsetenv, &[x], values::global_env())?;
+    interp().visible = false;
+    Ok(Some(value))
+}
+
 /// The prologue's result when the R body is to run.
 pub(crate) fn decline() -> R<Sexp> {
     Ok(nil())
@@ -663,7 +684,7 @@ unsafe fn dots(frame: Sexp) -> R<Option<SmallVec<[(Sexp, Sexp); 8]>>> {
 
 /// Calls the builtin `function` with positional `args`, for a kernel that reads only its
 /// arguments.
-unsafe fn kernel(function: BuiltinFn, args: &[Sexp], env: Sexp) -> R<Sexp> {
+pub(crate) unsafe fn kernel(function: BuiltinFn, args: &[Sexp], env: Sexp) -> R<Sexp> {
     let args: SmallVec<[Arg; 9]> = args
         .iter()
         .map(|&value| Arg { tag: nil(), value })
@@ -1023,6 +1044,150 @@ unsafe fn do_setdiff(call: &Call<'_>) -> R<Sexp> {
     finish(frame, result, true)
 }
 
+/// `intersect(x, y)` of plain vectors: the elements of `unique(x)` without names that `y` has,
+/// in the type `c()` gives `x` and `y` together. R's body asks `.set_ops_need_as_vector()`
+/// first, which costs two `tryCatch()` calls, and for plain vectors its answer cannot change the
+/// result because `unique()` drops every attribute.
+unsafe fn do_intersect(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.env()?;
+    let Some(x) = argument(frame, symbols().x)? else {
+        return decline();
+    };
+    if x == nil() {
+        return finish(frame, nil(), true);
+    }
+    let Some(y) = argument(frame, symbols().y)? else {
+        return decline();
+    };
+    if y == nil() {
+        return finish(frame, nil(), true);
+    }
+    if !is_plain_atomic(x) || !is_plain_atomic(y) {
+        return decline();
+    }
+    // `c()` turns numbers into strings with its own formatting, and complex numbers have their
+    // own rules; those mixes keep the R body.
+    let mixed = x.kind() != y.kind();
+    let text_or_complex = |kind: SexpType| matches!(kind, SexpType::String | SexpType::Complex);
+    if mixed && (text_or_complex(x.kind()) || text_or_complex(y.kind())) {
+        return decline();
+    }
+    let no = values::scalar_bool(false)?;
+    crate::heap().root(no);
+    let none = values::logical_vector(&[NA_LOGICAL])?;
+    crate::heap().root(none);
+    let unique_x = kernel(sort::do_unique, &[x, no, no, none], frame)?;
+    values::set_attr(unique_x, symbols().names, nil())?;
+    let unique_y = kernel(sort::do_unique, &[y, no, no, none], frame)?;
+    let zero = values::scalar_integer(0)?;
+    crate::heap().root(zero);
+    let positions = kernel(sort::do_match, &[unique_x, unique_y, zero, nil()], frame)?;
+    let kept: Vec<usize> = values::ints(positions)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &position)| (position > 0).then_some(index))
+        .collect();
+    let mut result = if kept.len() == length(unique_x) {
+        unique_x
+    } else {
+        crate::subset::select_elements(unique_x, &kept)?
+    };
+    // Logical, integer and double rank in that order for `c()`.
+    let rank = |kind: SexpType| match kind {
+        SexpType::Logical => 0,
+        SexpType::Integer => 1,
+        _ => 2,
+    };
+    if mixed && rank(y.kind()) > rank(x.kind()) {
+        crate::heap().root(result);
+        result = crate::coerce::coerce_vector(result, y.kind())?;
+    }
+    finish(frame, result, true)
+}
+
+/// `Sys.getenv(x, unset, names)` of a character vector `x`, a single string or `NA` for
+/// `unset`, and a single logical for `names`: the values, named by `x` when `names` asks for
+/// it, without the closure's `structure()` call.
+unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.env()?;
+    let symbols = symbols();
+    let Some(x) = argument(frame, symbols.x)? else {
+        return decline();
+    };
+    // An empty `x` lists the whole environment, which `structure()` names with `NA`s.
+    if x.kind() != SexpType::String || x.attrib() != nil() || length(x) == 0 {
+        return decline();
+    }
+    let Some(unset) = argument(frame, symbols.unset)? else {
+        return decline();
+    };
+    if length(unset) != 1 || unset.attrib() != nil() {
+        return decline();
+    }
+    let unset = match unset.kind() {
+        SexpType::String => unset,
+        SexpType::Logical if values::ints(unset)[0] == NA_LOGICAL => {
+            let text = values::scalar_string_charsxp(values::na_string())?;
+            crate::heap().root(text);
+            text
+        }
+        _ => return decline(),
+    };
+    let Some(names) = argument(frame, symbols.names)? else {
+        return decline();
+    };
+    if names.kind() != SexpType::Logical || length(names) != 1 || names.attrib() != nil() {
+        return decline();
+    }
+    let named = match values::ints(names)[0] {
+        NA_LOGICAL => length(x) > 1,
+        flag => flag != 0,
+    };
+    let value = kernel(crate::system::do_sys_getenv, &[x, unset], frame)?;
+    if named {
+        values::set_attr(value, symbols.names, x)?;
+    }
+    finish(frame, value, true)
+}
+
+/// `Sys.setenv(...)` where every argument is named and is a single string, so `unlist()` and
+/// `as.character()` leave the values as they are.
+unsafe fn do_sys_setenv(call: &Call<'_>) -> R<Sexp> {
+    let frame = call.env()?;
+    let Some(items) = dots(frame)? else {
+        return decline();
+    };
+    if items.is_empty() || items.iter().any(|&(tag, _)| tag == nil()) {
+        return decline();
+    }
+    let mut new_values: SmallVec<[Sexp; 8]> = SmallVec::new();
+    // `list(...)` forces every element before any is looked at.
+    for &(_, item) in &items {
+        let value = eval::value_of(item)?;
+        crate::heap().root(value);
+        new_values.push(value);
+    }
+    if new_values.iter().any(|&value| {
+        value.kind() != SexpType::String || length(value) != 1 || value.attrib() != nil()
+    }) {
+        return decline();
+    }
+    let names = values::alloc(SexpType::String, items.len())?;
+    crate::heap().root(names);
+    let strings = values::alloc(SexpType::String, items.len())?;
+    crate::heap().root(strings);
+    for (index, (&(tag, _), &value)) in items.iter().zip(&new_values).enumerate() {
+        let name = tag.car();
+        if name.bytes().is_empty() {
+            return decline();
+        }
+        values::set_elt(names, index, name);
+        values::set_elt(strings, index, value.element(0));
+    }
+    let value = kernel(crate::system::do_sys_setenv, &[names, strings], frame)?;
+    finish(frame, value, false)
+}
+
 /// Attribute names `structure()` sets through `attributes<-` with no check that could fail or
 /// convert the object: everything but the attributes R validates.
 fn sets_unchecked(name: &[u8]) -> bool {
@@ -1044,8 +1209,8 @@ fn sets_unchecked(name: &[u8]) -> bool {
     )
 }
 
-/// `structure(.Data, ...)` when every attribute is named and is either a plain one or a `class`
-/// that is a character vector without `"factor"`.
+/// `structure(.Data, ...)` when every attribute is named and is either a plain one, `names` that
+/// need no coercion, or a `class` that is a character vector without `"factor"`.
 unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env()?;
     let Some(data) = argument(frame, symbols().dot_data)? else {
@@ -1080,6 +1245,27 @@ unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
             let na = value.kind() == SexpType::String
                 && (0..length(value)).any(|index| value.element(index) == values::na_string());
             if value.kind() != SexpType::String || value.attrib() != nil() || factor || na {
+                return decline();
+            }
+        } else if name.as_bytes() == b"names" {
+            // `names<-` coerces, pads a shorter value with NA and rejects a longer one; a plain
+            // character vector of the vector's own length needs none of that.
+            let plain = value == nil()
+                || (value.kind() == SexpType::String
+                    && value.attrib() == nil()
+                    && length(value) == length(data));
+            let vector = matches!(
+                data.kind(),
+                SexpType::Logical
+                    | SexpType::Integer
+                    | SexpType::Real
+                    | SexpType::Complex
+                    | SexpType::String
+                    | SexpType::Raw
+                    | SexpType::List
+                    | SexpType::Expression
+            );
+            if !plain || !vector {
                 return decline();
             }
         } else if !sets_unchecked(name.as_bytes()) {

@@ -1,0 +1,15 @@
+# structure(names =) sets a plain character vector of the right length directly, and coerces,
+# pads or rejects anything else as names<- does.
+print(structure(1:3, names = c("a", "b", "c"))); print(structure(c(x = 1, y = 2), names = NULL))
+print(structure(1:3, names = c("a", "b"))); print(structure(1:3, names = 1:3))
+print(tryCatch(structure(1:2, names = letters[1:3]), error = conditionMessage))
+print(structure(list(1, 2), names = c("a", NA))); print(structure(c(x = 1, y = 2), names = c("p", "q"), class = "foo"))
+print(attributes(structure(matrix(1:4, 2), names = letters[1:4])))
+print(attributes(structure(1:4, names = letters[1:4], dim = c(2L, 2L))))
+print(attributes(structure(1:2, foo = 1, names = c("a", "b"))))
+print(structure(quote(f(x)), names = c("a", "b"))); print(structure(as.raw(1:2), names = c("r", "s")))
+print(structure(c(a = "x"), names = structure("b", note = 1)))
+print(structure(factor(c("u", "v")), names = c("p", "q")))
+v <- c(1, 2); w <- structure(v, names = c("a", "b")); print(v); print(w)
+print(structure(1:2, names = c("a", "b"), names = c("c", "d")))
+print(structure(expression(1, 2), names = c("e", "f")))

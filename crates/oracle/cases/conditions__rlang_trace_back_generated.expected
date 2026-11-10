@@ -6,7 +6,7 @@
 | 6 character character run_stack(kinds, trim)/0/TRUE/NA/global;step(list(marks = list(globalenv()), trim = trim))/1/TRUE/NA/NA;wrapper(state, inner)/2/TRUE/NA/global;withCallingHandlers(next_step(state), warning = function(w) NULL)/3/TRUE/base/::;next_step(state)/3/TRUE/NA/NA;wrapper(state, inner)/5/TRUE/NA/global
 | 2 character character run_stack(kinds, trim)/0/TRUE/NA/global;step(list(marks = list(globalenv()), trim = trim))/1/TRUE/NA/global
 | traces: 87 distinct of 150 
-| checksum: 5630665 
+| checksum: 5641561 
 [messages]
 [warnings]
 [errors]

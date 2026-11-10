@@ -1437,8 +1437,12 @@ impl Heap {
         self.install_char(name)
     }
 
-    /// The interned symbol whose print name is the `CHARSXP` `name`.
+    /// The interned symbol whose print name is the `CHARSXP` `name`. `NA_character_` is not the
+    /// interned "NA" string, and installs as the symbol `NA`, as GNU R's `installTrChar` does.
     pub unsafe fn install_char(&mut self, name: Sexp) -> HeapResult<Sexp> {
+        if name == self.known.na_string {
+            return self.install(b"NA");
+        }
         if let Some(&symbol) = self.symbols.get(&name) {
             return Ok(symbol);
         }

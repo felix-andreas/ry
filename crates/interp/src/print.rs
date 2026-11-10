@@ -929,6 +929,8 @@ unsafe fn print_list(list: Sexp, options: &PrintOptions, tag: &mut String) -> R<
     };
     for index in 0..shown {
         let element = list.element(index);
+        // GNU R prints an `NA` name as `$<NA>`.
+        let na_name = names != nil() && names.element(index) == values::na_string();
         let name = if names != nil() {
             values::string_at(names, index).map(|text| text.into_owned())
         } else {
@@ -951,6 +953,7 @@ unsafe fn print_list(list: Sexp, options: &PrintOptions, tag: &mut String) -> R<
                         tag.push_str("$...");
                     }
                 }
+                None if na_name => tag.push_str("$<NA>"),
                 Some(_) | None => tag.push_str(&format!("[[{}]]", index + 1)),
             }
         }

@@ -375,6 +375,8 @@ object. Long vectors use `R_xlen_t` lengths throughout.
 - **ALTREP is native.** An ALTREP object is a vector whose methods table decides length, element
   access, region access and dataptr materialization. Package-defined classes use the R API; ry's own
   compact sequences, memory-mapped vectors and table columns (section 6) use the same mechanism.
+  The interpreter reads an element of a long ALTREP vector through its `Elt` method, so
+  `x <- seq_len(2^31 - 1); x[c(1, 2^31 - 1)]` reads two elements instead of expanding 8 GB.
 
 ### Memory management
 
