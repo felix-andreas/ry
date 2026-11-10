@@ -425,11 +425,11 @@ unsafe fn slot_promise_value(promise: Sexp, owner: usize) -> R<Sexp> {
     if expression.kind() == SexpType::Symbol {
         let names = function.cdr().cdr().element(bytecode::SLOTS).element(1);
         match (0..values::length(names)).find(|&index| names.element(index) == expression) {
-            None => return eval(expression, function.tag()),
+            None => return eval_enclosed_name(expression, function.tag(), owner),
             Some(slot) => {
                 let value = *bytecode::register_address(header + 1 + slot);
                 if value == unbound() {
-                    return eval(expression, function.tag());
+                    return eval_enclosed_name(expression, function.tag(), owner);
                 }
                 if value.kind() == SexpType::Promise {
                     return force_promise(value);
@@ -441,6 +441,17 @@ unsafe fn slot_promise_value(promise: Sexp, owner: usize) -> R<Sexp> {
         }
     }
     eval(expression, frame_env(owner, Reify::Site("promise over the frame"))?)
+}
+
+/// Evaluates `symbol` from `enclosure` for the slot frame at `owner`, whose own slots do not bind
+/// it, so an unbound name is reported against the frame's call and not the enclosure's.
+unsafe fn eval_enclosed_name(symbol: Sexp, enclosure: Sexp, owner: usize) -> R<Sexp> {
+    interp().visible = true;
+    let lexical = || interp().frames.get(owner).map_or(nil(), |frame| frame.call);
+    match eval_symbol_reporting(symbol, enclosure, lexical) {
+        Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
+        result => result,
+    }
 }
 
 /// A promise of `expression`, compiled code or a name, over the slots of the slot frame at
@@ -683,11 +694,11 @@ unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
         return eval(symbol, frame.env);
     }
     if slot == NO_REFERENCE_SLOT {
-        return eval(symbol, frame.function.tag());
+        return eval_enclosed_name(symbol, frame.function.tag(), owner);
     }
     let value = *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
     if value == unbound() {
-        return eval(symbol, frame.function.tag());
+        return eval_enclosed_name(symbol, frame.function.tag(), owner);
     }
     if value.kind() == SexpType::Promise {
         return force_promise(value);
