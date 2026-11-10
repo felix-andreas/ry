@@ -2176,6 +2176,16 @@ impl Compiler {
                 ".ry_match" if supported_match(&args)? => {
                     return self.compiled_match(call, head, primitive, dst, &args);
                 }
+                // `quote(x)` is `x` itself, so a slot frame needs no environment for it, as
+                // `identical(x, quote(expr = ))` in rlang's `is_missing` would otherwise.
+                "quote" => {
+                    return match args.as_slice() {
+                        [(tag, quoted)] if *tag == nil() || symbol_name(*tag) == "expr" => {
+                            self.quoted(call, head, primitive, dst, *quoted)
+                        }
+                        _ => self.general_call(call, head, dst),
+                    };
+                }
                 "missing" => {
                     return match args.as_slice() {
                         [(tag, symbol)]
@@ -2733,6 +2743,26 @@ impl Compiler {
         let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
         let symbol = self.constant(symbol);
         self.emit(Op::Missing, &[dst, symbol]);
+        self.cold_fallback(&[guard], call, dst)
+    }
+
+    /// `quote(quoted)`, guarded by `quote`: the quoted expression as a constant.
+    unsafe fn quoted(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        dst: u32,
+        quoted: Sexp,
+    ) -> R<()> {
+        let name = self.constant(head);
+        let expected = self.constant(primitive);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
+        let constant = self.constant(quoted);
+        self.emit(Op::Constant, &[dst, constant]);
+        self.emit(Op::Visible, &[]);
         self.cold_fallback(&[guard], call, dst)
     }
 

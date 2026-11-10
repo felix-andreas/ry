@@ -739,7 +739,7 @@ pub unsafe fn detach_references(args: &[Arg]) -> R<()> {
 /// reference to several frames, so converting it in place is what keeps it one promise that
 /// forces once for all of them.
 pub unsafe fn detach_reference(reference: Sexp) -> R<()> {
-    let promise = reference_promise(reference)?;
+    let [value, code, env, compiled] = reference_promise(reference)?;
     let state = interp();
     let used = state.references_used as usize;
     let Some(index) = state.references[..used]
@@ -749,11 +749,10 @@ pub unsafe fn detach_reference(reference: Sexp) -> R<()> {
         panic!("an argument reference outlived the call it was made for");
     };
     let heap = crate::heap();
-    heap.root(promise);
-    heap.set_car(reference, promise.car());
-    heap.set_cdr(reference, promise.cdr());
-    heap.set_tag(reference, promise.tag());
-    heap.set_attrib(reference, promise.attrib());
+    heap.set_car(reference, value);
+    heap.set_cdr(reference, code);
+    heap.set_tag(reference, env);
+    heap.set_attrib(reference, compiled);
     reference.set_gp_bits(gp::ARGUMENT_REFERENCE, false);
     let target = values::integer_vector(&[0, 0, 0])?;
     heap.root(target);
@@ -767,31 +766,49 @@ pub unsafe fn detach_reference(reference: Sexp) -> R<()> {
     Ok(())
 }
 
-/// The ordinary promise that stands for an argument reference: a forced promise of its name
-/// once it is forced, and a promise of its name in the frame it names before.
-unsafe fn reference_promise(reference: Sexp) -> R<Sexp> {
+/// The fields (value, code, environment, compiled code) of the ordinary promise that stands for
+/// an argument reference: a forced promise of its name once it is forced, and a promise of its
+/// name in the frame it names before. [`detach_reference`] writes them into the reference
+/// itself, so no promise is allocated only to be copied.
+unsafe fn reference_promise(reference: Sexp) -> R<[Sexp; 4]> {
     let symbol = reference.cdr();
     if reference.car() != unbound() {
-        return forced_promise(symbol, reference.car());
+        return Ok([reference.car(), symbol, nil(), nil()]);
     }
-    if let Some(env) = reference_env(reference) {
+    let (env, expression) = if let Some(env) = reference_env(reference) {
         let code = reference.attrib();
-        if code.kind() == SexpType::Bytecode {
-            return compiled_promise(code, env);
-        }
-        return make_promise(symbol, env);
-    }
-    let (owner, _) = reference_target(reference);
-    let caller = &interp().frames[owner];
-    let expression = reference_code(reference).unwrap_or(symbol);
-    if caller.env != nil() {
-        return if expression.kind() == SexpType::Bytecode {
-            compiled_promise(expression, caller.env)
+        (
+            env,
+            if code.kind() == SexpType::Bytecode {
+                code
+            } else {
+                symbol
+            },
+        )
+    } else {
+        let (owner, _) = reference_target(reference);
+        let expression = reference_code(reference).unwrap_or(symbol);
+        let frame = &mut interp().frames[owner];
+        if frame.env != nil() {
+            (frame.env, expression)
         } else {
-            make_promise(symbol, caller.env)
-        };
-    }
-    slot_promise(owner, expression)
+            let mut env = frame.pending;
+            if env == nil() {
+                let function = frame.function;
+                env = frame_environment(function, function.car())?;
+                env.set_gp_bits(gp::PENDING_FRAME, true);
+                interp().frames[owner].pending = env;
+            }
+            interp().frames[owner].unforced += 1;
+            (env, expression)
+        }
+    };
+    activity::count(Counter::PromisesCreated);
+    Ok(if expression.kind() == SexpType::Bytecode {
+        [unbound(), bytecode::source_of(expression), env, expression]
+    } else {
+        [unbound(), symbol, env, nil()]
+    })
 }
 
 /// The environment of an unforced `promise`, made first when it is a slot frame's pending one
