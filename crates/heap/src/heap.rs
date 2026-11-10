@@ -961,8 +961,7 @@ impl Heap {
         }
         let memory = self.space.allocate_from_run(CLASS as usize)?;
         self.young_bytes = young;
-        let object = Sexp::from_non_null(memory.cast());
-        object.init_header(kind, CLASS, 0, self.known.nil);
+        let object = self.init_small(memory, kind, CLASS as usize, VECTOR_DATA_OFFSET);
         object.set_length_and_capacity(1, 1);
         object.data().cast::<[u64; 2]>().write(payload);
         Some(object)
