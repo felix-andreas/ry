@@ -101,7 +101,10 @@ jobs:
           curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
           echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-20 main" | sudo tee /etc/apt/sources.list.d/llvm-20.list
           sudo apt-get update && sudo apt-get install -y bolt-20
-          Rscript -e 'install.packages(c("testthat", "purrr", "stringr", "lubridate", "data.table", "xts", "zoo"))'
+          Rscript -e 'packages <- c("testthat", "purrr", "stringr", "lubridate", "data.table", "xts", "zoo"); install.packages(packages); stopifnot(all(vapply(packages, requireNamespace, NA, quietly = TRUE)))'
+          # Two release target directories and the instrumented fat-LTO link need more disk than the
+          # runner has free.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
       - name: package
         run: just package "$VERSION" ${{ matrix.target }}
       # RY_SMOKE_PACKAGES installs jsonlite with GNU R and loads it under `ry run`: a CRAN binary on

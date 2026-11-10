@@ -34,7 +34,7 @@ def main():
     if not chosen:
         sys.exit(f"hot_functions: no symbol of {library} has a count in {profile}")
     print(f"hot_functions: {len(chosen)} of {len(ran)} functions that ran have a symbol", file=sys.stderr)
-    print("\n".join(sorted(chosen)))
+    sys.stdout.writelines(name + "\n" for name in sorted(chosen))
 
 
 if __name__ == "__main__":

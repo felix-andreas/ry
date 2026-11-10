@@ -40,16 +40,16 @@ def public_programs():
     return trained, [program for program in programs if program not in trained]
 
 
-def jobs(ry, env, scratch):
+def jobs(ry, tier, scratch):
     driver = root / "crates/oracle/src/driver.R"
     for case in sorted((root / "crates/oracle/cases").glob("*.R")):
-        report = scratch / f"{case.stem}.json"
+        report = scratch / f"{tier}-{case.stem}.json"
         yield f"oracle/{case.stem}", [ry, "run", "--runtime", "ry", str(driver), str(case), str(report)], case.parent
     harness = (bench / "harness.R").read_text()
     for workload in sorted(bench.glob("*.R")):
         if workload.name == "harness.R":
             continue
-        script = scratch / f"workload-{workload.name}"
+        script = scratch / f"{tier}-workload-{workload.name}"
         script.write_text(harness + "\n" + workload.read_text())
         yield f"workload/{workload.stem}", [ry, "run", "--runtime", "ry", str(script)], bench
     training, _ = public_programs()
@@ -84,7 +84,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="ry-train-") as scratch:
         scratch = pathlib.Path(scratch)
         work = [(f"{tier}:{name}", command, cwd, env)
-                for tier, env in tiers for name, command, cwd in jobs(args.ry, base, scratch)]
+                for tier, env in tiers for name, command, cwd in jobs(args.ry, tier, scratch)]
         failed = 0
         broken_workloads = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:

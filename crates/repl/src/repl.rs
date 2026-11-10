@@ -12,6 +12,7 @@ use std::{
     error::Error,
     ffi::{CString, c_char, c_int, c_void},
     fmt, fs,
+    hint::black_box,
     io::{self, IsTerminal},
     path::{Path, PathBuf},
 };
@@ -440,7 +441,7 @@ pub fn bundled_base() -> Result<PathBuf, ReplError> {
     // Read through `black_box` so this function compiles to the same control flow whether or not
     // a base R is embedded: the release build embeds one into a binary whose profile was
     // collected without it (tools/layout/optimize.sh), and a profile fails on a changed function.
-    match std::hint::black_box(&EMBEDDED_BASE) {
+    match black_box(&EMBEDDED_BASE) {
         Some(base) => extract_base(base),
         None => Err(ReplError(
             "this ry has no base R: it was built without RY_EMBED_BASE, and no base-r directory \
@@ -492,7 +493,7 @@ fn ry_runtime_library() -> Result<(PathBuf, bool), ReplError> {
         }
     }
     // Through `black_box` for the reason `bundled_base` gives.
-    if let Some(runtime) = std::hint::black_box(&EMBEDDED_RUNTIME) {
+    if let Some(runtime) = black_box(&EMBEDDED_RUNTIME) {
         return extract_runtime(runtime).map(|path| (path, true));
     }
     Err(ReplError(format!(

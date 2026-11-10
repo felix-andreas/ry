@@ -1890,7 +1890,7 @@ copy. Measured against the plain release build in one sitting (4-core cloud VM, 
 | --- | --- | --- | --- |
 | testthat_full test phase, JIT on / off | 0.252 / 0.248 s | 0.228 / 0.219 s | 0.219 / 0.218 s |
 | testthat_full process wall, JIT on | 1.68 s | 1.51 s | 1.44 s |
-| testthat_full peak RSS, JIT on | 82.5 MB | 76.8 MB | 80.1 MB |
+| testthat_full peak RSS, JIT on (the two optimized builds interleaved in a second sitting) | 82.5 MB | 76.3 MB | 76.1 MB |
 | testthat_full callgrind instructions | 2.60 G | 2.22 G | 2.21 G |
 | period.apply 2e6, JIT on / off | 0.70 / 0.70 s | 0.56 / 0.55 s | 0.56 / 0.57 s |
 | period.apply per period: instructions, I1 misses | 185k, 5,450 | 160k, 3,360 | 160k, 3,050 |
@@ -1906,10 +1906,12 @@ ones the profile never saw (awfy entirely, and the odd positions of rcp and shoo
 | shootout, trained (16) / held out (17) | 2.19 / 2.16 | 2.57 / 2.55 | 2.56 / 2.58 |
 
 PGO accounts for nearly all the gain, and the held-out programs gain as much as the trained ones,
-so the profile generalizes. BOLT cuts instruction-cache misses by another 9% and changes wall
-time by between 4% faster and 3% slower, faster on testthat_full, at about 3 MB more peak RSS
-than PGO alone (still below the plain build) (BOLT keeps the original text and adds a
-new segment, so the file grows from 107 MB to 136 MB).
+so the profile generalizes. BOLT cuts instruction-cache misses by another 9%. It changes the
+public suites by between 4% faster and 3% slower, and testthat_full's process wall time by 1 to
+13% faster in each of five interleaved batches of five runs, with JIT on and off. Peak RSS
+matches PGO alone: BOLT moves the hot functions into a new 6.6 MB text segment and leaves the
+original text mostly unread, so libR's resident pages total 15.6 MB against 16.0 MB. The file
+grows from 107 MB to 136 MB, because the original text stays in it.
 
 - **Why the earlier attempt lost.** An earlier attempt profiled only `interp`, `heap`, `libr` and `R`
   and trained on the oracle cases alone, and ran 1.4 to 1.9x slower; that slowdown was not
@@ -1917,7 +1919,7 @@ new segment, so the file grows from 107 MB to 136 MB).
   failure: passing `-Cprofile-generate`/`-Cprofile-use` in `RUSTFLAGS` changes every crate's
   `-C metadata` hash, which is part of every v0-mangled symbol and codegen-unit name, so the two
   builds name each function differently and the profile matched about 1% of the functions that
-  ran. LLVM warns only on a hash mismatch, never on a function it finds no record for.
+  ran. By default LLVM warns only on a hash mismatch, never on a function it finds no record for.
 - **The flags go through `RUSTC_WRAPPER`** (`tools/layout/rustc-wrapper.sh`, reading
   `RY_LAYOUT_RUSTFLAGS`), applied to every rustc call with `--target`, which skips build scripts
   and proc-macros. Both builds keep the release profile's `strip` off and use their own target

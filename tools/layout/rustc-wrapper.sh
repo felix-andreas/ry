@@ -10,6 +10,7 @@
 set -euo pipefail
 rustc=$1
 shift
+# Split on whitespace, so a profile path must not contain a space.
 read -ra extra <<< "${RY_LAYOUT_RUSTFLAGS:-}"
 case " $* " in
 *" --target "*) exec "$rustc" "$@" "${extra[@]}" ;;

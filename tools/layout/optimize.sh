@@ -91,8 +91,15 @@ mkdir -p "$work/pgo-raw" "$work/bolt-raw" "$work/runtime"
 # instrumentation, from running at once.
 build() {
 	export RUSTC_WRAPPER="$root/tools/layout/rustc-wrapper.sh" CARGO_PROFILE_RELEASE_STRIP=false
-	cargo build --release --locked --target "$target" -p libr -p rcmd 2> >(tee -a "$work/build.log" >&2)
-	cargo build --release --locked --target "$target" -p ry-lang 2> >(tee -a "$work/build.log" >&2)
+	cargo_logged -p libr -p rcmd
+	cargo_logged -p ry-lang
+}
+
+# Runs a release build with its output in build.log as well. A pipe rather than a process
+# substitution, because bash waits for a pipe's `tee` but not for a substitution's, and
+# check_profile must read the last lines, which hold the LTO link's warnings.
+cargo_logged() {
+	cargo build --release --locked --target "$target" "$@" 2>&1 | tee -a "$work/build.log" >&2
 }
 
 # Fails when the build log shows a profile that does not match the code. A hash mismatch or a
@@ -111,6 +118,7 @@ check_profile() {
 	fi
 	missing=$(grep -c 'no profile data available' "$work/build.log" || true)
 	records=$("$profdata" show "$work/pgo.profdata" | sed -n 's/^Total functions: //p')
+	[ -n "$records" ] || { echo "error: llvm-profdata show printed no function count" >&2; exit 1; }
 	echo "optimize: $missing functions without a profile record, against $records records" >&2
 	if [ $((missing * 100)) -gt "$records" ]; then
 		echo "error: the profile names no record for $missing functions; the two builds named them differently" >&2
@@ -122,20 +130,30 @@ echo "optimize: instrumented build" >&2
 RY_LAYOUT_RUSTFLAGS="-Cprofile-generate=$work/pgo-raw" CARGO_TARGET_DIR="$work/instrumented" build
 # `%4m` merges each binary's counters into a pool of four files as processes exit, instead of
 # one file per process.
-export LLVM_PROFILE_FILE="$work/pgo-raw/%4m.profraw"
+# Building base R runs the instrumented runtime too, and its profile is discarded: training is
+# the mix train.py runs, not the base R build.
 echo "optimize: base R and training on the instrumented build" >&2
-base_r "$work/instrumented/$target/base-r" "$instrumented/$rcmd" "$instrumented/$library"
+LLVM_PROFILE_FILE=/dev/null base_r "$work/instrumented/$target/base-r" "$instrumented/$rcmd" "$instrumented/$library"
+export LLVM_PROFILE_FILE="$work/pgo-raw/%4m.profraw"
 RY_BASE_R="$work/instrumented/$target/base-r" RY_LIBR="$instrumented/$library" \
 	python3 -I tools/layout/train.py "$instrumented/$ry"
 unset LLVM_PROFILE_FILE
 "$profdata" merge -o "$work/pgo.profdata" "$work/pgo-raw"
 
-# A function the profile has no record for means the two builds compiled different code, so
-# LLVM's warning for it fails the build like a hash mismatch does.
+# LLVM reports a function the profile has no record for only with this flag, and check_profile
+# counts those reports.
 flags="-Cprofile-use=$work/pgo.profdata -Cllvm-args=-pgo-warn-missing-function"
 # BOLT moves functions only in a binary that keeps its relocations, and needs the symbol table,
 # so stripping waits until after it.
 [ -z "$bolt" ] || flags="$flags -Clink-arg=-Wl,--emit-relocs"
+# Cargo does not see the wrapper's flags, so it would keep crates compiled against an older
+# profile. A profile that differs from the last build's starts the optimized build afresh.
+stamp=$(sha256sum "$work/pgo.profdata" | cut -d' ' -f1)
+if [ "$(cat "$work/optimized/profile.sha256" 2> /dev/null || true)" != "$stamp" ]; then
+	rm -rf "$work/optimized"
+	mkdir -p "$work/optimized"
+	echo "$stamp" > "$work/optimized/profile.sha256"
+fi
 export RY_LAYOUT_RUSTFLAGS="$flags" CARGO_TARGET_DIR="$work/optimized"
 echo "optimize: profile-guided release build" >&2
 : > "$work/build.log"
@@ -144,9 +162,19 @@ check_profile
 
 runtime="$work/runtime/$library"
 cp "$optimized/$library" "$runtime"
-for sibling in libRblas.so libRlapack.so; do
-	[ ! -e "$optimized/$sibling" ] || cp "$optimized/$sibling" "$work/runtime/"
-done
+# GNU R's reference BLAS and LAPACK, which a release embeds beside libR. tools/base-r/build.sh
+# writes them beside the instrumented libR. They bind libR by its soname, so the same files
+# serve the optimized one.
+if [ "$library" = libR.so ]; then
+	for sibling in libRblas.so libRlapack.so; do
+		found=""
+		for directory in "$instrumented" "$build"; do
+			[ -e "$directory/$sibling" ] && { found="$directory/$sibling"; break; }
+		done
+		[ -n "$found" ] || { echo "error: no $sibling beside $instrumented/$library or $build/$library; build base R without RY_LAYOUT_BASE" >&2; exit 1; }
+		cp "$found" "$work/runtime/"
+	done
+fi
 base="$target_root/$target/base-r"
 if [ -z "${RY_LAYOUT_BASE:-}" ]; then
 	RY_LAYOUT_BASE="$work/instrumented/$target/base-r"
@@ -186,14 +214,15 @@ strip --strip-unneeded "$runtime"
 "$optimized/$rcmd" start-image "$base" --libr "$runtime" > /dev/null
 
 echo "optimize: ry with the runtime and base R embedded" >&2
-RY_EMBED_RUNTIME="$runtime" RY_EMBED_BASE="$base" \
-	cargo build --release --locked --target "$target" -p ry-lang 2> >(tee -a "$work/build.log" >&2)
+# A fresh log, because cargo replays the warnings of units it does not rebuild.
+: > "$work/build.log"
+RY_EMBED_RUNTIME="$runtime" RY_EMBED_BASE="$base" cargo_logged -p ry-lang
 check_profile
 strip "$optimized/$ry"
 # `just package` and the bench recipes read the release directory, so the optimized binaries
 # replace whatever a plain build left there.
 mkdir -p "$build"
 cp "$optimized/$ry" "$build/$ry"
-cp "$runtime" "$build/$library"
+cp "$work/runtime/"* "$build/"
 cp "$optimized/$rcmd" "$build/$rcmd"
 echo "$build/$ry"
