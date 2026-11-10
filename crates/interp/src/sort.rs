@@ -692,8 +692,8 @@ unsafe fn do_any_duplicated(call: &Call<'_>) -> R<Sexp> {
 /// otherwise the higher of the two numeric types. Factors match by their labels, and other
 /// classed objects by what `mtfrm()` makes of them.
 pub(crate) unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
-    let x = match_operand(call.arg(0), call.env)?;
-    let table = match_operand(call.arg(1), call.env)?;
+    let x = match_operand(call.arg(0), call)?;
+    let table = match_operand(call.arg(1), call)?;
     let nomatch = coerce_vector(call.arg(2), SexpType::Integer)?;
     let nomatch = values::ints(nomatch).first().copied().unwrap_or(NA_INTEGER);
     let count = length(x);
@@ -2441,7 +2441,7 @@ unsafe fn hash_object(object: Sexp, hasher: &mut FxHasher) {
 
 /// `x` or `table` of `match`, with factors as their labels and other classed objects as
 /// `mtfrm()` makes them.
-unsafe fn match_operand(object: Sexp, env: Sexp) -> R<Sexp> {
+unsafe fn match_operand(object: Sexp, call: &Call<'_>) -> R<Sexp> {
     if object != nil() && !object.kind().is_vector() {
         return Err(error("'match' requires vector arguments"));
     }
@@ -2452,7 +2452,7 @@ unsafe fn match_operand(object: Sexp, env: Sexp) -> R<Sexp> {
         return factor_as_character(object);
     }
     let transform = values::call(values::install("mtfrm")?, &[object])?;
-    eval::eval(transform, env)
+    eval::eval(transform, call.env()?)
 }
 
 unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: &[Sexp]) -> bool {

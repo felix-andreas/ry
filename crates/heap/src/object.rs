@@ -333,6 +333,9 @@ pub mod gp {
     /// that do not count as references, which code running on the environment from elsewhere
     /// must respect before it updates a value in place.
     pub const COMPILED_FRAME: u16 = 1 << 9;
+    /// The environment a slot frame's promises name before the frame has made it: it has no
+    /// bindings yet, and forcing such a promise runs on the frame's slots instead.
+    pub const PENDING_FRAME: u16 = 1 << 7;
     /// A binding cell, or a symbol, that a compiled function lookup depends on. Rebinding the
     /// cell, or binding the symbol in a function frame, moves the heap's binding epoch and the
     /// symbol's lookup stamp, so compiled code revalidates a lookup only when both moved.
@@ -346,6 +349,10 @@ pub mod gp {
     pub const TYPED_DEFINITION: u16 = 1 << 12;
     /// A promise whose value an inline parameter annotation checks when it is forced.
     pub const CHECKED_PROMISE: u16 = 1 << 12;
+    /// A promise that is an argument reference: it names a variable's slot in a live slot
+    /// frame instead of an environment, and its attribute holds the frame's position, the slot
+    /// and the frame's header register (`interp::eval::argument_reference`).
+    pub const ARGUMENT_REFERENCE: u16 = 1 << 13;
     /// A closure `debug()` flagged, GNU R's `RDEBUG`: every call stops at its first statement
     /// while a debugger is attached.
     pub const CLOSURE_DEBUG: u16 = 1 << 15;

@@ -162,7 +162,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryCodeImageWrite", 2, do_write),
 ];
 
-const MAGIC: &[u8; 8] = b"RYCODE\x00\x01";
+const MAGIC: &[u8; 8] = b"RYCODE\x00\x02";
 
 /// The bytes of one record table entry.
 const ENTRY_SIZE: usize = 40;

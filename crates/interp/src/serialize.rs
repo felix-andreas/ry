@@ -1282,7 +1282,7 @@ pub unsafe fn lazy_record_header(promise: Sexp) -> R<Option<(u32, bool, u16)>> {
     let [(_, key), (_, file), (_, compressed), _] = arguments[..] else {
         return Ok(None);
     };
-    let env = promise.tag();
+    let env = eval::promise_env(promise)?;
     let plain = |argument: Sexp| -> R<Option<Sexp>> {
         if argument.kind() != SexpType::Symbol {
             return Ok(Some(argument));
@@ -1787,8 +1787,8 @@ struct Encoder<'a> {
 impl Encoder<'_> {
     unsafe fn code(&mut self, code: Sexp, depth: u32) -> Result<(), Unencodable> {
         use crate::bytecode::{
-            EPOCHS, FEEDBACK, FIRST_CONSTANT, HINTS, LOOPS, PROFILE, REGISTERS, SOURCE, SUMMARY,
-            profile,
+            EPOCHS, FEEDBACK, FIRST_CONSTANT, HINTS, LOOPS, PROFILE, REGISTERS, SLOTS, SOURCE,
+            SUMMARY, profile,
         };
         if depth > MAX_DEPTH {
             return Err(Unencodable("code nested too deeply"));
@@ -1822,6 +1822,14 @@ impl Encoder<'_> {
                 .map_or(0, |&count| count as u32 as u64),
         );
         self.value(constants.element(SUMMARY), depth + 1)?;
+        // The slot table's third element caches compiled defaults against the closure's
+        // formals, so only the map and the names belong in the image.
+        let slots = constants.element(SLOTS);
+        self.out.push(u8::from(slots != nil()));
+        if slots != nil() {
+            self.value(slots.element(0), depth + 1)?;
+            self.value(slots.element(1), depth + 1)?;
+        }
         let trained = self.trained
             && values::ints(constants.element(PROFILE))[..profile::SERIALIZED]
                 .iter()
@@ -2116,8 +2124,8 @@ struct Decoder<'a, 'b> {
 impl Decoder<'_, '_> {
     unsafe fn code(&mut self, depth: u32) -> R<Sexp> {
         use crate::bytecode::{
-            EPOCHS, FEEDBACK, FIRST_CONSTANT, HINTS, LOOPS, PROFILE, REGISTERS, SOURCE, SUMMARY,
-            TIER1, profile, tier,
+            EPOCHS, FEEDBACK, FIRST_CONSTANT, HINTS, LOOPS, PROFILE, REGISTERS, SLOTS, SOURCE,
+            SUMMARY, TIER1, profile, tier,
         };
         if depth > MAX_DEPTH {
             return Err(error("the code image nests too deeply"));
@@ -2148,6 +2156,21 @@ impl Decoder<'_, '_> {
         )?;
         let summary = self.value(depth + 1)?;
         heap.root(summary);
+        let slots = match self.input.byte()? {
+            0 => nil(),
+            1 => {
+                let map = self.value(depth + 1)?;
+                heap.root(map);
+                let names = self.value(depth + 1)?;
+                heap.root(names);
+                let slots = alloc(SexpType::List, 3)?;
+                heap.set_element(slots, 0, map);
+                heap.set_element(slots, 1, names);
+                slots
+            }
+            _ => return Err(error("the code image holds a malformed slot table")),
+        };
+        heap.root(slots);
         let epochs = alloc(SexpType::Real, caches)?;
         heap.root(epochs);
         values::reals_mut(epochs).fill(f64::from_bits(u64::MAX));
@@ -2200,6 +2223,7 @@ impl Decoder<'_, '_> {
         heap.set_element(constants, TIER1, nil());
         heap.set_element(constants, HINTS, hints);
         heap.set_element(constants, SUMMARY, summary);
+        heap.set_element(constants, SLOTS, slots);
         for index in 0..constant_count {
             let constant = self.value(depth + 1)?;
             heap.set_element(constants, FIRST_CONSTANT + index, constant);

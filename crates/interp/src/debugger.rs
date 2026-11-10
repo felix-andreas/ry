@@ -973,10 +973,15 @@ unsafe fn stack(srcref: Sexp) -> Vec<StackFrame> {
     let frames = &interp().frames;
     let mut stack = Vec::with_capacity(frames.len() + 1);
     let mut current = srcref;
-    for frame in frames.iter().rev() {
+    for (index, frame) in frames.iter().enumerate().rev() {
+        // The client inspects every frame's variables, so a slot frame gets its environment.
+        let env = match crate::eval::frame_env(index, crate::eval::Reify::Site("debugger")) {
+            Ok(env) => env,
+            Err(_) => panic!("the debugger could not give frame {index} an environment"),
+        };
         stack.push(StackFrame {
             name: deparse::deparse_first_line(frame.call.car()),
-            env: frame.env,
+            env,
             srcref: current,
         });
         current = frame.srcref;

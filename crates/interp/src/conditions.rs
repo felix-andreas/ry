@@ -41,6 +41,18 @@ pub struct RestartEntry {
     pub next: RestartStack,
 }
 
+/// Whether an entry of `stack` has `closure` as its handler.
+pub(crate) fn handlers_hold(stack: &HandlerStack, closure: Sexp) -> bool {
+    let mut entry = stack.as_ref();
+    while let Some(handler) = entry {
+        if handler.handler == closure {
+            return true;
+        }
+        entry = handler.next.as_ref();
+    }
+    false
+}
+
 pub(crate) unsafe fn trace_handlers(stack: &HandlerStack, marker: &mut Marker<'_>) {
     let mut entry = stack.as_ref();
     while let Some(handler) = entry {
@@ -717,9 +729,9 @@ unsafe fn do_default_warn(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// The call `stop()` and `warning()` report: the caller of the closure that called them.
-unsafe fn caller_call(env: Sexp) -> Sexp {
+unsafe fn caller_call(call: &Call<'_>) -> Sexp {
     let frames = &interp().frames;
-    match frames.iter().rposition(|frame| frame.env == env) {
+    match call.frame_index() {
         Some(position) if position >= 1 => frames[position - 1].call,
         _ => nil(),
     }
@@ -727,11 +739,7 @@ unsafe fn caller_call(env: Sexp) -> Sexp {
 
 unsafe fn do_stop(call: &Call<'_>) -> R<Sexp> {
     let use_call = values::as_logical_scalar(call.arg(0)) != 0;
-    let condition_call = if use_call {
-        caller_call(call.env)
-    } else {
-        nil()
-    };
+    let condition_call = if use_call { caller_call(call) } else { nil() };
     let message = if length(call.arg(1)) > 0 {
         string_at(call.arg(1), 0)
             .map(|text| text.into_owned())
@@ -748,11 +756,7 @@ unsafe fn do_stop(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_warning(call: &Call<'_>) -> R<Sexp> {
     let use_call = values::as_logical_scalar(call.arg(0)) != 0;
     let immediate = values::as_logical_scalar(call.arg(1)) == 1;
-    let condition_call = if use_call {
-        caller_call(call.env)
-    } else {
-        nil()
-    };
+    let condition_call = if use_call { caller_call(call) } else { nil() };
     let message = if length(call.arg(3)) > 0 {
         string_at(call.arg(3), 0)
             .map(|text| text.into_owned())

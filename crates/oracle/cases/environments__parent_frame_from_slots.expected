@@ -1,0 +1,27 @@
+[stdout]
+| cleanup b 
+| cleanup a 
+| x was 21 
+| [1] 42
+| [1] TRUE
+| [1] FALSE  TRUE
+| [1] 42
+| [1] "by callee"
+| [1] "still here"
+| [1] "inside"
+| [1] "boxed"
+| [1] "outer value"
+| [1] "not reached"
+| [1] "top"
+| [1] "caught boom"
+| saw careful 
+| [1] "finished"
+| [1] "local seen"
+| [1] TRUE
+| [1] "a b"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "a b"

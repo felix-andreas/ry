@@ -161,7 +161,7 @@ pub unsafe fn port_nlsb(call: &NativeCall<'_>) -> R<Sexp> {
         current: None,
     };
     let start = real_values(coerce_vector(
-        eval::eval(values::call(get_pars, &[])?, call.env)?,
+        eval::eval(values::call(get_pars, &[])?, call.env()?)?,
         SexpType::Real,
     )?)?;
     let n = start.len();
@@ -884,7 +884,7 @@ impl LeastSquares<'_> {
         if self.current.as_deref() != Some(x) {
             crate::scope(|| {
                 let par = values::real_vector(x)?;
-                eval::eval(values::call(self.set_pars, &[par])?, self.call.env)?;
+                eval::eval(values::call(self.set_pars, &[par])?, self.call.env()?)?;
                 Ok(values::nil())
             })?;
             self.current = Some(x.to_vec());
@@ -894,7 +894,7 @@ impl LeastSquares<'_> {
 
     unsafe fn residuals(&mut self) -> R<Vec<f64>> {
         crate::scope(|| {
-            let result = eval::eval(values::call(self.resid, &[])?, self.call.env)?;
+            let result = eval::eval(values::call(self.resid, &[])?, self.call.env()?)?;
             Ok(ValueVector(real_values(coerce_vector(
                 result,
                 SexpType::Real,
@@ -918,7 +918,7 @@ impl LeastSquares<'_> {
         let rows = residuals.len();
         let n = x.len();
         let jacobian = crate::scope(|| {
-            let result = eval::eval(values::call(self.gradient, &[])?, self.call.env)?;
+            let result = eval::eval(values::call(self.gradient, &[])?, self.call.env()?)?;
             Ok(ValueVector(real_values(coerce_vector(
                 result,
                 SexpType::Real,

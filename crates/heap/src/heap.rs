@@ -57,6 +57,39 @@ use {
     },
 };
 
+/// What reading the bindings of a slot frame's pending environment (`gp::PENDING_FRAME`) runs
+/// first. A slot frame keeps its variables in registers, and the environment it hands to
+/// promises and closures it makes stays bare until something needs its bindings; the
+/// interpreter installs a resolver that gives the environment the frame's bindings in place.
+/// Routing every bindings read through [`bindings`] means no reader can see the bare frame.
+static PENDING_RESOLVER: std::sync::OnceLock<unsafe fn(Sexp)> = std::sync::OnceLock::new();
+
+/// Installs the interpreter's resolver for pending environments ([`PENDING_RESOLVER`]).
+pub fn set_pending_resolver(resolver: unsafe fn(Sexp)) {
+    if PENDING_RESOLVER.set(resolver).is_err() {
+        // Installed already, by an earlier interpreter in this process.
+    }
+}
+
+/// `env`'s own frame of bindings, given its bindings first when it is a slot frame's pending
+/// environment. Everything but the collector reads bindings through here.
+#[inline(always)]
+unsafe fn bindings(env: Sexp) -> *mut Frame {
+    if env.has_gp(gp::PENDING_FRAME) {
+        resolve_pending(env);
+    }
+    env.frame_ptr()
+}
+
+#[cold]
+#[inline(never)]
+unsafe fn resolve_pending(env: Sexp) {
+    let Some(resolver) = PENDING_RESOLVER.get() else {
+        panic!("a pending environment was read without an interpreter to resolve it");
+    };
+    resolver(env);
+}
+
 /// The longest vector R allows, `R_XLEN_T_MAX`.
 pub const MAX_VECTOR_LENGTH: isize = 4_503_599_627_370_496;
 /// GNU R's default `PROTECT` stack size, `R_PPSSIZE`.
@@ -250,6 +283,28 @@ struct RootStack {
 /// frame stack or a JIT's stack maps.
 pub trait RootSource {
     fn trace(&self, marker: &mut Marker<'_>);
+
+    /// Drops what the source holds weakly and the collection found dead. Runs after marking,
+    /// before anything is freed, so a dead object's address cannot yet be reused.
+    fn clear_dead(&self, _liveness: &Liveness<'_>) {}
+}
+
+/// What a finished mark found live, for [`RootSource::clear_dead`].
+pub struct Liveness<'a> {
+    space: &'a Space,
+    major: bool,
+}
+
+impl Liveness<'_> {
+    /// Whether `object` survives this collection.
+    pub unsafe fn is_live(&self, object: Sexp) -> bool {
+        self.space.is_marked(object)
+    }
+
+    /// Whether this collection traced the whole heap.
+    pub fn is_major(&self) -> bool {
+        self.major
+    }
 }
 
 pub struct Marker<'a> {
@@ -1810,7 +1865,7 @@ impl Heap {
         if env == self.known.empty_env {
             return None;
         }
-        (*env.frame_ptr()).find(symbol)
+        (*bindings(env)).find(symbol)
     }
 
     /// [`Heap::frame_cell`] through a lookup site's position hint (see [`Frame::find_hinted`]).
@@ -1824,7 +1879,7 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return self.frame_cell(env, symbol);
         }
-        (*env.frame_ptr()).find_hinted(symbol, hint)
+        (*bindings(env)).find_hinted(symbol, hint)
     }
 
     /// The binding cells of `env`'s own frame. The global frame's bindings live on the symbols,
@@ -1832,7 +1887,7 @@ impl Heap {
     pub unsafe fn local_cells(&self, env: Sexp) -> impl Iterator<Item = Sexp> + '_ {
         let frame = (!self.is_symbol_frame(env) && env != self.known.empty_env)
             // SAFETY: an environment other than these owns its frame for as long as it lives.
-            .then(|| unsafe { &*env.frame_ptr() });
+            .then(|| unsafe { &*bindings(env) });
         frame.into_iter().flat_map(Frame::cells)
     }
 
@@ -1872,7 +1927,7 @@ impl Heap {
             symbol.set_cdr_unbarriered(cell);
         } else {
             self.write_barrier(env, cell);
-            let frame = &mut *env.frame_ptr();
+            let frame = &mut *bindings(env);
             let owned = frame.owns_memory();
             frame.insert(symbol, cell);
             if !owned && frame.owns_memory() {
@@ -2061,6 +2116,35 @@ impl Heap {
         self.drop_enclosure(env);
     }
 
+    /// Stores `value` into a slot of a closure call's slot frame, which counts one reference to
+    /// what it holds, as a binding cell does. Slots live in the interpreter's register file, a
+    /// root, so the store needs no write barrier.
+    #[inline(always)]
+    pub unsafe fn store_slot(&mut self, slot: &mut Sexp, value: Sexp) {
+        value.increment_refcount();
+        if slot.release_reference() {
+            self.note_zero(*slot);
+        }
+        *slot = value;
+    }
+
+    /// Gives up the references a returning call's slot frame holds, as [`Heap::clear_frame`]
+    /// does for a frame's bindings: an argument's promise that only its slot holds gives up its
+    /// value and environment too.
+    pub unsafe fn release_slots(&mut self, slots: &mut [Sexp]) {
+        let nil = self.known.nil;
+        for slot in slots {
+            let value = *slot;
+            if value.kind() == SexpType::Promise && value.refcount() == 1 {
+                self.release_promise(value);
+            }
+            if value.release_reference() {
+                self.note_zero(value);
+            }
+            *slot = nil;
+        }
+    }
+
     /// Releases the frames that waited for a reconcile ([`Heap::release_frame`]), in the order
     /// their calls returned, so a callee's frame gives up its promises before its caller's frame
     /// is counted. The roots are flagged [`gc_bits::HELD`]; `frames_held` are the frames a root
@@ -2150,7 +2234,7 @@ impl Heap {
         if env == self.known.empty_env {
             return Ok(false);
         }
-        let Some(cell) = (*env.frame_ptr()).remove(symbol) else {
+        let Some(cell) = (*bindings(env)).remove(symbol) else {
             return Ok(false);
         };
         self.clear_removed_cell(cell);
@@ -2214,7 +2298,7 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return self.frame_symbols(env);
         }
-        (*env.frame_ptr()).symbols().collect()
+        (*bindings(env)).symbols().collect()
     }
 
     /// The symbols bound in `env`'s own frame, in the order GNU R lists them.
@@ -2230,7 +2314,7 @@ impl Heap {
         if env == self.known.empty_env {
             return Vec::new();
         }
-        (*env.frame_ptr())
+        (*bindings(env))
             .listed_cells()
             .iter()
             .map(|cell| cell.car())
@@ -2241,7 +2325,7 @@ impl Heap {
     /// decides the order the frame is listed in.
     pub unsafe fn set_frame_hashed(&mut self, env: Sexp, size: i32) {
         if !self.is_symbol_frame(env) && env != self.known.empty_env {
-            (*env.frame_ptr()).set_hashed(size);
+            (*bindings(env)).set_hashed(size);
             self.space.set_finalizable(env);
         }
     }
@@ -2252,7 +2336,7 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return None;
         }
-        unsafe { (*env.frame_ptr()).hash_profile() }
+        unsafe { (*bindings(env)).hash_profile() }
     }
 
     /// Counts a binding of `symbol` that `env` holds only for the length of one operation, as
@@ -2263,7 +2347,7 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return;
         }
-        unsafe { (*env.frame_ptr()).count_transient(symbol) }
+        unsafe { (*bindings(env)).count_transient(symbol) }
     }
 
     /// Marks the bindings of a closure frame made so far as its formals.
@@ -2311,6 +2395,11 @@ impl Heap {
     /// Keeps `object` alive for the rest of the heap's life.
     pub fn add_global_root(&mut self, object: Sexp) {
         self.roots.globals.push(object);
+    }
+
+    /// Whether `R_PreserveObject` holds `object`.
+    pub fn is_preserved(&self, object: Sexp) -> bool {
+        self.roots.precious.contains_key(&object)
     }
 
     /// `R_PreserveObject`. Preserving twice needs two releases.
@@ -3041,6 +3130,13 @@ impl Heap {
         self.drain();
         self.process_weak_refs();
         self.clear_dead_weak_pairs();
+        let liveness = Liveness {
+            space: &self.space,
+            major: kind == Collection::Major,
+        };
+        for (_, source) in &self.sources {
+            source.clear_dead(&liveness);
+        }
         // Before the sweep, while a mark still means "survives". A returned frame the sweep frees
         // gives up its bindings first: sweeping decrements nothing, and those bindings may be the
         // only counted references left to its caller's frame, which also waits to be released.

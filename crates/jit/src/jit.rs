@@ -92,17 +92,18 @@ const ENTRY_THRESHOLD: i32 = 3000;
 const COMPILE_FIXED: u64 = 2_000_000;
 const COMPILE_PER_WORD: u64 = 50_000;
 const SAVING_PER_NATIVE: u64 = 100;
-/// A body's expected calls are its call rate over its recording window, in calls per KiB the
-/// session allocated meanwhile, times this many KiB. Allocation measures how much interpreted
-/// work ran: it is deterministic, costs nothing to keep, and the code that runs between two
-/// calls of a hot callback allocates a few KiB at most. The horizon is fixed rather than taken
-/// from how long the session has run, because that undercounts callbacks that turn hot early:
-/// the functional workload's first callbacks got 13 times the calls such an estimate predicted.
-/// Its value sits between the two measured cases, with a margin of about two either side:
-/// `isTRUE` in a test suite (one call per 54 KiB, about 1400 calls after compiling, needs at
-/// least 770 MiB) and the functional workload's slowest-rate callback (one call per 3.8 KiB,
-/// 40,000 calls, needs at most 130 MiB).
-const HORIZON_KIB: u64 = 1 << 18;
+/// A body's expected calls are its share of the closure calls the session made over its
+/// recording window, times this many calls. The session's call count measures how much
+/// interpreted work ran between two calls of the body: it is deterministic and does not move
+/// when an optimization makes calls allocate less, which an allocation clock did (slot frames
+/// cut testthat's allocation per call and pushed `isTRUE` over the line). The horizon is fixed
+/// rather than taken from how long the session has run, because that undercounts callbacks that
+/// turn hot early: the functional workload's first callbacks got 13 times the calls such an
+/// estimate predicted. Its value sits between the two measured cases: `isTRUE` in a test suite
+/// (one call in 63, needs a horizon of at least 600,000) and the functional workload's
+/// slowest-rate callbacks, `x^2` and `Reduce`'s (one call in 9, need at most 390,000). Against
+/// `1 << 18`, which lost those two callbacks, it saved functional 10.8M instructions.
+const HORIZON_CALLS: u64 = 1 << 19;
 /// Backward jumps a body takes before a loop compiles, in the default mode, for the same reason.
 const BACK_EDGE_THRESHOLD: i32 = 10_000;
 /// Tier 1 compiles a body in time that grows with its length, about 10 us per instruction word,
@@ -223,14 +224,15 @@ unsafe fn repays(machine: &Machine<'_>, shape: analysis::Shape) -> bool {
         let threshold = bytecode::tier().map_or(0, |tier| tier.entry_threshold);
         let window_entries =
             u64::try_from(threshold - bytecode::recording_start(threshold)).unwrap_or(0);
-        let window_kib = u64::from(clock().wrapping_sub(profile[profile::WINDOW]) as u32).max(1);
-        let calls = window_entries * HORIZON_KIB / window_kib;
+        let window_calls =
+            u64::from(clock().wrapping_sub(profile[profile::WINDOW]) as u32).max(1);
+        let calls = window_entries * HORIZON_CALLS / window_calls;
         let words = values::ints(machine.code.car()).len() as u64;
         let cost = COMPILE_FIXED + COMPILE_PER_WORD * words;
         let saving = calls * SAVING_PER_NATIVE * shape.native as u64;
         if logging() {
             eprintln!(
-                "jit: {} expects {calls} calls ({window_entries} in {window_kib} KiB) saving {saving} against a compile of {cost}",
+                "jit: {} expects {calls} calls ({window_entries} of {window_calls} calls) saving {saving} against a compile of {cost}",
                 describe(machine.code)
             );
         }
@@ -238,9 +240,10 @@ unsafe fn repays(machine: &Machine<'_>, shape: analysis::Shape) -> bool {
     }
 }
 
-/// The session's allocation clock in KiB, wrapping, as [`profile::WINDOW`] holds it.
+/// The session's call clock ([`interp::interp::Interp::calls_ever`]), as [`profile::WINDOW`]
+/// holds it.
 fn clock() -> i32 {
-    (heap().allocated_ever() >> 10) as i32
+    interp().calls_ever as i32
 }
 
 /// Whether every formal of the running closure carries a checked annotation. Such a closure
@@ -326,7 +329,7 @@ unsafe fn compiled_for<'a>(
             let address = tier1.external_address() as *const Compiled;
             if !address.is_null() && (*address).portable {
                 let compiled = &*address;
-                let enclosure = machine.env.enclosure();
+                let enclosure = machine.enclosure();
                 if compiled.checked.get().weak_key() != enclosure
                     && !runtime::sibling_of_checked(compiled, enclosure)
                 {
@@ -349,7 +352,7 @@ unsafe fn compiled_for<'a>(
                 let compiled = &*(tier1.external_address() as *const Compiled);
                 // Closures made by one `function` expression share their body but not their
                 // enclosure, which the compiled lookups are specialized to.
-                return (compiled.enclosure == machine.env.enclosure()).then_some(compiled);
+                return (compiled.enclosure == machine.enclosure()).then_some(compiled);
             }
             // The enclosure the code was compiled for died, and no activation can still run the
             // code, because a running one keeps its enclosure reachable. The address is cleared
@@ -510,11 +513,18 @@ unsafe fn compile_in<'a>(
     trigger: Trigger,
 ) -> Result<&'a Compiled, Refusal> {
     unsafe {
-        let enclosure = machine.env.enclosure();
+        let enclosure = machine.enclosure();
         let forced = MODE.with(Cell::get) == Mode::Force;
         let shape = analysis::shape(machine.code);
         if !forced && !shape.may_run_natively() {
             return Err(Refusal(analysis::NEVER_NATIVE));
+        }
+        if !forced
+            && trigger == Trigger::HotEntry
+            && !shape.loops
+            && machine.function.has_gp(gp::NATIVE_ENTRY)
+        {
+            return Err(Refusal(analysis::NATIVE_ENTRY));
         }
         if !forced && trigger == Trigger::HotEntry && !shape.loops && !repays(machine, shape) {
             return Err(Refusal(analysis::RARE));
@@ -725,7 +735,7 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
     unsafe {
         // A loop entry resumes an activation whose frame may have bound a name before the
         // compiler started watching it, which no epoch change records.
-        if !runtime::valid(compiled, machine.env, entry_pc != 0) {
+        if !runtime::valid(compiled, machine, entry_pc != 0) {
             runtime::invalidate(machine.code);
             return None;
         }
@@ -735,18 +745,26 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         }
         std::slice::from_raw_parts_mut(bytecode::register_address(cells), compiled.slots.len())
             .fill(values::nil());
-        let mut loops = vec![0i64; 2 * compiled.loops];
-        for (index, state) in machine.loops.iter().enumerate().take(compiled.loops) {
-            loops[2 * index] = state.index as i64;
-            loops[2 * index + 1] = state.count as i64;
+        let mut loops = vec![0i64; runtime::LOOP_WORDS * compiled.loops];
+        for (words, state) in loops
+            .chunks_exact_mut(runtime::LOOP_WORDS)
+            .zip(machine.loops.iter())
+        {
+            words.copy_from_slice(&[
+                state.index as i64,
+                state.count as i64,
+                state.first.to_bits() as i64,
+                state.step.to_bits() as i64,
+            ]);
         }
         let mut activation = Activation {
             registers: bytecode::register_address(machine.base),
             loops: loops.as_mut_ptr(),
             visible: &mut interp().visible,
             entry_pc: entry_pc as i64,
-            env: machine.env,
+            header: bytecode::register_address(machine.header),
             hints: bytecode::lookup_hints(machine.code),
+            enclosure: machine.enclosure(),
             machine: machine as *mut Machine<'_> as *mut c_void,
             compiled,
             pending: None,

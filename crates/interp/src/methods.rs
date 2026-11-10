@@ -538,12 +538,11 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
     let position = state
         .frames
         .iter()
-        .rposition(|frame| frame.env == generic_env)
+        .rposition(|frame| frame.owns(generic_env))
         .ok_or_else(|| error("could not find the generic function's frame"))?;
-    let (call, sys_parent) = (
-        state.frames[position].call,
-        state.frames[position].sys_parent,
-    );
+    let call = state.frames[position].call;
+    let sys_parent = eval::frame_sys_parent(position, eval::Reify::Site("S4 dispatch"))?;
+    eval::materialize_references(position)?;
     let promargs: eval::Args = crate::frame_args(state, position).into();
     let heap = crate::heap();
     let method_env = values::new_env(method.tag())?;

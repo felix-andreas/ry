@@ -770,6 +770,11 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 - **Unboxing.** Integers, doubles and logicals of length one without attributes live in machine
   registers, with R's `NA` and overflow rules. Element reads and writes on integer, double and
   logical vectors are inline, and a write copies only when the vector is shared.
+- **Loops over sequences.** A `for` loop over a compact sequence such as `1:n` or `seq_len(n)`
+  never expands it: both tiers compute each element from the first element and the increment, so
+  `for (i in 1:1e8)` runs in constant memory. The loop state carries the index, the count, the
+  first element and the increment (an increment of 0 means the loop reads the vector's storage),
+  and deoptimization hands all four to tier 0.
 - **Variables.** A body that never reflects on its frame keeps its variables in slots instead of
   its environment. The environment object still exists, but compiled code writes a variable back
   only before something that could observe it runs (a generic call, a dispatching operation, the
@@ -938,12 +943,12 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | Lookup stamps compared as their bits | V8 | built | 1.25k per `seq()` call | `LookupCache` in `bytecode.rs` |
 | Hash index only for frames over 32 bindings | ry | built | 3k per `seq()` call (`Frame::insert`) | `INDEX_THRESHOLD` in `env.rs` |
 | Builtin checks derived at registration | GNU R `PRIMARITY` | built | builtin call overhead | `Checks` in `crates/interp/src/builtins.rs` |
-| A per-closure call plan for `run_closure`'s bookkeeping | JSC `CodeBlock` | rejected, measured | annotation, `on.exit`, move-tracking and depth checks measure 1.3k of 141.6k instructions per `seq()` call and already exit early; the rest of `run_closure` is the frame record push and pop, which slot frames replace | |
+| A call plan per call site: arguments written straight into the callee's slots | JSC `CodeBlock`, V8 | built | `run_closure`'s matching and binding; a call from a loop costs 2,330 instructions, down from 3,065 on heap frames | `direct_plan` in `bytecode.rs`, `call_with_plan` in `eval.rs` |
 | **2. Call facts ahead of time** | | | | |
 | Version-stamped bindings: a function guard is one compare | JSC watchpoints, V8 property cells | built | 154 guards per `seq()` call; 141.6k to 139.7k instructions per call | the `Op::Guard` arm and `cached_cell` in `bytecode.rs` |
 | Frames cleared in place, without copying the cell list | ry | built | `clear_frame`; 139.7k to 136.6k per `seq()` call, with the two rows below | `Heap::clear_frame` in `crates/heap/src/heap.rs` |
 | Untyped closures skip the signature lookup; `on.exit` handling only when an exit expression exists | ry | built | part of the 3.1k above | `signature_of` in `crates/interp/src/annotations.rs`, `run_closure` in `eval.rs` |
-| Frames as slot arrays, environment reified on demand | Ř, V8 | rejected for now, measured | binding cells cost about 420 of a closure call's 3,968 instructions (defining formals 100, `Frame::insert` 114, clearing 97, lookups 110); values held inline would save 100 to 150 of them, about 3%, while about 180 call sites read cells and reifying a frame would need allocation behind shared references. A closure call already costs less than on GNU R | |
+| Frames as slot arrays, environment reified on demand | Ř, V8 | built for tier 0; tier 1 and baseline bodies keep heap frames | binding cells, environments and frame clearing per call; on the testthat workload (JIT off) 7.736G to 7.652G instructions with the row above | `bind_slots`, `reify` in `eval.rs`; `slot-frames.md` |
 | Promise elision for strict, effect-free arguments | Ř | done in tier 0 (`crates/interp/src/effects.rs`) | `closure_args_into` 3.8% of a call microbenchmark | `f(i, 1)` 3,968 to 3,411 instructions per call; `seq()` unchanged, its helpers are not effect-free |
 | Cheaper promises: created lazily, held inline in the frame slot, or allocated from a per-call arena | Ř, GNU R | rejected, measured | a closure call on the testthat workload costs about 8,100 instructions with 1.2 promises; allocating a promise is a nursery bump, and promises are 1.4 of the 7.4 objects freed per call. None of the three designs saves more than that allocation, and each changes what `PRCODE`, `PRENV`, `substitute` and `delayedAssign` see | |
 | Formals bound in one pass; a forced promise settled with one barrier; the stack check against a cached floor | ry | built | defining formals 270, settling 87 and `stacker`'s thread-local lookup per call; 8,174 to 8,140 instructions per closure call on the testthat workload | `Frame::insert_formals` in `crates/heap/src/env.rs`, `Heap::settle_promise`, `on_large_stack` in `eval.rs` |
@@ -968,7 +973,7 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | Per-argument-type native functions for scalar closures | Julia | built | recursive scalar functions | `crates/jit/src/native.rs` |
 | Baseline compiler from bytecode, no optimization | V8 Sparkplug | built, opt-in (`RY_JIT=baseline`, `RY_JIT_THRESHOLDS`); `RY_JIT=on` leaves it out | warm code under the 3000-entry threshold. Compiles in a median of 28 µs per body (at most about 0.5 ms), but a call per instruction measures level with tier 0's tail-call handlers (a scalar loop 0.53 s against 0.47 to 0.51 s), and with variable access and scalar comparisons inline it still loses on `bench-real` to the instruction-cache footprint of per-body code (9.7 MB over 972 bodies on `testthat`). `RY_JIT=baseline` runs it alone | `crates/jit/src/baseline.rs`, `assembler.rs` |
 | Lazy basic block versioning as the baseline's second stage | YJIT | planned | type checks left inside handlers in warm code | |
-| A lower Cranelift threshold once the baseline tier exists | HotSpot, .NET tiering | measured, kept at 3000 entries; large bodies wait in proportion to their size, and a loop-free body compiles only when its call rate over the recording window (calls per KiB allocated) promises enough calls to repay the compile | tier 1 under 3% of the time on eight of nine workloads. Callgrind geomean against JIT off: 1000 entries 1.015, 2000 1.016, 3000 1.013, 6000 1.010, 10,000 1.010, so the threshold does not decide on against off. The rate check took testthat's JIT-on cost over JIT off from 17.6M to 5.6M instructions and kept every functional callback compiling | `SIZE_WAIT_WORDS` and `repays` in `crates/jit/src/jit.rs` |
+| A lower Cranelift threshold once the baseline tier exists | HotSpot, .NET tiering | measured, kept at 3000 entries; large bodies wait in proportion to their size, and a loop-free body compiles only when its call rate over the recording window (its share of the session's closure calls) promises enough calls to repay the compile | tier 1 under 3% of the time on eight of nine workloads. Callgrind geomean against JIT off: 1000 entries 1.015, 2000 1.016, 3000 1.013, 6000 1.010, 10,000 1.010, so the threshold does not decide on against off. The rate check took testthat's JIT-on cost over JIT off from 17.6M to 5.6M instructions and kept every functional callback compiling | `SIZE_WAIT_WORDS` and `repays` in `crates/jit/src/jit.rs` |
 | Cross-closure inlining with deoptimization | Ř (PIR) | partly built: effect-free closures, single-expression or block bodies, guarded on callee identity; a failed guard reruns the whole call in tier 0. Callees with effects, which need frame materialization, are planned | calls from compiled code re-enter tier 0 | `inline`, `lower_block` in `crates/jit/src/analysis.rs` |
 | Escape analysis, scalar replacement, vector fusion | Graal, goose | planned | scalar and intermediate vector allocation | |
 | Per-signature numeric specialization of vector code | Julia | planned | | |
@@ -1015,6 +1020,12 @@ R's vector builtins share one kernel layer in `crates/interp/src/kernels.rs`, wh
   operands, and reads that operand from the output buffer, so aliasing is exact under recycling.
   A destination of length one is never reused, because the shared `TRUE`, `FALSE` and `NA`
   constants can look private. A scalar operand of a math function, a comparison or unary minus is answered without the element loop.
+- **Complex arithmetic.** `+`, `-`, `*`, `/` and `^` with a complex operand run as slice kernels
+  under the same reuse rule. `*` and `/` are ports of libgcc's `__muldc3` and `__divdc3`, which
+  GCC-compiled GNU R uses and Rust's runtime replaces with compiler-rt's, and every step keeps
+  GCC's operand order so the same NaN payload wins: results match GNU R bit for bit, `NA` versus
+  `NaN` included. `^` is GNU R's `mycpow`, and `z^2` reproduces `R_cpow_n`'s `1 * (z * z)`. A double
+  beside a complex vector is lifted per element, NA as `NA + 0i`.
 - **Reductions.** `sum` on integers, `any`, `all`, `min`, `max` and `range` are SIMD kernels;
   `range` finds both bounds in one pass. `prod` and the double `sum` accumulate in x87 long double
   as GNU R does, so they keep scalar loops.
@@ -1047,6 +1058,109 @@ left one is a scalar beside a longer vector or when both recycle, so `NA_real_ +
 first operand's payload wins. The kernels reproduce each case. Beside a scalar that is not NaN,
 only the vector's element can be NaN and the hardware's `+` and `*` return its payload in either
 operand order, so those loops carry no per-element NaN test.
+
+### The native execution model
+
+Package code is meant to run as machine code calling machine code, with tier 0 kept for `eval`,
+non-standard evaluation and whatever compiled code declines. Four parts make that up, and they
+are one design because each constrains the others: the frame is what compiled code reads, the
+calling convention decides what a frame holds on entry, unboxed values decide when the frame is
+written, and install-time code decides which of these facts are known before the first call.
+
+| Part | Status | Owner |
+| --- | --- | --- |
+| Slot frames, environments made on demand | built for tier 0 (`slot-frames.md`) | frames |
+| A direct calling convention between closures | built from tier 0 to tier 0; machine to machine planned | frames (tier 0), JIT (machine code) |
+| Unboxed length-1 doubles, integers and logicals in compiled code | built inside tier 1 and native functions; across calls planned | JIT |
+| Whole-package compilation at install, with entry guards and deoptimization to tier 0 | scalar native functions built; general bodies planned | JIT |
+
+The targets are at least 80% of closures in rlang, cli and testthat running as machine code (5 to
+11% today), 30% fewer instructions on the testthat workload, and `bench-real` at twice GNU R's
+speed. Vector kernels are a separate module behind a narrow interface that compiled code calls.
+
+**Frame layout.** A call's frame is a window of the register file: a header register, one slot per
+symbol the body can bind (formals first, in order, then locals numbered by the compiler's slot
+table), then the body's own registers. The header holds the frame's environment once one exists
+and `NULL` before. Each slot counts one reference and holds a value, a promise, the empty argument
+for a missing formal, the unbound marker for an unassigned local, or for `...` the `DOTSXP` the
+call collected. `Frame.missing` carries one missing bit per formal (up to 64 formals). Machine code
+uses the same window: its spilled values live in the slots, so a frame looks the same whichever
+tier is running it, and switching tiers moves no values.
+
+**Calling convention.** A call site that calls closures carries a plan in its constants. The first
+call of a body there marks the site, and the second builds the plan: for each formal of the
+callee, the position of the argument that fills its slot, or -1 when the site supplies none.
+Later calls of the same formals and body skip argument matching and write the arguments straight
+into the callee's slots (`eval::call_with_plan`); a site that has seen eight different bodies stops
+planning. A plan exists only when matching cannot depend on the values: the callee has no `...`
+formal, the site passes no `...` or `..N`, and every formal the site leaves out has a literal
+default. Everything else binds through the matcher (`bind_slots`, with its per-body match cache),
+still into a slot frame. Arguments go in as values when they are constants, or variables passed
+to an effect-free callee; otherwise as promises over the caller's slots (`eval::slot_promise`),
+which do not need the caller's environment. A call that passes `...` on appends the promises the
+caller's `...` slot collected.
+
+Between machine code (planned), a call of a sibling closure in a locked namespace is a direct
+machine call to the callee's entry for the argument types at hand, guarded once by the image's
+check epoch. Pure arguments (`native::pure_value`) are passed evaluated and unboxed; the rest are
+passed as promises over the caller's frame, exactly as tier 0 passes them.
+
+**What makes the environment.** The frame keeps no environment until something hands one out.
+`eval::frame_env`, `eval::frame_sys_parent` and `Call::env` are the only ways to get one, and the
+first use builds it from the slots (`reify`); from then on the environment is the only source of
+truth. The triggers are a closure or formula made in the frame; `parent.frame`, `sys.frame(s)`,
+`sys.function` and `as.environment(-1)` from a callee; S3 and S4 dispatch, which read the generic's
+caller; specials and builtins that receive the environment; replacement calls such as
+`names(x) <- v`; `PRENV` of one of the frame's
+promises, `R_GetCurrentEnv` and the `rho` of `.External2`; a promise of an argument the compiler
+did not compile; `..N`; and the debugger. `missing`, `nargs`, `sys.call`, `substitute(name)`,
+`return` and forwarding `...` read the slots and make nothing.
+
+**What stays on heap frames.** A body runs in a heap frame from the start when the compiler
+refuses it a slot table. Some of those refusals are permanent and some only wait for a slot path:
+
+| Body uses | Frame | Why |
+| --- | --- | --- |
+| `assign`, `delayedAssign`, `makeActiveBinding`, `list2env`, `rm`, `attach`, `eval`, `evalq`, `local`, `with`, `within`, `source` | heap | they bind names the compiler cannot number, so the slot table would be wrong |
+| `environment()`, `sys.frame(s)`, `lockBinding` | heap | they hand out the frame itself, so a slot frame would make its environment on entry |
+| `...` formals | slots (built) | the `...` slot holds the collected arguments |
+| a formal with a non-literal default, left out | heap (slot path planned) | the default's promise needs an environment; it can be a promise over the slots instead, compiled with the body's slot table |
+| `sys.function` | heap (slot path planned) | reads `Frame.function`, not the environment |
+| `Recall` | slots | reads `Frame.function` and `Frame.call` of its caller, and hands the recalled frame its caller's pending environment as parent |
+| `on.exit` | heap (slot path planned) | the exit expressions run in the frame; they can run on the slots, making the environment only if they need it |
+| `match.arg` | slots, reified when called | it reads its caller through `sys.function` and `parent.frame`; a slot path reads the formal's default from the closure and its value from the slot |
+| `do.call` | heap (slot path planned) | with a function value and no `envir`, the call needs no frame |
+
+**Deoptimization and frame state.** Machine code that leaves for tier 0 continues on the same
+window. Each exit carries a frame-state map: for every live slot and register, whether it is
+already in the window or is a machine value of a known type, plus the tier-0 instruction to resume
+at. Leaving boxes the machine values, writes them into their slots, restores the missing bits and
+jumps into tier 0's loop; it makes no environment, because only a trigger does. A callee can give
+the frame its environment while machine code waits on the call, and then the slots are dead, so
+machine code checks the header after every call that can reify and leaves for tier 0 when it is
+set.
+
+Baseline and tier-1 code run in slot frames today. Both read the header register on every
+variable probe: while it is `NULL`, a variable the slot table numbers loads straight from its slot
+at an index fixed when the code compiles, and a name the table does not number is looked up from
+the closure's environment. Tier 1 keeps its own copies of the variables it loaded and writes a
+changed one back through the frame (`Machine::assign`), into the slot or, once a callee made the
+environment, into its binding, so it needs no exit when the frame reifies under it.
+
+**Boxing.** A length-1 double, integer or logical without attributes stays in a machine register
+while compiled code uses it, with R's `NA` and overflow rules. It is boxed when it escapes: written
+to a slot before anything that can read the frame (a generic call, a dispatching operation, a
+trigger, a deoptimization, a return to tier 0), passed to a callee that is not machine code,
+stored into a vector or list, captured by a promise, or returned to a caller that expects a
+`SEXP`. A machine-to-machine call passes and returns it unboxed, per the callee's specialization.
+
+**Install-time code.** `ry install` compiles each closure of a locked namespace it can type to
+machine code in the image's native section: an entry that checks its guards (the manifest's
+builtins and siblings, against the check epoch) and the argument types of its specialization,
+then runs the body on a slot window, calling siblings directly and everything else through tier
+0's call path. A failed entry guard runs the call in tier 0. A failed guard inside the body
+deoptimizes through the frame-state map, which the image stores beside the code. Tier 0 keeps
+`eval` and non-standard evaluation.
 
 ### Builtin fast paths
 

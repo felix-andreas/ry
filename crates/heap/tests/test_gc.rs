@@ -1739,3 +1739,137 @@ fn a_namespace_load_defers_major_collections_until_it_ends() {
     assert!(after >= during);
     assert_eq!(majors(true), (0, 0));
 }
+
+/// The string and symbol tables against a reference map. Random strings in every encoding are
+/// interned, kept or dropped, and collected at random points; random names are installed, past
+/// the point where the symbol table grows. A string the reference still holds must intern to the
+/// same object, a new one must differ from every live string, and each symbol must be found by
+/// its name and stay the only symbol with that name.
+fn run_interning(seed: u64, steps: usize, stress: bool) {
+    use std::collections::HashMap;
+    let mut rng = SplitMix64(seed);
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| {
+        policy.young_limit = 4096 + rng.below(64 * 1024);
+        if stress {
+            policy.stress = GcStress::EveryAllocation;
+        }
+    });
+    let encodings = [
+        Encoding::Native,
+        Encoding::Utf8,
+        Encoding::Latin1,
+        Encoding::Bytes,
+    ];
+    let mut text = |rng: &mut SplitMix64, longest: usize| -> Vec<u8> {
+        // A small alphabet makes repeats common; lengths cross the scan's 4, 8 and 16-byte paths.
+        let length = rng.below(longest + 1);
+        (0..length)
+            .map(|_| b"ab_.Z9\xc3\xa9\xff"[rng.below(9)])
+            .collect()
+    };
+    let mut strings: HashMap<(Vec<u8>, u32), Sexp> = HashMap::new();
+    let mut symbols: HashMap<Vec<u8>, Sexp> = HashMap::new();
+    let initial_symbols = heap.symbol_count();
+    unsafe {
+        let check_symbol = |heap: &mut Heap, symbols: &mut HashMap<Vec<u8>, Sexp>, name: Vec<u8>| {
+            let symbol = heap.install(&name).expect("install");
+            assert_eq!(symbol.kind(), SexpType::Symbol);
+            assert_eq!(symbol.car().bytes(), name.as_slice(), "a symbol's print name");
+            assert_eq!(heap.find_symbol(&name), Some(symbol));
+            match symbols.get(&name) {
+                Some(&known) => assert_eq!(symbol, known, "a name installed twice"),
+                None => {
+                    assert!(
+                        !symbols.values().any(|&other| other == symbol),
+                        "two names share a symbol"
+                    );
+                    symbols.insert(name, symbol);
+                }
+            }
+        };
+        // Enough names to grow the symbol table at least once in most seeds.
+        for _ in 0..rng.below(6000) {
+            let mut name = b"fz_".to_vec();
+            name.extend(text(&mut rng, 10));
+            check_symbol(&mut heap, &mut symbols, name);
+        }
+        for _ in 0..steps {
+            match rng.below(10) {
+                0..=4 => {
+                    let bytes = text(&mut rng, 24);
+                    let encoding = encodings[rng.below(encodings.len())];
+                    let string = heap.mk_char(&bytes, encoding).expect("mk_char");
+                    assert_eq!(string.kind(), SexpType::Char);
+                    assert_eq!(string.bytes(), bytes.as_slice());
+                    // ASCII text is one string in every encoding, stored unmarked.
+                    let marked = if bytes.is_ascii() {
+                        Encoding::Native
+                    } else {
+                        encoding
+                    };
+                    assert_eq!(Encoding::of(string), marked, "the encoding of {bytes:?}");
+                    let key = (bytes, marked as u32);
+                    match strings.get(&key) {
+                        Some(&known) => assert_eq!(string, known, "{key:?} interned twice"),
+                        None => {
+                            assert!(
+                                !strings.values().any(|&other| other == string),
+                                "{key:?} is another live string"
+                            );
+                            if rng.chance(2, 3) {
+                                heap.root(string);
+                                strings.insert(key, string);
+                            }
+                        }
+                    }
+                }
+                5 | 6 => {
+                    let mut name = b"fz_".to_vec();
+                    name.extend(text(&mut rng, 10));
+                    check_symbol(&mut heap, &mut symbols, name);
+                }
+                7 if !strings.is_empty() => {
+                    let key = strings.keys().nth(rng.below(strings.len())).cloned();
+                    if let Some(key) = key {
+                        strings.remove(&key);
+                    }
+                }
+                _ => {
+                    heap.release_handles(0);
+                    for &string in strings.values() {
+                        heap.root(string);
+                    }
+                    let kind = match rng.below(4) {
+                        0 => Collection::Major,
+                        1 => Collection::Intermediate,
+                        _ => Collection::Minor,
+                    };
+                    heap.collect(kind);
+                    for ((bytes, _), &string) in &strings {
+                        assert_eq!(string.kind(), SexpType::Char, "a live string was freed");
+                        assert_eq!(string.bytes(), bytes.as_slice());
+                    }
+                }
+            }
+        }
+        for ((bytes, encoding), &string) in &strings {
+            let encoding = Encoding::from_code(*encoding).expect("an encoding");
+            assert_eq!(heap.mk_char(bytes, encoding).expect("mk_char"), string);
+        }
+        for (name, &symbol) in &symbols {
+            assert_eq!(heap.find_symbol(name), Some(symbol));
+        }
+        assert_eq!(heap.symbol_count(), initial_symbols + symbols.len());
+    }
+}
+
+#[test]
+fn fuzz_interning_agrees_with_a_reference_map() {
+    for_each_seed(fuzz_iterations(24), |seed| run_interning(seed, 1500, false));
+}
+
+#[test]
+fn fuzz_interning_agrees_with_a_reference_map_under_stress() {
+    for_each_seed(fuzz_iterations(4), |seed| run_interning(500 + seed, 300, true));
+}

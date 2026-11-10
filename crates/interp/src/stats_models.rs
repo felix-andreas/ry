@@ -311,7 +311,7 @@ pub unsafe fn modelframe(call: &NativeCall<'_>) -> R<Sexp> {
             (symbols().drop, values::scalar_bool(false)?),
         ];
         let subsetting = values::pairlist(&items, SexpType::Language)?;
-        eval::eval(subsetting, call.env)?
+        eval::eval(subsetting, call.env()?)?
     } else {
         data
     };
@@ -324,7 +324,7 @@ pub unsafe fn modelframe(call: &NativeCall<'_>) -> R<Sexp> {
         _ => na_action,
     };
     let action_call = values::call(action, &[data])?;
-    let result = eval::eval(action_call, call.env)?;
+    let result = eval::eval(action_call, call.env()?)?;
     if result.kind() != SexpType::List || length(result) != length(data) {
         return Err(call.error("invalid result from na.action"));
     }
@@ -435,7 +435,7 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
                     vec![value, values::scalar_bool(false)?]
                 };
                 let contrast_call = values::call(contrasts_symbol, &arguments)?;
-                let matrix = as_reals(eval::eval(contrast_call, call.env)?)?;
+                let matrix = as_reals(eval::eval(contrast_call, call.env()?)?)?;
                 *slot = Some(matrix);
             }
         }

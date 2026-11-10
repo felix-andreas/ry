@@ -395,6 +395,13 @@ fn assemble_stubs(arch: Arch) -> Result<(Vec<u8>, Vec<usize>), &'static str> {
     asm.branch(Condition::NotEqual, slow);
     // Visible before the lookup, as in tier 0; the step sets it again.
     asm.store_interp_byte(visible, 1);
+    let value = asm.label();
+    let cell = asm.label();
+    probe_slot(&mut asm, cell, slow);
+    // A slot holds the value itself, so the checks below apply to it as to a cell's value.
+    asm.load(Width::W64, Reg::Accumulator, Reg::T3, 0);
+    asm.jump(value);
+    asm.bind(cell);
     probe_frame(&mut asm, slow);
     asm.load(Width::W16, Reg::T2, Reg::T3, header_layout::GP as u32);
     asm.test_constant(Reg::T2, u32::from(gp::ACTIVE_BINDING));
@@ -405,6 +412,7 @@ fn assemble_stubs(arch: Arch) -> Result<(Vec<u8>, Vec<usize>), &'static str> {
         Reg::T3,
         header_layout::SECOND as u32,
     );
+    asm.bind(value);
     asm.constant(Reg::T1, missing_arg().as_ptr() as u64);
     asm.compare(Reg::Accumulator, Reg::T1);
     asm.branch(Condition::Equal, slow);
@@ -436,6 +444,12 @@ fn assemble_stubs(arch: Arch) -> Result<(Vec<u8>, Vec<usize>), &'static str> {
 
     entries.push(asm.offset());
     let slow = asm.label();
+    // A store into a slot frame clears the formal's missing bit in the frame record, which
+    // the step does.
+    let cell = asm.label();
+    probe_slot(&mut asm, cell, slow);
+    asm.jump(slow);
+    asm.bind(cell);
     probe_frame(&mut asm, slow);
     asm.load(Width::W16, Reg::T2, Reg::T3, header_layout::GP as u32);
     asm.test_constant(
@@ -564,6 +578,41 @@ fn assemble_stubs(arch: Arch) -> Result<(Vec<u8>, Vec<usize>), &'static str> {
     Ok((finished.bytes, entries))
 }
 
+/// Branches to `cell` when the activation has an environment. Otherwise it runs in a slot frame
+/// (`docs/src/content/docs/development/design/slot-frames.md`), and this leaves in `T3` the
+/// address of the frame slot that holds lookup slot `T6`'s symbol, or branches to `slow` when
+/// the symbol has none, which leaves the lookup to the enclosure.
+fn probe_slot(asm: &mut Assembler, cell: Label, slow: Label) {
+    asm.load(
+        Width::W64,
+        Reg::T3,
+        Reg::Activation,
+        baseline_layout::HEADER as u32,
+    );
+    asm.load(Width::W64, Reg::T0, Reg::T3, 0);
+    asm.constant(Reg::T1, nil().as_ptr() as u64);
+    asm.compare(Reg::T0, Reg::T1);
+    asm.branch(Condition::NotEqual, cell);
+    asm.load(
+        Width::W64,
+        Reg::T2,
+        Reg::Activation,
+        baseline_layout::SLOT_MAP as u32,
+    );
+    asm.test(Reg::T2, Reg::T2);
+    asm.branch(Condition::Equal, slow);
+    asm.move_register(Reg::T1, Reg::T6);
+    asm.shift_left(Reg::T1, 2);
+    asm.add(Reg::T2, Reg::T1);
+    // -1, zero-extended, for a symbol without a slot.
+    asm.load(Width::W32, Reg::T1, Reg::T2, 0);
+    asm.test_constant(Reg::T1, 1 << 31);
+    asm.branch(Condition::NotEqual, slow);
+    asm.add_constant(Reg::T1, 1);
+    asm.shift_left(Reg::T1, 3);
+    asm.add(Reg::T3, Reg::T1);
+}
+
 /// Finds the binding cell of the symbol in `T4` in the activation's own frame at the position
 /// lookup slot `T6` last found it, leaving it in `T3`, as `Frame::find_hinted` does on a hint
 /// that matches; `T5` holds the symbol's filter bit. A frame without the symbol, a stale hint
@@ -572,12 +621,15 @@ fn assemble_stubs(arch: Arch) -> Result<(Vec<u8>, Vec<usize>), &'static str> {
 fn probe_frame(asm: &mut Assembler, slow: Label) {
     const _: () = assert!(frame::SLOT == 16);
     let at = |field: usize| (ENVIRONMENT_FRAME_OFFSET + field) as u32;
+    // The header register holds the activation's environment: [`probe_slot`] has handled a
+    // slot frame without one.
     asm.load(
         Width::W64,
         Reg::T0,
         Reg::Activation,
-        baseline_layout::ENV as u32,
+        baseline_layout::HEADER as u32,
     );
+    asm.load(Width::W64, Reg::T0, Reg::T0, 0);
     asm.load(Width::W64, Reg::T1, Reg::T0, at(frame::FILTER));
     asm.test(Reg::T1, Reg::T5);
     asm.branch(Condition::Equal, slow);
