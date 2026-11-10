@@ -18,8 +18,8 @@ use {
         },
         lower,
         testing::{
-            check_bytecode_agreement, check_lowering_input, check_render_drawing,
-            check_unserialize_input, with_interpreter,
+            check_bytecode_agreement, check_fused_agreement, check_lowering_input,
+            check_render_drawing, check_unserialize_input, with_interpreter,
         },
         values,
     },
@@ -119,6 +119,11 @@ fn deparse_round_trips_lowered_seeds() {
 #[test]
 fn fuzz_bytecode_agrees_with_the_ast_evaluator() {
     for_each_seed(300, |seed| check_bytecode_agreement(&mut SplitMix64(seed)));
+}
+
+#[test]
+fn fuzz_fused_passes_agree_with_the_ast_evaluator() {
+    for_each_seed(300, |seed| check_fused_agreement(&mut SplitMix64(seed)));
 }
 
 /// Random drawings, with nested and dangling definitions and degenerate geometry, render to

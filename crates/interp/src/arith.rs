@@ -24,6 +24,7 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         coerce::{self, coerce_vector},
         conditions, interp,
+        kernels::{self, Comparison, Integers, Reals},
         long_double::{self, LongDouble},
         rmath,
         unwind::{R, error},
@@ -228,7 +229,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
             return Ok(None);
         }
         let value = operand.slice::<i32>()[0];
-        values::scalar_logical(if value == NA_LOGICAL { NA_LOGICAL } else { 1 - value }).map(Some)
+        values::scalar_logical(if value == NA_LOGICAL {
+            NA_LOGICAL
+        } else {
+            1 - value
+        })
+        .map(Some)
     }),
     builtin("abs", 1, |call| unsafe { math1(call, Math::Abs) }).generic(Generic::Math),
     builtin("sign", 1, |call| unsafe { math1(call, Math::Sign) }).generic(Generic::Math),
@@ -1065,18 +1071,8 @@ unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
     };
     if op == Op::Subtract {
         match result.kind() {
-            SexpType::Integer => {
-                for value in values::ints_mut(result) {
-                    if *value != NA_INTEGER {
-                        *value = -*value;
-                    }
-                }
-            }
-            SexpType::Real => {
-                for value in values::reals_mut(result) {
-                    *value = -*value;
-                }
-            }
+            SexpType::Integer => kernels::negate_integers(None, values::ints_mut(result)),
+            SexpType::Real => kernels::negate_reals(None, values::reals_mut(result)),
             SexpType::Complex => {
                 for value in values::complexes_mut(result) {
                     value.r = -value.r;
@@ -1293,115 +1289,25 @@ pub unsafe fn real_at(vector: Sexp, index: usize) -> f64 {
 
 unsafe fn real_arithmetic(op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
     let result = values::alloc_uninit(SexpType::Real, count)?;
-    if count == 0 {
-        return Ok(result);
-    }
-    let output = values::reals_mut(result);
-    let real = |value: f64| value;
-    match (left.kind(), right.kind()) {
-        (SexpType::Real, SexpType::Real) => real_kernel(
-            op,
-            values::reals(left),
-            values::reals(right),
-            output,
-            real,
-            real,
-        ),
-        (SexpType::Real, _) => real_kernel(
-            op,
-            values::reals(left),
-            values::ints(right),
-            output,
-            real,
-            widen,
-        ),
-        (_, SexpType::Real) => real_kernel(
-            op,
-            values::ints(left),
-            values::reals(right),
-            output,
-            widen,
-            real,
-        ),
-        _ => real_kernel(
-            op,
-            values::ints(left),
-            values::ints(right),
-            output,
-            widen,
-            widen,
-        ),
+    if count > 0 {
+        let has_integer = left.kind() == SexpType::Integer || right.kind() == SexpType::Integer;
+        // Swapping the operands of `+` or `*` changes nothing but which NaN payload wins.
+        let (left, right) =
+            if kernels::payload_from_right(op, has_integer, length(left), length(right)) {
+                (right, left)
+            } else {
+                (left, right)
+            };
+        kernels::real_arithmetic(op, numbers(left), numbers(right), values::reals_mut(result));
     }
     Ok(result)
 }
 
-/// An integer or logical element as a double.
-#[inline(always)]
-fn widen(value: i32) -> f64 {
-    if value == NA_INTEGER {
-        NA_REAL
-    } else {
-        value as f64
-    }
-}
-
-/// Applies `op` elementwise with recycling. Each operator gets its own loop, so the common
-/// cases compile to straight-line vector code instead of a dispatch per element.
-#[inline(always)]
-fn real_kernel<A: Copy, B: Copy>(
-    op: Op,
-    a: &[A],
-    b: &[B],
-    output: &mut [f64],
-    left: impl Fn(A) -> f64,
-    right: impl Fn(B) -> f64,
-) {
-    match op {
-        Op::Add => recycle(a, b, output, |x, y| left(x) + right(y)),
-        Op::Subtract => recycle(a, b, output, |x, y| left(x) - right(y)),
-        Op::Multiply => recycle(a, b, output, |x, y| left(x) * right(y)),
-        Op::Divide => recycle(a, b, output, |x, y| left(x) / right(y)),
-        Op::Power => recycle(a, b, output, |x, y| power(left(x), right(y))),
-        Op::Modulo => recycle(a, b, output, |x, y| real_modulo(left(x), right(y))),
-        Op::IntegerDivide => recycle(a, b, output, |x, y| real_integer_divide(left(x), right(y))),
-    }
-}
-
-/// `output[i] = f(a[i % a.len()], b[i % b.len()])`, with the equal-length and scalar cases
-/// split out because they are almost every call and vectorize.
-#[inline(always)]
-fn recycle<T: Copy, U: Copy, O>(a: &[T], b: &[U], output: &mut [O], f: impl Fn(T, U) -> O) {
-    let count = output.len();
-    if a.is_empty() || b.is_empty() {
-        return;
-    }
-    if a.len() == count && b.len() == count {
-        for ((slot, &x), &y) in output.iter_mut().zip(a).zip(b) {
-            *slot = f(x, y);
-        }
-    } else if a.len() == count && b.len() == 1 {
-        let y = b[0];
-        for (slot, &x) in output.iter_mut().zip(a) {
-            *slot = f(x, y);
-        }
-    } else if a.len() == 1 && b.len() == count {
-        let x = a[0];
-        for (slot, &y) in output.iter_mut().zip(b) {
-            *slot = f(x, y);
-        }
-    } else {
-        let (mut i, mut j) = (0, 0);
-        for slot in output.iter_mut() {
-            *slot = f(a[i], b[j]);
-            i += 1;
-            if i == a.len() {
-                i = 0;
-            }
-            j += 1;
-            if j == b.len() {
-                j = 0;
-            }
-        }
+/// A numeric vector's elements as a kernel operand.
+unsafe fn numbers<'a>(vector: Sexp) -> Reals<'a> {
+    match vector.kind() {
+        SexpType::Real => Reals::Doubles(values::reals(vector)),
+        _ => Reals::Integers(values::ints(vector)),
     }
 }
 
@@ -1492,11 +1398,12 @@ pub fn power(base: f64, exponent: f64) -> f64 {
 /// `a %% b`. The remainder is corrected in x87 extended precision, as GNU R computes it, so
 /// `1e17 %% 7` is the exact 5 rather than the 0 a double computation gives.
 pub fn real_modulo(a: f64, b: f64) -> f64 {
-    if is_na_real(a) || is_na_real(b) {
-        return NA_REAL;
-    }
+    // GNU R tests for a zero divisor first, so `NA %% 0` is `NaN`.
     if b == 0.0 {
         return f64::NAN;
+    }
+    if is_na_real(a) || is_na_real(b) {
+        return NA_REAL;
     }
     if let Some(remainder) = exact_integer_modulo(a, b) {
         return remainder;
@@ -1511,8 +1418,9 @@ pub fn real_modulo(a: f64, b: f64) -> f64 {
 
 /// `a %/% b`, consistent with `real_modulo`: `a == (a %/% b) * b + a %% b` up to rounding.
 pub fn real_integer_divide(a: f64, b: f64) -> f64 {
-    if is_na_real(a) || is_na_real(b) {
-        return NA_REAL;
+    // GNU R divides first, so a NaN operand passes through with the payload of the division.
+    if a.is_nan() || b.is_nan() {
+        return a / b;
     }
     if b != 0.0
         && let Some(remainder) = exact_integer_modulo(a, b)
@@ -1577,63 +1485,13 @@ unsafe fn integer_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp, count:
     if count == 0 {
         return Ok(result);
     }
-    let a = values::ints(left);
-    let b = values::ints(right);
-    let output = values::ints_mut(result);
-    let overflowed = std::cell::Cell::new(false);
-    let checked = |value: Option<i32>| match value {
-        Some(value) if value != NA_INTEGER => value,
-        _ => {
-            overflowed.set(true);
-            NA_INTEGER
-        }
-    };
-    let either_na = |x: i32, y: i32| x == NA_INTEGER || y == NA_INTEGER;
-    match op {
-        Op::Add => recycle(a, b, output, |x, y| {
-            if either_na(x, y) {
-                NA_INTEGER
-            } else {
-                checked(x.checked_add(y))
-            }
-        }),
-        Op::Subtract => recycle(a, b, output, |x, y| {
-            if either_na(x, y) {
-                NA_INTEGER
-            } else {
-                checked(x.checked_sub(y))
-            }
-        }),
-        Op::Multiply => recycle(a, b, output, |x, y| {
-            if either_na(x, y) {
-                NA_INTEGER
-            } else {
-                checked(x.checked_mul(y))
-            }
-        }),
-        Op::Modulo => recycle(a, b, output, |x, y| {
-            if either_na(x, y) || y == 0 {
-                NA_INTEGER
-            } else {
-                x.rem_euclid(y) + if y < 0 && x.rem_euclid(y) != 0 { y } else { 0 }
-            }
-        }),
-        Op::IntegerDivide => recycle(a, b, output, |x, y| {
-            if either_na(x, y) || y == 0 {
-                NA_INTEGER
-            } else {
-                let value = (x as f64 / y as f64).floor() as i32;
-                if value == NA_INTEGER {
-                    NA_INTEGER
-                } else {
-                    value
-                }
-            }
-        }),
-        Op::Divide | Op::Power => unreachable!(),
-    }
-    let overflow = overflowed.get();
-    if overflow {
+    let overflowed = kernels::integer_arithmetic(
+        op,
+        Integers::Values(values::ints(left)),
+        Integers::Values(values::ints(right)),
+        values::ints_mut(result),
+    );
+    if overflowed {
         conditions::warning_call(call, "NAs produced by integer overflow")?;
     }
     Ok(result)
@@ -1798,30 +1656,6 @@ unsafe fn complex_arithmetic(op: Op, left: Sexp, right: Sexp, count: usize) -> R
 
 // Comparison.
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Comparison {
-    Equal,
-    NotEqual,
-    Less,
-    Greater,
-    LessEqual,
-    GreaterEqual,
-}
-
-impl Comparison {
-    fn holds(self, ordering: std::cmp::Ordering) -> bool {
-        use std::cmp::Ordering::*;
-        match self {
-            Comparison::Equal => ordering == Equal,
-            Comparison::NotEqual => ordering != Equal,
-            Comparison::Less => ordering == Less,
-            Comparison::Greater => ordering == Greater,
-            Comparison::LessEqual => ordering != Greater,
-            Comparison::GreaterEqual => ordering != Less,
-        }
-    }
-}
-
 /// A language object as the string comparison sees it.
 unsafe fn comparable(value: Sexp) -> R<Sexp> {
     match value.kind() {
@@ -1928,75 +1762,34 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
             if matches!(left.kind(), SexpType::Integer | SexpType::Logical)
                 && matches!(right.kind(), SexpType::Integer | SexpType::Logical) =>
         {
-            let output = values::ints_mut(result);
-            compare_kernel(
+            kernels::compare_integers(
                 comparison,
-                values::ints(left),
-                values::ints(right),
-                output,
-                |x| x == NA_INTEGER,
-                |x| x == NA_INTEGER,
-                |x| x,
-                |y| y,
+                Integers::Values(values::ints(left)),
+                Integers::Values(values::ints(right)),
+                values::ints_mut(result),
             );
         }
         _ => {
-            let output = values::ints_mut(result);
-            let real = |value: f64| value;
-            let integer_na = |value: i32| value == NA_INTEGER;
-            let real_na = |value: f64| value.is_nan();
-            let left_integer = matches!(left.kind(), SexpType::Integer | SexpType::Logical);
-            let right_integer = matches!(right.kind(), SexpType::Integer | SexpType::Logical);
-            match (
-                left_integer,
-                right_integer,
-                left.kind() == SexpType::Real && right.kind() == SexpType::Real,
-            ) {
-                (_, _, true) => compare_kernel(
-                    comparison,
-                    values::reals(left),
-                    values::reals(right),
-                    output,
-                    real_na,
-                    real_na,
-                    real,
-                    real,
-                ),
-                (false, true, _) if left.kind() == SexpType::Real => compare_kernel(
-                    comparison,
-                    values::reals(left),
-                    values::ints(right),
-                    output,
-                    real_na,
-                    integer_na,
-                    real,
-                    widen,
-                ),
-                (true, false, _) if right.kind() == SexpType::Real => compare_kernel(
-                    comparison,
-                    values::ints(left),
-                    values::reals(right),
-                    output,
-                    integer_na,
-                    real_na,
-                    widen,
-                    real,
-                ),
-                _ => {
-                    let left = coerce_vector(left, SexpType::Real)?;
-                    let right = coerce_vector(right, SexpType::Real)?;
-                    compare_kernel(
-                        comparison,
-                        values::reals(left),
-                        values::reals(right),
-                        output,
-                        real_na,
-                        real_na,
-                        real,
-                        real,
-                    );
-                }
-            }
+            let numeric = |value: Sexp| {
+                matches!(
+                    value.kind(),
+                    SexpType::Integer | SexpType::Logical | SexpType::Real
+                )
+            };
+            let (left, right) = if numeric(left) && numeric(right) {
+                (left, right)
+            } else {
+                (
+                    coerce_vector(left, SexpType::Real)?,
+                    coerce_vector(right, SexpType::Real)?,
+                )
+            };
+            kernels::compare_reals(
+                comparison,
+                numbers(left),
+                numbers(right),
+                values::ints_mut(result),
+            );
         }
     }
     relational_attributes(call.arg(0), call.arg(1), result, call.call)?;
@@ -2006,37 +1799,6 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
         return values::scalar_logical(values::ints(result)[0]);
     }
     Ok(result)
-}
-
-/// Compares elementwise with recycling, `NA` wherever either side is missing. Each operator
-/// gets its own loop for the same reason as [`real_kernel`].
-#[inline(always)]
-#[allow(clippy::too_many_arguments)]
-fn compare_kernel<A: Copy, B: Copy, T: PartialOrd>(
-    comparison: Comparison,
-    a: &[A],
-    b: &[B],
-    output: &mut [i32],
-    left_na: impl Fn(A) -> bool,
-    right_na: impl Fn(B) -> bool,
-    left: impl Fn(A) -> T,
-    right: impl Fn(B) -> T,
-) {
-    let compare = |x: A, y: B, holds: fn(&T, &T) -> bool| {
-        if left_na(x) || right_na(y) {
-            NA_LOGICAL
-        } else {
-            holds(&left(x), &right(y)) as i32
-        }
-    };
-    match comparison {
-        Comparison::Equal => recycle(a, b, output, |x, y| compare(x, y, T::eq)),
-        Comparison::NotEqual => recycle(a, b, output, |x, y| compare(x, y, T::ne)),
-        Comparison::Less => recycle(a, b, output, |x, y| compare(x, y, T::lt)),
-        Comparison::Greater => recycle(a, b, output, |x, y| compare(x, y, T::gt)),
-        Comparison::LessEqual => recycle(a, b, output, |x, y| compare(x, y, T::le)),
-        Comparison::GreaterEqual => recycle(a, b, output, |x, y| compare(x, y, T::ge)),
-    }
 }
 
 // Logic.
@@ -2119,28 +1881,12 @@ unsafe fn logic(call: &Call<'_>, is_and: bool) -> R<Sexp> {
     if count > 0 {
         let (left_values, right_values) = (logical_view(left), logical_view(right));
         let (a, b) = (left_values.as_ref(), right_values.as_ref());
-        let output = values::ints_mut(result);
-        if is_and {
-            recycle(a, b, output, |x, y| {
-                if x == 0 || y == 0 {
-                    0
-                } else if x == NA_LOGICAL || y == NA_LOGICAL {
-                    NA_LOGICAL
-                } else {
-                    1
-                }
-            });
-        } else {
-            recycle(a, b, output, |x, y| {
-                if x == 1 || y == 1 {
-                    1
-                } else if x == NA_LOGICAL || y == NA_LOGICAL {
-                    NA_LOGICAL
-                } else {
-                    0
-                }
-            });
-        }
+        kernels::logic(
+            is_and,
+            Integers::Values(a),
+            Integers::Values(b),
+            values::ints_mut(result),
+        );
     }
     relational_attributes(left, right, result, call.call)?;
     Ok(result)
@@ -2172,19 +1918,10 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
             values::copy_most_attributes(operand, result, true)?;
             Ok(result)
         }
-        SexpType::Logical
-        | SexpType::Integer
-        | SexpType::Real
-        | SexpType::Complex => {
-            let result = alloc(SexpType::Logical, count)?;
-            for index in 0..count {
-                let value = logical_at(operand, index);
-                values::ints_mut(result)[index] = if value == NA_LOGICAL {
-                    NA_LOGICAL
-                } else {
-                    1 - value
-                };
-            }
+        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex => {
+            let result = values::alloc_uninit(SexpType::Logical, count)?;
+            let flags = logical_view(operand);
+            kernels::not(Some(&flags), values::ints_mut(result));
             for symbol in [symbols().names, symbols().dim, symbols().dimnames] {
                 let value = get_attr(operand, symbol);
                 if value != nil() {
@@ -2205,8 +1942,42 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
 
 // The Math group.
 
+/// The math functions an element-wise tree can apply, by their base names.
+pub const MATHS: [(Math, &str); 30] = [
+    (Math::Abs, "abs"),
+    (Math::Sign, "sign"),
+    (Math::Sqrt, "sqrt"),
+    (Math::Floor, "floor"),
+    (Math::Ceiling, "ceiling"),
+    (Math::Trunc, "trunc"),
+    (Math::Exp, "exp"),
+    (Math::Expm1, "expm1"),
+    (Math::Log1p, "log1p"),
+    (Math::Log2, "log2"),
+    (Math::Log10, "log10"),
+    (Math::Cos, "cos"),
+    (Math::Sin, "sin"),
+    (Math::Tan, "tan"),
+    (Math::Cospi, "cospi"),
+    (Math::Sinpi, "sinpi"),
+    (Math::Tanpi, "tanpi"),
+    (Math::Acos, "acos"),
+    (Math::Asin, "asin"),
+    (Math::Atan, "atan"),
+    (Math::Cosh, "cosh"),
+    (Math::Sinh, "sinh"),
+    (Math::Tanh, "tanh"),
+    (Math::Acosh, "acosh"),
+    (Math::Asinh, "asinh"),
+    (Math::Atanh, "atanh"),
+    (Math::Gamma, "gamma"),
+    (Math::Lgamma, "lgamma"),
+    (Math::Digamma, "digamma"),
+    (Math::Trigamma, "trigamma"),
+];
+
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Math {
+pub enum Math {
     Abs,
     Sign,
     Sqrt,
@@ -2239,7 +2010,7 @@ enum Math {
     Trigamma,
 }
 
-fn math_value(function: Math, x: f64) -> f64 {
+pub fn math_value(function: Math, x: f64) -> f64 {
     use std::f64::consts::PI;
     match function {
         Math::Abs => x.abs(),
@@ -2349,42 +2120,10 @@ unsafe fn math1(call: &Call<'_>, function: Math) -> R<Sexp> {
             values::copy_most_attributes(operand, result, true)?;
             Ok(result)
         }
-        SexpType::Real => {
+        SexpType::Real | SexpType::Integer | SexpType::Logical => {
             let result = values::alloc_uninit(SexpType::Real, count)?;
-            let source = values::reals(operand);
-            let target = values::reals_mut(result);
-            // The common functions get their own loop, so the function is not re-chosen for
-            // every element and the loop has no call left to keep it from being vectorized.
-            let produced_nan = match function {
-                Math::Floor => map_reals(source, target, f64::floor),
-                Math::Ceiling => map_reals(source, target, f64::ceil),
-                Math::Trunc => map_reals(source, target, f64::trunc),
-                Math::Abs => map_reals(source, target, f64::abs),
-                Math::Sqrt => map_reals(source, target, f64::sqrt),
-                Math::Exp => map_reals(source, target, f64::exp),
-                _ => map_reals(source, target, |x| math_value(function, x)),
-            };
-            values::copy_most_attributes(operand, result, true)?;
-            if produced_nan {
-                conditions::warning_call(call.call, "NaNs produced")?;
-            }
-            Ok(result)
-        }
-        SexpType::Integer | SexpType::Logical => {
-            let result = alloc(SexpType::Real, count)?;
-            let mut produced_nan = false;
-            for index in 0..count {
-                let x = real_at(operand, index);
-                let value = if is_na_real(x) {
-                    NA_REAL
-                } else {
-                    math_value(function, x)
-                };
-                if value.is_nan() && !x.is_nan() {
-                    produced_nan = true;
-                }
-                values::reals_mut(result)[index] = value;
-            }
+            let produced_nan =
+                kernels::math(function, Some(numbers(operand)), values::reals_mut(result));
             values::copy_most_attributes(operand, result, true)?;
             if produced_nan {
                 conditions::warning_call(call.call, "NaNs produced")?;
@@ -2394,18 +2133,6 @@ unsafe fn math1(call: &Call<'_>, function: Math) -> R<Sexp> {
         SexpType::Complex => complex_math(call, function, operand),
         _ => Err(call.error("non-numeric argument to mathematical function")),
     }
-}
-
-/// Writes `function` of each element of `source` into `target`, keeping NA as NA, and reports
-/// whether a NaN came out of a value that was not NaN.
-fn map_reals(source: &[f64], target: &mut [f64], function: impl Fn(f64) -> f64) -> bool {
-    let mut produced_nan = false;
-    for (slot, &x) in target.iter_mut().zip(source) {
-        let value = if is_na_real(x) { NA_REAL } else { function(x) };
-        produced_nan |= value.is_nan() & !x.is_nan();
-        *slot = value;
-    }
-    produced_nan
 }
 
 unsafe fn complex_math(call: &Call<'_>, function: Math, operand: Sexp) -> R<Sexp> {

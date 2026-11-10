@@ -106,6 +106,81 @@ pub fn check_bytecode_agreement(entropy: &mut impl Entropy) {
     });
 }
 
+/// A random element-wise tree over vector operands, the shape the tier-0 compiler fuses into
+/// one pass, gives the same value from the fused pass as from the AST evaluator: the same NA
+/// and NaN payloads, the same NA on integer overflow, the same recycling and reductions.
+pub fn check_fused_agreement(entropy: &mut impl Entropy) {
+    let operands = [
+        "c(1.5, NA, -2, NaN, 0, 1e308)",
+        "c(NaN, 2, NA, -0.5, 3, -1e308)",
+        "c(2147483647L, -3L, NA, 0L, 7L, -2147483647L)",
+        "c(1L, 2L, 3L, 4L, 5L, 6L)",
+        "c(TRUE, NA, FALSE, TRUE, FALSE, TRUE)",
+        "c(0.25, -4, 9, 1, 16, 100)",
+        "c(2, -1)",
+        "c(3L, 1L, 2L)",
+        "5",
+        "-2L",
+    ];
+    let a = operands[entropy.below(operands.len())];
+    let b = operands[entropy.below(operands.len())];
+    let tree = fused_expression(entropy, 3);
+    let body = match entropy.below(5) {
+        0 => format!("sum({tree})"),
+        1 => format!("any({tree})"),
+        2 => format!("all({tree})"),
+        _ => tree,
+    };
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        let (direct, compiled) = unsafe { outcomes(&body, a, b) };
+        for (call, outcome) in compiled.iter().enumerate() {
+            assert_eq!(
+                &direct,
+                outcome,
+                "call {}: `{body}` with a = {a}, b = {b}",
+                call + 1
+            );
+        }
+    });
+}
+
+fn fused_expression(entropy: &mut impl Entropy, depth: usize) -> String {
+    if depth == 0 || entropy.below(4) == 0 {
+        let leaves = ["a", "b", "a", "b", "2", "1L", "0.5", "NA", "TRUE"];
+        return leaves[entropy.below(leaves.len())].to_owned();
+    }
+    match entropy.below(8) {
+        0 => format!("-({})", fused_expression(entropy, depth - 1)),
+        1 => format!("!({})", fused_expression(entropy, depth - 1)),
+        2 => {
+            let functions = [
+                "exp", "sqrt", "abs", "floor", "log10", "sin", "trunc", "sign",
+            ];
+            format!(
+                "{}({})",
+                functions[entropy.below(functions.len())],
+                fused_expression(entropy, depth - 1)
+            )
+        }
+        3 => format!(
+            "({} {} {})",
+            fused_expression(entropy, depth - 1),
+            ["&", "|"][entropy.below(2)],
+            fused_expression(entropy, depth - 1)
+        ),
+        _ => {
+            let operators = ["+", "-", "*", "/", "^", "==", "<", ">=", "!="];
+            format!(
+                "({} {} {})",
+                fused_expression(entropy, depth - 1),
+                operators[entropy.below(operators.len())],
+                fused_expression(entropy, depth - 1)
+            )
+        }
+    }
+}
+
 unsafe fn outcomes(body: &str, a: &str, b: &str) -> (String, Vec<String>) {
     unsafe {
         // The direct run assigns its locals globally, which the closure would then read, so

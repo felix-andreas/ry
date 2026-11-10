@@ -23,7 +23,6 @@
 //! can change it, so code outside the compiled body never sees the difference.
 
 pub use interp::effects::{Speculation, base_builtin, resolve_function};
-
 use {
     crate::native::{self, Native},
     bumpalo::Bump,
@@ -2193,6 +2192,9 @@ impl<'a> Builder<'a> {
                 }
                 Action::FallThrough
             }
+            // The fused pass is an interpreter shortcut: optimized code runs the ordinary code
+            // after it, which computes the same value.
+            Op::Fused => Action::FallThrough,
             Op::Jump | Op::Resume => {
                 self.push_edge(operand(0), state);
                 return Ok(Action::Jump);
@@ -3843,7 +3845,13 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
             kill(operand(0), live);
             gen_(operand(1), live);
         }
-        Op::Guard | Op::Jump | Op::Resume | Op::Invisible | Op::Visible | Op::SetSrcref => {}
+        Op::Guard
+        | Op::Fused
+        | Op::Jump
+        | Op::Resume
+        | Op::Invisible
+        | Op::Visible
+        | Op::SetSrcref => {}
         Op::EndStatement => {
             kill(operand(0), live);
             for register in operand(1)..operand(2) {

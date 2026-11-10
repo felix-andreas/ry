@@ -1,0 +1,126 @@
+[stdout]
+| chain double 
+| [1] NaN  NA  NA NaN   0  15
+| chain2 double 
+| [1] NaN  NA  NA NaN  -1  16
+| payload double 
+| [1] NaN  NA  NA NaN   0   0
+| power double 
+| [1] NaN  NA  NA NaN   1  25
+| negate double 
+| [1] NaN  NA  NA NaN   0 -12
+| mixed double 
+| [1]  0.050000 -5.733333  8.500000  5.100000  6.966667  9.666667
+| int integer 
+| [1]  4 -1 18 NA 11 18
+| overflow warning: NAs produced by integer overflow 
+| overflow warning: NAs produced by integer overflow 
+| overflow warning: NAs produced by integer overflow 
+| overflow integer 
+| [1]  0 -4 NA NA  5 NA
+| intdiv double 
+| [1] 1.5000000 0.3333333        NA        NA 6.0000000       Inf
+| negint integer 
+| [1]           1           5          NA          NA          -4 -2147483647
+| abs warning: NAs produced by integer overflow 
+| abs warning: NAs produced by integer overflow 
+| abs warning: NAs produced by integer overflow 
+| abs integer 
+| [1]  2  3 NA  5  6 NA
+| compare logical 
+| [1]   NA   NA   NA   NA TRUE TRUE
+| logic logical 
+| [1]  TRUE FALSE    NA  TRUE  TRUE  TRUE
+| not logical 
+| [1] FALSE FALSE    NA    NA  TRUE FALSE
+| logical integer 
+| [1]  3  0 NA  3  3  0
+| sum_na integer 
+| [1] NA
+| sum_int_na integer 
+| [1] NA
+| sum_gt integer 
+| [1] 3
+| sum_double double 
+| [1] 9.3
+| sum_int integer 
+| [1] 42
+| sum_not integer 
+| [1] 3
+| sum_wide double 
+| [1] 2147483648
+| any logical 
+| [1] TRUE
+| any_na logical 
+| [1] TRUE
+| any_overflow warning: NAs produced by integer overflow 
+| any_overflow warning: NAs produced by integer overflow 
+| any_overflow warning: NAs produced by integer overflow 
+| any_overflow logical 
+| [1] TRUE
+| all logical 
+| [1] TRUE
+| all_false logical 
+| [1] FALSE
+| all_na logical 
+| [1] NA
+| gbm double 
+| [1] 1.0211272 0.9727790 1.0001191 1.0425766 1.0571259 0.9331639
+| gbm_na double 
+| [1] 0.9875978 1.0001191 1.0127991        NA       NaN 1.0256399
+| sqrt_nan warning: NaNs produced 
+| sqrt_nan warning: NaNs produced 
+| sqrt_nan warning: NaNs produced 
+| sqrt_nan double 
+| [1] 1.707107      NaN       NA      NaN      NaN 2.414214
+| math double 
+| [1]   2.761096  11.991493   1.000000   3.670064   4.207513 249.382348
+| floor_int warning: NAs produced by integer overflow 
+| floor_int warning: NAs produced by integer overflow 
+| floor_int warning: NAs produced by integer overflow 
+| floor_int double 
+| [1]  4 -2 NA 10 12 NA
+| trig double 
+| [1]  0.08764102  0.25218162  0.00000000  0.49829555  0.76323912 -0.11311011
+| long double 
+| [1] 1500.00000 1001.00022    1.00000    1.00000    2.56748
+| recycle warning: longer object length is not a multiple of shorter object length 
+| recycle warning: longer object length is not a multiple of shorter object length 
+| recycle warning: longer object length is not a multiple of shorter object length 
+| recycle double 
+| [1] 2 5 4
+| recycle_int double 
+| [1]  2  5  4  9  6 13
+| matrix double 
+|      [,1] [,2] [,3]
+| [1,]    3    7   11
+| [2,]    5    9   13
+| names double 
+| a b 
+| 3 5 
+| empty double 
+| numeric(0)
+| keep list 
+| [[1]]
+| [1] 1 2 3
+| 
+| [[2]]
+| [1] 3 5 7
+| 
+| promise double 
+| [1] NaN  NA  NA NaN   0  15
+| [1] "mine"
+| [1] 7.369979e+01 3.337327e-02 2.718282e+00 1.998196e+03 1.803374e+04
+| [6] 4.539993e-05
+| local_function character 
+| [1] "local"
+| [1]  TRUE FALSE
+| [1]  TRUE FALSE
+| [1]  TRUE FALSE
+| [1]  TRUE FALSE
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

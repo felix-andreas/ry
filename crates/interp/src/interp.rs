@@ -58,6 +58,7 @@ pub mod graphics_render;
 pub mod help_server;
 pub mod http;
 pub mod image;
+pub mod kernels;
 pub mod latex;
 pub mod linalg;
 pub mod linpack;

@@ -43,10 +43,13 @@
 use {
     crate::{
         Interp,
+        arith::MATHS,
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
         conditions, dispatch, effects,
         eval::{self, SwitchSelector, as_condition},
-        interp, moves,
+        interp,
+        kernels::{self, Element, MAX_NODES, Node, Reduction},
+        moves,
         unwind::{Jump, R, Unwind, error, error_in},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
@@ -378,6 +381,8 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         summary: nil(),
         bound: None,
         cold: Vec::new(),
+        temporary: None,
+        sites: None,
     };
     let heap = crate::heap();
     let mut list = nil();
@@ -477,7 +482,9 @@ pub enum Op {
     Jump,
     /// `src call target`: jumps when the condition is false.
     JumpUnless,
-    /// `operator dst left right call function`
+    /// `operator dst left right call function reuse`. Bit 0 of `reuse` marks `left` and bit 1
+    /// `right` as a temporary that only this instruction reads, so a plain vector there with no
+    /// counted reference may hold the result (`kernels::binary`).
     Arithmetic,
     /// `src`
     Return,
@@ -577,6 +584,12 @@ pub enum Op {
     /// `target`: a guard fallback laid out after the body returning to it. Unlike a backward
     /// `Jump`, it is never a loop's back edge.
     Resume,
+    /// `dst program target`: an element-wise expression such as `exp(a * b + c)` or
+    /// `sum(x > 0)` computed in one pass by `kernels::fused`, without intermediate vectors,
+    /// after which execution goes on at `target`. The expression's ordinary code follows, and
+    /// runs whenever the fused pass declines. `program` is the integer vector [`fusion`] lays
+    /// out, or `NULL` when the ordinary code did not take the expected shape.
+    Fused,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its last operand.
@@ -591,7 +604,7 @@ enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 44] = [
+pub const OPS: [Op; 45] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -636,6 +649,7 @@ pub const OPS: [Op; 44] = [
     Op::SubAssignMatrix,
     Op::Replace,
     Op::Resume,
+    Op::Fused,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -751,6 +765,14 @@ struct Compiler {
     cold: Vec<Cold>,
     /// The stored half of the effect-free fact, `NULL` for an argument's code.
     summary: Sexp,
+    /// The register an element-wise operator last wrote a fresh result into, with the code
+    /// position after it. An operand compiled to exactly that is a temporary only its parent
+    /// reads, which may then write its result into the operand's storage (see
+    /// [`Op::Arithmetic`]).
+    temporary: Option<(u32, u32)>,
+    /// While the ordinary code of a fused expression compiles: the positions of the
+    /// instructions [`Compiler::fusion_program`] matches against the fusion plan's steps.
+    sites: Option<Vec<u32>>,
 }
 
 /// A guard fallback compiled out of line: the guards that fail to it, its instruction, and where
@@ -775,6 +797,57 @@ struct Loop {
     end: u32,
     exit: u32,
     step: u32,
+}
+
+/// An element-wise tree [`Compiler::fused_call`] compiles to an [`Op::Fused`]: the nodes and
+/// leaves `kernels::fused` takes (a leaf is a variable's symbol or a constant's value), and the
+/// instructions the tree's ordinary code is expected to consist of, in order.
+struct FusionPlan {
+    nodes: Vec<Node>,
+    leaves: Vec<Sexp>,
+    steps: Vec<FusionStep>,
+    reduction: Option<Reduction>,
+}
+
+impl FusionPlan {
+    fn leaf(&mut self, leaf: Sexp) -> usize {
+        self.leaves.push(leaf);
+        self.nodes.push(Node::Leaf(self.leaves.len() - 1));
+        self.nodes.len() - 1
+    }
+}
+
+enum FusionStep {
+    /// The guard or function lookup that checks the operator `symbol` names `expected`.
+    Head(Sexp, Sexp),
+    /// The variable read of leaf `index`.
+    Variable(usize),
+    /// The instruction that computes node `index`, or the reduction when `None`.
+    Result(Option<usize>),
+}
+
+/// The layout of an [`Op::Fused`] program, an integer vector: a header, then per guard
+/// `[symbol, expected, cache slot, probe]` (constants and the operands of the operator's guard
+/// or function lookup, `probe` set when the frame itself may bind the name), per leaf
+/// `[is variable, constant, cache slot, site]` (`constant` the symbol of a variable or the value
+/// of a constant), and per node `[tag, a, b, c, site]`. A node's tag is 0 for leaf `a`, 1 for
+/// `ARITHS[a]` on nodes `b` and `c`, 2 for `&` (`a` set) or `|` on `b` and `c`, 3 for unary `-`
+/// on `a`, 4 for `!` on `a`, and 5 for `MATHS[a]` on `b`. A site is the position of the ordinary
+/// instruction whose type feedback the fused pass records.
+mod fusion {
+    /// How often the pass declined in a row; it stops trying at [`GIVE_UP`].
+    pub const DECLINES: usize = 0;
+    pub const NODES: usize = 1;
+    pub const LEAVES: usize = 2;
+    /// -1 for none, else 0 for `sum`, 1 for `any` and 2 for `all`.
+    pub const REDUCTION: usize = 3;
+    pub const REDUCTION_SITE: usize = 4;
+    pub const GUARDS: usize = 5;
+    pub const HEADER: usize = 6;
+    pub const GUARD: usize = 4;
+    pub const LEAF: usize = 4;
+    pub const NODE: usize = 5;
+    pub const GIVE_UP: i32 = 16;
 }
 
 /// Compiles a closure body, or reports that it is better left to the AST evaluator. The
@@ -810,6 +883,8 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         tail_updates: tail_updates(body, function),
         cold: Vec::new(),
         summary: nil(),
+        temporary: None,
+        sites: None,
     };
     let slot = compiler.cache();
     compiler.summary =
@@ -1584,6 +1659,14 @@ impl Compiler {
     }
 
     fn emit(&mut self, op: Op, operands: &[u32]) {
+        if let Some(sites) = &mut self.sites
+            && matches!(
+                op,
+                Op::Guard | Op::GetFun | Op::GetVar | Op::Arithmetic | Op::CallBuiltin
+            )
+        {
+            sites.push(self.code.len() as u32);
+        }
         self.code.push(op_word(op));
         self.code.extend_from_slice(operands);
     }
@@ -1694,6 +1777,265 @@ impl Compiler {
     }
 
     unsafe fn call(&mut self, call: Sexp, dst: u32) -> R<()> {
+        if self.sites.is_none()
+            && self.bound.is_none()
+            && let Some(plan) = self.fusion_plan(call)?
+        {
+            return self.fused_call(call, dst, &plan);
+        }
+        self.unfused_call(call, dst)
+    }
+
+    /// An element-wise expression of at least two operators, such as `exp(a * b + c)` or
+    /// `sum(x > 0)`, as an [`Op::Fused`] in front of its ordinary code: the fused pass computes
+    /// it without intermediate vectors and jumps over the ordinary code, which runs whenever the
+    /// pass declines. The ordinary code is compiled exactly as it would be without fusion, and
+    /// the fused pass records the type feedback its instructions would have recorded, so the
+    /// optimizing tier sees the same code and the same types either way.
+    unsafe fn fused_call(&mut self, call: Sexp, dst: u32, plan: &FusionPlan) -> R<()> {
+        let program_position = self.code.len() + 2;
+        let target = self.emit_patchable(Op::Fused, &[dst, 0, 0]);
+        self.sites = Some(Vec::new());
+        let compiled = self.unfused_call(call, dst);
+        let sites = self.sites.take().unwrap_or_default();
+        compiled?;
+        self.patch(target);
+        let program = match self.fusion_program(plan, &sites) {
+            Some(words) => values::integer_vector(&words)?,
+            None => nil(),
+        };
+        self.code[program_position] = self.constant(program);
+        Ok(())
+    }
+
+    /// The fusion plan for `call`, if it is an element-wise tree worth fusing.
+    unsafe fn fusion_plan(&mut self, call: Sexp) -> R<Option<FusionPlan>> {
+        let head = call.car();
+        if head.kind() != SexpType::Symbol {
+            return Ok(None);
+        }
+        let mut plan = FusionPlan {
+            nodes: Vec::new(),
+            leaves: Vec::new(),
+            steps: Vec::new(),
+            reduction: None,
+        };
+        let name = symbol_name(head);
+        let reduction = match &*name {
+            "sum" => Some(Reduction::Sum),
+            "any" => Some(Reduction::Any),
+            "all" => Some(Reduction::All),
+            _ => None,
+        };
+        if let Some(reduction) = reduction {
+            let args = values::pairlist_items(call.cdr());
+            let [(tag, argument)] = args.as_slice() else {
+                return Ok(None);
+            };
+            let Some(expected) = crate::builtins::primitive(&name) else {
+                return Ok(None);
+            };
+            if *tag != nil() || self.enclosing_function(head) != Some(expected) {
+                return Ok(None);
+            }
+            plan.steps.push(FusionStep::Head(head, expected));
+            if self.fusion_node(*argument, &mut plan)?.is_none() {
+                return Ok(None);
+            }
+            plan.steps.push(FusionStep::Result(None));
+            plan.reduction = Some(reduction);
+        } else if self.fusion_node(call, &mut plan)?.is_none() {
+            return Ok(None);
+        }
+        let operators = plan
+            .nodes
+            .iter()
+            .filter(|node| !matches!(node, Node::Leaf(_)))
+            .count()
+            + usize::from(plan.reduction.is_some());
+        Ok(
+            (operators >= 2 && plan.nodes.len() <= MAX_NODES && plan.leaves.len() <= MAX_NODES)
+                .then_some(plan),
+        )
+    }
+
+    /// Adds `expression` to `plan` as a node of the element-wise tree and returns its index:
+    /// a variable or numeric constant as a leaf, a call of a base operator or math function on
+    /// such nodes as an operator node. `None` when it is anything else.
+    unsafe fn fusion_node(&mut self, expression: Sexp, plan: &mut FusionPlan) -> R<Option<usize>> {
+        match expression.kind() {
+            SexpType::Symbol => {
+                if expression == symbols().dots
+                    || eval::dot_dot_index(expression).is_some()
+                    || expression == missing_arg()
+                {
+                    return Ok(None);
+                }
+                plan.steps.push(FusionStep::Variable(plan.leaves.len()));
+                return Ok(Some(plan.leaf(expression)));
+            }
+            SexpType::Real | SexpType::Integer | SexpType::Logical
+                if expression.length() == 1 && expression.attrib() == nil() =>
+            {
+                return Ok(Some(plan.leaf(expression)));
+            }
+            SexpType::Language => {}
+            _ => return Ok(None),
+        }
+        let head = expression.car();
+        if head.kind() != SexpType::Symbol || plan.nodes.len() >= MAX_NODES {
+            return Ok(None);
+        }
+        let args = values::pairlist_items(expression.cdr());
+        if args.iter().any(|(tag, value)| {
+            *tag != nil() || *value == symbols().dots || *value == missing_arg()
+        }) {
+            return Ok(None);
+        }
+        let name = symbol_name(head);
+        let arith = ARITHS
+            .iter()
+            .find(|(_, operator)| *operator == name)
+            .map(|(arith, _)| *arith);
+        let math = MATHS.iter().position(|(_, function)| *function == name);
+        let expected = match (&*name, args.len()) {
+            ("(", 1) => self.base_primitive(head, &name)?,
+            (_, 2) if arith.is_some() => self.base_primitive(head, &name)?,
+            ("&" | "|", 2) | ("-" | "!", 1) => crate::builtins::primitive(&name)
+                .filter(|&function| self.enclosing_function(head) == Some(function)),
+            (_, 1) if math.is_some() => crate::builtins::primitive(&name)
+                .filter(|&function| self.enclosing_function(head) == Some(function)),
+            _ => None,
+        };
+        let Some(expected) = expected else {
+            return Ok(None);
+        };
+        plan.steps.push(FusionStep::Head(head, expected));
+        let mut inputs = [0; 2];
+        for (input, (_, argument)) in inputs.iter_mut().zip(&args) {
+            match self.fusion_node(*argument, plan)? {
+                Some(index) => *input = index,
+                None => return Ok(None),
+            }
+        }
+        let [first, second] = inputs;
+        let node = match (&*name, args.len(), arith, math) {
+            ("(", 1, _, _) => return Ok(Some(first)),
+            (_, 2, Some(arith), _) => Node::Binary(arith, first, second),
+            ("&" | "|", 2, _, _) => Node::Logic {
+                is_and: name == "&",
+                left: first,
+                right: second,
+            },
+            ("-", 1, _, _) => Node::Negate(first),
+            ("!", 1, _, _) => Node::Not(first),
+            (_, 1, _, Some(math)) => Node::Math(MATHS[math].0, first),
+            _ => return Ok(None),
+        };
+        plan.steps.push(FusionStep::Result(Some(plan.nodes.len())));
+        plan.nodes.push(node);
+        Ok(Some(plan.nodes.len() - 1))
+    }
+
+    /// The program [`Op::Fused`] runs for `plan`, laid out as [`fusion`] describes, with each
+    /// step matched to the instruction of the ordinary code at `sites`. `None` when the ordinary
+    /// code took another shape than the plan expects, such as a fallback to the evaluator.
+    unsafe fn fusion_program(&mut self, plan: &FusionPlan, sites: &[u32]) -> Option<Vec<i32>> {
+        if sites.len() != plan.steps.len() {
+            return None;
+        }
+        let mut guards = Vec::new();
+        let mut leaves: Vec<[i32; fusion::LEAF]> = vec![[0; fusion::LEAF]; plan.leaves.len()];
+        let mut node_sites = vec![0; plan.nodes.len()];
+        let mut reduction_site = 0;
+        for (step, &site) in plan.steps.iter().zip(sites) {
+            let position = site as usize;
+            let op = op_of(*self.code.get(position)?)?;
+            let operands = self
+                .code
+                .get(position + 1..position + 1 + operand_count(op))?
+                .to_vec();
+            let operand = |index: usize| operands[index];
+            match *step {
+                FusionStep::Head(symbol, expected) => {
+                    let (symbol_operand, cache, probe) = match op {
+                        Op::Guard => (operand(0), operand(2), operand(3)),
+                        Op::GetFun => (operand(1), operand(2), 1),
+                        _ => return None,
+                    };
+                    if self.constant_at(symbol_operand) != Some(symbol) {
+                        return None;
+                    }
+                    let expected = self.constant(expected);
+                    guards.push([symbol_operand, expected, cache, probe].map(|word| word as i32));
+                }
+                FusionStep::Variable(leaf) => {
+                    if op != Op::GetVar || self.constant_at(operand(1)) != Some(plan.leaves[leaf]) {
+                        return None;
+                    }
+                    leaves[leaf] = [1, operand(1) as i32, operand(2) as i32, site as i32];
+                }
+                FusionStep::Result(node) => match (node, op) {
+                    (Some(node), Op::Arithmetic | Op::CallBuiltin) => node_sites[node] = site,
+                    (None, Op::CallBuiltin) => reduction_site = site,
+                    _ => return None,
+                },
+            }
+        }
+        for (words, &leaf) in leaves.iter_mut().zip(&plan.leaves) {
+            if leaf.kind() != SexpType::Symbol {
+                *words = [0, self.constant(leaf) as i32, 0, 0];
+            }
+        }
+        let reduction = match plan.reduction {
+            None => -1,
+            Some(Reduction::Sum) => 0,
+            Some(Reduction::Any) => 1,
+            Some(Reduction::All) => 2,
+        };
+        let mut words = vec![
+            0,
+            plan.nodes.len() as i32,
+            plan.leaves.len() as i32,
+            reduction,
+            reduction_site as i32,
+            guards.len() as i32,
+        ];
+        words.extend(guards.iter().flatten());
+        words.extend(leaves.iter().flatten());
+        for (node, &site) in plan.nodes.iter().zip(&node_sites) {
+            let site = site as i32;
+            let arith_index = |arith: Arith| arith as i32;
+            words.extend_from_slice(&match *node {
+                Node::Leaf(leaf) => [0, leaf as i32, 0, 0, 0],
+                Node::Binary(arith, left, right) => {
+                    [1, arith_index(arith), left as i32, right as i32, site]
+                }
+                Node::Logic {
+                    is_and,
+                    left,
+                    right,
+                } => [2, i32::from(is_and), left as i32, right as i32, site],
+                Node::Negate(input) => [3, input as i32, 0, 0, site],
+                Node::Not(input) => [4, input as i32, 0, 0, site],
+                Node::Math(math, input) => [
+                    5,
+                    MATHS.iter().position(|(function, _)| *function == math)? as i32,
+                    input as i32,
+                    0,
+                    site,
+                ],
+            });
+        }
+        Some(words)
+    }
+
+    fn constant_at(&self, index: u32) -> Option<Sexp> {
+        let index = (index as usize).checked_sub(FIRST_CONSTANT)?;
+        self.constants.get(index).copied()
+    }
+
+    unsafe fn unfused_call(&mut self, call: Sexp, dst: u32) -> R<()> {
         let head = call.car();
         if head.kind() == SexpType::Language {
             // A head that is itself a call, most often `pkg::f`, evaluates to the function and
@@ -2233,6 +2575,9 @@ impl Compiler {
         let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
         self.inline(call, primitive, dst, name, args)?;
         self.cold_fallback(&[guard], call, dst)?;
+        if ARITHS.iter().any(|(_, operator)| *operator == name) {
+            self.temporary = Some((dst, self.here()));
+        }
         Ok(())
     }
 
@@ -2471,12 +2816,23 @@ impl Compiler {
                 let left = self.allocate();
                 let right = self.allocate();
                 self.expression(args[0].1, left)?;
+                let left_temporary = self.temporary == Some((left, self.here()));
                 self.expression(args[1].1, right)?;
+                let right_temporary = self.temporary == Some((right, self.here()));
+                let reuse = u32::from(left_temporary) | u32::from(right_temporary) << 1;
                 let call_constant = self.constant(call);
                 let function = self.constant(primitive);
                 self.emit(
                     Op::Arithmetic,
-                    &[arith as u32, dst, left, right, call_constant, function],
+                    &[
+                        arith as u32,
+                        dst,
+                        left,
+                        right,
+                        call_constant,
+                        function,
+                        reuse,
+                    ],
                 );
                 self.release_to(mark);
             }
@@ -2948,7 +3304,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::Guard => 5,
         Op::Jump | Op::Resume => 1,
         Op::JumpUnless => 3,
-        Op::Arithmetic => 6,
+        Op::Arithmetic => 7,
         Op::Return => 1,
         Op::ForInit => 3,
         Op::ForStep => 4,
@@ -2965,6 +3321,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::BranchUnlessPrimitive => 3,
         Op::BranchIfObject => 2,
         Op::DispatchSubject => 4,
+        Op::Fused => 3,
     }
 }
 
@@ -3485,6 +3842,7 @@ handlers! {
     run_sub_assign: SubAssign, true, op_sub_assign;
     run_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
     run_replace: Replace, true, op_replace;
+    run_fused: Fused, true, op_fused;
 }
 
 /// `Jump`, the one instruction whose failure resumes somewhere other than after itself: the
@@ -3886,8 +4244,19 @@ unsafe fn op_jump_unless(state: &mut Activation<'_, '_>, instruction: Instructio
 unsafe fn op_arithmetic(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let left = instruction.input(2);
     let right = instruction.input(3);
-    let value = match fast_arithmetic(ARITHS[instruction.operand(0)].0, left, right)? {
+    let operator = ARITHS[instruction.operand(0)].0;
+    let value = match fast_arithmetic(operator, left, right)? {
         Some(value) => value,
+        None if let Some(value) = kernels::binary(
+            state.constant(instruction, 4),
+            operator,
+            left,
+            right,
+            instruction.operand(6) as u32,
+        )? =>
+        {
+            value
+        }
         None => {
             let call = state.constant(instruction, 4);
             let function = state.constant(instruction, 5);
@@ -3909,6 +4278,167 @@ unsafe fn op_arithmetic(state: &mut Activation<'_, '_>, instruction: Instruction
     instruction.output(1, value);
     (*state.interp).visible = true;
     Ok(Flow::Next)
+}
+
+#[inline(always)]
+unsafe fn op_fused(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let program = state.constant(instruction, 1);
+    if program == nil() {
+        return Ok(Flow::Next);
+    }
+    let words = values::ints_mut(program);
+    if words[fusion::DECLINES] >= fusion::GIVE_UP {
+        return Ok(Flow::Next);
+    }
+    match fused_pass(state, instruction, words)? {
+        Some(value) => {
+            words[fusion::DECLINES] = 0;
+            instruction.output(0, value);
+            (*state.interp).visible = true;
+            Ok(Flow::Goto(instruction.operand(2)))
+        }
+        None => {
+            words[fusion::DECLINES] += 1;
+            Ok(Flow::Next)
+        }
+    }
+}
+
+/// Runs a fused program (laid out as [`fusion`] describes), or declines with `None` when the
+/// ordinary code must run instead: an operator name no longer finds its base function, a
+/// variable is missing or bound actively, or `kernels::fused` declines the values.
+unsafe fn fused_pass(
+    state: &mut Activation<'_, '_>,
+    instruction: Instruction,
+    words: &[i32],
+) -> R<Option<Sexp>> {
+    let heap = crate::heap();
+    let env = state.env;
+    let cache = state.cache;
+    let node_count = words[fusion::NODES] as usize;
+    let leaf_count = words[fusion::LEAVES] as usize;
+    let guard_count = words[fusion::GUARDS] as usize;
+    let guards_end = fusion::HEADER + guard_count * fusion::GUARD;
+    let leaves_end = guards_end + leaf_count * fusion::LEAF;
+    let leaf_words = &words[guards_end..leaves_end];
+    let node_words = &words[leaves_end..leaves_end + node_count * fusion::NODE];
+    // The leaves are read in the order the ordinary code reads them. Forcing an argument's
+    // promise runs code, which must find the values read before it referenced, as the ordinary
+    // code's registers are, so that an assignment it makes copies instead of changing them.
+    let mut leaves = [nil(); MAX_NODES];
+    for (index, leaf) in leaf_words.chunks_exact(fusion::LEAF).enumerate() {
+        let constant = state.constants.element(leaf[1] as usize);
+        if leaf[0] == 0 {
+            leaves[index] = constant;
+            continue;
+        }
+        let slot = leaf[2] as usize;
+        let hint = &mut *cache.hints.add(slot);
+        let cell = match heap.frame_cell_hinted(env, constant, hint) {
+            Some(cell) => cell,
+            None => match outside_function_frames(constant, env.enclosure(), hint) {
+                Err(cell) => cell,
+                Ok(enclosure) => match cached_cell(constant, enclosure, cache, slot) {
+                    Some(cell) => cell,
+                    None => return Ok(None),
+                },
+            },
+        };
+        let value = cell.cdr();
+        if cell.has_gp(gp::ACTIVE_BINDING) || value == missing_arg() || value == unbound() {
+            return Ok(None);
+        }
+        leaves[index] = if value.kind() != SexpType::Promise {
+            value
+        } else if value.car() != unbound() {
+            value.car()
+        } else if heap.frame_cell_hinted(env, constant, hint) == Some(cell) {
+            let read = &leaves[..index];
+            for &earlier in read {
+                heap.root(earlier);
+                earlier.increment_refcount();
+            }
+            let base = state.machine.base;
+            let held = base..base + instruction.operand(0);
+            let forced = holding(held, || eval::force_promise(value));
+            for &earlier in read {
+                earlier.decrement_refcount();
+            }
+            let forced = forced?;
+            heap.root(forced);
+            forced
+        } else {
+            return Ok(None);
+        };
+    }
+    for guard in words[fusion::HEADER..guards_end].chunks_exact(fusion::GUARD) {
+        let symbol = state.constants.element(guard[0] as usize);
+        let expected = state.constants.element(guard[1] as usize);
+        let slot = guard[2] as usize;
+        let hint = &mut *cache.hints.add(slot);
+        if guard[3] != 0 && heap.frame_cell_hinted(env, symbol, hint).is_some() {
+            return Ok(None);
+        }
+        let Ok(enclosure) = outside_function_frames(symbol, env.enclosure(), hint) else {
+            return Ok(None);
+        };
+        let Some(cell) = cached_cell(symbol, enclosure, cache, slot) else {
+            return Ok(None);
+        };
+        if cell.has_gp(gp::ACTIVE_BINDING) || forced_value(cell.cdr()) != expected {
+            return Ok(None);
+        }
+    }
+    let mut nodes: SmallVec<[Node; MAX_NODES]> = SmallVec::new();
+    for node in node_words.chunks_exact(fusion::NODE) {
+        let [a, b, c] = [node[1], node[2], node[3]].map(|word| word as usize);
+        nodes.push(match node[0] {
+            0 => Node::Leaf(a),
+            1 => Node::Binary(ARITHS[a].0, b, c),
+            2 => Node::Logic {
+                is_and: a != 0,
+                left: b,
+                right: c,
+            },
+            3 => Node::Negate(a),
+            4 => Node::Not(a),
+            _ => Node::Math(MATHS[a].0, b),
+        });
+    }
+    let reduction = match words[fusion::REDUCTION] {
+        0 => Some(Reduction::Sum),
+        1 => Some(Reduction::Any),
+        2 => Some(Reduction::All),
+        _ => None,
+    };
+    let Some(fused) = kernels::fused(&nodes, &leaves[..leaf_count], reduction)? else {
+        return Ok(None);
+    };
+    if !state.feedback.is_null() {
+        for (index, leaf) in leaf_words.chunks_exact(fusion::LEAF).enumerate() {
+            if leaf[0] != 0 {
+                state.record(leaf[3] as usize, leaves[index]);
+            }
+        }
+        for (index, node) in node_words.chunks_exact(fusion::NODE).enumerate() {
+            if node[0] == 0 {
+                continue;
+            }
+            let kind = match (fused.elements[index], fused.scalar[index]) {
+                (Element::Logical, true) => feedback::LOGICAL_SCALAR,
+                (Element::Integer, true) => feedback::INTEGER_SCALAR,
+                (Element::Double, true) => feedback::DOUBLE_SCALAR,
+                (Element::Logical, false) => feedback::LOGICAL_VECTOR,
+                (Element::Integer, false) => feedback::INTEGER_VECTOR,
+                (Element::Double, false) => feedback::DOUBLE_VECTOR,
+            };
+            *state.feedback.add(node[4] as usize) |= i32::from(kind);
+        }
+        if reduction.is_some() {
+            state.record(words[fusion::REDUCTION_SITE] as usize, fused.value);
+        }
+    }
+    Ok(Some(fused.value))
 }
 
 #[inline(always)]

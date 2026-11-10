@@ -840,7 +840,7 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | Tail-call dispatch, one indirect jump per handler | LuaJIT, JSC | built | the shared indirect jump; measured level with the match loop (121.4k against 120.8k per `seq()`), since handlers that call out still need a frame. The handler signature is `(activation, pc)` so that few values stay live across calls | `handlers!` in `bytecode.rs` |
 | Dense feedback storage, one slot per profiled instruction | V8 | planned | feedback is one `i32` per code word | |
 | One description of each instruction's semantics, shared by tier 0 and the baseline | Deegen (LuaJIT Remake) | planned | the baseline drifting from tier 0 | |
-| Lazy fused vectors for element-wise arithmetic, as ALTREP objects | Riposte, pqR | planned | intermediate vectors in untyped vector code | |
+| One kernel layer for vector builtins: slice kernels compiled for AVX2 and SSE2, results written into dead temporaries, and an `Op::Fused` superinstruction that evaluates an element-wise tree in 512-element chunks or declines before anything observable happens | pqR (`R_allocOrReuseVector`, task merging), Riposte | in progress | builtins 51% of `simulation`; one allocation and one pass per operator | `crates/interp/src/kernels.rs` |
 | **4. Optimizing tiers** | | | | |
 | Per-argument-type native functions for scalar closures | Julia | built | recursive scalar functions | `crates/jit/src/native.rs` |
 | Baseline compiler from bytecode, no optimization | V8 Sparkplug | planned | warm code under the 3000-entry threshold | |
@@ -864,6 +864,38 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 | A partial-evaluation framework (AST interpreters) | Truffle and Graal | rejected | | |
 | Generating the interpreter and baseline from LLVM IR | Deegen | rejected | | |
 | Freeing R objects when their count reaches zero | LXR | rejected | | |
+| Lazy fused vectors as ALTREP objects | Riposte, pqR | rejected | every reader, C code through `DATAPTR` included, would materialize them, and where a deferred warning surfaces would become observable | |
+
+### The vector kernel layer
+
+R's vector builtins share one kernel layer in `crates/interp/src/kernels.rs`, which is target row
+(a)'s design for element-wise work. It has three parts.
+
+- **Slice kernels.** A kernel takes each operand as a slice or a scalar and writes into an output
+  slice. It touches no R object, allocates nothing and raises nothing: an integer kernel returns an
+  overflow flag, and its caller warns. Each kernel is compiled for AVX2 and for the SSE2 baseline,
+  and the AVX2 copy is chosen at run time. Compiled code calls this layer directly.
+- **Reuse.** An operation writes its result into an operand's buffer when the bytecode compiler
+  marked the operand's register as a temporary read only by this instruction, and at run time the
+  value's count is zero, it is mutable, not ALTREP, and has the result's type and length. The
+  compiler's mark is needed because registers hold uncounted references, so a zero count alone does
+  not prove the value dead. This is pqR's `R_allocOrReuseVector` rule, restricted to what the
+  compiler proves.
+- **Fusion.** For an element-wise tree such as `a * b + c` or `sum(x > 0)` whose leaves are
+  constants and variables, the compiler emits `Op::Fused` in front of the ordinary code. The
+  instruction reads the leaves in the ordinary code's order (forcing an argument's promise as a
+  variable read would) and checks every operator's binding through its guard cache. It declines
+  and falls through to the ordinary code on anything observable (an active binding, an attribute,
+  an object, ALTREP, recycling other than scalar against equal lengths, integer overflow, a NaN
+  that a math function produced), so fused and unfused evaluation cannot be told apart. Otherwise
+  it runs the tree in 512-element chunks, writes only the root, and records the type feedback of
+  the instructions it skipped, so the JIT, which compiles the ordinary code, sees the same types.
+
+NaN results match GNU R 4.3.3 on x86-64, where an operation on two NaNs returns the first
+operand's payload. GNU R's compiled loops swap the operands of `+` and `*` on two doubles when the
+left one is a scalar beside a longer vector or when both recycle, so `NA_real_ + c(NaN, 1)` is
+`NaN` while `c(NA, 1) + NaN` is `NA`; with an integer operand, and for `-`, `/` and `%/%`, the
+first operand's payload wins. The kernels reproduce each case.
 
 ### How the static types feed the JIT
 
