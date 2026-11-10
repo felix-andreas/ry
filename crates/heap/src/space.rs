@@ -162,6 +162,9 @@ const IDLE_CURSOR: Cursor = Cursor {
 #[derive(Default)]
 pub(crate) struct Swept {
     pub freed: u64,
+    /// Bytes of the dead objects outside the oldest generation, which an intermediate
+    /// collection would have freed too.
+    pub untenured_bytes: usize,
 }
 
 impl Space {
@@ -509,6 +512,24 @@ impl Space {
         }
     }
 
+    /// Bytes of the old objects outside the oldest generation, which outside a collection are
+    /// the marked slots that are not tenured: what an intermediate collection can free.
+    pub fn younger_old_bytes(&self) -> usize {
+        let mut bytes = 0;
+        for page in 0..self.page_count {
+            let Some(&slot_size) = SLOT_SIZES.get(self.page_class[page] as usize) else {
+                continue;
+            };
+            let slots: u32 = self.marks[page]
+                .iter()
+                .zip(&self.tenured[page])
+                .map(|(marks, tenured)| (marks & !tenured).count_ones())
+                .sum();
+            bytes += slots as usize * slot_size;
+        }
+        bytes
+    }
+
     /// Whether `object`, a small object, is in the tenured bitmap; `None` for a large object.
     pub fn is_tenured_slot(&self, object: Sexp) -> Option<bool> {
         self.locate(object)
@@ -613,6 +634,8 @@ impl Space {
                     }
                 }
                 swept.freed += u64::from(dead.count_ones());
+                swept.untenured_bytes +=
+                    (dead & !self.tenured[page][word]).count_ones() as usize * slot_size;
             }
             self.allocated[page][word] = marks;
             self.interned[page][word] &= marks;
