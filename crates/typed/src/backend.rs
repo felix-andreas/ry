@@ -26,8 +26,9 @@ use {
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
     ssa::{
-        AbiParam, Block, Builder, CallConv, FloatCC, FuncId, FuncRef, IntCC, MemFlagsData, SigRef,
-        Signature, StackSlotData, StackSlotKind, Type as Machine, Value, Variable,
+        AbiParam, Allocator, Block, Builder, CallConv, FloatCC, FuncId, FuncRef, IntCC,
+        MemFlagsData, SigRef, Signature, StackSlotData, StackSlotKind, Type as Machine, Value,
+        Variable,
         types::{F64, I32, I64},
     },
     std::sync::atomic::AtomicBool,
@@ -86,7 +87,7 @@ fn signature(params: &[Type], result: Type) -> Signature {
 
 /// Compiles `function`, whose calls of other functions index `callees`.
 pub fn compile(function: &Function, callees: &[Callee]) -> Result<Code, Refusal> {
-    ssa::with_module(|module| -> Result<Code, Refusal> {
+    ssa::with_module(Allocator::Backtracking, |module| -> Result<Code, Refusal> {
         let params = &function.locals[..function.params];
         let own_signature = signature(params, function.result);
         let id = module.declare(&own_signature)?;

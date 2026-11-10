@@ -500,6 +500,60 @@ pub unsafe extern "C" fn jit_record(activation: *mut Activation, pc: i64, value:
     }
 }
 
+/// Finds a variable as compiled code's inline probe would when the activation's frame is
+/// reified or the variable is free in the body: in the activation's own environment, else in its
+/// enclosure when that is a function's frame, through the lookup slot's hint. Only a plain value
+/// or an evaluated promise counts, since that case runs no code and changes nothing; the result
+/// is the value with its low bit set when the enclosure bound it, or 0 when tier 0's lookup must
+/// run. The probe lives out of line because inlining both frame walks at every variable load
+/// made a large body's code grow by about a hundred instructions per load.
+pub unsafe extern "C" fn jit_probe(
+    activation: *const Activation,
+    symbol: *mut Header,
+    lookup: i64,
+) -> u64 {
+    unsafe {
+        let activation = &*activation;
+        let Some(symbol) = Sexp::from_raw(symbol) else {
+            return 0;
+        };
+        let heap = heap();
+        let hint = &mut *activation.hints.add(lookup as usize);
+        let env = *activation.header;
+        let (local, enclosure) = if env == values::nil() {
+            (None, activation.enclosure)
+        } else {
+            (heap.frame_cell_hinted(env, symbol, hint), env.enclosure())
+        };
+        let (cell, tag) = match local {
+            Some(cell) => (cell, 0),
+            None if enclosure.has_gp(gp::FUNCTION_FRAME) => {
+                match heap.frame_cell_hinted(enclosure, symbol, hint) {
+                    Some(cell) => (cell, 1),
+                    None => return 0,
+                }
+            }
+            None => return 0,
+        };
+        if cell.has_gp(gp::ACTIVE_BINDING) {
+            return 0;
+        }
+        let value = cell.cdr();
+        if value == values::missing_arg() || value == values::unbound() {
+            return 0;
+        }
+        let value = if value.kind() == SexpType::Promise {
+            match value.car() {
+                forced if forced == values::unbound() => return 0,
+                forced => forced,
+            }
+        } else {
+            value
+        };
+        value.as_ptr() as u64 | tag
+    }
+}
+
 /// Loads a slot's variable for an element assignment, which has no inline cache.
 pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -> i32 {
     unsafe {

@@ -8720,12 +8720,28 @@ Each one trades a narrow class of missed errors for a class of false reports see
   was 420k parameters created for 3.9k kept. `read_variable` now walks single-predecessor chains
   once the predecessors are known, which creates 99k and keeps the same 3.9k; translation went
   from 95 to 54 ms.
-- **Cranelift is the rest.** For the same body (70k instructions) it spends 0.22 s: register
-  allocation 0.14, e-graph 0.04, lowering 0.02. Its cost per instruction grows from about 1 µs
-  at 7k instructions to 2 µs at 70k, in register allocation. The IR is dominated by variable
-  loads (253 `GetVar` sites, about 100 instructions each from the inline lookup and its deopt
-  paths) and deopt exits (1,209 at about 20 instructions each). No size cap: shrinking those two
-  is the next lever.
+- **The rest was quadratic in merges times slots, and in register allocation.** With the
+  steps below, testthat's forced codegen fell from 3.1 to 1.2 s, and the 12 bodies over 3,000
+  words went from 17 to 4.7 µs per word, below the 5.5 of bodies under 250 words, so cost is
+  linear in body size and no size cap or hotness threshold is needed. For `[<-.data.frame`
+  (14,819 words) one compile went from about 300 to about 95 ms.
+  - Each slot's run-time status was an SSA variable live across the whole body, so every merge
+    got a parameter per slot: 47k parameters over 8k blocks, and a `PureUnlessObserved` step
+    redefined all of them. Statuses now live in a stack array of 4-byte cells
+    (`Translator::statuses`): 8.6k parameters, and seal time fell from 24 to 5 ms. A reset
+    touches only the slots the state may have loaded, behind a cold branch.
+  - Tier 1 compiles with Cranelift's single-pass register allocator (`ssa::Allocator`), which
+    is linear; the backtracking one took 100 ms of a 38k-instruction body's 160. Tier 1 code is
+    mostly helper calls, so the extra spills do not show in run time. The typed tier and native
+    code keep the backtracking allocator, each allocator having its own module pool because
+    Cranelift fixes it per module.
+  - A deopt exit writes only the loops around its pc, since tier 0 reads a loop's words only
+    inside that loop. Writing every loop made each exit grow with the body's loop count and kept
+    every loop variable live everywhere.
+  - A variable load inlines only the slot-frame hit; frame walks and the environment probe run
+    in `runtime::jit_probe`, whose result tags the enclosing status in its low bit.
+  - Trivial-parameter removal is a worklist over each parameter's users rather than repeated
+    sweeps.
 - **Why one body compiled up to four times**, each fixed at its source:
   - A failed speculation on an instruction compiled code steps through tier 0 was never recorded
     as feedback, so each recompile made the same bet. `interpret::<SINGLE>` records always.

@@ -40,8 +40,8 @@ use {
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
     ssa::{
-        AbiParam, Block, Builder, CallConv, FloatCC, FuncRef, Ieee64, IntCC, MemFlagsData,
-        Signature, StackSlotData, StackSlotKind, Type, Value, Variable,
+        AbiParam, Allocator, Block, Builder, CallConv, FloatCC, FuncRef, Ieee64, IntCC,
+        MemFlagsData, Signature, StackSlotData, StackSlotKind, Type, Value, Variable,
         types::{F64, I8, I32, I64},
     },
     std::{
@@ -437,7 +437,7 @@ unsafe fn compile(function: Sexp, params: &[Ty]) -> Result<Native, Refusal> {
         });
     }
     let started = std::time::Instant::now();
-    let (address, size) = ssa::with_module(|module| -> Result<_, Refusal> {
+    let (address, size) = ssa::with_module(Allocator::Backtracking, |module| -> Result<_, Refusal> {
         let own_signature = signature(params, guess, CallConv::Host);
         let id = module.declare(&own_signature)?;
         let mut builder = Builder::new(own_signature.clone());
@@ -3451,7 +3451,7 @@ unsafe fn trampoline(params: &[Ty], result: Ty) -> Option<Trampoline> {
     if let Some(found) = TRAMPOLINES.with_borrow(|trampolines| trampolines.get(&key).copied()) {
         return Some(found);
     }
-    let compiled = ssa::with_module(|module| -> Result<usize, Refusal> {
+    let compiled = ssa::with_module(Allocator::Backtracking, |module| -> Result<usize, Refusal> {
         let mut outer = Signature::new(CallConv::Host);
         outer.params.extend([AbiParam::new(I64); 4]);
         outer.returns.push(AbiParam::new(I64));

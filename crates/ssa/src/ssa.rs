@@ -13,7 +13,7 @@
 mod lower;
 pub mod section;
 
-pub use lower::{Error, FuncId, Module, ObjectModule, with_module};
+pub use lower::{Allocator, Error, FuncId, Module, ObjectModule, with_module};
 use {
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
@@ -809,74 +809,115 @@ impl Builder {
 
     /// Replaces each variable parameter whose arguments are all one value (or itself) by that
     /// value, until none is left. A parameter no branch reaches becomes a zero.
+    ///
+    /// Removing a parameter can make the parameters that take it as an argument trivial, so
+    /// those, and only those, are checked again. Sweeping every parameter until nothing changed
+    /// costs one sweep per link of a chain of trivial parameters, which grows with the square
+    /// of a large body's size.
     fn remove_trivial_params(&mut self, predecessors: &[SmallVec<[(Inst, u8); 2]>]) {
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for block in 0..self.function.blocks.len() {
-                let count = self
-                    .function
-                    .blocks
-                    .get(block)
-                    .map_or(0, |data| data.variable_params.len());
-                for param in 0..count {
-                    let Some(&VariableParam { value, live, .. }) = self
-                        .function
-                        .blocks
-                        .get(block)
-                        .and_then(|data| data.variable_params.get(param))
-                    else {
-                        continue;
-                    };
-                    if !live {
-                        continue;
-                    }
-                    let mut same: Option<Value> = None;
-                    let mut trivial = true;
-                    for edge in predecessors.get(block).map_or(&[][..], |edges| edges) {
-                        let Some(&argument) = self
-                            .function
-                            .variable_args
-                            .get(edge)
-                            .and_then(|args| args.get(param))
-                        else {
-                            continue;
-                        };
-                        let argument = self.function.resolve(argument);
-                        if argument == value || Some(argument) == same {
-                            continue;
-                        }
-                        if same.is_some() {
-                            trivial = false;
-                            break;
-                        }
-                        same = Some(argument);
-                    }
-                    if !trivial {
-                        continue;
-                    }
-                    let ty = self
-                        .function
-                        .values
-                        .get(value.index())
-                        .map_or(Type::I64, |data| data.ty);
-                    let replacement = match same {
-                        Some(same) => same,
-                        None => self.zero(ty),
-                    };
-                    if let Some(data) = self.function.values.get_mut(value.index()) {
-                        data.definition = Definition::Alias(replacement);
-                    }
-                    if let Some(param) = self
-                        .function
-                        .blocks
-                        .get_mut(block)
-                        .and_then(|data| data.variable_params.get_mut(param))
-                    {
-                        param.live = false;
-                    }
-                    changed = true;
+        let mut params: Vec<(u32, u32)> = Vec::new();
+        let mut number = vec![u32::MAX; self.function.values.len()];
+        for (block, data) in self.function.blocks.iter().enumerate() {
+            for (index, param) in data.variable_params.iter().enumerate() {
+                if let Some(slot) = number.get_mut(param.value.index()) {
+                    *slot = params.len() as u32;
                 }
+                params.push((block as u32, index as u32));
+            }
+        }
+        // The parameters that take each parameter as an argument. Removing a parameter hands
+        // its users to its replacement, so they are checked again if that one goes too.
+        let mut users: Vec<SmallVec<[u32; 2]>> = vec![SmallVec::new(); params.len()];
+        for (user, &(block, index)) in params.iter().enumerate() {
+            for edge in predecessors.get(block as usize).map_or(&[][..], |edges| edges) {
+                let Some(&argument) = self
+                    .function
+                    .variable_args
+                    .get(edge)
+                    .and_then(|args| args.get(index as usize))
+                else {
+                    continue;
+                };
+                let argument = self.function.resolve(argument);
+                if let Some(list) = number
+                    .get(argument.index())
+                    .and_then(|&param| users.get_mut(param as usize))
+                {
+                    list.push(user as u32);
+                }
+            }
+        }
+        let mut work: Vec<u32> = (0..params.len() as u32).rev().collect();
+        while let Some(id) = work.pop() {
+            let Some(&(block, param)) = params.get(id as usize) else {
+                continue;
+            };
+            let (block, param) = (block as usize, param as usize);
+            let Some(&VariableParam { value, live, .. }) = self
+                .function
+                .blocks
+                .get(block)
+                .and_then(|data| data.variable_params.get(param))
+            else {
+                continue;
+            };
+            if !live {
+                continue;
+            }
+            let mut same: Option<Value> = None;
+            let mut trivial = true;
+            for edge in predecessors.get(block).map_or(&[][..], |edges| edges) {
+                let Some(&argument) = self
+                    .function
+                    .variable_args
+                    .get(edge)
+                    .and_then(|args| args.get(param))
+                else {
+                    continue;
+                };
+                let argument = self.function.resolve(argument);
+                if argument == value || Some(argument) == same {
+                    continue;
+                }
+                if same.is_some() {
+                    trivial = false;
+                    break;
+                }
+                same = Some(argument);
+            }
+            if !trivial {
+                continue;
+            }
+            let ty = self
+                .function
+                .values
+                .get(value.index())
+                .map_or(Type::I64, |data| data.ty);
+            let replacement = match same {
+                Some(same) => same,
+                None => self.zero(ty),
+            };
+            if let Some(data) = self.function.values.get_mut(value.index()) {
+                data.definition = Definition::Alias(replacement);
+            }
+            if let Some(param) = self
+                .function
+                .blocks
+                .get_mut(block)
+                .and_then(|data| data.variable_params.get_mut(param))
+            {
+                param.live = false;
+            }
+            let moved = users
+                .get_mut(id as usize)
+                .map(std::mem::take)
+                .unwrap_or_default();
+            work.extend_from_slice(&moved);
+            if let Some(list) = number
+                .get(replacement.index())
+                .and_then(|&param| users.get_mut(param as usize))
+            {
+                list.extend_from_slice(&moved);
             }
         }
     }
