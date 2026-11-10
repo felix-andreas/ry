@@ -116,6 +116,7 @@ These are the reads that need the environment as an object. Each one reifies the
 | Condition handlers and restarts that record a frame | `.addCondHands`, `.addRestart` (`conditions.rs`) |
 | The C API | `R_GetCurrentEnv`, `PRENV` on a promise over the frame, `.External` and `.External2` (which pass the environment) |
 | A promise over the frame still unforced when the frame returns | `run_frame` in `eval.rs` |
+| A method `UseMethod` dispatches to while the generic has locals to forward (the R < 4.4 behavior) | `do_usemethod` in `dispatch.rs` runs the method in a heap frame, because a slot frame shows the forwarded locals only once it has an environment |
 
 A builtin that receives `call.env` and only reads a frame property (`missing`, `nargs`, `on.exit`,
 `sys.call`, `match.call`) gets the frame reference instead and does not reify.
@@ -180,8 +181,9 @@ The second step is built (`slot_promise`, `force_slot_promise` and `resolved_env
   (`Frame.caller`), which `envir::caller_index` and `frame_sys_parent` follow. A promise forced
   further down the stack therefore still reports its own frame's caller.
 - **Readers of a promise's environment** go through `eval::promise_env`, which reifies the owner:
-  `PRENV` in the C API, serialization, `missing()` through a promise, and the table engine's
-  `eval` expansion. Identity checks against a promise's environment compare the pending
+  `PRENV` in the C API, serialization and the table engine's `eval` expansion. `missing()`
+  through a promise of a name reads the owner's slot instead (`pending_slot_is_missing`), as
+  the binding in the reified environment would answer. Identity checks against a promise's environment compare the pending
   environment, which is the frame's environment once it reifies.
 
 ## Argument references
@@ -238,7 +240,10 @@ environment and the AST evaluator is what runs uncompiled package code.
   or move tracking sends the call down the generic path. Forwarding `...` to a callee without a
   plan detaches the references among its items first.
 - **Scope.** Every argument to a planned callee becomes a reference except a `..N` symbol and a
-  value that is already a promise, and compiled code passes constants as they are. A call
+  value that is already a promise, and compiled code passes constants as they are. The
+  element call that `lapply`, `vapply` and `Map` make, `FUN(X[[i]])`, passes its first argument
+  as a reference into the builtin's environment whose value is already the element, so the
+  callee neither allocates a promise nor reifies on it. A call
   that passes `..N` gets no plan, so its other arguments become promises. When per-call matching
   of a call that passes `...` fails (an unused argument, a default that is not a literal), the
   call detaches its references and takes the generic path.
@@ -288,6 +293,24 @@ Behind `syntax::testing::enable_invariants()`, reification cross-checks itself: 
 environment built from the slots with what the heap-frame path would have bound for the same call
 (the same symbols, values and missing flags). A scenario in `crates/ry/tests/scenarios/` exercises
 each trigger above and each read that must not reify.
+
+## Why frames reify
+
+`--profile-summary` reports, under "Package calls", how many calls into package code ran without
+an environment and why each of the rest has one. `reify` records its cause (`eval::Reify`: the
+builtin that asked, or a named site such as `"function definition"` or `"method dispatch"`) in
+`Frame.reified_by`, and the frame's pop classifies the call:
+
+| Class | Meaning |
+|---|---|
+| direct | the frame never reified and was passed no promise |
+| a reify cause | the frame reified for that reason; `eval::OBSERVING_REASONS` marks the causes where code observed the environment itself (`eval`, `environment()`, `sys.frame`, `parent.frame`, `assign`, `get`, native code) |
+| `promise argument: variable`, `call`, `other` | the frame stayed unreified but was passed a real promise of that kind |
+| `frame with an environment` | the callee has no slot table and always gets a heap frame |
+
+The section prints the direct share, the direct share of calls that did not observe their
+environment, and the table of classes. The counting runs only while a profile summary is
+collected.
 
 ## Prior decision
 

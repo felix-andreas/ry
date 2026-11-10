@@ -163,6 +163,9 @@ pub struct Frame {
     /// A builtin wrapper run by [`eval::run_wrapper`]: its slots hold the values of arguments
     /// that the generic path would have bound as promises, so a reify wraps them.
     pub inlined: bool,
+    /// The [`heap::activity::label`] of what gave the slot frame its environment, while a
+    /// profile summary is collected; [`NOT_REIFIED`] otherwise.
+    pub reified_by: u32,
     /// Where the call's arguments (values or promises, with the tags the call gave them) start
     /// in [`Interp::frame_args`]; they run up to the next frame's start. `sys.function`'s
     /// pairlist of them is built only when dispatch asks for it, so a call allocates none.
@@ -183,6 +186,9 @@ pub struct Frame {
 
 /// [`Frame::slots`] of a frame that keeps its variables in an environment.
 pub const NO_SLOTS: u32 = u32::MAX;
+
+/// [`Frame::reified_by`] of a frame no reason was recorded for.
+pub const NOT_REIFIED: u32 = u32::MAX;
 
 /// The arguments of the frame at `index` (zero-based), as the call passed them.
 pub fn frame_args(state: &Interp, index: usize) -> &[Arg] {

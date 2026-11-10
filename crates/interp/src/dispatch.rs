@@ -6,6 +6,7 @@
 use {
     crate::{
         Frame,
+        annotations::Entry,
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
         interp,
@@ -869,7 +870,7 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     };
     // Methods are looked up from the generic's caller and see it as their `parent.frame()`,
     // so a generic called from a slot frame gives that frame its environment.
-    let sys_parent = eval::frame_sys_parent(position)?;
+    let sys_parent = eval::frame_sys_parent(position, eval::Reify::Site("method dispatch"))?;
     eval::materialize_references(position)?;
     let promargs: eval::Args = crate::frame_args(interp(), position).into();
     let object = if call.len() >= 2 {
@@ -905,6 +906,7 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
         )));
     };
     let mut vars = found.vars;
+    let dispatch_vars = vars.len();
     // Through R 4.3, local variables the generic defined before dispatching are visible to the
     // method; R 4.4 stopped forwarding them.
     if function.kind() == SexpType::Closure && !crate::system::r_at_least(4, 4) {
@@ -930,7 +932,15 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     let args = promargs;
     let new_call = renamed_call(frame_call, found.method_name)?;
     drop(dispatching);
-    let result = apply_method(new_call, found.method, &args, sys_parent, &vars, false)?;
+    // A slot frame shows its method variables only once it has an environment, and its lookups
+    // of other names go straight to the enclosure, so a method that sees forwarded locals gets
+    // its environment from the start.
+    let result = if vars.len() > dispatch_vars && found.method.kind() == SexpType::Closure {
+        let env = eval::bind_arguments(new_call, found.method, &args, Some(&vars))?;
+        eval::run_closure(new_call, found.method, env, sys_parent, &args, Entry::Unchecked)?
+    } else {
+        apply_method(new_call, found.method, &args, sys_parent, &vars, false)?
+    };
     Err(crate::unwind::jump(crate::Jump::Return {
         env,
         value: result,
@@ -1067,8 +1077,8 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         let frame = &interp().frames[position];
         (frame.call, frame.function)
     };
-    let method_env = eval::frame_env(position)?;
-    let sys_parent = eval::frame_sys_parent(position)?;
+    let method_env = eval::frame_env(position, eval::Reify::Site("method dispatch"))?;
+    let sys_parent = eval::frame_sys_parent(position, eval::Reify::Site("method dispatch"))?;
     eval::materialize_references(position)?;
     let promargs: eval::Args = crate::frame_args(interp(), position).into();
     if frame_call.car().kind() != SexpType::Symbol {
@@ -1697,6 +1707,7 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
         pending: nil(),
         unforced: 0,
         inlined: false,
+        reified_by: crate::NOT_REIFIED,
     });
     let depth = state.frames.len();
     let result = apply_method(new_call, found.method, promised, env, &found.vars, true);

@@ -178,7 +178,9 @@ unsafe fn sys_frame_at(n: i32, context: Option<usize>) -> R<Sexp> {
         return Err(error("not that many frames on the stack"));
     }
     match context {
-        Some(index) if back <= index as i64 => crate::eval::frame_env(index - back as usize),
+        Some(index) if back <= index as i64 => {
+            crate::eval::frame_env(index - back as usize, crate::eval::Reify::Site("sys.frame"))
+        }
         _ if back == depth => Ok(global_env()),
         _ => Err(error("not that many frames on the stack")),
     }
@@ -384,7 +386,7 @@ unsafe fn do_parent_frame(call: &Call<'_>) -> R<Sexp> {
             return Ok(global_env());
         };
         if n == 1 {
-            return crate::eval::frame_sys_parent(caller);
+            return crate::eval::frame_sys_parent(caller, crate::eval::Reify::Site("parent.frame"));
         }
         n -= 1;
         index = caller;
@@ -395,7 +397,7 @@ unsafe fn do_environment(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(0);
     match function.kind() {
         SexpType::Nil => match call.frame_index() {
-            Some(index) => crate::eval::frame_sys_parent(index),
+            Some(index) => crate::eval::frame_sys_parent(index, crate::eval::Reify::Site("environment()")),
             None => Ok(global_env()),
         },
         SexpType::Closure => Ok(function.tag()),
@@ -983,7 +985,7 @@ pub unsafe fn as_environment(value: Sexp) -> R<Sexp> {
                 // The calling environment.
                 return match interp().frames.len() {
                     0 => Ok(global_env()),
-                    count => crate::eval::frame_sys_parent(count - 1),
+                    count => crate::eval::frame_sys_parent(count - 1, crate::eval::Reify::Site("pos = -1")),
                 };
             }
             if position < 1 || position as usize > path.len() {

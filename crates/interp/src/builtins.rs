@@ -86,7 +86,7 @@ impl Call<'_> {
         if self.rho != nil() || self.frame == crate::NO_SLOTS {
             return Ok(self.rho);
         }
-        crate::eval::frame_env(self.frame as usize)
+        crate::eval::frame_env(self.frame as usize, crate::eval::Reify::Builtin(self.op))
     }
 
     /// What the calling slot frame's `...` slot holds, when the call was made from a slot frame

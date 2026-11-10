@@ -428,7 +428,7 @@ unsafe fn slot_promise_value(promise: Sexp, owner: usize) -> R<Sexp> {
             }
         }
     }
-    eval(expression, frame_env(owner)?)
+    eval(expression, frame_env(owner, Reify::Site("promise over the frame"))?)
 }
 
 /// A promise of `expression`, compiled code or a name, over the slots of the slot frame at
@@ -627,7 +627,7 @@ unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
         return force_promise(value);
     }
     if value == missing_arg() {
-        return eval(symbol, frame_env(owner)?);
+        return eval(symbol, frame_env(owner, Reify::Site("promise over the frame"))?);
     }
     Ok(value)
 }
@@ -819,7 +819,7 @@ pub unsafe fn promise_env(promise: Sexp) -> R<Sexp> {
         && promise.car() == unbound()
         && reference_env(promise).is_none()
     {
-        return frame_env(reference_target(promise).0);
+        return frame_env(reference_target(promise).0, Reify::Site("promise environment"));
     }
     resolved_env(promise.tag())
 }
@@ -837,7 +837,7 @@ pub unsafe fn resolved_env(env: Sexp) -> R<Sexp> {
     else {
         panic!("a promise names the pending environment of a frame that has returned");
     };
-    frame_env(owner)
+    frame_env(owner, Reify::Site("resolved environment"))
 }
 
 /// Stores `value` as the value of the unforced `promise`, as forcing it to that value does.
@@ -2119,13 +2119,30 @@ pub unsafe fn run_wrapper(
 /// that has none yet. Everything that hands a frame's environment to R code or native code
 /// reads it here.
 #[inline]
-pub unsafe fn frame_env(index: usize) -> R<Sexp> {
+pub unsafe fn frame_env(index: usize, cause: Reify) -> R<Sexp> {
     let frame = &interp().frames[index];
     if frame.env != nil() || frame.slots == crate::NO_SLOTS {
         return Ok(frame.env);
     }
-    reify(index)
+    reify(index, cause)
 }
+
+/// What asked for a slot frame's environment, which the profile summary reports as the reason
+/// a package call's frame was reified.
+#[derive(Clone, Copy)]
+pub enum Reify {
+    /// The builtin `op`, through [`crate::builtins::Call::env`].
+    Builtin(Sexp),
+    Site(&'static str),
+}
+
+/// The reasons that observe a frame's environment: they evaluate code in it, hand it out as a
+/// value, or read or write its bindings by name. Every other reason is a mechanism a slot
+/// frame could serve without one.
+pub const OBSERVING_REASONS: [&str; 15] = [
+    "eval", "evalq", "environment", "environment()", "sys.frame", "sys.frames", "parent.frame",
+    "pos = -1", "assign", "get", "get0", "exists", "mget", "native code", "as.environment",
+];
 
 /// The `...` slot of the frame at `index`, when it is a slot frame without an environment and
 /// has a `...` formal.
@@ -2150,25 +2167,25 @@ pub unsafe fn slot_dots(index: usize) -> Option<Sexp> {
 
 /// The environment of the slot frame whose slots the running byte code reads, which a `NULL`
 /// environment it hands out stands for (see [`crate::builtins::Call::env`]).
-pub unsafe fn slot_owner_env() -> R<Sexp> {
+pub unsafe fn slot_owner_env(cause: Reify) -> R<Sexp> {
     let owner = interp().slot_owner;
     if owner == crate::NO_SLOTS {
         panic!("byte code handed out a slot frame's environment outside any slot frame");
     }
-    frame_env(owner as usize)
+    frame_env(owner as usize, cause)
 }
 
 /// `parent.frame()` of the frame at `index`: the environment its call was made from.
-pub unsafe fn frame_sys_parent(index: usize) -> R<Sexp> {
+pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
     let frame = &interp().frames[index];
     if frame.sys_parent != nil() || frame.caller == crate::NO_SLOTS {
         return Ok(frame.sys_parent);
     }
-    frame_env(frame.caller as usize)
+    frame_env(frame.caller as usize, cause)
 }
 
 /// The environment of the slot frame whose header register is `header`, which must be live.
-pub unsafe fn slot_frame_env(header: usize) -> R<Sexp> {
+pub unsafe fn slot_frame_env(header: usize, cause: Reify) -> R<Sexp> {
     let frames = &interp().frames;
     let Some(index) = frames
         .iter()
@@ -2176,7 +2193,7 @@ pub unsafe fn slot_frame_env(header: usize) -> R<Sexp> {
     else {
         panic!("a slot frame's activation outlived its frame");
     };
-    frame_env(index)
+    frame_env(index, cause)
 }
 
 /// Gives the slot frame at `index` its environment: one binding cell per bound slot, formals
@@ -2185,7 +2202,14 @@ pub unsafe fn slot_frame_env(header: usize) -> R<Sexp> {
 /// their references and nothing reads them again.
 #[cold]
 #[inline(never)]
-unsafe fn reify(index: usize) -> R<Sexp> {
+unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
+    if activity::enabled() {
+        let name = match cause {
+            Reify::Builtin(op) => builtin_def(op)?.name,
+            Reify::Site(name) => name,
+        };
+        interp().frames[index].reified_by = activity::label(name);
+    }
     materialize_references(index)?;
     let frame = &interp().frames[index];
     // A variable the caller passed to an inlined wrapper sits in its slot as the value; the
@@ -2455,7 +2479,7 @@ pub unsafe fn run_frame(
     };
     if !state.object_systems {
         let sys_parent = if caller != crate::NO_SLOTS {
-            frame_env(caller as usize)?
+            frame_env(caller as usize, Reify::Site("object-system check"))?
         } else {
             sys_parent
         };
@@ -2562,7 +2586,7 @@ unsafe fn finish_frame(
         && frame.unforced > 0
         && frame.unforced > unforced_defaults(frame)
     {
-        reify(depth - 1)?;
+        reify(depth - 1, Reify::Site("promise outliving the frame"))?;
     }
     result
 }
@@ -2627,6 +2651,7 @@ unsafe fn push_frame(
         pending: nil(),
         unforced: 0,
         inlined: false,
+        reified_by: crate::NOT_REIFIED,
     });
     if PROFILE_TICK.load(Ordering::Relaxed) {
         record_profile_sample(None)?;
@@ -2674,7 +2699,9 @@ unsafe fn pop_frame(
 
 /// Counts a call to a closure of a package namespace, and whether it skipped the generic call
 /// protocol: it ran natively without a frame (`frame` is `None`) or in a slot frame that never
-/// made its environment, and no argument was a promise.
+/// made its environment, and no argument was a promise. A call that did not is counted under
+/// the reason: what reified its frame, a frame that had an environment from the start, or the
+/// kind of its first promise argument's code.
 #[cold]
 pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, args: &[Arg]) {
     let enclosure = function.tag();
@@ -2682,12 +2709,31 @@ pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, a
         return;
     }
     activity::count(Counter::PackageCalls);
-    if frame.is_none_or(|frame| frame.slots != crate::NO_SLOTS && frame.env == nil())
-        && args
+    let reason = match frame {
+        Some(frame) if frame.slots == crate::NO_SLOTS => Some("frame with an environment"),
+        Some(frame) if frame.env != nil() => {
+            let reason = activity::label_name(frame.reified_by);
+            if reason.as_deref().is_some_and(|name| OBSERVING_REASONS.contains(&name)) {
+                activity::count(Counter::PackageCallsObserved);
+            }
+            activity::count_package_fallback(match reason {
+                Some(_) => frame.reified_by,
+                None => activity::label("reason not recorded"),
+            });
+            return;
+        }
+        _ => args
             .iter()
-            .all(|arg| arg.value.kind() != SexpType::Promise || is_reference(arg.value))
-    {
-        activity::count(Counter::PackageCallsDirect);
+            .find(|arg| arg.value.kind() == SexpType::Promise && !is_reference(arg.value))
+            .map(|arg| match arg.value.cdr().kind() {
+                SexpType::Symbol => "promise argument: variable",
+                SexpType::Language => "promise argument: call",
+                _ => "promise argument: other",
+            }),
+    };
+    match reason {
+        Some(reason) => activity::count_package_fallback(activity::label(reason)),
+        None => activity::count(Counter::PackageCallsDirect),
     }
 }
 
@@ -2882,7 +2928,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         return result;
     }
     let expressions = std::mem::take(&mut frame.on_exit);
-    let env = frame_env(depth - 1)?;
+    let env = frame_env(depth - 1, Reify::Site("on.exit"))?;
     let visible = interp().visible;
     let mark = crate::heap().handle_mark();
     for &expression in &expressions {
@@ -3304,6 +3350,11 @@ pub(crate) unsafe fn value_is_missing(value: Sexp) -> R<bool> {
         && value.tag().kind() == SexpType::Environment
     {
         let code = value.cdr();
+        // A promise over a slot frame that has no environment yet reads the frame's slot, as
+        // reifying the frame and asking its binding would, without making the environment.
+        if value.tag().has_gp(gp::PENDING_FRAME) && dot_dot_index(code).is_none() {
+            return pending_slot_is_missing(value.tag(), code);
+        }
         let caller = promise_env(value)?;
         // A promise for `..1` asks about the caller's `...`, the binding that holds it.
         let bound = if dot_dot_index(code).is_some() {
@@ -3316,6 +3367,35 @@ pub(crate) unsafe fn value_is_missing(value: Sexp) -> R<bool> {
         }
     }
     Ok(false)
+}
+
+/// [`symbol_is_missing`] of `symbol` in the slot frame whose pending environment is `pending`,
+/// for a caller the argument came from, so a defaulted formal is not missing. A reified slot
+/// frame binds each slot to its content and the method variables after them, so reading them in
+/// that order asks what its environment would answer.
+unsafe fn pending_slot_is_missing(pending: Sexp, symbol: Sexp) -> R<bool> {
+    let state = interp();
+    let Some(owner) = state.frames.iter().rposition(|frame| frame.pending == pending) else {
+        panic!("a promise names the pending environment of a frame that has returned");
+    };
+    let frame = &state.frames[owner];
+    let names = frame.function.cdr().cdr().element(bytecode::SLOTS).element(1);
+    if let Some(slot) = (0..values::length(names)).find(|&slot| names.element(slot) == symbol) {
+        let value = *bytecode::register_address(frame.slots as usize + 1 + slot);
+        return if value == unbound() {
+            Ok(false)
+        } else {
+            value_is_missing(value)
+        };
+    }
+    let bound = crate::method_vars(state, owner)
+        .iter()
+        .find(|(name, _)| *name == symbol)
+        .map(|&(_, value)| value);
+    match bound {
+        Some(value) => value_is_missing(value),
+        None => Ok(false),
+    }
 }
 
 // The control-flow specials.
@@ -4460,18 +4540,42 @@ pub unsafe fn force_and_call_with(
         return apply_call(call, function, arguments, env);
     }
     let mut args = Args::new();
-    promise_args_into(call.cdr(), env, &mut args)?;
-    let mut seeded = false;
-    if let (Some(value), Some(arg)) = (first, args.first())
-        && arg.value.kind() == SexpType::Promise
-        && arg.value.car() == unbound()
-        && !arg.value.has_gp(gp::CHECKED_PROMISE)
+    let arguments = call.cdr();
+    // The known first value, as `lapply` reads `X[[i]]`, binds as a forced argument reference to
+    // its expression: a forced promise of it once anything keeps it, and no allocation until.
+    let mark = interp().references_used;
+    let seeded = if let Some(value) = first
+        && arguments.kind() == SexpType::Pairlist
+        && arguments.car().kind() == SexpType::Language
     {
-        let heap = crate::heap();
-        heap.set_car(arg.value, value);
-        heap.set_tag(arg.value, nil());
-        seeded = true;
-    }
+        let reference = env_reference(env, arguments.car())?;
+        crate::heap().set_car(reference, value);
+        args.push(Arg {
+            tag: arguments.tag(),
+            value: reference,
+        });
+        promise_args_into(arguments.cdr(), env, &mut args)?;
+        true
+    } else {
+        promise_args_into(arguments, env, &mut args)?;
+        false
+    };
+    let result = call_seeded(call, function, env, &mut args, count, seeded, known);
+    release_references(mark);
+    result
+}
+
+/// The rest of [`force_and_call_with`] for a closure `function`, with `args` made; a seeded
+/// first argument is an argument reference, which only a slot frame may take.
+unsafe fn call_seeded(
+    call: Sexp,
+    function: Sexp,
+    env: Sexp,
+    args: &mut Args,
+    count: usize,
+    seeded: bool,
+    known: Option<&mut KnownFirst>,
+) -> R<Sexp> {
     for arg in args.iter().take(count) {
         if arg.value.kind() == SexpType::Promise {
             force_promise(arg.value)?;
@@ -4489,12 +4593,15 @@ pub unsafe fn force_and_call_with(
         _ => Entry::Unchecked,
     };
     if !matches!(entry, Entry::Checked(Some(_)))
-        && let Some(frame) = bind_slots(call, function, &args)?
+        && let Some(frame) = bind_slots(call, function, args)?
     {
-        return run_frame(call, function, frame, env, &args, entry, &[]);
+        return run_frame(call, function, frame, env, args, entry, &[]);
     }
-    let frame = bind_arguments(call, function, &args, None)?;
-    run_closure(call, function, frame, env, &args, entry)
+    if seeded {
+        detach_reference(args[0].value)?;
+    }
+    let frame = bind_arguments(call, function, args, None)?;
+    run_closure(call, function, frame, env, args, entry)
 }
 
 unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
@@ -4551,6 +4658,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         pending: nil(),
         unforced: 0,
         inlined: false,
+        reified_by: crate::NOT_REIFIED,
     });
     let depth = state.frames.len();
     let result = scope(|| match expression.kind() {
@@ -4589,7 +4697,7 @@ unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("'Recall' called from outside a closure"));
     };
     let (caller_call, function) = (state.frames[caller].call, state.frames[caller].function);
-    apply(caller_call, function, call.args, frame_sys_parent(own)?)
+    apply(caller_call, function, call.args, frame_sys_parent(own, Reify::Site("caller call"))?)
 }
 
 unsafe fn do_primitive(call: &Call<'_>) -> R<Sexp> {
