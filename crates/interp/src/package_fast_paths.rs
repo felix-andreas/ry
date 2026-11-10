@@ -24,11 +24,20 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryTraceBack", 0, do_trace_back),
 ];
 
-/// The package functions that get a fast path: package, function, the internal the prologue
-/// calls, and the [`crate::session::stable_hash`] of the formals and body it follows.
-/// `RY_PRINT_FAST_PATH_HASHES=1` prints the hashes of the loaded ones.
-const FAST_PATHS: &[(&str, &str, &str, u64)] =
-    &[("rlang", "trace_back", "ryTraceBack", 0x41ea91d219cd95a7)];
+/// The package functions that get a fast path: package, the one release whose code the native
+/// version follows, function, the internal the prologue calls, and the
+/// [`crate::session::stable_hash`] of that release's formals and body. Any other release hashes
+/// differently and keeps its R body; `crates/ry/tests/scenarios/native-package-functions.scenario`
+/// fails when the installed release is not the one listed, so an update shows up in the test
+/// suite rather than as a silent slowdown. `RY_PRINT_FAST_PATH_HASHES=1` prints the hashes of the
+/// loaded functions.
+const FAST_PATHS: &[(&str, &str, &str, &str, u64)] = &[(
+    "rlang",
+    "1.3.0",
+    "trace_back",
+    "ryTraceBack",
+    0x41ea91d219cd95a7,
+)];
 
 /// `ryPackageFastPaths(package, env)`: installs the fast paths of `package` into its namespace.
 unsafe fn do_package_fast_paths(call: &Call<'_>) -> R<Sexp> {
@@ -40,7 +49,7 @@ unsafe fn do_package_fast_paths(call: &Call<'_>) -> R<Sexp> {
         return Ok(nil());
     }
     let print = std::env::var_os("RY_PRINT_FAST_PATH_HASHES").is_some();
-    for &(owner, name, internal_name, expected) in FAST_PATHS {
+    for &(owner, _release, name, internal_name, expected) in FAST_PATHS {
         if owner != package {
             continue;
         }
@@ -166,7 +175,11 @@ unsafe fn do_trace_back(call: &Call<'_>) -> R<Sexp> {
         let index = start + position;
         crate::heap().set_element(call_column, position, calls[index]);
         let parent = sys_parent_number((depth - index) as i64, Some(own));
-        let parent = if parent == index as i64 + 1 { 0 } else { parent };
+        let parent = if parent == index as i64 + 1 {
+            0
+        } else {
+            parent
+        };
         let parent = if parent > start as i64 {
             (parent - start as i64) as i32
         } else {

@@ -16,7 +16,6 @@ use {
     std::borrow::Cow,
 };
 
-
 macro_rules! symbol_table {
     ($($field:ident = $name:literal),* $(,)?) => {
         /// Symbols the interpreter compares against or looks up by, installed once.

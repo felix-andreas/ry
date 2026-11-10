@@ -1,0 +1,46 @@
+# A package author whose tests call `expect_error()` runs them on ry: rlang's `trace_back()`, which
+# every caught error and warning records, runs natively. The fast path is installed when rlang's
+# namespace loads, through a script, `ry load` and `requireNamespace()` alike, and only for the
+# exact code of the release it was ported from: a changed copy of the function keeps its R body.
+# The first check fails when the installed rlang is another release, so an update that drops the
+# fast path shows up here.
+
+requires ry-runtime r-package:rlang
+
+file check.R
+| library(rlang)
+| prologue <- quote(.Internal(ryTraceBack()))
+| native <- function(f) identical(body(f)[[2]], prologue)
+| cat("rlang", format(packageVersion("rlang")), "native trace_back:", native(rlang:::trace_back), "\n")
+| r_body <- body(rlang:::trace_back)[[3]]
+| exact <- new.env()
+| exact$trace_back <- rlang:::trace_back
+| body(exact$trace_back) <- r_body
+| changed <- new.env()
+| changed$trace_back <- rlang:::trace_back
+| body(changed$trace_back) <- call("{", quote(invisible(NULL)), r_body)
+| .Internal(ryPackageFastPaths("rlang", exact))
+| .Internal(ryPackageFastPaths("rlang", changed))
+| cat("exact copy:", native(exact$trace_back), "changed copy:", native(changed$trace_back), "\n")
+| f <- function() g()
+| g <- function() rlang::trace_back()
+| trace <- f()
+| cat("calls:", vapply(trace$call, function(call) deparse(call), ""), "\n")
+file DESCRIPTION
+| Package: ledger
+| Version: 0.1.0
+| Imports: rlang
+file NAMESPACE
+| importFrom(rlang, abort)
+file R/ledger.R
+| balance <- function(entries) if (length(entries) == 0) abort("no entries") else sum(entries)
+
+run ry run --runtime ry check.R
+expect exit 0
+expect stdout "rlang 1.3.0 native trace_back: TRUE"
+expect stdout "exact copy: TRUE changed copy: FALSE"
+expect stdout "calls: f() g()"
+
+run ry load --runtime ry -e "cat('loaded:', identical(body(rlang:::trace_back)[[2]], quote(.Internal(ryTraceBack()))), '\\n')"
+expect exit 0
+expect stdout "loaded: TRUE"

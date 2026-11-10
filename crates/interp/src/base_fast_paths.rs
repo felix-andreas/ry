@@ -862,11 +862,7 @@ unsafe fn do_reduce(call: &Call<'_>) -> R<Sexp> {
         values::scalar_logical(missing_init as i32)?,
         frame,
     )?;
-    eval::define(
-        symbols.len,
-        values::scalar_integer(count as i32)?,
-        frame,
-    )?;
+    eval::define(symbols.len, values::scalar_integer(count as i32)?, frame)?;
     eval::define(symbols.f, function, frame)?;
     let element_call = values::call(symbols.bracket2, &[symbols.x, i_symbol])?;
     heap.root(element_call);

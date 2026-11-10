@@ -10,14 +10,14 @@
 use {
     oracle::{
         Engine, ProcessEngine,
-        fuzz::{SeedReport, check_seed, program, render_divergences},
+        fuzz::{SeedReport, check_seed, program, render_divergences, trace_back_program},
         gnu_r_available, ry_runtime_available,
     },
     std::{
         path::PathBuf,
         time::{Duration, Instant},
     },
-    syntax::testing::fuzz_iterations,
+    syntax::testing::{fuzz_iterations, fuzz_seeds},
 };
 
 /// A debug build runs a fuzz program in a few seconds, so a run this long is a hang.
@@ -129,4 +129,47 @@ fn scratch_directory() -> PathBuf {
     ));
     std::fs::create_dir_all(&directory).expect("create the fuzz scratch directory");
     directory
+}
+
+/// rlang's `trace_back()` runs natively on ry, and the native trace must be `identical()` to the
+/// one the function's R body builds from the same frame, on random stacks, at tier 0 and under
+/// the JIT. `FUZZ_SEED` replays a failing program.
+#[test]
+fn fuzz_native_trace_back_matches_its_r_body() {
+    if !ry_runtime_available() {
+        eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
+        return;
+    }
+    let engines = [
+        ProcessEngine::ry_tier0().with_timeout(TIMEOUT),
+        ProcessEngine::ry_jit().with_timeout(TIMEOUT),
+    ];
+    let directory = scratch_directory();
+    for seed in fuzz_seeds(4) {
+        let script = directory.join(format!("trace_back_{seed}.R"));
+        std::fs::write(&script, trace_back_program(seed)).expect("write the fuzz program");
+        for engine in &engines {
+            let outcome = engine
+                .run(&script)
+                .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", engine.name()));
+            if outcome.stdout.contains("rlang is not installed") {
+                eprintln!("skipped: rlang is not installed for ry");
+                std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
+                return;
+            }
+            let lines: Vec<&str> = outcome.stdout.lines().collect();
+            let differing: Vec<&&str> = lines
+                .iter()
+                .filter(|line| !line.ends_with(": TRUE"))
+                .collect();
+            assert!(
+                lines.len() == 8 && differing.is_empty() && outcome.errors.is_empty(),
+                "seed {seed} under {}: {differing:?} {:?}\n{}\nreplay with FUZZ_SEED={seed} cargo test -p oracle --test test_differential fuzz_native_trace_back",
+                engine.name(),
+                outcome.errors,
+                outcome.stdout
+            );
+        }
+    }
+    std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
 }

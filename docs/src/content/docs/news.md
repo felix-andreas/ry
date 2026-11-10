@@ -3,6 +3,17 @@ title: News
 description: Release announcements and project news
 ---
 
+## Unreleased
+
+### Package-specific fast paths
+
+ry runs a few package functions natively when the installed package is exactly the release the
+native code follows; any other release runs its own R code unchanged.
+
+| Package | Function | Release | Effect |
+| --- | --- | --- | --- |
+| rlang | `trace_back()` | 1.3.0 | 0.16 ms instead of 9 ms at a depth of 200 frames, so every `expect_error()` and `expect_warning()` is cheaper; the testthat workload takes 32% fewer instructions |
+
 ## ry 0.4.3-beta, Linux only
 
 *Released in November 2026 as a pre-release.*
