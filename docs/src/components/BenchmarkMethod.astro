@@ -1,0 +1,26 @@
+---
+// How each measured suite was run, read from its results file: one column per suite.
+import { legacyNotes, methodRows } from '../lib/benchmarks';
+
+const { columns, rows } = methodRows();
+// A cell's backticks mark code, as in the Markdown export.
+const parts = (text: string) => text.split('`').map((part, index) => ({ part, code: index % 2 === 1 }));
+---
+
+<table>
+	<thead>
+		<tr>
+			{columns.map((column) => <th>{column}</th>)}
+		</tr>
+	</thead>
+	<tbody>
+		{
+			rows.map((row) => (
+				<tr>
+					{row.map((cell, index) => (index === 0 ? <th scope="row">{cell}</th> : <td>{parts(cell).map(({ part, code }) => (code ? <code>{part}</code> : part))}</td>))}
+				</tr>
+			))
+		}
+	</tbody>
+</table>
+{legacyNotes().map((note) => <p>{note}</p>)}
