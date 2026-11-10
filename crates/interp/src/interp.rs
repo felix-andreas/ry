@@ -386,9 +386,9 @@ pub struct Interp {
     /// assignment, so a builtin replacement function reports its errors and warnings against
     /// `x[i] <- v`, not `` `[<-`(*tmp*, i, v) `` or the enclosing function's call.
     pub assignment_call: Option<(Sexp, Sexp, usize)>,
-    /// The base closures whose calls run natively, each with its native code
-    /// (`base_fast_paths::native_entry`).
-    pub native_entries: SmallVec<[(Sexp, NativeEntry); 8]>,
+    /// The base closures whose calls run natively, each with its native code and whether GNU
+    /// R's compiler inlines its calls (`base_fast_paths::native_entry`).
+    pub native_entries: SmallVec<[(Sexp, NativeEntry, bool); 8]>,
     /// Base R's `loadNamespace`, whose calls the collector treats as a namespace load
     /// (`Heap::enter_namespace_load`), or nil before base is loaded. Matched by identity and
     /// preserved, so a collected closure's address cannot be reused by another function.

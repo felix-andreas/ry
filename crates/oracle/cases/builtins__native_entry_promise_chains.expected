@@ -1,0 +1,42 @@
+[stdout]
+| [1] "integer"
+| [1] "integer"
+| [1] "double"
+| [1] "character"
+| forced
+| [1] "double"
+| forced
+| second
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| g(y)
+| [1] "integer"
+| same(p, q)
+| [1] TRUE
+| h(calls())
+| g(y)
+| calls()
+| [1] "integer"
+| [1] "double" "double" "1"     
+| [1] "double" "1"     
+| [1] 7 2
+| [1] TRUE
+| [1] FALSE
+| forced
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| forced
+| [1] TRUE
+| [1] "integer"
+| forced
+| [1] "complex"
+| [1] "promise already under evaluation: recursive default argument reference or earlier problems?"
+| [1] "argument \"m\" is missing, with no default"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "argument \"m\" is missing, with no default"
