@@ -626,7 +626,7 @@ pub unsafe fn call_direct(definition: &BuiltinDef, args: &[Sexp]) -> R<Option<Se
 // target to copy) runs straight through; anything else takes the out-of-line path, so this
 // frame stays small enough that entry and exit cost a handful of instructions.
 #[inline]
-unsafe fn call_builtin_reusing(
+pub(crate) unsafe fn call_builtin_reusing(
     definition: &BuiltinDef,
     call: Sexp,
     op: Sexp,

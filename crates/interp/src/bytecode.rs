@@ -2764,7 +2764,11 @@ impl Compiler {
                 }
                 self.emit(Op::Return, &[dst]);
             }
-            "<-" | "=" if reuses_first_argument(call) => self.fallback(call, dst)?,
+            // A slot frame's `CallRebinding` decides from the slot whether the builtin may update
+            // in place; a frame with an environment leaves that to `eval::rebind`.
+            "<-" | "=" if reuses_first_argument(call) && self.slot_formals.is_none() => {
+                self.fallback(call, dst)?
+            }
             "<-" | "=" => {
                 if rebinds_first_argument(call) {
                     self.rebinding = Some((args[1].1, args[0].1));
@@ -3241,7 +3245,9 @@ impl Compiler {
         let args = values::pairlist_items(call.cdr());
         // A register holds an argument's value without counting as a reference, so a later
         // argument that modifies a variable in place would change an earlier argument's value.
-        let simple = args.iter().all(|(_, value)| *value != symbols().dots)
+        let simple = !(rebinding.is_some()
+            && crate::standard_library::reuses_first_argument(&symbol_name(head)))
+            && args.iter().all(|(_, value)| *value != symbols().dots)
             && !args
                 .iter()
                 .skip(1)
@@ -4819,7 +4825,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         value
     } else if state.in_slots()
         && function.kind() == SexpType::Builtin
-        && let Some(value) = slot_builtin_call(state, call, function)?
+        && let Some(value) = slot_builtin_call(state, call, function, None)?
     {
         value
     } else {
@@ -4944,10 +4950,15 @@ unsafe fn slot_substitute(
 /// without an environment. `None` when an argument needs one, or when forcing an argument gave
 /// the frame its environment, in which case the generic path evaluates the arguments again from
 /// it (the promises it meets are forced already, so nothing runs twice).
+///
+/// `target` is the slot that `target <- call` assigns when the call's first argument reads it
+/// (`x <- f(x, ...)`): the builtin may then update that value in place when the slot holds its
+/// only reference (see [`slot_reusable`]).
 unsafe fn slot_builtin_call(
     state: &Activation<'_, '_>,
     call: Sexp,
     function: Sexp,
+    target: Option<*mut Sexp>,
 ) -> R<Option<Sexp>> {
     let dots = symbols().dots;
     let missing = missing_arg();
@@ -4996,7 +5007,31 @@ unsafe fn slot_builtin_call(
     {
         return Ok(Some(value));
     }
-    call_builtin(definition, call, function, &args, env).map(Some)
+    match target {
+        Some(slot) if definition.reuses_first_argument => {
+            let reusable = slot_reusable(state, slot, &args);
+            eval::call_builtin_reusing(definition, call, function, &args, env, reusable).map(Some)
+        }
+        _ => call_builtin(definition, call, function, &args, env).map(Some),
+    }
+}
+
+/// The first argument of `x <- f(x, ...)` when the update may happen in place: `slot`, the slot
+/// of `x`, holds the value itself and is its only reference, no other argument is the same
+/// object, and no register of the slot frame's expressions holds it uncounted. A slot frame
+/// without an environment is visible to nothing else, so the slot's reference is the binding's;
+/// a value bound through a promise stays shared with the promise, which the call's argument
+/// list still holds.
+unsafe fn slot_reusable(state: &Activation<'_, '_>, slot: *mut Sexp, args: &[Arg]) -> Option<Sexp> {
+    let subject = args.first()?.value;
+    if *slot != subject || subject.refcount() != 1 || args[1..].iter().any(|arg| arg.value == subject) {
+        return None;
+    }
+    let registers = &interp().bytecode.registers;
+    let start = state.header.offset_from(registers.as_ptr()) as usize
+        + 1
+        + length(state.constants.element(SLOTS).element(1));
+    (!registers.get(start..)?.contains(&subject)).then_some(subject)
 }
 
 /// The values of [`slot_builtin_call`]'s arguments, each counted as referenced and rooted.
@@ -5210,6 +5245,22 @@ unsafe fn op_call_rebinding(state: &mut Activation<'_, '_>, instruction: Instruc
     let function = instruction.input(1);
     let call = state.constant(instruction, 2);
     let target = state.constant(instruction, 3);
+    // A slot frame keeps its slots: a builtin may update the slot's value in place, and a
+    // closure is called as any other (moving the value needs the binding's cell).
+    if state.in_slots()
+        && let Some(slot) = slot_named(state, target)
+    {
+        if function.kind() == SexpType::Builtin
+            && let Some(value) = slot_builtin_call(state, call, function, Some(slot))?
+        {
+            state.record(instruction.at, value);
+            instruction.output(0, value);
+            return Ok(Flow::Next);
+        }
+        if function.kind() == SexpType::Closure {
+            return op_call_generic(state, instruction);
+        }
+    }
     let value = eval::rebind_call(call, function, target, state.env()?)?;
     state.record(instruction.at, value);
     instruction.output(0, value);
