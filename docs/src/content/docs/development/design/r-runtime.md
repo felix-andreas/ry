@@ -912,7 +912,7 @@ I/O builtins can do fewer system calls than GNU R's. The 3x corpus milestone nee
 
 | Target row | Status | What it needs |
 | --- | --- | --- |
-| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | in progress | builtins from 28% (workloads) and 18% (corpus) to 10x faster; the top of the ranking above first. Built: `attributes`, `c`, `[[` and `[[<-` with constant subscripts, `forceAndCall`, a builtin `FUN` in the apply family, `Reduce`, the one-argument builtins `!`, `length`, `is.null`, `is.na`, `is.character`, `is.logical` and `is.function` in compiled calls, and native entries for `identical`, `isTRUE`, `isFALSE`, `nrow`, `ncol`, `match`, `%in%` and `%||%` (the "Builtin fast paths" rows below), a tier-0 op for `missing()`, `lapply` and `vapply` that reuse `i` and read `X[[i]]` directly per element, `structure()` that sets attributes in place, tier-0 `%%` and `%/%`, element assignments indexed by `$` and `[[` reads, and a `.Call` that resolves its routine without allocating. Next: the `.Call` boundary itself (about 1.5x GNU R per call), `$<-` and `[[<-` that append a name, `ryStructure`, `round`. `exp` and `[<-` on plain vectors already run at GNU R's speed |
+| (a) Builtins several times faster than GNU R's C: no allocation on the fast path, SIMD kernels, fused element-wise temporaries | in progress | builtins from 28% (workloads) and 18% (corpus) to 10x faster; the top of the ranking above first. Built: `attributes`, `c`, `[[` and `[[<-` with constant subscripts, `forceAndCall`, a builtin `FUN` in the apply family, `Reduce`, the one-argument builtins `!`, `length`, `is.null`, `is.na`, `is.character`, `is.logical` and `is.function` in compiled calls, and native entries for `identical`, `isTRUE`, `isFALSE`, `nrow`, `ncol`, `match`, `%in%` and `%||%` (the "Builtin fast paths" rows below), a tier-0 op for `missing()`, `lapply` and `vapply` that reuse `i` and read `X[[i]]` directly per element, `structure()` that sets attributes in place, tier-0 `%%` and `%/%`, element assignments indexed by `$` and `[[` reads, a `.Call` that resolves its routine from the address pointer, and `x[i] <- v` written in place. Next: the shared call machinery around a builtin (`.Call` is 3.5x GNU R per call, `[<-` 1.4x), `$<-` and `[[<-` that append a name, `ryStructure`, `round` |
 | (b) Automatic parallelism for effect-free apply-family calls and long element-wise operations, deterministic, with bit-identical reductions | deferred, architecture-ready | the effect-free fact per function and the invariants in `decisions.md`; package native code stays single-threaded. Deferred because the target users already run their test suites in parallel across processes and are CPU bound, so every core is busy and threads inside one process would only compete with the other workers. Single-core speed is the goal, and every cost paid per process (warm-up, compile time, package loading, resident memory) is paid once per worker |
 | (c) Tier-1 compilation of most R-level time | planned | R code from 56% (workloads) to 30x faster; tier 1 today runs under 3% of the time on eight of nine workloads |
 | (d) Native code shrinks only through ry-native replacements or parallelism | planned | ry's own ports (`stats`: 40% of `simulation`) are ry's to speed up; third-party C stays: `data.table` and `xts` on the workloads, `data.table` and `rlang` on the corpus |
@@ -1061,9 +1061,25 @@ Instructions per call at tier 0, measured with callgrind net of the loop:
 | `c(a, a, a)` | 2315 | 1351 | 2050 |
 | `c(list(1, 2), list(3))` | 3425 | 3032 | 2700 |
 | `x[[i]]`, double vector | 1155 | 925 | 223 |
+| `x[i] <- 1`, index `c(2L, 5L)` | 5273 | 2146 | 1580 |
+| `.Call(r, x)`, a registered routine | 4133 | 2916 | 830 |
 
-The remaining cost of `x[[i]]` is call machinery shared by every compiled call (the function
-lookup and its guard, two frame lookups, the scalar result's allocation), not `[[` itself.
+- **Assignment in place.** Compiled `x[i] <- v` on an unshared atomic vector without
+  attributes writes the selected elements directly, recycling `v` as GNU R does. It declines to
+  the full `[<-` whenever the result would change shape or a warning is due: NA or zero
+  positions, growth, a coercion that widens `x`, or a length that does not divide.
+- **`vapply` results.** One module checks each result against `FUN.VALUE` and copies it into
+  the preallocated answer, widening integer and logical values inline, then sets names, dims and
+  dimnames once. Every loop that calls `FUN` per element uses it, so the checks and their error
+  text exist once.
+- **`.Call` by address.** A routine is native code exactly when its `NativeSymbolInfo`'s
+  `address` pointer has no tag and a non-null address, so the call reads two slots by position
+  and passes its arguments from the stack, with no name search or allocation before native code
+  runs. A `PACKAGE` argument or an arity mismatch goes to the general path, which reports the
+  errors.
+
+The remaining cost of `x[[i]]` and `.Call` is call machinery shared by every compiled call (the
+function lookup and its guard, frame lookups, the result's allocation), not the builtin itself.
 
 ### How the static types feed the JIT
 

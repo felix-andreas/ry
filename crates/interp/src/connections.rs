@@ -1373,8 +1373,9 @@ unsafe fn do_text_connection(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(1);
     let open = values::require_string(call.arg(2), "open")?;
     let env = call.arg(3);
-    let device = match open.as_str() {
-        "" | "r" => {
+    // GNU R reads only the mode's first letter, so `"rt"` reads and knitr's `"wr"` writes.
+    let device = match open.bytes().next() {
+        None | Some(b'r') => {
             if object.kind() != SexpType::String {
                 return Err(error("invalid 'text' argument"));
             }
@@ -1386,7 +1387,7 @@ unsafe fn do_text_connection(call: &Call<'_>) -> R<Sexp> {
             Device::TextInput(TextInput { data, position: 0 })
         }
         // GNU R appends for every write mode but a plain "w", including "wb".
-        "w" | "a" | "wb" | "ab" => {
+        Some(b'w' | b'a') => {
             let target = if object == nil() {
                 None
             } else {
