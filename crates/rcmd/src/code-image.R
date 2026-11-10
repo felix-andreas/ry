@@ -61,7 +61,7 @@ if (training == "tests") {
     run_quietly(training, chdir = TRUE)
 }
 
-counts <- .Internal(ryCodeImageWrite(trained, explain))
+counts <- .Internal(ryCodeImageWrite(trained, explain, TRUE))
 summary <- sprintf(
     "closures=%d written=%d native=%d",
     counts[["closures"]], counts[["written"]], counts[["native"]]

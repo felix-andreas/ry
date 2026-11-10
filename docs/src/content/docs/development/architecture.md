@@ -609,9 +609,11 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   time, and nothing keys it on the run-time environment. `ry-rcmd start-image BASE --libr FILE`
   (`just start-image`) writes it again over a built tree.
 - **Base code images.** Right after the start image, the same step starts a session from it,
-  fetches every binding the base-priority packages still keep lazy, and writes their code images
-  (`R/<package>.ryc`), so those fetches read uncompressed records in place. They are untrained and
-  written for the same build as the start image.
+  fetches every binding the base-priority packages still keep lazy, and writes their images
+  (`R/<package>.ryc`) with the uncompressed records alone, so those fetches read them in place
+  instead of inflating them. They hold no compiled or machine code: for untrained base code,
+  decoding it and mapping a native section cost more than compiling the closures a session
+  calls. They are written for the same build as the start image.
 - **One build.** The header carries the runtime's identity (`RY_RUNTIME_ID`, a hash of the
   runtime's sources), and an image of another build is skipped silently, so a development
   checkout starts the slow way after a runtime edit until `just start-image` runs.

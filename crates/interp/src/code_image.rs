@@ -169,7 +169,7 @@ pub unsafe fn set_flags_from_c(object: Sexp, bits: u16) {
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryCodeImageRecord", 1, do_record).invisible(),
-    internal("ryCodeImageWrite", 2, do_write),
+    internal("ryCodeImageWrite", 3, do_write),
 ];
 
 const MAGIC: &[u8; 8] = b"RYCODE\x00\x02";
@@ -924,14 +924,16 @@ fn release_recording(recording: &Recording) {
     }
 }
 
-/// `ryCodeImageWrite(trained, explain)`: compiles every recorded closure and writes each
+/// `ryCodeImageWrite(trained, explain, code)`: compiles every recorded closure and writes each
 /// database's image, keeping the run's feedback when `trained`, and with it the machine code of
 /// the closures whose facts need no run. With `explain`, prints what kept each closure from
-/// machine code. Returns how many closures were recorded and written, how many native functions
+/// machine code. Without `code`, an image holds the records' streams alone: decoding untrained
+/// code and mapping a native section cost a session more than compiling the closures it calls. Returns how many closures were recorded and written, how many native functions
 /// were compiled, and how many closures were left out for each reason.
 unsafe fn do_write(call: &Call<'_>) -> R<Sexp> {
     let trained = values::as_logical_scalar(call.arg(0)) == 1;
     let explain = values::as_logical_scalar(call.arg(1)) == 1;
+    let code = values::as_logical_scalar(call.arg(2)) == 1;
     let state = &mut interp().code_image;
     if state.build.is_empty() {
         return Err(error(
@@ -948,7 +950,7 @@ unsafe fn do_write(call: &Call<'_>) -> R<Sexp> {
         .records
         .iter()
         .try_for_each(|(database, records)| {
-            write_image(database, records, build, trained, explain, &mut summary)
+            write_image(database, records, build, trained, explain, code, &mut summary)
         });
     release_recording(&recording);
     written?;
@@ -991,6 +993,7 @@ unsafe fn write_image(
     build: &str,
     trained: bool,
     explain: bool,
+    code: bool,
     summary: &mut Summary,
 ) -> R<()> {
     let Some(stamp) = DatabaseStamp::of(database).map_err(error)? else {
@@ -998,6 +1001,14 @@ unsafe fn write_image(
     };
     let mut payloads = Vec::with_capacity(records.len());
     for recorded in records.values() {
+        if !code {
+            let count = length(recorded.closures) / 2;
+            let mut payload = Vec::with_capacity(count + 1);
+            write_varint(&mut payload, count as u64);
+            payload.resize(payload.len() + count, 0);
+            payloads.push(payload);
+            continue;
+        }
         let closures: Vec<(Sexp, Sexp)> = (0..length(recorded.closures) / 2)
             .map(|index| {
                 (
@@ -1021,7 +1032,10 @@ unsafe fn write_image(
             }
         }
     }
-    let native = native_hooks().and_then(|hooks| (hooks.compile)(&candidates, explain));
+    let native = code
+        .then(native_hooks)
+        .flatten()
+        .and_then(|hooks| (hooks.compile)(&candidates, explain));
     if let Some(native) = &native {
         summary.native += native.functions;
     }

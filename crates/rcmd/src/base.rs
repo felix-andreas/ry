@@ -381,9 +381,10 @@ fn run_image_writer(front_end: &Path, root: &Path, work: &Path) -> Result<()> {
 }
 
 /// Fetches every lazy-loaded binding of the base packages still left in their lazy-load
-/// databases once the start-up image is loaded, and writes each database's code image, so a
-/// session reads those records uncompressed and in place instead of inflating them. Recommended
-/// packages get their images when they are installed, trained, so they are left alone here.
+/// databases once the start-up image is loaded, and writes each database's image with the
+/// records' streams alone, so a session reads those records uncompressed and in place instead of
+/// inflating them. Recommended packages get full images when they are installed, so they are
+/// left alone here.
 const BASE_CODE_IMAGES: &str = r#"
 library <- file.path(R.home(), "library")
 packages <- rownames(utils::installed.packages(library, priority = "base"))
@@ -397,7 +398,7 @@ for (package in packages) {
         }
     }
 }
-invisible(.Internal(ryCodeImageWrite(FALSE, FALSE)))
+invisible(.Internal(ryCodeImageWrite(FALSE, FALSE, FALSE)))
 "#;
 
 fn run_in_home(
