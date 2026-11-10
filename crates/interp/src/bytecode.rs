@@ -4519,17 +4519,22 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
     }
     let slots = constants.element(SLOTS);
     if slots != nil() {
+        let in_frame =
+            |slot: &i32| (-1..length(slots.element(1)) as i64).contains(&i64::from(*slot));
+        let by_constant = || slots.element(3);
         let well_formed = slots.kind() == SexpType::List
-            && length(slots) == 3
+            && length(slots) == 4
             && slots.element(2) == nil()
             && slots.element(0).kind() == SexpType::Integer
             && length(slots.element(0)) == caches
             && slots.element(1).kind() == SexpType::List
             && (0..length(slots.element(1)))
                 .all(|index| slots.element(1).element(index).kind() == SexpType::Symbol)
-            && values::ints(slots.element(0))
-                .iter()
-                .all(|&slot| (-1..length(slots.element(1)) as i64).contains(&i64::from(slot)));
+            && values::ints(slots.element(0)).iter().all(in_frame)
+            && (by_constant() == nil()
+                || (by_constant().kind() == SexpType::Integer
+                    && length(by_constant()) <= constant_count
+                    && values::ints(by_constant()).iter().all(in_frame)));
         if !well_formed {
             return Err("a malformed slot table".to_owned());
         }
@@ -5166,13 +5171,13 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
                 let start = machine.function.tag();
                 (
                     lookup_outside(
-                    symbol,
-                    start,
-                    LexicalFrame::of(machine),
-                    LookupCache::of(code),
-                    cache,
-                    0..0,
-                )?,
+                        symbol,
+                        start,
+                        LexicalFrame::of(machine),
+                        LookupCache::of(code),
+                        cache,
+                        0..0,
+                    )?,
                     false,
                 )
             }
@@ -9743,7 +9748,9 @@ unsafe fn lookup_outside(
                 || value == unbound()
                 || value.kind() == SexpType::Promise
             {
-                return holding(held, || eval::eval_symbol_reporting(symbol, env, || lexical.call()));
+                return holding(held, || {
+                    eval::eval_symbol_reporting(symbol, env, || lexical.call())
+                });
             }
             return Ok(value);
         }
@@ -9753,7 +9760,9 @@ unsafe fn lookup_outside(
     {
         let value = cell.cdr();
         if value.kind() == SexpType::Promise {
-            return holding(held, || eval::eval_symbol_reporting(symbol, env, || lexical.call()));
+            return holding(held, || {
+                eval::eval_symbol_reporting(symbol, env, || lexical.call())
+            });
         }
         if value != missing_arg() && value != unbound() {
             return Ok(value);
@@ -9764,7 +9773,9 @@ unsafe fn lookup_outside(
     if let Some(cell) = resolve(symbol, enclosure, false)? {
         fill_cache(symbol, enclosure, cell, cache, slot);
     }
-    holding(held, || eval::eval_symbol_reporting(symbol, env, || lexical.call()))
+    holding(held, || {
+        eval::eval_symbol_reporting(symbol, env, || lexical.call())
+    })
 }
 
 /// Runs `run`, which forces a promise or an active binding and so runs code. The registers
