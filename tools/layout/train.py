@@ -7,7 +7,7 @@ once with `RY_JIT=off`, so both tiers' paths are in the profile. The mix:
 - every oracle case (crates/oracle/cases/*.R) through the oracle's driver, so a case that stops
   at an error still runs to its end, as it does under `oracle compare`;
 - every workload of the representative mix (tools/bench/real/*.R) with its harness and
-  `RY_BENCH_REPEAT=1`; the testthat workload is skipped when testthat is not installed;
+  `RY_BENCH_REPEAT=1`;
 - the training half of the vendored public suites (tools/bench/real/suites): the `rcp` and
   `shootout` programs at even positions in sorted order. The odd half and the whole `awfy` suite
   are held out, so a measurement on them shows whether the profile generalizes (`--held-out`
@@ -16,7 +16,9 @@ once with `RY_JIT=off`, so both tiers' paths are in the profile. The mix:
 The instrumented binaries write their profiles wherever their build put them (LLVM_PROFILE_FILE
 for PGO, the BOLT runtime's file for BOLT); this script only runs programs. A program that fails
 is reported but does not stop the training, because a failure on the instrumented build is still
-a valid profile of the path up to it. The exit status is non-zero only when nothing ran.
+a valid profile of the path up to it. The exit status is non-zero when nothing ran or when a
+workload of the mix failed, since the mix is the core of the profile. The workloads need
+testthat, purrr, stringr, lubridate, data.table, xts and zoo installed.
 
 usage: tools/layout/train.py RY [--jobs N] [--held-out]
 """
@@ -38,25 +40,14 @@ def public_programs():
     return trained, [program for program in programs if program not in trained]
 
 
-def has_package(ry, package, env, scratch):
-    script = scratch / f"has-{package}.R"
-    script.write_text(f"cat(requireNamespace('{package}', quietly = TRUE))\n")
-    probe = subprocess.run([ry, "run", "--runtime", "ry", str(script)], capture_output=True, text=True, env=env,
-                           timeout=TIMEOUT)
-    return probe.stdout.strip().endswith("TRUE")
-
-
 def jobs(ry, env, scratch):
     driver = root / "crates/oracle/src/driver.R"
     for case in sorted((root / "crates/oracle/cases").glob("*.R")):
         report = scratch / f"{case.stem}.json"
         yield f"oracle/{case.stem}", [ry, "run", "--runtime", "ry", str(driver), str(case), str(report)], case.parent
     harness = (bench / "harness.R").read_text()
-    testthat = has_package(ry, "testthat", env, scratch)
-    if not testthat:
-        print("train: testthat is not installed, so the testthat workload is skipped", file=sys.stderr)
     for workload in sorted(bench.glob("*.R")):
-        if workload.name == "harness.R" or (workload.stem == "testthat" and not testthat):
+        if workload.name == "harness.R":
             continue
         script = scratch / f"workload-{workload.name}"
         script.write_text(harness + "\n" + workload.read_text())
@@ -95,14 +86,20 @@ def main():
         work = [(f"{tier}:{name}", command, cwd, env)
                 for tier, env in tiers for name, command, cwd in jobs(args.ry, base, scratch)]
         failed = 0
+        broken_workloads = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
             for name, error in pool.map(lambda job: run(*job), work):
                 if error:
                     failed += 1
+                    if "workload/" in name:
+                        broken_workloads.append(name)
                     print(f"train: {name}: {error}", file=sys.stderr)
     print(f"train: ran {len(work)} programs, {failed} failed", file=sys.stderr)
-    if failed == len(work):
-        sys.exit(1)
+    # A workload that cannot run, usually for a missing package, leaves its paths out of the
+    # profile, and that profile then optimizes them as cold.
+    if failed == len(work) or broken_workloads:
+        sys.exit(f"train: the workload mix must run in full; failed: {', '.join(broken_workloads)}"
+                 if broken_workloads else 1)
 
 
 if __name__ == "__main__":
