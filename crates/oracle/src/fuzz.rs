@@ -558,14 +558,22 @@ impl Generator {
             "c(a = \"x\")" => "as.character(i)",
             _ => "i * 0.5",
         };
-        let name = ["paste0(\"k\", i %% 3)", "\"a\"", "letters[i]", "NA_character_"]
-            [self.rng.below(4)];
+        let name = [
+            "paste0(\"k\", i %% 3)",
+            "\"a\"",
+            "letters[i]",
+            "NA_character_",
+        ][self.rng.below(4)];
         let form = match self.rng.below(3) {
             0 => format!("x[[{name}]] <- {value}"),
             1 => format!("x[{name}] <- {value}"),
             _ => format!("x$k <- {value}"),
         };
-        let share = if self.rng.chance(1, 2) { "kept <- x\n    " } else { "" };
+        let share = if self.rng.chance(1, 2) {
+            "kept <- x\n    "
+        } else {
+            ""
+        };
         let size = 1 + self.rng.below(6);
         format!(
             "ap{k} <- function(x, n) {{\n  for (i in seq_len(n)) {{\n    {share}{form}\n  }}\n  x\n}}\nbase{k} <- {start}\nstr(ap{k}(base{k}, {size}))\nstr(base{k})\nstr(Reduce(function(acc, i) {{ acc[[paste0(\"r\", i %% 2)]] <- i; acc }}, seq_len({size}), {start}))\n"
@@ -583,7 +591,8 @@ impl Generator {
         let recycle = if rows % 2 == 0 { "c(-1, 1)" } else { "-1" };
         let digits = self.rng.below(7) as i64 - 2;
         let kind = ["0", "0L", "FALSE"][self.rng.below(3)];
-        let subscript = ["i", "-i", "i + 0.5", "-(i + 0L)", "c(i, NA)", "i - 1L"][self.rng.below(6)];
+        let subscript =
+            ["i", "-i", "i + 0.5", "-(i + 0L)", "c(i, NA)", "i - 1L"][self.rng.below(6)];
         let fill = match kind {
             "0L" => format!("seq_len({rows})"),
             "FALSE" => format!("rep(c(TRUE, NA), length.out = {rows})"),
@@ -930,10 +939,12 @@ pub fn check_seed(
             Err(EngineError::Unavailable(reason)) => {
                 unavailable.push(format!("{}: {reason}", engine.name()))
             }
-            Err(EngineError::Failed(reason)) => divergences.push(Divergence {
-                engine: engine.name(),
-                detail: reason,
-            }),
+            Err(EngineError::Failed(reason) | EngineError::Crashed(reason)) => {
+                divergences.push(Divergence {
+                    engine: engine.name(),
+                    detail: reason,
+                })
+            }
         }
     }
     if let Err(error) = std::fs::remove_file(&path) {

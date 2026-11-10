@@ -2,39 +2,39 @@
 | + zw :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  1.5   NA  NaN  Inf  Inf  Inf  Inf  NaN   NA   1.5
-| im  0.0   NA    1  NaN -Inf -Inf  NaN    1   NA   0.0
+| im  0.0    0    1  NaN -Inf -Inf  NaN    1    0   0.0
 | + zd :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re   NA   NA  NaN    0  Inf    0  Inf -Inf    0     1
-| im   -2   NA    1  NaN    0 -Inf  Inf    0    0     2
+| im   -2    0    1  NaN    0 -Inf  Inf    0    0     2
 | + dz :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re   NA  NaN  NaN    0  Inf    0  Inf -Inf    0     1
-| im   -2   NA    1  NaN    0 -Inf  Inf    0    0     2
+| im   -2    0    1  NaN    0 -Inf  Inf    0    0     2
 | + zn :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re   NA   NA  NaN   -2  Inf    7   NA    1   -4     2
-| im   NA   NA    1  NaN    0 -Inf   NA    0    0     2
+| im   -2    0    1  NaN    0 -Inf  Inf    0    0     2
 | + nz :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re   NA   NA  NaN   -2  Inf    7   NA    1   -4     2
-| im   NA   NA    1  NaN    0 -Inf   NA    0    0     2
+| im   -2    0    1  NaN    0 -Inf  Inf    0    0     2
 | + zb :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  2.5   NA  NaN    2   NA    0  Inf    1   -3    NA
-| im -2.0   NA    1  NaN   NA -Inf  Inf    0    0    NA
+| im -2.0    0    1  NaN    0 -Inf  Inf    0    0     2
 | + zs :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  3.5   NA  NaN    3  Inf    2  Inf    2   -1     2
-| im -2.0   NA    1  NaN    0 -Inf  Inf    0    0     2
+| im -2.0    0    1  NaN    0 -Inf  Inf    0    0     2
 | + sz :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  3.5   NA  NaN    3  Inf    2  Inf    2   -1     2
-| im -1.0   NA    2  NaN    1 -Inf  Inf    1    1     3
+| im -1.0    1    2  NaN    1 -Inf  Inf    1    1     3
 | + zna :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re   NA   NA  NaN   NA   NA   NA   NA   NA   NA    NA
-| im   NA   NA   NA  NaN   NA   NA   NA   NA   NA    NA
+| im   -2    0    1  NaN    0 -Inf  Inf    0    0     2
 | + nas :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re   NA   NA   NA   NA   NA   NA   NA   NA   NA    NA
@@ -42,68 +42,68 @@
 | + z2 :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  3.5   NA  NaN    3  Inf    2  Inf    2   -1     2
-| im -2.0   NA    1  NaN    0 -Inf  Inf    0    0     2
+| im -2.0    0    1  NaN    0 -Inf  Inf    0    0     2
 | + z2i :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  3.5   NA  NaN    3  Inf    2  Inf    2   -1     2
-| im -2.0   NA    1  NaN    0 -Inf  Inf    0    0     2
+| im -2.0    0    1  NaN    0 -Inf  Inf    0    0     2
 | + z2c :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  3.5   NA  NaN    3  Inf    2  Inf    2   -1     2
-| im -2.0   NA    1  NaN    0 -Inf  Inf    0    0     2
+| im -2.0    0    1  NaN    0 -Inf  Inf    0    0     2
 | + zneg :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re -0.5   NA  NaN   -1  Inf   -2  Inf   -2   -5    -2
-| im -2.0   NA    1  NaN    0 -Inf  Inf    0    0     2
+| im -2.0    0    1  NaN    0 -Inf  Inf    0    0     2
 | + zhalf :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re    2   NA  NaN  1.5  Inf  0.5  Inf  0.5 -2.5   0.5
-| im   -2   NA    1  NaN    0 -Inf  Inf  0.0  0.0   2.0
+| im   -2    0    1  NaN    0 -Inf  Inf  0.0  0.0   2.0
 | + short :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  1.5   NA  NaN   NA  Inf   NA  Inf   NA   -3    NA
-| im -1.0   NA    2  NaN    1   NA  Inf   NA    1    NA
+| im -1.0    0    2  NaN    1 -Inf  Inf    0    1     2
 | + uneven :
 | warning: longer object length is not a multiple of shorter object length 
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  2.5   NA  NaN    2  Inf    3  Inf    2    0     1
-| im -1.0   NA    1  NaN    0 -Inf  Inf    0    0     3
+| im -1.0    0    1  NaN    0 -Inf  Inf    0    0     3
 | - zw :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  1.5   NA  NaN -Inf  Inf -Inf  Inf  NaN   NA  -1.5
-| im -4.0   NA    1  NaN  Inf -Inf  NaN   -1   NA   4.0
+| im -4.0    0    1  NaN  Inf -Inf  NaN   -1    0   4.0
 | - zd :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re   NA   NA  NaN    2  NaN    0  Inf  Inf   -6    -1
-| im   -2   NA    1  NaN    0 -Inf  Inf    0    0     2
+| im   -2    0    1  NaN    0 -Inf  Inf    0    0     2
 | - dz :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re   NA  NaN  NaN   -2  NaN    0 -Inf -Inf    6     1
-| im    2   NA   -1  NaN    0  Inf -Inf    0    0    -2
+| im    2    0   -1  NaN    0  Inf -Inf    0    0    -2
 | - zn :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re   NA   NA  NaN    4  Inf   -7   NA   -1   -2    -2
-| im   NA   NA    1  NaN    0 -Inf   NA    0    0     2
+| im   -2    0    1  NaN    0 -Inf  Inf    0    0     2
 | - nz :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re   NA   NA  NaN   -4 -Inf    7   NA    1    2     2
-| im   NA   NA   -1  NaN    0  Inf   NA    0    0    -2
+| im    2    0   -1  NaN    0  Inf -Inf    0    0    -2
 | - zb :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  0.5   NA  NaN    0   NA    0  Inf   -1   -3    NA
-| im -2.0   NA    1  NaN   NA -Inf  Inf    0    0    NA
+| im -2.0    0    1  NaN    0 -Inf  Inf    0    0     2
 | - zs :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re -0.5   NA  NaN   -1  Inf   -2  Inf   -2   -5    -2
-| im -2.0   NA    1  NaN    0 -Inf  Inf    0    0     2
+| im -2.0    0    1  NaN    0 -Inf  Inf    0    0     2
 | - sz :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  0.5   NA  NaN    1 -Inf    2 -Inf    2    5     2
-| im  3.0   NA    0  NaN    1  Inf -Inf    1    1    -1
+| im  3.0    1    0  NaN    1  Inf -Inf    1    1    -1
 | - zna :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re   NA   NA  NaN   NA   NA   NA   NA   NA   NA    NA
-| im   NA   NA   NA  NaN   NA   NA   NA   NA   NA    NA
+| im   -2    0    1  NaN    0 -Inf  Inf    0    0     2
 | - nas :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re   NA   NA   NA   NA   NA   NA   NA   NA   NA    NA
@@ -111,32 +111,32 @@
 | - z2 :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re -0.5   NA  NaN   -1  Inf   -2  Inf   -2   -5    -2
-| im -2.0   NA    1  NaN    0 -Inf  Inf    0    0     2
+| im -2.0    0    1  NaN    0 -Inf  Inf    0    0     2
 | - z2i :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re -0.5   NA  NaN   -1  Inf   -2  Inf   -2   -5    -2
-| im -2.0   NA    1  NaN    0 -Inf  Inf    0    0     2
+| im -2.0    0    1  NaN    0 -Inf  Inf    0    0     2
 | - z2c :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re -0.5   NA  NaN   -1  Inf   -2  Inf   -2   -5    -2
-| im -2.0   NA    1  NaN    0 -Inf  Inf    0    0     2
+| im -2.0    0    1  NaN    0 -Inf  Inf    0    0     2
 | - zneg :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  3.5   NA  NaN    3  Inf    2  Inf    2   -1     2
-| im -2.0   NA    1  NaN    0 -Inf  Inf    0    0     2
+| im -2.0    0    1  NaN    0 -Inf  Inf    0    0     2
 | - zhalf :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re    1   NA  NaN  0.5  Inf -0.5  Inf -0.5 -3.5  -0.5
-| im   -2   NA    1  NaN    0 -Inf  Inf  0.0  0.0   2.0
+| im   -2    0    1  NaN    0 -Inf  Inf  0.0  0.0   2.0
 | - short :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  1.5   NA  NaN   NA  Inf   NA  Inf   NA   -3    NA
-| im -3.0   NA    0  NaN   -1   NA  Inf   NA   -1    NA
+| im -3.0    0    0  NaN   -1 -Inf  Inf    0   -1     2
 | - uneven :
 | warning: longer object length is not a multiple of shorter object length 
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  0.5   NA  NaN    0  Inf   -3  Inf   -2   -6    -1
-| im -3.0   NA    1  NaN    0 -Inf  Inf    0    0     1
+| im -3.0    0    1  NaN    0 -Inf  Inf    0    0     1
 | * zw :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re    4   NA  NaN  Inf  NaN  NaN  Inf  NaN   NA     4
@@ -212,7 +212,7 @@
 | im -0.75   NA  Inf  NaN  NaN  NaN  NaN  NaN   NA  0.48
 | / zd :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
-| re   NA   NA  NaN  NaN  NaN  NaN  Inf    0   -1     0
+| re   NA  NaN  NaN  NaN  NaN  NaN  Inf    0   -1     0
 | im   NA   NA  NaN  NaN  NaN -Inf  Inf    0    0     2
 | / dz :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
@@ -224,7 +224,7 @@
 | im   NA   NA  NaN  NaN  NaN -Inf   NA    0    0     1
 | / nz :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8]      [,9] [,10]
-| re   NA   NA  NaN  NaN    0    0   NA  Inf 0.3333333     0
+| re   NA   NA  NaN  NaN    0    0  NaN  Inf 0.3333333     0
 | im   NA   NA  NaN  NaN    0    0   NA  NaN 0.0000000    -1
 | / zb :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
@@ -290,7 +290,7 @@
 | ^ zn :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8]       [,9] [,10]
 | re  NaN   NA  NaN  NaN    1  NaN  NaN    0 -0.3333333    -4
-| im  NaN   NA  NaN  NaN    0  Inf  NaN    0  0.0000000     0
+| im  NaN    0  NaN  NaN    0  Inf  NaN    0  0.0000000     0
 | ^ nz :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9]     [,10]
 | re  NaN  NaN  NaN  NaN    0  NaN  NaN    1   -1 0.1834570
@@ -309,8 +309,8 @@
 | im -6.693212  NaN  NaN  NaN  NaN  NaN  NaN    0 -0.088  0.39532701
 | ^ zna :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
-| re  NaN  NaN  NaN  NaN  NaN  NaN  NaN  NaN  NaN   NaN
-| im  NaN  NaN  NaN  NaN  NaN  NaN  NaN  NaN  NaN   NaN
+| re  NaN  NaN  NaN  NaN  NaN  NaN  NaN   NA  NaN   NaN
+| im  NaN  NaN  NaN  NaN  NaN  NaN  NaN    0  NaN   NaN
 | ^ nas :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  NaN  NaN  NaN  NaN  NaN  NaN  NaN    1   NA   NaN
@@ -337,8 +337,8 @@
 | im -0.7071068  NaN  NaN  NaN  NaN  NaN  NaN    0 1.732051e+00     1
 | ^ short :
 |        [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8]       [,9] [,10]
-| re 1.538758  NaN  NaN  NaN  NaN  NaN  NaN  NaN 0.01965509   NaN
-| im 2.005319  NaN  NaN  NaN  NaN  NaN  NaN  NaN 0.03848532   NaN
+| re 1.538758  NaN  NaN  NaN  NaN  NaN  NaN   NA 0.01965509   NaN
+| im 2.005319  NaN  NaN  NaN  NaN  NaN  NaN    0 0.03848532   NaN
 | ^ uneven :
 | warning: longer object length is not a multiple of shorter object length 
 |           [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9]      [,10]
@@ -358,7 +358,7 @@
 | a  1.5  NaN  Inf
 | b   NA    1    0
 | a  0.0    3    2
-| b   NA  NaN -Inf
+| b  2.0  NaN -Inf
 | List of 2
 |  $ dim     : int [1:2] 2 3
 |  $ dimnames:List of 2
@@ -388,7 +388,7 @@
 | a    0  NaN  NaN
 | b   NA    0    0
 | a    0    0    0
-| b   NA  NaN  NaN
+| b    0  NaN  NaN
 | List of 2
 |  $ dim     : int [1:2] 2 3
 |  $ dimnames:List of 2
@@ -401,7 +401,7 @@
 |  $ names: chr [1:3] "x" "y" "w"
 |       x  y   w
 | re -1.5 NA NaN
-| im  3.0 NA  -1
+| im  3.0  0  -1
 | List of 1
 |  $ names: chr [1:3] "x" "y" "w"
 |        x  y   w
@@ -559,12 +559,12 @@
 | Conj :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
 | re  1.5   NA  NaN    1  Inf    0  Inf    0   -3     0
-| im  2.0   NA   -1  NaN    0  Inf -Inf    0    0    -2
+| im  2.0    0   -1  NaN    0  Inf -Inf    0    0    -2
 |   [,1] [,2] [,3]
 | a  1.5  NaN  Inf
 | b   NA    1    0
 | a  2.0   -1    0
-| b   NA  NaN  Inf
+| b  0.0  NaN  Inf
 | List of 2
 |  $ dim     : int [1:2] 2 3
 |  $ dimnames:List of 2
@@ -586,11 +586,11 @@
 |   ..$ : NULL
 | Im :
 |    [,1] [,2] [,3] [,4] [,5] [,6] [,7] [,8] [,9] [,10]
-| re   -2   NA    1  NaN    0 -Inf  Inf    0    0     2
+| re   -2    0    1  NaN    0 -Inf  Inf    0    0     2
 | im    0    0    0    0    0    0    0    0    0     0
 |   [,1] [,2] [,3]
 | a   -2    1    0
-| b   NA  NaN -Inf
+| b    0  NaN -Inf
 | a    0    0    0
 | b    0    0    0
 | List of 2
@@ -659,7 +659,7 @@
 | a -1.5  NaN -Inf
 | b   NA   -1    0
 | a  2.0   -1    0
-| b   NA  NaN  Inf
+| b  0.0  NaN  Inf
 | List of 2
 |  $ dim     : int [1:2] 2 3
 |  $ dimnames:List of 2
