@@ -875,7 +875,11 @@ impl Heap {
     pub unsafe fn alloc_scalar(&mut self, kind: SexpType, payload: [u64; 2]) -> HeapResult<Sexp> {
         debug_assert!(matches!(
             kind,
-            SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex | SexpType::Raw
+            SexpType::Logical
+                | SexpType::Integer
+                | SexpType::Real
+                | SexpType::Complex
+                | SexpType::Raw
         ));
         const SIZE: usize = VECTOR_DATA_OFFSET + 16;
         const CLASS: u8 = SIZE_CLASS_BY_WORDS[SIZE / 8];

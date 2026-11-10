@@ -1244,7 +1244,9 @@ unsafe fn slab(
 /// Writes the slab [`slab`] found.
 unsafe fn write_slab(result: Sexp, value: Sexp, dims: &[usize], fixed: &[Option<usize>]) {
     match result.kind() {
-        SexpType::Real => scatter_slab(values::reals_mut(result), values::reals(value), dims, fixed),
+        SexpType::Real => {
+            scatter_slab(values::reals_mut(result), values::reals(value), dims, fixed)
+        }
         _ => scatter_slab(values::ints_mut(result), values::ints(value), dims, fixed),
     }
 }
@@ -1637,11 +1639,13 @@ unsafe fn single_position(
                     index,
                 ));
             }
-            if value < 0 && extent == 2 && value >= -2 {
+            // A matrix subscript never counts from the end, so a negative one selects nothing.
+            let matrix = bounds.dimension.is_some();
+            if value < 0 && extent == 2 && value >= -2 && !matrix {
                 return Ok(if value == -1 { 1 } else { 0 });
             }
             if value <= 0 {
-                let amount = if value < 0 && extent > 1 {
+                let amount = if value < 0 && extent > 1 && !matrix {
                     "more"
                 } else {
                     "less"
@@ -1673,7 +1677,7 @@ unsafe fn single_position(
             }
             let value = value.trunc();
             if value < 0.0 {
-                if extent == 2 && value >= -2.0 {
+                if extent == 2 && value >= -2.0 && bounds.dimension.is_none() {
                     return Ok(if value == -1.0 { 1 } else { 0 });
                 }
                 return Err(error_in(
@@ -1796,7 +1800,8 @@ pub unsafe fn dollar_value(object: Sexp, name: Sexp, call: Sexp, env: Sexp) -> R
                 value: name_string,
             },
         ];
-        if let Some(value) = crate::dispatch::dispatch_builtin(symbols().dollar, call, &args, env)? {
+        if let Some(value) = crate::dispatch::dispatch_builtin(symbols().dollar, call, &args, env)?
+        {
             return Ok(value);
         }
     }
@@ -1895,7 +1900,9 @@ unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
                 value: values::scalar_string_charsxp(symbol.car())?,
             },
         ];
-        if let Some(value) = crate::dispatch::dispatch_builtin(symbols().at, call.call, &args, call.env)? {
+        if let Some(value) =
+            crate::dispatch::dispatch_builtin(symbols().at, call.call, &args, call.env)?
+        {
             return Ok(value);
         }
     }
@@ -2104,7 +2111,8 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
                 value,
             },
         ];
-        if let Some(result) = crate::dispatch::dispatch_builtin(symbols().at_assign, call.call, &args, call.env)?
+        if let Some(result) =
+            crate::dispatch::dispatch_builtin(symbols().at_assign, call.call, &args, call.env)?
         {
             return Ok(result);
         }
@@ -3120,7 +3128,8 @@ unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
                 value,
             },
         ];
-        if let Some(result) = crate::dispatch::dispatch_builtin(symbols().dollar_assign, call.call, &args, call.env)?
+        if let Some(result) =
+            crate::dispatch::dispatch_builtin(symbols().dollar_assign, call.call, &args, call.env)?
         {
             return Ok(result);
         }
@@ -3252,7 +3261,11 @@ unsafe fn do_set_length(call: &Call<'_>) -> R<Sexp> {
     let names = values::names(object);
     if names != nil() {
         let new_names = alloc(SexpType::String, new_length)?;
-        copy_prefix(values::materialize(names)?, new_names, new_length.min(count))?;
+        copy_prefix(
+            values::materialize(names)?,
+            new_names,
+            new_length.min(count),
+        )?;
         values::set_attr(result, symbols().names, new_names)?;
     }
     Ok(result)
@@ -4273,7 +4286,9 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
         }
         let source = values::materialize(value)?;
         let source_rows = if is_matrix {
-            values::dims(value).and_then(|dims| dims.first().copied()).unwrap_or(0)
+            values::dims(value)
+                .and_then(|dims| dims.first().copied())
+                .unwrap_or(0)
         } else {
             0
         };
@@ -4291,11 +4306,29 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                     set_na(result, target(along));
                 }
             } else if is_matrix && by_row {
-                copy_mapped(source, result, extent, |along| line + along * source_rows, target)?;
+                copy_mapped(
+                    source,
+                    result,
+                    extent,
+                    |along| line + along * source_rows,
+                    target,
+                )?;
             } else if is_matrix {
-                copy_mapped(source, result, extent, |along| along + line * source_rows, target)?;
+                copy_mapped(
+                    source,
+                    result,
+                    extent,
+                    |along| along + line * source_rows,
+                    target,
+                )?;
             } else {
-                copy_mapped(source, result, extent, |along| along % source_length, target)?;
+                copy_mapped(
+                    source,
+                    result,
+                    extent,
+                    |along| along % source_length,
+                    target,
+                )?;
             }
             let arg = &items[position];
             if is_matrix {

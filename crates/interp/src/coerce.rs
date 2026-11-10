@@ -815,9 +815,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("as.vector", 2, do_as_vector).generic(Generic::Internal),
     builtin("as.call", 1, do_as_call).generic(Generic::Internal),
     internal("as.function.default", 2, do_as_function),
-    internal("typeof", 1, |call| unsafe {
-        type_of(call.arg(0))
-    }),
+    internal("typeof", 1, |call| unsafe { type_of(call.arg(0)) }),
     internal("vector", 2, do_vector),
     builtin("storage.mode<-", 2, do_set_storage_mode),
     internal("is.vector", 2, do_is_vector),
