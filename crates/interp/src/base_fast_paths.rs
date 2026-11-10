@@ -38,6 +38,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rySysSetenv", 0, do_sys_setenv),
     internal("ryFormatDefault", 0, do_format_default),
     internal("ryReduce", 0, do_reduce),
+    internal("ryMessage", 0, do_message),
+    internal("rySignalCondition", 0, do_signal_condition),
 ];
 
 /// The base functions that get a fast path, with the internal their prologue calls and the
@@ -53,6 +55,8 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("Sys.setenv", "rySysSetenv", 0xb3ad8ec3b2915ce0),
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
     ("Reduce", "ryReduce", 0xd929e4c219983788),
+    ("message", "ryMessage", 0x0),
+    ("signalCondition", "rySignalCondition", 0x0),
 ];
 
 /// Puts the fast paths in front of the base namespace's functions, changing each closure in
@@ -95,7 +99,7 @@ pub unsafe fn prologue_needs_environment(body: Sexp) -> bool {
     let inner = first.cdr().car();
     inner.kind() == SexpType::Language
         && inner.car().kind() == SexpType::Symbol
-        && ["ryMatchArg", "ryReduce", "ryTraceBack"].contains(&&*values::symbol_name(inner.car()))
+        && ["ryMatchArg", "ryReduce", "ryTraceBack", "rySignalCondition"].contains(&&*values::symbol_name(inner.car()))
 }
 
 /// Puts `.Internal(<internal_name>())` in front of the body of `function` when its formals and
@@ -170,6 +174,7 @@ const NATIVE_ENTRIES: &[(&str, u64, NativeEntry)] = &[
     ("is.vector", 0xf347f791e9374052, native_is_vector),
     ("isNamespace", 0x9dbd26992b319771, native_is_namespace),
     ("Sys.unsetenv", 0x3bf70db0fa5a60ee, native_sys_unsetenv),
+    ("getOption", 0x0, native_get_option),
 ];
 
 /// Marks the closures of [`NATIVE_ENTRIES`] whose code matches and records them in
@@ -617,6 +622,30 @@ unsafe fn native_or_else(args: &[Arg]) -> R<Option<Sexp>> {
     resolved(y.value)
 }
 
+/// `getOption(x, default)` of one option name. The R body reads `default` only when the option
+/// is unset.
+unsafe fn native_get_option(args: &[Arg]) -> R<Option<Sexp>> {
+    let (x, default) = match args {
+        [x] => (x, None),
+        [x, default] => (x, Some(default)),
+        _ => return Ok(None),
+    };
+    let Some(name) = resolved(x.value)? else {
+        return Ok(None);
+    };
+    if name.kind() != SexpType::String
+        || length(name) != 1
+        || name.element(0) == values::na_string()
+    {
+        return Ok(None);
+    }
+    let value = crate::envir::option_value(name.element(0));
+    match default {
+        Some(default) if value == nil() => resolved(default.value),
+        _ => Ok(Some(value)),
+    }
+}
+
 /// `Sys.unsetenv(x)` of a character vector, which `as.character()` would leave as it is.
 unsafe fn native_sys_unsetenv(args: &[Arg]) -> R<Option<Sexp>> {
     let Some([x]) = resolved_all::<1>(args)? else {
@@ -632,6 +661,13 @@ unsafe fn native_sys_unsetenv(args: &[Arg]) -> R<Option<Sexp>> {
     )?;
     interp().visible = false;
     Ok(Some(value))
+}
+
+/// Whether the fast paths that skip R frames may run. Setting `RY_FAST_PATHS=0` turns them off,
+/// so a test can compare their output with the R bodies they stand for on the same base R.
+pub(crate) fn fast_paths_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RY_FAST_PATHS").is_none_or(|value| value != "0"))
 }
 
 /// The prologue's result when the R body is to run.
@@ -1446,4 +1482,136 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
         Err(other) => return Err(other),
     };
     finish(frame, result, true)
+}
+
+/// `message(...)` that no handler takes, with arguments that are plain vectors: the text goes
+/// straight to `stderr()`. The R body builds the condition, establishes the `muffleMessage`
+/// restart through `withRestarts` and signals the condition, but without a handler for it no R
+/// code runs while it is signalled, so none of those frames can be observed. A handler, an
+/// argument that needs evaluating, or a `conditionMessage` method of the user's own sends the
+/// call to the R body.
+unsafe fn do_message(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    if !fast_paths_enabled()
+        || crate::conditions::handled(&[b"simpleMessage", b"message", b"condition"])
+        || !is_default(frame, symbols().domain)?
+    {
+        return decline();
+    }
+    let Some(items) = dots(frame)? else {
+        return decline();
+    };
+    let mut parts: SmallVec<[Sexp; 8]> = SmallVec::new();
+    for &(_, item) in &items {
+        let Some(value) = resolved(item)? else {
+            return decline();
+        };
+        let plain = matches!(
+            value.kind(),
+            SexpType::Nil
+                | SexpType::Logical
+                | SexpType::Integer
+                | SexpType::Real
+                | SexpType::String
+        ) && !value.is_object()
+            && !values::has_attributes(value);
+        if !plain {
+            return decline();
+        }
+        parts.push(value);
+    }
+    let Some(append_lf) = flag(frame, symbols().append_lf)? else {
+        return decline();
+    };
+    for name in [
+        symbols().condition_message_simple_message,
+        symbols().condition_message_message,
+    ] {
+        let base = values::base_namespace();
+        if crate::dispatch::lookup_method(name, base, base)?.is_some() {
+            return decline();
+        }
+    }
+    let mut text = Vec::new();
+    for value in parts {
+        let strings = crate::coerce::coerce_vector(value, SexpType::String)?;
+        crate::heap().root(strings);
+        for index in 0..length(strings) {
+            let string = values::string_elt(strings, index);
+            if string == values::na_string() {
+                text.extend_from_slice(b"NA");
+            } else if string.has_gp(gp::LATIN1 | gp::BYTES) {
+                return decline();
+            } else {
+                text.extend_from_slice(string.bytes());
+            }
+        }
+    }
+    if append_lf {
+        text.push(b'\n');
+    }
+    crate::connections::cat_text(crate::connections::stderr_connection()?, &text)?;
+    finish(frame, nil(), false)
+}
+
+/// `signalCondition(cond)` for a condition list whose message and call come from base's
+/// `conditionMessage.condition` and `conditionCall.condition`. The R body reaches them through
+/// `inherits()`, two generics and their methods, which all return before any handler runs, so
+/// only the variables they leave in the frame, `msg` and `call`, can be observed.
+unsafe fn do_signal_condition(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let frame = call.env()?;
+    let Some(condition) = argument(ClosureFrame::Env(frame), symbols().cond)? else {
+        return decline();
+    };
+    let class = values::get_attr(condition, symbols().class);
+    if condition.kind() != SexpType::List
+        || class.kind() != SexpType::String
+        || !(0..length(class)).any(|index| class.element(index).bytes() == b"condition")
+    {
+        return decline();
+    }
+    // `conditionMessage(cond)` and `conditionCall(cond)` dispatch on the class, and the base
+    // methods read the fields with `$`, which dispatches too: only base's `condition` methods
+    // may apply.
+    let base = values::base_namespace();
+    for index in 0..length(class) {
+        let name = class.element(index).bytes();
+        if name == b"condition" {
+            break;
+        }
+        let Ok(name) = std::str::from_utf8(name) else {
+            return decline();
+        };
+        for generic in ["conditionMessage", "conditionCall", "$"] {
+            let method = install(&format!("{generic}.{name}"))?;
+            if crate::dispatch::lookup_method(method, frame, base)?.is_some() {
+                return decline();
+            }
+        }
+    }
+    let Some(message) = list_field(condition, b"message") else {
+        return decline();
+    };
+    let Some(condition_call) = list_field(condition, b"call") else {
+        return decline();
+    };
+    eval::define(symbols().msg, message, frame)?;
+    eval::define(symbols().call, condition_call, frame)?;
+    let value = crate::conditions::signal_condition(condition, condition_call)?;
+    finish(ClosureFrame::Env(frame), value, true)
+}
+
+/// The element of the list `list` named exactly `name`, as `list$name` finds it; `None` when no
+/// name matches exactly, where `$` would try partial matching.
+unsafe fn list_field(list: Sexp, name: &[u8]) -> Option<Sexp> {
+    let names = values::get_attr(list, symbols().names);
+    if names.kind() != SexpType::String {
+        return None;
+    }
+    (0..length(names).min(length(list)))
+        .find(|&index| names.element(index).bytes() == name)
+        .map(|index| list.element(index))
 }
