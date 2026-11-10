@@ -239,7 +239,11 @@ impl Generator {
         let mut text = format!(
             "g{k} <- function(n) {{\n  v <- {allocate}\n  for (i in seq_len(n)) {write}\n  {read}\n}}\nw{k} <- NA\n{run}\n"
         );
-        let shown = self.show(&format!("w{k}"));
+        // `cat` rejects a list, so a list result is always printed.
+        let shown = match allocate.starts_with("vector") {
+            true => format!("print(w{k})"),
+            false => self.show(&format!("w{k}")),
+        };
         text.push_str(&shown);
         text.push('\n');
         if self.rng.chance(1, 2) {
