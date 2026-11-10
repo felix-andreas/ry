@@ -926,11 +926,11 @@ impl Heap {
     /// Changes the collection policy. The allocation fast path reads a budget derived from it,
     /// which this recomputes, so the policy has no other mutable access.
     pub fn update_policy(&mut self, change: impl FnOnce(&mut GcPolicy)) {
-        change(&mut self.policy);
         let young_limit = self.policy.young_limit;
-        self.nursery = self
-            .nursery
-            .clamp(young_limit, young_limit.saturating_mul(NURSERY_GROWTH));
+        change(&mut self.policy);
+        if self.policy.young_limit != young_limit {
+            self.nursery = self.policy.young_limit;
+        }
         self.refresh_small_trigger();
     }
 
@@ -3540,11 +3540,15 @@ impl Heap {
     /// traces one, so its loops carry no test for it.
     #[inline(always)]
     unsafe fn mark_child<const TENURED: bool>(&mut self, object: Sexp) {
-        if self.space.mark(object) && !is_leaf(object, self.known.nil) {
+        let newly = if TENURED {
+            let (newly, tenured) = self.space.mark_beside_tenured(object);
+            self.younger_child |= !tenured;
+            newly
+        } else {
+            self.space.mark(object)
+        };
+        if newly && !is_leaf(object, self.known.nil) {
             self.mark_stack.push(object);
-        }
-        if TENURED && !self.younger_child && !self.space.is_tenured(object) {
-            self.younger_child = true;
         }
     }
 

@@ -1942,3 +1942,89 @@ fn fuzz_interning_agrees_with_a_reference_map_under_stress() {
         run_interning(500 + seed, 300, true)
     });
 }
+
+#[test]
+fn a_preserved_object_needs_as_many_releases_as_preserves() {
+    let mut heap = Heap::new();
+    unsafe {
+        let twice = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        *twice.slice_mut::<i32>().first_mut().expect("one element") = 2;
+        let once = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        *once.slice_mut::<i32>().first_mut().expect("one element") = 1;
+        heap.preserve(twice);
+        heap.preserve(once);
+        heap.preserve(twice);
+        heap.release(twice);
+        heap.collect(Collection::Major);
+        assert!(heap.is_preserved(twice));
+        assert_eq!(twice.slice::<i32>(), &[2]);
+        heap.release(once);
+        assert!(!heap.is_preserved(once));
+        heap.collect(Collection::Major);
+        assert_eq!(twice.slice::<i32>(), &[2]);
+        heap.release(twice);
+        assert!(!heap.is_preserved(twice));
+        // Releasing what is not preserved does nothing, as in GNU R.
+        heap.release(twice);
+        assert!(!heap.is_preserved(twice));
+    }
+}
+
+/// Allocates `count` integer scalars and keeps them in a rooted list, as a program building a
+/// structure does, then returns the list.
+unsafe fn build_kept(heap: &mut Heap, count: isize) -> Sexp {
+    unsafe {
+        let list = heap.alloc_vector(SexpType::List, count).expect("alloc");
+        heap.add_global_root(list);
+        for index in 0..count {
+            let element = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            *element.slice_mut::<i32>().first_mut().expect("one element") = index as i32;
+            heap.set_element(list, index as usize, element);
+        }
+        list
+    }
+}
+
+#[test]
+fn a_nursery_whose_objects_survive_grows_until_they_die_young() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.young_limit = 1024 * 1024);
+    unsafe {
+        // A third of what this allocates stays, so each minor collection doubles the nursery.
+        let list = heap.alloc_vector(SexpType::List, 40_000).expect("alloc");
+        heap.add_global_root(list);
+        for index in 0..40_000 {
+            heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            let element = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            *element.slice_mut::<i32>().first_mut().expect("one element") = index;
+            heap.set_element(list, index as usize, element);
+        }
+        // Garbage only: the policy's nursery would collect eight times in these 8 MB, and the
+        // grown one collects fewer times while it halves back.
+        let before = heap.stats().minor_collections;
+        for _ in 0..256 * 1024 {
+            heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        }
+        let minors = heap.stats().minor_collections - before;
+        assert!(minors <= 5, "{minors} minor collections");
+        assert_eq!(list.element(39_999).slice::<i32>(), &[39_999]);
+    }
+}
+
+#[test]
+fn an_escalation_skips_an_intermediate_collection_that_freed_nothing_before() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| {
+        policy.young_limit = 64 * 1024;
+        policy.node_limit = 1024 * 1024;
+        policy.min_node_limit = 1024 * 1024;
+    });
+    unsafe {
+        let list = build_kept(&mut heap, 200_000);
+        let stats = heap.stats();
+        assert!(stats.major_collections >= 2, "{stats:?}");
+        assert_eq!(stats.intermediate_collections, 1, "{stats:?}");
+        assert_eq!(list.element(199_999).slice::<i32>(), &[199_999]);
+    }
+}

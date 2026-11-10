@@ -393,13 +393,24 @@ impl Space {
         }
     }
 
-    /// Whether `object`, which this collection has marked, is tenured.
-    #[inline]
-    pub unsafe fn is_tenured(&self, object: Sexp) -> bool {
-        match self.locate(object) {
-            Some((page, word, bit)) => self.tenured[page][word] & bit != 0,
-            None => unsafe { object.gc_bits() & gc_bits::TENURED != 0 },
+    /// [`Space::mark`] for a child of a tenured object in a deeper collection, which must also
+    /// learn whether the child is tenured once marked. Reading that bit beside the mark saves
+    /// locating the slot a second time.
+    #[inline(always)]
+    pub unsafe fn mark_beside_tenured(&mut self, object: Sexp) -> (bool, bool) {
+        let Some((page, word, bit)) = self.locate(object) else {
+            let newly = unsafe { self.mark_large(object) };
+            return (newly, unsafe { object.gc_bits() } & gc_bits::TENURED != 0);
+        };
+        // The bounds hold for the reason `Space::mark` gives.
+        let marks = unsafe { self.marks.get_unchecked_mut(page).get_unchecked_mut(word) };
+        let newly = *marks & bit == 0;
+        if newly {
+            *marks |= bit;
+            unsafe { self.age(object, Some((page, word, bit))) };
         }
+        let tenured = unsafe { *self.tenured.get_unchecked(page).get_unchecked(word) } & bit != 0;
+        (newly, tenured)
     }
 
     /// Records that `object`, an environment in this space, has a frame that owns memory, which
