@@ -1,0 +1,122 @@
+id = "kernels"
+name = "Numeric kernels (ours)"
+harness = "tools/bench/harness.R"
+summary = "Our programs whose time goes into loops, recursion and arithmetic on numbers"
+description = """
+Programs written for ry's benchmarks, each the hot path of numeric code: scalar loops, recursion,
+element loops over vectors, whole-vector arithmetic and small simulations, several taken from the
+finance and biostatistics benchmark code bases. A program belongs here when its time goes into
+arithmetic on numbers and numeric vectors; one whose time goes into lists, attributes, dispatch,
+strings or tables is an application workload. Each is sized so GNU R takes 0.1 to 2 seconds per
+run. A process runs the program once cold, then five times warm, and reports the median warm time,
+so the time leaves out start-up, GNU R's byte compilation and ry's first tier-up. The result is
+checked against GNU R's on every engine. Where a `<name>.typed.R` sits beside the program, the same
+computation written in typed ry runs in strict mode as the ry typed column.
+"""
+
+[[programs]]
+id = "array_dot"
+display = "Dot product"
+summary = "An element loop over a million doubles summing `x[[i]] * y[[i]]`, five times: scalar indexing and arithmetic."
+source = "tools/bench/kernels/array_dot.R"
+typed_source = "tools/bench/kernels/array_dot.typed.R"
+
+[[programs]]
+id = "array_filter"
+display = "Counting filter"
+summary = "An element loop over a million doubles counting those above one half: indexing and comparison in a loop."
+source = "tools/bench/kernels/array_filter.R"
+typed_source = "tools/bench/kernels/array_filter.typed.R"
+
+[[programs]]
+id = "array_map"
+display = "Element map"
+summary = "An element loop writing `x[[i]] * 2 + 1` into a preallocated vector of a million doubles: subassignment in a loop."
+source = "tools/bench/kernels/array_map.R"
+typed_source = "tools/bench/kernels/array_map.typed.R"
+
+[[programs]]
+id = "array_sum"
+display = "Element sum"
+summary = "An element loop summing a million doubles, twenty times: the cheapest indexed loop."
+source = "tools/bench/kernels/array_sum.R"
+typed_source = "tools/bench/kernels/array_sum.typed.R"
+
+[[programs]]
+id = "closures"
+display = "Closures and lapply"
+summary = "Small closures called in a loop, then lapply and vapply over a sequence: closure calls and argument matching."
+source = "tools/bench/kernels/closures.R"
+typed_source = "tools/bench/kernels/closures.typed.R"
+
+[[programs]]
+id = "drawdown"
+display = "Drawdown and volatility"
+summary = "Maximum drawdown and EWMA volatility in one pass over a return series: scalar state carried through a loop."
+source = "tools/bench/kernels/drawdown.R"
+typed_source = "tools/bench/kernels/drawdown.typed.R"
+
+[[programs]]
+id = "fib"
+display = "Recursive Fibonacci"
+summary = "fib(30), about 2.7 million calls of a small recursive function: call overhead."
+source = "tools/bench/kernels/fib.R"
+typed_source = "tools/bench/kernels/fib.typed.R"
+
+[[programs]]
+id = "integer_loop"
+display = "Collatz chains"
+summary = "Collatz chain lengths up to 30,000 in nested while loops: integer arithmetic and branches."
+source = "tools/bench/kernels/integer_loop.R"
+
+[[programs]]
+id = "jackknife"
+display = "Jackknife estimate"
+summary = "A jackknife standard error through vapply and a closure that drops one element: vector copies per call."
+source = "tools/bench/kernels/jackknife.R"
+
+[[programs]]
+id = "log_rank"
+display = "Log-rank statistic"
+summary = "The log-rank test statistic, a loop over event times with whole-vector comparisons in its body."
+source = "tools/bench/kernels/log_rank.R"
+typed_source = "tools/bench/kernels/log_rank.typed.R"
+
+[[programs]]
+id = "loop_sum"
+display = "Counted loop sum"
+summary = "A scalar double accumulator in a counted loop of ten million steps: the bare loop."
+source = "tools/bench/kernels/loop_sum.R"
+typed_source = "tools/bench/kernels/loop_sum.typed.R"
+
+[[programs]]
+id = "nested_loops"
+display = "Pairwise distances"
+summary = "An O(n^2) pairwise distance sum in two nested loops: scalar indexing in an inner loop."
+source = "tools/bench/kernels/nested_loops.R"
+
+[[programs]]
+id = "simulation"
+display = "Path simulation"
+summary = "Simulated price paths with matrix products, apply over rows, quantiles and sorting: vectorized model code."
+source = "tools/bench/kernels/simulation.R"
+
+[[programs]]
+id = "vasicek"
+display = "Vasicek rate paths"
+summary = "Vasicek interest-rate paths, one matrix row per step: vector arithmetic and matrix subassignment."
+source = "tools/bench/kernels/vasicek.R"
+typed_source = "tools/bench/kernels/vasicek.typed.R"
+
+[[programs]]
+id = "vector_arith"
+display = "Vector arithmetic"
+summary = "Whole-vector arithmetic on a million doubles, repeated in a loop: allocation of large temporaries."
+source = "tools/bench/kernels/vector_arith.R"
+typed_source = "tools/bench/kernels/vector_arith.typed.R"
+
+[[programs]]
+id = "vector_loop"
+display = "Scale and shift"
+summary = "Element-wise reads and writes of a double vector in a loop: `y[i] <- x[i] * 2 + 1`."
+source = "tools/bench/kernels/vector_loop.R"

@@ -239,7 +239,7 @@ tools/bench/progress.py check    --release X.Y.Z-beta=$ry --project benches/finb
 tools/bench/progress.py code     --rev X.Y.Z-beta > code.json
 ```
 
-`check` needs the finance code base, from `tools/bench/generate.py --out benches --domain finance
+`check` needs the finance code base, from `tools/bench/tooling/generate.py --out benches --domain finance
 --lines 300000 --files 500 --ry $ry`. Pass several `--release` flags to measure more than one build
 in the sitting; a build of the checked-out commit is `--release main=target/release/ry`, which is
 recorded as `main@<commit>`. Run on an otherwise idle machine, because the timings are wall times.

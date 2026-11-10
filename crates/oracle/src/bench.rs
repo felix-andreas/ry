@@ -497,7 +497,7 @@ fn package_name(package_dir: &Path) -> Result<String, BenchError> {
 /// A few benchmark dependencies cannot be installed everywhere (`polars` needs a newer R than
 /// some hosts have, `Rblpapi` needs the proprietary Bloomberg SDK). The code reaches them only
 /// through `::` inside guarded or injectable branches, so the copy under test moves the missing
-/// ones from `Imports` to `Suggests`, as `tools/bench/run-tests.R` does. Deleting them instead
+/// ones from `Imports` to `Suggests`, as `tools/bench/tooling/run-tests.R` does. Deleting them instead
 /// would switch their stubs off, and strict mode would then refuse to load typed code that calls
 /// them.
 fn suggest_missing_imports(package: &Path) -> Result<(), BenchError> {
