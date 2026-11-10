@@ -865,23 +865,9 @@ pub(crate) unsafe fn direct_subset(call: Sexp, args: &[Sexp]) -> R<Option<Sexp>>
         return Ok(None);
     }
     if let [index] = indices
-        && matches!(index.kind(), SexpType::Integer | SexpType::Real)
-        && object.kind().is_atomic()
-        && !object.is_altrep()
-        && !index.is_altrep()
-        && !values::has_attributes(object)
-        && !values::has_attributes(*index)
-        && length(*index) == 1
+        && let Some(element) = crate::element_access::scalar_subset(object, *index)?
     {
-        let position = match index.kind() {
-            SexpType::Integer => f64::from(index.slice::<i32>()[0]),
-            _ => index.slice::<f64>()[0],
-        };
-        // NA_integer_ and NaN fail the lower bound, and `x[2.7]` truncates to the second
-        // element.
-        if position >= 1.0 && position < length(object) as f64 + 1.0 {
-            return vector_element(object, position as usize - 1).map(Some);
-        }
+        return Ok(Some(element));
     }
     subset(object, indices, true, call).map(Some)
 }

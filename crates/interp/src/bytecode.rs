@@ -2014,6 +2014,7 @@ impl Compiler {
         for (index, constant) in compiler.constants.iter().enumerate() {
             heap.set_element(constants, FIRST_CONSTANT + index, *constant);
         }
+        index_slots(constants)?;
         let caches = values::alloc(SexpType::List, compiler.caches as usize * 2)?;
         heap.mark_weak_pairs(caches);
         let code = values::triple(SexpType::Bytecode, words, constants, caches)?;
@@ -2070,22 +2071,11 @@ impl Compiler {
         for (index, name) in names.iter().enumerate() {
             heap.set_element(symbols, index, *name);
         }
-        // Handlers that name their variable by a constant operand find its slot here, without
-        // comparing it against every name.
-        let by_constant = values::alloc(SexpType::Integer, FIRST_CONSTANT + self.constants.len())?;
-        heap.root(by_constant);
-        let by_constant_slots = values::ints_mut(by_constant);
-        by_constant_slots.fill(-1);
-        for (index, constant) in self.constants.iter().enumerate() {
-            if let Some(slot) = names.iter().position(|name| name == constant) {
-                by_constant_slots[FIRST_CONSTANT + index] = slot as i32;
-            }
-        }
-        // The third element is filled by `slot_defaults` on the first call that needs it.
+        // The third element is filled by `slot_defaults` on the first call that needs it, and
+        // the fourth by `index_slots` once the constants are in place.
         let slots = values::alloc(SexpType::List, 4)?;
         heap.set_element(slots, 0, map);
         heap.set_element(slots, 1, symbols);
-        heap.set_element(slots, 3, by_constant);
         Ok(slots)
     }
 
@@ -6333,14 +6323,36 @@ unsafe fn wrapper_argument(state: &Activation<'_, '_>, expression: Sexp) -> R<Op
 
 /// The slot of `symbol` in a slot frame, found by name for instructions that carry no lookup
 /// cache. Slot tables are short, so the scan costs less than a hash lookup.
+/// Fills the fourth element of a code object's [`SLOTS`] table: each constant's slot, or -1
+/// for a constant the frame keeps in no slot, so that handlers naming their variable by a
+/// constant operand find its slot with one load ([`slot_at`]). It is derived from the names
+/// and the constants, so the code image stores neither it nor anything it could disagree with.
+pub(crate) unsafe fn index_slots(constants: Sexp) -> R<()> {
+    let table = constants.element(SLOTS);
+    if table == nil() {
+        return Ok(());
+    }
+    let heap = crate::heap();
+    let names = table.element(1);
+    let count = length(constants);
+    let by_constant = values::alloc(SexpType::Integer, count)?;
+    values::ints_mut(by_constant).fill(-1);
+    for index in FIRST_CONSTANT..count {
+        let constant = constants.element(index);
+        if constant.kind() == SexpType::Symbol
+            && let Some(slot) = (0..length(names)).find(|&slot| names.element(slot) == constant)
+        {
+            values::ints_mut(by_constant)[index] = slot as i32;
+        }
+    }
+    heap.set_element(table, 3, by_constant);
+    Ok(())
+}
+
 /// The frame slot of the symbol at constant `constant`, as [`slot_named`] finds it.
 #[inline(always)]
 unsafe fn slot_at(state: &Activation<'_, '_>, constant: usize) -> Option<*mut Sexp> {
-    let table = state.constants.element(SLOTS);
-    if length(table) < 4 {
-        return slot_named(state, state.constants.element(constant));
-    }
-    let slot = *values::ints(table.element(3)).get(constant)?;
+    let slot = *values::ints(state.constants.element(SLOTS).element(3)).get(constant)?;
     (slot >= 0).then(|| state.header.add(1 + slot as usize))
 }
 
