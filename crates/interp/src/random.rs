@@ -202,6 +202,43 @@ pub unsafe fn get_rng_state() -> R<()> {
     }
 }
 
+/// What a batch of draws changes outside `.Random.seed`, saved so that the batch can be
+/// discarded with [`rollback`].
+pub struct Checkpoint {
+    box_muller_saved: f64,
+}
+
+/// A checkpoint before a batch of draws, or `None` when discarding the batch could be seen:
+/// `.Random.seed` must hold exactly the generator's state, so that the next
+/// [`get_rng_state`] rebuilds the state from it, and no user-supplied generator may run, since
+/// its code would see the discarded draws.
+pub unsafe fn checkpoint() -> Option<Checkpoint> {
+    let rng = rng();
+    if rng.state.kind() == Kind::UserSupplied || rng.normal_kind == NormalKind::UserSupplied {
+        return None;
+    }
+    let Some(cell) = crate::heap().frame_cell(global_env(), symbols().dot_random_seed) else {
+        return None;
+    };
+    let seeds = cell.cdr();
+    if cell.has_gp(gp::ACTIVE_BINDING)
+        || seeds.kind() != SexpType::Integer
+        || seeds.is_altrep()
+        || !stores_current_state(rng, ints(seeds))
+    {
+        return None;
+    }
+    Some(Checkpoint {
+        box_muller_saved: rng.box_muller_saved,
+    })
+}
+
+/// Discards the draws made since `checkpoint`. The generator's words differ from
+/// `.Random.seed` afterwards, so the next [`get_rng_state`] reads them back from it.
+pub unsafe fn rollback(checkpoint: Checkpoint) {
+    rng().box_muller_saved = checkpoint.box_muller_saved;
+}
+
 /// `PutRNGstate`: writes the kinds and the generator state to `.Random.seed`.
 pub unsafe fn put_rng_state() -> R<()> {
     let rng = rng();

@@ -144,9 +144,19 @@ pub(crate) unsafe fn install_prologue(
     Ok(true)
 }
 
-/// The native code for a whole call of a base closure: the result, or `None` when the closure
-/// is to run as usual. It sees the call's arguments as the closure would receive them.
+/// The native code for a whole call of a closure: the result, or `None` when the closure is to
+/// run as usual.
 pub type NativeEntry = unsafe fn(&[Arg]) -> R<Option<Sexp>>;
+
+/// How a registered closure's native code reads the call's arguments.
+#[derive(Clone, Copy)]
+pub enum Entry {
+    /// As the closure would receive them, untagged.
+    Whole(NativeEntry),
+    /// Matched to the closure's formals, with the defaults filled in, and passed to the
+    /// routine as the closure's body passes them ([`recognize_routine_closure`]).
+    Routine(NativeEntry, RoutinePlan),
+}
 
 /// The base closures whose whole call runs natively when every argument it needs is already a
 /// value, with the [`stable_hash`] of their formals and body (GNU R 4.6.2). Each is a one-line
@@ -181,7 +191,7 @@ pub unsafe fn register_native_entries(namespace: Sexp) -> R<()> {
         crate::system::r_version().number() == crate::methods_core::BUNDLED_VERSION.trim();
     let mut missed = Vec::new();
     interp().native_entries.clear();
-    for &(name, expected, entry) in NATIVE_ENTRIES {
+    for &(name, expected, code) in NATIVE_ENTRIES {
         let function = eval::value_of(eval::find_var_in_frame(install(name)?, namespace)?)?;
         if function.kind() != SexpType::Closure {
             missed.push(name);
@@ -197,11 +207,7 @@ pub unsafe fn register_native_entries(namespace: Sexp) -> R<()> {
             missed.push(name);
             continue;
         }
-        function.set_gp_bits(gp::NATIVE_ENTRY, true);
-        // The registry matches by identity, so the closure must outlive any reassignment of its
-        // binding: a collected closure's address could be reused by a copy that carries the mark.
-        crate::heap().preserve(function);
-        interp().native_entries.push((function, entry));
+        register(function, Entry::Whole(code));
     }
     if bundled && !missed.is_empty() {
         return Err(crate::unwind::error(format!(
@@ -213,6 +219,206 @@ pub unsafe fn register_native_entries(namespace: Sexp) -> R<()> {
     Ok(())
 }
 
+/// Marks `function` and records its entry in the registry, which stays sorted by address so
+/// that a call finds its entry by binary search.
+unsafe fn register(function: Sexp, entry: Entry) {
+    function.set_gp_bits(gp::NATIVE_ENTRY, true);
+    // The registry matches by identity, so the closure must outlive any reassignment of its
+    // binding: a collected closure's address could be reused by a copy that carries the mark.
+    crate::heap().preserve(function);
+    let entries = &mut interp().native_entries;
+    let address = function.as_ptr() as usize;
+    if let Err(position) =
+        entries.binary_search_by_key(&address, |(candidate, _)| candidate.as_ptr() as usize)
+    {
+        entries.insert(position, (function, entry));
+    }
+}
+
+/// The registered entry of `function`.
+fn registered(function: Sexp) -> Option<Entry> {
+    let entries = &interp().native_entries;
+    let address = function.as_ptr() as usize;
+    let position = entries
+        .binary_search_by_key(&address, |(candidate, _)| candidate.as_ptr() as usize)
+        .ok()?;
+    entries.get(position).map(|&(_, entry)| entry)
+}
+
+/// Gives `function` a direct entry when it is one of stats' distribution closures that only
+/// pass their arguments to a routine of [`crate::distributions::DIRECT_ROUTINES`]: a body
+/// `.Call(C_<routine>, ...)` whose arguments are the formals in order, or `1/<formal>`, every
+/// default it uses a constant. A body `if (missing(<formal>)) <that call> else ...` qualifies
+/// for the calls that leave that formal out. Such a call is the routine applied to the matched
+/// arguments, so the entry calls the routine without building the frame, the promises or the
+/// `.Call`; the routine declines whenever it would signal a condition, so a warning or error
+/// still reports the closure's call. The shape is the whole contract, so no release hash is
+/// needed. The lazy-load fetch calls this for every closure it reads, and an image start for the
+/// closures the image holds already forced.
+pub unsafe fn recognize_routine_closure(function: Sexp) -> R<()> {
+    if function.kind() != SexpType::Closure || function.has_gp(gp::NATIVE_ENTRY) {
+        return Ok(());
+    }
+    let mut formals: SmallVec<[(Sexp, Sexp); 6]> = SmallVec::new();
+    let mut cell = function.car();
+    while cell.kind() == SexpType::Pairlist {
+        formals.push((cell.tag(), cell.car()));
+        cell = cell.cdr();
+    }
+    let position = |symbol: Sexp| formals.iter().position(|&(name, _)| name == symbol);
+    let mut body = crate::bytecode::closure_body(function);
+    if body.kind() == SexpType::Language
+        && body.car() == symbols().brace
+        && values::pairlist_length(body.cdr()) == 1
+    {
+        body = body.cdr().car();
+    }
+    let mut absent = None;
+    if body.kind() == SexpType::Language && body.car() == install("if")? {
+        let condition = body.cdr().car();
+        if condition.kind() != SexpType::Language
+            || condition.car() != install("missing")?
+            || values::pairlist_length(condition.cdr()) != 1
+        {
+            return Ok(());
+        }
+        let Some(index) = position(condition.cdr().car()) else {
+            return Ok(());
+        };
+        absent = Some(index);
+        body = body.cdr().cdr().car();
+    }
+    if body.kind() != SexpType::Language || body.car() != install(".Call")? {
+        return Ok(());
+    }
+    let routine_symbol = body.cdr().car();
+    if routine_symbol.kind() != SexpType::Symbol {
+        return Ok(());
+    }
+    let name = values::symbol_name(routine_symbol);
+    let Some(routine) = name.strip_prefix("C_") else {
+        return Ok(());
+    };
+    let Some(&(_, arity, code)) = crate::distributions::DIRECT_ROUTINES
+        .iter()
+        .find(|(candidate, _, _)| *candidate == routine)
+    else {
+        return Ok(());
+    };
+    let divide = install("/")?;
+    let mut plan = RoutinePlan {
+        sources: [Source::Formal(0); MAX_ROUTINE_ARGUMENTS],
+        count: 0,
+        absent: absent.map(|index| index as u8),
+    };
+    let mut used = 0u32;
+    let mut argument = body.cdr().cdr();
+    while argument.kind() == SexpType::Pairlist {
+        let expression = argument.car();
+        let source = if let Some(index) = position(expression) {
+            Source::Formal(index as u8)
+        } else if expression.kind() == SexpType::Language
+            && expression.car() == divide
+            && values::pairlist_length(expression.cdr()) == 2
+            && is_real_one(expression.cdr().car())
+            && let Some(index) = position(expression.cdr().cdr().car())
+        {
+            Source::Reciprocal(index as u8)
+        } else {
+            return Ok(());
+        };
+        let index = match source {
+            Source::Formal(index) | Source::Reciprocal(index) => usize::from(index),
+        };
+        let Some(slot) = plan.sources.get_mut(plan.count) else {
+            return Ok(());
+        };
+        if argument.tag() != nil() || Some(index) == absent || used & (1 << index) != 0 {
+            return Ok(());
+        }
+        *slot = source;
+        plan.count += 1;
+        used |= 1 << index;
+        argument = argument.cdr();
+    }
+    // Every formal but the absent one reaches the routine, with a default it can read as is.
+    let defaults_are_values = formals.iter().enumerate().all(|(index, &(_, default))| {
+        Some(index) == absent
+            || used & (1 << index) != 0
+                && (default == missing_arg()
+                    || !matches!(
+                        default.kind(),
+                        SexpType::Symbol
+                            | SexpType::Language
+                            | SexpType::Promise
+                            | SexpType::Bytecode
+                    ))
+    });
+    if argument != nil()
+        || plan.count != arity
+        || formals.len() > MAX_ROUTINE_ARGUMENTS
+        || !defaults_are_values
+        || crate::envir::namespace_name(function.tag()).as_deref() != Some("stats")
+    {
+        return Ok(());
+    }
+    register(function, Entry::Routine(code, plan));
+    Ok(())
+}
+
+/// The most arguments a direct routine takes, and the most formals its closure has.
+const MAX_ROUTINE_ARGUMENTS: usize = 6;
+
+/// How the arguments of a closure with an [`Entry::Routine`] become the routine's.
+#[derive(Clone, Copy)]
+pub struct RoutinePlan {
+    sources: [Source; MAX_ROUTINE_ARGUMENTS],
+    count: usize,
+    /// The formal the closure's body tests with `missing()`, which the call must leave out.
+    absent: Option<u8>,
+}
+
+/// Where one argument of the routine comes from.
+#[derive(Clone, Copy)]
+enum Source {
+    /// The value of the formal at this position.
+    Formal(u8),
+    /// `1/<formal>`, which the routine reads for a rate given as its scale.
+    Reciprocal(u8),
+}
+
+/// Whether `expression` is the constant `1`, as the parser reads it.
+unsafe fn is_real_one(expression: Sexp) -> bool {
+    expression.kind() == SexpType::Real
+        && !expression.is_altrep()
+        && expression.attrib() == nil()
+        && values::reals(expression) == [1.0]
+}
+
+/// Recognizes the closures of the stats namespace that an image start holds already forced,
+/// whose fetch ran when the image was written ([`recognize_routine_closure`]).
+pub unsafe fn register_routine_entries() -> R<()> {
+    let registry = crate::heap().known().namespace_registry;
+    let namespace = eval::find_var_in_frame(install("stats")?, registry)?;
+    if namespace.kind() != SexpType::Environment {
+        return Ok(());
+    }
+    for &(name, _, _) in crate::distributions::DIRECT_ROUTINES {
+        let Some(cell) = crate::heap().frame_cell(namespace, install(name)?) else {
+            continue;
+        };
+        let mut value = cell.cdr();
+        if value.kind() == SexpType::Promise {
+            value = value.car();
+        }
+        if value.kind() == SexpType::Closure {
+            value.set_gp_bits(gp::NATIVE_ENTRY, false);
+            recognize_routine_closure(value)?;
+        }
+    }
+    Ok(())
+}
+
 /// Runs the call of `function`, a closure marked [`gp::NATIVE_ENTRY`], natively when its
 /// native code accepts the arguments. The closure's frame is never built, which is
 /// unobservable because the native code only reads arguments that are already values: a
@@ -220,29 +426,37 @@ pub unsafe fn register_native_entries(namespace: Sexp) -> R<()> {
 /// to a value, so nothing runs that could see the missing frame (`sys.calls()`, a handler, a
 /// traceback). A closure being debugged or traced runs as usual.
 pub unsafe fn native_entry(function: Sexp, args: &[Arg]) -> R<Option<Sexp>> {
-    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
-        || args.iter().any(|arg| arg.tag != nil())
-    {
+    if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
         return Ok(None);
     }
-    let Some(&(_, entry)) = interp()
-        .native_entries
-        .iter()
-        .find(|(candidate, _)| *candidate == function)
-    else {
-        // A closure with install-time machine code carries the same mark.
-        let value = match crate::code_image::native_hooks() {
-            Some(hooks) => (hooks.call)(function, args).transpose()?,
-            None => None,
-        };
-        if value.is_some() && activity::enabled() {
-            crate::eval::count_package_call(function, None, args);
+    let tagged = args.iter().any(|arg| arg.tag != nil());
+    let value = match registered(function) {
+        Some(Entry::Whole(code)) if !tagged => {
+            // An entry whose closure returns invisibly clears the flag itself.
+            interp().visible = true;
+            code(args)?
         }
-        return Ok(value);
+        Some(Entry::Whole(_)) => return Ok(None),
+        Some(Entry::Routine(code, plan)) => {
+            let Some(matched) = routine_arguments(function, plan, args)? else {
+                return Ok(None);
+            };
+            interp().visible = true;
+            code(&matched)?
+        }
+        None if tagged => return Ok(None),
+        None => {
+            // A closure with install-time machine code carries the same mark.
+            let value = match crate::code_image::native_hooks() {
+                Some(hooks) => (hooks.call)(function, args).transpose()?,
+                None => None,
+            };
+            if value.is_some() && activity::enabled() {
+                crate::eval::count_package_call(function, None, args);
+            }
+            return Ok(value);
+        }
     };
-    // An entry whose closure returns invisibly clears the flag itself.
-    interp().visible = true;
-    let value = entry(args)?;
     if value.is_some() {
         activity::count(Counter::NativeEntries);
         if activity::enabled() {
@@ -267,9 +481,6 @@ pub unsafe fn native_entry_by_value(
     let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
-        if cell.tag() != nil() {
-            return Ok(None);
-        }
         let expression = cell.car();
         let value = match expression.kind() {
             SexpType::Symbol => {
@@ -284,10 +495,112 @@ pub unsafe fn native_entry_by_value(
             SexpType::Language | SexpType::Promise | SexpType::Bytecode => return Ok(None),
             _ => expression,
         };
-        args.push(Arg { tag: nil(), value });
+        args.push(Arg {
+            tag: cell.tag(),
+            value,
+        });
         cell = cell.cdr();
     }
     native_entry(function, &args)
+}
+
+/// The routine's arguments for a call of `function`, a closure with an [`Entry::Routine`]: the
+/// call's arguments matched to the formals by exact name and then by position, each
+/// [`resolved`] or its formal's constant default, and arranged by `plan`. `None` when matching
+/// needs more than that, an argument is not a value yet, or the call supplies the formal the
+/// body tests with `missing()`.
+unsafe fn routine_arguments(
+    function: Sexp,
+    plan: RoutinePlan,
+    args: &[Arg],
+) -> R<Option<SmallVec<[Arg; MAX_ROUTINE_ARGUMENTS]>>> {
+    let mut formals: SmallVec<[(Sexp, Sexp); MAX_ROUTINE_ARGUMENTS]> = SmallVec::new();
+    let mut cell = function.car();
+    while cell.kind() == SexpType::Pairlist {
+        formals.push((cell.tag(), cell.car()));
+        cell = cell.cdr();
+    }
+    let mut matched: SmallVec<[Option<Sexp>; MAX_ROUTINE_ARGUMENTS]> =
+        SmallVec::from_elem(None, formals.len());
+    for arg in args.iter().filter(|arg| arg.tag != nil()) {
+        let Some(position) = formals.iter().position(|&(name, _)| name == arg.tag) else {
+            return Ok(None);
+        };
+        if matched[position].is_some() {
+            return Ok(None);
+        }
+        matched[position] = Some(arg.value);
+    }
+    let mut free = 0;
+    for arg in args.iter().filter(|arg| arg.tag == nil()) {
+        while matched.get(free).is_some_and(Option::is_some) {
+            free += 1;
+        }
+        let Some(slot) = matched.get_mut(free) else {
+            return Ok(None);
+        };
+        *slot = Some(arg.value);
+    }
+    if let Some(absent) = plan.absent
+        && matched.get(usize::from(absent)).is_some_and(Option::is_some)
+    {
+        return Ok(None);
+    }
+    let mut routine_args = SmallVec::new();
+    for source in &plan.sources[..plan.count] {
+        let (Source::Formal(index) | Source::Reciprocal(index)) = *source;
+        let index = usize::from(index);
+        let (Some(slot), Some(&(_, default))) = (matched.get(index), formals.get(index)) else {
+            return Ok(None);
+        };
+        let value = match slot {
+            Some(argument) => match resolved(*argument)? {
+                Some(value) => value,
+                None => return Ok(None),
+            },
+            None if default == missing_arg() => return Ok(None),
+            None => default,
+        };
+        let value = match source {
+            Source::Formal(_) => value,
+            Source::Reciprocal(_) => match reciprocal(value)? {
+                Some(value) => value,
+                None => return Ok(None),
+            },
+        };
+        routine_args.push(Arg { tag: nil(), value });
+    }
+    Ok(Some(routine_args))
+}
+
+/// `1/x` for a logical, integer or double `x` without attributes, which is no object, so `/`
+/// does not dispatch and keeps no attributes; `None` for any other `x`.
+unsafe fn reciprocal(x: Sexp) -> R<Option<Sexp>> {
+    if x.is_altrep() || x.attrib() != nil() {
+        return Ok(None);
+    }
+    let result = match x.kind() {
+        SexpType::Real => {
+            let result = values::alloc_uninit(SexpType::Real, length(x))?;
+            for (slot, &value) in values::reals_mut(result).iter_mut().zip(values::reals(x)) {
+                *slot = 1.0 / value;
+            }
+            result
+        }
+        SexpType::Logical | SexpType::Integer => {
+            let result = values::alloc_uninit(SexpType::Real, length(x))?;
+            for (slot, &value) in values::reals_mut(result).iter_mut().zip(values::ints(x)) {
+                *slot = if value == NA_INTEGER {
+                    heap::object::NA_REAL
+                } else {
+                    1.0 / f64::from(value)
+                };
+            }
+            result
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(result))
 }
 
 /// The value an argument stands for when reading it runs no R code: a value, a forced promise's

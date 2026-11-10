@@ -119,7 +119,7 @@ pub mod viewer;
 pub use crate::unwind::{Jump, RError};
 use {
     crate::{
-        base_fast_paths::NativeEntry,
+        base_fast_paths::Entry,
         builtins::{Arg, BuiltinDef, Kind},
         conditions::{HandlerStack, RestartStack},
         unwind::{R, Unwind},
@@ -129,7 +129,6 @@ use {
         object::{Sexp, SexpType},
     },
     rustc_hash::FxHashMap,
-    smallvec::SmallVec,
     std::{cell::UnsafeCell, rc::Rc},
 };
 
@@ -386,9 +385,9 @@ pub struct Interp {
     /// assignment, so a builtin replacement function reports its errors and warnings against
     /// `x[i] <- v`, not `` `[<-`(*tmp*, i, v) `` or the enclosing function's call.
     pub assignment_call: Option<(Sexp, Sexp, usize)>,
-    /// The base closures whose calls run natively, each with its native code
+    /// The closures whose calls run natively, each with its native code, sorted by address
     /// (`base_fast_paths::native_entry`).
-    pub native_entries: SmallVec<[(Sexp, NativeEntry); 8]>,
+    pub native_entries: Vec<(Sexp, Entry)>,
     /// Base R's `loadNamespace`, whose calls the collector treats as a namespace load
     /// (`Heap::enter_namespace_load`), or nil before base is loaded. Matched by identity and
     /// preserved, so a collected closure's address cannot be reused by another function.
@@ -565,7 +564,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         visible: true,
         returned_values: Vec::new(),
         assignment_call: None,
-        native_entries: SmallVec::new(),
+        native_entries: Vec::new(),
         namespace_loader: heap.known().nil,
         tmp_values: Vec::new(),
         loops: Vec::new(),
