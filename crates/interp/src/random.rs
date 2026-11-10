@@ -725,24 +725,52 @@ unsafe fn do_sample2(call: &Call<'_>) -> R<Sexp> {
         return Err(error("This algorithm is for size <= n/2"));
     }
     let size = size as usize;
-    // The result is the working memory: a duplicate is detected by the set of drawn values,
-    // which is sized for the whole sample up front so that it never rehashes.
     let integer = population <= f64::from(i32::MAX);
     let result = if integer {
         alloc_uninit(SexpType::Integer, size)?
     } else {
         alloc_uninit(SexpType::Real, size)?
     };
-    let mut seen = FxHashSet::with_capacity_and_hasher(size, Default::default());
     get_rng_state()?;
+    // A duplicate is detected by the set of drawn values. A bitset over the population costs
+    // population / 8 bytes and one bit test per draw; a hash set costs about 16 bytes per drawn
+    // value, so the bitset wins while the population is at most 128 times the sample.
+    let population_index = population as u64;
+    if population_index / 128 <= size as u64 {
+        let mut words = vec![0u64; population_index.div_ceil(64) as usize];
+        draw_distinct(result, integer, size, population_index, |value| {
+            let bit = value - 1;
+            let word = &mut words[(bit / 64) as usize];
+            let mask = 1u64 << (bit % 64);
+            let fresh = *word & mask == 0;
+            *word |= mask;
+            fresh
+        });
+    } else {
+        let mut seen = FxHashSet::with_capacity_and_hasher(size, Default::default());
+        draw_distinct(result, integer, size, population_index, |value| seen.insert(value));
+    }
+    put_rng_state()?;
+    Ok(result)
+}
+
+/// Fills `result` with `size` draws from `1..=population`, redrawing a value `insert` reports as
+/// seen before.
+unsafe fn draw_distinct(
+    result: Sexp,
+    integer: bool,
+    size: usize,
+    population: u64,
+    mut insert: impl FnMut(u64) -> bool,
+) {
     with_deviates!(|draws| {
         for index in 0..size {
             // GNU R gives up after 100 redraws and keeps the duplicate; with size <= n/2 a
             // redraw is needed less than half the time, so the cap is never reached in practice.
             let mut value = 0;
             for _ in 0..100 {
-                value = draws.whole_index(population as u64) + 1;
-                if seen.insert(value) {
+                value = draws.whole_index(population) + 1;
+                if insert(value) {
                     break;
                 }
             }
@@ -753,8 +781,6 @@ unsafe fn do_sample2(call: &Call<'_>) -> R<Sexp> {
             }
         }
     });
-    put_rng_state()?;
-    Ok(result)
 }
 
 /// Sampling with equal probabilities. Populations beyond the integer range give doubles.
