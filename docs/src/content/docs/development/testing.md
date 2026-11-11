@@ -402,6 +402,36 @@ uncaught errors as transcripts, and a seeded simulator plays a client that sends
 invalid, requests at every stop. Every request must get exactly one response, the session must end,
 and the interpreter must be left clean. `FUZZ_SEED=<seed>` replays a failing session.
 
+#### Known oracle failures
+
+`crates/oracle/known_failures.toml` lists the oracle cases that fail on main under one engine, so a
+branch can tell its own regressions from failures it inherited. Each entry names the case (its file
+name in `cases/` without `.R`), the engine as `--engine` names it, the area of ry the bug lives in
+(such as `jit` or `gc`), and a one-line reason; `provisional = true` marks a failure seen on a branch whose runtime matches main
+but not yet confirmed on main itself.
+
+```toml
+[[failure]]
+case = "base__match_arg_native"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+```
+
+`oracle compare` and `ORACLE_ENGINE=<engine> cargo test -p oracle` sort every failure against the
+file and fail the run on two things: a failure the file does not list, and a listed case that
+passes. The second rule means the change that fixes a case also deletes its entry. Add an entry
+only for a failure main already has, never for one your own change introduces. A run prints each
+listed failure as `known` without its diff and ends with one line per engine:
+
+```
+ry-jit-gctorture: 3 of 7 passed, 4 known (same as main), 0 new, 0 listed but passing
+ry-gctorture-young: 4 of 7 passed, 3 known (same as main), 0 new, 0 listed but passing
+```
+
+The oracle refuses a file whose entry names an unknown engine, a missing case, or the same case and
+engine twice, and `known_failures_are_valid` in `test_cases.rs` checks the file without running R.
+
 ### The table engine
 
 `crates/table/tests/test_table.rs` drives the engine from Rust. Every expected value that encodes

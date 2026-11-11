@@ -9,9 +9,10 @@
 
 use {
     oracle::{
-        BUILD_FILE, BuildCheck, Engine, EngineError, ProcessEngine, check_build, diff,
-        engine_from_environment, expected_path, find_cases, gnu_r_available, gnu_r_build,
-        installed_packages, parse, render, runnable_cases, ry_runtime_available, write_build,
+        BUILD_FILE, BuildCheck, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine,
+        check_build, diff, engine_from_environment, expected_path, find_cases, gnu_r_available,
+        gnu_r_build, installed_packages, known_failure, known_failures, parse, render,
+        runnable_cases, ry_runtime_available, write_build,
     },
     std::{
         path::PathBuf,
@@ -107,11 +108,13 @@ fn second_engine_matches_gnu_r() {
         Ok(build) => eprintln!("GNU R {build}"),
         Err(error) => panic!("{error}"),
     }
+    let known = known_failures().unwrap_or_else(|error| panic!("{error}"));
+    let name = second.name();
     let mut failures = Vec::new();
     for case in cases() {
-        match second.run(&case) {
+        let failure = match second.run(&case) {
             Err(EngineError::Unavailable(_)) => return,
-            Err(error) => failures.push(format!("{}: {error}", case.display())),
+            Err(error) => Some(format!("{}: {error}", case.display())),
             Ok(actual) => {
                 let expected = match gnu_r.run(&case) {
                     Ok(expected) => expected,
@@ -121,13 +124,29 @@ fn second_engine_matches_gnu_r() {
                     }
                     Err(error) => panic!("{}: {error}", case.display()),
                 };
-                if let Some(difference) = diff("GNU R", &expected, &second.name(), &actual) {
-                    failures.push(format!("{}\n{difference}", case.display()));
-                }
+                diff("GNU R", &expected, &name, &actual)
+                    .map(|difference| format!("{}\n{difference}", case.display()))
             }
+        };
+        match (failure, known_failure(&known, &case, &name)) {
+            (Some(_), Some(entry)) => eprintln!("known {}: {}", case.display(), entry.reason),
+            (Some(failure), None) => failures.push(failure),
+            (None, Some(_)) => failures.push(format!(
+                "{} passes under {name}, so delete its entry from {KNOWN_FAILURES_FILE}",
+                case.display()
+            )),
+            (None, None) => {}
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Every entry in `known_failures.toml` names an existing case and engine, once.
+#[test]
+fn known_failures_are_valid() {
+    if let Err(error) = known_failures() {
+        panic!("{error}");
+    }
 }
 
 #[test]
