@@ -1,0 +1,411 @@
+id = "public"
+name = "Public R JIT benchmarks"
+summary = "standard programs from R compiler research (Ř, rcp)"
+description = """
+The programs are the benchmark suite that the Ř (rir) and rcp R compilers measure, the 57 programs of Kocourek, Křikava and Vitek's "Copy-and-Patch Just-in-Time Compiler for R" (VMIL 2025) minus three that cannot be sized to a few seconds. They are vendored unchanged from PRL-PRG/r-compile-server at commit b2b13a3150bddcc2d6dae8c37ecbbf1007170940 under its MIT licence, with the Benchmarks Game ports contributed by Leo Osvald and the Are We Fast Yet translations credited to Kalibera et al. Each file ends with a driver that runs the program once at a fixed size, chosen so that GNU R takes about 0.5 to 2.5 s, and prints its name, a checksum of its output and result, and its time. Each program runs once per fresh process from its own directory, so the time includes GNU R's byte compilation and ry's JIT tier-up, and its checksum must match GNU R's.
+"""
+
+[[groups]]
+id = "awfy"
+name = "Are We Fast Yet"
+description = "R translations of programs from the Are We Fast Yet suite, which compares language implementations on the same small object and loop workloads. Bounce comes in three variants that differ in how a ball's fields are indexed."
+url = "https://github.com/PRL-PRG/r-compile-server/tree/b2b13a3150bddcc2d6dae8c37ecbbf1007170940/client/rsh/inst/benchmarks/areWeFast"
+license = "MIT"
+
+[[groups]]
+id = "shootout"
+name = "Benchmarks Game"
+description = "R ports of the Computer Language Benchmarks Game programs, each in several variants that range from idiomatic vectorized R to naive scalar loops. The input-reading programs read a FASTA file that the driver generates with fasta.R before timing starts."
+url = "https://github.com/PRL-PRG/r-compile-server/tree/b2b13a3150bddcc2d6dae8c37ecbbf1007170940/client/rsh/inst/benchmarks/shootout"
+license = "MIT"
+
+[[groups]]
+id = "rcp"
+name = "rcp micro-benchmarks and convolutions"
+description = "The 13 micro-benchmarks of the simple/ directory, each one tight loop that isolates an interpreter cost such as variable assignment, vector subassignment or closure calls, and the 3 convolution programs of RealThing/, which compute the same convolution with scalar loops or vector operations."
+url = "https://github.com/PRL-PRG/r-compile-server/tree/b2b13a3150bddcc2d6dae8c37ecbbf1007170940/client/rsh/inst/benchmarks"
+license = "MIT"
+
+# Are We Fast Yet
+
+[[programs]]
+id = "bounce"
+group = "awfy"
+display = "Bouncing balls, named fields"
+summary = "Moves 3,000 balls for 50 steps with lapply, reading and writing each ball's fields by name (ball['xVel'])"
+source = "tools/bench/public/awfy/bounce.R"
+
+[[programs]]
+id = "bounce_nonames"
+group = "awfy"
+display = "Bouncing balls, positional fields"
+summary = "Moves 10,000 balls for 50 steps with lapply, indexing each ball's fields by position and counting bounces through <<-"
+source = "tools/bench/public/awfy/bounce_nonames.R"
+
+[[programs]]
+id = "bounce_nonames_simple"
+group = "awfy"
+display = "Bouncing balls, positional fields, simple setup"
+summary = "Same as the positional variant, but each ball's four random numbers are drawn into locals before c() builds it"
+source = "tools/bench/public/awfy/bounce_nonames_simple.R"
+
+[[programs]]
+id = "mandelbrot"
+group = "awfy"
+display = "Mandelbrot set, scalar loops"
+summary = "Computes a 450 x 450 Mandelbrot bitmap checksum with nested scalar while loops, double arithmetic and bitwShiftL/bitwXor"
+source = "tools/bench/public/awfy/mandelbrot.R"
+
+[[programs]]
+id = "storage"
+group = "awfy"
+display = "Tree allocation"
+summary = "Recursively builds a depth-10 tree of 4-element lists with random leaves, stressing allocation, recursion and <<-"
+source = "tools/bench/public/awfy/storage.R"
+
+# Benchmarks Game
+
+[[programs]]
+id = "binarytrees"
+group = "shootout"
+display = "Binary trees"
+summary = "Allocates and walks recursive list trees up to depth 12, with integer arithmetic and sapply over the iterations"
+source = "tools/bench/public/shootout/binarytrees.R"
+
+[[programs]]
+id = "binarytrees_2"
+group = "shootout"
+display = "Binary trees, inline arithmetic"
+summary = "Binary trees with the child items computed inline in the recursive call and double rather than integer depths"
+source = "tools/bench/public/shootout/binarytrees_2.R"
+
+[[programs]]
+id = "binarytrees_naive"
+group = "shootout"
+display = "Binary trees, explicit loop"
+summary = "Binary trees that sums each depth's checks in a for loop instead of sapply"
+source = "tools/bench/public/shootout/binarytrees_naive.R"
+
+[[programs]]
+id = "fannkuchredux"
+group = "shootout"
+display = "Fannkuch-redux"
+summary = "Counts pancake flips over all permutations of 9 elements, reversing prefixes with vectorized rev and slice assignment"
+source = "tools/bench/public/shootout/fannkuchredux.R"
+
+[[programs]]
+id = "fannkuchredux_naive"
+group = "shootout"
+display = "Fannkuch-redux, scalar swaps"
+summary = "Fannkuch-redux that reverses prefixes and rotates the permutation one element at a time with [[ swaps"
+source = "tools/bench/public/shootout/fannkuchredux_naive.R"
+
+[[programs]]
+id = "fasta"
+group = "shootout"
+display = "Fasta"
+summary = "Generates DNA sequences with an integer LCG, picking each line's codes at once with outer() and colSums"
+source = "tools/bench/public/shootout/fasta.R"
+
+[[programs]]
+id = "fasta_2"
+group = "shootout"
+display = "Fasta, vectorized linear search"
+summary = "Fasta that picks each line's codes by a vectorized linear search, advancing indices with which() until all match"
+source = "tools/bench/public/shootout/fasta_2.R"
+
+[[programs]]
+id = "fasta_3"
+group = "shootout"
+display = "Fasta, vectorized binary search"
+summary = "Fasta that picks each line's codes by a vectorized binary search over the cumulative probabilities"
+source = "tools/bench/public/shootout/fasta_3.R"
+
+[[programs]]
+id = "fasta_naive"
+group = "shootout"
+display = "Fasta, scalar linear search"
+summary = "Fasta that picks each character with a scalar linear search loop and joins every line with paste"
+source = "tools/bench/public/shootout/fasta_naive.R"
+
+[[programs]]
+id = "fasta_naive_2"
+group = "shootout"
+display = "Fasta, scalar binary search"
+summary = "Fasta that picks each character with a scalar binary search loop and joins every line with paste"
+source = "tools/bench/public/shootout/fasta_naive_2.R"
+
+[[programs]]
+id = "fastaredux"
+group = "shootout"
+display = "Fasta-redux"
+summary = "Fasta with a 4,096-entry lookup table that maps a random number to a code, corrected for a whole line at a time"
+source = "tools/bench/public/shootout/fastaredux.R"
+
+[[programs]]
+id = "fastaredux_naive"
+group = "shootout"
+display = "Fasta-redux, scalar lookup"
+summary = "Fasta-redux that does the table lookup and its correction one character at a time in a scalar loop"
+source = "tools/bench/public/shootout/fastaredux_naive.R"
+
+[[programs]]
+id = "knucleotide"
+group = "shootout"
+display = "K-nucleotide, hashed environment"
+summary = "Reads a FASTA file and counts k-mer frequencies in a hashed environment with exists, get and assign"
+source = "tools/bench/public/shootout/knucleotide.R"
+
+[[programs]]
+id = "knucleotide_brute"
+group = "shootout"
+display = "K-nucleotide, attribute counts"
+summary = "K-nucleotide that keeps each k-mer's count as an attribute of an integer vector, read with attr and set with attr<-"
+source = "tools/bench/public/shootout/knucleotide_brute.R"
+
+[[programs]]
+id = "knucleotide_brute_2"
+group = "shootout"
+display = "K-nucleotide, attribute counts, growing vector"
+summary = "Attribute-count k-nucleotide that also grows the underlying vector by doubling each time a new k-mer appears"
+source = "tools/bench/public/shootout/knucleotide_brute_2.R"
+
+[[programs]]
+id = "knucleotide_brute_3"
+group = "shootout"
+display = "K-nucleotide, named vector counts"
+summary = "K-nucleotide that keeps the counts in a named integer vector, indexed and assigned by k-mer name"
+source = "tools/bench/public/shootout/knucleotide_brute_3.R"
+
+[[programs]]
+id = "mandelbrot_ascii"
+group = "shootout"
+display = "Mandelbrot, vectorized rows"
+summary = "Iterates complex vectors one 1,300-point row at a time, packs the bits into raw bytes and prints them"
+source = "tools/bench/public/shootout/mandelbrot_ascii.R"
+
+[[programs]]
+id = "mandelbrot_naive_ascii"
+group = "shootout"
+display = "Mandelbrot, scalar points"
+summary = "Iterates each point as a complex scalar with an escape test, packing bits into bytes one point at a time"
+source = "tools/bench/public/shootout/mandelbrot_naive_ascii.R"
+
+[[programs]]
+id = "mandelbrot_noout"
+group = "shootout"
+display = "Mandelbrot, vectorized rows, no output"
+summary = "The vectorized-row Mandelbrot without printing the bitmap, so the time is complex vector arithmetic"
+source = "tools/bench/public/shootout/mandelbrot_noout.R"
+
+[[programs]]
+id = "mandelbrot_noout_naive"
+group = "shootout"
+display = "Mandelbrot, whole-plane matrix"
+summary = "Iterates a 1,000 x 1,000 complex matrix 20 times, storing exp(-abs(Z)) into slices of a 3-D array"
+source = "tools/bench/public/shootout/mandelbrot_noout_naive.R"
+
+[[programs]]
+id = "nbody"
+group = "shootout"
+display = "N-body"
+summary = "Simulates five planets with one coordinate vector per axis, using outer() and %*% at each of 40,000 steps"
+source = "tools/bench/public/shootout/nbody.R"
+
+[[programs]]
+id = "nbody_2"
+group = "shootout"
+display = "N-body, matrix state"
+summary = "N-body with positions in 3 x 5 matrices and pairwise distances filled into a 3-D array by nested loops, then aperm"
+source = "tools/bench/public/shootout/nbody_2.R"
+
+[[programs]]
+id = "pidigits"
+group = "shootout"
+display = "Pi digits"
+summary = "Prints 55 digits of pi with a spigot over a hand-written bignum on base-10,000 integer vectors"
+source = "tools/bench/public/shootout/pidigits.R"
+
+[[programs]]
+id = "regexdna"
+group = "shootout"
+display = "Regex DNA"
+summary = "Counts nine DNA patterns with gregexpr and expands IUB codes with gsub over one large string"
+source = "tools/bench/public/shootout/regexdna.R"
+
+[[programs]]
+id = "reversecomplement"
+group = "shootout"
+display = "Reverse complement"
+summary = "Reads a FASTA file line by line and maps each line's characters through a named vector in one vectorized lookup"
+source = "tools/bench/public/shootout/reversecomplement.R"
+
+[[programs]]
+id = "reversecomplement_2"
+group = "shootout"
+display = "Reverse complement, whole file"
+summary = "Reverse complement that reads the whole file with one readLines call before mapping each line"
+source = "tools/bench/public/shootout/reversecomplement_2.R"
+
+[[programs]]
+id = "reversecomplement_naive"
+group = "shootout"
+display = "Reverse complement, scalar lookup"
+summary = "Reverse complement that maps one character at a time with [[ on the named vector in a for loop"
+source = "tools/bench/public/shootout/reversecomplement_naive.R"
+
+[[programs]]
+id = "spectralnorm"
+group = "shootout"
+display = "Spectral norm"
+summary = "Multiplies by an 800 x 800 matrix once, filling each row with scalar closure calls and taking a %*% dot product"
+source = "tools/bench/public/shootout/spectralnorm.R"
+
+[[programs]]
+id = "spectralnorm_alt"
+group = "shootout"
+display = "Spectral norm, precomputed matrix"
+summary = "Builds the 3,000 x 3,000 matrix once with outer() and runs 10 power iterations as matrix products"
+source = "tools/bench/public/shootout/spectralnorm_alt.R"
+
+[[programs]]
+id = "spectralnorm_alt_2"
+group = "shootout"
+display = "Spectral norm, matrix rebuilt per product"
+summary = "Spectral norm that rebuilds the 1,200 x 1,200 matrix with outer() for every matrix product"
+source = "tools/bench/public/shootout/spectralnorm_alt_2.R"
+
+[[programs]]
+id = "spectralnorm_alt_3"
+group = "shootout"
+display = "Spectral norm, element-wise matrix fill"
+summary = "Spectral norm that copies a precomputed table into a fresh matrix with [[i, j]]<- in nested loops for every product"
+source = "tools/bench/public/shootout/spectralnorm_alt_3.R"
+
+[[programs]]
+id = "spectralnorm_math"
+group = "shootout"
+display = "Spectral norm, eigenvalues"
+summary = "Computes the spectral norm directly as the largest eigenvalue of t(A) %*% A with eigen(), so LAPACK dominates"
+source = "tools/bench/public/shootout/spectralnorm_math.R"
+
+[[programs]]
+id = "spectralnorm_naive"
+group = "shootout"
+display = "Spectral norm, scalar loops"
+summary = "Spectral norm with every matrix-vector product as nested scalar loops that call a closure per element"
+source = "tools/bench/public/shootout/spectralnorm_naive.R"
+
+# rcp
+
+[[programs]]
+id = "bytecodes"
+group = "rcp"
+display = "Many local assignments"
+summary = "A while loop that assigns the counter to 24 local variables per iteration, 500,000 times"
+source = "tools/bench/public/rcp/bytecodes.R"
+
+[[programs]]
+id = "convolution"
+group = "rcp"
+display = "Convolution, scalar loops"
+summary = "Convolves two 1,000-element vectors 10 times with nested for loops and [ indexing, as in Writing R Extensions"
+source = "tools/bench/public/rcp/convolution.R"
+
+[[programs]]
+id = "convolution_slow"
+group = "rcp"
+display = "Convolution, [[ indexing"
+summary = "Convolution with nested loops over seq(length =), [[ indexing and the outer element hoisted into a local"
+source = "tools/bench/public/rcp/convolution_slow.R"
+
+[[programs]]
+id = "convolution_v"
+group = "rcp"
+display = "Convolution, vectorized"
+summary = "Convolves 1,500-element vectors with outer(), rbind, reshaping through length<- and dim<-, and rowSums"
+source = "tools/bench/public/rcp/convolution_v.R"
+
+[[programs]]
+id = "empty-for"
+group = "rcp"
+display = "Empty for loop"
+summary = "Runs a for loop with an empty body over 1:1e8, measuring pure loop overhead"
+source = "tools/bench/public/rcp/empty-for.R"
+
+[[programs]]
+id = "empty-while"
+group = "rcp"
+display = "Counting while loop"
+summary = "Increments a double scalar in a while loop up to 2e7"
+source = "tools/bench/public/rcp/empty-while.R"
+
+[[programs]]
+id = "lapply"
+group = "rcp"
+display = "lapply with a closure"
+summary = "Calls a one-argument closure through lapply over 1e6 integers"
+source = "tools/bench/public/rcp/lapply.R"
+
+[[programs]]
+id = "lapply-dots"
+group = "rcp"
+display = "lapply with an extra argument"
+summary = "Calls a two-argument closure through lapply over 1e6 integers, passing the second argument through ..."
+source = "tools/bench/public/rcp/lapply-dots.R"
+
+[[programs]]
+id = "list-for"
+group = "rcp"
+display = "Growing a list, for loop"
+summary = "Grows an empty list to 1.5e6 elements by [[<- in a for loop"
+source = "tools/bench/public/rcp/list-for.R"
+
+[[programs]]
+id = "list-while"
+group = "rcp"
+display = "Growing a list, while loop"
+summary = "Grows an empty list to 1.5e6 elements by [[<- in a while loop with a double index"
+source = "tools/bench/public/rcp/list-while.R"
+
+[[programs]]
+id = "matrix-for"
+group = "rcp"
+display = "Matrix element assignment"
+summary = "Assigns every element of a 3,000 x 3,000 matrix with [[i, j]]<- in nested for loops"
+source = "tools/bench/public/rcp/matrix-for.R"
+
+[[programs]]
+id = "scalar-for"
+group = "rcp"
+display = "Scalar assignment, for loop"
+summary = "Assigns the loop variable to a local in a for loop over 1:5e7"
+source = "tools/bench/public/rcp/scalar-for.R"
+
+[[programs]]
+id = "scalar-while"
+group = "rcp"
+display = "Scalar assignment, while loop"
+summary = "Assigns and increments two double scalars in a while loop, 2.5e7 times"
+source = "tools/bench/public/rcp/scalar-while.R"
+
+[[programs]]
+id = "super-while"
+group = "rcp"
+display = "Superassignment loop"
+summary = "A closure increments a variable of its enclosing function with <<- in a while loop, 6e6 times"
+source = "tools/bench/public/rcp/super-while.R"
+
+[[programs]]
+id = "vector-for"
+group = "rcp"
+display = "Vector element assignment, for loop"
+summary = "Fills a 3e7-element vector by [[<- in a for loop, the first write coercing it from logical to integer"
+source = "tools/bench/public/rcp/vector-for.R"
+
+[[programs]]
+id = "vector-while"
+group = "rcp"
+display = "Vector element assignment, while loop"
+summary = "Fills a 2e7-element integer vector by [[<- in a while loop with an integer counter, then sums it"
+source = "tools/bench/public/rcp/vector-while.R"

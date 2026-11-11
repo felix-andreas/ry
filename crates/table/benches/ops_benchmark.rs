@@ -1,10 +1,10 @@
 //! File reading and writing and the data.table functions beyond `[`, run on the ry engine. It
-//! prints the same tab-separated lines as `tools/bench/table/ops.R` (`question  run  seconds
+//! prints the same tab-separated lines as `tools/bench/internal/table/ops.R` (`question  run  seconds
 //! rows  cols  checksum`), so the two outputs line up row by row. Every question runs twice, and
 //! an input a question modifies in place is forked outside the clock.
 //!
 //! Usage: `cargo bench -p table --bench ops_benchmark -- <data-dir>`, where the directory holds
-//! `groupby.csv` from `tools/bench/table/datagen.R`.
+//! `groupby.csv` from `tools/bench/internal/table/datagen.R`.
 
 mod allocator;
 

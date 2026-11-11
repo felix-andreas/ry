@@ -1,0 +1,111 @@
+id = "applications"
+name = "Application workloads (ours)"
+harness = "tools/bench/harness.R"
+summary = "programs we wrote in the shape of package and business code: calls, dispatch, conditions, records, tables"
+description = """
+Programs written for ry's benchmarks in the shape of the code real R packages and analyses run:
+validation at API boundaries, condition handling, S3, S4 and R6 objects, records as named lists,
+string building, data frames and data.table, time series, and a testthat suite. Their time goes
+into R's object and data machinery rather than into arithmetic, which is what separates them from
+the numeric kernels. Each is sized so GNU R takes 0.1 to 2 seconds per run. A process runs the
+program once cold, then five times warm, and reports the median warm time, so the time leaves out
+start-up and loading packages. The result is checked against GNU R's on every engine. Where a
+`<name>.typed.R` sits beside the program, the same computation written in typed ry runs in strict
+mode as the ry typed column.
+"""
+
+[[programs]]
+id = "bond_book"
+display = "Bond book pricing"
+summary = "Prices 200,000 bonds, each a short vector computation through seq_len, rep, exp and sum: many small base calls."
+source = "tools/bench/applications/bond_book.R"
+typed_source = "tools/bench/applications/bond_book.typed.R"
+
+[[programs]]
+id = "conditions"
+display = "Condition handling"
+summary = "tryCatch, withCallingHandlers, custom condition classes, retries and on.exit around fallible steps."
+source = "tools/bench/applications/conditions.R"
+
+[[programs]]
+id = "expr_tree"
+display = "Expression tree"
+summary = "Builds and evaluates a tree of sums, maxima and negations: recursion over nested lists."
+source = "tools/bench/applications/expr_tree.R"
+typed_source = "tools/bench/applications/expr_tree.typed.R"
+
+[[programs]]
+id = "functional"
+display = "Functional style"
+summary = "lapply, Map, Filter, Reduce, do.call and purrr over lists, function factories and memoization in an environment."
+source = "tools/bench/applications/functional.R"
+
+[[programs]]
+id = "objects"
+display = "Object systems"
+summary = "S3 methods with UseMethod and NextMethod, S4 classes with validity, R6 classes with active bindings."
+source = "tools/bench/applications/objects.R"
+
+[[programs]]
+id = "orders"
+display = "Order invoicing"
+summary = "Prices order lines with a loyalty discount and regional tax, then totals invoices: records and branches."
+source = "tools/bench/applications/orders.R"
+typed_source = "tools/bench/applications/orders.typed.R"
+
+[[programs]]
+id = "records"
+display = "Records as lists"
+summary = "Named lists grown, updated with `$<-` and `[[<-`, merged with modifyList, grouped with split and bound with rbind."
+source = "tools/bench/applications/records.R"
+
+[[programs]]
+id = "report"
+display = "Report formatting"
+summary = "Formats one line per account, then joins and measures the report: string building."
+source = "tools/bench/applications/report.R"
+typed_source = "tools/bench/applications/report.typed.R"
+
+[[programs]]
+id = "sales"
+display = "Sales table pipeline"
+summary = "Filters a million sales rows, adds a revenue column and totals it per region: data frame indexing and tapply."
+source = "tools/bench/applications/sales.R"
+typed_source = "tools/bench/applications/sales.typed.R"
+
+[[programs]]
+id = "strings"
+display = "String handling"
+summary = "paste, sprintf, gsub, regmatches, splitting and padding, and the same through stringr."
+source = "tools/bench/applications/strings.R"
+
+[[programs]]
+id = "tables"
+display = "Tables"
+summary = "data.table grouping, `:=` updates, keyed joins and rbindlist, and the same steps on base data frames."
+source = "tools/bench/applications/tables.R"
+
+[[programs]]
+id = "team_scores"
+display = "Row validation"
+summary = "Parses comma-separated rows, rejects invalid ones and totals scores per team: strsplit, conversion and failures as values."
+source = "tools/bench/applications/team_scores.R"
+typed_source = "tools/bench/applications/team_scores.typed.R"
+
+[[programs]]
+id = "testthat"
+display = "testthat suite"
+summary = "Many small test_that() blocks with expect_equal, expect_error and expect_warning: testthat's condition machinery."
+source = "tools/bench/applications/testthat.R"
+
+[[programs]]
+id = "timeseries"
+display = "Time series and dates"
+summary = "xts and zoo series merged, lagged and rolled, lubridate parsing and month arithmetic, base Date sequences."
+source = "tools/bench/applications/timeseries.R"
+
+[[programs]]
+id = "validation"
+display = "Argument validation"
+summary = "Small functions with defaults, `...` forwarding, match.arg, stopifnot, missing() and match.call()."
+source = "tools/bench/applications/validation.R"
