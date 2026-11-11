@@ -76,7 +76,12 @@ build `ry` and `libr` first. `--engine ry-jit` is the same runtime with `RY_JIT=
 every body that is called twice and every loop through the JIT, so comparing it against GNU R checks
 the compiled tier on every case. `ry-tier0` runs with `RY_JIT=off`, and `ry-gctorture` runs with
 `RY_GC_STRESS=1`, which collects before every allocation once the script starts, and
-`ry-gctorture-young` with `RY_GC_STRESS=young`, which also keeps the survivors collectable. Without `--engine` or `ORACLE_ENGINE` the second engine
+`ry-gctorture-young` with `RY_GC_STRESS=young`, which also keeps the survivors collectable.
+`ry-jit-gctorture` combines `RY_JIT=force` with `RY_GC_STRESS=1`, so it checks that compiled code
+keeps every object it holds rooted. `--engine` takes a comma-separated list, such as
+`--engine ry,ry-jit-gctorture`, which runs GNU R once per case and prints a summary line per engine.
+A failure listed in `crates/oracle/known_failures.toml` reports as known rather than failing the run
+([Testing](/development/testing#known-oracle-failures) has the rule). Without `--engine` or `ORACLE_ENGINE` the second engine
 is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or `ry-jit`, or any command line) makes
 `cargo test -p oracle` also require the engine to match GNU R on every case.
 

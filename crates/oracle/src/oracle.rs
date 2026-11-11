@@ -94,6 +94,98 @@ struct Report {
     libraries: Option<String>,
 }
 
+/// The modes of ry's runtime that `--engine` names, which [`KnownFailure::engine`] must be one of.
+pub const ENGINES: [&str; 6] = [
+    "ry",
+    "ry-tier0",
+    "ry-jit",
+    "ry-gctorture",
+    "ry-gctorture-young",
+    "ry-jit-gctorture",
+];
+
+/// A case that fails on main under one engine, listed in [`KNOWN_FAILURES_FILE`] so that a run
+/// tells it apart from a failure a change introduced.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnownFailure {
+    /// The case's `group__name`, the file name without `.R`.
+    pub case: String,
+    pub engine: String,
+    pub owner: String,
+    pub reason: String,
+    /// Seen failing on a branch but not yet on main.
+    #[serde(default)]
+    pub provisional: bool,
+}
+
+/// The known failures, beside `Cargo.toml` in this crate.
+pub const KNOWN_FAILURES_FILE: &str = "known_failures.toml";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KnownFailuresFile {
+    #[serde(default)]
+    failure: Vec<KnownFailure>,
+}
+
+/// Reads [`KNOWN_FAILURES_FILE`], refusing an entry that names an unknown engine, a case that
+/// does not exist, or the same case and engine twice, so a stale or mistyped entry cannot hide.
+pub fn known_failures() -> Result<Vec<KnownFailure>, String> {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = directory.join(KNOWN_FAILURES_FILE);
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let file: KnownFailuresFile =
+        toml::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+    for (index, entry) in file.failure.iter().enumerate() {
+        if !ENGINES.contains(&entry.engine.as_str()) {
+            return Err(format!(
+                "{}: `{}` names engine `{}`, which is not one of {}",
+                path.display(),
+                entry.case,
+                entry.engine,
+                ENGINES.join(", ")
+            ));
+        }
+        if !directory
+            .join("cases")
+            .join(format!("{}.R", entry.case))
+            .is_file()
+        {
+            return Err(format!(
+                "{}: there is no case `{}` in cases/",
+                path.display(),
+                entry.case
+            ));
+        }
+        if file.failure[..index]
+            .iter()
+            .any(|earlier| earlier.case == entry.case && earlier.engine == entry.engine)
+        {
+            return Err(format!(
+                "{}: `{}` under `{}` is listed twice",
+                path.display(),
+                entry.case,
+                entry.engine
+            ));
+        }
+    }
+    Ok(file.failure)
+}
+
+/// The entry in `known` for `case` under the engine named `engine`.
+pub fn known_failure<'a>(
+    known: &'a [KnownFailure],
+    case: &Path,
+    engine: &str,
+) -> Option<&'a KnownFailure> {
+    let name = case.file_stem()?.to_str()?;
+    known
+        .iter()
+        .find(|entry| entry.case == name && entry.engine == engine)
+}
+
 /// The stand-in until ry's runtime exists. It reports itself as unavailable for every file.
 pub struct StubEngine;
 
@@ -150,8 +242,7 @@ impl ProcessEngine {
         }
     }
 
-    /// The engine a name stands for: `gnu-r`, `ry`, `ry-tier0`, `ry-jit`, `ry-gctorture`,
-    /// `ry-gctorture-young`, or a command line.
+    /// The engine a name stands for: one of [`ENGINES`], `gnu-r`, or a command line.
     pub fn named(name: &str) -> Option<Self> {
         match name {
             "gnu-r" => Some(ProcessEngine::gnu_r()),
@@ -160,6 +251,7 @@ impl ProcessEngine {
             "ry-jit" => Some(ProcessEngine::ry_jit()),
             "ry-gctorture" => Some(ProcessEngine::ry_gc_torture()),
             "ry-gctorture-young" => Some(ProcessEngine::ry_gc_torture_young()),
+            "ry-jit-gctorture" => Some(ProcessEngine::ry_jit_gc_torture()),
             command => ProcessEngine::from_command(command),
         }
     }
@@ -203,6 +295,17 @@ impl ProcessEngine {
         engine
             .environment
             .push(("RY_GC_STRESS".to_string(), "young".to_string()));
+        engine
+    }
+
+    /// [`ProcessEngine::ry_gc_torture`] with the JIT forced on, so compiled code runs under
+    /// collection stress from its first call rather than only once the default JIT finds it hot.
+    pub fn ry_jit_gc_torture() -> Self {
+        let mut engine = ProcessEngine::ry_gc_torture();
+        engine.name = "ry-jit-gctorture".to_string();
+        engine
+            .environment
+            .push(("RY_JIT".to_string(), "force".to_string()));
         engine
     }
 
