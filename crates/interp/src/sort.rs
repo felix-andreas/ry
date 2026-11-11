@@ -25,6 +25,7 @@ use {
         records::NativeKind,
     },
     rustc_hash::{FxHashMap, FxHashSet, FxHasher},
+    smallvec::{SmallVec, smallvec},
     std::{
         borrow::Cow,
         cell::Cell,
@@ -226,7 +227,11 @@ fn order_by_collation<Text: AsRef<str>>(texts: &[Text], c: bool) -> Vec<u32> {
             starts.push(keys.len() as u32);
             keys.extend(bytes.iter().map(|&byte| ASCII_RANKS[byte as usize]));
             keys.push(0);
-            keys.extend(bytes.iter().map(|&byte| byte.is_ascii_uppercase() as u8 + 1));
+            keys.extend(
+                bytes
+                    .iter()
+                    .map(|&byte| byte.is_ascii_uppercase() as u8 + 1),
+            );
         }
         starts.push(keys.len() as u32);
         let key = |index: u32| {
@@ -289,7 +294,10 @@ fn collation_key(text: &str, keys: &mut Vec<u32>) {
     keys.push(0);
     keys.extend(text.chars().map(|character| base_letter(character).1 + 1));
     keys.push(0);
-    keys.extend(text.chars().map(|character| character.is_uppercase() as u32 + 1));
+    keys.extend(
+        text.chars()
+            .map(|character| character.is_uppercase() as u32 + 1),
+    );
     keys.push(0);
     keys.extend(text.chars().map(|character| character as u32 + 1));
 }
@@ -824,14 +832,17 @@ pub(crate) unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
     let incomparables = incomparable_keys(call.arg(3), kind)?;
     if incomparables.is_none()
         && let (Some(table_keys), Some(x_keys)) = (plain_keys(table), plain_keys(x))
-        && let Some(mut result) = match_positions(table_keys, x_keys)
+        && plain_kinds_match(table_keys, x_keys)
     {
+        let result = values::alloc_uninit(SexpType::Integer, count)?;
+        let positions = values::ints_mut(result);
+        match_positions(table_keys, x_keys, positions);
         if nomatch != 0 {
-            for position in result.iter_mut().filter(|position| **position == 0) {
+            for position in positions.iter_mut().filter(|position| **position == 0) {
                 *position = nomatch;
             }
         }
-        return values::integer_vector(&result);
+        return Ok(result);
     }
     let mut positions: FxHashMap<Key<'_>, i32> = FxHashMap::default();
     for (index, key) in element_keys(table).into_iter().enumerate() {
@@ -2266,40 +2277,52 @@ unsafe fn plain_keys<'a>(vector: Sexp) -> Option<PlainKeys<'a>> {
     }
 }
 
-/// For each element of `x`, the 1-based position of the first equal element of `table`, or 0.
-/// `None` unless both sides have the same kind.
-unsafe fn match_positions(table: PlainKeys<'_>, x: PlainKeys<'_>) -> Option<Vec<i32>> {
-    Some(match (table, x) {
+/// Whether [`match_positions`] can match `x` against `table`: both sides have the same kind.
+fn plain_kinds_match(table: PlainKeys<'_>, x: PlainKeys<'_>) -> bool {
+    matches!(
+        (table, x),
+        (PlainKeys::Integer(_), PlainKeys::Integer(_))
+            | (PlainKeys::Real(_), PlainKeys::Real(_))
+            | (PlainKeys::Interned(..), PlainKeys::Interned(..))
+    )
+}
+
+/// Writes to `positions`, for each element of `x`, the 1-based position of the first equal
+/// element of `table`, or 0. Both sides have the same kind ([`plain_kinds_match`]).
+unsafe fn match_positions(table: PlainKeys<'_>, x: PlainKeys<'_>, positions: &mut [i32]) {
+    match (table, x) {
         (PlainKeys::Integer(table), PlainKeys::Integer(x)) => {
             if let Some(range) = DenseRange::of(table, table.len().max(x.len())) {
-                let mut positions = vec![0i32; range.slots()];
+                let mut first: SmallVec<[i32; 32]> = smallvec![0; range.slots()];
                 for (index, &value) in table.iter().enumerate().rev() {
-                    positions[range.slot(value)] = index as i32 + 1;
+                    first[range.slot(value)] = index as i32 + 1;
                 }
-                return Some(
-                    x.iter()
-                        .map(|&value| range.find(value).map_or(0, |slot| positions[slot]))
-                        .collect(),
-                );
+                for (position, &value) in positions.iter_mut().zip(x) {
+                    *position = range.find(value).map_or(0, |slot| first[slot]);
+                }
+                return;
             }
-            hashed_matches(table.len(), |index| table[index], x.len(), |index| x[index])
+            hashed_matches(
+                table.len(),
+                |index| table[index],
+                |index| x[index],
+                positions,
+            )
         }
         (PlainKeys::Real(table), PlainKeys::Real(x)) => hashed_matches(
             table.len(),
             |index| real_key(table[index]),
-            x.len(),
             |index| real_key(x[index]),
+            positions,
         ),
-        (PlainKeys::Interned(table, table_count), PlainKeys::Interned(x, x_count)) => {
-            hashed_matches(
-                table_count,
-                |index| table.element(index),
-                x_count,
-                |index| x.element(index),
-            )
-        }
-        _ => return None,
-    })
+        (PlainKeys::Interned(table, table_count), PlainKeys::Interned(x, _)) => hashed_matches(
+            table_count,
+            |index| table.element(index),
+            |index| x.element(index),
+            positions,
+        ),
+        _ => positions.fill(0),
+    }
 }
 
 /// Which elements repeat an earlier one (a later one with `from_last`).
@@ -2374,20 +2397,18 @@ impl DenseRange {
 fn hashed_matches<K: TableKey>(
     table_count: usize,
     table_key: impl Fn(usize) -> K,
-    x_count: usize,
     x_key: impl Fn(usize) -> K,
-) -> Vec<i32> {
+    out: &mut [i32],
+) {
     let mut positions = PositionTable::new(table_count);
     for index in 0..table_count {
         positions.find_or_insert(table_key(index), index, &table_key);
     }
-    (0..x_count)
-        .map(|index| {
-            positions
-                .find(x_key(index), &table_key)
-                .map_or(0, |position| position as i32 + 1)
-        })
-        .collect()
+    for (index, position) in out.iter_mut().enumerate() {
+        *position = positions
+            .find(x_key(index), &table_key)
+            .map_or(0, |found| found as i32 + 1);
+    }
 }
 
 fn hashed_duplicates<K: TableKey>(
@@ -2452,7 +2473,8 @@ impl TableKey for Sexp {
 /// a table over `n` keys is at most `16 n` bytes. Probing is linear over a power-of-two array at
 /// most half full, and the slot comes from the hash's high bits.
 struct PositionTable {
-    slots: Vec<u32>,
+    /// A small table, the usual `x %in% c("a", "b")`, stays on the stack.
+    slots: SmallVec<[u32; 32]>,
     shift: u32,
 }
 
@@ -2460,7 +2482,7 @@ impl PositionTable {
     fn new(count: usize) -> Self {
         let bits = (2 * count.max(8)).next_power_of_two().trailing_zeros();
         Self {
-            slots: vec![0; 1 << bits],
+            slots: smallvec![0; 1 << bits],
             shift: 64 - bits,
         }
     }
@@ -2711,14 +2733,13 @@ unsafe fn attributes_identical(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped
     if x.attrib() == nil() && y.attrib() == nil() {
         return true;
     }
-    let items = |object: Sexp| -> Vec<(Sexp, Sexp)> {
-        values::pairlist_items(object.attrib())
-            .into_iter()
+    let items = |object: Sexp| {
+        std::iter::successors(Some(object.attrib()), |cell: &Sexp| Some(cell.cdr()))
+            .take_while(|&cell| cell != nil())
+            .map(|cell| (cell.tag(), cell.car()))
             .filter(|(tag, _)| !skipped.contains(tag))
-            .collect()
     };
-    let (left, right) = (items(x), items(y));
-    if left.len() != right.len() {
+    if items(x).count() != items(y).count() {
         return false;
     }
     let same = |tag: Sexp, value: Sexp, other: Sexp| {
@@ -2729,15 +2750,13 @@ unsafe fn attributes_identical(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped
         }
     };
     if flags.attributes_as_set {
-        left.iter().all(|&(tag, value)| {
-            right
-                .iter()
-                .any(|&(other_tag, other)| other_tag == tag && same(tag, value, other))
+        items(x).all(|(tag, value)| {
+            items(y).any(|(other_tag, other)| other_tag == tag && same(tag, value, other))
         })
     } else {
-        left.iter()
-            .zip(&right)
-            .all(|(&(tag, value), &(other_tag, other))| tag == other_tag && same(tag, value, other))
+        items(x)
+            .zip(items(y))
+            .all(|((tag, value), (other_tag, other))| tag == other_tag && same(tag, value, other))
     }
 }
 
@@ -2872,8 +2891,12 @@ mod tests {
     /// in accents or case, on both the general and the ASCII key.
     #[test]
     fn collation_order_matches_collate() {
-        const MIXED: &[char] = &['a', 'A', 'b', '_', '.', '1', ' ', 'é', 'É', 'z', 'ß', '-', '9', 'Ω'];
-        const ASCII: &[char] = &['a', 'A', 'b', 'B', '_', '.', '1', ' ', 'z', 'Z', '-', '9', '~', '$'];
+        const MIXED: &[char] = &[
+            'a', 'A', 'b', '_', '.', '1', ' ', 'é', 'É', 'z', 'ß', '-', '9', 'Ω',
+        ];
+        const ASCII: &[char] = &[
+            'a', 'A', 'b', 'B', '_', '.', '1', ' ', 'z', 'Z', '-', '9', '~', '$',
+        ];
         let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut next = || {
             state ^= state << 13;
@@ -2885,18 +2908,29 @@ mod tests {
             let texts: Vec<String> = (0..400)
                 .map(|_| {
                     let length = (next() % 5) as usize;
-                    (0..length).map(|_| alphabet[(next() % alphabet.len() as u64) as usize]).collect()
+                    (0..length)
+                        .map(|_| alphabet[(next() % alphabet.len() as u64) as usize])
+                        .collect()
                 })
                 .collect();
             for c in [false, true] {
                 let mut expected: Vec<u32> = (0..texts.len() as u32).collect();
                 expected.sort_by(|&left, &right| {
                     let (left, right) = (&texts[left as usize], &texts[right as usize]);
-                    if c { left.cmp(right) } else { root_collate(left, right) }
+                    if c {
+                        left.cmp(right)
+                    } else {
+                        root_collate(left, right)
+                    }
                 });
-                let expected: Vec<&String> = expected.iter().map(|&index| &texts[index as usize]).collect();
-                let actual: Vec<&String> =
-                    order_by_collation(&texts, c).iter().map(|&index| &texts[index as usize]).collect();
+                let expected: Vec<&String> = expected
+                    .iter()
+                    .map(|&index| &texts[index as usize])
+                    .collect();
+                let actual: Vec<&String> = order_by_collation(&texts, c)
+                    .iter()
+                    .map(|&index| &texts[index as usize])
+                    .collect();
                 assert_eq!(actual, expected, "C collation {c}");
             }
         }

@@ -661,6 +661,7 @@ pub(crate) fn holds_handles(kind: SexpType) -> bool {
 /// The bytes an object of `kind` with `length` elements occupies, header included. `CHARSXP`
 /// keeps a terminating NUL after its bytes, as `R_CHAR` promises, and a large handle vector its
 /// card bytes ([`CARD_ELEMENTS`]).
+#[inline]
 pub fn object_size(kind: SexpType, length: usize) -> Option<usize> {
     match kind.shape() {
         Shape::Vector => {

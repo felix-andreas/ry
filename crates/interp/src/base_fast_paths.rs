@@ -118,7 +118,8 @@ pub unsafe fn prologue_needs_environment(body: Sexp) -> bool {
     let inner = first.cdr().car();
     inner.kind() == SexpType::Language
         && inner.car().kind() == SexpType::Symbol
-        && ["ryMatchArg", "ryReduce", "ryTraceBack", "rySignalCondition"].contains(&&*values::symbol_name(inner.car()))
+        && ["ryMatchArg", "ryReduce", "ryTraceBack", "rySignalCondition"]
+            .contains(&&*values::symbol_name(inner.car()))
 }
 
 /// Puts `.Internal(<internal_name>())` in front of the body of `function` when its formals and
@@ -246,8 +247,14 @@ unsafe fn install_nested_prologue(
     // `function(formals, body, srcref)`
     let body_cell = definition.cdr().cdr();
     let body = body_cell.car();
-    let Some(block) =
-        with_prologue(definition.cdr().car(), body, inner, internal_name, expected, print)?
+    let Some(block) = with_prologue(
+        definition.cdr().car(),
+        body,
+        inner,
+        internal_name,
+        expected,
+        print,
+    )?
     else {
         return Ok(false);
     };
@@ -1193,8 +1200,7 @@ unsafe fn native_read_rds(args: &[Arg]) -> R<Option<Sexp>> {
         bytes.as_slice()
     };
     // `unserialize()` of memory also takes `save()` files, which `readRDS()` rejects.
-    if !(stream.starts_with(b"X\n") || stream.starts_with(b"B\n") || stream.starts_with(b"A\n"))
-    {
+    if !(stream.starts_with(b"X\n") || stream.starts_with(b"B\n") || stream.starts_with(b"A\n")) {
         return Ok(None);
     }
     match crate::serialize::unserialize(stream, nil()) {
@@ -1942,7 +1948,11 @@ unsafe fn do_sys_which(call: &Call<'_>) -> R<Sexp> {
                 let path = crate::system::which(&name);
                 #[cfg(not(unix))]
                 let path: Option<std::path::PathBuf> = None;
-                values::mkchar(&path.map(|path| path.display().to_string()).unwrap_or_default())?
+                values::mkchar(
+                    &path
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default(),
+                )?
             }
         };
         values::set_elt(result, index, found);
@@ -2223,7 +2233,8 @@ unsafe fn do_assign_native_routines(call: &Call<'_>) -> R<Sexp> {
             return decline();
         }
         let info = values::list_get(dll, "info");
-        let Some(registered) = crate::builtins::internal_function(install("getRegisteredRoutines")?)
+        let Some(registered) =
+            crate::builtins::internal_function(install("getRegisteredRoutines")?)
         else {
             return decline();
         };
@@ -2231,7 +2242,10 @@ unsafe fn do_assign_native_routines(call: &Call<'_>) -> R<Sexp> {
             eval::builtin_def(registered)?,
             nil(),
             registered,
-            &[Arg { tag: nil(), value: info }],
+            &[Arg {
+                tag: nil(),
+                value: info,
+            }],
             values::global_env(),
         )?;
         crate::heap().root(routines);

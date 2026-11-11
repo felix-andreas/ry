@@ -203,11 +203,11 @@ enum UtilsSocket {
 /// the connection failed, which `make.socket()` turns into "socket not established".
 unsafe fn do_sockconnect(call: &NativeCall<'_>) -> R<Sexp> {
     let port = values::as_integer_scalar(call.arg(0));
-    let host = values::require_string(call.arg(1), "host")?;
+    let host = values::require_str(call.arg(1), "host")?;
     let Ok(port) = u16::try_from(port) else {
         return scalar_integer(0);
     };
-    let addresses = match (host.as_str(), port).to_socket_addrs() {
+    let addresses = match (host.as_ref(), port).to_socket_addrs() {
         Ok(addresses) => addresses,
         Err(reason) => {
             report_socket_error(&reason);
@@ -301,7 +301,7 @@ unsafe fn do_sockread(call: &NativeCall<'_>) -> R<Sexp> {
 /// `.Call(C_sockwrite, socket, string)`: the number of bytes written.
 unsafe fn do_sockwrite(call: &NativeCall<'_>) -> R<Sexp> {
     let key = values::as_integer_scalar(call.arg(0));
-    let text = values::require_string(call.arg(1), "string")?;
+    let text = values::require_str(call.arg(1), "string")?;
     let written = socket_stream(key).and_then(|mut stream| stream.write(text.as_bytes()));
     match written {
         Ok(count) => scalar_integer(i32::try_from(count).unwrap_or(i32::MAX)),
@@ -1771,8 +1771,8 @@ unsafe fn do_char_class(call: &NativeCall<'_>) -> R<Sexp> {
             ));
         }
     };
-    let class = values::require_string(call.arg(1), "class")?;
-    let test: fn(char) -> bool = match class.as_str() {
+    let class = values::require_str(call.arg(1), "class")?;
+    let test: fn(char) -> bool = match class.as_ref() {
         "alnum" => char::is_alphanumeric,
         "alpha" => char::is_alphabetic,
         "blank" => |character| character == ' ' || character == '\t',
@@ -1813,8 +1813,8 @@ unsafe fn do_flush_console(_: &NativeCall<'_>) -> R<Sexp> {
 /// `nsl(hostname)`: the host's IPv4 address, or `NULL` with a warning when it does not resolve.
 unsafe fn do_nsl(call: &NativeCall<'_>) -> R<Sexp> {
     use std::net::ToSocketAddrs;
-    let host = values::require_string(call.arg(0), "hostname")?;
-    let address = (host.as_str(), 0)
+    let host = values::require_str(call.arg(0), "hostname")?;
+    let address = (host.as_ref(), 0)
         .to_socket_addrs()
         .ok()
         .and_then(|mut addresses| addresses.find(std::net::SocketAddr::is_ipv4));
@@ -2066,7 +2066,7 @@ const STATE_COUNT: usize = 4;
 
 /// `hashtab_Ext(type, K)`: a table for `2^K` entries before it grows.
 unsafe fn do_hashtab(call: &NativeCall<'_>) -> R<Sexp> {
-    let kind = values::require_string(call.arg(0), "type")?;
+    let kind = values::require_str(call.arg(0), "type")?;
     if kind != "identical" && kind != "address" {
         return Err(error(format!("bad hash table type: {kind}")));
     }
@@ -2344,7 +2344,7 @@ unsafe fn do_download(call: &NativeCall<'_>) -> R<Sexp> {
     }
     let destination =
         values::string_at(destination, 0).ok_or_else(|| error("invalid 'destfile' argument"))?;
-    let mode = values::require_string(call.arg(3), "mode")?;
+    let mode = values::require_str(call.arg(3), "mode")?;
     let Some(path) = url.strip_prefix("file://") else {
         let scheme = ["http", "ftp"]
             .into_iter()
@@ -2382,12 +2382,12 @@ unsafe fn do_download(call: &NativeCall<'_>) -> R<Sexp> {
 /// members of a zip archive (stored or deflated). Listing returns the names, sizes and
 /// modification times; extracting returns 0 with the extracted paths as `extracted`.
 unsafe fn do_unzip(call: &NativeCall<'_>) -> R<Sexp> {
-    let path = values::require_string(call.arg(0), "zipfile")?;
+    let path = values::require_str(call.arg(0), "zipfile")?;
     let path = crate::connections::expand_path(&path);
     let wanted = call.arg(1);
     let wanted: Option<Vec<String>> =
         (wanted != nil()).then(|| values::strings(wanted).into_iter().flatten().collect());
-    let directory = values::require_string(call.arg(2), "exdir")?;
+    let directory = values::require_str(call.arg(2), "exdir")?;
     let list = values::as_logical_scalar(call.arg(3)) == 1;
     let overwrite = values::as_logical_scalar(call.arg(4)) == 1;
     let junk_paths = values::as_logical_scalar(call.arg(5)) == 1;

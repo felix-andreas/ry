@@ -839,7 +839,7 @@ impl Objective<'_> {
         let matrix = crate::scope(|| {
             let result = eval::eval(expression, self.rho)?;
             let square = result.kind().is_atomic()
-                && values::dims(result).is_some_and(|dims| dims == [n, n]);
+                && values::dims(result).is_some_and(|dims| dims[..] == [n, n]);
             if !square {
                 return Ok(None);
             }

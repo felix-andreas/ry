@@ -1628,7 +1628,7 @@ unsafe fn run(text: &str) -> String {
             Err(Unwind::Error(error)) => format!("error: {}", error.message),
             // An error no handler caught ran the default handler, which recorded the message
             // after a head that names the call.
-            Err(Unwind::Jump(jump)) if matches!(*jump, Jump::TopLevel) => {
+            Err(Unwind::Jump(jump)) if matches!(jump, Jump::TopLevel) => {
                 let text = &interp::interp().error_message;
                 // The head breaks the line when the call is long, so the break moves with the
                 // closure's name and is normalized away.

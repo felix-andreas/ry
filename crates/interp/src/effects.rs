@@ -207,7 +207,7 @@ pub unsafe fn effect_free(function: Sexp) -> R<bool> {
         }
     }
     let home = home_of(enclosure);
-    let mut found = Vec::new();
+    let mut found = Lookups::new();
     let holds = resolve(function, &mut found, &mut SmallVec::new())?;
     // A failed proof stays sound for any enclosure, because a binding in a function frame on
     // the way could only make a call resolve to something else. A proof that holds carries over
@@ -234,11 +234,14 @@ pub unsafe fn effect_free(function: Sexp) -> R<bool> {
     Ok(holds)
 }
 
+/// The function lookups a proof rests on: a body calls only a few functions.
+pub type Lookups = SmallVec<[Speculation; 8]>;
+
 /// The function lookups the effect-free fact of `function` rests on, or `None` when it is not
 /// effect-free. Each lookup's symbol and cell are watched, so rebinding either moves the
 /// symbol's stamp.
-pub unsafe fn effect_free_lookups(function: Sexp) -> R<Option<Vec<Speculation>>> {
-    let mut found = Vec::new();
+pub unsafe fn effect_free_lookups(function: Sexp) -> R<Option<Lookups>> {
+    let mut found = Lookups::new();
     if bytecode::compiled_body(function)?.kind() != SexpType::Bytecode
         || !resolve(function, &mut found, &mut SmallVec::new())?
     {
@@ -423,7 +426,7 @@ unsafe fn collect_calls(
 /// of its body is, so it is assumed to be.
 unsafe fn resolve(
     function: Sexp,
-    found: &mut Vec<Speculation>,
+    found: &mut Lookups,
     visiting: &mut SmallVec<[(Sexp, Sexp); MAX_DEPTH]>,
 ) -> R<bool> {
     let code = function.cdr();

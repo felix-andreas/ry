@@ -6,6 +6,7 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
+        strings::{insert_fill, with_text_buffer},
         unwind::{R, error},
         values::{self, alloc, length, nil, symbols},
     },
@@ -275,31 +276,48 @@ fn real_format_candidates(values: &[f64], settings: Settings) -> RealCandidates 
 
 /// One double in a given format, without padding.
 pub fn format_real_with(value: f64, format: RealFormat, na: &str) -> String {
+    let mut text = String::new();
+    // Writing into a `String` cannot fail, and the text stays empty if it ever did.
+    if push_real_with(&mut text, value, format, na).is_err() {
+        text.clear();
+    }
+    text
+}
+
+/// Appends `value` to `out` as [`format_real_with`] formats it.
+pub fn push_real_with(
+    out: &mut String,
+    value: f64,
+    format: RealFormat,
+    na: &str,
+) -> std::fmt::Result {
     if is_na_real(value) {
-        return na.to_owned();
+        out.push_str(na);
+        return Ok(());
     }
     if value.is_nan() {
-        return "NaN".into();
+        out.push_str("NaN");
+        return Ok(());
     }
     if value.is_infinite() {
-        return if value < 0.0 {
-            "-Inf".into()
-        } else {
-            "Inf".into()
-        };
+        out.push_str(if value < 0.0 { "-Inf" } else { "Inf" });
+        return Ok(());
     }
     // GNU R's `encodeReal0` writes a negative zero as a positive one.
     let value = if value == 0.0 { 0.0 } else { value };
     if format.exponent == 0 {
-        let text = format!("{:.*}", format.decimals, value);
+        let begin = out.len();
+        write!(out, "{:.*}", format.decimals, value)?;
         // `-0` prints as `0`.
+        let text = &out[begin..];
         if text.starts_with('-') && text[1..].bytes().all(|byte| byte == b'0' || byte == b'.') {
-            return text[1..].to_owned();
+            out.remove(begin);
         }
-        return text;
+        return Ok(());
     }
     // Adding zero turns `-0` into `0`, which is how it prints.
-    scientific_text(value + 0.0, format.decimals)
+    out.push_str(&scientific_text(value + 0.0, format.decimals));
+    Ok(())
 }
 
 /// `value` in scientific notation with `decimals` mantissa decimals and at least two exponent
@@ -325,11 +343,18 @@ pub fn format_real_alone(value: f64, digits: usize) -> String {
 
 /// As `format_real_alone`, with a scientific-notation penalty (`options(scipen)`).
 pub fn format_real_alone_scipen(value: f64, digits: usize, scipen: i32) -> String {
-    if value.is_finite()
-        && let Some(text) = shortest_alone(value, digits, scipen)
-    {
-        return text;
+    let mut text = String::new();
+    push_real_alone(&mut text, value, digits, scipen);
+    text
+}
+
+/// Appends `value` to `out` as [`format_real_alone_scipen`] formats it.
+pub fn push_real_alone(out: &mut String, value: f64, digits: usize, scipen: i32) {
+    let begin = out.len();
+    if value.is_finite() && push_shortest_alone(out, value, digits, scipen).is_some() {
+        return;
     }
+    out.truncate(begin);
     let settings = Settings {
         digits,
         scipen,
@@ -337,14 +362,23 @@ pub fn format_real_alone_scipen(value: f64, digits: usize, scipen: i32) -> Strin
         nsmall: 0,
     };
     let format = format_real_common(&[value], settings);
-    format_real_with(value, format, "NA")
+    // Writing into a `String` cannot fail, and the text stays empty if it ever did.
+    if push_real_with(out, value, format, "NA").is_err() {
+        out.truncate(begin);
+    }
 }
 
-/// `format_real_alone_scipen` for a finite value whose shortest round-trip digits fit in
+/// Whether `options(OutDec)` is the default `"."`, so formatted numbers need no localizing.
+pub fn decimal_is_point() -> bool {
+    OUTPUT_DECIMAL.with(|decimal| decimal.borrow().as_str() == ".")
+}
+
+/// `push_real_alone` for a finite value whose shortest round-trip digits fit in
 /// `digits` (see `SHORTEST_EXACT_DIGITS`), built straight from those digits. Those digits are exactly what `scientific` counts
 /// and what either notation prints, so one shortest conversion replaces the significance pass
-/// and the second, fixed-precision conversion. `None` when the digits do not fit.
-fn shortest_alone(value: f64, digits: usize, scipen: i32) -> Option<String> {
+/// and the second, fixed-precision conversion. `None` when the digits do not fit, with `out`
+/// left partly written for the caller to cut back.
+fn push_shortest_alone(out: &mut String, value: f64, digits: usize, scipen: i32) -> Option<()> {
     // Zero goes through the width comparison too: under `scipen <= -5` GNU R writes `0e+00`.
     if digits > SHORTEST_EXACT_DIGITS || !(value.is_normal() || value == 0.0) {
         return None;
@@ -373,7 +407,7 @@ fn shortest_alone(value: f64, digits: usize, scipen: i32) -> Option<String> {
     let exponent_digits = if exponent.unsigned_abs() >= 100 { 3 } else { 2 };
     let scientific_width =
         negative as usize + (count > 1) as usize + (count - 1) + 3 + exponent_digits;
-    let mut out = String::with_capacity(fixed_width.max(scientific_width));
+    out.reserve(fixed_width.max(scientific_width));
     if negative {
         out.push('-');
     }
@@ -384,7 +418,7 @@ fn shortest_alone(value: f64, digits: usize, scipen: i32) -> Option<String> {
         if left <= 0 {
             out.push_str("0.");
             out.extend(std::iter::repeat_n('0', left.unsigned_abs() as usize));
-            push_digits(&mut out, significand);
+            push_digits(out, significand);
         } else if count <= left as usize {
             // Zeros stand in for digits past the shortest ones only while every integer up to
             // the value is a double, so that the value is exactly the integer they spell; GNU R
@@ -392,20 +426,20 @@ fn shortest_alone(value: f64, digits: usize, scipen: i32) -> Option<String> {
             if left as usize > SHORTEST_EXACT_DIGITS {
                 return None;
             }
-            push_digits(&mut out, significand);
+            push_digits(out, significand);
             out.extend(std::iter::repeat_n('0', left as usize - count));
         } else {
             let (whole, fraction) = significand.split_at(left as usize);
-            push_digits(&mut out, whole);
+            push_digits(out, whole);
             out.push('.');
-            push_digits(&mut out, fraction);
+            push_digits(out, fraction);
         }
     } else {
         let (first, rest) = significand.split_at(1);
-        push_digits(&mut out, first);
+        push_digits(out, first);
         if !rest.is_empty() {
             out.push('.');
-            push_digits(&mut out, rest);
+            push_digits(out, rest);
         }
         write!(
             out,
@@ -415,7 +449,7 @@ fn shortest_alone(value: f64, digits: usize, scipen: i32) -> Option<String> {
         )
         .ok()?;
     }
-    Some(out)
+    Some(())
 }
 
 pub fn format_integer(value: i32) -> String {
@@ -438,7 +472,13 @@ pub(crate) fn output_decimal() -> String {
 }
 
 pub fn set_output_decimal(mark: &str) {
-    OUTPUT_DECIMAL.with(|decimal| *decimal.borrow_mut() = mark.to_owned());
+    OUTPUT_DECIMAL.with(|decimal| {
+        let mut decimal = decimal.borrow_mut();
+        if decimal.as_str() != mark {
+            decimal.clear();
+            decimal.push_str(mark);
+        }
+    });
 }
 
 /// GNU R 4.5.0 and later warn each time a double is written with a decimal mark that is not one
@@ -724,6 +764,14 @@ pub fn pad(text: &str, width: usize, left: bool) -> String {
         padding + text
     } else {
         text.to_owned() + &padding
+    }
+}
+
+/// Pads `out` with spaces on the left to `width` display columns, as [`pad`] does.
+fn pad_start(out: &mut String, width: usize) {
+    let current = display_width(out);
+    if current < width {
+        insert_fill(out, 0, ' ', width - current);
     }
 }
 
@@ -1075,33 +1123,52 @@ unsafe fn format_numbers(
         _ => None,
     }
     .unwrap_or(0);
-    let text_at = |index: usize| -> String {
-        match (vector.kind(), real_format) {
-            (SexpType::Real, Some(format)) => {
-                let text = format_real_with(values::reals(vector)[index], format, NA);
-                localize_decimal(pad(&text, format.width, true))
-            }
-            (SexpType::Logical, _) => match values::ints(vector)[index] {
-                NA_INTEGER => pad(NA, common, true),
-                value => pad(format_logical(value), common, true),
-            },
-            _ => match values::ints(vector)[index] {
-                NA_INTEGER => pad(NA, common, true),
-                value => pad(&value.to_string(), common, true),
-            },
-        }
-    };
+    let localized = !decimal_is_point();
     let result = alloc(SexpType::String, count)?;
     let mut width = None;
     for index in 0..count {
-        let text = text_at(index);
-        if real_format.is_some()
-            && *width.get_or_insert(display_width(&text)) != display_width(&text)
-        {
+        let fits = with_text_buffer(|out| {
+            match (vector.kind(), real_format) {
+                (SexpType::Real, Some(format)) => {
+                    push_real_with(out, values::reals(vector)[index], format, NA)
+                        .map_err(|_| error("formatting a number failed"))?;
+                    pad_start(out, format.width);
+                    if localized {
+                        *out = localize_decimal(std::mem::take(out));
+                    }
+                }
+                (SexpType::Logical, _) => {
+                    out.push_str(match values::ints(vector)[index] {
+                        NA_INTEGER => NA,
+                        value => format_logical(value),
+                    });
+                    pad_start(out, common);
+                }
+                _ => {
+                    match values::ints(vector)[index] {
+                        NA_INTEGER => out.push_str(NA),
+                        value => write!(out, "{value}")
+                            .map_err(|_| error("formatting a number failed"))?,
+                    }
+                    pad_start(out, common);
+                }
+            }
+            if real_format.is_some()
+                && *width.get_or_insert(display_width(out)) != display_width(out)
+            {
+                return Ok(false);
+            }
+            if trim {
+                let spaces = out.len() - out.trim_start().len();
+                out.drain(..spaces);
+            }
+            pad_start(out, min_width);
+            values::set_mkchar(result, index, out)?;
+            Ok(true)
+        })?;
+        if !fits {
             return Ok(None);
         }
-        let text = if trim { text.trim_start() } else { &text };
-        values::set_mkchar(result, index, &pad(text, min_width, true))?;
     }
     // Warned only once the result is final: the general path warns for itself.
     if real_format.is_some() {
@@ -1123,11 +1190,11 @@ unsafe fn copy_format_attributes(vector: Sexp, result: Sexp) -> R<()> {
 /// `formatC(x, mode, width, digits, format, flag, i.strlen)`: C-style formatting per element.
 unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     let vector = call.arg(0);
-    let mode = values::require_string(call.arg(1), "mode")?;
+    let mode = values::require_str(call.arg(1), "mode")?;
     let width = values::as_integer_scalar(call.arg(2));
     let digits = values::as_integer_scalar(call.arg(3));
-    let format = values::require_string(call.arg(4), "format")?;
-    let flag = values::require_string(call.arg(5), "flag")?;
+    let format = values::require_str(call.arg(4), "format")?;
+    let flag = values::require_str(call.arg(5), "flag")?;
     let count = length(vector);
     let result = alloc(SexpType::String, count)?;
     let mut padded = String::new();

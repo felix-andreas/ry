@@ -2496,7 +2496,10 @@ mod tests {
             let (mu, sigma) = if picks.below(2) == 0 {
                 (0.0, 1.0)
             } else {
-                ((uniform(&mut picks) - 0.5) * 4.0, (uniform(&mut picks) * 4.0 - 2.0).exp())
+                (
+                    (uniform(&mut picks) - 0.5) * 4.0,
+                    (uniform(&mut picks) * 4.0 - 2.0).exp(),
+                )
             };
             let lower = picks.below(2) == 0;
             let flags = [i32::from(lower), 0];
