@@ -36,7 +36,7 @@ use {
     std::{borrow::Cow, ffi::c_void, fmt},
 };
 
-const MAGIC: &[u8; 8] = b"RYHEAP\x00\x02";
+const MAGIC: &[u8; 8] = b"RYHEAP\x00\x03";
 
 /// The objects that exist before a session starts and that an image holds at the addresses they
 /// have in both processes.
@@ -212,8 +212,10 @@ impl Heap {
     /// returns `roots`, in order. `replace` names an object the image stores in place of another
     /// everywhere it is referenced, such as a closure body's source in place of its compiled
     /// code. The large objects among `last` go at the end of the large-object section, in that
-    /// order, after every other large object, so that the pages of objects a session may never
-    /// touch do not share a read-ahead window with those it does. `address` encodes each external pointer's address as a nonzero token the loading
+    /// order, after every other large object. The image records those and the pages the
+    /// heap filled while [`Heap::segregate`] was on, and the loader asks the system not to read
+    /// ahead around them, so that faulting in one object a session uses does not make the code
+    /// of functions it never runs resident. `address` encodes each external pointer's address as a nonzero token the loading
     /// process can decode, or `None` when it cannot be carried. Strings that name a path at or
     /// under one of `prefixes` are listed so that a [`Relocation`] can move them.
     pub unsafe fn write_image(
@@ -274,7 +276,7 @@ impl Heap {
         let mut out = Writer::default();
         out.bytes.extend_from_slice(MAGIC);
         out.u64(precondition);
-        let large = self.move_large_objects(&mut roots, last)?;
+        let (large, cold_large) = self.move_large_objects(&mut roots, last)?;
         out.u64(IMAGE_LARGE_BASE as u64);
         out.u64(large.len() as u64 * 8);
         let mut large_objects: Vec<u64> = self
@@ -284,6 +286,14 @@ impl Heap {
             .collect();
         large_objects.sort_unstable();
         out.u64s(&large_objects);
+        out.u64(cold_large as u64);
+        let cold_pages: Vec<u64> = self
+            .space
+            .segregated_pages()
+            .iter()
+            .map(|&page| u64::from(page))
+            .collect();
+        out.u64s(&cold_pages);
 
         let live = self.live_objects();
         let mut frames: Vec<ListedFrame> = Vec::new();
@@ -458,12 +468,13 @@ impl Heap {
     }
 
     /// Moves every large object to [`IMAGE_LARGE_BASE`], where the loading process maps them
-    /// too, and returns the section's bytes. Those in `last` go last, in its order.
+    /// too, and returns the section's bytes with the offset at which the objects in `last` start.
+    /// Those go last, in its order.
     unsafe fn move_large_objects(
         &mut self,
         roots: &mut [Sexp],
         last: &[Sexp],
-    ) -> Result<Vec<u64>, ImageError> {
+    ) -> Result<(Vec<u64>, usize), ImageError> {
         let mut rank: FxHashMap<Sexp, usize> = FxHashMap::default();
         for (position, &object) in last.iter().enumerate() {
             if self.large.contains(&object) {
@@ -477,14 +488,19 @@ impl Heap {
         });
         let mut offsets = Vec::with_capacity(old.len());
         let mut length = 0;
+        let mut cold = None;
         for &object in &old {
+            if cold.is_none() && rank.contains_key(&object) {
+                cold = Some(length);
+            }
             offsets.push(length);
             length += self.size_of(object).next_multiple_of(16);
         }
         let section_length = length.next_multiple_of(PAGE_SIZE);
         if section_length == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
+        let cold = cold.unwrap_or(section_length);
         let start = IMAGE_LARGE_BASE as *mut u8;
         if virtual_memory::reserve_at(start, section_length).is_none()
             || !virtual_memory::commit(start, section_length)
@@ -531,7 +547,7 @@ impl Heap {
         self.forward_roots(roots, &forward);
         let mut section = vec![0u64; section_length / 8];
         std::ptr::copy_nonoverlapping(start, section.as_mut_ptr().cast::<u8>(), section_length);
-        Ok(section)
+        Ok((section, cold))
     }
 
     /// The strings that name a path at or under one of `prefixes`, each with the fields that
@@ -616,6 +632,8 @@ impl Heap {
         let large_base = input.u64()? as usize;
         let large_length = input.u64()? as usize;
         let large_objects = input.u64s()?;
+        let cold_large = input.u64()? as usize;
+        let cold_pages = input.u64s()?;
         if large_base != IMAGE_LARGE_BASE || large_length % PAGE_SIZE != 0 {
             return Err(invalid("its large objects are not at the image address"));
         }
@@ -675,7 +693,12 @@ impl Heap {
                 }));
             }
             large(std::slice::from_raw_parts_mut(section, large_length))?;
+            // Rounded down to a heap page, a multiple of every system page size, so the advice
+            // covers every cold object whole.
+            let cold = (cold_large / PAGE_SIZE * PAGE_SIZE).min(large_length);
+            virtual_memory::expect_random_reads(section.add(cold), large_length - cold);
         }
+        self.space.expect_random_reads(&cold_pages);
 
         self.remembered.clear();
         self.escaped.clear();

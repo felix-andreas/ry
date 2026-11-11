@@ -200,6 +200,10 @@ unsafe fn build(heap: &mut Heap, rng: &mut SplitMix64, names: &mut Vec<String>) 
                     nodes[rng.below(nodes.len())]
                 }
             };
+            // Runs of objects on pages of their own, which the image marks for the loader.
+            if rng.chance(1, 8) {
+                heap.segregate(rng.chance(1, 2));
+            }
             let node = match rng.below(9) {
                 0 => {
                     let length = rng.below(40);
@@ -339,6 +343,7 @@ unsafe fn build(heap: &mut Heap, rng: &mut SplitMix64, names: &mut Vec<String>) 
         for &root in &roots {
             heap.root(root);
         }
+        heap.segregate(false);
         heap.allow_collection();
         roots
     }
@@ -357,7 +362,7 @@ unsafe fn write(
             roots,
             prefixes,
             &|_| None,
-            &[],
+            &roots[roots.len() / 2..],
             &mut encode,
         )
         .unwrap_or_else(|error| panic!("the image does not write: {error}"))
