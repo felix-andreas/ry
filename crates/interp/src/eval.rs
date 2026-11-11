@@ -2478,10 +2478,24 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
     let heap = crate::heap();
     heap.define_formals_uncollected(env, &bindings)?;
     heap.mark_frame_formals(env);
-    for slot in bindings.len()..count {
-        let value = *registers.add(1 + slot);
-        if value != unbound() {
-            heap.define(env, names.element(slot), value)?;
+    if pending == nil() {
+        let locals: SmallVec<[Formal; 12]> = (bindings.len()..count)
+            .filter_map(|slot| {
+                let value = *registers.add(1 + slot);
+                (value != unbound()).then(|| Formal {
+                    symbol: names.element(slot),
+                    value,
+                    missing: false,
+                })
+            })
+            .collect();
+        heap.define_locals_uncollected(env, &locals)?;
+    } else {
+        for slot in bindings.len()..count {
+            let value = *registers.add(1 + slot);
+            if value != unbound() {
+                heap.define(env, names.element(slot), value)?;
+            }
         }
     }
     let method_vars: SmallVec<[(Sexp, Sexp); 6]> = crate::method_vars(interp(), index).into();
@@ -4266,6 +4280,11 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
         }
         _ => return Err(call.error("invalid for() loop sequence")),
     };
+    // R binds the variable to NULL before the first iteration, which only shows when there is
+    // none.
+    if count == 0 {
+        define(variable, nil(), env)?;
+    }
     // The body must see the sequence as shared, so that modifying the variable it came from
     // copies it instead of changing the elements still to come.
     sequence.increment_refcount();

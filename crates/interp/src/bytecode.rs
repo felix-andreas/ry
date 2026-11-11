@@ -47,7 +47,10 @@ use {
         Interp,
         arith::{MATHS, math_index},
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
-        conditions, dispatch::{self, Site}, effects,
+        conditions,
+        dispatch::{self, Site},
+        effects,
+        envir::namespace_binding,
         eval::{self, Reify, SwitchSelector, as_condition},
         interp,
         kernels::{self, Element, MAX_NODES, Node, Reduction},
@@ -639,6 +642,7 @@ unsafe fn compile_promise_arguments(function: Sexp, arguments: Sexp) -> R<Sexp> 
         // never needs one of its own to return to.
         srcref: nil(),
         rebinding: None,
+        assigning: None,
         tail_updates: (Vec::new(), nil()),
         summary: nil(),
         // Promise code runs on the slots of the frame that made it, so it shares that frame's
@@ -914,6 +918,11 @@ pub enum Op {
     /// `dst symbol`: `missing(symbol)` for a plain symbol, read from the frame without building
     /// the special's call.
     Missing,
+    /// `dst package symbol exported cache`: `package::symbol` (`exported` 1) or
+    /// `package:::symbol` (0) for literal names, read from the namespace binding the cache slot
+    /// holds while the lookup stamps of the bindings that led to it stand still
+    /// ([`namespace_binding`]).
+    Namespace,
     /// `dst program target`: an element-wise expression such as `exp(a * b + c)` or
     /// `sum(x > 0)` computed in one pass by `kernels::fused`, without intermediate vectors,
     /// after which execution goes on at `target`. The expression's ordinary code follows, and
@@ -942,7 +951,7 @@ pub enum ElementKind {
     Dollar = 2,
 }
 
-pub const OPS: [Op; 49] = [
+pub const OPS: [Op; 50] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -989,6 +998,7 @@ pub const OPS: [Op; 49] = [
     Op::Replace,
     Op::Resume,
     Op::Missing,
+    Op::Namespace,
     Op::Fused,
     Op::Unfused,
     Op::SuperAssign,
@@ -1114,6 +1124,10 @@ struct Compiler {
     /// The call `x <- f(x, ...)` assigns to `x`, while the compiler compiles that call, so a
     /// call of a closure becomes [`Op::CallRebinding`].
     rebinding: Option<(Sexp, Sexp)>,
+    /// The call `x <- call` assigns to `x`, with the symbol's constant and the assignment's
+    /// lookup cache slot, while the compiler compiles that call, so a fused pass may compute
+    /// the result into the value `x` holds.
+    assigning: Option<Sexp>,
     /// The body's calls in tail position that are `f(p, ...)` for a library builtin that
     /// updates its first argument in place, `p` the first parameter, with `p`: each becomes
     /// [`Op::CallTailUpdate`] (see [`tail_updates`]).
@@ -1237,11 +1251,13 @@ mod fusion {
     pub const DECLINES: usize = 0;
     pub const NODES: usize = 1;
     pub const LEAVES: usize = 2;
-    /// -1 for none, else 0 for `sum`, 1 for `any` and 2 for `all`.
+    /// -1 for none, [`ASSIGNED`] for none with the result assigned by the `SetVar` the pass
+    /// jumps to, else 0 for `sum`, 1 for `any` and 2 for `all`.
     pub const REDUCTION: usize = 3;
     pub const REDUCTION_SITE: usize = 4;
     pub const GUARDS: usize = 5;
     pub const HEADER: usize = 6;
+    pub const ASSIGNED: i32 = -2;
     pub const GUARD: usize = 4;
     pub const LEAF: usize = 4;
     pub const NODE: usize = 5;
@@ -1277,6 +1293,7 @@ unsafe fn compile_unreported(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         enclosure: function.tag(),
         srcref: values::get_attr(function, symbols().srcref),
         rebinding: None,
+        assigning: None,
         bound: None,
         tail_updates: tail_updates(body, function),
         cold: Vec::new(),
@@ -1743,7 +1760,7 @@ unsafe fn may_modify_in_place(expression: Sexp) -> bool {
         {
             return true;
         }
-        if rebinds_first_argument(expression) {
+        if rebinds_first_argument(expression) || assigns_fusible(expression) {
             return true;
         }
         if matches!(
@@ -1761,6 +1778,27 @@ unsafe fn may_modify_in_place(expression: Sexp) -> bool {
         cell = cell.cdr();
     }
     false
+}
+
+/// Whether `expression` is `x <- call` for an element-wise operator or math function, whose
+/// fused pass may compute its result into the value `x` holds (`kernels::fused`), so an
+/// earlier argument of an enclosing call must not keep `x` in an uncounted register.
+unsafe fn assigns_fusible(expression: Sexp) -> bool {
+    let head = expression.car();
+    if head.kind() != SexpType::Symbol || !matches!(&*symbol_name(head), "<-" | "=") {
+        return false;
+    }
+    let value = expression.cdr().cdr().car();
+    if expression.cdr().car().kind() != SexpType::Symbol
+        || value.kind() != SexpType::Language
+        || value.car().kind() != SexpType::Symbol
+    {
+        return false;
+    }
+    let operator = symbol_name(value.car());
+    ARITHS.iter().any(|(_, name)| *name == &*operator)
+        || math_index(&operator).is_some()
+        || matches!(&*operator, "&" | "|" | "!")
 }
 
 /// Whether `expression` is `x <- f(x, ...)`, whose call may update the value of `x` in place
@@ -2361,6 +2399,7 @@ impl Compiler {
     /// name their base functions, since a redefined operator might not evaluate it at all; when
     /// one does not, the whole call goes to the evaluator instead.
     unsafe fn fused_call(&mut self, call: Sexp, dst: u32, plan: &FusionPlan) -> R<()> {
+        let assigned = self.assigning == Some(call);
         let ahead_end = plan
             .steps
             .iter()
@@ -2422,7 +2461,7 @@ impl Compiler {
         if ordinary.next().is_some() {
             sites.clear();
         }
-        let program = match self.fusion_program(plan, &sites, &ahead) {
+        let program = match self.fusion_program(plan, &sites, &ahead, assigned) {
             Some(words) => values::integer_vector(&words)?,
             None => {
                 self.code[program_position - 2] = op_word(Op::Unfused);
@@ -2613,6 +2652,7 @@ impl Compiler {
         plan: &FusionPlan,
         sites: &[u32],
         ahead: &[(usize, u32)],
+        assigned: bool,
     ) -> Option<Vec<i32>> {
         if sites.len() != plan.steps.len() {
             return None;
@@ -2671,6 +2711,7 @@ impl Compiler {
             }
         }
         let reduction = match plan.reduction {
+            None if assigned => fusion::ASSIGNED,
             None => -1,
             Some(Reduction::Sum) => 0,
             Some(Reduction::Any) => 1,
@@ -2772,6 +2813,31 @@ impl Compiler {
                             self.quoted(call, head, primitive, dst, *quoted)
                         }
                         _ => self.general_call(call, head, dst),
+                    };
+                }
+                "::" | ":::" => {
+                    let literal = match args.as_slice() {
+                        [(package_tag, package), (name_tag, symbol)]
+                            if *package_tag == nil() && *name_tag == nil() =>
+                        {
+                            match (colon_literal(*package)?, colon_literal(*symbol)?) {
+                                (Some(package), Some(symbol)) => Some((package, symbol)),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    return match literal {
+                        Some((package, symbol)) => self.namespace(
+                            call,
+                            head,
+                            primitive,
+                            dst,
+                            package,
+                            symbol,
+                            name == "::",
+                        ),
+                        None => self.general_call(call, head, dst),
                     };
                 }
                 "missing" => {
@@ -3085,11 +3151,13 @@ impl Compiler {
                         && !self.frame_may_bind(index.car())
                         && self.side_effect_free_index(*object, target, depth + 1);
                 }
-                if arguments.iter().any(|(tag, _)| *tag != nil()) || self.frame_may_bind(index.car())
+                if arguments.iter().any(|(tag, _)| *tag != nil())
+                    || self.frame_may_bind(index.car())
                 {
                     return false;
                 }
-                let operand = |argument: Sexp| self.side_effect_free_index(argument, target, depth + 1);
+                let operand =
+                    |argument: Sexp| self.side_effect_free_index(argument, target, depth + 1);
                 match (&*operator, arguments.as_slice()) {
                     ("<-" | "=", [(_, variable), (_, value)]) => {
                         variable.kind() == SexpType::Symbol
@@ -3229,6 +3297,8 @@ impl Compiler {
                 | "switch"
                 | "missing"
                 | "quote"
+                | "::"
+                | ":::"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -3400,6 +3470,33 @@ impl Compiler {
         let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
         let symbol = self.constant(symbol);
         self.emit(Op::Missing, &[dst, symbol]);
+        self.cold_fallback(&[guard], call, dst)
+    }
+
+    /// `package::symbol` or `package:::symbol`, guarded by the operator: [`Op::Namespace`].
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn namespace(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        dst: u32,
+        package: Sexp,
+        symbol: Sexp,
+        exported: bool,
+    ) -> R<()> {
+        let name = self.constant(head);
+        let expected = self.constant(primitive);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        let guard = self.emit_patchable(Op::Guard, &[name, expected, cache, probe, 0]);
+        let package = self.constant(package);
+        let symbol = self.constant(symbol);
+        let lookup = self.cache();
+        self.emit(
+            Op::Namespace,
+            &[dst, package, symbol, u32::from(exported), lookup],
+        );
         self.cold_fallback(&[guard], call, dst)
     }
 
@@ -3596,8 +3693,12 @@ impl Compiler {
                 if rebinds_first_argument(call) {
                     self.rebinding = Some((args[1].1, args[0].1));
                 }
+                if assigns_fusible(call) {
+                    self.assigning = Some(args[1].1);
+                }
                 let compiled = self.expression(args[1].1, dst);
                 self.rebinding = None;
+                self.assigning = None;
                 compiled?;
                 let symbol = self.constant(args[0].1);
                 let slot = self.cache();
@@ -4204,6 +4305,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::Guard => 5,
         Op::Jump | Op::Resume => 1,
         Op::Missing | Op::SuperAssign => 2,
+        Op::Namespace => 5,
         Op::JumpUnless => 3,
         Op::Arithmetic => 7,
         Op::Return => 1,
@@ -4364,6 +4466,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::Arithmetic => &[Operator, Register, Register, Register, Call, Constant],
         Op::Return | Op::ForEnd => &[Register],
         Op::Missing => &[Register, Symbol],
+        Op::Namespace => &[Register, Symbol, Symbol, Immediate, Cache],
         Op::SuperAssign => &[Symbol, Register],
         Op::ForInit => &[Loop, Register, Constant],
         Op::ForStep => &[Loop, Register, Symbol, Target],
@@ -4614,7 +4717,7 @@ unsafe fn valid_fusion_program(
         || leaves > MAX_NODES
         || guards > MAX_NODES
         || words.len() != leaves_end + nodes * fusion::NODE
-        || !(-1..=2).contains(&words[fusion::REDUCTION])
+        || !(fusion::ASSIGNED..=2).contains(&words[fusion::REDUCTION])
         || count(fusion::REDUCTION_SITE).is_none_or(|site| site >= sites)
     {
         return false;
@@ -4862,7 +4965,13 @@ unsafe fn run_at(function: Sexp, code: Sexp, header: usize, base: usize) -> R<Se
     let profile = values::ints_mut(constants.element(PROFILE));
     let entries = profile[profile::ENTRIES].saturating_add(1);
     profile[profile::ENTRIES] = entries;
-    let mut loops: SmallVec<[LoopState; 4]> = smallvec![LoopState::default(); loop_count(code)];
+    // Built empty and filled only for a body with loops, so the inline buffer is not assembled
+    // on the stack and copied, which every call of a body paid.
+    let mut loops: SmallVec<[LoopState; 4]> = SmallVec::new();
+    let count = loop_count(code);
+    if count != 0 {
+        loops.extend(std::iter::repeat_n(LoopState::default(), count));
+    }
     let env = *register_address(header);
     // A slot frame's environment, once it has one, is fresh and marked as compiled when made.
     let was_compiled_frame = env != nil() && env.has_gp(gp::COMPILED_FRAME);
@@ -5100,13 +5209,13 @@ pub unsafe fn load_variable(machine: &Machine<'_>, pc: usize) -> R<(Sexp, bool)>
                 let start = machine.function.tag();
                 (
                     lookup_outside(
-                    symbol,
-                    start,
-                    LexicalFrame::of(machine),
-                    LookupCache::of(code),
-                    cache,
-                    0..0,
-                )?,
+                        symbol,
+                        start,
+                        LexicalFrame::of(machine),
+                        LookupCache::of(code),
+                        cache,
+                        0..0,
+                    )?,
                     false,
                 )
             }
@@ -5257,6 +5366,70 @@ type Handler = unsafe fn(&mut Activation<'_, '_>, usize);
 /// instruction at `pc`.
 #[inline(always)]
 unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) -> (R<Sexp>, usize) {
+    let mut state = activation(machine);
+    let handlers = if SINGLE {
+        &STEP_HANDLERS
+    } else {
+        &RUN_HANDLERS
+    };
+    if !SINGLE {
+        release(&state);
+        if let Some(baseline) = baseline_code(state.constants) {
+            run_baseline(&mut state, baseline, pc);
+            return (state.exit, STOP);
+        }
+    }
+    (*handlers.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
+    (state.exit, state.stepped)
+}
+
+/// Runs the [`Op::Fused`] instruction at `pc` for optimized code, which goes on at the
+/// instruction's target when this returns `true` and runs the ordinary code otherwise.
+pub unsafe fn fused_step(machine: &mut Machine<'_>, pc: usize) -> R<bool> {
+    let mut state = activation(machine);
+    let instruction = Instruction {
+        code: state.code,
+        at: pc,
+        registers: state.registers,
+    };
+    Ok(matches!(op_fused(&mut state, instruction)?, Flow::Goto(_)))
+}
+
+/// The instruction whose type feedback describes the value of the fused program `program`:
+/// its reduction's call, or else its root operator.
+pub unsafe fn fused_result_site(program: Sexp) -> Option<usize> {
+    if program.kind() != SexpType::Integer {
+        return None;
+    }
+    let words = values::ints(program);
+    if words.get(fusion::REDUCTION).copied()? >= 0 {
+        return usize::try_from(*words.get(fusion::REDUCTION_SITE)?).ok();
+    }
+    let root = words.len().checked_sub(fusion::NODE)?;
+    usize::try_from(*words.get(root + 4)?).ok()
+}
+
+/// The registers the fused program `program` reads: those of the call operands its
+/// expression evaluates ahead of the pass.
+pub unsafe fn fused_operand_registers(program: Sexp) -> SmallVec<[usize; 4]> {
+    if program.kind() != SexpType::Integer {
+        return SmallVec::new();
+    }
+    let words = values::ints(program);
+    let count = |index: usize| words.get(index).map_or(0, |&word| word as usize);
+    let start = fusion::HEADER + count(fusion::GUARDS) * fusion::GUARD;
+    let end = start + count(fusion::LEAVES) * fusion::LEAF;
+    words
+        .get(start..end)
+        .unwrap_or_default()
+        .chunks_exact(fusion::LEAF)
+        .filter(|leaf| leaf[0] == 2)
+        .map(|leaf| leaf[1] as usize)
+        .collect()
+}
+
+#[inline(always)]
+unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>) -> Activation<'m, 'a> {
     let constants = machine.code.cdr();
     let feedback = if values::ints(constants.element(PROFILE))[profile::RECORDING] != 0 {
         values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
@@ -5271,7 +5444,7 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
     } else {
         values::ints(slots.element(0)).as_ptr()
     };
-    let mut state = Activation {
+    Activation {
         constants,
         cache: LookupCache::of(machine.code),
         feedback,
@@ -5285,21 +5458,7 @@ unsafe fn interpret<const SINGLE: bool>(machine: &mut Machine<'_>, pc: usize) ->
         exit: Ok(nil()),
         stepped: STOP,
         machine,
-    };
-    let handlers = if SINGLE {
-        &STEP_HANDLERS
-    } else {
-        &RUN_HANDLERS
-    };
-    if !SINGLE {
-        release(&state);
-        if let Some(baseline) = baseline_code(constants) {
-            run_baseline(&mut state, baseline, pc);
-            return (state.exit, STOP);
-        }
     }
-    (*handlers.as_ptr().add(op_index(code, pc)))(&mut state, pc);
-    (state.exit, state.stepped)
 }
 
 /// The machine code the baseline tier compiled for these constants' code, if any.
@@ -5582,6 +5741,7 @@ handlers! {
     run_sub_assign_matrix, step_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
     run_replace, step_replace: Replace, true, op_replace;
     run_missing, step_missing: Missing, true, op_missing;
+    run_namespace, step_namespace: Namespace, true, op_namespace;
     run_fused, step_fused: Fused, true, op_fused;
     run_unfused, step_unfused: Unfused, false, op_unfused;
     run_super_assign, step_super_assign: SuperAssign, true, op_super_assign;
@@ -5702,6 +5862,7 @@ macro_rules! fast_paths {
 
 fast_paths! {
     fast_get_var: GetVar, get_var_fast;
+    fast_get_fun: GetFun, get_fun_fast;
     fast_set_var: SetVar, set_var_fast;
     fast_guard: Guard, guard_fast;
     fast_jump_unless: JumpUnless, jump_unless_fast;
@@ -5747,6 +5908,41 @@ unsafe fn get_var_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usiz
     *state.registers.add(*code.add(at + 1) as usize) = value;
     (*state.interp).visible = true;
     Some(at + 1 + operand_count(Op::GetVar))
+}
+
+/// `GetFun` in a slot frame: a slot holding a function, or else the cached cell of a name the
+/// frame does not bind, while it holds a function. A cache key is never a function frame, so a
+/// hit also means no function frame lies between the closure and the cached binding.
+#[inline(always)]
+unsafe fn get_fun_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let heap = &*state.heap;
+    let known = heap.known();
+    if *state.header != known.nil {
+        return None;
+    }
+    let code = state.code;
+    let cache_slot = *code.add(at + 3) as usize;
+    let slot = *state.slot_map.add(cache_slot);
+    let mut value = if slot >= 0 {
+        *state.header.add(1 + slot as usize)
+    } else {
+        let cache = state.cache;
+        let symbol = pool_constant(state, *code.add(at + 2) as usize);
+        if *cache.epochs.add(cache_slot) != heap.lookup_stamp(symbol)
+            || *cache.slots.add(cache_slot * 2) != state.machine.function.tag()
+        {
+            return None;
+        }
+        (*cache.slots.add(cache_slot * 2 + 1)).cdr()
+    };
+    if value.kind() == SexpType::Promise {
+        value = value.car();
+    }
+    if !values::is_function(value) {
+        return None;
+    }
+    *state.registers.add(*code.add(at + 1) as usize) = value;
+    Some(at + 1 + operand_count(Op::GetFun))
 }
 
 /// `SetVar` of a local in a slot frame, when giving up the old value needs no bookkeeping.
@@ -7210,7 +7406,10 @@ unsafe fn slot_special_call(
             }
             // `name <<- value` assigns from the enclosure outwards, so only the value reads the
             // frame.
-            "<<-" if argument.kind() == SexpType::Symbol && eval::dot_dot_index(argument).is_none() => {
+            "<<-"
+                if argument.kind() == SexpType::Symbol
+                    && eval::dot_dot_index(argument).is_none() =>
+            {
                 let Some(value) = slot_operand(state, rest.car())? else {
                     return Ok(None);
                 };
@@ -7446,7 +7645,8 @@ unsafe fn slot_use_method(
     };
     // Through R 4.3 the method sees the generic's locals, which only an environment can show.
     let names = state.constants.element(SLOTS).element(1);
-    let locals = (length(formals)..length(names)).any(|index| *state.header.add(1 + index) != unbound());
+    let locals =
+        (length(formals)..length(names)).any(|index| *state.header.add(1 + index) != unbound());
     if locals && !crate::system::r_at_least(4, 4) {
         return Ok(None);
     }
@@ -7605,8 +7805,7 @@ unsafe fn assign_slot_element(
             | SexpType::List
             | SexpType::Expression
     );
-    if !replaceable || target.is_object() || (kind == ElementKind::Dollar && length(index) != 1)
-    {
+    if !replaceable || target.is_object() || (kind == ElementKind::Dollar && length(index) != 1) {
         return Ok(false);
     }
     moves::modifying(target)?;
@@ -8272,6 +8471,78 @@ unsafe fn op_missing(state: &mut Activation<'_, '_>, instruction: Instruction) -
     Ok(Flow::Next)
 }
 
+/// `package::symbol` through the cached namespace binding, and through the evaluator's lookup,
+/// which may load the namespace, when the cache is empty or stale.
+unsafe fn op_namespace(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let package = state.constant(instruction, 1);
+    let symbol = state.constant(instruction, 2);
+    let slot = instruction.operand(4);
+    let cache = state.cache;
+    let cached = if *cache.epochs.add(slot) == namespace_stamp(package, symbol) {
+        bound_value(*cache.slots.add(slot * 2 + 1))
+    } else {
+        None
+    };
+    let value = match cached {
+        Some(value) => value,
+        None => {
+            let exported = instruction.operand(3) != 0;
+            let (value, cell) = namespace_binding(package, symbol, exported)?;
+            if let Some(cell) = cell {
+                let heap = crate::heap();
+                heap.set_element(cache.caches, slot * 2, package);
+                heap.set_element(cache.caches, slot * 2 + 1, cell);
+                *cache.epochs.add(slot) = namespace_stamp(package, symbol);
+            }
+            value
+        }
+    };
+    state.record(instruction.at, value);
+    (*state.interp).visible = true;
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+/// What a cached `package::symbol` depends on besides the cell's value: the registry's binding
+/// of the package, the namespace's `.__NAMESPACE__.` and its `exports` table, and every binding
+/// of the name on the way from the namespace to the cell. [`namespace_binding`] watches
+/// the bindings it read, so changing any of them moves one of these stamps, and stamps only
+/// grow, so their sum moves too.
+#[inline(always)]
+unsafe fn namespace_stamp(package: Sexp, symbol: Sexp) -> u64 {
+    let heap = crate::heap();
+    let symbols = symbols();
+    heap.lookup_stamp(package)
+        .wrapping_add(heap.lookup_stamp(symbol))
+        .wrapping_add(heap.lookup_stamp(symbols.dot_namespace))
+        .wrapping_add(heap.lookup_stamp(symbols.exports))
+}
+
+/// The value a binding cell holds when reading it needs no evaluation: not an active binding,
+/// an unforced promise, or a missing or unbound value.
+#[inline(always)]
+unsafe fn bound_value(cell: Sexp) -> Option<Sexp> {
+    if cell == nil() || cell.has_gp(gp::ACTIVE_BINDING) {
+        return None;
+    }
+    let mut value = cell.cdr();
+    if value.kind() == SexpType::Promise {
+        value = value.car();
+    }
+    (value != unbound() && value != missing_arg()).then_some(value)
+}
+
+/// The symbol a side of a literal `::` names: a symbol as written, or a one-element string.
+unsafe fn colon_literal(value: Sexp) -> R<Option<Sexp>> {
+    match value.kind() {
+        SexpType::Symbol if value != missing_arg() && value != symbols().dots => Ok(Some(value)),
+        SexpType::String if length(value) == 1 && value.attrib() == nil() => {
+            values::install_charsxp(value.element(0)).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
 /// `missing(symbol)`, read from a slot frame's slots and missing bits when `symbol` is one of
 /// its formals, which needs no environment.
 unsafe fn slot_missing(state: &Activation<'_, '_>, symbol: Sexp) -> R<bool> {
@@ -8484,12 +8755,19 @@ unsafe fn fused_pass(
         }
         let slot = leaf[2] as usize;
         let hint = &mut *cache.hints.add(slot);
-        let local_value = if env == nil() { local_slot(constant) } else { None };
+        let local_value = if env == nil() {
+            local_slot(constant)
+        } else {
+            None
+        };
         let (value, local) = match local_value {
             Some(value) => (value, true),
             None => {
-                let local_cell =
-                    if env == nil() { None } else { heap.frame_cell_hinted(env, constant, hint) };
+                let local_cell = if env == nil() {
+                    None
+                } else {
+                    heap.frame_cell_hinted(env, constant, hint)
+                };
                 let (cell, local) = match local_cell {
                     Some(cell) => (cell, true),
                     None => match outside_function_frames(constant, enclosure, hint) {
@@ -8582,7 +8860,22 @@ unsafe fn fused_pass(
         2 => Some(Reduction::All),
         _ => None,
     };
-    let Some(fused) = kernels::fused(&nodes, &leaves[..leaf_count], reduction)? else {
+    // The assignment's `SetVar` names the symbol and its lookup cache; a code image is only
+    // checked to make the jump target an instruction, so the pass checks that it is this one.
+    let assignment = instruction.code.add(instruction.operand(2));
+    let into = if words[fusion::REDUCTION] == fusion::ASSIGNED
+        && *assignment == op_word(Op::SetVar) as i32
+        && *assignment.add(2) as usize == instruction.operand(0)
+    {
+        reusable_target(
+            state,
+            state.constants.element(*assignment.add(1) as usize),
+            *assignment.add(3) as usize,
+        )
+    } else {
+        None
+    };
+    let Some(fused) = kernels::fused(&nodes, &leaves[..leaf_count], reduction, into)? else {
         return Ok(None);
     };
     if !state.feedback.is_null() {
@@ -8610,6 +8903,26 @@ unsafe fn fused_pass(
         }
     }
     Ok(Some(fused.value))
+}
+
+/// The value `symbol` holds in the activation's own frame, when the assignment the fused
+/// pass computes may overwrite it: the binding is a plain one holding the only reference, and
+/// no register of the frame's expressions holds it uncounted (`slot_owns`,
+/// `eval::reuse_permitted`). The compiler keeps such registers dead in the innermost compiled
+/// frame, as `may_modify_in_place` counts `x <- call` among the in-place updates.
+unsafe fn reusable_target(state: &Activation<'_, '_>, symbol: Sexp, cache: usize) -> Option<Sexp> {
+    if state.in_slots() {
+        let value = *state.slot(cache)?;
+        return slot_owns(state, value).then_some(value);
+    }
+    let env = *state.header;
+    let hint = &mut *state.cache.hints.add(cache);
+    let cell = crate::heap().frame_cell_hinted(env, symbol, hint)?;
+    let value = cell.cdr();
+    (!cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED)
+        && value.refcount() == 1
+        && eval::reuse_permitted(env, value))
+    .then_some(value)
 }
 
 #[inline(always)]
@@ -8692,6 +9005,17 @@ unsafe fn op_for_step(state: &mut Activation<'_, '_>, instruction: Instruction) 
         .get_mut(instruction.operand(0))
         .ok_or_else(|| error("compiled code names a loop it does not have"))?;
     if loop_state.index >= loop_state.count {
+        // R binds the variable to NULL before the first iteration, which only shows when there
+        // is none; binding it on every entry would cost a loop the scalar it overwrites in place.
+        if loop_state.count == 0 {
+            match slot {
+                Some(slot) => {
+                    crate::heap().store_slot(&mut *slot, nil());
+                    clear_missing(state, slot);
+                }
+                None => eval::define(variable, nil(), env)?,
+            }
+        }
         return Ok(Flow::Goto(instruction.operand(3)));
     }
     let sequence = instruction.input(1);
@@ -9337,9 +9661,10 @@ unsafe fn replace_variable(
                 item = item.cdr();
             }
             let interpreter = interp();
-            let outer = interpreter
-                .assignment_call
-                .replace((setter_call, whole, interpreter.frames.len()));
+            let outer =
+                interpreter
+                    .assignment_call
+                    .replace((setter_call, whole, interpreter.frames.len()));
             let result = eval::call_builtin(definition, setter_call, function, &arguments, env);
             interp().assignment_call = outer;
             result
@@ -9716,7 +10041,9 @@ unsafe fn lookup_outside(
                 || value == unbound()
                 || value.kind() == SexpType::Promise
             {
-                return holding(held, || eval::eval_symbol_reporting(symbol, env, || lexical.call()));
+                return holding(held, || {
+                    eval::eval_symbol_reporting(symbol, env, || lexical.call())
+                });
             }
             return Ok(value);
         }
@@ -9726,7 +10053,9 @@ unsafe fn lookup_outside(
     {
         let value = cell.cdr();
         if value.kind() == SexpType::Promise {
-            return holding(held, || eval::eval_symbol_reporting(symbol, env, || lexical.call()));
+            return holding(held, || {
+                eval::eval_symbol_reporting(symbol, env, || lexical.call())
+            });
         }
         if value != missing_arg() && value != unbound() {
             return Ok(value);
@@ -9737,7 +10066,9 @@ unsafe fn lookup_outside(
     if let Some(cell) = resolve(symbol, enclosure, false)? {
         fill_cache(symbol, enclosure, cell, cache, slot);
     }
-    holding(held, || eval::eval_symbol_reporting(symbol, env, || lexical.call()))
+    holding(held, || {
+        eval::eval_symbol_reporting(symbol, env, || lexical.call())
+    })
 }
 
 /// Runs `run`, which forces a promise or an active binding and so runs code. The registers
@@ -9816,8 +10147,17 @@ unsafe fn lookup_function_missed(
     call: Sexp,
 ) -> R<Sexp> {
     activity::count(Counter::LookupMisses);
+    // The frames between `env` and `enclosure` do not bind `symbol`, so the cell `resolve`
+    // finds, which holds a function (forced, if it was a promise), is the answer.
     if let Some(cell) = resolve(symbol, enclosure, true)? {
         fill_cache(symbol, enclosure, cell, cache, slot);
+        let mut value = cell.cdr();
+        if value.kind() == SexpType::Promise {
+            value = value.car();
+        }
+        if values::is_function(value) {
+            return Ok(value);
+        }
     }
     eval::find_called_fun(symbol, env, call)
 }
@@ -9950,6 +10290,7 @@ unsafe fn cached_cell(
 
 unsafe fn fill_cache(symbol: Sexp, enclosure: Sexp, cell: Sexp, cache: LookupCache, slot: usize) {
     let heap = crate::heap();
+    heap.observe_environment(enclosure);
     heap.set_element(cache.caches, slot * 2, enclosure);
     heap.set_element(cache.caches, slot * 2 + 1, cell);
     *cache.epochs.add(slot) = heap.lookup_stamp(symbol);

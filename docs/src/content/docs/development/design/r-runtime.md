@@ -986,7 +986,9 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | Slot hints at lookup sites, behind the frame's symbol filter | JSC, V8 inline caches | built | variable lookup | `cached_cell`, `Frame::find_hinted` in `crates/heap/src/env.rs` |
 | Function lookups skip frames that cannot bind the symbol | ry | built | `lookup_function` | `lookup_function` in `bytecode.rs` |
 | Lookup stamps compared as their bits | V8 | built | 1.25k per `seq()` call | `LookupCache` in `bytecode.rs` |
-| Hash index only for frames over 32 bindings | ry | built | 3k per `seq()` call (`Frame::insert`) | `INDEX_THRESHOLD` in `env.rs` |
+| Index only for frames over 32 bindings: one open-addressed block of packed (hash, position) words | ry | built | 3k per `seq()` call (`Frame::insert`) | `INDEX_THRESHOLD` in `env.rs` |
+| Literal `pkg::name` reads the namespace binding it found, while the stamps of the bindings that led there stand still | JSC watchpoints | built | `namespace_lookup` on testthat_full, JIT off: 33,841 calls to 1,549 over five repetitions | `Op::Namespace` in `bytecode.rs`, `namespace_binding` in `envir.rs` |
+| Frameless `GetFun` for a slot holding a function and for a cached global function | LuaJIT, CPython | built | testthat_full, JIT off: the `GetFun` handler 22.7M to 12.4M instructions per repetition | `get_fun_fast` in `bytecode.rs` |
 | Builtin checks derived at registration | GNU R `PRIMARITY` | built | builtin call overhead | `Checks` in `crates/interp/src/builtins.rs` |
 | A call plan per call site: arguments written straight into the callee's slots | JSC `CodeBlock`, V8 | built | `run_closure`'s matching and binding; a call from a loop costs 2,330 instructions, down from 3,065 on heap frames | `direct_plan` in `bytecode.rs`, `call_with_plan` in `eval.rs` |
 | **2. Call facts ahead of time** | | | | |
@@ -1016,7 +1018,7 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | Tail-call dispatch, one indirect jump per handler | LuaJIT, JSC | built | the shared indirect jump; measured level with the match loop (121.4k against 120.8k per `seq()`), since handlers that call out still need a frame. The handler signature is `(activation, pc)` so that few values stay live across calls | `handlers!` in `bytecode.rs` |
 | Dense feedback storage, one slot per profiled instruction | V8 | planned | feedback is one `i32` per code word | |
 | One description of each instruction's semantics, shared by tier 0 and the baseline | Deegen (LuaJIT Remake) | planned | the baseline drifting from tier 0 | |
-| One kernel layer for vector builtins: vectorized slice kernels, results written into dead temporaries, and an `Op::Fused` superinstruction that evaluates an element-wise tree in 512-element chunks or declines before anything observable happens | pqR (`R_allocOrReuseVector`, task merging), Riposte | in progress | builtins 51% of `simulation`; one allocation and one pass per operator | `crates/interp/src/kernels.rs` |
+| One kernel layer for vector builtins: vectorized slice kernels, results written into dead temporaries, and an `Op::Fused` superinstruction that evaluates an element-wise tree in 512-element chunks or declines before anything observable happens | pqR (`R_allocOrReuseVector`, task merging), Riposte | in progress | builtins 51% of `simulation`; one allocation and one pass per operator. `y <- exp(-x^2/2) * k` runs at 1.4 to 1.6 ns per element against GNU R's 6.3 (4x), `x * k + 1` at 0.3 against 1.8 | `crates/interp/src/kernels.rs`, `vector_math.rs` |
 | **4. Optimizing tiers** | | | | |
 | Per-argument-type native functions for scalar closures | Julia | built | recursive scalar functions | `crates/jit/src/native.rs` |
 | Baseline compiler from bytecode, no optimization | V8 Sparkplug | built, opt-in (`RY_JIT=baseline`, `RY_JIT_THRESHOLDS`); `RY_JIT=on` leaves it out | warm code under the 3000-entry threshold. Compiles in a median of 28 µs per body (at most about 0.5 ms), but a call per instruction measures level with tier 0's tail-call handlers (a scalar loop 0.53 s against 0.47 to 0.51 s), and with variable access and scalar comparisons inline it still loses on `bench-real` to the instruction-cache footprint of per-body code (9.7 MB over 972 bodies on `testthat`). `RY_JIT=baseline` runs it alone | `crates/jit/src/baseline.rs`, `assembler.rs` |
@@ -1097,7 +1099,22 @@ R's vector builtins share one kernel layer in `crates/interp/src/kernels.rs`, wh
   modify a variable in place (an assignment, `eval`, a replacement call) stays unfused. A site
   that declines 16 times in a row rewrites its opcode to `Op::Unfused`, which does nothing, and
   drops its program, so a site that never fuses costs one dispatch in tier 0, no code in baseline
-  code, and no heap.
+  code, and no heap. Baseline code calls the same pass (`jit_fused`) instead of skipping it.
+- **Assignment into the old buffer.** For `y <- expr`, a fused double pass writes its result into
+  the vector `y` already holds when nothing else can see that vector: the binding is not active
+  or locked, the vector's count is one, and it has the result's type and length. `y` may be a
+  leaf of the tree, as in `x <- exp(-x^2 / 2) * 0.5 + x`; the pass then keeps each chunk in
+  scratch and copies it over `y`'s elements only after every node has read them. A loop that
+  reassigns a vector therefore allocates nothing after its first pass. Integer passes never
+  reuse, because an overflow halfway through declines to the ordinary code, which must still
+  read the old value.
+- **SIMD `exp` and `log`.** On x86-64 with AVX2 and FMA, `exp` and `log` of doubles, alone or
+  inside a fused pass, run four lanes at a time (`crates/interp/src/vector_math.rs`). They are
+  ports of glibc's `__exp_fma` and `__log_fma`, the variants GNU R calls on such a machine, and
+  agree with them bit for bit; the first call compares both on edge values and falls back to
+  glibc when they differ. Table lookups use paired 128-bit loads rather than gathers, which the
+  Gather Data Sampling mitigation makes slow. `x^2` is `x * x` and division by a power of two is
+  multiplication by its exact reciprocal, which give GNU R's bits, NA's quieted payload included.
 
 NaN results match GNU R 4.3.3 on x86-64, where an operation on two NaNs returns the first
 operand's payload. GNU R's compiled loops swap the operands of `+` and `*` on two doubles when the
