@@ -547,8 +547,9 @@ pub enum Effect {
     /// Reads and writes only its registers, and never signals a condition.
     Pure,
     /// Runs no R code unless one of these registers holds an object or an ALTREP vector (whose
-    /// methods a package may write in R), or a calling handler is established, since a warning
-    /// runs the handler; in each case it is opaque.
+    /// methods a package may write in R) or an environment (whose promises and active bindings
+    /// a read may run), or a calling handler is established, since a warning runs the handler;
+    /// in each case it is opaque.
     PureUnlessObserved,
     /// May run arbitrary R code, which may read or rebind the frame's variables.
     Opaque,
@@ -2163,13 +2164,22 @@ impl<'a> Builder<'a> {
                         state.visible = Some(true);
                         self.slot_read(state, operand(0), operand(1), layout, index, feedback)
                     }
-                    _ => self.fast_step(
-                        state,
-                        Some((operand(0), feedback)),
-                        &[],
-                        Effect::Opaque,
-                        Fast::Read,
-                    ),
+                    // `$` runs R code only through a method of an object or an environment's
+                    // promise or active binding, which the observed check sends the opaque way.
+                    _ => {
+                        let subject = self.slice(
+                            [operand(1)]
+                                .into_iter()
+                                .filter(|&register| !state.registers[register].is_plain()),
+                        );
+                        self.fast_step(
+                            state,
+                            Some((operand(0), feedback)),
+                            subject,
+                            Effect::PureUnlessObserved,
+                            Fast::Read,
+                        )
+                    }
                 }
             }
             Op::Item => {
@@ -3870,7 +3880,15 @@ impl<'a> Builder<'a> {
                 Effect::PureUnlessObserved,
             ));
         }
-        let fast = if count == 2 && matches!(name, "[" | "[[") {
+        // Tier 0's fast handler takes only a scalar index, which feedback types as a scalar, so
+        // an index typed as a vector has not been one at this site and would only pay for the
+        // handler's decline.
+        let fast = if count == 2
+            && matches!(name, "[" | "[[")
+            && !matches!(
+                types[1],
+                Ty::IntVec | Ty::DblVec | Ty::LglVec | Ty::IntArr | Ty::DblArr | Ty::LglArr | Ty::List
+            ) {
             Fast::Read
         } else {
             Fast::No

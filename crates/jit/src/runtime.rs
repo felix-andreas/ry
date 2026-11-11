@@ -113,6 +113,17 @@ pub mod outcome {
     pub const LOAD_INVALIDATED: i32 = 4;
 }
 
+/// What [`jit_quiet_step`] did with an element read or store.
+pub mod quiet {
+    /// The generic handler ran the instruction, which may have rebound a store's variable.
+    pub const STEPPED: i32 = 0;
+    /// Nothing ran: the generic handler might run R code, so compiled code steps the
+    /// instruction with the frame written back.
+    pub const DECLINED: i32 = 1;
+    /// The generic handler raised an error, which is parked.
+    pub const FAILED: i32 = 2;
+}
+
 /// A compiled body. Owned by an external pointer in the code's `TIER1` constant, which keeps
 /// every object the machine code embeds alive: through a weak reference keyed on the enclosure
 /// for code tied to its enclosure, or directly for portable code.
@@ -137,6 +148,9 @@ pub struct Compiled {
     /// Tier 0's register count; the slot root cells follow.
     pub registers: usize,
     pub slots: Vec<Sexp>,
+    /// Each slot's position in the code's slot table, which numbers a slot frame's variables,
+    /// or `None` for a symbol the table does not number.
+    pub frame: Box<[Option<usize>]>,
     pub loops: usize,
     pub speculations: Vec<Speculation>,
     /// The binding epoch the speculations were last checked against.
@@ -452,6 +466,14 @@ unsafe fn checked<T>(
     }
 }
 
+/// The frame slot that holds `slot`'s variable, while the activation runs in a slot frame
+/// without an environment.
+unsafe fn frame_slot(activation: &Activation, machine: &Machine<'_>, slot: i64) -> Option<*mut Sexp> {
+    unsafe {
+        compiled(activation).frame[slot as usize].and_then(|position| machine.frame_slot(position))
+    }
+}
+
 unsafe fn slot_cell(activation: &Activation, slot: i64) -> *mut Sexp {
     unsafe {
         activation
@@ -465,8 +487,12 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
     unsafe {
         checked(activation, outcome::FAILED, |activation| {
             let machine = machine(activation);
-            let epoch = heap().binding_epoch();
-            match scoped(|| bytecode::step_one(machine, pc as usize)) {
+            let heap = heap();
+            let epoch = if validate != 0 { heap.binding_epoch() } else { 0 };
+            let mark = heap.handle_mark();
+            let stepped = bytecode::step_one(machine, pc as usize);
+            heap.release_handles(mark);
+            match stepped {
                 Err(unwind) => {
                     park(activation, unwind);
                     outcome::FAILED
@@ -481,11 +507,27 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
     }
 }
 
-/// Runs the instruction at `pc` through tier 0's fast handler for it: 1 when the handler
-/// applied, 0 when the instruction still has to be stepped. A fast handler never unwinds or
-/// runs R code, so this needs neither a guard nor a validation.
+/// Runs the element read or store at `pc` through tier 0's fast handler for it
+/// ([`bytecode::fast_step`]), which runs no R code: nonzero when the handler applied.
 pub unsafe extern "C" fn jit_fast_step(activation: *mut Activation, pc: i64) -> i32 {
-    unsafe { bytecode::fast_step(machine(&*activation), pc as usize) as i32 }
+    unsafe { i32::from(bytecode::fast_step(machine(&*activation), pc as usize)) }
+}
+
+/// Runs the element read or store at `pc` through its generic handler where that runs no R
+/// code ([`bytecode::quiet_step`]), so nothing needs validating: one of [`quiet`]'s outcomes.
+pub unsafe extern "C" fn jit_quiet_step(activation: *mut Activation, pc: i64) -> i32 {
+    unsafe {
+        checked(activation, quiet::FAILED, |activation| {
+            match bytecode::quiet_step(machine(activation), pc as usize) {
+                None => quiet::DECLINED,
+                Some(Ok(())) => quiet::STEPPED,
+                Some(Err(unwind)) => {
+                    park(activation, unwind);
+                    quiet::FAILED
+                }
+            }
+        })
+    }
 }
 
 /// Runs the fused pass of the `Fused` instruction at `pc`: [`outcome::FUSED`] when it computed
@@ -599,7 +641,7 @@ pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -
             let epoch = heap().binding_epoch();
             let loaded = scoped(|| {
                 if machine.env() == values::nil() {
-                    return match machine.slot_of(symbol).map(|slot| *slot) {
+                    return match frame_slot(activation, machine, slot).map(|slot| *slot) {
                         Some(value) if value.kind() == SexpType::Promise => {
                             let forced = if value.car() == values::unbound() {
                                 let forced = eval::force_promise(value)?;
@@ -671,7 +713,7 @@ pub unsafe extern "C" fn jit_peek_slot(activation: *mut Activation, slot: i64) -
             let mut env = machine.env();
             let mut local = true;
             if env == values::nil() {
-                if let Some(frame_slot) = machine.slot_of(symbol) {
+                if let Some(frame_slot) = frame_slot(activation, machine, slot) {
                     let mut value = *frame_slot;
                     if value.kind() == SexpType::Promise {
                         value = value.car();
@@ -923,6 +965,21 @@ pub unsafe extern "C" fn jit_flush(
             let machine = machine(activation);
             let symbol = compiled(activation).slots[slot as usize];
             let cell = slot_cell(activation, slot);
+            let frame = frame_slot(activation, machine, slot);
+            // A boxed value into a slot frame allocates nothing, so it needs no handle scope.
+            if kind == representation::BOXED && frame.is_some() {
+                let value = *cell;
+                return match machine.assign(frame, symbol, value) {
+                    Ok(()) => {
+                        value.decrement_refcount();
+                        1
+                    }
+                    Err(unwind) => {
+                        park(activation, unwind);
+                        0
+                    }
+                };
+            }
             let element = match kind {
                 representation::INTEGER => Some((SexpType::Integer, f64::from(bits as i32))),
                 representation::LOGICAL => Some((SexpType::Logical, f64::from(bits as i32))),
@@ -932,7 +989,7 @@ pub unsafe extern "C" fn jit_flush(
             // A loop writes the same variables back on every iteration, so reusing the box the
             // variable holds saves an allocation each time.
             if let Some((kind, element)) = element
-                && let Some(value) = machine.overwrite(symbol, kind, element)
+                && let Some(value) = machine.overwrite(frame, symbol, kind, element)
             {
                 *cell = value;
                 return 1;
@@ -945,7 +1002,7 @@ pub unsafe extern "C" fn jit_flush(
                     _ => *cell,
                 };
                 *cell = value;
-                machine.assign(symbol, value)?;
+                machine.assign(frame, symbol, value)?;
                 if kind == representation::BOXED {
                     value.decrement_refcount();
                 }

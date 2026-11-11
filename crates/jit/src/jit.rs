@@ -642,6 +642,20 @@ unsafe fn compile_in<'a>(
             rooted,
             registers: plan.registers,
             slots: plan.slots.to_vec(),
+            frame: {
+                let table = machine.code.cdr().element(bytecode::SLOTS);
+                let names = if table == values::nil() {
+                    values::nil()
+                } else {
+                    table.element(1)
+                };
+                plan.slots
+                    .iter()
+                    .map(|&symbol| {
+                        (0..values::length(names)).find(|&index| names.element(index) == symbol)
+                    })
+                    .collect()
+            },
             loops: plan.loops,
             speculations: plan.speculations.to_vec(),
             // No epoch or stamp matches, so the first run checks the compiling activation's own

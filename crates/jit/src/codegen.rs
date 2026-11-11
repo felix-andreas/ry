@@ -19,7 +19,7 @@ use {
             StateRef, Store, Ty, jump_target, status,
         },
         native,
-        runtime::{self, Activation, Exit, offset, outcome, reason, representation},
+        runtime::{self, Activation, Exit, offset, outcome, quiet, reason, representation},
     },
     heap::object::{
         INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, NA_REAL_BITS, RECORD_DATA_OFFSET,
@@ -1197,24 +1197,19 @@ impl<'p> Translator<'p> {
             if let Fast::Store(slot) = fast {
                 self.flush_slot(before, slot, failed);
             }
-            let pc_value = iconst(&mut self.builder, pc);
-            let handled = self
-                .call(
-                    runtime::jit_fast_step as *const () as usize,
-                    &[I64, I64],
-                    Some(I32),
-                    &[self.activation, pc_value],
-                )
-                .ok_or(Refusal("a helper without a result"))?;
-            let done = self.builder.create_block();
-            let generic = self.builder.create_block();
-            self.builder.ins().brif(handled, done, &[], generic, &[]);
-            self.builder.switch_to_block(done);
+            let [handled, stepped, generic] = self.fast_step(pc, true, failed)?;
+            self.builder.switch_to_block(handled);
             // The handler stores into the frame's object in place, so a variable held as that
             // object stays valid, and only an unboxed copy goes stale.
             if let Fast::Store(slot) = fast
                 && before.slots[slot].ty.in_variables()
             {
+                let zero = self.builder.ins().iconst(I32, 0);
+                self.set_status(slot, zero);
+            }
+            self.builder.ins().jump(refining, &[]);
+            self.builder.switch_to_block(stepped);
+            if let Fast::Store(slot) = fast {
                 let zero = self.builder.ins().iconst(I32, 0);
                 self.set_status(slot, zero);
             }
@@ -1244,6 +1239,14 @@ impl<'p> Translator<'p> {
                         .ins()
                         .band_imm_u(bits, OBJECT_FLAG | ALTREP_FLAG);
                     any = self.builder.ins().bor(any, observed);
+                    let kind = self.builder.ins().uload8(I32, flags(), value, KIND);
+                    let environment = self.builder.ins().icmp_imm_s(
+                        IntCC::Equal,
+                        kind,
+                        SexpType::Environment as i64,
+                    );
+                    let environment = self.builder.ins().uextend(I32, environment);
+                    any = self.builder.ins().bor(any, environment);
                 }
                 let dispatching = self.builder.create_block();
                 let join = self.builder.create_block();
@@ -3004,7 +3007,10 @@ impl<'p> Translator<'p> {
         }
 
         self.builder.switch_to_block(slow);
-        self.sub_assign_in_tier0(position, before, slot, failed)?;
+        // Tier 0's fast handler stores into an atomic vector only what the code above does, so
+        // with the vector's type known it would only decline.
+        let fast = matches!(subscript, Subscript::Vector(_)) && target == Ty::Boxed;
+        self.sub_assign_in_tier0(position, before, slot, fast, failed)?;
         self.builder.ins().jump(join, &[]);
 
         self.builder.switch_to_block(join);
@@ -3023,6 +3029,7 @@ impl<'p> Translator<'p> {
         position: usize,
         before: &StateRef<'p>,
         slot: usize,
+        fast: bool,
         failed: Label,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
@@ -3035,20 +3042,13 @@ impl<'p> Translator<'p> {
         // Tier 0's fast handler takes the stores this code leaves out, such as one into a list
         // with names, and needs only this variable in the frame.
         self.flush_slot(before, slot, failed);
-        let pc_value = iconst(&mut self.builder, pc);
-        let handled = self
-            .call(
-                runtime::jit_fast_step as *const () as usize,
-                &[I64, I64],
-                Some(I32),
-                &[self.activation, pc_value],
-            )
-            .ok_or(Refusal("a helper without a result"))?;
-        let stepping = self.builder.create_block();
-        let stored = self.builder.create_block();
+        let [stored, stepped, stepping] = self.fast_step(pc, fast, failed)?;
         let done = self.builder.create_block();
         self.builder.set_cold_block(stepping);
-        self.builder.ins().brif(handled, stored, &[], stepping, &[]);
+        self.builder.switch_to_block(stepped);
+        let unloaded = self.builder.ins().iconst(I32, 0);
+        self.set_status(slot, unloaded);
+        self.builder.ins().jump(done, &[]);
         self.builder.switch_to_block(stepping);
         self.flush_all(before, failed);
         let zero = self.builder.ins().iconst(I32, 0);
@@ -3127,7 +3127,7 @@ impl<'p> Translator<'p> {
         self.builder.ins().brif(stored, join, &[], slow, &[]);
 
         self.builder.switch_to_block(slow);
-        self.sub_assign_in_tier0(position, before, slot, failed)?;
+        self.sub_assign_in_tier0(position, before, slot, true, failed)?;
         self.builder.ins().jump(join, &[]);
 
         self.builder.switch_to_block(join);
@@ -4363,6 +4363,51 @@ impl<'p> Translator<'p> {
         self.builder
             .ins()
             .istore16(flags(), new_count, value, REFCOUNT);
+    }
+
+    /// Calls [`runtime::jit_fast_step`] for the element op at `pc` when `fast` says tier 0's
+    /// fast handler may apply, then [`runtime::jit_quiet_step`] where it did not, and branches
+    /// on what they did, to the returned blocks: where the fast handler ran the op, where the
+    /// generic handler did, and where neither did. An error leaves through `failed`.
+    fn fast_step(&mut self, pc: usize, fast: bool, failed: Label) -> Result<[Label; 3], Refusal> {
+        let pc = iconst(&mut self.builder, pc);
+        let [handled, quiet, stepped, declining, declined] =
+            std::array::from_fn(|_| self.builder.create_block());
+        if fast {
+            let applied = self
+                .call(
+                    runtime::jit_fast_step as *const () as usize,
+                    &[I64, I64],
+                    Some(I32),
+                    &[self.activation, pc],
+                )
+                .ok_or(Refusal("a helper without a result"))?;
+            self.builder.ins().brif(applied, handled, &[], quiet, &[]);
+        } else {
+            self.builder.ins().jump(quiet, &[]);
+        }
+        self.builder.switch_to_block(quiet);
+        let result = self
+            .call(
+                runtime::jit_quiet_step as *const () as usize,
+                &[I64, I64],
+                Some(I32),
+                &[self.activation, pc],
+            )
+            .ok_or(Refusal("a helper without a result"))?;
+        let ran = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, result, quiet::STEPPED as i64);
+        self.builder.ins().brif(ran, stepped, &[], declining, &[]);
+        self.builder.switch_to_block(declining);
+        let nothing = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, result, quiet::DECLINED as i64);
+        self.guard(nothing, failed);
+        self.builder.ins().jump(declined, &[]);
+        Ok([handled, stepped, declined])
     }
 
     /// Runs the tier-0 instruction at `pc` through [`runtime::jit_step`].

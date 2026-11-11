@@ -267,7 +267,14 @@ impl Machine<'_> {
         let names = slots.element(1);
         (0..length(names))
             .find(|&index| names.element(index) == symbol)
-            .map(|position| register_address(self.header + 1 + position))
+            .and_then(|position| self.frame_slot(position))
+    }
+
+    /// The frame slot at `position` in the slot table, while the activation runs in a slot frame
+    /// without an environment: [`Machine::slot_of`] for a caller that numbered its symbols ahead.
+    #[inline(always)]
+    pub unsafe fn frame_slot(&self, position: usize) -> Option<*mut Sexp> {
+        (self.env() == nil()).then(|| register_address(self.header + 1 + position))
     }
 
     /// What the activation's own frame binds `symbol` to, without forcing or reifying: a slot's
@@ -284,9 +291,15 @@ impl Machine<'_> {
 
     /// Binds `symbol` to `value` in the activation's own frame, as `SetVar` does: into its slot
     /// in a slot frame, clearing a formal's missing bit, and otherwise into the environment.
-    pub unsafe fn assign(&self, symbol: Sexp, value: Sexp) -> R<()> {
-        if let Some(slot) = self.slot_of(symbol) {
-            crate::heap().store_slot(&mut *slot, value);
+    /// `slot` is [`Machine::slot_of`] the symbol.
+    pub unsafe fn assign(&self, slot: Option<*mut Sexp>, symbol: Sexp, value: Sexp) -> R<()> {
+        if let Some(slot) = slot {
+            // As `SetVar`'s fast handler stores, leaving an old value a reconcile could reclaim
+            // to the collector rather than noting it now.
+            let heap = crate::heap();
+            if !heap.try_store_slot(&mut *slot, value) {
+                heap.store_slot(&mut *slot, value);
+            }
             self.clear_missing(slot);
             return Ok(());
         }
@@ -297,8 +310,15 @@ impl Machine<'_> {
     /// Assigns the scalar `element` of `kind` to `symbol` by storing it into the value the
     /// variable is bound to, when that is a plain scalar of `kind` that nothing else references.
     /// Returns that value, or `None` when the assignment needs a new one.
-    pub unsafe fn overwrite(&self, symbol: Sexp, kind: SexpType, element: f64) -> Option<Sexp> {
-        let current = match self.slot_of(symbol) {
+    /// `slot` is [`Machine::slot_of`] the symbol.
+    pub unsafe fn overwrite(
+        &self,
+        slot: Option<*mut Sexp>,
+        symbol: Sexp,
+        kind: SexpType,
+        element: f64,
+    ) -> Option<Sexp> {
+        let current = match slot {
             Some(slot) => {
                 let current = *slot;
                 if !overwrite_scalar(current, kind, element) {
@@ -336,6 +356,7 @@ pub fn tier() -> Option<&'static Tier> {
 }
 
 /// The address of register `index` of the file. Valid while the window that holds it exists.
+#[inline]
 pub fn register_address(index: usize) -> *mut Sexp {
     // The buffer never reallocates, so this pointer stays valid as the file grows and shrinks.
     unsafe { interp().bytecode.registers.as_mut_ptr().add(index) }
@@ -5211,14 +5232,14 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
     }
 }
 
-/// Runs the instruction at `pc` through tier 0's fast handler for it, for the optimizing tier,
-/// which calls this before it steps an element read or store: whether the handler applied.
-/// A handler that applies reads and writes only the instruction's registers, records its
-/// feedback and, for `SubAssign`, writes the element of its variable's vector in place.
+/// Runs the element read or store at `pc` through tier 0's fast handler for it, for the
+/// optimizing tier, and says whether the handler applied: it then read and wrote only the
+/// instruction's registers, recorded its feedback and, for `SubAssign`, wrote the element of
+/// its variable's vector in place.
 pub unsafe fn fast_step(machine: &mut Machine<'_>, pc: usize) -> bool {
     let mut state = activation(machine, true);
     let index = op_index(state.code, pc);
-    let fast = if index == Op::CallBuiltin as usize {
+    let applied = if index == Op::CallBuiltin as usize {
         call_builtin_fast(&mut state, pc)
     } else if index == Op::SubAssign as usize {
         sub_assign_fast(&mut state, pc)
@@ -5227,7 +5248,66 @@ pub unsafe fn fast_step(machine: &mut Machine<'_>, pc: usize) -> bool {
     } else {
         None
     };
-    fast.is_some()
+    applied.is_some()
+}
+
+/// Runs the element read or store at `pc` through its generic handler when that runs no R code,
+/// for the optimizing tier where [`fast_step`] declined, so that no frame needs writing back. It
+/// may rebind `SubAssign`'s variable. `None` when the handler might run R code, and nothing
+/// ran: a calling handler is established, which a warning would run, or an operand is an
+/// object, an ALTREP vector, an environment or a promise, whose methods, active bindings or
+/// forcing could.
+pub unsafe fn quiet_step(machine: &mut Machine<'_>, pc: usize) -> Option<R<()>> {
+    let mut state = activation(machine, true);
+    let index = op_index(state.code, pc);
+    if !runs_no_r_code(&state, index, pc) {
+        return None;
+    }
+    let heap = state.heap;
+    let mark = (*heap).handle_mark();
+    (*STEP_HANDLERS.as_ptr().add(index))(&mut state, pc);
+    (*heap).release_handles(mark);
+    Some(state.exit.map(|_| ()))
+}
+
+#[inline(always)]
+unsafe fn runs_no_r_code(state: &Activation<'_, '_>, index: usize, pc: usize) -> bool {
+    if (*state.interp).handlers.is_some() {
+        return false;
+    }
+    let code = state.code;
+    let registers = state.registers;
+    let operand = |at: usize| *registers.add(*code.add(pc + 1 + at) as usize);
+    let plain = |value: Sexp| {
+        !matches!(
+            value.kind(),
+            SexpType::Environment | SexpType::Promise | SexpType::Symbol | SexpType::Language
+        ) && !value.is_object()
+            && !value.is_altrep()
+    };
+    if index == Op::CallBuiltin as usize {
+        let first = *code.add(pc + 4) as usize;
+        let count = *code.add(pc + 5) as usize;
+        element_builtin(state, pc).is_some()
+            && (first..first + count).all(|register| plain(*registers.add(register)))
+    } else if index == Op::Field as usize {
+        plain(operand(1))
+    } else if index == Op::SubAssign as usize {
+        assigned_slot(state, pc).is_some_and(|cell| {
+            matches!(
+                (*cell).kind(),
+                SexpType::Logical
+                    | SexpType::Integer
+                    | SexpType::Real
+                    | SexpType::Complex
+                    | SexpType::String
+                    | SexpType::List
+            ) && plain(*cell)
+        }) && plain(operand(2))
+            && plain(operand(3))
+    } else {
+        false
+    }
 }
 
 /// Where an activation stands after [`step`] ran one of its instructions.
@@ -6197,12 +6277,17 @@ unsafe fn branch_if_object_fast(state: &mut Activation<'_, '_>, at: usize) -> Op
 /// being taken sees the full call, as [`eval::call_direct`] arranges for every direct entry.
 #[inline(always)]
 unsafe fn call_builtin_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
-    let code = state.code;
-    let registers = state.registers;
-    if *code.add(at + 5) != 2 {
+    if *state.code.add(at + 5) != 2 {
         return None;
     }
-    let function = *registers.add(*code.add(at + 2) as usize);
+    let double = element_builtin(state, at)?;
+    read_element_call(state, at, double)
+}
+
+/// Whether the `CallBuiltin` at `at` calls the base `[[` (`true`) or `[` (`false`).
+#[inline(always)]
+unsafe fn element_builtin(state: &Activation<'_, '_>, at: usize) -> Option<bool> {
+    let function = *state.registers.add(*state.code.add(at + 2) as usize);
     if function.kind() != SexpType::Special {
         return None;
     }
@@ -6210,14 +6295,13 @@ unsafe fn call_builtin_fast(state: &mut Activation<'_, '_>, at: usize) -> Option
         .builtin(function.primitive_index())?
         .symbol?;
     let names = symbols();
-    let double = if symbol == names.bracket2 {
-        true
+    if symbol == names.bracket2 {
+        Some(true)
     } else if symbol == names.bracket {
-        false
+        Some(false)
     } else {
-        return None;
-    };
-    read_element_call(state, at, double)
+        None
+    }
 }
 
 /// The rest of [`call_builtin_fast`] once the builtin is `[` (or `[[`, `double`). Out of line
@@ -6284,27 +6368,15 @@ unsafe fn field_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize>
 /// [`moves::modifying`] would end it.
 #[inline(always)]
 unsafe fn sub_assign_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
-    let heap = &mut *state.heap;
-    let known = *heap.known();
-    if *state.header != known.nil {
-        return None;
-    }
     let code = state.code;
     let registers = state.registers;
     let element_kind = *code.add(at + 6);
     if element_kind > 2 {
         return None;
     }
-    let by_constant = pool_constant(state, SLOTS).element(3);
-    if by_constant == known.nil {
-        return None;
-    }
-    let slot = *values::ints(by_constant).get(*code.add(at + 2) as usize)?;
-    if slot < 0 {
-        return None;
-    }
-    let slot = state.header.add(1 + slot as usize);
-    let target = *slot;
+    let target = *assigned_slot(state, at)?;
+    let heap = &mut *state.heap;
+    let known = *heap.known();
     let value = *registers.add(*code.add(at + 4) as usize);
     let kind = target.kind();
     if !matches!(
@@ -6368,6 +6440,25 @@ unsafe fn sub_assign_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<u
     *registers.add(*code.add(at + 1) as usize) = value;
     (*state.interp).visible = false;
     Some(at + 1 + operand_count(Op::SubAssign))
+}
+
+/// The cell of the slot frame that holds the variable `SubAssign` at `at` assigns, when the
+/// activation runs on a slot frame and the variable is one of its slots.
+#[inline(always)]
+unsafe fn assigned_slot(state: &Activation<'_, '_>, at: usize) -> Option<*mut Sexp> {
+    let known = *(*state.heap).known();
+    if *state.header != known.nil {
+        return None;
+    }
+    let by_constant = pool_constant(state, SLOTS).element(3);
+    if by_constant == known.nil {
+        return None;
+    }
+    let slot = *values::ints(by_constant).get(*state.code.add(at + 2) as usize)?;
+    if slot < 0 {
+        return None;
+    }
+    Some(state.header.add(1 + slot as usize))
 }
 
 /// The handler of each specialized arithmetic form, in place of the generic `Arithmetic`'s.

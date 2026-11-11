@@ -3112,7 +3112,9 @@ fn typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic() {
 }
 
 /// The element operations compiled code hands to tier 0's handlers, each the body of a loop
-/// over `i` with `x <- list(a = 1, b = 2)` and `k <- 2L` in scope.
+/// over `i` with `x <- list(a = 1, b = 2)`, `p <- list(a = 1, bbb = 2)`, `v <- c(1, 2, 3, 4, 5,
+/// 6)` and `k <- 2L` in scope. The last three take tier 0's generic handlers: a range subscript,
+/// an append that converts the vector, and a partial match.
 const ELEMENT_OPS: &[&str] = &[
     "y <- x[[k]]",
     "y <- x[2L]",
@@ -3121,6 +3123,9 @@ const ELEMENT_OPS: &[&str] = &[
     "x$b <- k",
     "y <- x$b",
     "y <- x[[\"b\"]]",
+    "y <- v[k:4L]",
+    "w <- c(1, 2); w[[3L]] <- k",
+    "y <- p$bb",
 ];
 
 /// A compiled element operation must never cost more instructions than tier 0's handler for the
@@ -3140,7 +3145,7 @@ fn element_ops_cost_no_more_than_tier_zero() {
         with_interpreter(|| unsafe {
             jit::install_mode(if mode == "force" { Mode::Force } else { Mode::Off });
             run(&format!(
-                "f <- function(n) {{ x <- list(a = 1, b = 2); k <- 2L; for (i in 1:n) {{ {body} }}; 0 }}"
+                "f <- function(n) {{ x <- list(a = 1, b = 2); p <- list(a = 1, bbb = 2); v <- c(1, 2, 3, 4, 5, 6); k <- 2L; for (i in 1:n) {{ {body} }}; 0 }}"
             ));
             for _ in 0..3 {
                 run("f(10L)");
