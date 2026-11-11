@@ -1,0 +1,125 @@
+# Oracle cases that fail on main under one engine. `oracle compare` reports a listed failure as
+# known instead of failing the run, and fails the run when a listed case passes, so whoever fixes
+# one deletes its entry in the same change. Add an entry only for a failure that main already
+# has, never for one your own change introduces. `provisional = true` marks a failure seen on a
+# branch whose runtime code matches main but not yet confirmed on main itself.
+#
+# Each entry: `case` (the file name in cases/ without `.R`), `engine` (as `--engine` names it),
+# `area` (the part of ry the bug lives in), and a one-line `reason`.
+
+[[failure]]
+case = "assignment__subassign_slot_values"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: the collector reaches a freed object through a live one (allocating under jit_box_integer)"
+
+[[failure]]
+case = "base__format_c_fast_path"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: the collector finds a freed object among its roots (allocating under detach_reference)"
+
+[[failure]]
+case = "base__match_arg_native"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+
+[[failure]]
+case = "base__replacement_calls_and_exit_values"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+
+[[failure]]
+case = "calls__inlined_base_internals"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+
+[[failure]]
+case = "colours__conversions"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+
+[[failure]]
+case = "connections__sockets"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+
+[[failure]]
+case = "environments__slot_element_assignment"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+
+[[failure]]
+case = "functions__builtin_wrappers"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+
+[[failure]]
+case = "io__connections"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+
+[[failure]]
+case = "io__read_rds_formats"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: the collector finds a freed object among its roots (allocating under jit_step)"
+
+[[failure]]
+case = "jit__matrix_element_reads"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+
+[[failure]]
+case = "stats__direct_routine_calls"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+
+[[failure]]
+case = "stats__nlm"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+
+[[failure]]
+case = "stats__uncmin_quadpack"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+
+[[failure]]
+case = "tools__help_server"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: the collector finds a freed object among its roots (allocating under jit_step)"
+
+[[failure]]
+case = "bytecode__finalizer_under_wide_window"
+engine = "ry-gctorture-young"
+area = "gc"
+reason = "counts one finalizer run fewer than GNU R: prints 2 and 6 where GNU R prints 3 and 7"
+provisional = true
+
+[[failure]]
+case = "jit__write_back_in_place"
+engine = "ry-gctorture-young"
+area = "interp"
+reason = "aborts: reads an object the collector freed (heap/src/object.rs freed_object)"
+provisional = true
+
+[[failure]]
+case = "kernels__elementwise"
+engine = "ry-gctorture-young"
+area = "interp"
+reason = "aborts: reads an object the collector freed (heap/src/object.rs freed_object)"
+provisional = true
