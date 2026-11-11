@@ -36,8 +36,8 @@ fn a_stale_start_image_is_written_again_and_never_loaded() {
     run(Command::new("cp").arg("-a").arg(&installed).arg(&base));
     let libr = library_path();
     let rcmd = ry_rcmd();
-    let image = rcmd::base::write_start_image(&base, &rcmd, &libr, None)
-        .expect("write the start-up image");
+    let image =
+        rcmd::base::write_start_image(&base, &rcmd, &libr, None).expect("write the start-up image");
     let current = fs::read(&image).expect("read the start-up image");
     assert_eq!(&current[..8], interp::image::MAGIC);
     let identity_length = u64::from_le_bytes(
