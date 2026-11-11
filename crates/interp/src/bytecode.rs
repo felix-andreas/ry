@@ -7376,18 +7376,41 @@ unsafe fn slot_substitute(
 /// an environment. Base wrappers call these on hot paths: `.Internal(f(x, ...))` (the internals
 /// the compiler leaves to the special because they dispatch or take `...`), a generic's
 /// `UseMethod("name")`, and `quote()` of an empty argument.
+///
+/// A call answered here never reaches the evaluator's builtin call, so the activity record counts
+/// and times it here: otherwise a profile would show every S3 dispatch from a slot frame with no
+/// `UseMethod` call.
 unsafe fn slot_special_call(
     state: &Activation<'_, '_>,
     instruction: Instruction,
     function: Sexp,
     call: Sexp,
 ) -> R<Option<Sexp>> {
-    let arguments = call.cdr();
-    if arguments == nil() {
+    if call.cdr() == nil() {
         return Ok(None);
     }
+    let definition = eval::builtin_def(function)?;
+    if !activity::enabled() {
+        return slot_special_answer(state, instruction, definition.name, call);
+    }
+    let index = eval::builtin_index(definition);
+    let _activity = activity::enter(Activity::Builtin, index as u32);
+    let answer = slot_special_answer(state, instruction, definition.name, call)?;
+    if answer.is_some() {
+        activity::count(Counter::BuiltinCalls);
+        activity::count_builtin(index);
+    }
+    Ok(answer)
+}
+
+unsafe fn slot_special_answer(
+    state: &Activation<'_, '_>,
+    instruction: Instruction,
+    name: &str,
+    call: Sexp,
+) -> R<Option<Sexp>> {
+    let arguments = call.cdr();
     let argument = arguments.car();
-    let name = eval::builtin_def(function)?.name;
     if name == "on.exit" {
         return slot_on_exit(state, instruction, call);
     }
