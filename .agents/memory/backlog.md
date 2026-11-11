@@ -1104,7 +1104,7 @@ calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 
 Shares are of each application's instructions (profiling build, one process); a ceiling is the item's whole inclusive cost, so a realistic gain is about half.
 
-- **S3 method resolution by a dense per-generic index.** `dispatch::resolve_s3` is 2.50% of testthat (62,000 calls at 1,659 instructions) and 2.47% of validation (270,000 calls at 870). The plan keys methods by interned class-symbol id per generic, which drops building `generic.class` names (`method_name`) and walking scopes (`lookup_in_scope`) on every dispatch. A whole `UseMethod` round trip already costs 15,700 instructions against GNU R's 36,500. Open question: does the session that landed the S3 and S4 inline caches (#344) still own this area?
+- **S3 method resolution by a dense per-generic index.** `dispatch::resolve_s3` is 2.50% of testthat (62,000 calls at 1,659 instructions) and 2.47% of validation (270,000 calls at 870). The plan keys methods by interned class-symbol id per generic, which drops building `generic.class` names (`method_name`) and walking scopes (`lookup_in_scope`) on every dispatch. A whole `UseMethod` round trip already costs 15,700 instructions against GNU R's 36,500. Unowned.
 - **Widen `direct_c` to the shapes that reach `do_c`.** In validation `combine::do_c` is 3.04% (126,000 calls at 2,292 instructions), against about 900 per call through `direct_c`; testthat spends 0.09% there. ry is at GNU R's cost already (`c(a = 0.6, b = 0.4)` 4,100 against 3,500; three strings 2,100 against 2,200), so this is a validation-only win of about 1.5 to 2%.
 
 An independent review profiled before it proposed. Every number below was taken on a 4-vCPU
