@@ -118,6 +118,47 @@ pub struct KnownFailure {
     /// Seen failing on a branch but not yet on main.
     #[serde(default)]
     pub provisional: bool,
+    /// A crash under a collector-stress engine that depends on the host or on timing, so a run
+    /// where the case passes is not a stale entry.
+    #[serde(default)]
+    pub intermittent: bool,
+}
+
+/// The engines that collect before every allocation. Only their failures may be
+/// [`KnownFailure::intermittent`]: a crash there depends on where the collector happens to run,
+/// while a failure under any other engine reproduces on every host.
+pub const GC_TORTURE_ENGINES: [&str; 3] =
+    ["ry-gctorture", "ry-gctorture-young", "ry-jit-gctorture"];
+
+/// How one case's result under one engine counts against [`KNOWN_FAILURES_FILE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Passed,
+    /// A failure the file lists.
+    Known,
+    /// A failure the file does not list.
+    New,
+    /// A listed case that passes, so its entry is stale.
+    ListedButPassing,
+    /// An intermittent entry whose case passed this time.
+    IntermittentPassed,
+}
+
+/// The verdict for a case that `failed` or passed, given its entry in the known failures.
+pub fn verdict(failed: bool, entry: Option<&KnownFailure>) -> Verdict {
+    match (failed, entry) {
+        (false, None) => Verdict::Passed,
+        (false, Some(entry)) if entry.intermittent => Verdict::IntermittentPassed,
+        (false, Some(_)) => Verdict::ListedButPassing,
+        (true, Some(_)) => Verdict::Known,
+        (true, None) => Verdict::New,
+    }
+}
+
+/// Whether `verdict` fails the run: a new failure does, and so does a stale entry, so the change
+/// that fixes a case also deletes its entry.
+pub fn fails_run(verdict: Verdict) -> bool {
+    matches!(verdict, Verdict::New | Verdict::ListedButPassing)
 }
 
 /// The known failures, beside `Cargo.toml` in this crate.
@@ -130,15 +171,23 @@ struct KnownFailuresFile {
     failure: Vec<KnownFailure>,
 }
 
-/// Reads [`KNOWN_FAILURES_FILE`], refusing an entry that names an unknown engine, a case that
-/// does not exist, or the same case and engine twice, so a stale or mistyped entry cannot hide.
+/// Reads [`KNOWN_FAILURES_FILE`] beside this crate's `Cargo.toml`, as [`parse_known_failures`]
+/// checks it.
 pub fn known_failures() -> Result<Vec<KnownFailure>, String> {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
     let path = directory.join(KNOWN_FAILURES_FILE);
     let text =
         std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    parse_known_failures(&text, directory)
+}
+
+/// Parses the known failures in `text`, the file in `directory`, refusing an entry that names an
+/// unknown engine, a case missing from `directory/cases`, the same case and engine twice, or
+/// `intermittent` outside [`GC_TORTURE_ENGINES`], so a stale or mistyped entry cannot hide.
+pub fn parse_known_failures(text: &str, directory: &Path) -> Result<Vec<KnownFailure>, String> {
+    let path = directory.join(KNOWN_FAILURES_FILE);
     let file: KnownFailuresFile =
-        toml::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+        toml::from_str(text).map_err(|error| format!("{}: {error}", path.display()))?;
     for (index, entry) in file.failure.iter().enumerate() {
         if !ENGINES.contains(&entry.engine.as_str()) {
             return Err(format!(
@@ -147,6 +196,16 @@ pub fn known_failures() -> Result<Vec<KnownFailure>, String> {
                 entry.case,
                 entry.engine,
                 ENGINES.join(", ")
+            ));
+        }
+        if entry.intermittent && !GC_TORTURE_ENGINES.contains(&entry.engine.as_str()) {
+            return Err(format!(
+                "{}: `{}` under `{}` is marked intermittent, which only an entry under {} may be, \
+                 because a failure under any other engine reproduces on every host",
+                path.display(),
+                entry.case,
+                entry.engine,
+                GC_TORTURE_ENGINES.join(", ")
             ));
         }
         if !directory
