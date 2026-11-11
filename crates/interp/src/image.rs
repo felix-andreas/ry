@@ -112,7 +112,7 @@ pub(crate) enum LoadError {
 }
 
 /// Loads the image of the R home `home`. `Ok(false)` means there is none, or another build of
-/// the runtime wrote it, and the caller starts the slow way.
+/// the runtime or an older format wrote it, and the caller starts the slow way.
 pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadError> {
     let path = &path(home);
     let file = match std::fs::File::open(path) {
@@ -133,6 +133,11 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
     let mut prefix = [0u8; 16];
     read_at(&file, &mut prefix, 0).map_err(cannot_read)?;
     if &prefix[..MAGIC.len()] != MAGIC {
+        // An image of an older format is stale like one another build wrote: the start is slow
+        // until the home is assembled again, which writes it anew.
+        if prefix[..MAGIC.len() - 1] == MAGIC[..MAGIC.len() - 1] {
+            return Ok(false);
+        }
         return Err(not_an_image());
     }
     let mut length = [0u8; 8];

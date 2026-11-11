@@ -32,7 +32,7 @@ use {
         space::{IMAGE_LARGE_BASE, PAGE_SIZE, SlotIndex, virtual_memory},
         strings,
     },
-    rustc_hash::{FxHashMap, FxHashSet},
+    rustc_hash::FxHashSet,
     std::{borrow::Cow, ffi::c_void, fmt},
 };
 
@@ -1029,9 +1029,16 @@ impl Heap {
             object.set_external_address(pointer);
         }
 
-        let mut moved: FxHashMap<Sexp, Sexp> = FxHashMap::default();
+        // The writer lists the strings in address order, so the moves form a sorted array that
+        // a binary search reads; the loader has no slot numbering to index a dense table by.
+        let mut moved: Vec<(Sexp, Sexp)> = Vec::new();
+        let mut previous = 0usize;
         for _ in 0..input.u32()? {
             let string = handle(input.u64()?)?;
+            if (string.as_ptr() as usize) <= previous {
+                return Err(invalid("its relocated strings are not in address order"));
+            }
+            previous = string.as_ptr() as usize;
             let referrers = input.u32()? as usize;
             let mut fields = Vec::with_capacity(referrers);
             for _ in 0..referrers {
@@ -1061,14 +1068,21 @@ impl Heap {
                     self.write_barrier(parent, replacement);
                 }
             }
-            moved.insert(string, replacement);
+            moved.push((string, replacement));
         }
         let mut roots = handles(&input.u64s()?)?;
         if !input.bytes.is_empty() {
             return Err(invalid("it has bytes past its end"));
         }
         if !moved.is_empty() {
-            self.forward_roots(&mut roots, &|object| moved.get(&object).copied());
+            self.forward_roots(&mut roots, &|object| {
+                moved
+                    .binary_search_by_key(&(object.as_ptr() as usize), |(string, _)| {
+                        string.as_ptr() as usize
+                    })
+                    .ok()
+                    .map(|position| moved[position].1)
+            });
         }
         self.refresh_small_trigger();
         self.stats.live_vector_cells = self.tenured_vector_cells;
