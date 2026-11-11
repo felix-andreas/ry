@@ -737,10 +737,15 @@ checked and refilled:
   collection inside the window frees exactly what GNU R would.
 - **Base `.Internal` wrappers are inlined.** A call of one of GNU R's "safe base internals"
   (`nchar`, `typeof`, `inherits`, `identical`, `match`, `rep_len`, `vector`, `which.max` and the
-  rest of the list in GNU R's `cmp.R`) compiles to a guard that the name still means base's
-  closure, the internal's arguments evaluated in the caller, and the internal called directly with
-  the original call, so an error reads `Error in nchar(x, ...)` as in GNU R. It applies only when
-  the closure's body is exactly `.Internal(f(formals...))` and every default is a constant. A
+  rest of the list in GNU R's `cmp.R`), or of a frame-free wrapper ry adds (`paste`, `paste0`,
+  `sprintf`, `character` and the rest of the `vector` family, `startsWith`, `make.unique`,
+  `.row_names_info`), compiles to a guard that the name still means base's closure, the internal's
+  arguments evaluated in the caller, and the internal called directly. It applies only when the
+  closure's body is exactly `.Internal(f(...))` over its formals and literals, and every default is
+  a constant. A `...` formal takes the arguments R's matching gives it and is passed on as the
+  internal's own arguments (`sprintf`) or as `list(...)` (`paste`). The internal sees base's
+  namespace as its environment, as it would from the closure's frame, and reports errors and
+  warnings against the original call, so a message reads `Error in nchar(x, ...)` as in GNU R. A
   failed guard makes the ordinary call, so a replaced base binding is always reached, where GNU
   R's compiled code keeps the original.
 - **Builtin checks are derived at registration.** Arity, names, replacement form and which
@@ -1038,7 +1043,7 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | Formals bound in one pass; a forced promise settled with one barrier; the stack check against a cached floor | ry | built | defining formals 270, settling 87 and `stacker`'s thread-local lookup per call; 8,174 to 8,140 instructions per closure call on the testthat workload | `Frame::insert_formals` in `crates/heap/src/env.rs`, `Heap::settle_promise`, `on_large_stack` in `eval.rs` |
 | The promargs pairlist built only when asked for | GNU R | planned | `args_pairlist` 2.7% of a call microbenchmark | |
 | Argument-match caches, one entry per closure body | V8, JSC | done (`eval::match_args_cached`) | `match_args` 2.8k, `bind_arguments` 2.8k per `seq()` call | matching in `seq()` 3.6k to 1.0k instructions; 1.0 to 1.2 million named calls per application workload |
-| Polymorphic inline caches for S3 and S4, keyed on the class vector | Self, V8 | built | S3 method lookup up to 17% (`timeseries`); instructions per dispatch: `UseMethod` 8.75k to 7.69k (GNU R 9.82k), with `NextMethod` 23.14k to 19.04k (GNU R 19.03k), `standardGeneric` 14.26k to 8.69k (GNU R 11.68k) | `resolve_s3`, `site_hit` in `crates/interp/src/dispatch.rs`; `S4Cache`, `dispatch_generic` in `crates/interp/src/methods.rs` |
+| Polymorphic inline caches for S3 and S4, keyed on the class vector | Self, V8 | built | S3 method lookup up to 17% (`timeseries`); instructions per dispatch: `UseMethod` 8.75k to 7.69k (GNU R 9.82k), with `NextMethod` 23.14k to 19.04k (GNU R 19.03k); one `NextMethod` level from a method in slots 20.55k to 17.16k (GNU R 4.6.2 17.74k), `standardGeneric` 14.26k to 8.69k (GNU R 11.68k) | `resolve_s3`, `site_hit` in `crates/interp/src/dispatch.rs`; `S4Cache`, `dispatch_generic` in `crates/interp/src/methods.rs` |
 | Closed bindings per locked namespace, reopened by `unlockBinding` and `assignInNamespace` | Bun, Roc | planned | namespace function lookups | |
 | Precise counts and borrowed parameters in tier 0 | Roc (Perceus) | planned | copies and peak memory | |
 | Setter instruction for one-level complex assignment | GNU R bytecode | built | `attributes(m) <- NULL` 4.2k to 1.5k instructions (GNU R 1.1k); `mostattributes(m) <-` 11.0k to 9.5k (GNU R 6.9k); `seq()` 136.2k to 135.0k | `Op::Replace`, `replace_variable` in `bytecode.rs` |

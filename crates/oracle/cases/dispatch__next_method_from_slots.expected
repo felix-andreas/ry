@@ -1,0 +1,58 @@
+[stdout]
+|  [1] "b a 10 x"                                                                                                 
+|  [2] "c b a 10 x"                                                                                               
+|  [3] "a 1 x"                                                                                                    
+|  [4] "a kept x"                                                                                                 
+|  [5] "default2 default 1"                                                                                       
+|  [6] "kept"                                                                                                     
+|  [7] "FALSE"                                                                                                    
+|  [8] "FALSE"                                                                                                    
+|  [9] "named.a 3 5"                                                                                              
+| [10] "named.a 105 5"                                                                                            
+| [11] "named.a 101"                                                                                              
+| [12] "y missing"                                                                                                
+| [13] "y 2"                                                                                                      
+| [14] "calls.a(structure(i, class = c(\"b\", \"a\")), 7) calls.a(x = structure(i, class = c(\"b\", \"a\")), 7) 2"
+| [15] "vars a environment"                                                                                       
+| [16] "2"                                                                                                        
+| [17] "2"                                                                                                        
+| [18] "3"                                                                                                        
+|  [1] "b a 600 x"                                                                                                
+|  [2] "c b a 600 x"                                                                                              
+|  [3] "a 60 x"                                                                                                   
+|  [4] "a kept x"                                                                                                 
+|  [5] "default2 default 60"                                                                                      
+|  [6] "kept"                                                                                                     
+|  [7] "FALSE"                                                                                                    
+|  [8] "FALSE"                                                                                                    
+|  [9] "named.a 3 5"                                                                                              
+| [10] "named.a 105 5"                                                                                            
+| [11] "named.a 101"                                                                                              
+| [12] "y missing"                                                                                                
+| [13] "y 2"                                                                                                      
+| [14] "calls.a(structure(i, class = c(\"b\", \"a\")), 7) calls.a(x = structure(i, class = c(\"b\", \"a\")), 7) 2"
+| [15] "vars a environment"                                                                                       
+| [16] "2"                                                                                                        
+| [17] "61"                                                                                                       
+| [18] "3"                                                                                                        
+| [1] "y 1"
+| [1] "b body"   "a body"   "y forced"
+| [1] "object not specified"
+| [1] 2 2 2
+| caller      a      b global 
+|   TRUE  FALSE  FALSE  FALSE 
+| caller      a      b global 
+|  FALSE  FALSE  FALSE   TRUE 
+| [1] "b local g.a" "b a 10 x"   
+| [1] "b local g.a" "b a 20 x"   
+| [1] "b local g.a" "b a 30 x"   
+| [1] "unused.a"            "kept by a"           "kept by a"          
+| [4] "kept by a condition"
+| [1] "unused.a"            "kept by a"           "kept by a"          
+| [4] "kept by a condition"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

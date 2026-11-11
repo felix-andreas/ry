@@ -1,11 +1,12 @@
 use {
     clap::{Parser, Subcommand},
     oracle::{
-        BUILD_FILE, Build, BuildCheck, Engine, EngineError, ProcessEngine,
+        BUILD_FILE, Build, BuildCheck, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine,
         bench::{self, Summary},
         build_file, check_build, diff, engine_from_environment, engine_packages, expected_path,
-        find_cases, gallery, gnu_r_available, gnu_r_build, install, installed_packages, packages,
-        parse, read_build, render, runnable_cases, write_build,
+        find_cases, gallery, gnu_r_available, gnu_r_build, install, installed_packages,
+        known_failure, known_failures, packages, parse, read_build, render, runnable_cases,
+        write_build,
     },
     packages::{PackageOutcome, Runtime, Settings},
     std::{
@@ -30,10 +31,15 @@ enum Command {
     Record { paths: Vec<PathBuf> },
     /// Run files under GNU R and under a second engine, and compare the two.
     Compare {
-        /// The second engine: `ry` for ry's runtime, `ry-jit` for it with the JIT forced on, or
-        /// a command line (default: `$ORACLE_ENGINE`, then the stub).
+        /// The engines compared with GNU R, comma separated: `ry`, `ry-tier0`, `ry-jit`,
+        /// `ry-gctorture`, `ry-gctorture-young`, `ry-jit-gctorture`, or a command line
+        /// (default: `$ORACLE_ENGINE`, then the stub).
         #[arg(long)]
         engine: Option<String>,
+        /// Run even when cases need packages that are not installed, skip those cases, and
+        /// mark the summary PARTIAL. Without it, such a run fails before it starts.
+        #[arg(long)]
+        allow_skips: bool,
         paths: Vec<PathBuf>,
     },
     /// Print the outcome of one file under GNU R.
@@ -169,15 +175,19 @@ fn main() -> ExitCode {
     }
     // Without GNU R, `compare` checks the second engine against the recorded outcomes, which is
     // how ry's runtime is tested on a machine that has only ry.
-    if let Command::Compare { engine, paths } = &cli.command
+    if let Command::Compare {
+        engine,
+        allow_skips,
+        paths,
+    } = &cli.command
         && !gnu_r_available()
     {
-        let Some(second) = second_engine(engine.as_deref()) else {
+        let Some(engines) = second_engines(engine.as_deref()) else {
             return ExitCode::from(2);
         };
-        eprintln!("GNU R was not found, so the engine is compared with the recorded outcomes");
-        let selection = cases(paths.clone(), || engine_packages(second.as_ref()));
-        return compare(None, second.as_ref(), &selection);
+        eprintln!("GNU R was not found, so the engines are compared with the recorded outcomes");
+        let selection = cases(paths.clone(), || engine_packages(engines[0].as_ref()));
+        return compare(None, &engines, &selection, *allow_skips);
     }
     if !gnu_r_available() {
         eprintln!("GNU R was not found; install R or set ORACLE_R to its path");
@@ -187,14 +197,19 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Verify { paths } => verify(&gnu_r, &cases(paths, installed_packages)),
         Command::Record { paths } => record(&gnu_r, &cases(paths, installed_packages)),
-        Command::Compare { engine, paths } => {
-            let Some(second) = second_engine(engine.as_deref()) else {
+        Command::Compare {
+            engine,
+            allow_skips,
+            paths,
+        } => {
+            let Some(engines) = second_engines(engine.as_deref()) else {
                 return ExitCode::from(2);
             };
             compare(
                 Some(&gnu_r),
-                second.as_ref(),
+                &engines,
                 &cases(paths, installed_packages),
+                allow_skips,
             )
         }
         Command::Bench {
@@ -489,22 +504,58 @@ fn check_suites(cases: &[PathBuf], build: &Build, action: &str) -> Result<(), ()
     Ok(())
 }
 
-/// The engine `--engine` names, else the one `ORACLE_ENGINE` names.
-fn second_engine(name: Option<&str>) -> Option<Box<dyn Engine>> {
-    match name {
-        Some(name) => match ProcessEngine::named(name) {
-            Some(engine) => Some(Box::new(engine)),
+/// The engines `--engine` names, comma separated, else the one `ORACLE_ENGINE` names.
+fn second_engines(names: Option<&str>) -> Option<Vec<Box<dyn Engine>>> {
+    let Some(names) = names else {
+        return Some(vec![engine_from_environment()]);
+    };
+    let mut engines: Vec<Box<dyn Engine>> = Vec::new();
+    for name in names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        match ProcessEngine::named(name) {
+            Some(engine) => engines.push(Box::new(engine)),
             None => {
                 eprintln!("--engine needs a command");
-                None
+                return None;
             }
-        },
-        None => Some(engine_from_environment()),
+        }
     }
+    if engines.is_empty() {
+        eprintln!("--engine needs a command");
+        return None;
+    }
+    Some(engines)
 }
 
-/// Compares `second` with GNU R, or with each case's recorded outcome when `gnu_r` is `None`.
-fn compare(gnu_r: Option<&ProcessEngine>, second: &dyn Engine, selection: &Selection) -> ExitCode {
+/// Compares each of `engines` with GNU R, or with each case's recorded outcome when `gnu_r` is
+/// `None`, and sorts every failure into known (listed in `known_failures.toml`, so main fails it
+/// too) or new. The run fails on a new failure, and on a listed case that passes, so the change
+/// that fixes a case also deletes its entry.
+fn compare(
+    gnu_r: Option<&ProcessEngine>,
+    engines: &[Box<dyn Engine>],
+    selection: &Selection,
+    allow_skips: bool,
+) -> ExitCode {
+    let known = match known_failures() {
+        Ok(known) => known,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(2);
+        }
+    };
+    if selection.missing > 0 && !allow_skips {
+        eprintln!(
+            "{} need packages that are not installed (listed above), so the run would not cover \
+             the suite. Install them into the corpus library (`just corpus`) or set R_LIBS to a \
+             library that has them; pass --allow-skips for a partial run.",
+            plural(selection.missing, "case", "cases")
+        );
+        return ExitCode::FAILURE;
+    }
     let cases = &selection.runnable;
     match gnu_r {
         Some(_) => {
@@ -529,8 +580,7 @@ fn compare(gnu_r: Option<&ProcessEngine>, second: &dyn Engine, selection: &Selec
             }
         }
     }
-    let mut failures = 0;
-    let mut skipped = 0;
+    let mut tallies = vec![Tally::default(); engines.len()];
     let mut crashed = Vec::new();
     for case in cases {
         let expected = match gnu_r {
@@ -549,40 +599,127 @@ fn compare(gnu_r: Option<&ProcessEngine>, second: &dyn Engine, selection: &Selec
             }
             Err(error) => {
                 println!("ERROR   {}: {error}", case.display());
-                failures += 1;
+                for tally in &mut tallies {
+                    tally.new += 1;
+                }
                 continue;
             }
         };
-        match second.run(case) {
-            Ok(actual) => match diff("GNU R", &expected, &second.name(), &actual) {
-                None => println!("ok      {}", case.display()),
-                Some(difference) => {
-                    println!("DIFFERS {}\n{difference}", case.display());
-                    failures += 1;
+        for (engine, tally) in engines.iter().zip(&mut tallies) {
+            let name = engine.name();
+            let shown = match engines.len() {
+                1 => case.display().to_string(),
+                _ => format!("{} [{name}]", case.display()),
+            };
+            let failure = match engine.run(case) {
+                Ok(actual) => diff("GNU R", &expected, &name, &actual)
+                    .map(|difference| format!("DIFFERS {shown}\n{difference}")),
+                Err(EngineError::Unavailable(_)) => {
+                    tally.unavailable += 1;
+                    continue;
                 }
-            },
-            Err(EngineError::Unavailable(_)) => skipped += 1,
-            Err(error) => {
-                println!("ERROR   {}: {error}", case.display());
-                failures += 1;
+                Err(error) => Some(format!("ERROR   {shown}: {error}")),
+            };
+            match (failure, known_failure(&known, case, &name)) {
+                (None, None) => {
+                    println!("ok      {shown}");
+                    tally.passed += 1;
+                }
+                (None, Some(_)) => {
+                    println!(
+                        "PASSES  {shown}: listed in {KNOWN_FAILURES_FILE}, so delete its entry"
+                    );
+                    tally.listed_but_passing += 1;
+                }
+                (Some(failure), None) => {
+                    println!("{failure}");
+                    tally.new += 1;
+                }
+                (Some(_), Some(entry)) => {
+                    println!(
+                        "known   {shown}: {} (area {}{})",
+                        entry.reason,
+                        entry.area,
+                        if entry.provisional {
+                            ", provisional"
+                        } else {
+                            ""
+                        }
+                    );
+                    tally.known += 1;
+                }
             }
         }
     }
-    if skipped > 0 {
+    let mut failed = false;
+    let mut ran = false;
+    let partial = if selection.missing > 0 {
+        "PARTIAL "
+    } else {
+        ""
+    };
+    for (engine, tally) in engines.iter().zip(&tallies) {
+        if cases.len() == crashed.len() + tally.unavailable {
+            if tally.unavailable > 0 {
+                println!("{}: unavailable, so every case was skipped", engine.name());
+            }
+            continue;
+        }
+        ran = true;
+        let skipped = selection.missing + crashed.len() + tally.unavailable;
+        let mut line = format!(
+            "{partial}{}: {} passed, {} failed ({} known, {} new), {skipped} skipped",
+            engine.name(),
+            tally.passed + tally.listed_but_passing,
+            tally.known + tally.new,
+            tally.known,
+            tally.new,
+        );
+        if skipped > 0 {
+            let mut reasons = Vec::new();
+            if selection.missing > 0 {
+                reasons.push(format!("{} missing a package", selection.missing));
+            }
+            if !crashed.is_empty() {
+                reasons.push(plural(crashed.len(), "GNU R crash", "GNU R crashes"));
+            }
+            if tally.unavailable > 0 {
+                reasons.push(format!("{} with the engine unavailable", tally.unavailable));
+            }
+            line.push_str(&format!(" ({})", reasons.join(", ")));
+        }
+        if tally.listed_but_passing > 0 {
+            line.push_str(&format!(
+                ", {} listed in {KNOWN_FAILURES_FILE} but passing",
+                tally.listed_but_passing
+            ));
+        }
+        println!("{line}");
+        failed |= tally.new + tally.listed_but_passing > 0;
+    }
+    if selection.missing > 0 {
         println!(
-            "skipped {skipped} case(s): engine `{}` is unavailable",
-            second.name()
+            "PARTIAL: --allow-skips left out {}, so these counts do not cover the suite",
+            plural(selection.missing, "case", "cases")
         );
     }
-    if skipped + crashed.len() == cases.len() {
-        return ExitCode::SUCCESS;
+    for case in &crashed {
+        println!("  GNU R crashed: {}", case.display());
     }
-    summarize(
-        cases.len() - skipped - crashed.len(),
-        failures,
-        selection.missing,
-        &crashed,
-    )
+    match failed || (!ran && !crashed.is_empty() && crashed.len() < cases.len()) {
+        true => ExitCode::FAILURE,
+        false => ExitCode::SUCCESS,
+    }
+}
+
+/// One engine's results in a `compare` run.
+#[derive(Clone, Default)]
+struct Tally {
+    passed: usize,
+    known: usize,
+    new: usize,
+    listed_but_passing: usize,
+    unavailable: usize,
 }
 
 fn run_fuzz(first: u64, count: u64, engines: &str, timeout: Duration) -> ExitCode {
