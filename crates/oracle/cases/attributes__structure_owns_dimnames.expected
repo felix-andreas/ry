@@ -1,0 +1,23 @@
+[stdout]
+| [1] FALSE
+| List of 3
+|  $ dim     : int [1:2] 2 2
+|  $ dimnames:List of 2
+|   ..$ : chr [1:2] "a" "b"
+|   ..$ : chr [1:2] "x" "y"
+|  $ extra   : num 1
+| [1] FALSE
+| [1] FALSE
+| List of 3
+|  $ dim     : int [1:2] 1 2
+|  $ dimnames:List of 2
+|   ..$ : chr "r"
+|   ..$ : chr [1:2] "p" "q"
+|  $ extra   : num 2
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE
