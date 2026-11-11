@@ -316,6 +316,25 @@ impl Heap {
             self.collect_for_image(&keep(&roots));
         }
         self.promote_young();
+        // An image is a function of the heap's live contents, so writing the same session twice
+        // gives the same bytes. A vector's bytes past its elements would otherwise carry whatever
+        // the memory held before: a resizable vector's spare capacity, a large handle vector's
+        // write-barrier cards (clear, since nothing is young any more), a string's bytes after
+        // its NUL and the rest of a small object's slot.
+        for object in self.live_objects() {
+            let kind = object.kind();
+            if kind.shape() == Shape::Vector
+                && !object.is_altrep()
+                && let Some(element) = kind.element_size()
+            {
+                let elements = object.length() as usize + usize::from(kind == SexpType::Char);
+                let used = object.data() as usize + elements * element;
+                let end = object.as_ptr() as usize + self.size_of(object);
+                if used < end {
+                    std::ptr::write_bytes(used as *mut u8, 0, end - used);
+                }
+            }
+        }
 
         let mut out = Writer::default();
         out.bytes.extend_from_slice(MAGIC);
@@ -395,6 +414,12 @@ impl Heap {
         let relocatable = self.relocatable_strings(&live, prefixes);
 
         let base = self.space.base();
+        let kept: Vec<(usize, usize)> = fixed_objects
+            .iter()
+            .copied()
+            .filter(|&object| keeps_contents(object))
+            .map(|object| (object.as_ptr() as usize - base, self.size_of(object)))
+            .collect();
         let page_bytes = self.space.write_image(&mut out);
         let mut pages = vec![0u64; page_bytes.len() / 8];
         std::ptr::copy_nonoverlapping(
@@ -408,7 +433,17 @@ impl Heap {
         }
         for frame in &frames {
             let offset = frame.env.frame_ptr() as usize - base;
+            // An empty frame leaves its inline storage uninitialized, which here would keep the
+            // spilled bindings' address.
+            std::ptr::write_bytes(copy.add(offset), 0, size_of::<Frame>());
             Frame::write_empty(copy.add(offset).cast(), 0);
+        }
+        let header = size_of::<Header>();
+        // The loader keeps its own contents of these objects, so the image's are never read.
+        for &(offset, size) in &kept {
+            if offset + size <= pages.len() * 8 {
+                std::ptr::write_bytes(copy.add(offset + header), 0, size - header);
+            }
         }
         for &(object, _) in &external {
             let offset =
@@ -428,6 +463,7 @@ impl Heap {
         ] {
             out.u64(value);
         }
+        self.strings.canonicalize();
         let (slots, len, tombstones) = self.strings.image();
         out.u64s(slots);
         out.u64(len as u64);

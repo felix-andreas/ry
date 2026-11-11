@@ -54,7 +54,8 @@ def main():
             if place < places.get(id, (3, 0.0)):
                 places[id] = place
     sys.stdout.write(f"numbering {numbering:016x}\n")
-    sys.stdout.write("".join(f"{id}\n" for id in sorted(places, key=places.get)))
+    # Ties go by id, so the order does not depend on the order the touch files are given in.
+    sys.stdout.write("".join(f"{id}\n" for id in sorted(places, key=lambda id: (places[id], id))))
 
 
 if __name__ == "__main__":
