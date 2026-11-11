@@ -188,22 +188,58 @@ export function machine(meta: Meta): string {
   return parts.join(', ');
 }
 
+// One measured suite's headline: ry's geometric-mean speed-up over GNU R, untyped and, where the
+// suite has a typed column, typed in strict mode. tools/bench/readme.py writes the same numbers into
+// the READMEs, and the landing page draws them as bars.
+export type SuiteSpeed = {
+  id: string;
+  name: string;
+  // The name without the `(ours)` marker, for places where the summary already says "we wrote".
+  shortName: string;
+  programs: number;
+  summary: string;
+  ry?: Interval & { programs: number };
+  typed?: Interval & { programs: number };
+};
+
+export function suiteSpeeds(): SuiteSpeed[] {
+  return measuredSuites().map((suite) => {
+    const geomean = suite.results?.geomean ?? {};
+    return {
+      id: suite.id,
+      name: suite.name,
+      shortName: suite.name.replace(/\s*\(ours\)/, ''),
+      programs: measuredPrograms(suite).length,
+      summary: suite.summary,
+      ry: geomean.ry,
+      typed: geomean.ry_typed,
+    };
+  });
+}
+
+// Whether the suites ran on different machines (CPU model or kernel) or against a GNU R on a
+// different BLAS, which makes their ratios incomparable with each other.
+export function mixedMachines(): boolean {
+  const machines = new Set(
+    measuredSuites().map((suite) => {
+      const meta = suite.results?.meta;
+      return JSON.stringify([meta?.machine.cpu, meta?.machine.kernel, meta?.gnuR.blas]);
+    }),
+  );
+  return machines.size > 1;
+}
+
 // One row per measured suite: what it is and ry's geometric-mean speed against GNU R, untyped and
-// typed in strict mode. tools/bench/readme.py writes the same rows into the READMEs.
+// typed in strict mode.
 export const summaryColumns = ['Suite', 'What it is', 'ry vs GNU R', 'ry typed'];
 
 export function summaryRows(): string[][] {
-  return measuredSuites().map((suite) => {
-    const geomean = suite.results?.geomean ?? {};
-    const untyped = geomean.ry;
-    const typed = geomean.ry_typed;
-    return [
-      suite.name,
-      `${measuredPrograms(suite).length} ${suite.summary}`,
-      untyped === undefined ? 'not measured' : formatRatio(untyped.median),
-      typed === undefined ? 'not typed' : formatRatio(typed.median),
-    ];
-  });
+  return suiteSpeeds().map((speed) => [
+    speed.name,
+    `${speed.programs} ${speed.summary}`,
+    speed.ry === undefined ? 'not measured' : formatRatio(speed.ry.median),
+    speed.typed === undefined ? 'not typed' : formatRatio(speed.typed.median),
+  ]);
 }
 
 export const summaryNote = 'Geometric means of the speed-ups over GNU R; above 1x means ry is faster.';

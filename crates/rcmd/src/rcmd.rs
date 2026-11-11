@@ -592,7 +592,7 @@ fn refresh_start_image(sources: &HomeSources<'_>) -> Result<()> {
         &image,
         sources.base,
         || unsafe { current(path.as_ptr()) } == 1,
-        || base::write_start_image(sources.base, sources.rcmd, sources.libr),
+        || base::write_start_image(sources.base, sources.rcmd, sources.libr, None),
     )
 }
 
