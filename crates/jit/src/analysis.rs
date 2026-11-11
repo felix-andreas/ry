@@ -4132,12 +4132,19 @@ fn builtin_result(name: &str, types: &[Ty]) -> Option<Ty> {
             Ty::Dbl
         }
     };
+    // These make compact sequences from two elements on, the common case to guess, wherever
+    // the runtime has registered the classes; an interpreter without them makes plain vectors.
+    // SAFETY: the interpreter is initialized before anything compiles.
+    let sequence = if unsafe { interp::interp().compact_sequence_classes[0] != values::nil() } {
+        Ty::IntSeq
+    } else {
+        Ty::IntVec
+    };
     Some(match (name, types) {
-        // These make compact sequences from two elements on, the common case to guess.
-        ("seq_len", [length]) if length.is_numeric_scalar() => Ty::IntSeq,
-        ("seq_along", [along]) if along.is_plain() => Ty::IntSeq,
+        ("seq_len", [length]) if length.is_numeric_scalar() => sequence,
+        ("seq_along", [along]) if along.is_plain() => sequence,
         // `1:n` makes integers even from double literals whenever the start is a whole number.
-        (":", [from, to]) if from.is_numeric_scalar() && to.is_numeric_scalar() => Ty::IntSeq,
+        (":", [from, to]) if from.is_numeric_scalar() && to.is_numeric_scalar() => sequence,
         ("sum", _) if all(&numeric) => match widest() {
             Ty::Dbl => Ty::Dbl,
             _ => Ty::Int,
