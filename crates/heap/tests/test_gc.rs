@@ -1823,22 +1823,6 @@ fn heap_growth_follows_gnu_r_variables() {
         default.next_limit(70 * MEGABYTE, MEGABYTE, minimum, false),
         minimum
     );
-    // An early growth predicts the live small objects grow by their last step again and sizes
-    // the limit so the prediction fills 70%: 40 MiB kept after 25 MiB predicts 55 MiB.
-    assert_eq!(
-        default.early_node_limit(40 * MEGABYTE, 25 * MEGABYTE),
-        (55.0 * MEGABYTE as f64 / 0.7) as usize
-    );
-    // The first growth has no previous step, so it predicts a doubling, and a live set that
-    // shrank predicts no growth.
-    assert_eq!(
-        default.early_node_limit(40 * MEGABYTE, 0),
-        (80.0 * MEGABYTE as f64 / 0.7) as usize
-    );
-    assert_eq!(
-        default.early_node_limit(40 * MEGABYTE, 60 * MEGABYTE),
-        (40.0 * MEGABYTE as f64 / 0.7) as usize
-    );
     // Without growth, the limit rises only to the need plus GNU R's smallest step.
     let tight = growth(&[("R_GC_MEM_GROW", "0")]);
     assert_eq!(

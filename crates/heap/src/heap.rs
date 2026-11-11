@@ -119,10 +119,6 @@ pub struct Heap {
     /// The share of the younger old generation the last escalation found dead, which predicts
     /// what an intermediate collection would free ([`Heap::escalate_if_full`]).
     younger_dead_share: f64,
-    /// How many major collections grew the node limit, and the small objects the last of them
-    /// kept, for [`HeapGrowth::early_node_limit`].
-    node_growths: u32,
-    last_grown_small_bytes: usize,
     /// Bytes of objects outside the oldest generation the last intermediate or major sweep freed.
     untenured_freed: usize,
     /// Bytes of large vectors allocated since the last major collection.
@@ -585,25 +581,9 @@ impl HeapGrowth {
         }
         (limit as usize).max(needed).max(minimum)
     }
-
-    /// The node limit an early growth asks for at least, after a major collection that kept
-    /// `kept` bytes of small objects when the previous growth kept `previous`. The live data is
-    /// predicted to grow by the same step again, and the limit is sized so that prediction fills
-    /// the grow fraction. A program building one structure across several collections, such as
-    /// a list of a million short vectors, otherwise grows the limit a fifth at a time and runs a
-    /// major collection that frees nothing at each step, as GNU R's `AdjustHeapSize` explains
-    /// for its own early adjustments.
-    pub fn early_node_limit(&self, kept: usize, previous: usize) -> usize {
-        let predicted = kept + kept.saturating_sub(previous);
-        (predicted as f64 / self.grow_fraction) as usize
-    }
 }
 
 const GROW_STEP_MIN: f64 = 80_000.0 * 8.0;
-
-/// How many growths of the node limit follow the live small objects' trend, as GNU R's early
-/// adjustments of `R_NSize` do (`adjust_count` runs from 1 while below 50).
-const EARLY_NODE_GROWTHS: u32 = 49;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct GcStats {
@@ -791,8 +771,6 @@ impl Heap {
             young_large: Vec::new(),
             escalating: false,
             younger_dead_share: 1.0,
-            node_growths: 0,
-            last_grown_small_bytes: 0,
             untenured_freed: 0,
             large_allocated_since_major: 0,
             remembered: Vec::new(),
@@ -3672,26 +3650,12 @@ impl Heap {
                     policy.min_heap_limit,
                     thrashing,
                 );
-                let grown = policy.growth.next_limit(
+                policy.node_limit = policy.growth.next_limit(
                     policy.node_limit,
                     self.old_small_bytes,
                     policy.min_node_limit,
                     false,
                 );
-                policy.node_limit = if grown > policy.node_limit
-                    && self.node_growths < EARLY_NODE_GROWTHS
-                {
-                    self.node_growths += 1;
-                    let previous =
-                        std::mem::replace(&mut self.last_grown_small_bytes, self.old_small_bytes);
-                    grown.max(
-                        policy
-                            .growth
-                            .early_node_limit(self.old_small_bytes, previous),
-                    )
-                } else {
-                    grown
-                };
                 self.mapped.limit = policy.heap_limit;
                 self.mapped.trim();
             }
