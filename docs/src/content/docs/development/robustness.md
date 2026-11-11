@@ -256,10 +256,20 @@ the plain mode's spacing. A small script runs about five times slower than under
 The default suite runs a seeded sample of the oracle cases (`cases_survive_gc_torture`,
 `cases_survive_young_gc_torture`) and of the generated programs (`fuzz_programs_survive_gc_torture`)
 under both modes, compared with ry unstressed. The sample always includes the cases in
-`REGRESSION_CASES` and the seeds in `REGRESSION_SEEDS`, which once read freed memory. Stress does not
-replace the unstressed oracle: before the argument-reference rooting fix,
-`datetime__year_overflow` crashed unstressed under the oracle harness and passed under both
-modes, likely because a freed object reads correctly until something reuses its memory.
+`REGRESSION_CASES` and the seeds in `REGRESSION_SEEDS`, which once read freed memory.
+
+Collecting often is not enough on its own, because each sweep hands a freed slot out again at the
+next allocation, and a stale reference then reads a valid object. So while `RY_GC_STRESS` or
+`RY_GC_VERIFY` is on, in any build, the collector poisons every object it frees (fills it with
+`0xDB`) and quarantines its memory: the allocator skips the freed small slots until 16 MiB of newer
+ones have joined them, and holds freed large objects until 64 MiB have. Reading the kind of a freed
+object then panics with `read the kind of a freed object at <address>`. Without stress or
+verification, debug builds poison freed slots but reuse them at once, and release builds do neither.
+
+Before the argument-reference rooting fix, `datetime__year_overflow` crashed unstressed under the
+oracle harness. In a debug build of that tree, `RY_GC_STRESS=young` with quarantine panicked
+with the message above in 3 of 3 runs, when a collection traced a root that still held a freed
+object, while plain `RY_GC_STRESS=1` passed 3 of 3, since it tenures the object before it can die.
 
 ## Running the long harnesses
 
