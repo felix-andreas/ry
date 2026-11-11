@@ -1,0 +1,424 @@
+{
+  "schema": 1,
+  "suite": "applications",
+  "name": "Application workloads (ours)",
+  "meta": {
+    "date": "2026-11-11",
+    "ry_commit": "5cd92a3",
+    "too_short_seconds": 0.1,
+    "gnu_r": {
+      "version": "4.6.2",
+      "blas": "/usr/lib/x86_64-linux-gnu/blas/libblas.so.3.12.0"
+    },
+    "machine": {
+      "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+      "cores": 4,
+      "kernel": "Linux 6.18.44-fc-v338"
+    },
+    "command": "tools/bench/bench.py kernels applications public packages --rounds 10 --write --samples /tmp/claude-0/-home-user-ry/2410cb03-e35c-50f9-8e51-b57b80a6b0c1/scratchpad/rerun --ry /home/user/ry-main/target/release/ry",
+    "rounds": 10,
+    "extra_rounds": 10,
+    "seed": 1
+  },
+  "engines": {
+    "gnu_r": "GNU R",
+    "ry": "ry",
+    "ry_typed": "ry typed"
+  },
+  "programs": [
+    {
+      "id": "bond_book",
+      "display": "Bond book pricing",
+      "seconds": {
+        "gnu_r": 0.512,
+        "ry": 0.2695,
+        "ry_typed": 0.055
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9095,
+          "low": 1.8191,
+          "high": 2.0438
+        },
+        "ry_typed": {
+          "median": 9.1919,
+          "low": 8.7866,
+          "high": 9.9182
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 70.7,
+        "ry": 62.3,
+        "ry_typed": 50.5
+      },
+      "flags": [
+        {
+          "kind": "too_short",
+          "engine": "ry_typed"
+        }
+      ]
+    },
+    {
+      "id": "conditions",
+      "display": "Condition handling",
+      "seconds": {
+        "gnu_r": 0.5225,
+        "ry": 0.4305
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.2922,
+          "low": 1.1645,
+          "high": 1.3542
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 70.6,
+        "ry": 64.9
+      },
+      "flags": []
+    },
+    {
+      "id": "expr_tree",
+      "display": "Expression tree",
+      "seconds": {
+        "gnu_r": 0.284,
+        "ry": 0.192,
+        "ry_typed": 0.241
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.4814,
+          "low": 1.4499,
+          "high": 1.5001
+        },
+        "ry_typed": {
+          "median": 1.1857,
+          "low": 1.1138,
+          "high": 1.2719
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 184.9,
+        "ry": 153.8,
+        "ry_typed": 87.3
+      },
+      "flags": [
+        {
+          "kind": "typed_refused",
+          "engine": "ry_typed",
+          "reason": "refusing `.ry_tag`; no code for [I64, I64]: a base function the typed core does not know"
+        }
+      ]
+    },
+    {
+      "id": "functional",
+      "display": "Functional style",
+      "seconds": {
+        "gnu_r": 0.5665,
+        "ry": 0.305
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.8656,
+          "low": 1.8347,
+          "high": 1.9914
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 122.6,
+        "ry": 103.9
+      },
+      "flags": []
+    },
+    {
+      "id": "objects",
+      "display": "Object systems",
+      "seconds": {
+        "gnu_r": 0.7335,
+        "ry": 0.4175
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.78,
+          "low": 1.6624,
+          "high": 1.8825
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 83.3,
+        "ry": 102.0
+      },
+      "flags": []
+    },
+    {
+      "id": "orders",
+      "display": "Order invoicing",
+      "seconds": {
+        "gnu_r": 0.508,
+        "ry": 0.2715,
+        "ry_typed": 0.528
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.8578,
+          "low": 1.7946,
+          "high": 1.9185
+        },
+        "ry_typed": {
+          "median": 0.9463,
+          "low": 0.9283,
+          "high": 0.9755
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 71.4,
+        "ry": 65.0,
+        "ry_typed": 68.3
+      },
+      "flags": [
+        {
+          "kind": "typed_refused",
+          "engine": "ry_typed",
+          "reason": "refusing `.ry_record`; no code for [I64]: a base function the typed core does not know; refusing `.ry_tag`"
+        }
+      ]
+    },
+    {
+      "id": "records",
+      "display": "Records as lists",
+      "seconds": {
+        "gnu_r": 0.473,
+        "ry": 0.2405
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.9769,
+          "low": 1.8764,
+          "high": 2.0455
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 148.6,
+        "ry": 113.3
+      },
+      "flags": []
+    },
+    {
+      "id": "report",
+      "display": "Report formatting",
+      "seconds": {
+        "gnu_r": 0.5815,
+        "ry": 0.365,
+        "ry_typed": 0.1725
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.6027,
+          "low": 1.5139,
+          "high": 1.7246
+        },
+        "ry_typed": {
+          "median": 3.4371,
+          "low": 3.3282,
+          "high": 3.6861
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 74.5,
+        "ry": 69.5,
+        "ry_typed": 84.5
+      },
+      "flags": [
+        {
+          "kind": "typed_refused",
+          "engine": "ry_typed",
+          "reason": "refusing `.ry_text`; no code for [I64]: a base function the typed core does not know"
+        }
+      ]
+    },
+    {
+      "id": "sales",
+      "display": "Sales table pipeline",
+      "seconds": {
+        "gnu_r": 0.1165,
+        "ry": 0.0625,
+        "ry_typed": 0.0415
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.8639,
+          "low": 1.7667,
+          "high": 1.9278
+        },
+        "ry_typed": {
+          "median": 2.8115,
+          "low": 2.5854,
+          "high": 2.9042
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 182.7,
+        "ry": 147.5,
+        "ry_typed": 317.9
+      },
+      "flags": [
+        {
+          "kind": "too_short",
+          "engine": "ry"
+        },
+        {
+          "kind": "too_short",
+          "engine": "ry_typed"
+        }
+      ]
+    },
+    {
+      "id": "strings",
+      "display": "String handling",
+      "seconds": {
+        "gnu_r": 0.674,
+        "ry": 0.393
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.7525,
+          "low": 1.5896,
+          "high": 1.8082
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 107.9,
+        "ry": 106.5
+      },
+      "flags": []
+    },
+    {
+      "id": "tables",
+      "display": "Tables",
+      "seconds": {
+        "gnu_r": 0.349,
+        "ry": 0.2885
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.2095,
+          "low": 1.1426,
+          "high": 1.2554
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 96.8,
+        "ry": 134.8
+      },
+      "flags": []
+    },
+    {
+      "id": "team_scores",
+      "display": "Row validation",
+      "seconds": {
+        "gnu_r": 0.732,
+        "ry": 0.471,
+        "ry_typed": 0.365
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.5354,
+          "low": 1.5052,
+          "high": 1.5621
+        },
+        "ry_typed": {
+          "median": 1.9841,
+          "low": 1.9269,
+          "high": 2.0541
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 124.2,
+        "ry": 127.5,
+        "ry_typed": 130.2
+      },
+      "flags": [
+        {
+          "kind": "typed_refused",
+          "engine": "ry_typed",
+          "reason": "no code for [Vector { item: Str, array: true }]: a mapped function that is not a local function; refusing `Result.with_default`; no code for [Str]: a base function the typed core does not know"
+        }
+      ]
+    },
+    {
+      "id": "testthat",
+      "display": "testthat suite",
+      "seconds": {
+        "gnu_r": 0.6765,
+        "ry": 0.2035
+      },
+      "ratio": {
+        "ry": {
+          "median": 3.3571,
+          "low": 3.1368,
+          "high": 3.6374
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 101.2,
+        "ry": 83.2
+      },
+      "flags": []
+    },
+    {
+      "id": "timeseries",
+      "display": "Time series and dates",
+      "seconds": {
+        "gnu_r": 1.1145,
+        "ry": 0.846
+      },
+      "ratio": {
+        "ry": {
+          "median": 1.3234,
+          "low": 1.271,
+          "high": 1.3796
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 122.9,
+        "ry": 122.7
+      },
+      "flags": []
+    },
+    {
+      "id": "validation",
+      "display": "Argument validation",
+      "seconds": {
+        "gnu_r": 0.725,
+        "ry": 0.2715
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.6363,
+          "low": 2.5171,
+          "high": 2.7571
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 70.5,
+        "ry": 63.4
+      },
+      "flags": []
+    }
+  ],
+  "geomean": {
+    "ry": {
+      "median": 1.7662,
+      "low": 1.7401,
+      "high": 1.7872,
+      "programs": 15
+    },
+    "ry_typed": {
+      "median": 2.4137,
+      "low": 2.3566,
+      "high": 2.4686,
+      "programs": 6
+    }
+  }
+}

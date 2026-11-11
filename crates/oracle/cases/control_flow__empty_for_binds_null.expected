@@ -1,12 +1,19 @@
-List of 2
- $ : logi TRUE
- $ : NULL
+[stdout]
+| List of 2
+|  $ : logi TRUE
+|  $ : NULL
+| NULL
+| NULL
+| NULL
+| [1] 3
+| [1] 2
+| [1] 1000
+| NULL
+| [1] TRUE
+| NULL
+[messages]
+[warnings]
+[errors]
+[value]
 NULL
-NULL
-NULL
-[1] 3
-[1] 2
-[1] 1000
-NULL
-[1] TRUE
-NULL
+| NULL

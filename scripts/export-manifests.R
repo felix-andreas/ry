@@ -29,7 +29,12 @@ namespaces <- c(
   "NlcOptim", "odbc", "ompr", "ompr.roi", "openxlsx", "partitions", "pdftools",
   "PerformanceAnalytics", "plumber", "pool", "progress", "quadprog", "rappdirs", "RcppDE",
   "RcppSimdJson", "readxl", "renv", "Rglpk", "rmgarch", "rugarch", "rvest", "snakecase",
-  "tryCatchLog", "uuid", "withr", "xml2", "xts", "YieldCurve", "zoo"
+  "tryCatchLog", "uuid", "withr", "xml2", "xts", "YieldCurve", "zoo",
+  "esgtoolkit", "loadfast", "polars", "Rblpapi", "ROI.plugin.highs", "zeallot",
+  # The recommended packages ship with every GNU R, so a name `package:ry` binds must not mask
+  # theirs either.
+  "boot", "class", "cluster", "codetools", "foreign", "KernSmooth", "lattice", "MASS", "Matrix",
+  "mgcv", "nlme", "nnet", "rpart", "spatial", "survival"
 )
 # `Rscript scripts/export-manifests.R zoo xts` regenerates only the named manifests.
 requested <- commandArgs(trailingOnly = TRUE)
@@ -75,9 +80,37 @@ write_manifest <- function(namespace, exports, note = NULL) {
   )
 }
 
+# Some packages need a system library or a vendor SDK to install (Rglpk, Rblpapi). With
+# EXPORT_SOURCES naming a directory of unpacked package sources, a namespace that is not
+# installed is read from its NAMESPACE file instead. Its `export()` directives are exactly what
+# getNamespaceExports() returns as long as the file exports nothing by pattern or as an S4 class
+# or method, so a file that does is refused.
+sources <- Sys.getenv("EXPORT_SOURCES")
+source_exports <- function(namespace) {
+  directory <- file.path(sources, namespace)
+  if (!nzchar(sources) || !file.exists(file.path(directory, "NAMESPACE"))) {
+    return(NULL)
+  }
+  parsed <- parseNamespaceFile(namespace, sources)
+  if (length(parsed$exportPatterns) || length(parsed$exportClasses) ||
+      length(parsed$exportMethods) || length(parsed$exportClassPatterns)) {
+    stop(namespace, "'s NAMESPACE exports by pattern or S4; install the package instead")
+  }
+  version <- read.dcf(file.path(directory, "DESCRIPTION"), fields = "Version")[1, 1]
+  list(exports = unique(parsed$exports), version = version)
+}
+
 for (namespace in namespaces) {
   if (!requireNamespace(namespace, quietly = TRUE)) {
-    cat(sprintf("skipped %s: not installed\n", namespace))
+    from_source <- source_exports(namespace)
+    if (is.null(from_source)) {
+      cat(sprintf("skipped %s: not installed\n", namespace))
+    } else {
+      write_manifest(
+        namespace, from_source$exports,
+        sprintf("# Read from the NAMESPACE file of %s %s.", namespace, from_source$version)
+      )
+    }
     next
   }
   write_manifest(namespace, exports_of(namespace))
