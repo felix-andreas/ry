@@ -47,6 +47,14 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryMessage", 0, do_message),
     internal("ryWarning", 0, do_warning),
     internal("rySignalCondition", 0, do_signal_condition),
+    internal("ryTryCatch", 0, do_try_catch),
+    internal("ryTryCatchList", 0, do_try_catch_list),
+    internal("ryDoTryCatch", 0, do_do_try_catch),
+    internal("ryWithRestarts", 0, do_with_restarts),
+    internal("ryWithOneRestart", 0, do_with_one_restart),
+    internal("ryDoWithOneRestart", 0, do_do_with_one_restart),
+    internal("ryTryInvokeRestart", 0, do_try_invoke_restart),
+    internal("ryInvokeRestart", 0, do_invoke_restart_named),
 ];
 
 /// The base functions that get a fast path, with the internal their prologue calls and the
@@ -70,17 +78,27 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("message", "ryMessage", 0x9b452884cddd7ceb),
     ("warning", "ryWarning", 0x919c2fc8a0bd927b),
     ("signalCondition", "rySignalCondition", 0xfb659fdee977c35c),
+    ("tryCatch", "ryTryCatch", 0),
+    ("withRestarts", "ryWithRestarts", 0),
+    ("tryInvokeRestart", "ryTryInvokeRestart", 0),
+    ("invokeRestart", "ryInvokeRestart", 0),
 ];
 
 /// The closures that a base function defines in its own body and that get a fast path: the
 /// outer function, the inner closure's name, the internal its prologue calls and the
 /// [`stable_hash`] of the inner closure's formals and body (GNU R 4.6.2).
-const NESTED_FAST_PATHS: &[(&str, &str, &str, u64)] = &[(
-    "loadNamespace",
-    "assignNativeRoutines",
-    "ryAssignNativeRoutines",
-    0x26c985af62edd0db,
-)];
+const NESTED_FAST_PATHS: &[(&str, &str, &str, u64)] = &[
+    (
+        "loadNamespace",
+        "assignNativeRoutines",
+        "ryAssignNativeRoutines",
+        0x26c985af62edd0db,
+    ),
+    ("tryCatch", "tryCatchList", "ryTryCatchList", 0),
+    ("tryCatch", "doTryCatch", "ryDoTryCatch", 0),
+    ("withRestarts", "withOneRestart", "ryWithOneRestart", 0),
+    ("withRestarts", "doWithOneRestart", "ryDoWithOneRestart", 0),
+];
 
 /// Puts the fast paths in front of the base namespace's functions, changing each closure in
 /// place so that every reference to it gets the fast path. ry builds its bundled base R itself,
@@ -128,8 +146,19 @@ pub unsafe fn prologue_needs_environment(body: Sexp) -> bool {
     let inner = first.cdr().car();
     inner.kind() == SexpType::Language
         && inner.car().kind() == SexpType::Symbol
-        && ["ryMatchArg", "ryReduce", "ryTraceBack", "rySignalCondition"]
-            .contains(&&*values::symbol_name(inner.car()))
+        && [
+            "ryMatchArg",
+            "ryReduce",
+            "ryTraceBack",
+            "rySignalCondition",
+            "ryTryCatch",
+            "ryTryCatchList",
+            "ryDoTryCatch",
+            "ryWithRestarts",
+            "ryWithOneRestart",
+            "ryDoWithOneRestart",
+        ]
+        .contains(&&*values::symbol_name(inner.car()))
 }
 
 /// Puts `.Internal(<internal_name>())` in front of the body of `function` when its formals and
@@ -180,6 +209,11 @@ unsafe fn with_prologue(
     }
     let hashed = if name == "Sys.which" {
         configured_which_as_bundled(original)?
+    } else if NESTED_FAST_PATHS
+        .iter()
+        .any(|&(outer, inner, ..)| outer == name || inner == name)
+    {
+        without_nested_prologues(original)?
     } else {
         original
     };
@@ -199,6 +233,45 @@ unsafe fn with_prologue(
         symbols().brace,
         values::cons(prologue, values::cons(original, nil())?)?,
     )?))
+}
+
+/// `body` without the prologues installed in front of the closures it defines, so an outer
+/// function hashes the same before and after its nested fast paths are installed.
+unsafe fn without_nested_prologues(body: Sexp) -> R<Sexp> {
+    unsafe fn strip(code: Sexp) {
+        if code.kind() != SexpType::Language {
+            return;
+        }
+        let mut rest = code;
+        while rest.kind() == SexpType::Pairlist || rest.kind() == SexpType::Language {
+            let item = rest.car();
+            if let Some(original) = nested_original(item) {
+                crate::heap().set_car(rest, original);
+            }
+            strip(rest.car());
+            rest = rest.cdr();
+        }
+    }
+    /// The original body of a `{ .Internal(ryX()); original }` block.
+    unsafe fn nested_original(code: Sexp) -> Option<Sexp> {
+        if code.kind() != SexpType::Language
+            || code.car() != symbols().brace
+            || values::pairlist_length(code.cdr()) != 2
+        {
+            return None;
+        }
+        let first = code.cdr().car();
+        let is_prologue = first.kind() == SexpType::Language
+            && first.car() == symbols().dot_internal
+            && first.cdr().car().kind() == SexpType::Language
+            && first.cdr().car().car().kind() == SexpType::Symbol
+            && values::symbol_name(first.cdr().car().car()).starts_with("ry");
+        is_prologue.then(|| code.cdr().cdr().car())
+    }
+    let copy = values::duplicate(body)?;
+    crate::heap().root(copy);
+    strip(copy);
+    Ok(copy)
 }
 
 /// `Sys.which`'s `body` as ry's bundled base R has it. GNU R's configure writes the path of the
@@ -3102,4 +3175,422 @@ unsafe fn list_field(list: Sexp, name: &[u8]) -> Option<Sexp> {
         return None;
     }
     Some(nil())
+}
+
+/// The statements of the R body behind the prologue of the closure running in frame `index`,
+/// which is `{ .Internal(ryX()); original }`, so a fast path can run some of them as they are.
+unsafe fn original_statements(index: usize) -> Sexp {
+    let body = crate::bytecode::closure_body(interp().frames[index].function);
+    body.cdr().cdr().car().cdr()
+}
+
+/// The element at `position` of the pairlist or call `list`.
+unsafe fn nth(list: Sexp, position: usize) -> Sexp {
+    let mut rest = list;
+    for _ in 0..position {
+        rest = rest.cdr();
+    }
+    rest.car()
+}
+
+/// `list(...)` over values already forced, in order, with names when any element has a tag.
+unsafe fn tagged_list(items: &[(Sexp, Sexp)]) -> R<Sexp> {
+    let heap = crate::heap();
+    let list = values::alloc(SexpType::List, items.len())?;
+    for (position, &(_, value)) in items.iter().enumerate() {
+        heap.set_element(list, position, value);
+    }
+    if items.iter().any(|&(tag, _)| tag != nil()) {
+        let names = values::alloc(SexpType::String, items.len())?;
+        for (position, &(tag, _)) in items.iter().enumerate() {
+            let name = if tag == nil() {
+                values::mkchar("")?
+            } else {
+                tag.car()
+            };
+            heap.set_element(names, position, name);
+        }
+        values::set_attr(list, symbols().names, names)?;
+    }
+    Ok(list)
+}
+
+/// `tryCatch(expr, ..., finally)`. Its frames stay: the R body's `tryCatchList(...)` statement
+/// runs as written, so `sys.calls()` and the call of a caught condition read as in GNU R. The
+/// prologue does the rest of the body natively: it registers `finally` with `on.exit`, forces
+/// the handlers in order as `list(...)` does, and binds `handlers`, `classes` and `parentenv`.
+unsafe fn do_try_catch(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let Some(index) = call.frame_index() else {
+        return decline();
+    };
+    let frame = call.env()?;
+    let Some(items) = dots(ClosureFrame::Env(frame))? else {
+        return decline();
+    };
+    let statements = original_statements(index);
+    let names = symbols();
+    eval::eval(nth(statements, 0), frame)?;
+    eval::eval(nth(statements, 1), frame)?;
+    if is_supplied(ClosureFrame::Env(frame), names.finally)? {
+        let on_exit = &mut interp().frames[index].on_exit;
+        on_exit.clear();
+        on_exit.push(names.finally);
+    }
+    let mut forced: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
+    for &(tag, item) in &items {
+        let value = eval::value_of(item)?;
+        crate::heap().root(value);
+        forced.push((tag, value));
+    }
+    let handlers = tagged_list(&forced)?;
+    let classes = values::get_attr(handlers, names.names);
+    eval::define(names.handlers, handlers, frame)?;
+    eval::define(names.classes, classes, frame)?;
+    eval::define(names.parentenv, eval::frame_sys_parent_pending(index)?, frame)?;
+    if length(classes) != forced.len() {
+        eval::eval(nth(statements, 6), frame)?;
+    }
+    let value = eval::eval(nth(statements, 7), frame)?;
+    finish(ClosureFrame::Env(frame), value, interp().visible)
+}
+
+/// `tryCatchList(expr, names, parentenv, handlers)` with one handler, which calls `tryCatchOne`
+/// through the R body's own call so its frame reads as in GNU R.
+unsafe fn do_try_catch_list(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let Some(index) = call.frame_index() else {
+        return decline();
+    };
+    let frame = call.env()?;
+    let Some(classes) = argument(ClosureFrame::Env(frame), symbols().names)? else {
+        return decline();
+    };
+    if classes.is_object() || length(classes) != 1 {
+        return decline();
+    }
+    eval::define(symbols().nh, values::scalar_integer(1)?, frame)?;
+    // `if (nh > 1L) ... else if (nh == 1L) tryCatchOne(...) else expr`
+    let branches = nth(original_statements(index), 1);
+    let one = nth(nth(branches, 3), 2);
+    let value = eval::eval(one, frame)?;
+    finish(ClosureFrame::Env(frame), value, interp().visible)
+}
+
+/// `doTryCatch(expr, name, parentenv, handler)`: establishes the exiting handler with the
+/// frame as its target and evaluates `expr`, whose `return(expr)` returns from `tryCatchOne`.
+unsafe fn do_do_try_catch(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let frame = call.env()?;
+    let names = symbols();
+    let mut values: [Sexp; 3] = [nil(); 3];
+    for (slot, symbol) in values
+        .iter_mut()
+        .zip([names.name, names.handler, names.parentenv])
+    {
+        let Some(value) = argument(ClosureFrame::Env(frame), symbol)? else {
+            return decline();
+        };
+        *slot = value;
+    }
+    let [name, handler, parent_env] = values;
+    let handlers = values::list_vector(&[handler])?;
+    let calling = values::scalar_logical(0)?;
+    kernel(
+        crate::conditions::do_add_cond_hands,
+        &[name, handlers, parent_env, frame, calling],
+        ClosureFrame::Env(frame),
+    )?;
+    let value = eval::eval(names.expr, frame)?;
+    finish(ClosureFrame::Env(frame), value, interp().visible)
+}
+
+/// `withRestarts(expr, ...)` for restarts given as functions or descriptions, as the warning
+/// and message signals establish `muffleWarning` and `muffleMessage`. The prologue builds the
+/// restart list `makeRestartList(...)` would: its frame returns before `expr` runs, and
+/// forcing a spec written as a `function` expression runs no code, so nothing sees the
+/// difference. `withOneRestart` and the frames below run as in GNU R.
+unsafe fn do_with_restarts(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let Some(index) = call.frame_index() else {
+        return decline();
+    };
+    let frame = call.env()?;
+    let Some(items) = dots(ClosureFrame::Env(frame))? else {
+        return decline();
+    };
+    let runs_no_code = |item: Sexp| {
+        item.kind() != SexpType::Promise
+            || item.car() != values::unbound()
+            || (item.cdr().kind() == SexpType::Language && item.cdr().car() == symbols().function)
+    };
+    if items
+        .iter()
+        .any(|&(tag, item)| tag == nil() || tag.car().bytes().is_empty() || !runs_no_code(item))
+    {
+        return decline();
+    }
+    let mut specs: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
+    for &(tag, item) in &items {
+        let spec = eval::value_of(item)?;
+        crate::heap().root(spec);
+        let is_function = matches!(
+            spec.kind(),
+            SexpType::Closure | SexpType::Builtin | SexpType::Special
+        );
+        if !is_function && spec.kind() != SexpType::String {
+            return decline();
+        }
+        specs.push((tag, spec));
+    }
+    let statements = original_statements(index);
+    for position in 0..5 {
+        eval::eval(nth(statements, position), frame)?;
+    }
+    let make_restart = eval::value_of(eval::find_var_in_frame(install("makeRestart")?, frame)?)?;
+    if make_restart.kind() != SexpType::Closure {
+        return decline();
+    }
+    let heap = crate::heap();
+    let restarts = values::alloc(SexpType::List, specs.len())?;
+    for (position, &(tag, spec)) in specs.iter().enumerate() {
+        let restart = make_restart_for(make_restart, tag.car(), spec)?;
+        heap.set_element(restarts, position, restart);
+    }
+    eval::define(symbols().restarts, restarts, frame)?;
+    let value = eval::eval(nth(statements, 6), frame)?;
+    finish(ClosureFrame::Env(frame), value, interp().visible)
+}
+
+/// `makeRestart(handler = spec)` or `makeRestart(description = spec)` with its `name` set to
+/// `name`: the frame `makeRestart` would leave holds its arguments, and the defaults it forces,
+/// `function(...) NULL` and `function(c) TRUE`, are closures over that frame.
+unsafe fn make_restart_for(make_restart: Sexp, name: Sexp, spec: Sexp) -> R<Sexp> {
+    let names = symbols();
+    let heap = crate::heap();
+    let env = values::new_env(make_restart.tag())?;
+    let mut fields: [Sexp; 6] = [nil(); 6];
+    let mut formal = make_restart.car();
+    // name, handler, description, test, interactive
+    let mut position = 0;
+    while formal.kind() == SexpType::Pairlist {
+        let symbol = formal.tag();
+        let value = if symbol == names.handler && spec.kind() != SexpType::String {
+            spec
+        } else if symbol == names.description && spec.kind() == SexpType::String {
+            spec
+        } else {
+            eval::eval(formal.car(), env)?
+        };
+        heap.root(value);
+        eval::define(symbol, value, env)?;
+        let field = if position == 0 { 0 } else { position + 1 };
+        if field >= fields.len() {
+            return Err(crate::unwind::error("makeRestart has unexpected formals"));
+        }
+        fields[field] = value;
+        position += 1;
+        formal = formal.cdr();
+    }
+    fields[0] = values::scalar_string_charsxp(name)?;
+    let restart = values::list_vector(&fields)?;
+    let field_names = values::alloc(SexpType::String, fields.len())?;
+    for (position, label) in [
+        "name",
+        "exit",
+        "handler",
+        "description",
+        "test",
+        "interactive",
+    ]
+    .iter()
+    .enumerate()
+    {
+        heap.set_element(field_names, position, values::mkchar(label)?);
+    }
+    values::set_attr(restart, names.names, field_names)?;
+    values::set_attr(restart, names.class, values::scalar_string("restart")?)?;
+    Ok(restart)
+}
+
+/// `doWithOneRestart(expr, restart)`: sets the restart's `exit` to the frame, establishes it
+/// and evaluates `expr`, whose `return(expr)` returns from `withOneRestart`.
+unsafe fn do_do_with_one_restart(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let frame = call.env()?;
+    let names = symbols();
+    let Some(restart) = argument(ClosureFrame::Env(frame), names.restart)? else {
+        return decline();
+    };
+    if restart.kind() != SexpType::List
+        || !is_plain_restart(restart, frame)?
+        || values::get_attr(restart, names.names).kind() != SexpType::String
+    {
+        return decline();
+    }
+    let field_names = values::get_attr(restart, names.names);
+    let Some(exit) = (0..length(field_names).min(length(restart)))
+        .find(|&position| field_names.element(position).bytes() == b"exit")
+    else {
+        return decline();
+    };
+    let copy = values::shallow_duplicate(restart)?;
+    crate::heap().set_element(copy, exit, frame);
+    eval::define(names.restart, copy, frame)?;
+    kernel(
+        crate::conditions::do_add_restart,
+        &[copy],
+        ClosureFrame::Env(frame),
+    )?;
+    let value = eval::eval(names.expr, frame)?;
+    finish(ClosureFrame::Env(frame), value, interp().visible)
+}
+
+/// Whether `restart` is a list of class `restart` alone, whose `$` and `$<-` no method
+/// visible from `frame` takes over.
+unsafe fn is_plain_restart(restart: Sexp, frame: Sexp) -> R<bool> {
+    let class = values::get_attr(restart, symbols().class);
+    if class.kind() != SexpType::String
+        || length(class) != 1
+        || class.element(0).bytes() != b"restart"
+    {
+        return Ok(false);
+    }
+    let base = values::base_namespace();
+    for method in [&b"$.restart"[..], b"$<-.restart"] {
+        if crate::dispatch::lookup_method(values::install_bytes(method)?, frame, base)?.is_some() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// `withOneRestart(expr, restart)`. After the restart is invoked, a handler that takes no
+/// arguments and whose body is a constant, as `muffleWarning`'s `function() NULL`, returns
+/// that constant without the `docall()` and `do.call()` frames, where no code would run.
+unsafe fn do_with_one_restart(call: &Call<'_>) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let Some(index) = call.frame_index() else {
+        return decline();
+    };
+    let frame = call.env()?;
+    let names = symbols();
+    let statements = original_statements(index);
+    eval::eval(nth(statements, 0), frame)?;
+    // Returns from this frame unless the restart is invoked.
+    eval::eval(nth(statements, 1), frame)?;
+    let restart_args = eval::value_of(eval::find_var_in_frame(names.restart_args, frame)?)?;
+    let Some(restart) = argument(ClosureFrame::Env(frame), names.restart)? else {
+        return decline_after(statements, 2, frame);
+    };
+    if restart_args.kind() != SexpType::List
+        || length(restart_args) != 0
+        || restart.kind() != SexpType::List
+        || !is_plain_restart(restart, frame)?
+    {
+        return decline_after(statements, 2, frame);
+    }
+    let handler = match list_field(restart, b"handler") {
+        Some(handler) if handler.kind() == SexpType::Closure && handler.car() == nil() => handler,
+        _ => return decline_after(statements, 2, frame),
+    };
+    let body = crate::bytecode::closure_body(handler);
+    if matches!(
+        body.kind(),
+        SexpType::Language | SexpType::Symbol | SexpType::Promise | SexpType::Bytecode
+    ) {
+        return decline_after(statements, 2, frame);
+    }
+    finish(ClosureFrame::Env(frame), body, true)
+}
+
+/// Runs the R body's statements from `position` on, for a fast path that has done the ones
+/// before it exactly as the R body would, and finishes the call with the last value.
+unsafe fn decline_after(statements: Sexp, position: usize, frame: Sexp) -> R<Sexp> {
+    let mut rest = statements;
+    for _ in 0..position {
+        rest = rest.cdr();
+    }
+    let mut value = nil();
+    while rest.kind() == SexpType::Pairlist {
+        value = eval::eval(rest.car(), frame)?;
+        crate::heap().root(value);
+        rest = rest.cdr();
+    }
+    finish(ClosureFrame::Env(frame), value, interp().visible)
+}
+
+/// `tryInvokeRestart(r)` and `invokeRestart(r)` for a restart named by a string and given no
+/// arguments, as `suppressWarnings()` and `suppressMessages()` call them. `findRestart()`
+/// would scan the restarts with no condition to test, so its frames run no other code and the
+/// restart is invoked from the same frame as in GNU R.
+unsafe fn invoke_restart_by_name(call: &Call<'_>, quiet_when_missing: bool) -> R<Sexp> {
+    if !fast_paths_enabled() {
+        return decline();
+    }
+    let frame = ClosureFrame::of(call);
+    let Some(name) = argument(frame, symbols().r)? else {
+        return decline();
+    };
+    if name.kind() != SexpType::String
+        || name.is_object()
+        || length(name) != 1
+        || name.element(0) == values::na_string()
+    {
+        return decline();
+    }
+    match dots(frame)? {
+        Some(items) if items.is_empty() => {}
+        _ => return decline(),
+    }
+    let wanted = name.element(0).bytes();
+    let mut entry = interp().restarts.clone();
+    while let Some(candidate) = entry {
+        let restart = candidate.restart;
+        if restart.kind() != SexpType::List || length(restart) < 2 {
+            return decline();
+        }
+        let restart_name = restart.element(0);
+        if restart_name.kind() != SexpType::String
+            || length(restart_name) != 1
+            || restart_name.element(0) == values::na_string()
+        {
+            return decline();
+        }
+        if restart_name.element(0).bytes() == wanted {
+            let arguments = values::alloc(SexpType::List, 0)?;
+            return kernel(
+                crate::conditions::do_invoke_restart,
+                &[restart, arguments],
+                frame,
+            );
+        }
+        entry = candidate.next.clone();
+    }
+    // Below the established restarts sits top level's `abort`, and a missing restart is an
+    // error for `invokeRestart()`; the R body handles both.
+    if !quiet_when_missing || wanted == b"abort" {
+        return decline();
+    }
+    finish(frame, nil(), false)
+}
+
+unsafe fn do_try_invoke_restart(call: &Call<'_>) -> R<Sexp> {
+    invoke_restart_by_name(call, true)
+}
+
+unsafe fn do_invoke_restart_named(call: &Call<'_>) -> R<Sexp> {
+    invoke_restart_by_name(call, false)
 }

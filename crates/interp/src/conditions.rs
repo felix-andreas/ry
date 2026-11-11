@@ -193,7 +193,7 @@ unsafe fn call_simple_error_handler(handler: Sexp, message: &str, call: Sexp) ->
         .is_some()
     {
         let hook_call = values::call(hook, &[handler, text, quoted_call])?;
-        eval::eval(hook_call, global_env())?;
+        eval::eval(hook_call, values::base_env())?;
     } else {
         let condition = make_condition(message, call, &["simpleError", "error", "condition"])?;
         let handler_call = values::call(handler, &[condition])?;
@@ -515,7 +515,9 @@ pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
         let text = scalar_string(&message)?;
         let hook_call = values::call(hook, &[text, quoted_call])?;
         let visible = interp().visible;
-        eval::eval(hook_call, global_env())?;
+        // GNU R calls the hook from the base environment, which no frame owns, so `sys.parents()`
+        // gives the hook's frame its own number.
+        eval::eval(hook_call, values::base_env())?;
         interp().visible = visible;
         return Ok(());
     }
@@ -697,7 +699,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("interruptsSuspended", -1, do_interrupts_suspended),
 ];
 
-unsafe fn do_add_cond_hands(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_add_cond_hands(call: &Call<'_>) -> R<Sexp> {
     activity::count(Counter::HandlersEstablished);
     let classes = call.arg(0);
     let handlers = call.arg(1);
@@ -884,7 +886,7 @@ unsafe fn do_print_deferred_warnings(_call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-unsafe fn do_add_restart(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_add_restart(call: &Call<'_>) -> R<Sexp> {
     let restart = call.arg(0);
     if restart.kind() != SexpType::List || length(restart) < 2 {
         return Err(error("bad restart"));
@@ -919,7 +921,7 @@ unsafe fn do_get_restart(call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-unsafe fn do_invoke_restart(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_invoke_restart(call: &Call<'_>) -> R<Sexp> {
     let restart = call.arg(0);
     let arguments = call.arg(1);
     if restart.kind() != SexpType::List || length(restart) < 2 {
