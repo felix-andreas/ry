@@ -74,21 +74,11 @@ fn scenarios_hold() {
 /// The typed benchmark programs whose kernels do not run on native code yet, with what the
 /// typed core refuses in each. Every other `<name>.typed.R` in `tools/bench/kernels` and
 /// `tools/bench/applications` must run natively.
-const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 7] = [
-    ("expr_tree", "tagged unions built in the kernel (`.ry_tag`)"),
+const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 3] = [
     ("log_rank", "a record parameter"),
-    (
-        "orders",
-        "records and tags built in the kernel (`.ry_record`, `.ry_tag`)",
-    ),
-    ("report", "text building (`.ry_text`)"),
     (
         "sales",
         "a `DataFrame` parameter, which the table engine runs",
-    ),
-    (
-        "team_scores",
-        "`Result.with_default` and a mapped non-local function",
     ),
     (
         "vasicek",
@@ -105,7 +95,9 @@ const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
 /// `RY_TYPED_LOG`, which names every typed function a call of falls back to the interpreter.
 #[test]
 fn typed_benchmarks_run_natively() {
-    if let Some(reason) = missing_requirement(&["ry-runtime".to_owned()], None) {
+    if let Some(reason) =
+        missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
+    {
         eprintln!("typed benchmarks: skipped, {reason}");
         return;
     }
@@ -333,7 +325,9 @@ fn native_reads_leave_missing_arguments_to_the_interpreter() {
 /// Runs the last of `files` with `--profile-summary` in a directory holding all of them, and
 /// gives the summary and what the script printed; `None` when ry's runtime is missing.
 fn profile_summary(files: &[(&str, &str)]) -> Option<(String, String)> {
-    if let Some(reason) = missing_requirement(&["ry-runtime".to_owned()], None) {
+    if let Some(reason) =
+        missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
+    {
         eprintln!("profile summary: skipped, {reason}");
         return None;
     }
