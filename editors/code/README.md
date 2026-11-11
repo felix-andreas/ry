@@ -109,7 +109,7 @@ How much faster ry's runtime is than GNU R, for each benchmark suite:
 - **Numeric kernels: 4.89x, 11x in typed ry.** 16 small programs we wrote whose time goes into loops, recursion and arithmetic on numbers.
 - **Application workloads: 1.77x, 2.41x in typed ry.** 15 programs we wrote in the shape of package and business code: calls, dispatch, conditions, records, tables.
 
-Each number is the geometric-mean speed-up over GNU R 4.6.2 (above 1x is faster), from 10 paired rounds on Linux. **Warning:** the suites ran on different machines, so their numbers are not directly comparable. [Benchmarks](https://ry-lang.org/benchmarks) shows every program and how it is measured.
+Each number is the geometric-mean speed-up over GNU R 4.6.2 (above 1x is faster), from 10 paired rounds on Linux. **Warning:** the suites ran on different machines or BLAS libraries, so their numbers are not directly comparable. [Benchmarks](https://ry-lang.org/benchmarks) shows every program and how it is measured.
 <!-- /bench-summary -->
 
 ## Settings
