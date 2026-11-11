@@ -1298,6 +1298,15 @@ fn no_shipped_package_exports_a_library_name() {
         .chain(frame::package_functions())
         .map(str::to_owned)
         .collect();
+    let unrecorded: Vec<_> = MUST_NOT_MASK
+        .iter()
+        .filter(|package| !directory.join(format!("{package}.exports")).is_file())
+        .collect();
+    assert!(
+        unrecorded.is_empty(),
+        "no types/<package>.exports for {unrecorded:?}: record them with \
+         scripts/export-manifests.R so this test can check them"
+    );
     let mut collisions = Vec::new();
     let entries = fs::read_dir(&directory)
         .unwrap_or_else(|failure| panic!("cannot list {}: {failure}", directory.display()));
@@ -1325,6 +1334,107 @@ fn no_shipped_package_exports_a_library_name() {
     }
     assert!(collisions.is_empty(), "{}", collisions.join("\n"));
 }
+
+/// The packages whose exports `package:ry` and the standard library must never mask: base R, the
+/// recommended packages every GNU R ships, and the benchmark code bases' dependency set.
+const MUST_NOT_MASK: &[&str] = &[
+    "base",
+    "compiler",
+    "datasets",
+    "grDevices",
+    "graphics",
+    "grid",
+    "methods",
+    "parallel",
+    "splines",
+    "stats",
+    "stats4",
+    "tcltk",
+    "tools",
+    "utils",
+    "boot",
+    "class",
+    "cluster",
+    "codetools",
+    "foreign",
+    "KernSmooth",
+    "lattice",
+    "MASS",
+    "Matrix",
+    "mgcv",
+    "nlme",
+    "nnet",
+    "rpart",
+    "spatial",
+    "survival",
+    "abind",
+    "assertthat",
+    "azidentity",
+    "AzureAuth",
+    "AzureKeyVault",
+    "AzureStor",
+    "AzureTableStor",
+    "brio",
+    "cachem",
+    "callr",
+    "cli",
+    "data.table",
+    "DBI",
+    "devtools",
+    "digest",
+    "doParallel",
+    "esgtoolkit",
+    "FLSSS",
+    "foreach",
+    "fs",
+    "git2r",
+    "httr",
+    "httr2",
+    "jsonlite",
+    "lgr",
+    "loadfast",
+    "lubridate",
+    "memoise",
+    "NlcOptim",
+    "odbc",
+    "ompr",
+    "ompr.roi",
+    "openxlsx",
+    "partitions",
+    "pdftools",
+    "PerformanceAnalytics",
+    "plumber",
+    "polars",
+    "pool",
+    "progress",
+    "purrr",
+    "quadprog",
+    "R6",
+    "rappdirs",
+    "Rblpapi",
+    "RcppDE",
+    "RcppSimdJson",
+    "readr",
+    "readxl",
+    "renv",
+    "Rglpk",
+    "rlang",
+    "rmgarch",
+    "ROI.plugin.highs",
+    "rugarch",
+    "rvest",
+    "snakecase",
+    "stringr",
+    "testthat",
+    "tryCatchLog",
+    "uuid",
+    "withr",
+    "xml2",
+    "xts",
+    "YieldCurve",
+    "zeallot",
+    "zoo",
+];
 
 #[test]
 fn standard_library_at_runtime() {
