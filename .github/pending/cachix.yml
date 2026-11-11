@@ -1,0 +1,56 @@
+# Builds the flake's package and dev shell for x86_64-linux and pushes every store path the build
+# produces to the public binary cache ry.cachix.org, so `nix profile install`, `nix build` and
+# `nix develop` on the flake download ry instead of compiling it. The paths filter mirrors the
+# package's source set in flake.nix, so a docs-only push does not rebuild. The cross-built release
+# packages (`ry-linux-x86_64` and the other two) are left out because nothing installs them through
+# nix.
+name: Cachix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - flake.nix
+      - flake.lock
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - crates/**
+      - types/**
+      - patches/**
+      - tools/base-r/**
+      - editors/code/package.json
+      - .github/workflows/cachix.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push supersedes a running build, whose paths would be stale by the time it finished.
+concurrency:
+  group: cachix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The dependency build, the test run and base R need more disk than the runner has free.
+      - name: free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: cachix/install-nix-action@v31
+      # With an auth token the action pushes every path this job builds, through a post-build hook.
+      # The cache's 5 GB also holds the oracle's prebuilt trees (tools/cache.sh), so the filter
+      # keeps out crane's dependency build (`ry-deps-*`): it is the largest output and only a
+      # rebuild from source reads it, never an install.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ry
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          pushFilter: "-ry-deps-"
+      # `ry` is also `default` and pulls in `ry-unwrapped`, so this covers every native package.
+      - name: package
+        run: nix build --print-build-logs .#packages.x86_64-linux.ry
+      - name: dev shell
+        run: nix build --print-build-logs .#devShells.x86_64-linux.default
