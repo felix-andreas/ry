@@ -2930,9 +2930,9 @@ impl Compiler {
     }
 
     /// For `x[i]`, `x[[i]]` or `x$name` as an assignment target: its [`ElementKind`], the base
-    /// replacement function, and the index expression (`"name"` for `x$name`), when `x` is a
-    /// variable and `i` is a constant or a variable that is never a promise (so evaluating it
-    /// early is unobservable).
+    /// replacement function, and the index expressions (`"name"` for `x$name`), when `x` is a
+    /// variable and each subscript is one the compiler can evaluate into a register
+    /// ([`Self::lowerable_subscript`]).
     unsafe fn element_assignment_target(
         &mut self,
         target: Sexp,
