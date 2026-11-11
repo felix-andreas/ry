@@ -388,8 +388,8 @@ unsafe fn inherits_bytes(object: Sexp, class: &[u8]) -> ApiResult<bool> {
 }
 
 /// `Rf_getAttrib`'s direct path: an attribute stored under a symbol, read in place. The
-/// value is reachable from `object`, so it needs no root, exactly as in GNU R. Names of a
-/// pairlist or of a one-dimensional array and compact row names are built on the slow path.
+/// value is reachable from `object`, so it needs no root, exactly as in GNU R. A pairlist's
+/// names and compact row names are built, so they take the slow path.
 #[inline(always)]
 unsafe fn get_attrib_direct(object: Sexp, name: Sexp) -> Option<Reachable> {
     let kind = object.kind();
