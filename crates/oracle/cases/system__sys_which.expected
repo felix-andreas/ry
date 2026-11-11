@@ -1,0 +1,14 @@
+[stdout]
+|           tool           data absent-program           <NA>                
+|     "DIR/tool"             ""             ""             NA             "" 
+|   DIR/tool   DIR/data 
+| "DIR/tool"         "" 
+| named character(0)
+|     tool 
+| "./tool" 
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 0L

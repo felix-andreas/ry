@@ -1,17 +1,18 @@
 ---
-// The two untyped benchmarks side by side: what each measures and ry's geometric-mean speed against GNU R.
-import { benchmarkSummaryColumns, benchmarkSummaryRows } from '../lib/benchmarks';
+// One row per measured suite: what it is and ry's geometric-mean speed against GNU R, untyped and
+// typed in strict mode, with each suite's measurement line under the table.
+import { measuredSuites, suiteMetadata, summaryColumns, summaryNote, summaryRows } from '../lib/benchmarks';
 ---
 
 <table>
 	<thead>
 		<tr>
-			{benchmarkSummaryColumns.map((column, index) => <th style={index > 1 ? 'text-align: right' : undefined}>{column}</th>)}
+			{summaryColumns.map((column, index) => <th style={index > 1 ? 'text-align: right' : undefined}>{column}</th>)}
 		</tr>
 	</thead>
 	<tbody>
 		{
-			benchmarkSummaryRows().map((row) => (
+			summaryRows().map((row) => (
 				<tr>
 					{row.map((cell, index) => <td style={index > 1 ? 'text-align: right' : undefined}>{cell}</td>)}
 				</tr>
@@ -19,3 +20,13 @@ import { benchmarkSummaryColumns, benchmarkSummaryRows } from '../lib/benchmarks
 		}
 	</tbody>
 </table>
+<p>{summaryNote}</p>
+<ul>
+	{
+		measuredSuites().map((suite) => (
+			<li>
+				{suite.name}: {suiteMetadata(suite).replace(/^M/, 'm')}
+			</li>
+		))
+	}
+</ul>

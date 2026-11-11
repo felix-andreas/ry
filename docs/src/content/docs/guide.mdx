@@ -1,0 +1,735 @@
+---
+title: Adopting ry
+description: Adopt ry in four steps on an existing R project, from checking unchanged code to fully typed code in strict mode
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+You adopt ry in four steps on an existing project, and you can stop after any of them. The first two
+leave your code running on GNU R. [Install ry](/installation) first.
+
+1. [Check](#step-1-check-your-code): `ry check` and `ry fmt` with no configuration.
+2. [Type](#step-2-type-your-code): `typing = true`, and `#:` comments where you want a contract.
+3. [Run](#step-3-run-on-rys-runtime): `ry run`, inline types, records and tagged unions.
+4. [Go fully typed](#step-4-go-fully-typed): `strict = true`, so every value has a known type.
+
+## Step 1: check your code
+
+No configuration and no annotations. ry finds the mistakes R reports only when a line runs, then formats the project, and the code keeps running on GNU R.
+
+### Find mistakes
+
+Take a package whose `R/discount.R` has a typo:
+
+```r
+apply_discount <- function(price, rate) {
+  price * ratee
+}
+```
+
+Run `ry check` anywhere in the project. It works the same in a folder of scripts with no
+`DESCRIPTION`:
+
+```text ry check
+$ ry check
+unresolved
+
+  ! I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?
+   --[R/discount.R:2:11]
+ 1 | apply_discount <- function(price, rate) {
+ 2 |   price * ratee
+   |           ^^^^^
+ 3 | }
+  help: Change to `rate` (`ry check --fix --unsafe-fixes` applies it)
+
+1 problem in 1 file
+1 fixable with `ry check --fix --unsafe-fixes`
+```
+
+A finding starts with its code (`unresolved`), then `!` for a warning or `x` for an error. The exit
+status is 1 when anything is found. [Fix and silence](#fix-and-silence) covers the `help:` line.
+
+ry resolves every name by R's scoping rules, so it knows what each file can see:
+
+| File | Sees |
+| --- | --- |
+| `R/*.R` | one package namespace, plus `library()` calls and the imports in `DESCRIPTION` and `NAMESPACE` |
+| a script | its own definitions, the package's, and every file it `source()`s by a literal path |
+| `tests/testthat/*.R` | the package, plus `helper-*.R` and `setup-*.R` |
+| `.Rmd`, `.qmd`, `.Rnw` | its R chunks in order, as one script |
+
+The same analysis reports an assignment nothing reads, a top-level name defined twice, `pkg::name`
+where `pkg` does not export `name`, and a `NAMESPACE` entry that does not exist. Inside dplyr verbs,
+data.table's `[` and `with()`, a bare name is a column, so it is not reported.
+
+After `library(pkg)` of a package ry has no stub for, any bare name might be one of its exports,
+so ry stops reporting unresolved names in the whole project. A [stub](#unknown)
+turns the check back on.
+
+### Syntax errors
+
+For this code, R says `unexpected symbol` and stops. ry names what is missing and keeps analyzing
+the rest of the file:
+
+```r
+config <- list(
+  title = "Revenue"
+  subtitle = "by quarter"
+)
+```
+
+```text ry check
+syntax-error
+
+  x missing `,` between these arguments
+   --[R/config.R:2:20]
+ 1 | config <- list(
+ 2 |   title = "Revenue"
+   |                    ^
+```
+
+### Lints
+
+Eleven lints are on by default. Three of them flag style that hides bugs, here in `R/rates.R`:
+
+```r
+total = 2L
+flag <- T
+x <- c(1, 2, )
+print(totl)
+```
+
+```text ry check
+assignment-operator
+
+  ! Use <-, not =, for assignment
+
+boolean-shorthand
+
+  ! Use TRUE, not T, for Boolean values
+
+trailing-comma
+
+  ! Unexpected comma after last argument
+```
+
+The other eight flag code that reads right but does something else:
+
+| Code | Flags | Why |
+| --- | --- | --- |
+| `equals-na` | `x == NA` | always `NA` |
+| `vector-logic` | `&` or `\|` in an `if` | evaluates both sides |
+| `length-sequence` | `1:length(x)` | counts down to 0 when `x` is empty |
+| `class-equals` | `class(x) == "data.frame"` | misses a tibble |
+| `length-test` | `length(x == 0)` | measures the comparison |
+| `unreachable-code` | code after `return()` or `stop()` | never runs |
+| `sprintf-arguments` | `sprintf("%s %s", a)` | wrong number of values |
+| `object-system` | an S4, R6 or Reference Class definition | [records and tags](#records-tags-and-match) are checked |
+
+Opt-in style lints, such as `single-quotes` and `redundant-return`, are listed in
+[Diagnostic codes](/reference/diagnostic-codes).
+
+### Fix and silence
+
+On `R/rates.R` above, `ry check --fix` applies the safe fixes (`=` to `<-`, `T` to `TRUE`, the
+trailing comma) and reports what is left. A spelling suggestion is a guess, so it needs
+`--unsafe-fixes` as well:
+
+```text
+$ ry check --fix
+unresolved
+
+  ! I could not resolve `totl` in this package, its imports, or builtins. Did you mean `total`?
+   --[R/rates.R:4:7]
+ 3 | x <- c(1, 2)
+ 4 | print(totl)
+   |       ^^^^
+  help: Change to `total` (`ry check --fix --unsafe-fixes` applies it)
+
+applied 3 fixes
+1 problem in 1 file
+1 fixable with `ry check --fix --unsafe-fixes`
+```
+
+To accept one finding, name its code in a comment on the line or the line above:
+
+```r
+y = 3L  # ry: allow(assignment-operator)
+```
+
+lintr's `# nolint` comments work too. To turn a check off for the project, set it in
+[`ry.toml`](/reference/configuration).
+
+### Format
+
+`ry fmt` formats every file in place:
+
+```r
+x<-c(1,2,3)
+if(x>1){y<-2}
+for (i in 1:3) print(i)
+```
+
+```r
+x <- c(1, 2, 3)
+if (x > 1) { y <- 2 }
+for (i in 1:3) {
+  print(i)
+}
+```
+
+Every loop body gets braces. There is no column limit: a call you wrote on one line stays on one
+line, and a call you broke across lines gets one argument per line. `ry fmt --range 2-3 FILE`
+formats only those lines. [Formatting rules](/reference/formatting-rules) has every rule.
+
+### In CI
+
+```sh
+ry check        # exit status 1 on any finding
+ry fmt --check  # exit status 1 if a file is not formatted
+```
+
+Pin the ry version in CI, because a newer release can report findings an older one did not.
+`ry check --output json` writes one JSON object per finding ([CLI](/reference/cli#json-output)).
+
+### In the editor
+
+The language server shows the same findings as you type, with hover, completion, go to definition,
+references, rename and quick fixes for the same fixes. [Installation](/installation#editors) sets it
+up.
+
+## Step 2: type your code
+
+Switch type checking on, read what inference finds, and annotate where code meets other code. The annotations are comments, so the code keeps running on GNU R.
+
+### Switch it on
+
+```toml
+# ry.toml
+[check]
+typing = true
+```
+
+A `# typing: on` comment at the top of a file switches it on for that file alone, and
+`# typing: off` switches it off, so you can adopt types one file at a time.
+
+### Inference
+
+ry infers types from how values are used, so unannotated code is checked as it is:
+
+```r
+apply_discount <- function(price, rate) price * (1 - rate)
+apply_discount(100, "0.2")
+```
+
+```text ry check typing
+type-mismatch
+
+  x expected a numeric value (`integer` or `double`), found `character`
+   --[R/discount.R:2:21]
+ 1 | apply_discount <- function(price, rate) price * (1 - rate)
+ 2 | apply_discount(100, "0.2")
+   |                     ^^^^^
+```
+
+`-` and `*` need numbers, so both parameters must be numbers. Each function gets the most general
+type its body allows, which the editor shows on hover:
+
+```r
+identity2 <- function(x) x           # <T> fn(x: T) -> T
+increment <- function(x) x + 1L      # <T: numeric> fn(x: T) -> T
+```
+
+`T` is any type, and `T: numeric` is `integer` or `double`, so `increment(2.5)` is a `double` and
+`increment("a")` is an error. Argument names are part of a function's type, because R matches
+arguments by name as often as by position:
+
+```r
+greet <- function(name, greeting = "hello") paste(greeting, name)
+greet("Ada", greting = "hi")
+```
+
+```text ry check typing
+type-mismatch
+
+  x this function has no parameter `greting`. Did you mean `greeting`?
+```
+
+### Annotate
+
+Inference cannot know what a file holds or what a function promises. A `#:` comment directly above
+an assignment states it, and every use of the value is checked against it. In the **Untyped** tab,
+`settings` could be anything, so ry reports nothing:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Untyped">
+
+```r
+settings <- readRDS("settings.rds")
+
+should_retry <- function(attempt) attempt < settings$retires
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: list{retries: integer, verbose: logical}
+settings <- readRDS("settings.rds")
+
+#: fn(attempt: integer) -> logical
+should_retry <- function(attempt) attempt < settings$retires
+```
+
+```text ry check typing
+type-mismatch
+
+  x field `retires` does not exist in `list{retries: integer, verbose: logical}`. Did you mean `retries`?
+```
+
+</TabItem>
+<TabItem label="Inline">
+
+```r
+settings: list{retries: integer, verbose: logical} <- readRDS("settings.rds")
+
+should_retry <- function(attempt: integer) -> logical attempt < settings$retires
+```
+
+```text ry check typing
+type-mismatch
+
+  x field `retires` does not exist in `list{retries: integer, verbose: logical}`. Did you mean `retries`?
+```
+
+</TabItem>
+</Tabs>
+
+The **Inline** tab writes each type next to its name. It means the same to the checker, but GNU R
+cannot parse it, so it runs only through ry ([step 3](#inline-annotations)). Your
+tab choice holds on every page.
+
+The body is checked against the signature too: a function declared `-> logical` that returns a
+string is an error at the return value. `[name]` in a `#:` signature marks a parameter callers may
+omit, as in `#: fn(name: character, [greeting]: character) -> character`. Annotate where code meets
+other code: exported functions, values read from files, and any contract you want enforced.
+Inference covers the rest.
+
+### Shapes
+
+R has no scalars, and one list type serves as record, tuple and dictionary alike. ry's types tell
+these apart without any change to your code:
+
+| Type | Holds | Example |
+| --- | --- | --- |
+| `integer` | exactly one element | `1L` |
+| `integer[]` | any length | `c(1L, 2L)` |
+| `integer[named]` | any length, with names | `c(a = 1L)` |
+| `list{name: character, age: integer}` | fixed fields | `list(name = "Ada", age = 36L)` |
+| `list{integer, character}` | fixed positions | `list(1L, "ok")` |
+| `list[integer]` | any length | `lapply(words, nchar)` |
+| `list[named: integer]` | looked up by key | `[[key]]` gives `integer \| NULL` |
+| `character \| NULL` | either | `NULL` default |
+
+`double` accepts `integer` and `logical`, but a number never passes for `character`. A fixed shape
+makes indexing checkable, where R returns `NULL` for a misspelled field and stops only at run time
+for a position past the end:
+
+```r
+result <- list(200L, "ok")
+result[[3]]
+```
+
+```text ry check typing
+type-mismatch
+
+  x position 3 does not exist in `list{integer, character}`
+```
+
+### NULL
+
+A value that may be `NULL` has a union type, and using it as if it were not is an error:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Comments">
+
+```r
+#: fn(config: list{retries: integer} | NULL) -> integer
+retries <- function(config) {
+  config$retries
+}
+```
+
+</TabItem>
+<TabItem label="Inline">
+
+```r
+retries <- function(config: list{retries: integer} | NULL) -> integer {
+  config$retries
+}
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+type-mismatch
+
+  x expected `integer`, found `integer | NULL`
+```
+
+An `is.null()` test *narrows* the type for the rest of the function, so adding
+`if (is.null(config)) return(3L)` as the first line clears the error. `is.character()`,
+`is.numeric()` and the other `is.*` tests narrow the same way.
+
+### Unknown
+
+Values ry cannot model have the type `Unknown`, which fits everywhere, so one unmodeled construct
+never causes a cascade of false errors. The main sources are base `data.frame` columns, S4 and R6
+objects, and packages ry has no stub for. An annotation gives such a value a type, as `settings`
+got one [above](#annotate), and every later use is checked against it.
+
+ry ships types for base R, the default packages, `data.table`, `dplyr`, `ggplot2` and `testthat`,
+and export lists for the rest of the tidyverse and other common packages. For any other package, a
+stub file declares what you call, and turns the unresolved-name check back on:
+
+```text
+# stubs/dbclient.Rtypes
+@type Session
+connect : fn(host: character) -> Session
+```
+
+[Authoring stubs](/development/authoring-stubs) has the format. A clean run does not say how much
+was `Unknown`; [strict mode](#strict-mode) does.
+[Limitations](/reference/type-system#limitations) lists what is not checked.
+
+## Step 3: run on ry's runtime
+
+Run R on ry's own runtime and use what GNU R cannot parse: inline type annotations, which are also checked at run time, and records, tagged unions and `match`.
+
+### Run code
+
+| Command | Runs |
+| --- | --- |
+| `ry run script.R` | a script on ry's runtime; arguments after it reach `commandArgs(TRUE)` |
+| `ry run` | a console on ry's runtime |
+| `ry R script.R`, `ry R` | the same on GNU R, with inline annotations erased |
+| `ry test` | the package's testthat tests; `--filter NAME`, `--watch` |
+| `ry document` | roxygen2, writing the same `man/*.Rd` and `NAMESPACE` byte for byte |
+| `ry load -e EXPR` | loads the package, evaluates `EXPR`, exits |
+
+Inside a package, `ry run` opens a console that loads the package, then reloads exactly the
+definitions you changed before each command. There is no `load_all()` to call and no session to
+restart. Take a package `tally` whose `R/count.R` has a bug:
+
+```r
+count_words <- function(text) length(strsplit(text, " ")[[1]])
+```
+
+```text
+$ ry run
+Loaded tally: 1 definition bound lazily, 0 top-level statements run, in 6 ms.
+ry console on ry's runtime. Type q() or Ctrl-D to quit.
+> count_words("the  quick fox")
+[1] 4
+```
+
+The double space makes an empty word. Change `" "` to `"[[:space:]]+"`, save, and run the same
+command:
+
+```text
+> count_words("the  quick fox")
+Reloaded tally: 1 definition rebound, in 13 ms.
+[1] 3
+```
+
+In RStudio or another R session, `source(pipe("ry load --r-entry"))` defines a `load_all()` that
+loads the same way; put the line in `~/.Rprofile`. ry's runtime is incomplete: code that needs
+something it lacks stops with an error that names it, and `ry R` runs the same code on GNU R.
+
+### Inline annotations
+
+An inline annotation, the **Inline** tab of [step 2](#annotate), means the same to
+the checker as its `#:` comment. On ry's runtime it is also checked when the code runs:
+
+```r
+scale <- function(values: double, by: double) -> double values * by
+scale("a", 1)
+```
+
+```text ry run runtime=ry
+$ ry run scale.R
+Error in scale("a", 1) :
+  argument `values` must be `double`, not `character`
+```
+
+The check tests the kind of value (`double`, `character`, a list, a function), not its length or
+class, and runs when the argument is first used, so lazy arguments stay lazy. `ry R` erases the
+annotations, so GNU R runs the file as plain R. A project whose files must also run under `Rscript`
+sets `inline-annotations = false` under `[check]`, and ry then reports every inline annotation.
+
+When a statement has both spellings and they disagree, ry uses the inline one and warns with
+`annotation-mismatch`.
+
+### Records, tags and match
+
+ry has its own data types, which a checker can follow completely where R's lists, S4 and R6 classes
+defeat it. They run only on ry's runtime:
+
+```r
+point <- (x = 1, y = 2)       # Record{x: double, y: double}
+pair <- (1L, "a")             # Tuple{integer, character}
+one <- (x = 1,)               # a one-field record needs the trailing comma
+point$x + point$y
+```
+
+```text ry run runtime=ry exact
+[1] 3
+```
+
+A record's fields are fixed and checked, and it has value semantics: `point$x <- 3` changes a copy
+only `point` sees. A *tag* is a name starting with `:`, with an optional payload, and a union of
+tags lists every case a value can be. `match` runs the first arm whose pattern fits, and ry reports
+a case no arm handles:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+alias Shape =
+  | :Circle(radius: double)
+  | :Rect(width: double, height: double)
+  | :Empty
+
+area <- function(s: Shape) -> double {
+  match (s) {
+    :Circle(radius = r) => pi * r^2
+    :Rect(width = w, height = h) => w * h
+  }
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @alias Shape {
+#:   | :Circle(radius: double)
+#:   | :Rect(width: double, height: double)
+#:   | :Empty
+#: }
+
+#: fn(s: Shape) -> double
+area <- function(s) {
+  match (s) {
+    :Circle(radius = r) => pi * r^2
+    :Rect(width = w, height = h) => w * h
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+non-exhaustive-match
+
+  x this `match` does not handle `:Empty`: add an arm for it, or a catch-all `_ => ...` arm
+```
+
+Add `:Empty => 0` and `area(:Rect(width = 2, height = 3))` returns `6`. Patterns are `_`, a name, a
+literal, a tag with payload patterns, `(p, q)`, `(x = p, ..)`, `p | q`, and a guard
+`p if (cond)`.
+
+R functions do not know these values, so passing one to an R function is an error until you convert
+it with `as.list()`:
+
+```r
+point <- (x = 1, y = 2)
+sum(point)
+```
+
+```text ry check typing
+type-mismatch
+
+  x `sum` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
+```
+
+`[1, 2, 3]` is a *List*, ry's typed sequence: one item type, no `NA`, no names and no recycling.
+[Type system](/reference/type-system#lists) has its rules.
+
+## Step 4: go fully typed
+
+Model data with types the checker knows completely, then switch on strict mode, which proves that every value has a known type.
+
+### Nominal types
+
+Records and tag unions are *structural*: any value with the right shape fits, and `alias` only names
+a shape. `type` declares a *nominal* type, which keeps values with the same shape apart. Only its
+constructor, `@Name(...)`, creates one:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+type Celsius = Record{degrees: double}
+type Fahrenheit = Record{degrees: double}
+
+boils <- function(water: Celsius) -> logical water$degrees >= 100
+
+oven <- @Fahrenheit(degrees = 350,)
+boils(oven)
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @type Celsius {Record{degrees: double}}
+
+#: @type Fahrenheit {Record{degrees: double}}
+
+#: fn(water: Celsius) -> logical
+boils <- function(water) water$degrees >= 100
+
+#: @new Fahrenheit
+oven <- (degrees = 350,)
+boils(oven)
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+type-mismatch
+
+  x expected `Celsius`, found `Fahrenheit`
+```
+
+With `alias` in place of `type`, both are the same record type and the call passes. `type` works
+over R values too: with `type UserId = character`, an `OrderId` string cannot pass for a `UserId`.
+When `@Email(...)` appears in one validating function only, every `Email` in the program has passed
+that validation. At run time, `@Name(x)` is just `x`.
+
+### DataFrame
+
+`DataFrame` is ry's typed table. Its queries use Polars' verbs and run on the Polars engine, and the
+checker follows every column through every step:
+
+```r
+sales <- DataFrame(region = ["eu", "us", "eu"], units = [3L, 5L, 2L], price = [1.5, 2, 3])
+sales |>
+  DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price")) |>
+  DataFrame.group_by("region") |>
+  GroupBy.agg(total = Expr.col("revenu") |> Expr.sum())
+```
+
+```text ry check typing
+type-mismatch
+
+  x this frame has no column `revenu`. Did you mean `revenue`?
+```
+
+Fix the typo and `ry run` prints the result:
+
+```text
+   region total
+   <char> <num>
+1:     eu  10.5
+2:     us  10.0
+```
+
+A `DataFrame.read_csv()` of a literal path in the project reads the file's header, so the checker
+knows its columns from the first step. data.table code keeps running unchanged.
+[DataFrames](/reference/dataframes) has the API, and
+[Moving from data.table](/reference/from-data-table) maps each data.table idiom.
+
+### The standard library
+
+Seven modules modeled on Roc's: `List`, `Str`, `Num`, `Bool`, `Dict`, `Set` and `Result`, called by
+qualified names. Where R would return `NA` or warn, a function returns a tag, which `match` handles:
+
+```r
+first_or_zero <- function(xs: List<I64>) -> I64 {
+  match (List.first(xs)) {
+    :Ok(x) => x
+    :Err(:ListWasEmpty) => 0i64
+  }
+}
+first_or_zero([])
+```
+
+```text ry run runtime=ry exact
+0i64
+```
+
+[Standard library](/reference/standard-library) lists every function.
+
+### Strict mode
+
+By default, ry checks what it can and lets `Unknown` values through, so a clean run does not say how
+much was checked. Strict mode makes every value ry cannot type, and every parameter nothing
+constrains, an error:
+
+```toml
+# ry.toml
+[check]
+strict = true
+```
+
+```r
+total <- function(df) sum(df$amount)
+```
+
+```text ry check typing strict
+strict
+
+  x strict mode: parameter `df` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `df: TYPE`
+
+strict
+
+  x strict mode: this expression has an undetermined type (`Unknown`)
+```
+
+Typing `df` as a `data.frame` clears the first error but not the second, because a `data.frame`'s
+columns are `Unknown`; a `DataFrame{amount: double[]}` clears both. A value declared `Any` is a
+deliberate opt-out and is not reported. Under strict mode, `ry run`, `ry R` and `ry load` refuse
+code with a strict-mode error, and a `# typing: strict` comment turns it on for one file.
+
+Most of what strict mode asks for is already known to inference. `ry check --annotate` writes the
+inferred type of each unannotated top-level function and binding into the file:
+
+```r
+area <- function(width, height = 1) width * height
+label <- function(shape) shape$name
+```
+
+becomes
+
+```r
+area <- function<T: numeric>(width: T, height: T = 1) -> T width * height
+label <- function(shape) shape$name
+```
+
+and reports what inference could not settle:
+
+```text
+strict
+
+  x strict mode: parameter `shape` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `shape: TYPE`
+
+strict
+
+  x strict mode: this expression has an undetermined type (`Unknown`)
+
+added 1 inferred annotation
+2 problems in 1 file
+```
+
+In strict mode, the top level of a file in `R/` may only define things (functions, types, classes,
+and constants computed without side effects), so loading a package has no side effects.
+`[check] object-systems = false` also rejects new S4, R6 and Reference Classes.
+[Type system](/reference/type-system#a-package-files-top-level) has the rules.
+
+The [type system reference](/reference/type-system) has every rule, and the
+[language tour](/ry) covers everything on one page.

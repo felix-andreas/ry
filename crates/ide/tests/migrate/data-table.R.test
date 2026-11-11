@@ -92,9 +92,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite the query with DataFrame verbs
 - sales[units > 2L & region != "asia"]
-+ sales |> DataFrame.filter(col("units") > 2L, col("region") != "asia")
++ sales |> DataFrame.filter(Expr.col("units") > 2L, Expr.col("region") != "asia")
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L, col("region") != "asia")
++ as.DataFrame(sales) |> DataFrame.filter(Expr.col("units") > 2L, Expr.col("region") != "asia")
 
 #---- filter_keeps_or_whole
 library(data.table)
@@ -106,9 +106,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite the query with DataFrame verbs
 - sales[units > 2L | region == "eu"]
-+ sales |> DataFrame.filter(col("units") > 2L | col("region") == "eu")
++ sales |> DataFrame.filter(Expr.col("units") > 2L | Expr.col("region") == "eu")
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L | col("region") == "eu")
++ as.DataFrame(sales) |> DataFrame.filter(Expr.col("units") > 2L | Expr.col("region") == "eu")
 
 #---- filter_with_is_na
 library(data.table)
@@ -120,9 +120,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite the query with DataFrame verbs
 - sales[is.na(region) & !(units < 2L)]
-+ sales |> DataFrame.filter(Expr.is_null(col("region")), !(col("units") < 2L))
++ sales |> DataFrame.filter(Expr.is_null(Expr.col("region")), !(Expr.col("units") < 2L))
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.filter(Expr.is_null(col("region")), !(col("units") < 2L))
++ as.DataFrame(sales) |> DataFrame.filter(Expr.is_null(Expr.col("region")), !(Expr.col("units") < 2L))
 
 #---- filter_reads_a_variable
 library(data.table)
@@ -135,9 +135,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite the query with DataFrame verbs
 - sales[units > threshold]
-+ sales |> DataFrame.filter(col("units") > threshold)
++ sales |> DataFrame.filter(Expr.col("units") > threshold)
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.filter(col("units") > threshold)
++ as.DataFrame(sales) |> DataFrame.filter(Expr.col("units") > threshold)
 
 #---- filter_with_known_columns
 library(data.table)
@@ -147,7 +147,7 @@ big <- sales[units > 2L]
 #++++
 Rewrite the query with DataFrame verbs
 - sales[units > 2L]
-+ as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L)
++ as.DataFrame(sales) |> DataFrame.filter(Expr.col("units") > 2L)
 
 #---- row_numbers_are_left_alone
 library(data.table)
@@ -204,9 +204,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite the query with DataFrame verbs
 - sales[, .(revenue = units * price)]
-+ sales |> DataFrame.select(revenue = col("units") * col("price"))
++ sales |> DataFrame.select(revenue = Expr.col("units") * Expr.col("price"))
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.select(revenue = col("units") * col("price"))
++ as.DataFrame(sales) |> DataFrame.select(revenue = Expr.col("units") * Expr.col("price"))
 
 #---- select_unnamed_computed_takes_data_table_name
 library(data.table)
@@ -218,9 +218,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite the query with DataFrame verbs
 - sales[, .(region, units * price)]
-+ sales |> DataFrame.select("region", V2 = col("units") * col("price"))
++ sales |> DataFrame.select("region", V2 = Expr.col("units") * Expr.col("price"))
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.select("region", V2 = col("units") * col("price"))
++ as.DataFrame(sales) |> DataFrame.select("region", V2 = Expr.col("units") * Expr.col("price"))
 
 #---- select_aggregations
 library(data.table)
@@ -232,9 +232,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite the query with DataFrame verbs
 - sales[, .(units = sum(units), price = mean(price, na.rm = TRUE))]
-+ sales |> DataFrame.select(units = col("units") |> Expr.sum(), price = col("price") |> Expr.mean())
++ sales |> DataFrame.select(units = Expr.col("units") |> Expr.sum(), price = Expr.col("price") |> Expr.mean())
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.select(units = col("units") |> Expr.sum(), price = col("price") |> Expr.mean())
++ as.DataFrame(sales) |> DataFrame.select(units = Expr.col("units") |> Expr.sum(), price = Expr.col("price") |> Expr.mean())
 
 #---- select_mixing_rows_and_aggregations_is_left_alone
 library(data.table)
@@ -269,9 +269,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite the query with DataFrame verbs
 - sales[, .(units = sum(units)), by = region]
-+ sales |> DataFrame.group_by("region") |> GroupBy.agg(units = col("units") |> Expr.sum())
++ sales |> DataFrame.group_by("region") |> GroupBy.agg(units = Expr.col("units") |> Expr.sum())
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.group_by("region") |> GroupBy.agg(units = col("units") |> Expr.sum())
++ as.DataFrame(sales) |> DataFrame.group_by("region") |> GroupBy.agg(units = Expr.col("units") |> Expr.sum())
 
 #---- group_by_several_spellings
 library(data.table)
@@ -286,24 +286,24 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite the query with DataFrame verbs
 - sales[, .(units = sum(units)), by = .(region, shop)]
-+ sales |> DataFrame.group_by("region", "shop") |> GroupBy.agg(units = col("units") |> Expr.sum())
++ sales |> DataFrame.group_by("region", "shop") |> GroupBy.agg(units = Expr.col("units") |> Expr.sum())
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.group_by("region", "shop") |> GroupBy.agg(units = col("units") |> Expr.sum())
++ as.DataFrame(sales) |> DataFrame.group_by("region", "shop") |> GroupBy.agg(units = Expr.col("units") |> Expr.sum())
 Rewrite the query with DataFrame verbs
 - sales[, .(units = sum(units)), by = c("region", "shop")]
-+ sales |> DataFrame.group_by("region", "shop") |> GroupBy.agg(units = col("units") |> Expr.sum())
++ sales |> DataFrame.group_by("region", "shop") |> GroupBy.agg(units = Expr.col("units") |> Expr.sum())
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.group_by("region", "shop") |> GroupBy.agg(units = col("units") |> Expr.sum())
++ as.DataFrame(sales) |> DataFrame.group_by("region", "shop") |> GroupBy.agg(units = Expr.col("units") |> Expr.sum())
 Rewrite the query with DataFrame verbs
 - sales[, .(units = sum(units)), by = list(region)]
-+ sales |> DataFrame.group_by("region") |> GroupBy.agg(units = col("units") |> Expr.sum())
++ sales |> DataFrame.group_by("region") |> GroupBy.agg(units = Expr.col("units") |> Expr.sum())
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.group_by("region") |> GroupBy.agg(units = col("units") |> Expr.sum())
++ as.DataFrame(sales) |> DataFrame.group_by("region") |> GroupBy.agg(units = Expr.col("units") |> Expr.sum())
 Rewrite the query with DataFrame verbs
 - sales[, .(units = sum(units)), by = "region"]
-+ sales |> DataFrame.group_by("region") |> GroupBy.agg(units = col("units") |> Expr.sum())
++ sales |> DataFrame.group_by("region") |> GroupBy.agg(units = Expr.col("units") |> Expr.sum())
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.group_by("region") |> GroupBy.agg(units = col("units") |> Expr.sum())
++ as.DataFrame(sales) |> DataFrame.group_by("region") |> GroupBy.agg(units = Expr.col("units") |> Expr.sum())
 
 #---- group_aggregations
 library(data.table)
@@ -315,9 +315,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite the query with DataFrame verbs
 - sales[, .(n = .N, low = min(price), high = max(price), mid = median(price), spread = sd(price), variance = var(price), first_units = first(units), last_units = last(units), revenue = sum(units * price), share = sum(units) / .N), by = region]
-+ sales |> DataFrame.group_by("region") |> GroupBy.agg(n = Expr.len(), low = col("price") |> Expr.min(), high = col("price") |> Expr.max(), mid = col("price") |> Expr.median(), spread = col("price") |> Expr.std(), variance = col("price") |> Expr.var(), first_units = col("units") |> Expr.first(), last_units = col("units") |> Expr.last(), revenue = (col("units") * col("price")) |> Expr.sum(), share = (col("units") |> Expr.sum()) / Expr.len())
++ sales |> DataFrame.group_by("region") |> GroupBy.agg(n = Expr.len(), low = Expr.col("price") |> Expr.min(), high = Expr.col("price") |> Expr.max(), mid = Expr.col("price") |> Expr.median(), spread = Expr.col("price") |> Expr.std(), variance = Expr.col("price") |> Expr.var(), first_units = Expr.col("units") |> Expr.first(), last_units = Expr.col("units") |> Expr.last(), revenue = (Expr.col("units") * Expr.col("price")) |> Expr.sum(), share = (Expr.col("units") |> Expr.sum()) / Expr.len())
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.group_by("region") |> GroupBy.agg(n = Expr.len(), low = col("price") |> Expr.min(), high = col("price") |> Expr.max(), mid = col("price") |> Expr.median(), spread = col("price") |> Expr.std(), variance = col("price") |> Expr.var(), first_units = col("units") |> Expr.first(), last_units = col("units") |> Expr.last(), revenue = (col("units") * col("price")) |> Expr.sum(), share = (col("units") |> Expr.sum()) / Expr.len())
++ as.DataFrame(sales) |> DataFrame.group_by("region") |> GroupBy.agg(n = Expr.len(), low = Expr.col("price") |> Expr.min(), high = Expr.col("price") |> Expr.max(), mid = Expr.col("price") |> Expr.median(), spread = Expr.col("price") |> Expr.std(), variance = Expr.col("price") |> Expr.var(), first_units = Expr.col("units") |> Expr.first(), last_units = Expr.col("units") |> Expr.last(), revenue = (Expr.col("units") * Expr.col("price")) |> Expr.sum(), share = (Expr.col("units") |> Expr.sum()) / Expr.len())
 
 #---- group_count_and_unnamed
 library(data.table)
@@ -335,9 +335,9 @@ applied alone:
 + as.DataFrame(sales) |> DataFrame.group_by("region") |> GroupBy.agg(N = Expr.len())
 Rewrite the query with DataFrame verbs
 - sales[, sum(units), by = region]
-+ sales |> DataFrame.group_by("region") |> GroupBy.agg(V1 = col("units") |> Expr.sum())
++ sales |> DataFrame.group_by("region") |> GroupBy.agg(V1 = Expr.col("units") |> Expr.sum())
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.group_by("region") |> GroupBy.agg(V1 = col("units") |> Expr.sum())
++ as.DataFrame(sales) |> DataFrame.group_by("region") |> GroupBy.agg(V1 = Expr.col("units") |> Expr.sum())
 
 #---- group_unsupported_aggregation_is_left_alone
 library(data.table)
@@ -371,9 +371,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite the query with DataFrame verbs
 - sales[units > 2L, .(units = sum(units)), by = region]
-+ sales |> DataFrame.filter(col("units") > 2L) |> DataFrame.group_by("region") |> GroupBy.agg(units = col("units") |> Expr.sum())
++ sales |> DataFrame.filter(Expr.col("units") > 2L) |> DataFrame.group_by("region") |> GroupBy.agg(units = Expr.col("units") |> Expr.sum())
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L) |> DataFrame.group_by("region") |> GroupBy.agg(units = col("units") |> Expr.sum())
++ as.DataFrame(sales) |> DataFrame.filter(Expr.col("units") > 2L) |> DataFrame.group_by("region") |> GroupBy.agg(units = Expr.col("units") |> Expr.sum())
 
 #---- filter_then_select
 library(data.table)
@@ -385,9 +385,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite the query with DataFrame verbs
 - sales[units > 2L, .(region)]
-+ sales |> DataFrame.filter(col("units") > 2L) |> DataFrame.select("region")
++ sales |> DataFrame.filter(Expr.col("units") > 2L) |> DataFrame.select("region")
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L) |> DataFrame.select("region")
++ as.DataFrame(sales) |> DataFrame.filter(Expr.col("units") > 2L) |> DataFrame.select("region")
 
 #---- chained_queries
 library(data.table)
@@ -399,9 +399,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite the query with DataFrame verbs
 - sales[units > 2L][, .(units = sum(units)), by = region]
-+ sales |> DataFrame.filter(col("units") > 2L) |> DataFrame.group_by("region") |> GroupBy.agg(units = col("units") |> Expr.sum())
++ sales |> DataFrame.filter(Expr.col("units") > 2L) |> DataFrame.group_by("region") |> GroupBy.agg(units = Expr.col("units") |> Expr.sum())
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L) |> DataFrame.group_by("region") |> GroupBy.agg(units = col("units") |> Expr.sum())
++ as.DataFrame(sales) |> DataFrame.filter(Expr.col("units") > 2L) |> DataFrame.group_by("region") |> GroupBy.agg(units = Expr.col("units") |> Expr.sum())
 
 #---- query_inside_an_operand_gets_parentheses
 library(data.table)
@@ -413,9 +413,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite the query with DataFrame verbs
 - sales[units > 2L]
-+ (sales |> DataFrame.filter(col("units") > 2L))
++ (sales |> DataFrame.filter(Expr.col("units") > 2L))
 applied alone:
-+ (as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L))
++ (as.DataFrame(sales) |> DataFrame.filter(Expr.col("units") > 2L))
 
 #---- add_column
 library(data.table)
@@ -427,9 +427,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite `:=` with `DataFrame.with_columns`
 - sales[, revenue := units * price]
-+ sales <- sales |> DataFrame.with_columns(revenue = col("units") * col("price"))
++ sales <- sales |> DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price"))
 applied alone:
-+ sales <- as.DataFrame(sales) |> DataFrame.with_columns(revenue = col("units") * col("price"))
++ sales <- as.DataFrame(sales) |> DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price"))
 
 #---- add_columns_functional_form
 library(data.table)
@@ -441,9 +441,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite `:=` with `DataFrame.with_columns`
 - sales[, `:=`(revenue = units * price, flag = TRUE)]
-+ sales <- sales |> DataFrame.with_columns(revenue = col("units") * col("price"), flag = lit(TRUE))
++ sales <- sales |> DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price"), flag = Expr.lit(TRUE))
 applied alone:
-+ sales <- as.DataFrame(sales) |> DataFrame.with_columns(revenue = col("units") * col("price"), flag = lit(TRUE))
++ sales <- as.DataFrame(sales) |> DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price"), flag = Expr.lit(TRUE))
 
 #---- add_columns_by_name_vector
 library(data.table)
@@ -455,9 +455,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite `:=` with `DataFrame.with_columns`
 - sales[, c("revenue", "double_units") := list(units * price, units * 2L)]
-+ sales <- sales |> DataFrame.with_columns(revenue = col("units") * col("price"), double_units = col("units") * 2L)
++ sales <- sales |> DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price"), double_units = Expr.col("units") * 2L)
 applied alone:
-+ sales <- as.DataFrame(sales) |> DataFrame.with_columns(revenue = col("units") * col("price"), double_units = col("units") * 2L)
++ sales <- as.DataFrame(sales) |> DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price"), double_units = Expr.col("units") * 2L)
 
 #---- add_column_inside_a_function_is_left_alone
 library(data.table)
@@ -485,7 +485,7 @@ sales[units > 2L, flag := TRUE]
 #++++
 Rewrite `:=` with `DataFrame.with_columns`
 - sales[units > 2L, flag := TRUE]
-+ sales <- as.DataFrame(sales) |> DataFrame.with_columns(flag = Expr.if_else(col("units") > 2L, TRUE, NA))
++ sales <- as.DataFrame(sales) |> DataFrame.with_columns(flag = Expr.if_else(Expr.col("units") > 2L, TRUE, NA))
 
 #---- update_rows_existing_column
 library(data.table)
@@ -494,7 +494,7 @@ sales[units > 4L | region == "eu", units := 0L]
 #++++
 Rewrite `:=` with `DataFrame.with_columns`
 - sales[units > 4L | region == "eu", units := 0L]
-+ sales <- as.DataFrame(sales) |> DataFrame.with_columns(units = Expr.if_else((col("units") > 4L | col("region") == "eu") & !Expr.is_null(col("units") > 4L | col("region") == "eu"), 0L, col("units")))
++ sales <- as.DataFrame(sales) |> DataFrame.with_columns(units = Expr.if_else((Expr.col("units") > 4L | Expr.col("region") == "eu") & !Expr.is_null(Expr.col("units") > 4L | Expr.col("region") == "eu"), 0L, Expr.col("units")))
 
 #---- update_rows_existing_column_of_another_type_is_left_alone
 library(data.table)
@@ -551,9 +551,9 @@ Rewrite `fread()` as `DataFrame.read_csv()`
 + DataFrame.read_csv("sales.csv")
 Rewrite the query with DataFrame verbs
 - sales[, .(units = sum(units))]
-+ data.table::as.data.table(as.DataFrame(sales) |> DataFrame.select(units = col("units") |> Expr.sum()))
++ data.table::as.data.table(as.DataFrame(sales) |> DataFrame.select(units = Expr.col("units") |> Expr.sum()))
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.select(units = col("units") |> Expr.sum())
++ as.DataFrame(sales) |> DataFrame.select(units = Expr.col("units") |> Expr.sum())
 
 #---- join_with_clashing_columns_is_left_alone
 library(data.table)
@@ -633,9 +633,9 @@ Rewrite `fread()` as `DataFrame.read_csv()`
 + DataFrame.read_csv("sales.csv")
 Rewrite `:=` with `DataFrame.with_columns`
 - sales[, revenue := units * price]
-+ sales <- sales |> DataFrame.with_columns(revenue = col("units") * col("price"))
++ sales <- sales |> DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price"))
 applied alone:
-+ sales <- as.DataFrame(sales) |> DataFrame.with_columns(revenue = col("units") * col("price"))
++ sales <- as.DataFrame(sales) |> DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price"))
 
 #---- code_action_on_a_query
 library(data.table)
@@ -649,9 +649,9 @@ Rewrite `data.table()` as `DataFrame()`
 + DataFrame
 Rewrite the query with DataFrame verbs
 - sales[units > 2L]
-+ sales |> DataFrame.filter(col("units") > 2L)
++ sales |> DataFrame.filter(Expr.col("units") > 2L)
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L)
++ as.DataFrame(sales) |> DataFrame.filter(Expr.col("units") > 2L)
 
 #---- constructor_returned_from_a_function_is_left_alone
 library(data.table)
@@ -674,7 +674,7 @@ Rewrite the query with DataFrame verbs
 - sales[units > 2L]
 left alone by the whole-file migration
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L)
++ as.DataFrame(sales) |> DataFrame.filter(Expr.col("units") > 2L)
 
 #---- query_returned_with_return_converts_back
 library(data.table)
@@ -684,9 +684,9 @@ top <- function(sales: data.table) {
 #++++
 Rewrite the query with DataFrame verbs
 - sales[units > 2L]
-+ data.table::as.data.table(as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L))
++ data.table::as.data.table(as.DataFrame(sales) |> DataFrame.filter(Expr.col("units") > 2L))
 applied alone:
-+ as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L)
++ as.DataFrame(sales) |> DataFrame.filter(Expr.col("units") > 2L)
 
 #---- table_passed_to_another_function_is_left_alone
 library(data.table)

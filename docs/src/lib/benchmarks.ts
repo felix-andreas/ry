@@ -1,190 +1,626 @@
-// The benchmark the docs show: `tools/bench/why/results.json`, which `just bench-why --write`
-// regenerates, and the programs it measured. Pages render both from here, so a table never drifts
-// from the measurement or from the code it measured.
-import results from '../../../tools/bench/why/results.json';
-import realResults from '../../../tools/bench/real/results.json';
+// The benchmark suites the docs show. Each suite is a directory `tools/bench/<suite>/` with a
+// `suite.toml` that names and describes its programs and, once measured, a `results.json` that
+// `just bench <suite> --write` regenerates. Pages, the landing page, the Markdown export and
+// `tools/bench/readme.py` render only these files, so a number never drifts from its measurement.
+// The runner owns every judgement about the data: which programs are too short, which typed
+// programs were refused, and the geometric means. This module renders them and computes nothing.
+import { parse } from 'smol-toml';
 
-const sources = import.meta.glob('../../../tools/bench/why/{untyped,typed}/*.R', {
-  query: '?raw',
-  import: 'default',
-  eager: true,
-}) as Record<string, string>;
+const manifests = import.meta.glob('../../../tools/bench/*/suite.toml', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
+const resultFiles = import.meta.glob('../../../tools/bench/*/results.json', { import: 'default', eager: true }) as Record<string, unknown>;
+const sourceFiles = import.meta.glob('../../../tools/bench/**/*.R', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 
-export type BenchmarkRow = {
-  program: string;
-  gnuR: number;
-  ry: number;
-  ryTyped: number;
-  speedup: number;
-  // Peak resident memory of the whole process in MiB, R's startup included.
-  peak: { gnuR: number; ry: number; ryTyped: number };
+export const repository = 'https://github.com/felix-andreas/ry/blob/main';
+
+// The order of the summary, the page and the README.
+const suiteOrder = ['public', 'packages', 'kernels', 'applications'];
+
+export type Interval = { median: number; low?: number; high?: number };
+export type Flag = { kind: string; engine?: string; reason?: string };
+export type TestCounts = { passed: number; failed: number; errors: number };
+export type Group = { id: string; name: string; description?: string; url?: string; license?: string };
+export type Meta = {
+  date: string;
+  ryCommit?: string;
+  gnuR: { version: string; blas?: string };
+  machine: { cpu: string; cores?: number; kernel?: string };
+  rounds: number;
+  seed?: number;
+  command?: string;
+  tooShortSeconds?: number;
+  // How a file written before the paired-rounds runner was sampled. Deleted with `fromLegacy`.
+  legacySampling?: string;
 };
-export type BenchmarkProgram = { description: string; untyped: string; typed: string };
-// One view of the measurement, shown as one tab of every benchmark table.
-export type BenchmarkView = { label: string; columns: string[]; cells: (row: BenchmarkRow) => string[]; note?: string };
+export type Program = {
+  id: string;
+  display: string;
+  summary?: string;
+  source?: string;
+  typedSource?: string;
+  group?: string;
+  version?: string;
+  // Absent for a program the suite defines but the results file does not hold.
+  measurement?: Measurement;
+};
+export type Measurement = {
+  seconds: Record<string, number>;
+  ratio: Record<string, Interval>;
+  peakMib?: Record<string, number>;
+  tests?: Record<string, TestCounts>;
+  flags: Flag[];
+};
+export type Results = {
+  path: string;
+  engines: string[];
+  geomean: Record<string, Interval & { programs: number }>;
+  meta: Meta;
+};
+export type Suite = {
+  id: string;
+  name: string;
+  summary: string;
+  directory: string;
+  harness?: string;
+  groups: Group[];
+  programs: Program[];
+  results?: Results;
+};
 
-export const benchmarkMachine = `${results.machine}, against GNU R ${/\d+\.\d+\.\d+/.exec(results.r)?.[0] ?? results.r}`;
+// The engine every ratio divides by: a ratio above 1x means the engine ran faster than GNU R.
+export const baseline = 'gnu_r';
 
-const engines = ['GNU R', 'ry', 'ry, typed and strict'];
+const engineLabels: Record<string, string> = {
+  gnu_r: 'GNU R',
+  ry: 'ry',
+  ry_typed: 'ry, typed and strict',
+  ry_nojit: 'ry, JIT off',
+};
 
-// Time with ry's speed-up over GNU R, and peak memory with ry's ratio to GNU R, where above 1x means
-// ry uses more.
-export const benchmarkViews: BenchmarkView[] = [
-  {
-    label: 'CPU',
-    columns: ['program', ...engines, 'speed-up'],
-    cells: (row) => [row.program, seconds(row.gnuR), seconds(row.ry), seconds(row.ryTyped), `${row.speedup.toFixed(1)}x`],
-  },
-  {
-    label: 'Memory',
-    columns: ['program', ...engines, 'ry / GNU R'],
-    cells: (row) => [
-      row.program,
-      mebibytes(row.peak.gnuR),
-      mebibytes(row.peak.ry),
-      mebibytes(row.peak.ryTyped),
-      `${(row.peak.ry / row.peak.gnuR).toFixed(1)}x`,
-    ],
-    note: "Peak memory is the peak resident set size of the whole process, R's startup included.",
-  },
-];
+export function engineLabel(engine: string): string {
+  return engineLabels[engine] ?? engine;
+}
 
-// The rows in the results' order, or only the named programs in the order given.
-export function benchmarkRows(programs?: string[]): BenchmarkRow[] {
-  const rows = results.programs.map((row) => ({
-    program: row.program,
-    gnuR: row.gnu_r,
-    ry: row.ry,
-    ryTyped: row.ry_typed,
-    speedup: row.gnu_r / row.ry,
-    peak: { gnuR: row.peak_mib.gnu_r, ry: row.peak_mib.ry, ryTyped: row.peak_mib.ry_typed },
-  }));
-  if (programs === undefined) return rows;
-  return programs.map((name) => {
-    const row = rows.find((candidate) => candidate.program === name);
-    if (row === undefined) throw new Error(`benchmark program \`${name}\` is not in results.json`);
-    return row;
+export const suites: Suite[] = loadSuites();
+
+export function suite(id: string): Suite | undefined {
+  return suites.find((candidate) => candidate.id === id);
+}
+
+export function measuredSuites(): Suite[] {
+  return suites.filter((candidate) => candidate.results !== undefined);
+}
+
+// The engines a suite compares against GNU R, in the order of its results file.
+export function comparedEngines(suite: Suite): string[] {
+  return (suite.results?.engines ?? []).filter((engine) => engine !== baseline);
+}
+
+export function measuredPrograms(suite: Suite): (Program & { measurement: Measurement })[] {
+  return suite.programs.filter((program): program is Program & { measurement: Measurement } => program.measurement !== undefined);
+}
+
+export function sourceUrl(path: string): string {
+  return `${repository}/${path}`;
+}
+
+export function sourceText(path: string): string | undefined {
+  return sourceFiles[`../../../${path}`];
+}
+
+// Whole numbers from 10x up, where a decimal adds nothing, and two decimals below, where 0.94x
+// against 1.02x is the point.
+export function formatRatio(ratio: number): string {
+  return ratio >= 10 ? `${ratio.toFixed(0)}x` : `${ratio.toFixed(2)}x`;
+}
+
+export function formatInterval(interval: Interval): string {
+  if (interval.low === undefined || interval.high === undefined) return formatRatio(interval.median);
+  return `${formatRatio(interval.median)} (${formatRatio(interval.low)} to ${formatRatio(interval.high)})`;
+}
+
+export function seconds(value: number): string {
+  return `${value.toFixed(3)} s`;
+}
+
+export function mebibytes(value: number): string {
+  return `${value.toFixed(0)} MiB`;
+}
+
+// A flag in words, for the label under a bar and for a table cell.
+export function flagText(flag: Flag): string {
+  const engine = flag.engine === undefined ? '' : ` on ${engineLabel(flag.engine)}`;
+  if (flag.kind === 'too_short') return `too short${engine}`;
+  if (flag.kind === 'typed_refused') return `typed version refused${flag.reason === undefined ? '' : `: ${flag.reason}`}`;
+  if (flag.kind === 'wide_interval') return `wide interval${engine}`;
+  return `${flag.kind.replaceAll('_', ' ')}${engine}${flag.reason === undefined ? '' : `: ${flag.reason}`}`;
+}
+
+// A ratio rests on the engine's time and on GNU R's, so a flag on either one marks it.
+export function ratioFlags(measurement: Measurement, engine: string): Flag[] {
+  return measurement.flags.filter((flag) => flag.engine === undefined || flag.engine === engine || flag.engine === baseline);
+}
+
+// Whether a program is too short to count: GNU R, whose time measures the work, finished it under
+// the floor. A short time on a ry engine is the speed-up being measured, so it is flagged but counts.
+export function isTooShort(measurement: Measurement): boolean {
+  return measurement.flags.some((flag) => flag.kind === 'too_short' && (flag.engine === undefined || flag.engine === baseline));
+}
+
+export function flagNotes(programs: Program[], floor = 0.1): string[] {
+  const flags = programs.flatMap((program) => program.measurement?.flags ?? []);
+  const kinds = new Set(flags.map((flag) => flag.kind));
+  const notes: string[] = [];
+  if (programs.some((program) => program.measurement !== undefined && isTooShort(program.measurement))) {
+    notes.push(`A program marked too short on GNU R finishes there in under ${floor} s, which is too little work for a stable ratio, so every geometric mean leaves it out.`);
+  }
+  if (flags.some((flag) => flag.kind === 'too_short' && flag.engine !== undefined && flag.engine !== baseline)) {
+    notes.push(`A time marked too short on a ry engine is under ${floor} s. That speed is what the suite measures, so it counts in the geometric mean.`);
+  }
+  if (kinds.has('typed_refused')) notes.push('A typed version the compiler refused has no typed time; the flag gives the reason.');
+  if (kinds.has('wide_interval')) notes.push("A program marked wide interval varied so much between rounds that its ratio's interval is wide; read its median with care.");
+  return notes;
+}
+
+// When, where and how a suite was measured, printed under each of its charts and tables.
+export function suiteMetadata(suite: Suite): string {
+  const results = suite.results;
+  if (results === undefined) return '';
+  const { meta } = results;
+  const commit = meta.ryCommit === undefined ? '' : ` at ry ${shortCommit(meta.ryCommit)}`;
+  const sampling = meta.legacySampling ?? `${meta.rounds} paired rounds`;
+  return `Measured on ${meta.date.slice(0, 10)}${commit} with GNU R ${meta.gnuR.version} on ${machine(meta)}; ${sampling}.`;
+}
+
+// A commit as its first nine hex digits, keeping a marker such as `-dirty` that follows the hash.
+export function shortCommit(commit: string): string {
+  return commit.replace(/^([0-9a-f]{9})[0-9a-f]*/, '$1');
+}
+
+export function machine(meta: Meta): string {
+  const parts = [meta.machine.cpu];
+  if (meta.machine.cores !== undefined) parts.push(`${meta.machine.cores} cores`);
+  if (meta.machine.kernel !== undefined) parts.push(meta.machine.kernel);
+  return parts.join(', ');
+}
+
+// One row per measured suite: what it is and ry's geometric-mean speed against GNU R, untyped and
+// typed in strict mode. tools/bench/readme.py writes the same rows into the READMEs.
+export const summaryColumns = ['Suite', 'What it is', 'ry vs GNU R', 'ry typed'];
+
+export function summaryRows(): string[][] {
+  return measuredSuites().map((suite) => {
+    const geomean = suite.results?.geomean ?? {};
+    const untyped = geomean.ry;
+    const typed = geomean.ry_typed;
+    return [
+      suite.name,
+      `${measuredPrograms(suite).length} ${suite.summary}`,
+      untyped === undefined ? 'not measured' : formatRatio(untyped.median),
+      typed === undefined ? 'not typed' : formatRatio(typed.median),
+    ];
   });
 }
 
-// A program's leading comment describes it, so it becomes the prose and the code starts after it.
-export function benchmarkProgram(program: string): BenchmarkProgram {
-  const untyped = source('untyped', program);
-  const lines = untyped.split('\n');
-  const commentLines = lines.findIndex((line) => !line.startsWith('#'));
+export const summaryNote = 'Geometric means of the speed-ups over GNU R; above 1x means ry is faster.';
+
+export function summaryMarkdown(): string {
+  return [
+    `| ${summaryColumns.join(' | ')} |`,
+    '| --- | --- | ---: | ---: |',
+    ...summaryRows().map((row) => `| ${row.join(' | ')} |`),
+    '',
+    summaryNote,
+    '',
+    ...measuredSuites().map((suite) => `- ${suite.name}: ${lowercaseFirst(suiteMetadata(suite))}`),
+  ].join('\n');
+}
+
+// A bar chart of speed relative to GNU R: one row per program, one bar per engine, on a logarithmic
+// axis centred on 1x, so 10x faster and 10x slower are bars of the same length.
+export type ChartBar = { engine: string; ratio?: Interval; faded: boolean; title: string };
+export type ChartRow = { label: string; id?: string; href?: string; flags: string[]; bars: ChartBar[]; summary?: boolean };
+export type Chart = { caption: string; engines: string[]; rows: ChartRow[]; notes: string[]; metadata: string };
+
+// One chart per group, or one for the whole suite when it has no groups.
+export function suiteCharts(suite: Suite): Chart[] {
+  const engines = comparedEngines(suite);
+  const programs = measuredPrograms(suite);
+  const groups = suite.groups.length === 0 ? [undefined] : suite.groups;
+  const charts: Chart[] = groups.flatMap((group) => {
+    const members = group === undefined ? programs : programs.filter((program) => program.group === group.id);
+    if (members.length === 0) return [];
+    const rows: ChartRow[] = members
+      .map((program) => chartRow(program, engines))
+      .sort((a, b) => (b.bars[0]?.ratio?.median ?? 0) - (a.bars[0]?.ratio?.median ?? 0));
+    return [{
+      caption: group === undefined ? suite.name : `${suite.name}: ${group.name}`,
+      engines,
+      rows,
+      notes: flagNotes(members, suite.results?.meta.tooShortSeconds),
+      metadata: suiteMetadata(suite),
+    }];
+  });
+  // The geometric mean spans the whole suite, so it closes the last chart.
+  charts.at(-1)?.rows.push(geomeanRow(suite, engines, groups.length > 1));
+  return charts;
+}
+
+function chartRow(program: Program & { measurement: Measurement }, engines: string[]): ChartRow {
+  const { measurement } = program;
+  const gnuR = measurement.seconds[baseline];
   return {
-    description: lines.slice(0, commentLines).map((line) => line.replace(/^#\s?/, '')).join(' '),
-    untyped: lines.slice(commentLines).join('\n').trim(),
-    typed: source('typed', program).split('\n').slice(commentLines).join('\n').trim(),
+    label: program.display,
+    id: program.id === program.display ? undefined : program.id,
+    href: program.source === undefined ? undefined : sourceUrl(program.source),
+    flags: measurement.flags.map(flagText),
+    bars: engines.map((engine) => {
+      const ratio = measurement.ratio[engine];
+      const time = measurement.seconds[engine];
+      const title = ratio === undefined
+        ? `${program.display}, ${engineLabel(engine)}: not measured`
+        : `${program.display}, ${engineLabel(engine)}: ${formatInterval(ratio)} the speed of GNU R` +
+          (time === undefined || gnuR === undefined ? '' : `, ${seconds(time)} against ${seconds(gnuR)}`);
+      return { engine, ratio, faded: isTooShort(measurement), title };
+    }),
   };
 }
 
-// Each view as a table under its own heading, the way a page's tabs become subheadings.
-export function benchmarkTableMarkdown(headingLevel: number, programs?: string[]): string {
-  const rows = benchmarkRows(programs);
-  const parts = benchmarkViews.map((view) =>
-    [
-      `${'#'.repeat(Math.min(headingLevel, 6))} ${view.label}`,
-      '',
-      `| ${view.columns.join(' | ')} |`,
-      `| --- | ${view.columns.slice(1).map(() => '---:').join(' | ')} |`,
-      ...rows.map((row) => `| \`${row.program}\` | ${view.cells(row).slice(1).join(' | ')} |`),
-      ...(view.note === undefined ? [] : ['', view.note]),
-    ].join('\n'),
-  );
-  return parts.join('\n\n');
+function geomeanRow(suite: Suite, engines: string[], grouped: boolean): ChartRow {
+  const geomean = suite.results?.geomean ?? {};
+  return {
+    label: grouped ? 'geometric mean of all groups' : 'geometric mean',
+    flags: [],
+    summary: true,
+    bars: engines.map((engine) => {
+      const value = geomean[engine];
+      return {
+        engine,
+        ratio: value,
+        faded: false,
+        title: value === undefined ? `${engineLabel(engine)}: no geometric mean` : `${engineLabel(engine)}: ${formatInterval(value)} over ${value.programs} programs`,
+      };
+    }),
+  };
 }
 
-export function benchmarkProgramsMarkdown(headingLevel: number): string {
+export function chartMarkdown(suite: Suite): string {
+  if (suite.results === undefined) return '';
+  return suiteCharts(suite)
+    .map((chart) =>
+      [
+        `${chart.caption}, speed-up over GNU R:`,
+        '',
+        `| program | ${chart.engines.map(engineLabel).join(' | ')} |`,
+        `| --- |${chart.engines.map(() => ' ---: |').join('')}`,
+        ...chart.rows.map((row) => {
+          const label = `${row.label}${row.id === undefined ? '' : ` (\`${row.id}\`)`}${row.flags.length === 0 ? '' : `, ${row.flags.join(', ')}`}`;
+          return `| ${label} | ${row.bars.map((bar) => (bar.ratio === undefined ? 'n/a' : formatInterval(bar.ratio))).join(' | ')} |`;
+        }),
+        '',
+        [...chart.notes, chart.metadata].join(' '),
+      ].join('\n'),
+    )
+    .join('\n\n');
+}
+
+// The measurement as tables: seconds and ratios, peak memory where the runner recorded it, and the
+// test counts of a suite of test suites.
+export type TableView = { label: string; columns: string[]; rows: string[][]; note?: string };
+
+export function tableViews(suite: Suite): TableView[] {
+  const engines = suite.results?.engines ?? [];
+  const compared = comparedEngines(suite);
+  const programs = measuredPrograms(suite);
+  const name = (program: Program) => `${program.display}${program.version === undefined ? '' : ` ${program.version}`}`;
+  const views: TableView[] = [{
+    label: 'Time',
+    columns: ['program', ...engines.map(engineLabel), ...compared.map((engine) => `${engineLabel(engine)}, speed-up`)],
+    rows: programs.map((program) => [
+      name(program),
+      ...engines.map((engine) => {
+        const value = program.measurement.seconds[engine];
+        return value === undefined ? 'n/a' : seconds(value);
+      }),
+      ...compared.map((engine) => {
+        const ratio = program.measurement.ratio[engine];
+        const flags = ratioFlags(program.measurement, engine).map(flagText);
+        return `${ratio === undefined ? 'n/a' : formatInterval(ratio)}${flags.length === 0 ? '' : ` (${flags.join(', ')})`}`;
+      }),
+    ]),
+    note: suite.results?.meta.legacySampling === undefined
+      ? 'Each time is the median over the rounds. Each speed-up is the median of the per-round ratios, with its 95% interval in parentheses.'
+      : undefined,
+  }];
+  if (programs.some((program) => program.measurement.peakMib !== undefined)) {
+    views.push({
+      label: 'Memory',
+      columns: ['program', ...engines.map(engineLabel)],
+      rows: programs.map((program) => [
+        name(program),
+        ...engines.map((engine) => {
+          const value = program.measurement.peakMib?.[engine];
+          return value === undefined ? 'n/a' : mebibytes(value);
+        }),
+      ]),
+      note: "Peak memory is the peak resident set size of the whole process, R's startup included.",
+    });
+  }
+  if (programs.some((program) => program.measurement.tests !== undefined)) {
+    views.push({
+      label: 'Tests',
+      columns: ['package', ...engines.map((engine) => `${engineLabel(engine)}: passed, failed, errors`)],
+      rows: programs.map((program) => [
+        name(program),
+        ...engines.map((engine) => {
+          const counts = program.measurement.tests?.[engine];
+          return counts === undefined ? 'n/a' : `${counts.passed}, ${counts.failed}, ${counts.errors}`;
+        }),
+      ]),
+    });
+  }
+  return views;
+}
+
+export function tableMarkdown(suite: Suite, headingLevel: number): string {
+  if (suite.results === undefined) return '';
   const heading = '#'.repeat(Math.min(headingLevel, 6));
-  const parts = [...benchmarkRows().map((row) => row.program), 'harness'].map((name) => {
-    const program = benchmarkProgram(name);
-    return [
-      `${heading} ${name}`,
-      '',
-      program.description,
-      '',
-      'Plain R:',
-      '',
-      '```r',
-      program.untyped,
-      '```',
-      '',
-      'Typed:',
-      '',
-      '```r',
-      program.typed,
-      '```',
-    ].join('\n');
-  });
-  return parts.join('\n\n');
-}
-
-function source(variant: 'untyped' | 'typed', program: string): string {
-  const text = sources[`../../../tools/bench/why/${variant}/${program}.R`];
-  if (text === undefined) throw new Error(`no benchmark source tools/bench/why/${variant}/${program}.R`);
-  return text;
-}
-
-function seconds(value: number): string {
-  return `${value.toFixed(3)} s`;
-}
-
-function mebibytes(value: number): string {
-  return `${value.toFixed(0)} MiB`;
-}
-
-export type RealWorkloadRow = { workload: string; gnuR: number; ryJit: number; ryNoJit: number };
-
-// The call-heavy workloads of `tools/bench/real/results.json`, which `just bench-real --write` regenerates.
-export function realWorkloadRows(): RealWorkloadRow[] {
-  return realResults.workloads.map((row) => ({
-    workload: row.workload,
-    gnuR: row.gnu_r,
-    ryJit: row.ry_jit,
-    ryNoJit: row.ry_nojit,
-  }));
-}
-
-// GNU R's time over ry's, as a geometric mean: above 1x means ry is faster.
-export function geomean(ratios: number[]): number {
-  return Math.exp(ratios.reduce((sum, ratio) => sum + Math.log(ratio), 0) / ratios.length);
-}
-
-export const kernelGeomean = geomean(results.programs.map((row) => row.gnu_r / row.ry));
-export const kernelCount = results.programs.length;
-export const realGeomean = geomean(realWorkloadRows().map((row) => row.gnuR / row.ryJit));
-export const realGeomeanNoJit = geomean(realWorkloadRows().map((row) => row.gnuR / row.ryNoJit));
-export const realCount = realWorkloadRows().length;
-
-export const benchmarkRealMachine = `${realResults.machine}, against GNU R ${/\d+\.\d+\.\d+/.exec(realResults.r)?.[0] ?? realResults.r}`;
-
-// What each of the two benchmarks measures and how ry fares on it, for the side-by-side summary.
-export function benchmarkSummaryRows(): string[][] {
   return [
-    ['Real-world workloads', 'call-heavy R: closures, S3 and S4 dispatch, conditions, environments, strings, lists', `${realCount}`, `${realGeomean.toFixed(2)}x`],
-    ['Synthetic kernels', 'tight loops, recursion and vector kernels, where the JIT applies', `${kernelCount}`, `${kernelGeomean.toFixed(2)}x`],
-  ];
-}
-export const benchmarkSummaryColumns = ['untyped R on ry', 'what it measures', 'programs', 'speed vs GNU R (geometric mean)'];
-
-export function realWorkloadMarkdown(): string {
-  const rows = realWorkloadRows();
-  return [
-    '| workload | GNU R | ry, JIT on | ry, JIT off | GNU R / ry, JIT on | GNU R / ry, JIT off |',
-    '| --- | ---: | ---: | ---: | ---: | ---: |',
-    ...rows.map(
-      (row) =>
-        `| \`${row.workload}\` | ${seconds(row.gnuR)} | ${seconds(row.ryJit)} | ${seconds(row.ryNoJit)} | ${(row.gnuR / row.ryJit).toFixed(2)}x | ${(row.gnuR / row.ryNoJit).toFixed(2)}x |`,
+    ...tableViews(suite).map((view) =>
+      [
+        `${heading} ${view.label}`,
+        '',
+        `| ${view.columns.join(' | ')} |`,
+        `| --- |${view.columns.slice(1).map(() => ' ---: |').join('')}`,
+        ...view.rows.map((row) => `| ${row.join(' | ')} |`),
+        ...(view.note === undefined ? [] : ['', view.note]),
+      ].join('\n'),
     ),
-    `| geometric mean | | | | ${realGeomean.toFixed(2)}x | ${realGeomeanNoJit.toFixed(2)}x |`,
+    suiteMetadata(suite),
+  ].join('\n\n');
+}
+
+// A program's code without its leading comment, which the suite's summary already says in words.
+export function programCode(path: string | undefined): string | undefined {
+  if (path === undefined) return undefined;
+  const text = sourceText(path);
+  if (text === undefined) return undefined;
+  const lines = text.split('\n');
+  const start = lines.findIndex((line) => !line.startsWith('#'));
+  return lines.slice(Math.max(start, 0)).join('\n').trim();
+}
+
+// A program's headline number: ry's speed-up on the untyped program.
+export function programRatio(program: Program): string {
+  const measurement = program.measurement;
+  if (measurement === undefined) return 'not in the committed results';
+  const ratio = measurement.ratio.ry;
+  if (ratio === undefined) return '';
+  return `${formatRatio(ratio.median)}${isTooShort(measurement) ? ' (too short)' : ''}`;
+}
+
+// Programs listed by group, each group with its upstream source and licence.
+export function programGroups(suite: Suite): { group?: Group; programs: Program[] }[] {
+  if (suite.groups.length === 0) return [{ programs: suite.programs }];
+  return suite.groups.map((group) => ({ group, programs: suite.programs.filter((program) => program.group === group.id) }));
+}
+
+export function programsMarkdown(suite: Suite, headingLevel: number): string {
+  const heading = '#'.repeat(Math.min(headingLevel, 6));
+  return programGroups(suite)
+    .map(({ group, programs }) => {
+      const intro = group === undefined
+        ? []
+        : [`${heading} ${group.name}`, '', [group.description, group.url && `Source: ${group.url}`, group.license && `Licence: ${group.license}.`].filter(Boolean).join(' '), ''];
+      const entries = programs.map((program) => {
+        const lines = [`- **${program.display}** ([\`${program.id}\`](${sourceUrl(program.source ?? suite.directory)}), ${programRatio(program)}): ${program.summary ?? ''}`];
+        const untyped = programCode(program.source);
+        const typed = programCode(program.typedSource);
+        if (typed !== undefined && untyped !== undefined) {
+          lines.push('', '  Plain R:', '', '  ```r', ...untyped.split('\n').map((line) => `  ${line}`), '  ```', '', '  Typed:', '', '  ```r', ...typed.split('\n').map((line) => `  ${line}`), '  ```');
+        }
+        return lines.join('\n');
+      });
+      return [...intro, ...entries].join('\n');
+    })
+    .join('\n\n');
+}
+
+// How each measured suite was run, as rows of one table with a column per suite.
+export function methodRows(): { columns: string[]; rows: string[][] } {
+  const measured = measuredSuites();
+  const meta = (suite: Suite) => suite.results?.meta;
+  const row = (label: string, cell: (suite: Suite) => string) => [label, ...measured.map(cell)];
+  return {
+    columns: ['', ...measured.map((suite) => suite.name)],
+    rows: [
+      row('Command', (suite) => (meta(suite)?.command === undefined ? '' : `\`${meta(suite)?.command}\``)),
+      row('Results file', (suite) => `\`${suite.results?.path ?? ''}\``),
+      row('Measured', (suite) => `${meta(suite)?.date.slice(0, 10) ?? ''}${meta(suite)?.ryCommit === undefined ? '' : ` at ry ${shortCommit(meta(suite)?.ryCommit ?? '')}`}`),
+      row('Machine', (suite) => { const value = meta(suite); return value === undefined ? '' : machine(value); }),
+      row('GNU R', (suite) => `${meta(suite)?.gnuR.version ?? ''}${meta(suite)?.gnuR.blas === undefined ? '' : `, ${meta(suite)?.gnuR.blas}`}`),
+      row('Engines', (suite) => (suite.results?.engines ?? []).map(engineLabel).join('; ')),
+      row('Samples', (suite) => meta(suite)?.legacySampling ?? `${meta(suite)?.rounds} paired rounds${meta(suite)?.seed === undefined ? '' : `, shuffle seed ${meta(suite)?.seed}`}`),
+    ],
+  };
+}
+
+// A results file written before the paired-rounds runner, named under the method table.
+export function legacyNotes(): string[] {
+  return measuredSuites()
+    .filter((suite) => suite.results?.meta.legacySampling !== undefined)
+    .map((suite) => `The committed ${suite.name} results predate this method: they hold ${suite.results?.meta.legacySampling}, so each ratio divides two times and has no interval.`);
+}
+
+export function methodMarkdown(): string {
+  const { columns, rows } = methodRows();
+  return [
+    `| ${columns.join(' | ')} |`,
+    `| --- |${columns.slice(1).map(() => ' --- |').join('')}`,
+    ...rows.map((row) => `| ${row.join(' | ')} |`),
+    ...legacyNotes().flatMap((note) => ['', note]),
   ].join('\n');
 }
 
-export function benchmarkSummaryMarkdown(): string {
-  return [
-    `| ${benchmarkSummaryColumns.join(' | ')} |`,
-    '| --- | --- | ---: | ---: |',
-    ...benchmarkSummaryRows().map((row) => `| ${row.join(' | ')} |`),
-  ].join('\n');
+function lowercaseFirst(text: string): string {
+  return text.slice(0, 1).toLowerCase() + text.slice(1);
+}
+
+type Manifest = {
+  id: string;
+  name: string;
+  summary: string;
+  harness?: string;
+  groups?: Group[];
+  programs?: { id: string; display: string; summary?: string; source?: string; typed_source?: string; group?: string; version?: string }[];
+};
+
+type RawResults = {
+  schema: number;
+  engines: string[];
+  meta: {
+    date: string;
+    ry_commit?: string | null;
+    gnu_r: { version: string; blas?: string | null };
+    machine: { cpu: string; cores?: number | null; kernel?: string | null };
+    rounds: number;
+    seed?: number | null;
+    command?: string | null;
+    too_short_seconds?: number | null;
+  };
+  programs: {
+    id: string;
+    display?: string;
+    seconds: Record<string, number>;
+    ratio: Record<string, Interval>;
+    peak_mib?: Record<string, number>;
+    tests?: Record<string, TestCounts>;
+    flags?: Flag[];
+  }[];
+  geomean: Record<string, Interval & { programs: number }>;
+};
+
+function loadSuites(): Suite[] {
+  const loaded = Object.entries(manifests).map(([path, text]) => {
+    const directory = path.replace(/^\.\.\/\.\.\/\.\.\//, '').replace(/\/suite\.toml$/, '');
+    const manifest = parse(text) as unknown as Manifest;
+    const raw = resultFiles[`../../../${directory}/results.json`];
+    const results = raw === undefined ? undefined : normalize(manifest.id, raw);
+    const byId = new Map((results?.programs ?? []).map((program) => [program.id, program]));
+    const programs: Program[] = (manifest.programs ?? []).map((program) => ({
+      id: program.id,
+      display: program.display,
+      summary: program.summary,
+      source: program.source,
+      typedSource: program.typed_source,
+      group: program.group,
+      version: program.version,
+      measurement: measurement(byId.get(program.id)),
+    }));
+    // A measured program the manifest does not name still shows, under the name the results give it.
+    for (const program of results?.programs ?? []) {
+      if (!programs.some((known) => known.id === program.id)) {
+        programs.push({ id: program.id, display: program.display ?? program.id, measurement: measurement(program) });
+      }
+    }
+    return {
+      id: manifest.id,
+      name: manifest.name,
+      summary: manifest.summary,
+      directory,
+      harness: manifest.harness,
+      groups: manifest.groups ?? [],
+      programs,
+      results: results === undefined
+        ? undefined
+        : { path: `${directory}/results.json`, engines: results.engines, geomean: results.geomean, meta: meta(results.meta, (results as { legacySampling?: string }).legacySampling) },
+    } satisfies Suite;
+  });
+  for (const [index, entry] of loaded.entries()) {
+    const twin = loaded.findIndex((other) => other.id === entry.id);
+    if (twin !== index) throw new Error(`benchmark suite \`${entry.id}\` is defined by both ${loaded[twin].directory} and ${entry.directory}`);
+  }
+  const rank = (id: string) => (suiteOrder.includes(id) ? suiteOrder.indexOf(id) : suiteOrder.length);
+  return loaded.sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
+}
+
+function measurement(program: RawResults['programs'][number] | undefined): Measurement | undefined {
+  if (program === undefined) return undefined;
+  return { seconds: program.seconds, ratio: program.ratio, peakMib: program.peak_mib, tests: program.tests, flags: program.flags ?? [] };
+}
+
+function meta(raw: RawResults['meta'], legacySampling: string | undefined): Meta {
+  return {
+    // A runner written in Python stores an absent value as null, which reads here as absent.
+    date: raw.date,
+    ryCommit: raw.ry_commit ?? undefined,
+    gnuR: { version: raw.gnu_r.version, blas: raw.gnu_r.blas ?? undefined },
+    machine: { cpu: raw.machine.cpu, cores: raw.machine.cores ?? undefined, kernel: raw.machine.kernel ?? undefined },
+    rounds: raw.rounds,
+    seed: raw.seed ?? undefined,
+    command: raw.command ?? undefined,
+    tooShortSeconds: raw.too_short_seconds ?? undefined,
+    legacySampling,
+  };
+}
+
+function normalize(id: string, raw: unknown): RawResults {
+  const value = raw as { schema?: number };
+  if (value.schema === 1) return raw as RawResults;
+  if (value.schema === undefined) return fromLegacy(raw);
+  throw new Error(`benchmark suite \`${id}\`: results.json has schema ${value.schema}, which the docs do not read`);
+}
+
+// TEMPORARY: maps the results files of `tools/bench/why` (numeric kernels) and `tools/bench/real`
+// (application workloads), written before the schema-1 runner, into schema 1. Delete it, and
+// `legacySampling` with it, once those directories are gone. `tools/bench/readme.py` has the twin
+// of this function.
+type LegacyResults = {
+  date: string;
+  commit?: string;
+  machine: string;
+  r: string;
+  repeat: number;
+  programs?: { program: string; gnu_r: number; ry: number; ry_typed: number; peak_mib: Record<string, number> }[];
+  workloads?: { workload: string; kind?: string; gnu_r: number; ry_jit: number; ry_nojit: number }[];
+};
+
+function fromLegacy(raw: unknown): RawResults & { legacySampling: string } {
+  const legacy = raw as LegacyResults;
+  const kernels = legacy.programs !== undefined;
+  const engines = kernels ? ['gnu_r', 'ry', 'ry_typed'] : ['gnu_r', 'ry', 'ry_nojit'];
+  const rows = kernels
+    ? (legacy.programs ?? []).map((row) => ({ id: row.program, seconds: { gnu_r: row.gnu_r, ry: row.ry, ry_typed: row.ry_typed }, peak_mib: row.peak_mib }))
+    : (legacy.workloads ?? []).filter((row) => (row.kind ?? 'workload') === 'workload').map((row) => ({ id: row.workload, seconds: { gnu_r: row.gnu_r, ry: row.ry_jit, ry_nojit: row.ry_nojit }, peak_mib: undefined }));
+  // These files flagged a program by GNU R's time alone and left it out of every geometric mean.
+  const programs = rows.map((row) => ({
+    ...row,
+    ratio: Object.fromEntries(engines.slice(1).map((engine) => [engine, { median: row.seconds.gnu_r / row.seconds[engine as keyof typeof row.seconds] }])),
+    flags: row.seconds.gnu_r < 0.1 ? [{ kind: 'too_short', engine: 'gnu_r' }] : [],
+  }));
+  const timed = programs.filter((program) => program.flags.length === 0);
+  const geomean = Object.fromEntries(
+    engines.slice(1).map((engine) => [
+      engine,
+      { median: Math.exp(timed.reduce((sum, program) => sum + Math.log(program.ratio[engine].median), 0) / timed.length), programs: timed.length },
+    ]),
+  );
+  const cpu = legacy.machine.split(', ');
+  return {
+    schema: 1,
+    engines,
+    meta: {
+      date: legacy.date,
+      ry_commit: legacy.commit,
+      gnu_r: { version: /\d+\.\d+\.\d+/.exec(legacy.r)?.[0] ?? legacy.r },
+      machine: { cpu: cpu[0], cores: Number.parseInt(cpu[1] ?? '', 10) || undefined, kernel: cpu[2] },
+      rounds: legacy.repeat,
+      command: kernels ? 'just bench-why --write' : 'just bench-real --write',
+      too_short_seconds: 0.1,
+    },
+    programs,
+    geomean,
+    legacySampling: kernels
+      ? `each engine's best time over ${legacy.repeat} processes, run one engine after another`
+      : `each engine's median time over ${legacy.repeat} rounds`,
+  };
 }

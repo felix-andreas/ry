@@ -1,40 +1,46 @@
 ---
-// The measured benchmark from tools/bench/why/results.json, as a CPU tab and a Memory tab. The tabs
-// share a sync key, so the reader's choice holds on every page. `programs` picks and orders rows.
+// A suite's measurement as tables, one tab each for time, peak memory and test counts where the
+// results hold them. The tabs share a sync key, so the reader's choice holds across suites.
 import { TabItem, Tabs } from '@astrojs/starlight/components';
-import { benchmarkRows, benchmarkViews } from '../lib/benchmarks';
+import { suite as findSuite, suiteMetadata, tableViews } from '../lib/benchmarks';
 
 interface Props {
-	programs?: string[];
+	suite: string;
 }
 
-const rows = benchmarkRows(Astro.props.programs);
+const suite = findSuite(Astro.props.suite);
+const views = suite?.results === undefined ? [] : tableViews(suite);
 ---
 
-<Tabs syncKey="benchmark-metric">
-	{
-		benchmarkViews.map((view) => (
-			<TabItem label={view.label}>
-				<table>
-					<thead>
-						<tr>
-							{view.columns.map((column, index) => (
-								<th style={index > 0 ? 'text-align: right' : undefined}>{column}</th>
-							))}
-						</tr>
-					</thead>
-					<tbody>
-						{rows.map((row) => (
-							<tr>
-								{view.cells(row).map((cell, index) => (
-									<td style={index > 0 ? 'text-align: right' : undefined}>{index === 0 ? <code>{cell}</code> : cell}</td>
+{
+	views.length > 0 && suite !== undefined && (
+		<>
+			<Tabs syncKey="benchmark-metric">
+				{views.map((view) => (
+					<TabItem label={view.label}>
+						<table>
+							<thead>
+								<tr>
+									{view.columns.map((column, index) => (
+										<th style={index > 0 ? 'text-align: right' : undefined}>{column}</th>
+									))}
+								</tr>
+							</thead>
+							<tbody>
+								{view.rows.map((row) => (
+									<tr>
+										{row.map((cell, index) => (
+											<td style={index > 0 ? 'text-align: right' : undefined}>{cell}</td>
+										))}
+									</tr>
 								))}
-							</tr>
-						))}
-					</tbody>
-				</table>
-				{view.note && <p>{view.note}</p>}
-			</TabItem>
-		))
-	}
-</Tabs>
+							</tbody>
+						</table>
+						{view.note && <p>{view.note}</p>}
+					</TabItem>
+				))}
+			</Tabs>
+			<p>{suiteMetadata(suite)}</p>
+		</>
+	)
+}

@@ -1,46 +1,41 @@
 ---
-title: ry at a glance
-description: Everything important about ry on one page, for people and agents, also served as Markdown at /ry.md
+title: Language tour
+description: Everything about ry on one page, code first, for people and agents; also served as Markdown at /ry.md
 ---
 
-import BenchmarkSummary from '../../components/BenchmarkSummary.astro';
-import BenchmarkTable from '../../components/BenchmarkTable.astro';
-
-ry is a type checker and a fast runtime for R, written in Rust. It also has a linter, a formatter, a
-language server and a package loader, all configured by one `ry.toml`. Plain R stays valid, and ry
-adds static types, records, tagged unions, a typed table and a standard library on top. This page is
-also served as Markdown at [`/ry.md`](/ry.md).
+ry is a type checker and a fast runtime for R, written in Rust. This page shows every feature once,
+code first and with real output, in the order you meet them: the commands, checking and typing R
+code, ry's own data types, strict mode, and the tooling around them. Each section links to its
+rules, and the page is also served as Markdown at [`/ry.md`](/ry.md).
 
 ## Commands
 
-| Command | What it does |
-| --- | --- |
-| `ry check [PATHS]` | Report problems; exit status 1 when there are any. `--fix` applies safe fixes, `--unsafe-fixes` the rest, `--output json` for tools |
-| `ry fmt [PATHS]` | Format in place; `--check` lists unformatted files, `--range 2-3` formats some lines |
-| `ry run [FILE]` | Run a script on ry's runtime, or open its console, which reloads your package before each command |
-| `ry R [FILE]` | The same on the GNU R installed on your machine, with inline annotations erased |
-| `ry load -e EXPR` | Load the package, evaluate `EXPR` (or `-f FILE`), exit |
-| `ry test` | testthat tests against the loaded package; `--filter`, `--watch` |
-| `ry document` | roxygen2 against the loaded package, byte-identical output |
-| `ry migrate data-table` | Rewrite data.table code as `DataFrame` code |
-| `ry server` | The language server, which your editor starts |
-| `ry debug-adapter` | A Debug Adapter Protocol debugger |
+```sh
+ry check [PATHS]        # report problems; exit status 1 if there are any
+ry check --fix          # apply safe fixes (--unsafe-fixes for the rest)
+ry fmt [PATHS]          # format in place (--check only lists unformatted files)
+ry run [FILE]           # run a script on ry's runtime, or open its console
+ry R [FILE]             # run on the GNU R installed on your machine
+ry load -e EXPR         # load the package in this directory and evaluate EXPR
+ry test                 # testthat tests against the loaded package
+ry document             # roxygen2 against the loaded package
+ry migrate data-table   # rewrite data.table code as DataFrame code
+ry server               # the language server, which your editor starts
+```
 
-Checking, formatting and the editor never run R. The other commands need base R: the 0.4.1-beta
-release reads it from a GNU R 4.3 or newer, and 0.4.3-beta (Linux) and a build from source carry base R 4.6.2 inside
-`ry`. `ry R` always needs GNU R. [Installation](/installation) has the binaries and editor setup.
+Checking, formatting and the editor never run R. [Installation](/installation) has the binaries,
+and [CLI](/reference/cli) lists every flag.
 
 ## Configuration
 
-`ry.toml` at the project root (the first one found walking up). Every key is optional:
+One `ry.toml` at the project root configures everything, and every key is optional:
 
 ```toml
 [check]
 typing = false               # report type errors
-strict = false               # also reject values with unknown types and untyped parameters
-inline-annotations = true    # false reports every inline annotation, for code Rscript must run
-object-systems = true        # false makes each S4, R6 or Reference Class definition an error
-unused = true                # report values that are never read
+strict = false               # also reject values whose type is unknown
+inline-annotations = true    # false warns at every inline annotation
+object-systems = true        # false makes S4, R6 and Reference Classes an error
 exclude = []                 # gitignore-style patterns
 
 [lint]
@@ -50,92 +45,132 @@ single-quotes = "warn"       # every lint takes "off", "warn" or "error"
 indent-width = 2
 ```
 
-A `# typing: off`, `on` or `strict` comment overrides the project for one file, and
-`# ry: allow(code)` silences one finding on its line and the next. lintr's `# nolint` comments and
-a `.lintr` file's `linters` field are honored. [Configuration](/reference/configuration) lists
-every key.
+A `# typing: strict` comment overrides the project for one file, and `# ry: allow(code)` silences
+one finding. [Configuration](/reference/configuration) lists every key.
 
-## What `ry check` finds without configuration
+## Checking plain R
 
-- **Names**, resolved by R's scoping rules: a misspelled variable or function, `pkg::name` that the
-  package does not export, an unused assignment, a top-level name defined twice, a `NAMESPACE`
-  entry that does not exist. Data-masking calls (dplyr verbs, data.table's `[`, `with()`) are
-  understood.
-- **Syntax errors**, named precisely (`missing , between these arguments`), with analysis
-  continuing after them.
-- **Eleven default lints**, such as `x == NA`, `1:length(x)`, `&` in an `if`, `T` for `TRUE`, `=`
-  for assignment, and a `sprintf()` format with the wrong number of values.
-- **Projects as R sees them**: `R/` is one package namespace, scripts follow their `source()` calls,
-  tests see helpers, and `.Rmd`, `.qmd` and `.Rnw` chunks form one script.
+Without any configuration, ry resolves every name by R's scoping rules and runs its lints:
 
-```text
+```r
+if (x == NA) print("missing")
+```
+
+```text ry check
 unresolved
 
-  ! I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?
-   --[R/discount.R:2:11]
- 1 | apply_discount <- function(price, rate) {
- 2 |   price * ratee
-   |           ^^^^^
+  ! I could not resolve `x` in this package, its imports, or builtins.
+
+equals-na
+
+  ! Comparing with NA always gives NA, whatever the other side holds. Use is.na() to test for missing values
+```
+
+ry reads a project the way R does: `R/` is one package namespace, scripts follow their `source()`
+calls, and `.Rmd` and `.qmd` chunks form one script. Data-masking calls such as dplyr verbs and
+`with()` are understood. [Diagnostic codes](/reference/diagnostic-codes) lists every lint.
+
+## Inferred types
+
+With `typing = true`, types are inferred from use, so unannotated code is checked:
+
+```r
+half <- function(x) x / 2
+half("4")
+```
+
+```text ry check typing
+type-mismatch
+
+  x expected a numeric value (`integer` or `double`), found `character`
 ```
 
 ## Annotations
 
-Types are inferred from use, so unannotated code is checked once `typing = true`. An annotation
-pins a contract. Each form has a comment spelling, which keeps the file plain R for every tool, and
-an inline spelling, which is shorter and is also checked at run time by `ry run`:
+An annotation pins a contract. Each one has a comment spelling, which keeps the file plain R for
+every other tool, and an inline spelling, which is shorter and is also checked at run time:
 
-| What | `#:` comment | Inline |
-| --- | --- | --- |
-| A value | `#: double` above `rate <- readRDS(f)` | `rate: double <- readRDS(f)` |
-| A function | `#: fn(price: double, rate: double) -> double` | `function(price: double, rate: double) -> double` |
-| An optional parameter | `#: fn(x: integer, [label]: character)` | `function(x: integer, label: character = "a")` |
-| A generic function | `#: <T> fn(x: T) -> T \| NULL` | `function<T>(x: T) -> T \| NULL` |
-| A nominal type | `#: @type Money {list{amount: double}}` | `type Money = list{amount: double}` |
-| A structural alias | `#: @alias Row {list{id: integer}}` | `alias Row = list{id: integer}` |
-| Creating a nominal value | `#: @new Money` above the value | `@Money(value)` |
-| Typing an `Unknown` value | `#: @if-unknown double` | `amount: @if-unknown double <- df$amount` |
-| Overriding inference | `#: @trust double` | `x: @trust double <- f()` |
-| One parameter per line | `#: @param count {integer}`, `#: @return {integer}` | (on the parameter list) |
+```r
+#: fn(price: double, rate: double) -> double
+net_price <- function(price, rate) price * (1 - rate)
 
-When a comment and an inline annotation disagree, ry uses the inline one and warns
-(`annotation-mismatch`). Inline annotations are on by default; with
-`inline-annotations = false`, ry warns at each one.
+gross_price <- function(price: double, rate: double) -> double price * (1 + rate)
+```
+
+GNU R cannot parse the inline spelling, so such a file runs through `ry run`, or through `ry R`,
+which erases the annotations. When a comment and an inline annotation disagree, ry uses the inline
+one and warns. [The guide](/guide#annotate) shows both side by side.
 
 ## Types
 
-| Type | Meaning |
-| --- | --- |
-| `integer`, `double`, `character`, `logical`, `complex` | Exactly one element |
-| `integer[]`, `double[named]` | A vector of any length, optionally with names |
-| `list{integer, character}`, `list{name: character}` | A list with a fixed shape, positional or named; `$` on a misspelled field is an error |
-| `list[integer]`, `list[named: integer]` | A list of any length, or looked up by key (`[[key]]` gives `integer \| NULL`) |
-| `character \| NULL` | A union; `is.null()` and the other `is.*` tests narrow it |
-| `fn(x: double, ...: character) -> double` | A function type; argument names are part of it |
-| `<T: numeric> fn(x: T) -> T` | A generic function, bounded to `integer` or `double` |
-| `Record{x: double}`, `Tuple{integer, character}` | ry's records and tuples |
-| `:Ok(integer) \| :Err(character) \| ..` | Tags; a trailing `..` leaves the union open |
-| `I64`, `F64`, `Bool`, `Str` | ry's own numbers and strings, which never hold `NA` |
-| `List<F64>` | ry's typed sequence: one item type, no `NA`, no names, no recycling |
-| `DataFrame{region: character[], units: integer[]}` | ry's typed table |
-| `Result<T, E>`, `Dict<K, V>`, `Set<T>` | Standard library types |
-| `Any` | A deliberate opt-out; compatible with everything, and strict mode accepts it |
-| `Unknown` | What ry could not infer (data frame columns, S4 and R6 objects); compatible with everything, and strict mode reports it |
+```text
+integer, double, character, logical    # exactly one element
+integer[], double[named]               # a vector of any length, optionally named
+list{name: character, retries: integer}  # a list with fixed fields
+list[integer]                          # a list of any length
+character | NULL                       # a union; is.null() narrows it
+fn(x: double) -> double                # a function
+<T: numeric> fn(x: T) -> T             # a generic function
+Any                                    # a deliberate opt-out
+Unknown                                # what ry could not infer
 
-A `double` accepts an `integer` or `logical`, but a number never passes for a `character`. Your own
-functions cannot be overloaded, and nominal types have no subtyping. The
-[tutorial](/tutorial/types) and the [type system reference](/reference/type-system) have the rules.
+I64, F64, Bool, Str                    # ry's own scalars, never NA
+Record{x: F64, y: F64}                 # a record
+Tuple{I64, Str}                        # a tuple
+List<F64>                              # a list of one item type
+:Open | :Closed(code: I64)             # a union of tags
+Result<I64, :InvalidNumStr>            # :Ok(I64) or :Err(:InvalidNumStr)
+Dict<Str, I64>                         # also Set<T>
+```
 
-## Records, tags and `match`
-
-ry's own data types have one spelling and run only on ry's runtime:
+A field that does not exist is an error, and `is.null()` narrows a union:
 
 ```r
-point <- (x = 1, y = 2)          # Record{x: double, y: double}; point$x reads a field
-pair <- (1L, "a")                # Tuple{integer, character}
-one <- (x = 1,)                  # a one-field record needs the trailing comma
-shape <- :Rect(width = 2, height = 3)   # a tag with a payload
-xs <- [1.5, 2, 3]                # List<F64>
+label <- function(config: list{name: character, retries: integer} | NULL) -> character {
+  if (is.null(config)) return("default")
+  config$nmae
+}
+```
 
+```text ry check typing
+type-mismatch
+
+  x field `nmae` does not exist in `list{name: character, retries: integer}`. Did you mean `name`?
+```
+
+A `double` accepts an `integer` or `logical`, but a number never passes for a `character`. Where
+inference gives up, `#: @if-unknown TYPE` fills in a type the checker could not find, and
+`#: @trust TYPE` overrides the one it found. The [type system](/reference/type-system) has every
+rule.
+
+## Records, tuples and lists
+
+Records, tuples, lists, tags and `DataFrame` are ry's own data types, and code that uses them runs
+only on ry's runtime. A record has named fields and value semantics, a tuple has positions, and a `List` holds items of one type with no `NA`, no names
+and no recycling:
+
+```r ry run runtime=ry strict
+point <- (x = 1, y = 2)
+point$x
+#> [1] 1
+(..point, y = 5)
+#> (x = 1, y = 5)
+(1L, "a")
+#> (1L, "a")
+xs <- [1.5, 2, 3]
+List.map(xs, function(x) x * 2)
+#> [3, 4, 6]
+```
+
+A one-field record needs a trailing comma, as in `(x = 1,)`. Passing a record to an R function is an
+error until you convert it with `as.list()`.
+
+## Tags and `match`
+
+A tag is a name with an optional payload, and an alias names a union of tags. `match` must handle
+every case:
+
+```r
 alias Shape =
   | :Circle(radius: double)
   | :Rect(width: double, height: double)
@@ -146,95 +181,122 @@ area <- function(s: Shape) -> double {
     :Rect(width = w, height = h) => w * h
   }
 }
-area(shape)
+area(:Rect(width = 2, height = 3))
 ```
 
-```text ry run runtime=ry strict
+```text ry run runtime=ry strict exact
 [1] 6
 ```
 
-A `match` that misses a case is a `non-exhaustive-match` error, and an arm the earlier ones already
-cover is an `unreachable-pattern` warning. Patterns are `_`, a name, a literal, a tag with payload
-patterns, `(p, q)`, `(x = p, ..)`, a list pattern `[first, ..rest]`, `p as name`, `p | q`, and a guard
-`p if (cond)`. `(..point, y = 3)` copies a record with a field replaced, and `try f(x)` returns an
-`:Err` from the enclosing function early. Records have value
-semantics, and passing one to an R function is an error until you convert it with `as.list()`.
-[Typed ry](/reference/language) tours these features as one small language, and
-[records, tuples and tags](/reference/type-system#records-tuples-and-tags) and
-[lists](/reference/type-system#lists) have the rules.
+A missing case is a `non-exhaustive-match` error. Patterns are `_`, a name, a literal, a tag,
+`(p, q)`, `(x = p, ..)`, `[first, ..rest]`, `p as name`, `p | q` and `p if (cond)`.
 
-## Standard library
+## Errors as values
 
-Seven modules modeled on Roc's builtins, called by plain qualified names: `Result`, `List`, `Str`,
-`Num`, `Bool`, `Dict` and `Set`. Every function is typed, never meets `NA`, and reports failure as
-a tag: `List.first(xs)` is `:Ok(x)` or `:Err(:ListWasEmpty)`, and `Str.to_integer("x")` is
-`:Err(:InvalidNumStr)`. A selection: `List.map`, `List.walk`, `List.map_try`, `List.sort_with`,
-`Str.split_on`, `Str.trim`, `Num.div_checked`, `Result.map`, `Result.with_default`, `Dict.update`,
-`Dict.from_list`. `Dict` and `Set` have value semantics and keep insertion order.
-[Standard library](/reference/standard-library) lists every function.
+Functions that can fail return `:Ok(value)` or `:Err(reason)`, and `try` returns an `:Err` from the
+enclosing function early:
+
+```r ry run runtime=ry strict
+List.first([])
+#> :Err(:ListWasEmpty)
+parse_sum <- function(a: Str, b: Str) -> Result<I64, :InvalidNumStr> {
+  x <- try Str.to_i64(a)
+  y <- try Str.to_i64(b)
+  :Ok(x + y)
+}
+parse_sum("1", "2")
+#> :Ok(3i64)
+parse_sum("1", "two")
+#> :Err(:InvalidNumStr)
+Result.with_default(parse_sum("1", "two"), 0)
+#> 0i64
+```
+
+`I64`, `F64`, `Bool` and `Str` are ry's own scalars, which never hold `NA`. The standard library has
+seven modules, `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` and `Set`, called by qualified names.
+[Standard library](/reference/standard-library) lists every function, and
+[Typed ry](/reference/language) tours the part of ry written only in these types.
+
+## Nominal types
+
+A `type` is distinct from every other type, even one with the same shape, and `@Name(value)`
+creates a value of it:
+
+```r
+type Celsius = Record{degrees: double}
+type Fahrenheit = Record{degrees: double}
+
+boiling <- function(t: Celsius) -> logical t$degrees >= 100
+boiling(@Celsius((degrees = 120,)))
+```
+
+```text ry run runtime=ry strict exact
+[1] TRUE
+```
+
+Passing a `Fahrenheit` to `boiling` is a type error. An `alias`, as for `Shape` above, is only a
+name for a structure.
 
 ## DataFrame
 
-ry's built-in table, queried with Polars' verbs and run on the Polars engine. The checker follows
-every column through every step, so a misspelled column or an unaggregated column in `agg` is an
-error before the query runs:
+ry's typed table runs on the Polars engine. The checker follows every column through every step, so
+a misspelled column is an error before the query runs:
 
-```r
+```r ry run runtime=ry strict
 sales <- DataFrame(region = ["eu", "us", "eu"], units = [3L, 5L, 2L], price = [1.5, 2, 3])
 sales |>
-  DataFrame.with_columns(revenue = col("units") * col("price")) |>
+  DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price")) |>
   DataFrame.group_by("region") |>
-  GroupBy.agg(total = col("revenue") |> Expr.sum())
+  GroupBy.agg(total = Expr.col("revenue") |> Expr.sum())
+#>    region total
+#>    <char> <num>
+#> 1:     eu  10.5
+#> 2:     us  10.0
 ```
 
-Verbs: `select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`, `join`, `join_asof`,
-`head`, and lazy queries through `LazyFrame`. Existing data.table code runs unchanged, most of its
-queries on the same engine, and data.table's own test suite passes under ry.
+Existing data.table code runs unchanged, on data.table's own R and C code.
 [DataFrames](/reference/dataframes) has the API.
 
 ## Strict mode
 
-`strict = true` makes every `Unknown` value and every unconstrained parameter an error, so a clean
-run means every value has a known type. `ry run`, `ry R`, `ry load` and the console then refuse code
-with a strict-mode error. Combined with `object-systems = false`, it also rejects new S4, R6 and
-Reference Classes, which otherwise get an `object-system` warning recommending records and tags.
-[Strict mode](/reference/type-system#strict-mode) lists what it reports.
+`strict = true` makes every value without a known type an error, so a clean run means every value
+is typed:
 
-## Running and loading packages
+```r
+total <- function(df) sum(df$amount)
+```
 
-`ry run` inside a package reloads exactly the definitions you changed before each command, with no
-`load_all()` and no restart. In RStudio, `source(pipe("ry load --r-entry"))` in `~/.Rprofile` gives
-you a fast `load_all()`. On a 326,000-line package, a cold load takes 1.3 to 1.7 s against
-`devtools::load_all()`'s 9.6 s, and a reload after an edit 79 to 83 ms against 8.6 s.
+```text ry check typing strict
+strict
+
+  x strict mode: parameter `df` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `df: TYPE`
+```
+
+`ry check --annotate` writes the inferred types into the file. Under strict mode, `ry run` and
+`ry load` refuse code with a strict-mode error, and a typed function compiles to native code before
+its first call. [Strict mode](/reference/type-system#strict-mode) lists what it reports.
+
+## Loading packages
+
+`ry run` inside a package opens a console that reloads exactly the definitions you changed before
+each command. On a package of about 300,000 lines, a cold load takes under 2 s against about 10 s for
+`devtools::load_all()`, and a reload after an edit takes under 100 ms against about 9 s. In RStudio,
+`source(pipe("ry load --r-entry"))` in `~/.Rprofile` gives you the same fast `load_all()`.
 [Package loading](/reference/package-loading) has the details.
 
 ## Editor
 
-Diagnostics as you type, hover with inferred types, completion ranked by the expected type,
-go-to-definition, references, rename, call hierarchy, signature help, inlay hints, quick fixes,
-refactorings (extract variable or function, inline, convert between `#:` and inline types), an
-outline, folding, semantic highlighting, formatting, and code lenses to run and debug tests. The VS
-Code extension adds a debugger, a console with live values, a data viewer and a plot panel. Any
-LSP editor can run `ry server`. [Installation](/installation#editors) sets each editor up.
+`ry server` gives any LSP editor diagnostics as you type, hover with inferred types, completion,
+go to definition, references, rename, inlay hints, quick fixes and refactorings. The VS Code
+extension adds a debugger, a console, a data viewer and a plot panel.
+[Installation](/installation#editors) sets each editor up.
 
-## Performance
+## Performance and status
 
-Untyped R on ry's runtime is faster than GNU R (with its bytecode compiler) on tight loops and
-recursion and slower on call-heavy code. The two benchmarks, side by side:
-
-<BenchmarkSummary />
-
-The kernels, untyped and typed in strict mode:
-
-<BenchmarkTable />
-
-DataFrames answer db-benchmark's group-by and join questions at ten million rows in about a quarter
-of data.table's time. [Benchmarks](/benchmarks) has the programs and the method.
-
-## Status
+ry's runtime is faster than GNU R on loops and recursion and slower on call-heavy code, and typed
+code in strict mode is faster again. [Benchmarks](/benchmarks) has the numbers.
 
 ry is in beta. The checker, language server, formatter and loader are ready for daily use, and
 diagnostic codes, `ry.toml` keys and the JSON output are stable. ry's runtime is incomplete: a
 script that needs something it lacks stops with an error that names it, and `ry R` runs plain and
-inline-annotated R on GNU R instead. Records, tags, lists, `DataFrame` and the standard library
-run only on ry's runtime.
+inline-annotated R on GNU R instead.

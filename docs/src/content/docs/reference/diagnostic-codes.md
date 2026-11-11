@@ -201,7 +201,7 @@ was meant for the length. The fix moves it outside, and is unsafe because it cha
 
 **`object-system`** (warning): a definition from S4, Reference Classes or R6, which is a call to
 `setClass`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` or `R6Class`. That code still
-runs, but ry checks [records and tagged unions](/tutorial/runtime#records-tags-and-match) statically and
+runs, but ry checks [records and tagged unions](/guide#records-tags-and-match) statically and
 cannot see inside these classes, so it recommends those instead:
 
 ```text

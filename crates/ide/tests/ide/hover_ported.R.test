@@ -248,7 +248,7 @@ action: Add inferred type annotation for `again`
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": integer"
   edit 17..17 -> ": NULL"
-completion (116): rep, repeat, rep.Date, rep.difftime, rep.factor, rep.int, rep.numeric_version, rep.POSIXct
+completion (117): rep, repeat, rep.Date, rep.difftime, rep.factor, rep.int, rep.numeric_version, rep.POSIXct
 hint @5: integer
 hint @17: NULL
 

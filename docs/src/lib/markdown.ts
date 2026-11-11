@@ -4,7 +4,7 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
 import starlightConfig from 'virtual:starlight/user-config';
 import vennSource from '../components/Venn.astro?raw';
-import { benchmarkMachine, benchmarkProgramsMarkdown, benchmarkSummaryMarkdown, benchmarkTableMarkdown, realWorkloadMarkdown } from './benchmarks';
+import { chartMarkdown, methodMarkdown, programsMarkdown, suite, summaryMarkdown, tableMarkdown } from './benchmarks';
 
 type DocsPage = CollectionEntry<'docs'>;
 type SidebarItem = { label?: string; slug?: string; items?: SidebarItem[] };
@@ -100,25 +100,26 @@ function bodyToMarkdown(body: string): string {
       push(`Diagram: ${vennDescription()}`, false);
       continue;
     }
-    const table = /^<BenchmarkTable\b(?:\s+programs=\{(\[[^\]]*\])\})?/.exec(line.trim());
-    if (table) {
-      push(benchmarkTableMarkdown(headingLevel + 1, table[1] === undefined ? undefined : JSON.parse(table[1])), false);
+    const benchmark = /^<(BenchmarkTable|BenchmarkPrograms|SpeedChart)\b[^>]*\bsuite="([a-z_]+)"/.exec(line.trim());
+    if (benchmark) {
+      const found = suite(benchmark[2]);
+      if (found?.results === undefined) {
+        // A suite without results is left off the page.
+      } else if (benchmark[1] === 'SpeedChart') {
+        push(chartMarkdown(found), false);
+      } else if (benchmark[1] === 'BenchmarkTable') {
+        push(tableMarkdown(found, headingLevel + 1), false);
+      } else {
+        push(programsMarkdown(found, headingLevel + 1), false);
+      }
       continue;
     }
     if (/^<BenchmarkSummary\b/.test(line.trim())) {
-      push(benchmarkSummaryMarkdown(), false);
+      push(summaryMarkdown(), false);
       continue;
     }
-    if (/^<RealWorkloads\b/.test(line.trim())) {
-      push(realWorkloadMarkdown(), false);
-      continue;
-    }
-    if (/^<BenchmarkPrograms\b/.test(line.trim())) {
-      push(benchmarkProgramsMarkdown(headingLevel + 1), false);
-      continue;
-    }
-    if (/^<BenchmarkMachine\b/.test(line.trim())) {
-      push(`Measured on ${benchmarkMachine}.`, false);
+    if (/^<BenchmarkMethod\b/.test(line.trim())) {
+      push(methodMarkdown(), false);
       continue;
     }
 

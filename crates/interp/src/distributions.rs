@@ -61,13 +61,14 @@
 pub use crate::random::Deviates;
 use {
     crate::{
+        base_fast_paths::NativeEntry,
         builtin_libraries::NativeFn,
         builtins::{Arg, BuiltinDef, internal},
         coerce::coerce_vector,
         conditions::warning,
         random::{self, with_deviates},
         rmath::*,
-        unwind::{R, error},
+        unwind::{R, Unwind, error},
         values::{
             alloc, alloc_uninit, as_integer_scalar, copy_attributes, get_attr, inherits,
             integer_vector, ints, ints_mut, length, list_vector, materialize, nil, reals,
@@ -95,10 +96,10 @@ macro_rules! distributions {
         /// and the Bessel functions and `psigamma`, which only base has.
         #[rustfmt::skip]
         pub const BUILTINS: &[BuiltinDef] = &[
-            $(internal($name, $arity, |call| unsafe { math::<$kernel>(call.args, Interface::Internal) }),)*
-            $(internal($base_name, $base_arity, |call| unsafe { math::<$base_kernel>(call.args, Interface::Internal) }),)*
+            $(internal($name, $arity, |call| unsafe { signalled(math::<$kernel>(call.args, Interface::Internal, Conditions::Signal)) }),)*
+            $(internal($base_name, $base_arity, |call| unsafe { signalled(math::<$base_kernel>(call.args, Interface::Internal, Conditions::Signal)) }),)*
             $(internal($random_name, $random_arity, |call| unsafe {
-                random_vector::<$sampler>(call.args, Interface::Internal, distributions!(@integer $shape))
+                signalled(random_vector::<$sampler>(call.args, Interface::Internal, distributions!(@integer $shape), Conditions::Signal))
             }),)*
             internal("dtukey", 5, |_| Err(error("unimplemented real function of 4 numeric arguments"))),
         ];
@@ -107,9 +108,9 @@ macro_rules! distributions {
         /// binds to the `C_` symbols of stats' R code.
         #[rustfmt::skip]
         pub const ROUTINES: &[(&str, NativeFn)] = &[
-            $(($name, |call| unsafe { math::<$kernel>(call.args, Interface::Stats) }),)*
+            $(($name, |call| unsafe { signalled(math::<$kernel>(call.args, Interface::Stats, Conditions::Signal)) }),)*
             $(($random_name, |call| unsafe {
-                random_vector::<$sampler>(call.args, Interface::Stats, distributions!(@integer $shape))
+                signalled(random_vector::<$sampler>(call.args, Interface::Stats, distributions!(@integer $shape), Conditions::Signal))
             }),)*
             ("rmultinom", |call| unsafe { rmultinom_routine(call.arg(0), call.arg(1), call.arg(2)) }),
             ("signrank_free", |_| Ok(nil())),
@@ -117,6 +118,30 @@ macro_rules! distributions {
                 wilcox_free();
                 Ok(nil())
             }),
+        ];
+
+        /// The stats routines a closure call can reach without a frame, with their arity: each
+        /// returns `None` instead of signalling a condition, so the caller runs the closure,
+        /// whose frame the condition reports (`base_fast_paths::register_routine_entries`).
+        #[rustfmt::skip]
+        pub const DIRECT_ROUTINES: &[(&str, usize, NativeEntry)] = &[
+            $(($name, $arity, |args| unsafe {
+                if !plain_numbers(args) {
+                    return Ok(None);
+                }
+                declined_on_error(math::<$kernel>(args, Interface::Stats, Conditions::Decline))
+            }),)*
+            $(($random_name, $random_arity, |args| unsafe {
+                if !plain_numbers(args) {
+                    return Ok(None);
+                }
+                declined_on_error(random_vector::<$sampler>(
+                    args,
+                    Interface::Stats,
+                    distributions!(@integer $shape),
+                    Conditions::Decline,
+                ))
+            }),)*
         ];
     };
     (@kernel $kernel:ident $vectors:literal |$v:ident, $f:tt| $body:expr) => {
@@ -200,7 +225,7 @@ distributions! {
         "pnbinom_mu" 5 3 PnbinomMu |v, f| pnbinom_mu(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
         "qnbinom_mu" 5 3 QnbinomMu |v, f| qnbinom_mu(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
         "dnorm" 4 3 Dnorm |v, f| dnorm(v[0], v[1], v[2], f[0] != 0);
-        "pnorm" 5 3 Pnorm |v, f| pnorm(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "pnorm" 5 3 Pnorm;
         "qnorm" 5 3 Qnorm;
         "dunif" 4 3 Dunif |v, f| dunif(v[0], v[1], v[2], f[0] != 0);
         "punif" 5 3 Punif |v, f| punif(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
@@ -296,6 +321,51 @@ impl Deviates for SessionDeviates {
     }
 }
 
+/// Whether a routine signals the warnings and errors it meets, or declines with `None` before
+/// any effect, so that a caller running a closure's call without its frame
+/// (`base_fast_paths::native_entry`) runs the closure instead and the condition reports the
+/// closure's call, as it does in GNU R.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Conditions {
+    Signal,
+    Decline,
+}
+
+/// The value of a routine run with [`Conditions::Signal`], which never declines.
+fn signalled(value: R<Option<Sexp>>) -> R<Sexp> {
+    value.map(|value| value.unwrap_or_else(nil))
+}
+
+/// The value of a routine run with [`Conditions::Decline`]: an error declines too, because the
+/// closure's own run raises it again against its call.
+fn declined_on_error(value: R<Option<Sexp>>) -> R<Option<Sexp>> {
+    match value {
+        Err(Unwind::Error(_)) => Ok(None),
+        value => value,
+    }
+}
+
+/// Whether every argument is a logical, integer or double vector held in memory, which the
+/// routines read without coercing (a string flag warns as it converts) or running an ALTREP
+/// class's code, neither of which a declining routine could undo.
+unsafe fn plain_numbers(args: &[Arg]) -> bool {
+    args.iter().all(|arg| {
+        matches!(
+            arg.value.kind(),
+            SexpType::Logical | SexpType::Integer | SexpType::Real
+        ) && !arg.value.is_altrep()
+    })
+}
+
+/// Whether the routine must decline rather than signal, discarding the warnings Rmath raised.
+fn declines(conditions: Conditions, signals: bool) -> bool {
+    if conditions == Conditions::Decline && (signals || has_warnings()) {
+        take_warnings();
+        return true;
+    }
+    false
+}
+
 unsafe fn raise_warnings() -> R<()> {
     for message in take_warnings() {
         warning(message)?;
@@ -329,7 +399,11 @@ trait Kernel {
 
 /// GNU R's `math2` to `math4`: the first `K::VECTORS` arguments recycle, the rest are integer
 /// flags (`log`, `lower.tail`, `log.p`, Bessel's `expo`), read as `asInteger` reads them.
-unsafe fn math<K: Kernel>(args: &[Arg], interface: Interface) -> R<Sexp> {
+unsafe fn math<K: Kernel>(
+    args: &[Arg],
+    interface: Interface,
+    conditions: Conditions,
+) -> R<Option<Sexp>> {
     let vectors = K::VECTORS;
     let mut originals = [nil(); 4];
     let mut operands = [nil(); 4];
@@ -351,7 +425,7 @@ unsafe fn math<K: Kernel>(args: &[Arg], interface: Interface) -> R<Sexp> {
         flags[slot] = flag(argument(args, index))?;
     }
     if lengths[..vectors].contains(&0) {
-        return alloc(SexpType::Real, 0);
+        return alloc(SexpType::Real, 0).map(Some);
     }
     let count = lengths[..vectors].iter().copied().max().unwrap_or(0);
     // The loop below writes every element.
@@ -376,6 +450,9 @@ unsafe fn math<K: Kernel>(args: &[Arg], interface: Interface) -> R<Sexp> {
         Some(nan_produced) => nan_produced,
         None => math_loop::<K>(&values, flags, out),
     };
+    if declines(conditions, nan_produced) {
+        return Ok(None);
+    }
     raise_warnings()?;
     if nan_produced {
         warning("NaNs produced")?;
@@ -383,7 +460,7 @@ unsafe fn math<K: Kernel>(args: &[Arg], interface: Interface) -> R<Sexp> {
     if let Some(index) = (0..vectors).find(|&index| lengths[index] == count) {
         copy_attributes(originals[index], result)?;
     }
-    Ok(result)
+    Ok(Some(result))
 }
 
 /// The element loop of [`math`], which recycles each operand with its own wrapping position
@@ -423,6 +500,45 @@ fn na_or_nan(operands: &[f64]) -> f64 {
         NA_REAL
     } else {
         f64::NAN
+    }
+}
+
+/// `pnorm`, whose tail exponentials run as one batch per chunk when only the quantiles vary.
+struct Pnorm;
+
+impl Kernel for Pnorm {
+    const VECTORS: usize = 3;
+
+    #[inline(always)]
+    fn apply(v: &[f64; 4], f: [i32; 2]) -> f64 {
+        pnorm(v[0], v[1], v[2], f[0] != 0, f[1] != 0)
+    }
+
+    fn fill_first(
+        quantiles: &[f64],
+        rest: &[f64; 4],
+        flags: [i32; 2],
+        out: &mut [f64],
+    ) -> Option<bool> {
+        let [_, mu, sigma, _] = *rest;
+        let lower = flags[0] != 0;
+        if !mu.is_finite() || !sigma.is_finite() || sigma <= 0.0 || flags[1] != 0 {
+            return None;
+        }
+        // `pnorm` standardizes first; a quantile that is NaN or standardizes to an infinity
+        // takes the scalar function's own path afterwards.
+        for (slot, &x) in out.iter_mut().zip(quantiles) {
+            *slot = (x - mu) / sigma;
+        }
+        pnorm_standard_fill(out, lower);
+        for (slot, &x) in out.iter_mut().zip(quantiles) {
+            if x.is_nan() {
+                *slot = na_or_nan(&[x]);
+            } else if !x.is_finite() || !((x - mu) / sigma).is_finite() {
+                *slot = pnorm(x, mu, sigma, lower, false);
+            }
+        }
+        Some(false)
     }
 }
 
@@ -545,7 +661,12 @@ trait Sampler {
 /// parameters recycle over it. Missing parameters give `NA`s, and every NaN drawn raises "NAs
 /// produced". The stats routines return the discrete generators' counts as integers when they
 /// all fit.
-unsafe fn random_vector<S: Sampler>(args: &[Arg], interface: Interface, integer: bool) -> R<Sexp> {
+unsafe fn random_vector<S: Sampler>(
+    args: &[Arg],
+    interface: Interface,
+    integer: bool,
+    conditions: Conditions,
+) -> R<Option<Sexp>> {
     let count = random_count(argument(args, 0))?;
     let parameters = args.len().saturating_sub(1).min(3);
     let mut operands = [nil(); 3];
@@ -564,18 +685,40 @@ unsafe fn random_vector<S: Sampler>(args: &[Arg], interface: Interface, integer:
     let result = alloc_uninit(SexpType::Real, count)?;
     let drawn = reals_mut(result);
     if count > 0 && lengths[..parameters].contains(&0) {
+        if conditions == Conditions::Decline {
+            return Ok(None);
+        }
         drawn.fill(NA_REAL);
         warning("NAs produced")?;
-        return random_result(result, integer);
+        return random_result(result, integer).map(Some);
     }
     if count > 0 {
         let mut values: [&[f64]; 3] = [&[]; 3];
         for index in 0..parameters {
             values[index] = reals(operands[index]);
         }
-        random::get_rng_state()?;
+        // Declining discards the draws, which only works while `.Random.seed` holds the state
+        // the draws start from.
+        let checkpoint = match conditions {
+            Conditions::Signal => None,
+            Conditions::Decline => match random::checkpoint() {
+                Some(checkpoint) => Some(checkpoint),
+                None => return Ok(None),
+            },
+        };
+        // A checkpoint found `.Random.seed` holding the generator's state already.
+        if checkpoint.is_none() {
+            random::get_rng_state()?;
+        }
         let outcome =
             with_deviates!(|deviates| draw_all::<S, _>(deviates, &values[..parameters], drawn));
+        if let Some(checkpoint) = checkpoint {
+            let produced_na = reals(result).iter().any(|value| value.is_nan());
+            if declines(conditions, outcome.is_err() || produced_na) {
+                random::rollback(checkpoint);
+                return Ok(None);
+            }
+        }
         random::put_rng_state()?;
         outcome?;
         raise_warnings()?;
@@ -583,7 +726,7 @@ unsafe fn random_vector<S: Sampler>(args: &[Arg], interface: Interface, integer:
             warning("NAs produced")?;
         }
     }
-    random_result(result, integer)
+    random_result(result, integer).map(Some)
 }
 
 /// Fills `slots` with draws whose parameters recycle from `values`. Scalar parameters prepare
@@ -2332,6 +2475,49 @@ mod tests {
             3 => (-uniform(picks) * 800.0).exp(),
             _ => uniform(picks),
         }
+    }
+
+    /// The batched path of `pnorm` must give the scalar function's bits, across the central
+    /// region, both of Cody's tail formulas, the far tails, infinities and NaN.
+    #[test]
+    fn pnorm_batches_match_the_scalar_function() {
+        for_each_seed(300, |seed| {
+            let mut picks = SplitMix64(0x9b07_0000 ^ seed);
+            let length = picks.below(700);
+            let quantiles: Vec<f64> = (0..length)
+                .map(|_| match picks.below(12) {
+                    0 => f64::NAN,
+                    1 => f64::INFINITY,
+                    2 => f64::NEG_INFINITY,
+                    3 => (uniform(&mut picks) - 0.5) * 90.0,
+                    _ => (uniform(&mut picks) - 0.5) * 16.0,
+                })
+                .collect();
+            let (mu, sigma) = if picks.below(2) == 0 {
+                (0.0, 1.0)
+            } else {
+                ((uniform(&mut picks) - 0.5) * 4.0, (uniform(&mut picks) * 4.0 - 2.0).exp())
+            };
+            let lower = picks.below(2) == 0;
+            let flags = [i32::from(lower), 0];
+            let mut out = vec![0.0; length];
+            let nan_produced =
+                Pnorm::fill_first(&quantiles, &[0.0, mu, sigma, 0.0], flags, &mut out)
+                    .expect("finite parameters take the batched path");
+            assert!(!nan_produced);
+            for (&x, &got) in quantiles.iter().zip(&out) {
+                let expected = if x.is_nan() {
+                    na_or_nan(&[x])
+                } else {
+                    pnorm(x, mu, sigma, lower, false)
+                };
+                assert_eq!(
+                    got.to_bits(),
+                    expected.to_bits(),
+                    "x = {x:e}, mu = {mu}, sigma = {sigma}, lower = {lower}"
+                );
+            }
+        });
     }
 
     /// The vector path of `qnorm`, with the central region across SIMD lanes, must give the

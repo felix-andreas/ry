@@ -17,9 +17,12 @@
 
 use std::{
     collections::BTreeMap,
-    fmt, fs, io,
+    fmt,
+    fs::{self, File, TryLockError},
+    io,
     path::{Path, PathBuf},
     process::Command,
+    sync::Mutex,
 };
 
 /// ry implements the API that data.table guards on its revision (`R_mapAttrib`, the resizable
@@ -425,6 +428,7 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
             link(&entry, &target)?;
         }
     }
+    refresh_start_image(sources)?;
     for entry in read_directory(&gnu_share)? {
         let name = entry.file_name().unwrap_or_default();
         if name == "make" {
@@ -559,6 +563,71 @@ exec "$cmd" $extra "$@"
     )
 }
 
+/// Rewrites the base tree's start-up image when the runtime `libr` cannot load it: the image
+/// predates a change to its format, or another build of the runtime wrote it. A home links the
+/// base tree's image, so without this every start in the home would quietly take the slow path.
+/// A base without an image, such as a GNU R installation, is left as it is.
+fn refresh_start_image(sources: &HomeSources<'_>) -> Result<()> {
+    type Current = unsafe extern "C" fn(*const std::ffi::c_char) -> std::ffi::c_int;
+    let image = sources.base.join("library/base/R/ry-start.image");
+    if !image.is_file() {
+        return Ok(());
+    }
+    let library = front_end::load_runtime(sources.libr)?;
+    let current = unsafe { library.get::<Current>(b"ry_start_image_current\0") }
+        .map(|entry| *entry)
+        .map_err(|error| {
+            Error::Usage(format!(
+                "{} is not ry's runtime: {error}",
+                sources.libr.display()
+            ))
+        });
+    // Unloading a Rust library that may have started threads or registered thread-local
+    // destructors is unsound, and the process that assembles a home usually runs it next.
+    std::mem::forget(library);
+    let current = current?;
+    let path = std::ffi::CString::new(image.to_string_lossy().into_owned())
+        .map_err(|_| Error::Usage(format!("{} contains a NUL byte", image.display())))?;
+    rewrite_stale_image(
+        &image,
+        sources.base,
+        || unsafe { current(path.as_ptr()) } == 1,
+        || base::write_start_image(sources.base, sources.rcmd, sources.libr),
+    )
+}
+
+/// Runs `write` when `is_current` says the start-up image at `image` is stale. A current image
+/// is only read, so a home can be assembled over a base tree it cannot write, such as an
+/// installed release or a shared cache. The writer relinks `lib` and `bin/exec` inside the base
+/// tree, so homes assembled at once over the same stale image take turns under a lock in the
+/// base tree, and the later ones find the image current.
+fn rewrite_stale_image(
+    image: &Path,
+    base: &Path,
+    is_current: impl Fn() -> bool,
+    write: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if is_current() {
+        return Ok(());
+    }
+    let lock_path = base.join(".start-image.lock");
+    let lock = fs::File::create(&lock_path).map_err(|error| {
+        Error::Usage(format!(
+            "the start-up image {} was written by another build of ry, and its base R tree \
+             cannot be written to replace it ({}: {error}); run `just start-image` with write \
+             access to {}",
+            image.display(),
+            lock_path.display(),
+            base.display()
+        ))
+    })?;
+    lock.lock().map_err(io_error(&lock_path))?;
+    if is_current() {
+        return Ok(());
+    }
+    write()
+}
+
 /// The toolchain with `-lblas` and `-llapack` spelled as the versioned files, `-l:libblas.so.3`
 /// and `-l:liblapack.so.3`. The bare names need the unversioned `libblas.so` that only a
 /// distribution's development package installs, while the runtime opens `libblas.so.3`, so a
@@ -587,6 +656,9 @@ fn versioned_linear_algebra(toolchain: &Toolchain) -> Toolchain {
 /// a front end already.
 pub fn runtime_home(libr: &Path, base: &Path) -> Result<PathBuf> {
     if is_ry_home(base) {
+        if let Some(lock) = lock_home(base)? {
+            hold(lock);
+        }
         return Ok(base.to_path_buf());
     }
     let beside = libr.with_file_name(if cfg!(windows) {
@@ -637,7 +709,201 @@ pub fn cache_directory() -> Option<PathBuf> {
 /// first time it is asked for, with ry's embedded headers and the base R tree `base`.
 /// The home is named by everything it is built from, so a rebuilt `libR` or another base R gets
 /// a home of its own, and a home in use is never rewritten.
+///
+/// Every process that uses a home holds a shared lock on its `.lock` file until it exits, and a
+/// process that assembles a new home removes each stale home whose lock it can take
+/// ([`prune_stale_homes`]).
 pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, base: &Path) -> Result<PathBuf> {
+    let home = cache.join(format!("{:016x}", home_key(libr, rcmd, base)?));
+    if home.join("etc").join("Makeconf").exists()
+        && let Some(lock) = lock_home(&home)?
+    {
+        hold(lock);
+        return Ok(home);
+    }
+    fs::create_dir_all(cache).map_err(io_error(cache))?;
+    // Assembled beside its final place and renamed into it, so a process that finds the home
+    // finds it whole, and two processes assembling at once both succeed. The staging directory
+    // is locked from the start, so a pruner skips it while it is assembled.
+    let staging = cache.join(format!(
+        ".{}-{}",
+        home.file_name().unwrap_or_default().to_string_lossy(),
+        staging_suffix()
+    ));
+    if staging.exists() {
+        fs::remove_dir_all(&staging).map_err(io_error(&staging))?;
+    }
+    fs::create_dir_all(&staging).map_err(io_error(&staging))?;
+    let lock_path = staging.join(LOCK_FILE);
+    let lock = File::create(&lock_path).map_err(io_error(&lock_path))?;
+    lock.lock().map_err(io_error(&lock_path))?;
+    let include = staging.join(".headers");
+    for (relative, contents) in headers::HEADERS {
+        let path = include.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(io_error(parent))?;
+        }
+        fs::write(&path, contents).map_err(io_error(&path))?;
+    }
+    let assembled = assemble_as(
+        &staging,
+        &home,
+        &HomeSources {
+            include: &include,
+            libr,
+            rcmd,
+            base,
+            toolchain: Toolchain::for_base(base)?,
+        },
+    )
+    .and_then(|()| fs::remove_dir_all(&include).map_err(io_error(&include)))
+    // What the home was built from, so a later pruner can tell whether it is stale.
+    .and_then(|()| {
+        write(
+            &staging.join(".libr"),
+            &format!("{}\n{}\n{}", libr.display(), rcmd.display(), base.display()),
+        )
+    });
+    if let Err(error) = assembled {
+        // The assembly error is the one to report; a staging directory left behind wastes disk
+        // but is never mistaken for a home, and the next pruner removes it.
+        drop(fs::remove_dir_all(&staging));
+        return Err(error);
+    }
+    // The rename and the downgrade to a shared lock happen under the cache's lock, which a
+    // pruner holds while it works, because converting a lock first releases it and a pruner
+    // could otherwise take the new home in between.
+    let cache_lock = lock_cache(cache)?;
+    match fs::rename(&staging, &home) {
+        Ok(()) => {
+            lock.lock_shared().map_err(io_error(&home))?;
+            hold(lock);
+            prune_stale_homes(cache, &home, &cache_lock);
+            Ok(home)
+        }
+        // Another process renamed its home into place first.
+        Err(_) if home.join("etc").join("Makeconf").exists() => {
+            drop(lock);
+            fs::remove_dir_all(&staging).map_err(io_error(&staging))?;
+            drop(cache_lock);
+            cached_home(cache, libr, rcmd, base)
+        }
+        Err(error) => {
+            // The rename error is the one to report, as for a failed assembly above.
+            drop(fs::remove_dir_all(&staging));
+            Err(Error::Io(home, error))
+        }
+    }
+}
+
+/// The file in every home, and in every staging directory, that processes lock.
+const LOCK_FILE: &str = ".lock";
+
+/// The name prefix of a home a pruner moved away to delete.
+const REMOVING: &str = ".removing-";
+
+/// The locks this process holds on the homes it uses, kept open until it exits.
+static HELD_HOMES: Mutex<Vec<File>> = Mutex::new(Vec::new());
+
+fn hold(lock: File) {
+    // A poisoned list still holds its locks; only the new one would be lost, and losing it
+    // would let another process remove a home this one uses.
+    let mut held = HELD_HOMES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.push(lock);
+}
+
+/// A shared lock on `home`, or `None` when a pruner removed the home before the lock was
+/// taken. A home from an older ry has no lock file, and the first process to use it adds one.
+fn lock_home(home: &Path) -> Result<Option<File>> {
+    let path = home.join(LOCK_FILE);
+    let lock = match File::options().create(true).append(true).open(&path) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(Error::Io(path, error)),
+    };
+    lock.lock_shared().map_err(io_error(&path))?;
+    // A pruner moves a home away before it deletes it, so a home still in its place after the
+    // lock is taken stays until this process exits.
+    Ok(home.join("etc").join("Makeconf").exists().then_some(lock))
+}
+
+/// The cache-wide lock that orders pruning against a new home's rename and lock downgrade.
+fn lock_cache(cache: &Path) -> Result<File> {
+    let path = cache.join(LOCK_FILE);
+    let lock = File::options()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(io_error(&path))?;
+    lock.lock().map_err(io_error(&path))?;
+    Ok(lock)
+}
+
+/// Removes every home and staging directory under `cache` other than `current` that is stale
+/// and that no process holds: its lock can be taken exclusively. A home is stale when the files
+/// it was built from would no longer name it, because one was rebuilt or deleted; a home built
+/// by an older ry records too little to tell, and counts as stale. Removal is best effort,
+/// because a home left behind costs only disk and the next assembly tries again.
+fn prune_stale_homes(cache: &Path, current: &Path, _cache_lock: &File) {
+    let Ok(entries) = read_directory(cache) else {
+        return;
+    };
+    for entry in entries {
+        if entry == current || !entry.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().unwrap_or_default().to_string_lossy();
+        let removing = name.starts_with(REMOVING);
+        let staging = name.starts_with('.') && !removing;
+        if !name.starts_with('.') && (!is_ry_home(&entry) || !is_stale(&entry)) {
+            continue;
+        }
+        // A staging directory without its lock yet is being created this instant, while a home
+        // from an older ry, and one a pruner failed to delete, have no lock to take.
+        let lock = match File::options().append(true).open(entry.join(LOCK_FILE)) {
+            Ok(lock) => Some(lock),
+            Err(error) if error.kind() == io::ErrorKind::NotFound && !staging => None,
+            Err(_) => continue,
+        };
+        if let Some(lock) = &lock
+            && let Err(TryLockError::WouldBlock | TryLockError::Error(_)) = lock.try_lock()
+        {
+            continue;
+        }
+        // Moved out of its place first, so a process that opened its lock file before this
+        // one took it finds no home there once it gets its lock, and assembles its own.
+        let doomed = if removing {
+            entry.clone()
+        } else {
+            cache.join(format!("{REMOVING}{}", staging_suffix()))
+        };
+        if doomed == entry || fs::rename(&entry, &doomed).is_ok() {
+            drop(fs::remove_dir_all(&doomed));
+        }
+        drop(lock);
+    }
+}
+
+/// Whether the files `home` was built from would no longer name it.
+fn is_stale(home: &Path) -> bool {
+    let Ok(record) = fs::read_to_string(home.join(".libr")) else {
+        return true;
+    };
+    let [libr, rcmd, base] = record.split('\n').collect::<Vec<_>>()[..] else {
+        return true;
+    };
+    let name = home.file_name().unwrap_or_default().to_string_lossy();
+    match home_key(Path::new(libr), Path::new(rcmd), Path::new(base)) {
+        Ok(key) => format!("{key:016x}") != name,
+        Err(_) => true,
+    }
+}
+
+/// The hash that names the home built from `libr`, `rcmd` and `base`: their paths, the sizes
+/// and modification times of the two binaries, the base's build manifest and ry's version.
+fn home_key(libr: &Path, rcmd: &Path, base: &Path) -> Result<u64> {
     let stamp = |path: &Path| -> Result<String> {
         let metadata = fs::metadata(path).map_err(io_error(path))?;
         let modified = metadata
@@ -667,76 +933,7 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, base: &Path) -> Resul
         manifest,
     ]
     .join("\n");
-    let home = cache.join(format!("{:016x}", fnv1a(key.as_bytes())));
-    if home.join("etc").join("Makeconf").exists() {
-        return Ok(home);
-    }
-    fs::create_dir_all(cache).map_err(io_error(cache))?;
-    // Assembled beside its final place and renamed into it, so a process that finds the home
-    // finds it whole, and two processes assembling at once both succeed.
-    let staging = cache.join(format!(
-        ".{}-{}",
-        home.file_name().unwrap_or_default().to_string_lossy(),
-        staging_suffix()
-    ));
-    if staging.exists() {
-        fs::remove_dir_all(&staging).map_err(io_error(&staging))?;
-    }
-    let include = staging.join(".headers");
-    for (relative, contents) in headers::HEADERS {
-        let path = include.join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(io_error(parent))?;
-        }
-        fs::write(&path, contents).map_err(io_error(&path))?;
-    }
-    let assembled = assemble_as(
-        &staging,
-        &home,
-        &HomeSources {
-            include: &include,
-            libr,
-            rcmd,
-            base,
-            toolchain: Toolchain::for_base(base)?,
-        },
-    )
-    .and_then(|()| fs::remove_dir_all(&include).map_err(io_error(&include)));
-    if let Err(error) = assembled {
-        // The assembly error is the one to report; a staging directory left behind wastes disk
-        // but is never mistaken for a home.
-        drop(fs::remove_dir_all(&staging));
-        return Err(error);
-    }
-    // The runtime and front end a home was built for, so a home for a rebuilt `libR` replaces
-    // the old one. Two copies of `ry` that share one extracted runtime keep a home each, since a
-    // home in use by the other copy must not be pruned.
-    let source = format!("{}\n{}", libr.display(), rcmd.display());
-    write(&staging.join(".libr"), &source)?;
-    match fs::rename(&staging, &home) {
-        Ok(()) => {
-            for entry in read_directory(cache)? {
-                let stale = entry != home
-                    && fs::read_to_string(entry.join(".libr")).is_ok_and(|other| other == source);
-                // A session still running from a stale home keeps its mapping of that `libR`.
-                // Pruning only saves disk once the new home is in place, so a home that cannot
-                // be removed now is tried again when the next home is built.
-                if stale {
-                    drop(fs::remove_dir_all(&entry));
-                }
-            }
-            Ok(home)
-        }
-        // Another process renamed its home into place first.
-        Err(_) if home.join("etc").join("Makeconf").exists() => fs::remove_dir_all(&staging)
-            .map(|()| home)
-            .map_err(io_error(&staging)),
-        Err(error) => {
-            // The rename error is the one to report, as for a failed assembly above.
-            drop(fs::remove_dir_all(&staging));
-            Err(Error::Io(home, error))
-        }
-    }
+    Ok(fnv1a(key.as_bytes()))
 }
 
 /// The Windows front ends: `bin/R.exe`, `bin/Rscript.exe` and `bin/x64/Rcmd.exe` are copies of
@@ -2519,6 +2716,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn current_image_needs_no_write_access_to_the_base_tree() {
+        let base = std::env::temp_dir().join(format!("ry-read-only-base-{}", std::process::id()));
+        fs::create_dir_all(&base).expect("temporary base tree");
+        let image = base.join("ry-start.image");
+        let mut permissions = fs::metadata(&base).expect("base metadata").permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&base, permissions.clone()).expect("read-only base");
+        let result =
+            rewrite_stale_image(&image, &base, || true, || panic!("wrote a current image"));
+        let lock_created = base.join(".start-image.lock").exists();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&base, permissions).expect("writable base");
+        fs::remove_dir_all(&base).expect("remove temporary base tree");
+        assert!(result.is_ok());
+        assert!(!lock_created, "checking a current image created the lock");
+    }
+
+    #[test]
+    fn stale_image_is_rewritten_once_under_the_lock() {
+        let base = std::env::temp_dir().join(format!("ry-stale-base-{}", std::process::id()));
+        fs::create_dir_all(&base).expect("temporary base tree");
+        let image = base.join("ry-start.image");
+        let checks = std::cell::Cell::new(0);
+        let mut writes = 0;
+        let result = rewrite_stale_image(
+            &image,
+            &base,
+            || {
+                checks.set(checks.get() + 1);
+                false
+            },
+            || {
+                writes += 1;
+                Ok(())
+            },
+        );
+        let lock_created = base.join(".start-image.lock").exists();
+        fs::remove_dir_all(&base).expect("remove temporary base tree");
+        assert!(result.is_ok());
+        assert_eq!((checks.get(), writes), (2, 1));
+        assert!(lock_created);
+    }
+
+    #[test]
     fn descriptions_parse_continuations_and_dependencies() {
         let description = Description::parse(
             "Package: demo\nLinkingTo: Rcpp (>= 1.0),\n    cpp11\nImports: R (>= 4.0), utils\n",
@@ -3188,5 +3430,71 @@ PATH="${R_CUSTOM_TOOLS_PATH:-${R_RTOOLS45_PATH}};${PATH}/"
         let unix = makeconf(Path::new("/r"), &Toolchain::default(), Platform::Linux);
         assert!(unix.contains("SHLIB_EXPORTS =\n") && SHLIB_MK.contains("$(SHLIB_EXPORTS)"));
         fs::remove_dir_all(&directory).expect("remove directory");
+    }
+
+    /// A new home removes every stale home and abandoned staging directory that no process
+    /// holds, and keeps a stale home a process still uses.
+    #[test]
+    fn assembling_a_home_prunes_stale_homes_nobody_holds() {
+        let root = std::env::temp_dir().join(format!("ry-rcmd-prune-{}", std::process::id()));
+        drop(fs::remove_dir_all(&root));
+        let put = |path: &Path, text: &str| {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(path, text)
+        };
+        let base = root.join("base");
+        put(
+            &base.join("library/base/DESCRIPTION"),
+            "Package: base\nVersion: 4.6.2\nBuilt: R 4.6.2; ; 2026-01-01; unix\n",
+        )
+        .expect("write base DESCRIPTION");
+        for directory in ["share", "etc", "bin", "library"] {
+            fs::create_dir_all(base.join(directory)).expect("create base directory");
+        }
+        let libr = root.join("build").join(LIBR_FILE);
+        let rcmd = root.join("build/ry-rcmd");
+        put(&libr, "first build").expect("write libR");
+        put(&rcmd, "front end").expect("write front end");
+        let cache = root.join("cache");
+        let homes = || {
+            let mut names: Vec<String> = read_directory(&cache)
+                .expect("list cache")
+                .iter()
+                .filter(|entry| entry.is_dir())
+                .map(|entry| entry.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        let held = cached_home(&cache, &libr, &rcmd, &base).expect("first home");
+        assert_eq!(cached_home(&cache, &libr, &rcmd, &base).expect("same home"), held);
+        // A home from an older ry, which records no base, and a staging directory whose
+        // assembly died: both are stale and unlocked.
+        put(&cache.join("00000000000000aa/.libr"), "/old/libR.so\n/old/ry").expect("old home");
+        put(&cache.join("00000000000000aa/etc/Makeconf"), "").expect("old Makeconf");
+        put(&cache.join(".00000000000000bb-1-000000001/.lock"), "").expect("dead staging");
+        // A rebuilt libR makes the first home stale, but this process still holds it.
+        put(&libr, "second build, longer").expect("rebuild libR");
+        let second = cached_home(&cache, &libr, &rcmd, &base).expect("second home");
+        let mut expected: Vec<String> = [&held, &second]
+            .iter()
+            .map(|home| home.file_name().unwrap_or_default().to_string_lossy().into_owned())
+            .collect();
+        expected.sort();
+        assert_eq!(homes(), expected);
+        // Once nothing holds them, the next home removes both.
+        HELD_HOMES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        put(&libr, "third build, longer still").expect("rebuild libR");
+        let third = cached_home(&cache, &libr, &rcmd, &base).expect("third home");
+        assert_eq!(
+            homes(),
+            [third.file_name().unwrap_or_default().to_string_lossy().into_owned()]
+        );
+        fs::remove_dir_all(&root).expect("remove root");
     }
 }

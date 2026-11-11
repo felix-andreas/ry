@@ -898,7 +898,7 @@ impl<'db> Migration<'_, 'db> {
                                 test.clone()
                             };
                             format!(
-                                "Expr.if_else({guarded} & !Expr.is_null({test}), {}, col({}))",
+                                "Expr.if_else({guarded} & !Expr.is_null({test}), {}, Expr.col({}))",
                                 node_text(&value),
                                 quote(&name)
                             )
@@ -930,13 +930,13 @@ impl<'db> Migration<'_, 'db> {
     }
 
     /// The value `:=` assigns, as an argument of `DataFrame.with_columns`: a column expression,
-    /// or a constant through `lit()`.
+    /// or a constant through `Expr.lit()`.
     fn column_value(&self, value: &SyntaxNode, table: &Table) -> Option<String> {
         if is_literal(value) {
             if is_null(value) {
                 return None;
             }
-            return Some(format!("lit({})", node_text(value)));
+            return Some(format!("Expr.lit({})", node_text(value)));
         }
         let fragment = self.expression(value, Context::Row, table)?;
         fragment.is_expression.then_some(fragment.text)
@@ -1137,7 +1137,7 @@ impl<'db> Migration<'_, 'db> {
                 }
                 // Outside an aggregation, a column in aggregate context gives one value per row.
                 (context == Context::Row).then(|| Fragment {
-                    text: format!("col({})", quote(&name)),
+                    text: format!("Expr.col({})", quote(&name)),
                     is_expression: true,
                     piped: false,
                 })

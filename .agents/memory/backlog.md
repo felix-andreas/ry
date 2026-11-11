@@ -35,6 +35,10 @@ The quality bar is four things.
 - testthat 3.3.2 fails to load under ry's runtime with "attempt to use zero-length variable name" ; 3.2.3 loads. ry raises that error for `new.env()[[""]]`; whether GNU R does too, and so whether that is the cause, is unverified (no GNU R on the measuring host).
 - `crates/jit/tests/test_tiers.rs` `run_time_binding_shadows_cached_global_function` fails for `gen`: a `g` bound in a generic's frame before `UseMethod` is not seen by `gen.default`, which calls the global `g`. The cause is outside the typed core: the test fails without it.
 
+## Open: one switch for every fast path
+
+- `RY_FAST_PATHS=0` is checked inside three prologues only (`fast_paths_enabled` in `crates/interp/src/base_fast_paths.rs`), so every other base and package prologue still runs and a fast-path bug cannot be bisected with it. Install time is the wrong place for the check, because a start-up image already holds installed prologues; check it once where a prologue internal is dispatched. Found while tracing withr's `get_options` prologue, which passed every name in one character vector to `options()` (only the first is read) and so broke `local_options` with an unset first option.
+
 ## Open: the baseline tier and JIT on against JIT off
 
 The baseline tier, the merged SSA IR (`crates/ssa`), size-scaled tier-up and block-bodied closure
@@ -116,6 +120,10 @@ left, in order of expected gain:
 - **Nix.** `flake.nix` fetches the tarball as a fixed-output derivation and builds the base in `postInstall`; `nix build` has not been run yet.
 - **Old base trees stay in the cache after an upgrade**, as runtimes do (see below).
 
+## Open: the real-world benchmark record predates paired rounds
+
+- `tools/bench/real/results.json` holds three rounds and each engine's median time, while `run.py` needs at least five rounds and writes per-round `ratios` and `short`. Rerun `just bench-real --write` on a machine with data.table, xts, zoo, lubridate and R6 installed, then write it in schema 1 (`decisions.md`, "Benchmark suites are directories the renderers only display"), so the page and README show its intervals and `fromLegacy` can go.
+
 ## Open: the benchmark packages under ry's runtime
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
@@ -127,7 +135,7 @@ left, in order of expected gain:
 
 - **`install.packages()` with several packages installs nothing.** On ry, `install.packages(c("a", "b"), lib = ...)` returns without installing any of them and without an error; one package per call works, so the benchmark library was installed one package at a time in dependency order.
 
-- **Old runtimes and R homes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB) and builds a new `ry/home/<hash>/`, and nothing removes the previous release's directories: a home is pruned only when a newer home is built for the same runtime and front end (`rcmd::cached_home`). Prune runtime and home directories that no `ry` on the machine can name, without removing one a running session still maps.
+- **Old runtimes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB), and nothing removes the previous release's directory. R homes are pruned already (`rcmd::cached_home` removes stale homes no process holds); runtimes need the same treatment, without removing one a running session still maps.
 
 ## Open: the CRAN package corpus
 
@@ -192,7 +200,7 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **Measure first.** Generate the suites (`python3 tools/bench/generate.py --out .bench --lines 300000 --files 500`), install the corpus library (`just corpus`; the polars R package builds from source and takes the longest), then run `just bench-compare .bench/finbench .bench/dsbench .bench/biobench` with `RY_GC_LOG=<file>` set. The report's last block gives each runtime's `gc.time()` total and share of suite time; the log gives every pause (kind, nanoseconds, young small and large bytes, old bytes), from which pause p50 and p99 and collections per second follow. Fix the largest cost the numbers show, then check each object type's allocation path against `decisions.md`, "Data-oriented design and explicit allocators" (open audit items: "Open: data-oriented layouts and explicit allocators").
 - **`gc()`'s "max used" is sampled only at collections**, so it reads below the process peak (575 MB against an 833 MB VmHWM for a loop that makes and drops large vectors; GNU R reports 1,054 MB because it counts at allocation). Updating the peak on each large-vector allocation would match GNU R's meaning (`crates/heap/src/heap.rs`, `crates/heap/tests/test_gc.rs` `released_old_vectors_leave_the_peak_at_one_vector`).
 - **`for` over a compact `1:n` expands it.** Both tiers materialize the sequence (40 MB for ten million elements) before the loop; GNU R iterates the compact form. Iterating start and step directly removes the allocation, the page faults and `loop_sum`'s peak.
-- **Builder peaks still above GNU R's by more than 10%** (fresh process per case, 2e7 doubles, peak over the inputs in MB, ry against GNU R 4.3.3): `x * 2 + 1` 305/153 (GNU R writes the result into an unshared temporary operand; ry cannot take a reference count of 0 as proof yet, because bytecode registers and JIT slots hold uncounted references, `eval::reuse_permitted`), `seq(1, n, by = 1)` 381/305, `vapply(l, function(v) v + 1, numeric(1))` over a 1e6 list 112/58, `unlist` 20/4. `resolve()` in `crates/interp/src/subset.rs` still builds a `Vec<usize>` per general subscript.
+- **Builder peaks still above GNU R's by more than 10%** (fresh process per case, 2e7 doubles, peak over the inputs in MB, ry against GNU R 4.3.3): `x * 2 + 1` 305/153 (GNU R writes the result into an unshared temporary operand; ry cannot take a reference count of 0 as proof yet, because bytecode registers and JIT slots hold uncounted references, `eval::reuse_permitted`), `seq(1, n, by = 1)` 381/305, `vapply(l, function(v) v + 1, numeric(1))` over a 1e6 list 112/58, `unlist` 20/4. `resolve()` in `crates/interp/src/subset.rs` still allocates a position list for a general subscript of more than eight positions.
 - **Collector throughput toward a tenth of today's collection time** (testthat workload: 9 minor collections, about 17 ms of pauses, `collect_keeping` 66.9M instructions). Lazy-load fetches are pretenured (`decisions.md`, "Pretenuring lazy-load fetches"), so `library(testthat)` runs no collection. Where the pauses go: a minor collection's `trace` visits tens of thousands of objects at about 260 instructions each, most of them old objects rescanned from the remembered set or the roots rather than young survivors (39k traced against 4.5k newly aged in a load's collection), so find which old objects are rescanned and why; dead returned frames are cleared one cell at a time, with a cache miss on each value's mark bit and refcount (about 7 ms over 20k frames and 110k cells); the sweep and the young string table about 3 ms (`decisions.md`, "Minor collections touch only what changed").
 - **GC torture over the package test suites** is owned by the robustness work (`oracle packages` under `RY_GC_STRESS` and `gctorture(TRUE)`, `development/robustness.md`).
 - **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
@@ -214,7 +222,7 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 ## Open: the package loader
 
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
-`docs/.../tutorial/runtime.mdx`). Gaps, roughly in order of how often a real package hits them:
+`docs/.../guide.mdx`, step 3). Gaps, roughly in order of how often a real package hits them:
 
 - **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
   the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
@@ -493,7 +501,7 @@ type-level function the annotation language does not have.
 ### Smaller open items
 
 - `@new` is unrestricted project-wide, so a nominal type's invariant holds only by convention. The
-  `tutorial/fully-typed.mdx` says so conditionally ("put `@new` in one constructor"). An
+  guide's step 4 says so conditionally ("put `@new` in one constructor"). An
   encapsulation modifier would make it a guarantee.
 - A narrowing failure on a field, or behind `&&`, produces a message byte-identical to the one for
   writing no guard at all. The docs know the fix, which is to lift the value into a local first. The
@@ -721,6 +729,26 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 
 `crates/jit` compiles hot bodies and loops (`decisions.md`, "the JIT tier"). In priority order:
 
+- **An optimizing layer for LuaJIT-class loops (not queued; starts only on the orchestrator's go,
+  after the call-setup enter/leave contract lands).** The current tracks (call setup, tier-0 lexical
+  addressing and unboxed scalars, slot frames) close the interpreter and value-representation gaps
+  to LuaJIT. The three that remain need one JIT-optimizer track, because each depends on the others:
+  - *Cross-closure inlining with deopt.* Inline hot callees under guards on the binding version and
+    on an observer bit (no `parent.frame`, `sys.call`, `eval` or `environment()` on the inlined
+    frame), and rebuild the callee frames from a snapshot when a guard fails. Needs the enter/leave
+    contract and the observer bitset from "Closure call setup: the 10x end shape" in `decisions.md`.
+  - *Allocation sinking.* Escape analysis over the JIT IR, so a temporary vector, a scalar box or a
+    short-lived list that never escapes the compiled region is never allocated, and is materialized
+    only on a deopt exit. Builds on counted registers.
+  - *Loop optimizations above Cranelift.* Cranelift does little loop work, so ry needs its own pass
+    over its IR: hoist invariant guards and loads (`length(x)`, attribute and class checks), remove
+    redundant type and NA guards, eliminate bounds checks on `x[i]` for `i` in `seq_along(x)` or
+    `1:n` with `n <= length(x)`, and peel the first iteration so guards run once.
+  - Compile latency stays a constraint: Cranelift takes milliseconds per function, so these passes
+    run only in the optimizing tier, behind the cheap baseline tier and install-time images.
+  - Target: scalar and `x[i]` loops in the bench-why and bench-real programs within 2x of the same
+    loop in C, measured with `just bench-why` and callgrind.
+
 - **Typed natives, the rest of the end shape** (`decisions.md`, "Typed closures run as native
   functions over records, tags and match"). Typed closures run as natives at their first call over
   scalars, plain vectors, records, tags and `match`. Not built, by expected gain:
@@ -896,9 +924,8 @@ The rest of the inventory measured cold. The largest hash maps are the large-fra
 `Frame` (0.08 / 0.16), the `CHARSXP` table behind `install_char` (0.05 / 0.07), the string-keyed
 `primitive_formals` probe in `call_builtin_checked` (0.04 / 0.05) and `Roots.precious` (0.05 /
 0.06). `Vec<bool>` sites are below 0.1: `match_builtin_args` 0.09, the `keep` vector in
-`subset::resolve` 0.06. These are cheap clean-ups, not wins: index `primitive_formals` by builtin
-id and turn the `Vec<bool>`s into bitsets (B5), and give `precious` the dense layout of row 11
-(B2).
+`subset::resolve` 0.06. `primitive_formals` is indexed by builtin index and both `Vec<bool>`s
+are bitsets. Left: give `precious` the dense layout of row 11 (B2).
 
 **Allocations per operation against GNU R.** Loops of 20,000 and 40,000 iterations of each operation,
 differenced. GNU R (4.6.2, its loop byte-compiled) counts `allocVector3`, `CONS_NR`, `cons`,
@@ -2574,10 +2601,10 @@ The end-to-end guard rests on the corpus suites.
   `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`, `drop`,
   `unpivot`, or `when/then/otherwise` chains beyond `Expr.if_else`. None of the db-benchmark questions needs them. `LazyFrame.scan_*`
   has no parquet predicate statistics use beyond what Polars' reader does.
-- **IDE:** rename of a column (across `col("x")` strings and `$x`) and goto-definition from a
+- **IDE:** rename of a column (across `Expr.col("x")` strings and `$x`) and goto-definition from a
   column string to the verb or constructor argument that created it are not implemented; hover and
   completion are.
-- **Checker:** an expression held in a variable (`e <- col("x") * 2`) leaves a verb's columns
+- **Checker:** an expression held in a variable (`e <- Expr.col("x") * 2`) leaves a verb's columns
   unknown and its operands unchecked, because the refinement reads argument syntax. Typing `Expr`
   with its column type (`Expr<double>`) would close it. The column-error wording says "the frame
   `x`" for every table kind. Operand checks cover arithmetic, logic, comparisons, `Expr.if_else`
@@ -2590,7 +2617,7 @@ The end-to-end guard rests on the corpus suites.
   vectors: at 1e7 rows this is most of the typed modules' gap in `make_events`, `fetch_prices`
   and `enrol` (`development/design/r-runtime.md`, "Real code: the benchmark modules"). Numeric
   columns could share R's buffers once the collector can pin them for a Polars buffer's life.
-- **R precedence trap:** `col("a") * 2 |> Expr.alias("b")` pipes only the `2`. A lint that
+- **R precedence trap:** `Expr.col("a") * 2 |> Expr.alias("b")` pipes only the `2`. A lint that
   recognizes a pipe into an `Expr.` function whose left side is a literal would catch it.
 
 - **Query features:** a `by` that needs R code, `:=` with `by` on the R path, and a join whose `j`
@@ -2609,8 +2636,6 @@ The end-to-end guard rests on the corpus suites.
   evaluated eagerly during lowering, and if a sibling then falls back to R, the whole `i` or `j`
   runs again in the data mask. An `i` or `j` that updates the queried frame during lowering
   leaves the IR built against the old schema.
-- **data.table masks `setkey`, `setkeyv`, `key` and `copy`** when attached after ry; its versions
-  reject a frame, so users call `ry::setkey`.
 - **Checker:** `.SDcols` as positions or `patterns()`, `(cols) := ...` through a variable, and
   `c(.N, lapply(.SD, f))` as `j` give a frame with unknown columns.
 - **Checker nits:** `x < "b"` on a factor gives the generic comparison message, and `factor == 1` is
@@ -2722,8 +2747,10 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   - POSIX (TRE) patterns still run on fancy-regex through a translation (`perl = TRUE` is PCRE2,
     `decisions.md`). A non-constant-size pattern runs on fancy-regex's backtracking VM because of
     `leftmost_longest`; linking TRE itself would give GNU R's exact POSIX semantics.
-  - `getParseData` ids are ry's own node numbers, where GNU R's are bison's internal ones, so code
-    that hard-codes an id would differ (none in the corpus does).
+  - `getParseData` columns and srcref bytes differ from GNU R on lines with non-ASCII text. GNU R
+    counts a multibyte character inside a string literal as its bytes, and whether it counts
+    columns in characters depends on the text's declared encoding (`known_to_be_utf8`); ry counts
+    characters. 26 of rlang's test-file rows differ for this reason alone.
   - lobstr's `obj_size` counts a closure's environment a few kilobytes higher than GNU R, because
     ry's environments and bytecode have their own layout. Only relative comparisons are portable.
   - Each ALTREP string or list element read through `Sexp::element` pushes a handle that lives
@@ -2732,9 +2759,6 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
     allocation.
   - The TRE matcher now compiles three regexes per pattern, which costs `grepl` in a loop with no
     matcher cache.
-  - `getParseData`'s comment parents (`comment_parent` in `crates/interp/src/lower.rs`) scan every
-    row per comment, quadratic in a heavily commented file parsed with `keep.source = TRUE`. The
-    builder knows each comment's enclosing node while it walks, so record it there.
   - Tier-1 code is freed once its enclosure dies (`compiled_for` in `crates/jit/src/jit.rs`), on
     the reasoning that a running activation keeps its closure, and so its enclosure, alive. An
     activation whose closure's environment is replaced while it runs (`environment(f) <- e`
@@ -3575,20 +3599,6 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   occurrences in `ide.rs` (goto-definition across files, inlay hints, unused-assignment fixes).
 - `Function | Null | Var` callee unions fall through to the not-callable finding.
 
-## Open: the data.table bridge
-
-`crates/interp/src/data_table.rs` declines these to data.table. Each one is a shape to accept once the engine can reproduce data.table's result exactly, checked by a new `datatable__*` oracle case.
-
-- Keyed subjects: accept them by carrying `sorted` through filters and selections the way data.table does, and binary-search `x[.("a")]` key joins.
-- Auto-indexing filters (`col == v`, `%in%`, `%chin%`): data.table adds an `index` attribute to the source on the first such filter. Accepting them means building that attribute (`setindexv`) after answering.
-- Reductions outside GForce form, and `:=` with `by` over doubles: base R sums in long double there. The engine would need a long double (or compensated, then verified) sum path.
-- `median`, `var`, `sd`, `prod` and `mean(na.rm = TRUE)` on doubles in GForce: data.table's own algorithms (long double accumulation, two-pass variance) must be mirrored first.
-- Integer sums in grouped `:=` are exact and could be accepted now; they decline because the reduction rule does not split by column type yet.
-- Joins without `on =` (key joins) and `x[]`.
-- `roll = "nearest"`: at a tie data.table takes the earlier row and Polars' as-of join the later one, so the bridge declines it. Accepting it needs a tie-break toward the earlier key.
-- `.EACHI` over a non-equi join, or with a `j` that reads a join column: data.table reports `i`'s bounds there, so these decline.
-- The benchmark code bases' data.table-heavy tests have not run under the bridge: their other dependencies (testthat, R6, purrr and more) are not installed in the default environment.
-
 ## Open: findings from the records, library and frame round
 
 - **A record prints a classed field as its bare data.** `print((first = as.Date("2024-01-01"),))` shows `(first = 19723,)`, because the record printer deparses each field without its class. Print a classed field through `format()`, as `print.default` does for a list element.
@@ -3610,7 +3620,7 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 - Completion at two characters is weakest on call heads (httr2 72%, purrr 76%): a package's own functions share long prefixes (`req_`, `resp_`, `oauth_flow_`), so two characters cannot pick among them. Measured and rejected: ranking by words a candidate shares with the enclosing function (helps at half the name, hurts at two characters) and spellings before calls. A signal beyond use counts (the types the call site expects) would be needed.
 - An installed package's `exportPattern` is read with the `regex` crate, which accepts most but not every POSIX extended regular expression R allows; a pattern it rejects exports nothing (logged).
-- Semantic tokens: `col("name")` strings are not colored as properties (columns read inside a `DataFrame` `[` query are).
+- Semantic tokens: `Expr.col("name")` strings are not colored as properties (columns read inside a `DataFrame` `[` query are).
 - Debugger: columns come from the srcref's tab-expanded column, so they are off on lines with
   tabs.
 - The console socket and everything on it (attach, `View()`, live hover and completion) is Unix

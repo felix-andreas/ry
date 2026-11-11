@@ -19,9 +19,10 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
         strings::Encoding,
     },
+    smallvec::SmallVec,
     syntax::{
-        NumberType, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize,
-        Unexpected, split_number_suffix,
+        NodeRef, NumberType, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange,
+        TextSize, Unexpected, split_number_suffix,
     },
 };
 
@@ -588,8 +589,9 @@ fn pipe_bind_failure(text: &str, offset: usize) -> Option<SyntaxFailure> {
 /// The first string literal or backquoted name whose escapes GNU R's lexer rejects, with the
 /// offset where its token starts.
 fn escape_failure(root: &SyntaxNode) -> Option<(usize, SyntaxFailure)> {
-    root.descendants_with_tokens()
-        .filter_map(SyntaxElement::into_token)
+    root.node_ref()
+        .elements_of_kind(|kind| matches!(kind, SyntaxKind::STRING | SyntaxKind::IDENT))
+        .filter_map(|element| element.into_token())
         .find_map(|token| {
             let text = token.text();
             let quote = match token.kind() {
@@ -603,7 +605,7 @@ fn escape_failure(root: &SyntaxNode) -> Option<(usize, SyntaxFailure)> {
                 _ => body,
             };
             let failure = unescape_bytes(inner).err()?;
-            let start = usize::from(token.text_range().start());
+            let start = usize::from(token.range().start());
             Some((
                 start,
                 SyntaxFailure {
@@ -621,28 +623,44 @@ fn escape_failure(root: &SyntaxNode) -> Option<(usize, SyntaxFailure)> {
 }
 
 /// The first error GNU R's grammar actions raise in `node`, in the order its parser reduces:
-/// inner expressions before the ones that contain them.
+/// inner expressions before the ones that contain them. Only parameter lists and pipes can fail,
+/// so one scan of the tree's kinds finds them, and a node without either costs nothing more.
 unsafe fn grammar_action_failure(node: &SyntaxNode) -> Option<SyntaxFailure> {
-    for child in node.children() {
-        if let Some(failure) = grammar_action_failure(&child) {
-            return Some(failure);
-        }
+    let cursor = node.node_ref();
+    if !cursor
+        .any_kind(|kind| matches!(kind, SyntaxKind::PARAMETER_LIST | SyntaxKind::PIPE_GREATER))
+    {
+        return None;
     }
-    match node.kind() {
-        SyntaxKind::PARAMETER_LIST => repeated_formal(node),
-        SyntaxKind::BINARY_EXPR
-            if significant_tokens(node)
-                .iter()
-                .any(|token| token.kind() == SyntaxKind::PIPE_GREATER) =>
-        {
-            pipe_failure(node)
+    let mut candidates: Vec<NodeRef<'_>> = cursor
+        .descendants_of_kind(|kind| {
+            matches!(kind, SyntaxKind::PARAMETER_LIST | SyntaxKind::BINARY_EXPR)
+        })
+        .filter(|candidate| {
+            candidate.kind() == SyntaxKind::PARAMETER_LIST
+                || candidate
+                    .child_kinds()
+                    .any(|kind| kind == SyntaxKind::PIPE_GREATER)
+        })
+        .collect();
+    // The order a bottom-up parser reduces in: a node after everything it contains, and before
+    // whatever starts after it ends.
+    candidates.sort_by_key(|candidate| {
+        let range = candidate.range();
+        (range.end(), std::cmp::Reverse(range.start()))
+    });
+    candidates.into_iter().find_map(|candidate| {
+        let candidate = node.at(candidate);
+        if candidate.kind() == SyntaxKind::PARAMETER_LIST {
+            repeated_formal(&candidate)
+        } else {
+            pipe_failure(&candidate)
         }
-        _ => None,
-    }
+    })
 }
 
 fn repeated_formal(parameters: &SyntaxNode) -> Option<SyntaxFailure> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen: SmallVec<[String; 8]> = SmallVec::new();
     for parameter in parameters
         .children()
         .filter(|child| child.kind() == SyntaxKind::PARAMETER)
@@ -658,7 +676,7 @@ fn repeated_formal(parameters: &SyntaxNode) -> Option<SyntaxFailure> {
             SyntaxElement::Node(node) => (node.text().to_string(), significant_range(node)),
         };
         let name = identifier(&text);
-        if !seen.insert(name.clone()) {
+        if seen.contains(&name) {
             let last = text.chars().next_back().map_or(0, char::len_utf8);
             return Some(SyntaxFailure {
                 unexpected: None,
@@ -671,6 +689,7 @@ fn repeated_formal(parameters: &SyntaxNode) -> Option<SyntaxFailure> {
                 }),
             });
         }
+        seen.push(name);
     }
     None
 }
@@ -857,6 +876,9 @@ pub unsafe fn lower_script_expression(
 pub struct SourceMap<'text> {
     pub(crate) text: &'text str,
     line_starts: Vec<usize>,
+    /// One bit per line, set when the line is ASCII without a tab, so a column on it is its
+    /// byte offset and needs no scan.
+    plain_lines: Vec<u64>,
     first_line: isize,
     srcfile: Sexp,
     /// The `srcref` class vector every srcref of this parse shares.
@@ -865,12 +887,35 @@ pub struct SourceMap<'text> {
 
 impl<'text> SourceMap<'text> {
     unsafe fn new(text: &'text str, first_line: isize, srcfile: Sexp) -> R<SourceMap<'text>> {
-        let line_starts = std::iter::once(0)
-            .chain(text.match_indices('\n').map(|(index, _)| index + 1))
-            .collect();
+        let mut line_starts = vec![0];
+        let mut plain_lines = Vec::new();
+        let mut plain = true;
+        for (index, &byte) in text.as_bytes().iter().enumerate() {
+            if byte == b'\n' {
+                let line = line_starts.len() - 1;
+                if line % 64 == 0 {
+                    plain_lines.push(0);
+                }
+                if plain && let Some(word) = plain_lines.last_mut() {
+                    *word |= 1 << (line % 64);
+                }
+                line_starts.push(index + 1);
+                plain = true;
+            } else if byte == b'\t' || !byte.is_ascii() {
+                plain = false;
+            }
+        }
+        let line = line_starts.len() - 1;
+        if line % 64 == 0 {
+            plain_lines.push(0);
+        }
+        if plain && let Some(word) = plain_lines.last_mut() {
+            *word |= 1 << (line % 64);
+        }
         Ok(SourceMap {
             text,
             line_starts,
+            plain_lines,
             first_line,
             srcfile,
             class: values::scalar_string("srcref")?,
@@ -918,11 +963,37 @@ unsafe fn srcref_object(source: &SourceMap, fields: [i32; 8]) -> R<Sexp> {
 /// The srcfile line, byte and column of the character at byte `offset`. A tab advances the column
 /// to the next multiple of 8, as in GNU R's parser.
 pub(crate) fn position(source: &SourceMap, offset: usize) -> (i32, i32, i32) {
-    let line = source
-        .line_starts
-        .partition_point(|&start| start <= offset)
-        .saturating_sub(1);
+    position_near(source, offset, &mut 0)
+}
+
+/// [`position`] for a caller that asks about nearby offsets in turn: `line` starts as the line of
+/// the previous offset, which is checked before the search, and ends as this offset's line.
+pub(crate) fn position_near(
+    source: &SourceMap,
+    offset: usize,
+    line: &mut usize,
+) -> (i32, i32, i32) {
+    let starts = &source.line_starts;
+    let on_line = starts.get(*line).is_some_and(|&start| start <= offset)
+        && starts.get(*line + 1).is_none_or(|&next| offset < next);
+    if !on_line {
+        *line = starts
+            .partition_point(|&start| start <= offset)
+            .saturating_sub(1);
+    }
+    let line = *line;
     let line_start = source.line_starts.get(line).copied().unwrap_or(0);
+    let line_number = (line as isize - source.first_line + 1) as i32;
+    let byte = (offset - line_start) as i32 + 1;
+    // The column counts the character at `offset` too, unless the offset is the end of the text.
+    let plain = offset < source.text.len()
+        && source
+            .plain_lines
+            .get(line / 64)
+            .is_some_and(|word| word & (1 << (line % 64)) != 0);
+    if plain {
+        return (line_number, byte, byte);
+    }
     let through = source.text[offset..]
         .chars()
         .next()
@@ -935,8 +1006,7 @@ pub(crate) fn position(source: &SourceMap, offset: usize) -> (i32, i32, i32) {
             column + 1
         };
     }
-    let line_number = (line as isize - source.first_line + 1) as i32;
-    (line_number, (offset - line_start) as i32 + 1, column)
+    (line_number, byte, column)
 }
 
 /// The range of a node from its first to its last token of R code, without the comments and
@@ -1470,6 +1540,12 @@ fn is_bare_placeholder(node: &SyntaxNode) -> bool {
 
 /// Whether a `_` in `node` is not the placeholder argument of a pipe, which R rejects.
 fn has_stray_placeholder(node: &SyntaxNode) -> bool {
+    if !node
+        .node_ref()
+        .any_kind(|kind| kind == SyntaxKind::UNDERSCORE)
+    {
+        return false;
+    }
     let placeholders = node.descendants().filter(is_bare_placeholder).count();
     let consumed = node
         .descendants()

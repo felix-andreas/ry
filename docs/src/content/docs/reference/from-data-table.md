@@ -49,7 +49,7 @@ dt[units > 2L & region != "asia"]
 `DataFrame.filter` keeps the rows where every condition holds:
 
 ```r
-sales |> DataFrame.filter(col("units") > 2L, col("region") != "asia")
+sales |> DataFrame.filter(Expr.col("units") > 2L, Expr.col("region") != "asia")
 ```
 
 ```text ry run runtime=ry exact continue
@@ -70,7 +70,7 @@ dt[, .(revenue = units * price)]
 
 ```r
 sales |> DataFrame.select("region", "units")
-sales |> DataFrame.select(revenue = col("units") * col("price"))
+sales |> DataFrame.select(revenue = Expr.col("units") * Expr.col("price"))
 ```
 
 ```text ry run runtime=ry exact continue
@@ -99,7 +99,7 @@ dt[, .(units = sum(units)), by = region]
 ```r
 sales |>
   DataFrame.group_by("region") |>
-  GroupBy.agg(units = col("units") |> Expr.sum())
+  GroupBy.agg(units = Expr.col("units") |> Expr.sum())
 ```
 
 ```text ry run runtime=ry exact continue
@@ -121,7 +121,7 @@ result. A DataFrame follows R's copy-on-modify rule instead of updating in place
 earlier keeps its old columns:
 
 ```r
-sales <- sales |> DataFrame.with_columns(revenue = col("units") * col("price"))
+sales <- sales |> DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price"))
 sales
 ```
 
@@ -191,69 +191,20 @@ sales |> DataFrame.sort("region", "units", descending = c(FALSE, TRUE))
 
 | data.table | DataFrame |
 | --- | --- |
-| `dt[, share := x / sum(x), by = g]` | `DataFrame.with_columns(df, share = col("x") / Expr.over(Expr.sum(col("x")), "g"))` |
-| `dt[, r := frank(-x, ties.method = "first"), by = g]` | `DataFrame.with_columns(df, r = Expr.over(Expr.rank(col("x"), descending = TRUE), "g"))` |
+| `dt[, share := x / sum(x), by = g]` | `DataFrame.with_columns(df, share = Expr.col("x") / Expr.over(Expr.sum(Expr.col("x")), "g"))` |
+| `dt[, r := frank(-x, ties.method = "first"), by = g]` | `DataFrame.with_columns(df, r = Expr.over(Expr.rank(Expr.col("x"), descending = TRUE), "g"))` |
 | `dcast(dt, g ~ k, value.var = "x", fun.aggregate = sum)` | `DataFrame.pivot(df, on = "k", index = "g", values = "x", agg = "sum")` |
 | `CJ`-style pairing, or `dt[, .(v = 1:n), by = .(id)]` | `DataFrame.join(df, DataFrame(v = 1:n), how = "cross")` |
-| `dt[, due := day + 28L]` | `DataFrame.with_columns(df, due = col("day") + 28L)` |
-| `dt[, days := as.integer(due - day)]` | `DataFrame.with_columns(df, days = col("due") - col("day"))` |
+| `dt[, due := day + 28L]` | `DataFrame.with_columns(df, due = Expr.col("day") + 28L)` |
+| `dt[, days := as.integer(due - day)]` | `DataFrame.with_columns(df, days = Expr.col("due") - Expr.col("day"))` |
 
 [Working with DataFrames](/reference/dataframes/#windows-and-ranks) shows each with its output.
 
 ## Existing data.table code
 
-Code written for data.table runs unchanged under `ry run`, and most queries on a
-`data.table` run on the same engine as [DataFrames](/reference/dataframes). A `data.table` keeps all of data.table's
-behavior: `:=` still updates it in place, and every alias sees the change. ry answers a query only
-when it can produce exactly what data.table would, meaning the same values, attributes, printing
-and warnings. Otherwise data.table answers it. These go to data.table:
-
-- a keyed table, and a table with extra attributes or classes;
-- code inside data.table's own namespace, except a grouped query without `:=`, which is how
-  `dcast` aggregates;
-- a query without `by` that only picks rows and whole columns, such as `x[i]`,
-  `x[order(a, -b)]`, `x[a > 0]`, `x[, .(a, b)]` or `x[, cols, with = FALSE]`, because
-  data.table copies them faster and with less memory;
-- a filter that data.table answers through an automatic index (`col == value`, `col %in% values`);
-- `sum`, `mean`, `median`, `var`, `sd` and `prod` where data.table's result depends on its own
-  summation order, such as a sum of doubles without `by` or a mean with `na.rm = TRUE` on doubles;
-- a grouped `sum` of an integer column whose values could overflow while they add up, because
-  data.table then returns doubles even when each group's total fits;
-- a join without `on =`, `x[]`, and any `i` or `j` that calls a function with side effects;
-- a rolling join with `roll = "nearest"`, a non-equi join whose join columns have different types
-  in the two tables, `by = .EACHI` over a non-equi join or with a `j` that reads a join column,
-  and `:=` together with `nomatch`;
-- a query that warns or fails.
-
-data.table's own test suite, `test.data.table()`, passes in full under ry, with every query either
-answered by ry or handed to data.table.
-
-Set `options(ry.datatable.trace = TRUE)` to see which engine answers each query: ry prints
-`[ry]` or `[data.table]` and the call on standard error. `options(ry.datatable = FALSE)` sends
-every query to data.table.
-
-```r
-library(data.table)
-options(ry.datatable.trace = TRUE)
-dt <- data.table(g = c("a", "b", "a"), x = 1:3)
-dt[x > 1L, .(n = .N), by = g]
-setkey(dt, g)
-dt[x > 1L]
-```
-
-```text
-[ry] dt[x > 1L, .(n = .N), by = g]
-        g     n
-   <char> <int>
-1:      b     1
-2:      a     1
-[data.table] dt[x > 1L]
-Key: <g>
-        g     x
-   <char> <int>
-1:      a     3
-2:      b     2
-```
+data.table is a normal package under ry. Code written for it runs unchanged under `ry run`, on
+data.table's own R and C code, and ry adds no special cases for it. A DataFrame replaces data.table
+only where you choose it for new code; the rest of this page maps each idiom across.
 
 ## Finding the data.table code
 
@@ -289,8 +240,8 @@ applied 4 rewrites in 1 file
 ```r
 library(data.table)
 sales <- DataFrame.read_csv("sales.csv")
-totals <- sales |> DataFrame.filter(col("units") > 2L) |> DataFrame.group_by("region") |> GroupBy.agg(units = col("units") |> Expr.sum(), n = Expr.len())
-sales <- sales |> DataFrame.with_columns(revenue = col("units") * col("price"))
+totals <- sales |> DataFrame.filter(Expr.col("units") > 2L) |> DataFrame.group_by("region") |> GroupBy.agg(units = Expr.col("units") |> Expr.sum(), n = Expr.len())
+sales <- sales |> DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price"))
 sales <- sales |> DataFrame.sort("region", "units", descending = c(FALSE, TRUE))
 ```
 
@@ -311,7 +262,7 @@ top <- function(sales: data.table) {
 }
 # becomes
 top <- function(sales: data.table) {
-  return(data.table::as.data.table(as.DataFrame(sales) |> DataFrame.filter(col("units") > 2L)))
+  return(data.table::as.data.table(as.DataFrame(sales) |> DataFrame.filter(Expr.col("units") > 2L)))
 }
 ```
 

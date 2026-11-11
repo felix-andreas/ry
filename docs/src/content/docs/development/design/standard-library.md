@@ -4,7 +4,7 @@ description: "Design draft: ry's Roc-style standard library of Result, List, Str
 ---
 
 This draft designs ry's standard library: a set of typed, native functions modeled on Roc's
-builtins, which build on ry's [records, tuples and tags](/tutorial/runtime#records-tags-and-match). It
+builtins, which build on ry's [records, tuples and tags](/guide#records-tags-and-match). It
 settles which modules exist, how they are named and typed, and how they reach a program. Once the
 library ships, the user contract is the [standard library reference](/reference/standard-library/).
 
@@ -41,7 +41,7 @@ The alternative, a namespace value that holds the functions, was declined for th
 ## Where the names live
 
 The functions live in the `ry` namespace, which is attached at startup as `package:ry` in front of
-the default packages, beside the DataFrame API (`DataFrame`, `col`, `setkey` and the rest), so `search()`
+the default packages, beside the DataFrame API (`DataFrame`, `Expr.col`, `DataFrame.join` and the rest), so `search()`
 starts with `".GlobalEnv"`, `"tools:ry"`, `"package:ry"`, `"package:stats"`. `ry::List.map` spells
 the same function after something else masks the bare name. (Without base R, as in the
 interpreter's own tests, the builtins bind them in a `package:ry` just above `package:base`.)

@@ -14,6 +14,7 @@ use {
 };
 
 pub const ROUTINES: &[(&str, NativeFn)] = &[
+    ("Renctest", do_renctest),
     ("Rmd5", |call| unsafe { digest(call, md5) }),
     ("Rsha256", |call| unsafe { digest(call, sha256) }),
     ("remove_dot_segments_wrapper", do_remove_dot_segments),
@@ -669,4 +670,22 @@ unsafe fn do_package_dependencies_scan(call: &NativeCall<'_>) -> R<Sexp> {
         }
     }
     string_vector(&names)
+}
+
+/// `.C(C_Renctest, x)`: prints the first string with its length in bytes, a probe of how a
+/// string's encoding reaches C code.
+unsafe fn do_renctest(call: &NativeCall<'_>) -> R<Sexp> {
+    let Some(first) = call.args.first() else {
+        return Err(error("'.C(Renctest)' needs one argument"));
+    };
+    if first.value.kind() != SexpType::String || length(first.value) == 0 {
+        return Err(error("'.C(Renctest)' needs a character vector"));
+    }
+    let text = values::string_elt(first.value, 0).bytes();
+    let mut line = Vec::with_capacity(text.len() + 24);
+    line.push(b'\'');
+    line.extend_from_slice(text);
+    line.extend_from_slice(format!("', nbytes = {}\n", text.len()).as_bytes());
+    crate::write_console(&line, false);
+    crate::builtin_libraries::c_result(call, &[first.value])
 }

@@ -1,5 +1,6 @@
 //! Replays the recorded cases under GNU R, and under the engine in `ORACLE_ENGINE` when set.
-//! `RY_BLESS=1` re-records the expectations. The test passes without R installed.
+//! `RY_BLESS=1` re-records the expectations. The test passes without R installed, and skips
+//! when GNU R is another release than the one `cases/gnu-r.txt` names.
 //!
 //! When ry's runtime is built, a rotating subset of the cases also runs under collection
 //! stress (`ry-gctorture`) and must give what ry gives unstressed. `FUZZ_SEED` picks the
@@ -7,9 +8,9 @@
 
 use {
     oracle::{
-        Engine, EngineError, ProcessEngine, diff, engine_from_environment, expected_path,
-        find_cases, gnu_r_available, installed_packages, parse, render, runnable_cases,
-        ry_runtime_available,
+        BUILD_FILE, BuildCheck, Engine, EngineError, ProcessEngine, check_build, diff,
+        engine_from_environment, expected_path, find_cases, gnu_r_available, gnu_r_build,
+        installed_packages, parse, render, runnable_cases, ry_runtime_available, write_build,
     },
     std::{
         path::PathBuf,
@@ -19,9 +20,12 @@ use {
     syntax::testing::{SplitMix64, fuzz_iterations},
 };
 
+fn case_directory() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cases")
+}
+
 fn cases() -> Vec<PathBuf> {
-    let found = find_cases(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cases"));
-    runnable_cases(found, installed_packages).0
+    runnable_cases(find_cases(&case_directory()), installed_packages).0
 }
 
 #[test]
@@ -32,12 +36,35 @@ fn recorded_outcomes_match_gnu_r() {
     }
     let gnu_r = ProcessEngine::gnu_r();
     let bless = std::env::var_os("RY_BLESS").is_some();
+    let build = gnu_r_build().unwrap_or_else(|error| panic!("{error}"));
+    eprintln!("GNU R {build}");
+    match check_build(&case_directory(), &build).unwrap_or_else(|error| panic!("{error}")) {
+        BuildCheck::Same => {}
+        BuildCheck::LibrariesDiffer(message) => eprintln!("warning: {message}"),
+        BuildCheck::ReleaseDiffers(message) if bless => panic!(
+            "refusing to bless: {message}; to move the suite to another release, delete \
+             cases/{BUILD_FILE} and bless again"
+        ),
+        BuildCheck::ReleaseDiffers(message) => {
+            eprintln!("skipped: {message}");
+            return;
+        }
+        BuildCheck::Unrecorded if bless => {
+            write_build(&case_directory().join(BUILD_FILE), &build).expect("write the build file")
+        }
+        BuildCheck::Unrecorded => panic!("cases/{BUILD_FILE} is missing; bless to write it"),
+    }
     let mut failures = Vec::new();
     assert!(!cases().is_empty(), "no oracle cases found");
     for case in cases() {
-        let actual = gnu_r
-            .run(&case)
-            .unwrap_or_else(|error| panic!("{}: {error}", case.display()));
+        let actual = match gnu_r.run(&case) {
+            Ok(actual) => actual,
+            Err(EngineError::Crashed(error)) => {
+                eprintln!("skipped {}: this GNU R crashed: {error}", case.display());
+                continue;
+            }
+            Err(error) => panic!("{}: {error}", case.display()),
+        };
         if bless {
             std::fs::write(expected_path(&case), render(&actual)).expect("write expectation");
             continue;
@@ -64,15 +91,24 @@ fn second_engine_matches_gnu_r() {
     }
     let gnu_r = ProcessEngine::gnu_r();
     let second = engine_from_environment();
+    match gnu_r_build() {
+        Ok(build) => eprintln!("GNU R {build}"),
+        Err(error) => panic!("{error}"),
+    }
     let mut failures = Vec::new();
     for case in cases() {
         match second.run(&case) {
             Err(EngineError::Unavailable(_)) => return,
             Err(error) => failures.push(format!("{}: {error}", case.display())),
             Ok(actual) => {
-                let expected = gnu_r
-                    .run(&case)
-                    .unwrap_or_else(|error| panic!("{}: {error}", case.display()));
+                let expected = match gnu_r.run(&case) {
+                    Ok(expected) => expected,
+                    Err(EngineError::Crashed(error)) => {
+                        eprintln!("skipped {}: this GNU R crashed: {error}", case.display());
+                        continue;
+                    }
+                    Err(error) => panic!("{}: {error}", case.display()),
+                };
                 if let Some(difference) = diff("GNU R", &expected, &second.name(), &actual) {
                     failures.push(format!("{}\n{difference}", case.display()));
                 }
@@ -180,4 +216,39 @@ fn rendering_round_trips() {
         libraries: None,
     };
     assert_eq!(parse(&render(&outcome)), Some(outcome));
+}
+
+/// A run against a live GNU R never reads the recorded outcomes, so a malformed one surfaces only
+/// in `oracle verify` or a run without R. This reads every case's file without running R.
+#[test]
+fn every_case_has_a_readable_expectation() {
+    let cases = find_cases(&case_directory());
+    assert!(!cases.is_empty(), "no oracle cases found");
+    let mut failures = Vec::new();
+    for case in &cases {
+        let path = expected_path(case);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            failures.push(format!("{}: no expectation file", path.display()));
+            continue;
+        };
+        match parse(&text) {
+            None => failures.push(format!(
+                "{}: not in the expectation format; record it with `oracle record {}`",
+                path.display(),
+                case.display()
+            )),
+            Some(outcome) if render(&outcome) != text => failures.push(format!(
+                "{}: reads, but does not match what `oracle record` writes",
+                path.display()
+            )),
+            Some(_) => {}
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} expectations are unreadable:\n{}",
+        failures.len(),
+        cases.len(),
+        failures.join("\n")
+    );
 }
