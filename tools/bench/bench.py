@@ -27,16 +27,21 @@ under 0.1 s (a program whose GNU R time is that short is also left out of the ge
 get `--extra-rounds` more rounds first), and `typed_refused` when the typed core refused part of a
 typed program, with the refusal that `RY_TYPED_LOG` printed.
 
+Every suite checks before it runs that the corpus library holds each package its programs load, at
+the version lock.tsv pins (for the packages suite, every locked package), and stops with the list of
+missing ones. `--partial` runs anyway: the summary and results.json say the run is partial and name
+the missing packages, and `--write` refuses such a run.
+
 `--samples FILE` keeps every round's raw samples in FILE as it goes, and a later run with the same
 FILE and options resumes after the last complete round. `--write` needs at least 10 rounds and
 every program, and stores results.json; tools/bench/readme.py renders the README from it.
 
 Usage: tools/bench/bench.py SUITE... | all [--ry PATH] [--rscript PATH] [--rounds N] [--seed N]
                             [--filter TEXT] [--extra-rounds N] [--samples FILE] [--write]
-                            [--baseline PATH] [--jit-off]
+                            [--baseline PATH] [--jit-off] [--partial]
 """
 import argparse, json, math, os, pathlib, platform, random, shlex, statistics, subprocess, sys
-import tempfile, threading, time, tomllib
+import re, tempfile, threading, time, tomllib
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent
@@ -71,6 +76,8 @@ def main():
     parser.add_argument("--write", action="store_true", help="store each suite's results.json")
     parser.add_argument("--baseline", metavar="PATH", help="a second ry, timed in the same rounds")
     parser.add_argument("--jit-off", action="store_true", help="also time ry with RY_JIT=off")
+    parser.add_argument("--partial", action="store_true",
+                        help="run even when the corpus library lacks packages, and mark the results partial")
     args = parser.parse_args()
     suites = SUITES if "all" in args.suites else args.suites
     for suite in suites:
@@ -81,12 +88,24 @@ def main():
             sys.exit(f"error: --write needs at least {PUBLISHED_ROUNDS} rounds")
         if args.filter or args.baseline or args.jit_off:
             sys.exit("error: --write records every program on the published engines only")
+        if args.partial:
+            sys.exit("error: --write records complete runs only, so it does not take --partial")
+        changes = sorted({line for tree in {checkout_of(args.ry), str(root)} for line in changed_paths(tree)})
+        if changes:
+            sys.exit("error: --write records a clean commit, but the working tree has changes; commit or "
+                     "remove them and rebuild ry:\n" + "\n".join(f"  {line}" for line in changes))
+    manifests = {suite: load_suite(suite) for suite in suites}
+    missing = {suite: missing_packages(suite, selected(manifest, args)) for suite, manifest in manifests.items()}
+    if any(missing.values()) and not args.partial:
+        sys.exit("error: the corpus library lacks packages the suites load; run "
+                 "`just bench-packages install`, or pass --partial to run without them:\n"
+                 + "\n".join(f"  {suite}: {', '.join(names)}" for suite, names in missing.items() if names))
     meta = metadata(args)
     print(f"Machine: {meta['machine']['cpu']}, {meta['machine']['cores']} cores, {meta['machine']['kernel']}")
     print(f"GNU R: {meta['gnu_r']['version']}, BLAS {meta['gnu_r']['blas']}; ry {meta['ry_commit']}\n")
     failed = False
     for suite in suites:
-        failed |= run_suite(suite, args, meta)
+        failed |= run_suite(suite, manifests[suite], missing[suite], args, meta)
     if failed:
         sys.exit("error: a program failed or disagreed with GNU R; nothing was written")
 
@@ -144,12 +163,52 @@ def load_suite(suite):
     return manifest
 
 
-def run_suite(suite, args, meta):
+def selected(manifest, args):
+    return [program for program in manifest["programs"]
+            if args.filter in program["id"] or args.filter == program.get("group")]
+
+
+def missing_packages(suite, programs):
+    """The packages the programs load that the corpus library lacks at the locked version, each
+    with the reason. A package's test suite may load any locked package, so the packages suite
+    needs all of them."""
+    versions = {name: version for name, version, _ in corpus.locked()}
+    if suite == "packages":
+        needed = set(versions)
+    else:
+        needed = set()
+        for program in programs:
+            for key in ("source", "typed_source"):
+                if key in program:
+                    needed |= loaded_packages((root / program[key]).read_text())
+        needed -= corpus.BASE_PACKAGES
+    missing = []
+    for name in sorted(needed, key=str.lower):
+        if name not in versions:
+            missing.append(f"{name} (not in packages/lock.tsv)")
+            continue
+        description = corpus.corpus / "library" / name / "DESCRIPTION"
+        if not description.is_file():
+            missing.append(name)
+            continue
+        installed = corpus.parse_dcf(description.read_text(errors="replace")).get("Version")
+        if installed != versions[name]:
+            missing.append(f"{name} ({installed} installed, {versions[name]} locked)")
+    return missing
+
+
+def loaded_packages(source):
+    """The packages an R source attaches, loads or reaches into with `::`."""
+    calls = re.findall(r"\b(?:library|require|requireNamespace|loadNamespace)\(\s*[\"']?([A-Za-z][A-Za-z0-9.]*)", source)
+    return set(calls) | set(re.findall(r"\b([A-Za-z][A-Za-z0-9.]*):::?[A-Za-z.`]", source))
+
+
+def run_suite(suite, manifest, missing, args, meta):
     """Times one suite and, with --write, stores its results. True when the run failed."""
-    manifest = load_suite(suite)
+    if missing:
+        meta = dict(meta, partial={"missing_packages": missing})
     table = engines(args, suite)
-    programs = [program for program in manifest["programs"]
-                if args.filter in program["id"] or args.filter == program.get("group")]
+    programs = selected(manifest, args)
     runner = {"public": PublicRunner, "packages": PackageRunner}.get(suite, WorkloadRunner)(suite, args)
     samples_path = pathlib.Path(args.samples).with_suffix(f".{suite}.json") if args.samples else None
     state = load_samples(samples_path, args, table, programs)
@@ -157,6 +216,8 @@ def run_suite(suite, args, meta):
     for _ in range(len(state["rounds"])):
         shuffle_round(shuffle, programs, table)
     print(f"## {manifest['name']}: {len(programs)} programs, {args.rounds} rounds\n")
+    if missing:
+        print(f"PARTIAL RUN: the corpus library lacks {', '.join(missing)}\n", flush=True)
     try:
         while len(state["rounds"]) < args.rounds:
             number = len(state["rounds"]) + 1
@@ -179,6 +240,9 @@ def run_suite(suite, args, meta):
     finally:
         runner.close()
     print_table(results, table)
+    if missing:
+        print(f"\nPARTIAL RUN: the corpus library lacks {', '.join(missing)}, so programs that load "
+              "them failed or were measured without them")
     failures = [(program, failure) for program in results["programs"] for failure in program.get("failures", [])]
     for program, failure in failures:
         print(f"FAILED {suite}/{program['id']} on {failure['engine']}: {failure['reason']}")
@@ -598,15 +662,29 @@ def metadata(args):
 
 
 def commit(ry):
-    """The commit of the checkout that built the measured ry, marked when that working tree has
-    changes outside tools/bench."""
-    checkout = subprocess.run(["git", "-C", str(pathlib.Path(ry).resolve().parent), "rev-parse", "--show-toplevel"],
-                              capture_output=True, text=True, check=True).stdout.strip()
-    head = subprocess.run(["git", "-C", checkout, "rev-parse", "--short", "HEAD"],
+    """The commit of the checkout that built the measured ry, marked `-dirty` when that working
+    tree has the changes `changed_paths` lists. `--write` refuses those, so a stored commit is
+    always clean."""
+    checkout = checkout_of(ry)
+    head = subprocess.run(["git", "-C", checkout, "rev-parse", "HEAD"],
                           capture_output=True, text=True, check=True).stdout.strip()
-    dirty = subprocess.run(["git", "-C", checkout, "status", "--porcelain", "--untracked-files=no", "--", ".",
-                            ":(exclude)tools/bench"], capture_output=True, text=True, check=True).stdout.strip()
-    return head + ("-dirty" if dirty else "")
+    return head + ("-dirty" if changed_paths(checkout) else "")
+
+
+def checkout_of(ry):
+    return subprocess.run(["git", "-C", str(pathlib.Path(ry).resolve().parent), "rev-parse", "--show-toplevel"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
+def changed_paths(checkout):
+    """`git status` lines for what makes a measurement unreproducible from its commit: a change to
+    any tracked file, and a file git does not track under crates/ (built into ry) or tools/bench/
+    (the programs and the runner)."""
+    tracked = subprocess.run(["git", "-C", checkout, "status", "--porcelain", "--untracked-files=no"],
+                             capture_output=True, text=True, check=True).stdout.splitlines()
+    untracked = subprocess.run(["git", "-C", checkout, "status", "--porcelain", "--untracked-files=all", "--",
+                                "crates", "tools/bench"], capture_output=True, text=True, check=True).stdout.splitlines()
+    return tracked + [line for line in untracked if line.startswith("??")]
 
 
 if __name__ == "__main__":

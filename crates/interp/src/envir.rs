@@ -1849,9 +1849,13 @@ unsafe fn do_lapply(call: &Call<'_>) -> R<Sexp> {
     let count = length(list);
     let result = alloc(SexpType::List, count)?;
     let mut calls = ElementCalls::new(list, env)?;
+    // Each call's value is rooted in this scope until the result holds it, so the handle stack
+    // stays as deep as one call however long `X` is.
+    let mark = crate::heap().handle_mark();
     for index in 0..count {
         let value = calls.call(index)?;
         values::set_elt(result, index, value);
+        crate::heap().release_handles(mark);
     }
     let names = values::names(list);
     if names != nil() {
@@ -1953,9 +1957,16 @@ unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
     let count = length(list);
     let mut results = VapplyResults::new(call.arg(2), count, call.arg(3))?;
     let mut calls = ElementCalls::new(list, call.env()?)?;
+    // As in `do_lapply`, a value's root goes once the results hold it, except the first value's:
+    // the results keep its names for the answer, and only the value keeps them alive.
+    let mut mark = None;
     for index in 0..count {
         let value = calls.call(index)?;
         results.push(index, value)?;
+        match mark {
+            Some(mark) => crate::heap().release_handles(mark),
+            None => mark = Some(crate::heap().handle_mark()),
+        }
     }
     results.finish(list)
 }

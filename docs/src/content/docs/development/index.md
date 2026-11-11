@@ -7,6 +7,34 @@ ry is a Rust workspace whose crates live under `crates/`. [Structure](/developme
 every source file, and [Architecture](/development/architecture) explains how the analysis fits
 together. The editor extensions live in `editors/code` (VS Code) and `editors/zed` (Zed).
 
+## Set up a machine
+
+On Ubuntu 24.04, one script provisions everything the build, the tests, the oracle and the
+benchmarks need, and `just doctor` checks the result:
+
+```sh
+sudo tools/dev-setup.sh   # apt libraries, just, GNU R 4.6.2 in /opt/R, the oracle's packages
+just doctor               # each check prints ok, warn or FAIL with the command that fixes it
+```
+
+The script is idempotent, so the cloud environment's setup script runs it in every fresh container.
+It installs `just` 1.59.0 from PyPI, because the justfile needs 1.40 or newer and Ubuntu's package
+is older. It builds the oracle's [reference GNU R](/development/corpus-and-oracle#the-reference-gnu-r)
+from source (about three and a half minutes on four cores) and installs the packages the oracle cases name, with
+rlang pinned to 1.3.0. The benchmark corpus library is a separate, longer step:
+`just bench-packages install`.
+
+`just doctor` also checks that `ry`, `libR.so` and the start-up image were built from the working
+tree, by recomputing the runtime hash they embed, and it reports free disk and the size of each
+`target/` profile. A cloud container's disk quota is about 40 GB whatever `df` says. `just prune`
+frees space without forcing a full rebuild: it removes build configurations nothing has read for two
+days and incremental caches older than an hour, and `just prune --tests` also removes test
+executables.
+
+The nix dev shell (`nix develop`) carries the same toolchain, but its closure is about 6.5 GB, and
+its GNU R is nixpkgs' build rather than the reference one, so the script is the default for cloud
+sessions.
+
 ## Build and test
 
 The workspace builds on the dated nightly that `rust-toolchain.toml` pins, because std's allocator
@@ -36,6 +64,8 @@ just perf                           # corpus perf and memory budgets (needs corp
 just repl-e2e                       # drive `ry R` and `ry run` through a pty
 just release-dry-run                # package and smoke-test this machine's release archive
 just docs-deploy <branch>           # build the docs site and deploy it (main is production)
+just doctor                         # check the toolchain, GNU R, the corpus and binary freshness
+just prune                          # free disk in target/ without forcing a full rebuild
 ```
 
 The simulators, fuzzers and long oracle runs have their own recipes, which
