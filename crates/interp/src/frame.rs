@@ -10,8 +10,8 @@
 //!
 //! Frames follow R's copy-on-modify rule rather than data.table's reference semantics. `:=`
 //! updates the frame in place when nothing else refers to it, and otherwise updates a fork and
-//! rebinds the variable the call named, so an alias taken earlier keeps the old columns. `setkey`
-//! always forks and rebinds.
+//! rebinds the variable the call named, so an alias taken earlier keeps the old columns.
+//! `DataFrame.set_key` always forks and rebinds.
 
 use {
     crate::{
@@ -71,7 +71,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("tail.DataFrame", -1, do_tail),
 ];
 
-/// A registered namespace in the shape `loadNamespace` builds, so `ry::setkey`, `std::List.map`
+/// A registered namespace in the shape `loadNamespace` builds, so `ry::DataFrame`, `std::List.map`
 /// and `asNamespace("std")` work like they do for an installed package.
 fn namespace_source(name: &str, title: &str) -> String {
     format!(
@@ -158,25 +158,12 @@ DataFrame.read_csv <- function(path, strings_as_factors = FALSE) .frame_read_csv
 DataFrame.read_parquet <- function(path) .frame_read_parquet(path)
 DataFrame.write_csv <- function(df, path) .frame_write_csv(df, path)
 DataFrame.write_parquet <- function(df, path) .frame_write_parquet(df, path)
-setkey <- function(x, ...) {
-  if (!inherits(x, "DataFrame")) stop("`setkey` takes a DataFrame here; use `data.table::setkey` for a data.table")
-  columns <- vapply(as.list(substitute(list(...)))[-1L], function(e) {
-    if (is.character(e)) e else deparse(e)
-  }, "")
-  .frame_setkey(substitute(x), columns, parent.frame())
+DataFrame.set_key <- function(df, cols) {
+  if (!is.character(cols)) stop("`cols` must be a character vector of column names")
+  .frame_setkey(substitute(df), cols, parent.frame())
 }
-setkeyv <- function(x, cols, ...) {
-  if (!inherits(x, "DataFrame")) stop("`setkeyv` takes a DataFrame here; use `data.table::setkeyv` for a data.table")
-  .frame_setkey(substitute(x), cols, parent.frame())
-}
-key <- function(x) {
-  if (!inherits(x, "DataFrame")) stop("`key` takes a DataFrame here; use `data.table::key` for a data.table")
-  .frame_key(x)
-}
-copy <- function(x) {
-  if (!inherits(x, "DataFrame")) stop("`copy` takes a DataFrame here; use `data.table::copy` for a data.table")
-  .frame_copy(x)
-}
+DataFrame.key <- function(df) .frame_key(df)
+DataFrame.copy <- function(df) .frame_copy(df)
 "#;
 
 /// S3 methods for generics of other packages, registered in their generic's methods table as an
@@ -695,7 +682,7 @@ unsafe fn do_frame_setkey(call: &Call<'_>) -> R<Sexp> {
     if name.kind() != SexpType::Symbol {
         return Err(error_in(
             call.call,
-            "`setkey` on a DataFrame needs the DataFrame's variable name",
+            "`DataFrame.set_key` needs the DataFrame's variable name",
         ));
     }
     let subject = eval::eval(name, env)?;

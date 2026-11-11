@@ -344,7 +344,7 @@ action: Add inferred type annotations for the whole file
   edit 19..19 -> "<T>"
   edit 26..26 -> ": T"
   edit 27..27 -> " -> list[named: double]"
-completion (82): seq_along, se.contrast, sealClass, search, searchpaths, seek, seek.connection, segments
+completion (80): seq_along, se.contrast, sealClass, search, searchpaths, seek, seek.connection, segments
 hint @19<T>
 hint @26: T
 hint @27 -> list[named: double]

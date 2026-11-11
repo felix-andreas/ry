@@ -13,7 +13,7 @@ column is reported before the query runs ([Types](#types)). Code you already wro
 keeps working on data.table itself ([Existing data.table code](#existing-datatable-code)).
 
 You query it with Polars' verbs (`select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
-`join`, `join_asof` and `head`) and column expressions written as `col("x")`. DataFrames need ry's own runtime,
+`join`, `join_asof` and `head`) and column expressions written as `Expr.col("x")`. DataFrames need ry's own runtime,
 so run scripts that use them with `ry run script.R`:
 
 ```r
@@ -23,11 +23,11 @@ sales <- DataFrame(
   price = [1.5, 2, 3, 0.5, 4]
 )
 sales |>
-  DataFrame.filter(col("units") > 1L) |>
-  DataFrame.with_columns(revenue = col("units") * col("price")) |>
+  DataFrame.filter(Expr.col("units") > 1L) |>
+  DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price")) |>
   DataFrame.group_by("region") |>
   GroupBy.agg(
-    col("revenue") |> Expr.sum(),
+    Expr.col("revenue") |> Expr.sum(),
     orders = Expr.len()
   ) |>
   DataFrame.sort("revenue", descending = TRUE)
@@ -91,9 +91,9 @@ before the script runs:
 ```r
 sales <- DataFrame.read_csv("data/sales.csv")
 by_region <- sales |>
-  DataFrame.filter(col("units") > 1L) |>
+  DataFrame.filter(Expr.col("units") > 1L) |>
   DataFrame.group_by("region") |>
-  GroupBy.agg(total = col("prcie") |> Expr.sum())
+  GroupBy.agg(total = Expr.col("prcie") |> Expr.sum())
 ```
 
 ```text
@@ -102,11 +102,11 @@ type-mismatch
   x this frame has no column `prcie`. Did you mean `price`?
    --[report.R:5:27]
  4 |   DataFrame.group_by("region") |>
- 5 |   GroupBy.agg(total = col("prcie") |> Expr.sum())
+ 5 |   GroupBy.agg(total = Expr.col("prcie") |> Expr.sum())
    |                           ^^^^^^^
 ```
 
-The editor completes `col("...")` and every column string of a verb with the columns at that step,
+The editor completes `Expr.col("...")` and every column string of a verb with the columns at that step,
 and hovering one shows its type. A path computed at run time, or a file the project does not have,
 gives a `DataFrame` whose columns are unknown, so nothing about them is checked. Annotate the
 variable to give it its columns, as in
@@ -116,10 +116,10 @@ are unknown is an error.
 
 ## Expressions
 
-`col("units")` refers to a column. Arithmetic (`+`, `-`, `*`, `/`, `^`, `%/%`, `%%`), comparisons,
+`Expr.col("units")` refers to a column. Arithmetic (`+`, `-`, `*`, `/`, `^`, `%/%`, `%%`), comparisons,
 `&`, `|` and `!` combine columns and plain R values into a new expression, so
-`col("units") * col("price")` and `col("price") > 2` are both expressions. `lit(value)` makes a
-constant column.
+`Expr.col("units") * Expr.col("price")` and `Expr.col("price") > 2` are both expressions.
+`Expr.lit(value)` makes a constant column.
 
 Aggregations reduce a column to one value: `Expr.sum`, `Expr.mean`, `Expr.median`, `Expr.min`,
 `Expr.max`, `Expr.first`, `Expr.last`, `Expr.std`, `Expr.var` and `Expr.count`. `Expr.len()`
@@ -132,7 +132,7 @@ R's precedence when you pipe into `Expr.alias`: `|>` binds tighter than `*`, so 
 expression in parentheses first.
 
 ```r
-(col("price") * 2) |> Expr.alias("double")
+(Expr.col("price") * 2) |> Expr.alias("double")
 ```
 
 ```text ry run runtime=ry exact continue
@@ -153,12 +153,12 @@ expression in parentheses first.
 | `DataFrame.join_asof(df, other, on, by = NULL)` | joins each row to the nearest row of `other` |
 
 A string names a column wherever a verb takes an expression, so `DataFrame.select(df, "region")`
-is short for `DataFrame.select(df, col("region"))`. Inside `GroupBy.agg`, each expression must
-give one value per group. `col("units")` alone gives one value per row, so the checker and the
+is short for `DataFrame.select(df, Expr.col("region"))`. Inside `GroupBy.agg`, each expression must
+give one value per group. `Expr.col("units")` alone gives one value per row, so the checker and the
 runtime both reject it until you aggregate it.
 
 ```r
-sales |> DataFrame.select("region", cost = col("price") * 1.2, col("units") >= 3L)
+sales |> DataFrame.select("region", cost = Expr.col("price") * 1.2, Expr.col("units") >= 3L)
 ```
 
 ```text ry run runtime=ry exact continue
@@ -180,7 +180,7 @@ sales |>
   DataFrame.lazy() |>
   LazyFrame.sort("units", descending = TRUE) |>
   LazyFrame.group_by("region") |>
-  LazyGroupBy.agg(top_units = col("units") |> Expr.head(2L)) |>
+  LazyGroupBy.agg(top_units = Expr.col("units") |> Expr.head(2L)) |>
   LazyFrame.collect()
 ```
 
@@ -241,6 +241,25 @@ DataFrame.join_asof(trades, quotes, on = "time", by = "ticker")
 3:      a     1    30    NA
 ```
 
+### Keys
+
+`DataFrame.set_key(df, cols)` sorts `df` by the columns `cols` names and records them as its key,
+and `x[y]` with no `on` joins on the key of `x`. It rebinds the variable it is given, so a reference
+taken earlier keeps the old order and no key. `DataFrame.key(df)` gives the key, or `NULL`, and
+`DataFrame.copy(df)` gives an independent copy.
+
+```r
+keyed <- sales
+DataFrame.set_key(keyed, "region")
+DataFrame.key(keyed)
+DataFrame.key(sales)
+```
+
+```text ry run runtime=ry exact continue
+[1] "region"
+NULL
+```
+
 ### Windows and ranks
 
 `Expr.over(expr, "key")` computes `expr` within each group of the key columns and gives every row
@@ -250,8 +269,8 @@ groups:
 
 ```r
 sales |> DataFrame.with_columns(
-  region_units = Expr.over(Expr.sum(col("units")), "region"),
-  place = Expr.over(Expr.rank(col("units"), descending = TRUE), "region")
+  region_units = Expr.over(Expr.sum(Expr.col("units")), "region"),
+  place = Expr.over(Expr.rank(Expr.col("units"), descending = TRUE), "region")
 )
 ```
 
@@ -292,12 +311,12 @@ sales |> DataFrame.pivot(on = "region", index = "units", values = "price")
 A column of R `Date` values stays a date column. Adding or subtracting a number of days gives a
 date, subtracting one date column from another gives the whole days between them as an integer,
 and a date compares with another date, such as one from `as.Date`. The checker reports any other
-operator on a date, such as `col("placed") * 2`.
+operator on a date, such as `Expr.col("placed") * 2`.
 
 ```r
 orders <- DataFrame(id = [1L, 2L], placed = as.Date(c("2024-01-30", "2024-02-03")))
-shipped <- orders |> DataFrame.with_columns(due = col("placed") + 14L)
-shipped |> DataFrame.filter(col("due") >= as.Date("2024-02-15"))
+shipped <- orders |> DataFrame.with_columns(due = Expr.col("placed") + 14L)
+shipped |> DataFrame.filter(Expr.col("due") >= as.Date("2024-02-15"))
 ```
 
 ```text ry run runtime=ry exact
@@ -317,8 +336,8 @@ it would run:
 ```r
 plan <- sales |>
   DataFrame.lazy() |>
-  LazyFrame.with_columns(revenue = col("units") * col("price")) |>
-  LazyFrame.filter(col("region") == "eu") |>
+  LazyFrame.with_columns(revenue = Expr.col("units") * Expr.col("price")) |>
+  LazyFrame.filter(Expr.col("region") == "eu") |>
   LazyFrame.select("region", "revenue")
 LazyFrame.explain(plan)
 LazyFrame.collect(plan)
@@ -370,10 +389,10 @@ exist, or a column that `agg` forgets to aggregate is reported before the query 
 ```r
 sales <- DataFrame(region = ["eu", "us"], units = [3L, 5L], price = [1.5, 2])
 summary <- sales |>
-  DataFrame.filter(col("units") > 1L) |>
-  DataFrame.with_columns(revenue = col("units") * col("price")) |>
+  DataFrame.filter(Expr.col("units") > 1L) |>
+  DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price")) |>
   DataFrame.group_by("region") |>
-  GroupBy.agg(total = col("revenue") |> Expr.sum(), orders = Expr.len())
+  GroupBy.agg(total = Expr.col("revenue") |> Expr.sum(), orders = Expr.len())
 ```
 
 Hover on each name to see its type:
@@ -388,7 +407,7 @@ The steps in between have types too. After `DataFrame.group_by("region")` the va
 columns come before the semicolon. A `LazyFrame` carries its columns the same way, so a lazy query
 is checked as closely as an eager one.
 
-In the editor, completion inside `col("...")` or any column string of a verb offers the columns of
+In the editor, completion inside `Expr.col("...")` or any column string of a verb offers the columns of
 the DataFrame at that step, and hovering such a string shows the column's type.
 
 A query can start from a file too. `DataFrame.read_csv("data/sales.csv")` and
@@ -402,7 +421,7 @@ its columns instead, as for any other value.
 A column that does not exist is reported on the string that names it, with the nearest column:
 
 ```r
-bad <- sales |> DataFrame.select(col("prcie"))
+bad <- sales |> DataFrame.select(Expr.col("prcie"))
 ```
 
 ```text ry check typing continue
@@ -415,7 +434,7 @@ The same check covers the keys of a join. Inside `GroupBy.agg`, every expression
 group to one value:
 
 ```r
-per_region <- sales |> DataFrame.group_by("region") |> GroupBy.agg(col("units"))
+per_region <- sales |> DataFrame.group_by("region") |> GroupBy.agg(Expr.col("units"))
 ```
 
 ```text ry check typing continue
@@ -424,14 +443,14 @@ type-mismatch
   x `units` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`
 ```
 
-Columns have types, so arithmetic follows R's rules: `col("units") * col("price")` is a `double`
+Columns have types, so arithmetic follows R's rules: `Expr.col("units") * Expr.col("price")` is a `double`
 column, a comparison is `logical`, and `Expr.sum` of an `integer` column stays `integer`. An
 operation on a column whose type cannot take it is reported on that column, such as arithmetic or
 `Expr.sum` on text, and so is a comparison of text with a number:
 
 ```r
-doubled <- sales |> DataFrame.with_columns(twice = col("region") * 2)
-big <- sales |> DataFrame.filter(col("region") > 1L)
+doubled <- sales |> DataFrame.with_columns(twice = Expr.col("region") * 2)
+big <- sales |> DataFrame.filter(Expr.col("region") > 1L)
 ```
 
 ```text ry check typing continue

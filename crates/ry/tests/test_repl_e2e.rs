@@ -1140,11 +1140,11 @@ const FRAME_TYPES: &[(&str, &str)] = &[
         "DataFrame{team: character[], amount: double[], units: integer[], label: character[]}",
     ),
     (
-        "DataFrame.select(sales, \"team\", double = col(\"units\") * 2)",
+        "DataFrame.select(sales, \"team\", double = Expr.col(\"units\") * 2)",
         "DataFrame{team: character[], double: double[]}",
     ),
     (
-        "sales |> DataFrame.group_by(\"team\") |> GroupBy.agg(total = col(\"amount\") |> Expr.sum(), n = Expr.len())",
+        "sales |> DataFrame.group_by(\"team\") |> GroupBy.agg(total = Expr.col(\"amount\") |> Expr.sum(), n = Expr.len())",
         "DataFrame{team: character[], total: double[], n: integer[]}",
     ),
     (
@@ -1152,15 +1152,15 @@ const FRAME_TYPES: &[(&str, &str)] = &[
         "DataFrame{team: character[], amount: double[], units: integer[], label: character[]}",
     ),
     (
-        "sales |> DataFrame.lazy() |> LazyFrame.filter(col(\"units\") > 4L) |> LazyFrame.collect()",
+        "sales |> DataFrame.lazy() |> LazyFrame.filter(Expr.col(\"units\") > 4L) |> LazyFrame.collect()",
         "DataFrame{team: character[], amount: double[], units: integer[]}",
     ),
     (
-        "DataFrame.with_columns(sales, share = col(\"amount\") / Expr.over(Expr.sum(col(\"amount\")), \"team\"), place = Expr.rank(col(\"amount\")))",
+        "DataFrame.with_columns(sales, share = Expr.col(\"amount\") / Expr.over(Expr.sum(Expr.col(\"amount\")), \"team\"), place = Expr.rank(Expr.col(\"amount\")))",
         "DataFrame{team: character[], amount: double[], units: integer[], share: double[], place: integer[]}",
     ),
     (
-        "DataFrame.with_columns(visits, due = col(\"day\") + 28L, waited = col(\"day\") - col(\"day\"))",
+        "DataFrame.with_columns(visits, due = Expr.col(\"day\") + 28L, waited = Expr.col(\"day\") - Expr.col(\"day\"))",
         "DataFrame{id: integer[], day: Date, due: Date, waited: integer[]}",
     ),
     (

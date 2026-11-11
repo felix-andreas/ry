@@ -3238,20 +3238,18 @@ first lines R had already read, leaving R mid-command.
   one, and otherwise forks the table (cheap: Arrow buffers are shared) and rebinds the variable the
   call named, searching enclosing scopes, so a global updated inside a function is rebound where
   it lives. An alias taken before the update keeps the old columns, as the checker models.
-  `setkey` always forks and rebinds.
+  `DataFrame.set_key` always forks and rebinds.
 - **`ry` is a registered namespace attached as `package:ry` at position 2** (`frame.rs`,
   `NAMESPACE`, `PACKAGE`, `ATTACH`), built in the shape `loadNamespace` gives an installed package,
-  so `ry::setkey` and `ry::List.map` work after another package masks the bare name. It is the one
+  so `ry::DataFrame` and `ry::List.map` work after another package masks the bare name. It is the one
   home of the standard library and the frame functions: the builtins bind the standard library in
   a `package:ry` just above base, and session startup moves those bindings into the namespace and
-  replaces that environment with the full package in front of the default packages, so `frame`
-  masks `graphics::frame`. It holds the user-facing functions;
-  `.frame_*` builtins do the work. `setkey`, `setkeyv`, `key` and `copy`
-  delegate to data.table for anything that is not a frame. S3 methods for other packages' generics
+  replaces that environment with the full package in front of the default packages. It holds the
+  user-facing functions; `.frame_*` builtins do the work. S3 methods for other packages' generics
   are registered in the generic's methods table, as an installed package's `S3method()`
   directives are; `as.data.table.frame` is registered from a data.table `onLoad` hook, because
   data.table is not loaded at startup. The checker's stubs are `types/ry.Rtypes`
-  and `types/ry.exports` (the names the checker types itself or that delegate to data.table), and
+  and `types/ry.exports`, and
   `test_standard_library.rs` keeps both equal to what the runtime binds.
 
 # Decision record: the JIT tier
@@ -3906,7 +3904,7 @@ first lines R had already read, leaving R mid-command.
 - **API:** Polars' verbs over expressions, as qualified functions used with `|>`:
   `DataFrame.select`, `with_columns`, `filter`, `group_by` + `GroupBy.agg`, `sort`, `join`,
   `head`/`tail`, `lazy`, and the `LazyFrame.*` mirror with `collect` and `explain`. Expressions are
-  `col("x")`, `lit(v)`, R's operators through `Ops.Expr`, and `Expr.*` functions (`alias`, the
+  `Expr.col("x")`, `Expr.lit(v)`, R's operators through `Ops.Expr`, and `Expr.*` functions (`alias`, the
   aggregations, `len`, `is_null`, `if_else`, `cor`). There is no method dispatch: a qualified name
   always means one function, which keeps the checker's and the IDE's view a plain name lookup. A
   string names a column wherever a verb takes an expression, as in Polars.
@@ -5872,18 +5870,18 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 ## DataFrame expression operands are checked against the engine's own typing
 
 - **Previous shape.** `frame_expression` in `check.rs` computed each expression's column type but
-  never looked at its operands, so `col("region") * 2` on a `character[]` column passed the
+  never looked at its operands, so `Expr.col("region") * 2` on a `character[]` column passed the
   checker and failed only when the query ran.
 - **Target shape.** The same walk checks operands with the rules of the engine's `Typer`
   (`crates/table/src/query.rs`): arithmetic, unary `-` and the numeric aggregations refuse text
   (`character` or `factor`), `&`/`|`/`!` refuse text, and the test of `Expr.if_else` must be
   `logical`. The class comes from `join_class`, so a type outside logical/number/text (unknown,
   `Any`) stays silent. Two error kinds, `ExpressionOperand` and `ExpressionComparison`, name the
-  column when the operand is a bare `col("x")`.
+  column when the operand is a bare `Expr.col("x")`.
 - **Deliberately stricter than the engine.** The engine compares an `integer` or `logical` with a
   string by formatting the number, as R does; the checker reports text against `integer` or
   `double` all the same, because with a known schema that pairing is almost always the wrong
-  column. Text against `logical` stays allowed, so `col("x") == NA` is not flagged.
+  column. Text against `logical` stays allowed, so `Expr.col("x") == NA` is not flagged.
 - **Impact.** No new state: the checks run inside the existing refinement of a verb call, which is
   per item, so incremental analysis is unchanged.
 
@@ -5891,11 +5889,11 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 
 - **Previous shape.** A `DataFrame` whose columns are unknown (a computed `read_csv` path, a bare
   `DataFrame` parameter, a verb argument the checker cannot read) is a known type, not `Unknown`,
-  so strict mode let every `col("x")` on it through unchecked, and "a clean strict run checks
+  so strict mode let every `Expr.col("x")` on it through unchecked, and "a clean strict run checks
   every column" did not hold.
 - **Target shape.** `note_unchecked_columns` in `check.rs` records a strict origin
   (`StrictOriginKind::UnknownColumns`) on the subject of a verb that names a column, through a
-  string argument or a `col("x")` anywhere inside one, when the subject's columns are unknown. A
+  string argument or a `Expr.col("x")` anywhere inside one, when the subject's columns are unknown. A
   verb whose chain already has an earlier step over unknown columns that names a column is
   skipped, so a chain is reported once, at its first step that names a column; steps that name
   none (`head`, `lazy`) are looked through. The message suggests the annotation with the first column the query names.
@@ -6617,14 +6615,14 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Where it lives.** `crates/ide/src/migrate.rs` (`data_table_rewrites`, `apply_data_table_rewrites`) is a pure read of the analysis database, like every editor feature. `code_actions` offers each rewrite that overlaps the viewport plus one whole-file action, and `ry migrate data-table` (`cli::migrate_data_table`) analyzes the requested files exactly as `ry check` does and applies the same list, so the editor and the CLI cannot disagree. It is not a lint fix: a lint's fix is local to its diagnostic and needs no types, while a rewrite needs the target's type and the columns it knows.
 - **What counts as a table.** A query `x[...]` is rewritten only when `item_check`'s type of `x` is a `Frame` (data.table or DataFrame) or the `data.table` named type, so a vector index is never touched.
 - **Column or variable.** With the frame's columns known, a bare name is a column exactly when it is one of them; data.table also looks columns up first, so a same-named variable loses there too. With unknown columns, a name is a column unless it resolves to a local binding (`item_naming().resolutions`), is a project global name (`project_global_names`), is a base constant (`T`, `F`, `pi`, `letters`, ...), or is one of data.table's own symbols. A guess cannot be wrong silently in the other direction: a name taken for a column that is not one makes the DataFrame query fail with a missing-column error at run time.
-- **Nothing approximate.** Every unsupported shape returns `None` and produces no rewrite. Updates in place (`:=`, `setorder`, `setDT`) are rewritten only as top-level statements outside any function, as `x <- x |> ...`, because inside a function the caller would stop seeing the change. `dt[i, col := v]` needs known columns: an existing column is rewritten only for a literal of its own type, as `Expr.if_else(test & !Expr.is_null(test), v, col("col"))`, since data.table leaves a row whose test is `NA` unchanged. A keyed join (`setkey` then `X[Y]`) is skipped because it needs statement order.
+- **Nothing approximate.** Every unsupported shape returns `None` and produces no rewrite. Updates in place (`:=`, `setorder`, `setDT`) are rewritten only as top-level statements outside any function, as `x <- x |> ...`, because inside a function the caller would stop seeing the change. `dt[i, col := v]` needs known columns: an existing column is rewritten only for a literal of its own type, as `Expr.if_else(test & !Expr.is_null(test), v, Expr.col("col"))`, since data.table leaves a row whose test is `NA` unchanged. A keyed join (`setkey` then `X[Y]`) is skipped because it needs statement order.
 - **A rewritten table never escapes to unrewritten code.** Every rewrite turns a data.table into a DataFrame. `[.DataFrame` still answers `x[i, j, by]` and `:=`, but data.table's own functions refuse one (`setorder(df, -x)` stops with "x must be a data.frame or data.table"), and so does any package code that checks `is.data.table`, so the whole-file migration (`DataTableRewrite.replacement`) keeps a form only where its table flows into other kept rewrites, into `$`, `[[` or a shape function (`nrow`, `names`, ...), or is discarded. A query that is its function's return value is wrapped in `data.table::as.data.table()`, so a function's interface keeps its classes (parameters already enter through `as.DataFrame()`). Every other form gets `replacement: None`; dropping one can expose another, so `data_table_rewrites` iterates to a fixpoint (`fate`, `uses_are_safe`). Uses are matched by name across the whole scope, which can only leave more forms alone. A single code action (`standalone`) is user-directed and stays offered. Found by `tools/bench/migrate/fuzz.py`: the previous engine rewrote the `data.table()` constructors in the benchmark templates while their callers stayed data.table code.
 - **Accepted differences.** DataFrame aggregations skip `NA` (so `na.rm = TRUE` is dropped and `sum(x)` without it no longer gives `NA`), `DataFrame.sort` puts `NA` last where `setorder` puts it first, and a join lists the left table's columns first. The guide's own mapping makes the same choices; `docs/.../reference/from-data-table.md` states them.
 
 ## Dates, windows, ranks, cross joins and pivots in the table engine
 
 - **Date is a column type.** `ColumnType::Date` maps to Polars' `Date` (whole days since 1970-01-01) and to an R double with class `"Date"` both ways (`table::convert::RVector::Date`, `libr::frame_altrep::date_vector`, `interp::frame::literal`). A fractional R date floors to its day, as `as.Date` printing does. Typing follows R's own rules for days: date ± number is a date, date - date is `integer[]` days, dates compare only with dates, and any other operator on a date is a `DateOperation` error (`check.rs`, `date_operation`). R itself would give a `difftime` for date - date; the engine has no duration column, so the integer day count is the deliberate shape.
-- **`Ops.Expr` beats `Ops.Date`.** `col("day") >= as.Date(...)` has two S3 `Ops` methods, which R refuses as incompatible. `chooseOpsMethod.Expr` returns `TRUE` (R >= 4.3 protocol, honored by `interp::dispatch`), so the expression method always wins; the stub's `Ops.Expr` accepts `Date` on either side.
+- **`Ops.Expr` beats `Ops.Date`.** `Expr.col("day") >= as.Date(...)` has two S3 `Ops` methods, which R refuses as incompatible. `chooseOpsMethod.Expr` returns `TRUE` (R >= 4.3 protocol, honored by `interp::dispatch`), so the expression method always wins; the stub's `Ops.Expr` accepts `Date` on either side.
 - **Windows and ranks lower to Polars.** `Expr.over(e, keys)` is `Expr::Window` and `Expr.rank` is `Expr::Rank` (ordinal, ties broken by row, `NA` last). The fast kernels decline both, so they run in Polars; the checker types `over` as per-row with its argument's type and `rank` as `integer[]`. The ordinal row number is `is_null().cum_count()`, because a constant `TRUE` mask is folded by Polars into a scalar of length one.
 - **Cross join is a `How`.** `How::Cross` takes no keys (`check_join_keys` rejects any), renames clashing right columns with the suffix, and keeps left-major order; the checker's `join_type` treats it as a join with empty keys.
 - **Pivot is eager.** `DataFrame.pivot` and `LazyFrame.pivot` collect first and run `table::ops::dcast`, because the output columns depend on the data, so no lazy plan can know its schema. The checker types the result as an unrefined `DataFrame` for the same reason.
@@ -8757,3 +8755,10 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Target shape.** A suite is `tools/bench/<suite>/` with `suite.toml` (id, name, summary, optional groups and harness, and per program a display name, summary, `source` and optional `typed_source`) and a schema-1 `results.json` (meta, engines, per-program ratios with intervals, flags and geometric means). The page and the README list suites by globbing those directories, in the fixed order public, packages, kernels, applications; a suite without results gets no row and no page section, so the page never announces a suite it cannot show. `suite.toml` is the only source of labels.
 - **The runner judges, the renderers display.** Too-short, refused-typed and failure flags and the geometric means come from the runner, so the site and the README cannot disagree about which programs count. This supersedes the renderer-side GNU R floor of "Published benchmark numbers come only from the results files". The runner flags a too-short time per engine, but only a GNU R time under `meta.too_short_seconds` removes a program from the geometric means, so the renderers fade a bar and print "too short" beside a ratio only for that case (`isTooShort`); a fast ry time is the speed-up being measured.
 - **Temporary.** `fromLegacy` (`docs/src/lib/benchmarks.ts`) and `from_legacy` (`tools/bench/readme.py`) map the older `why/` and `real/` files into schema 1, keeping the GNU R floor those files were measured under. Delete both, and `why/suite.toml` and `real/suite.toml`, with those directories.
+
+## package:ry attaches no bare name another package exports
+
+- **Previous shape.** `package:ry` attached bare `setkey`, `setkeyv`, `key` and `copy` for DataFrames. A hook copied them into `package:data.table` so they could delegate for data.tables; once data.table became an ordinary package with no special case, the hook went, and `library(data.table)` printed "The following objects are masked from 'package:ry'", which GNU R does not print. Six oracle cases failed on that one line.
+- **Why bare names mask.** `package:ry` sits at position 2, so any package attached later that exports the same name reports the mask, and code that calls the bare name gets whichever was attached last.
+- **Target shape.** Every DataFrame function is qualified: `DataFrame.set_key(df, cols)` (one function for both `setkey` forms, taking a character vector), `DataFrame.key(df)` and `DataFrame.copy(df)`. Column expressions are `Expr.col(name)` and constants `Expr.lit(value)`, beside `Expr.sum` and the other expression functions: a bare `col` would mask base R's `col`, and `col` and `lit` build expressions, so they belong under `Expr`. The only bare function is the `DataFrame` constructor, plus the `as.*`/`is.*` conversions; everything else is under `DataFrame.`, `Expr.`, `GroupBy.` or `LazyFrame.`, and no name is exempt.
+- **Enforced** by `no_shipped_package_exports_a_library_name` in `crates/interp/tests/test_standard_library.rs`, which checks the standard library and `package:ry`'s functions against every `types/*.exports` manifest (base R, the recommended packages and the benchmark dependency set).
