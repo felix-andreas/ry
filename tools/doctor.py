@@ -240,6 +240,9 @@ def check_corpus():
 
 def check_cache(corpus_complete):
     """Whoever changes what a tree is built from builds it once and pushes it, so the next fresh container restores it."""
+    # tools/cache.sh takes zstd from nixpkgs when it is not installed, so nix is all a restore needs.
+    if not shutil.which("nix-store") and not pathlib.Path("/nix/var/nix/profiles/default/bin/nix-store").exists():
+        report("warn", "cache", "nix is not installed, so a fresh container cannot restore from ry.cachix.org and builds the reference R and the corpus from source", "install nix (https://nixos.org/download)")
     lock = root / "tools/cache.lock"
     recorded = {tuple(line.split()[:2]) for line in lock.read_text().splitlines() if line.strip()} if lock.exists() else set()
     for tree in ["r", "corpus"]:

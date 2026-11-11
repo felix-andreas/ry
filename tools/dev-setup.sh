@@ -30,8 +30,10 @@ for package in "${apt_packages[@]}"; do
 done
 if [ ${#missing[@]} -gt 0 ]; then
 	log "apt: installing ${#missing[@]} packages"
-	apt-get update -qq
-	DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${missing[@]}" >/dev/null
+	# Update only when the shipped package lists fall short: an Ubuntu mirror that is briefly down
+	# fails `apt-get update` for a container that needs nothing new.
+	install() { DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${missing[@]}" >/dev/null; }
+	install || { apt-get update -qq || true; install; }
 fi
 
 if [ "$(just --version 2>/dev/null)" != "just $just_version" ]; then

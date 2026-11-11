@@ -30,7 +30,7 @@ the current scripts. The script also restores the package-test corpus library fr
 (about ten seconds). When the cache has no build of the pinned set, `just bench-packages install`
 installs it from source in about eight minutes.
 
-Restoring needs nix, which the cloud image has; without it, the script builds R from source.
+Restoring needs nix, which the cloud image has, and takes zstd from nixpkgs when it is not installed; without nix, the script builds R from source.
 `tools/cache.lock` names each prebuilt tree by a hash of the files it was built from, so editing
 `tools/reference-r.sh` or a pinned version makes the next container build from source, and
 `just doctor` warns until the lock has a build of the current inputs. After such a change, push the
