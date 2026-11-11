@@ -308,29 +308,30 @@ const BENCH_CALLS: u64 = 4000;
 
 /// The most instructions one call of each hot API function may cost, measured with callgrind
 /// over a `bench_` loop in `rytest` (`rytest_api_bench`), loop and setup included. Each budget
-/// sits at or below what the function cost before it had a direct path, so none can get slower
-/// than that without failing here.
+/// sits at or below the cost of the same loop with every direct path switched off, which is the
+/// entry point's general path, so none can get slower than that without failing here. Running
+/// this test with `RY_API_BENCH_SLOW=1` measures that general path and fails with its costs.
 const BUDGETS: &[(&str, u64)] = &[
-    ("bench_set_attrib_symbol", 0),
-    ("bench_set_attrib_class", 0),
-    ("bench_set_attrib_dim", 0),
-    ("bench_set_attrib_dimnames", 0),
-    ("bench_set_attrib_names", 0),
-    ("bench_get_attrib", 0),
-    ("bench_alloc_vector", 0),
-    ("bench_scalar_integer", 0),
-    ("bench_scalar_logical", 0),
-    ("bench_mk_string", 0),
-    ("bench_install", 0),
-    ("bench_nrows_ncols", 0),
-    ("bench_lang2", 0),
-    ("bench_cons", 0),
-    ("bench_as_scalars", 0),
-    ("bench_inherits", 0),
-    ("bench_protect_with_index", 0),
-    ("bench_char_is_ascii", 0),
-    ("bench_external_ptr_addr", 0),
-    ("bench_get_option", 0),
+    ("bench_set_attrib_symbol", 136),
+    ("bench_set_attrib_class", 159),
+    ("bench_set_attrib_dim", 203),
+    ("bench_set_attrib_dimnames", 600),
+    ("bench_set_attrib_names", 137),
+    ("bench_get_attrib", 80),
+    ("bench_alloc_vector", 260),
+    ("bench_scalar_integer", 240),
+    ("bench_scalar_logical", 94),
+    ("bench_mk_string", 428),
+    ("bench_install", 375),
+    ("bench_nrows_ncols", 119),
+    ("bench_lang2", 151),
+    ("bench_cons", 129),
+    ("bench_as_scalars", 193),
+    ("bench_inherits", 149),
+    ("bench_protect_with_index", 38),
+    ("bench_char_is_ascii", 33),
+    ("bench_external_ptr_addr", 15),
+    ("bench_get_option", 136),
 ];
 
 /// Runs the `bench_` loops under callgrind in a child copy of this test and checks the cost per
@@ -341,6 +342,9 @@ fn hot_api_functions_stay_within_instruction_budgets() {
     if std::env::var_os("RY_API_BENCH_CHILD").is_some() {
         let r = r();
         rytest(&r);
+        if std::env::var_os("RY_API_BENCH_SLOW").is_some() {
+            unsafe { (r.api().ry_set_slow_paths_only)(1) };
+        }
         r.call("rytest_api_bench", &[r.integer(BENCH_CALLS as c_int)])
             .expect("the benchmark loops run");
         return;
