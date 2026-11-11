@@ -3,7 +3,7 @@
 # `testthat::`, and the helpers are on the search path with the package's objects but stay out of
 # its namespace.
 
-requires ry-runtime r-package:testthat
+requires ry-runtime gnu-r r-package:testthat
 
 file DESCRIPTION
 | Package: ledger
