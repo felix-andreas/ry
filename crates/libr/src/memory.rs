@@ -12,11 +12,12 @@ use {
         vectors::{set_names_from, sexp_type},
     },
     heap::{
-        Collection, HeapError,
+        Collection, HeapError, TRIPLE_BYTES,
         arena::Arena,
         object::{Header, NA_INTEGER, NA_REAL, Rcomplex, Sexp, SexpType, gp},
         strings::Encoding,
     },
+    smallvec::SmallVec,
     std::ffi::{c_char, c_int, c_long, c_void},
 };
 
@@ -533,7 +534,120 @@ pub unsafe extern "C" fn Rf_mkNamed(kind: SEXPTYPE, names: *const *const c_char)
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_duplicate(object: Sexp) -> Sexp {
-    enter(|| duplicate(object, true))
+    direct(
+        |runtime| {
+            let mark = runtime.heap.handle_mark();
+            let copy = duplicate_direct(runtime, object, 0);
+            runtime.heap.release_handles(mark);
+            copy
+        },
+        || duplicate(object, true),
+    )
+}
+
+/// The deepest nesting `duplicate_direct` copies before it leaves the object to the slow path,
+/// so a pathological expression cannot exhaust the native stack on the direct path.
+const DIRECT_DUPLICATE_DEPTH: u32 = 64;
+
+/// `Rf_duplicate` for the shapes native code copies most often: a captured call or pairlist
+/// without attributes, whose leaves are symbols, constants without attributes, and values a copy
+/// shares. Anything else (an attribute, ALTREP, a list, a closure) declines. A decline may
+/// follow allocations, which nothing outside can see, so the slow path starts from the
+/// original object.
+unsafe fn duplicate_direct(runtime: &mut Runtime, object: Sexp, depth: u32) -> Option<Sexp> {
+    let kind = object.kind();
+    match kind {
+        _ if is_shared_by_copies(kind) => Some(object),
+        SexpType::Pairlist | SexpType::Language | SexpType::Dots => {
+            duplicate_cells_direct(runtime, object, depth)
+        }
+        SexpType::Logical
+        | SexpType::Integer
+        | SexpType::Real
+        | SexpType::Complex
+        | SexpType::Raw
+        | SexpType::String => {
+            if object.is_altrep() || !has_plain_header(runtime, object) {
+                return None;
+            }
+            let length = object.length() as usize;
+            let copy = runtime.heap.alloc_vector_uninit(kind, length).ok()?;
+            if kind == SexpType::String {
+                runtime.heap.copy_elements(copy, 0, object, 0, length);
+            } else {
+                let bytes = length * kind.element_size().unwrap_or(0);
+                std::ptr::copy_nonoverlapping(object.data(), copy.data(), bytes);
+            }
+            Some(copy)
+        }
+        _ => None,
+    }
+}
+
+/// Copies a chain of cells after its elements, so each cell is allocated once with its final
+/// element and successor, back to front, under one collection check. The element copies are
+/// rooted until then, and the original cells are reachable through `object`.
+unsafe fn duplicate_cells_direct(runtime: &mut Runtime, object: Sexp, depth: u32) -> Option<Sexp> {
+    if depth == DIRECT_DUPLICATE_DEPTH {
+        return None;
+    }
+    let mut cells: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
+    let mut cell = object;
+    while is_cell(cell.kind()) {
+        if !has_plain_header(runtime, cell) {
+            return None;
+        }
+        let mut element = cell.car();
+        if !is_shared_by_copies(element.kind()) {
+            element = duplicate_direct(runtime, element, depth + 1)?;
+            runtime.heap.root(element);
+        }
+        cells.push((cell, element));
+        cell = cell.cdr();
+    }
+    runtime.heap.reserve(cells.len() * TRIPLE_BYTES, &[]);
+    let mut copy = cell;
+    for &(original, element) in cells.iter().rev() {
+        copy = runtime
+            .heap
+            .alloc_triple_uncollected(original.kind(), element, copy, original.tag())
+            .ok()?;
+        copy.set_gp(original.gp());
+    }
+    Some(copy)
+}
+
+/// Kinds `duplicate` returns as themselves.
+fn is_shared_by_copies(kind: SexpType) -> bool {
+    matches!(
+        kind,
+        SexpType::Nil
+            | SexpType::Symbol
+            | SexpType::Environment
+            | SexpType::Special
+            | SexpType::Builtin
+            | SexpType::ExternalPtr
+            | SexpType::WeakRef
+            | SexpType::Bytecode
+            | SexpType::Char
+            | SexpType::Promise
+            | SexpType::Binding
+            | SexpType::Any
+            | SexpType::Free
+            | SexpType::Record
+    )
+}
+
+fn is_cell(kind: SexpType) -> bool {
+    matches!(
+        kind,
+        SexpType::Pairlist | SexpType::Language | SexpType::Dots
+    )
+}
+
+/// No attributes, object bit or S4 bit, so `copy_attributes` would leave a fresh copy as it is.
+unsafe fn has_plain_header(runtime: &Runtime, object: Sexp) -> bool {
+    object.attrib() == runtime.nil() && !object.is_object() && !object.has_gp(gp::S4_OBJECT)
 }
 
 #[unsafe(no_mangle)]
