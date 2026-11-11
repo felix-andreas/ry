@@ -43,7 +43,11 @@ the simulator pins that property with a test. A seeded battery loops through
 `FUZZ_SEED=14 cargo test -p loader --test test_reload_fuzz a_reload_matches_a_fresh_load -- --exact`.
 Three variables move the window. `FUZZ_SEED` alone replays that one seed. `FUZZ_ITERS` sets the
 count, starting at `FUZZ_SEED` or 0. `FUZZ_DEPTH` multiplies each loop's own default count instead,
-so a test with several loops keeps their proportions when a campaign deepens it.
+so a test with several loops keeps their proportions when a campaign deepens it. Each case builds
+its generator from its seed alone, as `SplitMix64(CONSTANT ^ seed)`, because a generator shared
+across cases makes a replayed seed draw different inputs and a deeper round rerun the same ones.
+`for_each_seed` takes the plain default count: wrapping it in `fuzz_iterations` applies
+`FUZZ_DEPTH` twice.
 
 **Invariants are always on in simulation.** Cross-checks that are too expensive for production run
 whenever a harness asks for them, and panic at the step that broke them with the inputs that
