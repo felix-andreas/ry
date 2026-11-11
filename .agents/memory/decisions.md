@@ -1941,7 +1941,7 @@ grows from 107 MB to 136 MB, because the original text stays in it.
   relocation sections that keep the symbol table alive through `strip`, so the script removes them
   with `objcopy --remove-relocations` first.
 - **Benchmarks of interpreter changes keep the plain build.** The layout build writes to
-  `target/x86_64-unknown-linux-gnu/release`; `just bench-real` and the other bench recipes build
+  `target/x86_64-unknown-linux-gnu/release`; `just bench` and the other bench recipes build
   `target/release` with plain `cargo build --release`, so a change is measured without a profile
   that was collected before it.
 
@@ -8356,7 +8356,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
 
 - **Context.** The target users run their test suites in parallel across processes (one R process per worker) and are CPU bound, so all cores are already busy.
 - **Decision.** Single-core speed is the goal. Automatic parallelism (row (b) in `r-runtime.md`) is deferred: threads inside one worker would compete with the other workers for the same cores.
-- **Metrics.** The primary metric for every runtime track is the testthat workload (`tools/bench/applications/testthat.R`) under callgrind. `just bench-real` comes second. Work on the native execution model also reports `just bench-real --public all` (awfy, shootout, rcp), because scalar loops are where FastR and Ř are ahead.
+- **Metrics.** The primary metric for every runtime track is the testthat workload (`tools/bench/applications/testthat.R`) under callgrind. `just bench applications` comes second. Work on the native execution model also reports `just bench public` (awfy, shootout, rcp), because scalar loops are where FastR and Ř are ahead.
 - **Per-process costs.** Every cost paid per process is paid once per worker: JIT warm-up and compile time, package loading, resident memory and cache pressure. So package code should run from install-time compiled code (read-only pages shared between workers, no warm-up) rather than code compiled at run time, and per-worker resident memory is a metric that must not regress.
 
 ## Builtins with positional direct entries, one implementation per semantic
