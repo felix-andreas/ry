@@ -71,6 +71,307 @@ fn scenarios_hold() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// The typed benchmark programs whose kernels do not run on native code yet, with what the
+/// typed core refuses in each. Every other `<name>.typed.R` in `tools/bench/kernels` and
+/// `tools/bench/applications` must run natively.
+const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 7] = [
+    ("expr_tree", "tagged unions built in the kernel (`.ry_tag`)"),
+    ("log_rank", "a record parameter"),
+    (
+        "orders",
+        "records and tags built in the kernel (`.ry_record`, `.ry_tag`)",
+    ),
+    ("report", "text building (`.ry_text`)"),
+    (
+        "sales",
+        "a `DataFrame` parameter, which the table engine runs",
+    ),
+    (
+        "team_scores",
+        "`Result.with_default` and a mapped non-local function",
+    ),
+    (
+        "vasicek",
+        "R's random number generator (`set.seed`, `stats::rnorm`)",
+    ),
+];
+
+/// The harness's own typed functions, which read R's clock and so run in the interpreter.
+const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
+
+/// A typed benchmark program that compiles natively has to stay native: a refusal that sends
+/// the warm calls of a strict typed closure to the interpreter fails nothing and shows only as
+/// time (500 times as much for `array_dot`). Each program runs once with
+/// `RY_TYPED_LOG`, which names every typed function a call of falls back to the interpreter.
+#[test]
+fn typed_benchmarks_run_natively() {
+    if let Some(reason) = missing_requirement(&["ry-runtime".to_owned()], None) {
+        eprintln!("typed benchmarks: skipped, {reason}");
+        return;
+    }
+    let bench = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/bench");
+    let harness = fs::read_to_string(bench.join("harness.typed.R")).expect("read the harness");
+    let mut programs: Vec<(String, PathBuf)> = ["kernels", "applications"]
+        .iter()
+        .flat_map(|suite| {
+            fs::read_dir(bench.join(suite))
+                .expect("the benchmark suite directory exists")
+                .map(|entry| entry.expect("a benchmark directory entry").path())
+        })
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?.strip_suffix(".typed.R")?.to_owned();
+            Some((name, path))
+        })
+        .collect();
+    programs.sort();
+    let directory = tempfile::tempdir().expect("temporary directory");
+    // Strict mode, as the benchmark runner runs typed programs.
+    fs::write(
+        directory.path().join("ry.toml"),
+        "[check]\ntyping = true\nstrict = true\n",
+    )
+    .expect("write ry.toml");
+    let mut failures = Vec::new();
+    for (name, path) in &programs {
+        if TYPED_BENCHMARKS_NOT_NATIVE
+            .iter()
+            .any(|(listed, _)| listed == name)
+        {
+            continue;
+        }
+        let program = fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let script = directory.path().join(format!("{name}.R"));
+        fs::write(&script, format!("{harness}\n{program}")).expect("write the script");
+        let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .args(["run", "--runtime", "ry"])
+            .arg(&script)
+            .current_dir(directory.path())
+            .env("RY_TYPED_LOG", "1")
+            // One timed run after the first is enough to reach the warm calls.
+            .env("RY_BENCH_REPEAT", "1")
+            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+            .output()
+            .expect("run ry");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            failures.push(format!("{name} failed:\n{stderr}"));
+            continue;
+        }
+        let interpreted: Vec<&str> = stderr
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("typed: `")?
+                    .strip_suffix("` runs in the interpreter")
+            })
+            .filter(|function| !TYPED_HARNESS_INTERPRETED.contains(function))
+            .collect();
+        if !interpreted.is_empty() {
+            let mut refusals: Vec<&str> = stderr
+                .lines()
+                .filter(|line| {
+                    line.starts_with("typed: no code") || line.starts_with("typed: refusing")
+                })
+                .collect();
+            refusals.sort_unstable();
+            refusals.dedup();
+            failures.push(format!(
+                "{name}: {} ran in the interpreter\n{}",
+                interpreted.join(", "),
+                refusals.join("\n")
+            ));
+        }
+    }
+    for (listed, _) in TYPED_BENCHMARKS_NOT_NATIVE {
+        if !programs.iter().any(|(name, _)| name == listed) {
+            failures.push(format!(
+                "{listed} is listed as not native but is not a benchmark"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A base closure with a native entry runs without a frame when the caller runs in a slot frame
+/// too: every call of `Sys.unsetenv` here passes a promise of a global variable from a function
+/// that runs in a slot frame, which the entry reads without forcing.
+#[test]
+fn native_entries_hold_in_slot_frames() {
+    const CALLS: u64 = 20_000;
+    let script = format!(
+        "name <- \"RY_SCENARIO_UNSET\"\n\
+         measure <- function(run) for (i in seq_len({CALLS})) run()\n\
+         measure(function() Sys.unsetenv(name))\n"
+    );
+    let Some((summary, _)) = profile_summary(&[("entries.R", &script)]) else {
+        return;
+    };
+    let native = summary_count(&summary, "closure calls run natively, without a frame");
+    assert!(
+        native >= CALLS,
+        "{native} closure calls ran natively, fewer than the script's {CALLS} calls of `Sys.unsetenv`"
+    );
+}
+
+/// A typed call the typed core declines still reads its arguments first. When an argument is a
+/// call made in a slot frame, finding that call's function must not give the frame an
+/// environment, which a lookup in its pending environment would, on every call.
+#[test]
+fn declined_typed_calls_keep_slot_frames() {
+    const CALLS: u64 = 20_000;
+    let script = format!(
+        "alias Region = :North | :South\n\
+         alias Order = Record{{net: F64, region: Region}}\n\
+         tax_rate <- function(region: Region) -> F64 {{\n\
+         \x20 match (region) {{\n\
+         \x20   :North => 0.2\n\
+         \x20   :South => 0.1\n\
+         \x20 }}\n\
+         }}\n\
+         alias Taxed = Record{{net: F64, tax: F64}}\n\
+         taxed <- function(order: Order) -> Taxed {{\n\
+         \x20 tax <- order$net * tax_rate(order$region)\n\
+         \x20 (net = order$net, tax = tax)\n\
+         }}\n\
+         total: F64 <- 0\n\
+         for (i in List.range(1, {CALLS})) total <- total + taxed((net = 1.0, region = :North))$tax\n\
+         print(total)\n"
+    );
+    let manifest = "[check]\ntyping = true\nstrict = true\n";
+    let Some((summary, stdout)) = profile_summary(&[("ry.toml", manifest), ("taxed.R", &script)])
+    else {
+        return;
+    };
+    assert_eq!(stdout, "[1] 4000\n");
+    let reified = summary_count(&summary, "slot frames turned into environments");
+    assert!(
+        reified < CALLS / 10,
+        "{reified} slot frames got an environment in {CALLS} calls of `taxed`"
+    );
+}
+
+/// A strict typed function that runs natively reads its arguments from the caller's slots
+/// without forcing them, and settles each promise it reads as forcing would. A wrapper that runs
+/// in a slot frame then returns with no promise left unforced, so it keeps its slots: one that
+/// still counted a settled promise would get an environment on every call. `both` reads the
+/// same promise twice, which settles it once.
+#[test]
+fn native_typed_calls_keep_slot_frames() {
+    const CALLS: u64 = 20_000;
+    let script = format!(
+        "twice <- function(v: F64) -> F64 v * 2.0\n\
+         add <- function(a: F64, b: F64) -> F64 a + b\n\
+         doubled <- function(v) twice(v)\n\
+         both <- function(v) add(v, v)\n\
+         x: F64 <- 0\n\
+         total: F64 <- 0\n\
+         for (k in List.range(1, {CALLS})) {{\n\
+         \x20 x <- x + 1.0\n\
+         \x20 total <- total + doubled(x + 0.5) + both(x + 0.5)\n\
+         }}\n\
+         print(total)\n"
+    );
+    let manifest = "[check]\ntyping = true\nstrict = true\n";
+    let Some((summary, stdout)) =
+        profile_summary(&[("ry.toml", manifest), ("wrapped.R", &script)])
+    else {
+        return;
+    };
+    // Each iteration adds 4 * (k + 0.5).
+    assert_eq!(stdout, "[1] 800080000\n");
+    let reified = summary_count(&summary, "slot frames turned into environments");
+    assert!(
+        reified < CALLS / 10,
+        "{reified} slot frames got an environment in {CALLS} calls of each wrapper"
+    );
+}
+
+/// A promise made over a slot frame's pending environment counts as unforced however it is
+/// made. Here `do.call` evaluates a call in the frame `parent.frame()` names, which makes the
+/// promise of `x` over the pending environment outside the slot frame's own call setup; a frame
+/// that missed it would count one promise too few when it is forced, and could return without
+/// the environment a promise still needs.
+#[test]
+fn promises_over_slot_frames_are_counted() {
+    let script = "show <- function() do.call(print, list(quote(x)), envir = parent.frame())\n\
+                  f <- function(x) { show(); NULL }\n\
+                  for (i in 1:3) f(i)\n\
+                  later <- function() do.call(function(y) function() y, list(quote(x)), envir = parent.frame())\n\
+                  g <- function(x) later()\n\
+                  k <- g(3)\n\
+                  print(k())\n";
+    if let Some((_, stdout)) = profile_summary(&[("counted.R", script)]) {
+        assert_eq!(stdout, "[1] 1\n[1] 2\n[1] 3\n[1] 3\n");
+    }
+}
+
+/// Native code reads a promise over a slot frame only when forcing it could give nothing but
+/// that value. A slot holding a missing argument is not such a promise: the call goes to the
+/// interpreter, which raises R's error for it.
+#[test]
+fn native_reads_leave_missing_arguments_to_the_interpreter() {
+    let script = "twice <- function(v: F64) -> F64 v * 2.0\n\
+                  f <- function(a) twice(a)\n\
+                  x: F64 <- 0\n\
+                  for (k in List.range(1, 3)) {\n\
+                  \x20 x <- x + 1.0\n\
+                  \x20 print(f(x + 0.5))\n\
+                  }\n\
+                  tryCatch(do.call(f, list()), error = function(e) cat(conditionMessage(e), \"\\n\"))\n";
+    let manifest = "[check]\ntyping = true\nstrict = true\n";
+    if let Some((_, stdout)) = profile_summary(&[("ry.toml", manifest), ("missing.R", script)]) {
+        assert_eq!(
+            stdout,
+            "[1] 3\n[1] 5\n[1] 7\nargument \"a\" is missing, with no default \n"
+        );
+    }
+}
+
+/// Runs the last of `files` with `--profile-summary` in a directory holding all of them, and
+/// gives the summary and what the script printed; `None` when ry's runtime is missing.
+fn profile_summary(files: &[(&str, &str)]) -> Option<(String, String)> {
+    if let Some(reason) = missing_requirement(&["ry-runtime".to_owned()], None) {
+        eprintln!("profile summary: skipped, {reason}");
+        return None;
+    }
+    let directory = tempfile::tempdir().expect("temporary directory");
+    for (name, text) in files {
+        fs::write(directory.path().join(name), text).expect("write a file");
+    }
+    let (script, _) = files.last().expect("a script to run");
+    let summary = directory.path().join("summary.md");
+    let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+        .args(["run", "--runtime", "ry", "--profile-summary"])
+        .arg(&summary)
+        .arg(script)
+        .current_dir(directory.path())
+        .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+        .output()
+        .expect("run ry");
+    assert!(
+        output.status.success(),
+        "{script} failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some((
+        fs::read_to_string(&summary).expect("read the profile summary"),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    ))
+}
+
+/// The count in the row of the summary's events table that `event` names.
+fn summary_count(summary: &str, event: &str) -> u64 {
+    summary
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix(&format!("| {event} | "))?
+                .strip_suffix(" |")?
+                .parse()
+                .ok()
+        })
+        .unwrap_or_else(|| panic!("the summary has no row `{event}`:\n{summary}"))
+}
+
 enum Outcome {
     Passed(usize),
     Skipped(String),

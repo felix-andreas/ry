@@ -30,7 +30,8 @@ use {
         Marker,
         object::{Sexp, SexpType, gp},
     },
-    rustc_hash::FxHashMap,
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{cell::RefCell, sync::OnceLock},
     syntax::{SyntaxKind, SyntaxNode},
 };
 
@@ -564,6 +565,33 @@ pub unsafe fn is_typed(function: Sexp) -> bool {
         crate::bytecode::closure_body(function)
     };
     key.has_gp(gp::TYPED_DEFINITION)
+}
+
+/// Whether `RY_TYPED_LOG` asks for the typed core's decisions on standard error.
+pub fn typed_logging() -> bool {
+    static LOGGING: OnceLock<bool> = OnceLock::new();
+    *LOGGING.get_or_init(|| std::env::var_os("RY_TYPED_LOG").is_some())
+}
+
+/// Reports, once per name, that a call of the typed closure `call` names runs in the
+/// interpreter because no native code took it. A typed function that should run natively and
+/// shows up here has fallen off the native path, which is otherwise invisible except as time.
+pub unsafe fn log_interpreted(call: Sexp) {
+    thread_local! {
+        static LOGGED: RefCell<FxHashSet<String>> = Default::default();
+    }
+    if !typed_logging() {
+        return;
+    }
+    let head = call.car();
+    let name = if head.kind() == SexpType::Symbol {
+        values::symbol_name(head).into_owned()
+    } else {
+        String::from("an anonymous function")
+    };
+    if LOGGED.with_borrow_mut(|logged| logged.insert(name.clone())) {
+        eprintln!("typed: `{name}` runs in the interpreter");
+    }
 }
 
 unsafe fn signature_of(function: Sexp) -> Option<Sexp> {
