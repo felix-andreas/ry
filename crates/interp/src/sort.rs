@@ -226,7 +226,11 @@ fn order_by_collation<Text: AsRef<str>>(texts: &[Text], c: bool) -> Vec<u32> {
             starts.push(keys.len() as u32);
             keys.extend(bytes.iter().map(|&byte| ASCII_RANKS[byte as usize]));
             keys.push(0);
-            keys.extend(bytes.iter().map(|&byte| byte.is_ascii_uppercase() as u8 + 1));
+            keys.extend(
+                bytes
+                    .iter()
+                    .map(|&byte| byte.is_ascii_uppercase() as u8 + 1),
+            );
         }
         starts.push(keys.len() as u32);
         let key = |index: u32| {
@@ -289,7 +293,10 @@ fn collation_key(text: &str, keys: &mut Vec<u32>) {
     keys.push(0);
     keys.extend(text.chars().map(|character| base_letter(character).1 + 1));
     keys.push(0);
-    keys.extend(text.chars().map(|character| character.is_uppercase() as u32 + 1));
+    keys.extend(
+        text.chars()
+            .map(|character| character.is_uppercase() as u32 + 1),
+    );
     keys.push(0);
     keys.extend(text.chars().map(|character| character as u32 + 1));
 }
@@ -2872,8 +2879,12 @@ mod tests {
     /// in accents or case, on both the general and the ASCII key.
     #[test]
     fn collation_order_matches_collate() {
-        const MIXED: &[char] = &['a', 'A', 'b', '_', '.', '1', ' ', 'é', 'É', 'z', 'ß', '-', '9', 'Ω'];
-        const ASCII: &[char] = &['a', 'A', 'b', 'B', '_', '.', '1', ' ', 'z', 'Z', '-', '9', '~', '$'];
+        const MIXED: &[char] = &[
+            'a', 'A', 'b', '_', '.', '1', ' ', 'é', 'É', 'z', 'ß', '-', '9', 'Ω',
+        ];
+        const ASCII: &[char] = &[
+            'a', 'A', 'b', 'B', '_', '.', '1', ' ', 'z', 'Z', '-', '9', '~', '$',
+        ];
         let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut next = || {
             state ^= state << 13;
@@ -2885,18 +2896,29 @@ mod tests {
             let texts: Vec<String> = (0..400)
                 .map(|_| {
                     let length = (next() % 5) as usize;
-                    (0..length).map(|_| alphabet[(next() % alphabet.len() as u64) as usize]).collect()
+                    (0..length)
+                        .map(|_| alphabet[(next() % alphabet.len() as u64) as usize])
+                        .collect()
                 })
                 .collect();
             for c in [false, true] {
                 let mut expected: Vec<u32> = (0..texts.len() as u32).collect();
                 expected.sort_by(|&left, &right| {
                     let (left, right) = (&texts[left as usize], &texts[right as usize]);
-                    if c { left.cmp(right) } else { root_collate(left, right) }
+                    if c {
+                        left.cmp(right)
+                    } else {
+                        root_collate(left, right)
+                    }
                 });
-                let expected: Vec<&String> = expected.iter().map(|&index| &texts[index as usize]).collect();
-                let actual: Vec<&String> =
-                    order_by_collation(&texts, c).iter().map(|&index| &texts[index as usize]).collect();
+                let expected: Vec<&String> = expected
+                    .iter()
+                    .map(|&index| &texts[index as usize])
+                    .collect();
+                let actual: Vec<&String> = order_by_collation(&texts, c)
+                    .iter()
+                    .map(|&index| &texts[index as usize])
+                    .collect();
                 assert_eq!(actual, expected, "C collation {c}");
             }
         }

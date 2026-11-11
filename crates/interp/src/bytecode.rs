@@ -6630,7 +6630,14 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
         });
         cell = cell.cdr();
     }
-    let value = call_builtin(definition, call, function, &args, *state.header, Some(site(state, instruction)))?;
+    let value = call_builtin(
+        definition,
+        call,
+        function,
+        &args,
+        *state.header,
+        Some(site(state, instruction)),
+    )?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     Ok(Flow::Next)
@@ -6755,7 +6762,8 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         value
     } else if state.in_slots()
         && function.kind() == SexpType::Builtin
-        && let Some(value) = slot_builtin_call(state, Some(site(state, instruction)), call, function, None)?
+        && let Some(value) =
+            slot_builtin_call(state, Some(site(state, instruction)), call, function, None)?
     {
         value
     } else {
@@ -7079,15 +7087,23 @@ unsafe fn call_wrapper(
         state.env(Reify::Site("wrapper call"))?
     };
     activity::count(Counter::WrappersInlined);
-    eval::run_inlined(call, function, header as u32, missing, sys_parent, &supplied, |frame| {
-        let definition = eval::builtin_def(builtin)?;
-        let state = crate::interp();
-        let owner = state.slot_owner;
-        state.slot_owner = frame;
-        let result = call_builtin(definition, body, builtin, &builtin_args, nil(), None);
-        crate::interp().slot_owner = owner;
-        result
-    })
+    eval::run_inlined(
+        call,
+        function,
+        header as u32,
+        missing,
+        sys_parent,
+        &supplied,
+        |frame| {
+            let definition = eval::builtin_def(builtin)?;
+            let state = crate::interp();
+            let owner = state.slot_owner;
+            state.slot_owner = frame;
+            let result = call_builtin(definition, body, builtin, &builtin_args, nil(), None);
+            crate::interp().slot_owner = owner;
+            result
+        },
+    )
     .map(Some)
 }
 
@@ -7232,9 +7248,15 @@ unsafe fn call_do_call(
         state.env(Reify::Site("do.call"))?
     };
     activity::count(Counter::DoCallsInlined);
-    eval::run_inlined(call, function, header as u32, 0b1100, sys_parent, &supplied, |_| {
-        eval::apply(target_call, target, &args, sys_parent)
-    })
+    eval::run_inlined(
+        call,
+        function,
+        header as u32,
+        0b1100,
+        sys_parent,
+        &supplied,
+        |_| eval::apply(target_call, target, &args, sys_parent),
+    )
     .map(Some)
 }
 
@@ -7509,7 +7531,10 @@ unsafe fn slot_named(state: &Activation<'_, '_>, symbol: Sexp) -> Option<*mut Se
 /// compiler made, never ALTREP, so the scan reads its storage directly.
 unsafe fn slot_index(state: &Activation<'_, '_>, symbol: Sexp) -> Option<usize> {
     let names = state.constants.element(SLOTS).element(1);
-    names.slice::<Sexp>().iter().position(|&name| name == symbol)
+    names
+        .slice::<Sexp>()
+        .iter()
+        .position(|&name| name == symbol)
 }
 
 /// `substitute(x)` of a single name in a slot frame, read from the slots without giving the
@@ -7918,7 +7943,8 @@ unsafe fn slot_builtin_call(
         nil()
     };
     if definition.generic != Generic::None
-        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env, site)?
+        && let Some(value) =
+            dispatch::try_builtin_dispatch(definition, call, function, &args, env, site)?
     {
         return Ok(Some(value));
     }
@@ -8366,7 +8392,14 @@ unsafe fn op_call_builtin_rebinding(
     let value = if reusable.is_some() {
         eval::call_builtin_reusing(definition, call, function, &args, *state.header, reusable)?
     } else {
-        call_builtin(definition, call, function, &args, *state.header, Some(site(state, instruction)))?
+        call_builtin(
+            definition,
+            call,
+            function,
+            &args,
+            *state.header,
+            Some(site(state, instruction)),
+        )?
     };
     state.record(instruction.at, value);
     instruction.output(0, value);
@@ -8435,7 +8468,13 @@ unsafe fn op_call_rebinding(state: &mut Activation<'_, '_>, instruction: Instruc
         && let Some(slot) = slot_named(state, target)
     {
         if function.kind() == SexpType::Builtin
-            && let Some(value) = slot_builtin_call(state, Some(site(state, instruction)), call, function, Some(slot))?
+            && let Some(value) = slot_builtin_call(
+                state,
+                Some(site(state, instruction)),
+                call,
+                function,
+                Some(slot),
+            )?
         {
             state.record(instruction.at, value);
             instruction.output(0, value);
@@ -8874,7 +8913,14 @@ unsafe fn op_arithmetic(state: &mut Activation<'_, '_>, instruction: Instruction
                     value: right,
                 },
             ];
-            call_builtin(definition, call, function, &args, *state.header, Some(site(state, instruction)))?
+            call_builtin(
+                definition,
+                call,
+                function,
+                &args,
+                *state.header,
+                Some(site(state, instruction)),
+            )?
         }
     };
     state.record(instruction.at, value);
@@ -10047,7 +10093,8 @@ pub(crate) unsafe fn call_builtin(
         } else {
             env
         };
-        if let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, args, env, site)?
+        if let Some(value) =
+            dispatch::try_builtin_dispatch(definition, call, function, args, env, site)?
         {
             return Ok(value);
         }

@@ -73,6 +73,9 @@ class(classed) <- 'money'
 Ops.money <- function(e1, e2) 1
 add <- function(x) if (x + x == 1) x else stop('Ops.money did not run')
 set_second <- function(x) { x[[2L]] <- 1; x }
+formatted <- function(x) .Internal(sprintf('%s has %5.2f and %-4d items', c('a', 'b'), x, 3L))
+pasted <- function(x) .Internal(paste(list(c('a', 'b'), x), '-', NULL, FALSE))
+collapsed <- function(x) .Internal(paste0(list(c('a', 'b'), x), ', ', FALSE))
 ";
 
 /// Each shape's code, run once per iteration, and the most Rust allocations it may make.
@@ -87,6 +90,9 @@ const SHAPES: &[(&str, &str, usize)] = &[
     ("call to list", "listed(quote(f(a, b = 2, c)))", 0),
     ("Ops group dispatch", "add(classed)", 0),
     ("[[<- on a list", "set_second(list(1, 2, 3))", 0),
+    ("sprintf", "formatted(1.5)", 0),
+    ("paste", "pasted('c')", 0),
+    ("paste0 with collapse", "collapsed('c')", 0),
 ];
 
 const ITERATIONS: usize = 200;

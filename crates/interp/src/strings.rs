@@ -37,6 +37,7 @@ use {
     std::{
         borrow::Cow,
         cell::{OnceCell, RefCell},
+        fmt::Write,
         rc::Rc,
     },
 };
@@ -105,6 +106,9 @@ unsafe fn do_paste0(call: &Call<'_>) -> R<Sexp> {
     paste(call, None, call.arg(1), call.arg(2))
 }
 
+/// One row's pieces and separators, for `paste`.
+type Parts = SmallVec<[Sexp; 16]>;
+
 /// `paste` joins bytes, not text, because a native string may hold bytes that are not UTF-8.
 /// As in GNU R, the result is marked "bytes" when any piece is, UTF-8 when any piece is UTF-8
 /// or latin1 (which is translated), and native otherwise.
@@ -129,7 +133,7 @@ unsafe fn paste(
         return Err(error("invalid 'collapse' argument"));
     };
     let recycle_zero = flag(recycle_zero);
-    let mut columns = Vec::with_capacity(length(list));
+    let mut columns: SmallVec<[Sexp; 8]> = SmallVec::with_capacity(length(list));
     for index in 0..length(list) {
         // Every element of a column is read, so a deferred column converts in one batch.
         columns.push(values::materialize(as_character(
@@ -137,7 +141,7 @@ unsafe fn paste(
             || call.env(),
         )?)?);
     }
-    let lengths: Vec<usize> = columns.iter().map(|&column| length(column)).collect();
+    let lengths: SmallVec<[usize; 8]> = columns.iter().map(|&column| length(column)).collect();
     let mut count = lengths.iter().copied().max().unwrap_or(0);
     if recycle_zero && lengths.contains(&0) {
         count = 0;
@@ -170,7 +174,7 @@ unsafe fn paste(
             }
         }
     };
-    let row_pieces = |parts: &mut Vec<Sexp>, row: usize| {
+    let row_pieces = |parts: &mut Parts, row: usize| {
         parts.clear();
         for (position, (&column, &column_length)) in columns.iter().zip(&lengths).enumerate() {
             if position > 0
@@ -183,17 +187,19 @@ unsafe fn paste(
             }
         }
     };
-    let mut parts = Vec::new();
+    let mut parts = Parts::new();
     let Some(collapse) = collapse else {
         let result = alloc(SexpType::String, count)?;
-        let mut bytes = Vec::new();
-        for row in 0..count {
-            row_pieces(&mut parts, row);
-            let encoding = encoding_of(&parts);
-            bytes.clear();
-            join_into(&mut bytes, &parts, encoding);
-            values::set_mkchar_bytes(result, row, &bytes, encoding)?;
-        }
+        with_byte_buffer(|bytes| {
+            for row in 0..count {
+                row_pieces(&mut parts, row);
+                let encoding = encoding_of(&parts);
+                bytes.clear();
+                join_into(bytes, &parts, encoding);
+                values::set_mkchar_bytes(result, row, bytes, encoding)?;
+            }
+            Ok(())
+        })?;
         return Ok(result);
     };
     // With `collapse`, each row's bytes go straight into the one result instead of becoming a
@@ -217,49 +223,51 @@ unsafe fn paste(
     }
     let collapse_bytes = collapse.bytes();
     estimate += count.saturating_sub(1) * collapse_bytes.len();
-    let mut bytes = Vec::with_capacity(estimate);
-    let mut encoding = if count > 1 {
-        encoding_of(&[collapse])
-    } else {
-        Encoding::Native
-    };
-    let collapse_latin1 = collapse.has_gp(gp::LATIN1);
-    let mut latin1_collapses = Vec::new();
-    for row in 0..count {
-        if row > 0 {
-            if collapse_latin1 {
-                // Whether the collapse is translated depends on the result's encoding, which is
-                // known only at the end.
-                latin1_collapses.push(bytes.len());
-            }
-            bytes.extend_from_slice(collapse_bytes);
-        }
-        row_pieces(&mut parts, row);
-        let row_encoding = encoding_of(&parts);
-        let start = bytes.len();
-        join_into(&mut bytes, &parts, row_encoding);
-        match row_encoding {
-            Encoding::Bytes => encoding = Encoding::Bytes,
-            Encoding::Utf8 if encoding == Encoding::Native && !bytes[start..].is_ascii() => {
-                encoding = Encoding::Utf8;
-            }
-            _ => {}
-        }
-    }
-    if !latin1_collapses.is_empty() && encoding != Encoding::Bytes {
-        let translated = values::char_str(collapse);
-        let mut joined = Vec::with_capacity(bytes.len());
-        let mut from = 0;
-        for &at in &latin1_collapses {
-            joined.extend_from_slice(&bytes[from..at]);
-            joined.extend_from_slice(translated.as_bytes());
-            from = at + collapse_bytes.len();
-        }
-        joined.extend_from_slice(&bytes[from..]);
-        bytes = joined;
-    }
     let collapsed = alloc(SexpType::String, 1)?;
-    values::set_mkchar_bytes(collapsed, 0, &bytes, encoding)?;
+    with_byte_buffer(|bytes| {
+        bytes.reserve(estimate);
+        let mut encoding = if count > 1 {
+            encoding_of(&[collapse])
+        } else {
+            Encoding::Native
+        };
+        let collapse_latin1 = collapse.has_gp(gp::LATIN1);
+        let mut latin1_collapses = Vec::new();
+        for row in 0..count {
+            if row > 0 {
+                if collapse_latin1 {
+                    // Whether the collapse is translated depends on the result's encoding, which is
+                    // known only at the end.
+                    latin1_collapses.push(bytes.len());
+                }
+                bytes.extend_from_slice(collapse_bytes);
+            }
+            row_pieces(&mut parts, row);
+            let row_encoding = encoding_of(&parts);
+            let start = bytes.len();
+            join_into(bytes, &parts, row_encoding);
+            match row_encoding {
+                Encoding::Bytes => encoding = Encoding::Bytes,
+                Encoding::Utf8 if encoding == Encoding::Native && !bytes[start..].is_ascii() => {
+                    encoding = Encoding::Utf8;
+                }
+                _ => {}
+            }
+        }
+        if !latin1_collapses.is_empty() && encoding != Encoding::Bytes {
+            let translated = values::char_str(collapse);
+            let mut joined = Vec::with_capacity(bytes.len());
+            let mut from = 0;
+            for &at in &latin1_collapses {
+                joined.extend_from_slice(&bytes[from..at]);
+                joined.extend_from_slice(translated.as_bytes());
+                from = at + collapse_bytes.len();
+            }
+            joined.extend_from_slice(&bytes[from..]);
+            *bytes = joined;
+        }
+        values::set_mkchar_bytes(collapsed, 0, bytes, encoding)
+    })?;
     Ok(collapsed)
 }
 
@@ -618,10 +626,36 @@ fn split_text(matcher: &Matcher, text: &str, pieces: &mut Vec<(usize, usize)>) -
     Ok(())
 }
 
+/// Runs `body` with the interpreter's text buffer, empty. A nested call (a `%s` conversion that
+/// runs an `as.character` method that calls `sprintf`, say) finds the buffer taken and starts
+/// its own, and the larger of the two is kept.
+pub unsafe fn with_byte_buffer<T>(body: impl FnOnce(&mut Vec<u8>) -> R<T>) -> R<T> {
+    let mut buffer = std::mem::take(&mut crate::interp().text_buffer);
+    buffer.clear();
+    let result = body(&mut buffer);
+    let kept = &mut crate::interp().text_buffer;
+    if buffer.capacity() > kept.capacity() {
+        *kept = buffer;
+    }
+    result
+}
+
+/// [`with_byte_buffer`] for text that is UTF-8.
+pub unsafe fn with_text_buffer<T>(body: impl FnOnce(&mut String) -> R<T>) -> R<T> {
+    with_byte_buffer(|bytes| {
+        // An empty buffer is valid UTF-8, so the conversion keeps its capacity and never fails.
+        let mut text = String::from_utf8(std::mem::take(bytes)).unwrap_or_default();
+        text.clear();
+        let result = body(&mut text);
+        *bytes = text.into_bytes();
+        result
+    })
+}
+
 /// One `%` conversion of a format string.
-struct Conversion {
+struct Conversion<'a> {
     /// The conversion as written, for error messages.
-    text: String,
+    text: &'a str,
     argument: usize,
     left: bool,
     plus: bool,
@@ -640,10 +674,13 @@ enum Amount {
     Argument(usize),
 }
 
-enum FormatPiece {
-    Text(String),
-    Conversion(Conversion),
+enum FormatPiece<'a> {
+    Text(&'a str),
+    Conversion(Conversion<'a>),
 }
+
+/// A parsed format string: a few literals and conversions, so it stays on the stack.
+type FormatPieces<'a> = SmallVec<[FormatPiece<'a>; 8]>;
 
 /// An argument of `sprintf` and the conversions it needs, computed once per call.
 struct FormatArgument {
@@ -664,7 +701,8 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
     for arg in call.args.iter().skip(1) {
         values::refuse_bytes(arg.value)?;
     }
-    let mut arguments = Vec::with_capacity(call.len().saturating_sub(1));
+    let mut arguments: SmallVec<[FormatArgument; 8]> =
+        SmallVec::with_capacity(call.len().saturating_sub(1));
     for (position, arg) in call.args.iter().enumerate().skip(1) {
         let value = arg.value;
         if matches!(value.kind(), SexpType::Symbol | SexpType::Language) {
@@ -684,16 +722,19 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
     if format_count == 0 || arguments.iter().any(|argument| argument.length == 0) {
         return alloc(SexpType::String, 0);
     }
-    let kinds: Vec<SexpType> = arguments
+    let kinds: SmallVec<[SexpType; 8]> = arguments
         .iter()
         .map(|argument| argument.value.kind())
         .collect();
-    let mut used = vec![false; arguments.len()];
-    let mut parsed = Vec::with_capacity(format_count);
-    for index in 0..format_count {
-        // An `NA` format is the text "NA", as in GNU R.
-        let format = string_at(formats, index).unwrap_or(Cow::Borrowed("NA"));
-        parsed.push(parse_format(&format, &kinds, &mut used)?);
+    // One bit per argument, set once a conversion reads it.
+    let mut used: SmallVec<[u64; 2]> = smallvec![0; arguments.len().div_ceil(64)];
+    // An `NA` format is the text "NA", as in GNU R.
+    let texts: SmallVec<[Cow<'_, str>; 1]> = (0..format_count)
+        .map(|index| string_at(formats, index).unwrap_or(Cow::Borrowed("NA")))
+        .collect();
+    let mut parsed: SmallVec<[FormatPieces<'_>; 1]> = SmallVec::with_capacity(format_count);
+    for text in &texts {
+        parsed.push(parse_format(text, &kinds, &mut used)?);
     }
     // `%s` converts a classed argument with its `as.character` method first, and the result's
     // length is what recycles, so a condition formats as one string.
@@ -709,56 +750,63 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
             }
         }
     }
-    let lengths: Vec<usize> = std::iter::once(format_count)
-        .chain(arguments.iter().map(|argument| argument.length))
-        .collect();
-    if lengths.contains(&0) {
-        return alloc(SexpType::String, 0);
+    let mut count = format_count;
+    for argument in &arguments {
+        if argument.length == 0 {
+            return alloc(SexpType::String, 0);
+        }
+        count = count.max(argument.length);
     }
-    let count = lengths.iter().copied().max().unwrap_or(0);
-    if lengths.iter().any(|&each| count % each != 0) {
+    if count % format_count != 0
+        || arguments
+            .iter()
+            .any(|argument| count % argument.length != 0)
+    {
         return Err(error("arguments cannot be recycled to the same length"));
     }
     let result = alloc(SexpType::String, count)?;
-    for row in 0..count {
-        let mut text = String::new();
-        for piece in &parsed[row % format_count] {
-            match piece {
-                FormatPiece::Text(literal) => text.push_str(literal),
-                FormatPiece::Conversion(conversion) => {
-                    text.push_str(&format_conversion(
-                        conversion,
-                        &mut arguments,
-                        row,
-                        call.env()?,
-                    )?);
+    with_text_buffer(|text| {
+        for row in 0..count {
+            text.clear();
+            for piece in &parsed[row % format_count] {
+                match piece {
+                    FormatPiece::Text(literal) => text.push_str(literal),
+                    FormatPiece::Conversion(conversion) => {
+                        format_conversion(conversion, &mut arguments, row, call.env()?, text)?;
+                    }
                 }
             }
+            values::set_mkchar(result, row, text)?;
         }
-        values::set_mkchar(result, row, &text)?;
-    }
-    let unused = used.iter().filter(|&&used| !used).count();
+        Ok(())
+    })?;
+    let read: usize = used.iter().map(|word| word.count_ones() as usize).sum();
+    let unused = arguments.len() - read;
     if unused > 0 {
-        let format = string_at(formats, 0).unwrap_or(Cow::Borrowed("NA"));
         let what = if unused == 1 {
             "one argument".to_owned()
         } else {
             format!("{unused} arguments")
         };
-        warning(format!("{what} not used by format '{format}'"))?;
+        warning(format!("{what} not used by format '{}'", texts[0]))?;
     }
     Ok(result)
 }
 
+/// The conversion letters `sprintf` accepts.
+const CONVERSIONS: &[u8] = b"dioxXfeEgGaAs";
+
 /// Splits a format string into literal text and conversions, resolving which argument each
-/// conversion (and each `*`) reads.
-fn parse_format(format: &str, kinds: &[SexpType], used: &mut [bool]) -> R<Vec<FormatPiece>> {
-    let chars: Vec<char> = format.chars().collect();
-    let mut pieces = Vec::new();
-    let mut literal = String::new();
+/// conversion (and each `*`) reads. `used` gets a bit set for each argument read.
+fn parse_format<'a>(format: &'a str, kinds: &[SexpType], used: &mut [u64]) -> R<FormatPieces<'a>> {
+    // Every byte the parser looks for is ASCII, which never occurs inside a multibyte UTF-8
+    // character, so it steps through bytes and slices only at ASCII positions.
+    let bytes = format.as_bytes();
+    let mut pieces = FormatPieces::new();
+    let mut literal_start = 0;
     let mut next_argument = 0;
     let mut index = 0;
-    let mut take = |explicit: Option<usize>, used: &mut [bool]| -> R<usize> {
+    let mut take = |explicit: Option<usize>, used: &mut [u64]| -> R<usize> {
         let argument = match explicit {
             Some(argument) => argument,
             None => {
@@ -766,36 +814,35 @@ fn parse_format(format: &str, kinds: &[SexpType], used: &mut [bool]) -> R<Vec<Fo
                 next_argument - 1
             }
         };
-        match used.get_mut(argument) {
-            Some(slot) => {
-                *slot = true;
-                Ok(argument)
-            }
-            None => match explicit {
-                Some(argument) => Err(error(format!(
-                    "reference to non-existent argument {}",
-                    argument + 1
-                ))),
-                None => Err(error("too few arguments")),
-            },
+        if argument < kinds.len() {
+            used[argument / 64] |= 1 << (argument % 64);
+            return Ok(argument);
+        }
+        match explicit {
+            Some(argument) => Err(error(format!(
+                "reference to non-existent argument {}",
+                argument + 1
+            ))),
+            None => Err(error("too few arguments")),
         }
     };
-    while index < chars.len() {
-        if chars[index] != '%' {
-            literal.push(chars[index]);
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
             index += 1;
             continue;
         }
-        if chars.get(index + 1) == Some(&'%') {
-            literal.push('%');
+        if bytes.get(index + 1) == Some(&b'%') {
+            // The literal runs through the first `%`, and the second is skipped.
+            pieces.push(FormatPiece::Text(&format[literal_start..=index]));
             index += 2;
+            literal_start = index;
             continue;
         }
         let start = index;
         index += 1;
-        let explicit = positional_reference(&chars, &mut index);
+        let explicit = positional_reference(bytes, &mut index);
         let mut conversion = Conversion {
-            text: String::new(),
+            text: "",
             argument: 0,
             left: false,
             plus: false,
@@ -806,52 +853,46 @@ fn parse_format(format: &str, kinds: &[SexpType], used: &mut [bool]) -> R<Vec<Fo
             precision: None,
             kind: '\0',
         };
-        while let Some(&character) = chars.get(index) {
-            match character {
-                '-' => conversion.left = true,
-                '+' => conversion.plus = true,
-                ' ' => conversion.space = true,
-                '0' => conversion.zero = true,
-                '#' => conversion.alternate = true,
+        while let Some(&byte) = bytes.get(index) {
+            match byte {
+                b'-' => conversion.left = true,
+                b'+' => conversion.plus = true,
+                b' ' => conversion.space = true,
+                b'0' => conversion.zero = true,
+                b'#' => conversion.alternate = true,
                 _ => break,
             }
             index += 1;
         }
-        if chars.get(index) == Some(&'*') {
+        if bytes.get(index) == Some(&b'*') {
             index += 1;
-            let star = positional_reference(&chars, &mut index);
+            let star = positional_reference(bytes, &mut index);
             conversion.width = Some(Amount::Argument(take(star, used)?));
-        } else if let Some(width) = read_number(&chars, &mut index) {
+        } else if let Some(width) = read_number(bytes, &mut index) {
             conversion.width = Some(Amount::Fixed(width));
         }
-        if chars.get(index) == Some(&'.') {
+        if bytes.get(index) == Some(&b'.') {
             index += 1;
-            if chars.get(index) == Some(&'*') {
+            if bytes.get(index) == Some(&b'*') {
                 index += 1;
-                let star = positional_reference(&chars, &mut index);
+                let star = positional_reference(bytes, &mut index);
                 conversion.precision = Some(Amount::Argument(take(star, used)?));
             } else {
                 conversion.precision =
-                    Some(Amount::Fixed(read_number(&chars, &mut index).unwrap_or(0)));
+                    Some(Amount::Fixed(read_number(bytes, &mut index).unwrap_or(0)));
             }
         }
-        let kind = chars.get(index).copied();
-        let end = (index + 1).min(chars.len());
-        conversion.text = chars[start..end].iter().collect();
-        const CONVERSIONS: &[char] = &[
-            'd', 'i', 'o', 'x', 'X', 'f', 'e', 'E', 'g', 'G', 'a', 'A', 's',
-        ];
-        if !kind.is_some_and(|kind| CONVERSIONS.contains(&kind)) {
+        let Some(&kind) = bytes.get(index).filter(|kind| CONVERSIONS.contains(kind)) else {
             // GNU R reads a specification up to the next conversion letter, and blames it on
             // the type of the argument it would have formatted.
-            let Some(letter) = chars[start + 1..]
+            let Some(letter) = bytes[start + 1..]
                 .iter()
-                .position(|c| CONVERSIONS.contains(c))
+                .position(|byte| CONVERSIONS.contains(byte))
             else {
-                let rest: String = chars[start..].iter().collect();
+                let rest = &format[start..];
                 return Err(error(format!("unrecognised format specification '{rest}'")));
             };
-            let chunk: String = chars[start..=start + 1 + letter].iter().collect();
+            let chunk = &format[start..=start + 1 + letter];
             if kinds.is_empty() {
                 return Err(error("too few arguments"));
             }
@@ -862,29 +903,31 @@ fn parse_format(format: &str, kinds: &[SexpType], used: &mut [bool]) -> R<Vec<Fo
                 _ => "use format %s for character objects",
             };
             return Err(error(format!("invalid format '{chunk}'; {advice}")));
-        }
-        conversion.kind = kind.unwrap_or('s');
+        };
+        conversion.kind = char::from(kind);
+        conversion.text = &format[start..=index];
         if kinds.is_empty() {
             return Err(error("too few arguments"));
         }
         conversion.argument = take(explicit, used)?;
-        index = end;
-        if !literal.is_empty() {
-            pieces.push(FormatPiece::Text(std::mem::take(&mut literal)));
+        if literal_start < start {
+            pieces.push(FormatPiece::Text(&format[literal_start..start]));
         }
         pieces.push(FormatPiece::Conversion(conversion));
+        index += 1;
+        literal_start = index;
     }
-    if !literal.is_empty() {
-        pieces.push(FormatPiece::Text(literal));
+    if literal_start < bytes.len() {
+        pieces.push(FormatPiece::Text(&format[literal_start..]));
     }
     Ok(pieces)
 }
 
 /// Reads an `n$` argument reference, which is 1-based, if one is written at `index`.
-fn positional_reference(chars: &[char], index: &mut usize) -> Option<usize> {
+fn positional_reference(bytes: &[u8], index: &mut usize) -> Option<usize> {
     let mut cursor = *index;
-    let number = read_number(chars, &mut cursor)?;
-    if chars.get(cursor) == Some(&'$') && number > 0 {
+    let number = read_number(bytes, &mut cursor)?;
+    if bytes.get(cursor) == Some(&b'$') && number > 0 {
         *index = cursor + 1;
         Some(number - 1)
     } else {
@@ -892,35 +935,36 @@ fn positional_reference(chars: &[char], index: &mut usize) -> Option<usize> {
     }
 }
 
-fn read_number(chars: &[char], index: &mut usize) -> Option<usize> {
+fn read_number(bytes: &[u8], index: &mut usize) -> Option<usize> {
     let start = *index;
     let mut value: usize = 0;
-    while let Some(digit) = chars
-        .get(*index)
-        .and_then(|character| character.to_digit(10))
-    {
-        value = value.saturating_mul(10).saturating_add(digit as usize);
+    while let Some(&digit) = bytes.get(*index).filter(|byte| byte.is_ascii_digit()) {
+        value = value
+            .saturating_mul(10)
+            .saturating_add(usize::from(digit - b'0'));
         *index += 1;
     }
     (*index > start).then_some(value)
 }
 
+/// Appends one conversion of row `row` to `out`.
 unsafe fn format_conversion(
-    conversion: &Conversion,
+    conversion: &Conversion<'_>,
     arguments: &mut [FormatArgument],
     row: usize,
     env: Sexp,
-) -> R<String> {
+    out: &mut String,
+) -> R<()> {
     let mut left = conversion.left;
     let width = match conversion.width {
-        None => None,
-        Some(Amount::Fixed(width)) => Some(width),
+        None => 0,
+        Some(Amount::Fixed(width)) => width,
         Some(Amount::Argument(position)) => {
             let value = star_value(&arguments[position], row)?;
             if value < 0 {
                 left = true;
             }
-            Some(value.unsigned_abs() as usize)
+            value.unsigned_abs() as usize
         }
     };
     let precision = match conversion.precision {
@@ -934,7 +978,7 @@ unsafe fn format_conversion(
     let argument = &mut arguments[conversion.argument];
     let index = row % argument.length;
     let value = argument.value;
-    let pad = |text: String| pad_bytes(text, width.unwrap_or(0), left);
+    let begin = out.len();
     if conversion.kind == 's' {
         let text = match argument.text {
             Some(text) => text,
@@ -944,11 +988,19 @@ unsafe fn format_conversion(
                 text
             }
         };
-        let mut text = string_at(text, index).map_or_else(|| "NA".to_owned(), Cow::into_owned);
-        if let Some(precision) = precision {
-            truncate_bytes(&mut text, precision);
+        out.push_str(&string_at(text, index).unwrap_or(Cow::Borrowed("NA")));
+        // The precision cuts the string to at most that many bytes, not inside a character.
+        if let Some(precision) = precision
+            && out.len() - begin > precision
+        {
+            let mut end = begin + precision;
+            while !out.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.truncate(end);
         }
-        return Ok(pad(text));
+        pad_from(out, begin, width, left);
+        return Ok(());
     }
     let integer_conversion = matches!(conversion.kind, 'd' | 'i' | 'o' | 'x' | 'X');
     match value.kind() {
@@ -985,15 +1037,11 @@ unsafe fn format_conversion(
             _ => values::ints(value)[index],
         };
         if integer == NA_INTEGER {
-            return Ok(pad("NA".to_owned()));
+            out.push_str("NA");
+            pad_from(out, begin, width, left);
+            return Ok(());
         }
-        return Ok(format_integer(
-            i64::from(integer),
-            conversion,
-            width,
-            left,
-            precision,
-        ));
+        return push_integer(out, integer, conversion, width, left, precision);
     }
     let number = match value.kind() {
         SexpType::Real => values::reals(value)[index],
@@ -1007,22 +1055,23 @@ unsafe fn format_conversion(
         }
     };
     if !number.is_finite() {
-        let text = if is_na_real(number) {
-            "NA".to_owned()
+        out.push_str(if is_na_real(number) {
+            "NA"
         } else if number.is_nan() {
-            "NaN".to_owned()
+            "NaN"
         } else if number < 0.0 {
-            "-Inf".to_owned()
+            "-Inf"
         } else if conversion.plus {
-            "+Inf".to_owned()
+            "+Inf"
         } else if conversion.space {
-            " Inf".to_owned()
+            " Inf"
         } else {
-            "Inf".to_owned()
-        };
-        return Ok(pad(text));
+            "Inf"
+        });
+        pad_from(out, begin, width, left);
+        return Ok(());
     }
-    Ok(format_real(number, conversion, width, left, precision))
+    push_real(out, number, conversion, width, left, precision)
 }
 
 unsafe fn star_value(argument: &FormatArgument, row: usize) -> R<i32> {
@@ -1048,121 +1097,129 @@ unsafe fn star_value(argument: &FormatArgument, row: usize) -> R<i32> {
     Ok(number)
 }
 
-fn format_integer(
-    value: i64,
-    conversion: &Conversion,
-    width: Option<usize>,
+fn push_integer(
+    out: &mut String,
+    value: i32,
+    conversion: &Conversion<'_>,
+    width: usize,
     left: bool,
     precision: Option<usize>,
-) -> String {
-    let (sign, mut digits, prefix) = match conversion.kind {
-        'o' => {
-            let digits = format!("{:o}", value as i32 as u32);
-            let prefix = if conversion.alternate && !digits.starts_with('0') {
-                "0"
-            } else {
-                ""
-            };
-            ("", digits, prefix)
-        }
-        'x' | 'X' => {
-            let mut digits = format!("{:x}", value as i32 as u32);
-            if conversion.kind == 'X' {
-                digits.make_ascii_uppercase();
-            }
-            let prefix = match (conversion.alternate && value != 0, conversion.kind) {
-                (false, _) => "",
-                (true, 'x') => "0x",
-                (true, _) => "0X",
-            };
-            ("", digits, prefix)
-        }
-        _ => {
-            let sign = if value < 0 {
-                "-"
-            } else if conversion.plus {
-                "+"
-            } else if conversion.space {
-                " "
-            } else {
-                ""
-            };
-            (sign, value.unsigned_abs().to_string(), "")
-        }
-    };
+) -> R<()> {
+    let begin = out.len();
+    // `%o`, `%x` and `%X` print the bits as unsigned, as C does.
+    let bits = value as u32;
+    match conversion.kind {
+        // An octal zero already starts with the `0` that `#` asks for.
+        'o' if conversion.alternate && bits != 0 => out.push('0'),
+        'x' if conversion.alternate && value != 0 => out.push_str("0x"),
+        'X' if conversion.alternate && value != 0 => out.push_str("0X"),
+        'o' | 'x' | 'X' => {}
+        _ if value < 0 => out.push('-'),
+        _ if conversion.plus => out.push('+'),
+        _ if conversion.space => out.push(' '),
+        _ => {}
+    }
+    let digits_at = out.len();
+    match conversion.kind {
+        'o' => write!(out, "{bits:o}"),
+        'x' => write!(out, "{bits:x}"),
+        'X' => write!(out, "{bits:X}"),
+        _ => write!(out, "{}", value.unsigned_abs()),
+    }
+    .map_err(|_| error("formatting a number failed"))?;
     if let Some(precision) = precision {
+        let digits = out.len() - digits_at;
         if precision == 0 && value == 0 {
-            digits.clear();
-        } else if digits.len() < precision {
-            digits.insert_str(0, &"0".repeat(precision - digits.len()));
+            out.truncate(digits_at);
+        } else if digits < precision {
+            insert_fill(out, digits_at, '0', precision - digits);
         }
     }
     let zero_pad = conversion.zero && !left && precision.is_none();
-    join_number(sign, prefix, &digits, width.unwrap_or(0), left, zero_pad)
+    finish_number(out, begin, digits_at, width, left, zero_pad);
+    Ok(())
 }
 
-fn format_real(
+fn push_real(
+    out: &mut String,
     value: f64,
-    conversion: &Conversion,
-    width: Option<usize>,
+    conversion: &Conversion<'_>,
+    width: usize,
     left: bool,
     precision: Option<usize>,
-) -> String {
+) -> R<()> {
+    let begin = out.len();
     let magnitude = value.abs();
     let alternate = conversion.alternate;
-    let mut body = match conversion.kind {
-        'f' => {
-            let mut text = format!("{:.*}", precision.unwrap_or(6), magnitude);
-            if alternate && !text.contains('.') {
-                text.push('.');
-            }
-            text
-        }
-        'e' | 'E' => exponent_form(magnitude, precision.unwrap_or(6), alternate),
-        'g' | 'G' => general_form(magnitude, precision.unwrap_or(6), alternate),
-        _ => hexadecimal_form(magnitude, precision, alternate),
-    };
-    if conversion.kind.is_ascii_uppercase() {
-        body.make_ascii_uppercase();
-    }
-    let (prefix, body) = match conversion.kind {
-        'a' | 'A' => body.split_at(2),
-        _ => ("", body.as_str()),
-    };
-    let sign = if value.is_sign_negative() {
-        "-"
+    if value.is_sign_negative() {
+        out.push('-');
     } else if conversion.plus {
-        "+"
+        out.push('+');
     } else if conversion.space {
-        " "
-    } else {
-        ""
-    };
-    join_number(
-        sign,
-        prefix,
-        body,
-        width.unwrap_or(0),
-        left,
-        conversion.zero && !left,
-    )
+        out.push(' ');
+    }
+    let mut digits_at = out.len();
+    match conversion.kind {
+        'f' => {
+            write!(out, "{:.*}", precision.unwrap_or(6), magnitude)
+                .map_err(|_| error("formatting a number failed"))?;
+            if alternate && !out[digits_at..].contains('.') {
+                out.push('.');
+            }
+        }
+        'e' | 'E' => out.push_str(&exponent_form(magnitude, precision.unwrap_or(6), alternate)),
+        'g' | 'G' => out.push_str(&general_form(magnitude, precision.unwrap_or(6), alternate)),
+        _ => {
+            // The `0x` prefix goes before any zero padding.
+            out.push_str(&hexadecimal_form(magnitude, precision, alternate));
+            digits_at += 2;
+        }
+    }
+    if conversion.kind.is_ascii_uppercase() {
+        out[begin..].make_ascii_uppercase();
+    }
+    finish_number(out, begin, digits_at, width, left, conversion.zero && !left);
+    Ok(())
 }
 
-/// Assembles a formatted number: zeros pad between the sign (and `0x` prefix) and the digits,
-/// spaces pad outside.
-fn join_number(
-    sign: &str,
-    prefix: &str,
-    digits: &str,
+/// Pads the number written from `begin` to `width`: zeros go between the sign (and `0x`
+/// prefix) and the digits at `digits_at`, spaces go outside.
+fn finish_number(
+    out: &mut String,
+    begin: usize,
+    digits_at: usize,
     width: usize,
     left: bool,
     zero_pad: bool,
-) -> String {
-    let length = sign.len() + prefix.len() + digits.len();
+) {
+    let length = out.len() - begin;
     if zero_pad && length < width {
-        return format!("{sign}{prefix}{}{digits}", "0".repeat(width - length));
+        insert_fill(out, digits_at, '0', width - length);
+    } else {
+        pad_from(out, begin, width, left);
     }
-    pad_bytes(format!("{sign}{prefix}{digits}"), width, left)
+}
+
+/// Pads the text written from `begin` with spaces to `width` bytes, on the left unless `left`.
+fn pad_from(out: &mut String, begin: usize, width: usize, left: bool) {
+    let length = out.len() - begin;
+    if length >= width {
+        return;
+    }
+    if left {
+        out.extend(std::iter::repeat_n(' ', width - length));
+    } else {
+        insert_fill(out, begin, ' ', width - length);
+    }
+}
+
+/// Inserts `count` copies of the ASCII `fill` at byte `at`, without a temporary string.
+fn insert_fill(out: &mut String, at: usize, fill: char, count: usize) {
+    debug_assert!(fill.is_ascii());
+    out.extend(std::iter::repeat_n(fill, count));
+    // SAFETY: the rotation moves the ASCII fill bytes, which are whole characters, to `at`, a
+    // character boundary, and keeps every other character's bytes together and in order.
+    unsafe { out.as_mut_vec()[at..].rotate_right(count) };
 }
 
 /// C's `%e`: one digit before the point and an exponent of at least two digits.
@@ -1263,31 +1320,6 @@ pub fn hexadecimal_form(magnitude: f64, precision: Option<usize>, alternate: boo
     };
     let sign = if exponent < 0 { '-' } else { '+' };
     format!("0x{lead}{point}{hex}p{sign}{}", exponent.unsigned_abs())
-}
-
-/// Pads to `width` bytes, as C's `printf` counts a field width.
-fn pad_bytes(text: String, width: usize, left: bool) -> String {
-    if text.len() >= width {
-        return text;
-    }
-    let padding = " ".repeat(width - text.len());
-    if left {
-        text + &padding
-    } else {
-        padding + &text
-    }
-}
-
-/// Cuts `text` to at most `limit` bytes without splitting a character.
-fn truncate_bytes(text: &mut String, limit: usize) {
-    if text.len() <= limit {
-        return;
-    }
-    let mut end = limit;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text.truncate(end);
 }
 
 unsafe fn change_case(call: &Call<'_>, upper: bool) -> R<Sexp> {
