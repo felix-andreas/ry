@@ -27,7 +27,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("serializeInfoFromConn", 1, do_serialize_info_from_conn),
     internal("unserialize", 2, do_unserialize),
     internal("lazyLoadDBflush", 1, |call| unsafe {
-        forget_database(&values::require_string(call.arg(0), "file")?);
+        forget_database(&values::require_str(call.arg(0), "file")?);
         Ok(nil())
     })
     .invisible(),
@@ -1230,14 +1230,18 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
     let (offset, size) = record_key(key);
     // A record is decoded (or copied) out of the mapped database before `unserialize` runs,
     // because its refhook can fetch from another database and so map it.
-    let value = pretenured(|| match code_image::source(database, offset as u64, size)? {
-        Source::Image(record) => code_image::read_image_record(database, &record, hook),
-        Source::Recording => {
-            let stream = record_stream(database, offset, size, compressed)?;
-            code_image::read_recorded(database, offset as u64, size, stream, hook)
-        }
-        Source::Database => unserialize(&record_stream(database, offset, size, compressed)?, hook),
-    })?;
+    let value = pretenured(
+        || match code_image::source(database, offset as u64, size)? {
+            Source::Image(record) => code_image::read_image_record(database, &record, hook),
+            Source::Recording => {
+                let stream = record_stream(database, offset, size, compressed)?;
+                code_image::read_recorded(database, offset as u64, size, stream, hook)
+            }
+            Source::Database => {
+                unserialize(&record_stream(database, offset, size, compressed)?, hook)
+            }
+        },
+    )?;
     if value.kind() == SexpType::Promise {
         return eval::force_promise(value);
     }

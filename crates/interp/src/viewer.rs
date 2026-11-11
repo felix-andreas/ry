@@ -515,7 +515,7 @@ fn message(failure: Unwind) -> String {
     match failure {
         Unwind::Error(failure) => failure.message,
         Unwind::Interrupt => "interrupted".to_owned(),
-        Unwind::Jump(jump) if matches!(*jump, Jump::TopLevel) => {
+        Unwind::Jump(jump) if matches!(jump, Jump::TopLevel) => {
             interp().error_message.trim_end().to_owned()
         }
         Unwind::Jump(_) => "the data viewer's code jumped".to_owned(),

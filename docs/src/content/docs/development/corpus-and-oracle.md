@@ -227,7 +227,8 @@ with the pango development headers installed (`libpango1.0-dev`), and with `data
 `rlang`, `knitr`, `rmarkdown`, `ragg` and `lattice` installed from CRAN into its library. Some
 cases depend on that build:
 
-- `utils__rprofmem` needs memory profiling.
+- `utils__rprofmem` and `environments__sys_call_shares_arguments` call `Rprofmem()`, so they need
+  memory profiling. Without it GNU R stops with "memory profiling is not available on this system".
 - The graphics cases need `png()` to draw through cairo, which R uses only when pango is present.
   Without it the bitmap type falls back to Xlib, which needs an X11 display.
 - Collation and a few string cases follow ICU, which R uses when its headers are installed.

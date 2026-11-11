@@ -811,7 +811,9 @@ pub unsafe extern "C" fn R_MakeDelayedBinding(
     enter(|| {
         checked_symbol(symbol, "R_MakeDelayedBinding")?;
         let env = environment(env, "R_MakeDelayedBinding")?;
-        let eval_env = environment(eval_env, "R_MakeDelayedBinding")?;
+        // A promise over a slot frame's pending environment would have to be counted as that
+        // frame's unforced promise, so it gets the frame's real environment.
+        let eval_env = interp::eval::resolved_env(environment(eval_env, "R_MakeDelayedBinding")?)?;
         let unbound = runtime().heap.known().unbound;
         let promise =
             runtime()

@@ -1,0 +1,35 @@
+[stdout]
+| simpleWarning | n is 3, NA and TRUE | f(3L) 
+| [1] "withCallingHandlers(f(3L), warning = function(w) {"               
+| [2] "warning(\"n is \", n, \", \", NA, \" and \", TRUE)"               
+| [3] ".signalSimpleWarning(\"n is 3, NA and TRUE\", base::quote(f(3L)))"
+| simpleWarning | no call | NULL 
+| simpleWarning | passed 1.5 through dots | h("passed ", 1.5, " through dots") 
+| simpleWarning | n is 2.25, NA and TRUE | f(2.25) 
+| simpleWarning | ab123 | doTryCatch(return(expr), name, parentenv, handler) 
+| simpleWarning |  | doTryCatch(return(expr), name, parentenv, handler) 
+| simpleWarning | 0.333333333333333 1e+05 1e+15 1e-20 0.3 0 NaN -Inf NA 123456789012 | doTryCatch(return(expr), name, parentenv, handler) 
+| $value
+| [1] "n is 1, NA and TRUE"
+| 
+| $visible
+| [1] FALSE
+| 
+| [1] "(converted from warning) n is 5, NA and TRUE"
+| simpleWarning | a condition | here() 
+| simpleWarning | level | doTryCatch(return(expr), name, parentenv, handler) 
+| simpleWarning | no translation | doTryCatch(return(expr), name, parentenv, handler) 
+| simpleWarning | classed | doTryCatch(return(expr), name, parentenv, handler) 
+| simpleWarning | from a method | doTryCatch(return(expr), name, parentenv, handler) 
+[messages]
+[warnings]
+- n is 4, NA and TRUE (in f(4L))
+- no call
+- immediate.
+- n is 5, NA and TRUE (in f(5L))
+- n is 6, NA and TRUE (in f(6L))
+- n is 7, NA and TRUE (in f(7L))
+[errors]
+[value]
+character
+| "n is 7, NA and TRUE"

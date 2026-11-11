@@ -436,8 +436,8 @@ unsafe fn do_tab_expand(call: &NativeCall<'_>) -> R<Sexp> {
 /// `splitString(string, delims)`: the string cut before and after every delimiter character,
 /// each delimiter being an element of its own.
 unsafe fn do_split_string(call: &NativeCall<'_>) -> R<Sexp> {
-    let text = values::require_string(call.arg(0), "string")?;
-    let delims = values::require_string(call.arg(1), "delims")?;
+    let text = values::require_str(call.arg(0), "string")?;
+    let delims = values::require_str(call.arg(1), "delims")?;
     let mut pieces = Vec::new();
     let mut current = String::new();
     for character in text.chars() {
@@ -460,7 +460,7 @@ unsafe fn do_split_string(call: &NativeCall<'_>) -> R<Sexp> {
 /// they consume: without `%%`, a `*` width or precision taking an argument of its own before
 /// its specification, and an `n$` specification put at argument `n` without the position.
 unsafe fn do_getfmts(call: &NativeCall<'_>) -> R<Sexp> {
-    let format = values::require_string(call.arg(0), "format")?;
+    let format = values::require_str(call.arg(0), "format")?;
     let bytes = format.as_bytes();
     let mut specifications: Vec<String> = Vec::new();
     let mut argument = 0;
@@ -530,7 +530,7 @@ unsafe fn do_getfmts(call: &NativeCall<'_>) -> R<Sexp> {
 /// directive naming it; whether each append worked.
 unsafe fn do_code_files_append(call: &NativeCall<'_>) -> R<Sexp> {
     use std::io::Write;
-    let target = values::require_string(call.arg(0), "file1")?;
+    let target = values::require_str(call.arg(0), "file1")?;
     let sources = call.arg(1);
     if sources.kind() != SexpType::String {
         return Err(error("invalid 'file2' argument"));
@@ -563,7 +563,7 @@ unsafe fn do_code_files_append(call: &NativeCall<'_>) -> R<Sexp> {
 /// `dirchmod(dir, group.writable)`: makes everything under `dir` readable by all: files 644
 /// (or 664), or 755 (775) when the owner may execute them, and directories 755 (775).
 unsafe fn do_dirchmod(call: &NativeCall<'_>) -> R<Sexp> {
-    let directory = values::require_string(call.arg(0), "dir")?;
+    let directory = values::require_str(call.arg(0), "dir")?;
     let group_writable = values::as_logical_scalar(call.arg(1)) == 1;
     let group = if group_writable { 0o020 } else { 0 };
     let mut pending = vec![std::path::PathBuf::from(crate::connections::expand_path(

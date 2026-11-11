@@ -38,9 +38,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rySysSetenv", 0, do_sys_setenv),
     internal("rySysWhich", 0, do_sys_which),
     internal("ryFormatDefault", 0, do_format_default),
+    internal("ryDeparse", 0, do_deparse),
+    internal("ryDeparseOpts", 0, do_deparse_opts),
     internal("ryReduce", 0, do_reduce),
     internal("ryAssignNativeRoutines", 0, do_assign_native_routines),
     internal("ryMessage", 0, do_message),
+    internal("ryWarning", 0, do_warning),
     internal("rySignalCondition", 0, do_signal_condition),
 ];
 
@@ -57,8 +60,11 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("Sys.setenv", "rySysSetenv", 0xb3ad8ec3b2915ce0),
     ("Sys.which", "rySysWhich", 0x17980645114e720c),
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
+    ("deparse", "ryDeparse", 0xe0e6a113b041c11d),
+    (".deparseOpts", "ryDeparseOpts", 0xa1d9386db7b3f18c),
     ("Reduce", "ryReduce", 0xd929e4c219983788),
     ("message", "ryMessage", 0x9b452884cddd7ceb),
+    ("warning", "ryWarning", 0x919c2fc8a0bd927b),
     ("signalCondition", "rySignalCondition", 0xfb659fdee977c35c),
 ];
 
@@ -118,7 +124,8 @@ pub unsafe fn prologue_needs_environment(body: Sexp) -> bool {
     let inner = first.cdr().car();
     inner.kind() == SexpType::Language
         && inner.car().kind() == SexpType::Symbol
-        && ["ryMatchArg", "ryReduce", "ryTraceBack", "rySignalCondition"].contains(&&*values::symbol_name(inner.car()))
+        && ["ryMatchArg", "ryReduce", "ryTraceBack", "rySignalCondition"]
+            .contains(&&*values::symbol_name(inner.car()))
 }
 
 /// Puts `.Internal(<internal_name>())` in front of the body of `function` when its formals and
@@ -246,8 +253,14 @@ unsafe fn install_nested_prologue(
     // `function(formals, body, srcref)`
     let body_cell = definition.cdr().cdr();
     let body = body_cell.car();
-    let Some(block) =
-        with_prologue(definition.cdr().car(), body, inner, internal_name, expected, print)?
+    let Some(block) = with_prologue(
+        definition.cdr().car(),
+        body,
+        inner,
+        internal_name,
+        expected,
+        print,
+    )?
     else {
         return Ok(false);
     };
@@ -1193,8 +1206,7 @@ unsafe fn native_read_rds(args: &[Arg]) -> R<Option<Sexp>> {
         bytes.as_slice()
     };
     // `unserialize()` of memory also takes `save()` files, which `readRDS()` rejects.
-    if !(stream.starts_with(b"X\n") || stream.starts_with(b"B\n") || stream.starts_with(b"A\n"))
-    {
+    if !(stream.starts_with(b"X\n") || stream.starts_with(b"B\n") || stream.starts_with(b"A\n")) {
         return Ok(None);
     }
     match crate::serialize::unserialize(stream, nil()) {
@@ -1942,7 +1954,11 @@ unsafe fn do_sys_which(call: &Call<'_>) -> R<Sexp> {
                 let path = crate::system::which(&name);
                 #[cfg(not(unix))]
                 let path: Option<std::path::PathBuf> = None;
-                values::mkchar(&path.map(|path| path.display().to_string()).unwrap_or_default())?
+                values::mkchar(
+                    &path
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default(),
+                )?
             }
         };
         values::set_elt(result, index, found);
@@ -2088,6 +2104,14 @@ unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
     }
     let result = crate::subset::modifiable(data)?;
     crate::heap().root(result);
+    // The R body reinstalls `dimnames` through `attributes<-`, and GNU R's `dimnamesgets` copies
+    // a list that something else references, so the result always owns its dimnames list. C
+    // code relies on that: xts's `dimnames<-` method clears the row names by writing into the
+    // list it is given, which must not reach the object `structure()` was called on.
+    let dimnames = values::get_attr(result, symbols.dimnames);
+    if dimnames.kind() == SexpType::List {
+        values::set_attr(result, symbols.dimnames, values::shallow_duplicate(dimnames)?)?;
+    }
     for &(tag, value) in &attributes {
         crate::subset::set_attribute_checked(result, tag, value, call.call)?;
     }
@@ -2163,6 +2187,142 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
     finish(frame, result, true)
 }
 
+/// `deparse(expr, width.cutoff, backtick, control, nlines)`: the R body's default `backtick`
+/// calls `mode()` and `%in%`, and `.deparseOpts(control)` calls `pmatch()`, `unique()` and
+/// `sum()`, several closure calls that cost far more than the deparse itself. The arguments are
+/// forced in the order the body's `.Internal(deparse())` call forces them, a `backtick` left at
+/// its default is computed here, and `control` goes through [`deparse_options`].
+unsafe fn do_deparse(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    let symbols = symbols();
+    let Some(expr) = argument(frame, symbols.expr)? else {
+        return decline();
+    };
+    let Some(width_cutoff) = argument(frame, symbols.width_cutoff)? else {
+        return decline();
+    };
+    let backtick = if is_default(frame, symbols.backtick)? {
+        // `mode(expr) %in% c("call", "expression", "(", "function")`: `mode()` answers "call"
+        // or "(" for a call, and "function" for a closure, builtin or special.
+        let backtick = matches!(
+            expr.kind(),
+            SexpType::Language
+                | SexpType::Expression
+                | SexpType::Closure
+                | SexpType::Builtin
+                | SexpType::Special
+        );
+        let backtick = values::scalar_logical(i32::from(backtick))?;
+        crate::heap().root(backtick);
+        backtick
+    } else {
+        let Some(backtick) = argument(frame, symbols.backtick)? else {
+            return decline();
+        };
+        backtick
+    };
+    let Some(control) = argument(frame, symbols.control)? else {
+        return decline();
+    };
+    let Some(options) = deparse_options(control)? else {
+        return decline();
+    };
+    let options = values::scalar_real(options)?;
+    crate::heap().root(options);
+    let Some(nlines) = argument(frame, symbols.nlines)? else {
+        return decline();
+    };
+    // A failing deparse is reported by the R body, from its own call.
+    let lines = match kernel(
+        crate::deparse::do_deparse,
+        &[expr, width_cutoff, backtick, options, nlines],
+        frame,
+    ) {
+        Ok(lines) => lines,
+        Err(Unwind::Error(_)) => return decline(),
+        Err(other) => return Err(other),
+    };
+    finish(frame, lines, true)
+}
+
+/// `.deparseOpts(control)`, the bit set of deparse options named by `control`.
+unsafe fn do_deparse_opts(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    let Some(control) = argument(frame, symbols().control)? else {
+        return decline();
+    };
+    match deparse_options(control)? {
+        Some(options) => finish(frame, values::scalar_real(options)?, true),
+        None => decline(),
+    }
+}
+
+/// What `.deparseOpts(control)` returns, for `NULL` or a character vector of option names
+/// spelled out in full, each at most once; `None` for anything the R body reports as an error
+/// or answers through partial matching. A bit's position is the option's 1-based position in
+/// `..deparseOpts`, as the R body counts them: 1 is "all", 10 "hexNumeric", 11 "digits17" and
+/// 13 "exact".
+unsafe fn deparse_options(control: Sexp) -> R<Option<f64>> {
+    if control == nil() {
+        return Ok(Some(0.0));
+    }
+    if control.kind() != SexpType::String || values::has_attributes(control) {
+        return Ok(None);
+    }
+    if length(control) == 0 {
+        return Ok(Some(0.0));
+    }
+    let table = eval::value_of(eval::find_var_in_frame(
+        symbols().deparse_options,
+        values::base_namespace(),
+    )?)?;
+    if table.kind() != SexpType::String || length(table) > 30 {
+        return Ok(None);
+    }
+    let bit = |position: u32| 1u32 << position;
+    let mut named = 0u32;
+    for index in 0..length(control) {
+        let name = values::string_elt(control, index);
+        if name == values::na_string() {
+            return Ok(None);
+        }
+        let Some(position) = (0..length(table))
+            .find(|&entry| values::string_elt(table, entry).bytes() == name.bytes())
+        else {
+            return Ok(None);
+        };
+        let position = bit(position as u32 + 1);
+        // `pmatch()` matches each table entry once, so a repeated name is not recognized.
+        if named & position != 0 {
+            return Ok(None);
+        }
+        named |= position;
+    }
+    if named & bit(1) != 0 {
+        if named & bit(13) != 0 {
+            return Ok(None);
+        }
+        let keeps_hex = named & bit(10) != 0;
+        named &= !bit(1);
+        named |= [2, 3, 4, 5, 6, 8, 12]
+            .into_iter()
+            .fold(0, |bits, position| bits | bit(position));
+        if !keeps_hex {
+            named |= bit(11);
+        }
+    } else if named & bit(13) != 0 {
+        named &= !bit(13);
+        named |= [2, 3, 4, 5, 6, 8, 10, 12]
+            .into_iter()
+            .fold(0, |bits, position| bits | bit(position));
+    }
+    if named & bit(10) != 0 && named & bit(11) != 0 {
+        return Ok(None);
+    }
+    // `sum(2^(opts - 2))`: position p is bit p - 2 of the result.
+    Ok(Some(f64::from(named >> 2)))
+}
+
 /// `assignNativeRoutines(dll, lib, env, nativeRoutines)`, the closure `loadNamespace()` defines
 /// to bind a package's registered native routines in its namespace (`useDynLib(pkg,
 /// .registration = TRUE)`): each routine's `NativeSymbolInfo` under its name with the
@@ -2215,7 +2375,8 @@ unsafe fn do_assign_native_routines(call: &Call<'_>) -> R<Sexp> {
             return decline();
         }
         let info = values::list_get(dll, "info");
-        let Some(registered) = crate::builtins::internal_function(install("getRegisteredRoutines")?)
+        let Some(registered) =
+            crate::builtins::internal_function(install("getRegisteredRoutines")?)
         else {
             return decline();
         };
@@ -2223,7 +2384,10 @@ unsafe fn do_assign_native_routines(call: &Call<'_>) -> R<Sexp> {
             eval::builtin_def(registered)?,
             nil(),
             registered,
-            &[Arg { tag: nil(), value: info }],
+            &[Arg {
+                tag: nil(),
+                value: info,
+            }],
             values::global_env(),
         )?;
         crate::heap().root(routines);
@@ -2346,6 +2510,69 @@ unsafe fn do_message(call: &Call<'_>) -> R<Sexp> {
     }
     crate::connections::cat_text(crate::connections::stderr_connection()?, &text)?;
     finish(frame, nil(), false)
+}
+
+/// `warning(...)` with arguments that are plain vectors: the message is built here instead of by
+/// `.makeMessage()`, whose `lapply()`, `as.character()` and `gettext()` run no code a handler or a
+/// method could observe for such values, and the warning is signalled as
+/// `.Internal(warning())` signals it, from the same frame. A condition object, an argument that
+/// needs evaluating, a non-default `domain` or an unusual flag sends the call to the R body.
+unsafe fn do_warning(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    // Skipping `gettext()` is exact only because ry's `.Internal(gettext())` returns its
+    // argument unchanged; once messages are translated, this must decline outside a C or
+    // English locale.
+    if !fast_paths_enabled() || !is_default(frame, symbols().domain)? {
+        return decline();
+    }
+    let Some(items) = dots(frame)? else {
+        return decline();
+    };
+    let mut parts: SmallVec<[Sexp; 8]> = SmallVec::new();
+    for &(_, item) in &items {
+        let Some(value) = resolved(item)? else {
+            return decline();
+        };
+        let plain = matches!(
+            value.kind(),
+            SexpType::Nil
+                | SexpType::Logical
+                | SexpType::Integer
+                | SexpType::Real
+                | SexpType::String
+        ) && !value.is_object()
+            && !values::has_attributes(value);
+        if !plain {
+            return decline();
+        }
+        parts.push(value);
+    }
+    let (Some(use_call), Some(immediate)) = (
+        flag(frame, symbols().call_dot)?,
+        flag(frame, symbols().immediate_dot)?,
+    ) else {
+        return decline();
+    };
+    let mut text = Vec::new();
+    for value in parts {
+        let strings = crate::coerce::coerce_vector(value, SexpType::String)?;
+        crate::heap().root(strings);
+        for index in 0..length(strings) {
+            let string = values::string_elt(strings, index);
+            if string == values::na_string() {
+                text.extend_from_slice(b"NA");
+            } else if string.has_gp(gp::LATIN1 | gp::BYTES) {
+                return decline();
+            } else {
+                text.extend_from_slice(string.bytes());
+            }
+        }
+    }
+    let Ok(message) = String::from_utf8(text) else {
+        return decline();
+    };
+    crate::conditions::signal_warning(call, use_call, immediate, &message)?;
+    finish(frame, crate::values::scalar_string(&message)?, false)
 }
 
 /// `signalCondition(cond)` for a condition list whose message and call come from base's

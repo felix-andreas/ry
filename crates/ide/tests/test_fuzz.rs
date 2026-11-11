@@ -3,7 +3,7 @@
 
 use {
     ide::testing::{check_ide_invariants as sweep, check_refactor_invariants},
-    syntax::testing::{SplitMix64, for_each_seed, fuzz_iterations, mutate_seed},
+    syntax::testing::{SplitMix64, for_each_seed, mutate_seed},
 };
 
 const SEEDS: &[&str] = &[
@@ -86,8 +86,8 @@ fn refactor_seeds_keep_code_valid() {
 
 #[test]
 fn refactor_seed_mutations_keep_code_valid() {
-    let mut rng = SplitMix64(0x0EF0_C7A1);
-    for _ in 0..fuzz_iterations(40) {
+    for_each_seed(40, |seed| {
+        let mut rng = SplitMix64(0x0EF0_C7A1 ^ seed);
         check_refactor_invariants(&mutate_seed(&mut rng, REFACTOR_SEEDS, 8));
-    }
+    });
 }

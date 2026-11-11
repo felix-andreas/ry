@@ -223,11 +223,16 @@ pub fn r() -> R<'static> {
 /// `readLines()`, rather than builtins alone.
 pub fn r_with_base() -> R<'static> {
     let r = r();
-    assert_eq!(
-        unsafe { (r.api().ry_start_session)() },
-        0,
-        "base R did not load"
-    );
+    if unsafe { (r.api().ry_start_session)() } != 0 {
+        // The console holds the session's own reason, which names the fix (`just base-r` when
+        // ry's base R is missing).
+        let console = CONSOLE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        panic!(
+            "base R did not load:\n{}\nbuild ry's base R with `just base-r`, or set RY_BASE_R \
+             to a complete one",
+            String::from_utf8_lossy(&console)
+        );
+    }
     r
 }
 
