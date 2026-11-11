@@ -652,8 +652,12 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   start-up never forced stays a promise. Every other code object ran during start-up and carries
   the writer's inline caches, type feedback and profile, so the image stores its source instead.
   A session therefore runs base R's functions as bytecode from their first call without
-  compiling them, and the pages of code it never calls stay in the shared page cache. The cost
-  is 1.9 MB of image and about 1 MB more file-backed memory in an empty run.
+  compiling them, and the pages of code it never calls stay in the shared page cache.
+- **Fresh code is laid out apart and read at random.** The writer allocates the fresh code on
+  heap pages of its own after start-up's objects (`Heap::segregate`) and places its large objects
+  last in the large section. The image records both ranges, and the loader advises the system to
+  read them at random (`MADV_RANDOM`), so a start that calls a few base functions reads only the
+  pages it touches instead of a read-ahead window of code it never runs.
 - **The same starting state, or no load.** Fixed objects (the heap's well-known objects, the
   primitives by index, `package:ry` and libR's ALTREP classes) exist before start-up in both
   processes. The writer records a digest of its heap's allocation state at that moment
@@ -666,8 +670,7 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   bindings spilled into memory outside the heap, external pointers to builtin routines (carried
   as tokens), and the native tables of the fixed ALTREP classes, which keep the loader's. The
   metadata carries the intern and symbol tables, the precious set, the global roots and the
-  counters. Weak-pair lists load empty, and compiled closure bodies are written as their source,
-  since the bytecode tier recompiles them.
+  counters. Weak-pair lists load empty.
 - **The writer refuses what it cannot carry.** Writing fails, and so does the base tree's build,
   when start-up left interpreter state behind (warnings, a call in progress, `.Random.seed` in the
   global environment, a new record layout, an open graphics device; `image::check_empty`), an
