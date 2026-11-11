@@ -399,9 +399,7 @@ fn fuzz_object_graphs_survive_collection() {
 
 #[test]
 fn fuzz_object_graphs_survive_stress_collection() {
-    for_each_seed(8, |seed| {
-        run(1000 + seed, 150, GcStress::EveryAllocation)
-    });
+    for_each_seed(8, |seed| run(1000 + seed, 150, GcStress::EveryAllocation));
 }
 
 #[test]
@@ -2075,8 +2073,14 @@ fn stress_quarantines_and_poisons_freed_objects() {
             later.push(heap.alloc_vector(SexpType::Integer, 1).expect("alloc"));
             later.push(heap.alloc_vector(SexpType::Real, 1 << 16).expect("alloc"));
         }
-        assert!(!later.contains(&small), "a quarantined slot is not handed out again");
-        assert!(!later.contains(&large), "quarantined large memory is not handed out again");
+        assert!(
+            !later.contains(&small),
+            "a quarantined slot is not handed out again"
+        );
+        assert!(
+            !later.contains(&large),
+            "quarantined large memory is not handed out again"
+        );
         assert!(small.is_poisoned() && large.is_poisoned());
         // Only debug builds check the kind byte, since the check costs every call.
         if cfg!(debug_assertions) {
