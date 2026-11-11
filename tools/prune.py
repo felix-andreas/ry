@@ -14,11 +14,12 @@ then at most one read a day, which is why the threshold is two days: an access t
 means no read in the last day.
 
     just prune               remove unused units and stale incremental caches
-    just prune --tests       also remove test executables (each relinks at its next run)
+    just prune --tests       also remove test executables (each recompiles at its next run)
     just prune --dry-run     only report what would go
 """
 
 import argparse
+import json
 import os
 import pathlib
 import shutil
@@ -43,9 +44,9 @@ def main():
         sys.exit(f"no target directory at {target}")
     before = shutil.disk_usage(target).free
     doomed = []
-    for profile in sorted(path for path in target.iterdir() if (path / "build").is_dir()):
+    for profile in sorted(path for path in directories(target) if (path / "build").is_dir()):
         superseded = superseded_units(profile / "build")
-        incremental = [path for path in (profile / "incremental").glob("*") if old_enough(path)]
+        incremental = [path for path in directories(profile / "incremental") if old_enough(path)]
         tests = test_executables(profile / "build") if arguments.tests else []
         for label, paths in [("unused units", superseded), ("incremental caches", incremental), ("test executables", tests)]:
             if paths:
@@ -55,55 +56,101 @@ def main():
     if arguments.dry_run:
         return
     for path in doomed:
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
+        # A build running alongside may remove a file first.
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except FileNotFoundError:
+            pass
     freed = (shutil.disk_usage(target).free - before) / 1e9
     print(f"freed {freed:.1f} GB; {shutil.disk_usage(target).free / 1e9:.1f} GB free")
 
 
 def superseded_units(build):
-    """Every unit directory nothing has read for two days that has a sibling of the same package and kind."""
+    """Every unit directory nothing has read for two days whose role another unit has taken over."""
     doomed = []
     now = time.time()
-    for package in build.iterdir():
+    for package in directories(build):
         groups = {}
-        for unit in package.iterdir():
-            # The fingerprint's `.json` names the unit's kind: `lib-polars_ops.json`,
-            # `bin-ry.json`, `test-integration-test-test_arrays.json`,
-            # `run-build-script-build-script-build.json`.
-            kind = tuple(sorted(path.name for path in (unit / "fingerprint").glob("*.json")))
-            if kind:
-                groups.setdefault(kind, []).append((last_used(unit), unit))
+        for unit in directories(package):
+            role = unit_role(unit)
+            if role:
+                groups.setdefault(role, []).append((last_used(unit), unit))
         for units in groups.values():
             units.sort()
             doomed += [unit for used, unit in units[:-1] if now - used > unused_seconds]
     return doomed
 
 
+def unit_role(unit):
+    """What a unit is, leaving out how it was configured.
+
+    The fingerprint's `.json` file names the unit's kind (`lib-polars_ops.json`, `bin-ry.json`,
+    `run-build-script-build-script-build.json`), and its fields tell apart the units of one package
+    that are all live: two versions of a crate (`path` hashes the source location, so syn 2 and
+    syn 3 differ), a host and a target build (`compile_kind`), and two feature sets such as a
+    build-dependency's and a normal dependency's. What is left to differ is the profile, the
+    rustflags, the cargo config and the compiler, and a unit that differs only there is a
+    configuration that has been replaced.
+    """
+    fingerprints = sorted(file_paths((unit / "fingerprint").glob("*.json")))
+    if not fingerprints:
+        return None
+    try:
+        fields = json.loads(fingerprints[0].read_text())
+    except (OSError, ValueError):
+        return None
+    return (
+        tuple(path.name for path in fingerprints),
+        *(str(fields.get(key)) for key in ["path", "target", "compile_kind", "features"]),
+    )
+
+
 def test_executables(build):
     found = []
     for fingerprint in build.glob("*/*/fingerprint/test-*.json"):
         out = fingerprint.parent.parent / "out"
-        found += [path for path in out.iterdir() if path.is_file() and os.access(path, os.X_OK) and old_enough(path)]
+        found += [path for path in file_paths(out.glob("*")) if os.access(path, os.X_OK) and old_enough(path)]
     return found
+
+
+def directories(path):
+    return [child for child in path.iterdir() if child.is_dir() and not child.is_symlink()] if path.is_dir() else []
+
+
+def file_paths(paths):
+    return [path for path in paths if path.is_file() and not path.is_symlink()]
 
 
 def last_used(unit):
     """The latest read or write of any file in the unit: a dependent's compile or link reads its rlib."""
-    times = [path.stat() for path in unit.rglob("*") if path.is_file() and not path.is_symlink()]
-    return max((max(stat.st_atime, stat.st_mtime) for stat in times), default=0)
+    latest = 0
+    for path in file_paths(unit.rglob("*")):
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        latest = max(latest, stat.st_atime, stat.st_mtime)
+    return latest
 
 
 def old_enough(path):
-    return time.time() - path.stat().st_mtime > min_age_seconds
+    try:
+        return time.time() - path.stat().st_mtime > min_age_seconds
+    except FileNotFoundError:
+        return False
 
 
 def disk_size(path):
-    if path.is_file():
-        return path.stat().st_blocks * 512
-    return sum(child.stat().st_blocks * 512 for child in path.rglob("*") if not child.is_symlink())
+    total = 0
+    for child in [path] if path.is_file() else file_paths(path.rglob("*")):
+        try:
+            total += child.stat().st_blocks * 512
+        except FileNotFoundError:
+            pass
+    return total
 
 
 if __name__ == "__main__":

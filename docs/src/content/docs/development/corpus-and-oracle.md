@@ -224,7 +224,8 @@ The `.expected` files are recorded with GNU R 4.6.2 built from source with
 ```
 
 with the pango development headers installed (`libpango1.0-dev`), and with `data.table`, `bit64`,
-`rlang`, `knitr`, `rmarkdown`, `ragg` and `lattice` installed from CRAN into its library. Some
+`rlang`, `knitr`, `rmarkdown`, `ragg`, `lattice`, `R6`, `withr` and `xts` installed from CRAN into
+its library. Some
 cases depend on that build:
 
 - `utils__rprofmem` and `environments__sys_call_shares_arguments` call `Rprofmem()`, so they need

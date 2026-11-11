@@ -20,7 +20,7 @@ just doctor               # each check prints ok, warn or FAIL with the command 
 The script is idempotent, so the cloud environment's setup script runs it in every fresh container.
 It installs `just` 1.59.0 from PyPI, because the justfile needs 1.40 or newer and Ubuntu's package
 is older. It builds the oracle's [reference GNU R](/development/corpus-and-oracle#the-reference-gnu-r)
-from source (about four minutes on four cores) and installs the packages the oracle cases name, with
+from source (about three and a half minutes on four cores) and installs the packages the oracle cases name, with
 rlang pinned to 1.3.0. The benchmark corpus library is a separate, longer step:
 `just bench-packages install`.
 

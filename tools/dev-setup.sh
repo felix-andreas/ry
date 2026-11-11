@@ -9,7 +9,7 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 r_version=$(cat "$root/tools/base-r/VERSION")
 r_prefix=/opt/R/$r_version
-# 1.40 is the oldest release that parses the justfile; tools/doctor.sh checks the same floor.
+# 1.40 is the oldest release that parses the justfile; tools/doctor.py checks the same floor.
 just_version=1.59.0
 jobs=$(nproc)
 
@@ -25,7 +25,7 @@ apt_packages=(
 	libssl-dev libxml2-dev libgit2-dev unixodbc-dev libpoppler-cpp-dev libglpk-dev libnlopt-dev
 	libsodium-dev libuv1-dev libfreetype-dev libharfbuzz-dev libfribidi-dev libwebp-dev
 	libfontconfig1-dev
-	valgrind time
+	valgrind time curl ca-certificates python3-pip
 )
 missing=()
 for package in "${apt_packages[@]}"; do
@@ -84,7 +84,7 @@ options(
   repos = c(CRAN = "https://packagemanager.posit.co/cran/__linux__/noble/latest"),
   Ncpus = jobs
 )
-wanted <- c("data.table", "bit64", "knitr", "rmarkdown", "ragg", "lattice", "R6", "testthat")
+wanted <- c("data.table", "bit64", "knitr", "rmarkdown", "ragg", "lattice", "R6", "withr", "xts", "testthat")
 missing <- setdiff(wanted, rownames(installed.packages()))
 if (length(missing)) install.packages(missing, quiet = TRUE)
 rlang <- "1.3.0"

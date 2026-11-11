@@ -19,7 +19,8 @@ import sys
 root = pathlib.Path(__file__).resolve().parent.parent
 # The oldest release that parses the justfile; tools/dev-setup.sh installs a pinned newer one.
 JUST_MINIMUM = (1, 40, 0)
-ORACLE_PACKAGES = ["data.table", "bit64", "rlang", "knitr", "rmarkdown", "ragg", "lattice"]
+# Every package an `# oracle: requires` line in crates/oracle/cases names.
+ORACLE_PACKAGES = ["data.table", "bit64", "rlang", "knitr", "rmarkdown", "ragg", "lattice", "R6", "withr", "xts"]
 # Pinned with FAST_PATHS in crates/interp/src/package_fast_paths.rs.
 RLANG_VERSION = "1.3.0"
 DISK_WARN_GB = 10
@@ -238,7 +239,8 @@ def runtime_identity(crates):
 
 
 def contains(path, needle):
-    if not path.exists():
+    # An interrupted link leaves an empty file, which mmap refuses.
+    if not path.exists() or path.stat().st_size == 0:
         return False
     with open(path, "rb") as file, mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ) as data:
         return data.find(needle) != -1
