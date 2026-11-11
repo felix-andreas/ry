@@ -379,6 +379,15 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     }
     moves::forcing(promise)?;
     activity::count(Counter::PromisesForced);
+    // Reading a slot runs no code, so nothing can collect, unwind or force the reference
+    // again before it settles: it needs neither a root nor the mark that catches recursion.
+    if promise.has_gp(gp::ARGUMENT_REFERENCE)
+        && let Some(value) = reference_slot_value(promise)
+    {
+        let value = settle_promise(promise, value)?;
+        crate::heap().root(value);
+        return Ok(value);
+    }
     // The code being forced can remove the last binding that holds the promise (a loader
     // placeholder replaces itself), and the promise's environment must outlive its code, so
     // the promise stays a root while it runs, as GNU R's pending-promise stack keeps it.
@@ -731,22 +740,19 @@ pub unsafe fn release_references(mark: u32) {
     let state = interp();
     let heap = crate::heap();
     let unbound = unbound();
-    let live = mark as usize..state.references_used as usize;
-    for (&reference, &target) in state
-        .references
-        .get(live.clone())
-        .unwrap_or(&[])
-        .iter()
-        .zip(state.reference_targets.get(live).unwrap_or(&[]))
-    {
+    for index in mark as usize..state.references_used as usize {
+        let reference = state.references[index];
         if reference.car() != unbound {
             heap.set_car(reference, unbound);
         }
+        // Only an environment or code reference, or one that was detached and replaced,
+        // changed the other fields.
         if reference.tag() != nil() {
             heap.set_tag(reference, nil());
-        }
-        if reference.attrib() != target {
-            heap.set_attrib(reference, target);
+            let target = state.reference_targets[index];
+            if reference.attrib() != target {
+                heap.set_attrib(reference, target);
+            }
         }
     }
     state.references_used = mark;
@@ -772,6 +778,24 @@ unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
         panic!("an argument reference outlived the frame it names");
     }
     (owner as usize, slot as u32)
+}
+
+/// The value a slot frame's argument reference stands for when its slot holds one: not a
+/// promise, an empty argument or nothing, and the frame has no environment that could have
+/// rebound the name. `None` sends the reference to [`force_reference`].
+#[inline]
+unsafe fn reference_slot_value(reference: Sexp) -> Option<Sexp> {
+    if reference.tag() != nil() {
+        return None;
+    }
+    let (owner, slot) = reference_target(reference);
+    let frame = &interp().frames[owner];
+    if frame.env != nil() || slot == NO_REFERENCE_SLOT {
+        return None;
+    }
+    let value = *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
+    (value != unbound() && value != missing_arg() && value.kind() != SexpType::Promise)
+        .then_some(value)
 }
 
 /// Forces an unforced argument reference: what its variable holds in the frame it names, read
