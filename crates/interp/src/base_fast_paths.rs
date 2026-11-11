@@ -2365,6 +2365,9 @@ unsafe fn do_message(call: &Call<'_>) -> R<Sexp> {
 /// needs evaluating, a non-default `domain` or an unusual flag sends the call to the R body.
 unsafe fn do_warning(call: &Call<'_>) -> R<Sexp> {
     let frame = ClosureFrame::of(call);
+    // Skipping `gettext()` is exact only because ry's `.Internal(gettext())` returns its
+    // argument unchanged; once messages are translated, this must decline outside a C or
+    // English locale.
     if !fast_paths_enabled() || !is_default(frame, symbols().domain)? {
         return decline();
     }
