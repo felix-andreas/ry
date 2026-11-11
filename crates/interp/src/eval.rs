@@ -1154,7 +1154,7 @@ pub unsafe fn call_direct(definition: &BuiltinDef, call: Sexp, args: &[Sexp]) ->
     }
     let value = scope(|| direct(call, args))
         .and_then(|value| crate::unwind::raise_parked().map(|()| value))
-        .map_err(|unwind| builtin_failure(definition, unwind))?;
+        .map_err(|unwind| builtin_failure(definition, unbound(), unwind))?;
     if value.is_some() {
         match definition.visibility {
             Visibility::On => interp().visible = true,
@@ -1189,9 +1189,22 @@ pub(crate) unsafe fn call_builtin_reusing(
                 .first()
                 .is_some_and(|target| target.value.refcount() >= 1))
     {
-        return call_builtin_checked(definition, call, op, args, env, reusable);
+        return call_builtin_checked(definition, call, op, args, env, reusable, unbound());
     }
-    run_builtin(definition, call, op, args, env, reusable)
+    run_builtin(definition, call, op, args, env, reusable, unbound())
+}
+
+/// Runs the `.Internal` `definition` that compiled code inlined from its base wrapper, blaming
+/// an error that names no call on the caller's `call`, as GNU R's compiler does: no wrapper
+/// closure runs, so the frame's own call would name the function that called the wrapper.
+pub(crate) unsafe fn call_inlined_internal(
+    definition: &BuiltinDef,
+    call: Sexp,
+    op: Sexp,
+    args: &[Arg],
+    env: Sexp,
+) -> R<Sexp> {
+    call_builtin_checked(definition, call, op, args, env, None, call)
 }
 
 /// The builtin call [`call_builtin_reusing`] hands off: it publishes the activity, raises the
@@ -1204,6 +1217,7 @@ unsafe fn call_builtin_checked(
     args: &[Arg],
     env: Sexp,
     reusable: Option<Sexp>,
+    blame: Sexp,
 ) -> R<Sexp> {
     let _activity = if activity::enabled() {
         let index = builtin_index(definition);
@@ -1252,11 +1266,12 @@ unsafe fn call_builtin_checked(
         }
         _ => args,
     };
-    run_builtin(definition, call, op, args, env, reusable)
+    run_builtin(definition, call, op, args, env, reusable, blame)
 }
 
 /// Runs a builtin whose call passed the checks: refuses a native value it cannot take, runs it
-/// in its own handle scope, sets visibility, and signals an error it raised.
+/// in its own handle scope, sets visibility, and signals an error it raised, blaming `blame`
+/// when the error names no call (`unbound()` leaves that to the frame's call).
 #[inline(always)]
 unsafe fn run_builtin(
     definition: &BuiltinDef,
@@ -1265,6 +1280,7 @@ unsafe fn run_builtin(
     args: &[Arg],
     env: Sexp,
     reusable: Option<Sexp>,
+    blame: Sexp,
 ) -> R<Sexp> {
     let checks = definition.checks;
     let context = Call {
@@ -1299,7 +1315,7 @@ unsafe fn run_builtin(
     match scope(|| (definition.function)(&context)) {
         Ok(value) => {
             if let Err(unwind) = crate::unwind::raise_parked() {
-                return Err(builtin_failure(definition, unwind));
+                return Err(builtin_failure(definition, blame, unwind));
             }
             match definition.visibility {
                 Visibility::On => interp().visible = true,
@@ -1308,7 +1324,7 @@ unsafe fn run_builtin(
             }
             Ok(value)
         }
-        Err(unwind) => Err(builtin_failure(definition, unwind)),
+        Err(unwind) => Err(builtin_failure(definition, blame, unwind)),
     }
 }
 
@@ -1316,11 +1332,11 @@ unsafe fn run_builtin(
 /// primitive's call as `errorcall` does.
 #[cold]
 #[inline(never)]
-unsafe fn builtin_failure(definition: &BuiltinDef, unwind: Unwind) -> Unwind {
+unsafe fn builtin_failure(definition: &BuiltinDef, blame: Sexp, unwind: Unwind) -> Unwind {
     match unwind {
         Unwind::Error(mut failure) => {
-            if failure.call == unbound() && matches!(definition.kind, Kind::Builtin) {
-                failure.call = unbound();
+            if failure.call == unbound() {
+                failure.call = blame;
             }
             conditions::signal_error(failure)
         }

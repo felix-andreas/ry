@@ -20,8 +20,8 @@ use {
 };
 
 /// The zero-based position of the element `x[i]` or `x[[i]]` (`double`) reads, for tier 0's
-/// handler of a call to the base primitive: `x` is a double, integer or logical vector (or for
-/// `[[` a list) that is not an object, an array or ALTREP, and has no attributes for `[`, and
+/// handler of a call to the base primitive: `x` is a double, integer, logical or character
+/// vector (or for `[[` a list) that is not an object, an array or ALTREP, and has no attributes for `[`, and
 /// `i` is a plain numeric scalar within bounds or, for `[[`, an existing ASCII name. `None` for
 /// anything else, so the builtin runs. The subscript is checked before the subject's flags
 /// because a subscript the handler does not take (a negative or vector one) is the common
@@ -36,7 +36,7 @@ pub(crate) unsafe fn element_position(
     let kind = subject.kind();
     if !matches!(
         kind,
-        SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::List
+        SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::String | SexpType::List
     ) || (kind == SexpType::List && !double)
     {
         return None;
@@ -60,8 +60,8 @@ pub(crate) unsafe fn element_position(
 }
 
 /// The element at `position` of a subject [`element_position`] took: a list's element itself,
-/// or a number as a fresh scalar from the young generation, `None` when that allocation needs
-/// a collection.
+/// or a number or string as a fresh scalar from the young generation, `None` when that
+/// allocation needs a collection.
 #[inline(always)]
 pub(crate) unsafe fn element_value(
     heap: &mut Heap,
@@ -72,6 +72,7 @@ pub(crate) unsafe fn element_value(
     let data = subject.data();
     match kind {
         SexpType::List => Some(*data.cast::<Sexp>().add(position)),
+        SexpType::String => string_scalar(heap, *data.cast::<Sexp>().add(position)),
         SexpType::Real => {
             let bits = (*data.cast::<f64>().add(position)).to_bits();
             heap.try_alloc_scalar(kind, [bits, 0])
@@ -81,6 +82,17 @@ pub(crate) unsafe fn element_value(
             heap.try_alloc_scalar(kind, [bits, 0])
         }
     }
+}
+
+/// A fresh character scalar holding the `CHARSXP` `charsxp`, from the young generation, or
+/// `None` when that needs a collection. Tier 0 and the JIT both read string elements through it.
+#[inline(always)]
+pub unsafe fn string_scalar(heap: &mut Heap, charsxp: Sexp) -> Option<Sexp> {
+    let value = heap.try_alloc_scalar(SexpType::String, [charsxp.as_ptr() as u64, 0])?;
+    // The scalar is young, so storing into it needs no barrier, only the count `set_element`
+    // would add.
+    charsxp.increment_refcount();
+    Some(value)
 }
 
 /// `x[i]` for an attribute-free atomic vector `x` and a plain numeric scalar `i` within bounds:

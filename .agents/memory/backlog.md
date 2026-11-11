@@ -984,6 +984,11 @@ overhead, not allocation.
 - Bench environment: a multi-package `install.packages()` call under ry installs nothing without
   an error, `ry R CMD INSTALL` fails with "cannot read CMD", and the testthat workload fails on
   both engines with testthat 3.3.2 ("attempt to use zero-length variable name").
+- Uncompiled calls of `vector("nope", 1L)` and `choose("a", 1)` report their error against the
+  internal's call (`vector(mode, length)`, `choose(n, k)`), where GNU R names the closure's call,
+  because those internals use `call.error` and GNU R's use `error()`. Compiled sites inline the
+  wrapper with the original call and agree; promise code and a closure's first, uncompiled call
+  do not. Fix in the internals (`crate::unwind::current_call()`, as `normalizePath` does).
 - The unary builtin path and native entries skip `call_builtin_checked`, so `--profile-summary`
   counters and Rprof do not see those calls. The `Reduce` prologue never binds `ind` in its frame,
   which only an `f` that reads `parent.frame()` can observe.

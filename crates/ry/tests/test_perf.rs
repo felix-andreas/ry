@@ -305,6 +305,114 @@ fn runtime_speed_stays_ahead_of_gnu_r() {
     );
 }
 
+/// Loop bodies, with the character vector each reads, whose marginal instruction count per
+/// iteration is held against an integer read, `acc + x[i]`. A string element compare is a pointer
+/// compare of two interned `CHARSXP`s, and `nchar` on ASCII text reads the stored length, so
+/// neither may cost much more than the integer read: at most [`STRING_TIER0_RATIO`] times as much
+/// in tier 0 and [`STRING_JIT_RATIO`] times in the JIT.
+const STRING_ELEMENT_LOOPS: [(&str, &str); 4] = [
+    (
+        "if (s[i] == \"7\") acc <- acc + 1L",
+        "c(\"1\", \"7\", \"3\")",
+    ),
+    (
+        "if (s[[i]] == \"7\") acc <- acc + 1L",
+        "c(\"1\", \"7\", \"3\")",
+    ),
+    (
+        "if (s[i] != \"7\") acc <- acc + 1L",
+        "c(\"1\", \"7\", \"3\")",
+    ),
+    (
+        "acc <- acc + nchar(s[[i]])",
+        "c(\"ab\", \"seven\", \"xyz\")",
+    ),
+];
+const STRING_TIER0_RATIO: f64 = 2.0;
+const STRING_JIT_RATIO: f64 = 3.0;
+
+#[test]
+#[ignore = "needs a release build with libR beside it and valgrind; run in release with --ignored"]
+fn string_element_reads_cost_about_an_integer_read() {
+    let binary = Path::new(env!("CARGO_BIN_EXE_ry"));
+    if !binary.with_file_name("libR.so").exists() {
+        eprintln!("skipped: ry's runtime library is not built beside the binary");
+        return;
+    }
+    if !Command::new("valgrind")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipped: no valgrind on this machine");
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let per_iteration = |mode: &str, body: &str, init: &str| {
+        // The difference between two loop lengths cancels start-up and compilation.
+        let counts: Vec<u64> = [20_000, 120_000]
+            .iter()
+            .map(|count| {
+                let script = directory.path().join(format!("loop_{count}.R"));
+                fs::write(
+                    &script,
+                    format!(
+                        "x <- rep(c(1L, 7L, 3L), length.out = {count})\n\
+                         s <- rep({init}, length.out = {count})\n\
+                         f <- function(x, s, n) {{ acc <- 0L; for (i in seq_len(n)) {{ {body} }}; acc }}\n\
+                         r <- f(x, s, {count}); r <- f(x, s, {count})\n"
+                    ),
+                )
+                .expect("write the script");
+                instructions(
+                    Command::new("valgrind")
+                        .args(["--tool=callgrind", "--callgrind-out-file=/dev/null"])
+                        .arg(binary)
+                        .args(["run", "--runtime", "ry"])
+                        .arg(&script)
+                        .env("RY_JIT", mode),
+                )
+            })
+            .collect();
+        // Each script calls the loop twice.
+        (counts[1] - counts[0]) as f64 / 200_000.0
+    };
+    let mut over = Vec::new();
+    for (mode, limit) in [("off", STRING_TIER0_RATIO), ("force", STRING_JIT_RATIO)] {
+        let integer = per_iteration(mode, "acc <- acc + x[i]", "\"a\"");
+        for (body, init) in STRING_ELEMENT_LOOPS {
+            let cost = per_iteration(mode, body, init);
+            let ratio = cost / integer;
+            eprintln!("RY_JIT={mode} `{body}`: {cost:.0} instructions, {ratio:.2}x {integer:.0}");
+            if ratio > limit {
+                over.push(format!(
+                    "`{body}` with RY_JIT={mode} at {ratio:.2}x, over {limit}x"
+                ));
+            }
+        }
+    }
+    assert!(
+        over.is_empty(),
+        "a string element read costs too much against an integer read: {}",
+        over.join(", ")
+    );
+}
+
+/// The instruction count callgrind reports for a successful run.
+fn instructions(command: &mut Command) -> u64 {
+    let output = command
+        .stdout(Stdio::null())
+        .output()
+        .expect("run the program under callgrind");
+    assert!(output.status.success(), "the program failed: {command:?}");
+    let report = String::from_utf8_lossy(&output.stderr);
+    report
+        .lines()
+        .find_map(|line| line.split("Collected : ").nth(1))
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no instruction count from {command:?}: {report}"))
+}
+
 /// The best warm time a benchmark program prints, as `name checksum median best cold`.
 fn warm_seconds(command: &mut Command) -> f64 {
     let output = command

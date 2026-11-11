@@ -20,8 +20,9 @@ use {
         arith,
         builtins::Arg,
         bytecode::{self, LoopState, Machine, PROFILE, TIER1, profile},
-        eval, heap,
+        element_access, eval, heap,
         standard_library::{self, CompiledKey},
+        strings,
         unwind::{R, Unwind, error},
         values,
     },
@@ -1117,6 +1118,44 @@ pub unsafe extern "C" fn jit_box_num(
 
 pub unsafe extern "C" fn jit_box_logical(activation: *mut Activation, value: i32) -> *mut Header {
     unsafe { boxed(activation, || values::scalar_logical(value)) }
+}
+
+/// A character scalar holding the `CHARSXP` `charsxp`, as `x[[i]]` on a character vector makes.
+/// The vector `charsxp` came from is in the register window, which keeps it alive if the
+/// allocation collects.
+pub unsafe extern "C" fn jit_string_scalar(
+    activation: *mut Activation,
+    charsxp: *mut Header,
+) -> *mut Header {
+    unsafe {
+        let Some(charsxp) = Sexp::from_raw(charsxp) else {
+            return values::nil().as_ptr();
+        };
+        match element_access::string_scalar(heap(), charsxp) {
+            Some(value) => value.as_ptr(),
+            None => boxed(activation, || values::scalar_string_charsxp(charsxp)),
+        }
+    }
+}
+
+/// `==` on two `CHARSXP`s whose encoding marks differ: 1, 0 or `NA`.
+pub unsafe extern "C" fn jit_string_equal(left: *mut Header, right: *mut Header) -> i32 {
+    unsafe {
+        match (Sexp::from_raw(left), Sexp::from_raw(right)) {
+            (Some(left), Some(right)) => values::string_equal(left, right, values::na_string()),
+            _ => NA_INTEGER,
+        }
+    }
+}
+
+/// `nchar` of the `CHARSXP` `charsxp` under the packed `mode`, or `i64::MIN` where `nchar`
+/// reports an error, which tier 0 then raises.
+pub unsafe extern "C" fn jit_nchar(charsxp: *mut Header, mode: i32) -> i64 {
+    unsafe {
+        Sexp::from_raw(charsxp)
+            .and_then(|charsxp| strings::nchar_count(charsxp, mode as u32))
+            .map_or(i64::MIN, i64::from)
+    }
 }
 
 /// A record, tuple or tag of `layout` whose `count` slots are `(kind, bits)` pairs in the

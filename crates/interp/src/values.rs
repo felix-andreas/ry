@@ -963,21 +963,46 @@ pub fn unescape_invalid_bytes(text: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// Whether two distinct interned strings hold the same text. Strings intern by bytes and
-/// encoding, so a native string and a UTF-8 one with the same bytes are distinct objects, and so
-/// are a latin1 string and its UTF-8 translation; GNU R's `Seql` calls both pairs equal because
-/// it compares their UTF-8 translations, and the session's native encoding is UTF-8.
-pub unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
-    if left.has_gp(gp::BYTES) || right.has_gp(gp::BYTES) {
-        return false;
+/// `left == right` for two strings as an R logical: `NA` when either is `NA`, otherwise
+/// whether they hold the same text, as GNU R's `Seql` decides. Every string but `NA` is interned
+/// by its bytes and its encoding marks, so the same object means the same text, and two
+/// distinct interned strings with the same marks differ ([`string_decided_unequal`]), which keeps
+/// the common cases free of reading the text. Both tiers' compiled `==` and `!=` on two strings call this.
+#[inline(always)]
+pub unsafe fn string_equal(left: Sexp, right: Sexp, na: Sexp) -> i32 {
+    if left == right {
+        return if left == na { NA_LOGICAL } else { 1 };
     }
-    // Interning by bytes and encoding means two distinct strings of the same encoding differ in
-    // their bytes, which keeps `x == "a"` from decoding every element.
-    if [gp::LATIN1, gp::UTF8]
-        .iter()
-        .all(|&bit| left.has_gp(bit) == right.has_gp(bit))
-    {
-        return false;
+    if left == na || right == na {
+        return NA_LOGICAL;
+    }
+    if string_decided_unequal(left.gp(), right.gp()) {
+        return 0;
+    }
+    same_text(left, right) as i32
+}
+
+/// The marks [`string_decided_unequal`] compares.
+pub const STRING_MARKS: u16 = gp::BYTES | gp::LATIN1 | gp::UTF8 | gp::ASCII;
+
+/// Whether two distinct strings with header bits `left` and `right` differ without reading their
+/// text: both are in the string table, which holds one object per byte string and marks, and
+/// their marks agree. GNU R's `Seql` relies on the same invariant. A string C code made with
+/// `allocVector(CHARSXP, n)` is not in the table and always has its text compared.
+#[inline(always)]
+pub fn string_decided_unequal(left: u16, right: u16) -> bool {
+    (left & right & gp::CACHED) | ((left ^ right) & STRING_MARKS) == gp::CACHED
+}
+
+/// Whether two distinct interned strings with different encoding marks hold the same text. A
+/// native string and a UTF-8 one with the same bytes are distinct objects, and so are a latin1
+/// string and its UTF-8 translation; GNU R's `Seql` calls both pairs equal because it compares
+/// their UTF-8 translations, and the session's native encoding is UTF-8. A string marked as
+/// bytes equals only itself.
+#[inline(never)]
+unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
+    if left.has_gp(gp::BYTES) || right.has_gp(gp::BYTES) {
+        return left.has_gp(gp::BYTES) && right.has_gp(gp::BYTES) && left.bytes() == right.bytes();
     }
     // Outside a UTF-8 locale, GNU R reads a non-ASCII string of unknown encoding as native bytes
     // that do not translate to the text of a marked string.

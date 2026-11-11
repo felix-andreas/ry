@@ -263,11 +263,154 @@ unsafe fn paste(
     Ok(collapsed)
 }
 
+/// What `nchar` counts, its `type` argument.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum CountType {
+    Bytes = 0,
+    Chars = 1,
+    Width = 2,
+}
+
+impl CountType {
+    /// The type `nchar`'s `type` argument names: a non-empty prefix of one of the three.
+    pub fn from_name(name: &str) -> Option<CountType> {
+        [
+            ("bytes", CountType::Bytes),
+            ("chars", CountType::Chars),
+            ("width", CountType::Width),
+        ]
+        .into_iter()
+        .find(|(full, _)| !name.is_empty() && full.starts_with(name))
+        .map(|(_, count_type)| count_type)
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            CountType::Bytes => "bytes",
+            CountType::Chars => "chars",
+            CountType::Width => "width",
+        }
+    }
+}
+
+/// Why `nchar` cannot count a string: it is in the `"bytes"` encoding and not ASCII, or it is
+/// not valid UTF-8.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CountType {
-    Bytes,
-    Chars,
-    Width,
+pub(crate) enum CountFailure {
+    BytesEncoding,
+    Invalid,
+}
+
+/// `nchar` of one string: `na_count` for `NA`, which is `NA` or 2 by `keepNA` and the type.
+/// Every string counted in bytes, and an ASCII string counted in characters, is answered from
+/// the header's length without reading the text, which is the path both tiers take for
+/// `nchar(s[[i]])`. Width reads the text, since ASCII control characters take no columns.
+#[inline(always)]
+pub(crate) unsafe fn string_count(
+    charsxp: Sexp,
+    count_type: CountType,
+    na_count: i32,
+) -> Result<i32, CountFailure> {
+    if charsxp == na_string() {
+        return Ok(na_count);
+    }
+    if count_type == CountType::Bytes
+        || (count_type == CountType::Chars && charsxp.has_gp(gp::ASCII))
+    {
+        return Ok(charsxp.length() as i32);
+    }
+    string_count_text(charsxp, count_type)
+}
+
+/// [`string_count`] in characters of a non-ASCII string, or in display width.
+#[inline(never)]
+unsafe fn string_count_text(charsxp: Sexp, count_type: CountType) -> Result<i32, CountFailure> {
+    let bytes = charsxp.bytes();
+    if charsxp.has_gp(gp::ASCII) {
+        return Ok(display_width(&values::char_str(charsxp)) as i32);
+    }
+    // Interned ASCII text is never marked, so a string marked as bytes here is not ASCII.
+    if charsxp.has_gp(gp::BYTES) {
+        return Err(CountFailure::BytesEncoding);
+    }
+    if charsxp.has_gp(gp::LATIN1) {
+        return Ok(match count_type {
+            CountType::Width => display_width(&values::char_str(charsxp)) as i32,
+            _ => bytes.len() as i32,
+        });
+    }
+    // Interning records whether the bytes are valid UTF-8, so counting characters needs no
+    // decoding: every character starts with exactly one byte that is not a continuation byte.
+    if !charsxp.is_valid_utf8() {
+        return Err(CountFailure::Invalid);
+    }
+    Ok(match count_type {
+        CountType::Width => display_width(&values::char_str(charsxp)) as i32,
+        _ => bytes.iter().filter(|&&byte| byte & 0xC0 != 0x80).count() as i32,
+    })
+}
+
+/// `nchar`'s count for `NA`: `NA`, or 2 when `keepNA` is false, or `NA` (the default) for
+/// type `"width"`.
+pub(crate) fn na_count(keep_na: i32, count_type: CountType) -> i32 {
+    match (keep_na, count_type) {
+        (1, _) | (NA_LOGICAL, CountType::Bytes | CountType::Chars) => NA_INTEGER,
+        _ => 2,
+    }
+}
+
+/// The `type`, `allowNA` and `keepNA` of a compiled `nchar(x, ...)` packed in one operand:
+/// the [`CountType`] in bits 0 and 1, `allowNA` in bit 2, and `keepNA` in bits 3 and 4 (0 for
+/// `NA`, 1 for `FALSE`, 2 for `TRUE`).
+pub fn nchar_mode(count_type: CountType, allow_na: bool, keep_na: i32) -> u32 {
+    let keep = match keep_na {
+        0 => 1,
+        1 => 2,
+        _ => 0,
+    };
+    count_type as u32 | (allow_na as u32) << 2 | keep << 3
+}
+
+/// `nchar(x, ...)` with the arguments [`nchar_mode`] packed into `mode`, for `x` a plain string
+/// scalar: the count as a fresh integer scalar from the young generation. `None` for any other
+/// `x`, for a string `nchar` reports an error on, and when the allocation needs a collection,
+/// all of which the internal's full path handles.
+#[inline(always)]
+pub unsafe fn nchar_scalar(heap: &mut heap::Heap, value: Sexp, mode: u32) -> Option<Sexp> {
+    if !value.is_plain_scalar(SexpType::String, heap.known().nil) {
+        return None;
+    }
+    let count = nchar_count(*value.data().cast::<Sexp>(), mode)?;
+    heap.try_alloc_scalar(SexpType::Integer, [count as u32 as u64, 0])
+}
+
+/// What `nchar` counts for the `CHARSXP` `charsxp` under the packed `mode`, or `None` where it
+/// reports an error. Tier 0 and the JIT both count through this.
+#[inline(always)]
+pub unsafe fn nchar_count(charsxp: Sexp, mode: u32) -> Option<i32> {
+    let (count_type, na) = unpack_nchar_mode(mode);
+    match string_count(charsxp, count_type, na) {
+        Ok(count) => Some(count),
+        Err(_) if mode & 4 != 0 => Some(NA_INTEGER),
+        Err(_) => None,
+    }
+}
+
+/// The [`CountType`] of a packed `nchar` mode, and what it counts for `NA_character_`.
+#[inline(always)]
+pub fn unpack_nchar_mode(mode: u32) -> (CountType, i32) {
+    let count_type = match mode & 3 {
+        0 => CountType::Bytes,
+        1 => CountType::Chars,
+        _ => CountType::Width,
+    };
+    let keep_na = match mode >> 3 & 3 {
+        0 => NA_LOGICAL,
+        1 => 0,
+        _ => 1,
+    };
+    (count_type, na_count(keep_na, count_type))
 }
 
 unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
@@ -275,29 +418,23 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
     if values::inherits(x, "factor") {
         return Err(error("'nchar()' requires a character vector"));
     }
-    let count_type = match values::first_string(call.arg(1)).as_deref() {
-        Some(name) if !name.is_empty() && "bytes".starts_with(name) => CountType::Bytes,
-        Some(name) if !name.is_empty() && "chars".starts_with(name) => CountType::Chars,
-        Some(name) if !name.is_empty() && "width".starts_with(name) => CountType::Width,
-        _ => return Err(error("invalid 'type' argument")),
+    let Some(count_type) = values::first_string(call.arg(1))
+        .as_deref()
+        .and_then(CountType::from_name)
+    else {
+        return Err(error("invalid 'type' argument"));
     };
-    let keep_na = values::as_logical_scalar(call.arg(3));
-    let na_count = match (keep_na, count_type) {
-        (1, _) | (NA_LOGICAL, CountType::Bytes | CountType::Chars) => NA_INTEGER,
-        _ => 2,
-    };
+    let na_count = na_count(values::as_logical_scalar(call.arg(3)), count_type);
     let allow_na = values::as_logical_scalar(call.arg(2)) == 1;
     let text = character_vector(x)?;
     let count = length(text);
     let result = alloc(SexpType::Integer, count)?;
     let counts = values::ints_mut(result);
     for (index, slot) in counts.iter_mut().enumerate() {
-        let charsxp = text.element(index);
-        if count_type != CountType::Bytes
-            && charsxp.has_gp(gp::BYTES)
-            && !charsxp.bytes().is_ascii()
-        {
-            if !allow_na {
+        *slot = match string_count(text.element(index), count_type, na_count) {
+            Ok(counted) => counted,
+            Err(_) if allow_na => NA_INTEGER,
+            Err(CountFailure::BytesEncoding) => {
                 let what = if count_type == CountType::Chars {
                     "number of characters"
                 } else {
@@ -308,27 +445,11 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
                     index + 1
                 )));
             }
-            *slot = NA_INTEGER;
-            continue;
-        }
-        let invalid = count_type != CountType::Bytes
-            && !charsxp.has_gp(gp::LATIN1)
-            && std::str::from_utf8(charsxp.bytes()).is_err();
-        *slot = if charsxp == na_string() {
-            na_count
-        } else if invalid {
-            if !allow_na {
+            Err(CountFailure::Invalid) => {
                 return Err(error(format!(
                     "invalid multibyte string, element {}",
                     index + 1
                 )));
-            }
-            NA_INTEGER
-        } else {
-            match count_type {
-                CountType::Bytes => charsxp.bytes().len() as i32,
-                CountType::Chars => values::char_str(charsxp).chars().count() as i32,
-                CountType::Width => display_width(&values::char_str(charsxp)) as i32,
             }
         };
     }
