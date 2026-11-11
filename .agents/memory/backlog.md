@@ -2712,6 +2712,15 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 - **Code images are about six times the size of the lazy-load database** (MASS: 706 KB `.ryc`
   against a 120 KB compressed `.rdb`), because instruction words, constants and feedback are
   stored uncompressed. Compress payloads, or pack the instruction stream, if install size matters.
+- **The start image is not laid out in touch order.** About 37% of the image's small pages are
+  holes start-up's collections left, and an empty start's touches spread over most 64 KB chunks,
+  so a cold start maps never-run code beside the code it runs (decisions.md, "The start image
+  keeps base R's closures compiled"). The end shape: the writer compacts every movable small
+  object into dense pages in a recorded first-touch order (an ordered list of stable item ids,
+  each with the phase that first touched it: empty start, library attach, first call), recorded
+  on `tools/layout/train.py`'s training runs and documented in `development/architecture.md`.
+  Frame slot indexes hash symbol addresses (`env.rs`), so they must be rebuilt after the move,
+  and every other address-keyed table needs an audit. The image format does not change.
 - **Unforced base bindings still compile at run time.** The start image holds compiled code for
   every closure bound in a loaded namespace, but lazy-load bindings that start-up never forces
   (most of stats and utils) are fetched and compiled when a session first calls them. Forcing them
