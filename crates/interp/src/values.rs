@@ -184,6 +184,8 @@ symbol_table! {
     several_ok = "several.ok",
     domain = "domain",
     append_lf = "appendLF",
+    call_dot = "call.",
+    immediate_dot = "immediate.",
     cond = "cond",
     msg = "msg",
     condition_message_simple_message = "conditionMessage.simpleMessage",
@@ -472,7 +474,13 @@ impl StringMemo<'_> {
         if self.off {
             return Ok(crate::heap().mk_char(bytes, Encoding::Native)?);
         }
+        // A call that makes only a few strings would spend more on building the table than
+        // the table saves.
+        const SHORT: usize = 16;
         self.lookups += 1;
+        if self.lookups <= SHORT && self.pieces.is_empty() {
+            return Ok(crate::heap().mk_char(bytes, Encoding::Native)?);
+        }
         if self.lookups == WINDOW {
             if self.hits < WINDOW / 8 {
                 self.off = true;
@@ -650,6 +658,47 @@ pub unsafe fn pairlist(items: &[(Sexp, Sexp)], kind: SexpType) -> R<Sexp> {
         list = triple(cell_kind, value, list, tag)?;
     }
     Ok(list)
+}
+
+/// Builds a pairlist (or call) front to back, so the items need not be collected first.
+pub struct PairlistBuilder {
+    kind: SexpType,
+    head: Sexp,
+    last: Sexp,
+}
+
+impl PairlistBuilder {
+    pub fn new(kind: SexpType) -> Self {
+        Self {
+            kind,
+            head: nil(),
+            last: nil(),
+        }
+    }
+
+    pub unsafe fn push(&mut self, tag: Sexp, value: Sexp) -> R<()> {
+        if self.head == nil() {
+            self.head = triple(self.kind, value, nil(), tag)?;
+            self.last = self.head;
+            return Ok(());
+        }
+        // The rooted head reaches every cell once it is linked, and nothing allocates between
+        // making a cell and linking it, so only the head takes a root.
+        let heap = crate::heap();
+        let cell = heap.alloc_triple(SexpType::Pairlist, value, nil(), tag)?;
+        heap.set_cdr(self.last, cell);
+        self.last = cell;
+        Ok(())
+    }
+
+    /// The cell pushed last, or `NULL` before the first push.
+    pub fn last(&self) -> Sexp {
+        self.last
+    }
+
+    pub fn finish(self) -> Sexp {
+        self.head
+    }
 }
 
 /// A call `function(arguments...)` with untagged arguments.
@@ -1248,8 +1297,11 @@ pub unsafe fn inherits(object: Sexp, class: &str) -> bool {
     (0..length(classes)).any(|index| classes.element(index).bytes() == class.as_bytes())
 }
 
+/// An array's extents: matrices and small arrays keep them on the stack.
+pub type Dims = smallvec::SmallVec<[usize; 4]>;
+
 /// The dim attribute as integers, if any.
-pub unsafe fn dims(object: Sexp) -> Option<Vec<usize>> {
+pub unsafe fn dims(object: Sexp) -> Option<Dims> {
     let dim = get_attr(object, symbols().dim);
     if dim == nil() {
         return None;
@@ -1314,7 +1366,7 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
         | SexpType::Binding
         | SexpType::Bytecode => return Ok(object),
         SexpType::Pairlist | SexpType::Language | SexpType::Dots => {
-            let mut items = Vec::new();
+            let mut builder = PairlistBuilder::new(kind);
             let mut cell = object;
             while matches!(
                 cell.kind(),
@@ -1325,27 +1377,20 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
                 } else {
                     cell.car()
                 };
-                items.push((cell.tag(), value, cell.attrib()));
-                cell = cell.cdr();
-            }
-            let mut list = nil();
-            for (position, (tag, value, attributes)) in items.into_iter().enumerate().rev() {
-                let cell_kind = if position == 0 {
-                    kind
-                } else {
-                    SexpType::Pairlist
-                };
-                list = triple(cell_kind, value, list, tag)?;
+                builder.push(cell.tag(), value)?;
                 // The head cell's attributes and flags are the object's, copied below.
-                if position != 0 && attributes != nil() {
+                let attributes = cell.attrib();
+                if cell != object && attributes != nil() {
                     let attributes = if deep {
                         duplicate_with(attributes, true)?
                     } else {
                         attributes
                     };
-                    heap.set_attrib(list, attributes);
+                    heap.set_attrib(builder.last(), attributes);
                 }
+                cell = cell.cdr();
             }
+            let list = builder.finish();
             if list == nil() {
                 return Ok(list);
             }
@@ -1525,11 +1570,16 @@ pub unsafe fn as_string_scalar(object: Sexp) -> R<Option<String>> {
 }
 
 /// Requires a single non-`NA` string.
-pub unsafe fn require_string(object: Sexp, what: &str) -> R<String> {
+pub unsafe fn require_str<'a>(object: Sexp, what: &str) -> R<Cow<'a, str>> {
     match first_string(object) {
-        Some(text) if length(object) == 1 => Ok(text.into_owned()),
+        Some(text) if length(object) == 1 => Ok(text),
         _ => Err(error(format!("invalid '{what}' argument"))),
     }
+}
+
+/// [`require_str`] as an owned string.
+pub unsafe fn require_string(object: Sexp, what: &str) -> R<String> {
+    require_str(object, what).map(Cow::into_owned)
 }
 
 /// Requires a single logical that is `TRUE` or `FALSE`.
@@ -1577,16 +1627,36 @@ pub unsafe fn list_items(list: Sexp) -> Vec<Sexp> {
 
 /// The pairlist as a list vector with the tags as names.
 pub unsafe fn pairlist_to_list(list: Sexp) -> R<Sexp> {
-    let items = pairlist_items(list);
-    let values: Vec<Sexp> = items.iter().map(|(_, value)| *value).collect();
-    let result = list_vector(&values)?;
+    let is_cell = |cell: Sexp| {
+        matches!(
+            cell.kind(),
+            SexpType::Pairlist | SexpType::Language | SexpType::Dots
+        )
+    };
+    let mut count = 0;
+    let mut tagged = false;
+    let mut cell = list;
+    while is_cell(cell) {
+        count += 1;
+        tagged |= cell.tag() != nil();
+        cell = cell.cdr();
+    }
+    let result = alloc(SexpType::List, count)?;
+    let mut cell = list;
+    for index in 0..count {
+        set_elt(result, index, cell.car());
+        cell = cell.cdr();
+    }
     copy_attributes(list, result)?;
-    if items.iter().any(|(tag, _)| *tag != nil()) {
-        let names = alloc(SexpType::String, items.len())?;
-        for (index, (tag, _)) in items.iter().enumerate() {
+    if tagged {
+        let names = alloc(SexpType::String, count)?;
+        let mut cell = list;
+        for index in 0..count {
+            let tag = cell.tag();
             if tag.kind() == SexpType::Symbol {
                 set_elt(names, index, tag.car());
             }
+            cell = cell.cdr();
         }
         set_attr(result, symbols().names, names)?;
     }
@@ -1596,7 +1666,7 @@ pub unsafe fn pairlist_to_list(list: Sexp) -> R<Sexp> {
 /// The list vector as a pairlist with its names as tags.
 pub unsafe fn list_to_pairlist(list: Sexp, kind: SexpType) -> R<Sexp> {
     let names = names(list);
-    let mut items = Vec::new();
+    let mut builder = PairlistBuilder::new(kind);
     for index in 0..length(list) {
         let tag = if names.kind() == SexpType::String {
             let name = names.element(index);
@@ -1612,9 +1682,9 @@ pub unsafe fn list_to_pairlist(list: Sexp, kind: SexpType) -> R<Sexp> {
             SexpType::List | SexpType::Expression => list.element(index),
             _ => crate::subset::vector_element(list, index)?,
         };
-        items.push((tag, value));
+        builder.push(tag, value)?;
     }
-    pairlist(&items, kind)
+    Ok(builder.finish())
 }
 
 /// Whether a `CHARSXP` is the empty string.

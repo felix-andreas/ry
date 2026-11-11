@@ -31,7 +31,7 @@ use {
     interp::{unwind::Unwind, values as rvalues},
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
-    std::{cell::RefCell, sync::OnceLock},
+    std::cell::RefCell,
 };
 
 /// Why a closure does not compile, for the log.
@@ -157,13 +157,13 @@ pub unsafe fn compiled_for(function: Sexp, params: &[Type]) -> Option<&'static C
     let compiled = match result {
         Ok(compiled) => {
             interp::heap().add_global_root(function);
-            if logging() {
+            if interp::annotations::typed_logging() {
                 eprintln!("typed: compiled for {params:?} -> {:?}", compiled.result);
             }
             Some(&*Box::leak(Box::new(compiled)))
         }
         Err(Refusal(why)) => {
-            if logging() {
+            if interp::annotations::typed_logging() {
                 eprintln!("typed: no code for {params:?}: {why}");
             }
             None
@@ -592,7 +592,3 @@ fn depth_budget() -> i64 {
     i64::from(state.max_depth) - state.frames.len() as i64
 }
 
-pub(crate) fn logging() -> bool {
-    static LOGGING: OnceLock<bool> = OnceLock::new();
-    *LOGGING.get_or_init(|| std::env::var_os("RY_TYPED_LOG").is_some())
-}

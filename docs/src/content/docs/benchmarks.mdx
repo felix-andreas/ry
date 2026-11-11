@@ -148,8 +148,10 @@ The runner, not this page, judges the data:
   may sum in a different order. A program that fails on any engine also fails the run.
 - **Package tests.** The packages suite is the exception, because there the program is the
   package's own test suite. Test counts that differ between the engines are flagged as tests
-  differ, and a test suite that does not run to the end on an engine is recorded as failing there,
-  which leaves the package out of the geometric mean.
+  differ, and the package stays in the geometric mean. A test script that ends in an R error, as
+  `R CMD check` reads a failing script, counts as one failed test. A test suite that crashes or
+  does not run to the end on an engine is recorded as failing there, which leaves the package out
+  of the geometric mean.
 - **Too short.** A program GNU R finishes in under 0.1 s does too little work for a stable ratio, so
   it is flagged too short and left out of every geometric mean. A ry time under 0.1 s is flagged
   too, but it counts, because that speed is what the suite measures.

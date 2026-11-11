@@ -893,7 +893,7 @@ unsafe fn record_fetch(
 /// `ryCodeImageRecord(directory)`: from now on, records every lazy-load record fetched from a
 /// database under `directory` with the closures it made, for [`do_write`].
 unsafe fn do_record(call: &Call<'_>) -> R<Sexp> {
-    let directory = values::require_string(call.arg(0), "directory")?;
+    let directory = values::require_str(call.arg(0), "directory")?.into_owned();
     let directory = std::path::absolute(&directory)
         .map_err(|failure| error(format!("cannot resolve {directory}: {failure}")))?;
     let state = &mut interp().code_image;
@@ -950,7 +950,15 @@ unsafe fn do_write(call: &Call<'_>) -> R<Sexp> {
         .records
         .iter()
         .try_for_each(|(database, records)| {
-            write_image(database, records, build, trained, explain, code, &mut summary)
+            write_image(
+                database,
+                records,
+                build,
+                trained,
+                explain,
+                code,
+                &mut summary,
+            )
         });
     release_recording(&recording);
     written?;

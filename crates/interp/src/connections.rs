@@ -547,7 +547,7 @@ pub unsafe fn with_input<T>(file: Sexp, read: impl FnOnce(&[u8], &mut usize) -> 
 /// The whole text of a file path (decompressed when it is gzip data) or of a connection.
 pub unsafe fn read_all_text(file: Sexp) -> R<String> {
     if file.kind() == SexpType::String {
-        let path = expand_path(&values::require_string(file, "file")?);
+        let path = expand_path(&values::require_str(file, "file")?);
         let bytes = std::fs::read(&path).map_err(|failure| {
             error(format!(
                 "cannot open file '{path}': {}",
@@ -638,7 +638,7 @@ pub unsafe fn print(file: Sexp, text: &[u8]) -> R<()> {
 /// Writes text to a connection, or a file path, or the console for `""`.
 pub unsafe fn write_text(file: Sexp, text: &str) -> R<()> {
     if file.kind() == SexpType::String {
-        let path = values::require_string(file, "file")?;
+        let path = values::require_str(file, "file")?;
         if path.is_empty() {
             crate::write_console(text.as_bytes(), false);
             return Ok(());
@@ -679,8 +679,8 @@ pub fn expand_path(path: &str) -> String {
 /// anonymous file, opened `"w+"` unless `open` says otherwise, and a file opened for reading
 /// that holds compressed data reads decompressed with class `gzfile`, `bzfile` or `xzfile`.
 unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
-    let description = values::require_string(call.arg(0), "description")?;
-    let open = values::require_string(call.arg(1), "open")?;
+    let description = values::require_str(call.arg(0), "description")?;
+    let open = values::require_str(call.arg(1), "open")?.into_owned();
     let blocking = values::require_flag(call.arg(2), "blocking")?;
     let mut raw = values::require_flag(call.arg(5), "raw")?;
     let text_encoding = values::first_string(call.arg(3))
@@ -705,7 +705,7 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
         }
     }
     let (path, temporary, open) = if description.is_empty() {
-        let open = match open.as_str() {
+        let open = match open.as_ref() {
             "" => "w+".to_owned(),
             "w+" | "w+b" => open,
             _ => {
@@ -776,8 +776,8 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
 /// gzip, bzip2 or xz data, whichever the magic bytes announce, and pass anything else through,
 /// as GNU R's do. Writes use the connection's own format.
 unsafe fn compressed_file(call: &Call<'_>, encoding: Compressed) -> R<Sexp> {
-    let description = values::require_string(call.arg(0), "description")?;
-    let open = values::require_string(call.arg(1), "open")?;
+    let description = values::require_str(call.arg(0), "description")?;
+    let open = values::require_str(call.arg(1), "open")?;
     let compression = values::as_integer_scalar(call.arg(3));
     // xzfile's negative levels select the slower "extreme" presets, which ry treats as the
     // matching ordinary preset.
@@ -812,11 +812,11 @@ unsafe fn compressed_file(call: &Call<'_>, encoding: Compressed) -> R<Sexp> {
 /// client of `host:port`, or with `server = TRUE` the first client to connect to `port`. The
 /// socket connects or accepts when the connection opens.
 unsafe fn do_socket_connection(call: &Call<'_>) -> R<Sexp> {
-    let host = values::require_string(call.arg(0), "host")?;
+    let host = values::require_str(call.arg(0), "host")?.into_owned();
     let port = socket_port(call.arg(1))?;
     let server = values::require_flag(call.arg(2), "server")?;
     let blocking = values::require_flag(call.arg(3), "blocking")?;
-    let open = values::require_string(call.arg(4), "open")?;
+    let open = values::require_str(call.arg(4), "open")?;
     let timeout = socket_timeout_seconds(call.arg(6));
     let no_delay = socket_no_delay(call.arg(7));
     let description = if server {
@@ -876,7 +876,7 @@ unsafe fn do_socket_accept(call: &Call<'_>) -> R<Sexp> {
         return Err(error("'socket' is not a servsockconn"));
     };
     let blocking = values::require_flag(call.arg(1), "blocking")?;
-    let open = values::require_string(call.arg(2), "open")?;
+    let open = values::require_str(call.arg(2), "open")?;
     let timeout = socket_timeout_seconds(call.arg(4));
     let no_delay = socket_no_delay(call.arg(5));
     let listener = server
@@ -896,7 +896,7 @@ unsafe fn do_socket_accept(call: &Call<'_>) -> R<Sexp> {
         input: Vec::new(),
         input_position: 0,
     });
-    let open = if open.is_empty() { "a+" } else { open.as_str() };
+    let open = if open.is_empty() { "a+" } else { open.as_ref() };
     let description = format!("<-localhost:{port}");
     new_builtin(
         "sockconn",
@@ -1151,10 +1151,10 @@ fn unsupported(class: &str) -> Unwind {
 /// `pipe(description, open, encoding)`: the command's standard output to read, or its input to
 /// write.
 unsafe fn do_pipe(call: &Call<'_>) -> R<Sexp> {
-    let command = values::require_string(call.arg(0), "description")?;
-    let open = values::require_string(call.arg(1), "open")?;
+    let command = values::require_str(call.arg(0), "description")?;
+    let open = values::require_str(call.arg(1), "open")?;
     let command_text =
-        CString::new(command.as_str()).map_err(|_| error("embedded nul in a pipe command"))?;
+        CString::new(command.as_ref()).map_err(|_| error("embedded nul in a pipe command"))?;
     let device = Device::Pipe(PipeDevice {
         command: command_text,
         stream: null_mut(),
@@ -1167,12 +1167,12 @@ unsafe fn do_pipe(call: &Call<'_>) -> R<Sexp> {
 
 /// `rawConnection(description, object, open)`: reads from or writes into a copy of a raw vector.
 unsafe fn do_raw_connection(call: &Call<'_>) -> R<Sexp> {
-    let description = values::require_string(call.arg(0), "description")?;
+    let description = values::require_str(call.arg(0), "description")?.into_owned();
     let object = call.arg(1);
     if object.kind() != SexpType::Raw {
         return Err(error("invalid 'raw' argument"));
     }
-    let open = values::require_string(call.arg(2), "open")?;
+    let open = values::require_str(call.arg(2), "open")?.into_owned();
     let open = if open.is_empty() {
         "r".to_owned()
     } else {
@@ -1200,8 +1200,8 @@ unsafe fn do_raw_connection(call: &Call<'_>) -> R<Sexp> {
 /// `unz(description, open, encoding)`: reads one member of a zip archive, named
 /// `"archive:member"` with the member after the last colon, as GNU R splits it.
 unsafe fn do_unz(call: &Call<'_>) -> R<Sexp> {
-    let description = values::require_string(call.arg(0), "description")?;
-    let open = values::require_string(call.arg(1), "open")?;
+    let description = values::require_str(call.arg(0), "description")?;
+    let open = values::require_str(call.arg(1), "open")?;
     let Some((archive, member)) = description.rsplit_once(':') else {
         return Err(error("invalid 'description' argument"));
     };
@@ -1221,9 +1221,9 @@ unsafe fn do_unz(call: &Call<'_>) -> R<Sexp> {
 /// `url(description, open, blocking, encoding, method, headers)`. A `file://` URL reads the
 /// file; any other URL is fetched whole when the connection opens.
 unsafe fn do_url(call: &Call<'_>) -> R<Sexp> {
-    let description = values::require_string(call.arg(0), "description")?;
-    let open = values::require_string(call.arg(1), "open")?;
-    let method = values::require_string(call.arg(4), "method")?;
+    let description = values::require_str(call.arg(0), "description")?;
+    let open = values::require_str(call.arg(1), "open")?;
+    let method = values::require_str(call.arg(4), "method")?;
     if method == "internal" && !description.starts_with("file://") {
         let scheme = description.split_once("://").map(|(scheme, _)| scheme);
         return Err(error(match scheme {
@@ -1369,9 +1369,9 @@ unsafe fn do_gzcon(call: &Call<'_>) -> R<Sexp> {
 /// `textConnection(nm, object, open, env, type)`: reads the lines of a character vector, or
 /// collects written lines, into the variable `object` names in `env` when it names one.
 unsafe fn do_text_connection(call: &Call<'_>) -> R<Sexp> {
-    let description = values::require_string(call.arg(0), "description")?;
+    let description = values::require_str(call.arg(0), "description")?.into_owned();
     let object = call.arg(1);
-    let open = values::require_string(call.arg(2), "open")?;
+    let open = values::require_str(call.arg(2), "open")?;
     let env = call.arg(3);
     // GNU R reads only the mode's first letter, so `"rt"` reads and knitr's `"wr"` writes.
     let device = match open.bytes().next() {
@@ -1391,7 +1391,7 @@ unsafe fn do_text_connection(call: &Call<'_>) -> R<Sexp> {
             let target = if object == nil() {
                 None
             } else {
-                let name = values::require_string(object, "object")?;
+                let name = values::require_str(object, "object")?;
                 Some(TextTarget {
                     symbol: values::install(&name)?,
                     env,
@@ -1429,7 +1429,7 @@ unsafe fn do_text_connection(call: &Call<'_>) -> R<Sexp> {
         }) => values::symbol_name(target.symbol).into_owned(),
         _ => description,
     };
-    let open = if open.is_empty() { "r" } else { open.as_str() };
+    let open = if open.is_empty() { "r" } else { open.as_ref() };
     new_builtin(
         "textConnection",
         description.as_bytes(),
@@ -1443,7 +1443,7 @@ unsafe fn do_text_connection(call: &Call<'_>) -> R<Sexp> {
 /// `open(con, open, blocking)`. Opening an open connection only warns, as in GNU R.
 unsafe fn do_open(call: &Call<'_>) -> R<Sexp> {
     let (slot, con) = resolve_con(call.arg(0))?;
-    let mode = values::require_string(call.arg(1), "open")?;
+    let mode = values::require_str(call.arg(1), "open")?;
     let blocking = values::require_flag(call.arg(2), "blocking")?;
     if slot <= 2 {
         return Err(error("cannot open standard connections"));
@@ -1617,7 +1617,7 @@ unsafe fn do_write_lines(call: &Call<'_>) -> R<Sexp> {
         return Err(error("can only write character objects"));
     }
     let con = resolve_con(call.arg(1))?.1;
-    let separator = values::require_string(call.arg(2), "sep")?;
+    let separator = values::require_str(call.arg(2), "sep")?;
     let use_bytes = values::as_logical_scalar(call.arg(3)) == 1;
     with_open(con, "wt", || {
         if (*con).canwrite == 0 {
@@ -1788,7 +1788,7 @@ unsafe fn do_write_char(call: &Call<'_>) -> R<Sexp> {
     let counts = values::ints(call.arg(2)).to_vec();
     let terminator = match call.arg(3) {
         eos if eos == nil() => None,
-        eos => Some(values::require_string(eos, "eos")?),
+        eos => Some(values::require_str(eos, "eos")?),
     };
     let use_bytes = values::require_flag(call.arg(4), "useBytes")?;
     let strings = values::strings(object);
@@ -1845,7 +1845,7 @@ unsafe fn do_write_char(call: &Call<'_>) -> R<Sexp> {
 /// `readBin(con, what, n, size, signed, swap)`, from a connection or from a raw vector.
 unsafe fn do_read_bin(call: &Call<'_>) -> R<Sexp> {
     let source = call.arg(0);
-    let kind = match values::require_string(call.arg(1), "what")?.as_str() {
+    let kind = match values::require_str(call.arg(1), "what")?.as_ref() {
         "numeric" | "double" => BinaryType::Double,
         "integer" | "int" => BinaryType::Integer,
         "logical" => BinaryType::Logical,
@@ -2223,19 +2223,18 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
                     .map(|index| cat_element(item, index, settings))
                     .collect::<R<_>>()?
             }
-            SexpType::List
-                if (0..values::length(item)).all(|index| {
-                    let element = item.element(index);
-                    element.kind().is_atomic() && values::length(element) == 1
-                }) =>
-            {
-                (0..values::length(item))
-                    .map(|index| cat_element(item.element(index), 0, settings))
-                    .collect::<R<_>>()?
-            }
-            SexpType::Language => vec![crate::deparse::deparse_one_line(item)],
+            // GNU R handles only atomic vectors and names; a list, even of length-one
+            // elements, a call and anything else is an error, reported against `cat()`'s own
+            // call. An empty list prints nothing.
+            SexpType::List if values::length(item) == 0 => Vec::new(),
             kind => {
-                return Err(call.error(format!(
+                // GNU R writes each object as it goes, so the objects before this one and the
+                // separator in front of it are already out when the error is raised.
+                if item_index > 0 {
+                    output.push_str(&separator_at(separator_index));
+                }
+                cat_text(file, output.as_bytes())?;
+                return Err(error(format!(
                     "argument {} (type '{}') cannot be handled by 'cat'",
                     item_index + 1,
                     kind.name()

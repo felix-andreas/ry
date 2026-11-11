@@ -7,7 +7,7 @@ use {
         testing::{ReloadLoaders, check_load_index_input, check_random_reload},
     },
     std::{path::PathBuf, time::Duration},
-    syntax::testing::{SplitMix64, for_each_seed, fuzz_iterations, mutate_seed, random_bytes},
+    syntax::testing::{SplitMix64, for_each_seed, mutate_seed, random_bytes},
 };
 
 #[test]
@@ -78,23 +78,42 @@ fn changed_roots_reports_each_disk_edit_once() {
         loader.changed_roots().is_empty(),
         "nothing changed since the load"
     );
-    // Each edit changes the size, so it shows even within one timestamp tick.
-    let mut rng = SplitMix64(7);
-    let mut text = String::from("f <- function() 22\n");
-    for step in 0..fuzz_iterations(20) {
-        let edited = rng.chance(1, 2);
-        if edited {
-            text.push_str("# edit\n");
-            let file = if rng.chance(1, 3) { "R/b.R" } else { "R/a.R" };
-            std::fs::write(root.join(file), &text).expect("write");
+}
+
+/// A random run of edits and quiet polls against a loaded package: each poll reports exactly
+/// the edits since the one before it, once.
+#[test]
+fn random_edits_are_each_reported_once() {
+    for_each_seed(4, |seed| {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let root = directory.path();
+        std::fs::create_dir_all(root.join("R")).expect("create R/");
+        std::fs::write(root.join("DESCRIPTION"), "Package: demo\nVersion: 1.0\n").expect("write");
+        std::fs::write(root.join("R/a.R"), "f <- function() 1\n").expect("write");
+        std::fs::write(root.join("R/b.R"), "g <- function() 1\n").expect("write");
+        let mut loader = Loader::default();
+        loader
+            .plan(root, false, &NamespaceConditions::default())
+            .expect("plans");
+        loader.commit(root);
+        // Each edit changes the size, so it shows even within one timestamp tick.
+        let mut rng = SplitMix64(0x0ED1_75 ^ seed);
+        let mut text = String::from("f <- function() 22\n");
+        for step in 0..5 {
+            let edited = rng.chance(1, 2);
+            if edited {
+                text.push_str("# edit\n");
+                let file = if rng.chance(1, 3) { "R/b.R" } else { "R/a.R" };
+                std::fs::write(root.join(file), &text).expect("write");
+            }
+            let changed = loader.changed_roots();
+            assert_eq!(changed.len(), usize::from(edited), "step {step}");
+            assert!(
+                loader.changed_roots().is_empty(),
+                "step {step}: reported twice"
+            );
         }
-        let changed = loader.changed_roots();
-        assert_eq!(changed.len(), usize::from(edited), "step {step}");
-        assert!(
-            loader.changed_roots().is_empty(),
-            "step {step}: reported twice"
-        );
-    }
+    });
 }
 
 /// An edit anywhere a load or a test run reads is reported by the watcher, tests and installed

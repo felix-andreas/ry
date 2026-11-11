@@ -811,7 +811,9 @@ unsafe fn do_withr_get_options(call: &Call<'_>) -> R<Sexp> {
     // vector would make `options()` read only its first name.
     let mut arguments = Vec::with_capacity(length(names));
     for index in 0..length(names) {
-        arguments.push(values::scalar_string_charsxp(values::string_elt(names, index))?);
+        arguments.push(values::scalar_string_charsxp(values::string_elt(
+            names, index,
+        ))?);
     }
     let old = kernel(envir::do_options, &arguments, frame)?;
     finish(frame, old, interp().visible)

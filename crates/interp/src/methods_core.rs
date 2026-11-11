@@ -1044,7 +1044,9 @@ unsafe fn forced_value(symbol: Sexp, frame: Sexp) -> R<Option<Sexp>> {
     if crate::heap().frame_cell(frame, symbol).is_none() {
         return Ok(None);
     }
-    Ok(Some(eval::value_of(eval::find_var_in_frame(symbol, frame)?)?))
+    Ok(Some(eval::value_of(eval::find_var_in_frame(
+        symbol, frame,
+    )?)?))
 }
 
 unsafe fn quiet_binding(cell: Sexp, depth: u32) -> R<Option<Sexp>> {
@@ -3901,10 +3903,14 @@ unsafe fn do_cache_meta_data(call: &Call<'_>) -> R<Sexp> {
                     item.element(0)
                 }
             };
-            if name == values::na_string() || others_packages.element(index) == values::na_string() {
+            if name == values::na_string() || others_packages.element(index) == values::na_string()
+            {
                 bail!(skip);
             }
-            required.push((name.bytes().to_vec(), others_packages.element(index).bytes().to_vec()));
+            required.push((
+                name.bytes().to_vec(),
+                others_packages.element(index).bytes().to_vec(),
+            ));
         }
     }
     let Some(package) = forced_value(symbols().dot_package_name, place)? else {
@@ -4471,7 +4477,10 @@ unsafe fn cache_foreign_generic(
                 bail!(false);
             }
         }
-        let removed: Vec<Sexp> = all.into_iter().filter(|label| !direct.contains(label)).collect();
+        let removed: Vec<Sexp> = all
+            .into_iter()
+            .filter(|label| !direct.contains(label))
+            .collect();
         plans.push((methods_table, all_table, removed, refill.then_some(direct)));
     }
 
