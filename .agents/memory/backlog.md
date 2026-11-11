@@ -122,10 +122,6 @@ left, in order of expected gain:
 - **Nix.** `flake.nix` fetches the tarball as a fixed-output derivation and builds the base in `postInstall`; `nix build` has not been run yet.
 - **Old base trees stay in the cache after an upgrade**, as runtimes do (see below).
 
-## Open: the package test suite benchmark
-
-- **zoo's tests fail on GNU R too.** In `tools/bench/packages/results.json`, zoo's test scripts halt on both engines (`vignette-zoo.R: Execution halted`), so it has no time on either. A failure on GNU R points at the corpus (a missing Suggests package or an offline step), not at ry; fix the lock or the runner so zoo measures.
-
 ## Open: the benchmark packages under ry's runtime
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.

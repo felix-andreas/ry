@@ -28,4 +28,4 @@ uuid
 withr
 xts
 zeallot
-zoo chron mondate strucchange timeDate tis tseries
+zoo AER chron mondate strucchange timeDate tis tseries
