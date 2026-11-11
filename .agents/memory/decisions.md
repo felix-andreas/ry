@@ -8784,11 +8784,12 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Weakness.** Code that ran during start-up carries the writer's inline caches, type feedback, profile counters and slot hints, so it could not be imaged as it was; dropping all code threw away work every session repeats.
 - **Target shape.** `bytecode::compile_namespaces_for_image` compiles every closure bound in a loaded namespace afresh, never runs it, and installs it as the closure's body; the image keeps exactly that set and stores any other code object as its source. Inline caches are weak-pair lists, which the image writes empty anyway; `PROFILE[RECORDING]` follows whether the writer had a tier, and a process without one clears it at the first entry, as decoded code does. Unforced lazy-load bindings stay promises (backlog: "Unforced base bindings still compile at run time").
 - **Why the heap image and not base `.ryc` code.** The `.ryc` route decodes each closure at its first call and costs about what compiling does (see "Lazy-load records are read in place from the code image"); heap pages are mapped as they are, with nothing decoded, and pages of never-called code stay page cache.
-- **Measured** (bench build, against main with each build's own start image):
-  - Callgrind: empty run 49.4M to 40.3M instructions (-18.5%), testthat_full (`RY_BENCH_REPEAT=1`, JIT off) 1,922.2M to 1,905.7M (-0.9%).
-  - Wall time, 30 paired rounds: empty run 1.009x [0.960, 1.060], testthat_full 1.007x [0.941, 1.076], both inside this machine's noise.
-  - Peak RSS with the page cache dropped (6 rounds): empty run 34.3 to 35.8 MB, all of it file-backed (anonymous 13 MB on both), testthat_full 64.5 to 64.6 MB. With a hot cache the empty run peaks 4.6 MB higher, the large-folio effect of a freshly written image.
-  - Start image 17.2 to 19.1 MB.
+- **Layout.** The writer allocates the fresh code on heap pages of its own (`Heap::segregate`) and ranks its large objects last; the image records those pages and the large-section offset, and the loader advises `MADV_RANDOM` over them. Without that, read-around on a cold fault plus fault-around pulled whole 64 KB chunks of never-run code into an empty start (it touches about 80 fresh closures spread over most chunks), which cost 1.5 MB of peak RSS. Advising the whole image instead doubled cold start-up; leaving image pages out of allocation cost testthat_full 4.5 MB.
+- **Measured** (release build, against main with each build's own start image):
+  - Callgrind (JIT off): empty run 49.2M to 39.1M instructions (-20.7%), testthat_full (`RY_BENCH_REPEAT=1`) 1,923.9M to 1,902.2M (-1.1%).
+  - Hot cache, 30 paired rounds: wall time empty run 0.90x [0.83, 0.97], testthat_full 1.01x [0.97, 1.06]; peak RSS empty 35.2 to 36.3 MB, testthat_full 66.8 to 66.0 MB.
+  - Page cache dropped, 6 rounds: peak RSS empty 34.6 to 34.8 MB, testthat_full 66.4 to 65.6 MB; wall time 1.20x and 1.14x, since each touched cold page is its own read.
+  - Start image 17.2 to 20.4 MB.
 
 ## Four published benchmark suites, one runner
 - **Previous shape.** Benchmarks lived in `tools/bench/why` (typed kernels with untyped twins) and `tools/bench/real` (workloads plus the public programs and the generated packages' tests), each with its own runner, results format and sampling (best time over repeats in one, medians of three rounds in the other). The package corpus had a third runner (`packages/run.py`) and its own README table. Typed versions lived in a parallel folder, so a program's two forms could drift apart in size.
