@@ -10,3 +10,6 @@
 [warnings]
 [errors]
 [value]
+integer
+| c(2L, 2L, 2L, 2L, 2L, 2L, 2L, 2L, 2L, 3L, 3L, 3L, 3L, 3L, 3L, 
+| 3L, 3L, 3L, 3L, 3L)

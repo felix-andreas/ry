@@ -1429,10 +1429,8 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
         crate::boundary::write_console(b"ry: the package loader did not load\n", true);
         return false;
     }
-    if heap::gc_stress_requested() == Some(heap::GcStressStart::Script) {
-        runtime()
-            .heap
-            .update_policy(|policy| policy.stress = heap::GcStress::EveryAllocation);
+    if let Some((heap::GcStressStart::Script, stress)) = heap::gc_stress_requested() {
+        runtime().heap.update_policy(|policy| policy.stress = stress);
     }
     // As under `Rscript`, SIGINT interrupts the script's evaluation, which R code can catch,
     // instead of killing the process.
