@@ -121,6 +121,14 @@ pub struct HeapImage {
     large: Vec<u64>,
     /// Each object's address and size in bytes, by stable id ([`Heap::write_image`]).
     ids: Vec<u64>,
+    numbering: u64,
+}
+
+/// The order an image's objects are laid out in: stable ids ([`HeapImage::ids`]), each listed
+/// once, for the numbering whose digest is `numbering` ([`HeapImage::numbering`]).
+pub struct ImageOrder<'a> {
+    pub numbering: u64,
+    pub ids: &'a [u32],
 }
 
 impl HeapImage {
@@ -130,6 +138,13 @@ impl HeapImage {
     /// one image orders the next one.
     pub fn ids(&self) -> &[u8] {
         words_as_bytes(&self.ids)
+    }
+
+    /// A digest of how the objects are numbered: their count and each one's size, by id. Two
+    /// heaps with the same digest number the same objects the same way, so an order recorded
+    /// against one lays out the other.
+    pub fn numbering(&self) -> u64 {
+        self.numbering
     }
 
     pub fn pages(&self) -> &[u8] {
@@ -237,7 +252,8 @@ impl Heap {
     /// The image is compacted: every object that can move is laid out in `order`, a list of
     /// stable ids, and then in the order of the ids, which number the objects in a walk from the
     /// roots that does not depend on their addresses. Objects with an id missing from `order`
-    /// follow those in it, in id order.
+    /// follow those in it, in id order. An order recorded for another numbering is an error,
+    /// since its ids would name other objects.
     ///
     /// Everything the heap's roots, the fixed objects and `roots` reach is kept; the loader
     /// returns `roots`, in order. `replace` names an object the image stores in place of another
@@ -251,7 +267,7 @@ impl Heap {
         fixed: &Fixed<'_>,
         precondition: u64,
         roots: &[Sexp],
-        order: &[u32],
+        order: Option<ImageOrder<'_>>,
         prefixes: &[Vec<u8>],
         replace: &dyn Fn(Sexp) -> Option<Sexp>,
         address: &mut dyn FnMut(Sexp) -> Option<u64>,
@@ -305,6 +321,22 @@ impl Heap {
         out.bytes.extend_from_slice(MAGIC);
         out.u64(precondition);
         let mut ids = self.number_for_image(&fixed_objects, &roots);
+        let mut numbering = Digest::new();
+        numbering.word(ids.len() as u64);
+        for &object in &ids {
+            numbering.word(self.size_of(object) as u64);
+        }
+        let numbering = numbering.finish();
+        let order = match order {
+            Some(order) if order.numbering != numbering => {
+                return Err(ImageError::Mismatch(format!(
+                    "the layout order was recorded for objects numbered {:016x}, and this heap's are numbered {numbering:016x}",
+                    order.numbering
+                )));
+            }
+            Some(order) => order.ids,
+            None => &[],
+        };
         let mut ranked: Vec<Sexp> = Vec::with_capacity(ids.len());
         let mut placed = vec![false; ids.len()];
         for id in order.iter().copied().chain(0..ids.len() as u32) {
@@ -459,6 +491,7 @@ impl Heap {
             pages,
             large,
             ids,
+            numbering,
         })
     }
 

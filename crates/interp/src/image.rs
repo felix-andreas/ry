@@ -17,7 +17,7 @@ use {
     crate::{builtin_libraries, bytecode, dispatch, format, heap, interp, unwind::R, values::nil},
     heap::{
         Fixed, ImageError, Relocation,
-        image::{Reader, Writer},
+        image::{ImageOrder, Reader, Writer},
         object::{Sexp, SexpType},
     },
     std::path::{Path, PathBuf},
@@ -208,7 +208,7 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<bool, LoadErro
             ImageError::Mismatch(_) => LoadError::Untouched(error.to_string()),
             _ => LoadError::Partial(error.to_string()),
         })?;
-    touch::record(&heap().image_memory());
+    touch::record(&heap().image_memory(), expected);
     restore_state(state, &roots, &relocation)
         .map_err(|error| LoadError::Partial(error.to_string()))?;
     Ok(true)
@@ -358,17 +358,9 @@ pub(crate) unsafe fn write(
     layout: Option<&Path>,
     before: &Before,
 ) -> Result<(), String> {
-    let order: Vec<u32> = match layout.map(|layout| layout.join("order")) {
-        Some(file) if file.exists() => std::fs::read_to_string(&file)
-            .map_err(|failure| format!("cannot read {}: {failure}", file.display()))?
-            .lines()
-            .map(|line| {
-                line.trim()
-                    .parse()
-                    .map_err(|_| format!("{} lists `{line}`, which is not an id", file.display()))
-            })
-            .collect::<Result<_, _>>()?,
-        _ => Vec::new(),
+    let order = match layout.map(|layout| layout.join("order")) {
+        Some(file) if file.exists() => Some(read_order(&file)?),
+        _ => None,
     };
     // Compiling comes before `check_empty`, so the check also covers any interpreter state a
     // rejected body could leave behind. Compiling runs no R code and adds no record layouts, so
@@ -398,7 +390,10 @@ pub(crate) unsafe fn write(
             &fixed,
             before.precondition,
             &roots,
-            &order,
+            order.as_ref().map(|(numbering, ids)| ImageOrder {
+                numbering: *numbering,
+                ids,
+            }),
             &prefixes,
             &|object| {
                 (object.kind() == SexpType::Bytecode
@@ -412,11 +407,6 @@ pub(crate) unsafe fn write(
             &mut |pointer| builtin_libraries::routine_token(pointer),
         )
         .map_err(|error| error.to_string())?;
-    if let Some(layout) = layout {
-        let file = layout.join("ids");
-        std::fs::write(&file, image.ids())
-            .map_err(|failure| format!("cannot write {}: {failure}", file.display()))?;
-    }
     let mut payload = Writer::default();
     payload.u32(homes.len() as u32);
     for home in &homes {
@@ -428,7 +418,8 @@ pub(crate) unsafe fn write(
     payload.u64(image.large().len() as u64);
     let mut header = Writer::default();
     header.blob(host.identity.as_bytes());
-    header.u64(checksum(&payload.bytes));
+    let image_checksum = checksum(&payload.bytes);
+    header.u64(image_checksum);
     header.bytes.extend_from_slice(&payload.bytes);
     let mut out = Writer::default();
     out.bytes.extend_from_slice(MAGIC);
@@ -446,7 +437,40 @@ pub(crate) unsafe fn write(
     let cannot_write =
         |failure: std::io::Error| format!("cannot write {}: {failure}", path.display());
     std::fs::write(&partial, &out.bytes).map_err(cannot_write)?;
-    std::fs::rename(&partial, path).map_err(cannot_write)
+    std::fs::rename(&partial, path).map_err(cannot_write)?;
+    if let Some(layout) = layout {
+        // The header ties the ids to this image, which touch profiles name by its checksum,
+        // and to the numbering, which the next write's order must match.
+        let mut ids = Vec::with_capacity(16 + image.ids().len());
+        ids.extend_from_slice(&image_checksum.to_le_bytes());
+        ids.extend_from_slice(&image.numbering().to_le_bytes());
+        ids.extend_from_slice(image.ids());
+        let file = layout.join("ids");
+        std::fs::write(&file, ids)
+            .map_err(|failure| format!("cannot write {}: {failure}", file.display()))?;
+    }
+    Ok(())
+}
+
+/// Reads a layout order (`tools/layout/image_order.py`): a first line `numbering HEX` naming
+/// the numbering its ids belong to, then one decimal id per line.
+fn read_order(file: &Path) -> Result<(u64, Vec<u32>), String> {
+    let text = std::fs::read_to_string(file)
+        .map_err(|failure| format!("cannot read {}: {failure}", file.display()))?;
+    let mut lines = text.lines();
+    let numbering = lines
+        .next()
+        .and_then(|line| line.strip_prefix("numbering "))
+        .and_then(|digest| u64::from_str_radix(digest.trim(), 16).ok())
+        .ok_or_else(|| format!("{} does not start with a `numbering` line", file.display()))?;
+    let ids = lines
+        .map(|line| {
+            line.trim()
+                .parse()
+                .map_err(|_| format!("{} lists `{line}`, which is not an id", file.display()))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok((numbering, ids))
 }
 
 /// Every primitive by index, which both processes create the same way before start-up.
@@ -778,7 +802,7 @@ pub(crate) mod touch {
     }
 
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-    pub(crate) fn record(_memory: &[std::ops::Range<usize>; 2]) {}
+    pub(crate) fn record(_memory: &[std::ops::Range<usize>; 2], _image: u64) {}
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub(crate) use recorder::record;
@@ -813,11 +837,13 @@ pub(crate) mod touch {
             open: Option<usize>,
             previous_segv: libc::sigaction,
             output: PathBuf,
+            /// The loaded image's header checksum, which names it in the profile.
+            image: u64,
         }
 
         static mut RECORDER: Option<Recorder> = None;
 
-        pub(crate) fn record(memory: &[Range<usize>; 2]) {
+        pub(crate) fn record(memory: &[Range<usize>; 2], image: u64) {
             let Some(output) = std::env::var_os("RY_IMAGE_TOUCH") else {
                 return;
             };
@@ -834,6 +860,7 @@ pub(crate) mod touch {
                     open: None,
                     previous_segv: std::mem::zeroed(),
                     output: PathBuf::from(output),
+                    image,
                 });
                 let Some(state) = recorder.as_mut() else {
                     return;
@@ -932,7 +959,8 @@ pub(crate) mod touch {
                         );
                     }
                 }
-                let mut text = String::with_capacity(state.touches.len() * 16);
+                let mut text = String::with_capacity(state.touches.len() * 16 + 32);
+                text.push_str(&format!("image {:016x}\n", state.image));
                 for &(address, phase) in &state.touches {
                     text.push_str(&format!("{address:x} {phase}\n"));
                 }

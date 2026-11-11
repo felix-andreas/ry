@@ -662,22 +662,29 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   objects go to the large section in the same order. Without an order the writer still
   compacts, in id order. Nothing is advised, because reading only the touched pages makes each
   page its own read and slows a cold start.
-- **The touch profile.** The layout build (`tools/layout/optimize.sh`) writes the image twice:
-  - The first write also writes `ids` into the layout directory (`ry-rcmd start-image BASE
-    --libr FILE --layout DIR`): for each id in turn, the object's address and size as two
-    little-endian `u64`s. Ids come from a depth-first walk over each object's handles (and an
-    environment's bound symbols and values), seeded in this order: fixed objects, global roots,
-    the precious set, the heap's globals, weak references, untracked objects, symbols sorted by
-    name, interned strings sorted by bytes, then every other live object by address. The same
-    heap state therefore gives the same ids in both writes.
-  - Each training run of `tools/layout/train.py --image-touch DIR` sets `RY_IMAGE_TOUCH=FILE`,
-    which protects the mapped image (x86-64 Linux only) and writes one line per first touch of a
-    16-byte granule: the address in hex and a phase, 0 for start-up, 1 inside a namespace load,
-    2 otherwise. The mix adds an empty program to the training programs.
-  - `tools/layout/image_order.py` maps the touches to ids and writes `order`, one decimal id per
-    line, sorted by the earliest phase any run touched the object in, then by its earliest
-    position relative to the run's length. The second write reads `order`; ids it does not list
-    follow in id order.
+- **The touch profile.** The layout build (`tools/layout/optimize.sh`) writes the image twice,
+  and three files in a layout directory carry the profile from the first write to the second.
+  None of them is part of the image: the loader never reads them, so a missing or stale profile
+  can only leave the image laid out in id order, and every step below refuses a file recorded
+  for another image or numbering instead of using it.
+  - `ids`, written by the first write (`ry-rcmd start-image BASE --libr FILE --layout DIR`), is
+    little-endian `u64`s: the image's header checksum, the digest of its numbering (the object
+    count and each object's size, by id), then each object's address and size, by id. Ids come
+    from a depth-first walk over each object's handles (and an environment's bound symbols and
+    values), seeded in this order: fixed objects, global roots, the precious set, the heap's
+    globals, weak references, untracked objects, symbols sorted by name, interned strings sorted
+    by bytes, then every other live object by address. The same start-up therefore numbers the
+    same objects the same way in both writes.
+  - A touch file comes from each training run of `tools/layout/train.py --image-touch DIR`,
+    which sets `RY_IMAGE_TOUCH=FILE`. The runtime then protects the mapped image (x86-64 Linux
+    only) and writes `image HEX`, the loaded image's header checksum, followed by one line per
+    first touch of a 16-byte granule: the address in hex and a phase, 0 for start-up, 1 inside a
+    namespace load, 2 otherwise. The mix adds an empty program to the training programs.
+  - `order` comes from `tools/layout/image_order.py`, which refuses a touch file whose image
+    line differs from the checksum in `ids`. It writes `numbering HEX`, copied from `ids`, then
+    one decimal id per line, sorted by the earliest phase any run touched the object in, then by
+    its earliest position relative to the run's length. The second write reads `order` and
+    fails when the numbering differs from its own; ids it does not list follow in id order.
 - **The same starting state, or no load.** Fixed objects (the heap's well-known objects, the
   primitives by index, `package:ry` and libR's ALTREP classes) exist before start-up in both
   processes. The writer records a digest of its heap's allocation state at that moment

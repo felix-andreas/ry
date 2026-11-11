@@ -10,7 +10,7 @@
 use {
     heap::{
         Collection, Fixed, Heap, ImageError, Relocation,
-        image::HeapImage,
+        image::{HeapImage, ImageOrder},
         object::{Sexp, SexpType, Shape},
         records::{Fields, Layout},
         strings::Encoding,
@@ -96,7 +96,6 @@ fn relocation_moves_paths_under_a_prefix() {
                 &mut source,
                 precondition,
                 &[vector],
-                &[],
                 &[b"/build/home".to_vec()],
             )
         };
@@ -164,8 +163,45 @@ unsafe fn round_trip(seed: u64) {
 }
 
 /// Builds the graph of `seed` in a heap at the image address and writes it, returning the image,
-/// the names the graph binds, and the graph's description.
+/// the names the graph binds, and the graph's description. Odd seeds lay the image out against
+/// its id order, so compaction moves nearly every object away from where the default layout
+/// would put it.
 unsafe fn written(seed: u64, prefixes: &[Vec<u8>]) -> (HeapImage, Vec<String>, Vec<String>) {
+    unsafe {
+        if seed % 2 == 0 {
+            return written_in(seed, prefixes, None).unwrap_or_else(|error| panic!("{error}"));
+        }
+        // The same seed builds the same heap, so a first write tells the numbering an order
+        // must be recorded for.
+        let (first, _, _) =
+            written_in(seed, prefixes, None).unwrap_or_else(|error| panic!("{error}"));
+        let numbering = first.numbering();
+        drop(first);
+        let order: Vec<u32> = (0..60_000).rev().collect();
+        let stale = ImageOrder {
+            numbering: numbering ^ 1,
+            ids: &order,
+        };
+        assert!(
+            matches!(
+                written_in(seed, prefixes, Some(stale)),
+                Err(ImageError::Mismatch(_))
+            ),
+            "seed {seed}: an order recorded for another numbering lays out the image"
+        );
+        let order = ImageOrder {
+            numbering,
+            ids: &order,
+        };
+        written_in(seed, prefixes, Some(order)).unwrap_or_else(|error| panic!("{error}"))
+    }
+}
+
+unsafe fn written_in(
+    seed: u64,
+    prefixes: &[Vec<u8>],
+    order: Option<ImageOrder<'_>>,
+) -> Result<(HeapImage, Vec<String>, Vec<String>), ImageError> {
     unsafe {
         let mut source = fresh_heap();
         let precondition = source.image_precondition(&fixed());
@@ -179,15 +215,16 @@ unsafe fn written(seed: u64, prefixes: &[Vec<u8>]) -> (HeapImage, Vec<String>, V
         let roots = build(&mut source, &mut SplitMix64(seed), &mut names);
         source.collect(Collection::Major);
         let expected = describe(&source, &roots, &names);
-        // Odd seeds lay the image out against its id order, so compaction moves nearly every
-        // object away from where the default layout would put it.
-        let order: Vec<u32> = if seed % 2 == 1 {
-            (0..60_000).rev().collect()
-        } else {
-            Vec::new()
-        };
-        let image = write(&mut source, precondition, &roots, &order, prefixes);
-        (image, names, expected)
+        let image = source.write_image(
+            &fixed(),
+            precondition,
+            &roots,
+            order,
+            prefixes,
+            &|_| None,
+            &mut encode,
+        )?;
+        Ok((image, names, expected))
     }
 }
 
@@ -358,7 +395,6 @@ unsafe fn write(
     heap: &mut Heap,
     precondition: u64,
     roots: &[Sexp],
-    order: &[u32],
     prefixes: &[Vec<u8>],
 ) -> HeapImage {
     unsafe {
@@ -366,7 +402,7 @@ unsafe fn write(
             &fixed(),
             precondition,
             roots,
-            order,
+            None,
             prefixes,
             &|_| None,
             &mut encode,
