@@ -14,6 +14,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, is_na_real},
         strings::Encoding,
     },
+    interp::sort::collate,
     std::ffi::{c_char, c_int, c_void},
 };
 
@@ -2403,7 +2404,7 @@ unsafe fn compare_elements(
             if a == na || b == na {
                 None
             } else {
-                Some(crate::strings::collate(&utf8_text(a)?, &utf8_text(b)?))
+                Some(collate(&utf8_text(a)?, &utf8_text(b)?))
             }
         }
         SexpType::Raw => {
