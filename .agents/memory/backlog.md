@@ -32,6 +32,10 @@ The quality bar is four things.
 - ry's own base R has no recommended packages, so `zoo` cannot load (`there is no package called
   'lattice'`) and the `timeseries` workload of `just bench applications` fails.
 - Deep recursion aborts the process: `options(expressions = 500000); f <- function(n) if (n == 0) 0 else 1 + f(n - 1); tryCatch(f(1e6), error = identity)` overflows the native stack instead of raising R's "evaluation nested too deeply" or "C stack usage" error. `on_large_stack` in `eval.rs` grows the stack in segments; find which frames recurse outside it.
+- Collection scheduling is nondeterministic, which the robustness rules forbid. vctrs' test suite
+  under one release build, with `RY_GC_LOG` set, ran 468 minor collections in one run and 549 in
+  the next (another build gave 552 and 551, all with 16 major collections), on a loaded 4-core
+  host. Suspects: address-dependent hashing, a timer-based trigger, or thread timing.
 - testthat 3.3.2 fails to load under ry's runtime with "attempt to use zero-length variable name" ; 3.2.3 loads. ry raises that error for `new.env()[[""]]`; whether GNU R does too, and so whether that is the cause, is unverified (no GNU R on the measuring host).
 
 ## Open: one switch for every fast path
