@@ -1,3 +1,10 @@
-2 4 466 4 41 sys.function() y ..1 matched(x = y, y + 1) 21 
-2 6 467 5 42 sys.function() y ..1 matched(x = y, y + 1) 42 
-2 8 468 6 43 sys.function() y ..1 matched(x = y, y + 1) 63 
+[stdout]
+| 2 4 466 4 41 sys.function() y ..1 matched(x = y, y + 1) 21 
+| 2 6 467 5 42 sys.function() y ..1 matched(x = y, y + 1) 42 
+| 2 8 468 6 43 sys.function() y ..1 matched(x = y, y + 1) 63 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
