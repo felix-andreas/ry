@@ -1188,7 +1188,7 @@ unsafe fn copy_format_attributes(vector: Sexp, result: Sexp) -> R<()> {
 }
 
 /// `formatC(x, mode, width, digits, format, flag, i.strlen)`: C-style formatting per element.
-unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
+pub(crate) unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     let vector = call.arg(0);
     let mode = values::require_str(call.arg(1), "mode")?;
     let width = values::as_integer_scalar(call.arg(2));

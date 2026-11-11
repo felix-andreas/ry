@@ -486,7 +486,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("complex", 3, do_complex),
     internal("polyroot", 1, do_polyroot),
     internal("pmin", -1, |call| unsafe { parallel_extreme(call, false) }),
-    internal("pmax", -1, |call| unsafe { parallel_extreme(call, true) }),
+    internal("pmax", -1, do_parallel_max),
     internal("cumall", 1, |call| Ok(call.arg(0))),
     internal("tabulate", 2, do_tabulate),
     internal("which", 1, do_which),
@@ -4691,6 +4691,10 @@ unsafe fn do_complex(call: &Call<'_>) -> R<Sexp> {
         values::complexes_mut(result)[index] = Rcomplex { r, i };
     }
     Ok(result)
+}
+
+pub(crate) unsafe fn do_parallel_max(call: &Call<'_>) -> R<Sexp> {
+    parallel_extreme(call, true)
 }
 
 unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
