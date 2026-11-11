@@ -5098,7 +5098,7 @@ unsafe fn continue_after(machine: &mut Machine<'_>, pc: usize, unwind: Unwind) -
         return Err(unwind);
     };
     let loops = machine.code.cdr().element(LOOPS);
-    let target = match *jump {
+    let target = match jump {
         Jump::Break { env: target } if target == machine.env() => loop_target(loops, pc, true),
         Jump::Next { env: target } if target == machine.env() => loop_target(loops, pc, false),
         _ => None,

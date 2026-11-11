@@ -286,7 +286,7 @@ unsafe fn expr(expr: Expr) -> R<Sexp> {
 }
 
 unsafe fn do_column(call: &Call<'_>) -> R<Sexp> {
-    let name = values::require_string(call.arg(0), "name")?;
+    let name = values::require_str(call.arg(0), "name")?;
     expr(Expr::Column(name.into()))
 }
 
@@ -295,10 +295,10 @@ unsafe fn do_literal(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_operator(call: &Call<'_>) -> R<Sexp> {
-    let operator = values::require_string(call.arg(0), "operator")?;
+    let operator = values::require_str(call.arg(0), "operator")?;
     let left = operand(call.arg(1), call.call)?;
     if values::require_flag(call.arg(3), "unary")? {
-        let op = match operator.as_str() {
+        let op = match operator.as_ref() {
             "-" => UnaryOp::Negate,
             "!" => UnaryOp::Not,
             "is_null" => UnaryOp::IsNa,
@@ -313,7 +313,7 @@ unsafe fn do_operator(call: &Call<'_>) -> R<Sexp> {
         return expr(Expr::Unary(op, Box::new(left)));
     }
     let right = operand(call.arg(2), call.call)?;
-    let op = match operator.as_str() {
+    let op = match operator.as_ref() {
         "+" => BinaryOp::Add,
         "-" => BinaryOp::Subtract,
         "*" => BinaryOp::Multiply,
@@ -342,7 +342,7 @@ unsafe fn do_operator(call: &Call<'_>) -> R<Sexp> {
 /// An aggregation skips `NA`s, as Polars' does.
 unsafe fn do_aggregate(call: &Call<'_>) -> R<Sexp> {
     let arg = expression(call.arg(0), call.call)?;
-    let function = match values::require_string(call.arg(1), "function")?.as_str() {
+    let function = match values::require_str(call.arg(1), "function")?.as_ref() {
         "sum" => Aggregate::Sum,
         "mean" => Aggregate::Mean,
         "min" => Aggregate::Min,
@@ -380,7 +380,7 @@ unsafe fn do_len(_: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_alias(call: &Call<'_>) -> R<Sexp> {
     let named = expression(call.arg(0), call.call)?;
-    let alias = values::require_string(call.arg(1), "name")?;
+    let alias = values::require_str(call.arg(1), "name")?;
     wrap(Object::Expr(Named {
         alias: Some(alias.into()),
         expr: named.expr,
@@ -680,7 +680,7 @@ unsafe fn do_join(call: &Call<'_>) -> R<Sexp> {
     let (plan, lazy) = plan_of(call.arg(0), caller)?;
     let (other, _) = plan_of(call.arg(1), caller)?;
     let cross = call.arg(4).kind() == SexpType::String
-        && values::require_string(call.arg(4), "how")? == "cross";
+        && values::require_str(call.arg(4), "how")? == "cross";
     let keys = |value: Sexp, side: &str| -> R<Vec<PlSmallStr>> {
         if cross && is_nil(value) {
             return Ok(Vec::new());
@@ -699,9 +699,9 @@ unsafe fn do_join(call: &Call<'_>) -> R<Sexp> {
     };
     let left_on = keys(call.arg(2), "left_on")?;
     let right_on = keys(call.arg(3), "right_on")?;
-    let how = values::require_string(call.arg(4), "how")?;
+    let how = values::require_str(call.arg(4), "how")?;
     let how = if how == "asof" {
-        let strategy = values::require_string(call.arg(6), "strategy")?;
+        let strategy = values::require_str(call.arg(6), "strategy")?;
         How::Asof(Strategy::parse(&strategy).ok_or_else(|| {
             error_in(
                 caller,
@@ -713,7 +713,7 @@ unsafe fn do_join(call: &Call<'_>) -> R<Sexp> {
             error_in(caller, format!("`how` is one of \"inner\", \"left\", \"full\", \"semi\", \"anti\" and \"cross\", not \"{how}\""))
         })?
     };
-    let suffix = values::require_string(call.arg(5), "suffix")?;
+    let suffix = values::require_str(call.arg(5), "suffix")?;
     let step = Step::Join {
         other: Box::new(other),
         left_on,
@@ -777,7 +777,7 @@ unsafe fn do_pivot(call: &Call<'_>) -> R<Sexp> {
             ));
         }
     };
-    let on = values::require_string(call.arg(1), "on")?;
+    let on = values::require_str(call.arg(1), "on")?;
     let index = call.arg(2);
     if index.kind() != SexpType::String || length(index) == 0 {
         return Err(error_in(
@@ -787,12 +787,12 @@ unsafe fn do_pivot(call: &Call<'_>) -> R<Sexp> {
     }
     let index: Vec<String> = values::strings(index).into_iter().flatten().collect();
     let index: Vec<&str> = index.iter().map(String::as_str).collect();
-    let value = values::require_string(call.arg(3), "values")?;
+    let value = values::require_str(call.arg(3), "values")?;
     let function = if is_nil(call.arg(4)) {
         None
     } else {
-        let name = values::require_string(call.arg(4), "agg")?;
-        Some(match name.as_str() {
+        let name = values::require_str(call.arg(4), "agg")?;
+        Some(match name.as_ref() {
             "sum" => Aggregate::Sum,
             "mean" => Aggregate::Mean,
             "min" => Aggregate::Min,
@@ -821,8 +821,8 @@ unsafe fn do_pivot(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_scan(call: &Call<'_>) -> R<Sexp> {
-    let path = values::require_string(call.arg(0), "path")?;
-    let plan = match values::require_string(call.arg(1), "format")?.as_str() {
+    let path = values::require_str(call.arg(0), "path")?.into_owned();
+    let plan = match values::require_str(call.arg(1), "format")?.as_ref() {
         "parquet" => Plan::scan_parquet(path),
         _ => Plan::scan_csv(path),
     };

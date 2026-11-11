@@ -2225,7 +2225,7 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("SubAssignArgs: invalid number of arguments"));
     };
     let mut object = nil();
-    let mut indices = Vec::new();
+    let mut indices: SmallVec<[Sexp; 4]> = SmallVec::new();
     for (position, arg) in rest.iter().enumerate() {
         if position == 0 {
             object = arg.value;
@@ -2801,7 +2801,7 @@ unsafe fn do_subassign2(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("SubAssignArgs: invalid number of arguments"));
     };
     let mut object = nil();
-    let mut indices = Vec::new();
+    let mut indices: SmallVec<[Sexp; 4]> = SmallVec::new();
     for (position, arg) in rest.iter().enumerate() {
         if position == 0 {
             object = arg.value;

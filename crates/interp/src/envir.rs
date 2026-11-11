@@ -111,7 +111,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     crate::builtins::special("::", 2, |call| unsafe { namespace_value(call, true) }),
     crate::builtins::special(":::", 2, |call| unsafe { namespace_value(call, false) }),
     internal("getNamespaceValue", 3, |call| unsafe {
-        values::require_string(call.arg(1), "name")?;
+        values::require_str(call.arg(1), "name")?;
         let symbol = values::install_charsxp(call.arg(1).element(0))?;
         let exported = values::as_logical_scalar(call.arg(2)) == 1;
         namespace_lookup(call.arg(0), symbol, exported)
@@ -661,7 +661,7 @@ unsafe fn lookup(symbol: Sexp, env: Sexp, mode: &str, inherits: bool) -> R<Optio
 unsafe fn do_get(call: &Call<'_>) -> R<Sexp> {
     let symbol = name_symbol(call.arg(0), "x")?;
     let env = environment_arg(call.arg(1), "envir")?;
-    let mode = values::require_string(call.arg(2), "mode")?;
+    let mode = values::require_str(call.arg(2), "mode")?;
     let inherits = values::as_logical_scalar(call.arg(3)) == 1;
     match lookup(symbol, env, &mode, inherits)? {
         Some(value) => {
@@ -689,7 +689,7 @@ unsafe fn do_get(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_get0(call: &Call<'_>) -> R<Sexp> {
     let symbol = name_symbol(call.arg(0), "x")?;
     let env = environment_arg(call.arg(1), "envir")?;
-    let mode = values::require_string(call.arg(2), "mode")?;
+    let mode = values::require_str(call.arg(2), "mode")?;
     let inherits = values::as_logical_scalar(call.arg(3)) == 1;
     match lookup(symbol, env, &mode, inherits)? {
         Some(value) => value_of(value),
@@ -742,7 +742,7 @@ unsafe fn do_mget(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_exists(call: &Call<'_>) -> R<Sexp> {
     let symbol = name_symbol(call.arg(0), "x")?;
     let env = environment_arg(call.arg(1), "envir")?;
-    let mode = values::require_string(call.arg(2), "mode")?;
+    let mode = values::require_str(call.arg(2), "mode")?;
     let inherits = values::as_logical_scalar(call.arg(3)) == 1;
     scalar_bool(lookup(symbol, env, &mode, inherits)?.is_some())
 }
@@ -1023,7 +1023,7 @@ pub unsafe fn as_environment(value: Sexp) -> R<Sexp> {
             Ok(path[position as usize - 1])
         }
         SexpType::String => {
-            let name = values::require_string(value, "pos")?;
+            let name = values::require_str(value, "pos")?;
             if name == ".GlobalEnv" {
                 return Ok(global_env());
             }
@@ -1475,10 +1475,13 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
 
 unsafe fn do_get_option(call: &Call<'_>) -> R<Sexp> {
     let name = call.arg(0);
-    if name.kind() == SexpType::String && length(name) == 1 && name.element(0) != values::na_string() {
+    if name.kind() == SexpType::String
+        && length(name) == 1
+        && name.element(0) != values::na_string()
+    {
         return Ok(option_value(name.element(0)));
     }
-    let name = values::require_string(name, "x")?;
+    let name = values::require_str(name, "x")?;
     Ok(get_option(&name))
 }
 
@@ -2034,7 +2037,7 @@ unsafe fn do_rapply(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(1);
     let classes = call.arg(2);
     let deflt = call.arg(3);
-    let how = values::require_string(call.arg(4), "how")?;
+    let how = values::require_str(call.arg(4), "how")?;
     rapply_one(object, function, classes, deflt, &how, call.env()?)
 }
 

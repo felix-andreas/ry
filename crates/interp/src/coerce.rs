@@ -1027,7 +1027,7 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
 }
 
 unsafe fn do_as_vector(call: &Call<'_>) -> R<Sexp> {
-    let mode = values::require_string(call.arg(1), "mode")?;
+    let mode = values::require_str(call.arg(1), "mode")?;
     as_vector(call.arg(0), &mode)
 }
 
@@ -1083,9 +1083,9 @@ unsafe fn do_as_function(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_vector(call: &Call<'_>) -> R<Sexp> {
-    let mode = values::require_string(call.arg(0), "mode")?;
+    let mode = values::require_str(call.arg(0), "mode")?;
     let count = crate::subset::length_argument(call.arg(1))?;
-    let kind = match mode.as_str() {
+    let kind = match mode.as_ref() {
         "any" => SexpType::Logical,
         mode => mode_type(mode)
             .ok_or_else(|| call.error(format!("vector: cannot make a vector of mode '{mode}'.")))?,
@@ -1102,7 +1102,7 @@ unsafe fn do_vector(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_set_storage_mode(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
-    let mode = values::require_string(call.arg(1), "value")?;
+    let mode = values::require_str(call.arg(1), "value")?;
     let kind = mode_type(&mode).ok_or_else(|| call.error("invalid value"))?;
     if object.kind() == kind {
         return Ok(object);
@@ -1115,9 +1115,9 @@ unsafe fn do_set_storage_mode(call: &Call<'_>) -> R<Sexp> {
 
 pub(crate) unsafe fn do_is_vector(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
-    let mode = values::require_string(call.arg(1), "mode")?;
+    let mode = values::require_str(call.arg(1), "mode")?;
     let kind = object.kind();
-    let kind_matches = match mode.as_str() {
+    let kind_matches = match mode.as_ref() {
         "any" => kind.is_vector(),
         "numeric" => {
             matches!(kind, SexpType::Integer | SexpType::Real)

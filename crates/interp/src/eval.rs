@@ -3388,7 +3388,7 @@ unsafe fn refuse_object_system(call: Sexp, function: Sexp, sys_parent: Sexp) -> 
 /// error that `try()` can catch, reported against the closure's call as in GNU R.
 fn stray_loop_jump(call: Sexp, env: Sexp, result: R<Sexp>) -> R<Sexp> {
     match result {
-        Err(Unwind::Jump(jump)) if matches!(*jump, Jump::Break { env: target } | Jump::Next { env: target } if target == env) => {
+        Err(Unwind::Jump(jump)) if matches!(jump, Jump::Break { env: target } | Jump::Next { env: target } if target == env) => {
             Err(error_in(
                 call,
                 "no loop for break/next, jumping to top level",
@@ -3405,7 +3405,7 @@ unsafe fn catch_return(env: Sexp, result: R<Sexp>) -> R<Sexp> {
             let Unwind::Jump(jump) = unwind else {
                 unreachable!()
             };
-            let Jump::Return { value, .. } = *jump else {
+            let Jump::Return { value, .. } = jump else {
                 unreachable!()
             };
             crate::heap().root(value);
@@ -3447,7 +3447,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
     // A `return(x)` unwinding to this frame is the value the function returns.
     let returned = match &result {
         Ok(value) => Some(*value),
-        Err(Unwind::Jump(jump)) => match **jump {
+        Err(Unwind::Jump(jump)) => match *jump {
             Jump::Return { env: target, value } if target == env => Some(value),
             _ => None,
         },
@@ -3468,8 +3468,8 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         match exit {
             // `on.exit(return(x))` makes `x` the frame's value, even over an error unwinding
             // through it, as in GNU R.
-            Err(Unwind::Jump(jump)) if matches!(*jump, Jump::Return { env: target, .. } if target == env) => {
-                if let Jump::Return { value, .. } = *jump {
+            Err(Unwind::Jump(jump)) if matches!(jump, Jump::Return { env: target, .. } if target == env) => {
+                if let Jump::Return { value, .. } = jump {
                     outcome = Ok(value);
                     if let Some(top) = interp().returned_values.last_mut() {
                         *top = Some(value);
@@ -4233,10 +4233,10 @@ unsafe fn loop_body(body: Sexp, env: Sexp) -> R<bool> {
     let result = scope(|| eval(body, env).map(|_| ()));
     match result {
         Ok(()) => Ok(true),
-        Err(Unwind::Jump(jump)) => match *jump {
+        Err(Unwind::Jump(jump)) => match jump {
             Jump::Break { env: target } if target == env => Ok(false),
             Jump::Next { env: target } if target == env => Ok(true),
-            other => Err(Unwind::Jump(Box::new(other))),
+            other => Err(Unwind::Jump(other)),
         },
         Err(other) => Err(other),
     }
@@ -5248,7 +5248,7 @@ unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_primitive(call: &Call<'_>) -> R<Sexp> {
-    let name = values::require_string(call.arg(0), "name")?;
+    let name = values::require_str(call.arg(0), "name")?;
     crate::builtins::primitive(&name)
         .ok_or_else(|| call.error("no such primitive function".to_string()))
 }
@@ -5266,7 +5266,7 @@ unsafe fn do_tilde(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_delayed_assign(call: &Call<'_>) -> R<Sexp> {
-    let name = values::require_string(call.arg(0), "x")?;
+    let name = values::require_str(call.arg(0), "x")?;
     let symbol = values::install(&name)?;
     let value = call.arg(1);
     let eval_env = call.arg(2);

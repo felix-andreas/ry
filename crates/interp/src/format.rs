@@ -1123,11 +1123,11 @@ unsafe fn copy_format_attributes(vector: Sexp, result: Sexp) -> R<()> {
 /// `formatC(x, mode, width, digits, format, flag, i.strlen)`: C-style formatting per element.
 unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     let vector = call.arg(0);
-    let mode = values::require_string(call.arg(1), "mode")?;
+    let mode = values::require_str(call.arg(1), "mode")?;
     let width = values::as_integer_scalar(call.arg(2));
     let digits = values::as_integer_scalar(call.arg(3));
-    let format = values::require_string(call.arg(4), "format")?;
-    let flag = values::require_string(call.arg(5), "flag")?;
+    let format = values::require_str(call.arg(4), "format")?;
+    let flag = values::require_str(call.arg(5), "flag")?;
     let count = length(vector);
     let result = alloc(SexpType::String, count)?;
     let mut padded = String::new();

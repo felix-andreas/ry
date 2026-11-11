@@ -4885,8 +4885,8 @@ unsafe fn do_is_unsorted(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_pack_bits(call: &Call<'_>) -> R<Sexp> {
     let bits = call.arg(0);
-    let kind = values::require_string(call.arg(1), "type")?;
-    let width = match kind.as_str() {
+    let kind = values::require_str(call.arg(1), "type")?;
+    let width = match kind.as_ref() {
         "raw" => 8,
         "integer" => 32,
         "double" => 64,

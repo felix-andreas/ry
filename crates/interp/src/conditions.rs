@@ -189,7 +189,7 @@ pub unsafe fn quietly(body: impl FnOnce() -> R<Sexp>) -> R<Option<Sexp>> {
     interp().handlers = saved;
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(Unwind::Jump(caught)) if matches!(*caught, Jump::Return { env, .. } if env == target) => {
+        Err(Unwind::Jump(caught)) if matches!(caught, Jump::Return { env, .. } if env == target) => {
             Ok(None)
         }
         Err(unwind) => Err(unwind),
@@ -307,7 +307,7 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
     interp().in_error -= 1;
     // Going to top level means invoking the innermost `abort` restart, so code that
     // establishes its own (`withRestarts(expr, abort = ...)`) regains control after the error.
-    if matches!(&outcome, Unwind::Jump(target) if matches!(**target, Jump::TopLevel)) {
+    if matches!(&outcome, Unwind::Jump(target) if matches!(*target, Jump::TopLevel)) {
         match user_abort_restart() {
             Ok(Some(target)) => return target,
             Ok(None) => {}

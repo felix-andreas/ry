@@ -3068,7 +3068,7 @@ fn rename_path(source: &Path, target: &Path) -> std::io::Result<()> {
 }
 
 unsafe fn do_dir_create(call: &Call<'_>) -> R<Sexp> {
-    let path = values::require_string(call.arg(0), "path")?;
+    let path = values::require_str(call.arg(0), "path")?;
     let show_warnings = values::as_logical_scalar(call.arg(1)) == 1;
     let recursive = values::as_logical_scalar(call.arg(2)) == 1;
     let expanded = crate::connections::expand_path(&path);
@@ -3111,7 +3111,7 @@ unsafe fn do_dir_create(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_setwd(call: &Call<'_>) -> R<Sexp> {
-    let path = values::require_string(call.arg(0), "dir")?;
+    let path = values::require_str(call.arg(0), "dir")?;
     let previous = working_directory();
     std::env::set_current_dir(crate::connections::expand_path(&path))
         .map_err(|_| call.error("cannot change working directory"))?;
@@ -3602,7 +3602,7 @@ fn transfer_size(bytes: u64) -> String {
 /// `curlGetHeaders(url, redirect, verify, timeout, TLS)`: the response header lines, with the
 /// final HTTP status as attribute `status`.
 unsafe fn do_curl_get_headers(call: &Call<'_>) -> R<Sexp> {
-    let url = values::require_string(call.arg(0), "url")?;
+    let url = values::require_str(call.arg(0), "url")?;
     let follow = values::as_logical_scalar(call.arg(1)) != 0;
     let seconds = values::as_real_scalar(call.arg(3));
     let timeout =
@@ -3795,7 +3795,7 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
         return do_windows_system(call);
     }
     use std::io::Write;
-    let command = values::require_string(call.arg(0), "command")?;
+    let command = values::require_str(call.arg(0), "command")?.into_owned();
     let intern = values::as_logical_scalar(call.arg(1)) == 1;
     let mut process = std::process::Command::new("sh");
     process.arg("-c").arg(&command);
@@ -4648,7 +4648,7 @@ unsafe fn do_esoft_version(_: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_read_renviron(call: &Call<'_>) -> R<Sexp> {
-    let path = values::require_string(call.arg(0), "x")?;
+    let path = values::require_str(call.arg(0), "x")?;
     let path = crate::connections::expand_path(&path);
     let Ok(text) = std::fs::read_to_string(&path) else {
         crate::conditions::warning_call(
