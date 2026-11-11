@@ -6145,13 +6145,22 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     sequences in the handler (pure arithmetic via `compact_sequence_steps`,
     `read_altrep_element_call` in `crates/interp/src/bytecode.rs`). Any other ALTREP read
     declines to the `[`/`[[` builtin, whose `element_access::altrep_element` reads one element
-    through the class's `Elt` method. The JIT reads attribute-free compact integer sequences
-    inline: the `INTEGER_SEQUENCE` feedback bit types such a value as `Ty::IntSeq`, whose guard
-    tests the ALTREP flag, the `compact_intseq` class pointer and nil attributes, and a `for`
-    loop, `x[i]`, `x[[i]]` or `length(x)` on it computes from the class's `c(n, n1, inc)` info
-    vector (`sequence_info` in `crates/jit/src/codegen.rs`). Compiled code embeds the class
-    pointer, so it is valid only in the process that compiled it. Every other ALTREP value side
-    exits on `OBJECT|ALTREP`.
+    through the class's `Elt` method. The JIT reads attribute-free compact integer and double
+    sequences inline: the `INTEGER_SEQUENCE` and `DOUBLE_SEQUENCE` feedback bits type such a value
+    as `Ty::IntSeq` or `Ty::DblSeq`, whose guard tests the ALTREP flag, the class pointer and nil
+    attributes, and a `for` loop, `x[i]`, `x[[i]]` or `length(x)` on it computes from the class's
+    `c(n, n1, inc)` info vector (`sequence_info` in `crates/jit/src/codegen.rs`). The double form
+    matters because `as.double(1:n)` stays compact; without it `x[i]` ran as a boxed builtin call
+    at 1,273 Ir per iteration. Feedback words are u32 because the two sequence kinds and the
+    string kinds do not fit in 16 bits. Compiled code embeds the class pointer, so it is valid
+    only in the process that compiled it. Every other ALTREP value side exits on `OBJECT|ALTREP`.
+  - *Reads leave a sequence compact.* GNU R's `print`, `[`, `[[` and `for` read through `*_ELT`,
+    so a compact sequence stays compact after them; only a data-pointer read (`format`, most
+    arithmetic) expands it. ry matches: printing reads an unexpanded sequence into a fresh vector
+    (`values::read_contents`), `[` on a compact sequence always takes the element path and
+    computes each element, `[[` reads numbers through `Elt`, and the tree-walking `for` (top-level
+    code) reads numbers element by element, which keeps `for (i in 1:1e9)` at top level at 43 MB
+    instead of 3.9 GB. `altrep__reads_keep_compact` pins the `inspect` state.
   - *Summaries ask the class.* `sum`, `min` and `max` call an ALTREP argument's own `Sum`, `Min`
     or `Max` method first (the `altrep_summary` host hook), as GNU R does, so `sum(1:n)` reads no
     elements and a class's errors surface as GNU R's.
@@ -6170,12 +6179,12 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     keeps (a compact sequence's expansion), because C code writes into duplicates: data.table's
     `frev` and `setkey` reversed or sorted the source `1:n` otherwise.
   - *Sparse reads.* `x[[i]]` and a sparse `x[i]` read through `values::int_elt`/`real_elt`; `x[i]`
-    reads element by element when the vector has 2^16 or more elements and the index selects at
-    most an eighth of them (`reads_sparsely`, `crates/interp/src/subset.rs`), and expands once
-    otherwise. `base__long_sequences` keeps `seq_len(2^31 - 1)` under 1 GB peak.
+    on another ALTREP number vector reads element by element when the vector has 2^16 or more
+    elements and the index selects at most an eighth of them (`reads_sparsely`,
+    `crates/interp/src/subset.rs`), and expands once otherwise. `base__long_sequences` keeps `seq_len(2^31 - 1)` under 1 GB peak.
   - *Representation differences that remain.* `inspect` prints the refcount of a wrapper or
     deferred string as `REF(65535)` (ry's not-mutable mark; GNU R prints the real count) and a
-    materialized compact sequence as `(expanded)`. Lists have a `wrap_list` class, as in GNU R
+    compact sequence a data-pointer read expanded as `(expanded)`, as GNU R does. Lists have a `wrap_list` class, as in GNU R
     4.6.
   - *Cost.* A plain read costs no more than before (measured with callgrind on a tier-0 loop
     `acc <- acc + x[i]`). A compact read in tier 0 costs about 110 to 190 Ir more per iteration than a
