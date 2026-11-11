@@ -1,0 +1,13 @@
+[stdout]
+| [1] 0
+| [1] 10 10 10
+| [1]  10 110 110
+| total <- 100
+| [1]  10 110 120 120
+| for (i in seq_len(n)) total <- total + i * 2
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

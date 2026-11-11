@@ -1,10 +1,10 @@
 //! The tier-0 bytecode interpreter.
 //!
 //! A closure body compiles to bytecode on its second call, or takes its code from its package's
-//! code image then. The code replaces the body as a
-//! `BCODESXP`, as GNU R stores compiled closures, so it lives and dies with the closure and
-//! everything that reads a body as source (`body()`, `deparse`, `identical`, serialization)
-//! goes through [`closure_body`], which returns the expression.
+//! code image then. The code replaces the body as a `BCODESXP`, as GNU R stores compiled
+//! closures, and everything that reads a body as source (`body()`, `deparse`, `identical`,
+//! serialization) goes through [`closure_body`], which returns the expression. Closures over one
+//! body expression share its code (see [`Bodies`]), which lives as long as the expression does.
 //!
 //! The machine has registers instead of an operand stack: each instruction names the registers
 //! it reads and writes, and the register file is a stack the collector traces. Every construct
@@ -65,7 +65,10 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::{SmallVec, smallvec},
-    std::ops::Range,
+    std::{
+        hash::{Hash, Hasher},
+        ops::Range,
+    },
 };
 
 /// The internals behind GNU R's `compiler` package. Its code buffer is assembled in R, and
@@ -103,9 +106,8 @@ pub struct State {
     /// Allocated once at [`REGISTER_FILE_CAPACITY`] and never grown past it, so a register
     /// window's address is stable for as long as the window exists.
     pub(crate) registers: Vec<Sexp>,
-    /// Calls seen per uncompiled body. Keys are only compared, never dereferenced, so a body
-    /// that died and whose address was reused merely compiles one call early.
-    calls: FxHashMap<Sexp, u32>,
+    /// The tier of every closure body that has run, shared by all closures over the body.
+    bodies: Bodies,
     tier: Option<Tier>,
     pub(crate) call_plans: CallPlans,
 }
@@ -114,7 +116,7 @@ impl Default for State {
     fn default() -> State {
         State {
             registers: Vec::with_capacity(REGISTER_FILE_CAPACITY),
-            calls: FxHashMap::default(),
+            bodies: Bodies::default(),
             tier: None,
             call_plans: CallPlans::default(),
         }
@@ -127,6 +129,203 @@ impl State {
             marker.mark(register);
         }
         self.call_plans.trace(marker);
+    }
+
+    pub(crate) unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
+        self.call_plans.clear_dead(liveness);
+        self.bodies.clear_dead(liveness);
+    }
+}
+
+/// The tier of each closure body, keyed by the body expression, which every closure made from
+/// one `function` expression shares, and so does every copy `environment<-` makes, as R6 does
+/// for each object's methods. Code compiled for one closure serves every other closure over the
+/// body whose formals and srcref are the same objects, since compiling reads nothing else of the
+/// closure: the enclosure only resolves names that the code guards at run time. A body counts
+/// its calls across all its closures until it compiles, and then holds its code while any
+/// closure runs it, so a closure made meanwhile runs the code from its first call instead of
+/// compiling again.
+///
+/// GNU R shares compiled bodies the same way, through a cache keyed by a hash of the body's
+/// structure. As there, a body changed in place since it compiled (through the C API) does not
+/// give its old code to a new closure, while closures that already run the code keep it.
+#[derive(Default)]
+struct Bodies {
+    /// Below [`COMPILED`], the calls the body has seen; with that bit set, the index of its
+    /// compiled entry in the columns below.
+    states: FxHashMap<Sexp, u32>,
+    /// The compiled entries, as columns indexed by entry. `keys` holds the body, or `NULL` for
+    /// a free entry. None of the columns is traced: an entry holds its objects weakly and goes
+    /// once any of them dies, so the code lives exactly as long as a closure that runs it.
+    keys: Vec<Sexp>,
+    codes: Vec<Sexp>,
+    formals: Vec<Sexp>,
+    srcrefs: Vec<Sexp>,
+    /// The [`shape`] of the body, formals and srcref when the code compiled.
+    shapes: Vec<u64>,
+    free: Vec<u32>,
+}
+
+/// The bit of a [`Bodies`] state that marks an entry index rather than a call count.
+const COMPILED: u32 = 1 << 31;
+
+/// What a closure over a body that has not compiled in it does at a call.
+enum BodyTier {
+    /// Runs the body's code, compiled for another closure over it.
+    Shared(Sexp),
+    /// Compiles now: the body runs often enough, or compiled for a closure this one cannot
+    /// share code with.
+    Compile,
+    /// Runs on the AST evaluator, after this many earlier calls.
+    Counting(u32),
+}
+
+impl Bodies {
+    /// The tier of `function`, a closure over `body`, installing shared code as its body.
+    unsafe fn tier(&self, function: Sexp, body: Sexp) -> BodyTier {
+        let Some(&state) = self.states.get(&body) else {
+            return BodyTier::Counting(0);
+        };
+        if state & COMPILED == 0 {
+            return BodyTier::Counting(state);
+        }
+        let entry = (state & !COMPILED) as usize;
+        let formals = function.car();
+        let srcref = values::get_attr(function, symbols().srcref);
+        if formals != self.formals[entry]
+            || srcref != self.srcrefs[entry]
+            || shape(body, formals, srcref) != self.shapes[entry]
+        {
+            return BodyTier::Compile;
+        }
+        let code = self.codes[entry];
+        crate::heap().set_cdr(function, code);
+        BodyTier::Shared(code)
+    }
+
+    /// Counts a call of `body` on the AST evaluator.
+    fn count(&mut self, body: Sexp, calls: u32) {
+        if self.states.len() > MAX_TRACKED_BODIES {
+            self.states.retain(|_, state| *state & COMPILED != 0);
+        }
+        self.states.insert(body, calls);
+    }
+
+    /// Starts counting again for a body the compiler rejected, so it tries once more only
+    /// after as many calls as a new body.
+    fn rejected(&mut self, body: Sexp) {
+        if self
+            .states
+            .get(&body)
+            .is_some_and(|state| state & COMPILED == 0)
+        {
+            self.states.remove(&body);
+        }
+    }
+
+    /// Records `code`, just compiled for `function`, as `body`'s code for closures to share. A
+    /// body that already has an entry keeps it: the code there serves the closures it was
+    /// compiled for, and replacing it would only make two kinds of closure take turns.
+    unsafe fn share(&mut self, function: Sexp, body: Sexp, code: Sexp) {
+        if self
+            .states
+            .get(&body)
+            .is_some_and(|state| state & COMPILED != 0)
+        {
+            return;
+        }
+        let formals = function.car();
+        let srcref = values::get_attr(function, symbols().srcref);
+        let shape = shape(body, formals, srcref);
+        let entry = match self.free.pop() {
+            Some(entry) => {
+                let index = entry as usize;
+                self.keys[index] = body;
+                self.codes[index] = code;
+                self.formals[index] = formals;
+                self.srcrefs[index] = srcref;
+                self.shapes[index] = shape;
+                entry
+            }
+            None => {
+                self.keys.push(body);
+                self.codes.push(code);
+                self.formals.push(formals);
+                self.srcrefs.push(srcref);
+                self.shapes.push(shape);
+                (self.keys.len() - 1) as u32
+            }
+        };
+        self.states.insert(body, entry | COMPILED);
+    }
+
+    /// Frees every entry that holds an object the collection found dead. The body may outlive
+    /// its code, as a quoted `function` expression does, and it then counts its calls afresh.
+    unsafe fn clear_dead(&mut self, liveness: &Liveness<'_>) {
+        let live = |object: Sexp| object == nil() || liveness.is_live(object);
+        for entry in 0..self.keys.len() {
+            let body = self.keys[entry];
+            if body == nil() {
+                continue;
+            }
+            if !live(body)
+                || !live(self.codes[entry])
+                || !live(self.formals[entry])
+                || !live(self.srcrefs[entry])
+            {
+                self.states.remove(&body);
+                self.keys[entry] = nil();
+                self.codes[entry] = nil();
+                self.formals[entry] = nil();
+                self.srcrefs[entry] = nil();
+                self.free.push(entry as u32);
+            }
+        }
+    }
+}
+
+/// A hash of what compiled code depends on: the structure of `body` and `formals`, and
+/// `srcref`. Symbols, strings and lists hash by identity, and so does any constant longer than
+/// one element; scalars hash by value, which is what an in-place change of a call reaches.
+unsafe fn shape(body: Sexp, formals: Sexp, srcref: Sexp) -> u64 {
+    let mut hasher = rustc_hash::FxHasher::default();
+    hash_shape(body, &mut hasher);
+    hash_shape(formals, &mut hasher);
+    srcref.hash(&mut hasher);
+    if srcref.kind() == SexpType::Integer {
+        values::ints(srcref).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+unsafe fn hash_shape(expression: Sexp, hasher: &mut rustc_hash::FxHasher) {
+    let mut node = expression;
+    loop {
+        (node.kind() as u8).hash(hasher);
+        match node.kind() {
+            SexpType::Language | SexpType::Pairlist => {
+                node.tag().hash(hasher);
+                hash_shape(node.car(), hasher);
+                node = node.cdr();
+            }
+            // Reading an ALTREP vector can run R code, so one hashes by identity.
+            _ if node.is_altrep() => {
+                node.hash(hasher);
+                return;
+            }
+            SexpType::Integer | SexpType::Logical if length(node) == 1 => {
+                values::ints(node).hash(hasher);
+                return;
+            }
+            SexpType::Real if length(node) == 1 => {
+                values::reals(node)[0].to_bits().hash(hasher);
+                return;
+            }
+            _ => {
+                node.hash(hasher);
+                return;
+            }
+        }
     }
 }
 
@@ -348,7 +547,8 @@ pub unsafe fn execute(code: Sexp, env: Sexp) -> R<Sexp> {
     eval::eval(source_of(code), env)
 }
 
-/// Runs a closure's body, compiling it on its second call.
+/// Runs a closure's body, compiling it on its second call, or running the code another closure
+/// over the same body compiled.
 pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     if body.kind() == SexpType::Bytecode {
         return run(function, body, env);
@@ -356,34 +556,25 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
     if !worth_compiling(body) {
         return eval::eval(body, env);
     }
-    let state = &mut interp().bytecode;
-    let calls = state.calls.entry(body).or_insert(0);
-    *calls += 1;
-    // A body with a loop pays for compiling within its first call, as GNU R's JIT assumes, and
-    // so does a typed one, whose signature lets the JIT compile it at that call too.
-    if *calls < COMPILE_AFTER_CALLS
-        && !contains_loop(body, LOOP_SEARCH_DEPTH)
-        && !crate::annotations::is_typed(function)
-    {
-        if state.calls.len() > MAX_TRACKED_BODIES {
-            state.calls.clear();
+    let bodies = &mut interp().bytecode.bodies;
+    match bodies.tier(function, body) {
+        BodyTier::Shared(code) => return run(function, code, env),
+        BodyTier::Compile => {}
+        // A body with a loop pays for compiling within its first call, as GNU R's JIT assumes,
+        // and so does a typed one, whose signature lets the JIT compile it at that call too.
+        BodyTier::Counting(calls)
+            if calls + 1 < COMPILE_AFTER_CALLS
+                && !contains_loop(body, LOOP_SEARCH_DEPTH)
+                && !crate::annotations::is_typed(function) =>
+        {
+            bodies.count(body, calls + 1);
+            return eval::eval(body, env);
         }
-        return eval::eval(body, env);
+        BodyTier::Counting(_) => {}
     }
-    state.calls.remove(&body);
-    // A package's code image replaces compiling, at the same call, rather than running code from
-    // the first call: decoding costs about as much as compiling, and many closures run only once.
-    if let Some(code) = crate::code_image::take_pending(function, body)? {
-        return run(function, code, env);
-    }
-    // A body the compiler rejects (an error is its way of saying so, such as for a `break`
-    // outside a loop) still runs correctly on the AST evaluator.
-    match compile(body, function) {
-        Ok(Some(code)) => {
-            crate::heap().set_cdr(function, code);
-            run(function, code, env)
-        }
-        Ok(None) | Err(_) => eval::eval(body, env),
+    match compile_for(function, body)? {
+        Some(code) => run(function, code, env),
+        None => eval::eval(body, env),
     }
 }
 
@@ -397,23 +588,40 @@ pub unsafe fn compile_before_call(function: Sexp) -> R<Sexp> {
     if !worth_compiling(body) {
         return Ok(body);
     }
-    let state = &mut interp().bytecode;
-    let calls = state.calls.get(&body).copied().unwrap_or(0);
-    if calls + 1 < COMPILE_AFTER_CALLS && !contains_loop(body, LOOP_SEARCH_DEPTH) {
-        return Ok(body);
-    }
-    state.calls.remove(&body);
-    if let Some(code) = crate::code_image::take_pending(function, body)? {
-        return Ok(code);
-    }
-    match compile(body, function) {
-        Ok(Some(code)) => {
-            crate::heap().set_cdr(function, code);
-            Ok(code)
+    match interp().bytecode.bodies.tier(function, body) {
+        BodyTier::Shared(code) => return Ok(code),
+        BodyTier::Compile => {}
+        BodyTier::Counting(calls) => {
+            if calls + 1 < COMPILE_AFTER_CALLS && !contains_loop(body, LOOP_SEARCH_DEPTH) {
+                return Ok(body);
+            }
         }
-        // A body the compiler rejects runs on the AST evaluator, as in `run_body`.
-        Ok(None) | Err(_) => Ok(body),
     }
+    Ok(compile_for(function, body)?.unwrap_or(body))
+}
+
+/// Compiles `body` as `function`'s, or takes its code from the package's code image, installs
+/// the code as the closure's body and records it for other closures over the body. `None` for a
+/// body the compiler rejects (an error is its way of saying so, such as for a `break` outside a
+/// loop), which goes on running correctly on the AST evaluator.
+unsafe fn compile_for(function: Sexp, body: Sexp) -> R<Option<Sexp>> {
+    // A package's code image replaces compiling, at the same call, rather than running code from
+    // the first call: decoding costs about as much as compiling, and many closures run only once.
+    let code = match crate::code_image::take_pending(function, body)? {
+        Some(code) => code,
+        None => match compile(body, function) {
+            Ok(Some(code)) => {
+                crate::heap().set_cdr(function, code);
+                code
+            }
+            Ok(None) | Err(_) => {
+                interp().bytecode.bodies.rejected(body);
+                return Ok(None);
+            }
+        },
+    };
+    interp().bytecode.bodies.share(function, body, code);
+    Ok(Some(code))
 }
 
 /// A closure over `env` for the `function` expression with `formals`, `body` and `srcref` in
@@ -470,16 +678,37 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Sexp> {
     if body.kind() == SexpType::Bytecode {
         return Ok(body);
     }
-    if let Some(code) = crate::code_image::take_pending(function, body)? {
+    if worth_compiling(body)
+        && let BodyTier::Shared(code) = interp().bytecode.bodies.tier(function, body)
+    {
         return Ok(code);
     }
-    match compile(body, function)? {
-        Some(code) => {
-            crate::heap().set_cdr(function, code);
-            Ok(code)
-        }
-        None => Ok(body),
+    compile_own_body(function)
+}
+
+/// A closure's body compiled for the closure itself, as [`compiled_body`] gives it but never
+/// code shared from another closure over the body. A code image needs this: shared code has
+/// run, and its constants hold what running recorded, such as the closures a wrapper's lookups
+/// pinned, which an image cannot encode and a session must not inherit.
+pub unsafe fn compile_own_body(function: Sexp) -> R<Sexp> {
+    let body = function.cdr();
+    if body.kind() == SexpType::Bytecode {
+        return Ok(body);
     }
+    let code = match crate::code_image::take_pending(function, body)? {
+        Some(code) => code,
+        None => match compile(body, function)? {
+            Some(code) => {
+                crate::heap().set_cdr(function, code);
+                code
+            }
+            None => return Ok(body),
+        },
+    };
+    if worth_compiling(body) {
+        interp().bytecode.bodies.share(function, body, code);
+    }
+    Ok(code)
 }
 
 /// Compiles, ahead of their first call, the functions `code` defines with `function(...)`

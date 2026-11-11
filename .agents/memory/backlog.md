@@ -995,6 +995,7 @@ overhead, not allocation.
 
 ## Open: untyped R against GNU R
 
+- Closures over equal but distinct body copies compile again. `Bodies` (`crates/interp/src/bytecode.rs`) shares code by body identity, but a lambda inside a testthat `expect_*()` argument is a fresh copy of its expression at each evaluation, so `testthat_full` compiles about 43 bodies per warm iteration (about 4M Ir of its 629M). GNU R's JIT cache hashes the structure and confirms with `identical`, so it shares them. A structural lookup at the compile decision, confirming with a deep compare of body, formals and srcref, would close it.
 - `.Call` into a package routine costs about 1.5x GNU R per call (`truelength()` x300k: 0.21 s
   against 0.14 s). What remains is the boundary itself: `call_native`'s native scope, rooting and
   `ry_call_native` in `crates/libr/src/boundary.rs`.

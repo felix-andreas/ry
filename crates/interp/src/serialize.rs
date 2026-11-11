@@ -1828,10 +1828,6 @@ mod tag {
     pub const BASE_FUNCTION: u8 = 20;
 }
 
-/// Base closures the compiler resolves while compiling and keeps as constants, found again by
-/// name in the base environment.
-const BASE_FUNCTIONS: &[&str] = &["local"];
-
 struct Encoder<'a> {
     out: &'a mut Vec<u8>,
     source: &'a SourceNumbers,
@@ -2009,14 +2005,12 @@ impl Encoder<'_> {
                 return Ok(());
             }
             SexpType::Closure => {
-                for name in BASE_FUNCTIONS {
-                    if base_function(name) == Some(value) {
-                        self.out.push(tag::BASE_FUNCTION);
-                        self.bytes(name.as_bytes());
-                        return Ok(());
-                    }
-                }
-                return Err(Unencodable("a closure"));
+                let Some(name) = base_function_name(value) else {
+                    return Err(Unencodable("a closure"));
+                };
+                self.out.push(tag::BASE_FUNCTION);
+                self.bytes(name.as_bytes());
+                return Ok(());
             }
             SexpType::Bytecode => {
                 self.out.push(tag::CODE);
@@ -2168,16 +2162,39 @@ fn shape_constants(words: &[i32]) -> Result<SmallVec<[usize; 4]>, Unencodable> {
     Ok(shapes)
 }
 
-/// The base closure bound to `name`, once something forced its lazy-load promise.
-unsafe fn base_function(name: &str) -> Option<Sexp> {
+/// The name base binds `function` to, when it is one of base's closures. The compiler keeps
+/// such closures as constants: `local`, and the closure a call of a safe base internal is
+/// guarded against. An image names them, and decoding finds them again by that name.
+unsafe fn base_function_name(function: Sexp) -> Option<String> {
     let heap = crate::heap();
-    let symbol = values::install(name).ok()?;
-    let cell = heap.frame_cell(heap.known().base_env, symbol)?;
+    if function.tag() != heap.known().base_namespace {
+        return None;
+    }
+    let base_env = heap.known().base_env;
+    heap.frame_symbols(base_env).into_iter().find_map(|symbol| {
+        let value = heap.frame_cell(base_env, symbol)?.cdr();
+        let value = if value.kind() == SexpType::Promise {
+            value.car()
+        } else {
+            value
+        };
+        (value == function).then(|| values::symbol_name(symbol).into_owned())
+    })
+}
+
+/// The base closure bound to `name`, forcing its lazy-load promise, which runs no R code, as
+/// compiling the code that names it did.
+unsafe fn base_function(name: &str) -> R<Option<Sexp>> {
+    let heap = crate::heap();
+    let symbol = values::install(name)?;
+    let Some(cell) = heap.frame_cell(heap.known().base_env, symbol) else {
+        return Ok(None);
+    };
     let mut value = cell.cdr();
     if value.kind() == SexpType::Promise {
-        value = value.car();
+        value = eval::force_promise(value)?;
     }
-    (value.kind() == SexpType::Closure).then_some(value)
+    Ok((value.kind() == SexpType::Closure).then_some(value))
 }
 
 struct Decoder<'a, 'b> {
@@ -2345,7 +2362,7 @@ impl Decoder<'_, '_> {
             tag::BASE_FUNCTION => {
                 let count = self.input.count()?;
                 let name = String::from_utf8_lossy(self.input.take(count)?).into_owned();
-                return base_function(&name).ok_or_else(|| {
+                return base_function(&name)?.ok_or_else(|| {
                     error(format!(
                         "the code image names base function '{name}', which is unbound"
                     ))

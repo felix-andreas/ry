@@ -1183,7 +1183,7 @@ unsafe fn compiled_code(closure: Sexp, body: Sexp, trained: bool) -> Result<Vec<
     if bytecode::source_body(closure) != body {
         return Err(Unencodable("a body replaced after loading"));
     }
-    let code = match bytecode::compiled_body(closure) {
+    let code = match bytecode::compile_own_body(closure) {
         Ok(code) if code.kind() == SexpType::Bytecode => code,
         _ => return Err(Unencodable("a body the compiler declines")),
     };
