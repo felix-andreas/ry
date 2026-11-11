@@ -193,7 +193,13 @@ pub(crate) unsafe fn name_position(heap: &Heap, subject: Sexp, index: Sexp) -> O
     if index.is_altrep() || index.attrib() != nil || index.length() != 1 {
         return None;
     }
-    let name = *index.data().cast::<Sexp>();
+    named_position(subject, *index.data().cast::<Sexp>())
+}
+
+/// The position of the first of `subject`'s names that is the `CHARSXP` `name`, under
+/// [`name_position`]'s rule.
+#[inline(always)]
+pub(crate) unsafe fn named_position(subject: Sexp, name: Sexp) -> Option<usize> {
     if name == na_string() || !name.has_gp(gp::ASCII) || name.length() == 0 {
         return None;
     }

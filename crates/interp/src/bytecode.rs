@@ -5211,6 +5211,25 @@ pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> 
     }
 }
 
+/// Runs the instruction at `pc` through tier 0's fast handler for it, for the optimizing tier,
+/// which calls this before it steps an element read or store: whether the handler applied.
+/// A handler that applies reads and writes only the instruction's registers, records its
+/// feedback and, for `SubAssign`, writes the element of its variable's vector in place.
+pub unsafe fn fast_step(machine: &mut Machine<'_>, pc: usize) -> bool {
+    let mut state = activation(machine, true);
+    let index = op_index(state.code, pc);
+    let fast = if index == Op::CallBuiltin as usize {
+        call_builtin_fast(&mut state, pc)
+    } else if index == Op::SubAssign as usize {
+        sub_assign_fast(&mut state, pc)
+    } else if index == Op::Field as usize {
+        field_fast(&mut state, pc)
+    } else {
+        None
+    };
+    fast.is_some()
+}
+
 /// Where an activation stands after [`step`] ran one of its instructions.
 pub enum Stepped {
     /// Interpretation continues at this pc.
@@ -5957,6 +5976,7 @@ fast_paths! {
     fast_branch_if_object: BranchIfObject, branch_if_object_fast;
     fast_call_builtin: CallBuiltin, call_builtin_fast;
     fast_sub_assign: SubAssign, sub_assign_fast;
+    fast_field: Field, field_fast;
 }
 
 /// The constant `index` of the activation's constant pool, read without the ALTREP check of
@@ -6232,6 +6252,26 @@ unsafe fn read_element_call(
     *registers.add(*code.add(at + 1) as usize) = value;
     (*state.interp).visible = true;
     Some(at + 1 + operand_count(Op::CallBuiltin))
+}
+
+/// `Field` (`x$name`) on a list that is not an object or ALTREP and has an element named
+/// exactly `name`: the first such element, which is what `$` reads before it tries partial
+/// matching. Anything else, a record included, runs the generic handler.
+#[inline(always)]
+unsafe fn field_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    let registers = state.registers;
+    let subject = *registers.add(*code.add(at + 2) as usize);
+    if subject.kind() != SexpType::List || subject.is_object() || subject.is_altrep() {
+        return None;
+    }
+    let name = pool_constant(state, *code.add(at + 3) as usize).car();
+    let position = element_access::named_position(subject, name)?;
+    let value = *subject.data().cast::<Sexp>().add(position);
+    state.record(at, value);
+    *registers.add(*code.add(at + 1) as usize) = value;
+    (*state.interp).visible = true;
+    Some(at + 1 + operand_count(Op::Field))
 }
 
 /// `SubAssign` of `x[i] <- v`, `x[[i]] <- v` or `x$name <- v` on a slot frame's slot that alone

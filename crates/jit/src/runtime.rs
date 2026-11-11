@@ -481,6 +481,13 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
     }
 }
 
+/// Runs the instruction at `pc` through tier 0's fast handler for it: 1 when the handler
+/// applied, 0 when the instruction still has to be stepped. A fast handler never unwinds or
+/// runs R code, so this needs neither a guard nor a validation.
+pub unsafe extern "C" fn jit_fast_step(activation: *mut Activation, pc: i64) -> i32 {
+    unsafe { bytecode::fast_step(machine(&*activation), pc as usize) as i32 }
+}
+
 /// Runs the fused pass of the `Fused` instruction at `pc`: [`outcome::FUSED`] when it computed
 /// the expression, [`outcome::OK`] when it declined and the ordinary code runs, and either
 /// invalidated outcome when an argument's promise it forced rebound a function the code

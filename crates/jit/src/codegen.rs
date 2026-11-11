@@ -15,7 +15,7 @@
 use {
     crate::{
         analysis::{
-            self, Action, Argument, Effect, Fold, Intrinsic, Numeric, Plan, Refusal, StateId,
+            self, Action, Argument, Effect, Fast, Fold, Intrinsic, Numeric, Plan, Refusal, StateId,
             StateRef, Store, Ty, jump_target, status,
         },
         native,
@@ -148,6 +148,15 @@ struct Translator<'p> {
     deopts: Vec<Deopt>,
     edges: Vec<PendingEdge>,
     nil: i64,
+    /// The position of the first instruction of the block being translated.
+    block_start: usize,
+}
+
+/// An object tier 0 already holds for a value compiled code keeps unboxed.
+#[derive(Clone, Copy)]
+enum Known {
+    Constant(Sexp),
+    Slot(usize),
 }
 
 /// A value's [`representation`] in a deoptimization exit.
@@ -210,6 +219,7 @@ impl<'p> Translator<'p> {
             deopts: Vec::new(),
             edges: Vec::new(),
             nil: values::nil().as_ptr() as i64,
+            block_start: 0,
         }
     }
 
@@ -306,6 +316,7 @@ impl<'p> Translator<'p> {
             };
             self.builder.switch_to_block(label);
             let (start, end) = (self.plan.blocks[index].start, self.plan.blocks[index].end);
+            self.block_start = start;
             for position in start..end {
                 let terminated = self.instruction(position)?;
                 if position + 1 == end && !terminated {
@@ -664,7 +675,8 @@ impl<'p> Translator<'p> {
                 effect,
                 objects,
                 dst,
-            } => self.step(position, &before, effect, objects, dst)?,
+                fast,
+            } => self.step(position, &before, effect, objects, dst, fast)?,
             Action::Prologue { dst } => {
                 self.box_reads(position, &before);
                 let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
@@ -1172,10 +1184,43 @@ impl<'p> Translator<'p> {
         effect: Effect,
         objects: &[usize],
         dst: Option<(usize, Ty)>,
+        fast: Fast,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
         self.box_reads(position, before);
         let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
+        // Tier 0's fast handler runs no R code, so where it applies the step needs none of the
+        // write-back, validation and reload below, and the compiled op costs no more than
+        // tier 0's.
+        let refining = self.builder.create_block();
+        if fast != Fast::No {
+            if let Fast::Store(slot) = fast {
+                self.flush_slot(before, slot, failed);
+            }
+            let pc_value = iconst(&mut self.builder, pc);
+            let handled = self
+                .call(
+                    runtime::jit_fast_step as *const () as usize,
+                    &[I64, I64],
+                    Some(I32),
+                    &[self.activation, pc_value],
+                )
+                .ok_or(Refusal("a helper without a result"))?;
+            let done = self.builder.create_block();
+            let generic = self.builder.create_block();
+            self.builder.ins().brif(handled, done, &[], generic, &[]);
+            self.builder.switch_to_block(done);
+            // The handler stores into the frame's object in place, so a variable held as that
+            // object stays valid, and only an unboxed copy goes stale.
+            if let Fast::Store(slot) = fast
+                && before.slots[slot].ty.in_variables()
+            {
+                let zero = self.builder.ins().iconst(I32, 0);
+                self.set_status(slot, zero);
+            }
+            self.builder.ins().jump(refining, &[]);
+            self.builder.switch_to_block(generic);
+        }
         let validate = match effect {
             Effect::Pure => self.builder.ins().iconst(I32, 0),
             Effect::Opaque => {
@@ -1236,6 +1281,8 @@ impl<'p> Translator<'p> {
                 self.builder.switch_to_block(joined);
             }
         }
+        self.builder.ins().jump(refining, &[]);
+        self.builder.switch_to_block(refining);
         if let Some((register, ty)) = dst {
             self.refine(register, ty, next, after, position + 1);
         }
@@ -1255,7 +1302,7 @@ impl<'p> Translator<'p> {
         target: usize,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
-        self.box_registers(reads.iter().copied(), before);
+        self.box_registers(position, reads.iter().copied(), before);
         let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
         self.flush_all(before, failed);
         let pc_value = iconst(&mut self.builder, pc);
@@ -1499,12 +1546,118 @@ impl<'p> Translator<'p> {
 
     /// Boxes the unboxed registers the instruction at `position` reads, so tier 0 finds them.
     unsafe fn box_reads(&mut self, position: usize, before: &StateRef<'p>) {
-        self.box_registers(analysis::reads(&self.plan.insts[position]), before);
+        self.box_registers(position, analysis::reads(&self.plan.insts[position]), before);
+    }
+
+    /// Where tier 0 would find the object for the unboxed `register` at `position`: the
+    /// constant pool's object or a variable's frame cell, when an earlier instruction of the
+    /// same block loaded the register from there and the instructions since write only other
+    /// registers. A step between them may rebind the variable, but then it also forgets the
+    /// variable, which the run-time status check in [`Self::box_for_tier0`] sees.
+    fn known_object(&self, position: usize, register: usize) -> Option<Known> {
+        for earlier in (self.block_start..position).rev() {
+            match *self.plan.actions.get(earlier)? {
+                Action::Constant { dst, value, .. } if dst == register => {
+                    return Some(Known::Constant(value));
+                }
+                Action::GetVar { dst, slot, .. } if dst == register => {
+                    return Some(Known::Slot(slot));
+                }
+                Action::Step {
+                    dst: Some((dst, _)),
+                    ..
+                }
+                | Action::GetFun { dst, .. }
+                    if dst == register =>
+                {
+                    return None;
+                }
+                Action::Constant { .. }
+                | Action::GetVar { forcing: false, .. }
+                | Action::GetFun { .. }
+                | Action::Step { dst: Some(_), .. }
+                | Action::Srcref(_)
+                | Action::Skip => {}
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// The boxed form of the unboxed `register` for tier 0. A constant is the pool's own object,
+    /// and a variable whose frame cell holds the object it was unboxed from reuses that object,
+    /// so neither allocates.
+    unsafe fn box_for_tier0(&mut self, position: usize, register: usize, ty: Ty, before: &StateRef<'p>) -> Value {
+        let slot = match self.known_object(position, register) {
+            Some(Known::Constant(constant)) => {
+                return self.builder.ins().iconst(I64, constant.as_ptr() as i64);
+            }
+            Some(Known::Slot(slot)) if before.slots[slot].may_be(status::LOCAL) => slot,
+            _ => {
+                let value = self.use_register(register, ty);
+                return self.box_value(ty, value);
+            }
+        };
+        // A variable compiled code assigned is written back first, once, so this and every
+        // later boxing of it reuse the frame's object instead of allocating.
+        let current = before.slots[slot];
+        if current.may_be(status::DIRTY) && current.ty.in_variables() {
+            let pc = self.plan.insts[position].pc;
+            let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
+            let status = self.status(slot);
+            let dirty = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
+            let flush = self.builder.create_block();
+            let flushed = self.builder.create_block();
+            self.builder.set_cold_block(flush);
+            self.builder.ins().brif(dirty, flush, &[], flushed, &[]);
+            self.builder.switch_to_block(flush);
+            let result = self.call_flush(slot, current.ty);
+            let ok = self.builder.ins().icmp_imm_s(IntCC::NotEqual, result, 0);
+            self.guard(ok, failed);
+            let clean = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
+            self.set_status(slot, clean);
+            self.builder.ins().jump(flushed, &[]);
+            self.builder.switch_to_block(flushed);
+        }
+        // A clean variable's cell holds the object it was unboxed from, unless that is a
+        // promise, whose value is what the register holds.
+        let kind = match ty {
+            Ty::Int => SexpType::Integer,
+            Ty::Dbl => SexpType::Real,
+            _ => SexpType::Logical,
+        };
+        let cell = self.load_slot_cell(slot);
+        let status = self.status(slot);
+        let local = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_LOCAL);
+        let held = self.builder.ins().uload8(I32, flags(), cell, KIND);
+        let same_kind = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, held, kind as i64);
+        let reusable = self.builder.ins().band(local, same_kind);
+        let boxing = self.builder.create_block();
+        let join = self.builder.create_block();
+        self.builder.append_block_param(join, I64);
+        self.builder.set_cold_block(boxing);
+        self.builder.ins().brif(reusable, join, &[cell], boxing, &[]);
+        self.builder.switch_to_block(boxing);
+        let value = self.use_register(register, ty);
+        let boxed = self.box_value(ty, value);
+        self.builder.ins().jump(join, &[boxed]);
+        self.builder.switch_to_block(join);
+        self.builder.block_params(join)[0]
     }
 
     /// Writes the unboxed values of `registers` to the window, for tier 0 to read.
     unsafe fn box_registers(
         &mut self,
+        position: usize,
         registers: impl IntoIterator<Item = usize>,
         before: &StateRef<'p>,
     ) {
@@ -1514,11 +1667,11 @@ impl<'p> Translator<'p> {
                 .get(register)
                 .copied()
                 .unwrap_or(Ty::Bottom);
-            if ty.is_unboxed() {
-                let value = self.use_register(register, ty);
-                let boxed = self.box_value(ty, value);
-                self.store_register(register, boxed);
+            if !ty.is_unboxed() {
+                continue;
             }
+            let boxed = self.box_for_tier0(position, register, ty, before);
+            self.store_register(register, boxed);
         }
     }
 
@@ -2878,8 +3031,26 @@ impl<'p> Translator<'p> {
             .current_block()
             .ok_or(Refusal("no current block"))?;
         self.builder.set_cold_block(block);
-        self.flush_all(before, failed);
         self.box_reads(position, before);
+        // Tier 0's fast handler takes the stores this code leaves out, such as one into a list
+        // with names, and needs only this variable in the frame.
+        self.flush_slot(before, slot, failed);
+        let pc_value = iconst(&mut self.builder, pc);
+        let handled = self
+            .call(
+                runtime::jit_fast_step as *const () as usize,
+                &[I64, I64],
+                Some(I32),
+                &[self.activation, pc_value],
+            )
+            .ok_or(Refusal("a helper without a result"))?;
+        let stepping = self.builder.create_block();
+        let stored = self.builder.create_block();
+        let done = self.builder.create_block();
+        self.builder.set_cold_block(stepping);
+        self.builder.ins().brif(handled, stored, &[], stepping, &[]);
+        self.builder.switch_to_block(stepping);
+        self.flush_all(before, failed);
         let zero = self.builder.ins().iconst(I32, 0);
         let result = self.call_step(pc, zero)?;
         let ok = self
@@ -2889,6 +3060,16 @@ impl<'p> Translator<'p> {
         self.guard(ok, failed);
         let unloaded = self.builder.ins().iconst(I32, 0);
         self.set_status(slot, unloaded);
+        self.builder.ins().jump(done, &[]);
+        // The handler stores into the frame's object in place, so a variable held as that
+        // object stays valid, and only an unboxed copy goes stale.
+        self.builder.switch_to_block(stored);
+        if before.slots[slot].ty.in_variables() {
+            let unloaded = self.builder.ins().iconst(I32, 0);
+            self.set_status(slot, unloaded);
+        }
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(done);
         Ok(())
     }
 

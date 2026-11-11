@@ -554,6 +554,19 @@ pub enum Effect {
     Opaque,
 }
 
+/// Whether a [`Action::Step`] first offers its instruction to tier 0's fast handler for it
+/// (`bytecode::fast_step`), which runs an element read or store without the step's write-back,
+/// validation and reload when its shape applies.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fast {
+    No,
+    /// A read of `[`, `[[` or `$`, which writes only its destination register.
+    Read,
+    /// A store into this slot's vector, which the handler finds in the frame and changes in
+    /// place.
+    Store(usize),
+}
+
 /// Scalar arithmetic the JIT does inline.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Numeric {
@@ -898,6 +911,7 @@ pub enum Action<'a> {
         effect: Effect,
         objects: &'a [usize],
         dst: Option<(usize, Ty)>,
+        fast: Fast,
     },
     /// Runs an [`Op::Fused`] pass in tier 0, reading the call operands it evaluated ahead from
     /// `reads`. When the pass computes the expression, `dst` holds its value, checked to be of
@@ -2149,7 +2163,13 @@ impl<'a> Builder<'a> {
                         state.visible = Some(true);
                         self.slot_read(state, operand(0), operand(1), layout, index, feedback)
                     }
-                    _ => self.opaque_step(state, Some((operand(0), feedback)), &[], Effect::Opaque),
+                    _ => self.fast_step(
+                        state,
+                        Some((operand(0), feedback)),
+                        &[],
+                        Effect::Opaque,
+                        Fast::Read,
+                    ),
                 }
             }
             Op::Item => {
@@ -2548,6 +2568,7 @@ impl<'a> Builder<'a> {
                 effect: Effect::Pure,
                 objects: &[],
                 dst: None,
+                fast: Fast::No,
             },
             // Compiled code keeps boxed values in the same register window as tier 0, so it
             // clears the finished statement's registers too, or they would keep its temporaries
@@ -2583,6 +2604,7 @@ impl<'a> Builder<'a> {
                     effect: Effect::Pure,
                     objects: &[],
                     dst: Some((operand(0), ty)),
+                    fast: Fast::No,
                 }
             }
             Op::SubAssign => {
@@ -2631,8 +2653,13 @@ impl<'a> Builder<'a> {
                         Ty::Bottom => Ty::Boxed,
                         ty => ty,
                     };
-                    let action =
-                        self.opaque_step(state, Some((operand(0), refine)), &[], Effect::Opaque);
+                    let action = self.fast_step(
+                        state,
+                        Some((operand(0), refine)),
+                        &[],
+                        Effect::Opaque,
+                        Fast::Store(slot),
+                    );
                     state.visible = Some(false);
                     action
                 }
@@ -3610,6 +3637,48 @@ impl<'a> Builder<'a> {
             effect,
             objects,
             dst,
+            fast: Fast::No,
+        }
+    }
+
+    /// [`Self::opaque_step`] for an instruction tier 0's fast handler may run instead. That path
+    /// leaves every variable as it was, except that a store's own variable is reloaded, since the
+    /// handler changed its vector in the frame; the state after is the join of both paths.
+    fn fast_step(
+        &mut self,
+        state: &mut State<'a>,
+        dst: Option<(usize, Ty)>,
+        objects: &'a [usize],
+        effect: Effect,
+        fast: Fast,
+    ) -> Action<'a> {
+        let mut kept = List::new_in(self.arena);
+        kept.extend(state.slots.iter().copied());
+        // The handler stores into the frame's object in place, so only an unboxed copy of the
+        // variable goes stale.
+        if let Fast::Store(slot) = fast
+            && let Some(kept) = kept.get_mut(slot)
+            && kept.ty.in_variables()
+        {
+            kept.status |= status::NOT_LOADED;
+        }
+        let action = self.opaque_step(state, dst, objects, effect);
+        for (slot, kept) in state.slots.iter_mut().zip(kept.iter()) {
+            *slot = slot.join(*kept);
+        }
+        match action {
+            Action::Step {
+                effect,
+                objects,
+                dst,
+                ..
+            } => Action::Step {
+                effect,
+                objects,
+                dst,
+                fast,
+            },
+            action => action,
         }
     }
 
@@ -3801,20 +3870,26 @@ impl<'a> Builder<'a> {
                 Effect::PureUnlessObserved,
             ));
         }
+        let fast = if count == 2 && matches!(name, "[" | "[[") {
+            Fast::Read
+        } else {
+            Fast::No
+        };
         if PURE_BUILTINS.contains(&name) {
             let objects = self.slice(
                 args.iter()
                     .copied()
                     .filter(|&register| !state.registers[register].is_plain()),
             );
-            return Ok(self.opaque_step(
+            return Ok(self.fast_step(
                 state,
                 Some((dst, feedback)),
                 objects,
                 Effect::PureUnlessObserved,
+                fast,
             ));
         }
-        Ok(self.opaque_step(state, Some((dst, feedback)), &[], Effect::Opaque))
+        Ok(self.fast_step(state, Some((dst, feedback)), &[], Effect::Opaque, fast))
     }
 
     /// Whether `function` is effect-free (see `interp::effects`), so a direct call may bind its
