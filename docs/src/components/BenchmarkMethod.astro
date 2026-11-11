@@ -1,6 +1,6 @@
 ---
-// How each measured suite was run, read from its results file: one column per suite.
-import { legacyNotes, methodRows } from '../lib/benchmarks';
+// How each measured suite was run, read from its results file: one row per suite.
+import { methodRows } from '../lib/benchmarks';
 
 const { columns, rows } = methodRows();
 // A cell's backticks mark code, as in the Markdown export.
@@ -23,4 +23,3 @@ const parts = (text: string) => text.split('`').map((part, index) => ({ part, co
 		}
 	</tbody>
 </table>
-{legacyNotes().map((note) => <p>{note}</p>)}

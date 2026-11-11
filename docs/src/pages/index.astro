@@ -840,7 +840,8 @@ const year = new Date().getFullYear();
                             </tbody>
                         </table>
                         <p class="bench-foot">
-                            Our numeric kernels, untyped, on ry and on GNU R with its bytecode compiler, bars on a logarithmic scale. A program marked too short finishes in under {kernels?.results?.meta.tooShortSeconds ?? 0.1} s on GNU R, which is too little work for a stable ratio.{" "}
+                            Our numeric kernels, untyped, on ry and on GNU R with its bytecode compiler, bars on a logarithmic scale.{" "}
+                            {benchmarks.some((row) => row.tooShort) && <>A program marked too short finishes in under {kernels?.results?.meta.tooShortSeconds ?? 0.1} s on GNU R, which is too little work for a stable ratio.{" "}</>}
                             {kernels && suiteMetadata(kernels)}{" "}
                             <a href="/benchmarks">Full table, programs and method</a>
                         </p>

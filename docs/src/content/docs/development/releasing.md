@@ -144,7 +144,8 @@ On x86_64 Linux, `just package` builds through `tools/layout/optimize.sh`, which
 crate with profile-guided optimization and lays out `libR.so` with BOLT when `llvm-bolt` 20 or
 newer is installed (`RY_LAYOUT=off` skips the whole pipeline, `RY_LAYOUT_BOLT=off` only BOLT). The script
 builds an instrumented `ry`, runs `tools/layout/train.py` on it (the oracle cases, the
-`tools/bench/real` workloads and half the public suites, with the JIT on and off), and rebuilds
+plain R programs of the numeric kernels and application workloads, and half the public suite, with
+the JIT on and off), and rebuilds
 with the profile. Any profile-mismatch warning, or more than 1% of functions without a profile
 record, fails the build, because a stale profile optimizes hot code as cold
 (`decisions.md`, "The Linux release build is profile-guided"). The training needs testthat, purrr,
@@ -152,7 +153,7 @@ stringr, lubridate, data.table, xts and zoo in GNU R's library, the instrumented
 `ry` takes about 14 GB of memory, and the pipeline takes about 30 minutes on 4 cores plus the
 base R build. The
 binaries land in `target/x86_64-unknown-linux-gnu/release`, apart from the plain
-`cargo build --release` output in `target/release` that `just bench-real` and the other bench
+`cargo build --release` output in `target/release` that `just bench` and the other bench
 recipes time, so benchmarks of interpreter changes keep measuring the plain layout. On first use `ry` extracts the runtime into
 `ry/runtime/<hash>/` and base R into `ry/base/<hash>/` of the user's cache. `ry` is also the R front end
 that `ry-rcmd` is in a development build: ry's R home runs it through a link named `ry-rcmd`

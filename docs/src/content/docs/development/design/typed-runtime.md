@@ -446,8 +446,8 @@ user-facing wording and the diagnostic codes follow the native-types contract.
 
 ## Measuring against the bar
 
-- **Rust references.** Each typed benchmark program has a Rust twin in `tools/bench/why/rust/`, and
-  `just bench-why` reports the typed time against it.
+- **Rust references.** Each typed benchmark program has a Rust twin in `tools/climb/rust/`, and
+  `just climb` reports the typed time against it.
 - **Three runs per program.** Every typed benchmark program, every typed oracle program and every
   program the fuzzer generates (records, tags, lists, strings, dicts, closures) runs three ways: in
   the interpreter with annotations checked, compiled, and compiled with every annotation erased,
