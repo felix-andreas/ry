@@ -36,7 +36,14 @@ use {
         },
         records::{Fields, slot_kind},
     },
-    interp::{annotations, bytecode, records, values},
+    interp::{
+        annotations, bytecode,
+        eval::{
+            PendingName, is_reference, peek_variable, pending_name, reference_value,
+            reference_variable, settle_unforced,
+        },
+        records, values,
+    },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
     ssa::{
@@ -3199,7 +3206,7 @@ pub(crate) unsafe fn run(
 /// `...` must keep the value this call saw, as if tier 0 had forced it.
 unsafe fn force_read(read: &[(Sexp, Sexp)]) {
     for &(promise, value) in read {
-        interp::eval::settle_unforced(promise, value);
+        settle_unforced(promise, value);
     }
 }
 
@@ -3222,8 +3229,19 @@ unsafe fn promise_value(
         return None;
     }
     let expression = promise.cdr();
-    let value = if interp::eval::is_reference(promise) {
-        interp::eval::reference_value(promise)?
+    // An argument reference from a caller with an environment keeps that environment and the
+    // argument's source as a promise does, so only a slot frame's reference reads differently.
+    let value = if is_reference(promise) && promise.tag().kind() != SexpType::Environment {
+        match reference_variable(promise) {
+            // The variable holds a promise of the caller's own argument, which the same rules
+            // read in its own environment.
+            Some(inner)
+                if inner.kind() == SexpType::Promise && inner.car() == values::unbound() =>
+            {
+                promise_value(inner, read, depth + 1)?
+            }
+            _ => reference_value(promise)?,
+        }
     } else if matches!(
         expression.kind(),
         SexpType::Integer
@@ -3241,7 +3259,9 @@ unsafe fn promise_value(
         if env.kind() != SexpType::Environment {
             return None;
         }
-        pure_value(expression, env, read, depth + 1)?
+        // A promise made by compiled code holds its argument compiled, and the compiled code
+        // computes what its source does.
+        pure_value(bytecode::source_of_body(expression), env, read, depth + 1)?
     };
     read.push((promise, value));
     Some(value)
@@ -3267,7 +3287,7 @@ unsafe fn pure_value(
             return (expression.attrib() == values::nil()).then_some(expression);
         }
         SexpType::Symbol => {
-            let bound = interp::eval::peek_variable(expression, env)?;
+            let bound = peek_variable(expression, env)?;
             return if bound.kind() == SexpType::Promise {
                 promise_value(bound, read, depth)
             } else {
@@ -3285,9 +3305,24 @@ unsafe fn pure_value(
     // resolves from the frame's enclosure. Looking it up in the pending environment itself would
     // reify the frame, through the heap's resolver, on every call.
     let start = if env.has_gp(heap::object::gp::PENDING_FRAME) {
-        match interp::eval::pending_name(env, head) {
-            interp::eval::PendingName::Slot(_) => return None,
-            interp::eval::PendingName::Enclosure(enclosure) => enclosure,
+        match pending_name(env, head) {
+            // R's function lookup passes over a binding that holds no function, as `c` does after
+            // `c <- 3`. A promise would have to be forced to tell, and a local function is not a
+            // base function the code below could stand in for.
+            PendingName::Slot(value)
+                if value != values::missing_arg()
+                    && !matches!(
+                        value.kind(),
+                        SexpType::Promise
+                            | SexpType::Closure
+                            | SexpType::Builtin
+                            | SexpType::Special
+                    ) =>
+            {
+                env.enclosure()
+            }
+            PendingName::Slot(_) => return None,
+            PendingName::Enclosure(enclosure) => enclosure,
         }
     } else {
         env

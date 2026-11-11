@@ -30,7 +30,8 @@ use {
         Marker,
         object::{Sexp, SexpType, gp},
     },
-    rustc_hash::FxHashMap,
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{cell::RefCell, sync::OnceLock},
     syntax::{SyntaxKind, SyntaxNode},
 };
 
@@ -568,7 +569,7 @@ pub unsafe fn is_typed(function: Sexp) -> bool {
 
 /// Whether `RY_TYPED_LOG` asks for the typed core's decisions on standard error.
 pub fn typed_logging() -> bool {
-    static LOGGING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static LOGGING: OnceLock<bool> = OnceLock::new();
     *LOGGING.get_or_init(|| std::env::var_os("RY_TYPED_LOG").is_some())
 }
 
@@ -577,7 +578,7 @@ pub fn typed_logging() -> bool {
 /// shows up here has fallen off the native path, which is otherwise invisible except as time.
 pub unsafe fn log_interpreted(call: Sexp) {
     thread_local! {
-        static LOGGED: std::cell::RefCell<rustc_hash::FxHashSet<String>> = Default::default();
+        static LOGGED: RefCell<FxHashSet<String>> = Default::default();
     }
     if !typed_logging() {
         return;

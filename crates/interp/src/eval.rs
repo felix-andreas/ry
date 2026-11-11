@@ -404,6 +404,10 @@ unsafe fn force_slot_promise(promise: Sexp, env: Sexp) -> R<Sexp> {
     let value = slot_promise_value(promise, owner)?;
     // A promise whose forcing failed stays unforced, so only a value settles the count.
     let frame = &mut interp().frames[owner];
+    debug_assert!(
+        frame.unforced > 0,
+        "a frame counts fewer unforced promises than it has"
+    );
     frame.unforced = frame.unforced.saturating_sub(1);
     Ok(value)
 }
@@ -430,9 +434,7 @@ unsafe fn slot_promise_value(promise: Sexp, owner: usize) -> R<Sexp> {
     )
 }
 
-/// What the name `symbol` reads in the live slot frame whose pending environment is `pending`,
-/// found where forcing a promise of it there finds it ([`slot_promise_value`]), but without
-/// forcing or evaluating anything.
+/// Where a name is bound for a live slot frame's pending environment ([`pending_name`]).
 pub enum PendingName {
     /// The content of the slot that binds the name: a value, a promise, or the empty argument.
     Slot(Sexp),
@@ -440,6 +442,9 @@ pub enum PendingName {
     Enclosure(Sexp),
 }
 
+/// What the name `symbol` reads in the live slot frame whose pending environment is `pending`,
+/// found where forcing a promise of it there finds it ([`slot_promise_value`]), but without
+/// forcing or evaluating anything.
 pub unsafe fn pending_name(pending: Sexp, symbol: Sexp) -> PendingName {
     let frame = &interp().frames[pending_owner(pending)];
     match slot_content(frame.function, frame.slots as usize, symbol) {
@@ -483,6 +488,10 @@ pub unsafe fn settle_unforced(promise: Sexp, value: Sexp) {
         && env.has_gp(gp::PENDING_FRAME)
     {
         let frame = &mut interp().frames[pending_owner(env)];
+        debug_assert!(
+            frame.unforced > 0,
+            "a frame counts fewer unforced promises than it has"
+        );
         frame.unforced = frame.unforced.saturating_sub(1);
     }
     crate::heap().settle_promise(promise, value);
@@ -779,7 +788,7 @@ unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
 }
 
 /// The value an unforced argument reference stands for when reading it runs no code: its
-/// variable's slot holds a value or a forced promise.
+/// variable holds a value or a forced promise ([`reference_variable`]).
 pub unsafe fn reference_value(reference: Sexp) -> Option<Sexp> {
     if let Some(env) = reference_env(reference) {
         let expression = reference.cdr();
@@ -793,22 +802,38 @@ pub unsafe fn reference_value(reference: Sexp) -> Option<Sexp> {
             _ => Some(expression),
         };
     }
-    if reference_code(reference).is_some() {
-        return None;
-    }
-    let (owner, slot) = reference_target(reference);
-    let frame = &interp().frames[owner];
-    if frame.env != nil() || slot == NO_REFERENCE_SLOT {
-        return None;
-    }
-    let value = *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
-    if value == unbound() || value == missing_arg() {
-        return None;
-    }
+    let value = reference_variable(reference)?;
     if value.kind() != SexpType::Promise {
         return Some(value);
     }
     (value.car() != unbound()).then(|| value.car())
+}
+
+/// What the variable a slot frame's argument reference names holds, read where forcing the
+/// reference would read it but without forcing or calling anything: a value or a promise, or
+/// `None` for a code reference, an environment reference, or an unbound, missing or active
+/// variable. A variable the frame keeps in no slot, or whose slot is unbound, is read in the
+/// frame's enclosure ([`peek_variable`]), so a global passed from a slot frame needs no
+/// environment for that frame.
+pub unsafe fn reference_variable(reference: Sexp) -> Option<Sexp> {
+    if reference_env(reference).is_some() || reference_code(reference).is_some() {
+        return None;
+    }
+    let symbol = reference.cdr();
+    let (owner, slot) = reference_target(reference);
+    let frame = &interp().frames[owner];
+    if frame.env != nil() {
+        return peek_variable(symbol, frame.env);
+    }
+    let value = if slot == NO_REFERENCE_SLOT {
+        unbound()
+    } else {
+        *bytecode::register_address(frame.slots as usize + 1 + slot as usize)
+    };
+    if value == unbound() {
+        return peek_variable(symbol, frame.function.tag());
+    }
+    (value != missing_arg()).then_some(value)
 }
 
 /// Whether the variable an unforced argument reference names is a missing argument in its

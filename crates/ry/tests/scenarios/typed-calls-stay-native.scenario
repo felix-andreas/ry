@@ -1,5 +1,6 @@
 # A user's strict typed function runs on native code however it is called: from the top level,
-# or again and again from an interpreted wrapper whose arguments are promises over its variables.
+# or again and again from an interpreted wrapper whose arguments are promises over its variables
+# or over arguments its own caller computed.
 # `RY_TYPED_LOG` names every typed function a call of falls back to the interpreter, so a kernel
 # that left native code shows up here and not only as lost time. `clock` reads R's clock, which
 # the typed core refuses, so it is the one name the log may print.
@@ -24,10 +25,15 @@ file calls.R
 |   dot(x, x)
 | }
 | for (k in List.range(1, 4)) print(wrap())
+| twice <- function(v: F64) -> F64 v * 2.0
+| doubled <- function(v) twice(v)
+| for (k in [1.0, 2.0, 3.0]) print(doubled(k + 0.5))
 
 env RY_TYPED_LOG 1
 run ry run --runtime ry calls.R
 expect exit 0
 expect stdout "14"
+expect stdout "[1] 7"
 expect stderr "typed: `clock` runs in the interpreter"
 expect stderr lacks "`dot` runs in the interpreter"
+expect stderr lacks "`twice` runs in the interpreter"

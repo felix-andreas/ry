@@ -631,7 +631,17 @@ unsafe fn resolved_through(argument: Sexp, depth: u32) -> R<Option<Sexp>> {
         return Ok(Some(argument.car()));
     }
     if eval::is_reference(argument) {
-        return match eval::reference_value(argument) {
+        let value = match eval::reference_variable(argument) {
+            Some(inner)
+                if inner.kind() == SexpType::Promise
+                    && inner.car() == values::unbound()
+                    && depth > 0 =>
+            {
+                resolved_through(inner, depth - 1)?
+            }
+            _ => eval::reference_value(argument),
+        };
+        return match value {
             Some(value) => eval::settle_promise(argument, value).map(Some),
             None => Ok(None),
         };

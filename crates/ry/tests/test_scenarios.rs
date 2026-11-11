@@ -97,9 +97,9 @@ const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 7] = [
 /// The harness's own typed functions, which read R's clock and so run in the interpreter.
 const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
 
-/// A typed benchmark program that compiles natively has to stay native: a change elsewhere in
-/// the runtime once made every warm call of a strict typed closure run in the interpreter
-/// without failing anything, only running 500 times slower. Each program runs once with
+/// A typed benchmark program that compiles natively has to stay native: a refusal that sends
+/// the warm calls of a strict typed closure to the interpreter fails nothing and shows only as
+/// time (500 times as much for `array_dot`). Each program runs once with
 /// `RY_TYPED_LOG`, which names every typed function a call of falls back to the interpreter.
 #[test]
 fn typed_benchmarks_run_natively() {
@@ -198,9 +198,9 @@ fn native_entries_hold_in_slot_frames() {
     );
 }
 
-/// A typed call the typed core declines still reads its arguments first, and reading
-/// `order$region` from the slot frame of `taxed` must not give that frame an environment: a
-/// lookup in its pending environment would, on every call.
+/// A typed call the typed core declines still reads its arguments first. When an argument is a
+/// call made in a slot frame, finding that call's function must not give the frame an
+/// environment, which a lookup in its pending environment would, on every call.
 #[test]
 fn declined_typed_calls_keep_slot_frames() {
     const CALLS: u64 = 20_000;
