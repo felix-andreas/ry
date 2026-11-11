@@ -74,21 +74,11 @@ fn scenarios_hold() {
 /// The typed benchmark programs whose kernels do not run on native code yet, with what the
 /// typed core refuses in each. Every other `<name>.typed.R` in `tools/bench/kernels` and
 /// `tools/bench/applications` must run natively.
-const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 7] = [
-    ("expr_tree", "tagged unions built in the kernel (`.ry_tag`)"),
+const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 3] = [
     ("log_rank", "a record parameter"),
-    (
-        "orders",
-        "records and tags built in the kernel (`.ry_record`, `.ry_tag`)",
-    ),
-    ("report", "text building (`.ry_text`)"),
     (
         "sales",
         "a `DataFrame` parameter, which the table engine runs",
-    ),
-    (
-        "team_scores",
-        "`Result.with_default` and a mapped non-local function",
     ),
     (
         "vasicek",
