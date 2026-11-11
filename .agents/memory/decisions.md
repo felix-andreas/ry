@@ -8853,7 +8853,8 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - `Machine` is unchanged; only tier 0's private `Activation` may be slimmed.
 - The handler calls the same per-instruction fast paths, so every per-site guard (`epochs[slot] == Heap::lookup_stamp(symbol)` plus the key check in `guard_fast` and `get_fun_fast`) still runs for both halves, and `effects::resolve`'s stamps need no change. The oracle case `bytecode__base_function_rebinds_at_one_site` rebinds a base builtin between calls at one fused site.
 - Pairs whose second half is a taken branch target (`BranchUnlessBuiltin` then `CallGeneric`) cannot fuse; pairs whose first half has no fast path or a narrow one (`SetVar`, `CallBuiltin`) gain nothing.
-- `set_superinstructions(false)` turns fusion off per thread for the fuzz check, which compares each body with and without it.
+- `set_superinstructions(false)` turns fusion off per thread for the fuzz check, which compares each body with and without it. `RY_SUPERINSTRUCTIONS=0` turns it off for a process, which is how the paired benchmark measures the same build both ways.
+- Guard is about 19% of dispatches and four of the eight pairs contain it, so removing guards was weighed first. Over the same corpus, a guard of a symbol already guarded in the same activation with no impure op in between is 1.5% of guards (3.9% if variable reads and writes count as pure), and no guard is loop-invariant, because every loop body runs a call. Even the same symbol guarded anywhere earlier in the frame is only 27.5%. So dominance-based guard dedup is not built: almost every repeat guard follows a call that could rebind the symbol, and the epoch has to be proven again.
 
 ## Flake inputs are git URLs
 
