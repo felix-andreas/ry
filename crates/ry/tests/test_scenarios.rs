@@ -233,6 +233,55 @@ fn declined_typed_calls_keep_slot_frames() {
     );
 }
 
+/// A strict typed function that runs natively reads its arguments from the caller's slots
+/// without forcing them, and settles each promise it reads as forcing would. A wrapper that runs
+/// in a slot frame then returns with no promise left unforced, so it keeps its slots: one that
+/// still counted a settled promise would get an environment on every call. `both` reads the
+/// same promise twice, which settles it once.
+#[test]
+fn native_typed_calls_keep_slot_frames() {
+    const CALLS: u64 = 20_000;
+    let script = format!(
+        "twice <- function(v: F64) -> F64 v * 2.0\n\
+         add <- function(a: F64, b: F64) -> F64 a + b\n\
+         doubled <- function(v) twice(v)\n\
+         both <- function(v) add(v, v)\n\
+         x: F64 <- 0\n\
+         total: F64 <- 0\n\
+         for (k in List.range(1, {CALLS})) {{\n\
+         \x20 x <- x + 1.0\n\
+         \x20 total <- total + doubled(x + 0.5) + both(x + 0.5)\n\
+         }}\n\
+         print(total)\n"
+    );
+    let manifest = "[check]\ntyping = true\nstrict = true\n";
+    let Some(summary) = profile_summary(&[("ry.toml", manifest), ("wrapped.R", &script)]) else {
+        return;
+    };
+    let reified = summary_count(&summary, "slot frames turned into environments");
+    assert!(
+        reified < CALLS / 10,
+        "{reified} slot frames got an environment in {CALLS} calls of each wrapper"
+    );
+}
+
+/// A promise made over a slot frame's pending environment counts as unforced however it is
+/// made. Here `do.call` evaluates a call in the frame `parent.frame()` names, which makes the
+/// promise of `x` over the pending environment outside the slot frame's own call setup; a frame
+/// that missed it would count one promise too few when it is forced, and could return without
+/// the environment a promise still needs.
+#[test]
+fn promises_over_slot_frames_are_counted() {
+    let script = "show <- function() do.call(print, list(quote(x)), envir = parent.frame())\n\
+                  f <- function(x) { show(); NULL }\n\
+                  for (i in 1:3) f(i)\n\
+                  later <- function() do.call(function(y) function() y, list(quote(x)), envir = parent.frame())\n\
+                  g <- function(x) later()\n\
+                  k <- g(3)\n\
+                  stopifnot(identical(k(), 3))\n";
+    profile_summary(&[("counted.R", script)]);
+}
+
 /// Runs the last of `files` with `--profile-summary` in a directory holding all of them, and
 /// gives the summary; `None` when ry's runtime is missing.
 fn profile_summary(files: &[(&str, &str)]) -> Option<String> {

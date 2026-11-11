@@ -38,7 +38,7 @@ pub type Args = SmallVec<[Arg; 10]>;
 pub type Matched = SmallVec<[Sexp; 8]>;
 
 /// The promise bit set while its code runs, to report recursive default references.
-const PROMISE_SEEN: u16 = 1 << 0;
+pub const PROMISE_SEEN: u16 = 1 << 0;
 
 /// Evaluates `expression` in `env`. An error raised below is signalled here, so handlers run
 /// close to where it happened.
@@ -335,7 +335,9 @@ pub unsafe fn set_var(symbol: Sexp, value: Sexp, env: Sexp) -> R<()> {
 /// A promise to evaluate `code` in `env`.
 pub unsafe fn make_promise(code: Sexp, env: Sexp) -> R<Sexp> {
     activity::count(Counter::PromisesCreated);
-    triple(SexpType::Promise, unbound(), code, env)
+    let promise = triple(SexpType::Promise, unbound(), code, env)?;
+    count_unforced(env);
+    Ok(promise)
 }
 
 /// A promise to run the compiled `code` in `env`, the frame of the code it was compiled with.
@@ -346,7 +348,19 @@ pub unsafe fn compiled_promise(code: Sexp, env: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     let promise = heap.alloc_compiled_promise(unbound(), bytecode::source_of(code), env, code)?;
     heap.root(promise);
+    count_unforced(env);
     Ok(promise)
+}
+
+/// Counts a new unforced promise over `env` when that is a slot frame's pending environment.
+/// Forcing or settling the promise takes it off the count again, and a frame that returns with
+/// a count of zero skips the check for promises and closures that outlive it
+/// ([`finish_frame`]), so every promise made over a pending environment, wherever it is made,
+/// must be counted here.
+unsafe fn count_unforced(env: Sexp) {
+    if env.kind() == SexpType::Environment && env.has_gp(gp::PENDING_FRAME) {
+        interp().frames[pending_owner(env)].unforced += 1;
+    }
 }
 
 /// A promise that already holds `value`, whose code is `code` for `substitute` to see.
@@ -534,13 +548,11 @@ unsafe fn eval_enclosed_name(symbol: Sexp, enclosure: Sexp, owner: usize) -> R<S
 /// promise and gets its bindings only if the frame reifies.
 pub unsafe fn slot_promise(owner: usize, expression: Sexp) -> R<Sexp> {
     let env = pending_env(owner)?;
-    let promise = if expression.kind() == SexpType::Bytecode {
-        compiled_promise(expression, env)?
+    if expression.kind() == SexpType::Bytecode {
+        compiled_promise(expression, env)
     } else {
-        make_promise(expression, env)?
-    };
-    interp().frames[owner].unforced += 1;
-    Ok(promise)
+        make_promise(expression, env)
+    }
 }
 
 /// A closure of `formals` and `body` defined in the slot frame whose header register is
@@ -854,7 +866,12 @@ unsafe fn reference_link(reference: Sexp) -> Option<Sexp> {
             return None;
         }
         return match expression.kind() {
-            SexpType::Symbol => crate::effects::eager_argument(expression, env),
+            // The environment can be a slot frame's pending one, as a call evaluated in
+            // `parent.frame()` makes it.
+            SexpType::Symbol if expression != missing_arg() && expression != symbols().dots => {
+                peek_variable(expression, env)
+            }
+            SexpType::Symbol => None,
             SexpType::Language => None,
             _ => Some(expression),
         };
@@ -1012,15 +1029,16 @@ unsafe fn reference_promise(reference: Sexp) -> R<[Sexp; 4]> {
     } else {
         let (owner, _) = reference_target(reference);
         let expression = reference_code(reference).unwrap_or(symbol);
-        let frame = &mut interp().frames[owner];
+        let frame = &interp().frames[owner];
         if frame.env != nil() {
             (frame.env, expression)
         } else {
-            let env = pending_env(owner)?;
-            interp().frames[owner].unforced += 1;
-            (env, expression)
+            (pending_env(owner)?, expression)
         }
     };
+    // The reference becomes a promise over `env`, which may be a pending environment however
+    // the reference was made.
+    count_unforced(env);
     activity::count(Counter::PromisesCreated);
     Ok(if expression.kind() == SexpType::Bytecode {
         [unbound(), bytecode::source_of(expression), env, expression]

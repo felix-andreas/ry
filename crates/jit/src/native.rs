@@ -39,8 +39,8 @@ use {
     interp::{
         annotations, bytecode,
         eval::{
-            PendingName, is_reference, peek_variable, pending_name, reference_variable,
-            settle_unforced,
+            PROMISE_SEEN, PendingName, is_reference, peek_variable, pending_name,
+            reference_variable, settle_unforced,
         },
         records, values,
     },
@@ -3227,8 +3227,13 @@ unsafe fn promise_value(
     if promise.car() != values::unbound() {
         return Some(promise.car());
     }
-    // A checked promise runs its annotation check when forced, which only tier 0 does.
-    if promise.has_gp(heap::object::gp::CHECKED_PROMISE) || depth > MAX_PURE_DEPTH {
+    // A checked promise runs its annotation check when forced, which only tier 0 does, and
+    // forcing a promise whose code is running raises the recursion error, which a read must not
+    // replace with a value.
+    if promise.has_gp(heap::object::gp::CHECKED_PROMISE)
+        || promise.has_gp(PROMISE_SEEN)
+        || depth > MAX_PURE_DEPTH
+    {
         return None;
     }
     let expression = promise.cdr();
