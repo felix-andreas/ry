@@ -224,8 +224,7 @@ unsafe fn repays(machine: &Machine<'_>, shape: analysis::Shape) -> bool {
         let threshold = bytecode::tier().map_or(0, |tier| tier.entry_threshold);
         let window_entries =
             u64::try_from(threshold - bytecode::recording_start(threshold)).unwrap_or(0);
-        let window_calls =
-            u64::from(clock().wrapping_sub(profile[profile::WINDOW]) as u32).max(1);
+        let window_calls = u64::from(clock().wrapping_sub(profile[profile::WINDOW]) as u32).max(1);
         let calls = window_entries * HORIZON_CALLS / window_calls;
         let words = values::ints(machine.code.car()).len() as u64;
         let cost = COMPILE_FIXED + COMPILE_PER_WORD * words;

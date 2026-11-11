@@ -13,8 +13,10 @@ values start apart too, so every round covers new seeds. The harnesses the campa
 depth. The oracle's GC torture joins the rotation too, choosing its cases by seed.
 
 Before the first round, the libr test suites that build and run the vendored packages' native
-code run once under `RY_GC_STRESS=startup` with `RY_GC_VERIFY=1`, which collects on every
-allocation and checks the write barrier before each minor collection.
+code run once under `RY_GC_STRESS=startup` and once under `RY_GC_STRESS=startup-young`, each with
+`RY_GC_VERIFY=1`. Both collect on every allocation and check the write barrier before each
+collection short of a major one; the young mode also keeps survivors collectable, so an object
+that only a Rust local holds is freed even after it survived earlier collections.
 
 A failure does not stop the campaign. Each one is logged with the command that replays it, and
 the script exits 1 if anything failed. A run the campaign's own deadline cuts short is logged as
@@ -116,10 +118,14 @@ def main():
             executable = executables.get(("libr", suite))
             if executable is None:
                 continue
-            environment = {"RY_GC_STRESS": "startup", "RY_GC_VERIFY": "1"}
-            outcome, output = run(executable, [], environment, "crates/libr", deadline)
-            report(outcome, f"gc-stress {suite}",
-                   f"RY_GC_STRESS=startup RY_GC_VERIFY=1 cargo test -p libr --test {suite}", output)
+            for stress in ["startup", "startup-young"]:
+                if time.monotonic() >= deadline:
+                    break
+                environment = {"RY_GC_STRESS": stress, "RY_GC_VERIFY": "1"}
+                outcome, output = run(executable, [], environment, "crates/libr", deadline)
+                report(outcome, f"gc-stress {stress} {suite}",
+                       f"RY_GC_STRESS={stress} RY_GC_VERIFY=1 cargo test -p libr --test {suite}",
+                       output)
 
     rounds = 0
     while time.monotonic() < deadline:

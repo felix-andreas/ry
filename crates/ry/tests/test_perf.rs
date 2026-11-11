@@ -216,11 +216,7 @@ fn typed_array_dot_peak_memory_stays_near_gnu_r() {
         assert_eq!(exit, 0, "the program failed: {command:?}");
         peak
     };
-    let gnu_r = peak(
-        Command::new("Rscript")
-            .arg("--vanilla")
-            .arg(script(false)),
-    );
+    let gnu_r = peak(Command::new("Rscript").arg("--vanilla").arg(script(false)));
     let ry = peak(
         Command::new(binary)
             .args(["run", "--runtime", "ry"])
