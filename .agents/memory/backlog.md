@@ -126,6 +126,8 @@ left, in order of expected gain:
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
 
+- **xts peaks 34% above GNU R.** In the packages suite (`tools/bench/packages/results.json`), xts's tests peak at 451.7 MiB on ry against 338.0 MiB on GNU R, the only package far above GNU R's peak. Owner: B4 (xts and zoo), after ALTREP. Start with what xts allocates that GNU R shares or frees earlier: index copies through `[.xts`, attribute duplication, and survivors the collector promotes.
+
 - **Package install speed.** `R CMD INSTALL` of Matrix takes 39 s on ry against GNU R's 177 s (74 s with `MAKEFLAGS=-j4`), and almost all of it is the compiler (`decisions.md`, "Package builds run `make` in parallel"). The R half is about 10% slower than GNU R's on the same `tools` calls: MASS's Rd objects take 0.55 s and help indices 0.27 s; Matrix's S4 sourcing takes 2.7 s. Levers: Rd parsing (`tools:::.install_package_Rd_objects`), and the separate test-load process (about 0.2 s per package).
 
 - **Quoted byte strings with a quote character.** GNU R prints a quoted `"bytes"` string that contains `"` with a stray trailing `\0` (`"q\"\\xff\0"`), an artifact of its escape buffer. ry prints it without the `\0`; this is deliberate.
