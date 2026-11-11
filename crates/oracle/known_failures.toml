@@ -32,6 +32,78 @@ owner = "D"
 reason = "aborts: compiled code reads an object the collector freed (heap/src/object.rs freed_object)"
 
 [[failure]]
+case = "calls__inlined_base_internals"
+engine = "ry-jit-gctorture"
+owner = "D"
+reason = "aborts: compiled code reads an object the collector freed (heap/src/object.rs freed_object)"
+
+[[failure]]
+case = "colours__conversions"
+engine = "ry-jit-gctorture"
+owner = "D"
+reason = "aborts: compiled code reads an object the collector freed (heap/src/object.rs freed_object)"
+
+[[failure]]
+case = "connections__sockets"
+engine = "ry-jit-gctorture"
+owner = "D"
+reason = "aborts: compiled code reads an object the collector freed (heap/src/object.rs freed_object)"
+
+[[failure]]
+case = "environments__slot_element_assignment"
+engine = "ry-jit-gctorture"
+owner = "D"
+reason = "aborts: compiled code reads an object the collector freed (heap/src/object.rs freed_object)"
+
+[[failure]]
+case = "functions__builtin_wrappers"
+engine = "ry-jit-gctorture"
+owner = "D"
+reason = "aborts: compiled code reads an object the collector freed (heap/src/object.rs freed_object)"
+
+[[failure]]
+case = "io__connections"
+engine = "ry-jit-gctorture"
+owner = "D"
+reason = "aborts: compiled code reads an object the collector freed (heap/src/object.rs freed_object)"
+
+[[failure]]
+case = "io__read_rds_formats"
+engine = "ry-jit-gctorture"
+owner = "D"
+reason = "aborts: compiled code reads an object the collector freed (heap/src/object.rs freed_object)"
+
+[[failure]]
+case = "jit__matrix_element_reads"
+engine = "ry-jit-gctorture"
+owner = "D"
+reason = "aborts: compiled code reads an object the collector freed (heap/src/object.rs freed_object)"
+
+[[failure]]
+case = "stats__direct_routine_calls"
+engine = "ry-jit-gctorture"
+owner = "D"
+reason = "aborts: compiled code reads an object the collector freed (heap/src/object.rs freed_object)"
+
+[[failure]]
+case = "stats__nlm"
+engine = "ry-jit-gctorture"
+owner = "D"
+reason = "aborts: compiled code reads an object the collector freed (heap/src/object.rs freed_object)"
+
+[[failure]]
+case = "stats__uncmin_quadpack"
+engine = "ry-jit-gctorture"
+owner = "D"
+reason = "aborts: compiled code reads an object the collector freed (heap/src/object.rs freed_object)"
+
+[[failure]]
+case = "tools__help_server"
+engine = "ry-jit-gctorture"
+owner = "D"
+reason = "aborts: compiled code reads an object the collector freed (heap/src/object.rs freed_object)"
+
+[[failure]]
 case = "bytecode__finalizer_under_wide_window"
 engine = "ry-gctorture-young"
 owner = "D"
