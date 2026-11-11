@@ -690,8 +690,15 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   - `order` comes from `tools/layout/image_order.py`, which refuses a touch file whose image
     line differs from the checksum in `ids`. It writes `numbering HEX`, copied from `ids`, then
     one decimal id per line, sorted by the earliest phase any run touched the object in, then by
-    its earliest position relative to the run's length. The second write reads `order` and
-    fails when the numbering differs from its own; ids it does not list follow in id order.
+    its earliest position relative to the run's length, then by id. The second write reads
+    `order` and fails when the numbering differs from its own; ids it does not list follow in id
+    order. An order only ranks objects, so one that names the wrong objects still gives a correct
+    image, only a less compact one.
+  - Writing the same base tree twice gives the same image bytes: the writer zeroes every byte
+    the live objects do not determine (spare vector capacity, write-barrier cards, slot tails,
+    and the process-local fields below) and places the intern table's entries in address order.
+    Strings that name the base tree's path are part of the numbering, so training and the
+    second write use the same tree at the same path.
 - **The same starting state, or no load.** Fixed objects (the heap's well-known objects, the
   primitives by index, `package:ry` and libR's ALTREP classes) exist before start-up in both
   processes. The writer records a digest of its heap's allocation state at that moment
@@ -702,7 +709,8 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
 - **Process-local state lives beside the pages.** The few fields that hold a process's own
   addresses are cleared in the written pages and restored by the loader: environment frames whose
   bindings spilled into memory outside the heap, external pointers to builtin routines (carried
-  as tokens), and the native tables of the fixed ALTREP classes, which keep the loader's. The
+  as tokens), and the contents of the fixed primitives and ALTREP classes, which keep the
+  loader's. The
   metadata carries the intern and symbol tables, the precious set, the global roots and the
   counters. Weak-pair lists load empty.
 - **The writer refuses what it cannot carry.** Writing fails, and so does the base tree's build,
