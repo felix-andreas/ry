@@ -32,6 +32,7 @@ use {
         long_double::{LongDouble, add_all},
         rmath::fround,
     },
+    smallvec::SmallVec,
     std::{
         alloc::{self, Layout},
         cell::Cell,
@@ -75,7 +76,33 @@ pub const LGL: u8 = 2;
 pub const STR: u8 = 3;
 /// ry's `I64`: 8-byte integers without `NA`, laid out as an R `I64` object's data.
 pub const I64: u8 = 4;
+/// Counted pointers to boxes, one word each.
+pub const OBJECT: u8 = 5;
 pub const DICT: u8 = 16;
+/// A record or tag box ([`Boxed`]), whose kind sits where a list's does.
+pub const BOX: u8 = 32;
+
+/// A box header: the shape's id and what its fields hold, so freeing a box never consults the
+/// shape table. The compiler reads fields at [`BOX_FIELDS`], one word each, a string taking two.
+/// Bit `w` of `objects` marks word `w` as a counted pointer, and of `strings` as a string's first
+/// word.
+#[repr(C)]
+pub struct Boxed {
+    pub count: u32,
+    pub kind: u8,
+    pub _pad: [u8; 3],
+    pub shape: u32,
+    pub objects: u32,
+    pub strings: u32,
+    pub words: u32,
+}
+
+/// Where a box's fields start.
+pub const BOX_FIELDS: usize = size_of::<Boxed>();
+/// Where a box's shape id sits.
+pub const BOX_SHAPE: usize = std::mem::offset_of!(Boxed, shape);
+/// The most words a box holds, one bit each in its masks.
+pub const MAX_BOX_WORDS: u32 = 32;
 
 /// The list's items belong to someone else (an R vector the compiler borrows).
 pub const VIEW: u8 = 1;
@@ -173,20 +200,15 @@ pub unsafe extern "C" fn ry_list_free(list: *mut List) {
     if list.is_null() {
         return;
     }
-    if (*list).kind == DICT {
-        dict_free(list as *mut Dict);
-        return;
-    }
-    if (*list).flags & VIEW != 0 {
-        block_free(list as *mut u8, HEADER_BYTES);
-        return;
-    }
-    if (*list).kind == STR {
-        for &item in items::<Str>(list) {
-            str_drop(item);
+    match (*list).kind {
+        DICT => dict_free(list as *mut Dict),
+        BOX => box_free(list as *mut Boxed),
+        _ if (*list).flags & VIEW != 0 => block_free(list as *mut u8, HEADER_BYTES),
+        kind => {
+            drop_items(kind, (*list).data, (*list).length as usize);
+            list_release_storage(list);
         }
     }
-    list_release_storage(list);
 }
 
 /// Frees a heap string buffer whose count reached zero.
@@ -232,7 +254,42 @@ pub unsafe extern "C" fn ry_live_objects() -> i64 {
 
 // Construction.
 
-/// `n` zeros, `FALSE`s, or empty strings.
+/// A box of `shape` with count one and `words` uninitialized field words, which the caller fills
+/// before anything can read or free it.
+pub unsafe extern "C" fn ry_box_new(shape: u32, objects: u32, strings: u32, words: u32) -> *mut u8 {
+    let boxed = block_alloc(BOX_FIELDS + 8 * words as usize) as *mut Boxed;
+    boxed.write(Boxed {
+        count: 1,
+        kind: BOX,
+        _pad: [0; 3],
+        shape,
+        objects,
+        strings,
+        words,
+    });
+    live_add(1);
+    boxed as *mut u8
+}
+
+/// A box without fields that is never counted or freed, so the compiler can bake it into code.
+pub fn static_box(shape: u32) -> *mut u8 {
+    // SAFETY: the block is written whole before it is returned, and never freed.
+    unsafe {
+        let boxed = block_alloc(BOX_FIELDS) as *mut Boxed;
+        boxed.write(Boxed {
+            count: STATIC_COUNT,
+            kind: BOX,
+            _pad: [0; 3],
+            shape,
+            objects: 0,
+            strings: 0,
+            words: 0,
+        });
+        boxed as *mut u8
+    }
+}
+
+/// `n` zeros, `FALSE`s, empty strings, or null pointers.
 pub unsafe extern "C" fn ry_list_new(kind: u32, length: u64) -> *mut List {
     let Some(kind) = list_kind(kind) else {
         return null_mut();
@@ -342,6 +399,13 @@ pub unsafe extern "C" fn ry_list_rep(kind: u32, word0: u64, word1: u64, times: u
     match kind {
         DBL => slice_mut::<f64>((*list).data, length).fill(f64::from_bits(word0)),
         I64 => slice_mut::<i64>((*list).data, length).fill(word0 as i64),
+        OBJECT => {
+            let item = word0 as *mut List;
+            if !item.is_null() && length > 0 {
+                count_add(&mut (*item).count, times);
+            }
+            slice_mut::<u64>((*list).data, length).fill(word0);
+        }
         STR => {
             let item = Str {
                 lo: word0,
@@ -1097,7 +1161,7 @@ pub unsafe extern "C" fn ry_list_equal(a: *mut List, b: *mut List) -> u32 {
     if a == b {
         return 1;
     }
-    if (*a).kind != (*b).kind || (*a).length != (*b).length {
+    if (*a).kind != (*b).kind || (*a).length != (*b).length || (*a).kind == OBJECT {
         return 0;
     }
     let equal = match (*a).kind {
@@ -1490,9 +1554,11 @@ pub unsafe extern "C" fn ry_list_set(
 ) -> *mut List {
     let target = ry_list_unshare(list, owned);
     let index = index as usize;
-    if (*target).kind == STR {
-        str_drop(*((*target).data as *const Str).add(index));
-    }
+    drop_items(
+        (*target).kind,
+        (*target).data.add(index * item_size((*target).kind)),
+        1,
+    );
     write_item((*target).data, (*target).kind, index, word0, word1);
     target
 }
@@ -1520,11 +1586,7 @@ pub unsafe extern "C" fn ry_list_concat(
     } else {
         let target = list_alloc(kind, length, length);
         ptr::copy_nonoverlapping((*a).data, (*target).data, a_length * width);
-        if kind == STR {
-            for &item in items::<Str>(a) {
-                str_dup(item);
-            }
-        }
+        dup_items(kind, (*a).data, a_length);
         consume(a, a_owned);
         target
     };
@@ -1537,11 +1599,7 @@ pub unsafe extern "C" fn ry_list_concat(
     if b_moves {
         list_release_storage(b);
     } else {
-        if kind == STR {
-            for &item in items::<Str>(b) {
-                str_dup(item);
-            }
-        }
+        dup_items(kind, (*b).data, b_length);
         consume(b, b_owned);
     }
     (*target).length = length as u64;
@@ -1563,13 +1621,9 @@ pub unsafe extern "C" fn ry_list_reverse(a: *mut List, a_owned: u32) -> *mut Lis
     match item_size((*a).kind) {
         4 => reverse_into(items::<i32>(a), slice_mut::<i32>((*result).data, length)),
         8 => reverse_into(items::<f64>(a), slice_mut::<f64>((*result).data, length)),
-        _ => {
-            reverse_into(items::<Str>(a), slice_mut::<Str>((*result).data, length));
-            for &item in items::<Str>(a) {
-                str_dup(item);
-            }
-        }
+        _ => reverse_into(items::<Str>(a), slice_mut::<Str>((*result).data, length)),
     }
+    dup_items((*a).kind, (*a).data, length);
     consume(a, a_owned);
     result
 }
@@ -1619,6 +1673,10 @@ pub unsafe extern "C" fn ry_list_sort(a: *mut List, a_owned: u32, decreasing: u3
 /// `NaN`.
 pub unsafe extern "C" fn ry_list_unique(a: *mut List, a_owned: u32) -> *mut List {
     let kind = (*a).kind;
+    if kind == OBJECT {
+        consume(a, a_owned);
+        return null_mut();
+    }
     let length = (*a).length as usize;
     let in_place = a_owned != 0 && is_unique(a);
     let target = if in_place {
@@ -1687,23 +1745,15 @@ pub unsafe extern "C" fn ry_list_slice(
     let kind = (*a).kind;
     let width = item_size(kind);
     if a_owned != 0 && is_unique(a) {
-        if kind == STR {
-            let all = items::<Str>(a);
-            for &item in all[..start].iter().chain(&all[end..]) {
-                str_drop(item);
-            }
-        }
+        drop_items(kind, (*a).data, start);
+        drop_items(kind, (*a).data.add(end * width), length - end);
         ptr::copy((*a).data.add(start * width), (*a).data, count * width);
         (*a).length = count as u64;
         return a;
     }
     let result = list_alloc(kind, count, count);
     ptr::copy_nonoverlapping((*a).data.add(start * width), (*result).data, count * width);
-    if kind == STR {
-        for &item in items::<Str>(result) {
-            str_dup(item);
-        }
-    }
+    dup_items(kind, (*result).data, count);
     consume(a, a_owned);
     result
 }
@@ -1715,7 +1765,7 @@ pub unsafe extern "C" fn ry_dict_new(key_kind: u32, value_kind: u32) -> *mut u8 
     let (Some(key_kind), Some(value_kind)) = (list_kind(key_kind), list_kind(value_kind)) else {
         return null_mut();
     };
-    if key_kind == LGL {
+    if key_kind == LGL || key_kind == OBJECT || value_kind == OBJECT {
         return null_mut();
     }
     dict_alloc(key_kind, value_kind, dict_seed()) as *mut u8
@@ -1797,8 +1847,8 @@ pub unsafe extern "C" fn ry_dict_get(dict: *mut u8, key0: u64, key1: u64, out: *
     };
     let value = value_slot(dict, position);
     match (*dict).value_kind {
-        DBL => {
-            *out = (*(value as *const f64)).to_bits();
+        DBL | I64 => {
+            *out = *(value as *const u64);
             *out.add(1) = 0;
         }
         STR => {
@@ -2193,11 +2243,7 @@ unsafe fn list_copy(list: *mut List, capacity: usize) -> *mut List {
     let length = (*list).length as usize;
     let copy = list_alloc(kind, length, capacity.max(length));
     ptr::copy_nonoverlapping((*list).data, (*copy).data, length * item_size(kind));
-    if kind == STR {
-        for &item in items::<Str>(copy) {
-            str_dup(item);
-        }
-    }
+    dup_items(kind, (*copy).data, length);
     copy
 }
 
@@ -2273,7 +2319,7 @@ unsafe fn slice_mut<'a, T>(data: *mut u8, length: usize) -> &'a mut [T] {
 unsafe fn write_item(data: *mut u8, kind: u8, index: usize, word0: u64, word1: u64) {
     match kind {
         DBL => *(data as *mut f64).add(index) = f64::from_bits(word0),
-        I64 => *(data as *mut i64).add(index) = word0 as i64,
+        I64 | OBJECT => *(data as *mut u64).add(index) = word0,
         STR => {
             *(data as *mut Str).add(index) = Str {
                 lo: word0,
@@ -2284,16 +2330,92 @@ unsafe fn write_item(data: *mut u8, kind: u8, index: usize, word0: u64, word1: u
     }
 }
 
+/// Counts again the `length` items at `data`, for a list that copied them.
+unsafe fn dup_items(kind: u8, data: *mut u8, length: usize) {
+    match kind {
+        STR => {
+            for &item in raw_slice(data as *const Str, length) {
+                str_dup(item);
+            }
+        }
+        OBJECT => {
+            for &item in raw_slice(data as *const *mut List, length) {
+                ry_list_dup(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Drops the `length` items at `data`, for a list that lets go of them.
+unsafe fn drop_items(kind: u8, data: *mut u8, length: usize) {
+    match kind {
+        STR => {
+            for &item in raw_slice(data as *const Str, length) {
+                str_drop(item);
+            }
+        }
+        OBJECT => {
+            for &item in raw_slice(data as *const *mut List, length) {
+                ry_list_drop(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Frees a box whose count reached zero, and every box that held only through it, with a
+/// worklist rather than recursion, so a long chain of tags cannot overflow the stack.
+unsafe fn box_free(first: *mut Boxed) {
+    let mut pending: SmallVec<[*mut Boxed; 16]> = SmallVec::new();
+    pending.push(first);
+    while let Some(boxed) = pending.pop() {
+        let Boxed {
+            objects,
+            strings,
+            words,
+            ..
+        } = *boxed;
+        let fields = (boxed as *mut u8).add(BOX_FIELDS) as *const u64;
+        for word in 0..words as usize {
+            if objects & (1 << word) != 0 {
+                let child = *fields.add(word) as *mut List;
+                if child.is_null() {
+                    continue;
+                }
+                let count = (*child).count;
+                if count == STATIC_COUNT {
+                    continue;
+                }
+                if count > 1 {
+                    (*child).count = count - 1;
+                } else if (*child).kind == BOX {
+                    pending.push(child as *mut Boxed);
+                } else {
+                    ry_list_free(child);
+                }
+            } else if strings & (1 << word) != 0 {
+                str_drop(Str {
+                    lo: *fields.add(word),
+                    hi: *fields.add(word + 1),
+                });
+            }
+        }
+        block_free(boxed as *mut u8, BOX_FIELDS + 8 * words as usize);
+        live_add(-1);
+    }
+}
+
 fn list_kind(kind: u32) -> Option<u8> {
     match kind {
-        0..=4 => Some(kind as u8),
+        0..=5 => Some(kind as u8),
         _ => None,
     }
 }
 
 fn item_size(kind: u8) -> usize {
     match kind {
-        DBL | I64 => 8,
+        DBL | I64 | OBJECT => 8,
         STR => 16,
         _ => 4,
     }
@@ -2959,8 +3081,89 @@ fn map_char(character: char, upper: bool) -> char {
     }
 }
 
-/// The case-mapped string, written over an owned unique buffer when every character keeps its
-/// width.
+/// `Str.to_i64`: Rust's integer syntax, in range. Status 0 on success, 1 otherwise.
+pub unsafe extern "C" fn ry_str_to_i64(lo: u64, hi: u64, out: *mut i64) -> u32 {
+    match (Str { lo, hi }).as_str().parse::<i64>() {
+        Ok(value) => {
+            *out = value;
+            0
+        }
+        Err(_) => 1,
+    }
+}
+
+/// An `I64` in decimal, as `Num.to_str` and an interpolation spell it.
+pub unsafe extern "C" fn ry_format_i64(value: i64) -> Str {
+    let mut text = StackText::new();
+    if write!(text, "{value}").is_ok() {
+        return str_from_bytes(text.as_bytes());
+    }
+    str_from_bytes(value.to_string().as_bytes())
+}
+
+/// `Str.repeat(string, count)` for a count the caller checked is not negative. The string is
+/// borrowed. A result longer than [`MAX_STR_BYTES`] comes back as the null string, `lo` and `hi`
+/// both zero, which no string has, since an inline string sets the top bit of `hi` and a buffer
+/// pointer is never null.
+pub unsafe extern "C" fn ry_str_repeat(lo: u64, hi: u64, count: i64) -> Str {
+    let string = Str { lo, hi };
+    let bytes = string.bytes();
+    let count = count.max(0) as usize;
+    let Some(total) = bytes
+        .len()
+        .checked_mul(count)
+        .filter(|&total| total <= MAX_STR_BYTES)
+    else {
+        return Str { lo: 0, hi: 0 };
+    };
+    str_build(total, |cursor| {
+        for _ in 0..count {
+            cursor.push(bytes);
+        }
+    })
+}
+
+/// The longest string compiled code builds by repetition, R's own limit on a string's bytes.
+pub const MAX_STR_BYTES: usize = i32::MAX as usize;
+
+/// `Str.with_ascii_uppercased` (`upper` nonzero) or `Str.with_ascii_lowercased`: only ASCII
+/// letters change, so the length never does, and an owned unique buffer is changed in place.
+pub unsafe extern "C" fn ry_str_ascii_case(lo: u64, hi: u64, owned: u32, upper: u32) -> Str {
+    let string = Str { lo, hi };
+    let bytes = string.bytes();
+    let change = |target: &mut [u8]| {
+        if upper != 0 {
+            target.make_ascii_uppercase();
+        } else {
+            target.make_ascii_lowercase();
+        }
+    };
+    if owned != 0 && str_is_unique(string) {
+        change(slice::from_raw_parts_mut(
+            (string.lo as *mut u8).add(STR_HEADER),
+            bytes.len(),
+        ));
+        return string;
+    }
+    let mut result = str_from_bytes(bytes);
+    if result.is_inline() {
+        let length = result.len();
+        change(slice::from_raw_parts_mut(
+            &mut result as *mut Str as *mut u8,
+            length,
+        ));
+    } else {
+        change(slice::from_raw_parts_mut(
+            (result.lo as *mut u8).add(STR_HEADER),
+            bytes.len(),
+        ));
+    }
+    if owned != 0 {
+        str_drop(string);
+    }
+    result
+}
+
 unsafe fn str_map_case(string: Str, owned: bool, upper: bool) -> Str {
     let bytes = string.bytes();
     let reuse = owned && str_is_unique(string);
@@ -3384,11 +3587,7 @@ unsafe fn dict_column(dict: *const Dict, kind: u8, column: *mut u8) -> *mut List
         );
         at += 1;
     }
-    if kind == STR {
-        for &item in items::<Str>(list) {
-            str_dup(item);
-        }
-    }
+    dup_items(kind, (*list).data, length);
     list
 }
 

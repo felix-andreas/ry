@@ -17,4 +17,7 @@ evaluate <- function(node: Node) -> F64 {
   }
 }
 tree <- build(21, 5)
-measure("expr_tree", function() evaluate(tree) + evaluate(build(14, 8)))
+measure("expr_tree", function() {
+  small <- build(14, 8)
+  evaluate(tree) + evaluate(small)
+})
