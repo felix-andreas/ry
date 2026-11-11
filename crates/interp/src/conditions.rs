@@ -49,6 +49,38 @@ pub struct RestartEntry {
     pub next: RestartStack,
 }
 
+/// The most released entries [`restore_handlers`] keeps for reuse.
+const HANDLER_POOL_SIZE: usize = 64;
+
+/// A stack entry for `handler`, reusing one a frame exit released when there is one.
+pub fn new_handler(handler: Handler) -> Rc<Handler> {
+    let state = interp();
+    if let Some(mut entry) = state.handler_pool.pop()
+        && let Some(slot) = Rc::get_mut(&mut entry)
+    {
+        *slot = handler;
+        return entry;
+    }
+    Rc::new(handler)
+}
+
+/// Makes `saved` the handler stack again, as a frame exit does, and keeps the entries above it
+/// that nothing else holds for [`new_handler`] to reuse.
+pub fn restore_handlers(saved: HandlerStack) {
+    let state = interp();
+    let mut released = std::mem::replace(&mut state.handlers, saved);
+    while let Some(mut entry) = released
+        && state.handler_pool.len() < HANDLER_POOL_SIZE
+    {
+        // An entry still on the restored stack, or saved by a frame or a caller, is shared.
+        let Some(handler) = Rc::get_mut(&mut entry) else {
+            break;
+        };
+        released = handler.next.take();
+        state.handler_pool.push(entry);
+    }
+}
+
 /// Whether an entry of `stack` has `closure` as its handler.
 pub(crate) fn handlers_hold(stack: &HandlerStack, closure: Sexp) -> bool {
     let mut entry = stack.as_ref();
@@ -189,7 +221,7 @@ pub unsafe fn quietly(body: impl FnOnce() -> R<Sexp>) -> R<Option<Sexp>> {
     interp().handlers = saved;
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(Unwind::Jump(caught)) if matches!(*caught, Jump::Return { env, .. } if env == target) => {
+        Err(Unwind::Jump(caught)) if matches!(caught, Jump::Return { env, .. } if env == target) => {
             Ok(None)
         }
         Err(unwind) => Err(unwind),
@@ -307,7 +339,7 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
     interp().in_error -= 1;
     // Going to top level means invoking the innermost `abort` restart, so code that
     // establishes its own (`withRestarts(expr, abort = ...)`) regains control after the error.
-    if matches!(&outcome, Unwind::Jump(target) if matches!(**target, Jump::TopLevel)) {
+    if matches!(&outcome, Unwind::Jump(target) if matches!(*target, Jump::TopLevel)) {
         match user_abort_restart() {
             Ok(Some(target)) => return target,
             Ok(None) => {}
@@ -684,7 +716,7 @@ unsafe fn do_add_cond_hands(call: &Call<'_>) -> R<Sexp> {
     let state = interp();
     let mut stack = state.handlers.clone();
     for index in (0..length(classes)).rev() {
-        stack = Some(Rc::new(Handler {
+        stack = Some(new_handler(Handler {
             class: classes.element(index),
             handler: handlers.element(index),
             calling,
@@ -805,7 +837,6 @@ unsafe fn do_stop(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_warning(call: &Call<'_>) -> R<Sexp> {
     let use_call = values::as_logical_scalar(call.arg(0)) != 0;
     let immediate = values::as_logical_scalar(call.arg(1)) == 1;
-    let condition_call = if use_call { caller_call(call) } else { nil() };
     let message = if length(call.arg(3)) > 0 {
         string_at(call.arg(3), 0)
             .map(|text| text.into_owned())
@@ -813,12 +844,24 @@ unsafe fn do_warning(call: &Call<'_>) -> R<Sexp> {
     } else {
         String::new()
     };
+    signal_warning(call, use_call, immediate, &message)?;
+    scalar_string(&message)
+}
+
+/// What `.Internal(warning(call., immediate., noBreaks., message))` does, for a builtin `call`
+/// made in the frame of `warning()` itself.
+pub(crate) unsafe fn signal_warning(
+    call: &Call<'_>,
+    use_call: bool,
+    immediate: bool,
+    message: &str,
+) -> R<()> {
+    let condition_call = if use_call { caller_call(call) } else { nil() };
     // Handlers still see an immediate warning; only the default handler prints it at once.
     let outer = std::mem::replace(&mut interp().immediate_warning, immediate);
-    let signalled = warning_call(condition_call, message.clone());
+    let signalled = warning_call(condition_call, message);
     interp().immediate_warning = outer;
-    signalled?;
-    scalar_string(&message)
+    signalled
 }
 
 unsafe fn do_geterrmessage(_call: &Call<'_>) -> R<Sexp> {

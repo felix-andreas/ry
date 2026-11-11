@@ -32,11 +32,18 @@ use {
     heap::{
         object::{
             INTEGER_PREFIX, LOGICAL_PREFIX, NA_INTEGER, NA_REAL_BITS, RECORD_DATA_OFFSET,
-            RECORD_LAYOUT_OFFSET, RECORD_UNBOXED_OFFSET, Sexp, SexpType, UNBOXED_SLOTS,
+            RECORD_LAYOUT_OFFSET, RECORD_UNBOXED_OFFSET, Sexp, SexpType, UNBOXED_SLOTS, gp,
         },
         records::{Fields, slot_kind},
     },
-    interp::{annotations, bytecode, records, values},
+    interp::{
+        annotations, bytecode,
+        eval::{
+            PROMISE_SEEN, PendingName, is_reference, peek_variable, pending_name,
+            reference_variable, settle_unforced,
+        },
+        records, values,
+    },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
     ssa::{
@@ -3076,10 +3083,7 @@ unsafe fn call_typed(function: Sexp, args: &[interp::builtins::Arg]) -> Option<R
     // A strict typed closure runs on the typed core's native values when it compiles there,
     // and on the scalar natives below when it does not.
     if let Some(value) = typed::call(function, &arguments) {
-        if value.is_ok() {
-            force_read(&read);
-        }
-        return Some(value);
+        return Some(value.and_then(|value| force_read(&read).map(|()| value)));
     }
     let (types, words) = argument_words(&arguments)?;
     let native = native_for(function, &types)?;
@@ -3101,7 +3105,6 @@ pub(crate) unsafe fn gather(
     function: Sexp,
     args: &[interp::builtins::Arg],
 ) -> Option<(SmallVec<[Sexp; 4]>, SmallVec<[(Sexp, Sexp); 4]>)> {
-    use heap::object::gp;
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE)
         || interp::moves::tracking()
     {
@@ -3118,10 +3121,13 @@ pub(crate) unsafe fn gather(
         {
             return None;
         }
-        let value = argument_value(arg.value)?;
-        if arg.value.kind() == SexpType::Promise && arg.value.car() == values::unbound() {
-            read.push((arg.value, value));
-        }
+        let value = if arg.value.kind() == SexpType::Promise {
+            promise_value(arg.value, &mut read, 0)?
+        } else if arg.value == values::missing_arg() {
+            return None;
+        } else {
+            arg.value
+        };
         arguments.push(value);
         formal = formal.cdr();
     }
@@ -3187,35 +3193,62 @@ pub(crate) unsafe fn run(
             .ok_or_else(|| interp::unwind::error("a native function returned no record")),
     };
     heap.release_handles(mark);
-    force_read(read);
+    if let Err(unwind) = force_read(read) {
+        return Some(Err(unwind));
+    }
     interp::interp().visible = true;
     Some(value)
 }
 
 /// Forces each argument promise a compiled call read without forcing: a promise shared through
-/// `...` must keep the value this call saw, as if tier 0 had forced it.
-unsafe fn force_read(read: &[(Sexp, Sexp)]) {
-    let heap = interp::heap();
+/// `...` must keep the value this call saw, as if tier 0 had forced it. Settling runs code only
+/// for a checked promise, which the reads decline, but the native call may have run R code that
+/// checks one since, and that check's error is the call's.
+unsafe fn force_read(read: &[(Sexp, Sexp)]) -> R<()> {
     for &(promise, value) in read {
-        heap.set_car(promise, value);
-        heap.set_tag(promise, values::nil());
+        settle_unforced(promise, value)?;
     }
+    Ok(())
 }
 
 type R<T> = Result<T, interp::unwind::Unwind>;
 
-/// The value an argument has without evaluating anything: a constant, a forced promise's value,
-/// or the binding a promise of a bare variable would read, unless reading it could run code.
-unsafe fn argument_value(value: Sexp) -> Option<Sexp> {
-    if value.kind() != SexpType::Promise {
-        return (value != values::missing_arg()).then_some(value);
+/// The value forcing `promise` gives, found without evaluating anything: a forced promise's
+/// value, a constant, or the value of an expression [`pure_value`] reads, in the promise's
+/// environment or in the slots of the slot frame it names. Each unforced promise read on the
+/// way goes to `read` with its value, so a call that succeeds settles it as forcing would have.
+unsafe fn promise_value(
+    promise: Sexp,
+    read: &mut SmallVec<[(Sexp, Sexp); 4]>,
+    depth: usize,
+) -> Option<Sexp> {
+    if promise.car() != values::unbound() {
+        return Some(promise.car());
     }
-    if value.car() != values::unbound() {
-        return Some(value.car());
+    // A checked promise runs its annotation check when forced, which only tier 0 does, and
+    // forcing a promise whose code is running raises the recursion error, which a read must not
+    // replace with a value.
+    if promise.has_gp(gp::CHECKED_PROMISE)
+        || promise.has_gp(PROMISE_SEEN)
+        || depth > MAX_PURE_DEPTH
+    {
+        return None;
     }
-    let symbol = value.cdr();
-    if matches!(
-        symbol.kind(),
+    let expression = promise.cdr();
+    // An argument reference from a caller with an environment keeps that environment and the
+    // argument's source as a promise does, so only a slot frame's reference reads differently.
+    let value = if is_reference(promise) && promise.tag().kind() != SexpType::Environment {
+        match reference_variable(promise) {
+            // The variable holds a promise of the caller's own argument, which the same rules
+            // read in its own environment.
+            Some(inner) if inner.kind() == SexpType::Promise => {
+                promise_value(inner, read, depth + 1)?
+            }
+            Some(value) => value,
+            None => return None,
+        }
+    } else if matches!(
+        expression.kind(),
         SexpType::Integer
             | SexpType::Real
             | SexpType::Logical
@@ -3225,18 +3258,18 @@ unsafe fn argument_value(value: Sexp) -> Option<Sexp> {
             | SexpType::Raw
     ) {
         // A promise of a constant evaluates to the constant itself.
-        return Some(symbol);
-    }
-    // A checked promise runs its annotation check when forced, which only tier 0 does.
-    // A promise over an unreified slot frame names a placeholder environment that binds
-    // nothing yet, so a lookup there would find the enclosure's variable instead.
-    if value.tag() == values::nil()
-        || value.has_gp(heap::object::gp::CHECKED_PROMISE)
-        || value.tag().has_gp(heap::object::gp::PENDING_FRAME)
-    {
-        return None;
-    }
-    pure_value(symbol, value.tag(), 0)
+        expression
+    } else {
+        let env = promise.tag();
+        if env.kind() != SexpType::Environment {
+            return None;
+        }
+        // A promise made by compiled code holds its argument compiled, and the compiled code
+        // computes what its source does.
+        pure_value(bytecode::source_of_body(expression), env, read, depth + 1)?
+    };
+    read.push((promise, value));
+    Some(value)
 }
 
 /// How deeply [`pure_value`] reads into an argument expression.
@@ -3248,22 +3281,22 @@ const MAX_PURE_DEPTH: usize = 8;
 /// such numbers, each named by its base function. Evaluating such an argument before the call
 /// gives the value forcing its promise would give, since the native code it is passed to runs
 /// no R code in between. Integer arithmetic that overflows is left to tier 0, which warns.
-unsafe fn pure_value(expression: Sexp, env: Sexp, depth: usize) -> Option<Sexp> {
+unsafe fn pure_value(
+    expression: Sexp,
+    env: Sexp,
+    read: &mut SmallVec<[(Sexp, Sexp); 4]>,
+    depth: usize,
+) -> Option<Sexp> {
     match expression.kind() {
         SexpType::Integer | SexpType::Real | SexpType::Logical => {
             return (expression.attrib() == values::nil()).then_some(expression);
         }
         SexpType::Symbol => {
-            let cell = interp::eval::find_cell(expression, env)?;
-            if cell.has_gp(heap::object::gp::ACTIVE_BINDING) {
-                return None;
-            }
-            let bound = cell.cdr();
-            return match bound.kind() {
-                SexpType::Promise if bound.car() != values::unbound() => Some(bound.car()),
-                SexpType::Promise => None,
-                _ if bound == values::missing_arg() || bound == values::unbound() => None,
-                _ => Some(bound),
+            let bound = peek_variable(expression, env)?;
+            return if bound.kind() == SexpType::Promise {
+                promise_value(bound, read, depth)
+            } else {
+                Some(bound)
             };
         }
         SexpType::Language if depth < MAX_PURE_DEPTH => {}
@@ -3273,17 +3306,43 @@ unsafe fn pure_value(expression: Sexp, env: Sexp, depth: usize) -> Option<Sexp> 
     if head.kind() != SexpType::Symbol {
         return None;
     }
+    // A slot frame's own binding of the function's name lives in its slots, and any other name
+    // resolves from the frame's enclosure. Looking it up in the pending environment itself would
+    // reify the frame, through the heap's resolver, on every call.
+    let start = if env.has_gp(gp::PENDING_FRAME) {
+        match pending_name(env, head) {
+            // R's function lookup passes over a binding that holds no function, as `c` does after
+            // `c <- 3`. A promise would have to be forced to tell, and a local function is not a
+            // base function the code below could stand in for.
+            PendingName::Slot(value)
+                if value != values::missing_arg()
+                    && !matches!(
+                        value.kind(),
+                        SexpType::Promise
+                            | SexpType::Closure
+                            | SexpType::Builtin
+                            | SexpType::Special
+                    ) =>
+            {
+                env.enclosure()
+            }
+            PendingName::Slot(_) => return None,
+            PendingName::Enclosure(enclosure) => enclosure,
+        }
+    } else {
+        env
+    };
     let items = values::pairlist_items(expression.cdr());
     if items.iter().any(|&(tag, value)| {
         tag != values::nil() || value == values::missing_arg() || value == values::symbols().dots
     }) {
         return None;
     }
-    let function = resolve_function(head, env)?.function;
+    let function = resolve_function(head, start)?.function;
     let name = base_builtin(function, head)?;
     let mut operands: SmallVec<[Sexp; 4]> = SmallVec::new();
     for &(_, item) in &items {
-        let operand = pure_value(item, env, depth + 1)?;
+        let operand = pure_value(item, env, read, depth + 1)?;
         if !matches!(
             operand.kind(),
             SexpType::Integer | SexpType::Real | SexpType::Logical

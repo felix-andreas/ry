@@ -121,7 +121,7 @@ use {
     crate::{
         base_fast_paths::Entry,
         builtins::{Arg, BuiltinDef, Kind},
-        conditions::{HandlerStack, RestartStack},
+        conditions::{Handler, HandlerStack, RestartStack},
         unwind::{R, Unwind},
     },
     heap::{
@@ -371,6 +371,9 @@ pub struct Interp {
     /// Stacks set aside while code runs as if at top level (a help server handler), kept here so
     /// the collector still sees them.
     pub suspended_handlers: Vec<(HandlerStack, RestartStack)>,
+    /// Handler entries a frame exit released, which the next handlers established reuse, so a
+    /// `tryCatch` in a loop makes no Rust allocation ([`conditions::restore_handlers`]).
+    pub handler_pool: Vec<Rc<Handler>>,
     /// `R_Srcref`: the srcref of the statement being evaluated, or `NULL`. A `{` with source
     /// references sets it for each statement, and a closure call sets it to the closure's own.
     pub srcref: Sexp,
@@ -415,6 +418,10 @@ pub struct Interp {
     pub immediate_warning: bool,
     /// The text `geterrmessage()` returns.
     pub error_message: String,
+    /// A buffer builtins reuse to assemble each element of a character result
+    /// ([`crate::strings::with_byte_buffer`]), so building a string allocates only when it is
+    /// longer than any built before.
+    pub text_buffer: Vec<u8>,
     /// Whether the default error handler prints (`R_ShowErrorMessages`).
     pub show_error_messages: bool,
     /// The attached Debug Adapter Protocol server, which the evaluator consults before each
@@ -566,6 +573,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         restarts: None,
         global_handlers: None,
         suspended_handlers: Vec::new(),
+        handler_pool: Vec::new(),
         srcref: heap.known().nil,
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
@@ -582,6 +590,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         warnings: Vec::new(),
         immediate_warning: false,
         error_message: String::new(),
+        text_buffer: Vec::new(),
         show_error_messages: true,
         debugger: None,
         in_error: 0,

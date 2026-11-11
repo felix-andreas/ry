@@ -196,7 +196,10 @@ impl Evaluator for Interpreter {
         // Handing the environment to native code reifies a slot frame.
         match interp::interp().frames.len() {
             0 => Ok(runtime().heap.known().global_env),
-            count => Ok(interp::eval::frame_env(count - 1, interp::eval::Reify::Site("native code"))?),
+            count => Ok(interp::eval::frame_env(
+                count - 1,
+                interp::eval::Reify::Site("native code"),
+            )?),
         }
     }
 
@@ -1122,7 +1125,7 @@ unsafe fn native_symbol(
 }
 
 unsafe fn do_get_symbol_info(call: &Call<'_>) -> ApiResult<Sexp> {
-    let name = interp::values::require_string(call.arg(0), "name")?;
+    let name = interp::values::require_str(call.arg(0), "name")?;
     let package = call.arg(1);
     let package_name = if package.kind() == SexpType::String {
         interp::values::first_string(package).map(|text| text.into_owned())
@@ -1187,7 +1190,7 @@ unsafe fn do_get_symbol_info(call: &Call<'_>) -> ApiResult<Sexp> {
 }
 
 unsafe fn do_is_loaded(call: &Call<'_>) -> ApiResult<Sexp> {
-    let name = interp::values::require_string(call.arg(0), "symbol")?;
+    let name = interp::values::require_str(call.arg(0), "symbol")?;
     let package = interp::values::first_string(call.arg(1)).map(|text| text.into_owned());
     let package = package.filter(|package| !package.is_empty());
     let found = [
@@ -1853,11 +1856,9 @@ pub unsafe fn call_namespaced(
 /// closure's frame, which only the interpreter knows; without one it is the global environment.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_GetCurrentEnv() -> Sexp {
-    enter(|| {
-        match evaluator() {
-            Some(evaluator) => evaluator.current_env(),
-            None => Ok(runtime().heap.known().global_env),
-        }
+    enter(|| match evaluator() {
+        Some(evaluator) => evaluator.current_env(),
+        None => Ok(runtime().heap.known().global_env),
     })
 }
 

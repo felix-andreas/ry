@@ -4,7 +4,7 @@
   "name": "Package test suites",
   "meta": {
     "date": "2026-11-11",
-    "ry_commit": "5cd92a3",
+    "ry_commit": "46191c4",
     "too_short_seconds": 0.1,
     "gnu_r": {
       "version": "4.6.2",
@@ -15,7 +15,7 @@
       "cores": 4,
       "kernel": "Linux 6.18.44-fc-v378"
     },
-    "command": "tools/bench/bench.py packages --rounds 10 --write --samples /tmp/claude-0/-home-user-ry/2410cb03-e35c-50f9-8e51-b57b80a6b0c1/scratchpad/rerun --ry /home/user/ry-main/target/release/ry",
+    "command": "tools/bench/bench.py packages --ry /home/user/ry-main/target/release/ry --write",
     "rounds": 10,
     "extra_rounds": 10,
     "seed": 1
@@ -29,19 +29,19 @@
       "id": "abind",
       "display": "abind",
       "seconds": {
-        "gnu_r": 0.7855,
-        "ry": 0.262
+        "gnu_r": 0.801,
+        "ry": 0.2565
       },
       "ratio": {
         "ry": {
-          "median": 3.0174,
-          "low": 2.7288,
-          "high": 3.1036
+          "median": 3.0861,
+          "low": 2.918,
+          "high": 3.2935
         }
       },
       "peak_mib": {
-        "gnu_r": 111.2,
-        "ry": 108.9
+        "gnu_r": 111.3,
+        "ry": 114.4
       },
       "flags": [],
       "version": "1.4-8",
@@ -63,26 +63,21 @@
       "id": "assertthat",
       "display": "assertthat",
       "seconds": {
-        "gnu_r": 0.848,
-        "ry": 0.3455
+        "gnu_r": 0.835,
+        "ry": 0.341
       },
       "ratio": {
         "ry": {
-          "median": 2.374,
-          "low": 2.2615,
-          "high": 2.6832
+          "median": 2.4247,
+          "low": 2.2401,
+          "high": 2.6605
         }
       },
       "peak_mib": {
-        "gnu_r": 113.1,
-        "ry": 82.7
+        "gnu_r": 113.2,
+        "ry": 92.7
       },
-      "flags": [
-        {
-          "kind": "wide_interval",
-          "engine": "ry"
-        }
-      ],
+      "flags": [],
       "version": "0.2.1",
       "runner": "testthat",
       "tests": {
@@ -102,19 +97,19 @@
       "id": "brio",
       "display": "brio",
       "seconds": {
-        "gnu_r": 0.8665,
-        "ry": 0.339
+        "gnu_r": 0.8085,
+        "ry": 0.333
       },
       "ratio": {
         "ry": {
-          "median": 2.5531,
-          "low": 2.3884,
-          "high": 2.7882
+          "median": 2.4955,
+          "low": 2.2502,
+          "high": 2.7239
         }
       },
       "peak_mib": {
-        "gnu_r": 127.0,
-        "ry": 89.1
+        "gnu_r": 127.1,
+        "ry": 99.1
       },
       "flags": [],
       "version": "1.1.5",
@@ -136,19 +131,19 @@
       "id": "cachem",
       "display": "cachem",
       "seconds": {
-        "gnu_r": 0.945,
-        "ry": 0.381
+        "gnu_r": 0.9055,
+        "ry": 0.376
       },
       "ratio": {
         "ry": {
-          "median": 2.4909,
-          "low": 2.3617,
-          "high": 2.5764
+          "median": 2.345,
+          "low": 2.2131,
+          "high": 2.5553
         }
       },
       "peak_mib": {
-        "gnu_r": 114.8,
-        "ry": 79.6
+        "gnu_r": 115.1,
+        "ry": 90.7
       },
       "flags": [],
       "version": "1.1.0",
@@ -170,19 +165,19 @@
       "id": "cli",
       "display": "cli",
       "seconds": {
-        "gnu_r": 26.9635,
-        "ry": 16.9025
+        "gnu_r": 25.9395,
+        "ry": 16.591
       },
       "ratio": {
         "ry": {
-          "median": 1.572,
-          "low": 1.5278,
-          "high": 1.6437
+          "median": 1.5372,
+          "low": 1.5038,
+          "high": 1.6132
         }
       },
       "peak_mib": {
-        "gnu_r": 180.9,
-        "ry": 200.8
+        "gnu_r": 180.6,
+        "ry": 206.6
       },
       "flags": [],
       "version": "3.6.6",
@@ -204,13 +199,27 @@
       "id": "data.table",
       "display": "data.table",
       "seconds": {
-        "gnu_r": 33.6885
+        "gnu_r": 31.518,
+        "ry": 23.861
       },
-      "ratio": {},
+      "ratio": {
+        "ry": {
+          "median": 1.3509,
+          "low": 1.2255,
+          "high": 1.3674
+        }
+      },
       "peak_mib": {
-        "gnu_r": 428.3
+        "gnu_r": 428.6,
+        "ry": 377.2
       },
-      "flags": [],
+      "flags": [
+        {
+          "kind": "tests_differ",
+          "engine": "ry",
+          "reason": "GNU R: 10 passed, 0 failed, 0 errors; ry: 9 passed, 1 failed, 0 errors"
+        }
+      ],
       "version": "1.18.6.1",
       "runner": "scripts",
       "tests": {
@@ -218,32 +227,31 @@
           "passed": 10,
           "failed": 0,
           "errors": 0
+        },
+        "ry": {
+          "passed": 9,
+          "failed": 1,
+          "errors": 0
         }
-      },
-      "failures": [
-        {
-          "engine": "ry",
-          "reason": "main.R: Execution halted"
-        }
-      ]
+      }
     },
     {
       "id": "DBI",
       "display": "DBI",
       "seconds": {
-        "gnu_r": 1.129,
-        "ry": 0.4615
+        "gnu_r": 1.1105,
+        "ry": 0.436
       },
       "ratio": {
         "ry": {
-          "median": 2.3742,
-          "low": 2.2467,
-          "high": 2.4922
+          "median": 2.4312,
+          "low": 2.2498,
+          "high": 2.5554
         }
       },
       "peak_mib": {
-        "gnu_r": 124.1,
-        "ry": 108.3
+        "gnu_r": 124.2,
+        "ry": 117.5
       },
       "flags": [],
       "version": "1.3.0",
@@ -265,19 +273,19 @@
       "id": "digest",
       "display": "digest",
       "seconds": {
-        "gnu_r": 0.4355,
-        "ry": 0.2455
+        "gnu_r": 0.422,
+        "ry": 0.2325
       },
       "ratio": {
         "ry": {
-          "median": 1.7889,
-          "low": 1.6905,
-          "high": 1.8558
+          "median": 1.7821,
+          "low": 1.618,
+          "high": 1.9153
         }
       },
       "peak_mib": {
-        "gnu_r": 96.6,
-        "ry": 74.8
+        "gnu_r": 96.7,
+        "ry": 84.0
       },
       "flags": [],
       "version": "0.6.39",
@@ -299,19 +307,19 @@
       "id": "foreach",
       "display": "foreach",
       "seconds": {
-        "gnu_r": 11.735,
-        "ry": 10.853
+        "gnu_r": 11.56,
+        "ry": 10.783
       },
       "ratio": {
         "ry": {
-          "median": 1.0875,
-          "low": 1.0684,
-          "high": 1.0979
+          "median": 1.0766,
+          "low": 1.0655,
+          "high": 1.0879
         }
       },
       "peak_mib": {
-        "gnu_r": 173.8,
-        "ry": 131.8
+        "gnu_r": 173.7,
+        "ry": 143.2
       },
       "flags": [],
       "version": "1.5.2",
@@ -333,19 +341,19 @@
       "id": "fs",
       "display": "fs",
       "seconds": {
-        "gnu_r": 10.6435,
-        "ry": 7.2665
+        "gnu_r": 10.215,
+        "ry": 6.744
       },
       "ratio": {
         "ry": {
-          "median": 1.4594,
-          "low": 1.3866,
-          "high": 1.5694
+          "median": 1.5275,
+          "low": 1.4384,
+          "high": 1.598
         }
       },
       "peak_mib": {
-        "gnu_r": 227.8,
-        "ry": 194.4
+        "gnu_r": 227.7,
+        "ry": 201.6
       },
       "flags": [],
       "version": "2.1.0",
@@ -367,19 +375,19 @@
       "id": "jsonlite",
       "display": "jsonlite",
       "seconds": {
-        "gnu_r": 3.4715,
-        "ry": 1.906
+        "gnu_r": 3.1425,
+        "ry": 1.8645
       },
       "ratio": {
         "ry": {
-          "median": 1.7244,
-          "low": 1.6641,
-          "high": 1.8553
+          "median": 1.6586,
+          "low": 1.5552,
+          "high": 1.7352
         }
       },
       "peak_mib": {
-        "gnu_r": 156.0,
-        "ry": 123.9
+        "gnu_r": 156.3,
+        "ry": 133.5
       },
       "flags": [],
       "version": "2.0.0",
@@ -401,19 +409,19 @@
       "id": "lgr",
       "display": "lgr",
       "seconds": {
-        "gnu_r": 7.4755,
-        "ry": 3.6695
+        "gnu_r": 5.9355,
+        "ry": 3.2695
       },
       "ratio": {
         "ry": {
-          "median": 2.1039,
-          "low": 1.9627,
-          "high": 2.163
+          "median": 1.8071,
+          "low": 1.7024,
+          "high": 1.9594
         }
       },
       "peak_mib": {
         "gnu_r": 154.9,
-        "ry": 126.2
+        "ry": 136.4
       },
       "flags": [],
       "version": "0.5.2",
@@ -435,19 +443,19 @@
       "id": "lubridate",
       "display": "lubridate",
       "seconds": {
-        "gnu_r": 15.6745,
-        "ry": 7.947
+        "gnu_r": 15.4705,
+        "ry": 7.633
       },
       "ratio": {
         "ry": {
-          "median": 1.9923,
-          "low": 1.8998,
-          "high": 2.1048
+          "median": 1.9834,
+          "low": 1.8929,
+          "high": 2.1603
         }
       },
       "peak_mib": {
-        "gnu_r": 182.7,
-        "ry": 184.3
+        "gnu_r": 182.6,
+        "ry": 193.1
       },
       "flags": [],
       "version": "1.9.5",
@@ -469,19 +477,19 @@
       "id": "memoise",
       "display": "memoise",
       "seconds": {
-        "gnu_r": 0.7295,
-        "ry": 0.3315
+        "gnu_r": 0.709,
+        "ry": 0.311
       },
       "ratio": {
         "ry": {
-          "median": 2.3418,
-          "low": 2.2146,
-          "high": 2.4237
+          "median": 2.2659,
+          "low": 2.1816,
+          "high": 2.3597
         }
       },
       "peak_mib": {
         "gnu_r": 113.5,
-        "ry": 81.2
+        "ry": 91.4
       },
       "flags": [],
       "version": "2.0.1",
@@ -503,26 +511,21 @@
       "id": "PerformanceAnalytics",
       "display": "PerformanceAnalytics",
       "seconds": {
-        "gnu_r": 2.883,
-        "ry": 1.377
+        "gnu_r": 2.8775,
+        "ry": 1.1985
       },
       "ratio": {
         "ry": {
-          "median": 2.1574,
-          "low": 1.918,
-          "high": 2.2596
+          "median": 2.1949,
+          "low": 2.0995,
+          "high": 2.289
         }
       },
       "peak_mib": {
-        "gnu_r": 132.4,
-        "ry": 125.8
+        "gnu_r": 132.7,
+        "ry": 135.6
       },
-      "flags": [
-        {
-          "kind": "wide_interval",
-          "engine": "ry"
-        }
-      ],
+      "flags": [],
       "version": "2.1.0",
       "runner": "testthat",
       "tests": {
@@ -542,19 +545,19 @@
       "id": "progress",
       "display": "progress",
       "seconds": {
-        "gnu_r": 0.5735,
-        "ry": 0.2165
+        "gnu_r": 0.5575,
+        "ry": 0.213
       },
       "ratio": {
         "ry": {
-          "median": 2.6119,
-          "low": 2.5392,
-          "high": 2.7181
+          "median": 2.5818,
+          "low": 2.5,
+          "high": 2.816
         }
       },
       "peak_mib": {
         "gnu_r": 116.9,
-        "ry": 84.3
+        "ry": 93.7
       },
       "flags": [],
       "version": "1.2.3",
@@ -576,31 +579,31 @@
       "id": "purrr",
       "display": "purrr",
       "seconds": {
-        "gnu_r": 15.0975,
-        "ry": 9.509
+        "gnu_r": 13.544,
+        "ry": 8.7095
       },
       "ratio": {
         "ry": {
-          "median": 1.6288,
-          "low": 1.5498,
-          "high": 1.6415
+          "median": 1.5699,
+          "low": 1.4558,
+          "high": 1.669
         }
       },
       "peak_mib": {
-        "gnu_r": 173.6,
-        "ry": 144.4
+        "gnu_r": 171.3,
+        "ry": 149.5
       },
       "flags": [],
       "version": "1.2.2",
       "runner": "testthat",
       "tests": {
         "gnu_r": {
-          "passed": 721,
+          "passed": 735,
           "failed": 0,
           "errors": 0
         },
         "ry": {
-          "passed": 721,
+          "passed": 735,
           "failed": 0,
           "errors": 0
         }
@@ -610,26 +613,21 @@
       "id": "R6",
       "display": "R6",
       "seconds": {
-        "gnu_r": 4.0195,
-        "ry": 1.495
+        "gnu_r": 3.7235,
+        "ry": 1.46
       },
       "ratio": {
         "ry": {
-          "median": 2.6586,
-          "low": 2.3317,
-          "high": 2.7977
+          "median": 2.5803,
+          "low": 2.4612,
+          "high": 2.772
         }
       },
       "peak_mib": {
-        "gnu_r": 117.2,
-        "ry": 99.4
+        "gnu_r": 116.8,
+        "ry": 109.8
       },
-      "flags": [
-        {
-          "kind": "wide_interval",
-          "engine": "ry"
-        }
-      ],
+      "flags": [],
       "version": "2.6.1",
       "runner": "testthat",
       "tests": {
@@ -649,19 +647,19 @@
       "id": "rappdirs",
       "display": "rappdirs",
       "seconds": {
-        "gnu_r": 0.821,
-        "ry": 0.3445
+        "gnu_r": 0.736,
+        "ry": 0.3035
       },
       "ratio": {
         "ry": {
-          "median": 2.3963,
-          "low": 2.1705,
-          "high": 2.5269
+          "median": 2.3965,
+          "low": 2.1789,
+          "high": 2.5143
         }
       },
       "peak_mib": {
-        "gnu_r": 116.1,
-        "ry": 88.9
+        "gnu_r": 116.4,
+        "ry": 98.3
       },
       "flags": [],
       "version": "0.3.4",
@@ -683,37 +681,37 @@
       "id": "rlang",
       "display": "rlang",
       "seconds": {
-        "gnu_r": 65.901,
-        "ry": 37.8905
+        "gnu_r": 64.1195,
+        "ry": 37.309
       },
       "ratio": {
         "ry": {
-          "median": 1.7112,
-          "low": 1.6738,
-          "high": 1.7545
+          "median": 1.7273,
+          "low": 1.6631,
+          "high": 1.7683
         }
       },
       "peak_mib": {
-        "gnu_r": 226.0,
-        "ry": 242.5
+        "gnu_r": 227.0,
+        "ry": 249.6
       },
       "flags": [
         {
           "kind": "tests_differ",
           "engine": "ry",
-          "reason": "GNU R: 4009 passed, 0 failed, 0 errors; ry: 3994 passed, 0 failed, 12 errors"
+          "reason": "GNU R: 4010 passed, 0 failed, 0 errors; ry: 3995 passed, 0 failed, 12 errors"
         }
       ],
       "version": "1.3.0",
       "runner": "testthat",
       "tests": {
         "gnu_r": {
-          "passed": 4009,
+          "passed": 4010,
           "failed": 0,
           "errors": 0
         },
         "ry": {
-          "passed": 3994,
+          "passed": 3995,
           "failed": 0,
           "errors": 12
         }
@@ -723,26 +721,21 @@
       "id": "snakecase",
       "display": "snakecase",
       "seconds": {
-        "gnu_r": 1.8925,
-        "ry": 1.243
+        "gnu_r": 1.8645,
+        "ry": 1.24
       },
       "ratio": {
         "ry": {
-          "median": 1.4613,
-          "low": 1.4017,
-          "high": 1.6215
+          "median": 1.4383,
+          "low": 1.3286,
+          "high": 1.5797
         }
       },
       "peak_mib": {
         "gnu_r": 121.0,
-        "ry": 110.3
+        "ry": 119.9
       },
-      "flags": [
-        {
-          "kind": "wide_interval",
-          "engine": "ry"
-        }
-      ],
+      "flags": [],
       "version": "0.11.1",
       "runner": "testthat",
       "tests": {
@@ -762,19 +755,19 @@
       "id": "stringr",
       "display": "stringr",
       "seconds": {
-        "gnu_r": 4.009,
-        "ry": 2.3245
+        "gnu_r": 3.913,
+        "ry": 2.4125
       },
       "ratio": {
         "ry": {
-          "median": 1.7213,
-          "low": 1.6535,
-          "high": 1.7433
+          "median": 1.7302,
+          "low": 1.5724,
+          "high": 1.7879
         }
       },
       "peak_mib": {
         "gnu_r": 128.4,
-        "ry": 122.0
+        "ry": 132.3
       },
       "flags": [],
       "version": "1.6.0",
@@ -796,19 +789,19 @@
       "id": "withr",
       "display": "withr",
       "seconds": {
-        "gnu_r": 2.6685,
-        "ry": 1.21
+        "gnu_r": 2.661,
+        "ry": 1.2445
       },
       "ratio": {
         "ry": {
-          "median": 2.2106,
-          "low": 2.1036,
-          "high": 2.2631
+          "median": 2.1358,
+          "low": 1.9897,
+          "high": 2.2851
         }
       },
       "peak_mib": {
-        "gnu_r": 187.7,
-        "ry": 142.9
+        "gnu_r": 188.0,
+        "ry": 151.8
       },
       "flags": [
         {
@@ -836,11 +829,19 @@
       "id": "xts",
       "display": "xts",
       "seconds": {
-        "gnu_r": 4.833
+        "gnu_r": 4.4955,
+        "ry": 3.695
       },
-      "ratio": {},
+      "ratio": {
+        "ry": {
+          "median": 1.1997,
+          "low": 1.13,
+          "high": 1.2892
+        }
+      },
       "peak_mib": {
-        "gnu_r": 337.7
+        "gnu_r": 338.0,
+        "ry": 451.7
       },
       "flags": [],
       "version": "0.14.3",
@@ -850,32 +851,31 @@
           "passed": 4038,
           "failed": 0,
           "errors": 0
+        },
+        "ry": {
+          "passed": 4038,
+          "failed": 0,
+          "errors": 0
         }
-      },
-      "failures": [
-        {
-          "engine": "ry",
-          "reason": "Execution halted"
-        }
-      ]
+      }
     },
     {
       "id": "zeallot",
       "display": "zeallot",
       "seconds": {
-        "gnu_r": 0.739,
-        "ry": 0.2925
+        "gnu_r": 0.6575,
+        "ry": 0.2945
       },
       "ratio": {
         "ry": {
-          "median": 2.2607,
-          "low": 2.2047,
-          "high": 2.5283
+          "median": 2.2554,
+          "low": 2.0154,
+          "high": 2.4377
         }
       },
       "peak_mib": {
-        "gnu_r": 115.0,
-        "ry": 85.2
+        "gnu_r": 115.1,
+        "ry": 94.5
       },
       "flags": [
         {
@@ -901,31 +901,44 @@
     {
       "id": "zoo",
       "display": "zoo",
-      "seconds": {},
-      "ratio": {},
-      "peak_mib": {},
+      "seconds": {
+        "gnu_r": 1.8135,
+        "ry": 0.744
+      },
+      "ratio": {
+        "ry": {
+          "median": 2.3358,
+          "low": 2.2725,
+          "high": 2.5145
+        }
+      },
+      "peak_mib": {
+        "gnu_r": 122.0,
+        "ry": 110.0
+      },
       "flags": [],
       "version": "1.9-1",
       "runner": "scripts",
-      "tests": {},
-      "failures": [
-        {
-          "engine": "gnu_r",
-          "reason": "vignette-zoo.R: Execution halted"
+      "tests": {
+        "gnu_r": {
+          "passed": 6,
+          "failed": 0,
+          "errors": 0
         },
-        {
-          "engine": "ry",
-          "reason": "vignette-zoo.R: Execution halted"
+        "ry": {
+          "passed": 6,
+          "failed": 0,
+          "errors": 0
         }
-      ]
+      }
     }
   ],
   "geomean": {
     "ry": {
-      "median": 2.0177,
-      "low": 1.9929,
-      "high": 2.0426,
-      "programs": 23
+      "median": 1.9335,
+      "low": 1.909,
+      "high": 1.9567,
+      "programs": 26
     }
   }
 }

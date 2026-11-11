@@ -17,6 +17,7 @@ use {
     },
     heap::object::{NA_INTEGER, Sexp, SexpType, gp},
     smallvec::SmallVec,
+    std::borrow::Cow,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -111,7 +112,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     crate::builtins::special("::", 2, |call| unsafe { namespace_value(call, true) }),
     crate::builtins::special(":::", 2, |call| unsafe { namespace_value(call, false) }),
     internal("getNamespaceValue", 3, |call| unsafe {
-        values::require_string(call.arg(1), "name")?;
+        values::require_str(call.arg(1), "name")?;
         let symbol = values::install_charsxp(call.arg(1).element(0))?;
         let exported = values::as_logical_scalar(call.arg(2)) == 1;
         namespace_lookup(call.arg(0), symbol, exported)
@@ -319,20 +320,18 @@ unsafe fn do_sys(call: &Call<'_>, kind: SysKind) -> R<Sexp> {
         SysKind::Frame => sys_frame_at(n, context),
         SysKind::NFrame => scalar_integer(frame_depth(context) as i32),
         SysKind::Calls => {
-            let depth = frame_depth(context);
-            let mut items = Vec::new();
-            for index in 1..=depth {
-                items.push((nil(), sys_call_at(index as i32, context, false)?));
+            let mut items = values::PairlistBuilder::new(SexpType::Pairlist);
+            for index in 1..=frame_depth(context) {
+                items.push(nil(), sys_call_at(index as i32, context, false)?)?;
             }
-            values::pairlist(&items, SexpType::Pairlist)
+            Ok(items.finish())
         }
         SysKind::Frames => {
-            let depth = frame_depth(context);
-            let mut items = Vec::new();
-            for index in 1..=depth {
-                items.push((nil(), sys_frame_at(index as i32, context)?));
+            let mut items = values::PairlistBuilder::new(SexpType::Pairlist);
+            for index in 1..=frame_depth(context) {
+                items.push(nil(), sys_frame_at(index as i32, context)?)?;
             }
-            values::pairlist(&items, SexpType::Pairlist)
+            Ok(items.finish())
         }
         SysKind::Parent => {
             if n == NA_INTEGER {
@@ -360,21 +359,21 @@ unsafe fn do_sys(call: &Call<'_>, kind: SysKind) -> R<Sexp> {
             let Some(index) = context else {
                 return Ok(nil());
             };
-            let on_exit = interp().frames[index].on_exit.clone();
-            match on_exit.as_slice() {
-                [] => Ok(nil()),
+            let count = interp().frames[index].on_exit.len();
+            if count < 2 {
                 // A slot frame's list may hold the expression compiled for its slots.
-                [single] => Ok(crate::bytecode::source_of_body(*single)),
-                many => {
-                    let mut items = vec![(nil(), symbols().brace)];
-                    items.extend(
-                        many.iter().map(|&expression| {
-                            (nil(), crate::bytecode::source_of_body(expression))
-                        }),
-                    );
-                    values::pairlist(&items, SexpType::Language)
-                }
+                return Ok(match interp().frames[index].on_exit.first() {
+                    Some(&single) => crate::bytecode::source_of_body(single),
+                    None => nil(),
+                });
             }
+            let mut items = values::PairlistBuilder::new(SexpType::Language);
+            items.push(nil(), symbols().brace)?;
+            for position in 0..count {
+                let expression = interp().frames[index].on_exit[position];
+                items.push(nil(), crate::bytecode::source_of_body(expression))?;
+            }
+            Ok(items.finish())
         }
     }
 }
@@ -661,7 +660,7 @@ unsafe fn lookup(symbol: Sexp, env: Sexp, mode: &str, inherits: bool) -> R<Optio
 unsafe fn do_get(call: &Call<'_>) -> R<Sexp> {
     let symbol = name_symbol(call.arg(0), "x")?;
     let env = environment_arg(call.arg(1), "envir")?;
-    let mode = values::require_string(call.arg(2), "mode")?;
+    let mode = values::require_str(call.arg(2), "mode")?;
     let inherits = values::as_logical_scalar(call.arg(3)) == 1;
     match lookup(symbol, env, &mode, inherits)? {
         Some(value) => {
@@ -689,7 +688,7 @@ unsafe fn do_get(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_get0(call: &Call<'_>) -> R<Sexp> {
     let symbol = name_symbol(call.arg(0), "x")?;
     let env = environment_arg(call.arg(1), "envir")?;
-    let mode = values::require_string(call.arg(2), "mode")?;
+    let mode = values::require_str(call.arg(2), "mode")?;
     let inherits = values::as_logical_scalar(call.arg(3)) == 1;
     match lookup(symbol, env, &mode, inherits)? {
         Some(value) => value_of(value),
@@ -742,7 +741,7 @@ unsafe fn do_mget(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_exists(call: &Call<'_>) -> R<Sexp> {
     let symbol = name_symbol(call.arg(0), "x")?;
     let env = environment_arg(call.arg(1), "envir")?;
-    let mode = values::require_string(call.arg(2), "mode")?;
+    let mode = values::require_str(call.arg(2), "mode")?;
     let inherits = values::as_logical_scalar(call.arg(3)) == 1;
     scalar_bool(lookup(symbol, env, &mode, inherits)?.is_some())
 }
@@ -965,37 +964,31 @@ unsafe fn do_active_binding_function(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// The search path, from the global environment to base.
-pub unsafe fn search_path() -> Vec<Sexp> {
-    let mut path = Vec::new();
-    let mut env = global_env();
-    while env != empty_env() {
-        path.push(env);
-        if env == base_env() {
-            break;
-        }
-        env = env.enclosure();
-    }
-    path
+pub unsafe fn search_path() -> impl Iterator<Item = Sexp> {
+    let mut next = Some(global_env());
+    std::iter::from_fn(move || {
+        let env = next?;
+        // SAFETY: the search path is a chain of live environments ending at base.
+        next = unsafe {
+            let enclosure = env.enclosure();
+            (env != base_env() && enclosure != empty_env()).then_some(enclosure)
+        };
+        Some(env)
+    })
 }
 
-unsafe fn search_name(env: Sexp) -> R<String> {
+unsafe fn search_name<'a>(env: Sexp) -> Cow<'a, str> {
     if env == global_env() {
-        return Ok(".GlobalEnv".into());
+        return Cow::Borrowed(".GlobalEnv");
     }
     if env == base_env() {
-        return Ok("package:base".into());
+        return Cow::Borrowed("package:base");
     }
-    let name = get_attr(env, symbols().name);
-    Ok(values::first_string(name)
-        .map(|text| text.into_owned())
-        .unwrap_or_default())
+    values::first_string(get_attr(env, symbols().name)).unwrap_or_default()
 }
 
 unsafe fn do_search(_call: &Call<'_>) -> R<Sexp> {
-    let names: Vec<String> = search_path()
-        .into_iter()
-        .map(|env| search_name(env))
-        .collect::<R<_>>()?;
+    let names: Vec<Cow<str>> = search_path().map(|env| search_name(env)).collect();
     string_vector(&names)
 }
 
@@ -1006,7 +999,6 @@ pub unsafe fn as_environment(value: Sexp) -> R<Sexp> {
         SexpType::Environment => Ok(value),
         SexpType::Integer | SexpType::Real => {
             let position = values::as_integer_scalar(value);
-            let path = search_path();
             if position == -1 {
                 // The calling environment.
                 return match interp().frames.len() {
@@ -1017,13 +1009,15 @@ pub unsafe fn as_environment(value: Sexp) -> R<Sexp> {
                     ),
                 };
             }
-            if position < 1 || position as usize > path.len() {
+            if position < 1 {
                 return Err(error("invalid 'pos' argument"));
             }
-            Ok(path[position as usize - 1])
+            search_path()
+                .nth(position as usize - 1)
+                .ok_or_else(|| error("invalid 'pos' argument"))
         }
         SexpType::String => {
-            let name = values::require_string(value, "pos")?;
+            let name = values::require_str(value, "pos")?;
             if name == ".GlobalEnv" {
                 return Ok(global_env());
             }
@@ -1031,7 +1025,7 @@ pub unsafe fn as_environment(value: Sexp) -> R<Sexp> {
                 return Ok(base_env());
             }
             for env in search_path() {
-                if search_name(env)? == name {
+                if search_name(env) == name {
                     return Ok(env);
                 }
             }
@@ -1109,14 +1103,13 @@ unsafe fn do_detach(call: &Call<'_>) -> R<Sexp> {
     if position < 2 {
         return Err(call.error("invalid 'pos' argument"));
     }
-    let path = search_path();
-    let Some(&env) = path.get(position as usize - 1) else {
+    let mut path = search_path().skip(position as usize - 2);
+    let (Some(previous), Some(env)) = (path.next(), path.next()) else {
         return Err(call.error("invalid 'pos' argument"));
     };
     if env == base_env() {
         return Err(call.error("detaching \"package:base\" is not allowed"));
     }
-    let previous = path[position as usize - 2];
     crate::heap().set_enclosure(previous, env.enclosure());
     interp().globals.keep.retain(|&kept| kept != env);
     Ok(env)
@@ -1253,7 +1246,7 @@ unsafe fn options_list(names: Option<&[String]>) -> R<Sexp> {
 }
 
 pub(crate) unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
-    let mut args: Vec<Arg> = Vec::new();
+    let mut args = crate::eval::Args::new();
     for arg in call.args {
         if arg.tag == nil() && arg.value.kind() == SexpType::List {
             let names = values::names(arg.value);
@@ -1475,10 +1468,13 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
 
 unsafe fn do_get_option(call: &Call<'_>) -> R<Sexp> {
     let name = call.arg(0);
-    if name.kind() == SexpType::String && length(name) == 1 && name.element(0) != values::na_string() {
+    if name.kind() == SexpType::String
+        && length(name) == 1
+        && name.element(0) != values::na_string()
+    {
         return Ok(option_value(name.element(0)));
     }
-    let name = values::require_string(name, "x")?;
+    let name = values::require_str(name, "x")?;
     Ok(get_option(&name))
 }
 
@@ -1817,7 +1813,8 @@ unsafe fn do_do_call(call: &Call<'_>) -> R<Sexp> {
         _ => return Err(call.error("'what' must be a function or character string")),
     };
     let names = values::names(arguments);
-    let mut items = vec![(nil(), function_expression)];
+    let mut new_call = values::PairlistBuilder::new(SexpType::Language);
+    new_call.push(nil(), function_expression)?;
     for index in 0..length(arguments) {
         let tag = if names != nil() {
             let name = names.element(index);
@@ -1834,10 +1831,9 @@ unsafe fn do_do_call(call: &Call<'_>) -> R<Sexp> {
         };
         // A symbol or call among the arguments is evaluated in `envir`, as in GNU R; the R
         // code quotes them first when `quote = TRUE`.
-        items.push((tag, arguments.element(index)));
+        new_call.push(tag, arguments.element(index))?;
     }
-    let new_call = values::pairlist(&items, SexpType::Language)?;
-    eval::eval(new_call, env)
+    eval::eval(new_call.finish(), env)
 }
 
 /// The function an apply-family builtin calls, with the call it reports.
@@ -1968,10 +1964,10 @@ unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(0);
     let dots = call.arg(1);
     let more = call.arg(2);
-    let lists = values::list_items(dots);
+    let lists: SmallVec<[Sexp; 4]> = (0..length(dots)).map(|index| dots.element(index)).collect();
     let names = values::names(dots);
     // A classed argument may define its own `length` and `[[` methods, which mapply honours.
-    let lengths: Vec<usize> = lists
+    let lengths: SmallVec<[usize; 4]> = lists
         .iter()
         .map(|&list| crate::subset::dispatch_length(list, call.env()?))
         .collect::<R<_>>()?;
@@ -1985,7 +1981,7 @@ unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
     let more_names = values::names(more);
     for index in 0..longest {
         let value = crate::scope(|| {
-            let mut args = Vec::new();
+            let mut args = eval::Args::new();
             for (position, &list) in lists.iter().enumerate() {
                 let element = if list.is_object() {
                     let position_value =
@@ -2034,7 +2030,7 @@ unsafe fn do_rapply(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(1);
     let classes = call.arg(2);
     let deflt = call.arg(3);
-    let how = values::require_string(call.arg(4), "how")?;
+    let how = values::require_str(call.arg(4), "how")?;
     rapply_one(object, function, classes, deflt, &how, call.env()?)
 }
 

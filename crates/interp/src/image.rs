@@ -14,10 +14,7 @@
 //! image is written.
 
 use {
-    crate::{
-        builtin_libraries, bytecode, dispatch, format, heap, interp, unwind::R,
-        values::nil,
-    },
+    crate::{builtin_libraries, bytecode, dispatch, format, heap, interp, unwind::R, values::nil},
     heap::{
         Fixed, ImageError, Relocation,
         image::{Reader, Writer},
@@ -70,7 +67,8 @@ pub fn is_current(path: &Path, identity: &str) -> bool {
         return false;
     }
     let mut written_by = vec![0u8; identity.len()];
-    read_at(&file, &mut written_by, prefix.len() as u64).is_ok() && written_by == identity.as_bytes()
+    read_at(&file, &mut written_by, prefix.len() as u64).is_ok()
+        && written_by == identity.as_bytes()
 }
 
 /// The variables that change which namespaces start-up loads or how it loads them, which the
