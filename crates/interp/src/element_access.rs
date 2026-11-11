@@ -19,27 +19,25 @@ use {
     },
 };
 
-/// `x[i]` or `x[[i]]` (`double`) read by tier 0's handler of a call to the base primitive,
-/// without the call: the element when `x` is a double, integer or logical vector (or for `[[` a
-/// list) that is not an object, an array or ALTREP, and has no attributes for `[`, and `i` a
-/// plain numeric scalar within bounds. A number is a fresh scalar from the young generation.
-/// `None` for anything else, and when that allocation needs a collection, so the builtin runs.
+/// The zero-based position of the element `x[i]` or `x[[i]]` (`double`) reads, for tier 0's
+/// handler of a call to the base primitive: `x` is a double, integer or logical vector (or for
+/// `[[` a list) that is not an object, an array or ALTREP, and has no attributes for `[`, and
+/// `i` is a plain numeric scalar within bounds or, for `[[`, an existing ASCII name. `None` for
+/// anything else, so the builtin runs. The subscript is checked before the subject's flags
+/// because a subscript the handler does not take (a negative or vector one) is the common
+/// reason to decline.
 #[inline(always)]
-pub(crate) unsafe fn read_element(
-    heap: &mut Heap,
+pub(crate) unsafe fn element_position(
+    heap: &Heap,
     subject: Sexp,
     index: Sexp,
     double: bool,
-) -> Option<Sexp> {
+) -> Option<usize> {
     let kind = subject.kind();
     if !matches!(
         kind,
         SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::List
     ) || (kind == SexpType::List && !double)
-        || subject.is_object()
-        || subject.is_array()
-        || subject.is_altrep()
-        || (!double && subject.attrib() != heap.known().nil)
     {
         return None;
     }
@@ -51,6 +49,26 @@ pub(crate) unsafe fn read_element(
     } else {
         scalar_position(index, subject.length() as usize)?
     };
+    if subject.is_object()
+        || subject.is_array()
+        || subject.is_altrep()
+        || (!double && subject.attrib() != heap.known().nil)
+    {
+        return None;
+    }
+    Some(position)
+}
+
+/// The element at `position` of a subject [`element_position`] took: a list's element itself,
+/// or a number as a fresh scalar from the young generation, `None` when that allocation needs
+/// a collection.
+#[inline(always)]
+pub(crate) unsafe fn element_value(
+    heap: &mut Heap,
+    subject: Sexp,
+    position: usize,
+) -> Option<Sexp> {
+    let kind = subject.kind();
     let data = subject.data();
     match kind {
         SexpType::List => Some(*data.cast::<Sexp>().add(position)),
@@ -165,12 +183,10 @@ pub(crate) unsafe fn direct_subset2(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp
     vector_element(object, position).map(Some)
 }
 
-/// The zero-based position a plain scalar integer or real subscript selects among `count`
-/// elements, or `None` when it is out of bounds, `NA`, or not such a scalar.
 /// The position of the first of `subject`'s names that is the one-string `index`, when that
-/// string is ASCII and not `NA`, which matches no name. Every ASCII `CHARSXP` is one interned object whatever its encoding mark, so
-/// the names that match it exactly are the ones that are the same pointer; any other string, or
-/// a name no element has, is left to the full subscript.
+/// string is ASCII and not `NA`, which matches no name. Every ASCII `CHARSXP` is one interned
+/// object whatever its encoding mark, so the names that match it exactly are the ones that are
+/// the same pointer; any other string, or a name no element has, is left to the full subscript.
 #[inline(always)]
 pub(crate) unsafe fn name_position(heap: &Heap, subject: Sexp, index: Sexp) -> Option<usize> {
     let nil = heap.known().nil;
@@ -189,6 +205,8 @@ pub(crate) unsafe fn name_position(heap: &Heap, subject: Sexp, index: Sexp) -> O
     names.iter().position(|candidate| *candidate == name)
 }
 
+/// The zero-based position a plain scalar integer or real subscript selects among `count`
+/// elements, or `None` when it is out of bounds, `NA`, or not such a scalar.
 #[inline(always)]
 pub(crate) unsafe fn scalar_position(index: Sexp, count: usize) -> Option<usize> {
     if index.is_altrep() || index.attrib() != nil() || length(index) != 1 {

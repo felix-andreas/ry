@@ -49,7 +49,7 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, internal},
         conditions,
         dispatch::{self, Site},
-        effects,
+        effects, element_access,
         envir::namespace_binding,
         eval::{self, Reify, SwitchSelector, as_condition},
         interp,
@@ -6089,8 +6089,8 @@ unsafe fn branch_if_object_fast(state: &mut Activation<'_, '_>, at: usize) -> Op
     Some(at + 1 + operand_count(Op::BranchIfObject))
 }
 
-/// `CallBuiltin` of the base `[` or `[[` on two positional values, reading the element as
-/// [`element_access::read_element`] does without the call. A profile or activity trace being
+/// `CallBuiltin` of the base `[` or `[[` on two positional values, reading the element
+/// [`element_access::element_position`] takes without the call. A profile or activity trace being
 /// taken sees the full call, as [`eval::call_direct`] arranges for every direct entry.
 #[inline(always)]
 unsafe fn call_builtin_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
@@ -6115,6 +6115,10 @@ unsafe fn call_builtin_fast(state: &mut Activation<'_, '_>, at: usize) -> Option
         return None;
     };
     let heap = &mut *state.heap;
+    let first = *code.add(at + 4) as usize;
+    let subject = *registers.add(first);
+    let position =
+        element_access::element_position(heap, subject, *registers.add(first + 1), double)?;
     let known = *heap.known();
     let arguments = pool_constant(state, *code.add(at + 3) as usize).cdr();
     let second = arguments.cdr();
@@ -6127,13 +6131,7 @@ unsafe fn call_builtin_fast(state: &mut Activation<'_, '_>, at: usize) -> Option
     {
         return None;
     }
-    let first = *code.add(at + 4) as usize;
-    let value = crate::element_access::read_element(
-        heap,
-        *registers.add(first),
-        *registers.add(first + 1),
-        double,
-    )?;
+    let value = element_access::element_value(heap, subject, position)?;
     state.record(at, value);
     *registers.add(*code.add(at + 1) as usize) = value;
     (*state.interp).visible = true;
@@ -6173,6 +6171,19 @@ unsafe fn sub_assign_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<u
     let target = *slot;
     let value = *registers.add(*code.add(at + 4) as usize);
     let kind = target.kind();
+    if !matches!(
+        kind,
+        SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::List
+    ) {
+        return None;
+    }
+    // The subscript is checked first: one past the end, which appends, is the common decline.
+    let index = *registers.add(*code.add(at + 3) as usize);
+    let position = if index.kind() == SexpType::String {
+        element_access::name_position(heap, target, index)?
+    } else {
+        element_access::scalar_position(index, target.length() as usize)?
+    };
     let plain_scalar =
         |value: Sexp| value.length() == 1 && value.attrib() == known.nil && !value.is_altrep();
     let element = match (kind, element_kind) {
@@ -6212,12 +6223,6 @@ unsafe fn sub_assign_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<u
     {
         return None;
     }
-    let index = *registers.add(*code.add(at + 3) as usize);
-    let position = if index.kind() == SexpType::String {
-        crate::element_access::name_position(heap, target, index)?
-    } else {
-        crate::element_access::scalar_position(index, target.length() as usize)?
-    };
     let data = target.data();
     match kind {
         SexpType::Real => *data.cast::<f64>().add(position) = *element.data().cast::<f64>(),
@@ -9370,7 +9375,7 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
         Some(index) => {
             assign_element_in_place(env, variable, index, value, kind)?
                 || (kind == ElementKind::Single
-                    && crate::element_access::assign_subset_in_place(env, variable, index, value)?)
+                    && element_access::assign_subset_in_place(env, variable, index, value)?)
         }
         None => false,
     };
