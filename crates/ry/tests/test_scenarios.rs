@@ -204,8 +204,17 @@ fn missing_requirement(requirements: &[String], library: Option<&Path>) -> Optio
     for requirement in requirements {
         match requirement.as_str() {
             "gnu-r" => {
-                if which("Rscript").is_none() {
+                let Some(gnu_r) = gnu_r() else {
                     return Some("GNU R is not installed".to_owned());
+                };
+                // `--runtime gnu-r` embeds GNU R through its shared library.
+                if !gnu_r.home.join("lib").join("libR.so").is_file()
+                    && !gnu_r.home.join("lib").join("libR.dylib").is_file()
+                {
+                    return Some(format!(
+                        "GNU R at {} has no shared library; it was built without `--enable-R-shlib`",
+                        gnu_r.home.display()
+                    ));
                 }
             }
             "ry-runtime" => {
@@ -333,7 +342,7 @@ fn scenario_library(requirements: &[String]) -> Option<&'static Path> {
     }
     let (library, release) = corpus_library()?;
     if requirements.iter().any(|requirement| requirement == "gnu-r")
-        && gnu_r_release().as_deref() != Some(release.as_str())
+        && gnu_r().map(|gnu_r| gnu_r.release.as_str()) != Some(release.as_str())
     {
         return None;
     }
@@ -354,8 +363,12 @@ fn corpus_library() -> Option<&'static (PathBuf, String)> {
     static LIBRARY: OnceLock<Option<(PathBuf, String)>> = OnceLock::new();
     LIBRARY
         .get_or_init(|| {
-            if std::env::var_os("R_LIBS").is_some() {
-                eprintln!("scenarios: R packages load from R_LIBS");
+            if let Some(libraries) = std::env::var_os("R_LIBS") {
+                if libraries.is_empty() {
+                    eprintln!("scenarios: R_LIBS is empty, so no default package library");
+                } else {
+                    eprintln!("scenarios: R packages load from R_LIBS={}", libraries.to_string_lossy());
+                }
                 return None;
             }
             let corpus = std::env::var_os("RY_CORPUS_DIR")
@@ -423,22 +436,30 @@ fn gnu_rscript() -> Option<PathBuf> {
         .or_else(|| which("Rscript"))
 }
 
-/// The release of the GNU R that `gnu-r` scenarios run ([`gnu_rscript`]).
-fn gnu_r_release() -> Option<String> {
-    static RELEASE: OnceLock<Option<String>> = OnceLock::new();
-    RELEASE
+/// The GNU R that `gnu-r` scenarios run ([`gnu_rscript`]): its R home and release.
+struct GnuR {
+    home: PathBuf,
+    release: String,
+}
+
+fn gnu_r() -> Option<&'static GnuR> {
+    static GNU_R: OnceLock<Option<GnuR>> = OnceLock::new();
+    GNU_R
         .get_or_init(|| {
             let output = Command::new(gnu_rscript()?)
-                .args(["-e", "cat(format(getRversion()))"])
+                .args(["-e", "cat(R.home(), format(getRversion()), sep = '\\n')"])
                 .output()
                 .ok()?;
-            let release = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if !output.status.success() || release.is_empty() {
+            if !output.status.success() {
                 return None;
             }
-            Some(release)
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut lines = stdout.lines();
+            let home = PathBuf::from(lines.next()?.trim());
+            let release = lines.next()?.trim().to_owned();
+            Some(GnuR { home, release })
         })
-        .clone()
+        .as_ref()
 }
 
 /// The base R tree ry's runtime loads in scenarios: the one `R_HOME` names, which emulates that
