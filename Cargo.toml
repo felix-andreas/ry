@@ -94,23 +94,25 @@ heap.opt-level = 2
 strip = true
 lto = true
 
-# `cargo bench` and `cargo test-release` (`cargo test --profile bench`) build with this profile.
-# Fat LTO of a test binary that links polars or libr needs more memory than a 16 GB machine has, so
-# tests use thin local LTO and parallel codegen. Plain `cargo test --release` still uses the release
-# profile. Shipped binaries and the benchmark numbers in the docs come from `cargo build --release`,
-# which keeps fat LTO.
-[profile.bench]
+# Release optimization without cross-crate LTO, for optimized tests (`cargo test-release` is `cargo test
+# --profile iterate`) and for iterating on performance: an edit to the interpreter relinks without a
+# fat-LTO pass, and a test binary that links polars or libr links within 16 GB, which fat LTO does
+# not. No inlining then crosses a crate boundary, so its timings are not release timings:
+# `tools/bench/bench.py` refuses it, and `ry --version` names the profile. Shipped binaries and every
+# published or quoted number come from `cargo build --release`.
+[profile.iterate]
 inherits = "release"
 lto = false
 codegen-units = 16
+strip = false
 
-# Release performance with symbols kept for profilers: `cargo build --profile profiling`.
+# Release with line tables kept for profilers: `cargo build --profile profiling`. It keeps release's
+# fat LTO and codegen settings, so the profiler sees release's inlining: compare
+# `size -A target/{release,profiling}/libR.so`, whose `.text` sections differ by under 0.2%. Line
+# tables are what perf, callgrind and samply read to attribute samples to functions, inlined frames
+# and lines. Full debug info only adds variables, and under fat LTO it pushes the link past 16 GB;
+# with line tables the link peaks near 11 GB.
 [profile.profiling]
 inherits = "release"
 strip = false
-debug = true
-
-# Full debug info for polars needs more memory than a 16 GB machine has, and line tables are
-# enough to symbolize a profile of a dependency.
-[profile.profiling.package."*"]
 debug = "line-tables-only"
