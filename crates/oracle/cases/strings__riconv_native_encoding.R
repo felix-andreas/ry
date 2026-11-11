@@ -1,6 +1,8 @@
 # Riconv_open reads "" as the codeset of the current LC_CTYPE, as iconv_open does, so the same
 # bytes convert under C.UTF-8, fail under C (ASCII), and read as Latin-1 under a Latin-1
-# locale; lowercase "utf-8" names UTF-8 too.
+# locale; lowercase "utf-8" names UTF-8 too. The Latin-1 block needs that locale generated
+# (`localedef -i en_US -f ISO-8859-1 en_US.ISO-8859-1`); the `.expected` file is recorded with
+# it, and without it both engines print that it is not installed.
 source_file <- file.path(tempdir(), "riconv_probe.c")
 writeLines(c(
   "#include <errno.h>",
