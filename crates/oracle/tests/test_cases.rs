@@ -9,13 +9,16 @@
 
 use {
     oracle::{
-        BUILD_FILE, BuildCheck, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine,
-        check_build, diff, engine_from_environment, expected_path, find_cases, gnu_r_available,
-        gnu_r_build, installed_packages, known_failure, known_failures, parse, render,
-        runnable_cases, ry_runtime_available, write_build,
+        BUILD_FILE, BuildCheck, Engine, EngineError, KNOWN_FAILURES_FILE, ProcessEngine, Verdict,
+        check_build, diff, engine_from_environment, expected_path, fails_run, find_cases,
+        gnu_r_available, gnu_r_build, installed_packages, known_failure, known_failures,
+        libraries_ahead_of_reference, parse, parse_known_failures, render, runnable_cases,
+        ry_runtime_available, verdict, write_build,
     },
     std::{
-        path::PathBuf,
+        ffi::OsStr,
+        path::{Path, PathBuf},
+        process::Command,
         sync::atomic::{AtomicUsize, Ordering},
         time::{Duration, Instant},
     },
@@ -128,14 +131,19 @@ fn second_engine_matches_gnu_r() {
                     .map(|difference| format!("{}\n{difference}", case.display()))
             }
         };
-        match (failure, known_failure(&known, &case, &name)) {
-            (Some(_), Some(entry)) => eprintln!("known {}: {}", case.display(), entry.reason),
-            (Some(failure), None) => failures.push(failure),
-            (None, Some(_)) => failures.push(format!(
+        let entry = known_failure(&known, &case, &name);
+        match verdict(failure.is_some(), entry) {
+            Verdict::Known => {
+                if let Some(entry) = entry {
+                    eprintln!("known {}: {}", case.display(), entry.reason);
+                }
+            }
+            Verdict::New => failures.extend(failure),
+            Verdict::ListedButPassing => failures.push(format!(
                 "{} passes under {name}, so delete its entry from {KNOWN_FAILURES_FILE}",
                 case.display()
             )),
-            (None, None) => {}
+            Verdict::Passed | Verdict::IntermittentPassed => {}
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -147,6 +155,168 @@ fn known_failures_are_valid() {
     if let Err(error) = known_failures() {
         panic!("{error}");
     }
+}
+
+/// A crash that depends on the host or on timing is listed as intermittent, and its case passing
+/// does not fail the run, while any other listed case that passes does, so its fix deletes it.
+#[test]
+fn a_passing_intermittent_entry_does_not_fail_the_run() {
+    let known = parse_known_failures(
+        r#"
+[[failure]]
+case = "base__match_arg_native"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts under the collector on some hosts"
+intermittent = true
+
+[[failure]]
+case = "base__match_arg_native"
+engine = "ry-gctorture"
+area = "gc"
+reason = "aborts under the collector"
+"#,
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let case = case_directory().join("base__match_arg_native.R");
+    let intermittent = known_failure(&known, &case, "ry-jit-gctorture");
+    let plain = known_failure(&known, &case, "ry-gctorture");
+
+    assert_eq!(verdict(false, intermittent), Verdict::IntermittentPassed);
+    assert!(!fails_run(verdict(false, intermittent)));
+    assert_eq!(verdict(true, intermittent), Verdict::Known);
+    assert!(!fails_run(verdict(true, intermittent)));
+
+    assert_eq!(verdict(false, plain), Verdict::ListedButPassing);
+    assert!(fails_run(verdict(false, plain)));
+    assert_eq!(verdict(true, plain), Verdict::Known);
+    assert!(!fails_run(verdict(true, plain)));
+
+    assert!(fails_run(verdict(true, None)));
+    assert!(!fails_run(verdict(false, None)));
+}
+
+/// Only a collector-stress engine's crash may be intermittent: a failure under any other engine
+/// reproduces on every host, so the file refuses the mark there.
+#[test]
+fn intermittent_is_refused_outside_the_gctorture_engines() {
+    let entry = |engine: &str| {
+        format!(
+            "[[failure]]\ncase = \"base__match_arg_native\"\nengine = \"{engine}\"\n\
+             area = \"jit\"\nreason = \"crashes\"\nintermittent = true\n"
+        )
+    };
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for engine in ["ry", "ry-tier0", "ry-jit"] {
+        let error = parse_known_failures(&entry(engine), directory)
+            .expect_err("an intermittent entry under an engine without gctorture");
+        assert!(
+            error.contains(&format!(
+                "`base__match_arg_native` under `{engine}` is marked intermittent, which only an \
+                 entry under ry-gctorture, ry-gctorture-young, ry-jit-gctorture may be"
+            )),
+            "{error}"
+        );
+    }
+    for engine in ["ry-gctorture", "ry-gctorture-young", "ry-jit-gctorture"] {
+        if let Err(error) = parse_known_failures(&entry(engine), directory) {
+            panic!("{error}");
+        }
+    }
+}
+
+/// An explicit `R_LIBS` comes before the corpus library, the corpus library fills in when
+/// `R_LIBS` is unset, and an empty `R_LIBS` turns it off.
+#[test]
+fn corpus_library_follows_an_explicit_r_libs() {
+    let corpus = Path::new("/work/.corpus/library");
+    let found = |explicit: Option<&str>| {
+        libraries_ahead_of_reference(explicit.map(OsStr::new), Some(corpus))
+            .map(|libraries| libraries.to_string_lossy().into_owned())
+    };
+    assert_eq!(found(None).as_deref(), Some("/work/.corpus/library"));
+    assert_eq!(
+        found(Some("/mine:/other")).as_deref(),
+        Some("/mine:/other:/work/.corpus/library")
+    );
+    assert_eq!(
+        found(Some("/work/.corpus/library:/mine")).as_deref(),
+        Some("/work/.corpus/library:/mine")
+    );
+    assert_eq!(found(Some("")), None);
+    assert_eq!(libraries_ahead_of_reference(None, None), None);
+}
+
+/// A case that needs a package the engine lacks fails `oracle compare` before anything runs,
+/// and `--allow-skips` runs the rest and marks every summary line PARTIAL. Without GNU R the
+/// oracle compares with the recorded outcomes and asks the engine which packages it has, so a
+/// shell script stands in for both and the test needs no R.
+#[test]
+fn compare_fails_on_a_missing_package_unless_skips_are_allowed() {
+    let directory = std::env::temp_dir().join(format!("oracle-skips-{}", std::process::id()));
+    let cases = directory.join("cases");
+    std::fs::create_dir_all(&cases).unwrap_or_else(|error| panic!("{error}"));
+    let engine = directory.join("engine.sh");
+    let write = |path: &Path, text: &str| {
+        std::fs::write(path, text).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    };
+    // The package probe sees `stats` only; every other script prints `hello`.
+    write(
+        &engine,
+        "case \"$1\" in *packages.R) echo stats ;; *) echo hello ;; esac\n\
+         printf '{\"messages\":[],\"warnings\":[],\"errors\":[],\"value\":null}' > \"$2\"\n",
+    );
+    let engine = format!("sh {}", engine.display());
+    let plain = cases.join("plain.R");
+    write(&plain, "cat('hello\\n')\n");
+    write(
+        &cases.join("needs.R"),
+        "# oracle: requires nosuchpackage\ncat('hello\\n')\n",
+    );
+    let outcome = ProcessEngine::from_command(&engine)
+        .and_then(|engine| engine.run(&plain).ok())
+        .unwrap_or_else(|| panic!("`{engine}` did not run"));
+    write(&expected_path(&plain), &render(&outcome));
+
+    let compare = |extra: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_oracle"))
+            .args(["compare", "--engine", &engine])
+            .args(extra)
+            .arg(&cases)
+            .env("ORACLE_R", directory.join("no-r"))
+            .output()
+            .unwrap_or_else(|error| panic!("oracle: {error}"));
+        let text = String::from_utf8_lossy(&output.stdout).into_owned()
+            + &String::from_utf8_lossy(&output.stderr);
+        (output.status.code(), text)
+    };
+    let (status, text) = compare(&[]);
+    assert_eq!(status, Some(1), "{text}");
+    assert!(text.contains("needs.R: needs nosuchpackage"), "{text}");
+    assert!(
+        text.contains("pass --allow-skips for a partial run"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("ok "),
+        "a refused run must not run any case:\n{text}"
+    );
+
+    let (status, text) = compare(&["--allow-skips"]);
+    assert_eq!(status, Some(0), "{text}");
+    assert!(
+        text.contains(&format!(
+            "PARTIAL {engine}: 1 passed, 0 failed (0 known, 0 new), 1 skipped (1 missing a package)"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains("PARTIAL: --allow-skips left out 1 case"),
+        "{text}"
+    );
+
+    std::fs::remove_dir_all(&directory).unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[test]
