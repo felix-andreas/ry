@@ -932,6 +932,46 @@ static SEXP attribute_tags(SEXP x)
     return tags;
 }
 
+/* A resizable copy of `a` with `INTEGER(b)[0]` spare slots, resized to `INTEGER(b)[1]` and then
+   to `INTEGER(b)[2]`, the way data.table over-allocates a table and shrinks it. The second
+   element says whether every slot the second resize exposed holds the empty value. */
+static SEXP resizable_round_trip(SEXP a, SEXP b)
+{
+    int type = TYPEOF(a);
+    R_xlen_t length = isVector(a) ? XLENGTH(a) : 0;
+    SEXP x = PROTECT(R_allocResizableVector(type, length + INTEGER(b)[0]));
+    for (R_xlen_t i = 0; i < length; i++) {
+        switch (type) {
+        case STRSXP: SET_STRING_ELT(x, i, STRING_ELT(a, i)); break;
+        case VECSXP: SET_VECTOR_ELT(x, i, VECTOR_ELT(a, i)); break;
+        case LGLSXP: LOGICAL(x)[i] = LOGICAL(a)[i]; break;
+        case INTSXP: INTEGER(x)[i] = INTEGER(a)[i]; break;
+        case REALSXP: REAL(x)[i] = REAL(a)[i]; break;
+        default: break;
+        }
+    }
+    DUPLICATE_ATTRIB(x, a);
+    R_resizeVector(x, INTEGER(b)[1]);
+    R_xlen_t shrunk = XLENGTH(x);
+    R_resizeVector(x, INTEGER(b)[2]);
+    int empty = 1;
+    for (R_xlen_t i = shrunk; i < XLENGTH(x); i++) {
+        switch (type) {
+        case STRSXP: empty &= STRING_ELT(x, i) == R_BlankString; break;
+        case VECSXP: empty &= VECTOR_ELT(x, i) == R_NilValue; break;
+        case LGLSXP: empty &= LOGICAL(x)[i] == 0; break;
+        case INTSXP: empty &= INTEGER(x)[i] == 0; break;
+        case REALSXP: empty &= REAL(x)[i] == 0; break;
+        default: break;
+        }
+    }
+    SEXP result = PROTECT(allocVector(VECSXP, 2));
+    SET_VECTOR_ELT(result, 0, x);
+    SET_VECTOR_ELT(result, 1, ScalarLogical(empty));
+    UNPROTECT(2);
+    return result;
+}
+
 SEXP rytest_api_op(SEXP op, SEXP a, SEXP b, SEXP c)
 {
     SEXP result;
@@ -969,8 +1009,9 @@ SEXP rytest_api_op(SEXP op, SEXP a, SEXP b, SEXP c)
         default: result = dimnamesgets(a, c);
         }
         break;
-    case 26: result = Rf_mkCharLenCE((const char *) RAW(a), LENGTH(a), INTEGER(b)[0]); break;
-    case 27: result = Rf_mkCharCE(CHAR(STRING_ELT(a, 0)), INTEGER(b)[0]); break;
+    case 26: result = resizable_round_trip(a, b); break;
+    case 27: result = Rf_mkCharLenCE((const char *) RAW(a), LENGTH(a), INTEGER(b)[0]); break;
+    case 28: result = Rf_mkCharCE(CHAR(STRING_ELT(a, 0)), INTEGER(b)[0]); break;
     default: result = R_NilValue;
     }
     PROTECT(result);
@@ -1218,6 +1259,21 @@ BENCH bench_delayed_binding(int count, SEXP env)
     if (sum == 1) Rprintf("unreachable\n");
 }
 
+/* data.table's `alloc.col` over-allocates a column list and its names by 1024 slots and shrinks
+   them to the table's columns. One pair grown and shrunk again keeps allocation out of the loop. */
+BENCH bench_resizable_grow_shrink(int count)
+{
+    SEXP columns = PROTECT(R_allocResizableVector(VECSXP, 1027));
+    SEXP names = PROTECT(R_allocResizableVector(STRSXP, 1027));
+    for (int i = 0; i < count; i++) {
+        R_resizeVector(columns, 3);
+        R_resizeVector(names, 3);
+        R_resizeVector(columns, 1027);
+        R_resizeVector(names, 1027);
+    }
+    UNPROTECT(2);
+}
+
 SEXP rytest_api_bench(SEXP count, SEXP env)
 {
     int n = INTEGER(count)[0];
@@ -1270,6 +1326,8 @@ SEXP rytest_api_bench(SEXP count, SEXP env)
     bench_binding_probes(n);
     R_gc();
     bench_delayed_binding(n, env);
+    R_gc();
+    bench_resizable_grow_shrink(n);
     return R_NilValue;
 }
 

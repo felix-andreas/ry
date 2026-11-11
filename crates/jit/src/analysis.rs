@@ -1243,7 +1243,8 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::Slot
             | Op::ForInit
             | Op::ForStep
-            | Op::ForEnd => true,
+            | Op::ForEnd
+            | Op::Internal => true,
             Op::Jump if operand(0) <= pc => return unbounded,
             Op::Jump => false,
             Op::CallBuiltin => {
@@ -2332,6 +2333,16 @@ impl<'a> Builder<'a> {
             ),
             // An active binding or a frame on the search path may run arbitrary code.
             Op::SuperAssign => self.opaque_step(state, None, &[], Effect::Opaque),
+            // An inlined internal may run R code, as `match` does through `mtfrm` on an object.
+            Op::Internal => {
+                let objects = self.slice(operand(3)..operand(3) + operand(4));
+                self.opaque_step(
+                    state,
+                    Some((operand(0), self.feedback_at(inst.pc))),
+                    objects,
+                    Effect::Opaque,
+                )
+            }
             Op::Replace => {
                 let value = match state.registers[operand(5) + operand(6) - 1] {
                     Ty::Bottom => Ty::Boxed,
@@ -4146,7 +4157,7 @@ pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
         Op::MatchShape | Op::MatchTag | Op::MatchLiteral | Op::MatchFail => smallvec![operand(0)],
         Op::Construct => (operand(2)..operand(2) + operand(3)).collect(),
         Op::Move => smallvec![operand(1)],
-        Op::BoundEval => (operand(3)..operand(3) + operand(4)).collect(),
+        Op::BoundEval | Op::Internal => (operand(3)..operand(3) + operand(4)).collect(),
         Op::MatchCondition | Op::SwitchArm => smallvec![operand(1)],
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             smallvec![operand(0)]
@@ -4218,6 +4229,12 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
         | Op::Closure
         | Op::Missing
         | Op::Namespace => kill(operand(0), live),
+        Op::Internal => {
+            kill(operand(0), live);
+            for register in operand(3)..operand(3) + operand(4) {
+                gen_(register, live);
+            }
+        }
         Op::SetVar | Op::SuperAssign => gen_(operand(1), live),
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             gen_(operand(0), live)

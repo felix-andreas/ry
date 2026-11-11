@@ -46,12 +46,23 @@ fn fuzz_direct_paths_match_slow_paths() {
             outcome
         });
         match &outcomes {
-            [Ok(direct), Ok(slow)] => assert_eq!(
-                unsafe { (r.api().R_compute_identical)(*direct, *slow, 0) },
-                1,
-                "seed {seed}: operation {} differs between the direct and the slow path",
-                operation.code
-            ),
+            [Ok(direct), Ok(slow)] => {
+                assert_eq!(
+                    unsafe { (r.api().R_compute_identical)(*direct, *slow, 0) },
+                    1,
+                    "seed {seed}: operation {} differs between the direct and the slow path",
+                    operation.code
+                );
+                if operation.code == 26 {
+                    let result = unsafe { (r.api().VECTOR_ELT)(*direct, 0) };
+                    let empty = unsafe { (r.api().VECTOR_ELT)(result, 1) };
+                    assert_eq!(
+                        r.integers(empty),
+                        [1],
+                        "seed {seed}: growing a resizable vector exposed a stale element"
+                    );
+                }
+            }
             [Err(direct), Err(slow)] => assert_eq!(direct, slow, "seed {seed}"),
             [direct, slow] => panic!(
                 "seed {seed}: operation {}: the direct path gave {direct:?}, the slow path {slow:?}",
@@ -67,7 +78,7 @@ fn duplicate(r: &R, value: Sexp) -> Sexp {
 }
 
 fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
-    let code = rng.below(28) as c_int;
+    let code = rng.below(29) as c_int;
     let arguments = match code {
         0 => {
             let object = random_object(r, rng);
@@ -80,7 +91,7 @@ fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
             let value = random_value(r, rng, object);
             [object, r.integer(rng.below(4) as c_int), value]
         }
-        26 => {
+        27 => {
             let texts: [&[u8]; 5] = [b"", b"a", b"a\0b", b"\xe9t\xe9", b"rytest.tag"];
             let text = texts[rng.below(texts.len())];
             let bytes = r.keep(unsafe { (r.api().Rf_allocVector)(RAWSXP, text.len() as isize) });
@@ -89,7 +100,7 @@ fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
             };
             [bytes, r.integer(random_encoding(rng)), r.nil()]
         }
-        27 => [
+        28 => [
             strings(r, &[["", "a", "rytest.tag", "\u{e9}t\u{e9}"][rng.below(4)]]),
             r.integer(random_encoding(rng)),
             r.nil(),
@@ -127,6 +138,24 @@ fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
                 binding_env(r, rng.chance(1, 2))
             };
             [env, r.symbol(name[rng.below(name.len())]), r.nil()]
+        }
+        26 => {
+            let object = random_object(r, rng);
+            let length = match r.type_of(object) {
+                LGLSXP | INTSXP | REALSXP | STRSXP | VECSXP => r.length(object) as c_int,
+                _ => 0,
+            };
+            // Spare capacity around one chunk of 32 reaches both the chunked scan of a shrink and its
+            // remainder.
+            let spare = [0, 1, 31, 33, 80][rng.below(5)];
+            let capacity = length + spare;
+            let mut resize = || match rng.below(8) {
+                0 => -1,
+                1 => capacity + 1,
+                _ => rng.below(capacity as usize + 1) as c_int,
+            };
+            let sizes = [spare, resize(), resize()];
+            [object, integers(r, &sizes), r.nil()]
         }
         _ => [
             random_object(r, rng),
@@ -430,6 +459,7 @@ const BUDGETS: &[(&str, u64)] = &[
     ("bench_set_car_cdr", 178),
     ("bench_binding_probes", 203),
     ("bench_delayed_binding", 230),
+    ("bench_resizable_grow_shrink", 7_000),
 ];
 
 /// Runs the `bench_` loops under callgrind in a child copy of this test and checks the cost per

@@ -1357,6 +1357,14 @@ impl Heap {
         if length > capacity {
             return Err(HeapError::ResizeBeyondCapacity { capacity, length });
         }
+        self.resize_within_capacity(vector, length);
+        Ok(())
+    }
+
+    /// [`Heap::resize_vector`] once its checks have passed: `vector` is resizable and
+    /// `0 <= length <= capacity`.
+    #[inline]
+    pub unsafe fn resize_within_capacity(&mut self, vector: Sexp, length: isize) {
         let old = vector.length();
         if length > old {
             let element = vector.kind().element_size().unwrap_or(0);
@@ -1367,9 +1375,11 @@ impl Heap {
                     } else {
                         self.known.nil
                     };
-                    for index in old..length {
-                        vector.set_element_unbarriered(index as usize, fill);
-                    }
+                    std::slice::from_raw_parts_mut(
+                        (vector.data() as *mut Sexp).add(old as usize),
+                        (length - old) as usize,
+                    )
+                    .fill(fill);
                 }
                 _ => std::ptr::write_bytes(
                     vector.data().add(old as usize * element),
@@ -1381,16 +1391,45 @@ impl Heap {
             vector.kind(),
             SexpType::String | SexpType::List | SexpType::Expression
         ) {
-            for index in length..old {
-                let dropped = vector.element(index as usize);
-                vector.set_element_unbarriered(index as usize, self.known.nil);
-                if dropped.release_reference() {
-                    self.note_zero(dropped);
+            // A table over-allocates its column list and names by a thousand or so slots and
+            // shrinks them to the columns it has, so most dropped slots still hold the value
+            // they were allocated with. Chunks holding only that value are skipped: comparing
+            // against one value is an xor and an or per slot, which vectorizes on any x86-64,
+            // where the 64-bit equality a second value would need does not.
+            let empty = if vector.kind() == SexpType::String {
+                self.known.blank_string
+            } else {
+                self.known.nil
+            };
+            let dropped = std::slice::from_raw_parts_mut(
+                (vector.data() as *mut Sexp).add(length as usize),
+                (old - length) as usize,
+            );
+            let (chunks, remainder) = dropped.as_chunks_mut::<32>();
+            for chunk in chunks {
+                let differs = chunk.iter().fold(0, |bits, &value| {
+                    bits | (value.as_ptr() as usize ^ empty.as_ptr() as usize)
+                });
+                if differs != 0 {
+                    self.release_dropped(chunk);
                 }
             }
+            self.release_dropped(remainder);
         }
         vector.set_length(length);
-        Ok(())
+    }
+
+    /// Clears the slots a shrinking vector drops and releases what they held. Nil's count is
+    /// pinned, and the blank string is a rooted global that no release can reclaim, so neither
+    /// is released.
+    unsafe fn release_dropped(&mut self, slots: &mut [Sexp]) {
+        let (nil, blank) = (self.known.nil, self.known.blank_string);
+        for slot in slots {
+            let dropped = std::mem::replace(slot, nil);
+            if dropped != nil && dropped != blank && dropped.release_reference() {
+                self.note_zero(dropped);
+            }
+        }
     }
 
     /// Lets `resize_vector` change the length of a vector allocated with a fixed length, within
