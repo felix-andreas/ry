@@ -73,7 +73,27 @@ fn scenarios_hold() {
 /// The typed benchmark programs whose kernels do not run on native code yet, with what the
 /// typed core refuses in each. Every other `<name>.typed.R` in `tools/bench/kernels` and
 /// `tools/bench/applications` must run natively.
-const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 0] = [];
+const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 7] = [
+    ("expr_tree", "tagged unions built in the kernel (`.ry_tag`)"),
+    ("log_rank", "a record parameter"),
+    (
+        "orders",
+        "records and tags built in the kernel (`.ry_record`, `.ry_tag`)",
+    ),
+    ("report", "text building (`.ry_text`)"),
+    (
+        "sales",
+        "a `DataFrame` parameter, which the table engine runs",
+    ),
+    (
+        "team_scores",
+        "`Result.with_default` and a mapped non-local function",
+    ),
+    (
+        "vasicek",
+        "R's random number generator (`set.seed`, `stats::rnorm`)",
+    ),
+];
 
 /// The harness's own typed functions, which read R's clock and so run in the interpreter.
 const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
@@ -103,7 +123,6 @@ fn typed_benchmarks_run_natively() {
         })
         .collect();
     programs.sort();
-    let names: Vec<String> = programs.iter().map(|(name, _)| name.clone()).collect();
     let directory = tempfile::tempdir().expect("temporary directory");
     // Strict mode, as the benchmark runner runs typed programs.
     fs::write(
@@ -128,6 +147,8 @@ fn typed_benchmarks_run_natively() {
             .arg(&script)
             .current_dir(directory.path())
             .env("RY_TYPED_LOG", "1")
+            // One timed run after the first is enough to reach the warm calls.
+            .env("RY_BENCH_REPEAT", "1")
             .env("XDG_CACHE_HOME", directory.path().join(".cache"))
             .output()
             .expect("run ry");
@@ -145,12 +166,14 @@ fn typed_benchmarks_run_natively() {
             .filter(|function| !TYPED_HARNESS_INTERPRETED.contains(function))
             .collect();
         if !interpreted.is_empty() {
-            let refusals: Vec<&str> = stderr
+            let mut refusals: Vec<&str> = stderr
                 .lines()
                 .filter(|line| {
                     line.starts_with("typed: no code") || line.starts_with("typed: refusing")
                 })
                 .collect();
+            refusals.sort_unstable();
+            refusals.dedup();
             failures.push(format!(
                 "{name}: {} ran in the interpreter\n{}",
                 interpreted.join(", "),
@@ -159,7 +182,7 @@ fn typed_benchmarks_run_natively() {
         }
     }
     for (listed, _) in TYPED_BENCHMARKS_NOT_NATIVE {
-        if !names.iter().any(|name| name == listed) {
+        if !programs.iter().any(|(name, _)| name == listed) {
             failures.push(format!(
                 "{listed} is listed as not native but is not a benchmark"
             ));
