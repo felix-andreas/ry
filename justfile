@@ -44,6 +44,12 @@ try-editor:
 doctor:
     @python3 -I tools/doctor.py
 
+# Push prebuilt trees to the ry.cachix.org binary cache and record them in tools/cache.lock (commit
+# it): `r` is the reference GNU R that tools/dev-setup.sh then restores in seconds, `corpus` the
+# package-test corpus library. Never push ry's own builds; the cache holds 5 GB.
+cache-push +trees="r":
+    for tree in {{ trees }}; do bash tools/cache.sh push "$tree" || exit 1; done
+
 # Free disk in target/ without forcing a full rebuild: unused build configurations and stale
 # incremental caches. `--tests` also removes test executables, `--dry-run` only reports.
 prune *args:
@@ -113,8 +119,8 @@ stats path=".":
 
 # Corpus perf and memory budgets, and the benchmark memory budget; fetch with `cargo -Zscript scripts/fetch-corpus.rs`.
 perf:
-    cargo test -p semantics --profile bench --test test_perf -- --ignored --nocapture
-    cargo test -p ry-lang --profile bench --test test_perf -- --ignored --nocapture
+    cargo test -p semantics --profile iterate --test test_perf -- --ignored --nocapture
+    cargo test -p ry-lang --profile iterate --test test_perf -- --ignored --nocapture
 
 # Times one published benchmark suite (public, packages, kernels, applications, or all) on GNU R, ry and,
 # where a program has a typed version, ry typed in strict mode, in paired shuffled rounds with a checksum gate
@@ -611,7 +617,7 @@ gc-torture mode="plain":
 # The language-server simulator over many seeds: `just simulate 1000 120` runs seeds 0 to 999 with
 # 120 actions each. Replay one failure with `SIMULATION_SEED=<seed> cargo test -p ry-lang --test test_simulation`.
 simulate count="200" actions="60" base="0":
-    SIMULATION_BASE={{ base }} FUZZ_ITERS={{ count }} SIMULATION_ACTIONS={{ actions }} cargo test -p ry-lang --profile bench --test test_simulation -- --nocapture
+    SIMULATION_BASE={{ base }} FUZZ_ITERS={{ count }} SIMULATION_ACTIONS={{ actions }} cargo test -p ry-lang --profile iterate --test test_simulation -- --nocapture
 
 # The scripted user journeys in crates/ry/tests/scenarios; `just scenarios edit-and-rename` runs one.
 scenarios name="":

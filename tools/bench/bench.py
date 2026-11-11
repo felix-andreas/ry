@@ -12,7 +12,8 @@ The engines are GNU R, ry, and ry typed: a program with a `<name>.typed.R` besid
 that typed version in strict mode. Every run is a fresh process. A round runs every program on
 every engine once, programs in an order shuffled per round and engines in an order shuffled per
 program, so no engine always follows another and inherits its cache state, and a drift of the
-machine's speed hits all engines alike. A program's time on an engine is the median over rounds,
+machine's speed hits all engines alike. Each suite first evicts every ry build's files from the
+page cache (evict.py), so peak RSS compares builds from the same page-cache state. A program's time on an engine is the median over rounds,
 and its ratio to GNU R is the median of the per-round ratios, with a 95% bootstrap interval over
 rounds. A suite's geometric mean has a bootstrap interval that resamples each program's rounds.
 
@@ -46,7 +47,9 @@ import re, tempfile, threading, time, tomllib
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent
 sys.path.insert(0, str(here / "tooling"))
+sys.path.insert(0, str(here))
 import packages as corpus  # noqa: E402
+from evict import evict  # noqa: E402
 
 SUITES = ["public", "packages", "kernels", "applications"]
 SCHEMA = 1
@@ -94,6 +97,8 @@ def main():
         if changes:
             sys.exit("error: --write records a clean commit, but the working tree has changes; commit or "
                      "remove them and rebuild ry:\n" + "\n".join(f"  {line}" for line in changes))
+    for binary in filter(None, [args.ry, args.baseline]):
+        refuse_unreleased(binary)
     manifests = {suite: load_suite(suite) for suite in suites}
     missing = {suite: missing_packages(suite, selected(manifest, args)) for suite, manifest in manifests.items()}
     if any(missing.values()) and not args.partial:
@@ -218,6 +223,9 @@ def run_suite(suite, manifest, missing, args, meta):
     print(f"## {manifest['name']}: {len(programs)} programs, {args.rounds} rounds\n")
     if missing:
         print(f"PARTIAL RUN: the corpus library lacks {', '.join(missing)}\n", flush=True)
+    # Peak RSS depends on how the page cache holds each build's files, which a fresh build holds
+    # differently from one read back from disk (see evict.py), so every ry build starts evicted.
+    evict([args.ry] + ([args.baseline] if args.baseline else []))
     try:
         while len(state["rounds"]) < args.rounds:
             number = len(state["rounds"]) + 1
@@ -637,6 +645,22 @@ def print_table(results, table):
 
 
 # Metadata.
+
+def refuse_unreleased(binary):
+    """Exits unless `binary` is a ry built with `--release`.
+
+    Any other profile names itself in `ry --version` (`ry 0.4.3-beta (iterate build)`): a debug build
+    is many times slower, and the iterate profile skips the cross-crate inlining LTO does, so a timing
+    of either would pass for a release number it is not.
+    """
+    try:
+        version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=60).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as error:
+        sys.exit(f"error: cannot run {binary}: {error}")
+    if re.search(r"\b[\w.-]+ build\b", version):
+        sys.exit(f"error: {binary} is not a release build ({version}); benchmarks time release builds "
+                 "only, so build it with `cargo build --release -p ry-lang -p libr`")
+
 
 def metadata(args):
     cpu = platform.processor() or platform.machine()

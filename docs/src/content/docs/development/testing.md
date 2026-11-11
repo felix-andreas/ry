@@ -425,7 +425,11 @@ runs in its own process, and the table adds both engines' peak RSS. zoo and xts 
 Compare peak RSS between two builds only from the same page-cache state. A freshly built `.ryc`
 or `libR.so` sits in the page cache in large folios, so one fault maps a whole block, and the same
 build reads back in small pages after eviction: two identical builds differed by 5 MB this way.
-Evict both builds' files with `posix_fadvise(POSIX_FADV_DONTNEED)` before every RSS comparison.
+`python3 tools/bench/evict.py RY...` evicts every file each build reads at run time, recursively:
+the executable's directory, its base R tree with every package's `.ryc`, ry's cache directory and
+the `R_LIBS` libraries. `tools/bench/bench.py` and `bench-base --memory` run it before measuring.
+Run it before every peak-RSS run you script yourself, because evicting only the top of `base-r`
+leaves the `.ryc` images cached.
 
 `just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
 n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with
@@ -733,16 +737,14 @@ memoization), resident bytes per line, and the p50 and p95 latency from a keystr
 diagnostics on the corpus's largest package. It prints what it measured, so it doubles as the
 corpus-wide measurement, while `ry debug analysis-stats` diagnoses one workspace phase by phase.
 
-Run optimized tests with `cargo test-release`, an alias for `cargo test --profile bench`, which is
-what `just perf` and `cargo bench` use. The `bench` profile keeps `opt-level = 3` but uses thin
-local LTO and 16 codegen units. Plain `cargo test --release` builds with the release profile's fat
-LTO: building libr's `test_linpack` that way peaks at 11.1 GiB of RSS and takes 30 minutes on
-four cores (it was OOM-killed once on a 16 GB machine), against 3.6 GiB and 11 minutes under
-`cargo test-release`. Shipped binaries and every benchmark number in
-the docs come from `cargo build --release`, so a budget measured under `cargo test-release` can be
-slightly slower than a release binary. Debug builds keep line tables only (`[profile.dev] debug =
-"line-tables-only"`), which keeps backtraces symbolized; set `CARGO_PROFILE_DEV_DEBUG=true` to
-inspect locals in a debugger.
+Run optimized tests with `cargo test-release`, an alias for `cargo test --profile iterate`, which is
+what `just perf` uses. The `iterate` profile keeps `opt-level = 3` but drops cross-crate LTO and
+uses 16 codegen units ([Build profiles](/development#build-profiles)). Plain `cargo test --release` builds
+with the release profile's fat LTO: building libr's `test_linpack` that way peaks at 11.1 GiB of RSS
+and takes 30 minutes on four cores (it was OOM-killed once on a 16 GB machine), against 3.6 GiB and
+11 minutes without it. A budget measured under `cargo test-release` can differ from a release
+binary's, so a number you quote comes from a release build. Debug builds keep line tables only (`[profile.dev] debug = "line-tables-only"`), which
+keeps backtraces symbolized; set `CARGO_PROFILE_DEV_DEBUG=true` to inspect locals in a debugger.
 
 `crates/ry/tests/test_perf.rs` holds the memory budget of a whole cold `ry check --no-cache` with
 type errors on. It generates the three 300,000-line benchmark code bases with

@@ -125,6 +125,9 @@ the interpreter, and the flag under the bar names what was refused.
 
 ## How it was measured
 
+Every number on this page comes from a release build of ry (`cargo build --release`), and the runner
+refuses any other build.
+
 A run measures several rounds. Each round runs every program on every engine once, with the
 programs in an order shuffled per round and the engines in an order shuffled per program, from a
 recorded seed. Each ratio is formed inside one round, GNU R's time over the engine's, and the
