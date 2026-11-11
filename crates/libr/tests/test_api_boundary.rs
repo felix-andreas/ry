@@ -67,7 +67,7 @@ fn duplicate(r: &R, value: Sexp) -> Sexp {
 }
 
 fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
-    let code = rng.below(26) as c_int;
+    let code = rng.below(28) as c_int;
     let arguments = match code {
         0 => {
             let object = random_object(r, rng);
@@ -80,6 +80,20 @@ fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
             let value = random_value(r, rng, object);
             [object, r.integer(rng.below(4) as c_int), value]
         }
+        26 => {
+            let texts: [&[u8]; 5] = [b"", b"a", b"a\0b", b"\xe9t\xe9", b"rytest.tag"];
+            let text = texts[rng.below(texts.len())];
+            let bytes = r.keep(unsafe { (r.api().Rf_allocVector)(RAWSXP, text.len() as isize) });
+            unsafe {
+                std::ptr::copy_nonoverlapping(text.as_ptr(), (r.api().RAW)(bytes), text.len())
+            };
+            [bytes, r.integer(random_encoding(rng)), r.nil()]
+        }
+        27 => [
+            strings(r, &[["", "a", "rytest.tag", "\u{e9}t\u{e9}"][rng.below(4)]]),
+            r.integer(random_encoding(rng)),
+            r.nil(),
+        ],
         7 => {
             let class = ["first", "factor", "data.frame", "rytest_class"][rng.below(4)];
             [random_object(r, rng), r.string(class), r.nil()]
@@ -121,6 +135,11 @@ fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
         ],
     };
     Operation { code, arguments }
+}
+
+/// The `cetype_t` codes, with two that `mkCharCE` rejects.
+fn random_encoding(rng: &mut SplitMix64) -> c_int {
+    [0, 1, 2, 3, 4, 5, 99][rng.below(7)]
 }
 
 /// Objects that reach every branch of the direct paths and the cases they decline: each vector

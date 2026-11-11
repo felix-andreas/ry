@@ -187,28 +187,42 @@ pub unsafe extern "C" fn Rf_charIsLatin1(object: Sexp) -> Rboolean {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_mkChar(text: *const c_char) -> Sexp {
-    enter(|| mk_char(c_bytes(text), Encoding::Native))
+    intern(c_bytes(text), Encoding::Native as c_int)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_mkCharCE(text: *const c_char, code: c_int) -> Sexp {
-    enter(|| mk_char(c_bytes(text), encoding(code)?))
+    intern(c_bytes(text), code)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_mkCharLen(text: *const c_char, length: c_int) -> Sexp {
-    enter(|| {
-        let bytes = std::slice::from_raw_parts(text as *const u8, length.max(0) as usize);
-        mk_char(bytes, Encoding::Native)
-    })
+    intern(
+        std::slice::from_raw_parts(text as *const u8, length.max(0) as usize),
+        Encoding::Native as c_int,
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_mkCharLenCE(text: *const c_char, length: c_int, code: c_int) -> Sexp {
-    enter(|| {
-        let bytes = std::slice::from_raw_parts(text as *const u8, length.max(0) as usize);
-        mk_char(bytes, encoding(code)?)
-    })
+    intern(
+        std::slice::from_raw_parts(text as *const u8, length.max(0) as usize),
+        code,
+    )
+}
+
+/// The `mkChar` family. Packages call it once per string they build, so a valid request skips
+/// the full boundary: interning raises nothing, and it fails, on an embedded NUL or an
+/// allocation, before it changes anything, which leaves the error to the slow path.
+#[inline(always)]
+unsafe fn intern(bytes: &[u8], code: c_int) -> Sexp {
+    direct(
+        |runtime| {
+            let encoding = Encoding::from_code(code as u32)?;
+            runtime.heap.mk_char(bytes, encoding).ok()
+        },
+        || mk_char(bytes, encoding(code)?),
+    )
 }
 
 #[unsafe(no_mangle)]

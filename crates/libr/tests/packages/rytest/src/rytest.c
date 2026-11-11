@@ -969,6 +969,8 @@ SEXP rytest_api_op(SEXP op, SEXP a, SEXP b, SEXP c)
         default: result = dimnamesgets(a, c);
         }
         break;
+    case 26: result = Rf_mkCharLenCE((const char *) RAW(a), LENGTH(a), INTEGER(b)[0]); break;
+    case 27: result = Rf_mkCharCE(CHAR(STRING_ELT(a, 0)), INTEGER(b)[0]); break;
     default: result = R_NilValue;
     }
     PROTECT(result);

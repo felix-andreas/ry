@@ -108,7 +108,7 @@ const HIGHS: u64 = 0x8080_8080_8080_8080;
 /// Reads the bytes once, a word at a time, for the NUL test, the ASCII test and the hash
 /// together. Re-interning a string that is already in the table costs little more than this pass
 /// and one probe, so the three used to be separate passes and are now one.
-#[inline]
+#[inline(always)]
 pub(crate) fn scan(bytes: &[u8]) -> Scan {
     let length = bytes.len();
     let (mut low, mut high) = (SEED_LOW, SEED_HIGH);
@@ -186,7 +186,7 @@ fn load(bytes: &[u8]) -> u64 {
 
 /// Whether the interned string `candidate` holds exactly `bytes`. Most strings are short, and two
 /// overlapping word loads compare them where a call to `memcmp` would cost more than the compare.
-#[inline]
+#[inline(always)]
 unsafe fn same_bytes(candidate: Sexp, bytes: &[u8]) -> bool {
     let length = bytes.len();
     if unsafe { candidate.length() } as usize != length {
@@ -216,7 +216,7 @@ impl StringTable {
         self.len
     }
 
-    #[inline]
+    #[inline(always)]
     pub unsafe fn find(&self, hash: u32, bytes: &[u8], encoding_bits: u16) -> Option<Sexp> {
         let mask = self.slots.len() - 1;
         let tag = tag(hash);
