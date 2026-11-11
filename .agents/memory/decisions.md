@@ -8775,3 +8775,5 @@ Each one trades a narrow class of missed errors for a class of false reports see
   - Wall time, 30 paired rounds: empty run 1.009x [0.960, 1.060], testthat_full 1.007x [0.941, 1.076], both inside this machine's noise.
   - Peak RSS with the page cache dropped (6 rounds): empty run 34.3 to 35.8 MB, all of it file-backed (anonymous 13 MB on both), testthat_full 64.5 to 64.6 MB. With a hot cache the empty run peaks 4.6 MB higher, the large-folio effect of a freshly written image.
   - Start image 17.2 to 19.1 MB.
+
+- **Enforced** by `no_shipped_package_exports_a_library_name` in `crates/interp/tests/test_standard_library.rs`, which checks the standard library and `package:ry`'s functions against every `types/*.exports` manifest and fails when a package in its `MUST_NOT_MASK` list (base R, the 15 recommended packages and the benchmark dependency set) has none. The manifests are vendored so CI needs no GNU R: `scripts/export-manifests.R` records them from an installed library, or with `EXPORT_SOURCES` from a package's NAMESPACE file when it needs a system library or vendor SDK to install (Rglpk, Rblpapi).

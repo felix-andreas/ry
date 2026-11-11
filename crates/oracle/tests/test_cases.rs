@@ -217,3 +217,38 @@ fn rendering_round_trips() {
     };
     assert_eq!(parse(&render(&outcome)), Some(outcome));
 }
+
+/// A run against a live GNU R never reads the recorded outcomes, so a malformed one surfaces only
+/// in `oracle verify` or a run without R. This reads every case's file without running R.
+#[test]
+fn every_case_has_a_readable_expectation() {
+    let cases = find_cases(&case_directory());
+    assert!(!cases.is_empty(), "no oracle cases found");
+    let mut failures = Vec::new();
+    for case in &cases {
+        let path = expected_path(case);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            failures.push(format!("{}: no expectation file", path.display()));
+            continue;
+        };
+        match parse(&text) {
+            None => failures.push(format!(
+                "{}: not in the expectation format; record it with `oracle record {}`",
+                path.display(),
+                case.display()
+            )),
+            Some(outcome) if render(&outcome) != text => failures.push(format!(
+                "{}: reads, but does not match what `oracle record` writes",
+                path.display()
+            )),
+            Some(_) => {}
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} expectations are unreadable:\n{}",
+        failures.len(),
+        cases.len(),
+        failures.join("\n")
+    );
+}
