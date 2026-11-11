@@ -610,9 +610,9 @@ fn compare(
                 }
                 (Some(_), Some(entry)) => {
                     println!(
-                        "known   {shown}: {} (owner {}{})",
+                        "known   {shown}: {} (area {}{})",
                         entry.reason,
-                        entry.owner,
+                        entry.area,
                         if entry.provisional {
                             ", provisional"
                         } else {

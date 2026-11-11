@@ -112,7 +112,7 @@ pub struct KnownFailure {
     /// The case's `group__name`, the file name without `.R`.
     pub case: String,
     pub engine: String,
-    pub owner: String,
+    pub area: String,
     pub reason: String,
     /// Seen failing on a branch but not yet on main.
     #[serde(default)]

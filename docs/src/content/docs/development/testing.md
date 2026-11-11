@@ -406,16 +406,16 @@ and the interpreter must be left clean. `FUZZ_SEED=<seed>` replays a failing ses
 
 `crates/oracle/known_failures.toml` lists the oracle cases that fail on main under one engine, so a
 branch can tell its own regressions from failures it inherited. Each entry names the case (its file
-name in `cases/` without `.R`), the engine as `--engine` names it, the owner fixing it, and a
-one-line reason; `provisional = true` marks a failure seen on a branch whose runtime matches main
+name in `cases/` without `.R`), the engine as `--engine` names it, the area of ry the bug lives in
+(such as `jit` or `gc`), and a one-line reason; `provisional = true` marks a failure seen on a branch whose runtime matches main
 but not yet confirmed on main itself.
 
 ```toml
 [[failure]]
 case = "base__match_arg_native"
 engine = "ry-jit-gctorture"
-owner = "D"
-reason = "aborts: compiled code reads an object the collector freed (heap/src/object.rs freed_object)"
+area = "jit"
+reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
 ```
 
 `oracle compare` and `ORACLE_ENGINE=<engine> cargo test -p oracle` sort every failure against the
