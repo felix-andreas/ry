@@ -705,6 +705,13 @@ checked and refilled:
   matches falls back to a search and is updated. A wrong hint costs a search, never a wrong answer.
 - **Lookups skip function frames.** A function lookup past the local frame walks only the frames
   that can bind the symbol, using the same hints.
+- **The call entry reads its fixed facts raw.** The compiler builds the constant pool and the
+  vectors in its fixed entries (register count, profile, feedback, slots), so none is ALTREP and
+  the entry indexes them directly. The tiers' schedule is checked against one counter, and only a
+  call that reaches it leaves the inlined fast path.
+- **A new register window is cleared.** Each call's window is filled with `NULL` when it grows, so
+  a register the frame has not written yet never holds what an earlier call left there, and a
+  collection inside the window frees exactly what GNU R would.
 - **Builtin checks are derived at registration.** Arity, names, replacement form and which
   arguments a builtin accepts as native values are computed once per builtin (`Checks` in
   `crates/interp/src/builtins.rs`), so a call does not re-derive them from the builtin's name.
