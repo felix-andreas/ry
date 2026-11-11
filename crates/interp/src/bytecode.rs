@@ -4418,9 +4418,12 @@ fn fuse_pairs(code: &mut [u32]) -> R<()> {
 }
 
 thread_local! {
-    /// Whether the compiler writes superinstructions, which tests turn off to compare a fused
-    /// body against the same body unfused.
-    static SUPERINSTRUCTIONS_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// Whether the compiler writes superinstructions. Tests turn them off to compare a fused body
+    /// against the same body unfused, and `RY_SUPERINSTRUCTIONS=0` turns them off for a process,
+    /// to measure them or to rule them out of a bug.
+    static SUPERINSTRUCTIONS_ON: std::cell::Cell<bool> = std::cell::Cell::new(
+        std::env::var_os("RY_SUPERINSTRUCTIONS").is_none_or(|value| value != "0"),
+    );
 }
 
 /// A bit per superinstruction, by its position in the table, that `code` holds; none for a

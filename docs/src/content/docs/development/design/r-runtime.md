@@ -718,6 +718,13 @@ checked and refilled:
 - **Op words carry their operand count.** Each instruction word holds the opcode in its low 8 bits
   and the operand count above them, so the next instruction's position is one shift and one add,
   with no table lookup.
+- **Superinstructions for the commonest pairs.** The pairs that most often run back to back
+  (`Guard` then `Guard`, `GetFun` then `BranchUnlessBuiltin`, `GetVar` then `CallBuiltin`, and five
+  more, chosen from dynamic pair counts) each get an opcode whose handler runs both fast paths with
+  one dispatch. The compiler writes the pair's opcode over the first instruction only, so every
+  instruction keeps its position, its operands and its feedback, and any pc can still be resumed
+  or single-stepped. When the first instruction leaves its fast path or jumps, the pair falls back
+  to the ordinary handlers. One table in `bytecode.rs` generates the opcodes and their handlers.
 - **One dispatch loop.** `interpret` in `crates/interp/src/bytecode.rs` keeps the frame, the code,
   the registers and the heap in locals for the whole run, and an error leaves the loop through one
   exit (the `tri!` macro) that hands it to the code's handler table. Single-stepping for the
