@@ -746,14 +746,14 @@ pub unsafe fn release_references(mark: u32) {
         if reference.car() != unbound {
             heap.set_car(reference, unbound);
         }
-        // Only an environment or code reference, or one that was detached and replaced,
-        // changed the other fields.
+        // Only an environment or code reference changes the other fields, and forcing one
+        // clears its tag again, so the attribute is compared with the target on its own.
         if reference.tag() != nil() {
             heap.set_tag(reference, nil());
-            let target = state.reference_targets[index];
-            if reference.attrib() != target {
-                heap.set_attrib(reference, target);
-            }
+        }
+        let target = state.reference_targets[index];
+        if reference.attrib() != target {
+            heap.set_attrib(reference, target);
         }
     }
     state.references_used = mark;

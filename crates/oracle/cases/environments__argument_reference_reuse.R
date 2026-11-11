@@ -24,3 +24,13 @@ for (k in 1:3) {
   cat(write_then_read(), nested(k, 2), deep(30, k), dots_then_write(k), kept_after_dots(k),
     own_function(), labels(k), call_matched(), recursive_force(k, 20), "\n")
 }
+# A caller with an environment passes compiled code as a reference that keeps the code beside
+# it; once forced and released, the next plain variable reusing that reference must not run it.
+id <- function(v) v
+reified <- function() {
+  e <- environment()
+  a <- 10
+  b <- 20
+  c(id(a + 1), id(b), id(a * 2), id(b))
+}
+for (k in 1:3) cat(reified(), "\n")
