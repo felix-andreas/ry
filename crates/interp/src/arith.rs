@@ -3969,11 +3969,6 @@ pub unsafe fn colon(start: f64, end: f64) -> R<Sexp> {
     Ok(result)
 }
 
-/// Sequences at least this long are compact ALTREP objects, as GNU R makes every `1:n`, so
-/// `seq_len(2^31 - 1)` costs nothing until its elements are read. Shorter ones stay ordinary
-/// vectors, which the evaluator's hot loops read without an indirection.
-const COMPACT_SEQUENCE_MIN: usize = 1 << 20;
-
 unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     if length(value) != 1 {
@@ -3996,10 +3991,12 @@ unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// The integers or doubles `first`, `first + increment`, ... of length `count`, for an
-/// increment of 1 or -1, which the caller keeps in the kind's range, compact from
-/// [`COMPACT_SEQUENCE_MIN`] elements when the host provides ALTREP classes.
+/// increment of 1 or -1, which the caller keeps in the kind's range. From two elements the
+/// sequence is a compact ALTREP object when the host provides the class, as GNU R makes every
+/// `1:n`, so `seq_len(2^31 - 1)` costs nothing until its elements are read and
+/// `.Internal(inspect())` reports what GNU R reports.
 unsafe fn sequence(kind: SexpType, count: usize, first: f64, increment: f64) -> R<Sexp> {
-    if count >= COMPACT_SEQUENCE_MIN
+    if count >= 2
         && let Some(sequence) = (interp().hooks.compact_sequence)(kind, count, first, increment)?
     {
         return Ok(sequence);

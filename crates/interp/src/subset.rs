@@ -111,6 +111,18 @@ pub unsafe fn modifiable(object: Sexp) -> R<Sexp> {
     }
 }
 
+/// [`modifiable`] for a builtin that changes only attributes, as GNU R's `names<-`,
+/// `dimnames<-` and `attributes<-` are: a shared long vector is copied under a wrapper, so its
+/// data is not copied at all.
+pub unsafe fn modifiable_attributes(object: Sexp) -> R<Sexp> {
+    crate::moves::modifying(object)?;
+    if values::maybe_shared(object) {
+        values::shallow_duplicate_attr(object)
+    } else {
+        Ok(object)
+    }
+}
+
 /// Element `index` of any vector as a length-one vector (or, for lists, the element).
 pub unsafe fn vector_element(vector: Sexp, index: usize) -> R<Sexp> {
     // String and list elements read through the ALTREP class's `Elt` method on their own, and
@@ -285,7 +297,6 @@ unsafe fn set_na(to: Sexp, to_index: usize) {
     }
 }
 
-/// A vector of the elements at `indices` (`usize::MAX` gives NA).
 /// Whether [`select_positions`] reads `count` elements of `vector` one at a time instead of
 /// expanding it: for a long ALTREP number vector, such as a compact sequence, of which the
 /// selection is a small part. A short one expands cheaply, and its class keeps the expansion.
@@ -299,6 +310,7 @@ unsafe fn reads_sparsely(vector: Sexp, count: usize) -> bool {
         && count <= length(vector) / 8
 }
 
+/// A vector of the elements at `indices` (`usize::MAX` gives NA).
 pub unsafe fn select_elements(vector: Sexp, indices: &[usize]) -> R<Sexp> {
     select_positions(vector, indices.iter().copied(), indices.len())
 }
@@ -2334,6 +2346,36 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
     subassign(object, &indices, value_arg.value, call.call)
 }
 
+/// Whether `x[i] <- value` leaves the atomic vector `object` exactly as it is: the subscript
+/// selects nothing and `value` needs no change of type. GNU R then returns `x` itself, so
+/// `x[FALSE] <- 1` keeps an ALTREP vector, such as a wrapper, unexpanded.
+unsafe fn selects_nothing(object: Sexp, indices: &[Sexp], value: Sexp) -> bool {
+    let &[index] = indices else {
+        return false;
+    };
+    let empty = match index.kind() {
+        SexpType::Nil => true,
+        SexpType::Logical => values::ints(index).iter().all(|&flag| flag == 0),
+        SexpType::Integer | SexpType::Real | SexpType::String => length(index) == 0,
+        _ => false,
+    };
+    let atomic = |kind| {
+        matches!(
+            kind,
+            SexpType::Logical
+                | SexpType::Integer
+                | SexpType::Real
+                | SexpType::Complex
+                | SexpType::String
+        )
+    };
+    let fits = value.kind() == object.kind()
+        || (atomic(value.kind())
+            && atomic(object.kind())
+            && coerce::higher_type(object.kind(), value.kind()) == object.kind());
+    empty && fits && !value.is_object() && index.attrib() == nil()
+}
+
 /// `x[i] <- value` and `x[i, j] <- value`.
 pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
     // `s[o] <- s` writes into the vector it reads from, so the value must be a copy, as in GNU
@@ -2354,6 +2396,9 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     } else {
         object
     };
+    if object.is_altrep() && selects_nothing(object, indices, value) {
+        return Ok(object);
+    }
     let object = values::materialize(object)?;
     let mut value = values::materialize(value)?;
     // A pairlist value assigns its elements into a list, as a list would, but has no atomic
@@ -3719,7 +3764,7 @@ unsafe fn do_dimnames(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_set_dimnames(call: &Call<'_>) -> R<Sexp> {
-    let object = modifiable(call.arg(0))?;
+    let object = modifiable_attributes(call.arg(0))?;
     set_dimnames(object, call.arg(1), call.call)?;
     Ok(object)
 }
@@ -3894,7 +3939,7 @@ pub(crate) unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
     let attributes = call.arg(1);
     // Unlike `attr<-`, giving NULL attributes turns it into an empty list, as in GNU R.
     let object = match call.arg(0) {
-        object if object != nil() => modifiable(object)?,
+        object if object != nil() => modifiable_attributes(object)?,
         _ if attributes == nil() => return Ok(nil()),
         _ => alloc(SexpType::List, 0)?,
     };
@@ -4336,7 +4381,7 @@ unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
     if kept.len() == dims.len() {
         return Ok(object);
     }
-    let result = values::shallow_duplicate(object)?;
+    let result = values::shallow_duplicate_attr(object)?;
     let dimnames = get_attr(object, symbols().dimnames);
     values::remove_attr(result, symbols().dim);
     values::remove_attr(result, symbols().dimnames);

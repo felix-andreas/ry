@@ -203,6 +203,20 @@ pub unsafe fn coerce_vector_quiet(
     if object.kind() == kind {
         return Ok(object);
     }
+    // As in GNU R, a compact integer sequence becomes a compact double one without expanding.
+    if kind == SexpType::Real
+        && object.kind() == SexpType::Integer
+        && !values::has_attributes(object)
+        && let Some((_, first, increment)) = values::compact_sequence(object)
+        && let Some(sequence) = (crate::interp().hooks.compact_sequence)(
+            SexpType::Real,
+            values::length(object),
+            first,
+            increment,
+        )?
+    {
+        return Ok(sequence);
+    }
     let object = values::materialize(object)?;
     let source = object.kind();
     let result = match source {
@@ -627,9 +641,9 @@ pub unsafe fn write_number_strings(numbers: Sexp, result: Sexp, scipen: i32) -> 
 /// doubles formatted under scientific-notation penalty `scipen`.
 pub unsafe fn number_as_charsxp(numbers: Sexp, index: usize, scipen: i32) -> R<Sexp> {
     if numbers.kind() == SexpType::Real {
-        real_as_charsxp(values::reals(numbers)[index], scipen)
+        real_as_charsxp(values::real_elt(numbers, index)?, scipen)
     } else {
-        match values::ints(numbers)[index] {
+        match values::int_elt(numbers, index)? {
             NA_INTEGER => Ok(na_string()),
             value => {
                 Ok(crate::heap()
@@ -964,10 +978,6 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
 ];
 
-/// The shortest number vector `as.character` converts lazily. Below it, the conversion costs
-/// less than the deferred vector's own allocations.
-const DEFERRED_STRINGS_MINIMUM: usize = 256;
-
 unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
     let object = values::plain(call.arg(0))?;
     if object.kind() == kind && !values::has_attributes(object) {
@@ -984,13 +994,11 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
             values::clear_attributes(result);
         });
     }
-    // As in GNU R, a long number vector without attributes converts to character lazily, so
-    // the strings are made only when something reads them.
+    // As in GNU R, a number vector without attributes converts to character lazily, so the
+    // strings are made only when something reads them.
     if kind == SexpType::String
         && matches!(object.kind(), SexpType::Integer | SexpType::Real)
         && !values::has_attributes(object)
-        && !object.is_altrep()
-        && length(object) >= DEFERRED_STRINGS_MINIMUM
         && let Some(deferred) = (crate::interp().hooks.defer_strings)(object)?
     {
         return Ok(deferred);

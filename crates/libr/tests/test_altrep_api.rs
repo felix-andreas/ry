@@ -141,10 +141,11 @@ fn check_compact_sequences() {
         assert_eq!(ints(descending), vec![2, 1, 0, -1, -2]);
         assert_eq!(ok(altrep::is_sorted(descending)), altrep::SORTED_DECR);
 
-        // Expansion keeps the values, and the object then serializes as an ordinary vector.
+        // Expansion keeps the values. A compact sequence is never written in place, so as in
+        // GNU R it serializes compactly even once expanded.
         ok(altrep::dataptr(sequence, true));
         assert!(!ok(altrep::dataptr_or_null(sequence)).is_null());
-        assert!(ok(altrep::serialized_state(sequence)).is_none());
+        assert!(ok(altrep::serialized_state(sequence)).is_some());
         assert!(ok(altrep::sum(sequence, false)).is_none());
         assert!(ok(altrep::inspect(sequence, 0, 0, 0, SUBTREE)));
         assert_eq!(take_console(), " 3 : 7 (expanded)\n");
@@ -230,7 +231,7 @@ fn check_wrappers() {
         assert!(ok(altrep::inspect(wrapped, 0, 0, 0, SUBTREE)));
         assert_eq!(
             take_console(),
-            " wrapper [srt=1,no_na=1]\n  <integer of length 3>\n"
+            " wrapper [srt=1,no_na=1,lck=0]\n  <integer of length 3>\n"
         );
         let copy = round_trip(wrapped);
         assert_eq!(ints(copy), vec![1, 2, 4]);

@@ -6470,8 +6470,10 @@ unsafe fn read_element_call<const STRING: bool>(
     ) else {
         // A tail call, and the subject's kind is tested only out of line: tested here, it joins
         // the kind dispatch above, which then compiles to a jump table that the numeric read pays
-        // for.
-        return if STRING {
+        // for. The ALTREP test is a header bit, not a kind, so it stays out of that dispatch.
+        return if subject.is_altrep() {
+            read_altrep_element_call(state, at)
+        } else if STRING {
             None
         } else {
             read_string_element_call(state, at, double)
@@ -6490,6 +6492,85 @@ unsafe fn read_element_call<const STRING: bool>(
         return None;
     }
     let value = element_access::element_value::<STRING>(heap, subject, position)?;
+    state.record(at, value);
+    *registers.add(*code.add(at + 1) as usize) = value;
+    (*state.interp).visible = true;
+    Some(at + 1 + operand_count(Op::CallBuiltin))
+}
+
+/// The ALTREP branch of [`read_element_call`]: `x[i]` or `x[[i]]` for a plain numeric scalar
+/// within bounds and, without attributes, a compact integer or double sequence, computed from
+/// its first element and increment without expanding it, or a deferred string, converting only
+/// that element. Any other ALTREP vector declines to the builtin, whose `Elt` read may run a
+/// package's R code.
+#[cold]
+#[inline(never)]
+unsafe fn read_altrep_element_call(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    let registers = state.registers;
+    let heap = &mut *state.heap;
+    let first = *code.add(at + 4) as usize;
+    let subject = *registers.add(first);
+    let index = *registers.add(first + 1);
+    let kind = subject.kind();
+    if subject.attrib() != heap.known().nil
+        || index.is_altrep()
+        || index.attrib() != heap.known().nil
+        || index.length() != 1
+    {
+        return None;
+    }
+    let sequence = values::compact_sequence(subject);
+    let count = match sequence {
+        Some((count, _, _)) => count,
+        None if kind == SexpType::String
+            && subject.tag() == (*state.interp).deferred_string_class =>
+        {
+            subject.length() as usize
+        }
+        None => return None,
+    };
+    let position = match index.kind() {
+        SexpType::Integer => f64::from(index.slice::<i32>()[0]),
+        SexpType::Real => index.slice::<f64>()[0],
+        _ => return None,
+    };
+    // NA_integer_ and NaN fail the lower bound, and `x[2.7]` truncates to the second element.
+    if !(position >= 1.0 && position < count as f64 + 1.0) {
+        return None;
+    }
+    let known = *heap.known();
+    let arguments = pool_constant(state, *code.add(at + 3) as usize).cdr();
+    let second = arguments.cdr();
+    if arguments.tag() != known.nil
+        || second.tag() != known.nil
+        || arguments.car() == known.missing_arg
+        || second.car() == known.missing_arg
+        || activity::enabled()
+    {
+        return None;
+    }
+    let offset = position as usize - 1;
+    let value = match sequence {
+        Some((_, start, step)) => {
+            let element = start + step * offset as f64;
+            let bits = if kind == SexpType::Integer {
+                element as i32 as u32 as u64
+            } else {
+                element.to_bits()
+            };
+            heap.try_alloc_scalar(kind, [bits, 0])?
+        }
+        None => {
+            // An error converting the element (only running out of memory) declines, and the
+            // builtin then converts it again and raises that error.
+            let element = values::altrep_string_elt(subject, offset).ok()?;
+            let scalar = heap.try_alloc_scalar(kind, [element.as_ptr() as u64, 0])?;
+            // The store `Heap::set_element` would count into a fresh vector.
+            element.increment_refcount();
+            scalar
+        }
+    };
     state.record(at, value);
     *registers.add(*code.add(at + 1) as usize) = value;
     (*state.interp).visible = true;
@@ -8390,7 +8471,7 @@ unsafe fn assign_slot_element(
         target
     } else {
         let was_array = target.is_array();
-        let copy = values::shallow_duplicate(target)?;
+        let copy = values::shallow_duplicate_attr(target)?;
         copy.set_array(was_array);
         heap.root(copy);
         copy
@@ -8408,6 +8489,7 @@ unsafe fn assign_slot_element(
     };
     interp().assignment_call = outer;
     let result = result?;
+    let result = values::unwrap_assigned(result, current == result);
     // A warning's calling handler may have looked at the frame, which then holds the variable
     // in its environment instead of the slot.
     if *state.header != nil() {
@@ -9557,11 +9639,7 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
     }
     // A compact sequence is stepped through by its first element and increment; expanding
     // `1:n` would allocate all n elements the loop reads one at a time.
-    let steps = if sequence.is_altrep() {
-        (interp().hooks.compact_sequence_steps)(sequence)
-    } else {
-        None
-    };
+    let steps = values::compact_sequence(sequence).map(|(_, first, step)| (first, step));
     let (first, step) = steps.unwrap_or((0.0, 0.0));
     let sequence = match steps {
         Some(_) => sequence,
@@ -10333,7 +10411,7 @@ unsafe fn replace_variable(
     };
     if shared || args[1..].contains(&target) {
         let was_array = target.is_array();
-        target = values::shallow_duplicate(target)?;
+        target = values::shallow_duplicate_attr(target)?;
         target.set_array(was_array);
     }
     heap.root(target);
@@ -10386,6 +10464,11 @@ unsafe fn replace_variable(
         interp().tmp_values.pop();
     }
     let result = result?;
+    let bound = match home {
+        Home::Cell(cell) => cell.cdr() == result,
+        Home::Slot(slot) => *slot == result,
+    };
+    let result = values::unwrap_assigned(result, bound);
     match home {
         Home::Cell(cell) => eval::assign_local(variable, result, env, Some(cell))?,
         // A warning's calling handler may have looked at the frame, which then holds the

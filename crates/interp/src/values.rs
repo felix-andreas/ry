@@ -878,6 +878,15 @@ pub unsafe fn real_elt(object: Sexp, index: usize) -> R<f64> {
     }
 }
 
+/// Element `index` of a character ALTREP vector, read through its class's `Elt` method, so a
+/// deferred string vector converts only that element. A plain vector's caller reads
+/// [`string_elt`] instead and keeps the ALTREP test out of its loop.
+#[cold]
+#[inline(never)]
+pub unsafe fn altrep_string_elt(object: Sexp, index: usize) -> R<Sexp> {
+    (interp().hooks.altrep_string_elt)(object, index)
+}
+
 #[inline]
 pub unsafe fn string_elt(object: Sexp, index: usize) -> Sexp {
     object.element(index)
@@ -1371,6 +1380,62 @@ pub unsafe fn shallow_duplicate(object: Sexp) -> R<Sexp> {
     }
     Ok(copy)
 }
+
+/// GNU R's `R_shallow_duplicate_attr`: a copy of `object` for a caller that changes only its
+/// attributes, which for a long atomic or character vector is a wrapper that shares the data
+/// until something writes to it. Like [`shallow_duplicate`], it drops the Array bit.
+pub unsafe fn shallow_duplicate_attr(object: Sexp) -> R<Sexp> {
+    let wrappable = matches!(
+        object.kind(),
+        SexpType::Integer
+            | SexpType::Logical
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::Raw
+            | SexpType::String
+    );
+    // An Array's kernels read its storage directly, which a wrapper does not have.
+    if !wrappable || object.is_array() || length(object) < WRAP_THRESHOLD {
+        return shallow_duplicate(object);
+    }
+    let copy = (interp().hooks.altrep_wrap)(object)?;
+    if copy.is_array() {
+        copy.set_array(false);
+    }
+    Ok(copy)
+}
+
+/// The length, first element and increment of a compact integer or double sequence, or `None`
+/// for any other vector. The class's first data slot is GNU R's `c(n, n1, inc)`, which
+/// serialization writes too, so reading it here saves the call into the host on hot paths.
+#[inline]
+pub unsafe fn compact_sequence(object: Sexp) -> Option<(usize, f64, f64)> {
+    let [integer, real] = interp().compact_sequence_classes;
+    let class = object.tag();
+    if !object.is_altrep() || (class != integer && class != real) {
+        return None;
+    }
+    let &[count, first, increment] = object.car().slice::<f64>() else {
+        return None;
+    };
+    Some((count as usize, first, increment))
+}
+
+/// The value a complex assignment binds: a wrapper [`shallow_duplicate_attr`] introduced is
+/// dropped for its data once the replacement has copied that data, as GNU R's
+/// `try_assign_unwrap` does. `bound` says whether the variable's binding is the one reference
+/// the value has.
+#[inline]
+pub unsafe fn unwrap_assigned(value: Sexp, bound: bool) -> Sexp {
+    if value.is_altrep() && (value.refcount() == 0 || (value.refcount() == 1 && bound)) {
+        (interp().hooks.altrep_unwrap)(value)
+    } else {
+        value
+    }
+}
+
+/// GNU R's `WRAP_THRESHOLD`: a shorter vector is cheaper to copy than to wrap.
+const WRAP_THRESHOLD: usize = 64;
 
 unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
     let heap = crate::heap();

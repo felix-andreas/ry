@@ -2194,7 +2194,8 @@ unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
         before_dim |= cell.tag() != symbols.names;
         cell = cell.cdr();
     }
-    let result = crate::subset::modifiable(data)?;
+    // The R body's `attributes(.Data) <- ...` copies a shared `.Data` under a wrapper.
+    let result = crate::subset::modifiable_attributes(data)?;
     crate::heap().root(result);
     // The R body reinstalls `dimnames` through `attributes<-`, and GNU R's `dimnamesgets` copies
     // a list that something else references, so the result always owns its dimnames list. C

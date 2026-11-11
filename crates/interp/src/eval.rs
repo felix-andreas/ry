@@ -5932,7 +5932,14 @@ pub unsafe fn complex_assign(
         // A copy-on-write copy is the same value, so an Array stays an Array; the
         // replacement function decides whether the write keeps it one.
         let was_array = base.is_array();
-        base = values::shallow_duplicate(base)?;
+        // As in GNU R, a shared local variable is copied under a wrapper, which defers copying
+        // the data until the replacement writes to it; a replacement that only changes
+        // attributes, or writes nothing, as `x[FALSE] <- 1` does, never copies it.
+        base = if !superassign && local_cell.is_some() && values::maybe_shared(base) {
+            values::shallow_duplicate_attr(base)?
+        } else {
+            values::shallow_duplicate(base)?
+        };
         base.set_array(was_array);
     }
     // GNU R binds `*tmp*` in this frame for the length of the assignment, and in a hashed frame
@@ -6040,7 +6047,14 @@ pub unsafe fn complex_assign(
         Ok(replacement)
     })();
     interp().tmp_values.pop();
-    assign_symbol(inner, replaced?, env, superassign)
+    let mut replaced = replaced?;
+    if !superassign && replaced.is_altrep() {
+        let bound = heap
+            .frame_cell(env, inner)
+            .is_some_and(|cell| cell.cdr() == replaced && !cell.has_gp(gp::ACTIVE_BINDING));
+        replaced = values::unwrap_assigned(replaced, bound);
+    }
+    assign_symbol(inner, replaced, env, superassign)
 }
 
 /// Whether `expression` contains an assignment whose target is `variable` or a part of it. An

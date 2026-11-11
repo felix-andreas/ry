@@ -6123,21 +6123,58 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   - Pinned by `crates/libr/tests/test_interrupts.rs`, which runs in its own process because it loads
     base R, and the oracle cases `conditions__suspended_interrupts` and
     `conditions__interrupt_handlers`.
-- **Long integer sequences are compact; short ones are plain vectors.** `:` and `seq_len` build
-  sequences of 2^20 or more elements through the `compact_intseq` host hook, which libr answers
-  with its `compact_intseq` ALTREP class (the interpreter cannot name libr, so a host without
-  ALTREP gets `None` and allocates). Previously every sequence was expanded, so vctrs's
-  `seq_len(2^31 - 1)`, built only to read its length, allocated 8 GB and the parallel package run
-  was killed for memory. Short sequences stay plain because reading one through ALTREP dispatch
-  costs more than filling it once, and the evaluator's and the JIT's fast paths read plain
-  integer data directly. Pinned by `base__long_sequences`.
-- **Indexing a compact sequence reads elements, never the whole vector.** A compact sequence's
-  `DATAPTR` expands it, so `x[[i]]` and a sparse `x[i]` read through `values::int_elt` and
-  `real_elt`, which call the `altrep_int_elt`/`altrep_real_elt` host hooks that libr answers with
-  the class's `Elt` method. `x[i]` takes the sparse path when the vector has at least 2^16
-  elements and the index selects at most an eighth of them; a denser index materializes once,
-  which is cheaper than one dispatch per element. `x <- seq_len(2^31 - 1); x[c(1, 2^31 - 1)]`
-  peaked at 8.4 GB before; `base__long_sequences` asserts the peak resident set stays under 1 GB.
+- **ALTREP vectors are first-class at GNU R's thresholds.** Every `1:n`, `seq_len` and
+  `seq_along` of two or more elements is a compact sequence (`sequence` in
+  `crates/interp/src/arith.rs`, through the `compact_sequence` host hook), `as.numeric` of one
+  stays compact, `as.character` of any number vector without attributes is a deferred string, and
+  `duplicate` of a vector of 64 or more elements that changes only attributes (`unclass`,
+  `names<-`, `attr<-`, `structure`, `dimnames<-`) makes a wrapper over the shared data
+  (`values::shallow_duplicate_attr`, `WRAP_THRESHOLD`). `.Internal(inspect())` and data.table's
+  ALTREP checks (754.07, .08, .10) therefore see what GNU R produces. The earlier thresholds
+  (2^20 for sequences, 256 for deferred strings, no wrappers) existed because tier 0 and the JIT
+  read plain data in place; the placement rule below removes that cost instead.
+  - *Placement rule.* A plain read pays one ALTREP bit test and nothing else; every ALTREP branch
+    is `#[cold] #[inline(never)]` and out of line. Tier 0's in-handler fast paths must not run R
+    code or collect, which a package class's `Elt` method may do, so tier 0 reads only compact
+    sequences in the handler (pure arithmetic via `compact_sequence_steps`,
+    `read_altrep_element_call` in `crates/interp/src/bytecode.rs`). Any other ALTREP read
+    declines to the `[`/`[[` builtin, whose `element_access::altrep_element` reads one element
+    through the class's `Elt` method. The JIT side exits on `OBJECT|ALTREP`.
+  - *Assignment unwraps.* Storing a wrapper into a variable or slot keeps its data when the
+    wrapper is the only owner (`values::unwrap_assigned`), so a hot loop sees a plain vector.
+  - *Wrappers share data as GNU R's do.* A shallow duplicate of a wrapper shares the wrapped
+    data; only a deep copy copies it. Every ALTREP instance is marked not mutable (refcount
+    65535 in `new_altrep`), so the interpreter copies before any write, and a write through the
+    data pointer of a shared wrapper copies first.
+  - *Materialize keeps attributes and skips attributed slots.* A wrapper's data keeps the
+    attributes it had when wrapped (GNU R's `DUPLICATE_ATTRIBUTES`), so `materialize_contents`
+    returns a stored slot for the object only when that slot has no attributes. Otherwise xts's
+    `unclass(x) - 1` dispatched `-.yearmon` on the unclassed result.
+  - *`duplicate` returns fresh storage.* `memory::duplicate` of an ALTREP object without a
+    `Duplicate` method materializes it and copies again when the result is storage the object
+    keeps (a compact sequence's expansion), because C code writes into duplicates: data.table's
+    `frev` and `setkey` reversed or sorted the source `1:n` otherwise.
+  - *Sparse reads.* `x[[i]]` and a sparse `x[i]` read through `values::int_elt`/`real_elt`; `x[i]`
+    reads element by element when the vector has 2^16 or more elements and the index selects at
+    most an eighth of them (`reads_sparsely`, `crates/interp/src/subset.rs`), and expands once
+    otherwise. `base__long_sequences` keeps `seq_len(2^31 - 1)` under 1 GB peak.
+  - *Representation differences that remain.* `inspect` prints the refcount of a wrapper or
+    deferred string as `REF(65535)` (ry's not-mutable mark; GNU R prints the real count) and a materialized compact sequence as `(expanded)`;
+    there is no list wrapper class (GNU R wraps lists too, but no package checks it).
+  - *Cost.* A plain read costs no more than before (measured with callgrind on a tier-0 loop
+    `acc <- acc + x[i]`). A compact read in tier 0 costs about 110 to 190 Ir more per iteration than a
+    plain one, against about 1,000 to 1,900 more when it declined to the builtin. Tier 0 reads the
+    class and the `c(n, n1, inc)` state inline (`values::compact_sequence`, with the class
+    identities in `Interp::compact_sequence_classes`), not through a host call. A deferred string
+    read converts only that element through `values::altrep_string_elt`, gated on
+    `Interp::deferred_string_class` because that class runs no R code; other ALTREP strings decline
+    to the builtin, since tier 0 must not re-enter R mid-instruction.
+  - *Follow-up.* The compact read in tier 0 is not yet within 20 Ir of a plain one, and the JIT
+    side exits on every compact read until an extern element reader lands behind its
+    `OBJECT|ALTREP` guard. Arithmetic on a wrapper over attributed data materializes and therefore
+    copies, where GNU R reads through the data pointer.
+  - Pinned by the oracle cases `altrep__wrappers` and `datatable__compact_columns` and by data.table's
+    own suite.
 
 ## utils' sockets, internal downloads and allocation profiling
 
@@ -6546,11 +6583,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **`rmultinom` carries the remaining probability as a double-double.** GNU R uses a `long double`; in plain `f64` ten probabilities of 0.1 leave a conditional probability just above 0.5, `rbinom` then draws the complement, and the counts differ from GNU R's for the same seed. RcppArmadillo compares R's draws with its own (`crates/interp/src/distributions.rs`, `rmultinom`).
 - **`[` subsets a parsed expression's `srcref` list.** plumber locates each endpoint's comment block with `attr(exprs[i], "srcref")` (`crates/interp/src/subset.rs`, `subset`).
 - **`Rf_setAttrib(R_NilValue, name, R_NilValue)` succeeds.** GNU R checks for removal before it rejects a `NULL` target, and data.table's `C_unlock` runs on a `j` result that is often `NULL` (`crates/libr/src/attributes.rs`, `set_attrib`).
-- **Integer sequences of at least 2^20 elements are compact ALTREP objects** (`colon`, `seq_len`, `seq_along` in `crates/interp/src/arith.rs`, through the `compact_intseq` interpreter hook). GNU R compacts every `1:n`; ry keeps short ones ordinary because the evaluator reads them without an indirection, and only long ones matter for memory. vctrs' tests build `seq_len(2^31 - 1)` twice and ran out of memory when it was materialized.
-- **Known representation differences from these thresholds.** data.table's tests 754.07, 754.08 and 754.10 fail on ry, and the packages row keeps showing them as `tests_differ` rather than hiding them. The values match: 754.09 and 754.11, which check the results of the same assignments, pass. No package gets a special case.
-  - What they pin. 754.07 reads GNU R's `.Internal(inspect())` output and expects `1:10` to be a compact integer sequence and `as.character(1:10)` a deferred string. 754.08 and 754.10 expect the verbose message "RHS for item 1 has been duplicated", which data.table prints only when the right-hand side is ALTREP: a deferred string, or the wrapper GNU R's `duplicate` makes for a vector of 64 or more elements.
-  - Why ry differs. A `1:n` is compact only from 2^20 elements (`COMPACT_SEQUENCE_MIN`, `crates/interp/src/arith.rs`), `as.character` of a number vector is deferred only from 256 elements (`DEFERRED_STRINGS_MINIMUM`, `crates/interp/src/coerce.rs`), and `duplicate` never makes a wrapper. Tier 0 and the JIT read plain vectors in place, and their loop type guards reject an ALTREP vector, so a small compact or deferred vector in a hot loop would leave compiled code or materialize on every read; below the thresholds the plain vector is cheaper.
-  - A generic match is feasible: compact sequences and deferred strings become first-class in tier 0 and the JIT (read in place, accepted by the guards), `duplicate` makes wrappers, and the thresholds go. The cost is a representation check on every vector read the guards cover, plus the guard work in the JIT, so it is measured before it is built. That work is planned; until it lands, these three tests are a documented difference.
+- **ALTREP vectors match GNU R's thresholds**: see "ALTREP vectors are first-class at GNU R's thresholds" for the placement rule, wrappers and the remaining `inspect` differences.
 - **`row.names<-` stores a real compact form `c(NA, n)` as integers**, as GNU R's `row_names_gets` does. cpp11's `data_frame::nrow` reads only the integer form, and readr's chunked reader loops forever on the real one.
 - **`R CMD INSTALL` of a directory leaves the shared objects in its `src/`.** The build runs in a copy outside the source (so a Cargo workspace never adopts it), but `pkgbuild::compile_dll` and `pkgload::load_all` expect GNU R's in-place result, so the objects are copied back (`crates/rcmd/src/rcmd.rs`, `install_source`).
 
