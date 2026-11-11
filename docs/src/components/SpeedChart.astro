@@ -13,7 +13,7 @@ interface Props {
 const suite = findSuite(Astro.props.suite);
 const charts = suite?.results === undefined ? [] : suiteCharts(suite);
 // Color follows the engine, so ry is the same blue in every chart.
-const engineColors: Record<string, number> = { ry: 0, ry_typed: 1, ry_nojit: 2 };
+const engineColors: Record<string, number> = { ry: 0, ry_typed: 1 };
 const color = (engine: string, index: number) => engineColors[engine] ?? index % 3;
 
 function axis(values: number[]) {

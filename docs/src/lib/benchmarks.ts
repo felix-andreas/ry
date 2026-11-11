@@ -17,6 +17,8 @@ const suiteOrder = ['public', 'packages', 'kernels', 'applications'];
 
 export type Interval = { median: number; low?: number; high?: number };
 export type Flag = { kind: string; engine?: string; reason?: string };
+// An engine on which a program did not run to the end. It has no time or ratio there.
+export type Failure = { engine: string; reason: string };
 export type TestCounts = { passed: number; failed: number; errors: number };
 export type Group = { id: string; name: string; description?: string; url?: string; license?: string };
 export type Meta = {
@@ -26,10 +28,8 @@ export type Meta = {
   machine: { cpu: string; cores?: number; kernel?: string };
   rounds: number;
   seed?: number;
-  command?: string;
+  extraRounds?: number;
   tooShortSeconds?: number;
-  // How a file written before the paired-rounds runner was sampled. Deleted with `fromLegacy`.
-  legacySampling?: string;
 };
 export type Program = {
   id: string;
@@ -48,9 +48,10 @@ export type Measurement = {
   peakMib?: Record<string, number>;
   tests?: Record<string, TestCounts>;
   flags: Flag[];
+  failures: Failure[];
 };
 export type Results = {
-  path: string;
+  // Engine keys in the order of the results file. `engineLabel` gives each one's name.
   engines: string[];
   geomean: Record<string, Interval & { programs: number }>;
   meta: Meta;
@@ -69,15 +70,11 @@ export type Suite = {
 // The engine every ratio divides by: a ratio above 1x means the engine ran faster than GNU R.
 export const baseline = 'gnu_r';
 
-const engineLabels: Record<string, string> = {
-  gnu_r: 'GNU R',
-  ry: 'ry',
-  ry_typed: 'ry, typed and strict',
-  ry_nojit: 'ry, JIT off',
-};
+// Each results file names its engines, so the labels come from the runner.
+const engineLabels = new Map<string, string>();
 
 export function engineLabel(engine: string): string {
-  return engineLabels[engine] ?? engine;
+  return engineLabels.get(engine) ?? engine;
 }
 
 export const suites: Suite[] = loadSuites();
@@ -127,11 +124,16 @@ export function mebibytes(value: number): string {
 }
 
 // A flag in words, for the label under a bar and for a table cell.
+export function failureText(failure: Failure): string {
+  return `fails on ${engineLabel(failure.engine)}: ${failure.reason}`;
+}
+
 export function flagText(flag: Flag): string {
   const engine = flag.engine === undefined ? '' : ` on ${engineLabel(flag.engine)}`;
   if (flag.kind === 'too_short') return `too short${engine}`;
   if (flag.kind === 'typed_refused') return `typed version refused${flag.reason === undefined ? '' : `: ${flag.reason}`}`;
   if (flag.kind === 'wide_interval') return `wide interval${engine}`;
+  if (flag.kind === 'tests_differ') return `tests differ${engine}${flag.reason === undefined ? '' : `: ${flag.reason}`}`;
   return `${flag.kind.replaceAll('_', ' ')}${engine}${flag.reason === undefined ? '' : `: ${flag.reason}`}`;
 }
 
@@ -158,6 +160,10 @@ export function flagNotes(programs: Program[], floor = 0.1): string[] {
   }
   if (kinds.has('typed_refused')) notes.push('A typed version the compiler refused has no typed time; the flag gives the reason.');
   if (kinds.has('wide_interval')) notes.push("A program marked wide interval varied so much between rounds that its ratio's interval is wide; read its median with care.");
+  if (kinds.has('tests_differ')) notes.push('A package marked tests differ passed a different number of tests on ry than on GNU R; the flag gives both counts.');
+  if (programs.some((program) => (program.measurement?.failures.length ?? 0) > 0)) {
+    notes.push('A program marked fails did not run to the end on that engine, so it has no speed-up there and every geometric mean leaves it out; the mark gives the last line of its error.');
+  }
   return notes;
 }
 
@@ -167,8 +173,7 @@ export function suiteMetadata(suite: Suite): string {
   if (results === undefined) return '';
   const { meta } = results;
   const commit = meta.ryCommit === undefined ? '' : ` at ry ${shortCommit(meta.ryCommit)}`;
-  const sampling = meta.legacySampling ?? `${meta.rounds} paired rounds`;
-  return `Measured on ${meta.date.slice(0, 10)}${commit} with GNU R ${meta.gnuR.version} on ${machine(meta)}; ${sampling}.`;
+  return `Measured on ${meta.date.slice(0, 10)}${commit} with GNU R ${meta.gnuR.version} on ${machine(meta)}; ${meta.rounds} paired rounds.`;
 }
 
 // A commit as its first nine hex digits, keeping a marker such as `-dirty` that follows the hash.
@@ -252,12 +257,13 @@ function chartRow(program: Program & { measurement: Measurement }, engines: stri
     label: program.display,
     id: program.id === program.display ? undefined : program.id,
     href: program.source === undefined ? undefined : sourceUrl(program.source),
-    flags: measurement.flags.map(flagText),
+    flags: [...measurement.failures.map(failureText), ...measurement.flags.map(flagText)],
     bars: engines.map((engine) => {
       const ratio = measurement.ratio[engine];
       const time = measurement.seconds[engine];
+      const failure = measurement.failures.find((candidate) => candidate.engine === engine || candidate.engine === baseline);
       const title = ratio === undefined
-        ? `${program.display}, ${engineLabel(engine)}: not measured`
+        ? `${program.display}, ${engineLabel(engine)}: ${failure === undefined ? 'not measured' : failureText(failure)}`
         : `${program.display}, ${engineLabel(engine)}: ${formatInterval(ratio)} the speed of GNU R` +
           (time === undefined || gnuR === undefined ? '' : `, ${seconds(time)} against ${seconds(gnuR)}`);
       return { engine, ratio, faded: isTooShort(measurement), title };
@@ -323,13 +329,14 @@ export function tableViews(suite: Suite): TableView[] {
       }),
       ...compared.map((engine) => {
         const ratio = program.measurement.ratio[engine];
-        const flags = ratioFlags(program.measurement, engine).map(flagText);
+        const flags = [
+          ...program.measurement.failures.filter((failure) => failure.engine === engine || failure.engine === baseline).map(failureText),
+          ...ratioFlags(program.measurement, engine).map(flagText),
+        ];
         return `${ratio === undefined ? 'n/a' : formatInterval(ratio)}${flags.length === 0 ? '' : ` (${flags.join(', ')})`}`;
       }),
     ]),
-    note: suite.results?.meta.legacySampling === undefined
-      ? 'Each time is the median over the rounds. Each speed-up is the median of the per-round ratios, with its 95% interval in parentheses.'
-      : undefined,
+    note: 'Each time is the median over the rounds. Each speed-up is the median of the per-round ratios, with its 95% interval in parentheses.',
   }];
   if (programs.some((program) => program.measurement.peakMib !== undefined)) {
     views.push({
@@ -393,6 +400,8 @@ export function programCode(path: string | undefined): string | undefined {
 export function programRatio(program: Program): string {
   const measurement = program.measurement;
   if (measurement === undefined) return 'not in the committed results';
+  const failure = measurement.failures[0];
+  if (failure !== undefined) return failure.engine === baseline ? `fails on ${engineLabel(baseline)} too` : `fails on ${engineLabel(failure.engine)}`;
   const ratio = measurement.ratio.ry;
   if (ratio === undefined) return '';
   return `${formatRatio(ratio.median)}${isTooShort(measurement) ? ' (too short)' : ''}`;
@@ -425,30 +434,23 @@ export function programsMarkdown(suite: Suite, headingLevel: number): string {
     .join('\n\n');
 }
 
-// How each measured suite was run, as rows of one table with a column per suite.
+// How each measured suite was run, one row per suite. The date, machine and commit are left out
+// because the line under each of the suite's charts and tables gives them.
 export function methodRows(): { columns: string[]; rows: string[][] } {
-  const measured = measuredSuites();
-  const meta = (suite: Suite) => suite.results?.meta;
-  const row = (label: string, cell: (suite: Suite) => string) => [label, ...measured.map(cell)];
   return {
-    columns: ['', ...measured.map((suite) => suite.name)],
-    rows: [
-      row('Command', (suite) => (meta(suite)?.command === undefined ? '' : `\`${meta(suite)?.command}\``)),
-      row('Results file', (suite) => `\`${suite.results?.path ?? ''}\``),
-      row('Measured', (suite) => `${meta(suite)?.date.slice(0, 10) ?? ''}${meta(suite)?.ryCommit === undefined ? '' : ` at ry ${shortCommit(meta(suite)?.ryCommit ?? '')}`}`),
-      row('Machine', (suite) => { const value = meta(suite); return value === undefined ? '' : machine(value); }),
-      row('GNU R', (suite) => `${meta(suite)?.gnuR.version ?? ''}${meta(suite)?.gnuR.blas === undefined ? '' : `, ${meta(suite)?.gnuR.blas}`}`),
-      row('Engines', (suite) => (suite.results?.engines ?? []).map(engineLabel).join('; ')),
-      row('Samples', (suite) => meta(suite)?.legacySampling ?? `${meta(suite)?.rounds} paired rounds${meta(suite)?.seed === undefined ? '' : `, shuffle seed ${meta(suite)?.seed}`}`),
-    ],
+    columns: ['Suite', 'Reproduce', 'GNU R', 'Engines', 'Samples'],
+    rows: measuredSuites().map((suite) => {
+      const meta = suite.results?.meta;
+      const blas = meta?.gnuR.blas?.split('/').pop();
+      return [
+        suite.name,
+        `\`just bench ${suite.id} --write\``,
+        `${meta?.gnuR.version ?? ''}${blas === undefined ? '' : `, BLAS \`${blas}\``}`,
+        (suite.results?.engines ?? []).map(engineLabel).join(', '),
+        `${meta?.rounds} paired rounds${meta?.extraRounds ? `, up to ${meta.extraRounds} more for a wide interval` : ''}${meta?.seed === undefined ? '' : `, seed ${meta.seed}`}`,
+      ];
+    }),
   };
-}
-
-// A results file written before the paired-rounds runner, named under the method table.
-export function legacyNotes(): string[] {
-  return measuredSuites()
-    .filter((suite) => suite.results?.meta.legacySampling !== undefined)
-    .map((suite) => `The committed ${suite.name} results predate this method: they hold ${suite.results?.meta.legacySampling}, so each ratio divides two times and has no interval.`);
 }
 
 export function methodMarkdown(): string {
@@ -457,7 +459,6 @@ export function methodMarkdown(): string {
     `| ${columns.join(' | ')} |`,
     `| --- |${columns.slice(1).map(() => ' --- |').join('')}`,
     ...rows.map((row) => `| ${row.join(' | ')} |`),
-    ...legacyNotes().flatMap((note) => ['', note]),
   ].join('\n');
 }
 
@@ -476,15 +477,15 @@ type Manifest = {
 
 type RawResults = {
   schema: number;
-  engines: string[];
+  engines: Record<string, string>;
   meta: {
     date: string;
     ry_commit?: string | null;
     gnu_r: { version: string; blas?: string | null };
     machine: { cpu: string; cores?: number | null; kernel?: string | null };
     rounds: number;
+    extra_rounds?: number | null;
     seed?: number | null;
-    command?: string | null;
     too_short_seconds?: number | null;
   };
   programs: {
@@ -495,6 +496,7 @@ type RawResults = {
     peak_mib?: Record<string, number>;
     tests?: Record<string, TestCounts>;
     flags?: Flag[];
+    failures?: Failure[];
   }[];
   geomean: Record<string, Interval & { programs: number }>;
 };
@@ -504,7 +506,8 @@ function loadSuites(): Suite[] {
     const directory = path.replace(/^\.\.\/\.\.\/\.\.\//, '').replace(/\/suite\.toml$/, '');
     const manifest = parse(text) as unknown as Manifest;
     const raw = resultFiles[`../../../${directory}/results.json`];
-    const results = raw === undefined ? undefined : normalize(manifest.id, raw);
+    const results = raw === undefined ? undefined : checkSchema(manifest.id, raw);
+    for (const [key, label] of Object.entries(results?.engines ?? {})) engineLabels.set(key, label);
     const byId = new Map((results?.programs ?? []).map((program) => [program.id, program]));
     const programs: Program[] = (manifest.programs ?? []).map((program) => ({
       id: program.id,
@@ -532,7 +535,7 @@ function loadSuites(): Suite[] {
       programs,
       results: results === undefined
         ? undefined
-        : { path: `${directory}/results.json`, engines: results.engines, geomean: results.geomean, meta: meta(results.meta, (results as { legacySampling?: string }).legacySampling) },
+        : { engines: Object.keys(results.engines), geomean: results.geomean, meta: meta(results.meta) },
     } satisfies Suite;
   });
   for (const [index, entry] of loaded.entries()) {
@@ -545,10 +548,10 @@ function loadSuites(): Suite[] {
 
 function measurement(program: RawResults['programs'][number] | undefined): Measurement | undefined {
   if (program === undefined) return undefined;
-  return { seconds: program.seconds, ratio: program.ratio, peakMib: program.peak_mib, tests: program.tests, flags: program.flags ?? [] };
+  return { seconds: program.seconds, ratio: program.ratio, peakMib: program.peak_mib, tests: program.tests, flags: program.flags ?? [], failures: program.failures ?? [] };
 }
 
-function meta(raw: RawResults['meta'], legacySampling: string | undefined): Meta {
+function meta(raw: RawResults['meta']): Meta {
   return {
     // A runner written in Python stores an absent value as null, which reads here as absent.
     date: raw.date,
@@ -557,70 +560,13 @@ function meta(raw: RawResults['meta'], legacySampling: string | undefined): Meta
     machine: { cpu: raw.machine.cpu, cores: raw.machine.cores ?? undefined, kernel: raw.machine.kernel ?? undefined },
     rounds: raw.rounds,
     seed: raw.seed ?? undefined,
-    command: raw.command ?? undefined,
+    extraRounds: raw.extra_rounds ?? undefined,
     tooShortSeconds: raw.too_short_seconds ?? undefined,
-    legacySampling,
   };
 }
 
-function normalize(id: string, raw: unknown): RawResults {
+function checkSchema(id: string, raw: unknown): RawResults {
   const value = raw as { schema?: number };
-  if (value.schema === 1) return raw as RawResults;
-  if (value.schema === undefined) return fromLegacy(raw);
-  throw new Error(`benchmark suite \`${id}\`: results.json has schema ${value.schema}, which the docs do not read`);
-}
-
-// TEMPORARY: maps the results files of `tools/bench/why` (numeric kernels) and `tools/bench/real`
-// (application workloads), written before the schema-1 runner, into schema 1. Delete it, and
-// `legacySampling` with it, once those directories are gone. `tools/bench/readme.py` has the twin
-// of this function.
-type LegacyResults = {
-  date: string;
-  commit?: string;
-  machine: string;
-  r: string;
-  repeat: number;
-  programs?: { program: string; gnu_r: number; ry: number; ry_typed: number; peak_mib: Record<string, number> }[];
-  workloads?: { workload: string; kind?: string; gnu_r: number; ry_jit: number; ry_nojit: number }[];
-};
-
-function fromLegacy(raw: unknown): RawResults & { legacySampling: string } {
-  const legacy = raw as LegacyResults;
-  const kernels = legacy.programs !== undefined;
-  const engines = kernels ? ['gnu_r', 'ry', 'ry_typed'] : ['gnu_r', 'ry', 'ry_nojit'];
-  const rows = kernels
-    ? (legacy.programs ?? []).map((row) => ({ id: row.program, seconds: { gnu_r: row.gnu_r, ry: row.ry, ry_typed: row.ry_typed }, peak_mib: row.peak_mib }))
-    : (legacy.workloads ?? []).filter((row) => (row.kind ?? 'workload') === 'workload').map((row) => ({ id: row.workload, seconds: { gnu_r: row.gnu_r, ry: row.ry_jit, ry_nojit: row.ry_nojit }, peak_mib: undefined }));
-  // These files flagged a program by GNU R's time alone and left it out of every geometric mean.
-  const programs = rows.map((row) => ({
-    ...row,
-    ratio: Object.fromEntries(engines.slice(1).map((engine) => [engine, { median: row.seconds.gnu_r / row.seconds[engine as keyof typeof row.seconds] }])),
-    flags: row.seconds.gnu_r < 0.1 ? [{ kind: 'too_short', engine: 'gnu_r' }] : [],
-  }));
-  const timed = programs.filter((program) => program.flags.length === 0);
-  const geomean = Object.fromEntries(
-    engines.slice(1).map((engine) => [
-      engine,
-      { median: Math.exp(timed.reduce((sum, program) => sum + Math.log(program.ratio[engine].median), 0) / timed.length), programs: timed.length },
-    ]),
-  );
-  const cpu = legacy.machine.split(', ');
-  return {
-    schema: 1,
-    engines,
-    meta: {
-      date: legacy.date,
-      ry_commit: legacy.commit,
-      gnu_r: { version: /\d+\.\d+\.\d+/.exec(legacy.r)?.[0] ?? legacy.r },
-      machine: { cpu: cpu[0], cores: Number.parseInt(cpu[1] ?? '', 10) || undefined, kernel: cpu[2] },
-      rounds: legacy.repeat,
-      command: kernels ? 'just bench-why --write' : 'just bench-real --write',
-      too_short_seconds: 0.1,
-    },
-    programs,
-    geomean,
-    legacySampling: kernels
-      ? `each engine's best time over ${legacy.repeat} processes, run one engine after another`
-      : `each engine's median time over ${legacy.repeat} rounds`,
-  };
+  if (value.schema !== 1) throw new Error(`benchmark suite \`${id}\`: results.json has schema ${value.schema}, which the docs do not read`);
+  return raw as RawResults;
 }
