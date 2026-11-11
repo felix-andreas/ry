@@ -1125,7 +1125,7 @@ unsafe fn native_symbol(
 }
 
 unsafe fn do_get_symbol_info(call: &Call<'_>) -> ApiResult<Sexp> {
-    let name = interp::values::require_string(call.arg(0), "name")?;
+    let name = interp::values::require_str(call.arg(0), "name")?;
     let package = call.arg(1);
     let package_name = if package.kind() == SexpType::String {
         interp::values::first_string(package).map(|text| text.into_owned())
@@ -1190,7 +1190,7 @@ unsafe fn do_get_symbol_info(call: &Call<'_>) -> ApiResult<Sexp> {
 }
 
 unsafe fn do_is_loaded(call: &Call<'_>) -> ApiResult<Sexp> {
-    let name = interp::values::require_string(call.arg(0), "symbol")?;
+    let name = interp::values::require_str(call.arg(0), "symbol")?;
     let package = interp::values::first_string(call.arg(1)).map(|text| text.into_owned());
     let package = package.filter(|package| !package.is_empty());
     let found = [

@@ -815,7 +815,7 @@ unsafe fn try_eval(expression: Sexp, env: Sexp) -> R<Result<Sexp, String>> {
     interp().handlers = saved;
     match result {
         Ok(value) => Ok(Ok(value)),
-        Err(Unwind::Jump(jump)) => match *jump {
+        Err(Unwind::Jump(jump)) => match jump {
             Jump::Return {
                 env: returned_to,
                 value,
@@ -831,7 +831,7 @@ unsafe fn try_eval(expression: Sexp, env: Sexp) -> R<Result<Sexp, String>> {
                     Ok(Err(conditions::condition_message(condition)))
                 }
             }
-            other => Err(Unwind::Jump(Box::new(other))),
+            other => Err(Unwind::Jump(other)),
         },
         Err(other) => Err(other),
     }
