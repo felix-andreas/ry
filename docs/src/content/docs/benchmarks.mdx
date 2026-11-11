@@ -168,4 +168,5 @@ first needs `just bench-packages install`. With `--write`, the runner stores
 the README summary from it. `--write` refuses a working tree with a change to a tracked file or an
 untracked file under `crates/` or `tools/bench/`, so every stored commit reproduces its
 measurement. The README summary warns when the suites were measured on different machines (CPU
-model or kernel), because their ratios are then not comparable.
+model or kernel) or against a GNU R on a different BLAS, because their ratios are then not
+comparable.

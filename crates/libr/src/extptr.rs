@@ -57,6 +57,9 @@ pub unsafe extern "C" fn R_MakeExternalPtr(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_ExternalPtrAddr(object: Sexp) -> *mut c_void {
+    if object.kind() == SexpType::ExternalPtr {
+        return object.external_address();
+    }
     enter(|| Ok(external_ptr(object, "R_ExternalPtrAddr")?.external_address()))
 }
 

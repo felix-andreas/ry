@@ -28,6 +28,7 @@ typedef struct {
 
 int ry_initialize(void);
 void ry_set_gc_stress(int enabled);
+void ry_set_slow_paths_only(int enabled);
 void ry_collect(int major);
 void ry_gc_stats(RyGcStats *stats);
 int ry_protect_depth(void);

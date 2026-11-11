@@ -110,15 +110,16 @@ def measured_sentence(suites):
             f"from {count} paired rounds on {' and '.join(kernels)}.")
 
 def mixed_machines(suites):
-    """A warning when the suites were measured on different machines (CPU model or kernel), because
-    their ratios are then not comparable with each other; the benchmarks page names each machine."""
+    """A warning when the suites were measured on different machines (CPU model or kernel) or against
+    a GNU R on a different BLAS, because their ratios are then not comparable with each other; the
+    benchmarks page names each machine."""
     machines = set()
     for suite in suites:
-        machine = suite["results"]["meta"]["machine"]
-        machines.add((machine["cpu"], machine.get("kernel")))
+        meta = suite["results"]["meta"]
+        machines.add((meta["machine"]["cpu"], meta["machine"].get("kernel"), meta["gnu_r"].get("blas")))
     if len(machines) < 2:
         return []
-    return ["**Warning:** the suites ran on different machines, so their numbers are not directly comparable."]
+    return ["**Warning:** the suites ran on different machines or BLAS libraries, so their numbers are not directly comparable."]
 
 def chart_svg(suites, theme):
     """Vertical grouped bars, one group per suite, each bar labeled with its value."""

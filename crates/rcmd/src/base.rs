@@ -62,7 +62,9 @@ pub fn installed() -> Option<PathBuf> {
 
 /// `base-r` in each directory from `directory` up to the cargo target directory that contains
 /// it, which cargo marks with `CACHEDIR.TAG`. Outside a target directory there are none, so an
-/// installed `ry` never picks up an unrelated `base-r` higher up the file system.
+/// installed `ry` never picks up an unrelated `base-r` higher up the file system. Neither is
+/// there one under the target's `tmp`, cargo's scratch directory for tests, where a test puts a
+/// copy of `ry` that must behave like a downloaded release.
 fn development_candidates(directory: &Path) -> Vec<PathBuf> {
     let Some(target) = directory
         .ancestors()
@@ -70,6 +72,9 @@ fn development_candidates(directory: &Path) -> Vec<PathBuf> {
     else {
         return Vec::new();
     };
+    if directory.starts_with(target.join("tmp")) {
+        return Vec::new();
+    }
     directory
         .ancestors()
         .take_while(|ancestor| *ancestor != target)

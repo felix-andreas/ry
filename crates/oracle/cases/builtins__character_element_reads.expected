@@ -1,0 +1,23 @@
+[stdout]
+| [1] "north" "south" NA      "east"  "north" "south"
+| [1] "a" "b"
+|  first second 
+|    "a"    "b" 
+| List of 2
+|  $ : chr "a"
+|  $ : chr NA
+| [1] "b" "b"
+| [1] "3"       "UTF-8"   "3"       "unknown"
+| List of 2
+|  $ : Factor w/ 2 levels "x","y": 1
+|  $ : Factor w/ 2 levels "x","y": 2
+| List of 3
+|  $ : chr "subscript out of bounds"
+|  $ : chr NA
+|  $ : chr "subscript out of bounds"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
