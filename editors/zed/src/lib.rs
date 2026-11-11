@@ -65,8 +65,9 @@ impl Extension {
             "felix-andreas/ry",
             GithubReleaseOptions {
                 require_assets: true,
-                // Every ry release so far is a pre-release, and `false` would find only 0.1.1.
-                pre_release: true,
+                // Zed matches this flag exactly, and nightlies are pre-releases, so `false` keeps
+                // untested snapshots away from Zed users.
+                pre_release: false,
             },
         )?;
 

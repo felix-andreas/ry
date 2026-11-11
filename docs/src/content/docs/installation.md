@@ -22,8 +22,8 @@ sudo mv ry /usr/local/bin/
 ry --version
 ```
 
-Every release is marked a pre-release, so name the tag: GitHub's `releases/latest` points at an old
-one. On Windows, put the folder holding `ry.exe` on your `PATH`. Other ways to install:
+Name the release's tag in the URL, as above, so you install exactly the version this table lists.
+On Windows, put the folder holding `ry.exe` on your `PATH`. Other ways to install:
 
 ```bash
 cargo +nightly install --git https://github.com/felix-andreas/ry ry-lang   # from source

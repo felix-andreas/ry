@@ -324,9 +324,11 @@ Smaller gaps:
   - strict mode can still report inside a statement that failed to parse.
 - Console completion: `df$` offers only `df`, and an unclosed `x[["` completes keywords instead of
   fields.
-- The Zed extension downloads the newest pre-release's archive (`editors/zed/src/lib.rs`), and
-  0.4.0-beta has only the Linux one, so on macOS and Windows the download fails until a release
-  ships every platform. The install page tells users there to put `ry` on `PATH`.
+- The Zed extension downloads the newest full release's archive (`editors/zed/src/lib.rs`), and
+  the first full release is 0.4.4, so a Zed extension published before 0.4.4 serves 0.1.1, and
+  0.4.4 must ship every platform's archive or the download fails on the missing ones. The Zed
+  registry copy built from `pre_release: true` serves the newest pre-release, which includes
+  nightlies (Linux only) until a Zed extension built from the current source is published.
 
 ## Open: what `ry check` still reports on the GNU R corpus
 
@@ -2480,9 +2482,11 @@ tagging fences `r` for Zed if that proves distant.
 
 - **There is no one-line installer.** The non-Rust route today is downloading a tarball from
   Releases. There is no `curl ... | sh`, Homebrew or winget path, and both uv and Ruff ship one.
-- **Every release is marked a pre-release**, so `releases/latest/` resolves to the old `0.1.1` tag
-  rather than the newest build, and the installation page names the tag in each URL. Promoting a
-  release would let the docs recommend `latest` instead.
+- **After 0.4.4 publishes, rewrite installation.md line ~25 to use `releases/latest`.** Every
+  release before 0.4.4 is a pre-release, so `releases/latest/` resolves to the old `0.1.1` tag and
+  the installation page names the tag in each URL. 0.4.4 is the first full release, and nightlies
+  are pre-releases with `--latest=false`, so from then on `releases/latest` is the newest full
+  release.
 - **The README's diagnostics are not checked.** `docs/` samples are tests (`test_docs`), but the
   two diagnostics in `README.md` and `editors/code/README.md` are pasted text that goes stale when
   a message or blame range changes; re-capture them after such a change.
