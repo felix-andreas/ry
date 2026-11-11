@@ -78,10 +78,10 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("message", "ryMessage", 0x9b452884cddd7ceb),
     ("warning", "ryWarning", 0x919c2fc8a0bd927b),
     ("signalCondition", "rySignalCondition", 0xfb659fdee977c35c),
-    ("tryCatch", "ryTryCatch", 0),
-    ("withRestarts", "ryWithRestarts", 0),
-    ("tryInvokeRestart", "ryTryInvokeRestart", 0),
-    ("invokeRestart", "ryInvokeRestart", 0),
+    ("tryCatch", "ryTryCatch", 0xd94c74ab7d1c9df2),
+    ("withRestarts", "ryWithRestarts", 0xcebb374dbd62409d),
+    ("tryInvokeRestart", "ryTryInvokeRestart", 0xe95eb95ec8453f49),
+    ("invokeRestart", "ryInvokeRestart", 0x76da20c2e48ae6a6),
 ];
 
 /// The closures that a base function defines in its own body and that get a fast path: the
@@ -94,10 +94,10 @@ const NESTED_FAST_PATHS: &[(&str, &str, &str, u64)] = &[
         "ryAssignNativeRoutines",
         0x26c985af62edd0db,
     ),
-    ("tryCatch", "tryCatchList", "ryTryCatchList", 0),
-    ("tryCatch", "doTryCatch", "ryDoTryCatch", 0),
-    ("withRestarts", "withOneRestart", "ryWithOneRestart", 0),
-    ("withRestarts", "doWithOneRestart", "ryDoWithOneRestart", 0),
+    ("tryCatch", "tryCatchList", "ryTryCatchList", 0x2e065bb04214d605),
+    ("tryCatch", "doTryCatch", "ryDoTryCatch", 0xacf47eb5e4bfc044),
+    ("withRestarts", "withOneRestart", "ryWithOneRestart", 0x66b61e2fa205a4b4),
+    ("withRestarts", "doWithOneRestart", "ryDoWithOneRestart", 0x3d98111142c9efce),
 ];
 
 /// Puts the fast paths in front of the base namespace's functions, changing each closure in
