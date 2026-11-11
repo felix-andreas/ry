@@ -458,7 +458,7 @@ fn young_stress_frees_a_survivor_that_only_a_rust_local_holds() {
 /// A weak pair's value that is still young when a deeper collection traces the tenured list
 /// holding it ages only to the younger old generation, so the list must stay remembered. If it
 /// did not, the next intermediate collection would free the value without tracing the list,
-/// leaving the pair pointing at a freed object (an inline cache, under `RY_GC_STRESS=young`).
+/// leaving the pair pointing at a freed object (a bytecode inline cache's effect proof).
 #[test]
 fn deeper_collection_keeps_a_tenured_weak_pair_list_remembered() {
     for first in [Collection::Intermediate, Collection::Major] {

@@ -113,12 +113,9 @@ ry's runtime against GNU R, as the geometric mean of each benchmark suite's spee
 
 Geometric means of the speed-ups over GNU R; above 1x means ry is faster.
 
-- Public R JIT benchmarks: measured on 2026-11-11 at ry 5cd92a3 with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.30GHz, 4 cores, Linux 6.18.44-fc-v378; 10 paired rounds.
-- Package test suites: measured on 2026-11-11 at ry 46191c4 with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.30GHz, 4 cores, Linux 6.18.44-fc-v378; 10 paired rounds.
-- Numeric kernels (ours): measured on 2026-11-11 at ry b868dc5-dirty with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v378; 10 paired rounds.
-- Application workloads (ours): measured on 2026-11-11 at ry 5cd92a3 with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v338; 10 paired rounds.
+Measured on 2026-11-11 against GNU R 4.6.2 on Linux, 10 paired rounds per suite.
 
-[Benchmarks](https://ry-lang.org/benchmarks) explains how each suite is built and measured, and shows every program.
+[Benchmarks](https://ry-lang.org/benchmarks) explains how each suite is built and measured, and shows every program, with the machine and ry commit of each suite.
 <!-- /bench-summary -->
 
 ## Settings

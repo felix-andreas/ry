@@ -3807,10 +3807,13 @@ impl Heap {
         match object.kind().shape() {
             Shape::Vector => {
                 if object.flags() & flag_bits::WEAK_PAIRS != 0 {
-                    // Tracing marks no pair, so it learns nothing about younger children. A
-                    // tenured list must stay remembered while it holds one, or the next
-                    // intermediate collection frees that child without tracing the list, which
-                    // is what clears a pair whose key or value died.
+                    // Tracing marks no pair, so it learns nothing about younger children, yet a
+                    // tenured list must stay remembered while it holds one. The next intermediate
+                    // collection traces a tenured list only from the remembered set, and that
+                    // trace is what clears a pair whose key or value died; without it the
+                    // collection frees the child and leaves the pair pointing at it. Keeping the
+                    // list remembered never marks a pair strongly, because a minor collection
+                    // that rescans it comes back to this branch.
                     if TENURED {
                         self.younger_child |= (0..object.length() as usize)
                             .any(|index| younger(object, object.stored_element(index)));
