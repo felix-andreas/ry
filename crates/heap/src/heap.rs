@@ -3047,6 +3047,11 @@ impl Heap {
         self.young_large.push(object);
         self.young_large_bytes += size;
         self.large_allocated_since_major += size;
+        // GNU R raises `gc()`'s "max used" at allocation, so a large vector made and dropped
+        // between two collections still shows in it; the young large bytes are the vectors made
+        // since the last collection.
+        let cells = self.stats.live_vector_cells + (self.young_large_bytes / 8) as u64;
+        self.stats.max_vector_cells = self.stats.max_vector_cells.max(cells);
         Ok(object)
     }
 
