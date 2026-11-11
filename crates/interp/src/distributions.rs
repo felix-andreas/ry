@@ -225,7 +225,7 @@ distributions! {
         "pnbinom_mu" 5 3 PnbinomMu |v, f| pnbinom_mu(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
         "qnbinom_mu" 5 3 QnbinomMu |v, f| qnbinom_mu(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
         "dnorm" 4 3 Dnorm |v, f| dnorm(v[0], v[1], v[2], f[0] != 0);
-        "pnorm" 5 3 Pnorm |v, f| pnorm(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
+        "pnorm" 5 3 Pnorm;
         "qnorm" 5 3 Qnorm;
         "dunif" 4 3 Dunif |v, f| dunif(v[0], v[1], v[2], f[0] != 0);
         "punif" 5 3 Punif |v, f| punif(v[0], v[1], v[2], f[0] != 0, f[1] != 0);
@@ -500,6 +500,45 @@ fn na_or_nan(operands: &[f64]) -> f64 {
         NA_REAL
     } else {
         f64::NAN
+    }
+}
+
+/// `pnorm`, whose tail exponentials run as one batch per chunk when only the quantiles vary.
+struct Pnorm;
+
+impl Kernel for Pnorm {
+    const VECTORS: usize = 3;
+
+    #[inline(always)]
+    fn apply(v: &[f64; 4], f: [i32; 2]) -> f64 {
+        pnorm(v[0], v[1], v[2], f[0] != 0, f[1] != 0)
+    }
+
+    fn fill_first(
+        quantiles: &[f64],
+        rest: &[f64; 4],
+        flags: [i32; 2],
+        out: &mut [f64],
+    ) -> Option<bool> {
+        let [_, mu, sigma, _] = *rest;
+        let lower = flags[0] != 0;
+        if !mu.is_finite() || !sigma.is_finite() || sigma <= 0.0 || flags[1] != 0 {
+            return None;
+        }
+        // `pnorm` standardizes first; a quantile that is NaN or standardizes to an infinity
+        // takes the scalar function's own path afterwards.
+        for (slot, &x) in out.iter_mut().zip(quantiles) {
+            *slot = (x - mu) / sigma;
+        }
+        pnorm_standard_fill(out, lower);
+        for (slot, &x) in out.iter_mut().zip(quantiles) {
+            if x.is_nan() {
+                *slot = na_or_nan(&[x]);
+            } else if !x.is_finite() || !((x - mu) / sigma).is_finite() {
+                *slot = pnorm(x, mu, sigma, lower, false);
+            }
+        }
+        Some(false)
     }
 }
 
@@ -2436,6 +2475,49 @@ mod tests {
             3 => (-uniform(picks) * 800.0).exp(),
             _ => uniform(picks),
         }
+    }
+
+    /// The batched path of `pnorm` must give the scalar function's bits, across the central
+    /// region, both of Cody's tail formulas, the far tails, infinities and NaN.
+    #[test]
+    fn pnorm_batches_match_the_scalar_function() {
+        for_each_seed(300, |seed| {
+            let mut picks = SplitMix64(0x9b07_0000 ^ seed);
+            let length = picks.below(700);
+            let quantiles: Vec<f64> = (0..length)
+                .map(|_| match picks.below(12) {
+                    0 => f64::NAN,
+                    1 => f64::INFINITY,
+                    2 => f64::NEG_INFINITY,
+                    3 => (uniform(&mut picks) - 0.5) * 90.0,
+                    _ => (uniform(&mut picks) - 0.5) * 16.0,
+                })
+                .collect();
+            let (mu, sigma) = if picks.below(2) == 0 {
+                (0.0, 1.0)
+            } else {
+                ((uniform(&mut picks) - 0.5) * 4.0, (uniform(&mut picks) * 4.0 - 2.0).exp())
+            };
+            let lower = picks.below(2) == 0;
+            let flags = [i32::from(lower), 0];
+            let mut out = vec![0.0; length];
+            let nan_produced =
+                Pnorm::fill_first(&quantiles, &[0.0, mu, sigma, 0.0], flags, &mut out)
+                    .expect("finite parameters take the batched path");
+            assert!(!nan_produced);
+            for (&x, &got) in quantiles.iter().zip(&out) {
+                let expected = if x.is_nan() {
+                    na_or_nan(&[x])
+                } else {
+                    pnorm(x, mu, sigma, lower, false)
+                };
+                assert_eq!(
+                    got.to_bits(),
+                    expected.to_bits(),
+                    "x = {x:e}, mu = {mu}, sigma = {sigma}, lower = {lower}"
+                );
+            }
+        });
     }
 
     /// The vector path of `qnorm`, with the central region across SIMD lanes, must give the

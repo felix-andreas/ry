@@ -838,6 +838,13 @@ impl<'a> Builder<'a> {
             check,
             "length(setdiff(search(), c(\"Autoloads\", \"tools:ry\", \"package:std\", \"package:ry\"))) != 2",
         );
+        // The script saves every binding of base, and `.userHooksEnv` holds the hooks this
+        // session's runtime registered at start-up. Saved, they would load from base.rdb in every
+        // later session beside the hooks that session registers itself, run twice per event, and
+        // outlive the runtime that defined them. GNU R saves the environment empty.
+        let script = format!(
+            "rm(list = ls(.userHooksEnv, all.names = TRUE), envir = .userHooksEnv)\n{script}"
+        );
         self.run_r(&script, "NULL")?;
         copy_file(
             &source.join("baseloader.R"),
