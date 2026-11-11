@@ -8832,10 +8832,6 @@ unsafe fn op_guard(state: &mut Activation<'_, '_>, instruction: Instruction) -> 
     }
     let found = if instruction.operand(3) == 0 {
         lookup_enclosing_function(symbol, enclosure, state.cache, slot)
-    } else if state.in_slots() {
-        // The slot frame answers as `GetFun` does, without making the environment the lookup
-        // from a frame would need.
-        slot_function(state, symbol, slot, unbound())
     } else {
         lookup_function(
             symbol,
