@@ -804,7 +804,7 @@ unsafe fn do_withr_get_options(call: &Call<'_>) -> R<Sexp> {
     );
     let names = values::names(new_options);
     // Without names, `options()` lists every option instead.
-    if !vector || new_options.is_object() || names == nil() {
+    if !vector || new_options.is_object() || names == nil() || length(names) == 0 {
         return decline();
     }
     // `do.call(options, as.list(names))` passes each name as its own argument; one character

@@ -30,6 +30,9 @@ DataFrame.schema : fn(df: DataFrame) -> character
 DataFrame.height : fn(df: DataFrame) -> integer
 DataFrame.width : fn(df: DataFrame) -> integer
 DataFrame.columns : fn(df: DataFrame) -> character
+DataFrame.key : fn(df: DataFrame) -> character | NULL
+DataFrame.set_key : fn(df: DataFrame, cols: character) -> DataFrame
+DataFrame.copy : fn(df: DataFrame) -> DataFrame
 DataFrame.read_csv : fn(path: character, [strings_as_factors]: logical) -> DataFrame
 DataFrame.read_parquet : fn(path: character) -> DataFrame
 DataFrame.write_csv : fn(df: DataFrame, path: character) -> DataFrame
@@ -67,9 +70,8 @@ LazyGroupBy.agg : fn(group: LazyGroupBy, ...: Expr) -> LazyFrame
 Ops.Expr : fn(e1: Expr, e2: Expr | double | integer | character | logical | Date) -> Expr
 Ops.Expr : fn(e1: double | integer | character | logical | Date, e2: Expr) -> Expr
 
-col : fn(x: character, [as.factor]: logical) -> Expr
-col : fn(x: Any, [as.factor]: logical) -> Any
-lit : fn(value: Any) -> Expr
+Expr.col : fn(name: character) -> Expr
+Expr.lit : fn(value: Any) -> Expr
 Expr.alias : fn(expr: Expr, name: character) -> Expr
 Expr.sum : fn(expr: Expr) -> Expr
 Expr.mean : fn(expr: Expr) -> Expr

@@ -35,6 +35,10 @@ The quality bar is four things.
 - testthat 3.3.2 fails to load under ry's runtime with "attempt to use zero-length variable name" ; 3.2.3 loads. ry raises that error for `new.env()[[""]]`; whether GNU R does too, and so whether that is the cause, is unverified (no GNU R on the measuring host).
 - `crates/jit/tests/test_tiers.rs` `run_time_binding_shadows_cached_global_function` fails for `gen`: a `g` bound in a generic's frame before `UseMethod` is not seen by `gen.default`, which calls the global `g`. The cause is outside the typed core: the test fails without it.
 
+## Open: one switch for every fast path
+
+- `RY_FAST_PATHS=0` is checked inside three prologues only (`fast_paths_enabled` in `crates/interp/src/base_fast_paths.rs`), so every other base and package prologue still runs and a fast-path bug cannot be bisected with it. Install time is the wrong place for the check, because a start-up image already holds installed prologues; check it once where a prologue internal is dispatched. Found while tracing withr's `get_options` prologue, which passed every name in one character vector to `options()` (only the first is read) and so broke `local_options` with an unset first option.
+
 ## Open: the baseline tier and JIT on against JIT off
 
 The baseline tier, the merged SSA IR (`crates/ssa`), size-scaled tier-up and block-bodied closure
@@ -2597,10 +2601,10 @@ The end-to-end guard rests on the corpus suites.
   `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`, `drop`,
   `unpivot`, or `when/then/otherwise` chains beyond `Expr.if_else`. None of the db-benchmark questions needs them. `LazyFrame.scan_*`
   has no parquet predicate statistics use beyond what Polars' reader does.
-- **IDE:** rename of a column (across `col("x")` strings and `$x`) and goto-definition from a
+- **IDE:** rename of a column (across `Expr.col("x")` strings and `$x`) and goto-definition from a
   column string to the verb or constructor argument that created it are not implemented; hover and
   completion are.
-- **Checker:** an expression held in a variable (`e <- col("x") * 2`) leaves a verb's columns
+- **Checker:** an expression held in a variable (`e <- Expr.col("x") * 2`) leaves a verb's columns
   unknown and its operands unchecked, because the refinement reads argument syntax. Typing `Expr`
   with its column type (`Expr<double>`) would close it. The column-error wording says "the frame
   `x`" for every table kind. Operand checks cover arithmetic, logic, comparisons, `Expr.if_else`
@@ -2613,7 +2617,7 @@ The end-to-end guard rests on the corpus suites.
   vectors: at 1e7 rows this is most of the typed modules' gap in `make_events`, `fetch_prices`
   and `enrol` (`development/design/r-runtime.md`, "Real code: the benchmark modules"). Numeric
   columns could share R's buffers once the collector can pin them for a Polars buffer's life.
-- **R precedence trap:** `col("a") * 2 |> Expr.alias("b")` pipes only the `2`. A lint that
+- **R precedence trap:** `Expr.col("a") * 2 |> Expr.alias("b")` pipes only the `2`. A lint that
   recognizes a pipe into an `Expr.` function whose left side is a literal would catch it.
 
 - **Query features:** a `by` that needs R code, `:=` with `by` on the R path, and a join whose `j`
@@ -2632,8 +2636,6 @@ The end-to-end guard rests on the corpus suites.
   evaluated eagerly during lowering, and if a sibling then falls back to R, the whole `i` or `j`
   runs again in the data mask. An `i` or `j` that updates the queried frame during lowering
   leaves the IR built against the old schema.
-- **data.table masks `setkey`, `setkeyv`, `key` and `copy`** when attached after ry; its versions
-  reject a frame, so users call `ry::setkey`.
 - **Checker:** `.SDcols` as positions or `patterns()`, `(cols) := ...` through a variable, and
   `c(.N, lapply(.SD, f))` as `j` give a frame with unknown columns.
 - **Checker nits:** `x < "b"` on a factor gives the generic comparison message, and `factor == 1` is
@@ -3618,7 +3620,7 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 - Completion at two characters is weakest on call heads (httr2 72%, purrr 76%): a package's own functions share long prefixes (`req_`, `resp_`, `oauth_flow_`), so two characters cannot pick among them. Measured and rejected: ranking by words a candidate shares with the enclosing function (helps at half the name, hurts at two characters) and spellings before calls. A signal beyond use counts (the types the call site expects) would be needed.
 - An installed package's `exportPattern` is read with the `regex` crate, which accepts most but not every POSIX extended regular expression R allows; a pattern it rejects exports nothing (logged).
-- Semantic tokens: `col("name")` strings are not colored as properties (columns read inside a `DataFrame` `[` query are).
+- Semantic tokens: `Expr.col("name")` strings are not colored as properties (columns read inside a `DataFrame` `[` query are).
 - Debugger: columns come from the srcref's tab-expanded column, so they are off on lines with
   tabs.
 - The console socket and everything on it (attach, `View()`, live hover and completion) is Unix

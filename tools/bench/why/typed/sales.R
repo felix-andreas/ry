@@ -2,10 +2,10 @@
 # The table type is ry's own; its columns are R vectors, so the total crosses back with `Num.from_r()`.
 pipeline <- function(sales: DataFrame{region: character[], units: integer[], price: double[]}) -> double {
   totals <- sales |>
-    DataFrame.filter(col("units") > 3L) |>
-    DataFrame.with_columns(revenue = col("units") * col("price")) |>
+    DataFrame.filter(Expr.col("units") > 3L) |>
+    DataFrame.with_columns(revenue = Expr.col("units") * Expr.col("price")) |>
     DataFrame.group_by("region") |>
-    GroupBy.agg(total = Expr.sum(col("revenue"))) |>
+    GroupBy.agg(total = Expr.sum(Expr.col("revenue"))) |>
     DataFrame.sort("region")
   sum(totals$total * seq_along(totals$total))
 }
