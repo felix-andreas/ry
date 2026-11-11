@@ -53,6 +53,15 @@ fn fuzz_direct_paths_match_slow_paths() {
                     "seed {seed}: operation {} differs between the direct and the slow path",
                     operation.code
                 );
+                if operation.code == 27 {
+                    let result = unsafe { (r.api().VECTOR_ELT)(*direct, 0) };
+                    let separate = unsafe { (r.api().VECTOR_ELT)(result, 1) };
+                    assert_eq!(
+                        r.integers(separate),
+                        [1],
+                        "seed {seed}: a copy shares storage with its original"
+                    );
+                }
                 if operation.code == 26 {
                     let result = unsafe { (r.api().VECTOR_ELT)(*direct, 0) };
                     let empty = unsafe { (r.api().VECTOR_ELT)(result, 1) };
@@ -73,12 +82,18 @@ fn fuzz_direct_paths_match_slow_paths() {
     });
 }
 
+/// A copy made on the slow path, so a direct path bug cannot reach both runs through their input.
 fn duplicate(r: &R, value: Sexp) -> Sexp {
-    r.keep(unsafe { (r.api().Rf_duplicate)(value) })
+    unsafe {
+        (r.api().ry_set_slow_paths_only)(1);
+        let copy = (r.api().Rf_duplicate)(value);
+        (r.api().ry_set_slow_paths_only)(0);
+        r.keep(copy)
+    }
 }
 
 fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
-    let code = rng.below(29) as c_int;
+    let code = rng.below(30) as c_int;
     let arguments = match code {
         0 => {
             let object = random_object(r, rng);
@@ -91,7 +106,7 @@ fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
             let value = random_value(r, rng, object);
             [object, r.integer(rng.below(4) as c_int), value]
         }
-        27 => {
+        28 => {
             let texts: [&[u8]; 5] = [b"", b"a", b"a\0b", b"\xe9t\xe9", b"rytest.tag"];
             let text = texts[rng.below(texts.len())];
             let bytes = r.keep(unsafe { (r.api().Rf_allocVector)(RAWSXP, text.len() as isize) });
@@ -100,7 +115,7 @@ fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
             };
             [bytes, r.integer(random_encoding(rng)), r.nil()]
         }
-        28 => [
+        29 => [
             strings(r, &[["", "a", "rytest.tag", "\u{e9}t\u{e9}"][rng.below(4)]]),
             r.integer(random_encoding(rng)),
             r.nil(),
@@ -157,6 +172,7 @@ fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
             let sizes = [spare, resize(), resize()];
             [object, integers(r, &sizes), r.nil()]
         }
+        27 => [random_expression(r, rng, 0), r.nil(), r.nil()],
         _ => [
             random_object(r, rng),
             random_object(r, rng),
@@ -169,6 +185,46 @@ fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
 /// The `cetype_t` codes, with two that `mkCharCE` rejects.
 fn random_encoding(rng: &mut SplitMix64) -> c_int {
     [0, 1, 2, 3, 4, 5, 99][rng.below(7)]
+}
+
+/// What native code hands `Rf_duplicate`: calls and pairlists with tagged and nested elements,
+/// improper ends, attributes on a cell, and leaves from [`random_object`], plus a nesting deeper
+/// than the direct path copies.
+fn random_expression(r: &R, rng: &mut SplitMix64, depth: usize) -> Sexp {
+    if depth == 0 && rng.chance(1, 16) {
+        let mut call = r.symbol("x");
+        for _ in 0..70 {
+            call = r.call_expression("f", &[(None, call)]);
+        }
+        return call;
+    }
+    match rng.below(if depth < 3 { 6 } else { 2 }) {
+        0 => r.symbol(["x", "y", "+"][rng.below(3)]),
+        1 => random_object(r, rng),
+        choice => {
+            let mut cells = if rng.chance(1, 8) {
+                r.integer(9)
+            } else {
+                r.nil()
+            };
+            for _ in 0..rng.below(4) {
+                let element = random_expression(r, rng, depth + 1);
+                cells = r.keep(unsafe { (r.api().Rf_cons)(element, cells) });
+                if rng.chance(1, 3) {
+                    unsafe { (r.api().SET_TAG)(cells, r.symbol("k")) };
+                }
+            }
+            let cells = if choice == 2 {
+                cells
+            } else {
+                r.keep(unsafe { (r.api().Rf_lcons)(r.symbol("f"), cells) })
+            };
+            if rng.chance(1, 8) && matches!(r.type_of(cells), LISTSXP | LANGSXP) {
+                attach(r, cells, "rytest.tag", r.integer(1));
+            }
+            cells
+        }
+    }
 }
 
 /// Objects that reach every branch of the direct paths and the cases they decline: each vector
@@ -459,7 +515,8 @@ const BUDGETS: &[(&str, u64)] = &[
     ("bench_set_car_cdr", 178),
     ("bench_binding_probes", 203),
     ("bench_delayed_binding", 230),
-    ("bench_resizable_grow_shrink", 7_000),
+    ("bench_resizable_grow_shrink", 6_600),
+    ("bench_duplicate_call", 2_100),
 ];
 
 /// Runs the `bench_` loops under callgrind in a child copy of this test and checks the cost per

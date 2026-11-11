@@ -106,7 +106,10 @@ pub fn main(arguments: Vec<String>) -> ExitCode {
             crate::r_command_line(rest).and_then(|session| run_r(&home, &session))
         }
         (Some((front, [path])), None) if front == "write-start-image" => {
-            write_start_image(&home, path)
+            write_start_image(&home, path, None)
+        }
+        (Some((front, [path, layout])), None) if front == "write-start-image" => {
+            write_start_image(&home, path, Some(layout))
         }
         (Some((front, rest)), None) if front == "Rscript" => {
             crate::rscript_command_line(rest).and_then(|session| run_r(&home, &session))
@@ -237,16 +240,20 @@ fn assemble(arguments: &[String]) -> crate::Result<PathBuf> {
 }
 
 fn start_image(arguments: &[String]) -> crate::Result<PathBuf> {
-    let (positional, options) = parse_options(arguments, &["--libr"]);
+    let (positional, options) = parse_options(arguments, &["--libr", "--layout"]);
     let (&[base], Some(libr)) = (positional.as_slice(), options.get("--libr")) else {
         return Err(crate::Error::Usage(
-            "usage: ry-rcmd start-image BASE --libr FILE".into(),
+            "usage: ry-rcmd start-image BASE --libr FILE [--layout DIR]".into(),
         ));
     };
+    let layout = options
+        .get("--layout")
+        .map(|layout| absolute(layout))
+        .transpose()?;
     let rcmd = std::env::current_exe()
         .map_err(|error| crate::Error::Io(PathBuf::from("ry-rcmd"), error))?;
     let base = absolute(base)?;
-    crate::base::write_start_image(&base, &rcmd, &absolute(libr)?)?;
+    crate::base::write_start_image(&base, &rcmd, &absolute(libr)?, layout.as_deref())?;
     Ok(base.join("library/base/R/ry-start.image"))
 }
 
@@ -364,11 +371,12 @@ fn run_r(home: &Path, session: &crate::Session) -> crate::Result<i32> {
 }
 
 /// Writes the start-up image of the R home's base R tree to `path`, through libR's
-/// `ry_write_start_image`. The base R build runs it as its last step.
-fn write_start_image(home: &Path, path: &str) -> crate::Result<i32> {
+/// `ry_write_start_image`, laid out by the touch profile in the directory `layout` when there is
+/// one. The base R build runs it as its last step.
+fn write_start_image(home: &Path, path: &str, layout: Option<&str>) -> crate::Result<i32> {
     let library_path = crate::libr_path(home);
     let library = load_runtime(&library_path)?;
-    type Write = unsafe extern "C" fn(*const c_char) -> c_int;
+    type Write = unsafe extern "C" fn(*const c_char, *const c_char) -> c_int;
     let write = unsafe { library.get::<Write>(b"ry_write_start_image\0") }
         .map(|symbol| *symbol)
         .map_err(|error| {
@@ -379,7 +387,18 @@ fn write_start_image(home: &Path, path: &str) -> crate::Result<i32> {
         })?;
     let path = CString::new(path)
         .map_err(|_| crate::Error::Usage("the image path contains a NUL byte".into()))?;
-    let status = unsafe { write(path.as_ptr()) };
+    let layout = layout
+        .map(CString::new)
+        .transpose()
+        .map_err(|_| crate::Error::Usage("the layout path contains a NUL byte".into()))?;
+    let status = unsafe {
+        write(
+            path.as_ptr(),
+            layout
+                .as_ref()
+                .map_or(std::ptr::null(), |layout| layout.as_ptr()),
+        )
+    };
     std::mem::forget(library);
     Ok(status)
 }
