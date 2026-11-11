@@ -608,18 +608,6 @@ unsafe fn gather<T: Copy + 'static>(
     Ok(result)
 }
 
-/// A `length.out`-style argument as a count.
-pub unsafe fn length_argument(value: Sexp) -> R<usize> {
-    if length(value) != 1 {
-        return Err(error("invalid 'length' argument"));
-    }
-    let count = values::as_real_scalar(value);
-    if count.is_nan() || count < 0.0 {
-        return Err(error("invalid 'length' argument"));
-    }
-    Ok(count as usize)
-}
-
 /// `length()` with S3 dispatch, for builtins that need an object's length.
 pub unsafe fn dispatch_length(object: Sexp, env: Sexp) -> R<usize> {
     if !object.is_object() {
@@ -3483,7 +3471,15 @@ unsafe fn do_length(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_set_length(call: &Call<'_>) -> R<Sexp> {
     let object = values::materialize(call.arg(0))?;
-    let new_length = length_argument(call.arg(1))?;
+    let value = call.arg(1);
+    if length(value) != 1 {
+        return Err(error("wrong length for 'value' argument"));
+    }
+    let new_length = values::as_real_scalar(value);
+    if new_length.is_nan() || new_length < 0.0 {
+        return Err(error("invalid value"));
+    }
+    let new_length = new_length as usize;
     if object == nil() {
         if new_length > 0 {
             conditions::warning_call(call.call, "length of NULL cannot be changed")?;

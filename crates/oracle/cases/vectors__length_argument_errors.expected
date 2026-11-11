@@ -1,0 +1,99 @@
+[stdout]
+| [[1]]
+| [1] "invalid value"
+| 
+| [[2]]
+| length(x) <- v
+| 
+| [[1]]
+| [1] "invalid value"
+| 
+| [[2]]
+| length(x) <- v
+| 
+| [[1]]
+| [1] "wrong length for 'value' argument"
+| 
+| [[2]]
+| length(x) <- v
+| 
+| [1] 1 2
+| [1]  1  2  3 NA NA
+| [[1]]
+| [1] "invalid 'length' argument"
+| 
+| [[2]]
+| vector("list", n)
+| 
+| [[1]]
+| [1] "invalid 'length' argument"
+| 
+| [[2]]
+| character(n)
+| 
+| [[1]]
+| [1] "invalid 'length' argument"
+| 
+| [[2]]
+| numeric(n)
+| 
+| [[1]]
+| [1] "invalid 'length' argument"
+| 
+| [[2]]
+| vector("list", n)
+| 
+| [[1]]
+| [1] "invalid 'length' argument"
+| 
+| [[2]]
+| character(n)
+| 
+| [[1]]
+| [1] "invalid 'length' argument"
+| 
+| [[2]]
+| numeric(n)
+| 
+| [[1]]
+| [1] "invalid 'length' argument"
+| 
+| [[2]]
+| vector("list", n)
+| 
+| [[1]]
+| [1] "invalid 'length' argument"
+| 
+| [[2]]
+| character(n)
+| 
+| [[1]]
+| [1] "invalid 'length' argument"
+| 
+| [[2]]
+| numeric(n)
+| 
+| [[1]]
+| [1] "invalid 'length' argument"
+| 
+| [[2]]
+| vector("list", n)
+| 
+| [[1]]
+| [1] "invalid 'length' argument"
+| 
+| [[2]]
+| character(n)
+| 
+| [[1]]
+| [1] "invalid 'length' argument"
+| 
+| [[2]]
+| numeric(n)
+| 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
