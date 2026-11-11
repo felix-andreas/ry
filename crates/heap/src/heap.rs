@@ -1108,7 +1108,9 @@ impl Heap {
         if length > MAX_VECTOR_LENGTH as usize {
             return Err(HeapError::TooLong);
         }
-        let size = object_size(kind, length).ok_or(HeapError::TooLong)?;
+        let Some(size) = object_size(kind, length) else {
+            return Err(HeapError::TooLong);
+        };
         let object = self.allocate_with(kind, size, &[], VECTOR_DATA_OFFSET)?;
         object.set_length_and_capacity(length as isize, length as isize);
         self.report_allocation(kind, length);
@@ -1261,7 +1263,9 @@ impl Heap {
         if length > MAX_VECTOR_LENGTH {
             return Err(HeapError::TooLong);
         }
-        let size = object_size(kind, length as usize).ok_or(HeapError::TooLong)?;
+        let Some(size) = object_size(kind, length as usize) else {
+            return Err(HeapError::TooLong);
+        };
         // Vectors of handles are filled below, so only the header needs zeroing first.
         let zeroed = if holds_handles(kind) {
             VECTOR_DATA_OFFSET
@@ -1430,7 +1434,9 @@ impl Heap {
         third: Sexp,
         extra: Option<Sexp>,
     ) -> HeapResult<Sexp> {
-        let size = object_size(kind, 0).ok_or(HeapError::TooLong)?;
+        let Some(size) = object_size(kind, 0) else {
+            return Err(HeapError::TooLong);
+        };
         let keep = [first, second, third, extra.unwrap_or(first)];
         let object = self.allocate_with(kind, size, &keep, 0)?;
         fill_triple(object, kind, first, second, third);
@@ -1462,7 +1468,9 @@ impl Heap {
         second: Sexp,
         third: Sexp,
     ) -> HeapResult<Sexp> {
-        let size = object_size(kind, 0).ok_or(HeapError::TooLong)?;
+        let Some(size) = object_size(kind, 0) else {
+            return Err(HeapError::TooLong);
+        };
         let object = self.allocate_uncollected(kind, size, 0)?;
         fill_triple(object, kind, first, second, third);
         Ok(object)
@@ -1504,7 +1512,9 @@ impl Heap {
         data1: Sexp,
         data2: Sexp,
     ) -> HeapResult<Sexp> {
-        let size = object_size(SexpType::Pairlist, 0).ok_or(HeapError::TooLong)?;
+        let Some(size) = object_size(SexpType::Pairlist, 0) else {
+            return Err(HeapError::TooLong);
+        };
         let object = self.allocate(kind, size, &[class, data1, data2])?;
         object.set_altrep_flag();
         object.set_car_unbarriered(data1);
@@ -1554,7 +1564,9 @@ impl Heap {
         tag: Sexp,
         protected: Sexp,
     ) -> HeapResult<Sexp> {
-        let size = object_size(SexpType::ExternalPtr, 0).ok_or(HeapError::TooLong)?;
+        let Some(size) = object_size(SexpType::ExternalPtr, 0) else {
+            return Err(HeapError::TooLong);
+        };
         let object = self.allocate(SexpType::ExternalPtr, size, &[tag, protected])?;
         object.set_external_address(address);
         object.set_external_tag_unbarriered(tag);
@@ -1573,7 +1585,9 @@ impl Heap {
         c_finalizer: usize,
         finalize_on_exit: bool,
     ) -> HeapResult<Sexp> {
-        let size = object_size(SexpType::WeakRef, 0).ok_or(HeapError::TooLong)?;
+        let Some(size) = object_size(SexpType::WeakRef, 0) else {
+            return Err(HeapError::TooLong);
+        };
         let object = self.allocate(SexpType::WeakRef, size, &[key, value, finalizer])?;
         let payload = object.weak_payload();
         payload.key.set(key);
@@ -1591,7 +1605,9 @@ impl Heap {
     }
 
     pub unsafe fn alloc_primitive(&mut self, kind: SexpType, index: u32) -> HeapResult<Sexp> {
-        let size = object_size(kind, 0).ok_or(HeapError::TooLong)?;
+        let Some(size) = object_size(kind, 0) else {
+            return Err(HeapError::TooLong);
+        };
         let object = self.allocate(kind, size, &[])?;
         object.set_primitive_index(index);
         Ok(object)
@@ -1615,7 +1631,9 @@ impl Heap {
         layout: u32,
         values: &[Sexp],
     ) -> HeapResult<Sexp> {
-        let size = object_size(SexpType::Record, values.len()).ok_or(HeapError::TooLong)?;
+        let Some(size) = object_size(SexpType::Record, values.len()) else {
+            return Err(HeapError::TooLong);
+        };
         if values.len() > u32::MAX as usize {
             return Err(HeapError::TooLong);
         }
@@ -1639,7 +1657,9 @@ impl Heap {
     /// so a number never has to be boxed on its way in. A [`Slot::Real`] must not carry a bit
     /// pattern [`slot_for`] keeps as a handle, and only the first [`crate::object::UNBOXED_SLOTS`] may be raw.
     pub unsafe fn alloc_record_slots(&mut self, layout: u32, slots: &[Slot]) -> HeapResult<Sexp> {
-        let size = object_size(SexpType::Record, slots.len()).ok_or(HeapError::TooLong)?;
+        let Some(size) = object_size(SexpType::Record, slots.len()) else {
+            return Err(HeapError::TooLong);
+        };
         if slots.len() > u32::MAX as usize {
             return Err(HeapError::TooLong);
         }
@@ -2833,10 +2853,9 @@ impl Heap {
         if young > self.small_trigger {
             return self.allocate_small_slow(kind, class, size, zeroed, keep);
         }
-        let memory = self
-            .space
-            .allocate(class)
-            .ok_or(HeapError::CannotAllocate { bytes: size })?;
+        let Some(memory) = self.space.allocate(class) else {
+            return Err(HeapError::CannotAllocate { bytes: size });
+        };
         self.young_bytes = young;
         Ok(self.init_small(memory, kind, class, zeroed))
     }
@@ -2852,10 +2871,9 @@ impl Heap {
         keep: &[Sexp],
     ) -> HeapResult<Sexp> {
         self.maybe_collect(size, false, keep);
-        let memory = self
-            .space
-            .allocate(class)
-            .ok_or(HeapError::CannotAllocate { bytes: size })?;
+        let Some(memory) = self.space.allocate(class) else {
+            return Err(HeapError::CannotAllocate { bytes: size });
+        };
         self.young_bytes += size;
         Ok(self.init_small(memory, kind, class, zeroed))
     }
@@ -2891,10 +2909,9 @@ impl Heap {
             return self.allocate_large_uncollected(kind, size, zeroed);
         };
         let class = class as usize;
-        let memory = self
-            .space
-            .allocate(class)
-            .ok_or(HeapError::CannotAllocate { bytes: size })?;
+        let Some(memory) = self.space.allocate(class) else {
+            return Err(HeapError::CannotAllocate { bytes: size });
+        };
         self.young_bytes += size;
         Ok(self.init_small(memory, kind, class, zeroed))
     }
@@ -4314,7 +4331,9 @@ impl Heap {
     }
 
     unsafe fn alloc_vector_inhibited(&mut self, kind: SexpType, length: isize) -> HeapResult<Sexp> {
-        let size = object_size(kind, length as usize).ok_or(HeapError::TooLong)?;
+        let Some(size) = object_size(kind, length as usize) else {
+            return Err(HeapError::TooLong);
+        };
         let object = self.allocate(kind, size, &[])?;
         object.set_length_and_capacity(length, length);
         Ok(object)
@@ -4552,10 +4571,12 @@ impl ProtectStack {
 
     /// `UNPROTECT_PTR`: removes the topmost protection of `object` wherever it is.
     pub fn unprotect_object(&mut self, object: Sexp) -> HeapResult<()> {
-        let position = self.stack.entries[self.base..]
+        let Some(position) = self.stack.entries[self.base..]
             .iter()
             .rposition(|&protected| protected == object)
-            .ok_or(HeapError::UnprotectPointerNotFound)?;
+        else {
+            return Err(HeapError::UnprotectPointerNotFound);
+        };
         self.stack
             .remove_range(self.base + position, self.base + position + 1);
         Ok(())
@@ -4563,11 +4584,9 @@ impl ProtectStack {
 
     pub fn reprotect(&mut self, object: Sexp, index: usize) -> HeapResult<()> {
         let available = self.stack.len();
-        let slot = self
-            .stack
-            .entries
-            .get_mut(index)
-            .ok_or(HeapError::ReprotectIndex { available, index })?;
+        let Some(slot) = self.stack.entries.get_mut(index) else {
+            return Err(HeapError::ReprotectIndex { available, index });
+        };
         *slot = object;
         self.stack.scanned = self.stack.scanned.min(index);
         Ok(())

@@ -392,20 +392,58 @@ unsafe fn inherits_bytes(object: Sexp, class: &[u8]) -> ApiResult<bool> {
 /// pairlist or of a one-dimensional array and compact row names are built on the slow path.
 #[inline(always)]
 unsafe fn get_attrib_direct(object: Sexp, name: Sexp) -> Option<Reachable> {
-    if name.kind() != SexpType::Symbol || object.kind() == SexpType::Char {
+    let kind = object.kind();
+    if name.kind() != SexpType::Symbol || kind == SexpType::Char {
         return None;
     }
-    if name == R_NamesSymbol.get() || name == R_RowNamesSymbol.get() {
-        return None;
+    let nil = runtime().nil();
+    if name == R_NamesSymbol.get() {
+        if matches!(
+            kind,
+            SexpType::Pairlist | SexpType::Language | SexpType::Dots
+        ) {
+            return None;
+        }
+        let (mut names, mut dim, mut dimnames) = (nil, nil, nil);
+        let mut cell = object.attrib();
+        while cell.kind() == SexpType::Pairlist {
+            let tag = cell.tag();
+            if tag == name {
+                names = cell.car();
+            } else if tag == R_DimSymbol.get() {
+                dim = cell.car();
+            } else if tag == R_DimNamesSymbol.get() {
+                dimnames = cell.car();
+            }
+            cell = cell.cdr();
+        }
+        // A one-dimensional array reports its only dimnames as its names, as `get_attrib` does.
+        if dim.kind() == SexpType::Integer && dim.length() == 1 {
+            if dimnames.kind() == SexpType::List && dimnames.length() >= 1 {
+                if dim.is_altrep() || dimnames.is_altrep() {
+                    return None;
+                }
+                return Some(Reachable(dimnames.slice::<Sexp>()[0]));
+            }
+        }
+        return Some(Reachable(names));
     }
     let mut cell = object.attrib();
     while cell.kind() == SexpType::Pairlist {
         if cell.tag() == name {
-            return Some(Reachable(cell.car()));
+            let value = cell.car();
+            // Compact row names expand into a fresh vector on the slow path.
+            if name == R_RowNamesSymbol.get()
+                && value.kind() == SexpType::Integer
+                && (value.is_altrep() || value.length() == 2)
+            {
+                return None;
+            }
+            return Some(Reachable(value));
         }
         cell = cell.cdr();
     }
-    Some(Reachable(runtime().nil()))
+    Some(Reachable(nil))
 }
 
 /// `Rf_setAttrib`'s direct path for a symbol name and a value that needs no coercion. It
@@ -514,8 +552,22 @@ unsafe fn dim_direct(runtime: &mut Runtime, object: Sexp, value: Sexp) -> Option
         return None;
     }
     attach(runtime, object, R_DimSymbol.get(), value)?;
-    remove_attribute(object, R_NamesSymbol.get());
-    remove_attribute(object, R_DimNamesSymbol.get());
+    // New extents invalidate the names and dimnames, which one walk unlinks together.
+    let (names, dimnames) = (R_NamesSymbol.get(), R_DimNamesSymbol.get());
+    let mut previous: Option<Sexp> = None;
+    let mut cell = object.attrib();
+    while cell.kind() == SexpType::Pairlist {
+        let next = cell.cdr();
+        if cell.tag() == names || cell.tag() == dimnames {
+            match previous {
+                Some(previous) => runtime.heap.set_cdr(previous, next),
+                None => runtime.heap.set_attrib(object, next),
+            }
+        } else {
+            previous = Some(cell);
+        }
+        cell = next;
+    }
     value.mark_not_mutable();
     Some(Reachable(value))
 }

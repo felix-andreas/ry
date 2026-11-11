@@ -103,7 +103,7 @@ fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
 /// type with and without `dim`, `names` and `class`, ALTREP, pairlists, `NULL`, `CHARSXP`s and
 /// symbols.
 fn random_object(r: &R, rng: &mut SplitMix64) -> Sexp {
-    let length = rng.below(7);
+    let mut length = rng.below(7);
     let object = match rng.below(12) {
         0 => return r.nil(),
         1 => return r.symbol("rytest.symbol"),
@@ -117,7 +117,10 @@ fn random_object(r: &R, rng: &mut SplitMix64) -> Sexp {
                 &[r.integer(rng.below(9) as c_int), r.integer(length as c_int)],
             )
             .expect("an ALTREP sequence"),
-        5 => r.real([0.5, -1e12, f64::NAN, 3e9][rng.below(4)]),
+        5 => {
+            length = 1;
+            r.real([0.5, -1e12, f64::NAN, 3e9][rng.below(4)])
+        }
         choice => {
             let kind = [LGLSXP, INTSXP, REALSXP, STRSXP, VECSXP, INTSXP][choice - 6];
             let vector = r.keep(unsafe { (r.api().Rf_allocVector)(kind, length as isize) });
@@ -130,7 +133,25 @@ fn random_object(r: &R, rng: &mut SplitMix64) -> Sexp {
         let rows = [1, length][rng.below(2)];
         let dim = integers(r, &[rows as c_int, (length / rows) as c_int]);
         let one = integers(r, &[length as c_int]);
-        attach(r, object, "dim", if rng.chance(1, 3) { one } else { dim });
+        let one_dimensional = rng.chance(1, 3);
+        attach(r, object, "dim", if one_dimensional { one } else { dim });
+        // A one-dimensional array reports its dimnames as its names.
+        if one_dimensional && rng.chance(1, 2) {
+            let labels: Vec<String> = (0..length).map(|index| format!("d{index}")).collect();
+            let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+            let dimnames = r.keep(unsafe { (r.api().Rf_allocVector)(VECSXP, 1) });
+            unsafe { (r.api().SET_VECTOR_ELT)(dimnames, 0, strings(r, &labels)) };
+            attach(r, object, "dimnames", dimnames);
+        }
+    }
+    if rng.chance(1, 5) {
+        // Compact row names expand on read; stored ones come back as they are.
+        let rows = match rng.below(3) {
+            0 => integers(r, &[i32::MIN, -(length as c_int)]),
+            1 => integers(r, &[3, 1]),
+            _ => strings(r, &["r1", "r2"]),
+        };
+        attach(r, object, "row.names", rows);
     }
     if rng.chance(1, 4) {
         let names: Vec<String> = (0..length).map(|index| format!("n{index}")).collect();
