@@ -228,8 +228,10 @@ pub fn check_quickening_agreement(entropy: &mut impl Entropy) {
 /// deoptimizes there. A test tier takes every activation of a random closure over at entry,
 /// single-steps it through `k` instructions, and hands it back through the same
 /// [`bytecode::TierExit::Resume`] path compiled code exits by. For every `k` up to the number
-/// of instructions the call runs, the result must equal tier 0's alone.
-pub fn check_resume_at_every_pc(entropy: &mut impl Entropy) {
+/// of instructions the call runs, the result must equal tier 0's alone. A step of a
+/// superinstruction runs only its first instruction, so this also resumes between the two
+/// halves of every pair. Returns the superinstructions the closure's code holds, a bit each.
+pub fn check_resume_at_every_pc(entropy: &mut impl Entropy) -> u64 {
     use {
         bytecode::{Machine, Stepped, Tier, TierExit},
         std::cell::Cell,
@@ -263,7 +265,9 @@ pub fn check_resume_at_every_pc(entropy: &mut impl Entropy) {
         Some(TierExit::Resume { pc, pending: None })
     }
     syntax::testing::enable_invariants();
-    let body = program(entropy);
+    // As in `check_superinstruction_agreement`, a builtin call of a free variable and of an
+    // argument comes first, to reach the pairs that end in one.
+    let body = format!("w <- abs(pi) + abs(b)\n{}", program(entropy));
     let arguments = [
         "3L",
         "-2.5",
@@ -326,8 +330,9 @@ pub fn check_resume_at_every_pc(entropy: &mut impl Entropy) {
                 }
                 budget += 1;
             }
+            function.map_or(0, |function| bytecode::superinstructions_in(function.cdr()))
         }
-    });
+    })
 }
 
 /// A random element-wise tree over vector operands, the shape the tier-0 compiler fuses into

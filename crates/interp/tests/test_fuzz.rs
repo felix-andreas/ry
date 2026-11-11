@@ -153,7 +153,15 @@ fn fuzz_superinstructions_agree_with_their_unfused_pairs() {
 
 #[test]
 fn fuzz_tier_zero_resumes_at_every_pc() {
-    for_each_seed(60, |seed| check_resume_at_every_pc(&mut SplitMix64(seed)));
+    let mut reached = 0u64;
+    for_each_seed(60, |seed| {
+        reached |= check_resume_at_every_pc(&mut SplitMix64(seed));
+    });
+    // Resuming between the halves of every superinstruction is part of the contract.
+    if std::env::var_os("FUZZ_ITERS").is_none() && std::env::var_os("FUZZ_SEED").is_none() {
+        let all = (1u64 << bytecode::SUPERINSTRUCTION_COUNT) - 1;
+        assert_eq!(reached, all, "superinstructions the seeds never reached: {:b}", all & !reached);
+    }
 }
 
 #[test]
