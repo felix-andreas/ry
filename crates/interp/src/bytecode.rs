@@ -8739,11 +8739,12 @@ unsafe fn slot_promises_into(
     args.clear();
     let owner = (*state.interp).slot_owner as usize;
     let mark = (*state.interp).references_used;
+    let unforced = (&(*state.interp).frames)[owner].unforced;
     let missing = missing_arg();
     // One pass builds the arguments and gives up at the first one that needs the frame's
     // environment, which is rare, undoing what it made: references go back to the pool, and
-    // promises over the pending environment leave the frame's count of unforced promises.
-    let mut promises = 0;
+    // the frame's count of unforced promises returns to what it was, since a promise made
+    // over a pending environment counts itself and one made over a reified one does not.
     let mut cell = arguments;
     while cell.kind() == SexpType::Pairlist {
         let expression = cell.car();
@@ -8765,26 +8766,19 @@ unsafe fn slot_promises_into(
                             .map_or(eval::NO_REFERENCE_SLOT, |index| index as u32);
                         eval::argument_reference(owner, slot, expression)?
                     }
-                    _ => {
-                        promises += 1;
-                        eval::slot_promise(owner, expression)?
-                    }
+                    _ => eval::slot_promise(owner, expression)?,
                 },
             ),
             SexpType::Bytecode if expression.cdr().element(SLOTS) == nil() => None,
             SexpType::Bytecode if references => Some(eval::code_reference(owner, expression)?),
             // Code the compiler rejected (it defines a function, say) runs uncompiled over the
             // pending environment, so the frame gets one only if the callee forces it.
-            SexpType::Bytecode | SexpType::Language => {
-                promises += 1;
-                Some(eval::slot_promise(owner, expression)?)
-            }
+            SexpType::Bytecode | SexpType::Language => Some(eval::slot_promise(owner, expression)?),
             SexpType::Promise => None,
             _ => Some(expression),
         };
         let Some(value) = value else {
-            let frame = &mut (&mut (*state.interp).frames)[owner];
-            frame.unforced = frame.unforced.saturating_sub(promises);
+            (&mut (*state.interp).frames)[owner].unforced = unforced;
             if (*state.interp).references_used != mark {
                 eval::release_references(mark);
             }
