@@ -388,6 +388,17 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     promise.set_gp_bits(PROMISE_SEEN, true);
     let code = promise.attrib();
     let env = promise.tag();
+    // Releasing a promise's last counted reference clears its environment, so an unforced
+    // promise without one was held by a root the counts do not see, and forcing it here would
+    // evaluate its code nowhere instead of where it was made.
+    if env == nil()
+        && !promise.has_gp(gp::ARGUMENT_REFERENCE)
+        && (cfg!(debug_assertions)
+            || syntax::testing::invariants_enabled()
+            || heap::gc_stress_requested().is_some())
+    {
+        panic!("a promise was forced after its last counted reference was released");
+    }
     let result = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
         force_reference(promise)
     } else if env.has_gp(gp::PENDING_FRAME) {
@@ -2631,7 +2642,7 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
         }
     }
     let method_vars: SmallVec<[(Sexp, Sexp); 6]> = crate::method_vars(interp(), index).into();
-    for (symbol, value) in method_vars {
+    for &(symbol, value) in &method_vars {
         if heap.frame_cell(env, symbol).is_none() {
             heap.define(env, symbol, resolved_value(value)?)?;
         }
@@ -2652,15 +2663,21 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
     }
     activity::count(Counter::FramesReified);
     if syntax::testing::invariants_enabled() {
-        check_reified(index, env, &bindings);
+        check_reified(index, env, &bindings, &method_vars);
     }
     Ok(env)
 }
 
 /// The cross-check behind `syntax::testing::enable_invariants()`: the environment made from a
 /// slot frame binds each formal as the heap-frame path would have, to the same value with the
-/// same missing flag, and binds nothing it should not.
-unsafe fn check_reified(index: usize, env: Sexp, bindings: &[Formal]) {
+/// same missing flag, and binds nothing but its body's locals and, for a method, its dispatch
+/// variables.
+unsafe fn check_reified(
+    index: usize,
+    env: Sexp,
+    bindings: &[Formal],
+    method_vars: &[(Sexp, Sexp)],
+) {
     let heap = crate::heap();
     for binding in bindings {
         let Some(cell) = heap.frame_cell(env, binding.symbol) else {
@@ -2682,7 +2699,7 @@ unsafe fn check_reified(index: usize, env: Sexp, bindings: &[Formal]) {
     };
     for symbol in crate::envir::env_symbols(env, true, false) {
         assert!(
-            locals.contains(&symbol),
+            locals.contains(&symbol) || method_vars.iter().any(|&(name, _)| name == symbol),
             "frame {index}: a reified slot frame binds {:?}, which its body cannot bind",
             values::symbol_name(symbol)
         );

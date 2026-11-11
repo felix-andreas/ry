@@ -70,6 +70,9 @@ describes it, and the open gaps are marked.
 - **S3 methods.** A method called by `UseMethod` or `NextMethod` gets a slot frame too. Its
   dispatch variables live beside the frame (`Interp::method_vars`, `Frame::method_vars`), and
   `reify` binds them, so `NextMethod` and `environment()` in the method find them.
+  `NextMethod` from such a method reads them without reifying (`eval::pending_name`), passes
+  the next method promises over the frame's pending environment, and lets the method return in
+  slots when the next method neither forced nor kept them (`MadePromises` in `dispatch.rs`).
 - **Layout.** The activation reserves `1 + n` registers above its own: a header register, then one
   slot per symbol the table numbers, formals first in order. The header holds the frame's
   environment once it has one, and `R_NilValue` before. A slot holds a value and counts one
@@ -119,13 +122,13 @@ These are the reads that need the environment as an object. Each one reifies the
 
 | Trigger | Where |
 |---|---|
-| A promise made in the frame that the slot-promise path does not cover (see below), default promises, `delayedAssign` | `make_promise`, `compiled_promise`, `formal_binding` in `eval.rs`; `NextMethod`'s promises in `dispatch.rs` |
+| A promise made in the frame that the slot-promise path does not cover (see below), default promises, `delayedAssign` | `make_promise`, `compiled_promise`, `formal_binding` in `eval.rs`; `NextMethod`'s promises in `dispatch.rs` when the next method keeps one past its return |
 | A closure created in the frame, past the frame's 16 tracked closures (see below) | `slot_closure` in `eval.rs`; `make_closure` for an uncompiled `function`; `~` (the formula's environment) |
 | A closure made in the frame that may outlive it | `finish_frame` in `eval.rs` |
 | Reflection that returns the environment | `environment()`, `sys.frame(s)`, `as.environment(-1)`, `sys.function` with its environment, `eval`'s numeric `envir` |
 | A read of the bindings of the pending environment `parent.frame()` handed out, or that environment kept past the frame's return | `eval::resolve_pending_read`, `finish_frame` in `eval.rs` |
 | Code that the compiler did not translate and that runs in the frame | `Op::Ast` (`<<-` targets, `...` forms), `BoundEval`, the debugger and `browser()` |
-| S3 and S4 dispatch reading the generic's frame | `UseMethod` and `NextMethod` (`dispatch.rs`); `standardGeneric`, which reads the signature arguments from the generic's frame and evaluates the method in a frame derived from it (`do_standard_generic` passes `call.env` to `dispatch_generic`), and `exec_method` and `callNextMethod` (`methods.rs`) |
+| S3 and S4 dispatch reading the generic's frame | `UseMethod` (`dispatch.rs`), and `NextMethod` only from a function that was not dispatched to (no `.Class` or `.GenericCallEnv` in its frame); `standardGeneric`, which reads the signature arguments from the generic's frame and evaluates the method in a frame derived from it (`do_standard_generic` passes `call.env` to `dispatch_generic`), and `exec_method` and `callNextMethod` (`methods.rs`) |
 | Condition handlers and restarts that record a frame | `.addCondHands`, `.addRestart` (`conditions.rs`) |
 | The C API | `R_GetCurrentEnv`, `PRENV` on a promise over the frame, `.External` and `.External2` (which pass the environment) |
 | A promise over the frame still unforced when the frame returns | `run_frame` in `eval.rs` |
