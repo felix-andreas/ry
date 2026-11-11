@@ -131,7 +131,7 @@ export function failureText(failure: Failure): string {
 export function flagText(flag: Flag): string {
   const engine = flag.engine === undefined ? '' : ` on ${engineLabel(flag.engine)}`;
   if (flag.kind === 'too_short') return `too short${engine}`;
-  if (flag.kind === 'typed_refused') return `typed version refused${flag.reason === undefined ? '' : `: ${flag.reason}`}`;
+  if (flag.kind === 'typed_refused') return `typed code partly refused${flag.reason === undefined ? '' : `: ${flag.reason}`}`;
   if (flag.kind === 'wide_interval') return `wide interval${engine}`;
   if (flag.kind === 'tests_differ') return `tests differ${engine}${flag.reason === undefined ? '' : `: ${flag.reason}`}`;
   return `${flag.kind.replaceAll('_', ' ')}${engine}${flag.reason === undefined ? '' : `: ${flag.reason}`}`;
@@ -158,7 +158,7 @@ export function flagNotes(programs: Program[], floor = 0.1): string[] {
   if (flags.some((flag) => flag.kind === 'too_short' && flag.engine !== undefined && flag.engine !== baseline)) {
     notes.push(`A time marked too short on a ry engine is under ${floor} s. That speed is what the suite measures, so it counts in the geometric mean.`);
   }
-  if (kinds.has('typed_refused')) notes.push('A typed version the compiler refused has no typed time; the flag gives the reason.');
+  if (kinds.has('typed_refused')) notes.push('A program marked typed code partly refused has code the typed core refused, which runs in the interpreter instead; the flag gives the refusal.');
   if (kinds.has('wide_interval')) notes.push("A program marked wide interval varied so much between rounds that its ratio's interval is wide; read its median with care.");
   if (kinds.has('tests_differ')) notes.push('A package marked tests differ passed a different number of tests on ry than on GNU R; the flag gives both counts.');
   if (programs.some((program) => (program.measurement?.failures.length ?? 0) > 0)) {
@@ -273,8 +273,11 @@ function chartRow(program: Program & { measurement: Measurement }, engines: stri
 
 function geomeanRow(suite: Suite, engines: string[], grouped: boolean): ChartRow {
   const geomean = suite.results?.geomean ?? {};
+  // A failing or too-short program leaves the mean, so the label says how many it covers.
+  const counted = geomean[engines[0]]?.programs;
+  const total = measuredPrograms(suite).length;
   return {
-    label: grouped ? 'geometric mean of all groups' : 'geometric mean',
+    label: `${grouped ? 'geometric mean of all groups' : 'geometric mean'}${counted !== undefined && counted < total ? `, ${counted} of ${total} programs` : ''}`,
     flags: [],
     summary: true,
     bars: engines.map((engine) => {
