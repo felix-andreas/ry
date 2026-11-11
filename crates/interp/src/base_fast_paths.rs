@@ -167,9 +167,14 @@ unsafe fn with_prologue(
     if already {
         original = body.cdr().cdr().car();
     }
+    let hashed = if name == "Sys.which" {
+        configured_which_as_bundled(original)?
+    } else {
+        original
+    };
     let mut hash = FNV_OFFSET;
     stable_hash(formals, &mut hash);
-    stable_hash(original, &mut hash);
+    stable_hash(hashed, &mut hash);
     if print {
         eprintln!("{name} {hash:#018x}");
     }
@@ -183,6 +188,41 @@ unsafe fn with_prologue(
         symbols().brace,
         values::cons(prologue, values::cons(original, nil())?)?,
     )?))
+}
+
+/// `Sys.which`'s `body` as ry's bundled base R has it. GNU R's configure writes the path of the
+/// `which` program it found into the body (`which <- "/usr/bin/which"`), so the body differs
+/// between builds of one release, and ry's own build writes `"which"`. The fast path never runs
+/// that program, so a body that differs only there is the same code to it.
+unsafe fn configured_which_as_bundled(body: Sexp) -> R<Sexp> {
+    let which = install("which")?;
+    let is_configured_which = |statement: Sexp| {
+        statement.kind() == SexpType::Language
+            && statement.car() == symbols().assign
+            && statement.cdr().car() == which
+            && statement.cdr().cdr().car().kind() == SexpType::String
+            && length(statement.cdr().cdr().car()) == 1
+    };
+    if body.kind() != SexpType::Language || body.car() != symbols().brace {
+        return Ok(body);
+    }
+    let mut statements = body.cdr();
+    while statements.kind() == SexpType::Pairlist && !is_configured_which(statements.car()) {
+        statements = statements.cdr();
+    }
+    if statements.kind() != SexpType::Pairlist {
+        return Ok(body);
+    }
+    let heap = crate::heap();
+    let copy = values::duplicate(body)?;
+    heap.root(copy);
+    let mut statements = copy.cdr();
+    while !is_configured_which(statements.car()) {
+        statements = statements.cdr();
+    }
+    let bundled = values::scalar_string("which")?;
+    heap.set_car(statements.car().cdr().cdr(), bundled);
+    Ok(copy)
 }
 
 /// Puts the prologue in front of the closure that `outer`'s body defines as
