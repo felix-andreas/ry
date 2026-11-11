@@ -4,7 +4,9 @@
 # the method assigned: through native code (rlang's C captures the promise and its environment),
 # a condition or restart that carries the next method's environment up to a handler above or
 # below, `delayedAssign` into the global environment, a closure made in a helper, `sys.frames`,
-# and a finalizer registered on the frame.
+# a finalizer registered on the frame, `environment()` returned or stored, `on.exit`, and
+# `substitute` or `match.call` evaluated after both returns. The method or the next method also
+# captures `sys.frames()`, `sys.function()` and `parent.frame()`.
 stash <- new.env()
 
 native <- function(x, y) UseMethod("native")
@@ -72,6 +74,64 @@ for (i in 1:40) {
     closure(),
     vapply(kept_frames, function(env) format(get("y", envir = env)), ""),
     stash$finalized
+  )
+  if (i == 1 || i == 40) print(r)
+}
+
+captured <- function(x, y) UseMethod("captured")
+captured.a <- function(x, y) {
+  stash$next_function <- sys.function()
+  stash$next_parent <- parent.frame()
+  stash$next_frames <- sys.frames()
+  "captured.a"
+}
+captured.b <- function(x, y) {
+  y <- paste("captured", y)
+  stash$method_function <- sys.function()
+  stash$method_parent <- parent.frame()
+  r <- NextMethod()
+  stash$method_frames <- sys.frames()
+  stash$method_env <- environment()
+  r
+}
+returned <- function(x, y) UseMethod("returned")
+returned.a <- function(x, y) environment()
+returned.b <- function(x, y) { y <- paste("returned", y); NextMethod() }
+exits <- function(x, y) UseMethod("exits")
+exits.a <- function(x, y) { on.exit(stash$exit_next <- y); "exits.a" }
+exits.b <- function(x, y) {
+  y <- paste("exits", y)
+  on.exit(stash$exit_method <- y, add = TRUE)
+  NextMethod()
+}
+quoted <- function(x, y) UseMethod("quoted")
+quoted.a <- function(x, y) list(substitute(y), match.call(), environment())
+quoted.b <- function(x, y) { y <- paste("quoted", y); NextMethod() }
+own_y <- function(frames) {
+  frames <- Filter(function(env) exists("y", envir = env, inherits = FALSE), frames)
+  vapply(frames, function(env) format(get("y", envir = env)), "")
+}
+caller <- function(i) { marker <- i; captured(object(i), i) }
+for (i in 1:40) {
+  caller(i)
+  returned_env <- returned(object(i), i)
+  exits(object(i), i)
+  q <- quoted(object(i), i)
+  r <- c(
+    identical(stash$method_function, captured.b),
+    identical(stash$next_function, captured.a),
+    get("marker", envir = stash$method_parent) == i,
+    get("marker", envir = stash$next_parent) == i,
+    own_y(stash$method_frames),
+    own_y(stash$next_frames),
+    get("y", envir = stash$method_env),
+    get("y", envir = returned_env),
+    stash$exit_next,
+    stash$exit_method,
+    deparse(q[[1]]),
+    deparse(q[[2]]),
+    eval(q[[1]], q[[3]]),
+    eval(q[[2]][[3]], parent.frame())
   )
   if (i == 1 || i == 40) print(r)
 }
