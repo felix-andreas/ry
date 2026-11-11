@@ -3,12 +3,13 @@
 
 use {
     crate::{
-        boundary::{ApiResult, Pinned, Reachable, enter, error},
+        Runtime,
+        boundary::{ApiResult, Pinned, Reachable, direct, enter, error},
         globals::R_NamesSymbol,
         runtime,
     },
     heap::{
-        Heap,
+        Heap, TRIPLE_BYTES,
         object::{Sexp, SexpType, Shape},
     },
     std::ffi::c_int,
@@ -255,21 +256,42 @@ read_path!(CADDDR, cdr, cdr, cdr, car);
 read_path!(CAD4R, cdr, cdr, cdr, cdr, car);
 read_path!(CAD5R, cdr, cdr, cdr, cdr, cdr, car);
 
+/// `cell` when a cell writer may store into it directly: a plain triple other than `NULL`.
+/// Anything else (`NULL`, ALTREP, a native record, an object with no cells) takes the slow
+/// path, which reports it.
+#[inline(always)]
+unsafe fn plain_cell(runtime: &Runtime, cell: Sexp) -> Option<Sexp> {
+    (cell.kind().shape() == Shape::Triple
+        && cell != runtime.nil()
+        && !cell.is_altrep()
+        && !interp::records::is_native(cell))
+    .then_some(cell)
+}
+
 macro_rules! write_path {
     ($name:ident, $($step:ident),*) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(object: Sexp, value: Sexp) -> Sexp {
-            enter(|| {
-                #[allow(unused_mut)]
-                let mut cell = object;
-                $( cell = triple(cell, stringify!($name))?.$step(); )*
-                let cell = triple(cell, stringify!($name))?;
-                if cell == runtime().nil() {
-                    return Err(error(concat!("bad value: ", stringify!($name), " on NULL")));
-                }
-                runtime().heap.set_car(cell, value);
-                Ok(value)
-            })
+            direct(
+                |runtime| {
+                    #[allow(unused_mut)]
+                    let mut cell = plain_cell(runtime, object)?;
+                    $( cell = plain_cell(runtime, cell.$step())?; )*
+                    runtime.heap.set_car(cell, value);
+                    Some(Reachable(value))
+                },
+                || {
+                    #[allow(unused_mut)]
+                    let mut cell = object;
+                    $( cell = triple(cell, stringify!($name))?.$step(); )*
+                    let cell = triple(cell, stringify!($name))?;
+                    if cell == runtime().nil() {
+                        return Err(error(concat!("bad value: ", stringify!($name), " on NULL")));
+                    }
+                    runtime().heap.set_car(cell, value);
+                    Ok(value)
+                },
+            )
         }
     };
 }
@@ -282,26 +304,40 @@ write_path!(SETCAD4R, cdr, cdr, cdr, cdr);
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SETCDR(object: Sexp, value: Sexp) -> Sexp {
-    enter(|| {
-        let cell = triple(object, "SETCDR")?;
-        if cell == runtime().nil() {
-            return Err(error("bad call to SETCDR"));
-        }
-        runtime().heap.set_cdr(cell, value);
-        Ok(value)
-    })
+    direct(
+        |runtime| {
+            let cell = plain_cell(runtime, object)?;
+            runtime.heap.set_cdr(cell, value);
+            Some(Reachable(value))
+        },
+        || {
+            let cell = triple(object, "SETCDR")?;
+            if cell == runtime().nil() {
+                return Err(error("bad call to SETCDR"));
+            }
+            runtime().heap.set_cdr(cell, value);
+            Ok(value)
+        },
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_TAG(object: Sexp, value: Sexp) {
-    enter(|| {
-        let cell = triple(object, "SET_TAG")?;
-        if cell == runtime().nil() {
-            return Err(error("bad call to SET_TAG"));
-        }
-        runtime().heap.set_tag(cell, value);
-        Ok(())
-    })
+    direct(
+        |runtime| {
+            let cell = plain_cell(runtime, object)?;
+            runtime.heap.set_tag(cell, value);
+            Some(())
+        },
+        || {
+            let cell = triple(object, "SET_TAG")?;
+            if cell == runtime().nil() {
+                return Err(error("bad call to SET_TAG"));
+            }
+            runtime().heap.set_tag(cell, value);
+            Ok(())
+        },
+    )
 }
 
 /// The missingness bits of an argument cell.
@@ -312,26 +348,68 @@ pub unsafe extern "C" fn MISSING(object: Sexp) -> c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_cons(car: Sexp, cdr: Sexp) -> Sexp {
-    enter(|| Ok(runtime().heap.cons(car, cdr)?))
+    direct(
+        |runtime| runtime.heap.cons(car, cdr).ok(),
+        || Ok(runtime().heap.cons(car, cdr)?),
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_lcons(car: Sexp, cdr: Sexp) -> Sexp {
-    enter(|| {
-        let nil = runtime().nil();
-        Ok(runtime()
-            .heap
-            .alloc_triple(SexpType::Language, car, cdr, nil)?)
-    })
+    direct(
+        |runtime| {
+            let nil = runtime.nil();
+            runtime
+                .heap
+                .alloc_triple(SexpType::Language, car, cdr, nil)
+                .ok()
+        },
+        || {
+            let nil = runtime().nil();
+            Ok(runtime()
+                .heap
+                .alloc_triple(SexpType::Language, car, cdr, nil)?)
+        },
+    )
 }
 
 macro_rules! list_constructor {
     ($name:ident, $kind:expr, $($argument:ident),+) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name($($argument: Sexp),+) -> Sexp {
-            enter(|| list_of($kind, &[$($argument),+]))
+            direct(
+                |runtime| list_direct(runtime, $kind, &[$($argument),+]),
+                || list_of($kind, &[$($argument),+]),
+            )
         }
     };
+}
+
+/// `list_of`'s direct path: one collection check for all the cells, after which the cells
+/// allocate without one, so neither the elements nor the cells built so far need a root.
+#[inline(always)]
+unsafe fn list_direct(
+    runtime: &mut crate::Runtime,
+    kind: SexpType,
+    elements: &[Sexp],
+) -> Option<Sexp> {
+    runtime
+        .heap
+        .reserve(elements.len() * TRIPLE_BYTES, elements);
+    let nil = runtime.nil();
+    let mut list = nil;
+    for (position, &element) in elements.iter().enumerate().rev() {
+        let cell_kind = if position == 0 {
+            kind
+        } else {
+            SexpType::Pairlist
+        };
+        list = runtime
+            .heap
+            .alloc_triple_uncollected(cell_kind, element, list, nil)
+            .ok()?;
+    }
+    Some(list)
 }
 
 list_constructor!(Rf_list1, SexpType::Pairlist, a);

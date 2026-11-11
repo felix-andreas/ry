@@ -3,8 +3,8 @@
 use {
     crate::{
         R_len_t, R_xlen_t, Rboolean, SEXPTYPE, altrep,
-        attributes::{get_attrib, inherits, set_attrib},
-        boundary::{ApiResult, enter, error, warn},
+        attributes::{get_attrib, inherits, raw_attribute, set_attrib},
+        boundary::{ApiResult, direct, enter, error, warn},
         globals::{R_ClassSymbol, R_DimSymbol, R_LevelsSymbol, R_NamesSymbol, R_TspSymbol},
         memory::{alloc_vector, scalar_string},
         runtime,
@@ -1497,30 +1497,59 @@ sortedness_api!(STRING_IS_SORTED, STRING_NO_NA);
 /// `isList` admits have rows, and a pairlist without a `dim` fails as `LENGTH` fails on it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_nrows(object: Sexp) -> c_int {
-    enter(|| {
-        if !has_rows(object) {
-            return Err(error("object is not a matrix"));
-        }
-        if let Some(dims) = dims(object)? {
-            return Ok(dims.first().copied().unwrap_or(0));
-        }
-        Ok(xlength(object)? as c_int)
-    })
+    direct(
+        |_| match plain_dim(object)? {
+            Some(extents) => Some(extents.first().copied().unwrap_or(0)),
+            None => c_int::try_from(plain_length(object)?).ok(),
+        },
+        || {
+            if !has_rows(object) {
+                return Err(error("object is not a matrix"));
+            }
+            if let Some(dims) = dims(object)? {
+                return Ok(dims.first().copied().unwrap_or(0));
+            }
+            Ok(xlength(object)? as c_int)
+        },
+    )
 }
 
 /// GNU R's `ncols`: the second extent of a `dim` with two or more, and otherwise one, so
 /// `NULL`, a plain vector and a data frame count as a single column.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_ncols(object: Sexp) -> c_int {
-    enter(|| {
-        if !has_rows(object) {
-            return Err(error("object is not a matrix"));
-        }
-        Ok(match dims(object)? {
-            Some(dims) if dims.len() >= 2 => dims[1],
-            _ => 1,
-        })
-    })
+    direct(
+        |_| match plain_dim(object)? {
+            Some(&[_, columns, ..]) => Some(columns),
+            _ => Some(1),
+        },
+        || {
+            if !has_rows(object) {
+                return Err(error("object is not a matrix"));
+            }
+            Ok(match dims(object)? {
+                Some(dims) if dims.len() >= 2 => dims[1],
+                _ => 1,
+            })
+        },
+    )
+}
+
+/// The `dim` extents `nrows` and `ncols` read, without entering the API: `Some(None)` for an
+/// object that has rows but no integer `dim`, and `None` when the slow path has to decide.
+#[inline(always)]
+unsafe fn plain_dim<'a>(object: Sexp) -> Option<Option<&'a [i32]>> {
+    if !has_rows(object) || interp::records::is_native(object) {
+        return None;
+    }
+    let dim = raw_attribute(object, R_DimSymbol.get());
+    if dim.kind() != SexpType::Integer {
+        return Some(None);
+    }
+    if dim.is_altrep() {
+        return None;
+    }
+    Some(Some(dim.slice::<i32>()))
 }
 
 /// Whether `nrows` and `ncols` accept `object`: `isVector(s) || isList(s)` in GNU R, which
@@ -1640,7 +1669,50 @@ pub unsafe extern "C" fn Rf_asCharacterFactor(object: Sexp) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_asLogical(object: Sexp) -> c_int {
-    enter(|| as_logical(object))
+    direct(
+        |_| {
+            Some(match plain_first(object)? {
+                First::Logical(value) => value,
+                First::Integer(value) => int_to_logical(value),
+                First::Real(value) => real_to_logical(value),
+                First::None => NA_LOGICAL,
+            })
+        },
+        || as_logical(object),
+    )
+}
+
+/// The first element of a plain logical, integer or double vector, which the `as*` scalar
+/// conversions read without entering the API. A value of any other type that is not atomic has
+/// no first element, and the conversions answer `NA` for it.
+enum First {
+    Logical(i32),
+    Integer(i32),
+    Real(f64),
+    None,
+}
+
+#[inline(always)]
+unsafe fn plain_first(object: Sexp) -> Option<First> {
+    let kind = object.kind();
+    if interp::records::is_native(object) || kind == SexpType::Char {
+        return None;
+    }
+    if !kind.is_atomic() {
+        return Some(First::None);
+    }
+    if object.is_altrep() {
+        return None;
+    }
+    if object.length() < 1 {
+        return Some(First::None);
+    }
+    match kind {
+        SexpType::Logical => Some(First::Logical(object.slice::<i32>()[0])),
+        SexpType::Integer => Some(First::Integer(object.slice::<i32>()[0])),
+        SexpType::Real => Some(First::Real(object.slice::<f64>()[0])),
+        _ => None,
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1661,12 +1733,32 @@ pub unsafe extern "C" fn Rf_asLogical2(object: Sexp, checking: c_int, call: Sexp
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_asInteger(object: Sexp) -> c_int {
-    enter(|| as_integer(object))
+    direct(
+        |_| match plain_first(object)? {
+            First::Logical(value) | First::Integer(value) => Some(value),
+            First::Real(value) => match real_to_int(value) {
+                // Out of range warns, which only the slow path may do.
+                (_, true) => None,
+                (value, false) => Some(value),
+            },
+            First::None => Some(NA_INTEGER),
+        },
+        || as_integer(object),
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_asReal(object: Sexp) -> f64 {
-    enter(|| as_real(object))
+    direct(
+        |_| {
+            Some(match plain_first(object)? {
+                First::Logical(value) | First::Integer(value) => int_to_real(value),
+                First::Real(value) => value,
+                First::None => NA_REAL,
+            })
+        },
+        || as_real(object),
+    )
 }
 
 #[unsafe(no_mangle)]
