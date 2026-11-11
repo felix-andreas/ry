@@ -9817,7 +9817,14 @@ unsafe fn assign_element(
     moves::modifying(target)?;
     let owned = owned(target);
     let target = if appends {
-        crate::subset::append_room(target, owned)?
+        // Of `subset::grows_in_place`'s tests, `owned` settles sharing and `appends` the
+        // attributes, and an ALTREP vector is never resizable, so only the room is left.
+        if owned && heap.is_resizable(target) && target.capacity() > count as isize {
+            heap.resize_vector(target, count as isize + 1)?;
+            target
+        } else {
+            crate::subset::append_copy(target, owned)?
+        }
     } else if owned {
         target
     } else {
