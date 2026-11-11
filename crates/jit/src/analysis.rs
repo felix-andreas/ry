@@ -76,10 +76,11 @@ pub enum Ty {
     Num,
     /// A boxed, attribute-free, non-ALTREP integer vector of any length.
     IntVec,
-    /// A boxed, attribute-free compact integer sequence (`1:n`, `seq_len(n)`, `seq_along(x)`):
-    /// compiled code computes an element from the sequence's first element and increment and
-    /// never reads its storage, which it does not have. It joins with nothing else, so no
-    /// vector operation or store sees one.
+    /// A boxed, attribute-free compact integer sequence (`1:n`, `seq_len(n)`, `seq_along(x)`)
+    /// or plain length-one integer vector, which `n:n` makes: compiled code computes an element
+    /// from the sequence's first element and increment, which are the element and zero for the
+    /// length-one vector, and never reads a sequence's storage, which it does not have. It
+    /// joins with nothing else, so no vector operation or store sees one.
     IntSeq,
     /// A boxed, attribute-free compact double sequence (`as.double(1:n)`), read like
     /// [`Ty::IntSeq`].
@@ -212,8 +213,9 @@ pub fn from_feedback(bits: u32) -> Ty {
         feedback::INTEGER_ARRAY => Ty::IntArr,
         feedback::DOUBLE_ARRAY => Ty::DblArr,
         feedback::LOGICAL_ARRAY => Ty::LglArr,
-        feedback::INTEGER_SEQUENCE => Ty::IntSeq,
-        feedback::DOUBLE_SEQUENCE => Ty::DblSeq,
+        // `a:b` with `a == b` makes a plain scalar, which a sequence's guard also passes.
+        _ if within(feedback::INTEGER_SEQUENCE | feedback::INTEGER_SCALAR) => Ty::IntSeq,
+        _ if within(feedback::DOUBLE_SEQUENCE | feedback::DOUBLE_SCALAR) => Ty::DblSeq,
         _ => Ty::Boxed,
     }
 }
@@ -289,8 +291,13 @@ impl Slot {
     };
 
     fn join(self, other: Slot) -> Slot {
+        let sequence = |side: Slot| matches!(side.ty, Ty::IntSeq | Ty::DblSeq);
         let ty = if self.status & status::LOADED == 0 && other.status & status::LOADED == 0 {
             // Both forgotten: the types are what a reload speculates on.
+            self.ty.join(other.ty)
+        } else if sequence(self) || sequence(other) {
+            // A sequence forgotten on one side, as `inds <- 1:n` is across the `which()` that
+            // replaces it on the other, is no plain vector, so the reload must expect both.
             self.ty.join(other.ty)
         } else if self.status & status::LOADED == 0 {
             other.ty
@@ -1390,6 +1397,7 @@ pub unsafe fn plan<'a>(
         defaulted: defaulted_formals(formals, arena),
         locals,
         hints: List::new_in(arena),
+        modified: List::new_in(arena),
         declared: List::new_in(arena),
         frame_safe: Map::with_hasher_in(FxBuildHasher, arena),
         closure_code: Map::with_hasher_in(FxBuildHasher, arena),
@@ -1630,6 +1638,9 @@ struct Builder<'a> {
     /// Each slot's type as tier 0 saw it at its loads, for inlined code that reads a variable
     /// compiled code has not loaded.
     hints: List<'a, Ty>,
+    /// By slot, whether the body assigns into the variable's value (`x[i] <- v`, `names(x) <-
+    /// v`), which turns a compact sequence the variable held into a plain vector.
+    modified: List<'a, bool>,
     /// By slot, the type the closure's signature declares for a formal, `Boxed` for anything else.
     declared: List<'a, Ty>,
     /// Whether each closure called directly is frame-safe, so each body is walked once.
@@ -1656,7 +1667,7 @@ impl<'a> Builder<'a> {
                 Op::GetVar => Some(inst.operand(1)),
                 Op::SetVar => Some(inst.operand(0)),
                 Op::ForStep => Some(inst.operand(2)),
-                Op::SubAssign | Op::SubAssignMatrix => Some(inst.operand(1)),
+                Op::SubAssign | Op::SubAssignMatrix | Op::Replace => Some(inst.operand(1)),
                 _ => None,
             };
             if let Some(operand) = symbol_operand {
@@ -1665,13 +1676,22 @@ impl<'a> Builder<'a> {
                     self.slot_of.insert(symbol, self.slots.len());
                     self.slots.push(symbol);
                     self.hints.push(Ty::Bottom);
+                    self.modified.push(false);
                     self.declared.push(Ty::Boxed);
                 }
-                let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32);
-                if inst.op == Op::GetVar && bits != 0 {
-                    let slot = self.slot_of[&symbol];
-                    self.hints[slot] = self.hints[slot].join(from_feedback(bits));
+                if matches!(inst.op, Op::SubAssign | Op::SubAssignMatrix | Op::Replace) {
+                    self.modified[self.slot_of[&symbol]] = true;
                 }
+            }
+        }
+        // A second pass, because a load that comes before the body's first assignment into the
+        // variable must already see it as modified.
+        for position in 0..self.insts.len() {
+            let inst = &self.insts[position];
+            let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32);
+            if inst.op == Op::GetVar && bits != 0 {
+                let slot = self.slot_of[&self.constant(inst.operand(1))];
+                self.hints[slot] = self.hints[slot].join(self.variable_ty(slot, bits));
             }
         }
         let source = self.code.cdr().element(bytecode::SOURCE);
@@ -1762,7 +1782,18 @@ impl<'a> Builder<'a> {
         if bits == feedback::INTEGER_SCALAR | feedback::DOUBLE_SCALAR {
             return Ty::Num;
         }
-        from_feedback(bits)
+        self.variable_ty(slot, bits)
+    }
+
+    /// The type a load of the variable in `slot` speculates on from its feedback `bits`. A
+    /// variable the body assigns into, such as `count <- 0:(n - 1L)` updated by `count[[r]] <-
+    /// r`, holds a compact sequence only until the first assignment, so a guess of a sequence
+    /// would fail on the next pass, deoptimize and recompile the body; it loads boxed instead.
+    fn variable_ty(&self, slot: usize, bits: u32) -> Ty {
+        match from_feedback(bits) {
+            Ty::IntSeq | Ty::DblSeq if self.modified[slot] => Ty::Boxed,
+            ty => ty,
+        }
     }
 
     /// Splits the instructions into blocks and finds each block's successors and the loop
@@ -1994,7 +2025,15 @@ impl<'a> Builder<'a> {
                 let current = state.slots[slot];
                 let load = if current.may_be(status::NOT_LOADED) {
                     let ty = if current.may_be(status::LOADED) {
-                        current.ty
+                        // `inds <- 1:n` stores a sequence that a later `inds <- which(...)` on
+                        // another path replaces with a plain vector, so where the feedback has
+                        // seen more than the sequence, the load expects both.
+                        if matches!(current.ty, Ty::IntSeq | Ty::DblSeq) && !self.never_ran(inst.pc)
+                        {
+                            current.ty.join(self.load_ty(inst.pc, slot))
+                        } else {
+                            current.ty
+                        }
                     } else if self.never_ran(inst.pc) && current.ty != Ty::Bottom {
                         // A variable forgotten across an opaque call, read where tier 0 has not
                         // read it yet (a branch not taken so far): the type it had before the call
@@ -2503,7 +2542,16 @@ impl<'a> Builder<'a> {
                         Some(speculated.vector())
                     }
                 };
-                state.registers[src] = refine.unwrap_or(ty.vector());
+                // From here on the register is only the loop's sequence, which `ForStep` reads
+                // through the first element and increment `ForInit` stored whenever it is
+                // compact, so a compact sequence types as its plain vector. A loop header then
+                // joins the guess from one pass with the refined type from the next, rather
+                // than losing both to `Boxed` and refusing the loop.
+                state.registers[src] = match refine.unwrap_or(ty.vector()) {
+                    Ty::IntSeq => Ty::IntVec,
+                    Ty::DblSeq => Ty::DblVec,
+                    other => other,
+                };
                 Action::ForInit {
                     index: operand(0),
                     src,
@@ -2513,11 +2561,7 @@ impl<'a> Builder<'a> {
             Op::ForStep => {
                 let slot = self.slot(self.constant(operand(2)));
                 self.push_edge(operand(3), state);
-                let element = match state.registers[operand(1)] {
-                    Ty::IntSeq => Ty::Int,
-                    Ty::DblSeq => Ty::Dbl,
-                    ty => ty.element(),
-                };
+                let element = state.registers[operand(1)].element();
                 state.slots[slot] = Slot {
                     status: status::DIRTY,
                     ty: element,
@@ -3800,7 +3844,13 @@ impl<'a> Builder<'a> {
         let feedback = if untagged && self.never_ran(inst.pc) {
             builtin_result(name, &types).unwrap_or(Ty::Boxed)
         } else {
-            self.feedback_at(inst.pc)
+            // `1:line` that has so far made only `1:1`, a plain scalar, makes a compact
+            // sequence for a longer line, which the sequence's guard takes as well as the scalar.
+            match (self.feedback_at(inst.pc), builtin_result(name, &types)) {
+                (Ty::Int, Some(Ty::IntSeq)) if untagged => Ty::IntSeq,
+                (Ty::Dbl, Some(Ty::DblSeq)) if untagged => Ty::DblSeq,
+                (feedback, _) => feedback,
+            }
         };
         // A library leaf never dispatches, but reading an ALTREP argument runs its class's
         // methods, which a package may write in R, so every boxed argument is observed.

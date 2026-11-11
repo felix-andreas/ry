@@ -887,7 +887,7 @@ typed_slice!(raws, raws_mut, raws_altrep, u8);
 #[inline]
 pub unsafe fn int_elt(object: Sexp, index: usize) -> R<i32> {
     if object.is_altrep() {
-        (interp().hooks.altrep_int_elt)(object, index)
+        altrep_int_elt(object, index)
     } else {
         Ok(object.slice::<i32>()[index])
     }
@@ -897,9 +897,31 @@ pub unsafe fn int_elt(object: Sexp, index: usize) -> R<i32> {
 #[inline]
 pub unsafe fn real_elt(object: Sexp, index: usize) -> R<f64> {
     if object.is_altrep() {
-        (interp().hooks.altrep_real_elt)(object, index)
+        altrep_real_elt(object, index)
     } else {
         Ok(object.slice::<f64>()[index])
+    }
+}
+
+/// The ALTREP branch of [`int_elt`]. A compact sequence computes the element from its first
+/// element and increment, which is what its class's `Elt` method returns, without the call
+/// through the class's method table that every other class pays.
+#[cold]
+#[inline(never)]
+unsafe fn altrep_int_elt(object: Sexp, index: usize) -> R<i32> {
+    match compact_sequence(object) {
+        Some((_, first, increment)) => Ok((first + increment * index as f64) as i32),
+        None => (interp().hooks.altrep_int_elt)(object, index),
+    }
+}
+
+/// The ALTREP branch of [`real_elt`], read like [`altrep_int_elt`].
+#[cold]
+#[inline(never)]
+unsafe fn altrep_real_elt(object: Sexp, index: usize) -> R<f64> {
+    match compact_sequence(object) {
+        Some((_, first, increment)) => Ok(first + increment * index as f64),
+        None => (interp().hooks.altrep_real_elt)(object, index),
     }
 }
 
