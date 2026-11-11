@@ -2984,6 +2984,25 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
                 "{ k <- 1i64; x <- \"\"; FUNCTION(k, x) }",
             ],
         ),
+        // A loop that wraps its own value constructs a shape the `match` above it must already
+        // test for on the first call.
+        (
+            "function(t: :Seed | :Wrapped(:Seed), n: I64) -> F64 { cur <- t\n total <- 0\n \
+             i <- 0i64\n while (i < n) { total <- total + match (cur) { :Wrapped(x) => 1\n _ => 0 }\n \
+             cur <- :Wrapped(cur)\n i <- i + 1i64 }\n total }",
+            &[
+                "{ x <- :Seed; k <- 3i64; FUNCTION(x, k) }",
+                "{ x <- :Seed; k <- 3i64; FUNCTION(x, k) }",
+            ],
+        ),
+        // A repeated string longer than R allows fails instead of aborting.
+        (
+            "function(s: Str, n: I64) -> I64 Str.count_utf8_bytes(Str.repeat(s, n))",
+            &[
+                "{ x <- \"ab\"; k <- 3i64; FUNCTION(x, k) }",
+                "{ x <- \"ab\"; k <- 4000000000i64; FUNCTION(x, k) }",
+            ],
+        ),
         (
             "function(s: Str) -> Bool Str.starts_with(s, \"ab\") && !Str.ends_with(s, \"z\")",
             &[
@@ -3029,6 +3048,61 @@ fn typed_core_keeps_tier_zero_semantics_for_records_tags_and_text() {
             let live = unsafe { typed::values::ry_live_objects() };
             assert_eq!(live, 0, "case {case} leaked {live} native values");
         }
+    });
+}
+
+#[test]
+fn typed_calls_in_unforced_arguments_do_not_run() {
+    // R runs an argument only when the callee forces it. A typed call is not run ahead of the
+    // call that receives it, even though its native code changes nothing, because it may not
+    // finish.
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            jit::install_mode(Mode::On);
+            run("lazy_unused <- function(n: F64) -> F64 n + 1");
+            run("lazy_first <- function(a: F64, b: F64) -> F64 a");
+            run("lazy_wrapper <- function(x) lazy_first(x, lazy_unused(x))");
+            for _ in 0..3 {
+                assert_eq!(run("lazy_wrapper(2.5)"), run("2.5"));
+            }
+            let unused = lower::parse_text("lazy_unused", "<test>")
+                .and_then(|parsed| eval::eval(parsed.element(0), values::global_env()));
+            let ran = unused.is_ok_and(typed::has_compiled);
+            jit::install_mode(Mode::Off);
+            assert!(!ran, "an unforced typed argument ran");
+        }
+    });
+}
+
+#[test]
+fn typed_core_does_not_convert_dictionary_updates() {
+    // A dictionary's values all have its value type, so an update that gives a logical for a
+    // `F64` dictionary is an error on every tier, never a conversion.
+    let definition = "function(rows: List<Str>) -> F64 { totals <- List.walk(rows, Dict.empty(), \
+        function(d: Dict<Str, F64>, row: Str) -> Dict<Str, F64> Dict.update(d, row, \
+        function(found: Result<F64, :Missing>) -> Result<F64, :Missing> :Ok(TRUE)))\n \
+        Result.with_default(Dict.get(totals, \"a\"), -1) }";
+    let call = "{ x <- List.from_r(c(\"a\", \"b\")); FUNCTION(x) }";
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        let (reference, compiled) = unsafe {
+            let run_in = |name: &str, mode: Mode| {
+                jit::install_mode(mode);
+                run(&format!("{name} <- {definition}"));
+                let outcomes: Vec<String> = (0..3)
+                    .map(|_| run(&call.replace("FUNCTION", name)))
+                    .collect();
+                jit::install_mode(Mode::Off);
+                outcomes
+            };
+            (
+                run_in("update_reference", Mode::Off),
+                run_in("update_compiled", Mode::On),
+            )
+        };
+        assert_eq!(reference, compiled);
+        assert!(reference[0].contains("must return"), "{reference:?}");
     });
 }
 

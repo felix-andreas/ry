@@ -221,7 +221,23 @@ unsafe fn still_resolves(compiled: &Compiled) -> bool {
     })
 }
 
+/// Compiles `function` for `params` until the code is current. Compiled code confirms the tag
+/// shapes it constructs, and a `match` over any tag compiled before them, in this code or in a
+/// function it calls, would not test for them.
 unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> {
+    for _ in 0..MAX_SHAPE_ROUNDS {
+        let compiled = compile_once(function, params)?;
+        if compiled.epoch.is_none_or(|epoch| epoch == shapes::epoch()) {
+            return Ok(compiled);
+        }
+    }
+    Err(Refusal("the shapes a `match` tests for keep growing"))
+}
+
+/// How many times [`compile`] tries before the shapes settle.
+const MAX_SHAPE_ROUNDS: usize = 4;
+
+unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> {
     let declared = if interp::annotations::returns_i64(function) {
         Some(Type::I64)
     } else {
@@ -260,6 +276,9 @@ unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> 
     let code = backend::compile(&ir, &linker.callees)?;
     let mut speculations = lowered.speculations;
     speculations.extend(linker.speculations);
+    for &shape in &lowered.constructed {
+        shapes::confirm(shape);
+    }
     let epoch = earliest(lowered.epoch, linker.epoch);
     Ok(Compiled {
         code,

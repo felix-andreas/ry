@@ -3102,21 +3102,29 @@ pub unsafe extern "C" fn ry_format_i64(value: i64) -> Str {
 }
 
 /// `Str.repeat(string, count)` for a count the caller checked is not negative. The string is
-/// borrowed.
+/// borrowed. A result longer than [`MAX_STR_BYTES`] comes back as the null string, `lo` and `hi`
+/// both zero, which no string has, since an inline string sets the top bit of `hi` and a buffer
+/// pointer is never null.
 pub unsafe extern "C" fn ry_str_repeat(lo: u64, hi: u64, count: i64) -> Str {
     let string = Str { lo, hi };
     let bytes = string.bytes();
     let count = count.max(0) as usize;
-    let total = bytes
+    let Some(total) = bytes
         .len()
         .checked_mul(count)
-        .unwrap_or_else(|| panic!("a repeated string of {count} copies overflows memory"));
+        .filter(|&total| total <= MAX_STR_BYTES)
+    else {
+        return Str { lo: 0, hi: 0 };
+    };
     str_build(total, |cursor| {
         for _ in 0..count {
             cursor.push(bytes);
         }
     })
 }
+
+/// The longest string compiled code builds by repetition, R's own limit on a string's bytes.
+pub const MAX_STR_BYTES: usize = i32::MAX as usize;
 
 /// `Str.with_ascii_uppercased` (`upper` nonzero) or `Str.with_ascii_lowercased`: only ASCII
 /// letters change, so the length never does, and an owned unique buffer is changed in place.

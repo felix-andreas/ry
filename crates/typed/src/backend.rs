@@ -1270,12 +1270,17 @@ impl Emitter<'_> {
                     .ins()
                     .icmp_imm_s(IntCC::SignedLessThan, count, 0);
                 self.fail_if(negative, &inst.fail_drops)?;
-                SmallVec::from_slice(&self.call(
+                let repeated = self.call(
                     address!(values::ry_str_repeat),
                     &[I64; 3],
                     &[I64, I64],
                     &[x[0], x[1], count],
-                ))
+                );
+                let [lo, hi] = [repeated[0], repeated[1]];
+                let both = self.builder.ins().bor(lo, hi);
+                let too_long = self.builder.ins().icmp_imm_s(IntCC::Equal, both, 0);
+                self.fail_if(too_long, &inst.fail_drops)?;
+                SmallVec::from_slice(&[lo, hi])
             }
             Op::Split(a, separator) => {
                 let (x, separator) = (self.get(*a)?, self.get(*separator)?);

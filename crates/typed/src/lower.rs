@@ -54,6 +54,8 @@ pub struct Lowered {
     pub speculations: Vec<Speculation>,
     /// The [`shapes::epoch`] whose confirmed shapes a `match` over any tag tests for.
     pub epoch: Option<u64>,
+    /// The tag shapes the code constructs, which the caller confirms once the code compiles.
+    pub constructed: SmallVec<[u32; 4]>,
 }
 
 /// The index [`Op::CallTyped`] uses for the function calling itself.
@@ -98,6 +100,7 @@ pub unsafe fn lower(
         unusable: SmallVec::new(),
         epoch: None,
         returned: None,
+        constructed: SmallVec::new(),
     };
     let mut assigned = Vec::new();
     assigned_symbols(body, &mut assigned);
@@ -144,6 +147,7 @@ pub unsafe fn lower(
         function: lowering.builder.function,
         speculations: lowering.speculations,
         epoch: lowering.epoch,
+        constructed: lowering.constructed,
     })
 }
 
@@ -185,6 +189,7 @@ struct Checkpoint {
     control: usize,
     unusable: usize,
     returned: Option<u32>,
+    constructed: usize,
     blocks: usize,
 }
 
@@ -210,6 +215,8 @@ struct Lowering<'c> {
     epoch: Option<u64>,
     /// The union of the tags an early `return` of the function itself gives.
     returned: Option<u32>,
+    /// The tag shapes the code constructs, which a `match` over any tag also tests for.
+    constructed: SmallVec<[u32; 4]>,
 }
 
 /// An argument of a call, by name or position.
@@ -2424,7 +2431,9 @@ impl Lowering<'_> {
             .ok_or(Refusal("a value with more fields than a box holds"))?;
         let ty = if tagged {
             // Values of this shape exist once the code runs, so a match over any tag tests for it.
-            shapes::confirm(shape);
+            if !self.constructed.contains(&shape) {
+                self.constructed.push(shape);
+            }
             Type::Tag(shapes::union_of(&[shape]))
         } else {
             Type::Record(shape)
@@ -2471,7 +2480,13 @@ impl Lowering<'_> {
                 None => {
                     self.epoch.get_or_insert(shapes::epoch());
                     let heap = interp::heap();
-                    let found = shapes::confirmed()
+                    let mut candidates = shapes::confirmed();
+                    for &shape in &self.constructed {
+                        if !candidates.contains(&shape) {
+                            candidates.push(shape);
+                        }
+                    }
+                    let found = candidates
                         .into_iter()
                         .filter(|&shape| {
                             let layout = shapes::shape(shape).layout;
@@ -2539,6 +2554,7 @@ impl Lowering<'_> {
                 control: self.control,
                 unusable: self.unusable.len(),
                 returned: self.returned,
+                constructed: self.constructed.len(),
                 blocks: self.builder.function.blocks.len(),
             });
             let completed = match (arm(self, case), checkpoint) {
@@ -2626,6 +2642,7 @@ impl Lowering<'_> {
         self.control = checkpoint.control;
         self.unusable.truncate(checkpoint.unusable);
         self.returned = checkpoint.returned;
+        self.constructed.truncate(checkpoint.constructed);
         true
     }
 
@@ -2911,7 +2928,11 @@ impl Lowering<'_> {
                 match (shape, layout) {
                     (Some(shape), Some(layout)) if layout == ok => {
                         let value = lowering.field(answer, shape, 0)?;
-                        let value = lowering.convert_scalar(value, item)?;
+                        // A dictionary's values all have its value type, which `Dict.update`
+                        // checks rather than converts, as `Dict.insert` does.
+                        if lowering.convert_scalar(value, item)? != value {
+                            return Err(Refusal("an update to a value of another type"));
+                        }
                         Ok(Some(
                             lowering
                                 .builder

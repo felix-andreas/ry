@@ -3275,9 +3275,10 @@ const MAX_PURE_DEPTH: usize = 8;
 
 /// The value `expression` has in `env` when evaluating it can run no R code, signal no
 /// condition and change nothing: a constant, a variable bound to a value or a forced promise,
-/// `(`, unary and binary `+`, `-`, `*`, `/` of numbers without attributes, and `c()` of
-/// such numbers, each named by its base function, and a call of a strict typed closure that
-/// runs natively on such values. Evaluating such an argument before the call
+/// and `(`, unary and binary `+`, `-`, `*`, `/` of numbers without attributes, and `c()` of
+/// such numbers, each named by its base function. A typed closure's call is not read ahead,
+/// although its native code changes nothing, because it may not finish, and an argument the
+/// callee never forces must not run. Evaluating such an argument before the call
 /// gives the value forcing its promise would give, since the native code it is passed to runs
 /// no R code in between. Integer arithmetic that overflows is left to tier 0, which warns.
 unsafe fn pure_value(
@@ -3342,18 +3343,6 @@ unsafe fn pure_value(
         return None;
     }
     let function = resolve_function(head, start)?.function;
-    if function.kind() == SexpType::Closure && interp::annotations::is_typed(function) {
-        let mut operands: SmallVec<[Sexp; 4]> = SmallVec::new();
-        for &(_, item) in &items {
-            operands.push(pure_value(item, env, read, depth + 1)?);
-        }
-        // A strict typed closure's native code runs no R code and changes nothing anyone can
-        // see, so calling it ahead gives the value forcing the promise would. An error it raises
-        // is left to tier 0, which raises it when the promise is forced.
-        let value = typed::call(function, &operands)?.ok()?;
-        interp::heap().root(value);
-        return Some(value);
-    }
     let name = base_builtin(function, head)?;
     let mut operands: SmallVec<[Sexp; 4]> = SmallVec::new();
     for &(_, item) in &items {
