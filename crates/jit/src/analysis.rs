@@ -1281,6 +1281,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::SwitchArm
             | Op::Replace
             | Op::Missing
+            | Op::Namespace
             | Op::SuperAssign
             | Op::SetSrcref
             | Op::Resume
@@ -2321,8 +2322,9 @@ impl<'a> Builder<'a> {
                 &[],
                 Effect::PureUnlessObserved,
             ),
-            // `missing` reads the frame's bindings, so the variables must be written back first.
-            Op::Ast | Op::Missing => self.opaque_step(
+            // `missing` reads the frame's bindings, so the variables must be written back first,
+            // and `::` may load a namespace, which runs arbitrary code.
+            Op::Ast | Op::Missing | Op::Namespace => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
                 &[],
@@ -4205,9 +4207,13 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
     let kill = |register: usize, live: &mut [u64]| set_bit(live, register, false);
     let gen_ = |register: usize, live: &mut [u64]| set_bit(live, register, true);
     match inst.op {
-        Op::Constant | Op::GetVar | Op::GetFun | Op::Ast | Op::Closure | Op::Missing => {
-            kill(operand(0), live)
-        }
+        Op::Constant
+        | Op::GetVar
+        | Op::GetFun
+        | Op::Ast
+        | Op::Closure
+        | Op::Missing
+        | Op::Namespace => kill(operand(0), live),
         Op::SetVar | Op::SuperAssign => gen_(operand(1), live),
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             gen_(operand(0), live)

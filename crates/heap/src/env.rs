@@ -17,11 +17,12 @@
 
 use {
     crate::object::Sexp,
-    rustc_hash::{FxHashMap, FxHashSet},
+    rustc_hash::FxHashSet,
     std::{
-        alloc::{Layout, alloc, dealloc, handle_alloc_error},
+        alloc::{Layout, alloc, alloc_zeroed, dealloc, handle_alloc_error},
         mem::MaybeUninit,
         ops::{Deref, DerefMut},
+        ptr::NonNull,
     },
 };
 
@@ -65,9 +66,9 @@ pub struct Frame {
     /// Inline, because most frames are a call's few arguments and locals, and a closure call
     /// should not pay for a second allocation beside the frame's own.
     bindings: Bindings,
-    /// Boxed, because only large frames have one and the inline map would push every
-    /// environment into a larger size class.
-    index: Option<Box<FxHashMap<Sexp, u32>>>,
+    /// One pointer wide, because only large frames have one and anything wider would push
+    /// every environment into a larger size class.
+    index: Option<SlotIndex>,
     /// GNU R's chained table for a hashed frame, which only decides the listing order: lookups
     /// go through `index`. Boxed, for the same reason as the index.
     table: Option<Box<HashTable>>,
@@ -398,7 +399,7 @@ impl Frame {
             return None;
         }
         match &self.index {
-            Some(index) => Some(*index.get(&symbol)? as usize),
+            Some(index) => index.find(symbol, &self.bindings),
             None => self
                 .bindings
                 .iter()
@@ -496,17 +497,9 @@ impl Frame {
             table.insert(position as usize);
         }
         match &mut self.index {
-            Some(index) => {
-                index.entry(symbol).or_insert(position);
-            }
+            Some(index) => index.insert(symbol, position, &self.bindings),
             None if self.bindings.len() > INDEX_THRESHOLD => {
-                let mut index = FxHashMap::default();
-                for (position, binding) in self.bindings.iter().enumerate() {
-                    if binding.symbol != REMOVED {
-                        index.entry(binding.symbol).or_insert(position as u32);
-                    }
-                }
-                self.index = Some(Box::new(index));
+                self.index = Some(SlotIndex::of(&self.bindings));
             }
             None => {}
         }
@@ -554,7 +547,7 @@ impl Frame {
             return None;
         }
         let position = match &mut self.index {
-            Some(index) => index.remove(&symbol)? as usize,
+            Some(index) => index.remove(symbol, &self.bindings)?,
             None => self
                 .bindings
                 .iter()
@@ -572,7 +565,7 @@ impl Frame {
             && let Some(duplicate) = (position + 1..(self.formals & !SHADOWED) as usize)
                 .find(|&later| self.bindings[later].symbol == symbol)
         {
-            index.insert(symbol, duplicate as u32);
+            index.insert(symbol, duplicate as u32, &self.bindings);
         }
         if self.removed as usize * 2 > self.bindings.len() {
             self.compact();
@@ -593,11 +586,8 @@ impl Frame {
         self.bindings.retain(|binding| binding.symbol != REMOVED);
         self.formals = self.formals & SHADOWED | formals as u32;
         self.removed = 0;
-        if let Some(index) = &mut self.index {
-            index.clear();
-            for (position, binding) in self.bindings.iter().enumerate() {
-                index.entry(binding.symbol).or_insert(position as u32);
-            }
+        if self.index.is_some() {
+            self.index = Some(SlotIndex::of(&self.bindings));
         }
     }
 }
@@ -668,15 +658,7 @@ impl Frame {
             filter |= filter_bit(binding.symbol);
             shadowed |= !seen.insert(binding.symbol);
         }
-        let index = (bindings.len() > INDEX_THRESHOLD).then(|| {
-            let mut index = FxHashMap::with_capacity_and_hasher(bindings.len(), Default::default());
-            for (position, binding) in bindings.iter().enumerate() {
-                if binding.symbol != REMOVED {
-                    index.entry(binding.symbol).or_insert(position as u32);
-                }
-            }
-            Box::new(index)
-        });
+        let index = (bindings.len() > INDEX_THRESHOLD).then(|| SlotIndex::of(&bindings));
         Frame {
             bindings,
             index,
@@ -696,6 +678,213 @@ impl Frame {
             removed: image.removed,
             filter,
         }
+    }
+}
+
+/// A large frame's lookup index: an open-addressing table with linear probing over the frame's
+/// slot positions. Each entry packs the upper half of the symbol's hash above its position plus
+/// one, so zero marks an empty entry, a probe that meets another symbol mostly fails on the
+/// packed hash without loading that binding, and growing or deleting rehashes from the entries
+/// alone. The table is at most half full, so a probe for a symbol the frame does not bind,
+/// which is what most lookups through a namespace ask, ends after about one entry.
+///
+/// One allocation holds the capacity and the count ahead of the entries, so the frame keeps a
+/// single thin pointer to it.
+struct SlotIndex {
+    header: NonNull<u64>,
+}
+
+/// The words ahead of a [`SlotIndex`]'s entries: its capacity, then its count.
+const INDEX_HEADER: usize = 2;
+const INDEX_MINIMUM_CAPACITY: usize = 64;
+
+/// The hash both the index's entry and its home bucket derive from: a multiplicative hash of the
+/// symbol's address, whose upper bits are well mixed.
+#[inline(always)]
+fn index_hash(symbol: Sexp) -> u32 {
+    ((symbol.as_ptr() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 32) as u32
+}
+
+impl SlotIndex {
+    /// The index of every live binding in `bindings`, the first one winning for a symbol bound
+    /// twice.
+    fn of(bindings: &[Binding]) -> SlotIndex {
+        let live = bindings
+            .iter()
+            .filter(|binding| binding.symbol != REMOVED)
+            .count();
+        let mut index = SlotIndex::with_capacity((live * 2).next_power_of_two());
+        for (position, binding) in bindings.iter().enumerate() {
+            if binding.symbol != REMOVED {
+                index.insert(binding.symbol, position as u32, bindings);
+            }
+        }
+        index
+    }
+
+    fn with_capacity(capacity: usize) -> SlotIndex {
+        let capacity = capacity.max(INDEX_MINIMUM_CAPACITY);
+        let layout = SlotIndex::layout(capacity);
+        // SAFETY: the layout is non-zero; zeroed entries are empty.
+        unsafe {
+            let header = alloc_zeroed(layout).cast::<u64>();
+            let Some(header) = NonNull::new(header) else {
+                handle_alloc_error(layout);
+            };
+            header.as_ptr().write(capacity as u64);
+            SlotIndex { header }
+        }
+    }
+
+    fn layout(capacity: usize) -> Layout {
+        Layout::array::<u64>(INDEX_HEADER + capacity).expect("a frame index fits in memory")
+    }
+
+    fn capacity(&self) -> usize {
+        // SAFETY: the header words are always initialized.
+        unsafe { *self.header.as_ptr() as usize }
+    }
+
+    fn count(&self) -> usize {
+        // SAFETY: as in `capacity`.
+        unsafe { *self.header.as_ptr().add(1) as usize }
+    }
+
+    fn set_count(&mut self, count: usize) {
+        // SAFETY: as in `capacity`.
+        unsafe { *self.header.as_ptr().add(1) = count as u64 }
+    }
+
+    fn entries(&self) -> &[u64] {
+        // SAFETY: `capacity` entries follow the header, all initialized.
+        unsafe {
+            std::slice::from_raw_parts(self.header.as_ptr().add(INDEX_HEADER), self.capacity())
+        }
+    }
+
+    fn entries_mut(&mut self) -> &mut [u64] {
+        // SAFETY: as in `entries`.
+        unsafe {
+            std::slice::from_raw_parts_mut(self.header.as_ptr().add(INDEX_HEADER), self.capacity())
+        }
+    }
+
+    /// The bucket a hash starts probing at in a table of `capacity` entries, a power of two.
+    #[inline(always)]
+    fn home(hash: u32, capacity: usize) -> usize {
+        ((hash as u64 * capacity as u64) >> 32) as usize
+    }
+
+    #[inline]
+    fn find(&self, symbol: Sexp, bindings: &[Binding]) -> Option<usize> {
+        let hash = index_hash(symbol);
+        let entries = self.entries();
+        let mask = entries.len() - 1;
+        let mut bucket = SlotIndex::home(hash, entries.len());
+        loop {
+            let entry = *entries.get(bucket)?;
+            if entry == 0 {
+                return None;
+            }
+            if (entry >> 32) as u32 == hash {
+                let position = (entry as u32 - 1) as usize;
+                if bindings.get(position)?.symbol == symbol {
+                    return Some(position);
+                }
+            }
+            bucket = (bucket + 1) & mask;
+        }
+    }
+
+    /// Indexes `symbol` at `position`, unless the index already holds it.
+    fn insert(&mut self, symbol: Sexp, position: u32, bindings: &[Binding]) {
+        if self.find(symbol, bindings).is_some() {
+            return;
+        }
+        if (self.count() + 1) * 2 > self.capacity() {
+            self.grow();
+        }
+        let hash = index_hash(symbol);
+        let entry = (hash as u64) << 32 | (position as u64 + 1);
+        let count = self.count();
+        self.place(entry);
+        self.set_count(count + 1);
+    }
+
+    /// Writes `entry` into the first empty bucket from its home.
+    fn place(&mut self, entry: u64) {
+        let entries = self.entries_mut();
+        let mask = entries.len() - 1;
+        let mut bucket = SlotIndex::home((entry >> 32) as u32, entries.len());
+        while entries[bucket] != 0 {
+            bucket = (bucket + 1) & mask;
+        }
+        entries[bucket] = entry;
+    }
+
+    fn grow(&mut self) {
+        let mut grown = SlotIndex::with_capacity(self.capacity() * 2);
+        for &entry in self.entries() {
+            if entry != 0 {
+                grown.place(entry);
+            }
+        }
+        grown.set_count(self.count());
+        *self = grown;
+    }
+
+    /// Removes `symbol` and returns its position, shifting later entries of the same probe run
+    /// back so that no lookup needs a tombstone to keep probing past the hole.
+    fn remove(&mut self, symbol: Sexp, bindings: &[Binding]) -> Option<usize> {
+        let hash = index_hash(symbol);
+        let count = self.count();
+        let entries = self.entries_mut();
+        let capacity = entries.len();
+        let mask = capacity - 1;
+        let mut bucket = SlotIndex::home(hash, capacity);
+        let position = loop {
+            let entry = entries[bucket];
+            if entry == 0 {
+                return None;
+            }
+            if (entry >> 32) as u32 == hash {
+                let position = (entry as u32 - 1) as usize;
+                if bindings.get(position)?.symbol == symbol {
+                    break position;
+                }
+            }
+            bucket = (bucket + 1) & mask;
+        };
+        let mut hole = bucket;
+        let mut next = bucket;
+        loop {
+            next = (next + 1) & mask;
+            let entry = entries[next];
+            if entry == 0 {
+                break;
+            }
+            let home = SlotIndex::home((entry >> 32) as u32, capacity);
+            // The entry may fill the hole when the hole lies between its home and its bucket.
+            if (next.wrapping_sub(home) & mask) >= (next.wrapping_sub(hole) & mask) {
+                entries[hole] = entry;
+                hole = next;
+            }
+        }
+        entries[hole] = 0;
+        self.set_count(count - 1);
+        Some(position)
+    }
+}
+
+impl Drop for SlotIndex {
+    fn drop(&mut self) {
+        // SAFETY: the allocation was made in `with_capacity` with this layout.
+        unsafe {
+            dealloc(
+                self.header.as_ptr().cast(),
+                SlotIndex::layout(self.capacity()),
+            )
+        };
     }
 }
 

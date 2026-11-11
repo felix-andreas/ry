@@ -2848,7 +2848,10 @@ unsafe fn direct_round(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
         SexpType::Integer | SexpType::Logical => {
             let count = length(operand);
             let result = alloc(SexpType::Real, count)?;
-            for (out, &value) in values::reals_mut(result).iter_mut().zip(values::ints(operand)) {
+            for (out, &value) in values::reals_mut(result)
+                .iter_mut()
+                .zip(values::ints(operand))
+            {
                 *out = if value == NA_INTEGER {
                     NA_REAL
                 } else {

@@ -11,8 +11,8 @@ use {
     oracle::{
         Engine, ProcessEngine,
         fuzz::{
-            SeedReport, check_seed, native_helpers_program, program, render_divergences,
-            trace_back_program,
+            SeedReport, check_seed, native_helpers_program, parse_data_program, program,
+            render_divergences, trace_back_program,
         },
         gnu_r_available, ry_runtime_available,
     },
@@ -230,6 +230,48 @@ fn fuzz_native_trace_back_matches_its_r_body() {
                 outcome.stdout
             );
         }
+    }
+    std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
+}
+
+/// `parse(keep.source = TRUE)` on random programs with comments, blank lines and tabs must give
+/// GNU R's parse data (ids and parents included) and srcrefs exactly. Parsing happens before any
+/// tier runs code, so tier 0 alone covers it.
+#[test]
+fn fuzz_parse_data_matches_gnu_r() {
+    if !gnu_r_available() || !ry_runtime_available() {
+        eprintln!("skipped: GNU R or ry's runtime is not available");
+        return;
+    }
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT);
+    let ry = ProcessEngine::ry_tier0().with_timeout(TIMEOUT);
+    let directory = scratch_directory();
+    for seed in fuzz_seeds(4) {
+        let script = directory.join(format!("parse_data_{seed}.R"));
+        std::fs::write(&script, parse_data_program(seed)).expect("write the fuzz program");
+        let expected = gnu_r
+            .run(&script)
+            .unwrap_or_else(|error| panic!("seed {seed}: GNU R failed: {error}"));
+        let actual = ry
+            .run(&script)
+            .unwrap_or_else(|error| panic!("seed {seed}: ry failed: {error}"));
+        assert!(
+            expected.errors.is_empty() && expected.stdout.lines().count() > 100,
+            "seed {seed}: GNU R did not parse the program: {:?}",
+            expected.errors
+        );
+        let differing = expected
+            .stdout
+            .lines()
+            .zip(actual.stdout.lines())
+            .position(|(left, right)| left != right);
+        assert!(
+            differing.is_none()
+                && expected.stdout.lines().count() == actual.stdout.lines().count()
+                && actual.errors.is_empty(),
+            "seed {seed}: parse data differs from GNU R at line {differing:?} {:?}\nreplay with FUZZ_SEED={seed} cargo test -p oracle --test test_differential fuzz_parse_data",
+            actual.errors
+        );
     }
     std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
 }

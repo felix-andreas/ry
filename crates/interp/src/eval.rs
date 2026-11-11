@@ -715,17 +715,75 @@ unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
     Ok(value)
 }
 
-/// The value an unforced argument reference stands for when reading it runs no code: its
-/// variable's slot holds a value or a forced promise.
-pub unsafe fn reference_value(reference: Sexp) -> Option<Sexp> {
+/// The value an unforced `promise` stands for when reading it runs no R code, settling it as
+/// forcing would: its code is a constant, or names a variable bound to a value, or to another
+/// such promise, as when a wrapper passes its argument on (`g <- function(x) typeof(x)`). Every
+/// promise on the chain is settled, innermost first, as forcing the outer one settles them.
+/// `None`, with nothing settled, when the chain ends in code that would run.
+pub unsafe fn settled_without_code(promise: Sexp) -> R<Option<Sexp>> {
+    // Longer chains are rare, and a chain that loops back (`function(x = y, y = x)`) must end
+    // in the error forcing raises, so it is left to forcing.
+    const CHAIN_LIMIT: usize = 16;
+    if promise.has_gp(PROMISE_SEEN) {
+        return Ok(None);
+    }
+    let mut chain: SmallVec<[Sexp; 4]> = smallvec![promise];
+    let mut link = promise;
+    let mut value = loop {
+        let next = if is_reference(link) {
+            reference_link(link)
+        } else {
+            promise_link(link)
+        };
+        let Some(next) = next else {
+            return Ok(None);
+        };
+        if next.kind() != SexpType::Promise {
+            break next;
+        }
+        if next.car() != unbound() {
+            break next.car();
+        }
+        if chain.len() == CHAIN_LIMIT || next.has_gp(PROMISE_SEEN) {
+            return Ok(None);
+        }
+        chain.push(next);
+        link = next;
+    };
+    for &link in chain.iter().rev() {
+        value = settle_promise(link, value)?;
+    }
+    Ok(Some(value))
+}
+
+/// What reading an unforced plain promise yields without running code: its constant code, or
+/// the binding its variable code names (a value or another promise).
+unsafe fn promise_link(promise: Sexp) -> Option<Sexp> {
+    // A promise over a slot frame without an environment names a placeholder that binds
+    // nothing yet, so a lookup there would find the enclosure's variable instead.
+    if promise.has_gp(gp::CHECKED_PROMISE) || promise.tag().has_gp(gp::PENDING_FRAME) {
+        return None;
+    }
+    let code = promise.cdr();
+    match code.kind() {
+        SexpType::Symbol if code != missing_arg() && code != symbols().dots => {
+            crate::effects::eager_argument(code, promise.tag())
+        }
+        SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode => None,
+        _ => Some(code),
+    }
+}
+
+/// What reading an unforced argument reference yields without running code: what its
+/// variable's slot holds, a value or a promise.
+unsafe fn reference_link(reference: Sexp) -> Option<Sexp> {
     if let Some(env) = reference_env(reference) {
         let expression = reference.cdr();
         if reference.attrib().kind() == SexpType::Bytecode {
             return None;
         }
         return match expression.kind() {
-            SexpType::Symbol => crate::effects::eager_argument(expression, env)
-                .filter(|value| value.kind() != SexpType::Promise),
+            SexpType::Symbol => crate::effects::eager_argument(expression, env),
             SexpType::Language => None,
             _ => Some(expression),
         };
@@ -739,13 +797,7 @@ pub unsafe fn reference_value(reference: Sexp) -> Option<Sexp> {
         return None;
     }
     let value = *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
-    if value == unbound() || value == missing_arg() {
-        return None;
-    }
-    if value.kind() != SexpType::Promise {
-        return Some(value);
-    }
-    (value.car() != unbound()).then(|| value.car())
+    (value != unbound() && value != missing_arg()).then_some(value)
 }
 
 /// Whether the variable an unforced argument reference names is a missing argument in its
@@ -1014,10 +1066,12 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
         }
         SexpType::Closure => {
             if function.has_gp(gp::NATIVE_ENTRY)
-                && let Some(value) =
-                    crate::base_fast_paths::native_entry_by_value(function, arguments, |symbol| {
-                        crate::effects::eager_argument(symbol, env)
-                    })?
+                && let Some(value) = crate::base_fast_paths::native_entry_by_value(
+                    function,
+                    arguments,
+                    false,
+                    |symbol| crate::effects::eager_argument(symbol, env),
+                )?
             {
                 return Ok(value);
             }
@@ -2424,10 +2478,24 @@ unsafe fn reify(index: usize, cause: Reify) -> R<Sexp> {
     let heap = crate::heap();
     heap.define_formals_uncollected(env, &bindings)?;
     heap.mark_frame_formals(env);
-    for slot in bindings.len()..count {
-        let value = *registers.add(1 + slot);
-        if value != unbound() {
-            heap.define(env, names.element(slot), value)?;
+    if pending == nil() {
+        let locals: SmallVec<[Formal; 12]> = (bindings.len()..count)
+            .filter_map(|slot| {
+                let value = *registers.add(1 + slot);
+                (value != unbound()).then(|| Formal {
+                    symbol: names.element(slot),
+                    value,
+                    missing: false,
+                })
+            })
+            .collect();
+        heap.define_locals_uncollected(env, &locals)?;
+    } else {
+        for slot in bindings.len()..count {
+            let value = *registers.add(1 + slot);
+            if value != unbound() {
+                heap.define(env, names.element(slot), value)?;
+            }
         }
     }
     let method_vars: SmallVec<[(Sexp, Sexp); 6]> = crate::method_vars(interp(), index).into();
@@ -4212,6 +4280,11 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
         }
         _ => return Err(call.error("invalid for() loop sequence")),
     };
+    // R binds the variable to NULL before the first iteration, which only shows when there is
+    // none.
+    if count == 0 {
+        define(variable, nil(), env)?;
+    }
     // The body must see the sequence as shared, so that modifying the variable it came from
     // copies it instead of changing the elements still to come.
     sequence.increment_refcount();

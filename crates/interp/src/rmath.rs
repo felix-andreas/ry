@@ -601,9 +601,7 @@ pub fn fround_slice(input: &[f64], digits: f64, output: &mut [f64]) {
                 let up = x10.ceil() / pow10;
                 let distance_up = up - x;
                 let distance_down = x - down;
-                sgn * if distance_up < distance_down
-                    || (odd(i10) && distance_up == distance_down)
-                {
+                sgn * if distance_up < distance_down || (odd(i10) && distance_up == distance_down) {
                     up
                 } else {
                     down

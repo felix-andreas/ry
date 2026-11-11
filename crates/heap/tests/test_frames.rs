@@ -164,6 +164,62 @@ fn fuzz_hinted_lookups_match_plain_lookups() {
     for_each_seed(60, run_hinted);
 }
 
+/// A large frame's lookup index through random definitions and removals that grow it, empty it
+/// and shift its probe runs back: every lookup finds exactly the cell the symbol was bound to,
+/// and nothing for a symbol the frame does not bind.
+fn run_indexed(seed: u64) {
+    let mut rng = SplitMix64(seed);
+    let mut heap = Heap::new();
+    let names: Vec<String> = (0..1 + rng.below(400))
+        .map(|index| format!("i{index}"))
+        .collect();
+    unsafe {
+        let nil = heap.nil();
+        let env = heap.alloc_environment(nil).expect("environment");
+        heap.root(env);
+        let symbols: Vec<Sexp> = names
+            .iter()
+            .map(|name| heap.install(name.as_bytes()).expect("install"))
+            .collect();
+        let mut cells: Vec<Option<Sexp>> = vec![None; symbols.len()];
+        // Mostly definitions first, so the frame grows past the index threshold, then a phase
+        // that removes more than it defines, so it empties and compacts.
+        let defining = 1 + rng.below(4);
+        for step in 0..1200 {
+            let which = rng.below(symbols.len());
+            let define = if step < 600 {
+                rng.below(5) < defining + 1
+            } else {
+                rng.below(5) < defining.min(2)
+            };
+            if define {
+                heap.define(env, symbols[which], nil).expect("define");
+                if cells[which].is_none() {
+                    cells[which] = heap.frame_cell(env, symbols[which]);
+                }
+            } else {
+                heap.remove_binding(env, symbols[which]).expect("remove");
+                cells[which] = None;
+            }
+            if step % 7 == 0 || step == 1199 {
+                for (index, &symbol) in symbols.iter().enumerate() {
+                    assert_eq!(
+                        heap.frame_cell(env, symbol),
+                        cells[index],
+                        "seed {seed}, step {step}: {}",
+                        names[index]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fuzz_indexed_lookups_match_the_bindings() {
+    for_each_seed(40, run_indexed);
+}
+
 #[test]
 fn closure_gp_bits_do_not_overlap() {
     let mut seen = 0u16;
