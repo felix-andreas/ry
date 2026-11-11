@@ -2,7 +2,7 @@
 
 use {
     crate::{
-        Rboolean,
+        Rboolean, Runtime,
         boundary::{ApiResult, Handout, Reachable, direct, enter, error},
         eval::force_promise,
         runtime,
@@ -334,13 +334,14 @@ pub unsafe extern "C" fn R_getVarEx(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_existsVarInFrame(env: Sexp, symbol: Sexp) -> Rboolean {
-    enter(|| {
-        let env = environment(env, "existsVarInFrame")?;
-        Ok(
-            (runtime().heap.frame_cell(env, symbol).is_some()
-                || base_binds_missing_arg(env, symbol)) as Rboolean,
-        )
-    })
+    let exists = |runtime: &Runtime, env: Sexp| {
+        (runtime.heap.frame_cell(env, symbol).is_some() || base_binds_missing_arg(env, symbol))
+            as Rboolean
+    };
+    direct(
+        |runtime| (env.kind() == SexpType::Environment).then(|| exists(runtime, env)),
+        || Ok(exists(runtime(), environment(env, "existsVarInFrame")?)),
+    )
 }
 
 /// GNU R's `R_MissingArg` is a symbol whose base value is itself (`mkSymMarker`), so the base
@@ -674,28 +675,62 @@ pub unsafe extern "C" fn R_ActiveBindingFunction(symbol: Sexp, env: Sexp) -> Sex
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_DelayedBindingExpression(symbol: Sexp, env: Sexp) -> Sexp {
-    enter(|| {
-        let promise = binding_of_type(
-            symbol,
-            env,
-            &[BindingType::Delayed],
-            "R_DelayedBindingExpression",
-        )?;
-        Ok(innermost_promise(promise).cdr())
-    })
+    direct(
+        |runtime| Some(Reachable(delayed_promise(runtime, symbol, env)?.cdr())),
+        || {
+            let promise = binding_of_type(
+                symbol,
+                env,
+                &[BindingType::Delayed],
+                "R_DelayedBindingExpression",
+            )?;
+            Ok(innermost_promise(promise).cdr())
+        },
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_DelayedBindingEnvironment(symbol: Sexp, env: Sexp) -> Sexp {
-    enter(|| {
-        let promise = binding_of_type(
-            symbol,
-            env,
-            &[BindingType::Delayed],
-            "R_DelayedBindingEnvironment",
-        )?;
-        Ok(interp::eval::promise_env(innermost_promise(promise))?)
-    })
+    direct(
+        |runtime| {
+            // An argument reference or a frame that has no environment yet makes one, which
+            // allocates and can fail, so only a promise with a real environment stays here.
+            let promise = delayed_promise(runtime, symbol, env)?;
+            let promise_env = promise.tag();
+            (!promise.has_gp(gp::ARGUMENT_REFERENCE) && !promise_env.has_gp(gp::PENDING_FRAME))
+                .then_some(Reachable(promise_env))
+        },
+        || {
+            let promise = binding_of_type(
+                symbol,
+                env,
+                &[BindingType::Delayed],
+                "R_DelayedBindingEnvironment",
+            )?;
+            Ok(interp::eval::promise_env(innermost_promise(promise))?)
+        },
+    )
+}
+
+/// The innermost promise of an unforced delayed binding of `symbol` in `env`'s frame, the
+/// promise `R_GetBindingType` calls delayed. Any other binding, or none, takes the slow path,
+/// which reports it.
+#[inline(always)]
+unsafe fn delayed_promise(runtime: &Runtime, symbol: Sexp, env: Sexp) -> Option<Sexp> {
+    if env.kind() != SexpType::Environment {
+        return None;
+    }
+    let cell = runtime.heap.frame_cell(env, symbol)?;
+    let value = cell.cdr();
+    if cell.has_gp(gp::ACTIVE_BINDING) || value.kind() != SexpType::Promise {
+        return None;
+    }
+    let unbound = runtime.heap.known().unbound;
+    let mut promise = value;
+    while promise.car() != unbound && promise.car().kind() == SexpType::Promise {
+        promise = promise.car();
+    }
+    (promise.car() == unbound).then_some(promise)
 }
 
 #[unsafe(no_mangle)]

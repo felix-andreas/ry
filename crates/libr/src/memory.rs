@@ -3,11 +3,11 @@
 
 use {
     crate::{
-        R_len_t, R_xlen_t, Rboolean, SEXPTYPE,
+        R_len_t, R_xlen_t, Rboolean, Runtime, SEXPTYPE,
         attributes::remove_attribute,
         boundary::{ApiResult, direct, enter, error, run_pending_finalizers},
         globals::{R_DimNamesSymbol, R_DimSymbol, R_NamesSymbol},
-        Runtime, runtime,
+        runtime,
         strings::c_bytes,
         vectors::{set_names_from, sexp_type},
     },

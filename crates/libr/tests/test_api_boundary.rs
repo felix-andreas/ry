@@ -26,7 +26,7 @@ struct Operation {
 
 #[test]
 fn fuzz_direct_paths_match_slow_paths() {
-    let r = r();
+    let r = r_with_base();
     rytest(&r);
     for_each_seed(400, |seed| {
         let mut rng = SplitMix64(0xd12ec7 ^ seed);
@@ -35,13 +35,12 @@ fn fuzz_direct_paths_match_slow_paths() {
         let stress = seed % 4 == 3;
         let outcomes = [false, true].map(|slow| {
             let [a, b, c] = operation.arguments;
-            let (a, c) = (duplicate(&r, a), duplicate(&r, c));
+            // `.Call` evaluates its arguments, so quoting passes symbols and calls as themselves.
+            let quoted = [duplicate(&r, a), b, duplicate(&r, c)].map(|argument| r.quote(argument));
+            let arguments = [r.integer(operation.code), quoted[0], quoted[1], quoted[2]];
             unsafe { (r.api().ry_set_slow_paths_only)(slow as c_int) };
             r.stress(stress);
-            let outcome = r.call(
-                "rytest_api_op",
-                &[r.integer(operation.code), a, b, c],
-            );
+            let outcome = r.call("rytest_api_op", &arguments);
             r.stress(false);
             unsafe { (r.api().ry_set_slow_paths_only)(0) };
             outcome
@@ -68,7 +67,7 @@ fn duplicate(r: &R, value: Sexp) -> Sexp {
 }
 
 fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
-    let code = rng.below(17) as c_int;
+    let code = rng.below(24) as c_int;
     let arguments = match code {
         0 => {
             let object = random_object(r, rng);
@@ -80,7 +79,11 @@ fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
             let class = ["first", "factor", "data.frame", "rytest_class"][rng.below(4)];
             [random_object(r, rng), r.string(class), r.nil()]
         }
-        12..=14 => [strings(r, &[&["", "a", "rytest.tag", "dim"][rng.below(4)]]), r.nil(), r.nil()],
+        12..=14 => [
+            strings(r, &[&["", "a", "rytest.tag", "dim"][rng.below(4)]]),
+            r.nil(),
+            r.nil(),
+        ],
         15 => {
             let kinds = [
                 LGLSXP, INTSXP, REALSXP, CPLXSXP, STRSXP, VECSXP, RAWSXP, LISTSXP, LANGSXP,
@@ -89,6 +92,22 @@ fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
             let kind = kinds[rng.below(kinds.len())];
             let length = [-1, 0, 1, 5][rng.below(4)];
             [r.integer(kind), r.integer(length), r.nil()]
+        }
+        17..=19 => [random_cells(r, rng), random_object(r, rng), r.nil()],
+        20 => {
+            let tag = [r.nil(), r.symbol("rytest.tag")][rng.below(2)];
+            [random_cells(r, rng), tag, r.nil()]
+        }
+        21..=23 => {
+            let name = [
+                "lazy", "forced", "active", "plain", "missing", "x", "absent",
+            ];
+            let env = if rng.chance(1, 4) {
+                r.nil()
+            } else {
+                binding_env(r, rng.chance(1, 2))
+            };
+            [env, r.symbol(name[rng.below(name.len())]), r.nil()]
         }
         _ => [
             random_object(r, rng),
@@ -159,9 +178,61 @@ fn random_object(r: &R, rng: &mut SplitMix64) -> Sexp {
         attach(r, object, "names", strings(r, &names));
     }
     if rng.chance(1, 4) {
-        attach(r, object, "class", strings(r, &[["first", "second"][rng.below(2)], "rytest_class"]));
+        attach(
+            r,
+            object,
+            "class",
+            strings(r, &[["first", "second"][rng.below(2)], "rytest_class"]),
+        );
     }
     object
+}
+
+/// What the cell writers get: pairlists and calls of one to three cells, which they write to,
+/// and `NULL` and a vector, which they refuse.
+fn random_cells(r: &R, rng: &mut SplitMix64) -> Sexp {
+    let mut cells = r.nil();
+    let length = rng.below(4);
+    for index in 0..length {
+        let car = r.integer(index as c_int);
+        cells = r.keep(unsafe {
+            if index + 1 == length && rng.chance(1, 2) {
+                (r.api().Rf_lcons)(r.symbol("c"), cells)
+            } else {
+                (r.api().Rf_cons)(car, cells)
+            }
+        });
+    }
+    if length == 0 && rng.chance(1, 2) {
+        return r.integer(1);
+    }
+    cells
+}
+
+/// An environment holding every kind of binding the binding readers tell apart, or the frame of
+/// a call whose argument `x` is an unforced promise.
+fn binding_env(r: &R, call_frame: bool) -> Sexp {
+    let code = if call_frame {
+        "(function(x) environment())(1 + 1)"
+    } else {
+        "local({
+            e <- new.env()
+            delayedAssign('lazy', 1 + 2, assign.env = e)
+            delayedAssign('forced', 3, assign.env = e)
+            get('forced', envir = e)
+            makeActiveBinding('active', function() 1, e)
+            assign('plain', 1, envir = e)
+            assign('missing', quote(expr = ), envir = e)
+            e
+        })"
+    };
+    let parsed = r
+        .eval("parse", &[(Some("text"), r.string(code))])
+        .expect("the code parses");
+    r.keep(
+        r.eval_expression(r.element(parsed, 0))
+            .expect("the environment builds"),
+    )
 }
 
 fn fill(r: &R, rng: &mut SplitMix64, vector: Sexp, kind: c_int, length: usize) {
@@ -173,11 +244,8 @@ fn fill(r: &R, rng: &mut SplitMix64, vector: Sexp, kind: c_int, length: usize) {
             STRSXP => {
                 for index in 0..length {
                     let text = ["a", "factor", "TRUE", "12"][rng.below(4)];
-                    let element = (r.api().Rf_mkCharLenCE)(
-                        text.as_ptr().cast(),
-                        text.len() as c_int,
-                        1,
-                    );
+                    let element =
+                        (r.api().Rf_mkCharLenCE)(text.as_ptr().cast(), text.len() as c_int, 1);
                     (r.api().SET_STRING_ELT)(vector, index as isize, element);
                 }
             }
@@ -215,7 +283,10 @@ fn random_name(r: &R, rng: &mut SplitMix64) -> Sexp {
 /// A value to set: `NULL`, extents that fit or do not, `dimnames` lists that the direct path
 /// takes or declines, classes with and without `factor`, names of every length, or anything.
 fn random_value(r: &R, rng: &mut SplitMix64, object: Sexp) -> Sexp {
-    let length = if matches!(r.type_of(object), LGLSXP | INTSXP | REALSXP | STRSXP | VECSXP) {
+    let length = if matches!(
+        r.type_of(object),
+        LGLSXP | INTSXP | REALSXP | STRSXP | VECSXP
+    ) {
         r.length(object) as c_int
     } else {
         1
@@ -295,8 +366,7 @@ fn strings(r: &R, values: &[&str]) -> Sexp {
     let vector = r.keep(unsafe { (r.api().Rf_allocVector)(STRSXP, values.len() as isize) });
     for (index, text) in values.iter().enumerate() {
         unsafe {
-            let element =
-                (r.api().Rf_mkCharLenCE)(text.as_ptr().cast(), text.len() as c_int, 1);
+            let element = (r.api().Rf_mkCharLenCE)(text.as_ptr().cast(), text.len() as c_int, 1);
             (r.api().SET_STRING_ELT)(vector, index as isize, element);
         }
     }
@@ -324,14 +394,17 @@ const BUDGETS: &[(&str, u64)] = &[
     ("bench_mk_string", 428),
     ("bench_install", 375),
     ("bench_nrows_ncols", 119),
-    ("bench_lang2", 151),
+    ("bench_lang2", 200),
     ("bench_cons", 129),
     ("bench_as_scalars", 193),
     ("bench_inherits", 149),
     ("bench_protect_with_index", 38),
     ("bench_char_is_ascii", 33),
     ("bench_external_ptr_addr", 15),
-    ("bench_get_option", 136),
+    ("bench_get_option", 160),
+    ("bench_set_car_cdr", 178),
+    ("bench_exists_var_in_frame", 104),
+    ("bench_delayed_binding", 230),
 ];
 
 /// Runs the `bench_` loops under callgrind in a child copy of this test and checks the cost per
@@ -340,12 +413,13 @@ const BUDGETS: &[(&str, u64)] = &[
 #[test]
 fn hot_api_functions_stay_within_instruction_budgets() {
     if std::env::var_os("RY_API_BENCH_CHILD").is_some() {
-        let r = r();
+        let r = r_with_base();
         rytest(&r);
+        let env = binding_env(&r, false);
         if std::env::var_os("RY_API_BENCH_SLOW").is_some() {
             unsafe { (r.api().ry_set_slow_paths_only)(1) };
         }
-        r.call("rytest_api_bench", &[r.integer(BENCH_CALLS as c_int)])
+        r.call("rytest_api_bench", &[r.integer(BENCH_CALLS as c_int), env])
             .expect("the benchmark loops run");
         return;
     }

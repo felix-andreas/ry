@@ -2,10 +2,10 @@
 
 use {
     crate::{
-        Rboolean,
+        Rboolean, Runtime,
         boundary::{ApiResult, Reachable, direct, enter, error},
         globals::{R_ClassSymbol, R_DimNamesSymbol, R_DimSymbol, R_NamesSymbol, R_RowNamesSymbol},
-        Runtime, runtime,
+        runtime,
         strings::c_bytes,
         vectors::{coerce_vector, generic_length, integers, sexp_elt, xlength},
     },

@@ -196,7 +196,10 @@ impl Evaluator for Interpreter {
         // Handing the environment to native code reifies a slot frame.
         match interp::interp().frames.len() {
             0 => Ok(runtime().heap.known().global_env),
-            count => Ok(interp::eval::frame_env(count - 1, interp::eval::Reify::Site("native code"))?),
+            count => Ok(interp::eval::frame_env(
+                count - 1,
+                interp::eval::Reify::Site("native code"),
+            )?),
         }
     }
 
@@ -1853,11 +1856,9 @@ pub unsafe fn call_namespaced(
 /// closure's frame, which only the interpreter knows; without one it is the global environment.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_GetCurrentEnv() -> Sexp {
-    enter(|| {
-        match evaluator() {
-            Some(evaluator) => evaluator.current_env(),
-            None => Ok(runtime().heap.known().global_env),
-        }
+    enter(|| match evaluator() {
+        Some(evaluator) => evaluator.current_env(),
+        None => Ok(runtime().heap.known().global_env),
     })
 }
 

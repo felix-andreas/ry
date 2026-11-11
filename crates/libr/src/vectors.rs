@@ -1503,9 +1503,9 @@ pub unsafe extern "C" fn Rf_nrows(object: Sexp) -> c_int {
             None => c_int::try_from(plain_length(object)?).ok(),
         },
         || {
-        if !has_rows(object) {
-            return Err(error("object is not a matrix"));
-        }
+            if !has_rows(object) {
+                return Err(error("object is not a matrix"));
+            }
             if let Some(dims) = dims(object)? {
                 return Ok(dims.first().copied().unwrap_or(0));
             }
@@ -1524,9 +1524,9 @@ pub unsafe extern "C" fn Rf_ncols(object: Sexp) -> c_int {
             _ => Some(1),
         },
         || {
-        if !has_rows(object) {
-            return Err(error("object is not a matrix"));
-        }
+            if !has_rows(object) {
+                return Err(error("object is not a matrix"));
+            }
             Ok(match dims(object)? {
                 Some(dims) if dims.len() >= 2 => dims[1],
                 _ => 1,

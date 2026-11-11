@@ -953,6 +953,13 @@ SEXP rytest_api_op(SEXP op, SEXP a, SEXP b, SEXP c)
     case 14: result = Rf_install(CHAR(STRING_ELT(a, 0))); break;
     case 15: result = ScalarLogical(LENGTH(Rf_allocVector(INTEGER(a)[0], INTEGER(b)[0]))); break;
     case 16: result = ScalarLogical(Rf_asLogical(Rf_GetOption1(Rf_install("rytest.option")))); break;
+    case 17: result = SETCAR(a, b); break;
+    case 18: result = SETCADR(a, b); break;
+    case 19: result = SETCDR(a, b); break;
+    case 20: SET_TAG(a, b); result = R_NilValue; break;
+    case 21: result = ScalarLogical(R_existsVarInFrame(a, b)); break;
+    case 22: result = R_DelayedBindingExpression(b, a); break;
+    case 23: result = R_DelayedBindingEnvironment(b, a); break;
     default: result = R_NilValue;
     }
     PROTECT(result);
@@ -1152,29 +1159,90 @@ BENCH bench_get_option(int count)
     if (sum < 0) Rprintf("unreachable\n");
 }
 
-SEXP rytest_api_bench(SEXP count)
+BENCH bench_set_car_cdr(int count)
+{
+    SEXP x = PROTECT(ScalarInteger(1));
+    SEXP cell = PROTECT(CONS(x, R_NilValue));
+    for (int i = 0; i < count; i++) {
+        SETCAR(cell, x);
+        SETCDR(cell, R_NilValue);
+    }
+    UNPROTECT(2);
+}
+
+BENCH bench_exists_var_in_frame(int count)
+{
+    SEXP env = PROTECT(R_NewEnv(R_EmptyEnv, TRUE, 0));
+    SEXP symbol = install("rytest.variable");
+    defineVar(symbol, R_NilValue, env);
+    int sum = 0;
+    for (int i = 0; i < count; i++)
+        sum += R_existsVarInFrame(env, symbol);
+    UNPROTECT(1);
+    if (sum < 0) Rprintf("unreachable\n");
+}
+
+/* `env` binds `lazy` with delayedAssign(), since the C API has no way to make a promise. */
+BENCH bench_delayed_binding(int count, SEXP env)
+{
+    SEXP symbol = install("lazy");
+    intptr_t sum = 0;
+    for (int i = 0; i < count; i++)
+        sum += (intptr_t) R_DelayedBindingExpression(symbol, env)
+            + (intptr_t) R_DelayedBindingEnvironment(symbol, env);
+    if (sum == 1) Rprintf("unreachable\n");
+}
+
+SEXP rytest_api_bench(SEXP count, SEXP env)
 {
     int n = INTEGER(count)[0];
+    /* A collection before each loop keeps one from landing inside a measured loop. */
+    R_gc();
     bench_set_attrib_symbol(n);
+    R_gc();
     bench_set_attrib_class(n);
+    R_gc();
     bench_set_attrib_dim(n);
+    R_gc();
     bench_set_attrib_dimnames(n);
+    R_gc();
     bench_set_attrib_names(n);
+    R_gc();
     bench_get_attrib(n);
+    R_gc();
     bench_alloc_vector(n);
+    R_gc();
     bench_scalar_integer(n);
+    R_gc();
     bench_scalar_logical(n);
+    R_gc();
     bench_mk_string(n);
+    R_gc();
     bench_install(n);
+    R_gc();
     bench_nrows_ncols(n);
+    R_gc();
     bench_lang2(n);
+    R_gc();
     bench_cons(n);
+    R_gc();
     bench_as_scalars(n);
+    R_gc();
     bench_inherits(n);
+    R_gc();
     bench_protect_with_index(n);
+    R_gc();
     bench_char_is_ascii(n);
+    R_gc();
     bench_external_ptr_addr(n);
+    R_gc();
     bench_get_option(n);
+    R_gc();
+    bench_set_car_cdr(n);
+    R_gc();
+    bench_exists_var_in_frame(n);
+    R_gc();
+    bench_delayed_binding(n, env);
     return R_NilValue;
 }
 
@@ -1240,7 +1308,7 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_keep_callback", (DL_FUNC) &rytest_keep_callback, 1},
     {"rytest_run_callback", (DL_FUNC) &rytest_run_callback, 0},
     {"rytest_api_op", (DL_FUNC) &rytest_api_op, 4},
-    {"rytest_api_bench", (DL_FUNC) &rytest_api_bench, 1},
+    {"rytest_api_bench", (DL_FUNC) &rytest_api_bench, 2},
     {NULL, NULL, 0}
 };
 
