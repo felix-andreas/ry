@@ -125,6 +125,12 @@ left, in order of expected gain:
 - **Windows linear algebra without GNU R.** No system LAPACK exists there, so `solve` and friends need `R_HOME` naming GNU R for its `Rblas.dll`/`Rlapack.dll`. Build R's reference BLAS and LAPACK (`src/extra/blas`, `src/modules/lapack` in the tarball) into the base tree on Windows; needs a Fortran compiler in the release workflow.
 - **The base build has run on Linux only.** `just package` runs `just base-r` on each release runner; macOS and Windows are unverified until the release workflow runs.
 - **CI must run GNU R 4.6.2.** The oracle's expectations are GNU R 4.6.2 output (`development/corpus-and-oracle.md`, "The reference GNU R"); `.github/pending/ci.yml` installs 4.6.2 and waits for `just accept`. Without GNU R, `oracle compare --engine ry` and `--engine ry-jit` pass 251 of 251 and skip the 12 cases whose packages ry's bundled library lacks (data.table, bit64, rlang, knitr, rmarkdown, ragg, lattice). Those 12 expectations print what the packages' CRAN releases printed when recorded, so a package release can change them.
+- **The oracle does not give ry on its own home GNU R's packages.** `tools/dev-setup.sh` installs
+  the oracle's packages into the reference R's own `.Library`, which ry on its own base R never
+  searches, so every `# oracle: requires` case fails there with "there is no package called". The
+  workaround is a directory of symlinks to the reference R's non-base packages, passed as `R_LIBS`
+  to both engines. The harness should build that shared library itself (or dev-setup should
+  install into a separate library) so a plain `ORACLE_ENGINE=ry-tier0 cargo test -p oracle` passes.
 - **Nix.** `flake.nix` fetches the tarball as a fixed-output derivation and builds the base in `postInstall`; `nix build` has not been run yet.
 - **Old base trees stay in the cache after an upgrade**, as runtimes do (see below).
 
