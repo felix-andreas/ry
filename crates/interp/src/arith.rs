@@ -4698,7 +4698,10 @@ pub(crate) unsafe fn do_parallel_max(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
-    let na_rm = values::as_logical_scalar(call.arg(0)) == 1;
+    let na_rm = match values::as_logical_scalar(call.arg(0)) {
+        NA_LOGICAL => return Err(call.error("invalid 'na.rm' value")),
+        value => value == 1,
+    };
     let items: Vec<Sexp> = call.args[1..]
         .iter()
         .map(|arg| values::materialize(arg.value))
@@ -4706,13 +4709,23 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
     if items.is_empty() {
         return Err(call.error("no arguments"));
     }
+    let mut kind = SexpType::Integer;
+    for &item in &items {
+        match item.kind() {
+            SexpType::Nil => {}
+            SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::String => {
+                kind = coerce::higher_type(kind, item.kind());
+            }
+            _ => return Err(call.error("invalid input type")),
+        }
+    }
     let count = items.iter().map(|&item| length(item)).max().unwrap_or(0);
     if items.iter().any(|&item| length(item) == 0) {
-        return alloc(items[0].kind(), 0);
+        return alloc(kind, 0);
     }
-    let kind = items.iter().fold(SexpType::Logical, |kind, item| {
-        coerce::higher_type(kind, item.kind())
-    });
+    if items.iter().any(|&item| count % length(item) != 0) {
+        crate::conditions::warning("an argument will be fractionally recycled")?;
+    }
     if kind == SexpType::String {
         let result = alloc(SexpType::String, count)?;
         for index in 0..count {
@@ -4763,11 +4776,13 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
     )?;
     for index in 0..count {
         let mut best: Option<f64> = None;
-        let mut na = false;
+        // GNU R keeps the last NA or NaN it meets, so `pmax(c(NA, NaN), c(NaN, NA))` is
+        // `c(NaN, NA)`, and with `na.rm = TRUE` it is the answer only when every value is missing.
+        let mut missing: Option<f64> = None;
         for &item in &items {
             let value = real_at(item, index % length(item));
             if value.is_nan() {
-                na = true;
+                missing = Some(value);
                 continue;
             }
             best = Some(match best {
@@ -4781,10 +4796,10 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
                 }
             });
         }
-        let value = if na && !na_rm {
-            NA_REAL
-        } else {
-            best.unwrap_or(NA_REAL)
+        let value = match (missing, best) {
+            (Some(missing), _) if !na_rm => missing,
+            (_, Some(best)) => best,
+            (missing, None) => missing.unwrap_or(NA_REAL),
         };
         if integer {
             values::ints_mut(result)[index] = if value.is_nan() {

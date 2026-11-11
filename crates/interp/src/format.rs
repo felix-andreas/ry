@@ -1195,6 +1195,12 @@ pub(crate) unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     let digits = values::as_integer_scalar(call.arg(3));
     let format = values::require_str(call.arg(4), "format")?;
     let flag = values::require_str(call.arg(5), "flag")?;
+    if !matches!(
+        vector.kind(),
+        SexpType::Integer | SexpType::Real | SexpType::String
+    ) {
+        return Err(call.error("unsupported type "));
+    }
     let count = length(vector);
     let result = alloc(SexpType::String, count)?;
     let mut padded = String::new();
@@ -1213,11 +1219,15 @@ pub(crate) unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
         } else {
             number.clear();
             let value = crate::subset::numeric_element(vector, index);
-            c_format_into(&mut number, value, &format, digits, &flag, integer);
+            // GNU R writes an `fg` zero as a bare "0", whatever the width and flag.
+            if format == "fg" && value == 0.0 {
+                number.push('0');
+            } else {
+                c_format_into(&mut number, value, &format, digits, &flag, integer);
+            }
             &number
         };
         let shortfall = width.saturating_sub(display_width(text));
-        // GNU R writes an `fg` zero as a bare "0", whatever the width.
         if shortfall == 0 || (format == "fg" && text == "0") {
             store_string(result, index, text, &mut memo)?;
             continue;
@@ -1227,10 +1237,8 @@ pub(crate) unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
             padded.push_str(text);
             padded.extend(std::iter::repeat_n(' ', shortfall));
         } else if flag.contains('0') && !text.contains(|c: char| c.is_alphabetic() && c != 'e') {
-            let (sign, digits) = match text.strip_prefix('-') {
-                Some(rest) => ("-", rest),
-                None => ("", text),
-            };
+            let sign_length = usize::from(text.starts_with(['-', '+', ' ']));
+            let (sign, digits) = text.split_at(sign_length);
             padded.push_str(sign);
             padded.extend(std::iter::repeat_n('0', shortfall));
             padded.push_str(digits);
