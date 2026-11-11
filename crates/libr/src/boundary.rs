@@ -9,6 +9,9 @@
 //!   are `enter`'s own and the exported function's, and neither holds anything with a destructor
 //!   at that point, which is the condition under which skipping a Rust frame with `longjmp` is
 //!   defined.
+//! - **Hot API functions** go through [`direct`] instead: a direct success path that never
+//!   raises, with [`enter`] only behind it for the calls that need checks, coercions, warnings or
+//!   an error. A direct path costs no unwind scope, no handle scope and no warning flush.
 //!
 //! A jump restores the `PROTECT` stack and the `R_alloc` watermark to where they were when its
 //! context began, as GNU R does.
@@ -113,6 +116,12 @@ impl Handout for Sexp {
 #[derive(Clone, Copy)]
 pub struct Reachable(pub Sexp);
 
+impl From<Reachable> for Sexp {
+    fn from(value: Reachable) -> Sexp {
+        value.0
+    }
+}
+
 impl Handout for Reachable {
     fn as_sexp(self) -> Option<Sexp> {
         Some(self.0)
@@ -191,6 +200,43 @@ pub unsafe fn enter<T: Handout>(body: impl FnOnce() -> ApiResult<T>) -> T {
             raise(unwind)
         }
     }
+}
+
+/// Runs a hot API function: `fast` finishes the common call directly, and `slow` runs inside
+/// [`enter`] whenever `fast` declines with `None`.
+///
+/// `fast` is the direct success path, so it must not raise, warn, panic, run R code or call
+/// into native code. It may allocate, because a collection runs no R code (finalizers wait for
+/// [`run_pending_finalizers`]), but it must root what it holds across an allocation, and it may
+/// only decline before it has changed anything native code or R can see: `slow` starts the call
+/// over from its arguments. A fallible step such as an allocation therefore comes before the
+/// first mutation, and declines on failure so that `slow` raises the error the usual way.
+///
+/// `fast` may answer with a different [`Handout`] than `slow`, such as [`Reachable`] for an
+/// attribute it reads in place, so the direct path roots only what needs a root.
+#[inline(always)]
+pub unsafe fn direct<T: Handout, U: Handout + Into<T>>(
+    fast: impl FnOnce(&mut Runtime) -> Option<U>,
+    slow: impl FnOnce() -> ApiResult<T>,
+) -> T {
+    let runtime = runtime();
+    if runtime.slow_paths_only {
+        return enter_cold(slow);
+    }
+    match fast(runtime) {
+        Some(value) => {
+            value.hand_out(runtime);
+            value.into()
+        }
+        None => enter_cold(slow),
+    }
+}
+
+/// [`enter`] out of line, so a hot API function's direct path stays small.
+#[cold]
+#[inline(never)]
+unsafe fn enter_cold<T: Handout>(body: impl FnOnce() -> ApiResult<T>) -> T {
+    enter(body)
 }
 
 /// Records `unwind` and jumps to the innermost C context. The caller must hold nothing with a

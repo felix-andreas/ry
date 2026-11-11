@@ -894,6 +894,12 @@ change that does not pay.
    stack: `match_args` returns `eval::Matched` and calls fill an `eval::Args`, both `SmallVec`s,
    so a typical closure call allocates nothing on the Rust heap (`decisions.md`, "the
    interpreter's call path, lookups and allocation").
+6. **Attributes in a dense table instead of a pairlist.** Every object keeps its attributes as a
+   pairlist, so `getAttrib` walks cells and `setAttrib` of a new name allocates one. A side table
+   keyed by object index, holding (symbol index, value) pairs inline for the usual one to three
+   attributes, would make both a short scan with no allocation. It changes the image format, so it
+   needs the AOT image owner's agreement first; the C API's direct paths (`decisions.md`, "Hot C
+   API entry points take a direct success path") already avoid everything else on that path.
 
 **Measured ranking of the evaluation path.** An inventory of every hash map, cache, `Vec<bool>`
 and short heap list in `interp`, `heap`, `jit`, `libr` and `typed` found 307 sites, 211 of them

@@ -3,12 +3,12 @@
 
 use {
     crate::{
-        boundary::{ApiResult, Pinned, Reachable, enter, error},
+        boundary::{ApiResult, Pinned, Reachable, direct, enter, error},
         globals::R_NamesSymbol,
         runtime,
     },
     heap::{
-        Heap,
+        Heap, TRIPLE_BYTES,
         object::{Sexp, SexpType, Shape},
     },
     std::ffi::c_int,
@@ -312,26 +312,62 @@ pub unsafe extern "C" fn MISSING(object: Sexp) -> c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_cons(car: Sexp, cdr: Sexp) -> Sexp {
-    enter(|| Ok(runtime().heap.cons(car, cdr)?))
+    direct(
+        |runtime| runtime.heap.cons(car, cdr).ok(),
+        || Ok(runtime().heap.cons(car, cdr)?),
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_lcons(car: Sexp, cdr: Sexp) -> Sexp {
-    enter(|| {
-        let nil = runtime().nil();
-        Ok(runtime()
-            .heap
-            .alloc_triple(SexpType::Language, car, cdr, nil)?)
-    })
+    direct(
+        |runtime| {
+            let nil = runtime.nil();
+            runtime
+                .heap
+                .alloc_triple(SexpType::Language, car, cdr, nil)
+                .ok()
+        },
+        || {
+            let nil = runtime().nil();
+            Ok(runtime()
+                .heap
+                .alloc_triple(SexpType::Language, car, cdr, nil)?)
+        },
+    )
 }
 
 macro_rules! list_constructor {
     ($name:ident, $kind:expr, $($argument:ident),+) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name($($argument: Sexp),+) -> Sexp {
-            enter(|| list_of($kind, &[$($argument),+]))
+            direct(
+                |runtime| list_direct(runtime, $kind, &[$($argument),+]),
+                || list_of($kind, &[$($argument),+]),
+            )
         }
     };
+}
+
+/// `list_of`'s direct path: one collection check for all the cells, after which the cells
+/// allocate without one, so neither the elements nor the cells built so far need a root.
+#[inline(always)]
+unsafe fn list_direct(runtime: &mut crate::Runtime, kind: SexpType, elements: &[Sexp]) -> Option<Sexp> {
+    runtime.heap.reserve(elements.len() * TRIPLE_BYTES, elements);
+    let nil = runtime.nil();
+    let mut list = nil;
+    for (position, &element) in elements.iter().enumerate().rev() {
+        let cell_kind = if position == 0 {
+            kind
+        } else {
+            SexpType::Pairlist
+        };
+        list = runtime
+            .heap
+            .alloc_triple_uncollected(cell_kind, element, list, nil)
+            .ok()?;
+    }
+    Some(list)
 }
 
 list_constructor!(Rf_list1, SexpType::Pairlist, a);

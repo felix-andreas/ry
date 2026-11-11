@@ -3,7 +3,7 @@
 use {
     crate::{
         Rboolean,
-        boundary::{ApiResult, Handout, Reachable, enter, error},
+        boundary::{ApiResult, Handout, Reachable, direct, enter, error},
         eval::force_promise,
         runtime,
         strings::utf8_text,
@@ -556,7 +556,7 @@ pub unsafe extern "C" fn R_IsPackageEnv(env: Sexp) -> Rboolean {
 /// `Rf_GetOption1`: the value of an option, or `NULL`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_GetOption1(tag: Sexp) -> Sexp {
-    enter(|| Ok(option_value(tag)))
+    direct(|_| Some(option_value(tag)), || Ok(option_value(tag)))
 }
 
 /// The option `tag` from base's `.Options`, the one store `options()` and `getOption()` use,

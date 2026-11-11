@@ -73,6 +73,7 @@ api! {
     ry_initialize: fn() -> c_int;
     ry_start_session: fn() -> c_int;
     ry_set_gc_stress: fn(c_int);
+    ry_set_slow_paths_only: fn(c_int);
     ry_collect: fn(c_int);
     ry_gc_stats: fn(*mut GcStats);
     ry_protect_depth: fn() -> c_int;

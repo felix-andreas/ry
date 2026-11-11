@@ -3,9 +3,9 @@
 use {
     crate::{
         Rboolean,
-        boundary::{ApiResult, enter, error},
+        boundary::{ApiResult, Reachable, direct, enter, error},
         globals::{R_ClassSymbol, R_DimNamesSymbol, R_DimSymbol, R_NamesSymbol, R_RowNamesSymbol},
-        runtime,
+        Runtime, runtime,
         strings::c_bytes,
         vectors::{coerce_vector, generic_length, integers, sexp_elt, xlength},
     },
@@ -368,6 +368,10 @@ unsafe fn row_names_gets(object: Sexp, value: Sexp) -> ApiResult<Sexp> {
 }
 
 pub unsafe fn inherits(object: Sexp, class: &str) -> ApiResult<bool> {
+    inherits_bytes(object, class.as_bytes())
+}
+
+unsafe fn inherits_bytes(object: Sexp, class: &[u8]) -> ApiResult<bool> {
     if !object.is_object() {
         return Ok(false);
     }
@@ -376,21 +380,246 @@ pub unsafe fn inherits(object: Sexp, class: &str) -> ApiResult<bool> {
         return Ok(false);
     }
     for index in 0..xlength(classes)? as usize {
-        if sexp_elt(classes, index)?.bytes() == class.as_bytes() {
+        if sexp_elt(classes, index)?.bytes() == class {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
+/// `Rf_getAttrib`'s direct path: an attribute stored under a symbol, read in place. The
+/// value is reachable from `object`, so it needs no root, exactly as in GNU R. Names of a
+/// pairlist or of a one-dimensional array and compact row names are built on the slow path.
+#[inline(always)]
+unsafe fn get_attrib_direct(object: Sexp, name: Sexp) -> Option<Reachable> {
+    if name.kind() != SexpType::Symbol || object.kind() == SexpType::Char {
+        return None;
+    }
+    if name == R_NamesSymbol.get() || name == R_RowNamesSymbol.get() {
+        return None;
+    }
+    let mut cell = object.attrib();
+    while cell.kind() == SexpType::Pairlist {
+        if cell.tag() == name {
+            return Some(Reachable(cell.car()));
+        }
+        cell = cell.cdr();
+    }
+    Some(Reachable(runtime().nil()))
+}
+
+/// `Rf_setAttrib`'s direct path for a symbol name and a value that needs no coercion. It
+/// declines, before changing anything, whenever [`set_attrib`] would convert, check further or
+/// raise, so both paths leave the same attributes behind.
+#[inline(always)]
+unsafe fn set_attrib_direct(
+    runtime: &mut Runtime,
+    object: Sexp,
+    name: Sexp,
+    value: Sexp,
+) -> Option<Reachable> {
+    let nil = runtime.nil();
+    let kind = object.kind();
+    if object == nil
+        || name.kind() != SexpType::Symbol
+        || kind == SexpType::Char
+        || interp::records::is_native(object)
+    {
+        return None;
+    }
+    if value == nil {
+        if name == R_NamesSymbol.get()
+            && matches!(
+                kind,
+                SexpType::Pairlist | SexpType::Language | SexpType::Dots
+            )
+        {
+            return None;
+        }
+        remove_attribute(object, name);
+        if name == R_ClassSymbol.get() {
+            object.set_object(false);
+        }
+        return Some(Reachable(value));
+    }
+    if name == R_NamesSymbol.get() {
+        // Names that already fit the vector exactly; padding and coercion take the slow path.
+        if !kind.is_vector()
+            || object.is_altrep()
+            || value.kind() != SexpType::String
+            || value.is_object()
+            || value.is_altrep()
+            || value.length() != object.length()
+        {
+            return None;
+        }
+        attach(runtime, object, name, value)?;
+        return Some(Reachable(value));
+    }
+    if name == R_DimSymbol.get() {
+        return dim_direct(runtime, object, value);
+    }
+    if name == R_DimNamesSymbol.get() {
+        return dimnames_direct(runtime, object, value);
+    }
+    if name == R_ClassSymbol.get() {
+        if value.kind() != SexpType::String || value.is_altrep() || value.length() == 0 {
+            return None;
+        }
+        if kind != SexpType::Integer
+            && value
+                .slice::<Sexp>()
+                .iter()
+                .any(|class| class.bytes() == b"factor")
+        {
+            return None;
+        }
+        attach(runtime, object, name, value)?;
+        object.set_object(true);
+        return Some(Reachable(value));
+    }
+    if name == R_RowNamesSymbol.get() {
+        return None;
+    }
+    attach(runtime, object, name, value)?;
+    Some(Reachable(value))
+}
+
+/// `dim<-` for a plain integer vector of valid extents. GNU R installs such a value itself
+/// rather than a copy and marks it immutable, and so does this path.
+#[inline(always)]
+unsafe fn dim_direct(runtime: &mut Runtime, object: Sexp, value: Sexp) -> Option<Reachable> {
+    if !object.kind().is_vector()
+        || object.is_altrep()
+        || value.kind() != SexpType::Integer
+        || value.is_altrep()
+        || value.attrib() != runtime.nil()
+        || value == object
+    {
+        return None;
+    }
+    let extents = value.slice::<i32>();
+    if extents.is_empty() {
+        return None;
+    }
+    let mut product = 1i64;
+    for &extent in extents {
+        // `NA_INTEGER` is negative, so this also declines missing extents.
+        if extent < 0 {
+            return None;
+        }
+        product = product.saturating_mul(extent as i64);
+    }
+    if product != object.length() as i64 {
+        return None;
+    }
+    attach(runtime, object, R_DimSymbol.get(), value)?;
+    remove_attribute(object, R_NamesSymbol.get());
+    remove_attribute(object, R_DimNamesSymbol.get());
+    value.mark_not_mutable();
+    Some(Reachable(value))
+}
+
+/// `dimnames<-` for a list without attributes whose components are missing, empty, or plain
+/// character vectors that match their extents. It stores a fresh list, as the interpreter's
+/// `dimnames<-` does, so native code that later writes into its own list changes nothing.
+#[inline(always)]
+unsafe fn dimnames_direct(runtime: &mut Runtime, object: Sexp, value: Sexp) -> Option<Reachable> {
+    let nil = runtime.nil();
+    if value.kind() != SexpType::List
+        || value.is_altrep()
+        || value.attrib() != nil
+        || value.length() == 0
+        || object.is_altrep()
+    {
+        return None;
+    }
+    let dim = raw_attribute(object, R_DimSymbol.get());
+    if dim.kind() != SexpType::Integer || dim.is_altrep() {
+        return None;
+    }
+    let extents = dim.slice::<i32>();
+    let components = value.slice::<Sexp>();
+    if components.len() > extents.len() {
+        return None;
+    }
+    for (&component, &extent) in components.iter().zip(extents) {
+        if component == nil {
+            continue;
+        }
+        if component.kind() != SexpType::String
+            || component.is_object()
+            || component.is_altrep()
+            || (component.length() != 0 && component.length() != extent.max(0) as isize)
+        {
+            return None;
+        }
+    }
+    let mark = runtime.heap.handle_mark();
+    runtime.heap.root(object);
+    runtime.heap.root(value);
+    let attached = runtime
+        .heap
+        .alloc_vector(SexpType::List, extents.len() as isize)
+        .ok()
+        .and_then(|stored| {
+            runtime.heap.root(stored);
+            for (index, &component) in value.slice::<Sexp>().iter().enumerate() {
+                if component != nil && component.length() != 0 {
+                    runtime.heap.set_element(stored, index, component);
+                }
+            }
+            attach(runtime, object, R_DimNamesSymbol.get(), stored)?;
+            Some(stored)
+        });
+    runtime.heap.release_handles(mark);
+    attached.map(Reachable)
+}
+
+/// Replaces or appends the attribute `name`, as [`install_attribute`] does. The only step that
+/// can fail is the allocation of a new cell, which comes before any change, so a `None` leaves
+/// `object` untouched.
+#[inline(always)]
+unsafe fn attach(runtime: &mut Runtime, object: Sexp, name: Sexp, value: Sexp) -> Option<()> {
+    let mut cell = object.attrib();
+    let mut last = None;
+    while cell.kind() == SexpType::Pairlist {
+        if cell.tag() == name {
+            runtime.heap.set_car(cell, value);
+            return Some(());
+        }
+        last = Some(cell);
+        cell = cell.cdr();
+    }
+    let nil = runtime.nil();
+    let mark = runtime.heap.handle_mark();
+    runtime.heap.root(object);
+    let new_cell = runtime
+        .heap
+        .alloc_triple(SexpType::Pairlist, value, nil, name);
+    runtime.heap.release_handles(mark);
+    let new_cell = new_cell.ok()?;
+    match last {
+        Some(last) => runtime.heap.set_cdr(last, new_cell),
+        None => runtime.heap.set_attrib(object, new_cell),
+    }
+    Some(())
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_getAttrib(object: Sexp, name: Sexp) -> Sexp {
-    enter(|| get_attrib(object, name))
+    direct(
+        |_| get_attrib_direct(object, name),
+        || get_attrib(object, name),
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_setAttrib(object: Sexp, name: Sexp, value: Sexp) -> Sexp {
-    enter(|| set_attrib(object, name, value))
+    direct(
+        |runtime| set_attrib_direct(runtime, object, name, value),
+        || set_attrib(object, name, value),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -460,10 +689,31 @@ pub unsafe extern "C" fn Rf_copyMostAttrib(from: Sexp, to: Sexp) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_inherits(object: Sexp, class: *const c_char) -> Rboolean {
-    enter(|| {
-        let class = String::from_utf8_lossy(c_bytes(class)).into_owned();
-        Ok(inherits(object, &class)? as Rboolean)
-    })
+    direct(
+        |_| inherits_direct(object, c_bytes(class)).map(|found| found as Rboolean),
+        || Ok(inherits_bytes(object, c_bytes(class))? as Rboolean),
+    )
+}
+
+/// `Rf_inherits`'s direct path, which compares the class names' bytes in place.
+#[inline(always)]
+unsafe fn inherits_direct(object: Sexp, class: &[u8]) -> Option<bool> {
+    if !object.is_object() {
+        return Some(false);
+    }
+    let classes = raw_attribute(object, R_ClassSymbol.get());
+    if classes.kind() != SexpType::String {
+        return Some(false);
+    }
+    if classes.is_altrep() {
+        return None;
+    }
+    Some(
+        classes
+            .slice::<Sexp>()
+            .iter()
+            .any(|name| name.bytes() == class),
+    )
 }
 
 #[unsafe(no_mangle)]

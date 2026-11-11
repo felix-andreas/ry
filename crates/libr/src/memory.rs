@@ -5,9 +5,9 @@ use {
     crate::{
         R_len_t, R_xlen_t, Rboolean, SEXPTYPE,
         attributes::remove_attribute,
-        boundary::{ApiResult, enter, error, run_pending_finalizers},
+        boundary::{ApiResult, direct, enter, error, run_pending_finalizers},
         globals::{R_DimNamesSymbol, R_DimSymbol, R_NamesSymbol},
-        runtime,
+        Runtime, runtime,
         strings::c_bytes,
         vectors::{set_names_from, sexp_type},
     },
@@ -285,7 +285,45 @@ pub unsafe fn length_gets(object: Sexp, length: R_xlen_t) -> ApiResult<Sexp> {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_allocVector(kind: SEXPTYPE, length: R_xlen_t) -> Sexp {
-    enter(|| alloc_vector(sexp_type(kind)?, length))
+    direct(
+        |runtime| alloc_vector_direct(runtime, kind, length),
+        || alloc_vector(sexp_type(kind)?, length),
+    )
+}
+
+/// `Rf_allocVector`'s direct path for vector types, which need no pairlist. Its result goes
+/// straight to the handout window, so it needs no root of its own.
+#[inline(always)]
+unsafe fn alloc_vector_direct(
+    runtime: &mut Runtime,
+    kind: SEXPTYPE,
+    length: R_xlen_t,
+) -> Option<Sexp> {
+    let kind = SexpType::from_code(kind)?;
+    if !kind.is_vector() || kind == SexpType::Char || length < 0 {
+        return None;
+    }
+    runtime.heap.alloc_vector_uninit(kind, length as usize).ok()
+}
+
+/// A fresh vector of length one holding `value`.
+#[inline(always)]
+unsafe fn scalar_direct<T: Copy>(runtime: &mut Runtime, kind: SexpType, value: T) -> Option<Sexp> {
+    let object = runtime.heap.alloc_vector_uninit(kind, 1).ok()?;
+    *(object.data() as *mut T) = value;
+    Some(object)
+}
+
+/// A character vector holding `charsxp`, which stays rooted across the allocation.
+#[inline(always)]
+unsafe fn scalar_string_direct(runtime: &mut Runtime, charsxp: Sexp) -> Option<Sexp> {
+    let mark = runtime.heap.handle_mark();
+    runtime.heap.root(charsxp);
+    let object = runtime.heap.alloc_vector(SexpType::String, 1);
+    runtime.heap.release_handles(mark);
+    let object = object.ok()?;
+    runtime.heap.set_element(object, 0, charsxp);
+    Some(object)
 }
 
 #[unsafe(no_mangle)]
@@ -398,45 +436,74 @@ pub unsafe extern "C" fn Rf_allocS4Object() -> Sexp {
 pub unsafe extern "C" fn Rf_ScalarLogical(value: c_int) -> Sexp {
     // GNU R returns its shared `TRUE`, `FALSE` and `NA` here, and packages compare the result's
     // address against them (data.table's `setattr` does).
-    enter(|| interp::values::scalar_logical(value))
+    direct(
+        |_| interp::values::scalar_logical(value).ok(),
+        || interp::values::scalar_logical(value),
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_ScalarInteger(value: c_int) -> Sexp {
-    enter(|| scalar(SexpType::Integer, value))
+    direct(
+        |runtime| scalar_direct(runtime, SexpType::Integer, value),
+        || scalar(SexpType::Integer, value),
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_ScalarReal(value: f64) -> Sexp {
-    enter(|| scalar(SexpType::Real, value))
+    direct(
+        |runtime| scalar_direct(runtime, SexpType::Real, value),
+        || scalar(SexpType::Real, value),
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_ScalarComplex(value: Rcomplex) -> Sexp {
-    enter(|| scalar(SexpType::Complex, value))
+    direct(
+        |runtime| scalar_direct(runtime, SexpType::Complex, value),
+        || scalar(SexpType::Complex, value),
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_ScalarRaw(value: u8) -> Sexp {
-    enter(|| scalar(SexpType::Raw, value))
+    direct(
+        |runtime| scalar_direct(runtime, SexpType::Raw, value),
+        || scalar(SexpType::Raw, value),
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_ScalarString(charsxp: Sexp) -> Sexp {
-    enter(|| {
-        crate::strings::check_charsxp(charsxp, "ScalarString")?;
-        scalar_string(charsxp)
-    })
+    direct(
+        |runtime| {
+            if charsxp.kind() != SexpType::Char {
+                return None;
+            }
+            scalar_string_direct(runtime, charsxp)
+        },
+        || {
+            crate::strings::check_charsxp(charsxp, "ScalarString")?;
+            scalar_string(charsxp)
+        },
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_mkString(text: *const c_char) -> Sexp {
-    enter(|| {
-        let runtime = runtime();
-        let charsxp = runtime.heap.mk_char(c_bytes(text), Encoding::Native)?;
-        runtime.heap.root(charsxp);
-        scalar_string(charsxp)
-    })
+    direct(
+        |runtime| {
+            let charsxp = runtime.heap.mk_char(c_bytes(text), Encoding::Native).ok()?;
+            scalar_string_direct(runtime, charsxp)
+        },
+        || {
+            let runtime = runtime();
+            let charsxp = runtime.heap.mk_char(c_bytes(text), Encoding::Native)?;
+            runtime.heap.root(charsxp);
+            scalar_string(charsxp)
+        },
+    )
 }
 
 /// `mkNamed(type, names)`: a vector whose names come from a `""`-terminated array.
@@ -650,6 +717,10 @@ pub unsafe extern "C" fn Rf_unprotect_ptr(object: *mut Header) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_ProtectWithIndex(object: *mut Header, index: *mut c_int) {
+    if let Ok(position) = runtime().heap.roots.protect.protect(protectable(object)) {
+        *index = position as c_int;
+        return;
+    }
     enter(|| {
         let position = runtime().heap.roots.protect.protect(protectable(object))?;
         *index = position as c_int;
@@ -659,6 +730,15 @@ pub unsafe extern "C" fn R_ProtectWithIndex(object: *mut Header, index: *mut c_i
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_Reprotect(object: *mut Header, index: c_int) {
+    if runtime()
+        .heap
+        .roots
+        .protect
+        .reprotect(protectable(object), index.max(0) as usize)
+        .is_ok()
+    {
+        return;
+    }
     enter(|| {
         Ok(runtime()
             .heap
