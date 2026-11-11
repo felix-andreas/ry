@@ -664,9 +664,13 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   page its own read and slows a cold start.
 - **The touch profile.** The layout build (`tools/layout/optimize.sh`) writes the image twice,
   and three files in a layout directory carry the profile from the first write to the second.
-  None of them is part of the image: the loader never reads them, so a missing or stale profile
-  can only leave the image laid out in id order, and every step below refuses a file recorded
-  for another image or numbering instead of using it.
+  None of them is part of the image or the repository: the loader never reads them, and the
+  layout build records a fresh profile for the binary it is building, so a change that
+  renumbers the image's objects cannot leave a stale order behind. Every other image write
+  (`just start-image`, the base tree's build, tests, CI, and the release builds other than
+  x86-64 Linux, which have no recorder) passes no layout directory and lays the image out in id
+  order, which removes the holes but not the scattering. Each step below refuses a file
+  recorded for another image or numbering instead of using it.
   - `ids`, written by the first write (`ry-rcmd start-image BASE --libr FILE --layout DIR`), is
     little-endian `u64`s: the image's header checksum, the digest of its numbering (the object
     count and each object's size, by id), then each object's address and size, by id. Ids come
