@@ -2228,6 +2228,12 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
             // call. An empty list prints nothing.
             SexpType::List if values::length(item) == 0 => Vec::new(),
             kind => {
+                // GNU R writes each object as it goes, so the objects before this one and the
+                // separator in front of it are already out when the error is raised.
+                if item_index > 0 {
+                    output.push_str(&separator_at(separator_index));
+                }
+                cat_text(file, output.as_bytes())?;
                 return Err(error(format!(
                     "argument {} (type '{}') cannot be handled by 'cat'",
                     item_index + 1,

@@ -1,5 +1,6 @@
 # cat() writes atomic vectors and names. A non-empty list, a call, a pairlist and an expression
-# are errors reported against the call to cat(), and an empty list or NULL prints nothing.
+# are errors reported against the call to cat(), and an empty list or NULL prints nothing. The
+# objects before the bad one, and the separator in front of it, are written before the error.
 cat(1:3, "a", TRUE, NA, 1.5, quote(sym), "\n")
 cat(list(), NULL, character(), "end\n")
 show <- function(expr) {
@@ -19,3 +20,6 @@ show(cat(expression(1)))
 show(cat(sin))
 f <- function(x) cat(x)
 show(f(list(1)))
+show(cat("a", "b", list(1), sep = "-"))
+show(cat(NULL, list(1)))
+show(cat(1:2, sin, sep = ","))
