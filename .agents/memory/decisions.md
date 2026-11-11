@@ -3794,8 +3794,13 @@ first lines R had already read, leaving R mid-command.
   valid prefix, because it accepts more than strict UTF-8 (code points past U+10FFFF, five-byte
   forms) and reports a cut-off invalid sequence as `EINVAL`; UTF-8 is stateless, so its answer
   equals one call over the whole input. A full output stops at the last whole character with
-  `E2BIG`, as glibc does. Pinned by `platform::tests::utf8_identity_matches_glibc` and the
-  oracle case `strings__riconv_utf8_identity`.
+  `E2BIG`, as glibc does. The copy applies only when both names spell UTF-8 (in any case,
+  with or without the hyphen). `Riconv_open` resolves `""` to the codeset of the current
+  `LC_CTYPE` (`platform::native_codeset`) before that test, because GNU R passes `""` straight
+  to `iconv_open`, where it names the locale's codeset; under `LC_CTYPE=C` that is ASCII, and
+  under a Latin-1 locale it is ISO-8859-1. Pinned by
+  `platform::tests::utf8_identity_matches_glibc` and the oracle cases
+  `strings__riconv_utf8_identity` and `strings__riconv_native_encoding`.
 - **Impact:** each fact has one implementation, so the oracle and GNU R's own tests exercise the
   code that libR and the interpreter both run. No effect on static analysis.
 

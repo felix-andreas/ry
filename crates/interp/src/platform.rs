@@ -1603,6 +1603,9 @@ mod tests {
             b"\xe2\x82",
         ];
         let mut fast = Iconv::open("UTF-8", "utf8").expect("glibc converts UTF-8");
+        assert!(Iconv::open("utf-8", "Utf8").is_some_and(|converter| converter.identity));
+        // "" is glibc's name for the locale's codeset, which callers resolve before this point.
+        assert!(Iconv::open("", "").is_some_and(|converter| !converter.identity));
         let mut glibc = Iconv::open("UTF-8", "UTF-8").expect("glibc converts UTF-8");
         glibc.identity = false;
         for_each_seed(20_000, |seed| {
