@@ -3076,6 +3076,32 @@ fn typed_calls_in_unforced_arguments_do_not_run() {
 }
 
 #[test]
+fn typed_to_typed_calls_evaluate_their_arguments_first() {
+    // Typed ry is strict: a typed function's call of another typed function evaluates every
+    // argument before the callee runs, on every tier, even one the callee never reads. A call
+    // from R code keeps R's laziness.
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            for mode in [Mode::Off, Mode::On] {
+                jit::install_mode(mode);
+                run("eager_calls <- 0");
+                run("eager_count <- function() { eager_calls <<- eager_calls + 1; 0 }");
+                run("eager_first <- function(a: F64, b: F64) -> F64 a");
+                run("eager_typed <- function(x: F64) -> F64 eager_first(x, eager_count())");
+                run("eager_r <- function(x) eager_first(x, eager_count())");
+                for _ in 0..3 {
+                    assert_eq!(run("eager_typed(2.5)"), run("2.5"));
+                    assert_eq!(run("eager_r(2.5)"), run("2.5"));
+                }
+                assert_eq!(run("eager_calls"), run("3"), "in mode {mode:?}");
+            }
+            jit::install_mode(Mode::Off);
+        }
+    });
+}
+
+#[test]
 fn typed_core_does_not_convert_dictionary_updates() {
     // A dictionary's values all have its value type, so an update that gives a logical for a
     // `F64` dictionary is an error on every tier, never a conversion.

@@ -1,0 +1,32 @@
+[stdout]
+| [1] 0
+| C.UTF-8 
+|  [1] "_x"   "a"    "A"    "a_b"  "a.b"  "ab"   "b"    "B"    "é"    "É"   
+| [11] "f"    "zeta" "Zeta" NA    
+| [1] TRUE
+|  [1] "Zeta" "zeta" "f"    "É"    "é"    "B"    "b"    "ab"   "a.b"  "a_b" 
+| [11] "A"    "a"    "_x"   NA    
+| [1] FALSE
+| [1] TRUE
+| C 
+|  [1] "A"    "B"    "Zeta" "_x"   "a"    "a.b"  "a_b"  "ab"   "b"    "f"   
+| [11] "zeta" "É"    "é"    NA    
+| [1] TRUE
+|  [1] "é"    "É"    "zeta" "f"    "b"    "ab"   "a_b"  "a.b"  "a"    "_x"  
+| [11] "Zeta" "B"    "A"    NA    
+| [1] TRUE
+| [1] FALSE
+| C.UTF-8 
+|  [1] "_x"   "a"    "A"    "a_b"  "a.b"  "ab"   "b"    "B"    "é"    "É"   
+| [11] "f"    "zeta" "Zeta" NA    
+| [1] TRUE
+|  [1] "Zeta" "zeta" "f"    "É"    "é"    "B"    "b"    "ab"   "a.b"  "a_b" 
+| [11] "A"    "a"    "_x"   NA    
+| [1] FALSE
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

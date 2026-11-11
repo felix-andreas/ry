@@ -76,16 +76,34 @@ build `ry` and `libr` first. `--engine ry-jit` is the same runtime with `RY_JIT=
 every body that is called twice and every loop through the JIT, so comparing it against GNU R checks
 the compiled tier on every case. `ry-tier0` runs with `RY_JIT=off`, and `ry-gctorture` runs with
 `RY_GC_STRESS=1`, which collects before every allocation once the script starts, and
-`ry-gctorture-young` with `RY_GC_STRESS=young`, which also keeps the survivors collectable. Without `--engine` or `ORACLE_ENGINE` the second engine
+`ry-gctorture-young` with `RY_GC_STRESS=young`, which also keeps the survivors collectable.
+`ry-jit-gctorture` combines `RY_JIT=force` with `RY_GC_STRESS=1`, so it checks that compiled code
+keeps every object it holds rooted. `--engine` takes a comma-separated list, such as
+`--engine ry,ry-jit-gctorture`, which runs GNU R once per case and prints a summary line per engine.
+A failure listed in `crates/oracle/known_failures.toml` reports as known rather than failing the run
+([Testing](/development/testing#known-oracle-failures) has the rule). Without `--engine` or `ORACLE_ENGINE` the second engine
 is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or `ry-jit`, or any command line) makes
 `cargo test -p oracle` also require the engine to match GNU R on every case.
 
-Both engines must search the same package library, installed by GNU R. ry runs on GNU R's base
-R when the two releases differ, so a package that ry installed (its `DESCRIPTION` says it was built
-under ry's release) makes `library()` warn "package 'x' was built under R version 4.6.2". The
-driver therefore reports the `R_LIBS` each engine saw, and a case whose engines saw different values
-fails with that message instead of a diff. A wrapper given as `ORACLE_RY` must not set `R_LIBS`
-itself.
+Every engine searches the reference R's libraries and nothing else. The oracle asks GNU R for its
+`.libPaths()` once (with `R_LIBS_SITE` and `R_LIBS_USER` empty, and any `R_LIBS` you set kept
+first), then runs each engine, and the gallery and `oracle bench` runs too, with `R_LIBS` set to
+those paths and `R_LIBS_SITE` and `R_LIBS_USER` set empty. Without that, ry would search its own
+defaults: its bundled base R's library, which holds none of the reference R's packages, and any GNU
+R site or user library it finds, such as Debian's `/usr/lib/R/site-library`, whose data.table 1.14.10,
+rlang 1.1.3 and withr 2.5.0 would load in place of the reference R's. `just doctor` warns when
+`ry run` by hand loads other packages than the reference R and prints the variables that make it
+match:
+
+```sh
+R_LIBS=/opt/R/4.6.2/lib/R/library R_LIBS_SITE= R_LIBS_USER= ry run case.R
+```
+
+The packages themselves must be installed by GNU R. ry runs on GNU R's base R when the two releases
+differ, so a package that ry installed (its `DESCRIPTION` says it was built under ry's release)
+makes `library()` warn "package 'x' was built under R version 4.6.2". The driver therefore reports
+the `R_LIBS` each engine saw, and a case whose engines saw different values fails with that message
+instead of a diff. A wrapper given as `ORACLE_RY` must not set `R_LIBS` itself.
 
 ry's native fast paths for base closures (`crates/interp/src/base_fast_paths.rs`) install only on
 the GNU R release whose code they follow, recognised by a hash. Against an older GNU R, such as a

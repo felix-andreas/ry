@@ -402,6 +402,36 @@ uncaught errors as transcripts, and a seeded simulator plays a client that sends
 invalid, requests at every stop. Every request must get exactly one response, the session must end,
 and the interpreter must be left clean. `FUZZ_SEED=<seed>` replays a failing session.
 
+#### Known oracle failures
+
+`crates/oracle/known_failures.toml` lists the oracle cases that fail on main under one engine, so a
+branch can tell its own regressions from failures it inherited. Each entry names the case (its file
+name in `cases/` without `.R`), the engine as `--engine` names it, the area of ry the bug lives in
+(such as `jit` or `gc`), and a one-line reason; `provisional = true` marks a failure seen on a branch whose runtime matches main
+but not yet confirmed on main itself.
+
+```toml
+[[failure]]
+case = "base__match_arg_native"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+```
+
+`oracle compare` and `ORACLE_ENGINE=<engine> cargo test -p oracle` sort every failure against the
+file and fail the run on two things: a failure the file does not list, and a listed case that
+passes. The second rule means the change that fixes a case also deletes its entry. Add an entry
+only for a failure main already has, never for one your own change introduces. A run prints each
+listed failure as `known` without its diff and ends with one line per engine:
+
+```
+ry-jit-gctorture: 3 of 7 passed, 4 known (same as main), 0 new, 0 listed but passing
+ry-gctorture-young: 4 of 7 passed, 3 known (same as main), 0 new, 0 listed but passing
+```
+
+The oracle refuses a file whose entry names an unknown engine, a missing case, or the same case and
+engine twice, and `known_failures_are_valid` in `test_cases.rs` checks the file without running R.
+
 ### The table engine
 
 `crates/table/tests/test_table.rs` drives the engine from Rust. Every expected value that encodes
@@ -425,7 +455,11 @@ runs in its own process, and the table adds both engines' peak RSS. zoo and xts 
 Compare peak RSS between two builds only from the same page-cache state. A freshly built `.ryc`
 or `libR.so` sits in the page cache in large folios, so one fault maps a whole block, and the same
 build reads back in small pages after eviction: two identical builds differed by 5 MB this way.
-Evict both builds' files with `posix_fadvise(POSIX_FADV_DONTNEED)` before every RSS comparison.
+`python3 tools/bench/evict.py RY...` evicts every file each build reads at run time, recursively:
+the executable's directory, its base R tree with every package's `.ryc`, ry's cache directory and
+the `R_LIBS` libraries. `tools/bench/bench.py` and `bench-base --memory` run it before measuring.
+Run it before every peak-RSS run you script yourself, because evicting only the top of `base-r`
+leaves the `.ryc` images cached.
 
 `just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
 n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with
