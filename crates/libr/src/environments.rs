@@ -614,20 +614,19 @@ unsafe fn promise_is_forced(promise: Sexp) -> bool {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_GetBindingType(symbol: Sexp, env: Sexp) -> BindingType {
-    enter(|| {
-        let env = environment(env, "R_GetBindingType")?;
-        let Some(cell) = runtime().heap.frame_cell(env, symbol) else {
-            return Ok(if base_binds_missing_arg(env, symbol) {
+    let kind = |runtime: &Runtime, env: Sexp| {
+        let Some(cell) = runtime.heap.frame_cell(env, symbol) else {
+            return if base_binds_missing_arg(env, symbol) {
                 BindingType::Missing
             } else {
                 BindingType::Unbound
-            });
+            };
         };
         if cell.has_gp(gp::ACTIVE_BINDING) {
-            return Ok(BindingType::Active);
+            return BindingType::Active;
         }
         let value = cell.cdr();
-        Ok(if value == runtime().heap.known().missing_arg {
+        if value == runtime.heap.known().missing_arg {
             BindingType::Missing
         } else if value.kind() == SexpType::Promise {
             if promise_is_forced(value) {
@@ -637,8 +636,12 @@ pub unsafe extern "C" fn R_GetBindingType(symbol: Sexp, env: Sexp) -> BindingTyp
             }
         } else {
             BindingType::Value
-        })
-    })
+        }
+    };
+    direct(
+        |runtime| (env.kind() == SexpType::Environment).then(|| kind(runtime, env)),
+        || Ok(kind(runtime(), environment(env, "R_GetBindingType")?)),
+    )
 }
 
 impl crate::boundary::Handout for BindingType {}

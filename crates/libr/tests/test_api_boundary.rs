@@ -67,7 +67,7 @@ fn duplicate(r: &R, value: Sexp) -> Sexp {
 }
 
 fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
-    let code = rng.below(24) as c_int;
+    let code = rng.below(26) as c_int;
     let arguments = match code {
         0 => {
             let object = random_object(r, rng);
@@ -75,6 +75,11 @@ fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
             [object, random_name(r, rng), value]
         }
         1 => [random_object(r, rng), random_name(r, rng), r.nil()],
+        25 => {
+            let object = random_object(r, rng);
+            let value = random_value(r, rng, object);
+            [object, r.integer(rng.below(4) as c_int), value]
+        }
         7 => {
             let class = ["first", "factor", "data.frame", "rytest_class"][rng.below(4)];
             [random_object(r, rng), r.string(class), r.nil()]
@@ -98,7 +103,7 @@ fn random_operation(r: &R, rng: &mut SplitMix64) -> Operation {
             let tag = [r.nil(), r.symbol("rytest.tag")][rng.below(2)];
             [random_cells(r, rng), tag, r.nil()]
         }
-        21..=23 => {
+        21..=24 => {
             let name = [
                 "lazy", "forced", "active", "plain", "missing", "x", "absent",
             ];
@@ -402,8 +407,9 @@ const BUDGETS: &[(&str, u64)] = &[
     ("bench_char_is_ascii", 33),
     ("bench_external_ptr_addr", 15),
     ("bench_get_option", 160),
+    ("bench_class_names_gets", 280),
     ("bench_set_car_cdr", 178),
-    ("bench_exists_var_in_frame", 104),
+    ("bench_binding_probes", 203),
     ("bench_delayed_binding", 230),
 ];
 

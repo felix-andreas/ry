@@ -960,6 +960,15 @@ SEXP rytest_api_op(SEXP op, SEXP a, SEXP b, SEXP c)
     case 21: result = ScalarLogical(R_existsVarInFrame(a, b)); break;
     case 22: result = R_DelayedBindingExpression(b, a); break;
     case 23: result = R_DelayedBindingEnvironment(b, a); break;
+    case 24: result = ScalarInteger(R_GetBindingType(b, a)); break;
+    case 25:
+        switch (INTEGER(b)[0]) {
+        case 0: result = classgets(a, c); break;
+        case 1: result = namesgets(a, c); break;
+        case 2: result = dimgets(a, c); break;
+        default: result = dimnamesgets(a, c);
+        }
+        break;
     default: result = R_NilValue;
     }
     PROTECT(result);
@@ -1159,6 +1168,20 @@ BENCH bench_get_option(int count)
     if (sum < 0) Rprintf("unreachable\n");
 }
 
+BENCH bench_class_names_gets(int count)
+{
+    SEXP x = PROTECT(allocVector(REALSXP, 2));
+    SEXP class = PROTECT(mkString("rytest_class"));
+    SEXP names = PROTECT(allocVector(STRSXP, 2));
+    SET_STRING_ELT(names, 0, mkChar("a"));
+    SET_STRING_ELT(names, 1, mkChar("b"));
+    for (int i = 0; i < count; i++) {
+        classgets(x, class);
+        namesgets(x, names);
+    }
+    UNPROTECT(3);
+}
+
 BENCH bench_set_car_cdr(int count)
 {
     SEXP x = PROTECT(ScalarInteger(1));
@@ -1170,14 +1193,14 @@ BENCH bench_set_car_cdr(int count)
     UNPROTECT(2);
 }
 
-BENCH bench_exists_var_in_frame(int count)
+BENCH bench_binding_probes(int count)
 {
     SEXP env = PROTECT(R_NewEnv(R_EmptyEnv, TRUE, 0));
     SEXP symbol = install("rytest.variable");
     defineVar(symbol, R_NilValue, env);
     int sum = 0;
     for (int i = 0; i < count; i++)
-        sum += R_existsVarInFrame(env, symbol);
+        sum += R_existsVarInFrame(env, symbol) + R_GetBindingType(symbol, env);
     UNPROTECT(1);
     if (sum < 0) Rprintf("unreachable\n");
 }
@@ -1238,9 +1261,11 @@ SEXP rytest_api_bench(SEXP count, SEXP env)
     R_gc();
     bench_get_option(n);
     R_gc();
+    bench_class_names_gets(n);
+    R_gc();
     bench_set_car_cdr(n);
     R_gc();
-    bench_exists_var_in_frame(n);
+    bench_binding_probes(n);
     R_gc();
     bench_delayed_binding(n, env);
     return R_NilValue;

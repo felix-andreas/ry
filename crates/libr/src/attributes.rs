@@ -676,31 +676,64 @@ pub unsafe extern "C" fn Rf_setAttrib(object: Sexp, name: Sexp, value: Sexp) -> 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_classgets(object: Sexp, value: Sexp) -> Sexp {
-    enter(|| class_gets(object, value))
+    direct(
+        |runtime| gets_direct(runtime, object, R_ClassSymbol.get(), value),
+        || class_gets(object, value),
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_namesgets(object: Sexp, value: Sexp) -> Sexp {
-    enter(|| {
-        names_gets(object, value)?;
-        Ok(object)
-    })
+    direct(
+        |runtime| {
+            gets_direct(runtime, object, R_NamesSymbol.get(), value).map(|_| Reachable(object))
+        },
+        || {
+            names_gets(object, value)?;
+            Ok(object)
+        },
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_dimgets(object: Sexp, value: Sexp) -> Sexp {
-    enter(|| {
-        dim_gets(object, value)?;
-        Ok(object)
-    })
+    direct(
+        |runtime| gets_direct(runtime, object, R_DimSymbol.get(), value).map(|_| Reachable(object)),
+        || {
+            dim_gets(object, value)?;
+            Ok(object)
+        },
+    )
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_dimnamesgets(object: Sexp, value: Sexp) -> Sexp {
-    enter(|| {
-        dimnames_gets(object, value)?;
-        Ok(object)
-    })
+    direct(
+        |runtime| {
+            gets_direct(runtime, object, R_DimNamesSymbol.get(), value).map(|_| Reachable(object))
+        },
+        || {
+            dimnames_gets(object, value)?;
+            Ok(object)
+        },
+    )
+}
+
+/// The `*gets` setters are `setAttrib` with a fixed name except for a `NULL` value, which
+/// `setAttrib` treats as removal and the setters do not, so only a non-`NULL` value shares
+/// [`set_attrib_direct`]. The object is the caller's argument, so returning it hands out
+/// nothing new.
+#[inline(always)]
+unsafe fn gets_direct(
+    runtime: &mut Runtime,
+    object: Sexp,
+    name: Sexp,
+    value: Sexp,
+) -> Option<Reachable> {
+    if value == runtime.nil() {
+        return None;
+    }
+    set_attrib_direct(runtime, object, name, value)
 }
 
 /// `Rf_GetRowNames`: the first element of a `dimnames` list.
