@@ -90,7 +90,7 @@ fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
         .flat_map(|step| step.words[1..].iter().cloned())
         .collect();
     let library = scenario_library(&requirements);
-    if let Some(reason) = missing_requirement(&requirements, library) {
+    if let Some(reason) = missing_requirement(&requirements, library)? {
         return Ok(Outcome::Skipped(reason));
     }
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
@@ -200,48 +200,54 @@ fn split_words(line: &str) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
-fn missing_requirement(requirements: &[String], library: Option<&Path>) -> Option<String> {
+/// Why the scenario cannot run here, or an error for a requirement the scenario misspells: a typo
+/// must fail rather than skip the scenario forever.
+fn missing_requirement(
+    requirements: &[String],
+    library: Option<&Path>,
+) -> Result<Option<String>, String> {
     for requirement in requirements {
         match requirement.as_str() {
             "gnu-r" => {
-                let Some(gnu_r) = gnu_r() else {
-                    return Some("GNU R is not installed".to_owned());
+                let gnu_r = match gnu_r() {
+                    Ok(gnu_r) => gnu_r,
+                    Err(reason) => return Ok(Some(reason.clone())),
                 };
                 // `--runtime gnu-r` embeds GNU R through its shared library.
                 if !gnu_r.home.join("lib").join("libR.so").is_file()
                     && !gnu_r.home.join("lib").join("libR.dylib").is_file()
                 {
-                    return Some(format!(
+                    return Ok(Some(format!(
                         "GNU R at {} has no shared library; it was built without `--enable-R-shlib`",
                         gnu_r.home.display()
-                    ));
+                    )));
                 }
             }
             "ry-runtime" => {
                 if ry_base().is_none() {
-                    return Some(
+                    return Ok(Some(
                         "ry's base R is not built; build it with `just base-r`".to_owned(),
-                    );
+                    ));
                 }
                 if let Err(error) = libr_path() {
-                    return Some(format!("ry's runtime is missing: {error}"));
+                    return Ok(Some(format!("ry's runtime is missing: {error}")));
                 }
             }
             other => {
                 let Some(package) = other.strip_prefix("r-package:") else {
-                    return Some(format!("unknown requirement `{other}`"));
+                    return Err(format!("unknown requirement `{other}`"));
                 };
                 let (package, minimum) = match package.split_once(">=") {
                     Some((package, minimum)) => (package, Some(minimum)),
                     None => (package, None),
                 };
-                if let Some(reason) = missing_package(package, minimum, requirements, library) {
-                    return Some(reason);
+                if let Some(reason) = missing_package(package, minimum, requirements, library)? {
+                    return Ok(Some(reason));
                 }
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// Why `package` cannot load in a runtime the scenario runs on, or loads older than `minimum`,
@@ -253,7 +259,7 @@ fn missing_package(
     minimum: Option<&str>,
     requirements: &[String],
     library: Option<&Path>,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     let valid = |text: &str| {
         !text.is_empty()
             && text
@@ -261,16 +267,25 @@ fn missing_package(
                 .all(|character| character.is_ascii_alphanumeric() || ".-".contains(character))
     };
     if !valid(package) || minimum.is_some_and(|minimum| !valid(minimum)) {
-        return Some(format!(
+        return Err(format!(
             "`r-package:{package}` is not a package name with an optional `>=VERSION`"
         ));
     }
-    // Exit status 1 means the package does not load, and 2 that it loads older than `minimum`,
-    // with the installed version on stdout.
+    if !requirements
+        .iter()
+        .any(|requirement| requirement == "ry-runtime" || requirement == "gnu-r")
+    {
+        return Err(format!(
+            "`r-package:{package}` needs `ry-runtime` or `gnu-r` to say which R it loads in"
+        ));
+    }
+    // A package older than `minimum` prints a marker line with its version and exits cleanly, so
+    // the probe cannot mistake a failing `ry run` or `Rscript`, whatever its exit status, for an
+    // old package.
     let mut probe = format!("if (!requireNamespace('{package}', quietly = TRUE)) quit(status = 1)\n");
     if let Some(minimum) = minimum {
         probe.push_str(&format!(
-            "if (packageVersion('{package}') < '{minimum}') {{ cat(format(packageVersion('{package}'))); quit(status = 2) }}\n"
+            "if (packageVersion('{package}') < '{minimum}') cat('{OLD_PACKAGE}', format(packageVersion('{package}')), '\\n')\n"
         ));
     }
     let mut runtimes = Vec::new();
@@ -280,7 +295,7 @@ fn missing_package(
         if let Err(error) =
             fs::create_dir_all(&directory).and_then(|()| fs::write(&script, &probe))
         {
-            return Some(format!("writing the package probe {}: {error}", script.display()));
+            return Err(format!("writing the package probe {}: {error}", script.display()));
         }
         let mut command = Command::new(env!("CARGO_BIN_EXE_ry"));
         command
@@ -295,42 +310,43 @@ fn missing_package(
     }
     if requirements.iter().any(|requirement| requirement == "gnu-r") {
         let Some(rscript) = gnu_rscript() else {
-            return Some("GNU R is not installed".to_owned());
+            return Ok(Some("GNU R is not installed".to_owned()));
         };
         let mut command = Command::new(&rscript);
         command.args(["-e", &probe]).envs(library_variables(library));
         runtimes.push((format!("GNU R at {}", rscript.display()), command));
     }
-    if runtimes.is_empty() {
-        return Some(format!(
-            "`r-package:{package}` needs `ry-runtime` or `gnu-r` to say which R it loads in"
-        ));
-    }
     for (runtime, mut command) in runtimes {
         let output = match command.output() {
             Ok(output) => output,
-            Err(error) => return Some(format!("checking for {package} with {runtime}: {error}")),
+            Err(error) => return Err(format!("checking for {package} with {runtime}: {error}")),
         };
-        if output.status.code() == Some(2) {
-            return Some(format!(
-                "{package} {} in {runtime}, scenario needs >= {}",
-                String::from_utf8_lossy(&output.stdout).trim(),
-                minimum.unwrap_or("?")
-            ));
-        }
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let detail = stderr.lines().rev().find(|line| !line.trim().is_empty());
-            return Some(match detail {
+            return Ok(Some(match detail {
                 Some(detail) => {
                     format!("the R package {package} does not load in {runtime}: {}", detail.trim())
                 }
                 None => format!("the R package {package} is not installed for {runtime}"),
-            });
+            }));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let installed = stdout
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(OLD_PACKAGE));
+        if let (Some(installed), Some(minimum)) = (installed, minimum) {
+            return Ok(Some(format!(
+                "{package} {} in {runtime}, scenario needs >= {minimum}",
+                installed.trim()
+            )));
         }
     }
-    None
+    Ok(None)
 }
+
+/// The marker the package probe prints before the version of a package that is too old.
+const OLD_PACKAGE: &str = "scenario-probe-old-package";
 
 /// The package library a scenario's R processes search: the corpus library ([`corpus_library`])
 /// for a scenario that requires an R package, when every runtime it requires matches the R
@@ -342,7 +358,7 @@ fn scenario_library(requirements: &[String]) -> Option<&'static Path> {
     }
     let (library, release) = corpus_library()?;
     if requirements.iter().any(|requirement| requirement == "gnu-r")
-        && gnu_r().map(|gnu_r| gnu_r.release.as_str()) != Some(release.as_str())
+        && gnu_r().ok().map(|gnu_r| gnu_r.release.as_str()) != Some(release.as_str())
     {
         return None;
     }
@@ -375,7 +391,10 @@ fn corpus_library() -> Option<&'static (PathBuf, String)> {
                 .filter(|directory| !directory.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.corpus"));
-            let library = corpus.join("library");
+            // Absolute, because the scenario's processes run in other directories.
+            let Ok(library) = fs::canonicalize(corpus.join("library")) else {
+                return None;
+            };
             if !library.is_dir() {
                 return None;
             }
@@ -398,17 +417,24 @@ fn corpus_library() -> Option<&'static (PathBuf, String)> {
                 let release = built.strip_prefix("R ")?.split(';').next()?;
                 Some(release.trim().to_owned())
             };
-            let mismatch = fs::read_dir(&library).ok().and_then(|entries| {
-                entries.flatten().find_map(|entry| {
-                    let description = entry.path().join("DESCRIPTION");
-                    if !description.is_file() {
-                        return None;
-                    }
-                    match built_by(&description) {
-                        Some(release) if release == presented => None,
-                        release => Some((entry.file_name(), release)),
-                    }
-                })
+            let entries = match fs::read_dir(&library)
+                .and_then(|entries| entries.collect::<Result<Vec<_>, _>>())
+            {
+                Ok(entries) => entries,
+                Err(error) => {
+                    eprintln!("scenarios: not using {}: {error}", library.display());
+                    return None;
+                }
+            };
+            let mismatch = entries.iter().find_map(|entry| {
+                let description = entry.path().join("DESCRIPTION");
+                if !description.is_file() {
+                    return None;
+                }
+                match built_by(&description) {
+                    Some(release) if release == presented => None,
+                    release => Some((entry.file_name(), release)),
+                }
             });
             if let Some((package, release)) = mismatch {
                 eprintln!(
@@ -442,22 +468,30 @@ struct GnuR {
     release: String,
 }
 
-fn gnu_r() -> Option<&'static GnuR> {
-    static GNU_R: OnceLock<Option<GnuR>> = OnceLock::new();
+/// The GNU R `gnu-r` scenarios run, or why there is none usable. `--vanilla` keeps a site profile
+/// that prints from shifting the lines this reads.
+fn gnu_r() -> Result<&'static GnuR, &'static String> {
+    static GNU_R: OnceLock<Result<GnuR, String>> = OnceLock::new();
     GNU_R
         .get_or_init(|| {
-            let output = Command::new(gnu_rscript()?)
-                .args(["-e", "cat(R.home(), format(getRversion()), sep = '\\n')"])
+            let rscript = gnu_rscript().ok_or("GNU R is not installed")?;
+            let output = Command::new(&rscript)
+                .args(["--vanilla", "-e", "cat(R.home(), format(getRversion()), sep = '\\n')"])
                 .output()
-                .ok()?;
-            if !output.status.success() {
-                return None;
-            }
+                .map_err(|error| format!("running {}: {error}", rscript.display()))?;
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut lines = stdout.lines();
-            let home = PathBuf::from(lines.next()?.trim());
-            let release = lines.next()?.trim().to_owned();
-            Some(GnuR { home, release })
+            let mut lines = stdout.lines().map(str::trim);
+            match (output.status.success(), lines.next(), lines.next()) {
+                (true, Some(home), Some(release)) => Ok(GnuR {
+                    home: PathBuf::from(home),
+                    release: release.to_owned(),
+                }),
+                _ => Err(format!(
+                    "{} does not report its R home and release: {}",
+                    rscript.display(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )),
+            }
         })
         .as_ref()
 }
@@ -1380,6 +1414,7 @@ impl Journey {
                 let output = Command::new(&front_end)
                     .args(["CMD", "INSTALL", "-l", "library", package])
                     .current_dir(&self.root)
+                    .envs(library_variables(self.library))
                     .output()
                     .map_err(|error| format!("running {}: {error}", front_end.display()))?;
                 self.last_run = Some(Run {
