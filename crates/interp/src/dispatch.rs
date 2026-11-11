@@ -8,7 +8,6 @@ use {
         Frame,
         annotations::Entry,
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
-        bytecode,
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
         interp,
         unwind::{R, error},
@@ -211,84 +210,65 @@ unsafe fn is_top_env(env: Sexp) -> bool {
         || (env.attrib() != nil() && crate::envir::is_package_env(env))
 }
 
-/// What S3 dispatch remembers between calls: a polymorphic inline cache per dispatch site, and
-/// behind it the bindings found from a top environment onward, by method name.
+/// What S3 dispatch keeps between calls: the method name each generic and class make, and the
+/// table of method rows that lookups by name read and write.
 ///
-/// A site is the instruction that dispatches ([`Site`]): the `UseMethod(...)` call in a
-/// generic's compiled body, or the call or operator of an internal or group generic. Its cache
-/// holds up to [`SITE_ENTRIES`] entries, one per class vector seen there, and an entry holds
-/// everything the lookup read, so a repeated dispatch on the same classes compares instead of
-/// searching. The entry is valid while
+/// A row belongs to one symbol, which names it ([`heap::Heap::method_row`]), so a lookup reaches
+/// its row without hashing. The row holds the symbol's name as a shared one-string vector, which
+/// is `.Generic` or `.Group` when the symbol names a generic and `.Method` when it names a
+/// method, and the binding the last lookup of the name found from a top environment onward. That
+/// binding is the answer again while
 ///
-/// - the lookup stamps of the method names it probed (and of `.__S3MethodsTable__.`) are
-///   unchanged, which says no binding of those names appeared or disappeared outside a function
-///   frame and no enclosure changed: this covers a method defined, removed or registered with
-///   `registerS3method`, and a package attached or detached;
-/// - the frames from the calling environment up to the top environment bind none of those
-///   names, which a hit checks afresh, because a binding in a function frame moves no stamp;
-/// - the methods table binding holds the same table; and
-/// - the method's binding still holds a function, which a hit reads afresh, because assigning a
-///   new value to an existing binding moves no stamp. A redefined method is therefore found
-///   without a miss.
+/// - the lookup starts from the same top environment and reads the same methods table, which the
+///   lookup compares, because the frames below the top environment and the table binding are
+///   read afresh on every dispatch;
+/// - the name's lookup stamp is unchanged, which says no binding of the name appeared or
+///   disappeared outside a function frame and no enclosure changed: this covers a method defined,
+///   removed, masked in the global environment or registered with `registerS3method`, and a
+///   package attached or detached; and
+/// - the binding still holds a function, which a hit reads afresh, because assigning a new value
+///   to an existing binding moves no stamp.
 ///
-/// The second cache, by method name, is for the dispatches that do not run from an instruction
-/// (`NextMethod`, an uncompiled body, dispatch from C, the internal lookups of `arith` and
-/// `subset`) and for a site that has seen more class vectors than it holds. An entry there holds the binding cell, not its value, for the
-/// same reason as a site's, and is valid while the binding epoch is unchanged, which moves when
-/// a binding outside a function frame appears or disappears or an enclosure changes.
+/// A lookup that passed a function frame, an active binding, or a binding of the name to
+/// something other than a function stores nothing, because a change there moves no stamp.
 ///
-/// Both caches are roots ([`trace_method_cache`]), so no environment, cell or class vector they
-/// name is freed and its address reused by a different object while the entry exists; a
-/// collection therefore leaves them valid. A minor collection marks only the entries stored
-/// since the last collection ([`MethodCache::written`]). A site's code is held weakly and its id
-/// freed when the code dies ([`S3Sites::clear_dead`]); an entry checks every input of the lookup
-/// anyway, so even a site that names the wrong instruction can only produce misses.
+/// The rows are roots ([`trace_method_cache`]), so no environment or cell they name is freed and
+/// its address reused while the row exists. A minor collection marks only the rows written since
+/// the last collection ([`MethodCache::written`]).
 #[derive(Default)]
 pub struct MethodCache {
-    stamp: u64,
-    entries: FxHashMap<(Sexp, Sexp, Sexp, bool), Option<Sexp>>,
     /// The method name symbol `prefix.class` by the symbol `prefix` and the interned string
     /// `class`. Building and interning the name was a third of a dispatch. Symbols are never
     /// freed and the table keeps its strings alive, so it needs no invalidation.
     names: FxHashMap<(Sexp, Sexp), Sexp>,
-    sites: S3Sites,
+    rows: MethodRows,
     pub s4: crate::methods::S4Cache,
     /// The `.Group` NextMethod defines when there is no group: `""`, shared and not mutable.
     blank_group: Option<Sexp>,
-    /// The key of every entry stored into either cache since the last collection. An older
-    /// entry's objects were marked by that collection and stay marked through a minor one, so a
-    /// minor collection marks the entries this log names instead of walking every entry, which
-    /// grows to thousands of sites in a package's test run. The log names keys rather than
-    /// objects so that an entry replaced or cleared before the collection keeps nothing alive:
-    /// in a run of only minor collections, whatever one marks is promoted and never freed.
+    /// What was stored since the last collection. An older row's objects were marked by that
+    /// collection and stay marked through a minor one, so a minor collection marks what this log
+    /// names instead of walking every row. The log names keys rather than objects so that an
+    /// entry replaced before the collection keeps nothing alive: in a run of only minor
+    /// collections, whatever one marks is promoted and never freed.
     written: Vec<Written>,
     /// Set when [`MethodCache::written`] passed [`WRITTEN_LIMIT`] and was dropped, so the next
-    /// collection walks every entry.
+    /// collection walks every row.
     overflowed: bool,
 }
 
 /// Stores logged between two collections before the log gives up and the next collection walks
-/// every entry instead.
+/// every row instead.
 const WRITTEN_LIMIT: usize = 1 << 16;
 
-/// The key of an entry stored into a method cache.
+/// What was stored into a method cache.
 #[derive(Clone, Copy)]
 pub(crate) enum Written {
-    Site(u32),
-    Entry((Sexp, Sexp, Sexp, bool)),
+    Row(u32),
     Name((Sexp, Sexp)),
     S4Site(Sexp),
 }
 
 impl MethodCache {
-    /// Frees the dispatch sites of code that died in a collection.
-    ///
-    /// # Safety
-    /// Runs inside a collection, between marking and sweeping.
-    pub(crate) unsafe fn clear_dead(&mut self, liveness: &heap::Liveness<'_>) {
-        self.sites.clear_dead(liveness)
-    }
-
     pub(crate) fn note_written(&mut self, key: Written) {
         if self.overflowed {
             return;
@@ -301,167 +281,23 @@ impl MethodCache {
     }
 }
 
-/// The class vectors one site remembers. Real generics see one to three at a site; a site that
-/// sees more is megamorphic and falls back to the cache by method name.
-const SITE_ENTRIES: usize = 4;
-
-/// The instruction a dispatch runs from: the one at `at` in the code whose constants are
-/// `constants`. The feedback word of its first operand, which no type recording uses, holds the
-/// site's id in [`S3Sites`] as `SITE_WORD + id`.
-#[derive(Clone, Copy)]
-pub struct Site {
-    pub constants: Sexp,
-    pub at: u32,
-}
-
-/// The least site word. A call plan's words lie in `-1 - PLAN_MISSES..` (unseen, misses, or a
-/// plan id plus one), so the two kinds never collide, and a call instruction whose word a
-/// dispatch took stops planning.
-pub(crate) const SITE_WORD: i32 = i32::MIN;
-/// One past the greatest site word.
-pub(crate) const SITE_WORD_END: i32 = SITE_WORD + (1 << 24);
-
-/// The S3 dispatch sites of the session, as columns indexed by site id. A site keeps at most
-/// [`SITE_ENTRIES`] entries inline, so it allocates nothing of its own, and the keys a hit
-/// compares sit apart from the rest of an entry. The code a site belongs to is held weakly.
+/// The method rows, as columns indexed by row. A lookup reads the four key columns and the cell.
 #[derive(Default)]
-struct S3Sites {
-    /// The constants of the code holding the site, or `None` for a free id.
-    owners: Vec<Option<Sexp>>,
-    /// The position of the site's instruction in that code.
-    ats: Vec<u32>,
-    keys: Vec<SmallVec<[EntryKey; SITE_ENTRIES]>>,
-    lookups: Vec<SmallVec<[SiteLookup; SITE_ENTRIES]>>,
-    free: Vec<u32>,
-}
-
-impl S3Sites {
-    /// The id the site's word names, when it is this site's.
-    unsafe fn id(&self, site: Site) -> Option<usize> {
-        let feedback = site.constants.element(bytecode::FEEDBACK);
-        let word = *values::ints(feedback).get(site.at as usize + 1)?;
-        if !(SITE_WORD..SITE_WORD_END).contains(&word) {
-            return None;
-        }
-        let id = (word - SITE_WORD) as usize;
-        (self.owners.get(id) == Some(&Some(site.constants)) && self.ats[id] == site.at)
-            .then_some(id)
-    }
-
-    /// The site's id, made when the site has none. A word that holds a call plan stays the
-    /// plan's, and the site goes without entries.
-    unsafe fn id_or_insert(&mut self, site: Site) -> Option<usize> {
-        if let Some(id) = self.id(site) {
-            return Some(id);
-        }
-        let feedback = site.constants.element(bytecode::FEEDBACK);
-        let word = values::ints_mut(feedback).get_mut(site.at as usize + 1)?;
-        if *word > 0 {
-            return None;
-        }
-        let id = match self.free.pop() {
-            Some(id) => {
-                let id = id as usize;
-                self.owners[id] = Some(site.constants);
-                self.ats[id] = site.at;
-                id
-            }
-            None => {
-                if self.owners.len() as i32 >= SITE_WORD_END - SITE_WORD {
-                    return None;
-                }
-                self.owners.push(Some(site.constants));
-                self.ats.push(site.at);
-                self.keys.push(SmallVec::new());
-                self.lookups.push(SmallVec::new());
-                self.owners.len() - 1
-            }
-        };
-        *word = SITE_WORD + id as i32;
-        Some(id)
-    }
-
-    /// Frees every site whose code died.
-    unsafe fn clear_dead(&mut self, liveness: &heap::Liveness<'_>) {
-        for id in 0..self.owners.len() {
-            if let Some(owner) = self.owners[id]
-                && !liveness.is_live(owner)
-            {
-                self.owners[id] = None;
-                self.keys[id].clear();
-                self.lookups[id].clear();
-                self.free.push(id as u32);
-            }
-        }
-    }
-}
-
-/// What a site entry is for: the inputs a hit compares. `classes` is a private copy, compared
-/// element by element, so an object whose class vector was modified in place cannot hit a stale
-/// entry.
-#[derive(Clone, Copy)]
-struct EntryKey {
-    generic: Sexp,
-    /// The group generic's symbol, or `NULL`.
-    group: Sexp,
-    with_default: bool,
-    classes: Sexp,
-    def_env: Sexp,
-}
-
-impl EntryKey {
-    unsafe fn matches(
-        &self,
-        generic: Sexp,
-        group: Sexp,
-        with_default: bool,
-        def_env: Sexp,
-        classes: Sexp,
-    ) -> bool {
-        self.generic == generic
-            && self.group == group
-            && self.with_default == with_default
-            && self.def_env == def_env
-            && same_classes(self.classes, classes)
-    }
-}
-
-/// The rest of a site entry: what the lookup read and found.
-struct SiteLookup {
-    top: Sexp,
-    search_top: bool,
-    /// The binding of `.__S3MethodsTable__.` in the generic's top environment and its value
-    /// when the entry was made, or `NULL` for both when there was none.
-    table_cell: Sexp,
-    table: Sexp,
-    /// The method names the lookup probed, in order; when it found a method, the last one.
-    candidates: SmallVec<[Sexp; 4]>,
-    stamp: u64,
-    found: Option<SiteMethod>,
-}
-
-struct SiteMethod {
-    cell: Sexp,
-    strings: MethodStrings,
-}
-
-/// The method an S3 lookup found, with the values of the dispatch variables that depend only
-/// on the lookup. A site entry shares them between calls, so they are not mutable.
-#[derive(Clone, Copy)]
-struct S3Method {
-    function: Sexp,
-    strings: MethodStrings,
-}
-
-#[derive(Clone, Copy)]
-struct MethodStrings {
-    /// The method's name, a symbol.
-    name: Sexp,
-    /// `.Generic`, `.Group` (or `NULL`), `.Class` and `.Method`.
-    generic: Sexp,
-    group: Sexp,
-    classes: Sexp,
-    method: Sexp,
+struct MethodRows {
+    /// The symbol that owns the row, which a lookup checks so that a row number left on a
+    /// symbol by another session's table can only miss.
+    symbols: Vec<Sexp>,
+    /// The symbol's name as a one-string character vector, not mutable.
+    strings: Vec<Sexp>,
+    /// The top environment the last stored lookup started from, the empty environment when it
+    /// skipped the global frame, or `NULL` before any lookup was stored.
+    tops: Vec<Sexp>,
+    /// The methods table that lookup searched, or `NULL` for none.
+    tables: Vec<Sexp>,
+    /// The name's lookup stamp when that lookup ran.
+    stamps: Vec<u64>,
+    /// The binding that lookup found, or `NULL` for none.
+    cells: Vec<Sexp>,
 }
 
 pub unsafe fn trace_method_cache(cache: &mut MethodCache, marker: &mut heap::Marker<'_>) {
@@ -471,12 +307,7 @@ pub unsafe fn trace_method_cache(cache: &mut MethodCache, marker: &mut heap::Mar
         }
         for &key in &cache.written {
             match key {
-                Written::Site(id) => mark_site(&cache.sites, id as usize, marker),
-                Written::Entry(key) => {
-                    if let Some(&cell) = cache.entries.get(&key) {
-                        mark_entry(key, cell, marker);
-                    }
-                }
+                Written::Row(row) => mark_row(&cache.rows, row as usize, marker),
                 Written::Name(key) => {
                     if cache.names.contains_key(&key) {
                         marker.mark(key.1);
@@ -501,63 +332,59 @@ unsafe fn trace_every_entry(cache: &MethodCache, marker: &mut heap::Marker<'_>) 
     if let Some(blank) = cache.blank_group {
         marker.mark(blank);
     }
-    for (&key, &cell) in &cache.entries {
-        mark_entry(key, cell, marker);
-    }
     for &(_, class) in cache.names.keys() {
         marker.mark(class);
     }
-    for id in 0..cache.sites.owners.len() {
-        mark_site(&cache.sites, id, marker);
-    }
-}
-
-unsafe fn mark_entry(
-    (name, top, table, _): (Sexp, Sexp, Sexp, bool),
-    cell: Option<Sexp>,
-    marker: &mut heap::Marker<'_>,
-) {
-    marker.mark(name);
-    marker.mark(top);
-    marker.mark(table);
-    if let Some(cell) = cell {
-        marker.mark(cell);
-    }
-}
-
-unsafe fn mark_site(sites: &S3Sites, id: usize, marker: &mut heap::Marker<'_>) {
-    let (Some(keys), Some(lookups)) = (sites.keys.get(id), sites.lookups.get(id)) else {
-        return;
-    };
-    for key in keys {
-        marker.mark(key.classes);
-        marker.mark(key.def_env);
-    }
-    for lookup in lookups {
-        for object in [lookup.top, lookup.table_cell, lookup.table] {
+    let rows = &cache.rows;
+    for column in [&rows.strings, &rows.tops, &rows.tables, &rows.cells] {
+        for &object in column {
             marker.mark(object);
         }
-        if let Some(found) = &lookup.found {
-            let strings = found.strings;
-            for object in [
-                found.cell,
-                strings.generic,
-                strings.group,
-                strings.classes,
-                strings.method,
-            ] {
-                marker.mark(object);
-            }
+    }
+}
+
+unsafe fn mark_row(rows: &MethodRows, row: usize, marker: &mut heap::Marker<'_>) {
+    for column in [&rows.strings, &rows.tops, &rows.tables, &rows.cells] {
+        if let Some(&object) = column.get(row) {
+            marker.mark(object);
         }
     }
+}
+
+/// The row of `symbol`, made when it has none.
+unsafe fn method_row(symbol: Sexp) -> R<usize> {
+    let heap = crate::heap();
+    if let Some(row) = heap.method_row(symbol)
+        && interp().method_cache.rows.symbols.get(row as usize) == Some(&symbol)
+    {
+        return Ok(row as usize);
+    }
+    let string = values::scalar_string_charsxp(symbol.car())?;
+    string.mark_not_mutable();
+    let cache = &mut interp().method_cache;
+    let rows = &mut cache.rows;
+    let row = rows.symbols.len();
+    rows.symbols.push(symbol);
+    rows.strings.push(string);
+    rows.tops.push(nil());
+    rows.tables.push(nil());
+    rows.stamps.push(0);
+    rows.cells.push(nil());
+    heap.set_method_row(symbol, row as u32);
+    cache.note_written(Written::Row(row as u32));
+    Ok(row)
+}
+
+/// `symbol`'s name as a shared one-string character vector.
+unsafe fn name_string(symbol: Sexp) -> R<Sexp> {
+    let row = method_row(symbol)?;
+    Ok(interp().method_cache.rows.strings[row])
 }
 
 /// The S3 method for `classes` of the generic `generic` (or of its group `group`, when that is
 /// not `NULL`), as dispatch from `call_env` finds it: for each class in turn the generic's
-/// method, then the group's, and with `with_default` finally `generic.default`. `site` is the
-/// call that dispatches, whose inline cache answers a repeated lookup.
+/// method, then the group's, and with `with_default` finally `generic.default`.
 unsafe fn resolve_s3(
-    site: Option<Site>,
     generic: Sexp,
     group: Sexp,
     with_default: bool,
@@ -565,23 +392,7 @@ unsafe fn resolve_s3(
     call_env: Sexp,
     def_env: Sexp,
 ) -> R<Option<S3Method>> {
-    if let Some(site) = site
-        && let Some(hit) = site_hit(
-            site,
-            generic,
-            group,
-            with_default,
-            classes,
-            call_env,
-            def_env,
-        )?
-    {
-        return Ok(hit);
-    }
-    let epoch = crate::heap().binding_epoch();
     let scope = method_scope(call_env, def_env)?;
-    let mut cacheable = true;
-    let mut candidates: SmallVec<[Sexp; 4]> = SmallVec::new();
     let count = length(classes);
     let mut found = None;
     'classes: for index in 0..count {
@@ -591,192 +402,72 @@ unsafe fn resolve_s3(
                 continue;
             }
             let name = method_name(prefix, class)?;
-            candidates.push(name);
-            if let Some((function, cell)) = lookup_in_scope(name, &scope, &mut cacheable)? {
+            if let Some(function) = lookup_in_scope(name, &scope)? {
                 // base's `sort.list` is a function, not the `sort` method for class "list",
                 // and GNU R's dispatch passes over it.
                 if name.car().bytes() == b"sort.list"
                     && function.kind() == SexpType::Closure
                     && function.tag() == values::base_namespace()
                 {
-                    cacheable = false;
                     continue;
                 }
-                found = Some((function, cell, name, index));
+                found = Some((function, name, index));
                 break 'classes;
             }
         }
     }
     if found.is_none() && with_default {
         let name = method_name(generic, symbols().default.car())?;
-        candidates.push(name);
-        if let Some((function, cell)) = lookup_in_scope(name, &scope, &mut cacheable)? {
-            found = Some((function, cell, name, count));
+        if let Some(function) = lookup_in_scope(name, &scope)? {
+            found = Some((function, name, count));
         }
     }
-    let method = match found {
-        Some((function, _, name, index)) => Some(S3Method {
-            function,
-            strings: MethodStrings {
-                name,
-                generic: values::scalar_string_charsxp(generic.car())?,
-                group: if group == nil() {
-                    nil()
-                } else {
-                    values::scalar_string_charsxp(group.car())?
-                },
-                classes: class_suffix(classes, index)?,
-                method: values::scalar_string_charsxp(name.car())?,
-            },
-        }),
-        None => None,
+    let Some((function, name, index)) = found else {
+        return Ok(None);
     };
-    let cell = found.map(|(_, cell, _, _)| cell);
-    // Forcing a lazily loaded binding can run code that defines bindings, and an entry stamped
-    // before that would claim a validity it never had. A method found in a function frame has
-    // no cell an entry could hold.
-    if let Some(site) = site
-        && cacheable
-        && crate::heap().binding_epoch() == epoch
-        && cell.is_none_or(|cell| cell.is_some())
-        && scope
-            .table_cell
-            .is_none_or(|cell| !cell.has_gp(gp::ACTIVE_BINDING))
-    {
-        let private = class_suffix(classes, 0)?;
-        private.mark_not_mutable();
-        let found = match (method, cell.flatten()) {
-            (Some(method), Some(cell)) => {
-                let strings = method.strings;
-                for object in [
-                    strings.generic,
-                    strings.group,
-                    strings.classes,
-                    strings.method,
-                ] {
-                    object.mark_not_mutable();
-                }
-                Some(SiteMethod { cell, strings })
-            }
-            _ => None,
-        };
-        let key = EntryKey {
-            generic,
-            group,
-            with_default,
-            classes: private,
-            def_env,
-        };
-        let lookup = SiteLookup {
-            top: scope.top,
-            search_top: scope.search_top,
-            table_cell: scope.table_cell.unwrap_or(nil()),
-            table: scope.table_cell.map_or(nil(), |cell| cell.cdr()),
-            stamp: candidates_stamp(&candidates),
-            candidates,
-            found,
-        };
-        let cache = &mut interp().method_cache;
-        if let Some(id) = cache.sites.id_or_insert(site) {
-            let (keys, lookups) = (&mut cache.sites.keys[id], &mut cache.sites.lookups[id]);
-            // An entry for the same classes whose stamp moved is replaced in place, so a method
-            // redefined again and again cannot push the other class vectors out.
-            if let Some(index) = keys
-                .iter()
-                .position(|stale| stale.matches(generic, group, with_default, def_env, classes))
-            {
-                keys[index] = key;
-                lookups[index] = lookup;
-            } else if keys.len() < SITE_ENTRIES {
-                keys.push(key);
-                lookups.push(lookup);
-            }
-            cache.note_written(Written::Site(id as u32));
-        }
-    }
-    Ok(method)
+    // The strings live in their symbols' rows, so the one allocation that is not kept anywhere
+    // comes last. `.Class` shares the class vector when it holds every class, as a method that
+    // modifies it copies it first.
+    let generic = name_string(generic)?;
+    let group = if group == nil() {
+        nil()
+    } else {
+        name_string(group)?
+    };
+    let method = name_string(name)?;
+    let classes = if index == 0 {
+        classes.mark_not_mutable();
+        classes
+    } else {
+        class_suffix(classes, index)?
+    };
+    let strings = MethodStrings {
+        name,
+        generic,
+        group,
+        classes,
+        method,
+    };
+    Ok(Some(S3Method { function, strings }))
 }
 
-/// A site's answer for this lookup: `Some(found)` when an entry for these inputs is still
-/// valid, `None` when the lookup has to search.
-unsafe fn site_hit(
-    site: Site,
+/// The method an S3 lookup found, with the values of the dispatch variables that depend on the
+/// lookup.
+#[derive(Clone, Copy)]
+struct S3Method {
+    function: Sexp,
+    strings: MethodStrings,
+}
+
+#[derive(Clone, Copy)]
+struct MethodStrings {
+    /// The method's name, a symbol.
+    name: Sexp,
+    /// `.Generic`, `.Group` (or `NULL`), `.Class` and `.Method`.
     generic: Sexp,
     group: Sexp,
-    with_default: bool,
     classes: Sexp,
-    call_env: Sexp,
-    def_env: Sexp,
-) -> R<Option<Option<S3Method>>> {
-    let sites = &interp().method_cache.sites;
-    let Some(id) = sites.id(site) else {
-        return Ok(None);
-    };
-    let Some(index) = sites.keys[id]
-        .iter()
-        .position(|key| key.matches(generic, group, with_default, def_env, classes))
-    else {
-        return Ok(None);
-    };
-    let entry = &sites.lookups[id][index];
-    if candidates_stamp(&entry.candidates) != entry.stamp
-        || !scope_unchanged(entry, call_env)
-        || (entry.table_cell != nil() && entry.table_cell.cdr() != entry.table)
-    {
-        return Ok(None);
-    }
-    let Some(found) = &entry.found else {
-        return Ok(Some(None));
-    };
-    let (cell, strings) = (found.cell, found.strings);
-    // The binding may hold a promise of a lazily loaded method, whose forcing runs code, so the
-    // entry is not read past this point.
-    let function = value_of(cell.cdr())?;
-    if !values::is_function(function) {
-        return Ok(None);
-    }
-    Ok(Some(Some(S3Method { function, strings })))
-}
-
-unsafe fn same_classes(cached: Sexp, classes: Sexp) -> bool {
-    let count = length(classes);
-    // Strings are interned, so equal elements are the same object.
-    length(cached) == count
-        && (0..count).all(|index| cached.element(index) == classes.element(index))
-}
-
-unsafe fn candidates_stamp(candidates: &[Sexp]) -> u64 {
-    let heap = crate::heap();
-    candidates.iter().fold(
-        heap.lookup_stamp(symbols().dot_s3_methods_table),
-        |stamp, &name| stamp.wrapping_add(heap.lookup_stamp(name)),
-    )
-}
-
-/// Whether the frames from `call_env` up to the entry's top environment bind none of the names
-/// it probed and end where the entry's did.
-unsafe fn scope_unchanged(entry: &SiteLookup, call_env: Sexp) -> bool {
-    let heap = crate::heap();
-    let mut env = call_env;
-    loop {
-        if env == values::empty_env() {
-            return !entry.search_top;
-        }
-        if env == entry.top {
-            return entry.search_top;
-        }
-        if is_top_env(env) {
-            return false;
-        }
-        if entry
-            .candidates
-            .iter()
-            .any(|&name| heap.frame_cell(env, name).is_some())
-        {
-            return false;
-        }
-        env = env.enclosure();
-    }
+    method: Sexp,
 }
 
 /// Where an S3 method lookup from `call_env` searches: the frames up to the top environment
@@ -786,7 +477,6 @@ struct MethodScope {
     call_env: Sexp,
     top: Sexp,
     search_top: bool,
-    table_cell: Option<Sexp>,
     table: Option<Sexp>,
 }
 
@@ -803,8 +493,7 @@ unsafe fn method_scope(call_env: Sexp, def_env: Sexp) -> R<MethodScope> {
         }
         env = env.enclosure();
     };
-    let table_cell = crate::heap().frame_cell(top_env(def_env), symbols().dot_s3_methods_table);
-    let table = match table_cell {
+    let table = match crate::heap().frame_cell(top_env(def_env), symbols().dot_s3_methods_table) {
         Some(cell) => value_of(eval::cell_value(cell)?)?,
         None => nil(),
     };
@@ -812,7 +501,6 @@ unsafe fn method_scope(call_env: Sexp, def_env: Sexp) -> R<MethodScope> {
         call_env,
         top,
         search_top,
-        table_cell,
         table: (table.kind() == SexpType::Environment).then_some(table),
     })
 }
@@ -821,67 +509,66 @@ unsafe fn method_scope(call_env: Sexp, def_env: Sexp) -> R<MethodScope> {
 /// the generic's namespace's registered-methods table, then along the search path.
 pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Option<Sexp>> {
     let scope = method_scope(call_env, def_env)?;
-    let mut cacheable = true;
-    Ok(lookup_in_scope(name, &scope, &mut cacheable)?.map(|(function, _)| function))
+    lookup_in_scope(name, &scope)
 }
 
-/// The method `name` in `scope` and the cell binding it, which is `None` when the binding is in
-/// a frame below the top environment. `cacheable` turns false when the lookup saw something
-/// whose change would move no stamp (see [`method_cell_from`]).
-unsafe fn lookup_in_scope(
-    name: Sexp,
-    scope: &MethodScope,
-    cacheable: &mut bool,
-) -> R<Option<(Sexp, Option<Sexp>)>> {
+/// The method `name` in `scope`, through the name's row for the part from the top environment
+/// on.
+unsafe fn lookup_in_scope(name: Sexp, scope: &MethodScope) -> R<Option<Sexp>> {
     let mut env = scope.call_env;
     while env != scope.top && env != values::empty_env() {
         if let Some(function) = function_in_frame(name, env)? {
-            *cacheable = false;
-            return Ok(Some((function, None)));
+            return Ok(Some(function));
         }
         env = env.enclosure();
     }
-    let stamp = crate::heap().binding_epoch();
-    let key = (
-        name,
-        scope.top,
-        scope.table.unwrap_or(values::empty_env()),
-        scope.search_top,
-    );
-    let cache = &mut interp().method_cache;
-    if cache.stamp != stamp {
-        cache.entries.clear();
-        cache.stamp = stamp;
-    }
-    match cache.entries.get(&key) {
-        Some(None) => return Ok(None),
-        Some(Some(cell)) => {
-            let cell = *cell;
+    let heap = crate::heap();
+    let stamp = heap.lookup_stamp(name);
+    let top = if scope.search_top {
+        scope.top
+    } else {
+        values::empty_env()
+    };
+    let table = scope.table.unwrap_or(nil());
+    if let Some(row) = heap.method_row(name) {
+        let rows = &interp().method_cache.rows;
+        let row = row as usize;
+        if rows.symbols.get(row) == Some(&name)
+            && rows.stamps[row] == stamp
+            && rows.tops[row] == top
+            && rows.tables[row] == table
+        {
+            let cell = rows.cells[row];
+            if cell == nil() {
+                return Ok(None);
+            }
             let value = value_of(eval::cell_value(cell)?)?;
             if values::is_function(value) {
-                return Ok(Some((value, Some(cell))));
+                return Ok(Some(value));
             }
         }
-        None => {}
     }
-    let mut cacheable_here = true;
+    let mut cacheable = true;
     let found = method_cell_from(
         name,
         scope.top,
         scope.search_top,
         scope.table,
-        &mut cacheable_here,
+        &mut cacheable,
     )?;
-    *cacheable &= cacheable_here;
-    let cache = &mut interp().method_cache;
-    // Forcing a lazily loaded binding can run code that defines bindings or collects, and an
-    // entry stamped before that would claim a validity it never had.
-    if cacheable_here && cache.stamp == stamp {
-        let cell = found.map(|(cell, _)| cell);
-        cache.note_written(Written::Entry(key));
-        cache.entries.insert(key, cell);
+    // Forcing a lazily loaded binding can run code that defines bindings, and a row stamped
+    // before that would claim a validity it never had.
+    if cacheable && heap.lookup_stamp(name) == stamp {
+        let row = method_row(name)?;
+        let cache = &mut interp().method_cache;
+        let rows = &mut cache.rows;
+        rows.tops[row] = top;
+        rows.tables[row] = table;
+        rows.stamps[row] = stamp;
+        rows.cells[row] = found.map_or(nil(), |(cell, _)| cell);
+        cache.note_written(Written::Row(row as u32));
     }
-    Ok(found.map(|(cell, function)| (function, Some(cell))))
+    Ok(found.map(|(_, function)| function))
 }
 
 /// The part of [`lookup_method`] from the top environment `top` on: the cell binding the method
@@ -1032,9 +719,8 @@ impl Found {
 }
 
 /// The S3 method of the generic named by the symbol `generic` for `object`'s classes, through
-/// the inline cache of the dispatching call `site`.
+/// `call_env`.
 unsafe fn find_s3_method(
-    site: Option<Site>,
     generic: Sexp,
     object: Sexp,
     call_env: Sexp,
@@ -1042,7 +728,7 @@ unsafe fn find_s3_method(
 ) -> R<Option<Found>> {
     let _activity = activity::enter(Activity::S3Dispatch, 0);
     let classes = implicit_class(object)?;
-    let method = resolve_s3(site, generic, nil(), true, classes, call_env, def_env)?;
+    let method = resolve_s3(generic, nil(), true, classes, call_env, def_env)?;
     Ok(method.map(|method| Found::of(method, call_env, def_env)))
 }
 
@@ -1093,14 +779,7 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
             object => object,
         }
     };
-    let found = generic_method(
-        None,
-        generic,
-        object,
-        env.enclosure(),
-        sys_parent,
-        sys_parent,
-    )?;
+    let found = generic_method(generic, object, env.enclosure(), sys_parent, sys_parent)?;
     let mut vars = found.vars;
     let dispatch_vars = vars.len();
     // Through R 4.3, local variables the generic defined before dispatching are visible to the
@@ -1157,7 +836,6 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
 /// names. Through R 4.3 the method sees the generic's locals, so the caller checks there are
 /// none.
 pub(crate) unsafe fn use_method_in_slots(
-    site: Site,
     generic: Sexp,
     position: usize,
     first: *mut Sexp,
@@ -1190,14 +868,7 @@ pub(crate) unsafe fn use_method_in_slots(
         value_of(value)?
     };
     let Some((owner, enclosure)) = caller else {
-        let found = generic_method(
-            Some(site),
-            generic,
-            object,
-            function.tag(),
-            sys_parent,
-            sys_parent,
-        )?;
+        let found = generic_method(generic, object, function.tag(), sys_parent, sys_parent)?;
         let new_call = renamed_call(frame_call, found.method_name)?;
         drop(dispatching);
         return apply_method(
@@ -1215,14 +886,7 @@ pub(crate) unsafe fn use_method_in_slots(
     // method finds it as its caller by position, and `.GenericCallEnv` holds its pending
     // environment, which whoever reads the variable makes real.
     let pending = eval::pending_env(owner)?;
-    let found = generic_method(
-        Some(site),
-        generic,
-        object,
-        function.tag(),
-        enclosure,
-        pending,
-    )?;
+    let found = generic_method(generic, object, function.tag(), enclosure, pending)?;
     let new_call = renamed_call(frame_call, found.method_name)?;
     drop(dispatching);
     if found.method.kind() != SexpType::Closure {
@@ -1304,7 +968,6 @@ unsafe fn lazy_caller(position: usize, generic: Sexp) -> R<Option<(usize, Sexp)>
 /// methods are looked up from `lookup`, the caller's environment or, for a caller without one,
 /// its enclosure; `call_env` is what the method's `.GenericCallEnv` holds.
 unsafe fn generic_method(
-    site: Option<Site>,
     generic: Sexp,
     object: Sexp,
     enclosure: Sexp,
@@ -1316,7 +979,7 @@ unsafe fn generic_method(
         Some(definition) if definition.kind() == SexpType::Closure => definition.tag(),
         _ => values::base_namespace(),
     };
-    if let Some(mut found) = find_s3_method(site, generic_symbol, object, lookup, def_env)? {
+    if let Some(mut found) = find_s3_method(generic_symbol, object, lookup, def_env)? {
         if call_env != lookup {
             for (symbol, value) in found.vars.iter_mut() {
                 if *symbol == symbols().dot_generic_call_env {
@@ -1619,13 +1282,12 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     }
     // Find the next method along the remaining classes.
     let scope = method_scope(lookup_env, def_env)?;
-    let mut cacheable = true;
     let mut found: Option<(Sexp, Sexp, usize)> = None;
     'classes: for index in start..class_count {
         let class = classes.element(index);
         for prefix in [Some(generic_symbol), group_symbol].into_iter().flatten() {
             let name = method_name(prefix, class)?;
-            if let Some((method, _)) = lookup_in_scope(name, &scope, &mut cacheable)? {
+            if let Some(method) = lookup_in_scope(name, &scope)? {
                 found = Some((method, name, index));
                 break 'classes;
             }
@@ -1635,7 +1297,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         Some(found) => found,
         None => {
             let default = method_name(generic_symbol, symbols.default.car())?;
-            if let Some((method, _)) = lookup_in_scope(default, &scope, &mut cacheable)? {
+            if let Some(method) = lookup_in_scope(default, &scope)? {
                 (method, default, class_count)
             } else {
                 let function = eval::find_fun(generic_symbol, values::base_env())
@@ -1836,7 +1498,6 @@ pub unsafe fn try_builtin_dispatch(
     op: Sexp,
     args: &[Arg],
     env: Sexp,
-    site: Option<Site>,
 ) -> R<Option<Sexp>> {
     // From R 4.4 on, the matrix products count their arguments before they dispatch, so
     // `` `%*%`(x) `` is an error even when `x` has a method.
@@ -1892,7 +1553,7 @@ pub unsafe fn try_builtin_dispatch(
                 .filter(|(position, arg)| kept(*position, arg))
                 .map(|(_, arg)| *arg)
                 .collect();
-            internal_dispatch(symbols().c, call, &kept, env, site)
+            internal_dispatch(symbols().c, call, &kept, env)
         }
         Generic::Internal => {
             if !first.value.is_object() {
@@ -1909,7 +1570,7 @@ pub unsafe fn try_builtin_dispatch(
                 Some(symbol) => symbol,
                 None => values::install(definition.name)?,
             };
-            internal_dispatch(generic, call, args, env, site)
+            internal_dispatch(generic, call, args, env)
         }
         Generic::Ops | Generic::MatrixOps => {
             let any_object = args.iter().take(2).any(|arg| arg.value.is_object());
@@ -1929,7 +1590,7 @@ pub unsafe fn try_builtin_dispatch(
             } else {
                 "matrixOps"
             };
-            group_dispatch(group, definition.name, call, args, env, site)
+            group_dispatch(group, definition.name, call, args, env)
         }
         Generic::Summary => {
             // GNU R's `fixup_NaRm` moves `na.rm` last, adding `na.rm = FALSE` when the call has
@@ -1969,7 +1630,7 @@ pub unsafe fn try_builtin_dispatch(
                 builder.push(arg.tag, arg.value)?;
             }
             let fixed_call = builder.finish();
-            group_dispatch("Summary", definition.name, fixed_call, &fixed, env, site)
+            group_dispatch("Summary", definition.name, fixed_call, &fixed, env)
         }
         Generic::Math | Generic::Complex => {
             if !first.value.is_object() {
@@ -1985,7 +1646,7 @@ pub unsafe fn try_builtin_dispatch(
             } else {
                 "Complex"
             };
-            group_dispatch(group, definition.name, call, args, env, site)
+            group_dispatch(group, definition.name, call, args, env)
         }
     }
 }
@@ -2047,7 +1708,7 @@ pub unsafe fn dispatch_builtin(
     {
         return Ok(Some(value));
     }
-    internal_dispatch(generic, call, args, env, None)
+    internal_dispatch(generic, call, args, env)
 }
 
 /// GNU R's `DispatchOrEval`, for a [`BuiltinDef::dispatch_or_eval`] special called with the
@@ -2080,11 +1741,11 @@ pub unsafe fn dispatch_or_eval(
         }
         let object = value_of(head.value)?;
         crate::heap().root(object);
-        return dispatch_promised(definition, call, op, &promised, env, args, None);
+        return dispatch_promised(definition, call, op, &promised, env, args);
     }
     let object = eval::eval(first, env)?;
     crate::heap().root(object);
-    dispatch_evaluated_subject(definition, call, op, arguments, object, env, args, None)
+    dispatch_evaluated_subject(definition, call, op, arguments, object, env, args)
 }
 
 /// [`dispatch_or_eval`] after the first argument of `arguments` evaluated to `object`. A frame
@@ -2097,7 +1758,6 @@ pub unsafe fn dispatch_evaluated_subject(
     object: Sexp,
     env: Sexp,
     args: &mut Args,
-    site: Option<Site>,
 ) -> R<Option<Sexp>> {
     if !object.is_object() {
         args.push(Arg {
@@ -2115,7 +1775,7 @@ pub unsafe fn dispatch_evaluated_subject(
         value: forced_promise(arguments.car(), object)?,
     }];
     promised.extend(eval::promise_args(arguments.cdr(), env)?);
-    dispatch_promised(definition, call, op, &promised, env, args, site)
+    dispatch_promised(definition, call, op, &promised, env, args)
 }
 
 unsafe fn dispatch_promised(
@@ -2125,7 +1785,6 @@ unsafe fn dispatch_promised(
     promised: &Args,
     env: Sexp,
     args: &mut Args,
-    site: Option<Site>,
 ) -> R<Option<Sexp>> {
     let object = value_of(promised[0].value)?;
     if object.is_object() {
@@ -2136,7 +1795,6 @@ unsafe fn dispatch_promised(
         {
             Some(value)
         } else if let Some(found) = find_s3_method(
-            site,
             values::install(definition.name)?,
             object,
             env,
@@ -2193,15 +1851,9 @@ unsafe fn promise_of_missing(value: Sexp) -> R<bool> {
     eval::argument_is_missing(value.cdr(), eval::promise_env(value)?)
 }
 
-unsafe fn internal_dispatch(
-    generic: Sexp,
-    call: Sexp,
-    args: &[Arg],
-    env: Sexp,
-    site: Option<Site>,
-) -> R<Option<Sexp>> {
+unsafe fn internal_dispatch(generic: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
     let object = args[0].value;
-    let Some(found) = find_s3_method(site, generic, object, env, values::base_namespace())? else {
+    let Some(found) = find_s3_method(generic, object, env, values::base_namespace())? else {
         return Ok(None);
     };
     activity::count(Counter::S3Dispatches);
@@ -2270,14 +1922,13 @@ unsafe fn group_dispatch(
     call: Sexp,
     args: &[Arg],
     env: Sexp,
-    site: Option<Site>,
 ) -> R<Option<Sexp>> {
     let binary = group == "Ops" || group == "matrixOps";
     let operands = if binary { args.len().min(2) } else { 1 };
     let mut found: SmallVec<[Option<Found>; 2]> = SmallVec::new();
     for arg in args.iter().take(operands) {
         if arg.value.is_object() {
-            found.push(find_group_method(group, generic, arg.value, env, site)?);
+            found.push(find_group_method(group, generic, arg.value, env)?);
         } else {
             found.push(None);
         }
@@ -2397,14 +2048,13 @@ unsafe fn find_group_method(
     generic: &str,
     object: Sexp,
     env: Sexp,
-    site: Option<Site>,
 ) -> R<Option<Found>> {
     let _activity = activity::enter(Activity::S3Dispatch, 0);
     let classes = implicit_class(object)?;
     let def_env = values::base_namespace();
     let generic = values::install(generic)?;
     let group = values::install(group)?;
-    let method = resolve_s3(site, generic, group, false, classes, env, def_env)?;
+    let method = resolve_s3(generic, group, false, classes, env, def_env)?;
     Ok(method.map(|method| Found::of(method, env, def_env)))
 }
 

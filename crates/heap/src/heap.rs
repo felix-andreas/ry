@@ -2728,6 +2728,16 @@ impl Heap {
         None
     }
 
+    /// The symbol's row in the interpreter's S3 method table, if it has one.
+    pub unsafe fn method_row(&self, symbol: Sexp) -> Option<u32> {
+        symbol.symbol_payload().method_row.get().checked_sub(1)
+    }
+
+    /// Gives `symbol` the row `row` in the interpreter's S3 method table.
+    pub unsafe fn set_method_row(&self, symbol: Sexp, row: u32) {
+        symbol.symbol_payload().method_row.set(row + 1);
+    }
+
     /// See the field: an unchanged epoch means no binding outside a function frame appeared or
     /// disappeared, and no enclosure changed.
     pub fn binding_epoch(&self) -> u64 {
@@ -4942,6 +4952,7 @@ unsafe fn fill_triple(object: Sexp, kind: SexpType, first: Sexp, second: Sexp, t
         std::ptr::addr_of_mut!((*symbol).epoch).write(Cell::new(0));
         std::ptr::addr_of_mut!((*symbol).global_cell).write(Cell::new(None));
         std::ptr::addr_of_mut!((*symbol).global_stamp).write(Cell::new(u64::MAX));
+        std::ptr::addr_of_mut!((*symbol).method_row).write(Cell::new(0));
     }
 }
 

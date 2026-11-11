@@ -309,6 +309,37 @@ impl Generator {
                 self.rng.below(9)
             ));
         }
+        if self.rng.chance(1, 2) {
+            // Methods change between calls of one site, in the order a package and a user
+            // session change them: a global mask and its removal, a registration, a frame-local
+            // method, and a global mask over the registered method.
+            let target = ["circle", "square", "shape"][self.rng.below(3)];
+            let call = format!("area{k}(object{k})");
+            let mut steps = [
+                format!("area{k}.{target} <- function(s, ...) \"masked {target}\""),
+                format!("rm(area{k}.{target})"),
+                format!(
+                    "registerS3method(\"area{k}\", \"{target}\", function(s, ...) \"registered {target}\")"
+                ),
+                format!(
+                    "local{k} <- function(s) {{ area{k}.{target} <- function(s, ...) \"frame {target}\"; area{k}(s) }}\nprint(local{k}(object{k}))"
+                ),
+                format!("area{k}.{target} <- function(s, ...) \"global {target}\""),
+                format!("rm(area{k}.{target})"),
+            ];
+            if self.rng.chance(1, 2) {
+                steps[..3].rotate_right(1);
+            }
+            let line = self.guarded(&call);
+            text.push_str(&format!("for (i in 1:2) {line}\n"));
+            for step in steps {
+                text.push_str(&step);
+                text.push('\n');
+                let line = self.guarded(&call);
+                text.push_str(&line);
+                text.push('\n');
+            }
+        }
         text
     }
 

@@ -1175,7 +1175,7 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
             let args = evaluate_args(arguments, env, definition.keep_missing, call)?;
             if definition.generic != Generic::None
                 && let Some(value) =
-                    dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
+                    dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
             {
                 return Ok(value);
             }
@@ -1868,7 +1868,7 @@ pub unsafe fn apply(call: Sexp, function: Sexp, args: &[Arg], env: Sexp) -> R<Se
             }
             if definition.generic != Generic::None
                 && let Some(value) =
-                    dispatch::try_builtin_dispatch(definition, call, function, &forced, env, None)?
+                    dispatch::try_builtin_dispatch(definition, call, function, &forced, env)?
             {
                 return Ok(value);
             }
@@ -4986,7 +4986,7 @@ unsafe fn do_internal(call: &Call<'_>) -> R<Sexp> {
     };
     if definition.generic != Generic::None
         && let Some(value) =
-            dispatch::try_builtin_dispatch(definition, inner, function, &args, call.env()?, None)?
+            dispatch::try_builtin_dispatch(definition, inner, function, &args, call.env()?)?
     {
         return Ok(value);
     }
@@ -5175,8 +5175,7 @@ pub unsafe fn call_with_values(call: Sexp, function: Sexp, values: &[Sexp], env:
     let definition = builtin_def(function)?;
     args.extend(values.iter().map(|&value| Arg { tag: nil(), value }));
     if definition.generic != Generic::None
-        && let Some(value) =
-            dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
+        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
     {
         return Ok(value);
     }
@@ -5239,7 +5238,7 @@ pub unsafe fn force_and_call_with(
                     return apply_call(call, function, arguments, env);
                 }
                 return match dispatch::dispatch_evaluated_subject(
-                    definition, call, function, arguments, value, env, &mut args, None,
+                    definition, call, function, arguments, value, env, &mut args,
                 )? {
                     Some(value) => Ok(value),
                     None => call_builtin(definition, call, function, &args, env),
@@ -5258,7 +5257,7 @@ pub unsafe fn force_and_call_with(
             )?;
             if definition.generic != Generic::None
                 && let Some(value) =
-                    dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
+                    dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
             {
                 return Ok(value);
             }
@@ -5728,8 +5727,7 @@ unsafe fn reuse_first_argument(
     let definition = builtin_def(function)?;
     let args = evaluate_args(call.cdr(), env, definition.keep_missing, call)?;
     if definition.generic != Generic::None
-        && let Some(value) =
-            dispatch::try_builtin_dispatch(definition, call, function, &args, env, None)?
+        && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, &args, env)?
     {
         return Ok(value);
     }

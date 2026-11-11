@@ -461,6 +461,9 @@ pub(crate) struct SymbolObject {
     pub epoch: Cell<u64>,
     pub global_cell: Cell<Option<Sexp>>,
     pub global_stamp: Cell<u64>,
+    /// One plus the symbol's row in the interpreter's table of S3 method resolutions, or 0 for
+    /// none. The table lives outside the heap, so a loaded image starts without rows.
+    pub method_row: Cell<u32>,
 }
 
 #[repr(C)]
@@ -1290,6 +1293,7 @@ impl Sexp {
             symbol.epoch.set(symbol.epoch.get() + 1);
             symbol.global_cell.set(None);
             symbol.global_stamp.set(u64::MAX);
+            symbol.method_row.set(0);
         }
     }
 
