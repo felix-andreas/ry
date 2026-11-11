@@ -1245,6 +1245,39 @@ pub(crate) unsafe fn use_method_in_slots(
     result.map(Some)
 }
 
+/// The enclosure of the slot frame whose pending environment is `env`, when methods may be
+/// looked up from it in place of the frame: it still has no environment and no slot is named
+/// like a method of any of `prefixes` (a generic or group name). `None` for any other `env`.
+unsafe fn pending_enclosure(env: Sexp, prefixes: &[&[u8]]) -> Option<Sexp> {
+    if env.kind() != SexpType::Environment || !env.has_gp(gp::PENDING_FRAME) {
+        return None;
+    }
+    let frames = &interp().frames;
+    let frame = &frames[frames.iter().rposition(|frame| frame.pending == env)?];
+    if frame.env != nil() || frame.slots == crate::NO_SLOTS {
+        return None;
+    }
+    let function = frame.function;
+    let probed = prefixes
+        .iter()
+        .any(|prefix| slot_named_like_method(function, prefix));
+    (!probed).then(|| function.tag())
+}
+
+/// Whether a slot of the compiled closure `function` is named `prefix` or `prefix.<anything>`,
+/// a name an S3 lookup of a method of `prefix` might find.
+unsafe fn slot_named_like_method(function: Sexp, prefix: &[u8]) -> bool {
+    let names = function
+        .cdr()
+        .cdr()
+        .element(crate::bytecode::SLOTS)
+        .element(1);
+    (0..length(names)).any(|index| {
+        let name = names.element(index).car().bytes();
+        name.starts_with(prefix) && (name.len() == prefix.len() || name[prefix.len()] == b'.')
+    })
+}
+
 /// For the slot frame at `position` whose caller is a slot frame still without an environment,
 /// the caller's position and enclosure, when `UseMethod(generic)` may look methods up from that
 /// enclosure: the caller binds no slot named `generic` or `generic.<class>`.
@@ -1262,16 +1295,7 @@ unsafe fn lazy_caller(position: usize, generic: Sexp) -> R<Option<(usize, Sexp)>
         return Ok(None);
     }
     let function = caller.function;
-    let names = function
-        .cdr()
-        .cdr()
-        .element(crate::bytecode::SLOTS)
-        .element(1);
-    let prefix = generic.element(0).bytes();
-    let probed = (0..length(names)).any(|index| {
-        let name = names.element(index).car().bytes();
-        name.starts_with(prefix) && (name.len() == prefix.len() || name[prefix.len()] == b'.')
-    });
+    let probed = slot_named_like_method(function, generic.element(0).bytes());
     Ok((!probed).then(|| (owner, function.tag())))
 }
 
@@ -1438,22 +1462,27 @@ unsafe fn apply_method(
 unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     activity::count(Counter::S3Dispatches);
     let dispatching = activity::enter(Activity::S3Dispatch, 0);
-    let env = call.env()?;
-    let state = interp();
-    // The NextMethod closure's frame is `env`; the method frame is the one it was called from.
-    // Errors name the `NextMethod(...)` closure call, as GNU R's do.
-    let Some(own) = state.frames.iter().rposition(|frame| frame.owns(env)) else {
+    // The NextMethod closure's frame is the call's; the method frame is the one it was called
+    // from. Both are found by position, so neither needs an environment. Errors name the
+    // `NextMethod(...)` closure call, as GNU R's do.
+    let Some(own) = call.frame_index() else {
         return Err(error("'NextMethod' called from outside a function"));
     };
     let Some(position) = crate::envir::caller_index(own) else {
         return Err(error("'NextMethod' called from outside a function"));
     };
-    let (frame_call, function) = {
+    let (frame_call, function, frame_env) = {
         let frame = &interp().frames[position];
-        (frame.call, frame.function)
+        (frame.call, frame.function, frame.env)
     };
-    let method_env = eval::frame_env(position, eval::Reify::Site("method dispatch"))?;
-    let sys_parent = eval::frame_sys_parent(position, eval::Reify::Site("method dispatch"))?;
+    // A method running in slots keeps them: its variables are read from the slots, and the
+    // promises the next method gets are over its pending environment, as a promise of an
+    // argument it passes on would be. Only code that reads the environment makes it real.
+    let method_env = if frame_env == nil() && interp().frames[position].slots != crate::NO_SLOTS {
+        eval::pending_env(position)?
+    } else {
+        frame_env
+    };
     eval::materialize_references(position)?;
     let promargs: eval::Args = crate::frame_args(interp(), position).into();
     if frame_call.car().kind() != SexpType::Symbol {
@@ -1461,7 +1490,19 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     }
     let symbols = symbols();
     let read = |symbol: Sexp| -> R<Sexp> {
-        let value = eval::find_var_in_frame(symbol, method_env)?;
+        // Forcing a value can make the frame real, which keeps the pending object as its
+        // environment.
+        let value = if !method_env.has_gp(gp::PENDING_FRAME) {
+            eval::find_var_in_frame(symbol, method_env)?
+        } else {
+            match eval::pending_name(method_env, symbol) {
+                eval::PendingName::Slot(value) => value,
+                eval::PendingName::Enclosure(_) => crate::method_vars(interp(), position)
+                    .iter()
+                    .find(|(name, _)| *name == symbol)
+                    .map_or(unbound(), |&(_, value)| value),
+            }
+        };
         Ok(if value == unbound() {
             value
         } else {
@@ -1479,7 +1520,8 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     // called directly on an unclassed object has nothing to resume from.
     let mut classes = read(symbols.dot_class)?;
     if classes == unbound() {
-        let object = dispatch_object(function, method_env)?;
+        let env = eval::frame_env(position, eval::Reify::Site("method dispatch"))?;
+        let object = dispatch_object(function, env)?;
         classes = get_attr(object, symbols.class);
         if classes == nil() {
             return Err(error("object not specified"));
@@ -1513,12 +1555,28 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         name if name == values::na_string() || name.length() == 0 => None,
         name => Some(values::install_charsxp(name)?),
     };
-    let call_env = {
+    // `.GenericCallEnv` is the pending environment of a generic's caller that runs in slots.
+    // Methods are then looked up from that frame's enclosure, which finds what its environment
+    // would when no slot is named like a method of the generic or group, and the next method
+    // gets the pending environment, so the caller keeps its slots.
+    let (call_env, lookup_env) = {
         let value = read(symbols.dot_generic_call_env)?;
         if value == unbound() {
-            sys_parent
+            let env = eval::frame_sys_parent(position, eval::Reify::Site("method dispatch"))?;
+            (env, env)
         } else {
-            eval::resolved_value(value)?
+            let mut prefixes: SmallVec<[&[u8]; 2]> = SmallVec::new();
+            prefixes.push(generic_string.bytes());
+            if let Some(group) = group_symbol {
+                prefixes.push(group.car().bytes());
+            }
+            match pending_enclosure(value, &prefixes) {
+                Some(enclosure) => (value, enclosure),
+                None => {
+                    let env = eval::resolved_value(value)?;
+                    (env, env)
+                }
+            }
         }
     };
     let def_env = {
@@ -1560,7 +1618,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         }
     }
     // Find the next method along the remaining classes.
-    let scope = method_scope(call_env, def_env)?;
+    let scope = method_scope(lookup_env, def_env)?;
     let mut cacheable = true;
     let mut found: Option<(Sexp, Sexp, usize)> = None;
     'classes: for index in start..class_count {
@@ -1596,6 +1654,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     // The arguments: the method's own, with each formal replaced by a promise of its current
     // value in the method's frame, so changes the method made are seen.
     let mut args = promargs;
+    let mut made = MadePromises(SmallVec::new());
     if function.kind() == SexpType::Closure {
         let matched = eval::match_args(function.car(), &args, frame_call)?;
         let mut formal = function.car();
@@ -1610,6 +1669,10 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
             }
             if let Some(arg) = args.iter_mut().find(|arg| arg.value == *value) {
                 arg.value = eval::make_promise(symbol, method_env)?;
+                if method_env.has_gp(gp::PENDING_FRAME) {
+                    arg.value.increment_refcount();
+                    made.0.push(arg.value);
+                }
             }
         }
     }
@@ -1658,34 +1721,109 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     let vars = dispatch_vars(&strings, call_env, def_env);
     let new_call = renamed_call(frame_call, next_name)?;
     drop(dispatching);
-    match method.kind() {
-        SexpType::Closure => apply_closure(new_call, method, &args, method_env, Some(&vars)),
-        _ => {
-            let definition = eval::builtin_def(method)?;
-            // A special evaluates its arguments itself, so it gets the promises, which
-            // evaluate to their values without running a value that is a call. A
-            // dispatch-or-eval special's function takes values, so it gets them forced.
-            let special = matches!(definition.kind, Kind::Special | Kind::InternalSpecial)
-                && !definition.is_dispatch_or_eval();
-            let mut forced = Vec::with_capacity(args.len());
-            for arg in &args {
-                let value = if arg.value == missing_arg() || special {
-                    arg.value
-                } else {
-                    value_of(arg.value)?
-                };
-                forced.push(Arg {
-                    tag: arg.tag,
-                    value,
-                });
-            }
-            // The call names the default method, as in GNU R's "Error in `[.default`(x, 5)",
-            // which also tells a special that dispatches internally not to dispatch again.
-            let default_name = method_name(generic_symbol, symbols.default.car())?;
-            let primitive_call = renamed_call(frame_call, default_name)?;
-            call_builtin(definition, primitive_call, method, &forced, method_env)
-        }
+    // As in GNU R, a next method that is a closure has the method's caller as its parent frame,
+    // and a builtin runs in the method's frame. A caller still in slots is named by its
+    // position, through the slot owner, as when byte code running on it makes a call.
+    let (sys_parent, owner) = if method.kind() == SexpType::Closure {
+        let frame = &interp().frames[position];
+        (frame.sys_parent, frame.caller)
+    } else if interp().frames[position].env == nil() {
+        (nil(), position as u32)
+    } else {
+        (method_env, crate::NO_SLOTS)
+    };
+    let state = interp();
+    let previous_owner = state.slot_owner;
+    let sys_parent = if sys_parent != nil() {
+        sys_parent
+    } else if owner != crate::NO_SLOTS {
+        state.slot_owner = owner;
+        nil()
+    } else {
+        values::global_env()
+    };
+    let result = match method.kind() {
+        SexpType::Closure => apply_closure(new_call, method, &args, sys_parent, Some(&vars)),
+        _ => apply_next_primitive(method, &args, frame_call, generic_symbol, sys_parent),
+    };
+    interp().slot_owner = previous_owner;
+    if let Ok(value) = result
+        && interp().frames[position].env == nil()
+    {
+        let dead = made.dead(value);
+        let frame = &mut interp().frames[position];
+        frame.unforced = frame.unforced.saturating_sub(dead);
     }
+    result
+}
+
+/// The promises NextMethod made over the pending environment of a method that runs in slots,
+/// each held by one counted reference of its own for the length of the next method's call.
+/// The method's frame counts them among the promises that may still be forced, and as it
+/// returns it makes its environment for any such promise that outlives it. A promise the next
+/// method neither forced nor kept dies with the call, which only this reference shows: once
+/// the callee's slots let it go, a promise nothing else holds gives up its environment and
+/// looks like a forced one.
+struct MadePromises(SmallVec<[Sexp; 4]>);
+
+impl MadePromises {
+    /// How many of the promises the next method left unforced and nothing but this list holds,
+    /// as it returns `value`: a preserved promise, one a global calling handler holds and the
+    /// value itself count as held, since the counts do not see those roots.
+    unsafe fn dead(&self, value: Sexp) -> u32 {
+        let heap = crate::heap();
+        let handlers = &interp().global_handlers;
+        self.0
+            .iter()
+            .filter(|&&promise| {
+                promise.refcount() == 1
+                    && promise.car() == unbound()
+                    && promise != value
+                    && !heap.is_preserved(promise)
+                    && !crate::conditions::handlers_hold(handlers, promise)
+            })
+            .count() as u32
+    }
+}
+
+impl Drop for MadePromises {
+    fn drop(&mut self) {
+        // SAFETY: each promise is live, held by the reference this list counts.
+        unsafe { crate::heap().release_slots(&mut self.0) }
+    }
+}
+
+/// `NextMethod` reaching the internal default, the builtin `method`, called from `caller_env`.
+unsafe fn apply_next_primitive(
+    method: Sexp,
+    args: &[Arg],
+    frame_call: Sexp,
+    generic_symbol: Sexp,
+    caller_env: Sexp,
+) -> R<Sexp> {
+    let definition = eval::builtin_def(method)?;
+    // A special evaluates its arguments itself, so it gets the promises, which evaluate to
+    // their values without running a value that is a call. A dispatch-or-eval special's
+    // function takes values, so it gets them forced.
+    let special = matches!(definition.kind, Kind::Special | Kind::InternalSpecial)
+        && !definition.is_dispatch_or_eval();
+    let mut forced = eval::Args::with_capacity(args.len());
+    for arg in args {
+        let value = if arg.value == missing_arg() || special {
+            arg.value
+        } else {
+            value_of(arg.value)?
+        };
+        forced.push(Arg {
+            tag: arg.tag,
+            value,
+        });
+    }
+    // The call names the default method, as in GNU R's "Error in `[.default`(x, 5)", which
+    // also tells a special that dispatches internally not to dispatch again.
+    let default_name = method_name(generic_symbol, symbols().default.car())?;
+    let primitive_call = renamed_call(frame_call, default_name)?;
+    call_builtin(definition, primitive_call, method, &forced, caller_env)
 }
 
 // Dispatch from builtins.
