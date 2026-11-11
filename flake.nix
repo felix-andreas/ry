@@ -1,13 +1,19 @@
 {
+  # Inputs are git URLs, not `github:`, because cloud agent sessions reach GitHub through a proxy
+  # that serves git clones of public repositories but refuses the archive tarballs `github:`
+  # fetches (.agents/memory/decisions.md, "Flake inputs are git URLs").
   inputs = {
-    systems.url = "github:nix-systems/default";
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    devshell.url = "github:numtide/devshell";
-    rust-overlay = {
-      url = "github:oxalica/rust-overlay";
+    systems.url = "git+https://github.com/nix-systems/default?shallow=1";
+    nixpkgs.url = "git+https://github.com/NixOS/nixpkgs?ref=nixos-unstable&shallow=1";
+    devshell = {
+      url = "git+https://github.com/numtide/devshell?shallow=1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    crane.url = "github:ipetkov/crane";
+    rust-overlay = {
+      url = "git+https://github.com/oxalica/rust-overlay?shallow=1";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    crane.url = "git+https://github.com/ipetkov/crane?shallow=1";
   };
 
   outputs =
