@@ -986,7 +986,9 @@ native code are small. The lowest per-suite ceilings are `lgr`'s 7.7x (its `Sys.
 | Slot hints at lookup sites, behind the frame's symbol filter | JSC, V8 inline caches | built | variable lookup | `cached_cell`, `Frame::find_hinted` in `crates/heap/src/env.rs` |
 | Function lookups skip frames that cannot bind the symbol | ry | built | `lookup_function` | `lookup_function` in `bytecode.rs` |
 | Lookup stamps compared as their bits | V8 | built | 1.25k per `seq()` call | `LookupCache` in `bytecode.rs` |
-| Hash index only for frames over 32 bindings | ry | built | 3k per `seq()` call (`Frame::insert`) | `INDEX_THRESHOLD` in `env.rs` |
+| Index only for frames over 32 bindings: one open-addressed block of packed (hash, position) words | ry | built | 3k per `seq()` call (`Frame::insert`) | `INDEX_THRESHOLD` in `env.rs` |
+| Literal `pkg::name` reads the namespace binding it found, while the stamps of the bindings that led there stand still | JSC watchpoints | built | `namespace_lookup` on testthat_full, JIT off: 33,841 calls to 1,549 over five repetitions | `Op::Namespace` in `bytecode.rs`, `namespace_binding` in `envir.rs` |
+| Frameless `GetFun` for a slot holding a function and for a cached global function | LuaJIT, CPython | built | testthat_full, JIT off: the `GetFun` handler 22.7M to 12.4M instructions per repetition | `get_fun_fast` in `bytecode.rs` |
 | Builtin checks derived at registration | GNU R `PRIMARITY` | built | builtin call overhead | `Checks` in `crates/interp/src/builtins.rs` |
 | A call plan per call site: arguments written straight into the callee's slots | JSC `CodeBlock`, V8 | built | `run_closure`'s matching and binding; a call from a loop costs 2,330 instructions, down from 3,065 on heap frames | `direct_plan` in `bytecode.rs`, `call_with_plan` in `eval.rs` |
 | **2. Call facts ahead of time** | | | | |
