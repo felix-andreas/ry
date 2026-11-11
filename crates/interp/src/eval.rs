@@ -28,6 +28,7 @@ use {
     },
     smallvec::{SmallVec, smallvec},
     std::sync::atomic::Ordering,
+    thin_vec::ThinVec,
 };
 
 /// A call's arguments as values or promises. Inline for the common few, so a closure call
@@ -3312,18 +3313,21 @@ unsafe fn push_frame(
     let method_vars_start = state.method_vars.len() as u32;
     state.method_vars.extend_from_slice(method_vars);
     state.calls_ever = state.calls_ever.wrapping_add(1);
-    state.frames.push(Frame {
+    let (handlers, restarts) = (state.handlers.clone(), state.restarts.clone());
+    let (srcref, closures) = (state.srcref, state.frame_closures.len() as u32);
+    let (handle_mark, previous_owner) = (crate::heap().handle_mark() as u32, state.slot_owner);
+    state.frames.push_with(|| Frame {
         call,
         function,
         env,
         sys_parent,
         args: start,
-        on_exit: Vec::new(),
-        handlers: state.handlers.clone(),
-        restarts: state.restarts.clone(),
-        srcref: state.srcref,
+        on_exit: ThinVec::new(),
+        handlers,
+        restarts,
+        srcref,
         method_vars: method_vars_start,
-        closures: state.frame_closures.len(),
+        closures,
         slots,
         missing,
         caller,
@@ -3332,8 +3336,8 @@ unsafe fn push_frame(
         inlined: false,
         reified_by: crate::NOT_REIFIED,
         pending_shared: false,
-        handle_mark: crate::heap().handle_mark() as u32,
-        previous_owner: state.slot_owner,
+        handle_mark,
+        previous_owner,
     });
     let sampled = if PROFILE_TICK.load(Ordering::Relaxed) {
         record_profile_sample(None)
@@ -3362,24 +3366,32 @@ unsafe fn pop_frame(function: Sexp, depth: usize, result: R<Sexp>) -> R<Sexp> {
             .unwrap_or(&[]);
         count_package_call(function, Some(frame), args);
     }
-    crate::truncate_frames(state, depth);
-    let Some(frame) = state.frames.pop() else {
+    // An unwind that skipped frames above this one, or closures awaiting their frame, need the
+    // general truncation; a call returning normally needs neither.
+    if state.frames.len() != depth || !state.pending_closures.is_empty() {
+        crate::truncate_frames(state, depth);
+    }
+    let Some(frame) = state.frames.last() else {
         panic!("a closure call's frame was popped while the call ran");
     };
-    state.frame_args.truncate(frame.args as usize);
-    state.method_vars.truncate(frame.method_vars as usize);
-    let (env, closures) = (frame.env, frame.closures);
+    let (env, closures, srcref) = (frame.env, frame.closures, frame.srcref);
+    let (args, method_vars) = (frame.args as usize, frame.method_vars as usize);
+    let Some((handlers, restarts)) = state.frames.pop() else {
+        panic!("a closure call's frame was popped while the call ran");
+    };
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
-    conditions::restore_handlers(frame.handlers);
-    state.restarts = frame.restarts;
-    state.srcref = frame.srcref;
+    conditions::restore_handlers(handlers);
+    state.restarts = restarts;
+    state.frame_args.truncate(args);
+    state.method_vars.truncate(method_vars);
+    state.srcref = srcref;
     if let Ok(value) = result
         && env != nil()
     {
-        let created = state.frame_closures.get(closures..).unwrap_or(&[]);
+        let created = state.frame_closures.get(closures as usize..).unwrap_or(&[]);
         crate::heap().release_frame(env, value, created);
     }
-    state.frame_closures.truncate(closures);
+    state.frame_closures.truncate(closures as usize);
     result
 }
 
@@ -4688,7 +4700,7 @@ pub unsafe fn make_closure(formals: Sexp, body: Sexp, srcref: Sexp, env: Sexp) -
     let state = interp();
     if let Some(frame) = state.frames.last()
         && frame.env == env
-        && state.frame_closures.len() - frame.closures < crate::FRAME_CLOSURES
+        && state.frame_closures.len() - (frame.closures as usize) < crate::FRAME_CLOSURES
     {
         state.frame_closures.push(closure);
     }
@@ -5380,12 +5392,12 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
         env,
         sys_parent: call.env()?,
         args: state.frame_args.len() as u32,
-        on_exit: Vec::new(),
+        on_exit: ThinVec::new(),
         handlers: handlers.clone(),
         restarts: restarts.clone(),
         srcref: state.srcref,
         method_vars: state.method_vars.len() as u32,
-        closures: state.frame_closures.len(),
+        closures: state.frame_closures.len() as u32,
         slots: crate::NO_SLOTS,
         missing: 0,
         caller: crate::NO_SLOTS,
@@ -5411,7 +5423,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     conditions::restore_handlers(state.frames[depth - 1].handlers.clone());
     state
         .frame_closures
-        .truncate(state.frames[depth - 1].closures);
+        .truncate(state.frames[depth - 1].closures as usize);
     crate::truncate_frames(state, depth - 1);
     state.restarts = restarts;
     result
