@@ -201,53 +201,93 @@ fn split_words(line: &str) -> Result<Vec<String>, String> {
 }
 
 /// Why the scenario cannot run here, or an error for a requirement the scenario misspells: a typo
-/// must fail rather than skip the scenario forever.
+/// must fail rather than skip the scenario forever. Every requirement is parsed before any is
+/// probed, so a typo fails even on a machine that would skip the scenario for another reason, and
+/// the runtimes are checked before a package probe runs in them.
 fn missing_requirement(
     requirements: &[String],
     library: Option<&Path>,
 ) -> Result<Option<String>, String> {
+    let mut packages = Vec::new();
     for requirement in requirements {
         match requirement.as_str() {
-            "gnu-r" => {
-                let gnu_r = match gnu_r() {
-                    Ok(gnu_r) => gnu_r,
-                    Err(reason) => return Ok(Some(reason.clone())),
-                };
-                // `--runtime gnu-r` embeds GNU R through its shared library.
-                if !gnu_r.home.join("lib").join("libR.so").is_file()
-                    && !gnu_r.home.join("lib").join("libR.dylib").is_file()
-                {
-                    return Ok(Some(format!(
-                        "GNU R at {} has no shared library; it was built without `--enable-R-shlib`",
-                        gnu_r.home.display()
-                    )));
-                }
-            }
-            "ry-runtime" => {
-                if ry_base().is_none() {
-                    return Ok(Some(
-                        "ry's base R is not built; build it with `just base-r`".to_owned(),
-                    ));
-                }
-                if let Err(error) = libr_path() {
-                    return Ok(Some(format!("ry's runtime is missing: {error}")));
-                }
-            }
+            "gnu-r" | "ry-runtime" => {}
             other => {
                 let Some(package) = other.strip_prefix("r-package:") else {
                     return Err(format!("unknown requirement `{other}`"));
                 };
-                let (package, minimum) = match package.split_once(">=") {
-                    Some((package, minimum)) => (package, Some(minimum)),
+                let (name, minimum) = match package.split_once(">=") {
+                    Some((name, minimum)) => (name, Some(minimum)),
                     None => (package, None),
                 };
-                if let Some(reason) = missing_package(package, minimum, requirements, library)? {
-                    return Ok(Some(reason));
+                if !is_package_name(name) || minimum.is_some_and(|minimum| !is_version(minimum)) {
+                    return Err(format!(
+                        "`{other}` is not an R package name with an optional `>=VERSION`"
+                    ));
                 }
+                packages.push((name, minimum));
             }
         }
     }
+    let requires = |name: &str| requirements.iter().any(|requirement| requirement == name);
+    if let Some((name, _)) = packages.first()
+        && !requires("ry-runtime")
+        && !requires("gnu-r")
+    {
+        return Err(format!(
+            "`r-package:{name}` needs `ry-runtime` or `gnu-r` to say which R it loads in"
+        ));
+    }
+    if requires("gnu-r") {
+        let gnu_r = match gnu_r() {
+            Ok(gnu_r) => gnu_r,
+            Err(reason) => return Ok(Some(reason.clone())),
+        };
+        // `--runtime gnu-r` embeds GNU R through its shared library.
+        if !gnu_r.home.join("lib").join("libR.so").is_file()
+            && !gnu_r.home.join("lib").join("libR.dylib").is_file()
+        {
+            return Ok(Some(format!(
+                "GNU R at {} has no shared library; it was built without `--enable-R-shlib`",
+                gnu_r.home.display()
+            )));
+        }
+    }
+    if requires("ry-runtime") {
+        if ry_base().is_none() {
+            return Ok(Some(
+                "ry's base R is not built; build it with `just base-r`".to_owned(),
+            ));
+        }
+        if let Err(error) = libr_path() {
+            return Ok(Some(format!("ry's runtime is missing: {error}")));
+        }
+    }
+    for (name, minimum) in packages {
+        if let Some(reason) = missing_package(name, minimum, requirements, library)? {
+            return Ok(Some(reason));
+        }
+    }
     Ok(None)
+}
+
+/// R's rule for a package name: ASCII letters, digits and dots, at least two characters, starting
+/// with a letter and not ending with a dot.
+fn is_package_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[bytes.len() - 1] != b'.'
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'.')
+}
+
+/// A version R's `numeric_version` reads: runs of digits separated by single dots or dashes.
+fn is_version(version: &str) -> bool {
+    version
+        .split(['.', '-'])
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// Why `package` cannot load in a runtime the scenario runs on, or loads older than `minimum`,
@@ -260,25 +300,6 @@ fn missing_package(
     requirements: &[String],
     library: Option<&Path>,
 ) -> Result<Option<String>, String> {
-    let valid = |text: &str| {
-        !text.is_empty()
-            && text
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || ".-".contains(character))
-    };
-    if !valid(package) || minimum.is_some_and(|minimum| !valid(minimum)) {
-        return Err(format!(
-            "`r-package:{package}` is not a package name with an optional `>=VERSION`"
-        ));
-    }
-    if !requirements
-        .iter()
-        .any(|requirement| requirement == "ry-runtime" || requirement == "gnu-r")
-    {
-        return Err(format!(
-            "`r-package:{package}` needs `ry-runtime` or `gnu-r` to say which R it loads in"
-        ));
-    }
     // A package older than `minimum` prints a marker line with its version and exits cleanly, so
     // the probe cannot mistake a failing `ry run` or `Rscript`, whatever its exit status, for an
     // old package.
