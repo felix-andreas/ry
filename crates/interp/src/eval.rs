@@ -1915,14 +1915,14 @@ pub unsafe fn apply_closure(
     {
         return Ok(value);
     }
-    if supplied.is_none()
-        && crate::annotations::is_typed(function)
-        && let Some(tier) = bytecode::tier()
-    {
-        if let Some(value) = (tier.call)(function, args) {
-            return value;
+    if supplied.is_none() && crate::annotations::is_typed(function) {
+        force_typed_arguments(args)?;
+        if let Some(tier) = bytecode::tier() {
+            if let Some(value) = (tier.call)(function, args) {
+                return value;
+            }
+            crate::annotations::log_interpreted(call);
         }
-        crate::annotations::log_interpreted(call);
     }
     if let Some(frame) = bind_slots(call, function, args)? {
         let method_vars = supplied.unwrap_or(&[]);
@@ -1938,6 +1938,46 @@ pub unsafe fn apply_closure(
     }
     let env = bind_arguments(call, function, args, supplied)?;
     run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
+}
+
+/// Forces, left to right, each argument promise that typed code wrote: a call from one typed
+/// function to another evaluates its arguments before the callee runs, as compiled typed code
+/// does, so the tiers agree on a typed program. An argument written in R code, including one a
+/// typed function receives through `...`, stays lazy.
+unsafe fn force_typed_arguments(args: &[Arg]) -> R<()> {
+    for arg in args {
+        let promise = arg.value;
+        if promise.kind() == SexpType::Promise
+            && promise.car() == unbound()
+            && written_in_typed_code(promise)
+        {
+            force_promise(promise)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether `promise`'s code is in the body of a typed function: its environment is the frame of
+/// a live call of one. A typed function never runs on slots, so a promise over a slot frame is
+/// R code's.
+unsafe fn written_in_typed_code(promise: Sexp) -> bool {
+    if promise.has_gp(gp::ARGUMENT_REFERENCE) {
+        return false;
+    }
+    let env = promise.tag();
+    if env.has_gp(gp::PENDING_FRAME) {
+        return false;
+    }
+    interp()
+        .frames
+        .iter()
+        .rev()
+        .find(|frame| frame.env == env)
+        .is_some_and(|frame| {
+            // `eval` and other builtins push frames too, whose function has no formals to read.
+            frame.function.kind() == SexpType::Closure
+                && crate::annotations::is_typed(frame.function)
+        })
 }
 
 /// [`apply_closure`] for promises the caller built for this call alone and never reads again,
@@ -1957,14 +1997,14 @@ pub unsafe fn apply_closure_owning(
     {
         return Ok(value);
     }
-    if supplied.is_none()
-        && crate::annotations::is_typed(function)
-        && let Some(tier) = bytecode::tier()
-    {
-        if let Some(value) = (tier.call)(function, args) {
-            return value;
+    if supplied.is_none() && crate::annotations::is_typed(function) {
+        force_typed_arguments(args)?;
+        if let Some(tier) = bytecode::tier() {
+            if let Some(value) = (tier.call)(function, args) {
+                return value;
+            }
+            crate::annotations::log_interpreted(call);
         }
-        crate::annotations::log_interpreted(call);
     }
     if let Some(frame) = bind_slots(call, function, args)? {
         let method_vars = supplied.unwrap_or(&[]);

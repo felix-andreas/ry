@@ -1,0 +1,19 @@
+# Typed ry is strict: a typed function's call of another typed function computes every argument
+# before the callee runs, while an argument written in R code stays a promise. The same calls
+# made through `eval`, as a script runner or `source` does, keep both rules.
+
+requires ry-runtime
+
+file eager.R
+| first <- function(a: double, b: double) -> double a
+| typed_caller <- function(x: double) -> double first(x, { cat("computed b\n"); 0 })
+| r_caller <- function(x) first(x, { cat("computed b\n"); 0 })
+| print(typed_caller(1))
+| print(r_caller(2))
+| runner <- function(code) eval(code, globalenv())
+| print(runner(quote(typed_caller(3))))
+| print(runner(quote(first(4, { cat("computed b\n"); 0 }))))
+
+run ry run --runtime ry eager.R
+expect exit 0
+expect stdout "computed b\n[1] 1\n[1] 2\ncomputed b\n[1] 3\n[1] 4\n"
