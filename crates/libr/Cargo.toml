@@ -57,6 +57,10 @@ name = "test_interrupts"
 path = "tests/test_interrupts.rs"
 
 [[test]]
+name = "test_finalizers"
+path = "tests/test_finalizers.rs"
+
+[[test]]
 name = "test_gnu_r_binaries"
 path = "tests/test_gnu_r_binaries.rs"
 
