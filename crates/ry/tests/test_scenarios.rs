@@ -83,12 +83,13 @@ struct Step {
 
 fn run_scenario(name: &str, text: &str) -> Result<Outcome, String> {
     let steps = parse(text)?;
-    for step in &steps {
-        if step.words[0] == "requires"
-            && let Some(reason) = missing_requirement(&step.words[1..])
-        {
-            return Ok(Outcome::Skipped(reason));
-        }
+    let requirements: Vec<String> = steps
+        .iter()
+        .filter(|step| step.words[0] == "requires")
+        .flat_map(|step| step.words[1..].iter().cloned())
+        .collect();
+    if let Some(reason) = missing_requirement(&requirements) {
+        return Ok(Outcome::Skipped(reason));
     }
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("scenarios")
@@ -218,21 +219,71 @@ fn missing_requirement(requirements: &[String]) -> Option<String> {
                 let Some(package) = other.strip_prefix("r-package:") else {
                     return Some(format!("unknown requirement `{other}`"));
                 };
-                let installed = which("Rscript").is_some_and(|rscript| {
-                    Command::new(rscript)
-                        .args([
-                            "-e",
-                            &format!(
-                                "quit(status = !requireNamespace('{package}', quietly = TRUE))"
-                            ),
-                        ])
-                        .output()
-                        .is_ok_and(|output| output.status.success())
-                });
-                if !installed {
-                    return Some(format!("the R package {package} is not installed"));
+                if let Some(reason) = missing_package(package, requirements) {
+                    return Some(reason);
                 }
             }
+        }
+    }
+    None
+}
+
+/// Why `package` cannot load in a runtime the scenario runs on, checked with that runtime itself:
+/// ry's for `ry-runtime`, and for `gnu-r` the GNU R that `--runtime gnu-r` picks. A library
+/// built by one R version may not load in another, so asking any other R could pass a package
+/// the scenario then fails to load, or skip one it can.
+fn missing_package(package: &str, requirements: &[String]) -> Option<String> {
+    let probe = format!("quit(status = !requireNamespace('{package}', quietly = TRUE))");
+    let mut runtimes = Vec::new();
+    if requirements.iter().any(|requirement| requirement == "ry-runtime") {
+        let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("package-probe");
+        let script = directory.join("probe.R");
+        if let Err(error) =
+            fs::create_dir_all(&directory).and_then(|()| fs::write(&script, &probe))
+        {
+            return Some(format!("writing the package probe {}: {error}", script.display()));
+        }
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ry"));
+        command
+            .args(["run", "--runtime", "ry"])
+            .arg(&script)
+            .current_dir(&directory)
+            .env("XDG_CACHE_HOME", directory.join(".cache"))
+            .env_remove("RY_LIBR")
+            .env_remove("RY_IMAGE");
+        runtimes.push(("ry's runtime".to_owned(), command));
+    }
+    if requirements.iter().any(|requirement| requirement == "gnu-r") {
+        let rscript = std::env::var_os("R_HOME")
+            .filter(|home| !home.is_empty())
+            .map(|home| PathBuf::from(home).join("bin").join("Rscript"))
+            .or_else(|| which("Rscript"));
+        let Some(rscript) = rscript else {
+            return Some("GNU R is not installed".to_owned());
+        };
+        let mut command = Command::new(&rscript);
+        command.args(["-e", &probe]);
+        runtimes.push((format!("GNU R at {}", rscript.display()), command));
+    }
+    if runtimes.is_empty() {
+        return Some(format!(
+            "`r-package:{package}` needs `ry-runtime` or `gnu-r` to say which R it loads in"
+        ));
+    }
+    for (runtime, mut command) in runtimes {
+        let output = match command.output() {
+            Ok(output) => output,
+            Err(error) => return Some(format!("checking for {package} with {runtime}: {error}")),
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = stderr.lines().rev().find(|line| !line.trim().is_empty());
+            return Some(match detail {
+                Some(detail) => {
+                    format!("the R package {package} does not load in {runtime}: {}", detail.trim())
+                }
+                None => format!("the R package {package} is not installed for {runtime}"),
+            });
         }
     }
     None

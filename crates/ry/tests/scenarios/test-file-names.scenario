@@ -2,7 +2,7 @@
 # and runs them with `ry test`. Both kinds run, and `--filter` matches the name without the
 # `test_` or `test-` prefix, as `devtools::test(filter =)` does.
 
-requires ry-runtime r-package:testthat
+requires ry-runtime gnu-r r-package:testthat
 
 file DESCRIPTION
 | Package: notes
