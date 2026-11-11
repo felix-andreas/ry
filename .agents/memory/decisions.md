@@ -6139,7 +6139,16 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     sequences in the handler (pure arithmetic via `compact_sequence_steps`,
     `read_altrep_element_call` in `crates/interp/src/bytecode.rs`). Any other ALTREP read
     declines to the `[`/`[[` builtin, whose `element_access::altrep_element` reads one element
-    through the class's `Elt` method. The JIT side exits on `OBJECT|ALTREP`.
+    through the class's `Elt` method. The JIT reads attribute-free compact integer sequences
+    inline: the `INTEGER_SEQUENCE` feedback bit types such a value as `Ty::IntSeq`, whose guard
+    tests the ALTREP flag, the `compact_intseq` class pointer and nil attributes, and a `for`
+    loop, `x[i]`, `x[[i]]` or `length(x)` on it computes from the class's `c(n, n1, inc)` info
+    vector (`sequence_info` in `crates/jit/src/codegen.rs`). Compiled code embeds the class
+    pointer, so it is valid only in the process that compiled it. Every other ALTREP value side
+    exits on `OBJECT|ALTREP`.
+  - *Summaries ask the class.* `sum`, `min` and `max` call an ALTREP argument's own `Sum`, `Min`
+    or `Max` method first (the `altrep_summary` host hook), as GNU R does, so `sum(1:n)` reads no
+    elements and a class's errors surface as GNU R's.
   - *Assignment unwraps.* Storing a wrapper into a variable or slot keeps its data when the
     wrapper is the only owner (`values::unwrap_assigned`), so a hot loop sees a plain vector.
   - *Wrappers share data as GNU R's do.* A shallow duplicate of a wrapper shares the wrapped
@@ -6159,8 +6168,9 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     most an eighth of them (`reads_sparsely`, `crates/interp/src/subset.rs`), and expands once
     otherwise. `base__long_sequences` keeps `seq_len(2^31 - 1)` under 1 GB peak.
   - *Representation differences that remain.* `inspect` prints the refcount of a wrapper or
-    deferred string as `REF(65535)` (ry's not-mutable mark; GNU R prints the real count) and a materialized compact sequence as `(expanded)`;
-    there is no list wrapper class (GNU R wraps lists too, but no package checks it).
+    deferred string as `REF(65535)` (ry's not-mutable mark; GNU R prints the real count) and a
+    materialized compact sequence as `(expanded)`. Lists have a `wrap_list` class, as in GNU R
+    4.6.
   - *Cost.* A plain read costs no more than before (measured with callgrind on a tier-0 loop
     `acc <- acc + x[i]`). A compact read in tier 0 costs about 110 to 190 Ir more per iteration than a
     plain one, against about 1,000 to 1,900 more when it declined to the builtin. Tier 0 reads the
@@ -6170,8 +6180,8 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
     `Interp::deferred_string_class` because that class runs no R code; other ALTREP strings decline
     to the builtin, since tier 0 must not re-enter R mid-instruction.
   - *Follow-up.* The compact read in tier 0 is not yet within 20 Ir of a plain one, and the JIT
-    side exits on every compact read until an extern element reader lands behind its
-    `OBJECT|ALTREP` guard. Arithmetic on a wrapper over attributed data materializes and therefore
+    side exits on deferred strings, wrappers and package classes until an extern element reader
+    (`ry_altrep_int_elt` and the real and string forms) lands behind its `OBJECT|ALTREP` guard. Arithmetic on a wrapper over attributed data materializes and therefore
     copies, where GNU R reads through the data pointer.
   - Pinned by the oracle cases `altrep__wrappers` and `datatable__compact_columns` and by data.table's
     own suite.
