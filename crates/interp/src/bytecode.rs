@@ -287,6 +287,8 @@ impl Bodies {
 /// A hash of what compiled code depends on: the structure of `body` and `formals`, and
 /// `srcref`. Symbols, strings and lists hash by identity, and so does any constant longer than
 /// one element; scalars hash by value, which is what an in-place change of a call reaches.
+// Out of line so a profile shows what the reuse check costs.
+#[inline(never)]
 unsafe fn shape(body: Sexp, formals: Sexp, srcref: Sexp) -> u64 {
     let mut hasher = rustc_hash::FxHasher::default();
     hash_shape(body, &mut hasher);
@@ -298,33 +300,27 @@ unsafe fn shape(body: Sexp, formals: Sexp, srcref: Sexp) -> u64 {
     hasher.finish()
 }
 
+/// Walks with an explicit stack, because a long left-nested chain such as `a + b + c + ...`
+/// nests calls in the car as deep as it is long.
 unsafe fn hash_shape(expression: Sexp, hasher: &mut rustc_hash::FxHasher) {
-    let mut node = expression;
-    loop {
+    let mut pending: SmallVec<[Sexp; 16]> = smallvec![expression];
+    while let Some(node) = pending.pop() {
         (node.kind() as u8).hash(hasher);
         match node.kind() {
             SexpType::Language | SexpType::Pairlist => {
                 node.tag().hash(hasher);
-                hash_shape(node.car(), hasher);
-                node = node.cdr();
+                pending.push(node.cdr());
+                pending.push(node.car());
             }
             // Reading an ALTREP vector can run R code, so one hashes by identity.
-            _ if node.is_altrep() => {
-                node.hash(hasher);
-                return;
-            }
+            _ if node.is_altrep() => node.hash(hasher),
             SexpType::Integer | SexpType::Logical if length(node) == 1 => {
                 values::ints(node).hash(hasher);
-                return;
             }
             SexpType::Real if length(node) == 1 => {
                 values::reals(node)[0].to_bits().hash(hasher);
-                return;
             }
-            _ => {
-                node.hash(hasher);
-                return;
-            }
+            _ => node.hash(hasher),
         }
     }
 }
