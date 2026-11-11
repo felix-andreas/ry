@@ -44,6 +44,66 @@
 |   ..- attr(*, "names")= chr [1:6] "a" "n1" "n2" "n3" ...
 |  $ : Named int [1:3] 1 0 NA
 |   ..- attr(*, "names")= chr [1:3] "a" "l1" "l2"
+| List of 2
+|  $ : num 1
+|  $ : chr "a"
+| List of 3
+|  $ : num 1
+|  $ : chr "a"
+|  $ : num [1:2] 2 3
+| List of 3
+|  $ : num 1
+|  $ : chr "a"
+|  $ : num [1:2] 2 3
+| List of 1
+|  $ :List of 4
+|   ..$ : num 1
+|   ..$ : chr "a"
+|   ..$ : num [1:2] 2 3
+|   ..$ : chr "z"
+| List of 5
+|  $ : num 1
+|  $ : chr "a"
+|  $ : num [1:2] 2 3
+|  $ : int 1
+|  $ : int 2
+| List of 6
+|  $ : num 1
+|  $ : chr "a"
+|  $ : num [1:2] 2 3
+|  $ : int 1
+|  $ : int 2
+|  $ : int 3
+| List of 2
+|  $ : num 1
+|  $ : chr "a"
+| List of 3
+|  $ : num 1
+|  $ : chr "a"
+|  $ : num [1:2] 2 3
+| List of 3
+|  $ : num 1
+|  $ : chr "a"
+|  $ : num [1:2] 2 3
+| List of 1
+|  $ :List of 4
+|   ..$ : num 1
+|   ..$ : chr "a"
+|   ..$ : num [1:2] 2 3
+|   ..$ : chr "z"
+| List of 5
+|  $ : num 1
+|  $ : chr "a"
+|  $ : num [1:2] 2 3
+|  $ : int 1
+|  $ : int 2
+| List of 6
+|  $ : num 1
+|  $ : chr "a"
+|  $ : num [1:2] 2 3
+|  $ : int 1
+|  $ : int 2
+|  $ : int 3
 [messages]
 [warnings]
 [errors]

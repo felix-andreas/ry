@@ -129,3 +129,17 @@ name_appends <- function() {
 }
 str(name_appends())
 str(name_appends())
+
+# Growing a shared list leaves every other reference to it intact.
+shared_appends <- function() {
+  x <- list(1, "a"); kept <- x; v <- c(2, 3)
+  y <- c(x, list(v))
+  x[[length(x) + 1L]] <- v
+  inner <- list(x)
+  inner[[1]][[length(inner[[1]]) + 1L]] <- "z"
+  str(kept); str(y); str(x); str(inner)
+  for (k in 1:3) { snapshot <- x; x[[length(x) + 1L]] <- k }
+  str(snapshot); str(x)
+}
+shared_appends()
+shared_appends()
