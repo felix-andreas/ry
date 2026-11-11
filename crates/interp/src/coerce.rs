@@ -4,6 +4,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, Generic, builtin, internal, is_native_value},
         conditions, deparse,
+        strings::with_text_buffer,
         system::r_at_least,
         unwind::{R, error},
         values::{
@@ -173,15 +174,16 @@ pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
 /// A double as the `CHARSXP` `as.character` gives it, under scientific-notation penalty `scipen`.
 unsafe fn real_as_charsxp(value: f64, scipen: i32) -> R<Sexp> {
     if is_na_real(value) {
-        Ok(na_string())
-    } else {
-        values::mkchar(&real_as_text(value, scipen))
+        return Ok(na_string());
     }
-}
-
-/// A double that is not NA as `as.character` writes it.
-fn real_as_text(value: f64, scipen: i32) -> String {
-    crate::format::localize_decimal(crate::format::format_real_alone_scipen(value, 15, scipen))
+    with_text_buffer(|text| {
+        crate::format::push_real_alone(text, value, 15, scipen);
+        if crate::format::decimal_is_point() {
+            values::mkchar(text)
+        } else {
+            values::mkchar(&crate::format::localize_decimal(text.clone()))
+        }
+    })
 }
 
 /// Converts a vector to `kind`, keeping its attributes, as GNU R's `coerceVector` does.
@@ -613,11 +615,8 @@ pub unsafe fn coerce_atomic(
 pub unsafe fn write_number_strings(numbers: Sexp, result: Sexp, scipen: i32) -> R<()> {
     if numbers.kind() == SexpType::Real {
         for (index, &value) in values::reals(numbers).iter().enumerate() {
-            if is_na_real(value) {
-                values::set_elt(result, index, na_string());
-            } else {
-                values::set_mkchar(result, index, &real_as_text(value, scipen))?;
-            }
+            let charsxp = real_as_charsxp(value, scipen)?;
+            values::set_elt(result, index, charsxp);
         }
         return Ok(());
     }

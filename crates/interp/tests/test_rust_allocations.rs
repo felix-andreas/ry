@@ -83,6 +83,23 @@ guarded <- function(x) {
   .Internal(.addCondHands('error', list(function(e) 1), here, here, FALSE))
   x
 }
+caught <- function() {
+  here <- .Internal(environment(NULL))
+  hit <- 0
+  .Internal(.addCondHands('custom', list(function(condition) hit <<- hit + 1), here, here, TRUE))
+  condition <- list(message = 'm', call = NULL)
+  class(condition) <- c('custom', 'condition')
+  .Internal(.signalCondition(condition, 'm', NULL))
+  hit
+}
+grid <- 1:12
+dim(grid) <- c(3L, 4L)
+corner <- function(m) m[1:2, 2:3]
+as_text <- function(x) .Internal(as.vector(x, 'character'))
+via_do_call <- function(x) .Internal(do.call(identity_of, list(x), globalenv()))
+paired <- function(x) .Internal(mapply(function(a, b) a + b, list(x, 2:3), NULL))
+global_by_name <- function() as.environment('.GlobalEnv')
+same <- function(x, y) .Internal(identical(x, y, TRUE, TRUE, TRUE, TRUE, FALSE, TRUE, FALSE))
 ";
 
 /// Each shape's code, run once per iteration, and the most Rust allocations it may make.
@@ -104,6 +121,13 @@ const SHAPES: &[(&str, &str, usize)] = &[
     ("gsub with groups", "swapped('hello world')", 1),
     ("gsub with a fixed pattern", "dotted('a.b.c')", 0),
     ("establish a handler", "guarded(1)", 0),
+    ("matrix subset", "corner(grid)", 0),
+    ("double to character", "as_text(c(1.5, 2, 1e-20))", 0),
+    ("do.call", "via_do_call(1)", 0),
+    // Each of the two closure calls `apply` makes from the builtin builds its call and grows a
+    // frame through the call protocol, which allocates twice.
+    ("mapply", "paired(1:2)", 4),
+    ("search path by name", "global_by_name()", 0),
 ];
 
 const ITERATIONS: usize = 200;
@@ -140,6 +164,47 @@ fn hot_paths_make_no_rust_allocations() {
             }
         }
         assert!(over.is_empty(), "over budget:\n{}", over.join("\n"));
+    });
+}
+
+/// Checks that must hold while every allocation collects, for the paths that link pairlists cell
+/// by cell and reuse pooled handlers without pushing a root of their own.
+const STRESSED: &[&str] = &[
+    "same(copy_call(quote(f(a, b = 2, c))), quote(f(1, b = 2, c)))",
+    "same(listed(quote(f(a, b = 2, c))), list(quote(f), quote(a), b = 2, quote(c)))",
+    "same(.Internal(as.vector(.Internal(as.vector(c(a = 1, b = 2, c = 3), 'pairlist')), 'list')), \
+     list(a = 1, b = 2, c = 3))",
+    "{ total <- 0; for (i in 1:20) total <- total + caught(); total == 20 }",
+    "{ for (i in 1:20) guarded(1); TRUE }",
+    "same(add(classed), classed)",
+    "{ want <- c(4L, 5L, 7L, 8L); dim(want) <- c(2L, 2L); same(corner(grid), want) }",
+    "same(as_text(c(1.5, 2, 1e-20)), c('1.5', '2', '1e-20'))",
+    "same(via_do_call(5), 5)",
+    "same(paired(1:2), list(3L, 5L))",
+];
+
+#[test]
+fn hot_paths_survive_gc_stress() {
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed, and every handle comes from its heap.
+        unsafe {
+            evaluate(SETUP).unwrap_or_else(|failure| panic!("the setup failed: {failure}"));
+            let mut failed = Vec::new();
+            for &code in STRESSED {
+                let expression = parse(code);
+                evaluate(".Internal(gctorture(TRUE))")
+                    .unwrap_or_else(|failure| panic!("gctorture failed: {failure}"));
+                let result = eval::eval(expression, values::global_env());
+                evaluate(".Internal(gctorture(FALSE))")
+                    .unwrap_or_else(|failure| panic!("gctorture failed: {failure}"));
+                match result {
+                    Ok(value) if values::is_true(value) => {}
+                    Ok(_) => failed.push(format!("`{code}` was not TRUE")),
+                    Err(failure) => failed.push(format!("`{code}` failed: {}", message(failure))),
+                }
+            }
+            assert!(failed.is_empty(), "under GC stress:\n{}", failed.join("\n"));
+        }
     });
 }
 

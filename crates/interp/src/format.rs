@@ -343,11 +343,18 @@ pub fn format_real_alone(value: f64, digits: usize) -> String {
 
 /// As `format_real_alone`, with a scientific-notation penalty (`options(scipen)`).
 pub fn format_real_alone_scipen(value: f64, digits: usize, scipen: i32) -> String {
-    if value.is_finite()
-        && let Some(text) = shortest_alone(value, digits, scipen)
-    {
-        return text;
+    let mut text = String::new();
+    push_real_alone(&mut text, value, digits, scipen);
+    text
+}
+
+/// Appends `value` to `out` as [`format_real_alone_scipen`] formats it.
+pub fn push_real_alone(out: &mut String, value: f64, digits: usize, scipen: i32) {
+    let begin = out.len();
+    if value.is_finite() && push_shortest_alone(out, value, digits, scipen).is_some() {
+        return;
     }
+    out.truncate(begin);
     let settings = Settings {
         digits,
         scipen,
@@ -355,14 +362,23 @@ pub fn format_real_alone_scipen(value: f64, digits: usize, scipen: i32) -> Strin
         nsmall: 0,
     };
     let format = format_real_common(&[value], settings);
-    format_real_with(value, format, "NA")
+    // Writing into a `String` cannot fail, and the text stays empty if it ever did.
+    if push_real_with(out, value, format, "NA").is_err() {
+        out.truncate(begin);
+    }
 }
 
-/// `format_real_alone_scipen` for a finite value whose shortest round-trip digits fit in
+/// Whether `options(OutDec)` is the default `"."`, so formatted numbers need no localizing.
+pub fn decimal_is_point() -> bool {
+    OUTPUT_DECIMAL.with(|decimal| decimal.borrow().as_str() == ".")
+}
+
+/// `push_real_alone` for a finite value whose shortest round-trip digits fit in
 /// `digits` (see `SHORTEST_EXACT_DIGITS`), built straight from those digits. Those digits are exactly what `scientific` counts
 /// and what either notation prints, so one shortest conversion replaces the significance pass
-/// and the second, fixed-precision conversion. `None` when the digits do not fit.
-fn shortest_alone(value: f64, digits: usize, scipen: i32) -> Option<String> {
+/// and the second, fixed-precision conversion. `None` when the digits do not fit, with `out`
+/// left partly written for the caller to cut back.
+fn push_shortest_alone(out: &mut String, value: f64, digits: usize, scipen: i32) -> Option<()> {
     // Zero goes through the width comparison too: under `scipen <= -5` GNU R writes `0e+00`.
     if digits > SHORTEST_EXACT_DIGITS || !(value.is_normal() || value == 0.0) {
         return None;
@@ -391,7 +407,7 @@ fn shortest_alone(value: f64, digits: usize, scipen: i32) -> Option<String> {
     let exponent_digits = if exponent.unsigned_abs() >= 100 { 3 } else { 2 };
     let scientific_width =
         negative as usize + (count > 1) as usize + (count - 1) + 3 + exponent_digits;
-    let mut out = String::with_capacity(fixed_width.max(scientific_width));
+    out.reserve(fixed_width.max(scientific_width));
     if negative {
         out.push('-');
     }
@@ -402,7 +418,7 @@ fn shortest_alone(value: f64, digits: usize, scipen: i32) -> Option<String> {
         if left <= 0 {
             out.push_str("0.");
             out.extend(std::iter::repeat_n('0', left.unsigned_abs() as usize));
-            push_digits(&mut out, significand);
+            push_digits(out, significand);
         } else if count <= left as usize {
             // Zeros stand in for digits past the shortest ones only while every integer up to
             // the value is a double, so that the value is exactly the integer they spell; GNU R
@@ -410,20 +426,20 @@ fn shortest_alone(value: f64, digits: usize, scipen: i32) -> Option<String> {
             if left as usize > SHORTEST_EXACT_DIGITS {
                 return None;
             }
-            push_digits(&mut out, significand);
+            push_digits(out, significand);
             out.extend(std::iter::repeat_n('0', left as usize - count));
         } else {
             let (whole, fraction) = significand.split_at(left as usize);
-            push_digits(&mut out, whole);
+            push_digits(out, whole);
             out.push('.');
-            push_digits(&mut out, fraction);
+            push_digits(out, fraction);
         }
     } else {
         let (first, rest) = significand.split_at(1);
-        push_digits(&mut out, first);
+        push_digits(out, first);
         if !rest.is_empty() {
             out.push('.');
-            push_digits(&mut out, rest);
+            push_digits(out, rest);
         }
         write!(
             out,
@@ -433,7 +449,7 @@ fn shortest_alone(value: f64, digits: usize, scipen: i32) -> Option<String> {
         )
         .ok()?;
     }
-    Some(out)
+    Some(())
 }
 
 pub fn format_integer(value: i32) -> String {
@@ -1107,7 +1123,7 @@ unsafe fn format_numbers(
         _ => None,
     }
     .unwrap_or(0);
-    let localized = OUTPUT_DECIMAL.with(|decimal| decimal.borrow().as_str() != ".");
+    let localized = !decimal_is_point();
     let result = alloc(SexpType::String, count)?;
     let mut width = None;
     for index in 0..count {

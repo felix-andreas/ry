@@ -17,6 +17,7 @@ use {
     },
     heap::object::{NA_INTEGER, Sexp, SexpType, gp},
     smallvec::SmallVec,
+    std::borrow::Cow,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -963,37 +964,31 @@ unsafe fn do_active_binding_function(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// The search path, from the global environment to base.
-pub unsafe fn search_path() -> Vec<Sexp> {
-    let mut path = Vec::new();
-    let mut env = global_env();
-    while env != empty_env() {
-        path.push(env);
-        if env == base_env() {
-            break;
-        }
-        env = env.enclosure();
-    }
-    path
+pub unsafe fn search_path() -> impl Iterator<Item = Sexp> {
+    let mut next = Some(global_env());
+    std::iter::from_fn(move || {
+        let env = next?;
+        // SAFETY: the search path is a chain of live environments ending at base.
+        next = unsafe {
+            let enclosure = env.enclosure();
+            (env != base_env() && enclosure != empty_env()).then_some(enclosure)
+        };
+        Some(env)
+    })
 }
 
-unsafe fn search_name(env: Sexp) -> R<String> {
+unsafe fn search_name<'a>(env: Sexp) -> Cow<'a, str> {
     if env == global_env() {
-        return Ok(".GlobalEnv".into());
+        return Cow::Borrowed(".GlobalEnv");
     }
     if env == base_env() {
-        return Ok("package:base".into());
+        return Cow::Borrowed("package:base");
     }
-    let name = get_attr(env, symbols().name);
-    Ok(values::first_string(name)
-        .map(|text| text.into_owned())
-        .unwrap_or_default())
+    values::first_string(get_attr(env, symbols().name)).unwrap_or_default()
 }
 
 unsafe fn do_search(_call: &Call<'_>) -> R<Sexp> {
-    let names: Vec<String> = search_path()
-        .into_iter()
-        .map(|env| search_name(env))
-        .collect::<R<_>>()?;
+    let names: Vec<Cow<str>> = search_path().map(|env| search_name(env)).collect();
     string_vector(&names)
 }
 
@@ -1004,7 +999,6 @@ pub unsafe fn as_environment(value: Sexp) -> R<Sexp> {
         SexpType::Environment => Ok(value),
         SexpType::Integer | SexpType::Real => {
             let position = values::as_integer_scalar(value);
-            let path = search_path();
             if position == -1 {
                 // The calling environment.
                 return match interp().frames.len() {
@@ -1015,10 +1009,12 @@ pub unsafe fn as_environment(value: Sexp) -> R<Sexp> {
                     ),
                 };
             }
-            if position < 1 || position as usize > path.len() {
+            if position < 1 {
                 return Err(error("invalid 'pos' argument"));
             }
-            Ok(path[position as usize - 1])
+            search_path()
+                .nth(position as usize - 1)
+                .ok_or_else(|| error("invalid 'pos' argument"))
         }
         SexpType::String => {
             let name = values::require_str(value, "pos")?;
@@ -1029,7 +1025,7 @@ pub unsafe fn as_environment(value: Sexp) -> R<Sexp> {
                 return Ok(base_env());
             }
             for env in search_path() {
-                if search_name(env)? == name {
+                if search_name(env) == name {
                     return Ok(env);
                 }
             }
@@ -1107,14 +1103,13 @@ unsafe fn do_detach(call: &Call<'_>) -> R<Sexp> {
     if position < 2 {
         return Err(call.error("invalid 'pos' argument"));
     }
-    let path = search_path();
-    let Some(&env) = path.get(position as usize - 1) else {
+    let mut path = search_path().skip(position as usize - 2);
+    let (Some(previous), Some(env)) = (path.next(), path.next()) else {
         return Err(call.error("invalid 'pos' argument"));
     };
     if env == base_env() {
         return Err(call.error("detaching \"package:base\" is not allowed"));
     }
-    let previous = path[position as usize - 2];
     crate::heap().set_enclosure(previous, env.enclosure());
     interp().globals.keep.retain(|&kept| kept != env);
     Ok(env)
@@ -1818,7 +1813,8 @@ unsafe fn do_do_call(call: &Call<'_>) -> R<Sexp> {
         _ => return Err(call.error("'what' must be a function or character string")),
     };
     let names = values::names(arguments);
-    let mut items = vec![(nil(), function_expression)];
+    let mut new_call = values::PairlistBuilder::new(SexpType::Language);
+    new_call.push(nil(), function_expression)?;
     for index in 0..length(arguments) {
         let tag = if names != nil() {
             let name = names.element(index);
@@ -1835,10 +1831,9 @@ unsafe fn do_do_call(call: &Call<'_>) -> R<Sexp> {
         };
         // A symbol or call among the arguments is evaluated in `envir`, as in GNU R; the R
         // code quotes them first when `quote = TRUE`.
-        items.push((tag, arguments.element(index)));
+        new_call.push(tag, arguments.element(index))?;
     }
-    let new_call = values::pairlist(&items, SexpType::Language)?;
-    eval::eval(new_call, env)
+    eval::eval(new_call.finish(), env)
 }
 
 /// The function an apply-family builtin calls, with the call it reports.
@@ -1969,10 +1964,10 @@ unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(0);
     let dots = call.arg(1);
     let more = call.arg(2);
-    let lists = values::list_items(dots);
+    let lists: SmallVec<[Sexp; 4]> = (0..length(dots)).map(|index| dots.element(index)).collect();
     let names = values::names(dots);
     // A classed argument may define its own `length` and `[[` methods, which mapply honours.
-    let lengths: Vec<usize> = lists
+    let lengths: SmallVec<[usize; 4]> = lists
         .iter()
         .map(|&list| crate::subset::dispatch_length(list, call.env()?))
         .collect::<R<_>>()?;
@@ -1986,7 +1981,7 @@ unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
     let more_names = values::names(more);
     for index in 0..longest {
         let value = crate::scope(|| {
-            let mut args = Vec::new();
+            let mut args = eval::Args::new();
             for (position, &list) in lists.iter().enumerate() {
                 let element = if list.is_object() {
                     let position_value =

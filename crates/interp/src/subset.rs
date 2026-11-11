@@ -1094,7 +1094,7 @@ unsafe fn array_subset(
         }
         return Ok(result);
     }
-    let mut selections: Vec<Vec<usize>> = Vec::with_capacity(dims.len());
+    let mut selections: SmallVec<[Positions; 4]> = SmallVec::with_capacity(dims.len());
     for (dimension, (&index, &extent)) in indices.iter().zip(dims).enumerate() {
         let names = if dimnames.kind() == SexpType::List {
             dimnames.element(dimension)
@@ -1106,24 +1106,22 @@ unsafe fn array_subset(
             return Err(error_in(call, "(subscript) logical subscript too long"));
         }
         let (positions, _) = resolve(index, extent, names, false, call)?;
-        let mut selection = Vec::with_capacity(positions.len());
-        for (offset, position) in positions.into_iter().enumerate() {
-            match position {
-                position if position < extent => selection.push(position),
-                NA_POSITION => selection.push(NA_POSITION),
-                _ => {
-                    return Err(array_out_of_bounds(
-                        call, object, dimension, index, offset, position,
-                    ));
-                }
-            }
+        if let Some((offset, &position)) = positions
+            .iter()
+            .enumerate()
+            .find(|&(_, &position)| position >= extent && position != NA_POSITION)
+        {
+            return Err(array_out_of_bounds(
+                call, object, dimension, index, offset, position,
+            ));
         }
-        selections.push(selection);
+        selections.push(positions);
     }
     let flat = flat_offsets(&selections, dims);
     let result = select_elements(object, &flat)?;
-    let new_dims: Vec<usize> = selections.iter().map(Vec::len).collect();
-    let new_dimnames: Vec<Sexp> = if dimnames.kind() == SexpType::List {
+    let new_dims: SmallVec<[usize; 4]> =
+        selections.iter().map(|selection| selection.len()).collect();
+    let new_dimnames: SmallVec<[Sexp; 4]> = if dimnames.kind() == SexpType::List {
         selections
             .iter()
             .enumerate()
@@ -1137,10 +1135,10 @@ unsafe fn array_subset(
             })
             .collect::<R<_>>()?
     } else {
-        vec![nil(); dims.len()]
+        smallvec![nil(); dims.len()]
     };
     let dimnames_names = values::names(dimnames);
-    let kept: Vec<usize> = if drop {
+    let kept: SmallVec<[usize; 4]> = if drop {
         (0..new_dims.len())
             .filter(|&dimension| new_dims[dimension] != 1)
             .collect()
@@ -1154,7 +1152,7 @@ unsafe fn array_subset(
         }
         return Ok(result);
     }
-    let dim_values: Vec<i32> = kept
+    let dim_values: SmallVec<[i32; 4]> = kept
         .iter()
         .map(|&dimension| new_dims[dimension] as i32)
         .collect();
@@ -1173,7 +1171,7 @@ unsafe fn array_subset(
             .any(|&dimension| new_dimnames[dimension] != nil())
         || dimnames_names != nil()
     {
-        let list: Vec<Sexp> = kept
+        let list: SmallVec<[Sexp; 4]> = kept
             .iter()
             .map(|&dimension| new_dimnames[dimension])
             .collect();
@@ -1347,8 +1345,8 @@ fn scatter_slab<T: Copy>(array: &mut [T], value: &[T], dims: &[usize], fixed: &[
 
 /// The column-major offsets of every combination of `selections`, the first dimension varying
 /// fastest, with `NA_POSITION` wherever a selected position is `NA`.
-fn flat_offsets(selections: &[Vec<usize>], dims: &[usize]) -> Vec<usize> {
-    let mut flat = vec![0usize];
+fn flat_offsets(selections: &[Positions], dims: &[usize]) -> Positions {
+    let mut flat: Positions = smallvec![0usize];
     let mut stride = 1usize;
     for (selection, &extent) in selections.iter().zip(dims) {
         let offset = |base: usize, position: usize| {
@@ -1368,7 +1366,7 @@ fn flat_offsets(selections: &[Vec<usize>], dims: &[usize]) -> Vec<usize> {
             stride *= extent;
             continue;
         }
-        let mut next = Vec::with_capacity(flat.len() * selection.len());
+        let mut next = Positions::with_capacity(flat.len() * selection.len());
         for &position in selection {
             next.extend(flat.iter().map(|&base| offset(base, position)));
         }
@@ -2445,7 +2443,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             return Ok(result);
         }
         let dimnames = get_attr(result, symbols().dimnames);
-        let mut selections = Vec::new();
+        let mut selections: SmallVec<[Positions; 4]> = SmallVec::new();
         for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
             let names = if dimnames.kind() == SexpType::List {
                 dimnames.element(dimension)
@@ -2453,32 +2451,44 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
                 nil()
             };
             let (positions, _) = resolve(index, extent, names, false, call)?;
-            let mut selection = Vec::new();
-            for (offset, position) in positions.into_iter().enumerate() {
-                match position {
-                    position if position < extent => selection.push(position),
-                    _ => {
-                        let call = crate::unwind::generated_call(call)?;
-                        return Err(array_out_of_bounds(
-                            call, object, dimension, index, offset, position,
-                        ));
-                    }
-                }
+            if let Some((offset, &position)) = positions
+                .iter()
+                .enumerate()
+                .find(|&(_, &position)| position >= extent && position != NA_POSITION)
+            {
+                let call = crate::unwind::generated_call(call)?;
+                return Err(array_out_of_bounds(
+                    call, object, dimension, index, offset, position,
+                ));
             }
-            selections.push(selection);
+            selections.push(positions);
         }
-        let total: usize = selections.iter().map(Vec::len).product();
-        if total == 0 {
-            return Ok(result);
+        let total: usize = selections.iter().map(|selection| selection.len()).product();
+        // A single value skips the NA rows, and a longer one cannot say which of its elements
+        // an NA row would have taken. GNU R's matrix assignment checks this before comparing
+        // lengths, and its array assignment after.
+        let has_na = value_count > 1
+            && selections
+                .iter()
+                .any(|selection| selection.contains(&NA_POSITION));
+        let na_error = || error_in(call, "NAs are not allowed in subscripted assignments");
+        if has_na && dims.len() == 2 {
+            return Err(na_error());
         }
-        if value_count == 0 {
+        if total > 0 && value_count == 0 {
             return Err(error_in(call, "replacement has length zero"));
         }
-        if !total.is_multiple_of(value_count) {
+        if total > 0 && !total.is_multiple_of(value_count) {
             return Err(error_in(
                 call,
                 "number of items to replace is not a multiple of replacement length",
             ));
+        }
+        if has_na {
+            return Err(na_error());
+        }
+        if total == 0 {
+            return Ok(result);
         }
         scatter(result, &flat_offsets(&selections, &dims), value)?;
         return Ok(result);
@@ -2759,7 +2769,7 @@ unsafe fn alloc_with_room(kind: SexpType, length: usize) -> R<Sexp> {
     Ok(vector)
 }
 
-/// `target[offsets] <- value`, recycling `value`, which is not empty.
+/// `target[offsets] <- value`, recycling `value`, which is not empty, and skipping NA offsets.
 unsafe fn scatter(target: Sexp, offsets: &[usize], value: Sexp) -> R<()> {
     let value = values::materialize(value)?;
     let count = length(value);
@@ -2777,14 +2787,19 @@ unsafe fn scatter(target: Sexp, offsets: &[usize], value: Sexp) -> R<()> {
         }
     }
     for (position, &offset) in offsets.iter().enumerate() {
-        assign_element(target, offset, value, position % count)?;
+        if offset != NA_POSITION {
+            assign_element(target, offset, value, position % count)?;
+        }
     }
     Ok(())
 }
 
+/// Writes `source`, recycled, to `offsets` of `target`, skipping the NA offsets.
 fn recycle_into<T: Copy>(target: &mut [T], offsets: &[usize], source: &[T]) {
     for (&offset, &item) in offsets.iter().zip(source.iter().cycle()) {
-        target[offset] = item;
+        if let Some(slot) = target.get_mut(offset) {
+            *slot = item;
+        }
     }
 }
 
@@ -4199,14 +4214,14 @@ unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
     values::remove_attr(result, symbols().dim);
     values::remove_attr(result, symbols().dimnames);
     if kept.len() > 1 {
-        let dim_values: Vec<i32> = kept
+        let dim_values: SmallVec<[i32; 4]> = kept
             .iter()
             .map(|&dimension| dims[dimension] as i32)
             .collect();
         let dim = values::integer_vector(&dim_values)?;
         values::set_attr(result, symbols().dim, dim)?;
         if dimnames != nil() {
-            let list: Vec<Sexp> = kept
+            let list: SmallVec<[Sexp; 4]> = kept
                 .iter()
                 .map(|&dimension| dimnames.element(dimension))
                 .collect();
@@ -4214,7 +4229,7 @@ unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
             values::set_attr(result, symbols().dimnames, list)?;
         }
     } else if dimnames != nil() {
-        let all_dimnames: Vec<Sexp> = (0..dims.len())
+        let all_dimnames: SmallVec<[Sexp; 4]> = (0..dims.len())
             .map(|dimension| dimnames.element(dimension))
             .collect();
         let names = dropped_names(&kept, &all_dimnames);
@@ -4229,16 +4244,12 @@ unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
 /// single element those of the only dimension that has names. With names on several
 /// dimensions, none of them names a single element.
 fn dropped_names(kept: &[usize], dimnames: &[Sexp]) -> Sexp {
-    let named: Vec<Sexp> = match kept {
-        [dimension] => dimnames.get(*dimension).copied().into_iter().collect(),
-        _ => dimnames
-            .iter()
-            .copied()
-            .filter(|names| *names != nil())
-            .collect(),
-    };
-    match named.as_slice() {
-        [names] => *names,
+    if let [dimension] = kept {
+        return dimnames.get(*dimension).copied().unwrap_or(nil());
+    }
+    let mut named = dimnames.iter().copied().filter(|names| *names != nil());
+    match (named.next(), named.next()) {
+        (Some(names), None) => names,
         _ => nil(),
     }
 }

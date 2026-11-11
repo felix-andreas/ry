@@ -6012,7 +6012,7 @@ pub unsafe fn eval_all(expressions: Sexp, env: Sexp) -> R<Sexp> {
 }
 
 /// Makes a fresh, empty `DOTSXP`-free argument list from evaluated values.
-pub fn value_args(values: &[Sexp]) -> Vec<Arg> {
+pub fn value_args(values: &[Sexp]) -> Args {
     values
         .iter()
         .map(|&value| Arg { tag: nil(), value })

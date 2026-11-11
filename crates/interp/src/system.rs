@@ -149,11 +149,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Sys.time", 0, do_sys_time),
     internal("date", 0, |_| unsafe {
         let now = now_seconds();
-        let (offset, _, zone) = resolve_zone("").offset_at(now);
+        let local = resolve_zone("");
+        let (offset, _, zone) = local.offset_at(now);
         scalar_string(&format_broken_down(
             &broken_down(now + offset as f64),
             "%a %b %d %H:%M:%S %Y",
-            &zone,
+            zone.as_str(),
             offset,
         ))
     }),
@@ -1156,18 +1157,34 @@ struct Zone {
     unknown: Option<String>,
 }
 
+/// A zone's abbreviation at one instant, borrowed from the zone or held inline by jiff, so
+/// converting a vector of times allocates no text per element.
+enum Abbreviation<'a> {
+    Unknown(&'a str),
+    Known(jiff::tz::TimeZoneOffsetInfo<'a>),
+}
+
+impl Abbreviation<'_> {
+    fn as_str(&self) -> &str {
+        match self {
+            Abbreviation::Unknown(text) => text,
+            Abbreviation::Known(info) => info.abbreviation(),
+        }
+    }
+}
+
 impl Zone {
     /// The UTC offset in seconds, whether daylight saving time is in effect, and the zone
     /// abbreviation at `seconds` since the epoch.
-    fn offset_at(&self, seconds: f64) -> (i32, bool, String) {
+    fn offset_at(&self, seconds: f64) -> (i32, bool, Abbreviation<'_>) {
         if let Some(abbreviation) = &self.unknown {
-            return (0, false, abbreviation.clone());
+            return (0, false, Abbreviation::Unknown(abbreviation));
         }
         let info = self.rules.to_offset_info(timestamp(seconds));
         (
             info.offset().seconds(),
             info.dst().is_dst(),
-            info.abbreviation().to_owned(),
+            Abbreviation::Known(info),
         )
     }
 
@@ -1691,7 +1708,7 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
         values::ints_mut(fields[6])[index] = time.weekday as i32;
         values::ints_mut(fields[7])[index] = time.yearday as i32;
         values::ints_mut(fields[8])[index] = dst as i32;
-        values::set_elt(fields[9], index, values::mkchar(&abbreviation)?);
+        values::set_elt(fields[9], index, values::mkchar(abbreviation.as_str())?);
         values::ints_mut(fields[10])[index] = offset;
     }
     let list = values::list_vector(&fields)?;
@@ -2563,7 +2580,7 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
             // reports the zone in force after the gap, where the wall clock read with the
             // earlier offset lands; from R 4.4 on its DST flag is unknown and its zone empty.
             let (dst, abbreviation) = if r_at_least(4, 4) {
-                (-1, String::new())
+                (-1, Abbreviation::Unknown(""))
             } else {
                 let (_, dst, abbreviation) = zone.offset_at(seconds[index]);
                 (dst as i32, abbreviation)
@@ -2577,7 +2594,7 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
             values::ints_mut(fields[6])[index] = wall.weekday as i32;
             values::ints_mut(fields[7])[index] = wall.yearday as i32;
             values::ints_mut(fields[8])[index] = dst;
-            values::set_elt(fields[9], index, values::mkchar(&abbreviation)?);
+            values::set_elt(fields[9], index, values::mkchar(abbreviation.as_str())?);
         }
     }
     if !utc {
