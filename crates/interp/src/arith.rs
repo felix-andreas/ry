@@ -20,6 +20,7 @@
 
 use {
     crate::{
+        AltrepSummary,
         arrays::{self, OperatorClass},
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         bytecode::Arith,
@@ -3113,20 +3114,56 @@ enum Summary {
 /// The values a summary function reduces, and whether `na.rm` was set.
 unsafe fn summary_args(call: &Call<'_>) -> R<(SmallVec<[Sexp; 4]>, bool)> {
     let mut items = SmallVec::new();
-    let mut na_rm = false;
-    for arg in call.args {
-        if arg.tag == symbols().na_rm {
-            na_rm = values::as_logical_scalar(arg.value) == 1;
-        } else if arg.value != nil() {
-            // NULL holds no values, and reading its elements as integers would see garbage.
-            items.push(values::materialize(arg.value)?);
-        }
+    for value in summary_values(call) {
+        items.push(values::materialize(value)?);
     }
-    Ok((items, na_rm))
+    Ok((items, summary_na_rm(call)))
+}
+
+unsafe fn summary_na_rm(call: &Call<'_>) -> bool {
+    call.args
+        .iter()
+        .filter(|arg| arg.tag == symbols().na_rm)
+        .last()
+        .is_some_and(|arg| values::as_logical_scalar(arg.value) == 1)
+}
+
+/// The arguments a summary function reduces. NULL holds no values, and reading its elements
+/// as integers would see garbage.
+fn summary_values<'a>(call: &'a Call<'_>) -> impl Iterator<Item = Sexp> + 'a {
+    call.args
+        .iter()
+        .filter(|arg| arg.tag != symbols().na_rm && arg.value != nil())
+        .map(|arg| arg.value)
 }
 
 unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
-    let (items, na_rm) = summary_args(call)?;
+    let na_rm = summary_na_rm(call);
+    // As GNU R does, an ALTREP argument's class answers for itself when it has the method, so
+    // a compact sequence sums without its elements and a class's errors surface as GNU R's do.
+    let method = match function {
+        Summary::Sum => Some(AltrepSummary::Sum),
+        Summary::Min => Some(AltrepSummary::Min),
+        Summary::Max => Some(AltrepSummary::Max),
+        Summary::Product => None,
+    };
+    let mut items: SmallVec<[Sexp; 4]> = SmallVec::new();
+    for value in summary_values(call) {
+        let ask_class = value.is_altrep()
+            && match value.kind() {
+                SexpType::Integer | SexpType::Real => method.is_some(),
+                SexpType::Logical => method == Some(AltrepSummary::Sum),
+                _ => false,
+            };
+        let answer = match method {
+            Some(method) if ask_class => (interp().hooks.altrep_summary)(value, method, na_rm)?,
+            _ => None,
+        };
+        items.push(match answer {
+            Some(answer) => answer,
+            None => values::materialize(value)?,
+        });
+    }
     for item in &items {
         if !(item.kind().is_atomic() || *item == nil())
             || (item.kind() == SexpType::String

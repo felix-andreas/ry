@@ -1313,6 +1313,7 @@ struct Builtins {
     wrap_complex: AltrepClass,
     wrap_raw: AltrepClass,
     wrap_string: AltrepClass,
+    wrap_list: AltrepClass,
 }
 
 unsafe fn builtins() -> ApiResult<Builtins> {
@@ -1409,6 +1410,7 @@ unsafe fn builtins() -> ApiResult<Builtins> {
         wrap_complex: wrapper(b"wrap_complex", SexpType::Complex)?,
         wrap_raw: wrapper(b"wrap_raw", SexpType::Raw)?,
         wrap_string: wrapper(b"wrap_string", SexpType::String)?,
+        wrap_list: wrapper(b"wrap_list", SexpType::List)?,
     };
     BUILTINS.set(Some(builtins));
     interp::interp().compact_sequence_classes = [
@@ -1493,7 +1495,6 @@ unsafe fn new_sequence(
     sequence.mark_not_mutable();
     Ok(sequence)
 }
-
 
 unsafe fn sequence_info(object: Sexp) -> (R_xlen_t, f64, f64) {
     let info = object.car().slice::<f64>();
@@ -1909,6 +1910,7 @@ pub unsafe fn wrap(object: Sexp, sorted: c_int, no_na: c_int) -> ApiResult<Sexp>
         SexpType::Complex => builtins.wrap_complex,
         SexpType::Raw => builtins.wrap_raw,
         SexpType::String => builtins.wrap_string,
+        SexpType::List => builtins.wrap_list,
         _ => return Ok(object),
     };
     let metadata = runtime().heap.alloc_vector(SexpType::Integer, 2)?;
@@ -1974,6 +1976,7 @@ unsafe fn is_wrapper(object: Sexp) -> bool {
         builtins.wrap_complex,
         builtins.wrap_raw,
         builtins.wrap_string,
+        builtins.wrap_list,
     ]
     .iter()
     .any(|wrapper| wrapper.pointer == class)

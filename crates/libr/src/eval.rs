@@ -22,7 +22,7 @@ use {
         strings::Encoding,
     },
     interp::{
-        TaskCallbackRoutine, builtin_libraries,
+        AltrepSummary, TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
         graphics_engine,
         native::{Interface, foreign_context},
@@ -103,6 +103,13 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         defer_strings: |object| unsafe { Ok(Some(crate::altrep::deferred_string(object)?)) },
         altrep_wrap: |object| unsafe { Ok(crate::altrep::try_wrap(object)?) },
         altrep_unwrap: |object| unsafe { crate::altrep::try_unwrap(object) },
+        altrep_summary: |object, method, remove_na| unsafe {
+            Ok(match method {
+                AltrepSummary::Sum => crate::altrep::sum(object, remove_na)?,
+                AltrepSummary::Min => crate::altrep::min(object, remove_na)?,
+                AltrepSummary::Max => crate::altrep::max(object, remove_na)?,
+            })
+        },
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
         run_exit_finalizers: || unsafe {
             crate::boundary::run_pending_finalizers();
@@ -1434,7 +1441,9 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
         return false;
     }
     if let Some((heap::GcStressStart::Script, stress)) = heap::gc_stress_requested() {
-        runtime().heap.update_policy(|policy| policy.stress = stress);
+        runtime()
+            .heap
+            .update_policy(|policy| policy.stress = stress);
     }
     // As under `Rscript`, SIGINT interrupts the script's evaluation, which R code can catch,
     // instead of killing the process.

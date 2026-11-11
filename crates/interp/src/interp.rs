@@ -298,6 +298,9 @@ pub struct Hooks {
     /// GNU R's `R_tryUnwrap`: the data under a wrapper that vouches for nothing and that only
     /// its binding holds, with the wrapper's attributes moved onto it, or the value itself.
     pub altrep_unwrap: unsafe fn(Sexp) -> Sexp,
+    /// The answer of an ALTREP vector's own `Sum`, `Min` or `Max` method with `na.rm`, or
+    /// `None` when its class has no such method.
+    pub altrep_summary: unsafe fn(Sexp, AltrepSummary, bool) -> R<Option<Sexp>>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
     /// Runs the finalizers registered with `onexit = TRUE`, as the session ends.
@@ -325,6 +328,14 @@ pub struct Hooks {
     /// `R_FindSymbol(name, "", NULL)`: a routine of any loaded DLL, as `RNGkind("user-supplied")`
     /// finds `user_unif_rand`.
     pub find_native_symbol: unsafe fn(&str) -> Option<NativeSymbol>,
+}
+
+/// The ALTREP summary methods `sum`, `min` and `max` consult.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AltrepSummary {
+    Sum,
+    Min,
+    Max,
 }
 
 /// A C routine as `R_FindSymbol` returns it, to be cast to its real signature.
@@ -665,6 +676,7 @@ pub fn default_hooks() -> Hooks {
         defer_strings: |_| Ok(None),
         altrep_wrap: |object| unsafe { values::shallow_duplicate(object) },
         altrep_unwrap: |object| object,
+        altrep_summary: |_, _, _| Ok(None),
         run_finalizers: || {},
         run_exit_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),

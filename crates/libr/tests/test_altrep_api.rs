@@ -244,7 +244,9 @@ fn check_wrappers() {
         assert_eq!(ok(altrep::is_sorted(wrapped)), altrep::UNKNOWN_SORTEDNESS);
         assert_eq!(ints(wrapped), vec![9, 2, 4]);
         let list = keep(ok(R::memory::alloc_vector(SexpType::List, 1)));
-        assert_eq!(ok(altrep::wrap(list, 1, 1)), list);
+        let wrapped_list = ok(altrep::wrap(list, 1, 1));
+        assert!(wrapped_list.is_altrep());
+        assert_eq!(ok(R::vectors::xlength(wrapped_list)), 1);
     }
 }
 
