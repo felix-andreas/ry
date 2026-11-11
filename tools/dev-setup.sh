@@ -47,7 +47,9 @@ fi
 # profiling and cairo are what other builds most often lack: without them the Rprofmem and
 # graphics cases differ from their recordings. The shared libR.so is what ry's console loads for
 # GNU R, and what Posit's binary packages link.
-if ! "$r_prefix/bin/Rscript" -e 'stopifnot(capabilities("profmem"), capabilities("cairo"))' >/dev/null 2>&1 ||
+# A build without pango-cairo still reports capabilities("cairo"), but its png() falls back to
+# bitmapType "Xlib", which fails headless with "X11 is not available".
+if ! "$r_prefix/bin/Rscript" -e 'stopifnot(capabilities("profmem"), capabilities("cairo"), capabilities("ICU"), getOption("bitmapType") == "cairo")' >/dev/null 2>&1 ||
 	[ ! -f "$r_prefix/lib/R/lib/libR.so" ]; then
 	log "GNU R $r_version: building into $r_prefix"
 	source_dir=$(mktemp -d)
