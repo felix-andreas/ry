@@ -1011,31 +1011,6 @@ pub fn real_arithmetic(
     right: Option<Reals<'_>>,
     output: &mut [f64],
 ) {
-    #[cfg(target_arch = "x86_64")]
-    if wide() {
-        // SAFETY: `wide` confirmed the CPU runs AVX2.
-        return unsafe { real_operation_wide(op, left, right, output) };
-    }
-    real_operation(op, left, right, output);
-}
-
-/// Whether the CPU runs AVX2, so that a loop compiled for it handles four doubles per
-/// instruction where the baseline build handles two. IEEE arithmetic rounds the same at any
-/// width, and Rust never fuses a multiply and an add, so both builds give the same bits.
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
-fn wide() -> bool {
-    std::is_x86_feature_detected!("avx2")
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-fn real_operation_wide(
-    op: Op,
-    left: Option<Reals<'_>>,
-    right: Option<Reals<'_>>,
-    output: &mut [f64],
-) {
     real_operation(op, left, right, output);
 }
 
@@ -1244,17 +1219,6 @@ pub fn abs_integers(source: Option<&[i32]>, output: &mut [i32]) {
 
 /// Unary minus on doubles; with `source` `None`, `output` holds the operand on entry.
 pub fn negate_reals(source: Option<&[f64]>, output: &mut [f64]) {
-    #[cfg(target_arch = "x86_64")]
-    if wide() {
-        // SAFETY: `wide` confirmed the CPU runs AVX2.
-        return unsafe { negate_reals_wide(source, output) };
-    }
-    map1(source, output, |x: f64| -x);
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-fn negate_reals_wide(source: Option<&[f64]>, output: &mut [f64]) {
     map1(source, output, |x: f64| -x);
 }
 
