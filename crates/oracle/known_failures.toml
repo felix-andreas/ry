@@ -38,6 +38,13 @@ area = "jit"
 reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
 
 [[failure]]
+case = "calls__inlined_base_wrappers"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "SIGSEGV on main: an error raised by an inlined .Internal from JIT code under GC stress crashes a later round (repro: rep_len(1, -i) in a loop under tryCatch, RY_GC_STRESS=1 RY_JIT=force)"
+provisional = true
+
+[[failure]]
 case = "colours__conversions"
 engine = "ry-jit-gctorture"
 area = "jit"
@@ -78,6 +85,13 @@ case = "jit__matrix_element_reads"
 engine = "ry-jit-gctorture"
 area = "jit"
 reason = "aborts: after a deopt exit, the collector reaches a freed object through a live one (jit_deopt_exit, jit_flush)"
+
+[[failure]]
+case = "print__deparse_undefined_s4_class"
+engine = "ry-jit-gctorture"
+area = "jit"
+reason = "SIGSEGV on main 41f9405, missing from the baseline"
+provisional = true
 
 [[failure]]
 case = "stats__direct_routine_calls"

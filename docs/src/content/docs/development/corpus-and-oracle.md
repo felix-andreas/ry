@@ -85,10 +85,13 @@ A failure listed in `crates/oracle/known_failures.toml` reports as known rather 
 is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or `ry-jit`, or any command line) makes
 `cargo test -p oracle` also require the engine to match GNU R on every case.
 
-Every engine searches the reference R's libraries and nothing else. The oracle asks GNU R for its
-`.libPaths()` once (with `R_LIBS_SITE` and `R_LIBS_USER` empty, and any `R_LIBS` you set kept
-first), then runs each engine, and the gallery and `oracle bench` runs too, with `R_LIBS` set to
-those paths and `R_LIBS_SITE` and `R_LIBS_USER` set empty. Without that, ry would search its own
+Every engine searches the same libraries: any `R_LIBS` you set, then the corpus library, then the
+reference R's own. The corpus library is `.corpus/library` in the workspace (`$RY_CORPUS_DIR/library`
+when that is set), where `just corpus` installs the packages many cases need, and the oracle adds it
+whenever the directory exists. An `R_LIBS` set to the empty string leaves it out. The oracle asks
+GNU R for its `.libPaths()` once with those libraries in `R_LIBS` (and `R_LIBS_SITE` and
+`R_LIBS_USER` empty), then runs each engine, and the gallery and `oracle bench` runs too, with
+`R_LIBS` set to the answer and `R_LIBS_SITE` and `R_LIBS_USER` set empty. Without that, ry would search its own
 defaults: its bundled base R's library, which holds none of the reference R's packages, and any GNU
 R site or user library it finds, such as Debian's `/usr/lib/R/site-library`, whose data.table 1.14.10,
 rlang 1.1.3 and withr 2.5.0 would load in place of the reference R's. `just doctor` warns when
@@ -125,8 +128,8 @@ The oracle cases check graphics state by value, and the gallery checks what is d
 `finance.R`, grid, lattice, ggplot2) declares figures with `figure("name", { ... })`, and
 `oracle gallery` renders each one under GNU R and under ry's runtime on the `agg` (ragg), `png`,
 `pdf` and `svg` devices, then compares the images and times every render. A figure's visible value is printed, as at the top level, because lattice,
-ggplot2 and xts draw only when printed. A figure whose packages GNU R lacks is skipped, so set
-`R_LIBS` to the corpus library (`.corpus/library`) to run all of them.
+ggplot2 and xts draw only when printed. A figure whose packages GNU R lacks is skipped, and the
+gallery searches the corpus library like `compare` does, so `just corpus` is enough to run all of them.
 
 ragg rasterizes the same way under both engines, so `agg` is the sharp check: at most 0.2% of
 pixels may differ. `png` and `pdf` (rasterized with `pdftoppm` to `<figure>.pdf.png`) allow 5%, and there a pixel
@@ -232,7 +235,8 @@ gated on that version in `crates/interp` (`system::r_at_least`), so ry with `R_H
 
 Without any GNU R, `compare` checks the engine against each case's recorded outcome instead and says
 so on stderr. The engine then runs on ry's bundled base R 4.6.2, the release the recordings come
-from. A case that needs a package the engine cannot load is reported as `skip ... needs <package>`.
+from. A case that needs a package the engine cannot load is listed as `skip ... needs <package>`,
+and the run fails unless you pass `--allow-skips` ([Testing](/development/testing#known-oracle-failures)).
 
 ## The reference GNU R
 
@@ -250,7 +254,8 @@ cases depend on that build:
 - `utils__rprofmem` and `environments__sys_call_shares_arguments` call `Rprofmem()`, so they need
   memory profiling. Without it GNU R stops with "memory profiling is not available on this system".
 - The graphics cases need `png()` to draw through cairo, which R uses only when pango is present.
-  Without it the bitmap type falls back to Xlib, which needs an X11 display.
+  Without it the bitmap type falls back to Xlib, which needs an X11 display, even though
+  `capabilities("cairo")` reads `TRUE`. `tools/doctor.py` and `tools/reference-r.sh` therefore check `getOption("bitmapType")`.
 - Collation and a few string cases follow ICU, which R uses when its headers are installed.
 - The `datatable__*`, `grid__*` and knitr cases print what those packages' current CRAN releases
   print, and each declares the packages it needs in an `# oracle: requires` line.
