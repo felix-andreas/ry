@@ -972,6 +972,46 @@ static SEXP resizable_round_trip(SEXP a, SEXP b)
     return result;
 }
 
+/* Whether `copy` reuses a cell or a vector of `original` that a deep copy must allocate afresh,
+   which would let a write through the copy reach the original. */
+static int shares_storage(SEXP copy, SEXP original)
+{
+    switch (TYPEOF(original)) {
+    case LISTSXP: case LANGSXP: case DOTSXP:
+        for (; TYPEOF(original) == LISTSXP || TYPEOF(original) == LANGSXP
+                 || TYPEOF(original) == DOTSXP;
+             original = CDR(original), copy = CDR(copy)) {
+            if (copy == original || shares_storage(CAR(copy), CAR(original)))
+                return 1;
+        }
+        return 0;
+    case LGLSXP: case INTSXP: case REALSXP: case CPLXSXP: case RAWSXP: case STRSXP:
+        return !ALTREP(original) && copy == original;
+    case VECSXP: case EXPRSXP:
+        if (ALTREP(original))
+            return 0;
+        if (copy == original)
+            return 1;
+        for (R_xlen_t i = 0; i < XLENGTH(original); i++)
+            if (shares_storage(VECTOR_ELT(copy, i), VECTOR_ELT(original, i)))
+                return 1;
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+/* `Rf_duplicate(a)`, and whether the copy keeps clear of `a`'s storage. */
+static SEXP duplicate_checked(SEXP a)
+{
+    SEXP copy = PROTECT(Rf_duplicate(a));
+    SEXP result = PROTECT(allocVector(VECSXP, 2));
+    SET_VECTOR_ELT(result, 0, copy);
+    SET_VECTOR_ELT(result, 1, ScalarLogical(!shares_storage(copy, a)));
+    UNPROTECT(2);
+    return result;
+}
+
 SEXP rytest_api_op(SEXP op, SEXP a, SEXP b, SEXP c)
 {
     SEXP result;
@@ -1010,6 +1050,7 @@ SEXP rytest_api_op(SEXP op, SEXP a, SEXP b, SEXP c)
         }
         break;
     case 26: result = resizable_round_trip(a, b); break;
+    case 27: result = duplicate_checked(a); break;
     default: result = R_NilValue;
     }
     PROTECT(result);
@@ -1272,6 +1313,19 @@ BENCH bench_resizable_grow_shrink(int count)
     UNPROTECT(2);
 }
 
+/* rlang's `capture` copies each captured argument's expression, a small call like this one. */
+BENCH bench_duplicate_call(int count)
+{
+    SEXP inner = PROTECT(lang3(install("g"), install("z"), ScalarInteger(1)));
+    SEXP sum = PROTECT(lang3(install("+"), install("y"), inner));
+    SEXP call = PROTECT(lang4(install("f"), install("x"), sum, mkString("a")));
+    intptr_t total = 0;
+    for (int i = 0; i < count; i++)
+        total += (intptr_t) Rf_duplicate(call);
+    UNPROTECT(3);
+    if (total == 1) Rprintf("unreachable\n");
+}
+
 SEXP rytest_api_bench(SEXP count, SEXP env)
 {
     int n = INTEGER(count)[0];
@@ -1326,6 +1380,8 @@ SEXP rytest_api_bench(SEXP count, SEXP env)
     bench_delayed_binding(n, env);
     R_gc();
     bench_resizable_grow_shrink(n);
+    R_gc();
+    bench_duplicate_call(n);
     return R_NilValue;
 }
 
