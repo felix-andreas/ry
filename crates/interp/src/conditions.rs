@@ -837,7 +837,6 @@ unsafe fn do_stop(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_warning(call: &Call<'_>) -> R<Sexp> {
     let use_call = values::as_logical_scalar(call.arg(0)) != 0;
     let immediate = values::as_logical_scalar(call.arg(1)) == 1;
-    let condition_call = if use_call { caller_call(call) } else { nil() };
     let message = if length(call.arg(3)) > 0 {
         string_at(call.arg(3), 0)
             .map(|text| text.into_owned())
@@ -845,12 +844,24 @@ unsafe fn do_warning(call: &Call<'_>) -> R<Sexp> {
     } else {
         String::new()
     };
+    signal_warning(call, use_call, immediate, &message)?;
+    scalar_string(&message)
+}
+
+/// What `.Internal(warning(call., immediate., noBreaks., message))` does, for a builtin `call`
+/// made in the frame of `warning()` itself.
+pub(crate) unsafe fn signal_warning(
+    call: &Call<'_>,
+    use_call: bool,
+    immediate: bool,
+    message: &str,
+) -> R<()> {
+    let condition_call = if use_call { caller_call(call) } else { nil() };
     // Handlers still see an immediate warning; only the default handler prints it at once.
     let outer = std::mem::replace(&mut interp().immediate_warning, immediate);
-    let signalled = warning_call(condition_call, message.clone());
+    let signalled = warning_call(condition_call, message);
     interp().immediate_warning = outer;
-    signalled?;
-    scalar_string(&message)
+    signalled
 }
 
 unsafe fn do_geterrmessage(_call: &Call<'_>) -> R<Sexp> {

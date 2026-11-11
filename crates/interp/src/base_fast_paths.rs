@@ -41,6 +41,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryReduce", 0, do_reduce),
     internal("ryAssignNativeRoutines", 0, do_assign_native_routines),
     internal("ryMessage", 0, do_message),
+    internal("ryWarning", 0, do_warning),
     internal("rySignalCondition", 0, do_signal_condition),
 ];
 
@@ -59,6 +60,7 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
     ("Reduce", "ryReduce", 0xd929e4c219983788),
     ("message", "ryMessage", 0x9b452884cddd7ceb),
+    ("warning", "ryWarning", 0x919c2fc8a0bd927b),
     ("signalCondition", "rySignalCondition", 0xfb659fdee977c35c),
 ];
 
@@ -2368,6 +2370,69 @@ unsafe fn do_message(call: &Call<'_>) -> R<Sexp> {
     }
     crate::connections::cat_text(crate::connections::stderr_connection()?, &text)?;
     finish(frame, nil(), false)
+}
+
+/// `warning(...)` with arguments that are plain vectors: the message is built here instead of by
+/// `.makeMessage()`, whose `lapply()`, `as.character()` and `gettext()` run no code a handler or a
+/// method could observe for such values, and the warning is signalled as
+/// `.Internal(warning())` signals it, from the same frame. A condition object, an argument that
+/// needs evaluating, a non-default `domain` or an unusual flag sends the call to the R body.
+unsafe fn do_warning(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    // Skipping `gettext()` is exact only because ry's `.Internal(gettext())` returns its
+    // argument unchanged; once messages are translated, this must decline outside a C or
+    // English locale.
+    if !fast_paths_enabled() || !is_default(frame, symbols().domain)? {
+        return decline();
+    }
+    let Some(items) = dots(frame)? else {
+        return decline();
+    };
+    let mut parts: SmallVec<[Sexp; 8]> = SmallVec::new();
+    for &(_, item) in &items {
+        let Some(value) = resolved(item)? else {
+            return decline();
+        };
+        let plain = matches!(
+            value.kind(),
+            SexpType::Nil
+                | SexpType::Logical
+                | SexpType::Integer
+                | SexpType::Real
+                | SexpType::String
+        ) && !value.is_object()
+            && !values::has_attributes(value);
+        if !plain {
+            return decline();
+        }
+        parts.push(value);
+    }
+    let (Some(use_call), Some(immediate)) = (
+        flag(frame, symbols().call_dot)?,
+        flag(frame, symbols().immediate_dot)?,
+    ) else {
+        return decline();
+    };
+    let mut text = Vec::new();
+    for value in parts {
+        let strings = crate::coerce::coerce_vector(value, SexpType::String)?;
+        crate::heap().root(strings);
+        for index in 0..length(strings) {
+            let string = values::string_elt(strings, index);
+            if string == values::na_string() {
+                text.extend_from_slice(b"NA");
+            } else if string.has_gp(gp::LATIN1 | gp::BYTES) {
+                return decline();
+            } else {
+                text.extend_from_slice(string.bytes());
+            }
+        }
+    }
+    let Ok(message) = String::from_utf8(text) else {
+        return decline();
+    };
+    crate::conditions::signal_warning(call, use_call, immediate, &message)?;
+    finish(frame, crate::values::scalar_string(&message)?, false)
 }
 
 /// `signalCondition(cond)` for a condition list whose message and call come from base's
