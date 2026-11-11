@@ -3278,24 +3278,27 @@ unsafe fn pure_value(
         _ => return None,
     }
     let head = expression.car();
-    // A slot frame's own binding of the function's name lives in its slots, which a lookup
-    // from its pending environment would pass over.
-    if head.kind() != SexpType::Symbol
-        || env.has_gp(heap::object::gp::PENDING_FRAME)
-            && matches!(
-                interp::eval::pending_name(env, head),
-                interp::eval::PendingName::Slot(_)
-            )
-    {
+    if head.kind() != SexpType::Symbol {
         return None;
     }
+    // A slot frame's own binding of the function's name lives in its slots, and any other name
+    // resolves from the frame's enclosure. Looking it up in the pending environment itself would
+    // reify the frame, through the heap's resolver, on every call.
+    let start = if env.has_gp(heap::object::gp::PENDING_FRAME) {
+        match interp::eval::pending_name(env, head) {
+            interp::eval::PendingName::Slot(_) => return None,
+            interp::eval::PendingName::Enclosure(enclosure) => enclosure,
+        }
+    } else {
+        env
+    };
     let items = values::pairlist_items(expression.cdr());
     if items.iter().any(|&(tag, value)| {
         tag != values::nil() || value == values::missing_arg() || value == values::symbols().dots
     }) {
         return None;
     }
-    let function = resolve_function(head, env)?.function;
+    let function = resolve_function(head, start)?.function;
     let name = base_builtin(function, head)?;
     let mut operands: SmallVec<[Sexp; 4]> = SmallVec::new();
     for &(_, item) in &items {
