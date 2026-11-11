@@ -5,6 +5,9 @@
 //! 64 MiB main-thread stack, because R sessions run on `main` and Windows' default of 1 MiB
 //! overflows while the default packages load (Linux and macOS give `main` 8 MiB). For `rcmd` it
 //! also embeds ry's C headers, from which ry assembles its R home at run time.
+//!
+//! It also sets `RY_VERSION`, which names the cargo profile of any build other than release
+//! (`0.4.3-beta (iterate build)`), so that `tools/bench/bench.py` can refuse it.
 
 use std::{
     env, fs,
@@ -27,15 +30,27 @@ fn main() {
     // `RY_BUILD` names a nightly build (`just nightly-name`) and is appended to `ry --version`.
     println!("cargo:rerun-if-env-changed=RY_BUILD");
     let version = env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
-    match env::var("RY_BUILD") {
-        Ok(build) if !build.is_empty() => {
-            println!("cargo:rustc-env=RY_VERSION={version} ({build})")
-        }
-        _ => println!("cargo:rustc-env=RY_VERSION={version}"),
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
+    let mut notes: Vec<String> = env::var("RY_BUILD")
+        .ok()
+        .filter(|build| !build.is_empty())
+        .into_iter()
+        .collect();
+    // Any profile but release says so in `ry --version`, so a timing of a debug or `iterate` build
+    // cannot pass for a release one; `tools/bench/bench.py` refuses such a binary. Cargo names no
+    // custom profile to a build script, but `OUT_DIR` lies under the profile's output directory.
+    if let Some(profile) = profile_directory(&out_dir)
+        && profile != "release"
+    {
+        notes.push(format!("{profile} build"));
+    }
+    if notes.is_empty() {
+        println!("cargo:rustc-env=RY_VERSION={version}");
+    } else {
+        println!("cargo:rustc-env=RY_VERSION={version} ({})", notes.join(", "));
     }
     println!("cargo:rerun-if-env-changed=WINDRES");
     let target = env::var("TARGET").unwrap_or_default();
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     if env::var("CARGO_PKG_NAME").is_ok_and(|name| name == "rcmd") {
         embed_headers(&out_dir);
     }
@@ -61,6 +76,15 @@ fn main() {
             manifest.display()
         );
     }
+}
+
+/// The output directory of the profile being built (`release`, `debug`, `iterate`, ...): the parent
+/// of the `build` directory that holds every build script's `OUT_DIR`.
+fn profile_directory(out_dir: &Path) -> Option<String> {
+    let build = out_dir
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == "build"))?;
+    Some(build.parent()?.file_name()?.to_string_lossy().into_owned())
 }
 
 /// Writes `headers.rs`, which embeds ry's C headers (`crates/libr/include`) as `HEADERS`, so
