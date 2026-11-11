@@ -1,10 +1,10 @@
 //! The table benchmark's questions, run on the ry engine through its query IR. It prints the same
-//! tab-separated lines as `tools/bench/table/datatable.R` (`question  run  seconds  rows  cols
+//! tab-separated lines as `tools/bench/internal/table/datatable.R` (`question  run  seconds  rows  cols
 //! checksum`), so the two outputs line up row by row. Loading is not timed, and every question
 //! runs twice.
 //!
 //! Usage: `cargo bench -p table --bench db_benchmark -- <data-dir> [--groupby-only | --joins-only]`,
-//! where the directory holds the CSV files `tools/bench/table/datagen.R` writes. `--groupby-only`
+//! where the directory holds the CSV files `tools/bench/internal/table/datagen.R` writes. `--groupby-only`
 //! runs only the ten group-by questions, and `--joins-only` only the five join questions.
 
 mod allocator;

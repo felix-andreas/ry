@@ -2,7 +2,8 @@
 """The fitness function of typed ry's hill climb (docs/src/content/docs/development/design/language-climb.md).
 It scores three things and prints one summary table:
 
-- speed: each benchmark program in tools/bench/why, typed in strict mode on ry, against its Rust
+- speed: each benchmark program with a typed version in tools/bench/kernels and
+  tools/bench/applications, typed in strict mode on ry, against its Rust
   reference in rust/, and the untyped twin on ry against GNU R. The score is the geometric mean of
   typed ry's time over Rust's, so lower is better and 1 is Rust's speed.
 - friendliness: the cases in friendly/, each a small program whose first line says what ry should
@@ -20,7 +21,7 @@ import argparse, datetime, json, math, os, pathlib, random, re, shutil, subproce
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent
-why = root / "tools/bench/why"
+bench = root / "tools/bench"
 scratch_root = pathlib.Path(tempfile.gettempdir()) / "ry-climb"
 
 
@@ -117,7 +118,7 @@ def friendliness(ry, environment, name_filter):
         passed += problem is None
         print(f"- {path.stem}: {'pass' if problem is None else problem}")
     lines = suffixes = 0
-    for path in (why / "typed").glob("*.R"):
+    for path in [*bench.glob("kernels/*.typed.R"), *bench.glob("applications/*.typed.R")]:
         text = path.read_text()
         lines += len([line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")])
         suffixes += len(re.findall(r"\b\d[\d.e]*(?:i64|f64)\b", text))
@@ -309,19 +310,25 @@ def timed(command, environment):
 
 
 def timed_r(command, variant, name, environment):
-    source = why / variant / f"{name}.R"
-    if not source.exists():
+    typed = variant == "typed"
+    suffix = ".typed.R" if typed else ".R"
+    source = next((path for suite in ("kernels", "applications") if (path := bench / suite / f"{name}{suffix}").exists()), None)
+    if source is None:
         return None
     directory = scratch_root / f"speed-{variant}"
     directory.mkdir(exist_ok=True)
-    if (why / variant / "ry.toml").exists():
-        shutil.copy(why / variant / "ry.toml", directory / "ry.toml")
-    (directory / "main.R").write_text((why / variant / "harness.R").read_text() + "\n" + source.read_text())
+    config = directory / "ry.toml"
+    if typed:
+        config.write_text("[check]\ntyping = true\nstrict = true\n")
+    elif config.exists():
+        config.unlink()
+    harness = bench / ("harness.typed.R" if typed else "harness.R")
+    (directory / "main.R").write_text(harness.read_text() + "\n" + source.read_text())
     result = subprocess.run(command + ["main.R"], cwd=directory, capture_output=True, text=True, env=dict(environment, R_DEFAULT_PACKAGES="stats"))
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     if result.returncode != 0 or not lines:
         return None
-    return float(lines[-1].split()[2])
+    return float(lines[-1].split()[3])
 
 
 def seconds(value):

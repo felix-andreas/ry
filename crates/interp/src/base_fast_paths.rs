@@ -2090,6 +2090,14 @@ unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
     }
     let result = crate::subset::modifiable(data)?;
     crate::heap().root(result);
+    // The R body reinstalls `dimnames` through `attributes<-`, and GNU R's `dimnamesgets` copies
+    // a list that something else references, so the result always owns its dimnames list. C
+    // code relies on that: xts's `dimnames<-` method clears the row names by writing into the
+    // list it is given, which must not reach the object `structure()` was called on.
+    let dimnames = values::get_attr(result, symbols.dimnames);
+    if dimnames.kind() == SexpType::List {
+        values::set_attr(result, symbols.dimnames, values::shallow_duplicate(dimnames)?)?;
+    }
     for &(tag, value) in &attributes {
         crate::subset::set_attribute_checked(result, tag, value, call.call)?;
     }

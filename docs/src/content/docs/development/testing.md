@@ -420,9 +420,14 @@ kernel whose checksum differs from GNU R's is marked `MISMATCH`. With `--memory`
 runs in its own process, and the table adds both engines' peak RSS. zoo and xts load from
 `RY_BENCH_RLIB` (default `~/R/library`).
 
+Compare peak RSS between two builds only from the same page-cache state. A freshly built `.ryc`
+or `libR.so` sits in the page cache in large folios, so one fault maps a whole block, and the same
+build reads back in small pages after eviction: two identical builds differed by 5 MB this way.
+Evict both builds' files with `posix_fadvise(POSIX_FADV_DONTNEED)` before every RSS comparison.
+
 `just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
 n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with
-the ratio ry / GNU R. The cases live in `tools/bench/stdlib`: `ry.R` holds ry's side and `gnu.R`
+the ratio ry / GNU R. The cases live in `tools/bench/internal/stdlib`: `ry.R` holds ry's side and `gnu.R`
 the R alternatives in base R, purrr, stringr and stringi under the same case names, and the
 fastest alternative sets the bar. A callback function is compared with R's callback idioms
 (`vapply`, `Filter`, `Reduce`, a `for` loop, purrr), and a function on one string with R's
@@ -431,7 +436,7 @@ ry's unboxed vector, and the faster of the two counts. Each case runs in its own
 `--timeout` shows as `timeout` without stopping the rest, and a `check` column compares
 checksums of both results. Packages load from `R_LIBS_USER`, and an alternative whose package is
 missing is skipped and named in the row. `--sort ratio` puts the slowest functions first, and
-`--write` saves the table, as in `tools/bench/stdlib/results.md`.
+`--write` saves the table, as in `tools/bench/internal/stdlib/results.md`.
 
 ### Coverage-guided fuzzing
 
@@ -739,7 +744,7 @@ inspect locals in a debugger.
 
 `crates/ry/tests/test_perf.rs` holds the memory budget of a whole cold `ry check --no-cache` with
 type errors on. It generates the three 300,000-line benchmark code bases with
-`tools/bench/generate.py`, runs the release binary on each, and fails when one peaks above
+`tools/bench/tooling/generate.py`, runs the release binary on each, and fails when one peaks above
 256 MiB resident. It reads the child's own peak with `wait4`, so it measures the process the user
 would run, allocator included. It is ignored by default for the same reasons:
 
@@ -751,7 +756,7 @@ cargo test-release -p ry-lang --test test_perf -- --ignored --nocapture
 
 ### Comparing two builds on testthat
 
-The testthat workload (`tools/bench/real/testthat.R`) gives two different wall times, and they
+The testthat workload (`tools/bench/applications/testthat.R`) gives two different wall times, and they
 answer different questions:
 
 | Number | What it covers | Command |
@@ -764,7 +769,7 @@ answer different questions:
 builds use the same `R_LIBS`, a library that ry itself installed testthat into, and each number is
 the median of five fresh processes. On the Linux release build with the JIT on, the test phase
 measured 0.219 s and the process wall 1.44 s, which is how one workload can be quoted as both. The
-comment at the top of `tools/bench/real/harness.R` gives the full environment of each command.
+comment at the top of `tools/bench/harness.R` gives the full environment of each command.
 [Benchmarks](/benchmarks#how-it-was-measured) covers the published suites and how they are timed.
 
 ## Guidelines

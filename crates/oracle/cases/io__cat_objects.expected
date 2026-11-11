@@ -1,0 +1,22 @@
+[stdout]
+| 1 2 3 a TRUE NA 1.5 sym 
+|   end
+| cat(list(1, 2)): argument 1 (type 'list') cannot be handled by 'cat' 
+| cat(list(1)): argument 1 (type 'list') cannot be handled by 'cat' 
+| cat(list(1, "a", TRUE)): argument 1 (type 'list') cannot be handled by 'cat' 
+| x cat("x", list(1, 2)): argument 2 (type 'list') cannot be handled by 'cat' 
+| cat(list(NULL)): argument 1 (type 'list') cannot be handled by 'cat' 
+| cat(quote(f(x))): argument 1 (type 'language') cannot be handled by 'cat' 
+| cat(pairlist(1)): argument 1 (type 'pairlist') cannot be handled by 'cat' 
+| cat(expression(1)): argument 1 (type 'expression') cannot be handled by 'cat' 
+| cat(sin): argument 1 (type 'builtin') cannot be handled by 'cat' 
+| cat(x): argument 1 (type 'list') cannot be handled by 'cat' 
+| a-b-cat("a", "b", list(1), sep = "-"): argument 3 (type 'list') cannot be handled by 'cat' 
+|  cat(NULL, list(1)): argument 2 (type 'list') cannot be handled by 'cat' 
+| 1,2,cat(1:2, sin, sep = ","): argument 2 (type 'builtin') cannot be handled by 'cat' 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

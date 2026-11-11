@@ -2223,19 +2223,18 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
                     .map(|index| cat_element(item, index, settings))
                     .collect::<R<_>>()?
             }
-            SexpType::List
-                if (0..values::length(item)).all(|index| {
-                    let element = item.element(index);
-                    element.kind().is_atomic() && values::length(element) == 1
-                }) =>
-            {
-                (0..values::length(item))
-                    .map(|index| cat_element(item.element(index), 0, settings))
-                    .collect::<R<_>>()?
-            }
-            SexpType::Language => vec![crate::deparse::deparse_one_line(item)],
+            // GNU R handles only atomic vectors and names; a list, even of length-one
+            // elements, a call and anything else is an error, reported against `cat()`'s own
+            // call. An empty list prints nothing.
+            SexpType::List if values::length(item) == 0 => Vec::new(),
             kind => {
-                return Err(call.error(format!(
+                // GNU R writes each object as it goes, so the objects before this one and the
+                // separator in front of it are already out when the error is raised.
+                if item_index > 0 {
+                    output.push_str(&separator_at(separator_index));
+                }
+                cat_text(file, output.as_bytes())?;
+                return Err(error(format!(
                     "argument {} (type '{}') cannot be handled by 'cat'",
                     item_index + 1,
                     kind.name()

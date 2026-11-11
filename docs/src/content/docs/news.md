@@ -52,7 +52,7 @@ native code follows; any other release runs its own R code unchanged.
 `<<-`, array slab writes such as `a[i, 2, ] <- v`, matrix `m[[i, j]]`, vector growth, `attr<-`,
 `%*%` on small matrices and complex vector arithmetic run on compiled or direct paths. With the
 JIT on, the geometric mean speed-up over GNU R rises from 1.58x to 1.90x on the awfy programs,
-from 2.27x to 2.78x on rcp and from 1.53x to 2.04x on shootout (`tools/bench/real/run.py
+from 2.27x to 2.78x on rcp and from 1.53x to 2.04x on shootout (`tools/bench/bench.py
 --public all --repeat 3`). Complex division and non-integer powers follow C99, so special values
 such as `(Inf+1i) / 0` match GNU R.
 
@@ -115,7 +115,7 @@ counts per call). None was re-measured for these notes.
 On the `bench-real` workloads (10 real-world programs, geometric mean of the speed relative to GNU R,
 `--repeat 3`), 0.4.3-beta runs 1.22 times as fast as GNU R with the JIT on and 1.28 times with it
 off. 0.4.2-beta measured 0.90 times with the JIT on. The new testthat workload
-(`tools/bench/real/testthat.R`) runs 1.12 times as fast with the JIT on and 1.23 times with it off.
+(`tools/bench/applications/testthat.R`) runs 1.12 times as fast with the JIT on and 1.23 times with it off.
 
 ### Also in this release
 
