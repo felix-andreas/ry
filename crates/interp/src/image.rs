@@ -1,10 +1,12 @@
 //! The start-up image: the session as it stands once base R and the default packages have
 //! loaded, built with ry's base R tree and shipped in it read-only, at
-//! `library/base/R/ry-start.image`. A start the image applies to loads it in place of base R's
+//! `library/base/R/ry-start.<build>.image`, so builds that share a tree each keep their own
+//! (`rcmd::images`). A start the image applies to loads it in place of base R's
 //! loader, the namespace loads and attaching the default packages, then runs the start-up steps
 //! that read the process environment, so those always see this process's values. Nothing writes
 //! an image at run time: `ry-rcmd write-start-image` writes it while the base tree is built
-//! (`crates/rcmd/src/base.rs`), in a fixed environment.
+//! (`crates/rcmd/src/base.rs`), or when a home is assembled over a tree that has none of this
+//! build, in a fixed environment.
 //!
 //! Base R's profile and the options-setting `.onLoad` hooks of utils, grDevices and stats read
 //! the environment, and they run again after every load. The image is for one set of namespaces
@@ -82,9 +84,10 @@ const LOADING_VARIABLES: &[&str] = &[
     "_R_METHODS_DONT_CHECKSUBCLASSES",
 ];
 
-/// The image of the R home `home`.
-pub fn path(home: &str) -> PathBuf {
-    Path::new(home).join("library/base/R/ry-start.image")
+/// The image the runtime build `identity` loads in the R home `home`
+/// (`library/base/R/ry-start.<identity>.image`, `rcmd::images`).
+pub fn path(home: &str, identity: &str) -> PathBuf {
+    rcmd::images::start_image(Path::new(home), identity)
 }
 
 /// Whether a start can load the image: it is not interactive, sources no profile, does not turn
@@ -129,7 +132,7 @@ pub(crate) enum LoadError {
 /// Loads the image of the R home `home`. On any error but [`LoadError::Partial`] the caller
 /// starts the slow way.
 pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<(), LoadError> {
-    let path = &path(home);
+    let path = &path(home, host.identity);
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {

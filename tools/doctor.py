@@ -284,11 +284,12 @@ def check_binaries():
             report("ok", f"binaries ({profile})", "ry and libR.so match the working tree")
     if not found:
         report("warn", "binaries", f"nothing built in {target}", "cargo build -p ry-lang -p libr -p rcmd")
-    image = target / "base-r/library/base/R/ry-start.image"
+    # crates/rcmd/src/images.rs: a tree keeps a start-up image per build, named by its identity.
+    image = target / f"base-r/library/base/R/ry-start.{identity.decode()}.image"
     if not (target / "base-r").is_dir():
         report("warn", "base R", f"no {target}/base-r: `ry run` falls back to R_HOME, and scenarios that hide GNU R skip", "just base-r dev (or release)")
     elif not image_written_by(image, identity):
-        report("warn", "base R", "the start-up image was written by another runtime build, so every start is the slow one", "just start-image dev (or release)")
+        report("warn", "base R", "no start-up image of this runtime build yet; the first `ry run` writes it, or run the fix", "just start-image dev (or release)")
     else:
         report("ok", "base R", f"{target}/base-r with a start-up image of this runtime")
 

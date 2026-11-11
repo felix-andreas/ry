@@ -264,9 +264,12 @@ A value outside a variable's range is ignored, as on GNU R.
 ### Start-up image
 
 ry's base R tree ships an image of the session as it stands once base R and the default packages
-have loaded (`library/base/R/ry-start.image`), and a start loads it instead of running base R's
-start-up code. On Linux an empty `ry run` script takes about 30 ms from the image and about 90 ms
-without it (`RY_IMAGE=0`). The image is written when ry is built and never at run time.
+have loaded (`library/base/R/ry-start.<build>.image`, where `<build>` identifies the ry build),
+and a start loads it instead of running base R's start-up code. On Linux an empty `ry run` script
+takes about 30 ms from the image and about 90 ms without it (`RY_IMAGE=0`). The image is written
+when ry is built, or when a ry build first starts over a base R tree that has none of its own, and
+never by a running session. Several ry builds can share one base R tree: each keeps its own images
+in it, and the tree keeps those of the four builds that wrote theirs most recently.
 
 Each start still runs the steps that read the environment: the C-level options, base R's profile,
 and the `.onLoad` hooks of utils, grDevices and stats. So `EDITOR`, `R_LIBS`, `_R_RNG_VERSION_`
@@ -368,8 +371,8 @@ is set to a value. A package
 whose `Makevars` builds correctly only with one job fails in parallel, so a failed parallel build
 runs again with one job, reusing the objects already built.
 
-An install on ry's runtime also writes the package's code image, `R/<package>.ryc` beside its
-lazy-load database: the compiled code of every closure, which a later session takes instead of
+An install on ry's runtime also writes the package's code image, `R/<package>.<build>.ryc`
+beside its lazy-load database: the compiled code of every closure, which a later session takes instead of
 compiling the closure itself, and the package's lazy-load records uncompressed, which a later
 session reads in place instead of inflating them. `--train tests`, `--train examples` or `--train SCRIPT` (`R CMD
 INSTALL --ry-train=...`) first runs the package's tests, its help-page examples or a script, and

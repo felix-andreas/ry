@@ -917,7 +917,7 @@ pub fn check_code_image_load(entropy: &mut impl Entropy) {
                     }
                 }
             }
-            std::fs::write(code_image::path(database), &image)
+            std::fs::write(code_image::path(database, build), &image)
                 .unwrap_or_else(|failure| panic!("cannot write the image: {failure}"));
             let previous = std::mem::replace(&mut crate::interp().code_image.build, build);
             let show = std::mem::replace(&mut crate::interp().show_error_messages, false);

@@ -49,7 +49,7 @@ env RY_JIT off
 env RY_JIT_LOG 1
 run ry run --runtime ry use.R
 expect exit 0
-expect stderr "install-time functions from library/arith/R/arith.ryc"
+expect stderr "install-time functions from library/arith/R/arith."
 expect stdout "[1] 5"
 expect stdout "[1] 4.242641"
 expect stdout "[1] 1"

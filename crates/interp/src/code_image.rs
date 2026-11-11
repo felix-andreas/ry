@@ -1,8 +1,8 @@
 //! Code images: the compiled code of an installed package's closures, written beside each
-//! lazy-load database when the package is installed (`R/<package>.ryc` beside
-//! `R/<package>.rdb`), so that a closure fetched from the database takes its code from the image
-//! instead of compiling it, and a trained image brings the type feedback and counters of its
-//! training run.
+//! lazy-load database when the package is installed (`R/<package>.<build>.ryc` beside
+//! `R/<package>.rdb`, named by the runtime build that wrote it, `rcmd::images`), so that a
+//! closure fetched from the database takes its code from the image instead of compiling it, and
+//! a trained image brings the type feedback and counters of its training run.
 //!
 //! A fetch does not decode anything: it notes where each closure's code lies in the image, and
 //! the call that would compile the closure decodes it instead ([`take_pending`]). Decoding costs
@@ -180,9 +180,10 @@ const ENTRY_SIZE: usize = 52;
 /// The flag bit of an image written after a training run.
 const TRAINED: u32 = 1;
 
-/// The code image of the lazy-load database `database`: its path with `.rdb` replaced by `.ryc`.
-pub fn path(database: &str) -> PathBuf {
-    Path::new(database.strip_suffix(".rdb").unwrap_or(database)).with_extension("ryc")
+/// The code image the runtime build `build` loads for the lazy-load database `database`: its
+/// path with `.rdb` replaced by `.<build>.ryc` (`rcmd::images`).
+pub fn path(database: &str, build: &str) -> PathBuf {
+    rcmd::images::code_image(Path::new(database), build)
 }
 
 /// The lazy-load databases this process read from and the code images it opened for them.
@@ -357,7 +358,7 @@ unsafe fn give_up(database: u32, message: &str) {
     let state = &mut interp().code_image;
     state.databases.images[database as usize] = ImageSlot::Absent;
     drop_pending(state, database);
-    let image = path(&state.databases.paths[database as usize]);
+    let image = path(&state.databases.paths[database as usize], state.build);
     report_damage(&format!(
         "cannot use the code image {} ({message}), so its functions compile as they run; \
          reinstall the package to repair it",
@@ -752,7 +753,7 @@ fn open(database: &str, build: &str) -> Result<Option<Rc<Image>>, String> {
     if std::env::var_os("RY_CODE_IMAGE").is_some_and(|value| value == "0") {
         return Ok(None);
     }
-    let file = match ImageFile::open(&path(database)) {
+    let file = match ImageFile::open(&path(database, build)) {
         Ok(file) => file,
         Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(failure) => return Err(failure.to_string()),
@@ -765,7 +766,7 @@ fn open(database: &str, build: &str) -> Result<Option<Rc<Image>>, String> {
         Err(unused) => {
             crate::image::report_unused(&format!(
                 "the code image {} {}",
-                path(database).display(),
+                path(database, build).display(),
                 match unused {
                     Unused::Format => "has another file format",
                     Unused::Build => "was written by another build of the runtime",
@@ -790,7 +791,7 @@ fn open(database: &str, build: &str) -> Result<Option<Rc<Image>>, String> {
             verified: bits(),
             streams_verified: bits(),
             file,
-            path: path(database),
+            path: path(database, build),
             entries: parsed.entries,
             native: Cell::new(native),
         })
@@ -1092,7 +1093,7 @@ unsafe fn write_image(
         &payloads,
         native.as_ref().map(|native| &*native.encode),
     )?;
-    let target = path(database);
+    let target = path(database, build);
     let staged = target.with_extension("ryc.partial");
     // The image is written beside the target and renamed over it, never rewritten in place: a
     // process that maps the old image keeps reading the old file, where writing into it would

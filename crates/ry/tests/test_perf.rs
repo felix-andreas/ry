@@ -9,8 +9,9 @@
 //! cargo test -p ry-lang --release --test test_perf -- --ignored --nocapture
 //! ```
 //!
-//! One test runs by default: the benchmark runner's refusal to time a start that could not use
-//! its R home's images, which skips without `libR` beside the binary or a built base R tree.
+//! One test runs by default: two builds sharing a base R tree keep their own images in it, and
+//! the benchmark runner fails a start that could not use its images. It skips without `libR` and
+//! `ry-rcmd` beside the binary or a built base R tree.
 
 #![cfg(unix)]
 
@@ -304,23 +305,31 @@ fn runtime_speed_stays_ahead_of_gnu_r() {
     );
 }
 
-/// A start-up or code image loads only into the build that wrote it, and a build that cannot load
-/// one starts the slow way. `tools/bench/bench.py` must fail a timed process that reports such an
-/// image, and refuse up front a build it cannot give a base R tree of its own.
+/// Two builds of the runtime that share a base R tree each write their own start-up and code
+/// images into it on their first start, and later starts alternating between them load their own
+/// images without rewriting or removing the other's. `tools/bench/bench.py` fails a timed process
+/// that reports an image it could not use.
+///
+/// The second build is a copy of this one with another identity patched into `ry` and `libR.so`,
+/// which is all that tells two builds' images apart.
 #[test]
-fn bench_refuses_a_start_from_another_builds_images() {
+fn two_builds_alternate_starts_without_displacing_each_others_images() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let binary = Path::new(env!("CARGO_BIN_EXE_ry"));
     let runtime = binary.with_file_name("libR.so");
     let tree = workspace.join("target/base-r");
-    let start_image = Path::new("library/base/R/ry-start.image");
-    let code_image = Path::new("library/stats/R/stats.ryc");
-    if !runtime.exists() || !tree.join(start_image).is_file() || !tree.join(code_image).is_file() {
-        eprintln!("skipped: needs libR beside the binary and target/base-r (`just base-r`)");
+    if !runtime.exists()
+        || !binary.with_file_name("ry-rcmd").exists()
+        || !tree.join("ry-base.txt").is_file()
+    {
+        eprintln!(
+            "skipped: needs libR and ry-rcmd beside the binary and target/base-r (`just base-r`)"
+        );
         return;
     }
     // Hard links keep the copy of the tree cheap, so it lives in the target directory, on the
-    // tree's file system; each image the test alters is written as a new file.
+    // tree's file system. Images are only ever written as new files and renamed into place, and
+    // the copy starts with none, so nothing the test does reaches the original tree.
     let directory = tempfile::tempdir_in(workspace.join("target")).expect("temporary directory");
     let copy = directory.path().join("base-r");
     let status = Command::new("cp")
@@ -330,74 +339,186 @@ fn bench_refuses_a_start_from_another_builds_images() {
         .status()
         .expect("cp runs");
     assert!(status.success(), "cp -al {} failed", tree.display());
-    // Assembling an R home rewrites the tree's start-up image and base code images when another
-    // build wrote them, so the home is assembled first, and the images are altered after it, as
-    // when a second build's home rewrites a tree the first build's home already links.
-    let cache = directory.path().join("cache");
+    for path in image_files(&copy) {
+        fs::remove_file(&path).expect("unlink an image of the copied tree");
+    }
     fs::write(
         directory.path().join("probe.R"),
-        "invisible(stats::median(c(3, 1, 2)))\n",
+        "invisible(stats::median(c(3, 1, 2)))\ninvisible(MASS::fractions(0.5))\n",
     )
     .expect("write the probe");
-    let assembled = Command::new(binary)
-        .args(["run", "--runtime", "ry", "probe.R"])
-        .current_dir(directory.path())
-        .env("RY_BASE_R", &copy)
-        .env("XDG_CACHE_HOME", &cache)
-        .output()
-        .expect("ry runs");
-    assert!(assembled.status.success(), "ry run failed: {assembled:?}");
-    // Each image opens with an eight-byte magic number; the start-up image then gives its header's
-    // length, and both then give the identity of the build that wrote them as a length and bytes.
-    for (image, identity_byte) in [(start_image, 24), (code_image, 16)] {
-        let mut bytes = fs::read(copy.join(image)).expect("read the image");
-        bytes[identity_byte] ^= 0x55;
-        fs::remove_file(copy.join(image)).expect("unlink the image's hard link");
-        fs::write(copy.join(image), bytes).expect("write the altered image");
+    let start = |ry: &Path| {
+        let output = Command::new(ry)
+            .args(["run", "--runtime", "ry", "probe.R"])
+            .current_dir(directory.path())
+            .env("RY_BASE_R", &copy)
+            .env("RY_IMAGE_LOG", "1")
+            .env("XDG_CACHE_HOME", directory.path().join("cache"))
+            .env_remove("RY_LIBR")
+            .env_remove("R_HOME")
+            .output()
+            .expect("ry runs");
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(output.status.success(), "{} failed: {stderr}", ry.display());
+        assert!(
+            !stderr.contains("ry: image unused"),
+            "{} started without its images: {stderr}",
+            ry.display()
+        );
+    };
+
+    start(binary);
+    let first = build_of(&copy).expect("the first start writes a start-up image");
+    // Another identity of the same length: every hexadecimal digit moved on by one.
+    let second: String = first
+        .chars()
+        .map(|digit| {
+            let value = digit.to_digit(16).expect("a hexadecimal identity");
+            char::from_digit((value + 1) % 16, 16).expect("a digit")
+        })
+        .collect();
+    let other = directory.path().join("other");
+    fs::create_dir(&other).expect("create the second build's directory");
+    for name in ["ry", "libR.so"] {
+        let bytes = fs::read(binary.with_file_name(name)).expect("read the build");
+        let patched = replace_all(&bytes, first.as_bytes(), second.as_bytes());
+        assert!(
+            patched != bytes,
+            "{name} does not carry the identity {first}"
+        );
+        fs::write(other.join(name), patched).expect("write the second build");
+        let mut permissions = fs::metadata(binary.with_file_name(name))
+            .expect("the build's permissions")
+            .permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(other.join(name), permissions).expect("make the copy executable");
     }
-    // A build without `ry-rcmd` beside it, which bench.py cannot build a base R tree for.
-    let lone = directory.path().join("lone");
-    fs::create_dir(&lone).expect("create a directory");
-    fs::hard_link(binary, lone.join("ry")).expect("link the binary");
+    for name in ["ry-rcmd", "libRblas.so", "libRlapack.so"] {
+        if binary.with_file_name(name).exists() {
+            fs::hard_link(binary.with_file_name(name), other.join(name)).expect("link the build");
+        }
+    }
+    let other_ry = other.join("ry");
+    start(&other_ry);
+
+    let images = |build: &str| {
+        [
+            "library/base/R/ry-start.{build}.image",
+            "library/stats/R/stats.{build}.ryc",
+            "library/MASS/R/MASS.{build}.ryc",
+        ]
+        .map(|path| copy.join(path.replace("{build}", build)))
+    };
+    for path in images(&first).iter().chain(&images(&second)) {
+        assert!(path.is_file(), "{} was not written", path.display());
+    }
+    let written = image_stamps(&copy);
+    for ry in [binary, &other_ry, binary, &other_ry] {
+        start(ry);
+    }
+    assert_eq!(
+        image_stamps(&copy),
+        written,
+        "starts alternating between two builds rewrote or removed images"
+    );
+
+    // An image of the second build that another build wrote, as a start sees a damaged identity:
+    // the code image opens with an eight-byte magic number and then the identity's length.
+    let stats = &images(&second)[1];
+    let mut bytes = fs::read(stats).expect("read the code image");
+    bytes[16] ^= 0x55;
+    fs::remove_file(stats).expect("unlink the code image");
+    fs::write(stats, bytes).expect("write the altered code image");
     let script = r#"
 import pathlib, sys
 sys.path.insert(0, "tools/bench")
 import bench
-work = pathlib.Path(sys.argv[3])
-bench.BENCH_TREES = work / "trees"
 env = dict(bench.os.environ, RY_IMAGE_LOG="1")
-status, out, err, _, _ = bench.spawn([sys.argv[1], "run", "--runtime", "ry", "probe.R"], env, cwd=work)
+status, out, err, _, _ = bench.spawn([sys.argv[1], "run", "--runtime", "ry", "probe.R"], env, cwd=sys.argv[2])
 print(f"timed run: status {status}: {err}")
-bench.own_base_trees([sys.argv[2]])
 "#;
     let output = Command::new("python3")
         .arg("-I")
         .arg("-c")
         .arg(script)
-        .arg(binary)
-        .arg(lone.join("ry"))
+        .arg(&other_ry)
         .arg(directory.path())
         .current_dir(&workspace)
         .env("RY_BASE_R", &copy)
-        .env("RY_LIBR", &runtime)
-        .env("XDG_CACHE_HOME", &cache)
+        .env("XDG_CACHE_HOME", directory.path().join("cache"))
+        .env_remove("RY_LIBR")
+        .env_remove("R_HOME")
         .output()
         .expect("python3 runs bench.py");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    eprintln!("{stdout}{stderr}");
     assert!(
         stdout.contains(
             "timed run: status None: started without an image it should load (ry: image unused: "
         ) && stdout.contains("was written by another build of the runtime"),
-        "a timed process that could not use an image must fail"
+        "a timed process that could not use an image must fail: {stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        !output.status.success()
-            && stderr.contains("cannot use the images of the base R tree it finds")
-            && stderr.contains("cannot build it a tree of its own without ry-rcmd and libR.so"),
-        "a build bench.py cannot give a base R tree must be refused"
-    );
+}
+
+/// Every start-up and code image file in the base R tree `tree`, sorted.
+fn image_files(tree: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for package in fs::read_dir(tree.join("library")).expect("read the library") {
+        let code = package.expect("a package").path().join("R");
+        let Ok(entries) = fs::read_dir(&code) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.expect("an entry").path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if name.ends_with(".ryc") || (name.starts_with("ry-start.") && name.ends_with(".image"))
+            {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// Each image file of `tree` with its modification time.
+fn image_stamps(tree: &Path) -> Vec<(std::path::PathBuf, std::time::SystemTime)> {
+    image_files(tree)
+        .into_iter()
+        .map(|path| {
+            let modified = fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .expect("the image's modification time");
+            (path, modified)
+        })
+        .collect()
+}
+
+/// The build whose start-up image `tree` holds, from its file name `ry-start.<build>.image`.
+fn build_of(tree: &Path) -> Option<String> {
+    image_files(tree).iter().find_map(|path| {
+        let name = path.file_name()?.to_str()?;
+        Some(
+            name.strip_prefix("ry-start.")?
+                .strip_suffix(".image")?
+                .to_owned(),
+        )
+    })
+}
+
+fn replace_all(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(from) {
+            out.extend_from_slice(to);
+            index += from.len();
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    out
 }
 
 /// The best warm time a benchmark program prints, as `name checksum median best cold`.

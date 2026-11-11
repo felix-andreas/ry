@@ -41,6 +41,7 @@ mod headers {
 
 pub mod base;
 pub mod front_end;
+pub mod images;
 mod makeconf;
 
 use makeconf::{expand_make, make_assignments};
@@ -428,7 +429,7 @@ fn assemble_as(root: &Path, home: &Path, sources: &HomeSources<'_>) -> Result<()
             link(&entry, &target)?;
         }
     }
-    refresh_start_image(sources)?;
+    refresh_start_image(sources.base, sources.rcmd, sources.libr)?;
     for entry in read_directory(&gnu_share)? {
         let name = entry.file_name().unwrap_or_default();
         if name == "make" {
@@ -563,36 +564,33 @@ exec "$cmd" $extra "$@"
     )
 }
 
-/// Rewrites the base tree's start-up image when the runtime `libr` cannot load it: the image
-/// predates a change to its format, or another build of the runtime wrote it. A home links the
-/// base tree's image, so without this every start in the home would quietly take the slow path.
-/// A base without an image, such as a GNU R installation, is left as it is.
-fn refresh_start_image(sources: &HomeSources<'_>) -> Result<()> {
+/// Writes the images of the runtime `libr` into the base tree `base` when the tree holds none
+/// this runtime loads: none of its build, or one of an older format. A home links the base
+/// tree's packages, so without this every start in the home would quietly take the slow path.
+/// Other builds' images are left in place ([`images`]). A base without a manifest, such as a GNU R
+/// installation, has no images and is left as it is.
+fn refresh_start_image(base: &Path, rcmd: &Path, libr: &Path) -> Result<()> {
     type Current = unsafe extern "C" fn(*const std::ffi::c_char) -> std::ffi::c_int;
-    let image = sources.base.join("library/base/R/ry-start.image");
-    if !image.is_file() {
+    if !base.join(base::MANIFEST).is_file() {
         return Ok(());
     }
-    let library = front_end::load_runtime(sources.libr)?;
+    let build = front_end::runtime_identity(libr)?;
+    let library = front_end::load_runtime(libr)?;
     let current = unsafe { library.get::<Current>(b"ry_start_image_current\0") }
         .map(|entry| *entry)
-        .map_err(|error| {
-            Error::Usage(format!(
-                "{} is not ry's runtime: {error}",
-                sources.libr.display()
-            ))
-        });
+        .map_err(|error| Error::Usage(format!("{} is not ry's runtime: {error}", libr.display())));
     // Unloading a Rust library that may have started threads or registered thread-local
     // destructors is unsound, and the process that assembles a home usually runs it next.
     std::mem::forget(library);
     let current = current?;
+    let image = images::start_image(base, &build);
     let path = std::ffi::CString::new(image.to_string_lossy().into_owned())
         .map_err(|_| Error::Usage(format!("{} contains a NUL byte", image.display())))?;
     rewrite_stale_image(
         &image,
-        sources.base,
+        base,
         || unsafe { current(path.as_ptr()) } == 1,
-        || base::write_start_image(sources.base, sources.rcmd, sources.libr),
+        || base::write_start_image(base, rcmd, libr).map(drop),
     )
 }
 
@@ -613,12 +611,11 @@ fn rewrite_stale_image(
     let lock_path = base.join(".start-image.lock");
     let lock = fs::File::create(&lock_path).map_err(|error| {
         Error::Usage(format!(
-            "the start-up image {} was written by another build of ry, and its base R tree \
-             cannot be written to replace it ({}: {error}); run `just start-image` with write \
-             access to {}",
+            "the base R tree {} has no start-up image of this build of ry ({}), and it cannot \
+             be written to add one ({}: {error}); run `just start-image` with write access to it",
+            base.display(),
             image.display(),
             lock_path.display(),
-            base.display()
         ))
     })?;
     lock.lock().map_err(io_error(&lock_path))?;
@@ -719,6 +716,9 @@ pub fn cached_home(cache: &Path, libr: &Path, rcmd: &Path, base: &Path) -> Resul
         && let Some(lock) = lock_home(&home)?
     {
         hold(lock);
+        // Another build's images can have pushed this one's out of the base tree since the home
+        // was assembled ([`images::prune`]).
+        refresh_start_image(base, rcmd, libr)?;
         return Ok(home);
     }
     fs::create_dir_all(cache).map_err(io_error(cache))?;

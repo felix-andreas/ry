@@ -19,7 +19,7 @@
 
 use {
     crate::{
-        Error, HomeSources, Platform, Result, Toolchain, assemble, io_error, libr_path,
+        Error, HomeSources, Platform, Result, Toolchain, assemble, images, io_error, libr_path,
         read_directory, shlib, staging_suffix, write, write_script,
     },
     std::{
@@ -330,12 +330,13 @@ pub fn build(sources: &BuildSources<'_>, output: &Path) -> Result<()> {
     fs::rename(&staging, output).map_err(io_error(output))
 }
 
-/// The start-up image of a built base tree (`interp::image`), whose sessions load it in place of
-/// base R's loader and the default packages: [`build`] writes it as its last step, and this
-/// writes it again over the tree at `root` with the runtime `libr` and the front end `rcmd`,
-/// which a runtime of another build needs, because an image loads only into the build that wrote
-/// it.
-pub fn write_start_image(root: &Path, rcmd: &Path, libr: &Path) -> Result<()> {
+/// Writes the start-up image and code images of the runtime `libr` into the built base tree at
+/// `root`, with the front end `rcmd`, for a runtime of another build than the one that built the
+/// tree: images load only into the build that wrote them, and their file names carry it
+/// ([`crate::images`]). Other builds' images stay, up to [`crate::images::KEPT_BUILDS`]
+/// builds. Returns the start-up image's path.
+pub fn write_start_image(root: &Path, rcmd: &Path, libr: &Path) -> Result<PathBuf> {
+    let build = crate::front_end::runtime_identity(libr)?;
     let libr_link = libr_path(root);
     let front_end = if Platform::HOST == Platform::Windows {
         root.join("bin").join("R.exe")
@@ -353,7 +354,7 @@ pub fn write_start_image(root: &Path, rcmd: &Path, libr: &Path) -> Result<()> {
     remove_if_present(&front_end)?;
     crate::link(libr, &libr_link)?;
     crate::link(rcmd, &front_end)?;
-    let written = run_image_writer(&front_end, root, &work);
+    let written = run_image_writer(&front_end, root, &work, &build);
     fs::remove_dir_all(&work).map_err(io_error(&work))?;
     remove_if_present(&libr_link)?;
     remove_if_present(&front_end)?;
@@ -363,15 +364,21 @@ pub fn write_start_image(root: &Path, rcmd: &Path, libr: &Path) -> Result<()> {
             fs::remove_dir(&path).map_err(io_error(&path))?;
         }
     }
-    written
+    written.map(|()| images::start_image(root, &build))
 }
 
-/// Runs `front_end write-start-image` in the home `root`, then writes the code images of the
-/// base packages from a session that starts from that image. The environment is emptied down to
-/// what finds programs and temporary files, because the image holds start-up as this one
-/// environment ran it; the steps that read the environment run again on every start.
-fn run_image_writer(front_end: &Path, root: &Path, work: &Path) -> Result<()> {
-    let image = root.join("library/base/R/ry-start.image");
+/// Runs `front_end write-start-image` in the home `root` for the runtime build `build`, then
+/// writes the code images of the base packages from a session that starts from that image, and
+/// those of every other package in the tree the way an install writes them, and finally prunes
+/// the images of builds beyond [`images::KEPT_BUILDS`]. The environment is emptied down to what
+/// finds programs and temporary files, because the image holds start-up as this one environment
+/// ran it; the steps that read the environment run again on every start.
+///
+/// A tree's other packages (the recommended ones) got their images when they were installed, by
+/// the build that installed them, so a build that writes its start-up image into a tree it did
+/// not build writes theirs too, rather than leave every package but base without an image.
+fn run_image_writer(front_end: &Path, root: &Path, work: &Path, build: &str) -> Result<()> {
+    let image = images::start_image(root, build);
     run_in_home(
         front_end,
         root,
@@ -397,6 +404,45 @@ fn run_image_writer(front_end: &Path, root: &Path, work: &Path) -> Result<()> {
         ],
     ) {
         eprintln!("Warning: the code images of the base packages were not written\n{error}");
+    }
+    let library = root.join("library");
+    let driver = work.join("code-image.R");
+    write(&driver, crate::CODE_IMAGE_DRIVER)?;
+    for package in read_directory(&library)? {
+        let Some(name) = package.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if ALL_PACKAGES.contains(&name) || !package.join(format!("R/{name}.rdb")).is_file() {
+            continue;
+        }
+        if let Err(error) = run_in_home(
+            front_end,
+            root,
+            work,
+            "ry-rcmd code image",
+            &[
+                OsStr::new("R"),
+                OsStr::new("--vanilla"),
+                OsStr::new("--no-echo"),
+                OsStr::new("-f"),
+                driver.as_os_str(),
+                OsStr::new("--args"),
+                OsStr::new(name),
+                library.as_os_str(),
+                work.as_os_str(),
+                OsStr::new("none"),
+                OsStr::new("false"),
+            ],
+        ) {
+            eprintln!("Warning: the code image of '{name}' was not written\n{error}");
+        }
+    }
+    // Pruning frees disk; a tree it could not prune still loads every build's images.
+    if let Err(error) = images::prune(root, build) {
+        eprintln!(
+            "Warning: the images of older builds in {} were not removed: {error}",
+            root.display()
+        );
     }
     Ok(())
 }
@@ -591,7 +637,8 @@ impl<'a> Builder<'a> {
         )?;
         self.build_help()?;
         self.compile_native()?;
-        run_image_writer(&self.front_end(), &self.root, &self.work)?;
+        let build = crate::front_end::runtime_identity(self.sources.libr)?;
+        run_image_writer(&self.front_end(), &self.root, &self.work, &build)?;
         self.finish()
     }
 

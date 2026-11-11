@@ -1380,8 +1380,9 @@ const IMAGE_HOST: interp::image::ImageHost = interp::image::ImageHost {
 
 /// Writes the start-up image of the R home `R_HOME` names to the NUL-terminated `path`: starts a
 /// session the slow way in this process's environment and saves it. Returns 0 once written, and
-/// 1 after reporting why it was not. The base tree's build calls this through
-/// `ry-rcmd write-start-image`; nothing else writes an image.
+/// 1 after reporting why it was not. `ry-rcmd write-start-image` calls this when a base tree is
+/// built, and when a home is assembled over a tree with no image of this build; nothing else
+/// writes an image.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_write_start_image(path: *const c_char) -> c_int {
     runtime();

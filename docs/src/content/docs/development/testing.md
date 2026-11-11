@@ -492,13 +492,15 @@ the `R_LIBS` libraries. `tools/bench/bench.py` and `bench-base --memory` run it 
 Run it before every peak-RSS run you script yourself, because evicting only the top of `base-r`
 leaves the `.ryc` images cached.
 
-Compare two builds only when each loads its own images. The start-up image and every `.ryc` load
-only into the build that wrote them, so of two builds sharing `target/base-r` one starts the slow
-way. `RY_IMAGE_LOG=1` makes ry print `ry: image unused: <image> was written by another build of the
-runtime` (or why else it skipped the image) on standard error. `tools/bench/bench.py` probes each
-build this way, gives a build that cannot use its tree's images (or predates the flag) its own base
-R tree, built once into `target/bench-base-r/<hash of its libR>`, and fails any timed process that
-reports an unused image.
+Two builds can share `target/base-r` in a comparison, because each loads only images its own
+name carries (`ry-start.<build>.image`, `<package>.<build>.ryc`, see
+[the architecture page](/development/architecture#the-start-up-image)). A build's first start
+writes its images, so `tools/bench/bench.py` starts each build once before timing anything.
+`RY_IMAGE_LOG=1` makes ry print `ry: image unused: <image> was written by another build of the
+runtime` (or why else it skipped an image) on standard error, and `bench.py` sets it on every timed
+process and fails one that prints it, because that process timed a slow start. It refuses a runtime
+that predates the flag. `two_builds_alternate_starts_without_displacing_each_others_images` in
+`crates/ry/tests/test_perf.rs` pins both halves.
 
 `just bench-stdlib [filter] [n]` times every `List`, `Str`, `Dict` and `Result` function at
 n = 1e6 by default against its fastest GNU R equivalent, and prints one row per function with

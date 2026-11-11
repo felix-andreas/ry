@@ -35,12 +35,12 @@ the missing packages, and `--write` refuses such a run.
 
 A start-up image and a package's code image load only into the build of ry that wrote them, and a
 build that cannot load them starts the slow way, which costs up to a sixth more instructions and
-several MB more memory. Before the first suite, bench.py runs each ry build once with
-`RY_IMAGE_LOG=1` and gives every build whose base R tree it cannot load its own tree, built once
-with tools/base-r/build.sh into target/bench-base-r/<hash of its libR> and named by `RY_BASE_R`;
-it stops when a build has no `ry-rcmd` and runtime beside it to build one. Every timed ry process
-also runs with `RY_IMAGE_LOG=1`, and one that reports an unused image fails, so a run never
-compares a fast start with a slow one.
+several MB more memory. Builds that share a base R tree each keep their own images there
+(crates/rcmd/src/images.rs), and a build writes its images the first time it starts. Before the
+first suite, bench.py starts each ry build once, so no timed process pays for writing them. Every
+ry process runs with `RY_IMAGE_LOG=1`, and one that reports an unused image fails, so a run never
+compares a fast start with a slow one. A build whose runtime predates `RY_IMAGE_LOG` cannot report
+one, so bench.py refuses it.
 
 `--samples FILE` keeps every round's raw samples in FILE as it goes, and a later run with the same
 FILE and options resumes after the last complete round. `--write` needs at least 10 rounds and
@@ -50,7 +50,7 @@ Usage: tools/bench/bench.py SUITE... | all [--ry PATH] [--rscript PATH] [--round
                             [--filter TEXT] [--extra-rounds N] [--samples FILE] [--write]
                             [--baseline PATH] [--jit-off] [--partial]
 """
-import argparse, hashlib, json, math, os, pathlib, platform, random, shlex, shutil, statistics
+import argparse, json, math, os, pathlib, platform, random, shlex, statistics
 import subprocess, sys, re, tempfile, threading, time, tomllib
 
 here = pathlib.Path(__file__).resolve().parent
@@ -73,7 +73,6 @@ PROGRAM_TIMEOUT = 300
 # The line ry prints on standard error under RY_IMAGE_LOG for each start-up or code image it could
 # not use (crates/interp/src/image.rs, `report_unused`).
 IMAGE_UNUSED = "ry: image unused: "
-BENCH_TREES = root / "target" / "bench-base-r"
 STRICT_CONFIG = "[check]\ntyping = true\nstrict = true\n"
 
 
@@ -115,7 +114,8 @@ def main():
                      "remove them and rebuild ry:\n" + "\n".join(f"  {line}" for line in changes))
     for binary in filter(None, [args.ry, args.baseline]):
         refuse_unreleased(binary)
-    args.base_trees = own_base_trees(list(dict.fromkeys(filter(None, [args.ry, args.baseline]))))
+    for binary in dict.fromkeys(filter(None, [args.ry, args.baseline])):
+        start_once(binary)
     manifests = {suite: load_suite(suite) for suite in suites}
     missing = {suite: missing_packages(suite, selected(manifest, args)) for suite, manifest in manifests.items()}
     if any(missing.values()) and not args.partial:
@@ -150,7 +150,7 @@ def engines(args, suite):
                                        capture_output=True, text=True, check=True).stdout.strip()
         base.update(R_LIBS=str(library), R_LIBS_USER=str(library), R_LIBS_SITE=gnu_r_library)
     ry = [args.ry, "run", "--runtime", "ry"]
-    ry_env = image_env(base, args.base_trees.get(args.ry))
+    ry_env = dict(base, RY_IMAGE_LOG="1")
     table = [Engine("gnu_r", "GNU R", [args.rscript, "--vanilla"], base),
              Engine("ry", "ry", ry, ry_env)]
     typed = suite in ("kernels", "applications")
@@ -160,74 +160,34 @@ def engines(args, suite):
         table.append(Engine("ry_nojit", "ry, JIT off", ry, dict(ry_env, RY_JIT="off")))
     if args.baseline:
         baseline = [args.baseline, "run", "--runtime", "ry"]
-        baseline_env = image_env(base, args.base_trees.get(args.baseline))
+        baseline_env = dict(base, RY_IMAGE_LOG="1")
         table.append(Engine("baseline", "baseline", baseline, baseline_env))
         if typed:
             table.append(Engine("baseline_typed", "baseline typed", baseline, baseline_env, typed=True))
     return table
 
 
-def image_env(base, tree):
-    """The environment of a ry engine: `base`, with every unused image reported so `spawn` can fail
-    the process, and the build's own base R tree when it needs one."""
-    env = dict(base, RY_IMAGE_LOG="1")
-    if tree is not None:
-        env["RY_BASE_R"] = str(tree)
-    return env
-
-
-def own_base_trees(binaries):
-    """The base R tree each of the ry builds `binaries` needs in place of the one it finds, as a
-    dict from binary to tree; a build that loads its own tree's images is absent.
-
-    Images load only into the build that wrote them, so of two builds that find one tree at most one
-    starts fast. A build that cannot load its tree's images, or whose runtime predates
-    `RY_IMAGE_LOG` and so cannot say, gets a tree of its own, built from the `ry-rcmd` and runtime
-    beside it and kept in target/bench-base-r under the hash of its runtime, so the next run with
-    the same build reuses it. Trees of other builds are removed, since each is about as large as
-    base R. Exits when a build needs a tree and none can be built."""
-    runtimes = {binary: runtime_of(binary) for binary in binaries}
-    contents = {binary: runtime.read_bytes() if runtime else None for binary, runtime in runtimes.items()}
-    # Assembling a build's R home the first time rewrites the start-up image and the base packages'
-    # code images in the tree it finds when they are another build's, which makes them stale for a
-    # build probed earlier, so only a second round shows what the timed runs will see.
-    for _ in range(2):
-        unused = {binary: image_unused(binary, {}) for binary in binaries}
-    for binary, content in contents.items():
-        if content is not None and b"RY_IMAGE_LOG" not in content:
-            unused[binary] = ["its runtime predates RY_IMAGE_LOG, so it cannot report an image it does not use"]
-    trees = {}
-    for binary, lines in unused.items():
-        if not lines:
-            continue
-        rcmd, runtime = pathlib.Path(binary).resolve().with_name("ry-rcmd"), runtimes[binary]
-        if not rcmd.is_file() or runtime is None:
-            sys.exit(f"error: {binary} cannot use the images of the base R tree it finds, so it would time "
-                     "a slow start:\n" + "\n".join(f"  {line}" for line in lines) + "\n"
-                     f"and bench.py cannot build it a tree of its own without ry-rcmd and "
-                     f"{runtime_library_name()} beside it; build one with `just base-r` for that build, "
-                     "or point RY_BASE_R at a base R tree that build wrote")
-        tree = BENCH_TREES / hashlib.sha256(contents[binary]).hexdigest()[:16]
-        if not (tree / "ry-base.txt").is_file():
-            print(f"{binary} gets a base R tree of its own ({lines[0]}), built once into "
-                  f"{tree.relative_to(root)}; this takes several minutes", flush=True)
-            if tree.exists():
-                shutil.rmtree(tree)
-            built = subprocess.run([str(root / "tools/base-r/build.sh"), str(tree), str(rcmd), str(runtime)],
-                                   capture_output=True, text=True)
-            if built.returncode != 0:
-                sys.exit(f"error: building a base R tree for {binary} failed:\n{built.stderr[-3000:]}")
-        trees[binary] = tree
-    if BENCH_TREES.is_dir():
-        for stale in BENCH_TREES.iterdir():
-            if stale not in trees.values():
-                shutil.rmtree(stale)
-    for binary, tree in trees.items():
-        lines = image_unused(binary, {"RY_BASE_R": str(tree)})
-        if lines:
-            sys.exit(f"error: {binary} cannot use the images of the base R tree built for it in {tree}:\n"
-                     + "\n".join(f"  {line}" for line in lines))
-    return trees
+def start_once(binary):
+    """Starts the ry build `binary` once, so it writes its images into the base R tree it finds if
+    they are missing, and exits when it reports an image it cannot use or cannot report one. The
+    probe loads a function from stats, so it opens a code image as well as the start-up image."""
+    runtime = runtime_of(binary)
+    if runtime is not None and b"RY_IMAGE_LOG" not in runtime.read_bytes():
+        sys.exit(f"error: the runtime of {binary} ({runtime}) predates RY_IMAGE_LOG, so it cannot report "
+                 "a start-up or code image it does not use, and its timings may measure a slow start; "
+                 "compare a build that has it")
+    with tempfile.TemporaryDirectory(prefix="ry-bench-probe-") as work:
+        script = pathlib.Path(work) / "probe.R"
+        script.write_text("invisible(stats::median(c(3, 1, 2)))\n")
+        env = dict(os.environ, LC_ALL="C.UTF-8", RY_IMAGE_LOG="1")
+        status, out, err, _, _ = spawn([binary, "run", "--runtime", "ry", script.name], env, cwd=work,
+                                       check_images=False)
+    if status != 0:
+        sys.exit(f"error: {binary} cannot run a one-line R script: {failure_reason(out, err)}")
+    unused = [line for line in err.splitlines() if line.startswith(IMAGE_UNUSED)]
+    if unused:
+        sys.exit(f"error: {binary} cannot use the images of the base R tree it finds, so it would time "
+                 "a slow start:\n" + "\n".join(f"  {line}" for line in unused))
 
 
 def runtime_of(binary):
@@ -237,21 +197,6 @@ def runtime_of(binary):
         return pathlib.Path(os.environ["RY_LIBR"])
     beside = pathlib.Path(binary).resolve().with_name(runtime_library_name())
     return beside if beside.is_file() else None
-
-
-def image_unused(binary, env):
-    """The images a start of the ry build `binary` reports it could not use, with `env` added to
-    this process's environment. The probe loads a function from stats, so it opens a code image
-    as well as the start-up image."""
-    with tempfile.TemporaryDirectory(prefix="ry-bench-probe-") as work:
-        script = pathlib.Path(work) / "probe.R"
-        script.write_text("invisible(stats::median(c(3, 1, 2)))\n")
-        full = dict(os.environ, LC_ALL="C.UTF-8", RY_IMAGE_LOG="1", **env)
-        status, out, err, _, _ = spawn([binary, "run", "--runtime", "ry", script.name], full, cwd=work,
-                                       check_images=False)
-    if status != 0:
-        sys.exit(f"error: {binary} cannot run a one-line R script: {failure_reason(out, err)}")
-    return [line for line in err.splitlines() if line.startswith(IMAGE_UNUSED)]
 
 
 def runtime_library_name():
@@ -335,7 +280,7 @@ def run_suite(suite, manifest, missing, args, meta):
         print(f"PARTIAL RUN: the corpus library lacks {', '.join(missing)}\n", flush=True)
     # Peak RSS depends on how the page cache holds each build's files, which a fresh build holds
     # differently from one read back from disk (see evict.py), so every ry build starts evicted.
-    evict([args.ry] + ([args.baseline] if args.baseline else []), args.base_trees.values())
+    evict([args.ry] + ([args.baseline] if args.baseline else []))
     try:
         while len(state["rounds"]) < args.rounds:
             number = len(state["rounds"]) + 1
