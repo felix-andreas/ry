@@ -209,7 +209,11 @@ pub(crate) unsafe fn name_position(heap: &Heap, subject: Sexp, index: Sexp) -> O
 /// elements, or `None` when it is out of bounds, `NA`, or not such a scalar.
 #[inline(always)]
 pub(crate) unsafe fn scalar_position(index: Sexp, count: usize) -> Option<usize> {
-    if index.is_altrep() || index.attrib() != nil() || length(index) != 1 {
+    if !matches!(index.kind(), SexpType::Integer | SexpType::Real)
+        || index.is_altrep()
+        || index.attrib() != nil()
+        || index.length() != 1
+    {
         return None;
     }
     match index.kind() {

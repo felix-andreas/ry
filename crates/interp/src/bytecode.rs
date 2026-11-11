@@ -6090,8 +6090,8 @@ unsafe fn branch_if_object_fast(state: &mut Activation<'_, '_>, at: usize) -> Op
 }
 
 /// `CallBuiltin` of the base `[` or `[[` on two positional values, reading the element
-/// [`element_access::element_position`] takes without the call. A profile or activity trace being
-/// taken sees the full call, as [`eval::call_direct`] arranges for every direct entry.
+/// [`element_access::element_position`] takes without the call. A profile or activity trace
+/// being taken sees the full call, as [`eval::call_direct`] arranges for every direct entry.
 #[inline(always)]
 unsafe fn call_builtin_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
     let code = state.code;
@@ -6114,6 +6114,19 @@ unsafe fn call_builtin_fast(state: &mut Activation<'_, '_>, at: usize) -> Option
     } else {
         return None;
     };
+    read_element_call(state, at, double)
+}
+
+/// The rest of [`call_builtin_fast`] once the builtin is `[` (or `[[`, `double`). Out of line
+/// because its frame setup would otherwise run for every builtin call the handler declines.
+#[inline(never)]
+unsafe fn read_element_call(
+    state: &mut Activation<'_, '_>,
+    at: usize,
+    double: bool,
+) -> Option<usize> {
+    let code = state.code;
+    let registers = state.registers;
     let heap = &mut *state.heap;
     let first = *code.add(at + 4) as usize;
     let subject = *registers.add(first);
