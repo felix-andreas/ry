@@ -322,6 +322,70 @@ fn native_reads_leave_missing_arguments_to_the_interpreter() {
     }
 }
 
+/// Two runs of the same program make the same collections: the trigger reads only the bytes the
+/// program allocated, never wall time, RSS or an address-dependent hash. The workload grows a
+/// kept list, fills hashed environments, interns fresh strings and builds closures, so all three
+/// collection kinds run. Instruction counts compared between builds rely on this; so does
+/// reading one process's `RY_GC_LOG` against another's.
+#[test]
+fn identical_runs_make_identical_collections() {
+    if let Some(reason) =
+        missing_requirement(&["ry-runtime".to_owned()], None).expect("a known requirement")
+    {
+        eprintln!("collection determinism: skipped, {reason}");
+        return;
+    }
+    let script = "kept <- list()\n\
+                  for (round in 1:40) {\n\
+                  \x20 table <- new.env(hash = TRUE)\n\
+                  \x20 for (i in 1:2000) assign(paste0(\"key\", round, \"_\", i), list(i, as.character(i)), envir = table)\n\
+                  \x20 kept[[round]] <- mget(ls(table)[1:50], envir = table)\n\
+                  \x20 adders <- lapply(1:500, function(i) function(x) x + i)\n\
+                  \x20 total <- sum(vapply(adders, function(f) f(1), 0))\n\
+                  \x20 if (round %% 10 == 0) gc()\n\
+                  }\n\
+                  cat(length(kept), total, \"\\n\")\n";
+    let directory = tempfile::tempdir().expect("temporary directory");
+    fs::write(directory.path().join("work.R"), script).expect("write the workload");
+    let collections = |run: &str| {
+        let log = directory.path().join(format!("{run}.log"));
+        let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .args(["run", "--runtime", "ry", "work.R"])
+            .current_dir(directory.path())
+            .env("XDG_CACHE_HOME", directory.path().join(".cache"))
+            .env("RY_GC_LOG", &log)
+            .output()
+            .expect("run ry");
+        assert!(
+            output.status.success(),
+            "the workload failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "40 125750 \n");
+        // Each line is `kind nanoseconds young_bytes young_large_bytes old_bytes pid`; the
+        // elapsed time and the process id differ between runs by nature.
+        fs::read_to_string(&log)
+            .expect("read the collection log")
+            .lines()
+            .map(|line| {
+                let fields: Vec<&str> = line.split(' ').collect();
+                assert_eq!(fields.len(), 6, "a collection log line has six fields: {line}");
+                [fields[0], fields[2], fields[3], fields[4]].join(" ")
+            })
+            .collect::<Vec<String>>()
+    };
+    let first = collections("first");
+    let second = collections("second");
+    for kind in ["minor", "intermediate", "major"] {
+        assert!(
+            first.iter().any(|line| line.starts_with(kind)),
+            "the workload made no {kind} collection:\n{}",
+            first.join("\n")
+        );
+    }
+    assert_eq!(first, second, "two identical runs made different collections");
+}
+
 /// Runs the last of `files` with `--profile-summary` in a directory holding all of them, and
 /// gives the summary and what the script printed; `None` when ry's runtime is missing.
 fn profile_summary(files: &[(&str, &str)]) -> Option<(String, String)> {
