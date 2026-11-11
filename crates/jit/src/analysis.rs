@@ -78,11 +78,6 @@ pub enum Ty {
     IntVec,
     DblVec,
     LglVec,
-    /// A boxed, attribute-free, non-ALTREP character vector of length one. Strings stay boxed:
-    /// compiled code compares and measures the `CHARSXP` the vector holds.
-    Str,
-    /// A boxed, attribute-free, non-ALTREP character vector of any length.
-    StrVec,
     /// A boxed, attribute-free list.
     List,
     /// A boxed `Array<integer>`, `Array<double>` or `Array<logical>` of any length: a vector with
@@ -143,7 +138,6 @@ impl Ty {
             Ty::IntVec | Ty::IntArr | Ty::Int => Ty::Int,
             Ty::DblVec | Ty::DblArr | Ty::Dbl => Ty::Dbl,
             Ty::LglVec | Ty::LglArr | Ty::Lgl => Ty::Lgl,
-            Ty::StrVec | Ty::Str => Ty::Str,
             _ => Ty::Boxed,
         }
     }
@@ -164,7 +158,6 @@ impl Ty {
             Ty::Int => Ty::IntVec,
             Ty::Dbl => Ty::DblVec,
             Ty::Lgl => Ty::LglVec,
-            Ty::Str => Ty::StrVec,
             other => other,
         }
     }
@@ -177,12 +170,7 @@ impl Ty {
             // Joined, an integer and a double stay unboxed: the value widens to a double and a
             // flag remembers which it was, so a loop whose branches disagree stays compiled.
             (Ty::Int | Ty::Dbl | Ty::Num, Ty::Int | Ty::Dbl | Ty::Num) => Ty::Num,
-            (a, b)
-                if a.vector() == b.vector()
-                    && (a.vector().is_vector() || a.vector() == Ty::StrVec) =>
-            {
-                a.vector()
-            }
+            (a, b) if a.vector() == b.vector() && a.vector().is_vector() => a.vector(),
             _ => Ty::Boxed,
         }
     }
@@ -209,11 +197,9 @@ pub fn from_feedback(bits: u16) -> Ty {
         feedback::INTEGER_SCALAR => Ty::Int,
         feedback::DOUBLE_SCALAR => Ty::Dbl,
         feedback::LOGICAL_SCALAR => Ty::Lgl,
-        feedback::STRING_SCALAR => Ty::Str,
         _ if within(feedback::INTEGER_SCALAR | feedback::INTEGER_VECTOR) => Ty::IntVec,
         _ if within(feedback::DOUBLE_SCALAR | feedback::DOUBLE_VECTOR) => Ty::DblVec,
         _ if within(feedback::LOGICAL_SCALAR | feedback::LOGICAL_VECTOR) => Ty::LglVec,
-        _ if within(feedback::STRING_SCALAR | feedback::STRING_VECTOR) => Ty::StrVec,
         feedback::LIST => Ty::List,
         feedback::INTEGER_ARRAY => Ty::IntArr,
         feedback::DOUBLE_ARRAY => Ty::DblArr,
@@ -609,14 +595,6 @@ pub enum Intrinsic {
     },
     /// `Dict.get()`.
     DictGet,
-    /// `==` (or `!=` when `negate`) on two strings: a pointer compare of their `CHARSXP`s, with
-    /// a call into the runtime only when the two are marked with different encodings.
-    StringEqual {
-        negate: bool,
-    },
-    /// `nchar(x)` on a string, with the call's arguments packed as
-    /// [`interp::strings::nchar_mode`] does.
-    Nchar(u32),
     /// `x$name` on a record of this layout, whose field is slot `index`, as the site's shape
     /// cache recorded it.
     Field {
@@ -2355,29 +2333,14 @@ impl<'a> Builder<'a> {
             ),
             // An active binding or a frame on the search path may run arbitrary code.
             Op::SuperAssign => self.opaque_step(state, None, &[], Effect::Opaque),
-            // `nchar` does not dispatch, and coerces an object's data without running R code.
-            Op::Internal if operand(5) != 0 && state.registers[operand(3)] == Ty::Str => {
-                state.registers[operand(0)] = Ty::Int;
-                state.visible = Some(true);
-                Action::Intrinsic {
-                    intrinsic: Intrinsic::Nchar(operand(5) as u32 - 1),
-                    dst: operand(0),
-                    args: self.slice([operand(3)]),
-                    result: Ty::Int,
-                }
-            }
-            // Other inlined internals may run R code, as `match` does through `mtfrm` on an object.
+            // An inlined internal may run R code, as `match` does through `mtfrm` on an object.
             Op::Internal => {
-                let effect = match operand(5) {
-                    0 => Effect::Opaque,
-                    _ => Effect::PureUnlessObserved,
-                };
                 let objects = self.slice(operand(3)..operand(3) + operand(4));
                 self.opaque_step(
                     state,
                     Some((operand(0), self.feedback_at(inst.pc))),
                     objects,
-                    effect,
+                    Effect::Opaque,
                 )
             }
             Op::Replace => {
@@ -3671,17 +3634,6 @@ impl<'a> Builder<'a> {
                 result,
             });
         }
-        if (a, b) == (Ty::Str, Ty::Str) && matches!(arith, Arith::Equal | Arith::NotEqual) {
-            state.registers[dst] = Ty::Lgl;
-            return Ok(Action::Intrinsic {
-                intrinsic: Intrinsic::StringEqual {
-                    negate: arith == Arith::NotEqual,
-                },
-                dst,
-                args: self.slice([left, right]),
-                result: Ty::Lgl,
-            });
-        }
         let scalar = |ty: Ty| ty.is_numeric_scalar() || ty == Ty::Num;
         if scalar(a) && scalar(b) && !remainder_operator(arith) {
             let integers = !matches!(a, Ty::Dbl | Ty::Num) && !matches!(b, Ty::Dbl | Ty::Num);
@@ -3942,8 +3894,6 @@ pub(crate) unsafe fn constant_type(value: Sexp) -> Ty {
         feedback::INTEGER_VECTOR => Ty::IntVec,
         feedback::DOUBLE_VECTOR => Ty::DblVec,
         feedback::LOGICAL_VECTOR => Ty::LglVec,
-        feedback::STRING_SCALAR => Ty::Str,
-        feedback::STRING_VECTOR => Ty::StrVec,
         feedback::LIST => Ty::List,
         feedback::INTEGER_ARRAY => Ty::IntArr,
         feedback::DOUBLE_ARRAY => Ty::DblArr,
@@ -4006,12 +3956,8 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
             (Intrinsic::Element, array.element())
         }
         ("[[", [Ty::List, Ty::Int | Ty::Dbl]) => (Intrinsic::Element, Ty::Boxed),
-        ("[" | "[[", [Ty::StrVec | Ty::Str, Ty::Int | Ty::Dbl]) => (Intrinsic::Element, Ty::Str),
         ("length", [ty])
-            if ty.is_vector()
-                || ty.is_array()
-                || ty.is_numeric_scalar()
-                || matches!(ty, Ty::List | Ty::Str | Ty::StrVec) =>
+            if ty.is_vector() || ty.is_array() || ty.is_numeric_scalar() || *ty == Ty::List =>
         {
             (Intrinsic::Length, Ty::Int)
         }

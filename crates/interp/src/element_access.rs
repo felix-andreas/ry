@@ -74,7 +74,11 @@ pub(crate) unsafe fn element_value<const STRING: bool>(
     let kind = subject.kind();
     let data = subject.data();
     if STRING {
-        return string_scalar(heap, *data.cast::<Sexp>().add(position));
+        let element = *data.cast::<Sexp>().add(position);
+        let scalar = heap.try_alloc_scalar(kind, [element.as_ptr() as u64, 0])?;
+        // The store `Heap::set_element` would count into a fresh vector.
+        element.increment_refcount();
+        return Some(scalar);
     }
     match kind {
         SexpType::List => Some(*data.cast::<Sexp>().add(position)),
@@ -87,17 +91,6 @@ pub(crate) unsafe fn element_value<const STRING: bool>(
             heap.try_alloc_scalar(kind, [bits, 0])
         }
     }
-}
-
-/// A fresh character scalar holding the `CHARSXP` `charsxp`, from the young generation, or
-/// `None` when that needs a collection. Tier 0 and the JIT both read string elements through it.
-#[inline(always)]
-pub unsafe fn string_scalar(heap: &mut Heap, charsxp: Sexp) -> Option<Sexp> {
-    let value = heap.try_alloc_scalar(SexpType::String, [charsxp.as_ptr() as u64, 0])?;
-    // The scalar is young, so storing into it needs no barrier, only the count `set_element`
-    // would add.
-    charsxp.increment_refcount();
-    Some(value)
 }
 
 /// `x[i]` for an attribute-free atomic vector `x` and a plain numeric scalar `i` within bounds:

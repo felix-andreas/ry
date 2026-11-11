@@ -2040,19 +2040,20 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
             for index in 0..count {
                 let a = left.element(index % left_length);
                 let b = right.element(index % right_length);
-                values::ints_mut(result)[index] =
-                    if matches!(comparison, Comparison::Equal | Comparison::NotEqual) {
-                        match values::string_equal(a, b, values::na_string()) {
-                            NA_LOGICAL => NA_LOGICAL,
-                            equal => (equal == (comparison == Comparison::Equal) as i32) as i32,
-                        }
-                    } else if a == values::na_string() || b == values::na_string() {
-                        NA_LOGICAL
+                values::ints_mut(result)[index] = if a == values::na_string()
+                    || b == values::na_string()
+                {
+                    NA_LOGICAL
+                } else if matches!(comparison, Comparison::Equal | Comparison::NotEqual) {
+                    comparison.holds(if a == b || values::same_text(a, b) {
+                        std::cmp::Ordering::Equal
                     } else {
-                        let ordering =
-                            crate::sort::collate(&values::char_str(a), &values::char_str(b));
-                        comparison.holds(ordering) as i32
-                    };
+                        std::cmp::Ordering::Less
+                    }) as i32
+                } else {
+                    let ordering = crate::sort::collate(&values::char_str(a), &values::char_str(b));
+                    comparison.holds(ordering) as i32
+                };
             }
         }
         SexpType::Complex => {

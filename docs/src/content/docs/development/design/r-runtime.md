@@ -735,20 +735,17 @@ checked and refilled:
 - **A new register window is cleared.** Each call's window is filled with `NULL` when it grows, so
   a register the frame has not written yet never holds what an earlier call left there, and a
   collection inside the window frees exactly what GNU R would.
-- **Builtin checks are derived at registration.** Arity, names, replacement form and which
-  arguments a builtin accepts as native values are computed once per builtin (`Checks` in
-  `crates/interp/src/builtins.rs`), so a call does not re-derive them from the builtin's name.
 - **Base `.Internal` wrappers are inlined.** A call of one of GNU R's "safe base internals"
   (`nchar`, `typeof`, `inherits`, `identical`, `match`, `rep_len`, `vector`, `which.max` and the
   rest of the list in GNU R's `cmp.R`) compiles to a guard that the name still means base's
   closure, the internal's arguments evaluated in the caller, and the internal called directly with
   the original call, so an error reads `Error in nchar(x, ...)` as in GNU R. It applies only when
   the closure's body is exactly `.Internal(f(formals...))` and every default is a constant. A
-  failed guard makes the ordinary call.
-- **Strings compare by pointer.** The string table holds one `CHARSXP` per byte string and
-  encoding mark, with ASCII text always unmarked, so `==` and `!=` on two strings with the same
-  marks compare pointers and read text only when the marks differ. `nchar` of type bytes, or of
-  type chars on ASCII text, reads the stored length.
+  failed guard makes the ordinary call, so a replaced base binding is always reached, where GNU
+  R's compiled code keeps the original.
+- **Builtin checks are derived at registration.** Arity, names, replacement form and which
+  arguments a builtin accepts as native values are computed once per builtin (`Checks` in
+  `crates/interp/src/builtins.rs`), so a call does not re-derive them from the builtin's name.
 
 **Tier 1 is an optimizing compiler on Cranelift.** Hot functions and hot loops (through on-stack
 replacement) compile from bytecode to an SSA IR with R-specific operations, in the style of Ř's PIR.
@@ -836,10 +833,7 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   (vector fusion, bounds-check elimination) are not built.
 - **Unboxing.** Integers, doubles and logicals of length one without attributes live in machine
   registers, with R's `NA` and overflow rules. Element reads and writes on integer, double and
-  logical vectors are inline, and a write copies only when the vector is shared. A string vector's
-  element read boxes the element as a fresh length-one string, and `==`, `!=` and `nchar` on it
-  are inline with the same pointer and stored-length rules as tier 0. Strings stay boxed in
-  registers, because the string table is weak and a bare `CHARSXP` in a register is not a root. So are `m[i, j]`
+  logical vectors are inline, and a write copies only when the vector is shared. So are `m[i, j]`
   and `m[[i, j]]` reads with scalar subscripts on an ordinary matrix; a subscript out of range,
   `NA` or below 1 hands the read to tier 0, which raises the error.
 - **Loops over sequences.** A `for` loop over a compact sequence such as `1:n` or `seq_len(n)`

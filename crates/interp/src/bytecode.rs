@@ -54,7 +54,7 @@ use {
         eval::{self, Reify, SwitchSelector, as_condition},
         interp,
         kernels::{self, Element, MAX_NODES, Node, Reduction},
-        moves, strings,
+        moves,
         unwind::{Jump, R, Unwind, error, error_in},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
@@ -938,12 +938,10 @@ pub enum Op {
     /// `symbol src`: `symbol <<- src`, which assigns in the first enclosing frame that binds
     /// `symbol`, or in the global environment.
     SuperAssign,
-    /// `dst call internal first count shape`: a call of a base closure whose body is only
+    /// `dst call internal first count`: a call of a base closure whose body is only
     /// `.Internal(f(...))`, inlined as GNU R's compiler inlines its "safe base internals": the
     /// internal's arguments, evaluated in the caller, are in registers `first..first + count`,
-    /// and the builtin `internal` runs on them with `call` as the call its errors name. A
-    /// nonzero `shape` marks `nchar` with literal options, packed as [`strings::nchar_mode`]
-    /// plus one, whose count of a plain string scalar needs no call.
+    /// and the builtin `internal` runs on them with `call` as the call its errors name.
     Internal,
 }
 
@@ -1067,9 +1065,6 @@ pub mod feedback {
     pub const BRANCH_TAKEN: u16 = 1 << 11;
     /// A `JumpUnless` fell through: its condition was `TRUE`.
     pub const BRANCH_NOT_TAKEN: u16 = 1 << 12;
-    /// A plain character vector of length one, or of any other length.
-    pub const STRING_SCALAR: u16 = 1 << 13;
-    pub const STRING_VECTOR: u16 = 1 << 14;
 }
 
 /// The feedback tier 0 recorded at `pc` of the byte code `code`: the [`feedback`] kinds of the
@@ -1105,8 +1100,6 @@ pub unsafe fn value_kind(value: Sexp) -> u16 {
         (SexpType::Integer, false) => feedback::INTEGER_VECTOR,
         (SexpType::Real, false) => feedback::DOUBLE_VECTOR,
         (SexpType::Logical, false) => feedback::LOGICAL_VECTOR,
-        (SexpType::String, true) => feedback::STRING_SCALAR,
-        (SexpType::String, false) => feedback::STRING_VECTOR,
         (SexpType::List, _) => feedback::LIST,
         _ => feedback::OTHER,
     }
@@ -3506,16 +3499,10 @@ impl Compiler {
             };
             expressions.push(expression);
         }
-        let shape = if symbol_name(inner.car()) == "nchar" {
-            nchar_shape(&expressions)
-        } else {
-            0
-        };
         Ok(Some(InlinedInternal {
             function,
             internal,
             expressions,
-            shape,
         }))
     }
 
@@ -3552,7 +3539,6 @@ impl Compiler {
                 internal,
                 first,
                 inline.expressions.len() as u32,
-                inline.shape,
             ],
         );
         self.release_to(mark);
@@ -4542,7 +4528,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::BranchIfObject => 2,
         Op::DispatchSubject => 4,
         Op::Fused | Op::Unfused => 3,
-        Op::Internal => 6,
+        Op::Internal => 5,
     }
 }
 
@@ -4575,12 +4561,6 @@ const RESPECIALIZE_SHIFT: u32 = 24;
 const RESPECIALIZE_MASK: u32 = 0xFF << RESPECIALIZE_SHIFT;
 const RESPECIALIZE_LIMIT: u32 = 4;
 
-/// Tier 0's specialized forms of [`Op::Arithmetic`], by opcode minus `OPS.len()`: the operator
-/// and the operands the form takes (see [`Operands`]). Tier 0 writes a form's opcode over a site's once the site computed
-/// a result on two plain scalars of those kinds (quickening, as in CPython's PEP 659). A form
-/// has the operands of the generic instruction, which [`op_of`] reports in its place, so the
-/// optimizing tiers, the verifier and code images never see it. Its handler checks the operand
-/// kinds with a masked header load each, and when they differ writes the generic opcode back.
 /// The base closures whose `.Internal` GNU R's compiler inlines, because the internal evaluates
 /// its arguments and neither looks at the caller's frame nor at how it was called.
 const SAFE_BASE_INTERNALS: [&str; 20] = [
@@ -4610,70 +4590,36 @@ struct InlinedInternal {
     function: Sexp,
     internal: Sexp,
     expressions: SmallVec<[Sexp; 6]>,
-    shape: u32,
 }
 
-/// The [`Op::Internal`] shape of `.Internal(nchar(x, type, allowNA, keepNA))`: the packed
-/// [`strings::nchar_mode`] plus one when every option is a literal `nchar` accepts, else 0.
-unsafe fn nchar_shape(expressions: &[Sexp]) -> u32 {
-    let [_, count_type, allow_na, keep_na] = expressions else {
-        return 0;
-    };
-    let nil = nil();
-    if !count_type.is_plain_scalar(SexpType::String, nil)
-        || !allow_na.is_plain_scalar(SexpType::Logical, nil)
-        || !keep_na.is_plain_scalar(SexpType::Logical, nil)
-    {
-        return 0;
-    }
-    let name = *count_type.data().cast::<Sexp>();
-    if name == values::na_string() {
-        return 0;
-    }
-    let Some(count_type) = strings::CountType::from_name(&values::char_str(name)) else {
-        return 0;
-    };
-    let allow_na = *allow_na.data().cast::<i32>();
-    if allow_na == NA_LOGICAL {
-        return 0;
-    }
-    strings::nchar_mode(count_type, allow_na != 0, *keep_na.data().cast::<i32>()) + 1
-}
-
-const QUICK_ARITHMETIC: [(Arith, Operands); 21] = [
-    (Arith::Add, Operands::Integers),
-    (Arith::Subtract, Operands::Integers),
-    (Arith::Multiply, Operands::Integers),
-    (Arith::Equal, Operands::Integers),
-    (Arith::NotEqual, Operands::Integers),
-    (Arith::Less, Operands::Integers),
-    (Arith::Greater, Operands::Integers),
-    (Arith::LessEqual, Operands::Integers),
-    (Arith::GreaterEqual, Operands::Integers),
-    (Arith::Add, Operands::Doubles),
-    (Arith::Subtract, Operands::Doubles),
-    (Arith::Multiply, Operands::Doubles),
-    (Arith::Divide, Operands::Doubles),
-    (Arith::Equal, Operands::Doubles),
-    (Arith::NotEqual, Operands::Doubles),
-    (Arith::Less, Operands::Doubles),
-    (Arith::Greater, Operands::Doubles),
-    (Arith::LessEqual, Operands::Doubles),
-    (Arith::GreaterEqual, Operands::Doubles),
-    (Arith::Equal, Operands::Strings),
-    (Arith::NotEqual, Operands::Strings),
+/// Tier 0's specialized forms of [`Op::Arithmetic`], by opcode minus `OPS.len()`: the operator
+/// and whether the form takes doubles (one operand a double, the other a double or an integer)
+/// rather than two integers. Tier 0 writes a form's opcode over a site's once the site computed
+/// a result on two plain scalars of those kinds (quickening, as in CPython's PEP 659). A form
+/// has the operands of the generic instruction, which [`op_of`] reports in its place, so the
+/// optimizing tiers, the verifier and code images never see it. Its handler checks the operand
+/// kinds with a masked header load each, and when they differ writes the generic opcode back.
+const QUICK_ARITHMETIC: [(Arith, bool); 19] = [
+    (Arith::Add, false),
+    (Arith::Subtract, false),
+    (Arith::Multiply, false),
+    (Arith::Equal, false),
+    (Arith::NotEqual, false),
+    (Arith::Less, false),
+    (Arith::Greater, false),
+    (Arith::LessEqual, false),
+    (Arith::GreaterEqual, false),
+    (Arith::Add, true),
+    (Arith::Subtract, true),
+    (Arith::Multiply, true),
+    (Arith::Divide, true),
+    (Arith::Equal, true),
+    (Arith::NotEqual, true),
+    (Arith::Less, true),
+    (Arith::Greater, true),
+    (Arith::LessEqual, true),
+    (Arith::GreaterEqual, true),
 ];
-
-/// The plain scalars a specialized form of [`Op::Arithmetic`] takes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Operands {
-    /// Two integers.
-    Integers,
-    /// Doubles, or a double and an integer.
-    Doubles,
-    /// Two strings, for `==` and `!=`.
-    Strings,
-}
 
 /// The size of tier 0's handler tables: every generic and specialized opcode.
 const HANDLER_COUNT: usize = OPS.len() + QUICK_ARITHMETIC.len();
@@ -4780,7 +4726,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::BranchUnlessPrimitive => &[Register, Constant, Target],
         Op::DispatchSubject => &[Register, Register, Call, Register],
         Op::Fused | Op::Unfused => &[Register, Fusion, Target],
-        Op::Internal => &[Register, Call, Constant, Base, Count, Immediate],
+        Op::Internal => &[Register, Call, Constant, Base, Count],
         Op::MatchShape | Op::MatchTag | Op::Slot | Op::Construct => return None,
     })
 }
@@ -6616,27 +6562,27 @@ const fn specialized_table(mut table: [Handler; HANDLER_COUNT]) -> [Handler; HAN
         };
     }
     forms!(
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
     );
     table
 }
 
-/// The opcode of the specialized form of `operator` on `operands`, if there is one.
-fn quick_form(operator: Arith, operands: Operands) -> Option<u32> {
+/// The opcode of the specialized form of `operator` on two integers or on doubles, if there is
+/// one.
+fn quick_form(operator: Arith, real: bool) -> Option<u32> {
     QUICK_ARITHMETIC
         .iter()
-        .position(|&form| form == (operator, operands))
+        .position(|&form| form == (operator, real))
         .map(|index| (OPS.len() + index) as u32)
 }
 
-/// Whether `left` and `right` are plain scalars of the kinds a form takes.
+/// Whether `left` and `right` are plain scalars of the kinds a form takes: two integers, or
+/// for a double form, doubles or integers with at least one double.
 #[inline(always)]
-unsafe fn form_fits(left: Sexp, right: Sexp, operands: Operands, nil: Sexp) -> bool {
-    let both = |kind| left.is_plain_scalar(kind, nil) && right.is_plain_scalar(kind, nil);
-    match operands {
-        Operands::Integers => return both(SexpType::Integer),
-        Operands::Strings => return both(SexpType::String),
-        Operands::Doubles => {}
+unsafe fn form_fits(left: Sexp, right: Sexp, real: bool, nil: Sexp) -> bool {
+    if !real {
+        return left.is_plain_scalar(SexpType::Integer, nil)
+            && right.is_plain_scalar(SexpType::Integer, nil);
     }
     let left_real = left.is_plain_scalar(SexpType::Real, nil);
     let right_real = right.is_plain_scalar(SexpType::Real, nil);
@@ -6650,14 +6596,14 @@ unsafe fn form_fits(left: Sexp, right: Sexp, operands: Operands, nil: Sexp) -> b
 /// that leaves to the builtin: an integer result that is NA or overflows, and an allocation the
 /// young generation has no room for.
 unsafe fn quick_arithmetic<const FORM: usize>(state: &mut Activation<'_, '_>, at: usize) {
-    let (operator, operands) = QUICK_ARITHMETIC[FORM];
+    let (operator, real) = QUICK_ARITHMETIC[FORM];
     let code = state.code;
     let registers = state.registers;
     let left = *registers.add(*code.add(at + 3) as usize);
     let right = *registers.add(*code.add(at + 4) as usize);
     let heap = &mut *state.heap;
     let known = *heap.known();
-    if !form_fits(left, right, operands, known.nil) {
+    if !form_fits(left, right, real, known.nil) {
         become arithmetic_miss(state, at);
     }
     let logical = |result: Option<bool>| match result {
@@ -6665,18 +6611,7 @@ unsafe fn quick_arithmetic<const FORM: usize>(state: &mut Activation<'_, '_>, at
         Some(false) => Some(known.false_value),
         None => Some(known.logical_na_value),
     };
-    let (value, kind) = if operands == Operands::Strings {
-        let equal = values::string_equal(
-            *left.data().cast::<Sexp>(),
-            *right.data().cast::<Sexp>(),
-            known.na_string,
-        );
-        let holds = match equal {
-            NA_LOGICAL => None,
-            equal => Some((equal == 1) == (operator == Arith::Equal)),
-        };
-        (logical(holds), feedback::LOGICAL_SCALAR)
-    } else if operands == Operands::Doubles {
+    let (value, kind) = if real {
         let as_real = |value: Sexp| {
             if value.kind() == SexpType::Integer {
                 let integer = *value.data().cast::<i32>();
@@ -6784,13 +6719,9 @@ unsafe fn quicken_arithmetic(
     {
         return;
     }
-    let operands = match (left.kind(), right.kind()) {
-        (SexpType::String, _) => Operands::Strings,
-        (SexpType::Real, _) | (_, SexpType::Real) => Operands::Doubles,
-        _ => Operands::Integers,
-    };
-    if let Some(form) = quick_form(operator, operands)
-        && form_fits(left, right, operands, nil())
+    let real = left.kind() == SexpType::Real || right.kind() == SexpType::Real;
+    if let Some(form) = quick_form(operator, real)
+        && form_fits(left, right, real, nil())
     {
         *word = ((current & !OP_MASK) | form) as i32;
     }
@@ -9082,33 +9013,22 @@ unsafe fn op_super_assign(state: &mut Activation<'_, '_>, instruction: Instructi
     Ok(Flow::Next)
 }
 
-/// A base closure's `.Internal` inlined ([`Op::Internal`]): `nchar` of a plain string scalar
-/// is counted in place, and anything else runs the internal on the evaluated arguments, as GNU
-/// R's compiled code does.
+/// A base closure's `.Internal` inlined ([`Op::Internal`]): the internal runs on the evaluated
+/// arguments, as in GNU R's compiled code.
 #[inline(always)]
 unsafe fn op_internal(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let first = instruction.operand(3);
-    let shape = instruction.operand(5) as u32;
-    let counted = match shape {
-        0 => None,
-        _ => strings::nchar_scalar(&mut *state.heap, instruction.register(first), shape - 1),
-    };
-    let value = match counted {
-        Some(count) => count,
-        None => {
-            let call = state.constant(instruction, 1);
-            let function = state.constant(instruction, 2);
-            let definition = eval::builtin_def(function)?;
-            let mut args = eval::Args::new();
-            for index in 0..instruction.operand(4) {
-                args.push(Arg {
-                    tag: nil(),
-                    value: instruction.register(first + index),
-                });
-            }
-            eval::call_inlined_internal(definition, call, function, &args, *state.header)?
-        }
-    };
+    let call = state.constant(instruction, 1);
+    let function = state.constant(instruction, 2);
+    let definition = eval::builtin_def(function)?;
+    let mut args = eval::Args::new();
+    for index in 0..instruction.operand(4) {
+        args.push(Arg {
+            tag: nil(),
+            value: instruction.register(first + index),
+        });
+    }
+    let value = eval::call_inlined_internal(definition, call, function, &args, *state.header)?;
     state.record(instruction.at, value);
     instruction.output(0, value);
     (*state.interp).visible = true;
@@ -10609,20 +10529,9 @@ unsafe fn record_feedback(constants: Sexp, pc: usize, value: Sexp) {
     values::ints_mut(feedback)[pc] |= i32::from(value_kind(value));
 }
 
-/// Arithmetic and comparison on two attribute-free scalar doubles or integers, and `==` and
-/// `!=` on two such strings. `None` sends the operation to the builtin, which handles
-/// everything else (and the warnings).
+/// Arithmetic and comparison on two attribute-free scalar doubles or integers. `None` sends the
+/// operation to the builtin, which handles everything else (and the warnings).
 unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<Sexp>> {
-    if matches!(operator, Arith::Equal | Arith::NotEqual)
-        && left.is_plain_scalar(SexpType::String, nil())
-        && right.is_plain_scalar(SexpType::String, nil())
-    {
-        let equal = values::string_equal(left.element(0), right.element(0), values::na_string());
-        return Ok(Some(values::scalar_logical(match equal {
-            NA_LOGICAL => NA_LOGICAL,
-            equal => ((equal == 1) == (operator == Arith::Equal)) as i32,
-        })?));
-    }
     let scalar = |value: Sexp| {
         matches!(value.kind(), SexpType::Real | SexpType::Integer)
             && value.length() == 1

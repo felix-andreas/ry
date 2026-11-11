@@ -33,7 +33,6 @@ use {
     interp::{
         annotations,
         bytecode::{self, Arith, Op, baseline_layout},
-        strings::{self, CountType},
         values,
     },
     rustc_hash::FxHashMap,
@@ -52,7 +51,6 @@ pub type Entry = unsafe extern "C" fn(*mut Activation) -> *mut heap::object::Hea
 /// Header offsets, as `heap::object` lays objects out.
 pub(crate) const KIND: i32 = 0;
 pub(crate) const FLAGS: i32 = 2;
-const GP: i32 = 4;
 const REFCOUNT: i32 = 6;
 const ATTRIB: i32 = 8;
 pub(crate) const LENGTH: i32 = 16;
@@ -2081,24 +2079,6 @@ impl<'p> Translator<'p> {
                         let value = self.builder.ins().load(F64, flags(), address, DATA);
                         self.builder.def_var(self.doubles[dst], value);
                     }
-                    Ty::Str => {
-                        let charsxp = self.builder.ins().load(I64, flags(), address, DATA);
-                        let value = self
-                            .call(
-                                runtime::jit_string_scalar as *const () as usize,
-                                &[I64, I64],
-                                Some(I64),
-                                &[self.activation, charsxp],
-                            )
-                            .ok_or(Refusal("a helper without a result"))?;
-                        // Only an exhausted heap gives nil, and tier 0 then raises the error.
-                        let made = self
-                            .builder
-                            .ins()
-                            .icmp_imm_s(IntCC::NotEqual, value, self.nil);
-                        self.hand_off_unless(position, before, made);
-                        self.store_register(dst, value);
-                    }
                     _ => {
                         let value = self.builder.ins().load(I64, flags(), address, DATA);
                         self.store_register(dst, value);
@@ -2109,115 +2089,6 @@ impl<'p> Translator<'p> {
                 self.builder.set_cold_block(slow);
                 self.hand_off(position, before);
                 self.builder.switch_to_block(join);
-            }
-            Intrinsic::StringEqual { negate } => {
-                let left = self.load_register(args[0]);
-                let right = self.load_register(args[1]);
-                let a = self.builder.ins().load(I64, flags(), left, DATA);
-                let b = self.builder.ins().load(I64, flags(), right, DATA);
-                let na_string = values::na_string().as_ptr() as i64;
-                let same = self.builder.ins().icmp(IntCC::Equal, a, b);
-                let a_na = self.builder.ins().icmp_imm_s(IntCC::Equal, a, na_string);
-                let b_na = self.builder.ins().icmp_imm_s(IntCC::Equal, b, na_string);
-                let missing = self.builder.ins().bor(a_na, b_na);
-                // Two interned strings with the same marks are equal only as the same object
-                // (`values::string_decided_unequal`): only other pairs need the text compared.
-                let a_bits = self.builder.ins().uload16(I32, flags(), a, GP);
-                let b_bits = self.builder.ins().uload16(I32, flags(), b, GP);
-                let both = self.builder.ins().band(a_bits, b_bits);
-                let cached = self.builder.ins().band_imm_u(both, gp::CACHED as i64);
-                let differ = self.builder.ins().bxor(a_bits, b_bits);
-                let marks = self
-                    .builder
-                    .ins()
-                    .band_imm_u(differ, values::STRING_MARKS as i64);
-                let unequal = self.builder.ins().bor(cached, marks);
-                let unequal =
-                    self.builder
-                        .ins()
-                        .icmp_imm_s(IntCC::Equal, unequal, gp::CACHED as i64);
-                let decided = self.builder.ins().bor(same, missing);
-                let decided = self.builder.ins().bor(decided, unequal);
-                let equal = self.builder.ins().uextend(I32, same);
-                let known = self.builder.ins().select(missing, na, equal);
-                let slow = self.builder.create_block();
-                let join = self.builder.create_block();
-                self.builder.append_block_param(join, I32);
-                self.builder.ins().brif(decided, join, &[known], slow, &[]);
-                self.builder.switch_to_block(slow);
-                self.builder.set_cold_block(slow);
-                let compared = self
-                    .call(
-                        runtime::jit_string_equal as *const () as usize,
-                        &[I64, I64],
-                        Some(I32),
-                        &[a, b],
-                    )
-                    .ok_or(Refusal("a helper without a result"))?;
-                self.builder.ins().jump(join, &[compared]);
-                self.builder.switch_to_block(join);
-                let mut result = self.builder.block_params(join)[0];
-                if negate {
-                    let flipped = self.builder.ins().bxor_imm_u(result, 1);
-                    let missing =
-                        self.builder
-                            .ins()
-                            .icmp_imm_s(IntCC::Equal, result, NA_INTEGER as i64);
-                    result = self.builder.ins().select(missing, result, flipped);
-                }
-                self.builder.def_var(self.integers[dst], result);
-            }
-            Intrinsic::Nchar(mode) => {
-                let value = self.load_register(args[0]);
-                let charsxp = self.builder.ins().load(I64, flags(), value, DATA);
-                let (count_type, na_count) = strings::unpack_nchar_mode(mode);
-                let missing = self.builder.ins().icmp_imm_s(
-                    IntCC::Equal,
-                    charsxp,
-                    values::na_string().as_ptr() as i64,
-                );
-                // Bytes are the stored length, and so are the characters of ASCII text; any
-                // other count reads the text.
-                let stored = match count_type {
-                    CountType::Bytes => self.builder.ins().iconst(I8, 1),
-                    CountType::Chars => {
-                        let bits = self.builder.ins().uload16(I32, flags(), charsxp, GP);
-                        let ascii = self.builder.ins().band_imm_u(bits, gp::ASCII as i64);
-                        self.builder.ins().icmp_imm_s(IntCC::NotEqual, ascii, 0)
-                    }
-                    CountType::Width => self.builder.ins().iconst(I8, 0),
-                };
-                let decided = self.builder.ins().bor(missing, stored);
-                let length = self.builder.ins().load(I64, flags(), charsxp, LENGTH);
-                let length = self.builder.ins().ireduce(I32, length);
-                let na_count = self.builder.ins().iconst(I32, na_count as i64);
-                let known = self.builder.ins().select(missing, na_count, length);
-                let slow = self.builder.create_block();
-                let join = self.builder.create_block();
-                self.builder.append_block_param(join, I32);
-                self.builder.ins().brif(decided, join, &[known], slow, &[]);
-                self.builder.switch_to_block(slow);
-                self.builder.set_cold_block(slow);
-                let mode = self.builder.ins().iconst(I32, mode as i64);
-                let counted = self
-                    .call(
-                        runtime::jit_nchar as *const () as usize,
-                        &[I64, I32],
-                        Some(I64),
-                        &[charsxp, mode],
-                    )
-                    .ok_or(Refusal("a helper without a result"))?;
-                // An error `nchar` reports, which tier 0 raises.
-                let counted_ok = self
-                    .builder
-                    .ins()
-                    .icmp_imm_s(IntCC::NotEqual, counted, i64::MIN);
-                self.hand_off_unless(position, before, counted_ok);
-                let counted = self.builder.ins().ireduce(I32, counted);
-                self.builder.ins().jump(join, &[counted]);
-                self.builder.switch_to_block(join);
-                let result = self.builder.block_params(join)[0];
-                self.builder.def_var(self.integers[dst], result);
             }
             Intrinsic::MatrixElement => {
                 let vector = self.load_register(args[0]);
@@ -4185,8 +4056,6 @@ impl<'p> Translator<'p> {
             Ty::DblVec => (SexpType::Real, false),
             Ty::LglVec => (SexpType::Logical, false),
             Ty::List => (SexpType::List, false),
-            Ty::Str => (SexpType::String, true),
-            Ty::StrVec => (SexpType::String, false),
             Ty::IntArr | Ty::DblArr | Ty::LglArr => {
                 // The Array bit promises no attributes, so the kind and the bits decide it.
                 let kind = match ty {

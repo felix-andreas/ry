@@ -2060,57 +2060,6 @@ fn an_escalation_skips_an_intermediate_collection_that_freed_nothing_before() {
     }
 }
 
-/// The string table holds one `CHARSXP` per byte string and encoding mark, across collections:
-/// compiled `==` on two strings reads distinct objects with the same marks as different text,
-/// so a second copy would make equal strings compare unequal. ASCII text is stored unmarked
-/// whatever encoding asked for it.
-#[test]
-fn interned_strings_are_unique_per_bytes_and_encoding() {
-    const PIECES: [&[u8]; 4] = [b"a", b"b", b"\xc3\xa9", b"\xe9"];
-    const ENCODINGS: [(Encoding, u16); 4] = [
-        (Encoding::Native, 0),
-        (Encoding::Utf8, gp::UTF8),
-        (Encoding::Latin1, gp::LATIN1),
-        (Encoding::Bytes, gp::BYTES),
-    ];
-    for_each_seed(20, |seed| {
-        let mut random = SplitMix64(seed);
-        let mut heap = Heap::new();
-        let mut seen: Vec<(Vec<u8>, u16, Sexp)> = Vec::new();
-        unsafe {
-            for step in 0..300 {
-                if step % 100 == 99 {
-                    heap.collect(Collection::Major);
-                }
-                let mut bytes = Vec::new();
-                for _ in 0..random.below(4) {
-                    bytes.extend_from_slice(PIECES[random.below(PIECES.len())]);
-                }
-                let (encoding, mark) = ENCODINGS[random.below(ENCODINGS.len())];
-                let interned = heap.mk_char(&bytes, encoding).expect("interning");
-                let marks = interned.gp() & (gp::ENCODING | gp::ASCII);
-                if bytes.is_ascii() {
-                    assert_eq!(marks, gp::ASCII, "ASCII text {bytes:?} is stored unmarked");
-                } else {
-                    assert_eq!(marks, mark);
-                }
-                assert!(interned.has_gp(gp::CACHED));
-                match seen
-                    .iter()
-                    .find(|(other, other_marks, _)| *other == bytes && *other_marks == marks)
-                {
-                    Some(&(_, _, first)) => assert_eq!(interned, first, "{bytes:?} interned twice"),
-                    None => {
-                        assert!(seen.iter().all(|&(_, _, other)| other != interned));
-                        heap.root(interned);
-                        seen.push((bytes, marks, interned));
-                    }
-                }
-            }
-        }
-    });
-}
-
 /// Under collection stress the collector poisons each object it frees and holds its memory back
 /// from reuse, so a stale reference reads poison instead of the object that would otherwise
 /// take the slot at the next allocation, and in a debug build asking its kind panics.
