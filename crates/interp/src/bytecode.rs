@@ -449,13 +449,6 @@ pub unsafe fn compiled_body(function: Sexp) -> R<Sexp> {
 /// process's caches, feedback and profile, so the image keeps only these fresh objects, which no
 /// call has touched yet, and stores any other code as its source. A start from the image then
 /// runs base R's functions compiled from their first call.
-///
-/// The code goes on pages of its own ([`heap::Heap::segregate`]), so that a page start-up touches
-/// does not also hold code a session never runs: the image is mapped from the file, and a fault
-/// maps the pages around it too. Code of closures start-up already called comes first, those it
-/// compiled before those it called once, because a start from the image calls them again; the
-/// rest follows in the order the closures were made, which keeps the functions of one source
-/// file together.
 pub unsafe fn compile_namespaces_for_image() -> R<Vec<Sexp>> {
     let heap = crate::heap();
     let registry = heap.known().namespace_registry;
@@ -468,7 +461,7 @@ pub unsafe fn compile_namespaces_for_image() -> R<Vec<Sexp>> {
             namespaces.push(cell.cdr());
         }
     }
-    let mut closures: Vec<(u8, Sexp)> = Vec::new();
+    let mut closures: Vec<Sexp> = Vec::new();
     for namespace in namespaces {
         for symbol in crate::envir::env_symbols(namespace, true, false) {
             let Some(cell) = heap.frame_cell(namespace, symbol) else {
@@ -483,22 +476,13 @@ pub unsafe fn compile_namespaces_for_image() -> R<Vec<Sexp>> {
             if function.kind() != SexpType::Closure {
                 continue;
             }
-            let body = function.cdr();
-            let started = if body.kind() == SexpType::Bytecode {
-                0
-            } else if interp().bytecode.calls.contains_key(&body) {
-                1
-            } else {
-                2
-            };
-            closures.push((started, function));
+            closures.push(function);
         }
     }
-    closures.sort_unstable_by_key(|&(started, function)| (started, function.as_ptr() as usize));
-    closures.dedup_by_key(|&mut (_, function)| function);
+    closures.sort_unstable_by_key(|function| function.as_ptr() as usize);
+    closures.dedup();
     let mut fresh = Vec::new();
-    heap.segregate(true);
-    for (_, function) in closures {
+    for function in closures {
         let body = closure_body(function);
         if !worth_compiling(body) {
             continue;
@@ -509,7 +493,6 @@ pub unsafe fn compile_namespaces_for_image() -> R<Vec<Sexp>> {
             fresh.push(code);
         }
     }
-    heap.segregate(false);
     Ok(fresh)
 }
 

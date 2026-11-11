@@ -653,11 +653,11 @@ image applies, and `crates/interp/src/session.rs` either loads the image or star
   the writer's inline caches, type feedback and profile, so the image stores its source instead.
   A session therefore runs base R's functions as bytecode from their first call without
   compiling them, and the pages of code it never calls stay in the shared page cache.
-- **Fresh code is laid out apart and read at random.** The writer allocates the fresh code on
-  heap pages of its own after start-up's objects (`Heap::segregate`) and places its large objects
-  last in the large section. The image records both ranges, and the loader advises the system to
-  read them at random (`MADV_RANDOM`), so a start that calls a few base functions reads only the
-  pages it touches instead of a read-ahead window of code it never runs.
+- **Fresh code fills start-up's free slots.** The writer allocates the fresh code after start-up,
+  so its small objects land in the holes start-up's collections left and its large objects follow
+  start-up's in the large section. Nothing is advised: a cold start reads ahead through code it
+  never runs, which costs about a megabyte of peak RSS but no wall time, while reading only the
+  touched pages makes each page its own read and slows a cold start by a fifth.
 - **The same starting state, or no load.** Fixed objects (the heap's well-known objects, the
   primitives by index, `package:ry` and libR's ALTREP classes) exist before start-up in both
   processes. The writer records a digest of its heap's allocation state at that moment

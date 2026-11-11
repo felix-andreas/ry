@@ -120,10 +120,6 @@ pub(crate) struct Space {
     parked_cursors: [Cursor; CLASS_COUNT],
     /// Whether `cursors` are the pretenuring ones ([`Space::set_pretenuring`]).
     pretenuring: bool,
-    /// Whether allocation takes only pages that hold no object ([`Space::set_segregating`]).
-    segregating: bool,
-    /// The pages allocation took while segregating, in the order it took them.
-    segregated_pages: Vec<u32>,
     /// Pages a pretenuring cursor entered since the last flush. They hold old objects and the
     /// pretenured ones, never a young object, so their allocated and unmarked slots are exactly
     /// the pretenured objects not yet flushed.
@@ -215,8 +211,6 @@ impl Space {
             cursors: [IDLE_CURSOR; CLASS_COUNT],
             parked_cursors: [IDLE_CURSOR; CLASS_COUNT],
             pretenuring: false,
-            segregating: false,
-            segregated_pages: Vec::new(),
             pretenured_pages: Vec::new(),
             available: Default::default(),
             empty_pages: Vec::new(),
@@ -286,12 +280,7 @@ impl Space {
                     return NonNull::new(next);
                 }
             }
-            let reused = if self.segregating {
-                None
-            } else {
-                self.available[class].pop()
-            };
-            let page = match reused {
+            let page = match self.available[class].pop() {
                 Some(page) => page,
                 None => {
                     let page = match self.empty_pages.pop() {
@@ -299,9 +288,6 @@ impl Space {
                         None => self.new_page()?,
                     };
                     self.page_class[page as usize] = class as u8;
-                    if self.segregating {
-                        self.segregated_pages.push(page);
-                    }
                     page
                 }
             };
@@ -771,60 +757,6 @@ impl Space {
             std::mem::swap(&mut self.cursors, &mut self.parked_cursors);
             self.pretenuring = on;
         }
-    }
-
-    /// Switches allocation between filling the free slots of pages that hold objects, as usual,
-    /// and taking only pages that hold none, so that what is allocated meanwhile lies on pages of
-    /// its own, in allocation order. The start-up image's writer uses it to keep code a session
-    /// may never run off the pages that start-up touches. Each switch ends the cursors' runs and
-    /// leaves their pages where the allocator finds free slots.
-    pub fn set_segregating(&mut self, on: bool) {
-        if self.segregating == on {
-            return;
-        }
-        release_runs(&mut self.cursors, &mut self.allocated, self.base);
-        for (class, cursor) in self.cursors.iter_mut().enumerate() {
-            // The page may have taken objects since the last sweep, which `live_slots` does not
-            // count yet, so it goes back with its class rather than through `file_page`.
-            if cursor.page != NO_PAGE {
-                self.available[class].push(cursor.page);
-            }
-            *cursor = IDLE_CURSOR;
-        }
-        self.segregating = on;
-    }
-
-    /// Advises the system that the image pages `pages` are read in no particular order
-    /// ([`virtual_memory::expect_random_reads`]), one call per run of consecutive pages.
-    pub unsafe fn expect_random_reads(&self, pages: &[u64]) {
-        let mut sorted = pages.to_vec();
-        sorted.sort_unstable();
-        let mut index = 0;
-        while index < sorted.len() {
-            let first = sorted[index];
-            let mut end = first + 1;
-            index += 1;
-            while index < sorted.len() && sorted[index] <= end {
-                end = end.max(sorted[index] + 1);
-                index += 1;
-            }
-            let first = first as usize;
-            if end as usize > self.page_class.len() {
-                return;
-            }
-            // SAFETY: the run lies among the space's committed pages.
-            unsafe {
-                virtual_memory::expect_random_reads(
-                    self.base.as_ptr().add(first * PAGE_SIZE),
-                    (end as usize - first) * PAGE_SIZE,
-                );
-            }
-        }
-    }
-
-    /// The pages allocation took while [`Space::set_segregating`] was on.
-    pub fn segregated_pages(&self) -> &[u32] {
-        &self.segregated_pages
     }
 
     pub fn has_pretenured(&self) -> bool {
@@ -1314,14 +1246,6 @@ pub(crate) mod virtual_memory {
     pub unsafe fn release(start: *mut u8, bytes: usize) -> bool {
         unsafe { libc::munmap(start.cast(), bytes) == 0 }
     }
-
-    /// Tells the system that `bytes` at `start`, mapped from a file, are read in no particular
-    /// order, so that a fault reads only its own page from disk rather than a read-ahead window.
-    pub unsafe fn expect_random_reads(start: *mut u8, bytes: usize) {
-        // The advice is a hint: refusing it changes which neighbouring pages a fault reads,
-        // never what the memory holds.
-        unsafe { libc::madvise(start.cast(), bytes, libc::MADV_RANDOM) };
-    }
 }
 
 #[cfg(windows)]
@@ -1356,6 +1280,4 @@ pub(crate) mod virtual_memory {
     pub unsafe fn release(start: *mut u8, _bytes: usize) -> bool {
         unsafe { VirtualFree(start.cast(), 0, MEM_RELEASE) != 0 }
     }
-    /// Windows reads an image's pages rather than mapping them, so there is nothing to advise.
-    pub unsafe fn expect_random_reads(_start: *mut u8, _bytes: usize) {}
 }
