@@ -8990,5 +8990,14 @@ Each one trades a narrow class of missed errors for a class of false reports see
 ## Arguments that name a local stay lazy
 
 - **Rejected: binding a caller's local variable to the callee's parameter by value.** A promise for `x` reads `x` when the argument is forced, not at the call, and code can write `x` in between: in `f <- function(a, b) { b; a }; g <- function() { x <- 1; f(x, x <- 2) }` the call returns 2, and a callee that runs `assign("x", 5, envir = parent.frame())` before using its argument sees 5, in ry and GNU R alike. Reading the value at the call needs a proof that nothing writes the local before the force: no other argument and no outstanding promise over the frame assigns it, and the frame is not turned into an environment during the call. `effects::effect_free` is that proof for the callees it accepts, which is why tier 0 binds their arguments eagerly. A promise created already forced keeps `substitute()` and `match.call()` correct but not the early read, and it still costs the promise.
-- **Measured ceiling.** Callgrind on one warm iteration (`RY_BENCH_REPEAT=2` minus `1`, release build): creating and forcing promises for variable arguments costs 2.7% of testthat_full, 0.53% of validation, 0.37% of objects and 0.62% of functional. Without a proof that the callee does not look at the promise, only the force is reachable: 1.7% of testthat_full and at most 0.4% of the others. Constants already pass as themselves. The rest of the 5 to 9% that promises cost per workload is code promises and the fixed cost of each promise, not the argument's shape.
+- **Measured ceiling.** Callgrind on one warm iteration (`RY_BENCH_REPEAT=2` minus `1`, release build, one process). The full ceiling is creating and forcing the promise for every variable argument; force only is what a promise created already forced could save, the most reachable without a proof that the callee never looks at the promise.
+
+  | Workload | Warm iteration | All promise work | Full ceiling | Force only |
+  |---|---|---|---|---|
+  | testthat_full | 624M Ir | 7.9% | 2.7% | 1.7% |
+  | validation | 1,571M Ir | 6.4% | 0.53% | 0.4% |
+  | objects | 2,747M Ir | 5.5% | 0.37% | 0.25% |
+  | functional | 3,035M Ir | 4.6% | 0.62% | 0.4% |
+
+  Constants already pass as themselves. The rest of what promises cost is code promises and the fixed cost of each promise, not the argument's shape.
 - **Revisit** only with a caller-side proof that the frame's locals cannot be written during the call, and a workload where variable arguments to callees that are not effect-free are at least 2% of the instructions.
