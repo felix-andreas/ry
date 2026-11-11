@@ -3184,6 +3184,38 @@ unsafe fn original_statements(index: usize) -> Sexp {
     body.cdr().cdr().car().cdr()
 }
 
+/// Runs the R body's `name <- function(...) ...` statement in `env` as the compiled body does:
+/// the closure shares the compiled code the outer closure holds for that `function`
+/// expression, where a closure made from the expression alone would be compiled again on every
+/// call of the outer function.
+unsafe fn define_inner_closure(index: usize, statement: Sexp, env: Sexp) -> R<()> {
+    // `name <- function(formals, body, srcref)`
+    let definition = nth(statement, 2);
+    let formals = nth(definition, 1);
+    let body = nth(definition, 2);
+    let srcref = match definition.cdr().cdr().cdr() {
+        rest if rest.kind() == SexpType::Pairlist => rest.car(),
+        _ => nil(),
+    };
+    let outer = interp().frames[index].function.cdr();
+    let mut shared = body;
+    if outer.kind() == SexpType::Bytecode {
+        let constants = outer.cdr();
+        if let Some(compiled) = (0..length(constants))
+            .map(|position| constants.element(position))
+            .find(|&constant| {
+                constant.kind() == SexpType::Bytecode
+                    && crate::bytecode::source_of(constant) == body
+            })
+        {
+            shared = compiled;
+        }
+    }
+    let closure = eval::make_closure(formals, shared, srcref, env)?;
+    crate::heap().root(closure);
+    eval::define(nth(statement, 1), closure, env)
+}
+
 /// The element at `position` of the pairlist or call `list`.
 unsafe fn nth(list: Sexp, position: usize) -> Sexp {
     let mut rest = list;
@@ -3232,8 +3264,8 @@ unsafe fn do_try_catch(call: &Call<'_>) -> R<Sexp> {
     };
     let statements = original_statements(index);
     let names = symbols();
-    eval::eval(nth(statements, 0), frame)?;
-    eval::eval(nth(statements, 1), frame)?;
+    define_inner_closure(index, nth(statements, 0), frame)?;
+    define_inner_closure(index, nth(statements, 1), frame)?;
     if is_supplied(ClosureFrame::Env(frame), names.finally)? {
         let on_exit = &mut interp().frames[index].on_exit;
         on_exit.clear();
@@ -3353,7 +3385,7 @@ unsafe fn do_with_restarts(call: &Call<'_>) -> R<Sexp> {
     }
     let statements = original_statements(index);
     for position in 0..5 {
-        eval::eval(nth(statements, position), frame)?;
+        define_inner_closure(index, nth(statements, position), frame)?;
     }
     let make_restart = eval::value_of(eval::find_var_in_frame(install("makeRestart")?, frame)?)?;
     if make_restart.kind() != SexpType::Closure {
@@ -3488,7 +3520,7 @@ unsafe fn do_with_one_restart(call: &Call<'_>) -> R<Sexp> {
     let frame = call.env()?;
     let names = symbols();
     let statements = original_statements(index);
-    eval::eval(nth(statements, 0), frame)?;
+    define_inner_closure(index, nth(statements, 0), frame)?;
     // Returns from this frame unless the restart is invoked.
     eval::eval(nth(statements, 1), frame)?;
     let restart_args = eval::value_of(eval::find_var_in_frame(names.restart_args, frame)?)?;
