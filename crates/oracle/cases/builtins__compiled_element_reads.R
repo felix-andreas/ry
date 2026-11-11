@@ -88,3 +88,37 @@ rm(paste)
 print(calls())
 helper <- 2
 print(tryCatch(calls(), error = conditionMessage))
+
+# A one-string index reads the first element with exactly that name.
+by_name <- function(x, key) {
+  out <- list()
+  for (k in 1:2) out[[k]] <- tryCatch(x[[key]], error = conditionMessage)
+  out
+}
+str(by_name(list(a = 1, b = "x", b = 3), "b"))
+str(by_name(c(a = 1, b = 2), "b"))
+str(by_name(c(a = 1L, b = 2L), "a"))
+str(by_name(c(a = TRUE), "a"))
+str(by_name(list(a = 1), "z"))
+str(by_name(c(a = 1), "z"))
+str(by_name(list(1, 2), "a"))
+str(by_name(list(ab = 1), "a"))
+str(by_name(list("é" = 1), "é"))
+str(by_name(list(a = 1), NA_character_))
+str(by_name(list(a = 1), ""))
+str(by_name(list(a = 1), c(k = "a")))
+
+name_stores <- function() {
+  v <- c(a = 1, b = 2)
+  l <- list(a = 1, b = 2)
+  for (k in 1:2) {
+    v[["b"]] <- k
+    v["a"] <- -k
+    l[["a"]] <- "s"
+    l["b"] <- list(k)
+  }
+  v[["c"]] <- 3
+  list(v, l)
+}
+print(name_stores())
+print(name_stores())

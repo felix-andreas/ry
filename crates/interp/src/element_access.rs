@@ -11,7 +11,7 @@ use {
         moves,
         subset::{int_to_real, vector_element},
         unwind::R,
-        values::{self, length, na_string, nil},
+        values::{self, length, na_string, nil, symbols},
     },
     heap::{
         Heap,
@@ -43,7 +43,14 @@ pub(crate) unsafe fn read_element(
     {
         return None;
     }
-    let position = scalar_position(index, subject.length() as usize)?;
+    let position = if index.kind() == SexpType::String {
+        if !double {
+            return None;
+        }
+        name_position(heap, subject, index)?
+    } else {
+        scalar_position(index, subject.length() as usize)?
+    };
     let data = subject.data();
     match kind {
         SexpType::List => Some(*data.cast::<Sexp>().add(position)),
@@ -160,6 +167,28 @@ pub(crate) unsafe fn direct_subset2(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp
 
 /// The zero-based position a plain scalar integer or real subscript selects among `count`
 /// elements, or `None` when it is out of bounds, `NA`, or not such a scalar.
+/// The position of the first of `subject`'s names that is the one-string `index`, when that
+/// string is ASCII. Every ASCII `CHARSXP` is one interned object whatever its encoding mark, so
+/// the names that match it exactly are the ones that are the same pointer; any other string, or
+/// a name no element has, is left to the full subscript.
+#[inline(always)]
+pub(crate) unsafe fn name_position(heap: &Heap, subject: Sexp, index: Sexp) -> Option<usize> {
+    let nil = heap.known().nil;
+    if index.is_altrep() || index.attrib() != nil || index.length() != 1 {
+        return None;
+    }
+    let name = *index.data().cast::<Sexp>();
+    if !name.has_gp(gp::ASCII) || name.length() == 0 {
+        return None;
+    }
+    let names = values::get_attr(subject, symbols().names);
+    if names.kind() != SexpType::String || names.is_altrep() {
+        return None;
+    }
+    let names = std::slice::from_raw_parts(names.data().cast::<Sexp>(), names.length() as usize);
+    names.iter().position(|candidate| *candidate == name)
+}
+
 #[inline(always)]
 pub(crate) unsafe fn scalar_position(index: Sexp, count: usize) -> Option<usize> {
     if index.is_altrep() || index.attrib() != nil() || length(index) != 1 {

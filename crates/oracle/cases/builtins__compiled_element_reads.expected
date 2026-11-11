@@ -207,9 +207,59 @@
 | [1] "helper"       "masked paste"
 | [1] "helper" "p 1"   
 | [1] "could not find function \"helper\""
+| List of 2
+|  $ : chr "x"
+|  $ : chr "x"
+| List of 2
+|  $ : num 2
+|  $ : num 2
+| List of 2
+|  $ : int 1
+|  $ : int 1
+| List of 2
+|  $ : logi TRUE
+|  $ : logi TRUE
+|  list()
+| List of 2
+|  $ : chr "subscript out of bounds"
+|  $ : chr "subscript out of bounds"
+|  list()
+|  list()
+| List of 2
+|  $ : num 1
+|  $ : num 1
+|  list()
+|  list()
+| List of 2
+|  $ : num 1
+|  $ : num 1
+| [[1]]
+|  a  b  c 
+| -2  2  3 
+| 
+| [[2]]
+| [[2]]$a
+| [1] "s"
+| 
+| [[2]]$b
+| [1] 2
+| 
+| 
+| [[1]]
+|  a  b  c 
+| -2  2  3 
+| 
+| [[2]]
+| [[2]]$a
+| [1] "s"
+| 
+| [[2]]$b
+| [1] 2
+| 
+| 
 [messages]
 [warnings]
 [errors]
 [value]
-character
-| "could not find function \"helper\""
+list
+| list(c(a = -2, b = 2, c = 3), list(a = "s", b = 2L))

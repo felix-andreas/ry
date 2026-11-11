@@ -127,3 +127,46 @@ lazy <- function(x, f) {
 v <- c(1, 2)
 print(lazy(v, v[[1L]] <- 50))
 print(v)
+
+# x$name <- v and a list's x[i] <- v store in place when the name exists or the value is one
+# element; a new name appends, NULL deletes, and a list holding itself copies first.
+lists <- function() {
+  x <- list(a = 1, b = "two", c = NULL, a = 4)
+  y <- list(1, 2, 3)
+  for (k in 1:3) {
+    x$b <- k
+    x$a <- list(k)
+    x[["c"]] <- c(z = k)
+    y[2L] <- list(k * 2)
+    y[3L] <- "s"
+    y[1L] <- list(NULL)
+  }
+  x$d <- "new"
+  x$c <- NULL
+  y[2L] <- list(y)
+  str(x)
+  str(y)
+  z <- list(p = 1)
+  for (k in 1:2) z$p <- z
+  str(z)
+  w <- list(1)
+  w[1L] <- list(c(q = 1))
+  w[1L] <- 1:2
+  w
+}
+print(lists())
+print(lists())
+
+# A non-ASCII name and a list with names that are not all set.
+names_edge <- function() {
+  x <- list("é" = 1, 2)
+  names(x)[2] <- NA
+  for (k in 1:2) {
+    x$"é" <- k
+    x[["é"]] <- k + 10
+  }
+  x$`NA` <- "na"
+  x
+}
+print(names_edge())
+print(names_edge())

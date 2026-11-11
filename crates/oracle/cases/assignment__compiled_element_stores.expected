@@ -212,9 +212,69 @@
 | 
 | [1] 100   2
 | [1] 50  2
+| List of 4
+|  $ a:List of 1
+|   ..$ : int 3
+|  $ b: int 3
+|  $ a: num 4
+|  $ d: chr "new"
+| List of 3
+|  $ : NULL
+|  $ :List of 3
+|   ..$ : NULL
+|   ..$ : num 6
+|   ..$ : chr "s"
+|  $ : chr "s"
+| List of 1
+|  $ p:List of 1
+|   ..$ p:List of 1
+|   .. ..$ p: num 1
+| [[1]]
+| [1] 1
+| 
+| List of 4
+|  $ a:List of 1
+|   ..$ : int 3
+|  $ b: int 3
+|  $ a: num 4
+|  $ d: chr "new"
+| List of 3
+|  $ : NULL
+|  $ :List of 3
+|   ..$ : NULL
+|   ..$ : num 6
+|   ..$ : chr "s"
+|  $ : chr "s"
+| List of 1
+|  $ p:List of 1
+|   ..$ p:List of 1
+|   .. ..$ p: num 1
+| [[1]]
+| [1] 1
+| 
+| $é
+| [1] 12
+| 
+| $<NA>
+| [1] 2
+| 
+| $`NA`
+| [1] "na"
+| 
+| $é
+| [1] 12
+| 
+| $<NA>
+| [1] 2
+| 
+| $`NA`
+| [1] "na"
+| 
 [messages]
 [warnings]
+- number of items to replace is not a multiple of replacement length (in w[1L] <- 1:2)
+- number of items to replace is not a multiple of replacement length (in w[1L] <- 1:2)
 [errors]
 [value]
-double
-| c(50, 2)
+list
+| structure(list(12, 2, "na"), names = c("é", NA, "NA"))
