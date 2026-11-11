@@ -20,8 +20,8 @@ A run fails, and writes nothing, when any program fails on any engine or prints 
 differs from GNU R's (a numeric checksum may differ by a relative 1e-10, the room a different
 summation order needs). The packages suite is the exception, because there a package's own test
 suite is the program: test outcomes that differ between engines are recorded as a `tests_differ`
-flag, and a test suite that does not run to the end on an engine is recorded as a failure in that
-package's row, which leaves the package out of the geometric mean. Flags mark a program without failing it: `too_short` when an engine's median is
+flag (a test script that ends in an R error counts as one failed test), and a test suite that
+crashes or does not run to the end on an engine is recorded as a failure in that package's row, which leaves the package out of the geometric mean. Flags mark a program without failing it: `too_short` when an engine's median is
 under 0.1 s (a program whose GNU R time is that short is also left out of the geometric mean),
 `wide_interval` when the interval of a ratio reaches more than 10% from its median (such programs
 get `--extra-rounds` more rounds first), and `typed_refused` when the typed core refused part of a
@@ -378,17 +378,22 @@ class PackageRunner:
 
     def run_tests(self, engine, env, name, kind, tests):
         if kind == "scripts":
-            seconds, peak, passed = 0.0, 0.0, 0
+            # A test script reports failing tests the way `R CMD check` reads them, by ending in an
+            # R error, which exits with status 1 (`test.data.table()` raises its error summary
+            # after running every test). Such a script ran to its end and counts as failed. A
+            # signal, a timeout or any other status means the suite did not finish.
+            seconds, peak, passed, failed = 0.0, 0.0, 0, 0
             for script in sorted(tests.glob("*.R")):
                 status, out, err, elapsed, script_peak = spawn(engine.command + [script.name], env, cwd=tests,
                                                                timeout=corpus.SUITE_TIMEOUT)
-                if status != 0:
+                if status not in (0, 1):
                     return {"seconds": None, "reason": f"{script.name}: {failure_reason(out, err)}"}
                 seconds += elapsed
                 peak = max(peak, script_peak)
-                passed += 1
-            return {"seconds": round(seconds, 3), "checksum": f"{passed} passed, 0 failed, 0 errors",
-                    "tests": {"passed": passed, "failed": 0, "errors": 0}, "peak_mib": round(peak, 1)}
+                passed += status == 0
+                failed += status == 1
+            return {"seconds": round(seconds, 3), "checksum": f"{passed} passed, {failed} failed, 0 errors",
+                    "tests": {"passed": passed, "failed": failed, "errors": 0}, "peak_mib": round(peak, 1)}
         driver = self.work / "driver.R"
         driver.write_text(corpus.driver(name, kind, tests))
         status, out, err, seconds, peak = spawn(engine.command + [str(driver)], env, cwd=tests,
