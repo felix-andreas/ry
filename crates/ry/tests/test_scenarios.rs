@@ -71,28 +71,9 @@ fn scenarios_hold() {
 }
 
 /// The typed benchmark programs whose kernels do not run on native code yet, with what the
-/// typed core refuses in each. Every other program in `tools/bench/why/typed` must run natively.
-const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 7] = [
-    ("expr_tree", "tagged unions (`.ry_tag`)"),
-    ("log_rank", "a record parameter"),
-    (
-        "orders",
-        "records built in the kernel (`.ry_record`, `.ry_tag`)",
-    ),
-    ("report", "text building (`.ry_text`)"),
-    (
-        "sales",
-        "a `DataFrame` parameter, which the table engine runs",
-    ),
-    (
-        "validate",
-        "`Result.with_default` and a mapped non-local function",
-    ),
-    (
-        "vasicek",
-        "R's random number generator (`set.seed`, `stats::rnorm`)",
-    ),
-];
+/// typed core refuses in each. Every other `<name>.typed.R` in `tools/bench/kernels` and
+/// `tools/bench/applications` must run natively.
+const TYPED_BENCHMARKS_NOT_NATIVE: [(&str, &str); 0] = [];
 
 /// The harness's own typed functions, which read R's clock and so run in the interpreter.
 const TYPED_HARNESS_INTERPRETED: [&str; 2] = ["measure", "clock"];
@@ -107,29 +88,39 @@ fn typed_benchmarks_run_natively() {
         eprintln!("typed benchmarks: skipped, {reason}");
         return;
     }
-    let programs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/bench/why/typed");
-    let harness = fs::read_to_string(programs.join("harness.R")).expect("read the harness");
-    let mut names: Vec<String> = fs::read_dir(&programs)
-        .expect("the typed benchmark directory exists")
-        .map(|entry| entry.expect("a benchmark directory entry").path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "R"))
-        .filter_map(|path| Some(path.file_stem()?.to_str()?.to_owned()))
-        .filter(|name| name != "harness")
+    let bench = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/bench");
+    let harness = fs::read_to_string(bench.join("harness.typed.R")).expect("read the harness");
+    let mut programs: Vec<(String, PathBuf)> = ["kernels", "applications"]
+        .iter()
+        .flat_map(|suite| {
+            fs::read_dir(bench.join(suite))
+                .expect("the benchmark suite directory exists")
+                .map(|entry| entry.expect("a benchmark directory entry").path())
+        })
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?.strip_suffix(".typed.R")?.to_owned();
+            Some((name, path))
+        })
         .collect();
-    names.sort();
+    programs.sort();
+    let names: Vec<String> = programs.iter().map(|(name, _)| name.clone()).collect();
     let directory = tempfile::tempdir().expect("temporary directory");
-    // Strict mode, as the benchmark runs the programs.
-    fs::copy(programs.join("ry.toml"), directory.path().join("ry.toml")).expect("copy ry.toml");
+    // Strict mode, as the benchmark runner runs typed programs.
+    fs::write(
+        directory.path().join("ry.toml"),
+        "[check]\ntyping = true\nstrict = true\n",
+    )
+    .expect("write ry.toml");
     let mut failures = Vec::new();
-    for name in &names {
+    for (name, path) in &programs {
         if TYPED_BENCHMARKS_NOT_NATIVE
             .iter()
             .any(|(listed, _)| listed == name)
         {
             continue;
         }
-        let program = fs::read_to_string(programs.join(format!("{name}.R")))
-            .unwrap_or_else(|error| panic!("read {name}.R: {error}"));
+        let program = fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         let script = directory.path().join(format!("{name}.R"));
         fs::write(&script, format!("{harness}\n{program}")).expect("write the script");
         let output = Command::new(env!("CARGO_BIN_EXE_ry"))

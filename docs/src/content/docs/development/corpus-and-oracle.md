@@ -271,7 +271,7 @@ just bench-gen --out .bench --lines 300000 --files 500
 just bench-test .bench/finbench
 ```
 
-`tools/bench/generate.py` writes `finbench`, `dsbench` and `biobench` under `--out`. Each is
+`tools/bench/tooling/generate.py` writes `finbench`, `dsbench` and `biobench` under `--out`. Each is
 an R package with a `DESCRIPTION` that imports exactly the benchmark dependency set, a
 `NAMESPACE`, R files, and a testthat suite. The generator is deterministic for a given `--seed`,
 and its output is not committed. `--domain` generates one package, and `--files` fixes the file
@@ -283,7 +283,7 @@ the generator erases the package with `ry debug erase` (so `target/release/ry` m
 an untyped run with the same seed generate the same program. Where a record or a tag union models the data better than S4, R6 or a named list, a template keeps both versions in `#@ typed` and `#@ untyped` blocks, so the typed program uses ry's own data types while the untyped one stays plain R (the finance `ledger`, data-science `readings` and biostatistics `followup` templates model their data as tags, tuples and records this way); the templates' `README.md` has the details. `--only` limits
 generation to the named templates, which is the quick way to iterate on one of them.
 
-The code comes from the R templates in `tools/bench/templates/` (see its `README.md`): shared
+The code comes from the R templates in `tools/bench/tooling/templates/` (see its `README.md`): shared
 infrastructure plus domain code, instantiated with random parameters until the line target is
 reached. Services that cannot run in a test (Azure, Bloomberg, ODBC) take an injectable client,
 so the tests never touch a network. `just bench-test` runs a package's tests against the corpus library, so run `just corpus` first.

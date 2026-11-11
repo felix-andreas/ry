@@ -6,9 +6,10 @@ once with `RY_JIT=off`, so both tiers' paths are in the profile. The mix:
 
 - every oracle case (crates/oracle/cases/*.R) through the oracle's driver, so a case that stops
   at an error still runs to its end, as it does under `oracle compare`;
-- every workload of the representative mix (tools/bench/real/*.R) with its harness and
+- every plain R program of the numeric kernels and application workloads (tools/bench/kernels and
+  tools/bench/applications) with its harness and
   `RY_BENCH_REPEAT=1`;
-- the training half of the vendored public suites (tools/bench/real/suites): the `rcp` and
+- the training half of the vendored public suites (tools/bench/public): the `rcp` and
   `shootout` programs at even positions in sorted order. The odd half and the whole `awfy` suite
   are held out, so a measurement on them shows whether the profile generalizes (`--held-out`
   prints those programs).
@@ -26,7 +27,7 @@ import argparse, concurrent.futures, os, pathlib, subprocess, sys, tempfile
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent
-bench = root / "tools/bench/real"
+bench = root / "tools/bench"
 # The instrumented build runs up to a few times slower than the release build.
 TIMEOUT = 900
 # Suites no training run sees, so they measure the profile on programs of a kind it never ran.
@@ -35,7 +36,7 @@ HELD_OUT_SUITES = {"awfy"}
 
 def public_programs():
     """The public suite programs split into the training half and the held-out half."""
-    programs = sorted((bench / "suites").glob("*/*.R"))
+    programs = sorted((bench / "public").glob("*/*.R"))
     trained = [program for program in programs[0::2] if program.parent.name not in HELD_OUT_SUITES]
     return trained, [program for program in programs if program not in trained]
 
@@ -46,8 +47,8 @@ def jobs(ry, tier, scratch):
         report = scratch / f"{tier}-{case.stem}.json"
         yield f"oracle/{case.stem}", [ry, "run", "--runtime", "ry", str(driver), str(case), str(report)], case.parent
     harness = (bench / "harness.R").read_text()
-    for workload in sorted(bench.glob("*.R")):
-        if workload.name == "harness.R":
+    for workload in sorted([*bench.glob("kernels/*.R"), *bench.glob("applications/*.R")]):
+        if workload.name.endswith(".typed.R"):
             continue
         script = scratch / f"{tier}-workload-{workload.name}"
         script.write_text(harness + "\n" + workload.read_text())
