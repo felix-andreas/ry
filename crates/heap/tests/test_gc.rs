@@ -447,9 +447,8 @@ fn young_stress_frees_a_survivor_that_only_a_rust_local_holds() {
             let before = heap.stats().objects_freed;
             // Another size class, so the allocation cannot take the freed slot back.
             heap.alloc_vector(SexpType::Real, 64).expect("alloc");
-            if cfg!(debug_assertions) {
-                assert_eq!(pooled.kind() == SexpType::Free, freed, "{stress:?}");
-            }
+            // Stress quarantines and poisons every freed object, in any build.
+            assert_eq!(pooled.is_poisoned(), freed, "{stress:?}");
             assert!(heap.stats().objects_freed > before, "{stress:?}");
         }
     }
@@ -804,13 +803,10 @@ fn unrooted_objects_are_freed_and_their_slots_reused() {
         let before = heap.stats().objects_freed;
         heap.collect(Collection::Minor);
         assert!(heap.stats().objects_freed > before);
-        // Only debug builds poison freed slots, since it costs a store per dead byte.
+        // Without stress or verification, only debug builds poison freed slots, since it
+        // costs a store per dead byte.
         if cfg!(debug_assertions) {
-            assert_eq!(
-                garbage.kind(),
-                SexpType::Free,
-                "a freed slot is poisoned as FREESXP"
-            );
+            assert!(garbage.is_poisoned(), "a freed slot is poisoned");
         }
         let reused = heap.alloc_vector(SexpType::Real, 3).expect("alloc");
         assert_eq!(reused, garbage, "the free list hands the slot out again");
@@ -1060,9 +1056,8 @@ fn an_intermediate_collection_frees_promoted_garbage_but_not_tenured_garbage() {
         let before = heap.stats().objects_freed;
         heap.collect(Collection::Intermediate);
         assert_eq!(heap.stats().objects_freed, before + 1);
-        if cfg!(debug_assertions) {
-            assert_eq!(promoted.kind(), SexpType::Free);
-        }
+        // Verification quarantines and poisons every freed object, in any build.
+        assert!(promoted.is_poisoned());
         assert_eq!(tenured.kind(), SexpType::Integer);
         heap.collect(Collection::Major);
         assert_eq!(heap.stats().objects_freed, before + 2);
@@ -2065,4 +2060,29 @@ fn an_escalation_skips_an_intermediate_collection_that_freed_nothing_before() {
         assert_eq!(stats.intermediate_collections, 1, "{stats:?}");
         assert_eq!(list.element(199_999).slice::<i32>(), &[199_999]);
     }
+}
+
+/// Under collection stress the collector poisons each object it frees and holds its memory back
+/// from reuse, so a stale reference reads poison instead of the object that would otherwise
+/// take the slot at the next allocation, and asking its kind panics.
+#[test]
+fn stress_quarantines_and_poisons_freed_objects() {
+    let mut heap = Heap::new();
+    heap.update_policy(|policy| policy.stress = GcStress::Young);
+    unsafe {
+        let small = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        let large = heap.alloc_vector(SexpType::Real, 1 << 16).expect("alloc");
+        let mut later = Vec::new();
+        for _ in 0..64 {
+            later.push(heap.alloc_vector(SexpType::Integer, 1).expect("alloc"));
+            later.push(heap.alloc_vector(SexpType::Real, 1 << 16).expect("alloc"));
+        }
+        assert!(!later.contains(&small), "a quarantined slot is not handed out again");
+        assert!(!later.contains(&large), "quarantined large memory is not handed out again");
+        assert!(small.is_poisoned() && large.is_poisoned());
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| small.kind()));
+        assert!(read.is_err(), "the kind of a freed object panics");
+    }
+    // Turning stress off gives the quarantined memory back.
+    heap.update_policy(|policy| policy.stress = GcStress::Off);
 }

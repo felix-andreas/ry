@@ -40,7 +40,7 @@ use {
             VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, holds_handles, object_size, slot_for,
         },
         records::{Layouts, slot_kind},
-        space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept},
+        space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept, poison},
         strings::{Encoding, StringTable},
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -48,6 +48,7 @@ use {
     std::{
         alloc::Layout,
         cell::Cell,
+        collections::VecDeque,
         ffi::c_void,
         fmt,
         io::Write,
@@ -169,6 +170,10 @@ pub struct Heap {
     sources: Vec<(u64, Rc<dyn RootSource>)>,
     next_source_id: u64,
     policy: GcPolicy,
+    /// Freed large objects held back from the allocator while the space quarantines freed
+    /// slots, with their sizes, oldest first.
+    quarantined_large: VecDeque<(NonNull<u8>, usize)>,
+    quarantined_large_bytes: usize,
     /// Bytes of small objects allocated since the last collection.
     young_bytes: usize,
     /// The `young_bytes` past which a small allocation takes the slow path, which runs a minor
@@ -805,6 +810,8 @@ impl Heap {
             sources: Vec::new(),
             next_source_id: 0,
             policy,
+            quarantined_large: VecDeque::new(),
+            quarantined_large_bytes: 0,
             young_bytes: 0,
             small_trigger: 0,
             young_large_bytes: 0,
@@ -829,6 +836,7 @@ impl Heap {
         unsafe { heap.create_well_known() };
         heap.inhibit = 0;
         heap.refresh_small_trigger();
+        heap.refresh_quarantine();
         heap
     }
 
@@ -936,6 +944,19 @@ impl Heap {
     pub fn update_policy(&mut self, change: impl FnOnce(&mut GcPolicy)) {
         change(&mut self.policy);
         self.refresh_small_trigger();
+        self.refresh_quarantine();
+    }
+
+    /// Quarantines freed objects exactly while collection stress or verification is on: a
+    /// freed object is poisoned and its memory held back from reuse for a while, so a read
+    /// through a stale reference hits poison rather than whatever took the memory next.
+    fn refresh_quarantine(&mut self) {
+        let on = self.policy.stress != GcStress::Off || self.policy.verify;
+        self.space.set_quarantine(on);
+        if !on {
+            // SAFETY: each quarantined object left the heap's tables when it was freed.
+            unsafe { self.release_quarantined_large(0) };
+        }
     }
 
     /// Marks the start of a namespace load (`loadNamespace`). Loads nest, because a namespace
@@ -4293,6 +4314,29 @@ impl Heap {
         if self.image_large.contains(&(memory as usize)) {
             return;
         }
+        if self.space.quarantining() {
+            poison(memory, size);
+            self.quarantined_large
+                .push_back((NonNull::new_unchecked(memory), size));
+            self.quarantined_large_bytes += size;
+            self.release_quarantined_large(QUARANTINE_LARGE_BYTES);
+        } else {
+            self.release_large_memory(memory, size);
+        }
+    }
+
+    /// Gives the oldest quarantined large objects' memory back until at most `limit` bytes stay.
+    unsafe fn release_quarantined_large(&mut self, limit: usize) {
+        while self.quarantined_large_bytes > limit {
+            let Some((memory, size)) = self.quarantined_large.pop_front() else {
+                break;
+            };
+            self.quarantined_large_bytes -= size;
+            self.release_large_memory(memory.as_ptr(), size);
+        }
+    }
+
+    unsafe fn release_large_memory(&mut self, memory: *mut u8, size: usize) {
         if size >= MAPPED_BYTES {
             self.mapped.release(NonNull::new_unchecked(memory), size);
         } else {
@@ -4383,6 +4427,7 @@ impl Drop for Heap {
             for object in large {
                 self.free_large(object);
             }
+            self.release_quarantined_large(0);
             if !self.image_large.is_empty() {
                 let start = self.image_large.start as *mut u8;
                 if !crate::space::virtual_memory::release(start, self.image_large.len()) {
@@ -4684,6 +4729,8 @@ impl Sexp {
 /// Entries the zero-count table gathers before a reconcile bounds it, however little they would
 /// free.
 const RECONCILE_ENTRIES: usize = 1 << 16;
+/// The bytes of freed large objects quarantine holds back before it releases the oldest.
+const QUARANTINE_LARGE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Large-vector bytes the zero-count table must stand to free before a reconcile runs for them.
 /// A package's test session has about 20,000 roots, which take about 100 µs to scan, so a

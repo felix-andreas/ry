@@ -26,7 +26,7 @@ use {
         image::{ImageError, Reader, Writer},
         object::{Sexp, SexpType, Shape, flag_bits, gc_bits},
     },
-    std::ptr::NonNull,
+    std::{collections::VecDeque, ptr::NonNull},
 };
 
 /// Slot sizes of the small-object pages. Forty bytes is a triple: a pairlist cell, a symbol, a
@@ -84,7 +84,14 @@ const SLOT_INDEX_MULTIPLIERS: [u64; CLASS_COUNT] = {
     }
     multipliers
 };
-const POISON: u8 = 0xDB;
+/// The byte a poisoned slot is filled with. As a kind byte it is no `SexpType`, so
+/// [`Sexp::kind`] panics on a freed object instead of reading garbage as some kind.
+pub(crate) const POISON: u8 = 0xDB;
+/// The bytes of freed small slots quarantine holds back from reuse before it gives the oldest
+/// back to the allocator.
+const QUARANTINE_BYTES: usize = 16 * 1024 * 1024;
+/// A bitmap with no slot set, which the allocator reads for a page while quarantine is off.
+static NO_SLOTS: Bitmap = [0; BITMAP_WORDS];
 
 pub(crate) struct Space {
     /// The start of the reservation, which `base` rounds up to a page boundary.
@@ -127,6 +134,8 @@ pub(crate) struct Space {
     /// Pages of each class with free slots, which no cursor is on.
     available: [Vec<u32>; CLASS_COUNT],
     empty_pages: Vec<u32>,
+    /// Freed slots held back from reuse, while collection stress or verification is on.
+    quarantine: Option<Quarantine>,
     /// Pages a cursor entered since the last collection: the only ones that can hold young objects.
     touched: Vec<u32>,
     /// The vector data, in 8-byte cells, of the objects marked since the heap last reset it,
@@ -157,6 +166,24 @@ const IDLE_CURSOR: Cursor = Cursor {
     page: NO_PAGE,
     next_slot: 0,
 };
+
+/// Freed slots that are neither allocated nor free: they hold poison, and the allocator skips
+/// them until they leave the quarantine, oldest first, once it holds more than
+/// [`QUARANTINE_BYTES`]. A read through a stale reference then hits poison instead of an object
+/// that has since taken the slot, which is what lets collection stress catch a use after free.
+struct Quarantine {
+    /// The quarantined slots of each page.
+    slots: Vec<Bitmap>,
+    /// The quarantined slots in the order they were freed, a bitmap word at a time.
+    queue: VecDeque<QuarantinedWord>,
+    bytes: usize,
+}
+
+struct QuarantinedWord {
+    page: u32,
+    word: u32,
+    bits: u64,
+}
 
 /// What a sweep found.
 #[derive(Default)]
@@ -214,6 +241,7 @@ impl Space {
             pretenured_pages: Vec::new(),
             available: Default::default(),
             empty_pages: Vec::new(),
+            quarantine: None,
             touched: Vec::new(),
             marked_vector_cells: 0,
             tenured_vector_cells: 0,
@@ -264,9 +292,17 @@ impl Space {
             let cursor = self.cursors[class];
             if cursor.page != NO_PAGE {
                 let page = cursor.page as usize;
-                if let Some((start, end)) =
-                    claim_run(&mut self.allocated[page], slots, cursor.next_slot as usize)
-                {
+                let held = self
+                    .quarantine
+                    .as_ref()
+                    .and_then(|quarantine| quarantine.slots.get(page))
+                    .unwrap_or(&NO_SLOTS);
+                if let Some((start, end)) = claim_run(
+                    &mut self.allocated[page],
+                    held,
+                    slots,
+                    cursor.next_slot as usize,
+                ) {
                     // SAFETY: both offsets are inside a committed page.
                     let page_base = unsafe { self.base.as_ptr().add(page * PAGE_SIZE) };
                     let next = unsafe { page_base.add(start * slot_size) };
@@ -331,6 +367,9 @@ impl Space {
         self.allocated.push([0; BITMAP_WORDS]);
         self.finalizable.push([0; BITMAP_WORDS]);
         self.interned.push([0; BITMAP_WORDS]);
+        if let Some(quarantine) = &mut self.quarantine {
+            quarantine.slots.push([0; BITMAP_WORDS]);
+        }
         Some(page as u32)
     }
 
@@ -593,6 +632,7 @@ impl Space {
         for &page in &touched {
             live_bytes += unsafe { self.sweep_page(page as usize, swept) };
         }
+        self.release_quarantine(QUARANTINE_BYTES);
         for &page in &touched {
             self.file_page(page);
         }
@@ -613,14 +653,19 @@ impl Space {
         self.touched.clear();
         let mut live_bytes = 0;
         for page in 0..self.page_count {
+            if self.page_class[page] != EMPTY_PAGE {
+                unsafe { self.sweep_page(page, swept) };
+                live_bytes +=
+                    self.live_slots[page] as usize * SLOT_SIZES[self.page_class[page] as usize];
+            }
+        }
+        self.release_quarantine(QUARANTINE_BYTES);
+        for page in 0..self.page_count {
             if self.page_class[page] == EMPTY_PAGE {
                 self.empty_pages.push(page as u32);
-                continue;
+            } else {
+                self.file_page(page as u32);
             }
-            unsafe { self.sweep_page(page, swept) };
-            live_bytes +=
-                self.live_slots[page] as usize * SLOT_SIZES[self.page_class[page] as usize];
-            self.file_page(page as u32);
         }
         self.reset_cursors();
         live_bytes
@@ -648,17 +693,20 @@ impl Space {
                 }
                 self.finalizable[page][word] &= !dead;
                 // Poisoning makes a use after free fail loudly, but costs a store per byte of
-                // every dead slot, so only debug builds pay for it. The kind byte stays
-                // meaningful: a freed slot reads as `FREESXP`.
-                if cfg!(debug_assertions) {
+                // every dead slot, so only debug builds and quarantine pay for it.
+                if cfg!(debug_assertions) || self.quarantine.is_some() {
                     for bit in set_bits(dead) {
-                        let slot = unsafe { page_base.add((word * 64 + bit) * slot_size) };
-                        unsafe {
-                            std::ptr::write_bytes(slot, POISON, slot_size);
-                            *slot = SexpType::Free as u8;
-                            *slot.add(1) = 0;
-                        }
+                        unsafe { poison(page_base.add((word * 64 + bit) * slot_size), slot_size) };
                     }
+                }
+                if let Some(quarantine) = &mut self.quarantine {
+                    quarantine.slots[page][word] |= dead;
+                    quarantine.queue.push_back(QuarantinedWord {
+                        page: page as u32,
+                        word: word as u32,
+                        bits: dead,
+                    });
+                    quarantine.bytes += dead.count_ones() as usize * slot_size;
                 }
                 swept.freed += u64::from(dead.count_ones());
                 swept.untenured_bytes +=
@@ -683,11 +731,57 @@ impl Space {
             return;
         }
         let live = self.live_slots[index] as usize;
-        if live == 0 {
+        let held = self
+            .quarantine
+            .as_ref()
+            .and_then(|quarantine| quarantine.slots.get(index))
+            .is_some_and(|slots| slots.iter().any(|&word| word != 0));
+        if live == 0 && !held {
             self.page_class[index] = EMPTY_PAGE;
             self.empty_pages.push(page);
         } else if live < PAGE_SIZE / SLOT_SIZES[class] {
             self.available[class].push(page);
+        }
+    }
+
+    /// Starts or stops holding freed slots back from reuse. Stopping gives every quarantined
+    /// slot back to the allocator.
+    pub fn set_quarantine(&mut self, on: bool) {
+        if on && self.quarantine.is_none() {
+            self.quarantine = Some(Quarantine {
+                slots: vec![[0; BITMAP_WORDS]; self.page_count],
+                queue: VecDeque::new(),
+                bytes: 0,
+            });
+        } else if !on {
+            self.quarantine = None;
+        }
+    }
+
+    pub fn quarantining(&self) -> bool {
+        self.quarantine.is_some()
+    }
+
+    /// Gives the oldest quarantined slots back to the allocator until at most `limit` bytes
+    /// stay. A page that empties keeps its class until the next sweep files it.
+    fn release_quarantine(&mut self, limit: usize) {
+        let Some(quarantine) = &mut self.quarantine else {
+            return;
+        };
+        while quarantine.bytes > limit {
+            let Some(entry) = quarantine.queue.pop_front() else {
+                break;
+            };
+            let page = entry.page as usize;
+            if let Some(word) = quarantine
+                .slots
+                .get_mut(page)
+                .and_then(|slots| slots.get_mut(entry.word as usize))
+            {
+                *word &= !entry.bits;
+            }
+            let slot_size = SLOT_SIZES[self.page_class[page] as usize];
+            quarantine.bytes -= entry.bits.count_ones() as usize * slot_size;
         }
     }
 
@@ -998,6 +1092,10 @@ impl Space {
         self.finalizable = finalizable;
         self.interned = interned;
         self.cursors = [IDLE_CURSOR; CLASS_COUNT];
+        if self.quarantine.is_some() {
+            self.set_quarantine(false);
+            self.set_quarantine(true);
+        }
         self.touched.clear();
         self.empty_pages.clear();
         for available in &mut self.available {
@@ -1067,16 +1165,30 @@ unsafe fn drop_frame(object: Sexp) {
     }
 }
 
+/// Overwrites a freed object of `bytes` bytes with [`POISON`]. Its GC bits stay clear, so the
+/// collector never takes a stale reference to it for a marked object.
+pub(crate) unsafe fn poison(object: *mut u8, bytes: usize) {
+    unsafe {
+        std::ptr::write_bytes(object, POISON, bytes);
+        *object.add(1) = 0;
+    }
+}
+
 /// Finds the first run of free slots at or after `from` among a page's first `slots`, marks it
-/// allocated, and returns its slot range. A run stops at the first allocated slot, so on a page
-/// with no objects it is the whole page.
-fn claim_run(allocated: &mut Bitmap, slots: usize, from: usize) -> Option<(usize, usize)> {
+/// allocated, and returns its slot range. A slot in `held` is not free. A run stops at the first
+/// slot that is not free, so on a page with no objects it is the whole page.
+fn claim_run(
+    allocated: &mut Bitmap,
+    held: &Bitmap,
+    slots: usize,
+    from: usize,
+) -> Option<(usize, usize)> {
     let words = slots.div_ceil(64);
     let mut word = from / 64;
     let mut start = None;
     let mut free = 0;
     while word < words {
-        free = !allocated[word] & valid_slots(slots, word);
+        free = !(allocated[word] | held[word]) & valid_slots(slots, word);
         if word == from / 64 {
             free &= u64::MAX << (from % 64);
         }
@@ -1096,7 +1208,7 @@ fn claim_run(allocated: &mut Bitmap, slots: usize, from: usize) -> Option<(usize
         if bit + run < 64 || end / 64 >= words {
             break;
         }
-        free = !allocated[end / 64] & valid_slots(slots, end / 64);
+        free = !(allocated[end / 64] | held[end / 64]) & valid_slots(slots, end / 64);
         if free & 1 == 0 {
             break;
         }
