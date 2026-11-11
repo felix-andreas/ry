@@ -1,6 +1,8 @@
 # oracle: requires R6
 # An R6 object a deeper call dropped runs its finalize method at a gc() inside a later function
-# with a large register window.
+# with a large register window. The objects are made by lapply, not a `for` loop: GNU R's
+# compiled `for` keeps its last values on its node stack, so their timing there depends on
+# whether GNU R's own JIT is on.
 log <- new.env()
 log$count <- 0L
 Tracked <- R6::R6Class("Tracked",
@@ -8,8 +10,8 @@ Tracked <- R6::R6Class("Tracked",
   private = list(finalize = function() log$count <- log$count + 1L)
 )
 deeper <- function(n) {
-  for (i in seq_len(n)) Tracked$new(i)
-  invisible(NULL)
+  objects <- lapply(seq_len(n), Tracked$new)
+  invisible(length(objects))
 }
 wide <- function(k) {
   before <- log$count
