@@ -176,8 +176,8 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         };
         eprintln!("GNU R was not found, so the engine is compared with the recorded outcomes");
-        let runnable = cases(paths.clone(), || engine_packages(second.as_ref()));
-        return compare(None, second.as_ref(), &runnable);
+        let selection = cases(paths.clone(), || engine_packages(second.as_ref()));
+        return compare(None, second.as_ref(), &selection);
     }
     if !gnu_r_available() {
         eprintln!("GNU R was not found; install R or set ORACLE_R to its path");
@@ -308,9 +308,16 @@ fn run_gallery(options: gallery::Options) -> ExitCode {
     }
 }
 
+/// The cases a run takes: those that can run, and how many were left out because they need a
+/// package the engine lacks, which the summary line counts.
+struct Selection {
+    runnable: Vec<PathBuf>,
+    missing: usize,
+}
+
 /// The cases under `paths` that can run, given the packages `installed` lists; each case that
 /// needs a missing package is reported as skipped.
-fn cases(paths: Vec<PathBuf>, installed: impl FnOnce() -> Option<Vec<String>>) -> Vec<PathBuf> {
+fn cases(paths: Vec<PathBuf>, installed: impl FnOnce() -> Option<Vec<String>>) -> Selection {
     let paths = if paths.is_empty() {
         vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cases")]
     } else {
@@ -329,10 +336,14 @@ fn cases(paths: Vec<PathBuf>, installed: impl FnOnce() -> Option<Vec<String>>) -
     for (case, packages) in &missing {
         println!("skip    {}: needs {}", case.display(), packages.join(", "));
     }
-    runnable
+    Selection {
+        runnable,
+        missing: missing.len(),
+    }
 }
 
-fn verify(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {
+fn verify(gnu_r: &ProcessEngine, selection: &Selection) -> ExitCode {
+    let cases = &selection.runnable;
     let Some(build) = announce_build() else {
         return ExitCode::from(2);
     };
@@ -340,7 +351,7 @@ fn verify(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {
         return ExitCode::from(2);
     }
     let mut failures = 0;
-    let mut skipped = 0;
+    let mut crashed = Vec::new();
     for case in cases {
         let expected = std::fs::read_to_string(expected_path(case))
             .ok()
@@ -360,7 +371,7 @@ fn verify(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {
             },
             Err(EngineError::Crashed(error)) => {
                 println!("skip    {}: this GNU R crashed: {error}", case.display());
-                skipped += 1;
+                crashed.push(case.as_path());
             }
             Err(error) => {
                 println!("ERROR   {}: {error}", case.display());
@@ -368,10 +379,16 @@ fn verify(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {
             }
         }
     }
-    summarize(cases.len() - skipped, failures)
+    summarize(
+        cases.len() - crashed.len(),
+        failures,
+        selection.missing,
+        &crashed,
+    )
 }
 
-fn record(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {
+fn record(gnu_r: &ProcessEngine, selection: &Selection) -> ExitCode {
+    let cases = &selection.runnable;
     let Some(build) = announce_build() else {
         return ExitCode::from(2);
     };
@@ -379,7 +396,7 @@ fn record(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {
         return ExitCode::from(2);
     }
     let mut failures = 0;
-    let mut skipped = 0;
+    let mut crashed = Vec::new();
     for case in cases {
         if build_file(case).is_none()
             && let Some(directory) = case.parent()
@@ -403,7 +420,7 @@ fn record(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {
             },
             Err(EngineError::Crashed(error)) => {
                 println!("skip    {}: this GNU R crashed: {error}", case.display());
-                skipped += 1;
+                crashed.push(case.as_path());
             }
             Err(error) => {
                 println!("ERROR   {}: {error}", case.display());
@@ -411,7 +428,12 @@ fn record(gnu_r: &ProcessEngine, cases: &[PathBuf]) -> ExitCode {
             }
         }
     }
-    summarize(cases.len() - skipped, failures)
+    summarize(
+        cases.len() - crashed.len(),
+        failures,
+        selection.missing,
+        &crashed,
+    )
 }
 
 /// Prints the build of the GNU R at hand, so every report says which R it ran.
@@ -482,7 +504,8 @@ fn second_engine(name: Option<&str>) -> Option<Box<dyn Engine>> {
 }
 
 /// Compares `second` with GNU R, or with each case's recorded outcome when `gnu_r` is `None`.
-fn compare(gnu_r: Option<&ProcessEngine>, second: &dyn Engine, cases: &[PathBuf]) -> ExitCode {
+fn compare(gnu_r: Option<&ProcessEngine>, second: &dyn Engine, selection: &Selection) -> ExitCode {
+    let cases = &selection.runnable;
     match gnu_r {
         Some(_) => {
             if announce_build().is_none() {
@@ -508,7 +531,7 @@ fn compare(gnu_r: Option<&ProcessEngine>, second: &dyn Engine, cases: &[PathBuf]
     }
     let mut failures = 0;
     let mut skipped = 0;
-    let mut crashed = 0;
+    let mut crashed = Vec::new();
     for case in cases {
         let expected = match gnu_r {
             Some(gnu_r) => gnu_r.run(case),
@@ -521,7 +544,7 @@ fn compare(gnu_r: Option<&ProcessEngine>, second: &dyn Engine, cases: &[PathBuf]
             Ok(outcome) => outcome,
             Err(EngineError::Crashed(error)) => {
                 println!("skip    {}: this GNU R crashed: {error}", case.display());
-                crashed += 1;
+                crashed.push(case.as_path());
                 continue;
             }
             Err(error) => {
@@ -551,10 +574,15 @@ fn compare(gnu_r: Option<&ProcessEngine>, second: &dyn Engine, cases: &[PathBuf]
             second.name()
         );
     }
-    if skipped + crashed == cases.len() {
+    if skipped + crashed.len() == cases.len() {
         return ExitCode::SUCCESS;
     }
-    summarize(cases.len() - skipped - crashed, failures)
+    summarize(
+        cases.len() - skipped - crashed.len(),
+        failures,
+        selection.missing,
+        &crashed,
+    )
 }
 
 fn run_fuzz(first: u64, count: u64, engines: &str, timeout: Duration) -> ExitCode {
@@ -793,13 +821,38 @@ fn run_packages(
     ExitCode::SUCCESS
 }
 
-fn summarize(total: usize, failures: usize) -> ExitCode {
-    println!("{} of {total} passed", total - failures);
+/// Prints the summary line, which counts the cases left out of `total` beside the result so a
+/// short run cannot pass for a complete one, and names each case GNU R crashed on. A crash of
+/// the reference is reported but does not fail the run, since it says nothing about the engine.
+fn summarize(total: usize, failures: usize, missing: usize, crashed: &[&Path]) -> ExitCode {
+    let mut line = format!("{} of {total} passed", total - failures);
+    if missing + crashed.len() > 0 {
+        let mut reasons = Vec::new();
+        if missing > 0 {
+            reasons.push(plural(missing, "missing package", "missing packages"));
+        }
+        if !crashed.is_empty() {
+            reasons.push(plural(crashed.len(), "GNU R crash", "GNU R crashes"));
+        }
+        line.push_str(&format!(
+            ", {} skipped ({})",
+            missing + crashed.len(),
+            reasons.join(", ")
+        ));
+    }
+    println!("{line}");
+    for case in crashed {
+        println!("  GNU R crashed: {}", case.display());
+    }
     if failures == 0 {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
     }
+}
+
+fn plural(count: usize, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
 }
 
 fn default_ry() -> PathBuf {
