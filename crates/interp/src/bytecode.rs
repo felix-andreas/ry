@@ -372,6 +372,9 @@ fn grow_registers(length: usize) -> R<()> {
         if syntax::testing::invariants_enabled() {
             poison_window(start, length);
         }
+        // A window starts with its frame's header, which reads as nil until the frame makes an
+        // environment, and the callers that bind slots do not write it.
+        state.registers[start] = nil();
     }
     Ok(())
 }
