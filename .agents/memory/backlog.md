@@ -108,14 +108,21 @@ left, in order of expected gain:
 - **`List.sum` over `F64` uses the long-double fold** (about 1.1 ms per million items) to match the interpreter; a plain f64 fold is faster but changes results (`decisions.md`, "Typed `I64` runs in registers").
 - **A refused strict closure reads its arguments on every call.** `jit::native::call_typed` gathers the arguments (evaluating their pure code) and looks up the compile cache before it finds the per-type refusal, and the interpreter then evaluates the same code again: typed `orders` runs about 3% more instructions than without the read. A per-closure "refused" bit is not sound, because untyped callers pass one annotation in several representations (doubles for a `List<I64>`), and a closure refused for one can compile for another, in the typed core or the scalar natives. `log_rank`, `sales` and `vasicek` pay it.
 - **Arguments that are unforced promises.** `typed::call` takes only values readable without forcing (constants, variables, forced promises, and base arithmetic and `c()` over them), so `f(c(1, 2))` from untyped code takes the native path but `evaluate(build(14, 8))` runs `evaluate` in the interpreter. A typed call is never read ahead: it may not finish, and R never runs an argument the callee does not force. A call from typed code forces its arguments first (typed ry is strict), so this is only about calls from R code, which must stay lazy; `expr_tree.typed.R`'s untyped `measure` lambda binds the tree to a variable first.
-- **Code files and `ry build --exe`.** Code is compiled in memory at the first call; the install-time code file, mapped shared code and executables in `typed-runtime.md` are not built.
 - **`ToDbl` of a loop counter keeps its `NA` select**, because the backend does not track which locals are known not to be `NA`.
 - **Call-time speculation checks walk every lookup chain.** `still_resolves` re-walks each speculation's environment chain on every call; a per-binding version stamp would make the check one compare.
 - **Compiled closures stay rooted for the session.** Up to `MAX_COMPILED` closures are kept alive by their code; dropping the code with the closure needs a finalizer hook in the heap.
 - **Mutual recursion caches a refusal.** A typed closure that calls one still being compiled refuses, and the refusal is remembered, so mutually recursive typed functions always take the native path.
 - **Names a branch creates.** A name set in only one branch, or with different types in the two, is out of scope after the `if`, so reading it refuses; a loop body's names are out of scope after the loop. Local functions defined or rebound in a branch or loop refuse.
 
-## Open: two Renviron readers
+## Open: ahead-of-time compilation of typed ry (mid priority)
+
+Compile strict typed ry to machine code before it runs, as Bun's `--aot` does for TypeScript (`prior-art.md`, "Beside ry's start image, install-time code and typed core"). This extends the install-time compiler that writes machine code for a package's numeric functions into `R/<package>.ryc` (`crates/jit/src/ahead.rs`, CLI reference "build and install"); the typed core (`crates/typed`) lowers and compiles a strict typed closure only at its first call.
+
+- **Precondition.** The typed benchmark programs run natively. `vasicek` (R calls per step) and `sales` (a `DataFrame` parameter) do not yet ("Open: the typed core", `test_scenarios::TYPED_BENCHMARKS_NOT_NATIVE`).
+- **Step 1: typed closures and the typed standard library at install or build time.** `ry install` compiles a package's strict typed closures, and ry's build compiles the typed standard library, into the code image's native section, without running anything. Inside the code a type is a fact; an R value is checked once at the typed boundary, and a failed check takes a slow path. Measure first-call time and resident memory per worker against first-call compilation.
+- **Step 2: a whole-program build of a typed script** (`ry build --exe` in `typed-runtime.md`), which compiles the script with the typed standard library and the packages it uses into one executable; untyped R in it stays on the JIT.
+- **The slow path.** Install-time code and the typed core both fall back to the interpreter on a failed entry test. Bun instead runs a compiled slow second version of the function; decide which one ry uses here, by measurement.
+
 
 - ry has two Renviron readers, the interpreter's startup one in `crates/interp/src/session.rs` and `rcmd::command_environment`. The interpreter's lets an already-set variable win, which differs from GNU R's `process_Renviron` (a file line always overrides). Merge them into one reader with GNU R's semantics.
 

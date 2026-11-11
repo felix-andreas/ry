@@ -35,6 +35,12 @@ sources:
   - id: bun-aot
     resource: https://bun.sh/docs/compiler/aot
     title: "Bun documentation: the ahead-of-time compiler, and its internals page"
+  - id: bun-aot-pr
+    resource: https://github.com/oven-sh/bun/pull/45631
+    title: "Bun pull request 45631: Compile TypeScript to machine code ahead of time"
+  - id: bun-aot-rewrite
+    resource: https://github.com/oven-sh/bun/pull/48120
+    title: "Bun pull request 48120: AOT, the next base"
   - id: jsc-speculation
     resource: https://webkit.org/blog/10308/speculation-in-javascriptcore/
     title: "Pizlo: Speculation in JavaScriptCore (WebKit blog, 2020)"
@@ -189,10 +195,10 @@ refers to its steps.
 | Whole-program value tracking | Bun | **Adopt per namespace** | The typed core of a locked namespace or strict file; untyped code keeps profiles |
 | Closed bindings per locked namespace: the bindings are closed though their values are not | Bun | **Adopt** (step 2) | Direct calls to sibling namespace functions and imports, invalidated by `unlockBinding` and `assignInNamespace` |
 | Freezing built-ins instead of deoptimizing | Bun | **Adopt for ry's standard library only** | R bindings get invalidation on `unlockBinding`, because mocking rebinds them |
-| Ahead-of-time machine code from whole-program facts, no profiles, values tested once where they enter | Bun (`--aot`) | **Adopt as a hybrid, planned** | `ry install` compiles from checker, closed-namespace and effect-free facts into the code image's native section; tier 0 keeps `eval` and NSE, the JIT keeps hot loops |
+| Ahead-of-time machine code from whole-program facts, no profiles, values tested once where they enter | Bun (`--aot`) | **Adopt as a hybrid, built for numeric functions** | `ry install` compiles from checker, closed-namespace and effect-free facts into the code image's native section; tier 0 keeps `eval` and NSE, the JIT keeps hot loops |
 | Machine code mapped read-only from the file and shared between processes | Bun | **Adopt** | Typed code files in installed packages and executables |
 | Mapped images shared across worker processes | Bun | **Adopt, planned** (step 5) | callr, parallel and doParallel workers map the same package images; measured as resident memory per worker |
-| A report of code compiled to a slow path, worst first, with fixes | Bun | **Adopt** | `ry check --explain` |
+| A report of code compiled to a slow path, worst first, with fixes | Bun | **Adopt** | `ry install --explain` |
 | Each program runs interpreted, compiled, and compiled with types erased; guesses forced to fail; facts checked | Bun | **Adopt** | Typed differential tests and fuzzing |
 | No compiler at run time, so every fallback is compiled at build time | Bun | **Reject** | ry compiles a second copy at the first call that needs it |
 | A standalone executable with its machine code mapped from the file | Bun | **Adopt** | `ry build --exe` |
@@ -609,18 +615,22 @@ that apply Bun's closed-world reasoning to untyped packages:
   `ry build --exe`, which writes a standalone executable as `bun compile` does. Worker processes
   started by callr, parallel and doParallel load the same packages, so mapping each package's image
   read-only lets them share it (planned as step 5, measured as resident memory per worker).
-- **Ahead-of-time machine code at install time, as one tier of a hybrid** (planned). `ry install`
-  compiles each package to machine code from facts it can prove without running anything: ry's
-  checker and inferred types, the closed bindings of the locked namespace, and the effect-free fact
-  per function. A value from outside the package (an argument from user code, a result of `.Call`)
+- **Ahead-of-time machine code at install time, as one tier of a hybrid** (built for a package's
+  numeric functions, for the argument types their annotations or constant defaults declare, and
+  otherwise for guessed scalar and vector types; the checker's inferred types are not used yet).
+  `ry install` compiles each package to machine code from facts it can prove without running
+  anything: ry's checker and inferred types, the closed bindings of the locked namespace, and the
+  effect-free fact per function. A value from outside the package (an argument from user code, a result of `.Call`)
   is tested once where it enters, and a failed test takes the tier-0 path for that call. The code
   goes through the one SSA IR and `cranelift-object` into the native section of the package's code
   image, mapped read-only so the test processes of one CI machine share it. Tier 0 keeps `eval` and
   non-standard evaluation, and the JIT keeps hot loops, because Bun's numbers show ahead-of-time
-  code losing to a JIT once warm. `ry check --explain` lists the operations that compiled to a
-  by-name lookup or an unproven test. It is measured on the testthat workload and on package load
+  code losing to a JIT once warm. `ry install --explain` lists the functions left in the
+  interpreter and, for each native specialization, the arguments it tests on entry and the names it
+  looks up. It is measured on the testthat workload and on package load
   time.
-- **`ry check --explain`** for the slow-path report. With no profile, it ranks by loop depth.
+- **`ry install --explain`** for the slow-path report. With no profile, it ranks the functions
+  left in the interpreter by size.
 - **The test matrix** for typed differential tests and the typed fuzzer.
 
 **What ry rejects.**
@@ -629,6 +639,47 @@ that apply Bun's closed-world reasoning to untyped packages:
   second copy at the first call that needs it.
 - **Types that never change behavior,** because ry's annotations are checked at the boundary and
   report mismatches.
+
+### Beside ry's start image, install-time code and typed core
+
+**The pipeline.** The type checker behind `bun check` checks each file, a lowering turns its syntax
+tree and types into an SSA IR, and JavaScriptCore runs a flow analysis over the whole program,
+optimizes the IR and generates machine code through B3. Bun's own `node:` and `bun:` modules compile
+from their TypeScript sources with the program, which is why the executable needs no
+JIT.[^bun-aot-pr] Each property access compiles to one of three forms, and the build prints the
+split (for example "1,204 free, 61 tested, 38 by name"): free is one load or store, tested is a
+shape test before the load, and by name is a run-time lookup through a cache.[^bun-aot-pr] A later
+pull request rewrote Bun's side of the compiler, which is experimental and also runs tests with
+`bun test --aot`.[^bun-aot-rewrite] In Bun's own numbers, the wins are start-up and short runs (the
+TypeScript 6 compiler from 14.00 s to 4.25 s, a CLI's first prompt from 318 ms to 141 ms) and the
+losses are long-running untyped code: idioms in a large program at 1.44 times a warm JIT's
+instructions, and Koa 22.9% slower once warm.
+
+**What ry has today.** Three pieces each cover part of what Bun's compiler does:
+
+| Piece | What it holds | When a type check fails |
+| --- | --- | --- |
+| Start image (`crates/heap/src/image.rs`, [architecture](/development/architecture/#the-start-up-image)) | Base R's heap after start-up, mapped in place. No machine code: the writer stores each closure body's source in place of its compiled code, so a session compiles the base closures it calls | Not applicable |
+| Install-time code (`R/<package>.ryc`, [CLI reference](/reference/cli/#build-and-install)) | Machine code for a package's numeric functions, for the argument types annotations or constant defaults declare, otherwise for double, integer and logical scalars and vectors | The call runs in the interpreter |
+| Typed core (`crates/typed`) | Strict typed closures on native values, lowered and compiled at their first call | The call reruns in the interpreter |
+
+The start image skips running start-up code, not compiling it, and untyped code outside an
+installed package's numeric functions reaches the JIT at run time. The typed core has Bun's split
+between facts and predictions: inside typed code a type is a fact, and an R value is checked and
+converted once where it enters. ry's boundary is stricter, because an R list never becomes a record
+without `as.record()` (`decisions.md`). Both compiled paths fall back to the interpreter where Bun
+runs a compiled slow second version of the function.
+
+**Ideas for ry,** not decisions (the adopted ones are listed above):
+
+- **Extend the install-time compiler to typed ry**, first by compiling strict typed closures and
+  the typed standard library at install or build time instead of at their first call, then by
+  building a whole typed script ahead of time. Strict typed code has no `eval` and a closed set of
+  values, which is what Bun's flow analysis needs, and untyped R stays on the JIT.
+- **A slow second version instead of the interpreter.** A compiled copy that takes the failing
+  argument as a plain R value would keep the call native without discarding code.
+- **A free, tested and by-name split** in `ry install --explain`, which today lists entry tests and
+  looked-up names per specialization but gives no program-wide count.
 
 ## Production JITs: JavaScriptCore, LuaJIT and V8
 
@@ -1048,6 +1099,7 @@ footnote also carries the source's link.
 
 [^bun-aot]: Bun documentation: the ahead-of-time compiler, and its internals page, <https://bun.sh/docs/compiler/aot>, <https://bun.sh/docs/compiler/internals>
 [^bun-aot-pr]: Bun pull request 45631, "Compile TypeScript to machine code ahead of time: `bun build --compile --aot`", <https://github.com/oven-sh/bun/pull/45631>
+[^bun-aot-rewrite]: Bun pull request 48120, "AOT: the next base", <https://github.com/oven-sh/bun/pull/48120>
 [^okf]: Open Knowledge Format v0.2, <https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md>
 [^roc]: Roc repository: docs/langref, design.md, design/lambda-set-specialization.md, <https://github.com/roc-lang/roc>
 [^perceus]: Reinking, Xie, de Moura and Leijen: Perceus, Garbage Free Reference Counting with Reuse, <https://www.microsoft.com/en-us/research/wp-content/uploads/2020/11/perceus-tr-v4.pdf>
