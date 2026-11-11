@@ -1081,7 +1081,6 @@ calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 - On testthat_full, tier 0's per-call setup and lookups (`run_at`, `fast_guard`, `grow_registers`, `fast_get_fun`, `fast_get_var`, `run_get_var`, `holding` and their slow paths) are about 9.6% of self instructions. `run_at` is about 167 instructions per call, mostly building `Activation` (about 20 stores, shared with the JIT) and the `Machine`. The register clear is about 16 of `grow_registers`' 57 and must stay.
 - Superinstructions (`decisions.md`, "Tier-0 superinstructions overwrite the first word of a pair") leave the instruction count flat: they remove dispatches, not work. Trimming `Activation` saves about 2 instructions per call (0.03%), because the fields the baseline JIT reads sit at fixed offsets.
 - Leaf code (a closure body that makes no call) could skip saving and restoring the environment flags and pushing and releasing the handle; that is the next per-call cut inside tier 0.
-- Guards that survive builtin calls need purity facts about builtins: a builtin known not to rebind any symbol would let one epoch proof cover the guards after it, and Guard is about 19% of dispatches. Repeats with no call in between are only about 2% of guards.
 - What remains beyond that is a thinner call path (the AOT track's call plans).
 
 An independent review profiled before it proposed. Every number below was taken on a 4-vCPU
