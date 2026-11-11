@@ -145,6 +145,9 @@ pub struct Runtime {
     /// entry, so its address cannot be reused by another object.
     pub truelengths: FxHashMap<Sexp, isize>,
     pub console: Console,
+    /// Sends every hot API function down its slow path, so a test can check that the direct
+    /// path and the slow path of each function leave the same results behind.
+    pub slow_paths_only: bool,
     running_finalizers: bool,
 }
 
@@ -228,6 +231,7 @@ impl Runtime {
             c_callables: FxHashMap::default(),
             truelengths: FxHashMap::default(),
             console: Box::new(boundary::default_console),
+            slow_paths_only: false,
             running_finalizers: false,
         };
         // SAFETY: the heap is fresh and collection is inhibited while the symbols are created.

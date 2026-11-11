@@ -60,11 +60,15 @@ unsafe fn do_c(call: &Call<'_>) -> R<Sexp> {
 
 /// `c(...)` of untagged arguments, none of which dispatches. When every argument is `NULL` or an
 /// atomic vector without attributes, no names can arise, so one pass sizes the result and a
-/// second copies the elements, without the naming walk.
+/// second copies the elements, without the naming walk. Lists without attributes likewise
+/// combine in one copy of their elements.
 unsafe fn direct_c(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
     let mut kind = SexpType::Nil;
     let mut total = 0;
     let mut plain = true;
+    // The element count when every argument is `NULL` or a list without attributes, which
+    // combine into one list of their elements.
+    let mut list_total = Some(0);
     for &value in args {
         if value.is_object() || is_native_value(value) {
             return Ok(None);
@@ -72,12 +76,29 @@ unsafe fn direct_c(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp>> {
         if value == nil() {
             continue;
         }
+        if value.kind() == SexpType::List && !value.is_altrep() && value.attrib() == nil() {
+            list_total = list_total.map(|count| count + length(value));
+            plain = false;
+            continue;
+        }
+        list_total = None;
         if !value.kind().is_atomic() || value.is_altrep() || value.attrib() != nil() {
             plain = false;
             continue;
         }
         kind = coerce::higher_type(kind, value.kind());
         total += length(value);
+    }
+    if let Some(total) = list_total.filter(|_| !plain) {
+        let heap = crate::heap();
+        let result = alloc(SexpType::List, total)?;
+        let mut position = 0;
+        for &value in args {
+            let count = length(value);
+            heap.copy_elements(result, position, value, 0, count);
+            position += count;
+        }
+        return Ok(Some(result));
     }
     if !plain {
         return combine_items(Items::Values(args), false, true).map(Some);

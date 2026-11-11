@@ -2947,9 +2947,9 @@ impl Compiler {
     }
 
     /// For `x[i]`, `x[[i]]` or `x$name` as an assignment target: its [`ElementKind`], the base
-    /// replacement function, and the index expression (`"name"` for `x$name`), when `x` is a
-    /// variable and `i` is a constant or a variable that is never a promise (so evaluating it
-    /// early is unobservable).
+    /// replacement function, and the index expressions (`"name"` for `x$name`), when `x` is a
+    /// variable and each subscript is one the compiler can evaluate into a register
+    /// ([`Self::lowerable_subscript`]).
     unsafe fn element_assignment_target(
         &mut self,
         target: Sexp,
@@ -2998,7 +2998,7 @@ impl Compiler {
         }
         if !subscripts
             .iter()
-            .all(|(_, index)| self.side_effect_free_index(*index, *variable, 0))
+            .all(|(_, index)| self.lowerable_subscript(*index, *variable))
         {
             return Ok(None);
         }
@@ -3052,7 +3052,7 @@ impl Compiler {
                         || (element && *value == missing_arg())
                         // A formal may itself be missing, which selects everything only
                         // when `[<-` sees the symbol, so it keeps the general assignment.
-                        || (self.side_effect_free_index(*value, *variable, 0)
+                        || (self.lowerable_subscript(*value, *variable)
                             && !(element && self.formals.contains(value))))
             })
         {
@@ -3087,6 +3087,12 @@ impl Compiler {
             self.allocate();
         }
         self.expression(args[1].1, base + count - 1)?;
+        self.read_target_first(
+            target.cdr().car(),
+            rest.iter()
+                .map(|(_, value)| *value)
+                .filter(|value| *value != missing_arg()),
+        )?;
         for (index, (_, value)) in rest.iter().enumerate() {
             let register = base + 1 + index as u32;
             if *value == missing_arg() {
@@ -3123,6 +3129,40 @@ impl Compiler {
         self.release_to(mark);
         self.cold_fallback(&[guard], call, dst)?;
         Ok(())
+    }
+
+    /// Reads `variable` into a scratch register when one of `subscripts` might observe or change
+    /// it, so the assignment reads it before evaluating them, as GNU R's does: an unbound
+    /// variable is the error, before anything a subscript prints or raises.
+    unsafe fn read_target_first(
+        &mut self,
+        variable: Sexp,
+        mut subscripts: impl Iterator<Item = Sexp>,
+    ) -> R<()> {
+        if subscripts.all(|subscript| self.side_effect_free_index(subscript, variable, 0)) {
+            return Ok(());
+        }
+        let mark = self.next_register;
+        let scratch = self.allocate();
+        self.expression(variable, scratch)?;
+        self.release_to(mark);
+        Ok(())
+    }
+
+    /// Whether the compiled assignment to `target` can take `index` as an argument it evaluates
+    /// into a register: anything but `...`, `..1` or an empty argument that assigns to `target`
+    /// nowhere in its code. Such an assignment rebinds the variable while the replacement holds
+    /// its old value, which [`eval::complex_assign`] handles by copying. The instruction that
+    /// takes the registers hands them to the replacement as forced promises, so nothing is
+    /// evaluated twice, and when `index` is not [side-effect free](Self::side_effect_free_index)
+    /// the compiled code reads `target` before it, as GNU R does.
+    unsafe fn lowerable_subscript(&self, index: Sexp, target: Sexp) -> bool {
+        let symbol = index.kind() == SexpType::Symbol;
+        !(symbol
+            && (index == symbols().dots
+                || index == missing_arg()
+                || eval::dot_dot_index(index).is_some()))
+            && !eval::assigns_to(index, target, symbols())
     }
 
     /// Whether evaluating the subscript `index` cannot change `target` or anything outside the
@@ -3228,6 +3268,7 @@ impl Compiler {
         let mark = self.next_register;
         let value = self.allocate();
         self.expression(args[1].1, value)?;
+        self.read_target_first(target.cdr().car(), subscripts.iter().copied())?;
         let mut registers: SmallVec<[u32; 2]> = SmallVec::new();
         for &subscript in subscripts {
             let register = self.allocate();
@@ -6406,13 +6447,28 @@ unsafe fn call_builtin_fast(state: &mut Activation<'_, '_>, at: usize) -> Option
     } else {
         return None;
     };
-    read_element_call(state, at, double)
+    read_element_call::<false>(state, at, double)
+}
+
+/// [`read_element_call`] of a character vector, reached only once the numeric kinds decline.
+#[cold]
+#[inline(never)]
+unsafe fn read_string_element_call(
+    state: &mut Activation<'_, '_>,
+    at: usize,
+    double: bool,
+) -> Option<usize> {
+    let subject = *state.registers.add(*state.code.add(at + 4) as usize);
+    if subject.kind() != SexpType::String {
+        return None;
+    }
+    read_element_call::<true>(state, at, double)
 }
 
 /// The rest of [`call_builtin_fast`] once the builtin is `[` (or `[[`, `double`). Out of line
 /// because its frame setup would otherwise run for every builtin call the handler declines.
 #[inline(never)]
-unsafe fn read_element_call(
+unsafe fn read_element_call<const STRING: bool>(
     state: &mut Activation<'_, '_>,
     at: usize,
     double: bool,
@@ -6422,8 +6478,21 @@ unsafe fn read_element_call(
     let heap = &mut *state.heap;
     let first = *code.add(at + 4) as usize;
     let subject = *registers.add(first);
-    let position =
-        element_access::element_position(heap, subject, *registers.add(first + 1), double)?;
+    let Some(position) = element_access::element_position::<STRING>(
+        heap,
+        subject,
+        *registers.add(first + 1),
+        double,
+    ) else {
+        // A tail call, and the subject's kind is tested only out of line: tested here, it joins
+        // the kind dispatch above, which then compiles to a jump table that the numeric read pays
+        // for.
+        return if STRING {
+            None
+        } else {
+            read_string_element_call(state, at, double)
+        };
+    };
     let known = *heap.known();
     let arguments = pool_constant(state, *code.add(at + 3) as usize).cdr();
     let second = arguments.cdr();
@@ -6436,7 +6505,7 @@ unsafe fn read_element_call(
     {
         return None;
     }
-    let value = element_access::element_value(heap, subject, position)?;
+    let value = element_access::element_value::<STRING>(heap, subject, position)?;
     state.record(at, value);
     *registers.add(*code.add(at + 1) as usize) = value;
     (*state.interp).visible = true;
@@ -9777,6 +9846,23 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
         1 => ElementKind::Double,
         _ => ElementKind::Dollar,
     };
+    let index = instruction.input(2);
+    let target = call.cdr().car();
+    // A symbol in the register is a formal left for lookup only when the subscript is that
+    // formal; any other symbol is a computed subscript, which `[<-` rejects.
+    if index.kind() == SexpType::Symbol && index != target.cdr().cdr().car() {
+        eval::complex_assign(
+            call,
+            target,
+            value,
+            state.env(Reify::Site("subassignment"))?,
+            false,
+            &evaluated_arguments(target, &[index])?,
+        )?;
+        instruction.output(0, value);
+        (*state.interp).visible = false;
+        return Ok(Flow::Next);
+    }
     if state.in_slots()
         && let Some(slot) = slot_at(state, instruction.operand(1))
         && let Some(index) = slot_subscript(state, instruction.input(2))
@@ -9793,7 +9879,7 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
         return Ok(Flow::Next);
     }
     let env = state.env(Reify::Site("subassignment"))?;
-    let done = match subscript_value(env, instruction.input(2))? {
+    let done = match subscript_value(env, index)? {
         Some(index) => {
             assign_element_in_place(env, variable, index, value, kind)?
                 || (kind == ElementKind::Single
@@ -9802,7 +9888,8 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
         None => false,
     };
     if !done {
-        eval::complex_assign(call, call.cdr().car(), value, env, false)?;
+        let evaluated = evaluated_arguments(target, &[index])?;
+        eval::complex_assign(call, target, value, env, false, &evaluated)?;
     }
     instruction.output(0, value);
     (*state.interp).visible = false;
@@ -9818,17 +9905,27 @@ unsafe fn op_sub_assign_matrix(
     let call = state.constant(instruction, 5);
     let value = instruction.input(4);
     let variable = state.constant(instruction, 1);
-    let done = match (
-        subscript_value(env, instruction.input(2))?,
-        subscript_value(env, instruction.input(3))?,
-    ) {
-        (Some(row), Some(column)) => {
-            assign_matrix_element_in_place(env, variable, row, column, value)?
-        }
-        _ => false,
-    };
+    let target = call.cdr().car();
+    let subscripts = [instruction.input(2), instruction.input(3)];
+    let codes = [target.cdr().cdr().car(), target.cdr().cdr().cdr().car()];
+    // As in `op_sub_assign`, a symbol other than the subscript's own is a computed one.
+    let lookups = subscripts
+        .iter()
+        .zip(codes)
+        .all(|(subscript, code)| subscript.kind() != SexpType::Symbol || *subscript == code);
+    let done = lookups
+        && match (
+            subscript_value(env, subscripts[0])?,
+            subscript_value(env, subscripts[1])?,
+        ) {
+            (Some(row), Some(column)) => {
+                assign_matrix_element_in_place(env, variable, row, column, value)?
+            }
+            _ => false,
+        };
     if !done {
-        eval::complex_assign(call, call.cdr().car(), value, env, false)?;
+        let evaluated = evaluated_arguments(target, &subscripts)?;
+        eval::complex_assign(call, target, value, env, false, &evaluated)?;
     }
     instruction.output(0, value);
     (*state.interp).visible = false;
@@ -9854,7 +9951,11 @@ unsafe fn op_replace(state: &mut Activation<'_, '_>, instruction: Instruction) -
     if !(state.in_slots() && replace(state, nil())?) {
         let env = state.env(Reify::Site("replacement call"))?;
         if !replace(state, env)? {
-            eval::complex_assign(whole, whole.cdr().car(), value, env, false)?;
+            let target = whole.cdr().car();
+            let subscripts =
+                std::slice::from_raw_parts(instruction.registers.add(first + 1), count - 2);
+            let evaluated = evaluated_arguments(target, subscripts)?;
+            eval::complex_assign(whole, target, value, env, false, &evaluated)?;
         }
     }
     instruction.output(0, value);
@@ -10007,8 +10108,14 @@ unsafe fn assign_element(
     let fits = match target.kind() {
         SexpType::List => kind != ElementKind::Single && value != nil(),
         SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::String => {
+            // A value of a lower atomic type converts to the target's, as `[<-` would.
+            let converts = matches!(
+                (target.kind(), value.kind()),
+                (SexpType::Real, SexpType::Integer | SexpType::Logical)
+                    | (SexpType::Integer, SexpType::Logical)
+            );
             kind != ElementKind::Dollar
-                && value.kind() == target.kind()
+                && (value.kind() == target.kind() || converts)
                 && length(value) == 1
                 && !value.is_altrep()
                 && !values::has_attributes(value)
@@ -10048,6 +10155,26 @@ unsafe fn assign_element(
                     {
                         return Ok(None);
                     }
+                    // `append_named` copies the value's payload, so a lower type converts
+                    // to the target's first.
+                    let value = match (target.kind(), value.kind()) {
+                        (SexpType::Real, SexpType::Integer | SexpType::Logical) => {
+                            let integer = value.slice::<i32>()[0];
+                            let converted = values::scalar_real(if integer == NA_INTEGER {
+                                NA_REAL
+                            } else {
+                                f64::from(integer)
+                            })?;
+                            heap.root(converted);
+                            converted
+                        }
+                        (SexpType::Integer, SexpType::Logical) => {
+                            let converted = values::scalar_integer(value.slice::<i32>()[0])?;
+                            heap.root(converted);
+                            converted
+                        }
+                        _ => value,
+                    };
                     moves::modifying(target)?;
                     let reuse = owned(target);
                     return crate::subset::append_named(target, wanted, value, reuse).map(Some);
@@ -10061,12 +10188,10 @@ unsafe fn assign_element(
         _ => return Ok(None),
     };
     let count = length(target);
-    // Assigning one past the end appends, which a vector without attributes that a previous
-    // growth left room in (see `subset::grow`) does in place.
-    let appends = position == count as f64 + 1.0
-        && heap.is_resizable(target)
-        && target.capacity() > count as isize
-        && target.attrib() == nil();
+    // Assigning one past the end of a vector without attributes appends, in place where a
+    // previous growth left room, and otherwise into a vector with room to grow, so repeated
+    // appends are amortized (see `subset::grow`).
+    let appends = position == count as f64 + 1.0 && target.attrib() == nil();
     // NaN fails both comparisons, and `x[[2.7]]` truncates to the second element.
     if !appends && !(position >= 1.0 && position < count as f64 + 1.0) {
         return Ok(None);
@@ -10076,27 +10201,64 @@ unsafe fn assign_element(
     // Otherwise the replacement function would change a shallow copy and bind it, which this
     // does without building the call.
     moves::modifying(target)?;
-    let target = if owned(target) {
+    let owned = owned(target);
+    let target = if appends {
+        // Of `subset::grows_in_place`'s tests, `owned` settles sharing and `appends` the
+        // attributes, and an ALTREP vector is never resizable, so only the room is left.
+        if owned && heap.is_resizable(target) && target.capacity() > count as isize {
+            heap.resize_vector(target, count as isize + 1)?;
+            target
+        } else {
+            crate::subset::append_copy(target, owned)?
+        }
+    } else if owned {
         target
-    } else if appends {
-        return Ok(None);
     } else {
         let copy = values::shallow_duplicate(target)?;
         heap.root(copy);
         copy
     };
-    if appends {
-        heap.resize_vector(target, count as isize + 1)?;
-    }
-    match target.kind() {
-        SexpType::Real => values::reals_mut(target)[position] = value.slice::<f64>()[0],
-        SexpType::Integer | SexpType::Logical => {
+    match (target.kind(), value.kind()) {
+        (SexpType::Real, SexpType::Real) => {
+            values::reals_mut(target)[position] = value.slice::<f64>()[0]
+        }
+        (SexpType::Real, _) => {
+            let integer = value.slice::<i32>()[0];
+            values::reals_mut(target)[position] = if integer == NA_INTEGER {
+                NA_REAL
+            } else {
+                f64::from(integer)
+            };
+        }
+        (SexpType::Integer | SexpType::Logical, _) => {
             values::ints_mut(target)[position] = value.slice::<i32>()[0]
         }
-        SexpType::String => heap.set_element(target, position, value.element(0)),
+        (SexpType::String, _) => heap.set_element(target, position, value.element(0)),
         _ => heap.set_element(target, position, value),
     }
     Ok(Some(target))
+}
+
+/// The arguments after the variable of the one-level assignment target `target`, as compiled
+/// code evaluated them into `registers`, for [`eval::complex_assign`]: each a forced promise of
+/// the argument's code, or the code itself where the register holds it (a formal left for
+/// lookup, an empty argument or a constant), so no argument is evaluated a second time.
+unsafe fn evaluated_arguments(target: Sexp, registers: &[Sexp]) -> R<SmallVec<[Sexp; 4]>> {
+    let heap = crate::heap();
+    let mut arguments = SmallVec::new();
+    let mut rest = target.cdr().cdr();
+    for &register in registers {
+        let code = rest.car();
+        arguments.push(if register == code {
+            code
+        } else {
+            let promise = eval::forced_promise(code, register)?;
+            heap.root(promise);
+            promise
+        });
+        rest = rest.cdr();
+    }
+    Ok(arguments)
 }
 
 /// The value of a compiled assignment's subscript register. A register holding a symbol holds a

@@ -408,9 +408,16 @@ fn fuzz_native_code_reads_closures_over_slot_frames() {
     let r = r_with_base();
     rytest(&r);
     let parsed = r
-        .eval("parse", &[(Some("text"), r.string("closure_case_call <- function(f) f()"))])
+        .eval(
+            "parse",
+            &[(
+                Some("text"),
+                r.string("closure_case_call <- function(f) f()"),
+            )],
+        )
         .expect("the helper parses");
-    r.eval("eval", &[(None, parsed)]).expect("the helper defines");
+    r.eval("eval", &[(None, parsed)])
+        .expect("the helper defines");
     for_each_seed(80, |seed| {
         let mut rng = SplitMix64(0xc105e ^ seed);
         let mark = r.protected.get();
@@ -460,7 +467,9 @@ fn fuzz_native_code_reads_closures_over_slot_frames() {
                 assert_eq!(r.type_of(value), 0, "seed {seed}, round {round}\n{source}");
             }
             if keep {
-                let called = r.call("rytest_run_callback", &[]).expect("the callback runs");
+                let called = r
+                    .call("rytest_run_callback", &[])
+                    .expect("the callback runs");
                 assert_eq!(
                     r.integers(called),
                     vec![final_value],

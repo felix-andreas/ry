@@ -20,25 +20,28 @@ use {
 };
 
 /// The zero-based position of the element `x[i]` or `x[[i]]` (`double`) reads, for tier 0's
-/// handler of a call to the base primitive: `x` is a double, integer, logical or character
-/// vector (or for `[[` a list) that is not an object, an array or ALTREP, and has no attributes for `[`, and
-/// `i` is a plain numeric scalar within bounds or, for `[[`, an existing ASCII name. `None` for
-/// anything else, so the builtin runs. The subscript is checked before the subject's flags
-/// because a subscript the handler does not take (a negative or vector one) is the common
-/// reason to decline.
+/// handler of a call to the base primitive: `x` is a double, integer or logical vector (or for
+/// `[[` a list), or with `STRING` a character vector, that is not an object, an array or ALTREP,
+/// and has no attributes for `[`, and `i` is a plain numeric scalar within bounds or, for `[[`,
+/// an existing ASCII name. `None` for anything else, so the builtin runs. The subscript is
+/// checked before the subject's flags because a subscript the handler does not take (a negative
+/// or vector one) is the common reason to decline. Character vectors take a separate
+/// instantiation so that the numeric reads, which dominate, carry no code for them.
 #[inline(always)]
-pub(crate) unsafe fn element_position(
+pub(crate) unsafe fn element_position<const STRING: bool>(
     heap: &Heap,
     subject: Sexp,
     index: Sexp,
     double: bool,
 ) -> Option<usize> {
     let kind = subject.kind();
-    if !matches!(
-        kind,
-        SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::String | SexpType::List
-    ) || (kind == SexpType::List && !double)
-    {
+    let taken = if STRING {
+        kind == SexpType::String
+    } else {
+        matches!(kind, SexpType::Real | SexpType::Integer | SexpType::Logical)
+            || (kind == SexpType::List && double)
+    };
+    if !taken {
         return None;
     }
     let position = if index.kind() == SexpType::String {
@@ -63,16 +66,18 @@ pub(crate) unsafe fn element_position(
 /// or a number or string as a fresh scalar from the young generation, `None` when that
 /// allocation needs a collection.
 #[inline(always)]
-pub(crate) unsafe fn element_value(
+pub(crate) unsafe fn element_value<const STRING: bool>(
     heap: &mut Heap,
     subject: Sexp,
     position: usize,
 ) -> Option<Sexp> {
     let kind = subject.kind();
     let data = subject.data();
+    if STRING {
+        return string_scalar(heap, *data.cast::<Sexp>().add(position));
+    }
     match kind {
         SexpType::List => Some(*data.cast::<Sexp>().add(position)),
-        SexpType::String => string_scalar(heap, *data.cast::<Sexp>().add(position)),
         SexpType::Real => {
             let bits = (*data.cast::<f64>().add(position)).to_bits();
             heap.try_alloc_scalar(kind, [bits, 0])
