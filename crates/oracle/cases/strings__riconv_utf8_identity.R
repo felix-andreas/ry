@@ -7,8 +7,8 @@ writeLines(c(
   "#include <errno.h>",
   "#include <Rinternals.h>",
   "#include <R_ext/Riconv.h>",
-  "SEXP riconv_probe(SEXP from, SEXP input, SEXP capacity) {",
-  "  void *converter = Riconv_open(\"UTF-8\", CHAR(STRING_ELT(from, 0)));",
+  "SEXP riconv_probe(SEXP to, SEXP from, SEXP input, SEXP capacity) {",
+  "  void *converter = Riconv_open(CHAR(STRING_ELT(to, 0)), CHAR(STRING_ELT(from, 0)));",
   "  size_t room = (size_t) INTEGER(capacity)[0], input_left = (size_t) XLENGTH(input), output_left = room;",
   "  char buffer[256];",
   "  const char *in = (const char *) RAW(input);",
@@ -33,8 +33,8 @@ status <- system2(file.path(R.home("bin"), "R"), c("CMD", "SHLIB", shQuote(sourc
 print(status)
 library_file <- sub("\\.c$", .Platform$dynlib.ext, source_file)
 dll <- dyn.load(library_file)
-probe <- function(bytes, capacity, from = "UTF-8") {
-  result <- .Call(getNativeSymbolInfo("riconv_probe", dll), from, as.raw(bytes), as.integer(capacity))
+probe <- function(bytes, capacity, from = "UTF-8", to = "UTF-8") {
+  result <- .Call(getNativeSymbolInfo("riconv_probe", dll), to, from, as.raw(bytes), as.integer(capacity))
   cat(sprintf("%-6s used %2d wrote %2d: %s\n", result[[1]], result[[2]], result[[3]],
               paste(format(result[[4]]), collapse = " ")))
 }
@@ -57,4 +57,10 @@ probe(c(charToRaw("ab"), 0xf4, 0x90, 0x80, 0x80, charToRaw("z")), 64)
 probe(c(charToRaw("ab"), 0xf8, 0x88, 0x80, 0x80, 0x80, charToRaw("z")), 64)
 probe(c(0xef, 0xbb, 0xbf, charToRaw("bom")), 64)
 probe(raw(0), 8)
+# Another encoding on either side converts through iconv.
+probe(c(charToRaw("caf"), 0xe9), 64, from = "latin1")
+probe(text, 64, to = "latin1")
+probe(c(charToRaw("ab"), 0xe2, 0x82, 0xac), 64, to = "latin1")
+probe(text, 64, to = "UTF-16LE")
+probe(c(charToRaw("ab"), 0xff), 64, from = "UTF-8", to = "UTF-16LE")
 dyn.unload(library_file)
