@@ -15,6 +15,7 @@ pub mod backend;
 pub mod ir;
 pub mod lower;
 pub mod ownership;
+pub mod shapes;
 pub mod values;
 
 use {
@@ -22,25 +23,32 @@ use {
         backend::{Callee, Code, Trampoline},
         ir::{Item, Type},
         lower::{Callees, Speculation},
-        values::{List, Str},
+        values::{Boxed, List, Str},
     },
     heap::{
-        object::{Sexp, SexpType, gp},
+        object::{INTEGER_PREFIX, LOGICAL_PREFIX, Sexp, SexpType, Slot, gp},
+        records::NativeKind,
         strings::Encoding,
     },
     interp::{unwind::Unwind, values as rvalues},
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
-    std::cell::RefCell,
+    std::{borrow::Cow, cell::RefCell},
 };
 
 /// Why a closure does not compile, for the log.
-#[derive(Clone, Copy, Debug)]
-pub struct Refusal(pub &'static str);
+#[derive(Clone, Debug)]
+pub struct Refusal(pub Cow<'static, str>);
+
+impl Refusal {
+    pub const fn new(why: &'static str) -> Self {
+        Refusal(Cow::Borrowed(why))
+    }
+}
 
 impl From<ssa::Error> for Refusal {
     fn from(error: ssa::Error) -> Self {
-        Refusal(error.0)
+        Refusal::new(error.0)
     }
 }
 
@@ -51,6 +59,9 @@ pub struct Compiled {
     pub result: Type,
     /// The function lookups this code and every function it calls assume.
     pub speculations: Vec<Speculation>,
+    /// The [`shapes::epoch`] whose confirmed shapes a `match` over any tag in this code, or in a
+    /// function it calls, tests for. The code is stale once more shapes are confirmed.
+    pub epoch: Option<u64>,
 }
 
 type Key = (Sexp, SmallVec<[Type; 4]>);
@@ -72,7 +83,13 @@ const MAX_REFUSALS: usize = 65536;
 
 /// The types a recursive call's result is first assumed to have, when the closure declares
 /// none. Each lowering that finds a different result type retries with the one it found.
-const GUESSES: [Type; 4] = [Type::Dbl, Type::Int, Type::Lgl, Type::Str];
+const GUESSES: [Type; 5] = [
+    Type::Dbl,
+    Type::Int,
+    Type::Lgl,
+    Type::Str,
+    Type::Tag(shapes::ANY),
+];
 
 /// How often a recursive closure's lowering may revise its result type.
 const MAX_REVISIONS: usize = 3;
@@ -96,27 +113,41 @@ pub unsafe fn call(function: Sexp, values: &[Sexp]) -> Option<Result<Sexp, Unwin
             params.push(Type::I64);
             continue;
         }
-        let ty = type_of(value)?;
+        let Some(ty) = type_of(value) else {
+            log_once(&format!(
+                "typed: no code for argument {}: {}",
+                position + 1,
+                boundary_refusal(value)
+            ));
+            return None;
+        };
         // A length-one vector passed where the closure declares a vector is that vector, not a
         // scalar.
         let ty = match ty.item() {
-            Some(item) if interp::annotations::declares_vector(function, position) => {
+            Some(item @ (Item::Int | Item::Dbl | Item::Lgl | Item::Str | Item::I64))
+                if interp::annotations::declares_vector(function, position) =>
+            {
                 Type::vector(item)
             }
             _ => ty,
         };
         params.push(ty);
     }
-    let compiled = compiled_for(function, &params)?;
-    if matches!(compiled.result, Type::Dict { .. }) {
-        return None;
-    }
+    // Converting a tag confirms its shapes, which the code compiled next must consider.
     let mut arguments = Arguments::default();
     for (&value, &ty) in values.iter().zip(&params) {
         if !arguments.push(value, ty) {
             arguments.release();
             return None;
         }
+    }
+    let Some(compiled) = compiled_for(function, &params) else {
+        arguments.release();
+        return None;
+    };
+    if matches!(compiled.result, Type::Dict { .. }) {
+        arguments.release();
+        return None;
     }
     let heap = interp::heap();
     let mark = heap.handle_mark();
@@ -141,8 +172,11 @@ pub unsafe fn call(function: Sexp, values: &[Sexp]) -> Option<Result<Sexp, Unwin
 pub unsafe fn compiled_for(function: Sexp, params: &[Type]) -> Option<&'static Compiled> {
     let key: Key = (function, SmallVec::from_slice(params));
     match COMPILED.with_borrow(|compiled| compiled.get(&key).copied()) {
-        // A function the code calls was rebound since it compiled: compile it again.
-        Some(Some(compiled)) if !still_resolves(compiled) => {}
+        // A function the code calls was rebound since it compiled, or a `match` over any tag
+        // misses shapes confirmed since: compile it again.
+        Some(Some(compiled))
+            if !still_resolves(compiled)
+                || compiled.epoch.is_some_and(|epoch| epoch != shapes::epoch()) => {}
         Some(found) => return found,
         None => {}
     }
@@ -200,14 +234,30 @@ unsafe fn still_resolves(compiled: &Compiled) -> bool {
     })
 }
 
+/// Compiles `function` for `params` until the code is current. Compiled code confirms the tag
+/// shapes it constructs, and a `match` over any tag compiled before them, in this code or in a
+/// function it calls, would not test for them.
 unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> {
+    for _ in 0..MAX_SHAPE_ROUNDS {
+        let compiled = compile_once(function, params)?;
+        if compiled.epoch.is_none_or(|epoch| epoch == shapes::epoch()) {
+            return Ok(compiled);
+        }
+    }
+    Err(Refusal::new("the shapes a `match` tests for keep growing"))
+}
+
+/// How many times [`compile`] tries before the shapes settle.
+const MAX_SHAPE_ROUNDS: usize = 4;
+
+unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> {
     let declared = if interp::annotations::returns_i64(function) {
         Some(Type::I64)
     } else {
         interp::annotations::declared_return_type(function).and_then(declared_type)
     };
     let guesses: SmallVec<[Type; 5]> = declared.into_iter().chain(GUESSES).collect();
-    let mut refusal = Refusal("the result type depends on the recursion");
+    let mut refusal = Refusal::new("the result type depends on the recursion");
     let mut found = None;
     'guesses: for &first in &guesses {
         let mut guess = first;
@@ -233,18 +283,30 @@ unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> 
     let arguments: SmallVec<[Option<(SexpType, bool)>; 4]> =
         params.iter().map(|&ty| storage(ty)).collect();
     if !interp::annotations::admits_storage(function, &arguments, storage(ir.result)) {
-        return Err(Refusal("the types fail the closure's annotations"));
+        return Err(Refusal::new("the types fail the closure's annotations"));
     }
     ownership::insert(&mut ir);
     let code = backend::compile(&ir, &linker.callees)?;
     let mut speculations = lowered.speculations;
     speculations.extend(linker.speculations);
+    for &shape in &lowered.constructed {
+        shapes::confirm(shape);
+    }
+    let epoch = earliest(lowered.epoch, linker.epoch);
     Ok(Compiled {
         code,
         params: SmallVec::from_slice(params),
         result: ir.result,
         speculations,
+        epoch,
     })
+}
+
+fn earliest(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Whether the function calls itself, so its result type is an assumption until confirmed.
@@ -262,15 +324,17 @@ fn calls_itself(function: &ir::Function) -> bool {
 struct Linker {
     callees: Vec<Callee>,
     speculations: Vec<Speculation>,
+    epoch: Option<u64>,
 }
 
 impl Callees for Linker {
     unsafe fn callee(&mut self, function: Sexp, params: &[Type]) -> Result<(usize, Type), Refusal> {
         let compiled = compiled_for(function, params)
-            .ok_or(Refusal("a typed function it calls does not compile"))?;
+            .ok_or(Refusal::new("a typed function it calls does not compile"))?;
         // Code that calls another function directly is only right while that function's own
         // lookups hold.
         self.speculations.extend_from_slice(&compiled.speculations);
+        self.epoch = earliest(self.epoch, compiled.epoch);
         self.callees.push(Callee {
             address: compiled.code.address,
             params: SmallVec::from_slice(params),
@@ -305,6 +369,7 @@ fn storage(ty: Type) -> Option<(SexpType, bool)> {
         Type::Null => (SexpType::Nil, false),
         Type::Vector { item, array } => (item_storage(item), array),
         Type::List(_) => (SexpType::List, false),
+        Type::Record(_) | Type::Tag(_) => (SexpType::Record, false),
         Type::Dict { .. } => return None,
     })
 }
@@ -316,6 +381,8 @@ fn item_storage(item: Item) -> SexpType {
         Item::Lgl => SexpType::Logical,
         Item::Str => SexpType::String,
         Item::I64 => SexpType::I64,
+        // A ry list of records or tags is an R list of them.
+        Item::Record(_) | Item::Tag(_) => SexpType::List,
     }
 }
 
@@ -326,15 +393,21 @@ fn item_kind(item: Item) -> u32 {
         Item::Lgl => values::LGL,
         Item::Str => values::STR,
         Item::I64 => values::I64,
+        Item::Record(_) | Item::Tag(_) => values::OBJECT,
     })
 }
 
 /// The typed core's type for an R value, or `None` when it has none: a length-one plain vector
-/// is a scalar, a longer or empty one a vector, an `Array` an array, and a plain list of
-/// length-one strings, numbers or logicals of one storage type a list of them.
+/// is a scalar, a longer or empty one a vector, an `Array` an array, a plain list of length-one
+/// strings, numbers or logicals of one storage type a list of them, and a plain tag any tag.
+/// A record or tuple has none, because a typed closure takes one only from typed code.
 unsafe fn type_of(value: Sexp) -> Option<Type> {
     if value.is_altrep() || value.attrib() != rvalues::nil() {
         return None;
+    }
+    if value.kind() == SexpType::Record {
+        return (!value.is_object() && interp::records::native_kind(value) == NativeKind::Tag)
+            .then_some(Type::Tag(shapes::ANY));
     }
     let array = value.is_array();
     let length = rvalues::length(value);
@@ -358,12 +431,47 @@ unsafe fn type_of(value: Sexp) -> Option<Type> {
     Some(Type::Vector { item, array })
 }
 
+/// Why an argument from R has no type in the typed core, and what to pass instead.
+unsafe fn boundary_refusal(value: Sexp) -> String {
+    if value.kind() == SexpType::Record {
+        return String::from(
+            "it is a record or tuple from R, which typed code takes only from typed code: pass \
+             its fields as parameters, or build it inside a typed function",
+        );
+    }
+    if value.attrib() != rvalues::nil() {
+        return String::from(
+            "it is an R value with attributes, such as a data frame or a factor, which typed code \
+             cannot hold: pass its columns or plain vectors",
+        );
+    }
+    format!(
+        "it is an R value of type `{}` that typed code cannot hold, such as a list of mixed \
+         types, an `NA` string or a non-UTF-8 string",
+        value.kind().name()
+    )
+}
+
+/// Writes `line` to standard error under `RY_TYPED_LOG`, once per session.
+fn log_once(line: &str) {
+    thread_local! {
+        static LOGGED: RefCell<FxHashSet<String>> = RefCell::new(FxHashSet::default());
+    }
+    if interp::annotations::typed_logging()
+        && LOGGED.with_borrow_mut(|logged| logged.insert(line.to_owned()))
+    {
+        eprintln!("{line}");
+    }
+}
+
 unsafe fn list_type(value: Sexp, length: usize) -> Option<Type> {
     let mut item = None;
     for index in 0..length {
         let element = value.element(index);
         let ty = type_of(element)?;
-        let found = ty.item().filter(|_| ty != Type::Bool)?;
+        let found = ty
+            .item()
+            .filter(|item| ty != Type::Bool && !matches!(item, Item::Record(_)))?;
         if item.is_some_and(|item| item != found) {
             return None;
         }
@@ -385,6 +493,7 @@ unsafe fn usable_string(charsxp: Sexp) -> bool {
 struct Arguments {
     words: SmallVec<[u64; 8]>,
     views: SmallVec<[*mut List; 4]>,
+    /// Lists and boxes, which both drop through [`values::ry_list_drop`].
     lists: SmallVec<[*mut List; 4]>,
     strings: SmallVec<[Str; 4]>,
 }
@@ -438,6 +547,9 @@ impl Arguments {
                 if list.is_null() {
                     return false;
                 }
+                // The list owns each item as soon as it is written, so dropping the list drops
+                // the items written before a failure, and the rest are null.
+                self.lists.push(list);
                 for index in 0..length {
                     let element = value.element(index);
                     let slot = (*list).data;
@@ -448,12 +560,24 @@ impl Arguments {
                         Item::Dbl => *(slot as *mut f64).add(index) = rvalues::reals(element)[0],
                         Item::I64 => *(slot as *mut i64).add(index) = element.slice::<i64>()[0],
                         Item::Str => *(slot as *mut Str).add(index) = str_of(element.element(0)),
+                        Item::Record(_) | Item::Tag(_) => {
+                            let Some((boxed, _)) = to_box(element) else {
+                                return false;
+                            };
+                            *(slot as *mut u64).add(index) = boxed;
+                        }
                     }
                 }
-                self.lists.push(list);
                 self.words.push(list as u64);
             }
-            Type::Bool | Type::Null | Type::Dict { .. } => return false,
+            Type::Tag(_) => {
+                let Some((boxed, _)) = to_box(value) else {
+                    return false;
+                };
+                self.lists.push(boxed as *mut List);
+                self.words.push(boxed);
+            }
+            Type::Bool | Type::Null | Type::Dict { .. } | Type::Record(_) => return false,
         }
         true
     }
@@ -493,6 +617,158 @@ unsafe fn string_list(value: Sexp) -> *mut List {
     list
 }
 
+/// A new box holding the plain record, tuple or tag `value` and, deeply, every such value in its
+/// fields, with its item type. `None` when a field holds a value no box can (a vector, a
+/// classed value, an `NA` string) or the fields take more words than a box holds. Every shape
+/// the conversion meets is confirmed, since a value of it now exists.
+unsafe fn to_box(value: Sexp) -> Option<(u64, Item)> {
+    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || to_box_inner(value))
+}
+
+/// Stack space a conversion leaves before it grows the stack, and how much it adds, since a
+/// deep tree recurses once per level.
+const STACK_RED_ZONE: usize = 64 * 1024;
+const STACK_GROWTH: usize = 1024 * 1024;
+
+unsafe fn to_box_inner(value: Sexp) -> Option<(u64, Item)> {
+    if value.kind() != SexpType::Record || value.is_object() || value.attrib() != rvalues::nil() {
+        return None;
+    }
+    let layout = value.record_layout();
+    let kind = interp::records::native_kind(value);
+    if matches!(kind, NativeKind::Dict | NativeKind::Set) {
+        return None;
+    }
+    let tagged = kind == NativeKind::Tag;
+    let mut items: SmallVec<[Item; 4]> = SmallVec::new();
+    let mut words: SmallVec<[[u64; 2]; 4]> = SmallVec::new();
+    let release = |items: &[Item], words: &[[u64; 2]]| {
+        for (&item, word) in items.iter().zip(words) {
+            match item {
+                Item::Str => values::ry_str_drop(word[0], word[1]),
+                Item::Record(_) | Item::Tag(_) => values::ry_list_drop(word[0] as *mut List),
+                _ => {}
+            }
+        }
+    };
+    for index in 0..value.record_slot_count() {
+        let (item, word) = match value.record_slot(index) {
+            Slot::Real(number) => (Item::Dbl, [number.to_bits(), 0]),
+            Slot::Integer(number) => (Item::Int, [number as u32 as u64, 0]),
+            Slot::Logical(number) => (Item::Lgl, [number as u32 as u64, 0]),
+            Slot::Handle(field) => match field_word(field) {
+                Some(found) => found,
+                None => {
+                    release(&items, &words);
+                    return None;
+                }
+            },
+        };
+        items.push(item);
+        words.push(word);
+    }
+    let Some(shape) = shapes::intern(layout, &items) else {
+        release(&items, &words);
+        return None;
+    };
+    if tagged {
+        shapes::confirm(shape);
+    }
+    let item = if tagged {
+        Item::Tag(shapes::ANY)
+    } else {
+        Item::Record(shape)
+    };
+    let description = shapes::shape(shape);
+    if description.words == 0 {
+        return Some((shapes::constant(shape), item));
+    }
+    let boxed = values::ry_box_new(
+        shape,
+        description.objects,
+        description.strings,
+        description.words,
+    );
+    for ((&field, word), &offset) in description
+        .fields
+        .iter()
+        .zip(&words)
+        .zip(&description.offsets)
+    {
+        let at = boxed.add(values::BOX_FIELDS + 8 * offset as usize) as *mut u64;
+        *at = word[0];
+        if field == Item::Str {
+            *at.add(1) = word[1];
+        }
+    }
+    Some((boxed as u64, item))
+}
+
+/// A record field that is a handle as a box field: a plain scalar, a usable string, an `I64`,
+/// or a record, tuple or tag, converted deeply.
+unsafe fn field_word(field: Sexp) -> Option<(Item, [u64; 2])> {
+    if field.kind() == SexpType::Record {
+        let (boxed, item) = to_box_inner(field)?;
+        return Some((item, [boxed, 0]));
+    }
+    match type_of(field)? {
+        Type::Int => Some((Item::Int, [rvalues::ints(field)[0] as u32 as u64, 0])),
+        Type::Lgl => Some((Item::Lgl, [rvalues::ints(field)[0] as u32 as u64, 0])),
+        Type::Dbl => Some((Item::Dbl, [rvalues::reals(field)[0].to_bits(), 0])),
+        Type::I64 => Some((Item::I64, [field.slice::<i64>()[0] as u64, 0])),
+        Type::Str => {
+            let string = str_of(field.element(0));
+            Some((Item::Str, [string.lo, string.hi]))
+        }
+        _ => None,
+    }
+}
+
+/// The R value of the box `boxed`, deeply: a record, tuple or tag of the box's layout.
+unsafe fn from_box(boxed: u64) -> Result<Sexp, Unwind> {
+    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || from_box_inner(boxed))
+}
+
+unsafe fn from_box_inner(boxed: u64) -> Result<Sexp, Unwind> {
+    let pointer = boxed as *const u8;
+    let shape = shapes::shape((*(pointer as *const Boxed)).shape);
+    let mut slots: SmallVec<[Slot; 4]> = SmallVec::new();
+    for (&item, &offset) in shape.fields.iter().zip(&shape.offsets) {
+        let at = pointer.add(values::BOX_FIELDS + 8 * offset as usize) as *const u64;
+        let word = *at;
+        slots.push(match item {
+            Item::Int => Slot::Integer(word as u32 as i32),
+            Item::Lgl => Slot::Logical(word as u32 as i32),
+            Item::Dbl => {
+                // A double whose upper word is a raw slot's prefix is stored boxed.
+                let upper = (word >> 32) as u32;
+                if upper == INTEGER_PREFIX || upper == LOGICAL_PREFIX {
+                    Slot::Handle(rvalues::scalar_real(f64::from_bits(word))?)
+                } else {
+                    Slot::Real(f64::from_bits(word))
+                }
+            }
+            Item::I64 => Slot::Handle(interp::numbers::alloc(word as i64)?),
+            Item::Str => Slot::Handle(string_vector(Str {
+                lo: word,
+                hi: *at.add(1),
+            })?),
+            Item::Record(_) | Item::Tag(_) => Slot::Handle(from_box_inner(word)?),
+        });
+    }
+    let heap = interp::heap();
+    let record = heap.alloc_record_slots(shape.layout, &slots)?;
+    heap.root(record);
+    Ok(record)
+}
+
+/// A rooted character vector holding `string`.
+unsafe fn string_vector(string: Str) -> Result<Sexp, Unwind> {
+    let vector = rvalues::alloc(SexpType::String, 1)?;
+    interp::heap().set_element(vector, 0, charsxp_of(string)?);
+    Ok(vector)
+}
+
 /// The R value of the native value whose words are `out`, which stays owned by the caller.
 unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
     let word = out[0];
@@ -502,15 +778,11 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
         Type::Dbl => rvalues::scalar_real(f64::from_bits(word)),
         Type::I64 => interp::numbers::alloc(word as i64),
         Type::Null => Ok(rvalues::nil()),
-        Type::Str => {
-            let string = Str {
-                lo: out[0],
-                hi: out[1],
-            };
-            let vector = rvalues::alloc(SexpType::String, 1)?;
-            interp::heap().set_element(vector, 0, charsxp_of(string)?);
-            Ok(vector)
-        }
+        Type::Str => string_vector(Str {
+            lo: out[0],
+            hi: out[1],
+        }),
+        Type::Record(_) | Type::Tag(_) => from_box(word),
         Type::Vector { item, array } => {
             let list = word as *mut List;
             let length = (*list).length as usize;
@@ -535,6 +807,12 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
                         interp::heap().set_element(vector, index, charsxp_of(string)?);
                     }
                 }
+                Item::Record(_) | Item::Tag(_) => {
+                    let items = std::slice::from_raw_parts(data as *const u64, length);
+                    for (index, &boxed) in items.iter().enumerate() {
+                        interp::heap().set_element(vector, index, from_box(boxed)?);
+                    }
+                }
             }
             vector.set_array(array);
             Ok(vector)
@@ -550,15 +828,8 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
                     Item::Lgl => rvalues::scalar_logical(*(data as *const i32).add(index))?,
                     Item::Dbl => rvalues::scalar_real(*(data as *const f64).add(index))?,
                     Item::I64 => interp::numbers::alloc(*(data as *const i64).add(index))?,
-                    Item::Str => {
-                        let string = rvalues::alloc(SexpType::String, 1)?;
-                        interp::heap().set_element(
-                            string,
-                            0,
-                            charsxp_of(*(data as *const Str).add(index))?,
-                        );
-                        string
-                    }
+                    Item::Str => string_vector(*(data as *const Str).add(index))?,
+                    Item::Record(_) | Item::Tag(_) => from_box(*(data as *const u64).add(index))?,
                 };
                 interp::heap().set_element(vector, index, element);
             }
@@ -578,9 +849,11 @@ unsafe fn charsxp_of(string: Str) -> Result<Sexp, Unwind> {
 unsafe fn drop_words(ty: Type, out: [u64; 2]) {
     match ty {
         Type::Str => values::ry_str_drop(out[0], out[1]),
-        Type::Vector { .. } | Type::List(_) | Type::Dict { .. } => {
-            values::ry_list_drop(out[0] as *mut List)
-        }
+        Type::Vector { .. }
+        | Type::List(_)
+        | Type::Dict { .. }
+        | Type::Record(_)
+        | Type::Tag(_) => values::ry_list_drop(out[0] as *mut List),
         _ => {}
     }
 }

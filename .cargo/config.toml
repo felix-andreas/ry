@@ -1,9 +1,18 @@
 [alias]
 # `cargo test --release` builds with the release profile's fat LTO, whose link of a libr or polars
-# test binary needs more memory than a 16 GB machine has. The bench profile is release without it.
-test-release = "test --profile bench"
+# test binary needs more memory than a 16 GB machine has. The iterate profile is release without it.
+test-release = "test --profile iterate"
 
 [env]
 # PCRE2 is compiled from the sources pcre2-sys bundles, so a release binary does not depend on the
 # system library being installed.
 PCRE2_SYS_STATIC = "1"
+
+# Resolve features once for the whole workspace, so `cargo build -p ry-lang` and `cargo test -p
+# interp` in one profile compile every dependency with the same features and share one tree instead
+# of rebuilding polars per command. crates/features adds what only dev-dependencies turn on.
+[unstable]
+feature-unification = true
+
+[resolver]
+feature-unification = "workspace"
