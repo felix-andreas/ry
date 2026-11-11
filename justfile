@@ -394,7 +394,7 @@ nightly-publish name:
     if gh release view "$name" >/dev/null 2>&1; then
     	gh release upload "$name" --clobber "$asset"
     else
-    	gh release create "$name" --latest=false --target "$sha" --title "ry $name" --notes "$notes" "$asset"
+    	gh release create "$name" --prerelease --latest=false --target "$sha" --title "ry $name" --notes "$notes" "$asset"
     fi
     # The names start with a date, so the newest sort last.
     gh release list --limit 200 --json tagName --jq '.[].tagName | select(startswith("nightly."))' |
