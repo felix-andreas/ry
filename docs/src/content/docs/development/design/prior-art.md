@@ -634,14 +634,15 @@ that apply Bun's closed-world reasoning to untyped packages:
 
 The four languages above know their types or ownership statically. ry's untyped tiers face a different problem, the one production JavaScript and Lua engines solve:
 running dynamically typed code fast while anything may be redefined at any time. The performance bar
-in the mandate is Bun, which is JavaScriptCore, and ry's tier 0 runs real R code slower than GNU R's
-bytecode interpreter: ggplot2, lattice and PerformanceAnalytics render 1.2 to 1.9 times slower than
-on GNU R, which the knowledge base attributes to interpreter call cost. On the call-heavy
-application workloads (`tools/bench/applications`, current numbers in `benchmarks.mdx`), `ry run
---profile-summary` split the untyped time, when this was written, into tier-0 instructions (23 to 44%), closure call setup (12
-to 24%), builtins (about 25%) and S3 method lookup (up to 17%), with tier 1 under 3% on all but one
-workload, because most hot closures run too few times to reach it.
-This part studies the three engines for ideas that close that gap.
+in the mandate is Bun, which is JavaScriptCore, and ry's tier 0 decides the speed of most real R
+code. Its per-call cost is where it trails GNU R's bytecode interpreter: ggplot2, lattice and
+PerformanceAnalytics render 1.2 to 1.9 times slower than on GNU R, which the knowledge base
+attributes to interpreter call cost. On the call-heavy application workloads
+(`tools/bench/applications`, current numbers in `benchmarks.mdx`), a `ry run --profile-summary`
+measurement split the untyped time into tier-0 instructions (23 to 44%), closure call setup (12 to
+24%), builtins (about 25%) and S3 method lookup (up to 17%), with tier 1 under 3% on all but one
+workload, because most hot closures run too few times to reach it. This part studies the three
+engines for ideas that cut that cost.
 
 R adds two constraints to the `SEXP` one at the top of this page. Environments are first-class and
 mutable from anywhere (`assign`, `eval`, `sys.function`, `parent.frame`, and native code through

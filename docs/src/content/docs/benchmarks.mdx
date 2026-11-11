@@ -31,9 +31,8 @@ start-up.
 
 <SpeedChart suite="public" />
 
-Scalar loops gain the most, as in the `scalar-while` and `spectralnorm` programs, because the JIT
-compiles them to machine code while GNU R interprets bytecode. The `binarytrees` programs, which
-spend their time allocating, run at about GNU R's speed.
+Scalar loops gain the most, because the JIT compiles them to machine code while GNU R interprets
+bytecode. Programs that spend their time allocating gain the least.
 
 <details>
 <summary>The numbers: seconds and peak memory</summary>
@@ -50,8 +49,9 @@ This suite times the test suites of packages from ry's benchmark dependency set.
 every dependency it installs is pinned by version and by the SHA-256 of its source tarball
 (`tools/bench/packages/lock.tsv`), so two machines measure the same code. GNU R installs them into
 one library that both engines load, because ry's `libR` is ABI-compatible with GNU R's. The tests
-run the way `R CMD check` runs them, offline, and each time is the wall time of a whole process,
-so it includes start-up and loading the package and its imports, as real use does.
+run the way `R CMD check` runs them, offline. Each time is the wall time of a whole process, or
+for a package whose `tests/` holds plain scripts, the sum over one process per script, so it
+includes start-up and loading the package and its imports, as real use does.
 
 The suite also counts the tests that pass, fail and raise errors on each engine. A package whose
 counts differ between the engines is flagged, and a package whose tests do not run to the end on an
@@ -80,12 +80,10 @@ engine must print the same checksum as GNU R, or the runner refuses to store the
 
 <SpeedChart suite="kernels" />
 
-Recursion and scalar loops gain the most from the JIT, while whole-vector arithmetic runs in C on
-GNU R too, so `vector_arith` and the simulations gain least. Typed scalar loops and recursion gain
-more again, because a typed function in strict mode compiles to native code before its first call.
-The typed programs that pass over a list of a million numbers or more (the four `array_` programs,
-`drawdown` and `vector_arith`) run slower than their plain R twins, and most of them slower than
-GNU R.
+Recursion and scalar loops gain the most from the JIT. Kernels whose time goes into vector and
+statistical routines gain the least, because those routines run in C on GNU R too. Typed scalar
+loops and recursion gain more again, because a typed function in strict mode compiles to native
+code before its first call.
 
 <details>
 <summary>The numbers: seconds and peak memory</summary>
@@ -113,8 +111,8 @@ also exist in typed ry.
 
 These programs gain less than the kernels, because call setup, method dispatch, condition handling
 and complex assignment decide their time, not loops the JIT compiles. Typing gains the most where
-the typed core compiles the whole program, as in `bond_book`. Where it refuses part of a program,
-that part runs in the interpreter, and the flag under the bar names what was refused.
+the typed core compiles the whole program. Where it refuses part of a program, that part runs in
+the interpreter, and the flag under the bar names what was refused.
 
 <details>
 <summary>The numbers: seconds and peak memory</summary>

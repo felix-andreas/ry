@@ -123,11 +123,11 @@ export function mebibytes(value: number): string {
   return `${value.toFixed(0)} MiB`;
 }
 
-// A flag in words, for the label under a bar and for a table cell.
 export function failureText(failure: Failure): string {
   return `fails on ${engineLabel(failure.engine)}: ${failure.reason}`;
 }
 
+// A flag in words, for the label under a bar and for a table cell.
 export function flagText(flag: Flag): string {
   const engine = flag.engine === undefined ? '' : ` on ${engineLabel(flag.engine)}`;
   if (flag.kind === 'too_short') return `too short${engine}`;
@@ -450,7 +450,7 @@ export function methodRows(): { columns: string[]; rows: string[][] } {
         `\`just bench ${suite.id} --write\``,
         `${meta?.gnuR.version ?? ''}${blas === undefined ? '' : `, BLAS \`${blas}\``}`,
         (suite.results?.engines ?? []).map(engineLabel).join(', '),
-        `${meta?.rounds} paired rounds${meta?.extraRounds ? `, up to ${meta.extraRounds} more for a wide interval` : ''}${meta?.seed === undefined ? '' : `, seed ${meta.seed}`}`,
+        `${meta?.rounds} paired rounds${meta?.extraRounds ? `, ${meta.extraRounds} more for each wide interval` : ''}${meta?.seed === undefined ? '' : `, seed ${meta.seed}`}`,
       ];
     }),
   };
