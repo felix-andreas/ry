@@ -94,6 +94,8 @@ def main():
         if changes:
             sys.exit("error: --write records a clean commit, but the working tree has changes; commit or "
                      "remove them and rebuild ry:\n" + "\n".join(f"  {line}" for line in changes))
+    for binary in filter(None, [args.ry, args.baseline]):
+        refuse_unreleased(binary)
     manifests = {suite: load_suite(suite) for suite in suites}
     missing = {suite: missing_packages(suite, selected(manifest, args)) for suite, manifest in manifests.items()}
     if any(missing.values()) and not args.partial:
@@ -637,6 +639,22 @@ def print_table(results, table):
 
 
 # Metadata.
+
+def refuse_unreleased(binary):
+    """Exits unless `binary` is a ry built with `--release`.
+
+    Any other profile names itself in `ry --version` (`ry 0.4.3-beta (iterate build)`): a debug build
+    is many times slower, and the iterate profile skips the cross-crate inlining LTO does, so a timing
+    of either would pass for a release number it is not.
+    """
+    try:
+        version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=60).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as error:
+        sys.exit(f"error: cannot run {binary}: {error}")
+    if re.search(r"\b[\w.-]+ build\b", version):
+        sys.exit(f"error: {binary} is not a release build ({version}); benchmarks time release builds "
+                 "only, so build it with `cargo build --release -p ry-lang -p libr`")
+
 
 def metadata(args):
     cpu = platform.processor() or platform.machine()

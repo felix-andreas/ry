@@ -365,3 +365,9 @@ front ends are copies of `ry-rcmd.exe` named `R.exe`, `Rscript.exe`, `Rcmd.exe` 
 and because Windows has no `bin/` scripts, the front end itself starts the R session behind
 `R CMD build`, `check`, `Rprof`, `Rdconv`, `Sweave` and `Stangle`, as GNU R's `Rcmd.exe` does. The package
 uses `crates/ry/build.rs` as its build script, for the Windows stack size and manifest.
+
+## `features`
+
+A manifest-only member that nothing links. Its normal dependencies carry the features that only
+dev-dependencies turn on, so that workspace-wide feature unification (`.cargo/config.toml`) gives
+`cargo build` and `cargo test` one compiled dependency tree.
