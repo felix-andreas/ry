@@ -164,4 +164,9 @@ The runner, not this page, judges the data:
 
 To reproduce a suite, run its command from the table on a machine with GNU R; the packages suite
 first needs `just bench-packages install`. With `--write`, the runner stores
-`tools/bench/<suite>/results.json`, and `just bench-readme` rewrites the README summary from it.
+`tools/bench/<suite>/results.json` with the commit that built ry, and `just readme` rewrites
+the README summary from it. `--write` refuses a working tree with a change to a tracked file or an
+untracked file under `crates/` or `tools/bench/`, so every stored commit reproduces its
+measurement. The README summary warns when the suites were measured on different machines (CPU
+model or kernel) or against a GNU R on a different BLAS, because their ratios are then not
+comparable.

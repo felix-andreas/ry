@@ -414,6 +414,35 @@ fn fuzz_reconciles_free_only_unreachable_vectors_under_stress() {
     for_each_seed(10, |seed| run_checked(seed, 200, true, false));
 }
 
+/// A weak pair's value that is still young when a deeper collection traces the tenured list
+/// holding it ages only to the younger old generation, so the list must stay remembered. If it
+/// did not, the next intermediate collection would free the value without tracing the list,
+/// leaving the pair pointing at a freed object (a bytecode inline cache's effect proof).
+#[test]
+fn deeper_collection_keeps_a_tenured_weak_pair_list_remembered() {
+    for first in [Collection::Intermediate, Collection::Major] {
+        let mut heap = Heap::new();
+        unsafe {
+            let key = heap.alloc_vector(SexpType::List, 0).expect("alloc");
+            heap.add_global_root(key);
+            let cache = heap.alloc_vector(SexpType::List, 2).expect("alloc");
+            heap.add_global_root(cache);
+            heap.mark_weak_pairs(cache);
+            heap.collect(Collection::Major);
+            heap.collect(Collection::Major);
+            let mark = heap.handle_mark();
+            let value = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            heap.root(value);
+            heap.set_element(cache, 0, key);
+            heap.set_element(cache, 1, value);
+            heap.collect(first);
+            heap.release_handles(mark);
+            heap.collect(Collection::Intermediate);
+            assert_eq!(cache.element(1), heap.nil(), "after {first:?}");
+        }
+    }
+}
+
 /// Past the bytes a reconcile waits for, so one dead vector runs it.
 const BIG: isize = 600_000;
 

@@ -42,6 +42,13 @@ pub extern "C" fn ry_set_gc_stress(enabled: c_int) {
     });
 }
 
+/// With `enabled`, hot API functions skip their direct success paths (see
+/// [`crate::boundary::direct`]).
+#[unsafe(no_mangle)]
+pub extern "C" fn ry_set_slow_paths_only(enabled: c_int) {
+    runtime().slow_paths_only = enabled != 0;
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_collect(major: c_int) {
     runtime().heap.collect(if major != 0 {

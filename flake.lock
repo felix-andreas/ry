@@ -4,72 +4,59 @@
       "locked": {
         "lastModified": 1784564969,
         "narHash": "sha256-TkTWNhJV/8Wk3czlbz4bwHZkFCaCHPsOy+oJe4PUiXg=",
-        "owner": "ipetkov",
-        "repo": "crane",
         "rev": "7930f6c291de6f83c257839d434592aa085f290a",
-        "type": "github"
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/ipetkov/crane"
       },
       "original": {
-        "owner": "ipetkov",
-        "repo": "crane",
-        "type": "github"
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/ipetkov/crane"
       }
     },
     "devshell": {
       "inputs": {
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": [
+          "nixpkgs"
+        ]
       },
       "locked": {
         "lastModified": 1768818222,
         "narHash": "sha256-460jc0+CZfyaO8+w8JNtlClB2n4ui1RbHfPTLkpwhU8=",
-        "owner": "numtide",
-        "repo": "devshell",
         "rev": "255a2b1725a20d060f566e4755dbf571bbbb5f76",
-        "type": "github"
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/numtide/devshell"
       },
       "original": {
-        "owner": "numtide",
-        "repo": "devshell",
-        "type": "github"
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/numtide/devshell"
       }
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1762156382,
-        "narHash": "sha256-Yg7Ag7ov5+36jEFC1DaZh/12SEXo6OO3/8rqADRxiqs=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "7241bcbb4f099a66aafca120d37c65e8dda32717",
-        "type": "github"
-      },
-      "original": {
-        "owner": "NixOS",
-        "ref": "nixpkgs-unstable",
-        "repo": "nixpkgs",
-        "type": "github"
-      }
-    },
-    "nixpkgs_2": {
-      "locked": {
         "lastModified": 1784497964,
         "narHash": "sha256-vlHUuqAcbcH2RKmHbPiuQzbv1pnzzavXnI62RD0bqCU=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
         "rev": "241313f4e8e508cb9b13278c2b0fa25b9ca27163",
-        "type": "github"
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/NixOS/nixpkgs",
+        "ref": "refs/heads/nixos-unstable"
       },
       "original": {
-        "owner": "NixOS",
-        "ref": "nixos-unstable",
-        "repo": "nixpkgs",
-        "type": "github"
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/NixOS/nixpkgs",
+        "ref": "nixos-unstable"
       }
     },
     "root": {
       "inputs": {
         "crane": "crane",
         "devshell": "devshell",
-        "nixpkgs": "nixpkgs_2",
+        "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay",
         "systems": "systems"
       }
@@ -83,30 +70,30 @@
       "locked": {
         "lastModified": 1793523538,
         "narHash": "sha256-vHPjEGxtV+StSLW9DJpa3c3gt0UD0s1q4nC98AZ0N0c=",
-        "owner": "oxalica",
-        "repo": "rust-overlay",
         "rev": "c85ccd343087c57da6021cafa1647142ad03e32e",
-        "type": "github"
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/oxalica/rust-overlay"
       },
       "original": {
-        "owner": "oxalica",
-        "repo": "rust-overlay",
-        "type": "github"
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/oxalica/rust-overlay"
       }
     },
     "systems": {
       "locked": {
         "lastModified": 1681028828,
         "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
-        "owner": "nix-systems",
-        "repo": "default",
         "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
-        "type": "github"
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/nix-systems/default"
       },
       "original": {
-        "owner": "nix-systems",
-        "repo": "default",
-        "type": "github"
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/nix-systems/default"
       }
     }
   },

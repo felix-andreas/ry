@@ -65,6 +65,10 @@ name = "test_fuzz_native"
 path = "tests/test_fuzz_native.rs"
 
 [[test]]
+name = "test_api_boundary"
+path = "tests/test_api_boundary.rs"
+
+[[test]]
 name = "test_corpus_binaries"
 path = "tests/test_corpus_binaries.rs"
 

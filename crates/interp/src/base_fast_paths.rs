@@ -38,6 +38,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rySysSetenv", 0, do_sys_setenv).prologue(),
     internal("rySysWhich", 0, do_sys_which).prologue(),
     internal("ryFormatDefault", 0, do_format_default).prologue(),
+    internal("ryFormatC", 0, do_format_c).prologue(),
+    internal("ryPmax", 0, do_pmax).prologue(),
     internal("ryDeparse", 0, do_deparse).prologue(),
     internal("ryDeparseOpts", 0, do_deparse_opts).prologue(),
     internal("ryReduce", 0, do_reduce).prologue(),
@@ -60,6 +62,8 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("Sys.setenv", "rySysSetenv", 0xb3ad8ec3b2915ce0),
     ("Sys.which", "rySysWhich", 0x17980645114e720c),
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
+    ("formatC", "ryFormatC", 0x85c5e0cf394a6e6d),
+    ("pmax", "ryPmax", 0x80c09180cb181c18),
     ("deparse", "ryDeparse", 0xe0e6a113b041c11d),
     (".deparseOpts", "ryDeparseOpts", 0xa1d9386db7b3f18c),
     ("Reduce", "ryReduce", 0xd929e4c219983788),
@@ -2195,6 +2199,461 @@ unsafe fn do_format_default(call: &Call<'_>) -> R<Sexp> {
     }
     // A bad argument makes the internal fail; the R body then reports it from its own call.
     let result = match kernel(crate::format::do_format, &args, frame) {
+        Ok(result) => result,
+        Err(Unwind::Error(_)) => return decline(),
+        Err(other) => return Err(other),
+    };
+    finish(frame, result, true)
+}
+
+/// `formatC()` on a plain integer or double vector, with no `mode`, a `flag` made of
+/// `[0+- #'I]`, any format but `"s"`, and at most a big mark among the marks. The R body checks
+/// its arguments, sizes a buffer with `pmax()` that ry's internal does not need, and inserts a
+/// big mark through `prettyNum()`'s string surgery in R. The prologue forces the arguments in
+/// the order the body and `prettyNum()` force them, computes the same `width` and `digits`,
+/// calls the same internal and inserts the mark itself. Every warning and error comes from the
+/// R body.
+unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    let symbols = symbols();
+    let Some(x) = argument(frame, symbols.x)? else {
+        return decline();
+    };
+    if !matches!(x.kind(), SexpType::Integer | SexpType::Real) || x.attrib() != nil() {
+        return decline();
+    }
+    let Some(flag) = argument(frame, symbols.flag)? else {
+        return decline();
+    };
+    let Some(flag_text) = string_scalar(flag) else {
+        return decline();
+    };
+    if !flag_text.bytes().all(|byte| b"0+- #'I".contains(&byte)) {
+        return decline();
+    }
+    let count = length(x);
+    if count == 0 {
+        return finish(frame, values::alloc(SexpType::String, 0)?, true);
+    }
+    if argument(frame, symbols.mode)? != Some(nil()) {
+        return decline();
+    }
+    let format = if is_supplied(frame, symbols.format)? {
+        let Some(format) = argument(frame, symbols.format)? else {
+            return decline();
+        };
+        format
+    } else {
+        nil()
+    };
+    let format = if format == nil() {
+        if x.kind() == SexpType::Integer {
+            "d"
+        } else {
+            "g"
+        }
+    } else {
+        match string_scalar(format).as_deref() {
+            Some("d") => "d",
+            Some("f") => "f",
+            Some("e") => "e",
+            Some("E") => "E",
+            Some("g") => "g",
+            Some("G") => "G",
+            Some("fg") => "fg",
+            _ => return decline(),
+        }
+    };
+    let integer = format == "d";
+    let Some(vector) = finite_copy(values::materialize(x)?, integer)? else {
+        return decline();
+    };
+    let FiniteCopy { vector, specials } = vector;
+    let Some(width) = argument(frame, symbols.width)? else {
+        return decline();
+    };
+    let Some(width) = optional_whole_number(width) else {
+        return decline();
+    };
+    let Some(digits) = argument(frame, symbols.digits)? else {
+        return decline();
+    };
+    let Some(digits) = optional_whole_number(digits) else {
+        return decline();
+    };
+    let width = if width.is_none() && digits.is_none() {
+        Some(1)
+    } else {
+        width
+    };
+    let digits = match digits {
+        None if integer => 2,
+        None => 4,
+        Some(digits) if digits < 0 => 6,
+        // `digits` above `.Machine`'s limit for the format warns.
+        Some(digits) if digits > if format == "f" { 324 } else { 50 } => return decline(),
+        Some(digits) => digits,
+    };
+    let width = match width {
+        None => digits + 1,
+        Some(0) => digits,
+        Some(width) => width,
+    };
+    let internal_digits = if digits > 0 && flag_text.contains('#') {
+        -digits
+    } else {
+        digits
+    };
+    let mode = values::scalar_string(if integer { "integer" } else { "double" })?;
+    crate::heap().root(mode);
+    let width_value = values::scalar_integer(width)?;
+    crate::heap().root(width_value);
+    let digits_value = values::scalar_integer(internal_digits)?;
+    crate::heap().root(digits_value);
+    let format_value = values::scalar_string(format)?;
+    crate::heap().root(format_value);
+    let result = kernel(
+        crate::format::do_format_c,
+        &[
+            vector,
+            mode,
+            width_value,
+            digits_value,
+            format_value,
+            flag,
+            nil(),
+        ],
+        frame,
+    )?;
+    if !specials.is_empty() {
+        let left = width < 0 || flag_text == "-";
+        let field = specials
+            .iter()
+            .map(|(_, label)| label.len())
+            .fold(width.unsigned_abs() as usize, usize::max);
+        for &(index, label) in &specials {
+            let padding = " ".repeat(field - label.len());
+            let text = if left {
+                format!("{label}{padding}")
+            } else {
+                format!("{padding}{label}")
+            };
+            values::set_mkchar(result, index, &text)?;
+        }
+    }
+    let Some(big_mark) = argument(frame, symbols.big_mark)? else {
+        return decline();
+    };
+    let Some(big_mark) = string_scalar(big_mark) else {
+        return decline();
+    };
+    if big_mark.is_empty() {
+        // The body's `nzchar(big.mark) || nzchar(small.mark) || decimal.mark != "." ||
+        // !is.null(zero.print) || drop0trailing`, forced in that order.
+        if !argument_is(frame, symbols.small_mark, |value| {
+            string_scalar(value).as_deref() == Some("")
+        })? || !argument_is(frame, symbols.decimal_mark, |value| {
+            string_scalar(value).as_deref() == Some(".")
+        })? || !argument_is(frame, symbols.zero_print, |value| value == nil())?
+            || !argument_is(frame, symbols.drop0trailing, |value| unsafe {
+                is_false(value)
+            })?
+        {
+            return decline();
+        }
+        return finish(frame, result, true);
+    }
+    // `prettyNum()` forces `decimal.mark` (warning when it equals the big mark), `zero.print`,
+    // `drop0trailing`, `preserve.width`, `big.interval` and `small.mark`, in that order.
+    if !big_mark.is_ascii()
+        || big_mark == "."
+        || !argument_is(frame, symbols.decimal_mark, |value| {
+            string_scalar(value).as_deref() == Some(".")
+        })?
+        || !argument_is(frame, symbols.zero_print, |value| value == nil())?
+        || !argument_is(frame, symbols.drop0trailing, |value| unsafe {
+            is_false(value)
+        })?
+    {
+        return decline();
+    }
+    let Some(preserve_width) = argument(frame, symbols.preserve_width)? else {
+        return decline();
+    };
+    let keep_width = match string_scalar(preserve_width).as_deref() {
+        Some("individual") => true,
+        Some("none") => false,
+        _ => return decline(),
+    };
+    let Some(interval) = argument(frame, symbols.big_interval)? else {
+        return decline();
+    };
+    let interval = match optional_whole_number(interval) {
+        Some(Some(interval)) if (1..=1000).contains(&interval) => interval as usize,
+        _ => return decline(),
+    };
+    if !argument_is(frame, symbols.small_mark, |value| {
+        string_scalar(value).as_deref() == Some("")
+    })? {
+        return decline();
+    }
+    let marked = values::alloc(SexpType::String, count)?;
+    crate::heap().root(marked);
+    for index in 0..count {
+        let text = values::char_str(result.element(index));
+        let Some(text) = with_big_marks(&text, &big_mark, interval, keep_width) else {
+            return decline();
+        };
+        values::set_mkchar(marked, index, &text)?;
+    }
+    finish(frame, marked, true)
+}
+
+/// A vector `formatC()`'s internal can take, with the positions of the values that are not
+/// finite and the text the R body writes for each (`as.character()` of the value, `"NA"` for a
+/// missing one).
+struct FiniteCopy {
+    vector: Sexp,
+    specials: SmallVec<[(usize, &'static str); 4]>,
+}
+
+/// `x` as the body leaves it before the internal: converted to integer for format `"d"`
+/// (`None` when a value is out of the integer range, which warns), or else read as double, with
+/// every value that is not finite replaced by 0. `x` itself when nothing changes.
+unsafe fn finite_copy(x: Sexp, integer: bool) -> R<Option<FiniteCopy>> {
+    let mut specials = SmallVec::new();
+    let count = length(x);
+    if x.kind() == SexpType::Integer {
+        for (index, &value) in values::ints(x).iter().enumerate() {
+            if value == NA_INTEGER {
+                specials.push((index, "NA"));
+            }
+        }
+        if specials.is_empty() {
+            return Ok(Some(FiniteCopy {
+                vector: x,
+                specials,
+            }));
+        }
+        let kind = if integer {
+            SexpType::Integer
+        } else {
+            SexpType::Real
+        };
+        let copy = values::alloc_uninit(kind, count)?;
+        crate::heap().root(copy);
+        for (index, &value) in values::ints(x).iter().enumerate() {
+            let value = if value == NA_INTEGER { 0 } else { value };
+            if integer {
+                values::ints_mut(copy)[index] = value;
+            } else {
+                values::reals_mut(copy)[index] = f64::from(value);
+            }
+        }
+        return Ok(Some(FiniteCopy {
+            vector: copy,
+            specials,
+        }));
+    }
+    for (index, &value) in values::reals(x).iter().enumerate() {
+        if integer {
+            if value.is_nan() {
+                specials.push((index, "NA"));
+            } else if !(value > -2147483648.0 && value < 2147483648.0) {
+                return Ok(None);
+            }
+        } else if !value.is_finite() {
+            let label = if heap::object::is_na_real(value) {
+                "NA"
+            } else if value.is_nan() {
+                "NaN"
+            } else if value > 0.0 {
+                "Inf"
+            } else {
+                "-Inf"
+            };
+            specials.push((index, label));
+        }
+    }
+    if !integer && specials.is_empty() {
+        return Ok(Some(FiniteCopy {
+            vector: x,
+            specials,
+        }));
+    }
+    let kind = if integer {
+        SexpType::Integer
+    } else {
+        SexpType::Real
+    };
+    let copy = values::alloc_uninit(kind, count)?;
+    crate::heap().root(copy);
+    for (index, &value) in values::reals(x).iter().enumerate() {
+        let value = if value.is_finite() { value } else { 0.0 };
+        if integer {
+            values::ints_mut(copy)[index] = value.trunc() as i32;
+        } else {
+            values::reals_mut(copy)[index] = value;
+        }
+    }
+    Ok(Some(FiniteCopy {
+        vector: copy,
+        specials,
+    }))
+}
+
+/// One element of `formatC()`'s result through `prettyNum(big.mark = mark, big.interval =
+/// interval, input.d.mark = ".")`: the integer part gets `mark` between every `interval` digits
+/// counted from its end, as the body's `gsub("([0-9]{interval})\\B", ...)` on the reversed part
+/// does, and with `keep_width` (`preserve.width = "individual"`) as many leading blanks as the
+/// marks added are dropped. `None` for text with more than one decimal point or non-ASCII text.
+fn with_big_marks(text: &str, mark: &str, interval: usize, keep_width: bool) -> Option<String> {
+    if !text.is_ascii() || text.bytes().filter(|&byte| byte == b'.').count() > 1 {
+        return None;
+    }
+    let (before, after) = text.split_once('.').unwrap_or((text, ""));
+    let longest_run = before
+        .split(|c: char| !c.is_ascii_digit())
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let mut marked = String::with_capacity(text.len() + mark.len() * (before.len() / interval));
+    if longest_run > interval {
+        let reversed: Vec<u8> = before.bytes().rev().collect();
+        let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+        let mark_reversed: String = mark.chars().rev().collect();
+        let mut out: Vec<u8> = Vec::with_capacity(reversed.len() * 2);
+        let mut index = 0;
+        while index < reversed.len() {
+            let end = index + interval;
+            if end < reversed.len()
+                && reversed[index..end].iter().all(u8::is_ascii_digit)
+                && is_word(reversed[end])
+            {
+                out.extend_from_slice(&reversed[index..end]);
+                out.extend_from_slice(mark_reversed.as_bytes());
+                index = end;
+            } else {
+                out.push(reversed[index]);
+                index += 1;
+            }
+        }
+        out.reverse();
+        marked.push_str(std::str::from_utf8(&out).ok()?);
+    } else {
+        marked.push_str(before);
+    }
+    // `strsplit()` drops an empty part after the point, and the body then writes no point.
+    if !after.is_empty() {
+        marked.push('.');
+        marked.push_str(after);
+    }
+    if keep_width {
+        let added = marked.len().saturating_sub(text.len());
+        let blanks = marked
+            .bytes()
+            .take(added)
+            .take_while(|&byte| byte == b' ')
+            .count();
+        marked.drain(..blanks);
+    }
+    Some(marked)
+}
+
+/// A string vector of length one that is no object and not `NA`.
+unsafe fn string_scalar(value: Sexp) -> Option<String> {
+    if value.kind() != SexpType::String || length(value) != 1 || value.attrib() != nil() {
+        return None;
+    }
+    let element = value.element(0);
+    (element != values::na_string()).then(|| values::char_str(element).into_owned())
+}
+
+/// `None` when `value` is neither `NULL` nor a whole number of at most a million in a plain
+/// integer or double scalar; otherwise the number, if any.
+unsafe fn optional_whole_number(value: Sexp) -> Option<Option<i32>> {
+    if value == nil() {
+        return Some(None);
+    }
+    if length(value) != 1 || value.attrib() != nil() {
+        return None;
+    }
+    let number = match value.kind() {
+        SexpType::Integer if values::ints(value)[0] != NA_INTEGER => {
+            f64::from(values::ints(value)[0])
+        }
+        SexpType::Real => values::reals(value)[0],
+        _ => return None,
+    };
+    (number.fract() == 0.0 && number.abs() <= 1e6).then_some(Some(number as i32))
+}
+
+unsafe fn is_false(value: Sexp) -> bool {
+    value.kind() == SexpType::Logical
+        && length(value) == 1
+        && value.attrib() == nil()
+        && values::ints(value)[0] == 0
+}
+
+/// Forces the formal `symbol` and tests its value; false when it has none.
+unsafe fn argument_is(
+    frame: ClosureFrame,
+    symbol: Sexp,
+    test: impl FnOnce(Sexp) -> bool,
+) -> R<bool> {
+    Ok(argument(frame, symbol)?.is_some_and(test))
+}
+
+/// `pmax(..., na.rm)` when every argument is `NULL` or an atomic vector that is no object, and
+/// the first has no attributes for `mostattributes<-` to copy. The R body's `vapply()` check and
+/// attribute copy are closure calls around the same internal.
+unsafe fn do_pmax(call: &Call<'_>) -> R<Sexp> {
+    let frame = ClosureFrame::of(call);
+    let Some(items) = dots(frame)? else {
+        return decline();
+    };
+    if items.is_empty() {
+        return decline();
+    }
+    let mut args: SmallVec<[Sexp; 9]> = SmallVec::new();
+    args.push(nil());
+    for (_, item) in items {
+        let value = eval::value_of(item)?;
+        crate::heap().root(value);
+        let atomic = matches!(
+            value.kind(),
+            SexpType::Logical
+                | SexpType::Integer
+                | SexpType::Real
+                | SexpType::Complex
+                | SexpType::String
+                | SexpType::Raw
+        );
+        if value != nil() && !(atomic && !value.is_object()) {
+            return decline();
+        }
+        args.push(value);
+    }
+    if args[1].attrib() != nil() {
+        return decline();
+    }
+    // GNU R warns when an argument is recycled fractionally.
+    let longest = args[1..]
+        .iter()
+        .map(|&value| length(value))
+        .max()
+        .unwrap_or(0);
+    if args[1..]
+        .iter()
+        .any(|&value| length(value) != 0 && longest % length(value) != 0)
+    {
+        return decline();
+    }
+    let Some(na_rm) = argument(frame, symbols().na_rm)? else {
+        return decline();
+    };
+    args[0] = na_rm;
+    let result = match kernel(crate::arith::do_parallel_max, &args, frame) {
         Ok(result) => result,
         Err(Unwind::Error(_)) => return decline(),
         Err(other) => return Err(other),
