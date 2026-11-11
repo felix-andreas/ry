@@ -1087,45 +1087,50 @@ pub const ARITHS: [(Arith, &str); 13] = [
 /// length-one vector and a plain vector is any other; both have no attributes and are not
 /// ALTREP. An Array of logical, integer or double items is its own kind at every length, because
 /// it promises what a plain vector does not (no NA, no attributes) and its operators differ. A
-/// compact integer sequence (`1:n`, `seq_len(n)`) is its own kind too, because compiled code
-/// computes its elements instead of loading them.
+/// compact integer or double sequence (`1:n`, `as.double(1:n)`) is its own kind too, because
+/// compiled code computes its elements instead of loading them.
 pub mod feedback {
-    pub const INTEGER_SCALAR: u16 = 1 << 0;
-    pub const DOUBLE_SCALAR: u16 = 1 << 1;
-    pub const LOGICAL_SCALAR: u16 = 1 << 2;
-    pub const INTEGER_VECTOR: u16 = 1 << 3;
-    pub const DOUBLE_VECTOR: u16 = 1 << 4;
-    pub const LOGICAL_VECTOR: u16 = 1 << 5;
-    pub const LIST: u16 = 1 << 6;
-    pub const OTHER: u16 = 1 << 7;
-    pub const INTEGER_ARRAY: u16 = 1 << 8;
-    pub const DOUBLE_ARRAY: u16 = 1 << 9;
-    pub const LOGICAL_ARRAY: u16 = 1 << 10;
+    pub const INTEGER_SCALAR: u32 = 1 << 0;
+    pub const DOUBLE_SCALAR: u32 = 1 << 1;
+    pub const LOGICAL_SCALAR: u32 = 1 << 2;
+    pub const INTEGER_VECTOR: u32 = 1 << 3;
+    pub const DOUBLE_VECTOR: u32 = 1 << 4;
+    pub const LOGICAL_VECTOR: u32 = 1 << 5;
+    pub const LIST: u32 = 1 << 6;
+    pub const OTHER: u32 = 1 << 7;
+    pub const INTEGER_ARRAY: u32 = 1 << 8;
+    pub const DOUBLE_ARRAY: u32 = 1 << 9;
+    pub const LOGICAL_ARRAY: u32 = 1 << 10;
     /// A `JumpUnless` jumped: its condition was `FALSE`.
-    pub const BRANCH_TAKEN: u16 = 1 << 11;
+    pub const BRANCH_TAKEN: u32 = 1 << 11;
     /// A `JumpUnless` fell through: its condition was `TRUE`.
-    pub const BRANCH_NOT_TAKEN: u16 = 1 << 12;
+    pub const BRANCH_NOT_TAKEN: u32 = 1 << 12;
     /// An attribute-free compact integer sequence.
-    pub const INTEGER_SEQUENCE: u16 = 1 << 15;
+    pub const INTEGER_SEQUENCE: u32 = 1 << 15;
+    /// An attribute-free compact double sequence, such as `as.double(1:n)`.
+    pub const DOUBLE_SEQUENCE: u32 = 1 << 16;
 }
 
 /// The feedback tier 0 recorded at `pc` of the byte code `code`: the [`feedback`] kinds of the
 /// values a value-producing instruction made, or the branch bits of a `JumpUnless`. Tier 0 only
 /// adds bits, so what it reports never shrinks until the optimizing tier clears the record.
-pub unsafe fn feedback_bits(code: Sexp, pc: usize) -> u16 {
+pub unsafe fn feedback_bits(code: Sexp, pc: usize) -> u32 {
     values::ints(code.cdr().element(FEEDBACK))
         .get(pc)
-        .map_or(0, |&bits| bits as u16)
+        .map_or(0, |&bits| bits as u32)
 }
 
 /// The [`feedback`] bit for `value`.
-pub unsafe fn value_kind(value: Sexp) -> u16 {
+pub unsafe fn value_kind(value: Sexp) -> u32 {
     if value.is_altrep() {
-        return if value.kind() == SexpType::Integer
-            && value.tag() == interp().compact_sequence_classes[0]
-            && !values::has_attributes(value)
-        {
+        let [integer, double] = interp().compact_sequence_classes;
+        let class = value.tag();
+        return if values::has_attributes(value) {
+            feedback::OTHER
+        } else if class == integer {
             feedback::INTEGER_SEQUENCE
+        } else if class == double {
+            feedback::DOUBLE_SEQUENCE
         } else {
             feedback::OTHER
         };
@@ -5609,14 +5614,14 @@ impl Activation<'_, '_> {
     #[inline(always)]
     unsafe fn record(&self, pc: usize, value: Sexp) {
         if !self.feedback.is_null() {
-            *self.feedback.add(pc) |= i32::from(value_kind(value));
+            *self.feedback.add(pc) |= value_kind(value) as i32;
         }
     }
 
     #[inline(always)]
-    unsafe fn record_kind(&self, pc: usize, kind: u16) {
+    unsafe fn record_kind(&self, pc: usize, kind: u32) {
         if !self.feedback.is_null() {
-            *self.feedback.add(pc) |= i32::from(kind);
+            *self.feedback.add(pc) |= kind as i32;
         }
     }
 }
@@ -9607,7 +9612,7 @@ unsafe fn fused_pass(
                 (Element::Integer, false) => feedback::INTEGER_VECTOR,
                 (Element::Double, false) => feedback::DOUBLE_VECTOR,
             };
-            *state.feedback.add(node[4] as usize) |= i32::from(kind);
+            *state.feedback.add(node[4] as usize) |= kind as i32;
         }
         if reduction.is_some() {
             state.record(words[fusion::REDUCTION_SITE] as usize, fused.value);
@@ -10658,7 +10663,7 @@ pub(crate) unsafe fn call_builtin(
 
 unsafe fn record_feedback(constants: Sexp, pc: usize, value: Sexp) {
     let feedback = constants.element(FEEDBACK);
-    values::ints_mut(feedback)[pc] |= i32::from(value_kind(value));
+    values::ints_mut(feedback)[pc] |= value_kind(value) as i32;
 }
 
 /// Arithmetic and comparison on two attribute-free scalar doubles or integers. `None` sends the

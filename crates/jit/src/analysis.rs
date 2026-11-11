@@ -81,6 +81,9 @@ pub enum Ty {
     /// never reads its storage, which it does not have. It joins with nothing else, so no
     /// vector operation or store sees one.
     IntSeq,
+    /// A boxed, attribute-free compact double sequence (`as.double(1:n)`), read like
+    /// [`Ty::IntSeq`].
+    DblSeq,
     DblVec,
     LglVec,
     /// A boxed, attribute-free list.
@@ -195,8 +198,8 @@ fn declared_ty(declared: Declared) -> Ty {
 }
 
 /// The type tier 0's feedback bits speculate on.
-pub fn from_feedback(bits: u16) -> Ty {
-    let within = |mask: u16| bits & !mask == 0;
+pub fn from_feedback(bits: u32) -> Ty {
+    let within = |mask: u32| bits & !mask == 0;
     match bits {
         0 => Ty::Boxed,
         feedback::INTEGER_SCALAR => Ty::Int,
@@ -210,6 +213,7 @@ pub fn from_feedback(bits: u16) -> Ty {
         feedback::DOUBLE_ARRAY => Ty::DblArr,
         feedback::LOGICAL_ARRAY => Ty::LglArr,
         feedback::INTEGER_SEQUENCE => Ty::IntSeq,
+        feedback::DOUBLE_SEQUENCE => Ty::DblSeq,
         _ => Ty::Boxed,
     }
 }
@@ -1485,7 +1489,7 @@ unsafe fn formal_hints(arena: Arena<'_>, code: Sexp, formals: Sexp) -> Option<Sm
             continue;
         }
         let symbol = constants.element(inst.operand(1));
-        let bits = feedback.get(inst.pc).map_or(0, |&bits| bits as u16);
+        let bits = feedback.get(inst.pc).map_or(0, |&bits| bits as u32);
         if let Some(index) = symbols.iter().position(|&formal| formal == symbol)
             && bits != 0
         {
@@ -1663,7 +1667,7 @@ impl<'a> Builder<'a> {
                     self.hints.push(Ty::Bottom);
                     self.declared.push(Ty::Boxed);
                 }
-                let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u16);
+                let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u32);
                 if inst.op == Op::GetVar && bits != 0 {
                     let slot = self.slot_of[&symbol];
                     self.hints[slot] = self.hints[slot].join(from_feedback(bits));
@@ -1727,7 +1731,7 @@ impl<'a> Builder<'a> {
     }
 
     fn feedback_at(&self, pc: usize) -> Ty {
-        from_feedback(self.feedback.get(pc).map_or(0, |&bits| bits as u16))
+        from_feedback(self.feedback.get(pc).map_or(0, |&bits| bits as u32))
     }
 
     /// Whether the instruction at `pc` has never recorded a value.
@@ -1754,7 +1758,7 @@ impl<'a> Builder<'a> {
         // of a closure shared by `make_scaler(2)` and `make_scaler(0.5)`, loads as `Num`, which
         // its arithmetic reads unboxed, rather than as a boxed value every reader hands back to
         // tier 0.
-        let bits = self.feedback.get(pc).map_or(0, |&bits| bits as u16);
+        let bits = self.feedback.get(pc).map_or(0, |&bits| bits as u32);
         if bits == feedback::INTEGER_SCALAR | feedback::DOUBLE_SCALAR {
             return Ty::Num;
         }
@@ -2462,6 +2466,7 @@ impl<'a> Builder<'a> {
                     // Code generation boxes an unboxed scalar sequence before the loop, and
                     // steps through a compact sequence without expanding it.
                     Ty::IntSeq
+                    | Ty::DblSeq
                     | Ty::IntVec
                     | Ty::DblVec
                     | Ty::LglVec
@@ -2510,6 +2515,7 @@ impl<'a> Builder<'a> {
                 self.push_edge(operand(3), state);
                 let element = match state.registers[operand(1)] {
                     Ty::IntSeq => Ty::Int,
+                    Ty::DblSeq => Ty::Dbl,
                     ty => ty.element(),
                 };
                 state.slots[slot] = Slot {
@@ -3910,6 +3916,7 @@ pub(crate) unsafe fn constant_type(value: Sexp) -> Ty {
         feedback::DOUBLE_ARRAY => Ty::DblArr,
         feedback::LOGICAL_ARRAY => Ty::LglArr,
         feedback::INTEGER_SEQUENCE => Ty::IntSeq,
+        feedback::DOUBLE_SEQUENCE => Ty::DblSeq,
         _ if values::is_function(value) => Ty::Fun(value),
         _ => Ty::Boxed,
     }
@@ -3969,11 +3976,12 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
         }
         ("[[", [Ty::List, Ty::Int | Ty::Dbl]) => (Intrinsic::Element, Ty::Boxed),
         ("[" | "[[", [Ty::IntSeq, Ty::Int | Ty::Dbl]) => (Intrinsic::Element, Ty::Int),
+        ("[" | "[[", [Ty::DblSeq, Ty::Int | Ty::Dbl]) => (Intrinsic::Element, Ty::Dbl),
         ("length", [ty])
             if ty.is_vector()
                 || ty.is_array()
                 || ty.is_numeric_scalar()
-                || matches!(ty, Ty::List | Ty::IntSeq) =>
+                || matches!(ty, Ty::List | Ty::IntSeq | Ty::DblSeq) =>
         {
             (Intrinsic::Length, Ty::Int)
         }

@@ -867,7 +867,7 @@ impl<'p> Translator<'p> {
                     let boxed = self.box_value(ty, unboxed);
                     self.store_register(src, boxed);
                     (boxed, self.builder.ins().load(I64, flags(), boxed, LENGTH))
-                } else if ty == Ty::IntSeq {
+                } else if matches!(ty, Ty::IntSeq | Ty::DblSeq) {
                     let value = self.load_register(src);
                     let (count, first, step) = self.sequence_info(value);
                     self.builder.def_var(self.loop_firsts[index], first);
@@ -961,6 +961,7 @@ impl<'p> Translator<'p> {
                 let sequence = self.load_register(src);
                 let element_ty = match before.registers[src] {
                     Ty::IntSeq => Ty::Int,
+                    Ty::DblSeq => Ty::Dbl,
                     ty => ty.element(),
                 };
                 let width = if matches!(element_ty, Ty::Int | Ty::Lgl) {
@@ -973,13 +974,17 @@ impl<'p> Translator<'p> {
                 let next_index = self.builder.ins().iadd_imm_s(current, 1);
                 self.builder.def_var(self.loop_indexes[index], next_index);
                 match before.registers[src] {
-                    Ty::IntSeq => {
+                    Ty::IntSeq | Ty::DblSeq => {
                         let first = self.builder.use_var(self.loop_firsts[index]);
                         let step = self.builder.use_var(self.loop_steps[index]);
                         let position = self.builder.ins().fcvt_from_sint(F64, current);
                         let offset = self.builder.ins().fmul(position, step);
                         let number = self.builder.ins().fadd(first, offset);
-                        let element = self.builder.ins().fcvt_to_sint_sat(I32, number);
+                        let element = if element_ty == Ty::Int {
+                            self.builder.ins().fcvt_to_sint_sat(I32, number)
+                        } else {
+                            number
+                        };
                         self.assign_slot(&before, slot, element_ty, element);
                     }
                     Ty::IntVec | Ty::DblVec => {
@@ -2038,7 +2043,7 @@ impl<'p> Translator<'p> {
         match intrinsic {
             Intrinsic::Element => {
                 let vector = self.load_register(args[0]);
-                let sequence = types[0] == Ty::IntSeq;
+                let sequence = matches!(types[0], Ty::IntSeq | Ty::DblSeq);
                 let (length, first, step) = if sequence {
                     let (length, first, step) = self.sequence_info(vector);
                     (length, Some(first), Some(step))
@@ -2096,6 +2101,12 @@ impl<'p> Translator<'p> {
                         let number = self.builder.ins().fadd(first, distance);
                         let value = self.builder.ins().fcvt_to_sint_sat(I32, number);
                         self.builder.def_var(self.integers[dst], value);
+                    }
+                    Ty::Dbl if let (Some(first), Some(step)) = (first, step) => {
+                        let position = self.builder.ins().fcvt_from_sint(F64, offset);
+                        let distance = self.builder.ins().fmul(position, step);
+                        let value = self.builder.ins().fadd(first, distance);
+                        self.builder.def_var(self.doubles[dst], value);
                     }
                     // A list element speculated to be a scalar is checked, then unboxed; any
                     // other element hands the read to tier 0.
@@ -2155,13 +2166,17 @@ impl<'p> Translator<'p> {
                 let value = if types[0].is_unboxed() {
                     self.builder.ins().iconst(I32, 1)
                 } else if types[0] == Ty::IntSeq {
-                    // A compact sequence is never longer than an integer can count.
+                    // A compact integer sequence is never longer than an integer can count.
                     let vector = self.load_register(args[0]);
                     let (length, _, _) = self.sequence_info(vector);
                     self.builder.ins().ireduce(I32, length)
                 } else {
                     let vector = self.load_register(args[0]);
-                    let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
+                    let length = if types[0] == Ty::DblSeq {
+                        self.sequence_info(vector).0
+                    } else {
+                        self.builder.ins().load(I64, flags(), vector, LENGTH)
+                    };
                     // Longer vectors have a double length; leave those to tier 0.
                     let fits = self.builder.ins().icmp_imm_s(
                         IntCC::SignedLessThanOrEqual,
@@ -4096,7 +4111,7 @@ impl<'p> Translator<'p> {
             Ty::DblVec => (SexpType::Real, false),
             Ty::LglVec => (SexpType::Logical, false),
             Ty::List => (SexpType::List, false),
-            Ty::IntSeq => {
+            Ty::IntSeq | Ty::DblSeq => {
                 // An ALTREP instance's class is its tag, which no ordinary vector has, so the
                 // flag is tested before the tag is read.
                 let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
@@ -4111,7 +4126,8 @@ impl<'p> Translator<'p> {
                     .brif(altrep, instance, &[], decided, &[no]);
                 self.builder.switch_to_block(instance);
                 let class = self.builder.ins().load(I64, flags(), value, TAG);
-                let sequence = interp::interp().compact_sequence_classes[0];
+                let [integer, double] = interp::interp().compact_sequence_classes;
+                let sequence = if ty == Ty::IntSeq { integer } else { double };
                 let fits =
                     self.builder
                         .ins()
