@@ -182,8 +182,8 @@ plus one copy without a binary (`ry.vsix`) for every other platform. Every copy 
 `LICENSE` that combines the extension's MIT licence with ry's `LICENSE`, and
 `THIRD_PARTY_NOTICES`. The Zed extension ships no binary: it downloads the matching archive from the newest
 full GitHub release (`pre_release: false` in `editors/zed/src/lib.rs`, which matches full releases
-only), and it is published to Zed's registry separately. 0.4.4 is the first full release, so
-publish the Zed extension no earlier than 0.4.4, or it serves 0.1.1.
+only). It is not in Zed's registry yet, and publishing it there is a separate step. 0.4.4 is the
+first full release, so publish the Zed extension no earlier than 0.4.4, or it serves 0.1.1.
 
 ## Version numbers
 

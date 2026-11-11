@@ -324,11 +324,10 @@ Smaller gaps:
   - strict mode can still report inside a statement that failed to parse.
 - Console completion: `df$` offers only `df`, and an unclosed `x[["` completes keywords instead of
   fields.
-- The Zed extension downloads the newest full release's archive (`editors/zed/src/lib.rs`), and
-  the first full release is 0.4.4, so a Zed extension published before 0.4.4 serves 0.1.1, and
-  0.4.4 must ship every platform's archive or the download fails on the missing ones. The Zed
-  registry copy built from `pre_release: true` serves the newest pre-release, which includes
-  nightlies (Linux only) until a Zed extension built from the current source is published.
+- The Zed extension is not in Zed's registry yet. It downloads the newest full release's archive
+  (`editors/zed/src/lib.rs`), and the first full release is 0.4.4, so publish it to Zed's registry
+  no earlier than 0.4.4 (before that it would serve 0.1.1), and 0.4.4 must ship every platform's
+  archive or the download fails on the missing ones.
 
 ## Open: what `ry check` still reports on the GNU R corpus
 
