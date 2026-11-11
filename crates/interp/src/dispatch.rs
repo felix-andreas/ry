@@ -1742,7 +1742,39 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         _ => apply_next_primitive(method, &args, frame_call, generic_symbol, sys_parent),
     };
     interp().slot_owner = previous_owner;
+    if let Ok(value) = result {
+        uncount_dead_promises(position, method_env, &args, value);
+    }
     result
+}
+
+/// Takes the promises NextMethod made over the pending environment of the method at `position`
+/// off the frame's count of promises that may still be forced, when the next method returned
+/// `value` without forcing them and nothing holds them any more. Otherwise the method would
+/// make its environment as it returns, for promises nothing can force. A promise counts as
+/// held while any counted reference to it remains (a slot, a binding, a list element), and
+/// while it is preserved, held by a global calling handler or the value returned.
+unsafe fn uncount_dead_promises(position: usize, method_env: Sexp, args: &[Arg], value: Sexp) {
+    let state = interp();
+    if !method_env.has_gp(gp::PENDING_FRAME) || state.frames[position].env != nil() {
+        return;
+    }
+    let heap = crate::heap();
+    let dead = args
+        .iter()
+        .filter(|arg| {
+            let promise = arg.value;
+            promise.kind() == SexpType::Promise
+                && promise.car() == unbound()
+                && promise.tag() == method_env
+                && promise.refcount() == 0
+                && promise != value
+                && !heap.is_preserved(promise)
+                && !crate::conditions::handlers_hold(&state.global_handlers, promise)
+        })
+        .count() as u32;
+    let frame = &mut state.frames[position];
+    frame.unforced = frame.unforced.saturating_sub(dead);
 }
 
 /// `NextMethod` reaching the internal default, the builtin `method`, called from `caller_env`.

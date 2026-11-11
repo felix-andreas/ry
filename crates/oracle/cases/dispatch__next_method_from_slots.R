@@ -102,3 +102,22 @@ print(p(structure(1, class = c("b", "a"))))
 shadow <- function(v) { g.a <- function(x, ...) "local g.a"; g(structure(v, class = c("b", "a"))) }
 not_function <- function(v) { g.a <- 1; g(structure(v, class = c("b", "a"))) }
 for (i in 1:3) print(c(shadow(i), not_function(i)))
+# A next method that never forces an argument lets the method return without its frame; one
+# that keeps the argument's promise, in a closure, a list of promises or a condition, still
+# reads the method's value after both return.
+unused <- function(x, y) UseMethod("unused")
+unused.a <- function(x, y) "unused.a"
+unused.b <- function(x, y) { y <- "late"; NextMethod() }
+held <- function(x, y) UseMethod("held")
+held.a <- function(x, y) list(function() y, environment())
+held.b <- function(x, y) { y <- "kept by a"; NextMethod() }
+caught <- function(x, y) UseMethod("caught")
+caught.a <- function(x, y) structure(class = "condition", list(message = "kept", get = function() y))
+caught.b <- function(x, y) { y <- "kept by a condition"; NextMethod() }
+for (i in 1:40) {
+  r <- c(unused(structure(i, class = c("b", "a")), stop("never forced")),
+    held(structure(i, class = c("b", "a")), i)[[1]](),
+    get("y", envir = held(structure(i, class = c("b", "a")), i)[[2]]),
+    caught(structure(i, class = c("b", "a")), i)$get())
+  if (i == 1 || i == 40) print(r)
+}

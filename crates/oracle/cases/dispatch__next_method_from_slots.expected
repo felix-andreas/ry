@@ -46,6 +46,10 @@
 | [1] "b local g.a" "b a 10 x"   
 | [1] "b local g.a" "b a 20 x"   
 | [1] "b local g.a" "b a 30 x"   
+| [1] "unused.a"            "kept by a"           "kept by a"          
+| [4] "kept by a condition"
+| [1] "unused.a"            "kept by a"           "kept by a"          
+| [4] "kept by a condition"
 [messages]
 [warnings]
 [errors]
