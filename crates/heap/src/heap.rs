@@ -1401,7 +1401,10 @@ impl Heap {
             // shrinks them to the columns it has, so most dropped slots still hold the value
             // they were allocated with. Chunks holding only that value are skipped: comparing
             // against one value is an xor and an or per slot, which vectorizes on any x86-64,
-            // where the 64-bit equality a second value would need does not.
+            // where the 64-bit equality a second value would need does not. A skipped slot keeps
+            // its value (the blank string in a character vector, where a released one holds
+            // nil), which is sound only because nothing reads past the length: a grow refills
+            // every slot it exposes, and the collector and card scans stop at the length.
             let empty = if vector.kind() == SexpType::String {
                 self.known.blank_string
             } else {
