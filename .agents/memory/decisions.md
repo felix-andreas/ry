@@ -8880,7 +8880,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   | `R_existsVarInFrame` | 0.58% | 0.23% | 0.35% | 475 |
   | `SETCAR`, `CAR`, `Rf_protect` | 0.1 to 0.3% each | | | |
 
-  A direct path roughly halves an entry's cost, so the two largest together would save about 0.5% of cli and less elsewhere. Reopen this only if a profile shows one entry above 2% of a named workload. Two vctrs costs that look like boundary costs are not: `Rf_allocVector` at about 11,000 Ir per call is probably collection charged to the allocator (unverified), and `INTEGER_RO` at about 19,000 Ir per call is compact-sequence materialization.
+  A direct path roughly halves an entry's cost, so the two largest together would save about 0.5% of cli and less elsewhere. Reopen this only if a profile shows one entry above 2% of a named workload. Two vctrs costs that look like boundary costs are not: `Rf_allocVector` at about 11,000 Ir per call is probably collection charged to the allocator (unverified), and `INTEGER_RO` at about 19,000 Ir per call comes from callers that build a fresh `1:n` on every call. A compact sequence is expanded once and then reused, as in GNU R, and building it costs about 37,000 Ir per call on both sides.
 
 ## Tier-0 call entry: raw pool reads, an out-of-line tier schedule, and a cleared register window
 
