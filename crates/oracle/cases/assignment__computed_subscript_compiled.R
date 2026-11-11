@@ -115,3 +115,17 @@ out_of_range <- function() {
   x[[-length(x)]] <- 1
 }
 print(tryCatch(out_of_range(), error = function(e) conditionMessage(e)))
+
+# A name append converts a lower type to the target's.
+name_appends <- function() {
+  d <- c(a = 0.5)
+  for (k in 1:3) d[[paste0("n", k)]] <- k
+  d[[paste0("t", 1)]] <- TRUE
+  d[[paste0("m", 1)]] <- NA_integer_
+  i <- c(a = 1L)
+  i[[paste0("l", 1)]] <- FALSE
+  i[[paste0("l", 2)]] <- NA
+  list(d, i)
+}
+str(name_appends())
+str(name_appends())

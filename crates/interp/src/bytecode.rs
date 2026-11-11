@@ -9741,6 +9741,26 @@ unsafe fn assign_element(
                     {
                         return Ok(None);
                     }
+                    // `append_named` copies the value's payload, so a lower type converts
+                    // to the target's first.
+                    let value = match (target.kind(), value.kind()) {
+                        (SexpType::Real, SexpType::Integer | SexpType::Logical) => {
+                            let integer = value.slice::<i32>()[0];
+                            let converted = values::scalar_real(if integer == NA_INTEGER {
+                                NA_REAL
+                            } else {
+                                f64::from(integer)
+                            })?;
+                            heap.root(converted);
+                            converted
+                        }
+                        (SexpType::Integer, SexpType::Logical) => {
+                            let converted = values::scalar_integer(value.slice::<i32>()[0])?;
+                            heap.root(converted);
+                            converted
+                        }
+                        _ => value,
+                    };
                     moves::modifying(target)?;
                     let reuse = owned(target);
                     return crate::subset::append_named(target, wanted, value, reuse).map(Some);
