@@ -1,0 +1,27 @@
+# Test builds and normal builds share one compiled dependency tree only when every dependency has
+# the same features in both. The workspace's feature unification (.cargo/config.toml) unifies the
+# normal dependencies of every member, but not dev-dependencies, so the features that only a test
+# target's dev-dependencies turn on are listed here as normal dependencies of a member nothing links.
+# Without them, `cargo test` after `cargo build` recompiles libc and everything above it, polars
+# included, into a second tree. When a new dev-dependency brings a feature, `cargo test --no-run`
+# after `cargo build` prints `Compiling` lines for registry crates; add its features here.
+[package]
+name = "features"
+edition = "2024"
+license = "UPL-1.0"
+version.workspace = true
+publish = false
+
+[lib]
+path = "src/features.rs"
+
+[dependencies]
+anyhow = "1"
+futures-io = "0.3"
+libc = { version = "0.2", features = ["extra_traits"] }
+tokio = { workspace = true, features = ["process"] }
+tokio-util = { workspace = true, features = ["compat"] }
+
+# Nothing here is used: the dependencies exist only for the features they turn on.
+[lints.cargo]
+unused_dependencies = "allow"
