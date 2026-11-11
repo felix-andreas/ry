@@ -138,7 +138,7 @@ left, in order of expected gain:
   searches, so every `# oracle: requires` case fails there with "there is no package called". The
   workaround is a directory of symlinks to the reference R's non-base packages, passed as `R_LIBS`
   to both engines. The harness should build that shared library itself (or dev-setup should
-  install into a separate library) so a plain `ORACLE_ENGINE=ry-tier0 cargo test -p oracle` passes.
+  install into a separate library) so a plain `ORACLE_ENGINE=ry-tier0 cargo test -p oracle` passes. The DX lead owns this fix.
 - **Nix.** `flake.nix` fetches the tarball as a fixed-output derivation and builds the base in `postInstall`; `nix build` has not been run yet.
 - **Old base trees stay in the cache after an upgrade**, as runtimes do (see below).
 
