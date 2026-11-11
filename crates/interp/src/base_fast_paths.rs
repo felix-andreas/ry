@@ -36,6 +36,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryStructure", 0, do_structure),
     internal("rySysGetenv", 0, do_sys_getenv),
     internal("rySysSetenv", 0, do_sys_setenv),
+    internal("rySysWhich", 0, do_sys_which),
     internal("ryFormatDefault", 0, do_format_default),
     internal("ryReduce", 0, do_reduce),
     internal("ryAssignNativeRoutines", 0, do_assign_native_routines),
@@ -54,6 +55,7 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("structure", "ryStructure", 0xe1de236049200229),
     ("Sys.getenv", "rySysGetenv", 0xe91342790fcd5c16),
     ("Sys.setenv", "rySysSetenv", 0xb3ad8ec3b2915ce0),
+    ("Sys.which", "rySysWhich", 0x17980645114e720c),
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
     ("Reduce", "ryReduce", 0xd929e4c219983788),
     ("message", "ryMessage", 0x9b452884cddd7ceb),
@@ -1872,6 +1874,41 @@ unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
         values::set_attr(value, symbols.names, x)?;
     }
     finish(frame, value, true)
+}
+
+/// Unix `Sys.which(names)` for a character vector without attributes: each name's program as
+/// `which` reports it, or "", named by the names. Base R runs `which` through `system()` once per
+/// name, which costs a shell each and fails outright where `PATH` holds no `sh`, as when utils'
+/// `.onLoad` asks for `uname` on such a `PATH`.
+unsafe fn do_sys_which(call: &Call<'_>) -> R<Sexp> {
+    if !cfg!(unix) {
+        return decline();
+    }
+    let frame = ClosureFrame::of(call);
+    let Some(names) = argument(frame, install("names")?)? else {
+        return decline();
+    };
+    if names.kind() != SexpType::String || names.attrib() != nil() || length(names) == 0 {
+        return decline();
+    }
+    let count = length(names);
+    let result = values::alloc(SexpType::String, count)?;
+    crate::heap().root(result);
+    for index in 0..count {
+        let found = match values::string_at(names, index) {
+            None => values::na_string(),
+            Some(name) => {
+                #[cfg(unix)]
+                let path = crate::system::which(&name);
+                #[cfg(not(unix))]
+                let path: Option<std::path::PathBuf> = None;
+                values::mkchar(&path.map(|path| path.display().to_string()).unwrap_or_default())?
+            }
+        };
+        values::set_elt(result, index, found);
+    }
+    values::set_attr(result, symbols().names, names)?;
+    finish(frame, result, true)
 }
 
 /// `Sys.setenv(...)` where every argument is named and is a single string, so `unlist()` and
