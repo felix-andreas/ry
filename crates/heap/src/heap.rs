@@ -40,7 +40,7 @@ use {
             VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, holds_handles, object_size, slot_for,
         },
         records::{Layouts, slot_kind},
-        space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept},
+        space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept, poison},
         strings::{Encoding, StringTable},
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -48,6 +48,7 @@ use {
     std::{
         alloc::Layout,
         cell::Cell,
+        collections::VecDeque,
         ffi::c_void,
         fmt,
         io::Write,
@@ -173,6 +174,10 @@ pub struct Heap {
     sources: Vec<(u64, Rc<dyn RootSource>)>,
     next_source_id: u64,
     policy: GcPolicy,
+    /// Freed large objects held back from the allocator while the space quarantines freed
+    /// slots, with their sizes, oldest first.
+    quarantined_large: VecDeque<(NonNull<u8>, usize)>,
+    quarantined_large_bytes: usize,
     /// Bytes of small objects allocated since the last collection.
     young_bytes: usize,
     /// The `young_bytes` past which a small allocation takes the slow path, which runs a minor
@@ -200,6 +205,12 @@ pub struct Heap {
     pretenure_young_bytes: usize,
     pretenure_young_large: usize,
     stress_counter: u64,
+    /// Set while [`GcStress::Young`] runs an intermediate collection that ages its survivors
+    /// only into the younger old generation.
+    keep_untenured: bool,
+    /// Whether the collection in progress is intermediate or major, whose tracing must notice a
+    /// tenured object left pointing at a younger child.
+    deeper: bool,
     known: WellKnown,
     /// Bumped whenever the set of bindings outside function frames changes (a binding created or
     /// removed, an enclosure replaced), so a cached lookup that resolved through those
@@ -412,6 +423,14 @@ pub enum GcStress {
     /// Collect before every allocation. Every eighth collection is a major one while the heap
     /// is small; past that, one per sixteenth of the live objects.
     EveryAllocation,
+    /// Collect before every allocation, as [`GcStress::EveryAllocation`] does, but keep the
+    /// survivors collectable: each collection unmarks and traces again every object outside the
+    /// oldest generation and ages none into it, so an object that survived earlier collections
+    /// is freed as soon as only a Rust local holds it, as it would be while still young. Plain
+    /// stress promotes an object at its first collection, after which only a major collection
+    /// can free it. Every 64th collection tenures the survivors, so the objects traced again
+    /// stay few, and major collections are spaced as for `EveryAllocation`.
+    Young,
 }
 
 /// When `RY_GC_STRESS` turns collection stress on for a whole run.
@@ -442,12 +461,16 @@ fn open_pause_log() -> Option<std::fs::File> {
     }
 }
 
-/// The collection stress `RY_GC_STRESS` asks for, if any.
-pub fn gc_stress_requested() -> Option<GcStressStart> {
+/// The collection stress `RY_GC_STRESS` asks for, if any, and when it starts. `young` and
+/// `startup-young` ask for [`GcStress::Young`]; any other value asks for
+/// [`GcStress::EveryAllocation`].
+pub fn gc_stress_requested() -> Option<(GcStressStart, GcStress)> {
     match std::env::var("RY_GC_STRESS").as_deref() {
         Err(_) | Ok("" | "0") => None,
-        Ok("startup") => Some(GcStressStart::Startup),
-        Ok(_) => Some(GcStressStart::Script),
+        Ok("startup") => Some((GcStressStart::Startup, GcStress::EveryAllocation)),
+        Ok("startup-young") => Some((GcStressStart::Startup, GcStress::Young)),
+        Ok("young") => Some((GcStressStart::Script, GcStress::Young)),
+        Ok(_) => Some((GcStressStart::Script, GcStress::EveryAllocation)),
     }
 }
 
@@ -809,6 +832,8 @@ impl Heap {
             sources: Vec::new(),
             next_source_id: 0,
             policy,
+            quarantined_large: VecDeque::new(),
+            quarantined_large_bytes: 0,
             young_bytes: 0,
             small_trigger: 0,
             young_large_bytes: 0,
@@ -821,6 +846,8 @@ impl Heap {
             pretenure_young_bytes: 0,
             pretenure_young_large: 0,
             stress_counter: 0,
+            keep_untenured: false,
+            deeper: false,
             pause_log: open_pause_log(),
             namespace_loads: 0,
             // Overwritten below, before anything reads it.
@@ -831,6 +858,7 @@ impl Heap {
         unsafe { heap.create_well_known() };
         heap.inhibit = 0;
         heap.refresh_small_trigger();
+        heap.refresh_quarantine();
         heap
     }
 
@@ -938,6 +966,19 @@ impl Heap {
     pub fn update_policy(&mut self, change: impl FnOnce(&mut GcPolicy)) {
         change(&mut self.policy);
         self.refresh_small_trigger();
+        self.refresh_quarantine();
+    }
+
+    /// Quarantines freed objects exactly while collection stress or verification is on: a
+    /// freed object is poisoned and its memory held back from reuse for a while, so a read
+    /// through a stale reference hits poison rather than whatever took the memory next.
+    fn refresh_quarantine(&mut self) {
+        let on = self.policy.stress != GcStress::Off || self.policy.verify;
+        self.space.set_quarantine(on);
+        if !on {
+            // SAFETY: each quarantined object left the heap's tables when it was freed.
+            unsafe { self.release_quarantined_large(0) };
+        }
     }
 
     /// Marks the start of a namespace load (`loadNamespace`). Loads nest, because a namespace
@@ -974,7 +1015,7 @@ impl Heap {
         // cell trigger ignores vector memory, because a session holding a few big vectors would
         // otherwise let as many bytes of small garbage pile up.
         self.small_trigger = match self.policy.stress {
-            GcStress::EveryAllocation => 0,
+            GcStress::EveryAllocation | GcStress::Young => 0,
             GcStress::Off => self.policy.young_limit.max(self.old_small_bytes / 2),
         };
     }
@@ -3024,6 +3065,19 @@ impl Heap {
                     self.escalate_if_full(keep, request);
                 }
             }
+            GcStress::Young => {
+                self.stress_counter += 1;
+                let spacing = (self.stats.live_objects / 16).max(8);
+                if self.stress_counter >= spacing {
+                    self.stress_counter = 0;
+                    self.collect_keeping(Collection::Major, keep, request);
+                } else {
+                    self.keep_untenured = self.stress_counter % 64 != 0;
+                    self.collect_keeping(Collection::Intermediate, keep, request);
+                    self.keep_untenured = false;
+                    self.escalate_if_full(keep, request);
+                }
+            }
             GcStress::Off => {
                 if self.collection_due(request, large) {
                     self.collect_keeping(Collection::Minor, keep, request);
@@ -3384,7 +3438,7 @@ impl Heap {
         if self.inhibit > 0 {
             return false;
         }
-        if self.policy.stress == GcStress::EveryAllocation {
+        if self.policy.stress != GcStress::Off {
             return true;
         }
         // Large vectors get a budget of their own. They do not crowd the nursery's cache, and
@@ -3429,6 +3483,7 @@ impl Heap {
             .then(|| (Instant::now(), self.young_bytes, self.young_large_bytes));
         self.space.marked_vector_cells = 0;
         self.space.tenured_vector_cells = 0;
+        self.deeper = kind != Collection::Minor;
         if kind != Collection::Major && self.policy.verify {
             self.verify_barrier();
         }
@@ -3436,7 +3491,11 @@ impl Heap {
             Collection::Minor => self.space.promote_bits = gc_bits::OLD,
             Collection::Intermediate => {
                 self.unmark_untenured();
-                self.space.promote_bits = gc_bits::OLD | gc_bits::TENURED;
+                self.space.promote_bits = if self.keep_untenured {
+                    gc_bits::OLD
+                } else {
+                    gc_bits::OLD | gc_bits::TENURED
+                };
             }
             Collection::Major => {
                 self.clear_marks();
@@ -3800,9 +3859,7 @@ impl Heap {
         // Collection ages each survivor by one generation, so a deeper collection can leave a
         // tenured object pointing at a child it aged only to the younger old generation; the
         // write barrier never saw that pointer, so tracing remembers the parent instead.
-        if self.space.promote_bits & gc_bits::TENURED == 0
-            || object.gc_bits() & gc_bits::TENURED == 0
-        {
+        if !self.deeper || object.gc_bits() & gc_bits::TENURED == 0 {
             self.trace_children::<false>(object);
             return;
         }
@@ -4311,6 +4368,29 @@ impl Heap {
         if self.image_large.contains(&(memory as usize)) {
             return;
         }
+        if self.space.quarantining() {
+            poison(memory, size);
+            self.quarantined_large
+                .push_back((NonNull::new_unchecked(memory), size));
+            self.quarantined_large_bytes += size;
+            self.release_quarantined_large(QUARANTINE_LARGE_BYTES);
+        } else {
+            self.release_large_memory(memory, size);
+        }
+    }
+
+    /// Gives the oldest quarantined large objects' memory back until at most `limit` bytes stay.
+    unsafe fn release_quarantined_large(&mut self, limit: usize) {
+        while self.quarantined_large_bytes > limit {
+            let Some((memory, size)) = self.quarantined_large.pop_front() else {
+                break;
+            };
+            self.quarantined_large_bytes -= size;
+            self.release_large_memory(memory.as_ptr(), size);
+        }
+    }
+
+    unsafe fn release_large_memory(&mut self, memory: *mut u8, size: usize) {
         if size >= MAPPED_BYTES {
             self.mapped.release(NonNull::new_unchecked(memory), size);
         } else {
@@ -4403,6 +4483,7 @@ impl Drop for Heap {
             for object in large {
                 self.free_large(object);
             }
+            self.release_quarantined_large(0);
             if !self.image_large.is_empty() {
                 let start = self.image_large.start as *mut u8;
                 if !crate::space::virtual_memory::release(start, self.image_large.len()) {
@@ -4558,7 +4639,7 @@ impl Default for GcPolicy {
             min_node_limit: 32 * 1024 * 1024,
             growth: HeapGrowth::from_environment(|name| std::env::var(name).ok()),
             stress: match gc_stress_requested() {
-                Some(GcStressStart::Startup) => GcStress::EveryAllocation,
+                Some((GcStressStart::Startup, stress)) => stress,
                 _ => GcStress::Off,
             },
             verify: std::env::var_os("RY_GC_VERIFY").is_some(),
@@ -4704,6 +4785,8 @@ impl Sexp {
 /// Entries the zero-count table gathers before a reconcile bounds it, however little they would
 /// free.
 const RECONCILE_ENTRIES: usize = 1 << 16;
+/// The bytes of freed large objects quarantine holds back before it releases the oldest.
+const QUARANTINE_LARGE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Large-vector bytes the zero-count table must stand to free before a reconcile runs for them.
 /// A package's test session has about 20,000 roots, which take about 100 µs to scan, so a

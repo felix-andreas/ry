@@ -3761,7 +3761,7 @@ unsafe fn do_gctorture2(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn set_gc_stress(on: bool) -> bool {
     let heap = crate::heap();
-    let previous = matches!(heap.policy().stress, GcStress::EveryAllocation);
+    let previous = heap.policy().stress != GcStress::Off;
     heap.update_policy(|policy| {
         policy.stress = if on {
             GcStress::EveryAllocation

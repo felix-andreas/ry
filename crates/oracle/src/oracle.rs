@@ -148,8 +148,8 @@ impl ProcessEngine {
         }
     }
 
-    /// The engine a name stands for: `gnu-r`, `ry`, `ry-tier0`, `ry-jit`, `ry-gctorture`, or a
-    /// command line.
+    /// The engine a name stands for: `gnu-r`, `ry`, `ry-tier0`, `ry-jit`, `ry-gctorture`,
+    /// `ry-gctorture-young`, or a command line.
     pub fn named(name: &str) -> Option<Self> {
         match name {
             "gnu-r" => Some(ProcessEngine::gnu_r()),
@@ -157,6 +157,7 @@ impl ProcessEngine {
             "ry-tier0" => Some(ProcessEngine::ry_tier0()),
             "ry-jit" => Some(ProcessEngine::ry_jit()),
             "ry-gctorture" => Some(ProcessEngine::ry_gc_torture()),
+            "ry-gctorture-young" => Some(ProcessEngine::ry_gc_torture_young()),
             command => ProcessEngine::from_command(command),
         }
     }
@@ -187,6 +188,19 @@ impl ProcessEngine {
         engine
             .environment
             .push(("RY_GC_STRESS".to_string(), "1".to_string()));
+        engine
+    }
+
+    /// [`ProcessEngine::ry_gc_torture`] with survivors kept collectable (`RY_GC_STRESS=young`):
+    /// every collection traces again what it has not tenured, so an object that survived earlier
+    /// collections and is then held by a Rust local alone is freed, as a minor collection frees
+    /// it outside stress while it is still young. Plain stress promotes it first and hides that.
+    pub fn ry_gc_torture_young() -> Self {
+        let mut engine = ProcessEngine::ry();
+        engine.name = "ry-gctorture-young".to_string();
+        engine
+            .environment
+            .push(("RY_GC_STRESS".to_string(), "young".to_string()));
         engine
     }
 

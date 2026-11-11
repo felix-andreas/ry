@@ -2,9 +2,10 @@
 //! `RY_BLESS=1` re-records the expectations. The test passes without R installed, and skips
 //! when GNU R is another release than the one `cases/gnu-r.txt` names.
 //!
-//! When ry's runtime is built, a rotating subset of the cases also runs under collection
-//! stress (`ry-gctorture`) and must give what ry gives unstressed. `FUZZ_SEED` picks the
-//! subset and `FUZZ_ITERS` its size; `ORACLE_ENGINE=ry-gctorture` runs every case against GNU R.
+//! When ry's runtime is built, a rotating subset of the cases also runs under each collection
+//! stress (`ry-gctorture` and `ry-gctorture-young`) and must give what ry gives unstressed.
+//! `FUZZ_SEED` picks the subset and `FUZZ_ITERS` its size; `ORACLE_ENGINE=ry-gctorture` runs
+//! every case against GNU R.
 
 use {
     oracle::{
@@ -23,6 +24,17 @@ use {
 fn case_directory() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cases")
 }
+
+/// Cases that once read a freed argument reference after it left the pool, run on every stress
+/// pass whatever the seed picks. `apply__lapply_closure_results_stay_rooted` crashed only under
+/// collection stress; `datetime__year_overflow` crashed unstressed in S3 dispatch from a slot
+/// builtin call; the other two crashed now and then with the JIT forced.
+const REGRESSION_CASES: &[&str] = &[
+    "apply__lapply_closure_results_stay_rooted",
+    "datetime__year_overflow",
+    "assignment__dollar_in_place",
+    "environments__unread_loop_variable",
+];
 
 fn cases() -> Vec<PathBuf> {
     runnable_cases(find_cases(&case_directory()), installed_packages).0
@@ -120,6 +132,16 @@ fn second_engine_matches_gnu_r() {
 
 #[test]
 fn cases_survive_gc_torture() {
+    cases_survive(ProcessEngine::ry_gc_torture());
+}
+
+#[test]
+fn cases_survive_young_gc_torture() {
+    cases_survive(ProcessEngine::ry_gc_torture_young());
+}
+
+/// A seeded subset of the cases under `torture` gives what ry gives unstressed.
+fn cases_survive(torture: ProcessEngine) {
     if !ry_runtime_available() {
         eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
         return;
@@ -128,15 +150,18 @@ fn cases_survive_gc_torture() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
-    let mut all = cases();
+    let (mut chosen, mut all): (Vec<PathBuf>, Vec<PathBuf>) =
+        cases().into_iter().partition(|case| {
+            case.file_stem()
+                .is_some_and(|stem| REGRESSION_CASES.iter().any(|name| stem == *name))
+        });
     let mut rng = SplitMix64(seed);
-    let mut chosen = Vec::new();
     for _ in 0..fuzz_iterations(1).min(all.len()) {
         chosen.push(all.swap_remove(rng.below(all.len())));
     }
     let timeout = Duration::from_secs(600);
     let ry = ProcessEngine::ry().with_timeout(timeout);
-    let torture = ProcessEngine::ry_gc_torture().with_timeout(timeout);
+    let torture = torture.with_timeout(timeout);
     let started = Instant::now();
     // Each case is two independent processes, so the cases run on every core; the failures are
     // reported in the order the seed chose the cases, whichever thread finished first.
@@ -164,7 +189,7 @@ fn cases_survive_gc_torture() {
                         match torture.run(case) {
                             Ok(stressed) => {
                                 if let Some(difference) =
-                                    diff("ry", &unstressed, "ry-gctorture", &stressed)
+                                    diff("ry", &unstressed, &torture.name(), &stressed)
                                 {
                                     found
                                         .push((index, format!("{}\n{difference}", case.display())));
@@ -190,8 +215,9 @@ fn cases_survive_gc_torture() {
     failures.sort_by_key(|(index, _)| *index);
     let failures: Vec<String> = failures.into_iter().map(|(_, failure)| failure).collect();
     eprintln!(
-        "{} case(s) from seed {seed} under collection stress in {:.1} s",
+        "{} case(s) from seed {seed} under {} in {:.1} s",
         chosen.len(),
+        torture.name(),
         started.elapsed().as_secs_f64()
     );
     assert!(

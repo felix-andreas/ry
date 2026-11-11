@@ -91,7 +91,16 @@ fn fuzz_programs_survive_gc_torture() {
     // not the divergences from GNU R that the pass above already reports.
     let ry = ProcessEngine::ry().with_timeout(TIMEOUT);
     let torture = ProcessEngine::ry_gc_torture().with_timeout(TORTURE_TIMEOUT);
-    let reports = run_seeds(&ry, &[&torture], fuzz_iterations(3).div_ceil(3));
+    let young = ProcessEngine::ry_gc_torture_young().with_timeout(TORTURE_TIMEOUT);
+    let mut reports = run_seeds(&ry, &[&torture, &young], fuzz_iterations(3).div_ceil(3));
+    let directory = scratch_directory();
+    for &seed in REGRESSION_SEEDS {
+        reports.push(
+            check_seed(seed, &ry, &[&torture, &young], &directory)
+                .unwrap_or_else(|error| panic!("seed {seed}: {} failed: {error}", ry.name())),
+        );
+    }
+    std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
     assert_agree(&reports);
 }
 
