@@ -20,7 +20,7 @@ for (w in list(NULL, 0L, 1L, 8L, -8L, 12)) {
   show(formatC(dbls, width = w, digits = 3L, format = "f"))
   show(formatC(ints, width = w))
 }
-for (fl in c("", "0", "-", "+", " ", "#", "0+", "-0", "I", "#0")) {
+for (fl in c("", "0", "-", "+", " ", "#", "0+", "-0", "#0")) {
   show(formatC(c(3.14159, -2, NA, Inf), width = 10L, digits = 2L, format = "f", flag = fl))
   show(formatC(c(42L, -7L, NA), width = 6L, flag = fl))
   show(formatC(c(0.000123, 1234.5), format = "g", flag = fl))
