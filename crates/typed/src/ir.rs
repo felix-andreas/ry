@@ -28,6 +28,10 @@ pub enum Item {
     Str,
     /// ry's 64-bit integer, which has no `NA` and whose arithmetic fails on overflow.
     I64,
+    /// A boxed record of this shape ([`crate::shapes`]).
+    Record(u32),
+    /// A boxed tag of this union of shapes.
+    Tag(u32),
 }
 
 /// The type of a local.
@@ -58,6 +62,10 @@ pub enum Type {
         key: Item,
         value: Item,
     },
+    /// A boxed record of one shape ([`crate::shapes`]).
+    Record(u32),
+    /// A boxed tag whose shape is one of a union's ([`crate::shapes::ANY`] for any shape).
+    Tag(u32),
 }
 
 impl Type {
@@ -65,7 +73,12 @@ impl Type {
     pub fn is_counted(self) -> bool {
         matches!(
             self,
-            Type::Str | Type::Vector { .. } | Type::List(_) | Type::Dict { .. }
+            Type::Str
+                | Type::Vector { .. }
+                | Type::List(_)
+                | Type::Dict { .. }
+                | Type::Record(_)
+                | Type::Tag(_)
         )
     }
 
@@ -73,7 +86,11 @@ impl Type {
     pub fn is_object(self) -> bool {
         matches!(
             self,
-            Type::Vector { .. } | Type::List(_) | Type::Dict { .. }
+            Type::Vector { .. }
+                | Type::List(_)
+                | Type::Dict { .. }
+                | Type::Record(_)
+                | Type::Tag(_)
         )
     }
 
@@ -85,6 +102,8 @@ impl Type {
             Item::Lgl => Type::Lgl,
             Item::Str => Type::Str,
             Item::I64 => Type::I64,
+            Item::Record(shape) => Type::Record(shape),
+            Item::Tag(union) => Type::Tag(union),
         }
     }
 
@@ -96,6 +115,8 @@ impl Type {
             Type::Lgl | Type::Bool => Some(Item::Lgl),
             Type::Str => Some(Item::Str),
             Type::I64 => Some(Item::I64),
+            Type::Record(shape) => Some(Item::Record(shape)),
+            Type::Tag(union) => Some(Item::Tag(union)),
             _ => None,
         }
     }
@@ -201,6 +222,8 @@ pub enum Constant {
     Str(u64, u64),
     I64(i64),
     Null,
+    /// A static object, such as a tag without a payload, whose count never changes.
+    Object(u64),
 }
 
 /// Arithmetic on two scalars or vectors.
@@ -270,6 +293,10 @@ pub enum Text {
     Upper,
     Lower,
     Nchar,
+    /// `Str.with_ascii_uppercased`: only ASCII letters change.
+    AsciiUpper,
+    /// `Str.with_ascii_lowercased`.
+    AsciiLower,
 }
 
 #[derive(Clone, Debug)]
@@ -360,6 +387,35 @@ pub enum Op {
     },
     /// A call of a compiled typed function with borrowed arguments.
     CallTyped(usize, SmallVec<[Local; 4]>),
+    /// A new box of this shape holding the fields, which it owns, in the shape's field order.
+    Construct(u32, SmallVec<[Local; 4]>),
+    /// Field `index` of a box known to have this shape.
+    Field(Local, u32, u32),
+    /// The shape id of a box, as an integer.
+    ShapeOf(Local),
+    /// `Str.count_utf8_bytes`, as an `I64`.
+    ByteCount(Local),
+    /// `Str.repeat(string, count)`, failing for a negative count.
+    RepeatStr(Local, Local),
+    /// `Str.split_on(string, separator)`, a list of strings.
+    Split(Local, Local),
+    /// A string parsed as the destination's type (`I64` or `Dbl`), with Rust's number syntax,
+    /// failing when it does not parse. [`Op::Parses`] tests first.
+    Parse(Local),
+    /// Whether a string parses as an `I64` (`true`) or as a double that is not `NaN`.
+    Parses(bool, Local),
+    /// An empty dictionary of the destination's type.
+    DictNew,
+    /// Whether the dictionary holds the key.
+    DictContains(Local, Local),
+    /// The value of a key the dictionary holds, failing otherwise.
+    DictGet(Local, Local),
+    /// The dictionary with the key mapped to the value.
+    DictInsert(Local, Local, Local),
+    /// The dictionary without the key.
+    DictRemove(Local, Local),
+    /// The list with the item appended, which it then owns.
+    Push(Local, Local),
     /// Fails when an interrupt is pending.
     Poll,
     Dup(Local),
@@ -371,7 +427,7 @@ impl Op {
     pub fn operands(&self) -> SmallVec<[Local; 4]> {
         use Op::*;
         match self {
-            Const(_) | Poll => SmallVec::new(),
+            Const(_) | Poll | DictNew => SmallVec::new(),
             Copy(a)
             | Not(a)
             | Math(_, _, a)
@@ -393,7 +449,12 @@ impl Op {
             | FormatFixed(a, _)
             | FormatPadded(a, _, _)
             | Dup(a)
-            | Drop(a) => SmallVec::from_slice(&[*a]),
+            | Drop(a)
+            | Field(a, _, _)
+            | ShapeOf(a)
+            | ByteCount(a)
+            | Parse(a)
+            | Parses(_, a) => SmallVec::from_slice(&[*a]),
             Arith(_, _, a, b)
             | Compare(_, _, a, b)
             | And(a, b)
@@ -411,14 +472,21 @@ impl Op {
             | VectorRound(a, b)
             | Join(a, b)
             | Affix(_, a, b)
-            | VectorAffix(_, a, b) => SmallVec::from_slice(&[*a, *b]),
-            Set(a, b, c) => SmallVec::from_slice(&[*a, *b, *c]),
+            | VectorAffix(_, a, b)
+            | RepeatStr(a, b)
+            | Split(a, b)
+            | DictContains(a, b)
+            | DictGet(a, b)
+            | DictRemove(a, b)
+            | Push(a, b) => SmallVec::from_slice(&[*a, *b]),
+            Set(a, b, c) | DictInsert(a, b, c) => SmallVec::from_slice(&[*a, *b, *c]),
             Concat(parts, separator) | PasteVectors(parts, separator) => {
                 let mut operands = parts.clone();
                 operands.push(*separator);
                 operands
             }
             CallTyped(_, arguments)
+            | Construct(_, arguments)
             | Elementwise {
                 inputs: arguments, ..
             } => arguments.clone(),
@@ -435,7 +503,11 @@ impl Op {
             VectorArith(..) | VectorCompare(..) | VectorLogic(..) => position < 2,
             VectorRound(..) => position == 0,
             // The list, and the new item, which the list then owns.
-            Set(..) => position != 1,
+            Set(..) | DictInsert(..) => position != 1,
+            DictRemove(..) => position == 0,
+            Push(..) => true,
+            // A box owns its fields.
+            Construct(..) => true,
             _ => false,
         }
     }
@@ -447,7 +519,8 @@ impl Op {
             Const(_) | Copy(_) | Compare(..) | Not(_) | And(..) | Or(..) | ToDbl(_)
             | LglToInt(_) | Length(_) | Relabel(..) | Dup(_) | Drop(_) | Concat(..) | Join(..)
             | Text(..) | Affix(..) | VectorText(..) | VectorAffix(..) | RoundDigits(..)
-            | Same(..) | Step(..) => false,
+            | Same(..) | Step(..) | Construct(..) | Field(..) | ShapeOf(_) | ByteCount(_)
+            | Split(..) | Parses(..) | DictContains(..) | DictRemove(..) | Push(..) => false,
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function
             // warns about NaNs.
             Arith(op, item, ..) => *item != Item::Dbl || *op == self::Arith::Mod,
