@@ -39,6 +39,16 @@ try-editor:
     echo
     echo "Or put it on your PATH, which every editor integration searches: export PATH=\"$(dirname "$ry"):\$PATH\""
 
+# Check the toolchain, the oracle's reference GNU R and its packages, the corpus library, that the
+# built binaries match the working tree, and free disk. `sudo tools/dev-setup.sh` provisions it all.
+doctor:
+    @python3 -I tools/doctor.py
+
+# Free disk in target/ without forcing a full rebuild: unused build configurations and stale
+# incremental caches. `--tests` also removes test executables, `--dry-run` only reports.
+prune *args:
+    python3 -I tools/prune.py {{ args }}
+
 test *args:
     cargo test -- --nocapture {{ args }}
 

@@ -220,7 +220,7 @@ from. A case that needs a package the engine cannot load is reported as `skip ..
 The `.expected` files are recorded with GNU R 4.6.2 built from source with
 
 ```sh
-./configure --enable-memory-profiling --with-x --without-recommended-packages --disable-java
+./configure --enable-R-shlib --enable-memory-profiling --with-x --without-recommended-packages --disable-java
 ```
 
 with the pango development headers installed (`libpango1.0-dev`), and with `data.table`, `bit64`,
@@ -234,6 +234,10 @@ cases depend on that build:
 - Collation and a few string cases follow ICU, which R uses when its headers are installed.
 - The `datatable__*`, `grid__*` and knitr cases print what those packages' current CRAN releases
   print, and each declares the packages it needs in an `# oracle: requires` line.
+
+`sudo tools/dev-setup.sh` builds exactly this into `/opt/R/4.6.2` and installs the packages, and
+`just doctor` checks it. `--enable-R-shlib` changes no output: it builds the `libR.so` that ry's
+console loads for GNU R and that binary packages link.
 
 Other builds differ in the last digits too: OpenBLAS changes `lm` and `arima` results, and the sign
 of `NA^NaN` depends on the compiler. So does `NaN + NA_integer_` (and `*`) in a closure's first,
