@@ -333,9 +333,9 @@ A check never changes what code that satisfies its annotations does, which the o
 comparing annotated cases on ry's runtime against GNU R running their erasure. The checks follow
 these rules:
 
-- **Parameters are checked when their value is computed.** An argument stays a promise and is
-  checked when it is forced, so laziness, `missing()`, and `substitute()` behave as in R, and an
-  argument that is never used is never checked. An argument that is already a value, such as a
+- **Parameters are checked when their value is computed.** An argument from R code stays a promise
+  and is checked when it is forced, so laziness, `missing()`, and `substitute()` behave as in R, and
+  an argument that is never used is never checked. An argument that is already a value, such as a
   constant, is checked when the function is entered.
 - **Every `...` argument is checked against the rest parameter's type**, under the same rule. An
   argument forwarded through `...` to another typed function is checked against both functions'
@@ -360,6 +360,26 @@ these rules:
   have the annotated type.
 - **A function with no parameters whose body is a constant or a bare name is not checked**, because
   it has no language object to carry its signature.
+
+Typed ry is strict, so a call from one typed function to another computes every argument the
+caller wrote, left to right, before the callee runs, even an argument the callee never uses. This
+is the one place where ry's runtime and GNU R running the erasure differ: GNU R computes such an
+argument only when the callee uses it. An argument written in R code, including one that reaches a
+typed function through `...`, stays lazy.
+
+```r
+first <- function(a: double, b: double) -> double a
+typed_caller <- function(x: double) -> double first(x, { cat("computed b\n"); 2 })
+r_caller <- function(x) first(x, { cat("computed b\n"); 2 })
+typed_caller(1)
+r_caller(1)
+```
+
+```text ry run runtime=ry
+computed b
+[1] 1
+[1] 1
+```
 
 A failed check is an ordinary R error, so `tryCatch()` and `try()` handle it. A parameter whose
 check failed stays unevaluated, as it would after an error while computing it, so code that catches

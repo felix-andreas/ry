@@ -33,16 +33,22 @@ use {
     interp::{unwind::Unwind, values as rvalues},
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::SmallVec,
-    std::cell::RefCell,
+    std::{borrow::Cow, cell::RefCell},
 };
 
 /// Why a closure does not compile, for the log.
-#[derive(Clone, Copy, Debug)]
-pub struct Refusal(pub &'static str);
+#[derive(Clone, Debug)]
+pub struct Refusal(pub Cow<'static, str>);
+
+impl Refusal {
+    pub const fn new(why: &'static str) -> Self {
+        Refusal(Cow::Borrowed(why))
+    }
+}
 
 impl From<ssa::Error> for Refusal {
     fn from(error: ssa::Error) -> Self {
-        Refusal(error.0)
+        Refusal::new(error.0)
     }
 }
 
@@ -107,7 +113,14 @@ pub unsafe fn call(function: Sexp, values: &[Sexp]) -> Option<Result<Sexp, Unwin
             params.push(Type::I64);
             continue;
         }
-        let ty = type_of(value)?;
+        let Some(ty) = type_of(value) else {
+            log_once(&format!(
+                "typed: no code for argument {}: {}",
+                position + 1,
+                boundary_refusal(value)
+            ));
+            return None;
+        };
         // A length-one vector passed where the closure declares a vector is that vector, not a
         // scalar.
         let ty = match ty.item() {
@@ -231,7 +244,7 @@ unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> 
             return Ok(compiled);
         }
     }
-    Err(Refusal("the shapes a `match` tests for keep growing"))
+    Err(Refusal::new("the shapes a `match` tests for keep growing"))
 }
 
 /// How many times [`compile`] tries before the shapes settle.
@@ -244,7 +257,7 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
         interp::annotations::declared_return_type(function).and_then(declared_type)
     };
     let guesses: SmallVec<[Type; 5]> = declared.into_iter().chain(GUESSES).collect();
-    let mut refusal = Refusal("the result type depends on the recursion");
+    let mut refusal = Refusal::new("the result type depends on the recursion");
     let mut found = None;
     'guesses: for &first in &guesses {
         let mut guess = first;
@@ -270,7 +283,7 @@ unsafe fn compile_once(function: Sexp, params: &[Type]) -> Result<Compiled, Refu
     let arguments: SmallVec<[Option<(SexpType, bool)>; 4]> =
         params.iter().map(|&ty| storage(ty)).collect();
     if !interp::annotations::admits_storage(function, &arguments, storage(ir.result)) {
-        return Err(Refusal("the types fail the closure's annotations"));
+        return Err(Refusal::new("the types fail the closure's annotations"));
     }
     ownership::insert(&mut ir);
     let code = backend::compile(&ir, &linker.callees)?;
@@ -317,7 +330,7 @@ struct Linker {
 impl Callees for Linker {
     unsafe fn callee(&mut self, function: Sexp, params: &[Type]) -> Result<(usize, Type), Refusal> {
         let compiled = compiled_for(function, params)
-            .ok_or(Refusal("a typed function it calls does not compile"))?;
+            .ok_or(Refusal::new("a typed function it calls does not compile"))?;
         // Code that calls another function directly is only right while that function's own
         // lookups hold.
         self.speculations.extend_from_slice(&compiled.speculations);
@@ -416,6 +429,39 @@ unsafe fn type_of(value: Sexp) -> Option<Type> {
         return Some(Type::of_item(item));
     }
     Some(Type::Vector { item, array })
+}
+
+/// Why an argument from R has no type in the typed core, and what to pass instead.
+unsafe fn boundary_refusal(value: Sexp) -> String {
+    if value.kind() == SexpType::Record {
+        return String::from(
+            "it is a record or tuple from R, which typed code takes only from typed code: pass \
+             its fields as parameters, or build it inside a typed function",
+        );
+    }
+    if value.attrib() != rvalues::nil() {
+        return String::from(
+            "it is an R value with attributes, such as a data frame or a factor, which typed code \
+             cannot hold: pass its columns or plain vectors",
+        );
+    }
+    format!(
+        "it is an R value of type `{}` that typed code cannot hold, such as a list of mixed \
+         types, an `NA` string or a non-UTF-8 string",
+        value.kind().name()
+    )
+}
+
+/// Writes `line` to standard error under `RY_TYPED_LOG`, once per session.
+fn log_once(line: &str) {
+    thread_local! {
+        static LOGGED: RefCell<FxHashSet<String>> = RefCell::new(FxHashSet::default());
+    }
+    if interp::annotations::typed_logging()
+        && LOGGED.with_borrow_mut(|logged| logged.insert(line.to_owned()))
+    {
+        eprintln!("{line}");
+    }
 }
 
 unsafe fn list_type(value: Sexp, length: usize) -> Option<Type> {
