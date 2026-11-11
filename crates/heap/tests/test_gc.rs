@@ -153,11 +153,11 @@ unsafe fn verify(heap: &mut Heap, model: &mut Model) {
 /// what it would free unreachable with a full collection instead of freeing it. Without it, a
 /// reconcile frees for real, and the contents check after each collection catches a live vector
 /// freed and reused.
-fn run(seed: u64, steps: usize, stress: bool) {
+fn run(seed: u64, steps: usize, stress: GcStress) {
     run_checked(seed, steps, stress, true);
 }
 
-fn run_checked(seed: u64, steps: usize, stress: bool, verify_reconcile: bool) {
+fn run_checked(seed: u64, steps: usize, stress: GcStress, verify_reconcile: bool) {
     let mut rng = SplitMix64(seed);
     let mut heap = Heap::new();
     heap.update_policy(|policy| {
@@ -166,9 +166,7 @@ fn run_checked(seed: u64, steps: usize, stress: bool, verify_reconcile: bool) {
         // Checks the barrier, and that each header's old bit agrees with its mark, before
         // every minor collection.
         policy.verify = verify_reconcile;
-        if stress {
-            policy.stress = GcStress::EveryAllocation;
-        }
+        policy.stress = stress;
     });
     let mut model = Model {
         nodes: Vec::new(),
@@ -396,22 +394,94 @@ fn run_checked(seed: u64, steps: usize, stress: bool, verify_reconcile: bool) {
 
 #[test]
 fn fuzz_object_graphs_survive_collection() {
-    for_each_seed(40, |seed| run(seed, 400, false));
+    for_each_seed(40, |seed| run(seed, 400, GcStress::Off));
 }
 
 #[test]
 fn fuzz_object_graphs_survive_stress_collection() {
-    for_each_seed(8, |seed| run(1000 + seed, 150, true));
+    for_each_seed(8, |seed| {
+        run(1000 + seed, 150, GcStress::EveryAllocation)
+    });
+}
+
+#[test]
+fn fuzz_object_graphs_survive_young_stress_collection() {
+    for_each_seed(8, |seed| run(2000 + seed, 150, GcStress::Young));
 }
 
 #[test]
 fn fuzz_reconciles_free_only_unreachable_vectors() {
-    for_each_seed(40, |seed| run_checked(seed, 400, false, false));
+    for_each_seed(40, |seed| run_checked(seed, 400, GcStress::Off, false));
 }
 
 #[test]
 fn fuzz_reconciles_free_only_unreachable_vectors_under_stress() {
-    for_each_seed(10, |seed| run_checked(seed, 200, true, false));
+    for_each_seed(10, |seed| {
+        run_checked(seed, 200, GcStress::EveryAllocation, false)
+    });
+}
+
+#[test]
+fn fuzz_reconciles_free_only_unreachable_vectors_under_young_stress() {
+    for_each_seed(10, |seed| run_checked(seed, 200, GcStress::Young, false));
+}
+
+/// An object that survived collections while a root reached it, and is then held by a Rust
+/// local alone, as an argument reference detached from its pool is: plain stress has promoted
+/// it, so only a major collection could free it, while young stress frees it at the next
+/// allocation, as a minor collection would free it outside stress before its first promotion.
+#[test]
+fn young_stress_frees_a_survivor_that_only_a_rust_local_holds() {
+    for (stress, freed) in [(GcStress::EveryAllocation, false), (GcStress::Young, true)] {
+        let mut heap = Heap::new();
+        heap.update_policy(|policy| policy.stress = stress);
+        unsafe {
+            let pool = heap.alloc_vector(SexpType::List, 1).expect("alloc");
+            heap.add_global_root(pool);
+            let pooled = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            heap.set_element(pool, 0, pooled);
+            for _ in 0..4 {
+                heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            }
+            heap.set_element(pool, 0, heap.nil());
+            let before = heap.stats().objects_freed;
+            // Another size class, so the allocation cannot take the freed slot back.
+            heap.alloc_vector(SexpType::Real, 64).expect("alloc");
+            if cfg!(debug_assertions) {
+                assert_eq!(pooled.kind() == SexpType::Free, freed, "{stress:?}");
+            }
+            assert!(heap.stats().objects_freed > before, "{stress:?}");
+        }
+    }
+}
+
+/// A weak pair's value that is still young when a deeper collection traces the tenured list
+/// holding it ages only to the younger old generation, so the list must stay remembered. If it
+/// did not, the next intermediate collection would free the value without tracing the list,
+/// leaving the pair pointing at a freed object (an inline cache, under `RY_GC_STRESS=young`).
+#[test]
+fn deeper_collection_keeps_a_tenured_weak_pair_list_remembered() {
+    for first in [Collection::Intermediate, Collection::Major] {
+        let mut heap = Heap::new();
+        unsafe {
+            let key = heap.alloc_vector(SexpType::List, 0).expect("alloc");
+            heap.add_global_root(key);
+            let cache = heap.alloc_vector(SexpType::List, 2).expect("alloc");
+            heap.add_global_root(cache);
+            heap.mark_weak_pairs(cache);
+            heap.collect(Collection::Major);
+            heap.collect(Collection::Major);
+            let mark = heap.handle_mark();
+            let value = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+            heap.root(value);
+            heap.set_element(cache, 0, key);
+            heap.set_element(cache, 1, value);
+            heap.collect(first);
+            heap.release_handles(mark);
+            heap.collect(Collection::Intermediate);
+            assert_eq!(cache.element(1), heap.nil(), "after {first:?}");
+        }
+    }
 }
 
 /// Past the bytes a reconcile waits for, so one dead vector runs it.

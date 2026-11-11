@@ -89,7 +89,8 @@ fn fuzz_programs_survive_gc_torture() {
     // not the divergences from GNU R that the pass above already reports.
     let ry = ProcessEngine::ry().with_timeout(TIMEOUT);
     let torture = ProcessEngine::ry_gc_torture().with_timeout(TORTURE_TIMEOUT);
-    let reports = run_seeds(&ry, &[&torture], fuzz_iterations(3).div_ceil(3));
+    let young = ProcessEngine::ry_gc_torture_young().with_timeout(TORTURE_TIMEOUT);
+    let reports = run_seeds(&ry, &[&torture, &young], fuzz_iterations(3).div_ceil(3));
     assert_agree(&reports);
 }
 

@@ -222,7 +222,7 @@ harness of that kind yet; the gap is filed in the backlog.
 | Environment variables | seeded random `Sys.setenv`, `Sys.unsetenv` and Rust-side writes over prefix-sharing, empty, `NA`, `=`-holding and non-ASCII names and values (`interp` `test_fuzz` `fuzz_environment_variables_agree_with_the_c_library`); the `system__sys_env_round_trips` oracle case | the C library's environment, on every `Sys.getenv`, `Sys.setenv` and `Sys.unsetenv` result; GNU R, through the oracle case |
 | Native helpers (withr, base) | seeded random calls of withr's environment and option helpers, `Sys.getenv`, `Sys.setenv`, `Sys.unsetenv`, `intersect` and `structure(names =)` with `NA`, empty, unset and non-ASCII values (`fuzz_native_helpers_match_their_r_bodies` in `oracle` `test_differential`, at tier 0 and under the JIT, `FUZZ_SEED` replays) | each function's own R body, by `identical()` on the value, visibility, condition and environment and option state; GNU R, through the oracle cases |
 | Graphics renderer | random drawings with nested, dangling and wrong-kind definitions and non-finite geometry (`interp` `test_fuzz`); the `graphics__` and `grid__` oracle cases; the plot gallery against GNU R (`oracle` `test_gallery`) | no panic, identical bytes on a second render, one file per page, and files a reader parses (PDF cross-reference offsets and page count, balanced SVG markup, a decodable PNG, BMP, TIFF, JPEG and PostScript headers); GNU R's warnings and capabilities |
-| Garbage collector | seeded allocation and mutation sequences (`heap` `test_gc`), including string and symbol interning in every encoding; `RY_GC_STRESS` over the oracle cases and generated programs; `RY_GC_VERIFY` | a model of the live graph; reference `HashMap`s of the interned strings and symbols; the unstressed run, the write-barrier invariant, a full collection over every reconcile's frees |
+| Garbage collector | seeded allocation and mutation sequences (`heap` `test_gc`), including string and symbol interning in every encoding; `RY_GC_STRESS` and `RY_GC_STRESS=young` over the oracle cases and generated programs; `RY_GC_VERIFY` | a model of the live graph; reference `HashMap`s of the interned strings and symbols; the unstressed run, the write-barrier invariant, a full collection over every reconcile's frees |
 | C API | native fuzzing (`libr` `test_fuzz_native`); mutated serialized streams (`rdb` `mutated_streams_never_panic`); `cargo fuzz` `unserialize` | GNU R's behavior; an R error, never a panic; the PROTECT balance check on every `.Call` |
 | JIT | `test_tiers`, including generated typed closures over vectors, records, tuples, tags and `match` that the first call compiles (`fuzz_typed_closures_agree_with_tier_zero`); random lists through every library traversal the JIT loops (`fuzz_stdlib_traversals_agree_with_model`); differential fuzzing with `RY_JIT=force` | tier 0's value, output and error message; GNU R; a Rust model of the library traversals |
 | Table engine | `table` property tests: random and mutated delimited text with quotes, embedded line breaks and random read options, read whole, through the slicer and through a memory-mapped file; grouped aggregates; sorting (`fuzz_csv_reading`, `fuzz_grouped_aggregates_against_a_reference`, `fuzz_sort_unique_and_runs_against_a_reference`); `cargo fuzz` `csv`, whose byte decoding `fuzz_csv_target_bytes` runs in the default suite | a whole read of the same text; a reference implementation; the eager implementation; the sniffer's promised columns |
@@ -238,6 +238,21 @@ different protect-stack depth than it entered with, ry warns `stack imbalance in
 does. A stricter checker that catches an unprotected object at the moment it is collected is
 `RY_GC_STRESS`, which collects before every allocation.
 
+Plain stress runs a minor collection each time, which ages every survivor into the old generation
+at once, and a minor collection never frees an old object. An object that survived one collection
+and is then held only by a Rust local is therefore safe under plain stress, although outside
+stress it is still young and the next minor collection frees it. `RY_GC_STRESS=young` catches that
+case. Every allocation runs a collection that traces again every object it has not tenured, so
+survivors stay collectable until every 64th collection tenures them, and major collections keep
+the plain mode's spacing. A small script runs about five times slower than under plain stress.
+
+| `RY_GC_STRESS` | Stress starts | Each allocation runs |
+| --- | --- | --- |
+| `1` | when the script starts | a minor collection |
+| `startup` | at the first allocation | a minor collection |
+| `young` | when the script starts | a collection that keeps survivors untenured |
+| `startup-young` | at the first allocation | a collection that keeps survivors untenured |
+
 ## Running the long harnesses
 
 | Recipe | What it runs |
@@ -245,7 +260,7 @@ does. A stricter checker that catches an unprotected object at the moment it is 
 | `just simulate COUNT ACTIONS BASE` | The language-server simulator over `COUNT` seeds from `BASE`. |
 | `just scenarios [NAME]` | Every scenario, or one. |
 | `just fuzz-differential SEED COUNT ENGINES` | Generated programs under GNU R and ry's engines. |
-| `just gc-torture` | Every oracle case under collection stress. |
+| `just gc-torture [young]` | Every oracle case under collection stress, or under `RY_GC_STRESS=young`. |
 | `just fuzz-deep [MINUTES] [BASE] [DEPTH]` | Every seeded harness at a deep budget until the time limit, described below. |
 | `just fuzz-run TARGET` | One `cargo fuzz` target under libFuzzer. |
 | `just fuzz-all SECONDS` | Every `cargo fuzz` target for `SECONDS` each, after seeding the corpora. |
@@ -260,7 +275,7 @@ test is then looked up in its binary's `--list`, which gives a test inside a mod
 test the binary does not list, or a run that runs no test, is a failure. It then works in three steps:
 
 1. The libr suites that run vendored packages' native code run once under `RY_GC_STRESS=startup`
-   with `RY_GC_VERIFY=1`.
+   and once under `RY_GC_STRESS=startup-young`, both with `RY_GC_VERIFY=1`.
 2. Each round runs every harness with `FUZZ_SEED` at the round's start and `FUZZ_DEPTH=DEPTH`, and
    four times that depth for the language-server simulation (at 150 actions), the C API sequences
    and the collector. Rounds start ten million seeds apart. The oracle's GC torture runs on a fresh

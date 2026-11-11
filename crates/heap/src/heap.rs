@@ -196,6 +196,12 @@ pub struct Heap {
     pretenure_young_bytes: usize,
     pretenure_young_large: usize,
     stress_counter: u64,
+    /// Set while [`GcStress::Young`] runs an intermediate collection that ages its survivors
+    /// only into the younger old generation.
+    keep_untenured: bool,
+    /// Whether the collection in progress is intermediate or major, whose tracing must notice a
+    /// tenured object left pointing at a younger child.
+    deeper: bool,
     known: WellKnown,
     /// Bumped whenever the set of bindings outside function frames changes (a binding created or
     /// removed, an enclosure replaced), so a cached lookup that resolved through those
@@ -408,6 +414,14 @@ pub enum GcStress {
     /// Collect before every allocation. Every eighth collection is a major one while the heap
     /// is small; past that, one per sixteenth of the live objects.
     EveryAllocation,
+    /// Collect before every allocation, as [`GcStress::EveryAllocation`] does, but keep the
+    /// survivors collectable: each collection unmarks and traces again every object outside the
+    /// oldest generation and ages none into it, so an object that survived earlier collections
+    /// is freed as soon as only a Rust local holds it, as it would be while still young. Plain
+    /// stress promotes an object at its first collection, after which only a major collection
+    /// can free it. Every 64th collection tenures the survivors, so the objects traced again
+    /// stay few, and major collections are spaced as for `EveryAllocation`.
+    Young,
 }
 
 /// When `RY_GC_STRESS` turns collection stress on for a whole run.
@@ -438,12 +452,16 @@ fn open_pause_log() -> Option<std::fs::File> {
     }
 }
 
-/// The collection stress `RY_GC_STRESS` asks for, if any.
-pub fn gc_stress_requested() -> Option<GcStressStart> {
+/// The collection stress `RY_GC_STRESS` asks for, if any, and when it starts. `young` and
+/// `startup-young` ask for [`GcStress::Young`]; any other value asks for
+/// [`GcStress::EveryAllocation`].
+pub fn gc_stress_requested() -> Option<(GcStressStart, GcStress)> {
     match std::env::var("RY_GC_STRESS").as_deref() {
         Err(_) | Ok("" | "0") => None,
-        Ok("startup") => Some(GcStressStart::Startup),
-        Ok(_) => Some(GcStressStart::Script),
+        Ok("startup") => Some((GcStressStart::Startup, GcStress::EveryAllocation)),
+        Ok("startup-young") => Some((GcStressStart::Startup, GcStress::Young)),
+        Ok("young") => Some((GcStressStart::Script, GcStress::Young)),
+        Ok(_) => Some((GcStressStart::Script, GcStress::EveryAllocation)),
     }
 }
 
@@ -799,6 +817,8 @@ impl Heap {
             pretenure_young_bytes: 0,
             pretenure_young_large: 0,
             stress_counter: 0,
+            keep_untenured: false,
+            deeper: false,
             pause_log: open_pause_log(),
             namespace_loads: 0,
             // Overwritten below, before anything reads it.
@@ -952,7 +972,7 @@ impl Heap {
         // cell trigger ignores vector memory, because a session holding a few big vectors would
         // otherwise let as many bytes of small garbage pile up.
         self.small_trigger = match self.policy.stress {
-            GcStress::EveryAllocation => 0,
+            GcStress::EveryAllocation | GcStress::Young => 0,
             GcStress::Off => self.policy.young_limit.max(self.old_small_bytes / 2),
         };
     }
@@ -2984,6 +3004,19 @@ impl Heap {
                     self.escalate_if_full(keep, request);
                 }
             }
+            GcStress::Young => {
+                self.stress_counter += 1;
+                let spacing = (self.stats.live_objects / 16).max(8);
+                if self.stress_counter >= spacing {
+                    self.stress_counter = 0;
+                    self.collect_keeping(Collection::Major, keep, request);
+                } else {
+                    self.keep_untenured = self.stress_counter % 64 != 0;
+                    self.collect_keeping(Collection::Intermediate, keep, request);
+                    self.keep_untenured = false;
+                    self.escalate_if_full(keep, request);
+                }
+            }
             GcStress::Off => {
                 if self.collection_due(request, large) {
                     self.collect_keeping(Collection::Minor, keep, request);
@@ -3344,7 +3377,7 @@ impl Heap {
         if self.inhibit > 0 {
             return false;
         }
-        if self.policy.stress == GcStress::EveryAllocation {
+        if self.policy.stress != GcStress::Off {
             return true;
         }
         // Large vectors get a budget of their own. They do not crowd the nursery's cache, and
@@ -3389,6 +3422,7 @@ impl Heap {
             .then(|| (Instant::now(), self.young_bytes, self.young_large_bytes));
         self.space.marked_vector_cells = 0;
         self.space.tenured_vector_cells = 0;
+        self.deeper = kind != Collection::Minor;
         if kind != Collection::Major && self.policy.verify {
             self.verify_barrier();
         }
@@ -3396,7 +3430,11 @@ impl Heap {
             Collection::Minor => self.space.promote_bits = gc_bits::OLD,
             Collection::Intermediate => {
                 self.unmark_untenured();
-                self.space.promote_bits = gc_bits::OLD | gc_bits::TENURED;
+                self.space.promote_bits = if self.keep_untenured {
+                    gc_bits::OLD
+                } else {
+                    gc_bits::OLD | gc_bits::TENURED
+                };
             }
             Collection::Major => {
                 self.clear_marks();
@@ -3746,9 +3784,7 @@ impl Heap {
         // Collection ages each survivor by one generation, so a deeper collection can leave a
         // tenured object pointing at a child it aged only to the younger old generation; the
         // write barrier never saw that pointer, so tracing remembers the parent instead.
-        if self.space.promote_bits & gc_bits::TENURED == 0
-            || object.gc_bits() & gc_bits::TENURED == 0
-        {
+        if !self.deeper || object.gc_bits() & gc_bits::TENURED == 0 {
             self.trace_children::<false>(object);
             return;
         }
@@ -3771,6 +3807,14 @@ impl Heap {
         match object.kind().shape() {
             Shape::Vector => {
                 if object.flags() & flag_bits::WEAK_PAIRS != 0 {
+                    // Tracing marks no pair, so it learns nothing about younger children. A
+                    // tenured list must stay remembered while it holds one, or the next
+                    // intermediate collection frees that child without tracing the list, which
+                    // is what clears a pair whose key or value died.
+                    if TENURED {
+                        self.younger_child |= (0..object.length() as usize)
+                            .any(|index| younger(object, object.stored_element(index)));
+                    }
                     self.weak_pairs.push(object);
                 } else if TENURED && object.is_carded() {
                     // A deeper collection derives each card of a tenured vector from scratch:
@@ -4491,7 +4535,7 @@ impl Default for GcPolicy {
             min_node_limit: 32 * 1024 * 1024,
             growth: HeapGrowth::from_environment(|name| std::env::var(name).ok()),
             stress: match gc_stress_requested() {
-                Some(GcStressStart::Startup) => GcStress::EveryAllocation,
+                Some((GcStressStart::Startup, stress)) => stress,
                 _ => GcStress::Off,
             },
             verify: std::env::var_os("RY_GC_VERIFY").is_some(),

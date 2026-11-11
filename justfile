@@ -575,16 +575,21 @@ bench-test package reporter="summary":
     Rscript tools/bench/tooling/run-tests.R {{ package }} {{ reporter }}
 
 # Differential fuzzing of the runtime: random programs under GNU R, ry's tier 0 and the forced JIT.
-# `just fuzz-differential 0 500` runs seeds 0 to 499; add `ry-gctorture` to the engines for stress.
+# `just fuzz-differential 0 500` runs seeds 0 to 499; add `ry-gctorture` or `ry-gctorture-young`
+# to the engines for stress.
 fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
     cargo build -q -p ry-lang -p libr -p rcmd -p oracle
     ./target/debug/oracle fuzz --seed {{ seed }} --count {{ count }} --engines {{ engines }}
 
 # Every oracle case under collection stress (`RY_GC_STRESS`), compared with ry unstressed;
-# `ORACLE_ENGINE=ry-gctorture cargo test -p oracle` compares them with GNU R instead.
-gc-torture:
+# `just gc-torture young` keeps survivors collectable (`RY_GC_STRESS=young`), which finds an
+# object only a Rust local holds. `ORACLE_ENGINE=ry-gctorture cargo test -p oracle` compares
+# the cases with GNU R instead.
+gc-torture mode="plain":
     cargo build -q -p ry-lang -p libr -p rcmd
-    FUZZ_ITERS=1000000 cargo test -p oracle --test test_cases cases_survive_gc_torture -- --nocapture
+    FUZZ_ITERS=1000000 cargo test -p oracle --test test_cases \
+        {{ if mode == "young" { "cases_survive_young_gc_torture" } else { "cases_survive_gc_torture" } }} \
+        -- --exact --nocapture
 
 # The language-server simulator over many seeds: `just simulate 1000 120` runs seeds 0 to 999 with
 # 120 actions each. Replay one failure with `SIMULATION_SEED=<seed> cargo test -p ry-lang --test test_simulation`.

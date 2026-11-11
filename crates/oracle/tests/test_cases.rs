@@ -2,9 +2,10 @@
 //! `RY_BLESS=1` re-records the expectations. The test passes without R installed, and skips
 //! when GNU R is another release than the one `cases/gnu-r.txt` names.
 //!
-//! When ry's runtime is built, a rotating subset of the cases also runs under collection
-//! stress (`ry-gctorture`) and must give what ry gives unstressed. `FUZZ_SEED` picks the
-//! subset and `FUZZ_ITERS` its size; `ORACLE_ENGINE=ry-gctorture` runs every case against GNU R.
+//! When ry's runtime is built, a rotating subset of the cases also runs under each collection
+//! stress (`ry-gctorture` and `ry-gctorture-young`) and must give what ry gives unstressed.
+//! `FUZZ_SEED` picks the subset and `FUZZ_ITERS` its size; `ORACLE_ENGINE=ry-gctorture` runs
+//! every case against GNU R.
 
 use {
     oracle::{
@@ -120,6 +121,16 @@ fn second_engine_matches_gnu_r() {
 
 #[test]
 fn cases_survive_gc_torture() {
+    cases_survive(ProcessEngine::ry_gc_torture());
+}
+
+#[test]
+fn cases_survive_young_gc_torture() {
+    cases_survive(ProcessEngine::ry_gc_torture_young());
+}
+
+/// A seeded subset of the cases under `torture` gives what ry gives unstressed.
+fn cases_survive(torture: ProcessEngine) {
     if !ry_runtime_available() {
         eprintln!("skipped: ry's runtime is not built; run `cargo build -p ry-lang -p libr`");
         return;
@@ -136,7 +147,7 @@ fn cases_survive_gc_torture() {
     }
     let timeout = Duration::from_secs(600);
     let ry = ProcessEngine::ry().with_timeout(timeout);
-    let torture = ProcessEngine::ry_gc_torture().with_timeout(timeout);
+    let torture = torture.with_timeout(timeout);
     let started = Instant::now();
     // Each case is two independent processes, so the cases run on every core; the failures are
     // reported in the order the seed chose the cases, whichever thread finished first.
@@ -164,7 +175,7 @@ fn cases_survive_gc_torture() {
                         match torture.run(case) {
                             Ok(stressed) => {
                                 if let Some(difference) =
-                                    diff("ry", &unstressed, "ry-gctorture", &stressed)
+                                    diff("ry", &unstressed, &torture.name(), &stressed)
                                 {
                                     found
                                         .push((index, format!("{}\n{difference}", case.display())));
@@ -190,8 +201,9 @@ fn cases_survive_gc_torture() {
     failures.sort_by_key(|(index, _)| *index);
     let failures: Vec<String> = failures.into_iter().map(|(_, failure)| failure).collect();
     eprintln!(
-        "{} case(s) from seed {seed} under collection stress in {:.1} s",
+        "{} case(s) from seed {seed} under {} in {:.1} s",
         chosen.len(),
+        torture.name(),
         started.elapsed().as_secs_f64()
     );
     assert!(
