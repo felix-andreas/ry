@@ -39,11 +39,21 @@ try-editor:
     echo
     echo "Or put it on your PATH, which every editor integration searches: export PATH=\"$(dirname "$ry"):\$PATH\""
 
+# Check the toolchain, the oracle's reference GNU R and its packages, the corpus library, that the
+# built binaries match the working tree, and free disk. `sudo tools/dev-setup.sh` provisions it all.
+doctor:
+    @python3 -I tools/doctor.py
+
+# Free disk in target/ without forcing a full rebuild: unused build configurations and stale
+# incremental caches. `--tests` also removes test executables, `--dry-run` only reports.
+prune *args:
+    python3 -I tools/prune.py {{ args }}
+
 test *args:
     cargo test -- --nocapture {{ args }}
 
 # The pre-landing check: tests, clippy at -D warnings, fmt, and the licence notices.
-gate: battery clippy fmt-check (notices "--check") (bench-readme "--check")
+gate: battery clippy fmt-check (notices "--check") (readme "--check")
 
 # Workspace tests; `zed_ry` needs a wasm toolchain, so it is excluded.
 battery *args:
@@ -125,10 +135,17 @@ climb *args:
     cargo build --release -p ry-lang -p libr
     python3 -I tools/climb/run.py {{ args }}
 
-# Rewrites the benchmark blocks of the two READMEs from the committed results files; `--check` only
-# reports a README that differs.
-bench-readme *args:
-    python3 -I tools/bench/readme.py {{ args }}
+# Regenerates what the READMEs show: the benchmark blocks and chart from the committed results files,
+# and docs/public/diagnostic.svg from a real `ry check` run on the README's Payment example.
+# `--check` only reports what differs.
+readme *args:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    status=0
+    python3 -I tools/bench/readme.py {{ args }} || status=1
+    cargo build -q -p ry-lang || exit 1
+    cargo -Zscript scripts/render-diagnostic-svg.rs "${CARGO_TARGET_DIR:-{{ justfile_directory() }}/target}/debug/ry" {{ args }} || status=1
+    exit $status
 
 # Manages the package-test corpus pinned in tools/bench/packages/lock.tsv: `just bench-packages install` fetches and
 # installs it from the rrepo CRAN mirror into .corpus/packages, and `just bench-packages lock` re-pins it.
