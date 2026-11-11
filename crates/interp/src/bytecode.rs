@@ -332,7 +332,8 @@ fn grow_registers(length: usize) -> R<()> {
     if length > start {
         // Every call grows the file past the registers the last call released, so this runs
         // once per call: `fill` stores the `NULL`s as wide writes, where `resize` cloned them
-        // one at a time.
+        // one at a time. Clearing is what lets a collection inside the new window free what a
+        // returned call left in these words, as GNU R does.
         // SAFETY: the capacity covers `length`, and `Sexp` is a plain pointer the next line
         // initializes before anything reads it.
         unsafe { registers.set_len(length) };
@@ -4862,7 +4863,24 @@ unsafe fn overwrite_scalar(value: Sexp, kind: SexpType, element: f64) -> bool {
 
 /// The number of `for` loops in `code`.
 pub unsafe fn loop_count(code: Sexp) -> usize {
-    length(code.cdr().element(LOOPS)) / 4
+    pool_entry(code.cdr(), LOOPS).length() as usize / 4
+}
+
+/// Entry `index` of a code object's constant pool. The compiler builds the pool and the
+/// vectors in its fixed entries itself, so none of them is ALTREP and the entry path reads them
+/// without the element accessor's ALTREP test.
+#[inline(always)]
+unsafe fn pool_entry(constants: Sexp, index: usize) -> Sexp {
+    debug_assert!(!constants.is_altrep());
+    *constants.data().cast::<Sexp>().add(index)
+}
+
+/// The integer words of the pool's fixed entry `index`, such as [`PROFILE`] or [`REGISTERS`].
+#[inline(always)]
+unsafe fn pool_ints(constants: Sexp, index: usize) -> *mut i32 {
+    let entry = pool_entry(constants, index);
+    debug_assert!(!entry.is_altrep());
+    entry.data().cast::<i32>()
 }
 
 /// Runs a compiled promise's code in `env`, the frame it was compiled for. Promise code has no
@@ -4872,7 +4890,7 @@ pub unsafe fn run_promise(code: Sexp, env: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     heap.root(code);
     let mark = heap.handle_mark();
-    let register_count = values::ints(code.cdr().element(REGISTERS))[0] as usize;
+    let register_count = *pool_ints(code.cdr(), REGISTERS) as usize;
     let header = interp().bytecode.registers.len();
     let base = header + 1;
     reserve_registers(base + register_count)?;
@@ -4910,7 +4928,7 @@ pub unsafe fn run_promise_on_slots(
     let heap = crate::heap();
     heap.root(code);
     let mark = heap.handle_mark();
-    let register_count = values::ints(code.cdr().element(REGISTERS))[0] as usize;
+    let register_count = *pool_ints(code.cdr(), REGISTERS) as usize;
     let base = interp().bytecode.registers.len();
     reserve_registers(base + register_count)?;
     let state = interp();
@@ -4960,11 +4978,11 @@ unsafe fn run_at(function: Sexp, code: Sexp, header: usize, base: usize) -> R<Se
     heap.root(code);
     let mark = heap.handle_mark();
     let constants = code.cdr();
-    let register_count = values::ints(constants.element(REGISTERS))[0] as usize;
+    let register_count = *pool_ints(constants, REGISTERS) as usize;
     reserve_registers(base + register_count)?;
-    let profile = values::ints_mut(constants.element(PROFILE));
-    let entries = profile[profile::ENTRIES].saturating_add(1);
-    profile[profile::ENTRIES] = entries;
+    let profile = pool_ints(constants, PROFILE);
+    let entries = (*profile.add(profile::ENTRIES)).saturating_add(1);
+    *profile.add(profile::ENTRIES) = entries;
     // Built empty and filled only for a body with loops, so the inline buffer is not assembled
     // on the stack and copied, which every call of a body paid.
     let mut loops: SmallVec<[LoopState; 4]> = SmallVec::new();
@@ -4986,19 +5004,12 @@ unsafe fn run_at(function: Sexp, code: Sexp, header: usize, base: usize) -> R<Se
         mark,
         loops: &mut loops,
     };
-    let entered = if entries >= profile[profile::NEXT] {
-        entry_event(&mut machine, entries)
+    // The tiers' schedule fires at a few entries of a body, so the common entry runs the code
+    // here, in this frame, and the scheduled one goes out of line.
+    let result = if entries >= *profile.add(profile::NEXT) {
+        run_scheduled_entry(&mut machine, entries)
     } else {
-        None
-    };
-    let result = match entered {
-        Some(TierExit::Finished(result)) => result,
-        Some(TierExit::Resume { pc, pending }) => match pending {
-            Some(unwind) => continue_after(&mut machine, pc, unwind)
-                .and_then(|pc| execute_code(&mut machine, pc)),
-            None => execute_code(&mut machine, pc),
-        },
-        None => execute_code(&mut machine, 0),
+        execute_code(&mut machine, 0)
     };
     interp().bytecode.registers.truncate(base);
     let env = *register_address(header);
@@ -5008,6 +5019,22 @@ unsafe fn run_at(function: Sexp, code: Sexp, header: usize, base: usize) -> R<Se
     match result {
         Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
         other => other,
+    }
+}
+
+/// Runs an activation whose entry the tiers' schedule picked: the optimizing tier may run it,
+/// or hand it back to resume at a pc.
+#[inline(never)]
+unsafe fn run_scheduled_entry(machine: &mut Machine<'_>, entries: i32) -> R<Sexp> {
+    match entry_event(machine, entries) {
+        Some(TierExit::Finished(result)) => result,
+        Some(TierExit::Resume { pc, pending }) => match pending {
+            Some(unwind) => {
+                continue_after(machine, pc, unwind).and_then(|pc| execute_code(machine, pc))
+            }
+            None => execute_code(machine, pc),
+        },
+        None => execute_code(machine, 0),
     }
 }
 
@@ -5086,6 +5113,7 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
     entered
 }
 
+#[inline(always)]
 unsafe fn execute_code(machine: &mut Machine<'_>, pc: usize) -> R<Sexp> {
     let _activity = activity::enter(Activity::Interpreter, 0);
     interpret::<false>(machine, pc).0
@@ -5431,18 +5459,18 @@ pub unsafe fn fused_operand_registers(program: Sexp) -> SmallVec<[usize; 4]> {
 #[inline(always)]
 unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>) -> Activation<'m, 'a> {
     let constants = machine.code.cdr();
-    let feedback = if values::ints(constants.element(PROFILE))[profile::RECORDING] != 0 {
-        values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr()
+    let feedback = if *pool_ints(constants, PROFILE).add(profile::RECORDING) != 0 {
+        pool_ints(constants, FEEDBACK)
     } else {
         std::ptr::null_mut()
     };
-    let code = values::ints(machine.code.car()).as_ptr();
+    let code = machine.code.car().data().cast::<i32>().cast_const();
     let registers = register_address(machine.base);
-    let slots = constants.element(SLOTS);
+    let slots = pool_entry(constants, SLOTS);
     let slot_map = if slots == nil() {
         std::ptr::null()
     } else {
-        values::ints(slots.element(0)).as_ptr()
+        pool_ints(slots, 0).cast_const()
     };
     Activation {
         constants,
@@ -5464,7 +5492,7 @@ unsafe fn activation<'m, 'a>(machine: &'m mut Machine<'a>) -> Activation<'m, 'a>
 /// The machine code the baseline tier compiled for these constants' code, if any.
 #[inline(always)]
 unsafe fn baseline_code(constants: Sexp) -> Option<BaselineCode> {
-    let holder = constants.element(BASELINE);
+    let holder = pool_entry(constants, BASELINE);
     if holder.kind() != SexpType::ExternalPtr {
         return None;
     }
@@ -5883,9 +5911,10 @@ unsafe fn pool_constant(state: &Activation<'_, '_>, index: usize) -> Sexp {
     *state.constants.data().cast::<Sexp>().add(index)
 }
 
-/// `GetVar` of a local in a slot frame: the slot's value, or a promise's value once forced.
-/// What needs the evaluator (an unforced promise, a missing argument, a name without a slot or
-/// value) runs the generic handler.
+/// `GetVar` in a slot frame: a slot's value, or else the cached cell's value of a name the frame
+/// does not bind, either a promise's value once forced. What needs the evaluator (an unforced
+/// promise, an active binding, a missing argument, a cache miss) runs the generic handler. A
+/// cache key is never a function frame, so a hit also means no function frame lies between.
 #[inline(always)]
 unsafe fn get_var_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
     let known = (*state.heap).known();
@@ -5893,11 +5922,25 @@ unsafe fn get_var_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usiz
         return None;
     }
     let code = state.code;
-    let slot = *state.slot_map.add(*code.add(at + 3) as usize);
-    if slot < 0 {
-        return None;
-    }
-    let mut value = *state.header.add(1 + slot as usize);
+    let cache_slot = *code.add(at + 3) as usize;
+    let slot = *state.slot_map.add(cache_slot);
+    let mut value = if slot >= 0 {
+        *state.header.add(1 + slot as usize)
+    } else {
+        let heap = &*state.heap;
+        let cache = state.cache;
+        let symbol = pool_constant(state, *code.add(at + 2) as usize);
+        if *cache.epochs.add(cache_slot) != heap.lookup_stamp(symbol)
+            || *cache.slots.add(cache_slot * 2) != state.machine.function.tag()
+        {
+            return None;
+        }
+        let cell = *cache.slots.add(cache_slot * 2 + 1);
+        if cell.has_gp(gp::ACTIVE_BINDING) {
+            return None;
+        }
+        cell.cdr()
+    };
     match value.kind() {
         SexpType::Promise => {
             value = value.car();
@@ -10305,6 +10348,9 @@ unsafe fn lookup_outside(
     {
         let value = cell.cdr();
         if value.kind() == SexpType::Promise {
+            if value.car() != unbound() {
+                return Ok(value.car());
+            }
             return holding(held, || {
                 eval::eval_symbol_reporting(symbol, env, || lexical.call())
             });
@@ -10328,17 +10374,20 @@ unsafe fn lookup_outside(
 /// references, so they count as referenced while that code runs: in `x + y` where forcing `y`
 /// runs `x[] <- 1`, the assignment must copy `x` rather than change the left operand.
 unsafe fn holding(held: Range<usize>, run: impl FnOnce() -> R<Sexp>) -> R<Sexp> {
-    let values: SmallVec<[Sexp; 8]> = interp()
-        .bytecode
-        .registers
-        .get(held)
-        .map(SmallVec::from_slice)
-        .unwrap_or_default();
-    for value in &values {
+    if held.is_empty() {
+        return run();
+    }
+    // The held registers belong to the running activation, and the code `run` starts uses only
+    // registers above the file's current length, so they read the same before and after.
+    let registers = &interp().bytecode.registers;
+    let Some(values) = registers.get(held.clone()) else {
+        return run();
+    };
+    for value in values {
         value.increment_refcount();
     }
     let result = run();
-    for value in &values {
+    for value in interp().bytecode.registers.get(held).unwrap_or_default() {
         value.decrement_refcount();
     }
     result
@@ -10476,11 +10525,12 @@ struct LookupCache {
 impl LookupCache {
     unsafe fn of(code: Sexp) -> Self {
         let caches = code.tag();
+        let constants = code.cdr();
         LookupCache {
-            epochs: values::reals_mut(code.cdr().element(EPOCHS)).as_mut_ptr() as *mut u64,
+            epochs: pool_entry(constants, EPOCHS).data().cast::<u64>(),
             caches,
             slots: caches.data() as *const Sexp,
-            hints: values::ints_mut(code.cdr().element(HINTS)).as_mut_ptr() as *mut u32,
+            hints: pool_ints(constants, HINTS).cast::<u32>(),
         }
     }
 }

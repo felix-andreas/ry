@@ -184,6 +184,8 @@ symbol_table! {
     several_ok = "several.ok",
     domain = "domain",
     append_lf = "appendLF",
+    call_dot = "call.",
+    immediate_dot = "immediate.",
     cond = "cond",
     msg = "msg",
     condition_message_simple_message = "conditionMessage.simpleMessage",
