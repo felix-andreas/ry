@@ -416,6 +416,44 @@ pub unsafe fn compile_before_call(function: Sexp) -> R<Sexp> {
     }
 }
 
+/// A closure over `env` for the `function` expression with `formals`, `body` and `srcref` in
+/// the code `outer`, made as [`Op::Closure`] makes it: every closure made from the expression
+/// shares one compiled body, kept in `outer`'s constants. A native prologue that runs part of
+/// a compiled body by hand makes its closures with this, since a closure made from the source
+/// alone would be compiled again for each call of the outer function.
+pub(crate) unsafe fn inner_closure(
+    outer: Sexp,
+    formals: Sexp,
+    body: Sexp,
+    srcref: Sexp,
+    env: Sexp,
+) -> R<Sexp> {
+    let heap = crate::heap();
+    let site = if outer.kind() == SexpType::Bytecode {
+        let constants = outer.cdr();
+        (0..length(constants)).find_map(|position| {
+            let constant = constants.element(position);
+            let matches = constant == body
+                || (constant.kind() == SexpType::Bytecode && source_of(constant) == body);
+            matches.then_some((constants, position, constant))
+        })
+    } else {
+        None
+    };
+    let Some((constants, position, shared)) = site else {
+        return eval::make_closure(formals, body, srcref, env);
+    };
+    let closure = eval::make_closure(formals, shared, srcref, env)?;
+    if shared.kind() != SexpType::Bytecode && worth_compiling(shared) {
+        heap.root(closure);
+        if let Ok(Some(code)) = compile(shared, closure) {
+            heap.set_element(constants, position, code);
+            heap.set_cdr(closure, code);
+        }
+    }
+    Ok(closure)
+}
+
 /// A closure's body as source: the expression of compiled code.
 pub unsafe fn closure_body(function: Sexp) -> Sexp {
     let body = function.cdr();
