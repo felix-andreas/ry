@@ -5,9 +5,10 @@
 
 use {
     crate::{
-        Frame, bytecode,
+        Frame,
         annotations::Entry,
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
+        bytecode,
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
         interp,
         unwind::{R, error},
@@ -409,7 +410,14 @@ struct EntryKey {
 }
 
 impl EntryKey {
-    unsafe fn matches(&self, generic: Sexp, group: Sexp, with_default: bool, def_env: Sexp, classes: Sexp) -> bool {
+    unsafe fn matches(
+        &self,
+        generic: Sexp,
+        group: Sexp,
+        with_default: bool,
+        def_env: Sexp,
+        classes: Sexp,
+    ) -> bool {
         self.generic == generic
             && self.group == group
             && self.with_default == with_default
@@ -1085,7 +1093,14 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
             object => object,
         }
     };
-    let found = generic_method(None, generic, object, env.enclosure(), sys_parent, sys_parent)?;
+    let found = generic_method(
+        None,
+        generic,
+        object,
+        env.enclosure(),
+        sys_parent,
+        sys_parent,
+    )?;
     let mut vars = found.vars;
     let dispatch_vars = vars.len();
     // Through R 4.3, local variables the generic defined before dispatching are visible to the
@@ -1118,7 +1133,14 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     // its environment from the start.
     let result = if vars.len() > dispatch_vars && found.method.kind() == SexpType::Closure {
         let env = eval::bind_arguments(new_call, found.method, &args, Some(&vars))?;
-        eval::run_closure(new_call, found.method, env, sys_parent, &args, Entry::Unchecked)?
+        eval::run_closure(
+            new_call,
+            found.method,
+            env,
+            sys_parent,
+            &args,
+            Entry::Unchecked,
+        )?
     } else {
         apply_method(new_call, found.method, &args, sys_parent, &vars, false)?
     };
@@ -1168,24 +1190,52 @@ pub(crate) unsafe fn use_method_in_slots(
         value_of(value)?
     };
     let Some((owner, enclosure)) = caller else {
-        let found = generic_method(Some(site), generic, object, function.tag(), sys_parent, sys_parent)?;
+        let found = generic_method(
+            Some(site),
+            generic,
+            object,
+            function.tag(),
+            sys_parent,
+            sys_parent,
+        )?;
         let new_call = renamed_call(frame_call, found.method_name)?;
         drop(dispatching);
-        return apply_method(new_call, found.method, &promargs, sys_parent, &found.vars, false)
-            .map(Some);
+        return apply_method(
+            new_call,
+            found.method,
+            &promargs,
+            sys_parent,
+            &found.vars,
+            false,
+        )
+        .map(Some);
     };
     // The caller is a slot frame without an environment. Methods are looked up from its
     // enclosure (`lazy_caller` checked that its own slots bind none of the names probed), the
     // method finds it as its caller by position, and `.GenericCallEnv` holds its pending
     // environment, which whoever reads the variable makes real.
     let pending = eval::pending_env(owner)?;
-    let found = generic_method(Some(site), generic, object, function.tag(), enclosure, pending)?;
+    let found = generic_method(
+        Some(site),
+        generic,
+        object,
+        function.tag(),
+        enclosure,
+        pending,
+    )?;
     let new_call = renamed_call(frame_call, found.method_name)?;
     drop(dispatching);
     if found.method.kind() != SexpType::Closure {
         let sys_parent = eval::frame_env(owner, eval::Reify::Site("method dispatch"))?;
-        return apply_method(new_call, found.method, &promargs, sys_parent, &found.vars, false)
-            .map(Some);
+        return apply_method(
+            new_call,
+            found.method,
+            &promargs,
+            sys_parent,
+            &found.vars,
+            false,
+        )
+        .map(Some);
     }
     let state = interp();
     let previous_owner = state.slot_owner;
@@ -1212,7 +1262,11 @@ unsafe fn lazy_caller(position: usize, generic: Sexp) -> R<Option<(usize, Sexp)>
         return Ok(None);
     }
     let function = caller.function;
-    let names = function.cdr().cdr().element(crate::bytecode::SLOTS).element(1);
+    let names = function
+        .cdr()
+        .cdr()
+        .element(crate::bytecode::SLOTS)
+        .element(1);
     let prefix = generic.element(0).bytes();
     let probed = (0..length(names)).any(|index| {
         let name = names.element(index).car().bytes();
@@ -1672,20 +1726,19 @@ pub unsafe fn try_builtin_dispatch(
             // it dispatches, so neither an S3 nor an S4 method sees them, and `nargs()` in the
             // method does not count them. It then dispatches through `DispatchAnyOrEval`,
             // which tries the S4 methods when any argument is an S4 object, not only the first.
-            let kept: Vec<Arg> = args
+            let kept = |position: usize, arg: &Arg| position == 0 || arg.value != nil();
+            if args
                 .iter()
                 .enumerate()
-                .filter(|(position, arg)| *position == 0 || arg.value != nil())
-                .map(|(_, arg)| *arg)
-                .collect();
-            if kept.iter().any(|arg| arg.value.has_gp(gp::S4_OBJECT)) {
+                .any(|(position, arg)| kept(position, arg) && arg.value.has_gp(gp::S4_OBJECT))
+            {
                 // The promises pair each value with its expression in the call, which still
                 // holds the dropped arguments, so they are made before the `NULL`s go.
-                let promised: Vec<Arg> = promised_args(call, args)?
+                let promised: Args = promised_args(call, args)?
                     .into_iter()
                     .zip(args)
                     .enumerate()
-                    .filter(|(position, (_, arg))| *position == 0 || arg.value != nil())
+                    .filter(|(position, (_, arg))| kept(*position, arg))
                     .map(|(_, (promise, _))| promise)
                     .collect();
                 if let Some(value) = s4_dispatch(op, call, &promised, env)? {
@@ -1695,6 +1748,12 @@ pub unsafe fn try_builtin_dispatch(
             if !first.value.is_object() {
                 return Ok(None);
             }
+            let kept: Args = args
+                .iter()
+                .enumerate()
+                .filter(|(position, arg)| kept(*position, arg))
+                .map(|(_, arg)| *arg)
+                .collect();
             internal_dispatch(symbols().c, call, &kept, env, site)
         }
         Generic::Internal => {
@@ -1740,12 +1799,7 @@ pub unsafe fn try_builtin_dispatch(
             // `na.rm` without a default. The method's call holds the evaluated arguments, as
             // `do_summary` builds it.
             let na_rm = symbols().na_rm;
-            let mut fixed: Vec<Arg> = args
-                .iter()
-                .filter(|arg| arg.tag != na_rm)
-                .copied()
-                .collect();
-            let Some(first) = fixed.first().copied() else {
+            let Some(first) = args.iter().find(|arg| arg.tag != na_rm).copied() else {
                 return Ok(None);
             };
             if !first.value.is_object() {
@@ -1760,15 +1814,23 @@ pub unsafe fn try_builtin_dispatch(
                 Some(arg) => arg.value,
                 None => values::scalar_logical(0)?,
             };
+            let mut fixed: Args = args
+                .iter()
+                .filter(|arg| arg.tag != na_rm)
+                .copied()
+                .collect();
             fixed.push(Arg { tag: na_rm, value });
             let head = if call.kind() == SexpType::Language {
                 call.car()
             } else {
                 op
             };
-            let mut items = vec![(nil(), head)];
-            items.extend(fixed.iter().map(|arg| (arg.tag, arg.value)));
-            let fixed_call = values::pairlist(&items, SexpType::Language)?;
+            let mut builder = values::PairlistBuilder::new(SexpType::Language);
+            builder.push(nil(), head)?;
+            for arg in &fixed {
+                builder.push(arg.tag, arg.value)?;
+            }
+            let fixed_call = builder.finish();
             group_dispatch("Summary", definition.name, fixed_call, &fixed, env, site)
         }
         Generic::Math | Generic::Complex => {
@@ -1792,19 +1854,26 @@ pub unsafe fn try_builtin_dispatch(
 
 /// The arguments as promises that hold their values, with the call's expressions as code, as
 /// GNU R passes them to a method.
-unsafe fn promised_args(call: Sexp, args: &[Arg]) -> R<Vec<Arg>> {
-    let expressions = if call.kind() == SexpType::Language {
-        values::pairlist_items(call.cdr())
+unsafe fn promised_args(call: Sexp, args: &[Arg]) -> R<Args> {
+    let mut expressions = if call.kind() == SexpType::Language {
+        call.cdr()
     } else {
-        Vec::new()
+        nil()
     };
-    let mut result = Vec::with_capacity(args.len());
-    for (index, arg) in args.iter().enumerate() {
-        let code = expressions
-            .get(index)
-            .map(|(_, expression)| *expression)
-            .filter(|expression| *expression != symbols().dots)
-            .unwrap_or(arg.value);
+    let mut result = Args::with_capacity(args.len());
+    for arg in args {
+        let code = if expressions != nil() {
+            let expression = expressions.car();
+            expressions = expressions.cdr();
+            expression
+        } else {
+            arg.value
+        };
+        let code = if code == symbols().dots {
+            arg.value
+        } else {
+            code
+        };
         let value = if arg.value == missing_arg() || arg.value.kind() == SexpType::Promise {
             arg.value
         } else {
@@ -1986,10 +2055,15 @@ unsafe fn promise_of_missing(value: Sexp) -> R<bool> {
     eval::argument_is_missing(value.cdr(), eval::promise_env(value)?)
 }
 
-unsafe fn internal_dispatch(generic: Sexp, call: Sexp, args: &[Arg], env: Sexp, site: Option<Site>) -> R<Option<Sexp>> {
+unsafe fn internal_dispatch(
+    generic: Sexp,
+    call: Sexp,
+    args: &[Arg],
+    env: Sexp,
+    site: Option<Site>,
+) -> R<Option<Sexp>> {
     let object = args[0].value;
-    let Some(found) = find_s3_method(site, generic, object, env, values::base_namespace())?
-    else {
+    let Some(found) = find_s3_method(site, generic, object, env, values::base_namespace())? else {
         return Ok(None);
     };
     activity::count(Counter::S3Dispatches);
@@ -2039,7 +2113,7 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
     let result = apply_method(new_call, found.method, promised, env, &found.vars, true);
     let state = interp();
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
-    state.handlers = state.frames[depth - 1].handlers.clone();
+    crate::conditions::restore_handlers(state.frames[depth - 1].handlers.clone());
     state
         .frame_closures
         .truncate(state.frames[depth - 1].closures);
@@ -2062,7 +2136,7 @@ unsafe fn group_dispatch(
 ) -> R<Option<Sexp>> {
     let binary = group == "Ops" || group == "matrixOps";
     let operands = if binary { args.len().min(2) } else { 1 };
-    let mut found: Vec<Option<Found>> = Vec::new();
+    let mut found: SmallVec<[Option<Found>; 2]> = SmallVec::new();
     for arg in args.iter().take(operands) {
         if arg.value.is_object() {
             found.push(find_group_method(group, generic, arg.value, env, site)?);
@@ -2110,28 +2184,32 @@ unsafe fn group_dispatch(
     let mut vars = found_method.vars;
     if binary {
         // `.Method` names the method for each operand, with "" for the other.
-        let method_name = symbol_name(found_method.method_name).into_owned();
-        let methods: Vec<String> = (0..operands)
-            .map(|index| {
-                if index == position
-                    || (operands == 2 && args[index].value.is_object() && {
-                        let other_classes = implicit_class(args[index].value).ok();
-                        other_classes.is_some_and(|classes| {
-                            (0..length(classes)).any(|class_index| {
-                                let class = char_str(classes.element(class_index));
-                                method_name == format!("{generic}.{class}")
-                                    || method_name == format!("{group}.{class}")
-                            })
-                        })
-                    })
-                {
-                    method_name.clone()
-                } else {
-                    String::new()
-                }
-            })
-            .collect();
-        let method_vector = string_vector(&methods)?;
+        let method_charsxp = found_method.method_name.car();
+        let method_name = char_str(method_charsxp);
+        // Whether the method is `<prefix>.<class>` for one of the classes.
+        let names_class = |prefix: &str, classes: Sexp| {
+            method_name
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.strip_prefix('.'))
+                .is_some_and(|class| {
+                    (0..length(classes)).any(|index| char_str(classes.element(index)) == class)
+                })
+        };
+        let method_vector = values::alloc(SexpType::String, operands)?;
+        for index in 0..operands {
+            let named = index == position
+                || (operands == 2
+                    && args[index].value.is_object()
+                    && implicit_class(args[index].value).is_ok_and(|classes| {
+                        names_class(generic, classes) || names_class(group, classes)
+                    }));
+            let element = if named {
+                method_charsxp
+            } else {
+                values::blank_string()
+            };
+            values::set_elt(method_vector, index, element);
+        }
         if let Some(entry) = vars
             .iter_mut()
             .find(|(symbol, _)| *symbol == symbols().dot_method)
@@ -2170,10 +2248,8 @@ unsafe fn choose_ops_method(
     crate::heap().root(reverse);
     let chooser_call = values::lcons(values::install("chooseOpsMethod")?, nil())?;
     crate::heap().root(chooser_call);
-    let chooser_args: Vec<Arg> = [x, y, chosen.method, other.method, call, reverse]
-        .into_iter()
-        .map(|value| Arg { tag: nil(), value })
-        .collect();
+    let chooser_args =
+        [x, y, chosen.method, other.method, call, reverse].map(|value| Arg { tag: nil(), value });
     let answer = eval::apply(chooser_call, function, &chooser_args, values::global_env())?;
     Ok(values::as_logical_scalar(answer) == 1)
 }

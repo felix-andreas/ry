@@ -2820,7 +2820,12 @@ pub fn pnorm_both(x: f64, tail: c_int, log: bool) -> (f64, f64) {
         tails_from(pnorm_middle_temp(y), y, &mut cumulative, &mut complementary);
         swap_tail(&mut cumulative, &mut complementary);
     } else if pnorm_uses_tail_formula(x, tail, log) {
-        tails_from(pnorm_tail_temp(x, y), x, &mut cumulative, &mut complementary);
+        tails_from(
+            pnorm_tail_temp(x, y),
+            x,
+            &mut cumulative,
+            &mut complementary,
+        );
         swap_tail(&mut cumulative, &mut complementary);
     } else if x > 0.0 {
         cumulative = d1(log);

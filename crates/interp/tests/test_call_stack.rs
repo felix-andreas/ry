@@ -5,13 +5,19 @@
 //! callee reads the stack, however large the arguments. Writing into the returned call must
 //! still leave the frame's call, and the caller's values, untouched.
 //!
+//! An argument reference that leaves the pool for a call is rooted for that call alone, so a
+//! loop of such calls must not deepen the handle stack.
+//!
 //! The interpreter runs here without base R, so the closures call the internals directly.
 //! `FUZZ_ITERS` raises the number of seeds.
 
 use {
     heap::object::Sexp,
     interp::{eval, lower, testing::with_interpreter, unwind::Unwind, values},
-    std::sync::atomic::{AtomicUsize, Ordering},
+    std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     syntax::testing::{SplitMix64, for_each_seed},
 };
 
@@ -39,6 +45,7 @@ mutate <- function(...) {
 const THRESHOLD: usize = 1000;
 
 static REPORTED: AtomicUsize = AtomicUsize::new(0);
+static DEPTHS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 #[test]
 fn reading_the_stack_shares_do_call_arguments() {
@@ -146,6 +153,61 @@ unsafe fn fingerprint(value: Sexp) -> Fingerprint {
             Fingerprint::Double(values::as_real_scalar(value))
         }
     }
+}
+
+/// `lapply` binds each element as an argument reference, and a closure that cannot take a slot
+/// frame (here because its body names `.Generic`) detaches it into a promise for the frame it
+/// binds. The detached promise is rooted while that call runs, and the handle stack, read at a
+/// large allocation inside every call, must stand at the same depth for every element once `f`
+/// has warmed up.
+#[test]
+fn detached_argument_references_do_not_accumulate_roots() {
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed, and every handle comes from its heap.
+        unsafe {
+            evaluate(
+                "f <- function(x) {
+                   if (FALSE) .Generic
+                   .Internal(vector(\"double\", 2000L))
+                   x
+                 }
+                 lp <- function(X, FUN) .Internal(lapply(X, FUN))",
+            )
+            .unwrap_or_else(|failure| panic!("the setup failed: {failure}"));
+            take_depths();
+            interp::heap().report_allocations(Some(record_handle_depth), THRESHOLD);
+            let mapped = evaluate("lp(1:500, f)");
+            interp::heap().report_allocations(None, 0);
+            let mapped = mapped.unwrap_or_else(|failure| panic!("lapply failed: {failure}"));
+            assert_eq!(values::length(mapped), 500);
+            // The first calls run while `f` compiles and warms up, at depths of their own.
+            let depths = take_depths();
+            let Some(steady) = depths.len().checked_sub(400).map(|start| &depths[start..]) else {
+                panic!("only {} calls allocated a reported vector", depths.len());
+            };
+            assert!(
+                steady.iter().all(|&depth| depth == steady[0]),
+                "the handle stack deepened over the last 400 calls: {steady:?}"
+            );
+        }
+    });
+}
+
+fn record_handle_depth(_size: usize) -> bool {
+    let depth = interp::heap().handle_mark();
+    DEPTHS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(depth);
+    true
+}
+
+fn take_depths() -> Vec<usize> {
+    std::mem::take(
+        &mut *DEPTHS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )
 }
 
 fn count_allocation(_size: usize) -> bool {

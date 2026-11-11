@@ -18,6 +18,7 @@ use {
         pcre2_match_data_8, pcre2_match_data_create_from_pattern_8, pcre2_match_data_free_8,
         pcre2_pattern_info_8,
     },
+    smallvec::SmallVec,
     std::ptr::{self, NonNull},
 };
 
@@ -144,7 +145,7 @@ impl PerlRegex {
         &self,
         subject: &str,
         from: usize,
-    ) -> Result<Option<Vec<Option<(usize, usize)>>>, String> {
+    ) -> Result<Option<SmallVec<[Option<(usize, usize)>; 4]>>, String> {
         Ok(self.search(subject, from)?.map(|groups| groups.collect()))
     }
 

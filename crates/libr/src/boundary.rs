@@ -821,7 +821,7 @@ pub unsafe extern "C" fn ry_pending_condition(classes: Sexp, target: Sexp) -> *m
     };
     let condition = match unwind {
         // The interpreter chose this context's exiting handler.
-        Unwind::Jump(jump) => match **jump {
+        Unwind::Jump(jump) => match *jump {
             interp::Jump::Return { env, value } if env == target => {
                 let condition = if value.kind() == SexpType::List && value.length() >= 1 {
                     value.element(0)

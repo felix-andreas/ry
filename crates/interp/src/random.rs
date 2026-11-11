@@ -51,8 +51,8 @@ use {
         unwind::{R, error},
         values::{
             alloc_uninit, as_integer_scalar, as_logical_scalar, as_real_scalar, global_env,
-            integer_vector, ints, ints_mut, is_nil, length, missing_arg, nil, reals,
-            reals_mut, string_at, symbols, unbound,
+            integer_vector, ints, ints_mut, is_nil, length, missing_arg, nil, reals, reals_mut,
+            string_at, symbols, unbound,
         },
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp},
@@ -584,7 +584,11 @@ impl Uniform for Twister<'_> {
         if !(0..TWISTER_WORDS as i32).contains(self.position) {
             regenerate_twister(self.position, self.words);
         }
-        let word = self.words.get(*self.position as usize).copied().unwrap_or(0);
+        let word = self
+            .words
+            .get(*self.position as usize)
+            .copied()
+            .unwrap_or(0);
         *self.position += 1;
         i64::from(temper_word(word) >> 16)
     }
@@ -748,7 +752,9 @@ unsafe fn do_sample2(call: &Call<'_>) -> R<Sexp> {
         });
     } else {
         let mut seen = FxHashSet::with_capacity_and_hasher(size, Default::default());
-        draw_distinct(result, integer, size, population_index, |value| seen.insert(value));
+        draw_distinct(result, integer, size, population_index, |value| {
+            seen.insert(value)
+        });
     }
     put_rng_state()?;
     Ok(result)
@@ -2267,15 +2273,23 @@ mod tests {
                 let expected = if sample_kind == SampleKind::Rounding && n > i32::MAX as u64 {
                     let mut draws = floats.draws();
                     let first = draws.uniform.next();
-                    let deviate = ((33554432.0 * first).floor() + draws.uniform.next()) / 33554432.0;
+                    let deviate =
+                        ((33554432.0 * first).floor() + draws.uniform.next()) / 33554432.0;
                     (n as f64 * deviate).floor() as u64
                 } else {
                     floats.draws().index_value(n as f64) as u64
                 };
                 assert_eq!(twister.whole_index(n), expected, "n = {n}, {sample_kind:?}");
-                assert_eq!(generic.draws().whole_index(n), expected, "n = {n}, {sample_kind:?}");
+                assert_eq!(
+                    generic.draws().whole_index(n),
+                    expected,
+                    "n = {n}, {sample_kind:?}"
+                );
             }
-            let State::MersenneTwister { position: expected, .. } = &floats.state else {
+            let State::MersenneTwister {
+                position: expected, ..
+            } = &floats.state
+            else {
                 panic!("a seeded generator is the Mersenne twister");
             };
             assert_eq!(*twister.uniform.position, *expected);

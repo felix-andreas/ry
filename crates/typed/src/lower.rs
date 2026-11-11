@@ -3013,7 +3013,7 @@ pub unsafe fn resolve_value(symbol: Sexp, start: Sexp) -> Option<Speculation> {
 
 /// Logs the name a refusal is about, since the refusal itself is a fixed message.
 fn note(name: &str) {
-    if crate::logging() {
+    if interp::annotations::typed_logging() {
         eprintln!("typed: refusing `{name}`");
     }
 }

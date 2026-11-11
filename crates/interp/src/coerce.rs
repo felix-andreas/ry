@@ -4,6 +4,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, Generic, builtin, internal, is_native_value},
         conditions, deparse,
+        strings::with_text_buffer,
         system::r_at_least,
         unwind::{R, error},
         values::{
@@ -173,15 +174,16 @@ pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
 /// A double as the `CHARSXP` `as.character` gives it, under scientific-notation penalty `scipen`.
 unsafe fn real_as_charsxp(value: f64, scipen: i32) -> R<Sexp> {
     if is_na_real(value) {
-        Ok(na_string())
-    } else {
-        values::mkchar(&real_as_text(value, scipen))
+        return Ok(na_string());
     }
-}
-
-/// A double that is not NA as `as.character` writes it.
-fn real_as_text(value: f64, scipen: i32) -> String {
-    crate::format::localize_decimal(crate::format::format_real_alone_scipen(value, 15, scipen))
+    with_text_buffer(|text| {
+        crate::format::push_real_alone(text, value, 15, scipen);
+        if crate::format::decimal_is_point() {
+            values::mkchar(text)
+        } else {
+            values::mkchar(&crate::format::localize_decimal(text.clone()))
+        }
+    })
 }
 
 /// Converts a vector to `kind`, keeping its attributes, as GNU R's `coerceVector` does.
@@ -613,11 +615,8 @@ pub unsafe fn coerce_atomic(
 pub unsafe fn write_number_strings(numbers: Sexp, result: Sexp, scipen: i32) -> R<()> {
     if numbers.kind() == SexpType::Real {
         for (index, &value) in values::reals(numbers).iter().enumerate() {
-            if is_na_real(value) {
-                values::set_elt(result, index, na_string());
-            } else {
-                values::set_mkchar(result, index, &real_as_text(value, scipen))?;
-            }
+            let charsxp = real_as_charsxp(value, scipen)?;
+            values::set_elt(result, index, charsxp);
         }
         return Ok(());
     }
@@ -1027,7 +1026,7 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
 }
 
 unsafe fn do_as_vector(call: &Call<'_>) -> R<Sexp> {
-    let mode = values::require_string(call.arg(1), "mode")?;
+    let mode = values::require_str(call.arg(1), "mode")?;
     as_vector(call.arg(0), &mode)
 }
 
@@ -1083,9 +1082,9 @@ unsafe fn do_as_function(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_vector(call: &Call<'_>) -> R<Sexp> {
-    let mode = values::require_string(call.arg(0), "mode")?;
+    let mode = values::require_str(call.arg(0), "mode")?;
     let count = crate::subset::length_argument(call.arg(1))?;
-    let kind = match mode.as_str() {
+    let kind = match mode.as_ref() {
         "any" => SexpType::Logical,
         mode => mode_type(mode)
             .ok_or_else(|| call.error(format!("vector: cannot make a vector of mode '{mode}'.")))?,
@@ -1102,7 +1101,7 @@ unsafe fn do_vector(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_set_storage_mode(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
-    let mode = values::require_string(call.arg(1), "value")?;
+    let mode = values::require_str(call.arg(1), "value")?;
     let kind = mode_type(&mode).ok_or_else(|| call.error("invalid value"))?;
     if object.kind() == kind {
         return Ok(object);
@@ -1115,9 +1114,9 @@ unsafe fn do_set_storage_mode(call: &Call<'_>) -> R<Sexp> {
 
 pub(crate) unsafe fn do_is_vector(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
-    let mode = values::require_string(call.arg(1), "mode")?;
+    let mode = values::require_str(call.arg(1), "mode")?;
     let kind = object.kind();
-    let kind_matches = match mode.as_str() {
+    let kind_matches = match mode.as_ref() {
         "any" => kind.is_vector(),
         "numeric" => {
             matches!(kind, SexpType::Integer | SexpType::Real)

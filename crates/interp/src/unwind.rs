@@ -167,7 +167,7 @@ pub(crate) unsafe fn trace_unwind(unwind: &Unwind, marker: &mut Marker<'_>) {
         match unwind {
             Unwind::Error(error) => marker.mark(error.call),
             Unwind::Interrupt => {}
-            Unwind::Jump(jump) => match **jump {
+            Unwind::Jump(jump) => match *jump {
                 Jump::Return { env, value } => {
                     marker.mark(env);
                     marker.mark(value);
@@ -183,8 +183,12 @@ pub(crate) unsafe fn trace_unwind(unwind: &Unwind, marker: &mut Marker<'_>) {
 pub enum Unwind {
     Error(RError),
     Interrupt,
-    Jump(Box<Jump>),
+    Jump(Jump),
 }
+
+// A jump is unboxed because `return`, `break` and `next` raise one on every use, and it fits in
+// the space an error already takes.
+const _: () = assert!(std::mem::size_of::<Unwind>() <= 40);
 
 #[derive(Debug)]
 pub struct RError {
@@ -194,7 +198,7 @@ pub struct RError {
     pub call: Sexp,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum Jump {
     /// Return `value` from the closure frame whose environment is `env`. Exiting handlers and
     /// restarts are returns to the frames `tryCatch` and `withRestarts` set up.
@@ -252,7 +256,7 @@ pub unsafe fn generated_call(call: Sexp) -> R<Sexp> {
 }
 
 pub fn jump(jump: Jump) -> Unwind {
-    Unwind::Jump(Box::new(jump))
+    Unwind::Jump(jump)
 }
 
 impl From<heap::HeapError> for Unwind {
@@ -308,7 +312,7 @@ impl Unwind {
         match self {
             Unwind::Error(error) => heap.root(error.call),
             Unwind::Interrupt => {}
-            Unwind::Jump(jump) => match **jump {
+            Unwind::Jump(jump) => match *jump {
                 Jump::Return { env, value } => {
                     heap.root(env);
                     heap.root(value);
@@ -321,7 +325,7 @@ impl Unwind {
 
     /// Whether this is a return to the frame whose environment is `env`.
     pub fn returns_to(&self, env: Sexp) -> bool {
-        matches!(self, Unwind::Jump(jump) if matches!(**jump, Jump::Return { env: target, .. } if target == env))
+        matches!(self, Unwind::Jump(jump) if matches!(*jump, Jump::Return { env: target, .. } if target == env))
     }
 }
 

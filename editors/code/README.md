@@ -107,15 +107,15 @@ ry's runtime against GNU R, as the geometric mean of each benchmark suite's spee
 | Suite | What it is | ry vs GNU R | ry typed |
 | --- | --- | ---: | ---: |
 | Public R JIT benchmarks | 54 standard programs from R compiler research (Ř, rcp) | 2.84x | not typed |
-| Package test suites | 26 pinned CRAN packages, each running its own test suite | 2.02x | not typed |
-| Numeric kernels (ours) | 16 small programs we wrote whose time goes into loops, recursion and arithmetic on numbers | 5.08x | 1.84x |
+| Package test suites | 26 pinned CRAN packages, each running its own test suite | 1.93x | not typed |
+| Numeric kernels (ours) | 16 small programs we wrote whose time goes into loops, recursion and arithmetic on numbers | 4.89x | 11x |
 | Application workloads (ours) | 15 programs we wrote in the shape of package and business code: calls, dispatch, conditions, records, tables | 1.77x | 2.41x |
 
 Geometric means of the speed-ups over GNU R; above 1x means ry is faster.
 
 - Public R JIT benchmarks: measured on 2026-11-11 at ry 5cd92a3 with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.30GHz, 4 cores, Linux 6.18.44-fc-v378; 10 paired rounds.
-- Package test suites: measured on 2026-11-11 at ry 5cd92a3 with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.30GHz, 4 cores, Linux 6.18.44-fc-v378; 10 paired rounds.
-- Numeric kernels (ours): measured on 2026-11-11 at ry 5cd92a3 with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v338; 10 paired rounds.
+- Package test suites: measured on 2026-11-11 at ry 46191c4 with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.30GHz, 4 cores, Linux 6.18.44-fc-v378; 10 paired rounds.
+- Numeric kernels (ours): measured on 2026-11-11 at ry b868dc5-dirty with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v378; 10 paired rounds.
 - Application workloads (ours): measured on 2026-11-11 at ry 5cd92a3 with GNU R 4.6.2 on Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, Linux 6.18.44-fc-v338; 10 paired rounds.
 
 [Benchmarks](https://ry-lang.org/benchmarks) explains how each suite is built and measured, and shows every program.

@@ -598,7 +598,7 @@ unsafe fn do_to_list(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_read_csv(call: &Call<'_>) -> R<Sexp> {
-    let path = values::require_string(call.arg(0), "path")?;
+    let path = values::require_str(call.arg(0), "path")?.into_owned();
     let factors = values::require_flag(call.arg(1), "strings_as_factors")?;
     let fail = |failure: &dyn std::fmt::Display| {
         error_in(call.call, format!("cannot read `{path}`: {failure}"))
@@ -613,7 +613,7 @@ unsafe fn do_read_csv(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_read_parquet(call: &Call<'_>) -> R<Sexp> {
-    let path = values::require_string(call.arg(0), "path")?;
+    let path = values::require_str(call.arg(0), "path")?.into_owned();
     let table = table::lazy::read_parquet(
         std::path::Path::new(&path),
         &table::io::ReadOptions::default(),
@@ -624,7 +624,7 @@ unsafe fn do_read_parquet(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_write_csv(call: &Call<'_>) -> R<Sexp> {
     let table = table_of(call.arg(0))?;
-    let path = values::require_string(call.arg(1), "path")?;
+    let path = values::require_str(call.arg(1), "path")?.into_owned();
     table::io::write_csv(table, std::path::Path::new(&path))
         .map_err(|failure| error_in(call.call, format!("cannot write `{path}`: {failure}")))?;
     Ok(call.arg(0))
@@ -632,7 +632,7 @@ unsafe fn do_write_csv(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_write_parquet(call: &Call<'_>) -> R<Sexp> {
     let table = table_of(call.arg(0))?;
-    let path = values::require_string(call.arg(1), "path")?;
+    let path = values::require_str(call.arg(1), "path")?.into_owned();
     let fail = |failure: &dyn std::fmt::Display| {
         error_in(call.call, format!("cannot write `{path}`: {failure}"))
     };
@@ -713,7 +713,7 @@ unsafe fn rebind(name: Sexp, value: Sexp, env: Sexp) -> R<()> {
 
 unsafe fn do_dollar(call: &Call<'_>) -> R<Sexp> {
     let table = table_of(call.arg(0))?;
-    let name = values::require_string(call.arg(1), "name")?;
+    let name = values::require_str(call.arg(1), "name")?;
     match table.frame().column(&name) {
         Ok(column) => column_value(column),
         Err(_) => Ok(nil()),
@@ -733,7 +733,7 @@ unsafe fn column_at(table: &Table, index: Sexp, call: Sexp) -> R<&Column> {
     let columns = table.frame().columns();
     match index.kind() {
         SexpType::String => {
-            let name = values::require_string(index, "column")?;
+            let name = values::require_str(index, "column")?;
             table
                 .frame()
                 .column(&name)
@@ -757,7 +757,7 @@ unsafe fn column_at(table: &Table, index: Sexp, call: Sexp) -> R<&Column> {
 unsafe fn do_set_column(call: &Call<'_>) -> R<Sexp> {
     let mut table = table_of(call.arg(0))?.fork();
     let name = match call.arg(1).kind() {
-        SexpType::String => values::require_string(call.arg(1), "name")?,
+        SexpType::String => values::require_str(call.arg(1), "name")?.into_owned(),
         _ => column_at(&table, call.arg(1), call.call)?
             .name()
             .to_string(),
@@ -1231,7 +1231,6 @@ impl Piece {
     fn is_missing(&self) -> bool {
         matches!(self.source, Source::Missing)
     }
-
 }
 
 /// The arguments of a call as pieces, expanding `...` into the promises it holds.
@@ -1678,7 +1677,7 @@ impl Lowering<'_> {
                         On::equal(tag_name(tag).unwrap_or_else(|| other.clone()), other)
                     }
                     SexpType::String => {
-                        let text = values::require_string(value, "on")?;
+                        let text = values::require_str(value, "on")?;
                         self.condition(tag_name(tag).as_deref(), &text)?
                     }
                     SexpType::Language if tag_name(tag).is_none() => {

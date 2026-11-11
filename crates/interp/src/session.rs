@@ -951,7 +951,7 @@ pub unsafe fn report_toplevel(unwind: Unwind) {
             write_console(text.as_bytes(), true);
         }
         Unwind::Interrupt => write_console(b"\n", false),
-        Unwind::Jump(jump) => match *jump {
+        Unwind::Jump(jump) => match jump {
             Jump::TopLevel => {}
             Jump::Return { .. } => {
                 write_console(
