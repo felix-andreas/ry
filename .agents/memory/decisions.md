@@ -8824,7 +8824,7 @@ Each one trades a narrow class of missed errors for a class of false reports see
   - Image 17.2 MB on main, 16.1 MB compacted (19.2 MB with the compiled closures before compaction).
   - Page cache dropped: empty run 0.94x [0.89, 0.99] (30 rounds), peak RSS 34.4 to 31.4 MB; testthat_full 1.02x [0.96, 1.09] (10 rounds), peak RSS 66.3 to 66.2 MB.
   - Hot, 30 rounds: empty run 0.86x [0.82, 0.90], peak RSS 35.1 to 32.2 MB; testthat_full 0.95x [0.90, 1.00], peak RSS 66.6 to 66.6 MB.
-  - Pages an empty start touches (4 KB): 1308 with the image in id order, 821 with the trained order.
+  - Image pages an empty start touches: 1309 4 KB pages (160 64 KB chunks) with the image in id order, 814 (102) with the trained order.
 
 ## Native entries read promises over a pending frame without forcing them
 
