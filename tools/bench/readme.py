@@ -4,10 +4,11 @@ suites, each a directory `tools/bench/<suite>/` with a `suite.toml` and a `resul
 the VS Code Marketplace show a README as it is, so the block is generated text, and `--check` fails
 when a README differs from what this script would write.
 
-The block is the summary table of the benchmarks page, which `docs/src/lib/benchmarks.ts` renders
-from the same files: one row per measured suite in a fixed order, with the geometric means the
-runner stored, and a ratio with two decimals below 10x and none from 10x up. A suite without a
-results file has no row.
+The block is one bullet per measured suite in a fixed order, giving the geometric means the runner
+stored and what the suite measures, then one sentence on how they were measured. Ratios have two
+decimals below 10x and none from 10x up, as on the benchmarks page, which
+`docs/src/lib/benchmarks.ts` renders from the same files. A suite without a results file has no
+bullet.
 
 A vertical grouped bar chart of the same geometric means, in a light and a dark SVG under
 `docs/public/`, is shown by the root README through `<picture>`. It has one group per suite with
@@ -67,7 +68,7 @@ def main():
             print(f"wrote {readme}")
     if stale:
         names = ", ".join(str(readme.relative_to(root)) for readme in stale)
-        sys.exit(f"error: the benchmark block of {names} differs from the results files; run `just bench-readme`")
+        sys.exit(f"error: the benchmark block of {names} differs from the results files; run `just readme`")
 
 def load_suites():
     """The measured suites in page order, each its manifest with its results beside it."""
@@ -86,52 +87,38 @@ def load_suites():
     return sorted(suites, key=rank)
 
 def summary_block(suites):
-    """The rows of `summaryRows` and the lines of `summaryMarkdown` in docs/src/lib/benchmarks.ts."""
-    lines = ["| Suite | What it is | ry vs GNU R | ry typed |", "| --- | --- | ---: | ---: |"]
+    """A bullet per suite, such as `**Numeric kernels: 4.89x, 11x in typed ry.** 16 small programs ...`."""
+    lines = []
     for suite in suites:
         geomean = suite["results"]["geomean"]
-        untyped = ratio(geomean["ry"]["median"]) if "ry" in geomean else "not measured"
-        typed = ratio(geomean["ry_typed"]["median"]) if "ry_typed" in geomean else "not typed"
-        lines.append(f"| {suite['name']} | {len(suite['results']['programs'])} {suite['summary']} | {untyped} | {typed} |")
-    lines += ["", "Geometric means of the speed-ups over GNU R; above 1x means ry is faster.", ""]
-    lines += [measured_line(suites), ""]
-    lines += mixed_machines(suites)
-    lines += ["[Benchmarks](https://ry-lang.org/benchmarks) explains how each suite is built and measured, and shows every program, with the machine and ry commit of each suite."]
-    return "\n".join(lines)
+        speeds = [ratio(geomean["ry"]["median"]) if "ry" in geomean else "not measured"]
+        if "ry_typed" in geomean:
+            speeds.append(f"{ratio(geomean['ry_typed']['median'])} in typed ry")
+        lines.append(f"- **{short_name(suite['name'])}: {', '.join(speeds)}.** {len(suite['results']['programs'])} {suite['summary']}.")
+    note = [measured_sentence(suites)] + mixed_machines(suites)
+    note.append("[Benchmarks](https://ry-lang.org/benchmarks) shows every program and how it is measured.")
+    return "\n".join(lines + ["", " ".join(note)])
 
-def measured_line(suites):
-    """One sentence for all suites; a field that differs between suites is listed per suite."""
+def measured_sentence(suites):
+    """One sentence for all suites; a field that differs between suites is given as a list or range."""
     metas = [suite["results"]["meta"] for suite in suites]
-    dates = sorted({meta["date"][:10] for meta in metas})
     versions = sorted({meta["gnu_r"]["version"] for meta in metas})
     kernels = sorted({(meta["machine"].get("kernel") or "an unknown OS").split()[0] for meta in metas})
     rounds = sorted({meta["rounds"] for meta in metas})
-    when = dates[0] if len(dates) == 1 else f"{dates[0]} to {dates[-1]}"
     count = str(rounds[0]) if len(rounds) == 1 else f"{rounds[0]} to {rounds[-1]}"
-    return f"Measured on {when} against GNU R {' and '.join(versions)} on {' and '.join(kernels)}, {count} paired rounds per suite."
+    return (f"Each number is the geometric-mean speed-up over GNU R {' and '.join(versions)} (above 1x is faster), "
+            f"from {count} paired rounds on {' and '.join(kernels)}.")
 
 def mixed_machines(suites):
-    """A warning, followed by a blank line, when the suites were measured on different machines
-    (CPU model or kernel), because their ratios are then not comparable with each other."""
-    machines = {}
+    """A warning when the suites were measured on different machines (CPU model or kernel), because
+    their ratios are then not comparable with each other; the benchmarks page names each machine."""
+    machines = set()
     for suite in suites:
         machine = suite["results"]["meta"]["machine"]
-        key = ", ".join(part for part in (machine["cpu"], machine.get("kernel")) if part)
-        machines.setdefault(key, []).append(suite["name"])
+        machines.add((machine["cpu"], machine.get("kernel")))
     if len(machines) < 2:
         return []
-    where = "; ".join(f"{' and '.join(names)} on {key}" for key, names in machines.items())
-    return [f"**Warning:** the suites were measured on different machines ({where}), so their ratios are not directly comparable.", ""]
-
-def metadata(results):
-    """The line `suiteMetadata` in docs/src/lib/benchmarks.ts prints under each chart."""
-    meta = results["meta"]
-    # The first nine hex digits, keeping a marker such as `-dirty`, as `shortCommit` does.
-    commit = " at ry " + re.sub(r"^([0-9a-f]{9})[0-9a-f]*", r"\1", meta["ry_commit"]) if meta.get("ry_commit") else ""
-    machine = ", ".join([meta["machine"]["cpu"]]
-                        + ([f"{meta['machine']['cores']} cores"] if meta["machine"].get("cores") else [])
-                        + ([meta["machine"]["kernel"]] if meta["machine"].get("kernel") else []))
-    return f"Measured on {meta['date'][:10]}{commit} with GNU R {meta['gnu_r']['version']} on {machine}; {meta['rounds']} paired rounds."
+    return ["**Warning:** the suites ran on different machines, so their numbers are not directly comparable."]
 
 def chart_svg(suites, theme):
     """Vertical grouped bars, one group per suite, each bar labeled with its value."""
@@ -177,7 +164,7 @@ def chart_svg(suites, theme):
     return "\n".join(out) + "\n"
 
 def short_name(name):
-    """Chart labels drop the `(ours)` marker, which the table keeps."""
+    """Chart labels and bullets drop the `(ours)` marker, because the summaries say "we wrote"."""
     return re.sub(r"\s*\(ours\)", "", name)
 
 def escape(text):

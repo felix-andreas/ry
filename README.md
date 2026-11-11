@@ -4,30 +4,78 @@
 
 # ry
 
-**A type checker and a fast runtime for R, written in Rust.**
+**A fast R runtime with a type checker, written in Rust.**
 
 [**Docs**](https://ry-lang.org) ·
+[**Install**](https://ry-lang.org/installation) ·
 [**Releases**](https://github.com/felix-andreas/ry/releases) ·
 [**VS Code**](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry) ·
 [**Zed**](https://github.com/felix-andreas/ry/tree/main/editors/zed)
 
 </div>
 
-ry checks, formats and runs the R code you already have, without changes, and its checker finds
-problems without running the code.
+ry is a fast R runtime, built to run your existing R code unchanged, plus a type checker and new
+language features that make your code safer and faster.
 
 ```sh
-ry check    # report problems
-ry fmt      # format in place
-ry run      # run a script on ry's runtime, or open a console that reloads your package
+ry run script.R   # run a script on ry's runtime; without a file, open ry's console
+ry check          # find bugs in the R files under the current directory, without running them
+ry fmt            # format the R files under the current directory in place
 ```
 
-## ry's own typed language
+ry is in beta. The checker, formatter, editor support and package loader are ready for daily use,
+but the runtime does not run all R code yet: a script that needs something it lacks stops with an
+error that names it, and `ry R script.R` runs the script on GNU R instead.
+[Install ry](https://ry-lang.org/installation), then follow [Adopting ry](https://ry-lang.org/guide).
 
-ry extends R with statically typed features of its own: records, tuples, tagged unions, exhaustive
-`match`, typed lists and a standard library. They are ry syntax, not R, so code that uses them runs
-only on ry's runtime. One example is exhaustive `match`: when you add a case to a tagged union, ry
-points you at every `match` that does not handle it.
+## Features
+
+### Speed
+
+How much faster ry's runtime is than GNU R, for each benchmark suite:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/public/bench-summary-dark.svg">
+  <img alt="Grouped bars of the geometric mean speed-up over GNU R for each benchmark suite, for ry and, where the suite has typed programs, ry typed" src="docs/public/bench-summary-light.svg">
+</picture>
+
+<!-- bench-summary -->
+- **Public R JIT benchmarks: 2.84x.** 54 standard programs from R compiler research (Ř, rcp).
+- **Package test suites: 1.93x.** 26 pinned CRAN packages, each running its own test suite.
+- **Numeric kernels: 4.89x, 11x in typed ry.** 16 small programs we wrote whose time goes into loops, recursion and arithmetic on numbers.
+- **Application workloads: 1.77x, 2.41x in typed ry.** 15 programs we wrote in the shape of package and business code: calls, dispatch, conditions, records, tables.
+
+Each number is the geometric-mean speed-up over GNU R 4.6.2 (above 1x is faster), from 10 paired rounds on Linux. **Warning:** the suites ran on different machines, so their numbers are not directly comparable. [Benchmarks](https://ry-lang.org/benchmarks) shows every program and how it is measured.
+<!-- /bench-summary -->
+
+### Type checker
+
+`ry check` finds bugs before the code runs. On plain R, with no configuration and no annotations,
+it reports names that do not resolve, syntax errors, values that are never read, and lints such as
+`x == NA` or `T` for `TRUE`, and `ry check --fix` applies the fixes that are safe.
+
+Set `typing = true` in `ry.toml`, and it also infers types from the same plain R and reports type
+errors:
+
+```r
+apply_discount <- function(price, rate) price * (1 - rate)
+apply_discount(100, "0.2")
+# type-mismatch: expected a numeric value (`integer` or `double`), found `character`
+```
+
+Where inference is not enough, you write a type yourself, either in a `#:` comment such as
+`#: fn(price: double, rate: double) -> double`, which keeps the file plain R, or inline, as in
+`function(price: double, rate: double) -> double`. Strict mode (`strict = true`) rejects every
+value whose type is not known, and `ry check --annotate` writes the inferred types into your files.
+[→ Adopting ry](https://ry-lang.org/guide#step-2-type-your-code)
+
+### The ry language
+
+On top of R, ry adds a small typed language of its own: records, tuples, tagged unions with
+exhaustive `match`, errors as values, nominal types, a typed `DataFrame` built on Polars, and a
+standard library. Code that uses them runs only on ry's runtime, and the plain R code beside it
+keeps working. When you add a case to a tagged union, `ry check` points you at every `match` that
+does not handle it:
 
 ```r
 alias Payment =
@@ -45,69 +93,21 @@ balance <- function(payment: Payment) -> double {
 balance(:Paid(amount = 10))
 ```
 
-```
-$ ry check
-non-exhaustive-match
+<img src="docs/public/diagnostic.svg" alt="ry check reports a non-exhaustive-match error: this match does not handle :Pending">
 
-  x this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ => ...` arm
-   --[payment.R:7:3]
- 6 | balance <- function(payment: Payment) -> double {
- 7 |   match (payment) {
-   |   ^^^^^^^^^^^^^^^
- 8 |     :Paid(amount = a) => a
-  help: Add an arm for `:Pending` (`ry check --fix --unsafe-fixes` applies it)
+[→ Language tour](https://ry-lang.org/ry)
 
-1 problem in 1 file
-1 fixable with `ry check --fix --unsafe-fixes`
-```
+### More
 
-The [language tour](https://ry-lang.org/ry) shows every feature.
-
-## Speed
-
-ry's runtime against GNU R, as the geometric mean of each benchmark suite's speed-ups:
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/public/bench-summary-dark.svg">
-  <img alt="Grouped bars of the geometric mean speed-up over GNU R for each benchmark suite, for ry and, where the suite has typed programs, ry typed" src="docs/public/bench-summary-light.svg">
-</picture>
-
-<!-- bench-summary -->
-| Suite | What it is | ry vs GNU R | ry typed |
-| --- | --- | ---: | ---: |
-| Public R JIT benchmarks | 54 standard programs from R compiler research (Ř, rcp) | 2.84x | not typed |
-| Package test suites | 26 pinned CRAN packages, each running its own test suite | 1.93x | not typed |
-| Numeric kernels (ours) | 16 small programs we wrote whose time goes into loops, recursion and arithmetic on numbers | 4.89x | 11x |
-| Application workloads (ours) | 15 programs we wrote in the shape of package and business code: calls, dispatch, conditions, records, tables | 1.77x | 2.41x |
-
-Geometric means of the speed-ups over GNU R; above 1x means ry is faster.
-
-Measured on 2026-11-11 against GNU R 4.6.2 on Linux, 10 paired rounds per suite.
-
-**Warning:** the suites were measured on different machines (Public R JIT benchmarks and Package test suites on Intel(R) Xeon(R) Processor @ 2.30GHz, Linux 6.18.44-fc-v378; Numeric kernels (ours) on Intel(R) Xeon(R) Processor @ 2.10GHz, Linux 6.18.44-fc-v378; Application workloads (ours) on Intel(R) Xeon(R) Processor @ 2.10GHz, Linux 6.18.44-fc-v338), so their ratios are not directly comparable.
-
-[Benchmarks](https://ry-lang.org/benchmarks) explains how each suite is built and measured, and shows every program, with the machine and ry commit of each suite.
-<!-- /bench-summary -->
-
-## Features
-
-- **Checker:** `ry check` reports unresolved names, syntax errors, lint warnings and type errors,
-  inferring types from plain R code without any annotations.
-- **Types:** optional annotations in `#:` comments or inline syntax, with generics, unions, records
-  and tagged unions. Strict mode rejects code that has no types.
-- **Formatter:** `ry fmt` rewrites R files into one consistent layout, like Black for Python or
-  rustfmt for Rust, so diffs show changes in logic rather than whitespace.
-- **Editor:** a language server for any LSP editor (hover, completion, go to definition, rename),
-  and a VS Code extension with a debugger.
-- **Loader:** `ry load` reloads a package of about 300,000 lines after an edit in under 100 ms,
-  where devtools `load_all()` takes about 9 s.
-- **Runtime:** runs R code with a JIT compiler, loads packages with compiled code through R's C
-  API, and adds `DataFrame`, a typed table built on Polars.
-
-ry is in beta. The checker, formatter, language server and loader are ready for daily use. The
-runtime is incomplete: a script that needs something it lacks stops with an error that names it, and
-`ry R` runs it on GNU R instead. [Install ry](https://ry-lang.org/installation), then follow
-[Adopting ry](https://ry-lang.org/guide) or take the [language tour](https://ry-lang.org/ry).
+- **Editor support.** A language server for VS Code, Zed and any other LSP editor: diagnostics as
+  you type, hover with inferred types, completion, go to definition, references, rename and quick
+  fixes. [→ Editors](https://ry-lang.org/installation#editors)
+- **Formatter.** `ry fmt` gives every R file one consistent layout, so diffs show changes in logic
+  rather than whitespace. [→ Formatting rules](https://ry-lang.org/reference/formatting-rules)
+- **Package loader.** `ry load`, and `ry run` inside a package, load the package from source like
+  devtools' `load_all()`, but lazily, and reload only what you changed: on a package of about
+  300,000 lines, a reload takes under 100 ms instead of about 9 s.
+  [→ Package loading](https://ry-lang.org/reference/package-loading)
 
 ## FAQ
 
@@ -127,10 +127,8 @@ No. Let Claude rewrite your code in Rust.
 
 ### Why is it called ry?
 
-It started as "the roughly good enough language server": all it offered was go-to-definition
-based on regular expressions, but it was fast. It grew into a proper language server built on
-tree-sitter, and people called it just Roughly. With its first type checker it was rewritten from
-scratch with its own recursive-descent parser, and renamed ry.
+It started as "the roughly good enough language server", which people shortened to Roughly. When it
+gained a type checker, it was rewritten from scratch and renamed ry.
 
 ## License
 
