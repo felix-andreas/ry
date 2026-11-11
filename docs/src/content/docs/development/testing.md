@@ -428,6 +428,22 @@ listed failure as `known` without its diff and ends with one line per engine:
 ry-jit-gctorture: 409 passed, 16 failed (16 known, 0 new), 0 skipped
 ```
 
+A crash under a gctorture engine (`ry-gctorture`, `ry-gctorture-young` or `ry-jit-gctorture`) can
+depend on the host or on timing, because it depends on where the collector happens to run. For
+such an entry, `intermittent = true` makes a passing case not fail the run. The case prints as
+`ok ... (listed as intermittent)`, counts as passed, and is tallied on its own line:
+
+```
+ok      cases/print__deparse_undefined_s4_class.R [ry-jit-gctorture] (listed as intermittent)
+known   cases/base__match_arg_native.R [ry-jit-gctorture]: aborts: after a deopt exit, ... (area jit)
+ry-jit-gctorture: 1 passed, 1 failed (1 known, 0 new), 0 skipped
+ry-jit-gctorture: intermittent, passed here: 1
+```
+
+A run where it fails reports it as known. The oracle refuses `intermittent` under any other
+engine, because a failure there reproduces on every host. A beta release requires the file to be
+empty, intermittent entries included.
+
 A count is only trustworthy if it covers every case, so `oracle compare` also refuses to start when
 a case needs a package that is not installed (a case names its packages in a leading
 `# oracle: requires` comment). It lists each such case and exits 1. Install the packages into the
@@ -444,8 +460,8 @@ PARTIAL ry: 2 passed, 0 failed (0 known, 0 new), 2 skipped (2 missing a package)
 PARTIAL: --allow-skips left out 2 cases, so these counts do not cover the suite
 ```
 
-The oracle refuses a file whose entry names an unknown engine, a missing case, or the same case and
-engine twice, and `known_failures_are_valid` in `test_cases.rs` checks the file without running R.
+The oracle refuses a file whose entry names an unknown engine, a missing case, the same case and
+engine twice, or `intermittent` outside the gctorture engines, and `known_failures_are_valid` in `test_cases.rs` checks the file without running R.
 
 ### The table engine
 
