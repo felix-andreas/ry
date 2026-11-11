@@ -36,7 +36,7 @@ use {
     std::{borrow::Cow, ffi::c_void, fmt},
 };
 
-const MAGIC: &[u8; 8] = b"RYHEAP\x00\x02";
+const MAGIC: &[u8; 8] = b"RYHEAP\x00\x03";
 
 /// The objects that exist before a session starts and that an image holds at the addresses they
 /// have in both processes.
@@ -345,6 +345,7 @@ impl Heap {
             self.retired_bytes,
             self.binding_epoch,
             self.enclosure_epoch,
+            u64::from(self.everything_bound_elsewhere),
         ] {
             out.u64(value);
         }
@@ -691,6 +692,7 @@ impl Heap {
         self.retired_bytes = input.u64()?;
         self.binding_epoch = self.binding_epoch.max(input.u64()?) + 1;
         self.enclosure_epoch = self.enclosure_epoch.max(input.u64()?) + 1;
+        self.everything_bound_elsewhere |= input.u64()? != 0;
         let slots = input.u64s()?;
         let len = input.u64()? as usize;
         let tombstones = input.u64()? as usize;

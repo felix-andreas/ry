@@ -16,7 +16,7 @@
 //! themselves, so a lookup of a base function is one load from the interned symbol.
 
 use {
-    crate::object::Sexp,
+    crate::object::{Sexp, gp},
     rustc_hash::FxHashSet,
     std::{
         alloc::{Layout, alloc, alloc_zeroed, dealloc, handle_alloc_error},
@@ -90,6 +90,20 @@ pub struct Frame {
 #[inline(always)]
 fn filter_bit(symbol: Sexp) -> u64 {
     1 << ((symbol.as_ptr() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 58)
+}
+
+/// Every binding a frame gains passes here, which is what makes [`gp::BOUND_ELSEWHERE`] sound:
+/// the base frames keep their bindings on the symbols and never insert. The test before the
+/// store keeps a symbol's header clean when the bit is already set, as it is for most symbols
+/// after start-up.
+#[inline(always)]
+fn mark_bound_elsewhere(symbol: Sexp) {
+    // SAFETY: a frame holds only interned symbols, which live as long as the heap.
+    unsafe {
+        if !symbol.has_gp(gp::BOUND_ELSEWHERE) {
+            symbol.set_gp_bits(gp::BOUND_ELSEWHERE, true);
+        }
+    }
 }
 
 /// Where machine code finds a frame's fields: the baseline tier probes a lookup site's hinted
@@ -486,6 +500,7 @@ impl Frame {
     /// symbol the frame already binds, and then the first cell keeps answering lookups, as the
     /// first match in GNU R's frame list does.
     pub(crate) fn insert(&mut self, symbol: Sexp, cell: Sexp) {
+        mark_bound_elsewhere(symbol);
         if self.filter & filter_bit(symbol) != 0 && self.find_position(symbol).is_some() {
             self.formals |= SHADOWED;
         }
@@ -521,6 +536,7 @@ impl Frame {
             return;
         }
         for (symbol, &cell) in symbols.zip(cells) {
+            mark_bound_elsewhere(symbol);
             let bit = filter_bit(symbol);
             if self.filter & bit != 0
                 && self.bindings.iter().any(|binding| binding.symbol == symbol)
@@ -655,6 +671,7 @@ impl Frame {
         let mut seen = FxHashSet::default();
         let mut shadowed = false;
         for binding in bindings.iter().filter(|binding| binding.symbol != REMOVED) {
+            mark_bound_elsewhere(binding.symbol);
             filter |= filter_bit(binding.symbol);
             shadowed |= !seen.insert(binding.symbol);
         }
