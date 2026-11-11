@@ -574,7 +574,7 @@ builtins in a systems language instead of in JavaScript. ry's equivalents are:
   sequence of calls to these, and no JIT can make a slow primitive fast.
 - **An optimizing JIT for the R code in between,** which is what the rest of this section is about.
 
-Where ry stands against that bar on untyped code: `just bench-real` times ten production-shaped
+Where ry stands against that bar on untyped code: `just bench applications` times ten production-shaped
 workloads (S3 objects, conditions, validation, strings, `lapply` pipelines, records, tables, xts
 and zoo, a scalar simulation, and a testthat suite of small `test_that()` blocks), and ry runs the
 first nine at 1.23 times GNU R's speed with the JIT and 1.27 times without it (geometric means of
@@ -879,7 +879,7 @@ a few thousand times, under tier 1's entry threshold. This table lists every ide
 plans or rejected for that code, in the order it is built. A status changes with the pull request
 that changes it. `prior-art.md` gives the reasoning behind each source engine's verdict.
 
-The gaps come from `ry run --profile-summary` on the nine `just bench-real` workloads (JIT on: tier-0
+The gaps come from `ry run --profile-summary` on the nine `just bench applications` workloads (JIT on: tier-0
 instructions 23 to 44% of the time, closure call setup 12 to 24%, builtins about 25%, S3 method
 lookup up to 17%) and from callgrind on `seq(1, 10, by = 2)`, which costs 121.4k instructions per
 call on ry (JIT off, down from 141.6k when this table started) and about 106k on GNU R 4.3.3. A
@@ -894,7 +894,7 @@ and jumping) costs about 11k instructions per call, about 13 per op over about 8
 a gap that size, so shrinking the op count and the cost per op (step 3) comes forward.
 
 **Target.** Untyped R with the JIT on runs at 10 times GNU R's speed on one thread, measured as the
-geometric mean over the `just bench-real` workloads and over the package corpus
+geometric mean over the `just bench applications` workloads and over the package corpus
 (`just bench-packages`). The milestones are 1.5x and then 3x. Today the workloads run at 0.9x
 (`results.json`) and the corpus at 1.06x (22 packages whose tests pass on both engines). Parallelism
 is deferred: the architecture keeps it possible (`decisions.md`, "Single-thread first"), but the

@@ -419,7 +419,7 @@ it with the representations above.
 
 ## The typed benchmark
 
-The typed programs in `tools/bench/why/typed` use only ry types: `List<F64>` instead of
+The typed programs (`*.typed.R` in `tools/bench/kernels` and `tools/bench/applications`) use only ry types: `List<F64>` instead of
 `double[]`, `F64` and `I64` scalars, `Str` for names, and the `List` and `Num` modules instead of
 `seq_len`, `sum` and `vapply`. The harness's clock and output are R calls at the boundary
 (`proc.time`, `cat`), converted with `Num.from_r`.

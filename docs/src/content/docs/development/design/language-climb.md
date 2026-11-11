@@ -24,8 +24,8 @@ before anything else. Among the other scores, speed and friendliness weigh equal
 
 ## Corpus
 
-- **Speed.** The 17 programs in `tools/bench/why/typed/` (typed ry, strict mode) and
-  `tools/bench/why/untyped/` (plain R), each with a Rust reference in `tools/climb/rust/` written
+- **Speed.** The 17 programs with a typed twin in `tools/bench/kernels/` and
+  `tools/bench/applications/` (`NAME.typed.R` in strict mode beside the plain R `NAME.R`), each with a Rust reference in `tools/climb/rust/` written
   the way a Rust programmer would and printing the same checksum.
 - **Friendliness.** `tools/climb/friendly/*.R`. A case starts with `# expect: ok` or
   `# expect: CODE`. An `ok` case must pass strict mode and, on ry's runtime, print exactly its `#>`

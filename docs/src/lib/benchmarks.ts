@@ -28,8 +28,6 @@ export type Meta = {
   seed?: number;
   command?: string;
   tooShortSeconds?: number;
-  // How a file written before the paired-rounds runner was sampled. Deleted with `fromLegacy`.
-  legacySampling?: string;
 };
 export type Program = {
   id: string;
@@ -167,8 +165,7 @@ export function suiteMetadata(suite: Suite): string {
   if (results === undefined) return '';
   const { meta } = results;
   const commit = meta.ryCommit === undefined ? '' : ` at ry ${shortCommit(meta.ryCommit)}`;
-  const sampling = meta.legacySampling ?? `${meta.rounds} paired rounds`;
-  return `Measured on ${meta.date.slice(0, 10)}${commit} with GNU R ${meta.gnuR.version} on ${machine(meta)}; ${sampling}.`;
+  return `Measured on ${meta.date.slice(0, 10)}${commit} with GNU R ${meta.gnuR.version} on ${machine(meta)}; ${meta.rounds} paired rounds.`;
 }
 
 // A commit as its first nine hex digits, keeping a marker such as `-dirty` that follows the hash.
@@ -327,9 +324,7 @@ export function tableViews(suite: Suite): TableView[] {
         return `${ratio === undefined ? 'n/a' : formatInterval(ratio)}${flags.length === 0 ? '' : ` (${flags.join(', ')})`}`;
       }),
     ]),
-    note: suite.results?.meta.legacySampling === undefined
-      ? 'Each time is the median over the rounds. Each speed-up is the median of the per-round ratios, with its 95% interval in parentheses.'
-      : undefined,
+    note: 'Each time is the median over the rounds. Each speed-up is the median of the per-round ratios, with its 95% interval in parentheses.',
   }];
   if (programs.some((program) => program.measurement.peakMib !== undefined)) {
     views.push({
@@ -439,16 +434,9 @@ export function methodRows(): { columns: string[]; rows: string[][] } {
       row('Machine', (suite) => { const value = meta(suite); return value === undefined ? '' : machine(value); }),
       row('GNU R', (suite) => `${meta(suite)?.gnuR.version ?? ''}${meta(suite)?.gnuR.blas === undefined ? '' : `, ${meta(suite)?.gnuR.blas}`}`),
       row('Engines', (suite) => (suite.results?.engines ?? []).map(engineLabel).join('; ')),
-      row('Samples', (suite) => meta(suite)?.legacySampling ?? `${meta(suite)?.rounds} paired rounds${meta(suite)?.seed === undefined ? '' : `, shuffle seed ${meta(suite)?.seed}`}`),
+      row('Samples', (suite) => `${meta(suite)?.rounds} paired rounds${meta(suite)?.seed === undefined ? '' : `, shuffle seed ${meta(suite)?.seed}`}`),
     ],
   };
-}
-
-// A results file written before the paired-rounds runner, named under the method table.
-export function legacyNotes(): string[] {
-  return measuredSuites()
-    .filter((suite) => suite.results?.meta.legacySampling !== undefined)
-    .map((suite) => `The committed ${suite.name} results predate this method: they hold ${suite.results?.meta.legacySampling}, so each ratio divides two times and has no interval.`);
 }
 
 export function methodMarkdown(): string {
@@ -457,7 +445,6 @@ export function methodMarkdown(): string {
     `| ${columns.join(' | ')} |`,
     `| --- |${columns.slice(1).map(() => ' --- |').join('')}`,
     ...rows.map((row) => `| ${row.join(' | ')} |`),
-    ...legacyNotes().flatMap((note) => ['', note]),
   ].join('\n');
 }
 
@@ -476,7 +463,8 @@ type Manifest = {
 
 type RawResults = {
   schema: number;
-  engines: string[];
+  // Each engine's id mapped to the label the runner printed, in the order the runner ran them.
+  engines: Record<string, string>;
   meta: {
     date: string;
     ry_commit?: string | null;
@@ -532,7 +520,7 @@ function loadSuites(): Suite[] {
       programs,
       results: results === undefined
         ? undefined
-        : { path: `${directory}/results.json`, engines: results.engines, geomean: results.geomean, meta: meta(results.meta, (results as { legacySampling?: string }).legacySampling) },
+        : { path: `${directory}/results.json`, engines: Object.keys(results.engines), geomean: results.geomean, meta: meta(results.meta) },
     } satisfies Suite;
   });
   for (const [index, entry] of loaded.entries()) {
@@ -548,7 +536,7 @@ function measurement(program: RawResults['programs'][number] | undefined): Measu
   return { seconds: program.seconds, ratio: program.ratio, peakMib: program.peak_mib, tests: program.tests, flags: program.flags ?? [] };
 }
 
-function meta(raw: RawResults['meta'], legacySampling: string | undefined): Meta {
+function meta(raw: RawResults['meta']): Meta {
   return {
     // A runner written in Python stores an absent value as null, which reads here as absent.
     date: raw.date,
@@ -559,68 +547,11 @@ function meta(raw: RawResults['meta'], legacySampling: string | undefined): Meta
     seed: raw.seed ?? undefined,
     command: raw.command ?? undefined,
     tooShortSeconds: raw.too_short_seconds ?? undefined,
-    legacySampling,
   };
 }
 
 function normalize(id: string, raw: unknown): RawResults {
   const value = raw as { schema?: number };
   if (value.schema === 1) return raw as RawResults;
-  if (value.schema === undefined) return fromLegacy(raw);
   throw new Error(`benchmark suite \`${id}\`: results.json has schema ${value.schema}, which the docs do not read`);
-}
-
-// TEMPORARY: maps the results files of `tools/bench/why` (numeric kernels) and `tools/bench/real`
-// (application workloads), written before the schema-1 runner, into schema 1. Delete it, and
-// `legacySampling` with it, once those directories are gone. `tools/bench/readme.py` has the twin
-// of this function.
-type LegacyResults = {
-  date: string;
-  commit?: string;
-  machine: string;
-  r: string;
-  repeat: number;
-  programs?: { program: string; gnu_r: number; ry: number; ry_typed: number; peak_mib: Record<string, number> }[];
-  workloads?: { workload: string; kind?: string; gnu_r: number; ry_jit: number; ry_nojit: number }[];
-};
-
-function fromLegacy(raw: unknown): RawResults & { legacySampling: string } {
-  const legacy = raw as LegacyResults;
-  const kernels = legacy.programs !== undefined;
-  const engines = kernels ? ['gnu_r', 'ry', 'ry_typed'] : ['gnu_r', 'ry', 'ry_nojit'];
-  const rows = kernels
-    ? (legacy.programs ?? []).map((row) => ({ id: row.program, seconds: { gnu_r: row.gnu_r, ry: row.ry, ry_typed: row.ry_typed }, peak_mib: row.peak_mib }))
-    : (legacy.workloads ?? []).filter((row) => (row.kind ?? 'workload') === 'workload').map((row) => ({ id: row.workload, seconds: { gnu_r: row.gnu_r, ry: row.ry_jit, ry_nojit: row.ry_nojit }, peak_mib: undefined }));
-  // These files flagged a program by GNU R's time alone and left it out of every geometric mean.
-  const programs = rows.map((row) => ({
-    ...row,
-    ratio: Object.fromEntries(engines.slice(1).map((engine) => [engine, { median: row.seconds.gnu_r / row.seconds[engine as keyof typeof row.seconds] }])),
-    flags: row.seconds.gnu_r < 0.1 ? [{ kind: 'too_short', engine: 'gnu_r' }] : [],
-  }));
-  const timed = programs.filter((program) => program.flags.length === 0);
-  const geomean = Object.fromEntries(
-    engines.slice(1).map((engine) => [
-      engine,
-      { median: Math.exp(timed.reduce((sum, program) => sum + Math.log(program.ratio[engine].median), 0) / timed.length), programs: timed.length },
-    ]),
-  );
-  const cpu = legacy.machine.split(', ');
-  return {
-    schema: 1,
-    engines,
-    meta: {
-      date: legacy.date,
-      ry_commit: legacy.commit,
-      gnu_r: { version: /\d+\.\d+\.\d+/.exec(legacy.r)?.[0] ?? legacy.r },
-      machine: { cpu: cpu[0], cores: Number.parseInt(cpu[1] ?? '', 10) || undefined, kernel: cpu[2] },
-      rounds: legacy.repeat,
-      command: kernels ? 'just bench-why --write' : 'just bench-real --write',
-      too_short_seconds: 0.1,
-    },
-    programs,
-    geomean,
-    legacySampling: kernels
-      ? `each engine's best time over ${legacy.repeat} processes, run one engine after another`
-      : `each engine's median time over ${legacy.repeat} rounds`,
-  };
 }

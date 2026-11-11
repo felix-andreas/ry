@@ -637,7 +637,7 @@ running dynamically typed code fast while anything may be redefined at any time.
 in the mandate is Bun, which is JavaScriptCore, and ry's tier 0 runs real R code slower than GNU R's
 bytecode interpreter: ggplot2, lattice and PerformanceAnalytics render 1.2 to 1.9 times slower than
 on GNU R, which the knowledge base attributes to interpreter call cost. On the nine
-production-shaped workloads of `just bench-real`, untyped R runs at 0.95 times GNU R's speed with
+production-shaped workloads of `just bench applications`, untyped R runs at 0.95 times GNU R's speed with
 the JIT off and 0.96 times with it on (geometric means, `benchmarks.mdx`). `ry run
 --profile-summary` splits that time into tier-0 instructions (23 to 44%), closure call setup (12
 to 24%), builtins (about 25%) and S3 method lookup (up to 17%), with tier 1 under 3% on all but one
@@ -690,7 +690,7 @@ its hot builtins in Zig and C++.[^bun]
   the frame itself, and a frame that binds a symbol twice (duplicate formals) ignores hints, so a
   stale hint never matches the wrong binding. **Built.** Before slot hints, the frame search
   (`Heap::frame_cell`) took 2.9% of the samples by self time on the `validation` workload of
-  `just bench-real` with the JIT off.
+  `just bench applications` with the JIT off.
 - **Watchpoint sets per binding.** Today a compiled body checks its function speculations on every
   entry: one global binding epoch, and when that moved, the lookup stamp of each speculated symbol
   (`valid` in `crates/jit/src/runtime.rs`). The epoch moves on every top-level binding, which a

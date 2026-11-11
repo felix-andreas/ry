@@ -176,7 +176,7 @@ export default defineConfig({
 	],
 	vite: {
 		plugins: [tailwind()],
-		// The benchmark pages read their programs and results from tools/bench/why/.
+		// The benchmark pages read their programs and results from tools/bench/.
 		server: { fs: { allow: ['..'] } },
 	},
 });

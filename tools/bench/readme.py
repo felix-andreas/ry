@@ -11,7 +11,7 @@ results file has no row.
 
 Usage: tools/bench/readme.py [--check]
 """
-import json, math, pathlib, re, statistics, sys, tomllib
+import json, pathlib, re, sys, tomllib
 from decimal import ROUND_HALF_UP, Decimal
 
 root = pathlib.Path(__file__).resolve().parent.parent.parent
@@ -84,8 +84,7 @@ def metadata(results):
     machine = ", ".join([meta["machine"]["cpu"]]
                         + ([f"{meta['machine']['cores']} cores"] if meta["machine"].get("cores") else [])
                         + ([meta["machine"]["kernel"]] if meta["machine"].get("kernel") else []))
-    sampling = results.get("legacy_sampling") or f"{meta['rounds']} paired rounds"
-    return f"Measured on {meta['date'][:10]}{commit} with GNU R {meta['gnu_r']['version']} on {machine}; {sampling}."
+    return f"Measured on {meta['date'][:10]}{commit} with GNU R {meta['gnu_r']['version']} on {machine}; {meta['rounds']} paired rounds."
 
 def lowercase_first(text):
     return text[:1].lower() + text[1:]
@@ -98,47 +97,7 @@ def ratio(value):
 def normalize(results):
     if results.get("schema") == 1:
         return results
-    if "schema" not in results:
-        return from_legacy(results)
     sys.exit(f"error: results.json has schema {results['schema']}, which this script does not read")
-
-# TEMPORARY: maps the results files of `tools/bench/why` (numeric kernels) and `tools/bench/real`
-# (application workloads), written before the schema-1 runner, into schema 1. Delete it, and
-# `legacy_sampling` with it, once those directories are gone. `fromLegacy` in
-# docs/src/lib/benchmarks.ts is its twin.
-def from_legacy(legacy):
-    kernels = "programs" in legacy
-    if kernels:
-        engines = ["gnu_r", "ry", "ry_typed"]
-        rows = [{"id": row["program"], "seconds": {engine: row[engine] for engine in engines}} for row in legacy["programs"]]
-    else:
-        engines = ["gnu_r", "ry", "ry_nojit"]
-        rows = [{"id": row["workload"], "seconds": {"gnu_r": row["gnu_r"], "ry": row["ry_jit"], "ry_nojit": row["ry_nojit"]}}
-                for row in legacy["workloads"] if row.get("kind", "workload") == "workload"]
-    # These files flagged a program by GNU R's time alone and left it out of every geometric mean.
-    timed = [row for row in rows if row["seconds"]["gnu_r"] >= 0.1]
-    geomean = {
-        engine: {"median": math.exp(statistics.fmean(math.log(row["seconds"]["gnu_r"] / row["seconds"][engine]) for row in timed)),
-                 "programs": len(timed)}
-        for engine in engines[1:]
-    }
-    cpu, cores, kernel = (legacy["machine"].split(", ") + [None, None])[:3]
-    version = re.search(r"\d+\.\d+\.\d+", legacy["r"])
-    return {
-        "schema": 1,
-        "engines": engines,
-        "meta": {
-            "date": legacy["date"],
-            "ry_commit": legacy.get("commit"),
-            "gnu_r": {"version": version[0] if version else legacy["r"]},
-            "machine": {"cpu": cpu, "cores": int(cores.split()[0]) if cores else None, "kernel": kernel},
-            "rounds": legacy["repeat"],
-        },
-        "programs": rows,
-        "geomean": geomean,
-        "legacy_sampling": (f"each engine's best time over {legacy['repeat']} processes, run one engine after another" if kernels
-                            else f"each engine's median time over {legacy['repeat']} rounds"),
-    }
 
 if __name__ == "__main__":
     main()
