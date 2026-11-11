@@ -21,7 +21,12 @@ a valid profile of the path up to it. The exit status is non-zero when nothing r
 workload of the mix failed, since the mix is the core of the profile. The workloads need
 testthat, purrr, stringr, lubridate, data.table, xts and zoo installed.
 
-usage: tools/layout/train.py RY [--jobs N] [--held-out]
+With `--image-touch DIR`, each run also records which objects of the start image it touches, in
+`DIR/<n>.touch` (`RY_IMAGE_TOUCH`), and an empty program joins the mix, so the profile holds a
+start that runs nothing too. `tools/layout/image_order.py` merges the files into the order the
+next image is laid out in.
+
+usage: tools/layout/train.py RY [--jobs N] [--held-out] [--image-touch DIR]
 """
 import argparse, concurrent.futures, os, pathlib, subprocess, sys, tempfile
 
@@ -41,8 +46,12 @@ def public_programs():
     return trained, [program for program in programs if program not in trained]
 
 
-def jobs(ry, tier, scratch):
+def jobs(ry, tier, scratch, image_touch):
     driver = root / "crates/oracle/src/driver.R"
+    if image_touch:
+        empty = scratch / "empty.R"
+        empty.write_text("")
+        yield "empty", [ry, "run", "--runtime", "ry", str(empty)], scratch
     for case in sorted((root / "crates/oracle/cases").glob("*.R")):
         report = scratch / f"{tier}-{case.stem}.json"
         yield f"oracle/{case.stem}", [ry, "run", "--runtime", "ry", str(driver), str(case), str(report)], case.parent
@@ -74,6 +83,7 @@ def main():
     parser.add_argument("ry")
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
     parser.add_argument("--held-out", action="store_true", help="print the held-out public programs and exit")
+    parser.add_argument("--image-touch", type=pathlib.Path, help="record each run's start image touches in this directory")
     args = parser.parse_args()
     if args.held_out:
         for program in public_programs()[1]:
@@ -85,7 +95,11 @@ def main():
     with tempfile.TemporaryDirectory(prefix="ry-train-") as scratch:
         scratch = pathlib.Path(scratch)
         work = [(f"{tier}:{name}", command, cwd, env)
-                for tier, env in tiers for name, command, cwd in jobs(args.ry, tier, scratch)]
+                for tier, env in tiers for name, command, cwd in jobs(args.ry, tier, scratch, args.image_touch)]
+        if args.image_touch:
+            args.image_touch.mkdir(parents=True, exist_ok=True)
+            work = [(name, command, cwd, dict(env, RY_IMAGE_TOUCH=str(args.image_touch / f"{index}.touch")))
+                    for index, (name, command, cwd, env) in enumerate(work)]
         failed = 0
         broken_workloads = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:

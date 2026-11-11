@@ -82,6 +82,7 @@ fn relocation_moves_paths_under_a_prefix() {
         let image = {
             let mut source = fresh_heap();
             let precondition = source.image_precondition(&fixed());
+            source.pin_for_image();
             let vector = source
                 .alloc_vector(SexpType::String, texts.len() as isize)
                 .expect("alloc");
@@ -95,6 +96,7 @@ fn relocation_moves_paths_under_a_prefix() {
                 &mut source,
                 precondition,
                 &[vector],
+                &[],
                 &[b"/build/home".to_vec()],
             )
         };
@@ -167,6 +169,7 @@ unsafe fn written(seed: u64, prefixes: &[Vec<u8>]) -> (HeapImage, Vec<String>, V
     unsafe {
         let mut source = fresh_heap();
         let precondition = source.image_precondition(&fixed());
+        source.pin_for_image();
         // Garbage that fills whole pages, so the image carries pages the writer's collection
         // emptied and the loader must file as empty.
         for _ in 0..20_000 {
@@ -176,7 +179,14 @@ unsafe fn written(seed: u64, prefixes: &[Vec<u8>]) -> (HeapImage, Vec<String>, V
         let roots = build(&mut source, &mut SplitMix64(seed), &mut names);
         source.collect(Collection::Major);
         let expected = describe(&source, &roots, &names);
-        let image = write(&mut source, precondition, &roots, prefixes);
+        // Odd seeds lay the image out against its id order, so compaction moves nearly every
+        // object away from where the default layout would put it.
+        let order: Vec<u32> = if seed % 2 == 1 {
+            (0..60_000).rev().collect()
+        } else {
+            Vec::new()
+        };
+        let image = write(&mut source, precondition, &roots, &order, prefixes);
         (image, names, expected)
     }
 }
@@ -348,6 +358,7 @@ unsafe fn write(
     heap: &mut Heap,
     precondition: u64,
     roots: &[Sexp],
+    order: &[u32],
     prefixes: &[Vec<u8>],
 ) -> HeapImage {
     unsafe {
@@ -355,6 +366,7 @@ unsafe fn write(
             &fixed(),
             precondition,
             roots,
+            order,
             prefixes,
             &|_| None,
             &mut encode,

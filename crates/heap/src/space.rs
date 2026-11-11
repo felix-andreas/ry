@@ -138,6 +138,10 @@ pub(crate) struct Space {
     /// collection, and `OLD` and `TENURED` in an intermediate or major one. A young object
     /// becomes `OLD` only.
     pub promote_bits: u8,
+    /// The slots allocated when a session that will be imaged began to start
+    /// ([`Space::pin_allocated`]). A loading process holds objects at those addresses, so
+    /// compacting the image leaves them where they are.
+    pinned: Vec<Bitmap>,
 }
 
 #[derive(Clone, Copy)]
@@ -218,6 +222,7 @@ impl Space {
             marked_vector_cells: 0,
             tenured_vector_cells: 0,
             promote_bits: gc_bits::OLD,
+            pinned: Vec::new(),
         }
     }
 
@@ -899,6 +904,193 @@ impl Space {
             }
         }
         ranges
+    }
+
+    /// Records the slots allocated now as ones [`Space::compact_for_image`] must not move.
+    pub fn pin_allocated(&mut self) {
+        // A cursor's claimed run counts as allocated, but nothing holds its slots yet.
+        let mut pinned = self.allocated[..self.page_count].to_vec();
+        for cursors in [self.cursors, self.parked_cursors] {
+            release_runs(&mut { cursors }, &mut pinned, self.base);
+        }
+        self.pinned = pinned;
+    }
+
+    /// Whether `object` is a small object in a slot [`Space::pin_allocated`] recorded.
+    pub fn is_pinned(&self, object: Sexp) -> bool {
+        self.locate(object).is_some_and(|(page, word, bit)| {
+            self.pinned
+                .get(page)
+                .is_some_and(|bitmap| bitmap[word] & bit != 0)
+        })
+    }
+
+    /// Whether `object` is a small object in the intern table.
+    pub fn is_interned(&self, object: Sexp) -> bool {
+        self.locate(object)
+            .is_some_and(|(page, word, bit)| self.interned[page][word] & bit != 0)
+    }
+
+    /// Whether `object` lives in this space rather than among the large objects.
+    pub fn holds(&self, object: Sexp) -> bool {
+        self.locate(object).is_some()
+    }
+
+    /// Moves each object of `order`, which are small, marked and unpinned, into a slot of its
+    /// class laid out in that order, and returns each move as `(from, to)`. The first objects of
+    /// a class fill the free slots of the pages that keep an object, in page order; the rest go
+    /// to the emptied and then to new pages, a page taken whenever a class needs one, so an
+    /// object's page follows the order of the objects that first needed it. Every collection
+    /// bit moves with its object; the caller points every reference at the new addresses.
+    pub unsafe fn compact_for_image(&mut self, order: &[Sexp]) -> Vec<(Sexp, Sexp)> {
+        self.release_cursors();
+        release_runs(&mut self.parked_cursors, &mut self.allocated, self.base);
+        self.cursors = [IDLE_CURSOR; CLASS_COUNT];
+        self.parked_cursors = [IDLE_CURSOR; CLASS_COUNT];
+        self.pretenuring = false;
+        self.pretenured_pages.clear();
+        self.touched.clear();
+        struct Moved {
+            from: Sexp,
+            class: usize,
+            start: usize,
+            tenured: bool,
+            interned: bool,
+            finalizable: bool,
+        }
+        let mut saved: Vec<u8> = Vec::new();
+        let mut moving: Vec<Moved> = Vec::with_capacity(order.len());
+        for &object in order {
+            let Some((page, word, bit)) = self.locate(object) else {
+                continue;
+            };
+            if self.marks[page][word] & bit == 0 || self.is_pinned(object) {
+                continue;
+            }
+            let class = self.page_class[page] as usize;
+            let start = saved.len();
+            saved.extend_from_slice(std::slice::from_raw_parts(
+                object.as_ptr().cast::<u8>(),
+                SLOT_SIZES[class],
+            ));
+            moving.push(Moved {
+                from: object,
+                class,
+                start,
+                tenured: self.tenured[page][word] & bit != 0,
+                interned: self.interned[page][word] & bit != 0,
+                finalizable: self.finalizable[page][word] & bit != 0,
+            });
+            for bitmap in [
+                &mut self.marks,
+                &mut self.tenured,
+                &mut self.allocated,
+                &mut self.interned,
+                &mut self.finalizable,
+            ] {
+                bitmap[page][word] &= !bit;
+            }
+            self.live_slots[page] -= 1;
+        }
+        // The pages that keep an object keep their class; every other page is free for any.
+        let mut holes: [Vec<u32>; CLASS_COUNT] = Default::default();
+        let mut free_pages: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
+        for page in 0..self.page_count {
+            if self.live_slots[page] == 0 {
+                self.page_class[page] = EMPTY_PAGE;
+                free_pages.push_back(page as u32);
+            } else {
+                holes[self.page_class[page] as usize].push(page as u32);
+            }
+        }
+        for pages in &mut holes {
+            pages.reverse();
+        }
+        let mut current: [Option<(u32, usize)>; CLASS_COUNT] = [None; CLASS_COUNT];
+        let mut moves = Vec::with_capacity(moving.len());
+        for moved in &moving {
+            let class = moved.class;
+            let slots = PAGE_SIZE / SLOT_SIZES[class];
+            let (page, slot) = loop {
+                if let Some((page, from)) = current[class] {
+                    let bitmap = &self.allocated[page as usize];
+                    if let Some(slot) =
+                        (from..slots).find(|&slot| bitmap[slot / 64] & (1 << (slot % 64)) == 0)
+                    {
+                        break (page, slot);
+                    }
+                }
+                let page = match holes[class].pop() {
+                    Some(page) => page,
+                    None => {
+                        let page = match free_pages.pop_front() {
+                            Some(page) => page,
+                            None => match self.new_page() {
+                                Some(page) => page,
+                                None => panic!("no page is left to compact the image into"),
+                            },
+                        };
+                        self.page_class[page as usize] = class as u8;
+                        page
+                    }
+                };
+                current[class] = Some((page, 0));
+            };
+            current[class] = Some((page, slot + 1));
+            let (index, word, bit) = (page as usize, slot / 64, 1u64 << (slot % 64));
+            let to = self
+                .base
+                .as_ptr()
+                .add(index * PAGE_SIZE + slot * SLOT_SIZES[class]);
+            std::ptr::copy_nonoverlapping(saved.as_ptr().add(moved.start), to, SLOT_SIZES[class]);
+            self.allocated[index][word] |= bit;
+            self.marks[index][word] |= bit;
+            if moved.tenured {
+                self.tenured[index][word] |= bit;
+            }
+            if moved.interned {
+                self.interned[index][word] |= bit;
+            }
+            if moved.finalizable {
+                self.finalizable[index][word] |= bit;
+            }
+            self.live_slots[index] += 1;
+            moves.push((
+                moved.from,
+                Sexp::from_non_null(NonNull::new_unchecked(to).cast()),
+            ));
+        }
+        // Trailing pages left empty are dropped from the image, down to the pages a loading
+        // process already holds.
+        let mut page_count = self.page_count;
+        while page_count > self.pinned.len() && self.page_class[page_count - 1] == EMPTY_PAGE {
+            page_count -= 1;
+        }
+        self.page_count = page_count;
+        self.page_class.truncate(page_count);
+        self.live_slots.truncate(page_count);
+        for bitmaps in [
+            &mut self.marks,
+            &mut self.tenured,
+            &mut self.allocated,
+            &mut self.finalizable,
+            &mut self.interned,
+        ] {
+            bitmaps.truncate(page_count);
+        }
+        self.total_live_slots = self.live_slots.iter().map(|&live| live as usize).sum();
+        self.empty_pages.clear();
+        for available in &mut self.available {
+            available.clear();
+        }
+        for page in 0..page_count {
+            if self.page_class[page] == EMPTY_PAGE {
+                self.empty_pages.push(page as u32);
+            } else {
+                self.file_page(page as u32);
+            }
+        }
+        moves
     }
 
     /// Takes over the pages and metadata [`Space::write_image`] wrote, in place of everything the
