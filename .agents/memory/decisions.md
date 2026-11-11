@@ -8988,3 +8988,18 @@ Each one trades a narrow class of missed errors for a class of false reports see
 - **Target shape.** `oracle compare` refuses to start when any selected case needs a missing package, and `--allow-skips` makes a deliberately partial run whose summary lines start with `PARTIAL`. Each summary line counts passed, failed (known and new) and skipped. `library_environment` puts `.corpus/library` (`$RY_CORPUS_DIR/library`, as `tools/corpus/install.R` writes it) after any explicit `R_LIBS` whenever the directory exists, so `just corpus` is all a container needs; an empty `R_LIBS` turns the corpus off. `compare_fails_on_a_missing_package_unless_skips_are_allowed` pins it without R, using a shell script as the engine against recorded outcomes.
 - **Why refuse instead of failing at the end.** The missing packages are known before any case runs, and a full pass takes up to 80 minutes, so a run that would be rejected anyway should stop in seconds.
 - **Not changed.** `cargo test -p oracle` still drops cases whose packages are missing, because CI runs it in environments without the corpus; the merge gate is `oracle compare`.
+
+## Arguments that name a local stay lazy
+
+- **Rejected: binding a caller's local variable to the callee's parameter by value.** A promise for `x` reads `x` when the argument is forced, not at the call, and code can write `x` in between: in `f <- function(a, b) { b; a }; g <- function() { x <- 1; f(x, x <- 2) }` the call returns 2, and a callee that runs `assign("x", 5, envir = parent.frame())` before using its argument sees 5, in ry and GNU R alike. Reading the value at the call needs a proof that nothing writes the local before the force: no other argument and no outstanding promise over the frame assigns it, and the frame is not turned into an environment during the call. `effects::effect_free` is that proof for the callees it accepts, which is why tier 0 binds their arguments eagerly. A promise created already forced keeps `substitute()` and `match.call()` correct but not the early read, and it still costs the promise.
+- **Measured ceiling.** Callgrind on one warm iteration (`RY_BENCH_REPEAT=2` minus `1`, release build, one process). The full ceiling is creating and forcing the promise for every variable argument; force only is what a promise created already forced could save, the most reachable without a proof that the callee never looks at the promise.
+
+  | Workload | Warm iteration | All promise work | Full ceiling | Force only |
+  |---|---|---|---|---|
+  | testthat_full | 624M Ir | 7.9% | 2.7% | 1.7% |
+  | validation | 1,571M Ir | 6.4% | 0.53% | 0.4% |
+  | objects | 2,747M Ir | 5.5% | 0.37% | 0.25% |
+  | functional | 3,035M Ir | 4.6% | 0.62% | 0.4% |
+
+  Constants already pass as themselves. The rest of what promises cost is code promises and the fixed cost of each promise, not the argument's shape.
+- **Revisit** only with a caller-side proof that the frame's locals cannot be written during the call, and a workload where variable arguments to callees that are not effect-free are at least 2% of the instructions.
