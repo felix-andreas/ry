@@ -596,6 +596,35 @@ fn find_program(name: &str) -> Option<PathBuf> {
     first_program_file(&directories, name, &extensions)
 }
 
+/// The program a Unix `which` finds for `name`: `name` itself when it holds a slash, otherwise
+/// the first executable file of that name in a `PATH` directory, where an empty entry is the
+/// working directory, reported as `./name`. `None` for an empty name or where nothing executable
+/// matches.
+#[cfg(unix)]
+pub(crate) fn which(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = |path: &Path| {
+        path.metadata()
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    };
+    if name.is_empty() {
+        return None;
+    }
+    if name.contains('/') {
+        let path = PathBuf::from(name);
+        return executable(&path).then_some(path);
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|directory| {
+        let candidate = if directory.as_os_str().is_empty() {
+            Path::new(".").join(name)
+        } else {
+            directory.join(name)
+        };
+        executable(&candidate).then_some(candidate)
+    })
+}
+
 /// The first file `name` with one of `extensions` added names in one of `directories`, trying
 /// every extension in a directory before the next directory.
 fn first_program_file(

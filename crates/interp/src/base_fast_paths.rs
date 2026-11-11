@@ -36,6 +36,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryStructure", 0, do_structure),
     internal("rySysGetenv", 0, do_sys_getenv),
     internal("rySysSetenv", 0, do_sys_setenv),
+    internal("rySysWhich", 0, do_sys_which),
     internal("ryFormatDefault", 0, do_format_default),
     internal("ryReduce", 0, do_reduce),
     internal("ryAssignNativeRoutines", 0, do_assign_native_routines),
@@ -54,6 +55,7 @@ const FAST_PATHS: &[(&str, &str, u64)] = &[
     ("structure", "ryStructure", 0xe1de236049200229),
     ("Sys.getenv", "rySysGetenv", 0xe91342790fcd5c16),
     ("Sys.setenv", "rySysSetenv", 0xb3ad8ec3b2915ce0),
+    ("Sys.which", "rySysWhich", 0x17980645114e720c),
     ("format.default", "ryFormatDefault", 0x5eb64c51109fbc94),
     ("Reduce", "ryReduce", 0xd929e4c219983788),
     ("message", "ryMessage", 0x9b452884cddd7ceb),
@@ -165,9 +167,14 @@ unsafe fn with_prologue(
     if already {
         original = body.cdr().cdr().car();
     }
+    let hashed = if name == "Sys.which" {
+        configured_which_as_bundled(original)?
+    } else {
+        original
+    };
     let mut hash = FNV_OFFSET;
     stable_hash(formals, &mut hash);
-    stable_hash(original, &mut hash);
+    stable_hash(hashed, &mut hash);
     if print {
         eprintln!("{name} {hash:#018x}");
     }
@@ -181,6 +188,41 @@ unsafe fn with_prologue(
         symbols().brace,
         values::cons(prologue, values::cons(original, nil())?)?,
     )?))
+}
+
+/// `Sys.which`'s `body` as ry's bundled base R has it. GNU R's configure writes the path of the
+/// `which` program it found into the body (`which <- "/usr/bin/which"`), so the body differs
+/// between builds of one release, and ry's own build writes `"which"`. The fast path never runs
+/// that program, so a body that differs only there is the same code to it.
+unsafe fn configured_which_as_bundled(body: Sexp) -> R<Sexp> {
+    let which = install("which")?;
+    let is_configured_which = |statement: Sexp| {
+        statement.kind() == SexpType::Language
+            && statement.car() == symbols().assign
+            && statement.cdr().car() == which
+            && statement.cdr().cdr().car().kind() == SexpType::String
+            && length(statement.cdr().cdr().car()) == 1
+    };
+    if body.kind() != SexpType::Language || body.car() != symbols().brace {
+        return Ok(body);
+    }
+    let mut statements = body.cdr();
+    while statements.kind() == SexpType::Pairlist && !is_configured_which(statements.car()) {
+        statements = statements.cdr();
+    }
+    if statements.kind() != SexpType::Pairlist {
+        return Ok(body);
+    }
+    let heap = crate::heap();
+    let copy = values::duplicate(body)?;
+    heap.root(copy);
+    let mut statements = copy.cdr();
+    while !is_configured_which(statements.car()) {
+        statements = statements.cdr();
+    }
+    let bundled = values::scalar_string("which")?;
+    heap.set_car(statements.car().cdr().cdr(), bundled);
+    Ok(copy)
 }
 
 /// Puts the prologue in front of the closure that `outer`'s body defines as
@@ -1872,6 +1914,41 @@ unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
         values::set_attr(value, symbols.names, x)?;
     }
     finish(frame, value, true)
+}
+
+/// Unix `Sys.which(names)` for a character vector without attributes: each name's program as
+/// `which` reports it, or "", named by the names. Base R runs `which` through `system()` once per
+/// name, which costs a shell each and fails outright where `PATH` holds no `sh`, as when utils'
+/// `.onLoad` asks for `uname` on such a `PATH`.
+unsafe fn do_sys_which(call: &Call<'_>) -> R<Sexp> {
+    if !cfg!(unix) {
+        return decline();
+    }
+    let frame = ClosureFrame::of(call);
+    let Some(names) = argument(frame, install("names")?)? else {
+        return decline();
+    };
+    if names.kind() != SexpType::String || names.attrib() != nil() || length(names) == 0 {
+        return decline();
+    }
+    let count = length(names);
+    let result = values::alloc(SexpType::String, count)?;
+    crate::heap().root(result);
+    for index in 0..count {
+        let found = match values::string_at(names, index) {
+            None => values::na_string(),
+            Some(name) => {
+                #[cfg(unix)]
+                let path = crate::system::which(&name);
+                #[cfg(not(unix))]
+                let path: Option<std::path::PathBuf> = None;
+                values::mkchar(&path.map(|path| path.display().to_string()).unwrap_or_default())?
+            }
+        };
+        values::set_elt(result, index, found);
+    }
+    values::set_attr(result, symbols().names, names)?;
+    finish(frame, result, true)
 }
 
 /// `Sys.setenv(...)` where every argument is named and is a single string, so `unlist()` and
