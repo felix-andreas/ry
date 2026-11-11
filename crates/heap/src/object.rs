@@ -723,8 +723,23 @@ impl Sexp {
     }
 
     pub unsafe fn kind(self) -> SexpType {
-        // The kind byte only ever holds a `SexpType` discriminant.
-        unsafe { std::mem::transmute::<u8, SexpType>(self.header().kind.get()) }
+        let kind = unsafe { self.header().kind.get() };
+        // A live object's kind byte holds a `SexpType` discriminant, and a freed one's holds
+        // `POISONED_KIND`. Debug builds poison with a byte that is no discriminant and check
+        // for it here; release builds poison with `FREESXP` instead, because the check costs
+        // instructions on every call of the hottest accessor in the runtime.
+        if cfg!(debug_assertions) && kind > SexpType::Free as u8 {
+            freed_object(self);
+        }
+        unsafe { std::mem::transmute::<u8, SexpType>(kind) }
+    }
+
+    /// Whether the collector freed this object and poisoned its memory, which it does in
+    /// debug builds and under collection stress or verification. Reading the kind byte of
+    /// freed memory is only sound while that memory belongs to the heap, so this is for tests
+    /// and diagnostics.
+    pub unsafe fn is_poisoned(self) -> bool {
+        unsafe { self.header().kind.get() == crate::space::POISONED_KIND }
     }
 
     pub unsafe fn attrib(self) -> Sexp {
@@ -1281,4 +1296,14 @@ impl Sexp {
     pub(crate) unsafe fn set_altrep_flag(self) {
         unsafe { self.set_flag(flag_bits::ALTREP, true) }
     }
+}
+
+#[cold]
+#[inline(never)]
+fn freed_object(object: Sexp) -> ! {
+    panic!(
+        "read the kind of a freed object at {:p}: something used a reference after the collector \
+         freed it",
+        object.as_ptr()
+    )
 }

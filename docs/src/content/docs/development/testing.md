@@ -391,8 +391,10 @@ its replay command, and `just fuzz-differential` and `just gc-torture` are the l
 `crates/oracle/tests/test_gallery.rs` renders a seeded sample of the plot gallery under both
 engines and compares the images ([Corpus and oracle](/development/corpus-and-oracle)).
 `just gc-torture` runs every oracle case on every core and takes about ten minutes on four cores
-in a debug build. `RY_GC_STRESS=1` stresses from the script's start and `RY_GC_STRESS=startup`
-from the first allocation, which takes about seven seconds on an empty script in a debug build.
+in a debug build, and `just gc-torture young` runs them under `ry-gctorture-young`. The generated
+programs run under both torture engines. `RY_GC_STRESS=1` stresses from the script's start and
+`RY_GC_STRESS=startup` from the first allocation, which takes about seven seconds on an empty script
+in a debug build ([Robustness](/development/robustness) lists the modes).
 
 `crates/interp/tests/test_debugger.rs` drives the debug adapter (`interp::debugger`) in-process.
 Scripted sessions pin breakpoints, stepping, the stack, variables, `evaluate`, `browser()` and

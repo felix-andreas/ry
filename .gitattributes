@@ -9,3 +9,10 @@ crates/oracle/cases/io__write_table.expected -text
 .vscode/tasks.json -text
 editors/code/tsconfig.json -text
 tools/research/data/*.csv -text
+
+# The knowledge base is mostly appended to, by many sessions at once, so two branches that each add
+# a line at the end of one section would otherwise conflict on every merge. A union merge keeps the
+# lines of both sides. Where both sides rewrote the same line, both versions survive and the next
+# memory pass prunes the stale one. GitHub's own merge button ignores this; a local `git merge` or
+# `git rebase` applies it.
+.agents/memory/*.md merge=union

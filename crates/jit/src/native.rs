@@ -3228,9 +3228,7 @@ unsafe fn promise_value(
     // A checked promise runs its annotation check when forced, which only tier 0 does, and
     // forcing a promise whose code is running raises the recursion error, which a read must not
     // replace with a value.
-    if promise.has_gp(gp::CHECKED_PROMISE)
-        || promise.has_gp(PROMISE_SEEN)
-        || depth > MAX_PURE_DEPTH
+    if promise.has_gp(gp::CHECKED_PROMISE) || promise.has_gp(PROMISE_SEEN) || depth > MAX_PURE_DEPTH
     {
         return None;
     }

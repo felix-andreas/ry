@@ -2129,7 +2129,11 @@ unsafe fn do_structure(call: &Call<'_>) -> R<Sexp> {
     // list it is given, which must not reach the object `structure()` was called on.
     let dimnames = values::get_attr(result, symbols.dimnames);
     if dimnames.kind() == SexpType::List {
-        values::set_attr(result, symbols.dimnames, values::shallow_duplicate(dimnames)?)?;
+        values::set_attr(
+            result,
+            symbols.dimnames,
+            values::shallow_duplicate(dimnames)?,
+        )?;
     }
     for &(tag, value) in &attributes {
         crate::subset::set_attribute_checked(result, tag, value, call.call)?;
