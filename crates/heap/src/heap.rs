@@ -601,9 +601,9 @@ impl HeapGrowth {
 
 const GROW_STEP_MIN: f64 = 80_000.0 * 8.0;
 
-/// How many growths of the node limit follow the live small objects' trend, as GNU R's first 50
-/// adjustments of `R_NSize` do.
-const EARLY_NODE_GROWTHS: u32 = 50;
+/// How many growths of the node limit follow the live small objects' trend, as GNU R's early
+/// adjustments of `R_NSize` do (`adjust_count` runs from 1 while below 50).
+const EARLY_NODE_GROWTHS: u32 = 49;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct GcStats {
