@@ -2079,6 +2079,7 @@ impl Compiler {
             self.code.extend_from_slice(&cold.words);
             self.emit(Op::Resume, &[cold.resume]);
         }
+        fuse_pairs(&mut self.code)?;
         let compiler = &*self;
         let heap = crate::heap();
         let words = values::alloc(SexpType::Integer, compiler.code.len())?;
@@ -4338,14 +4339,15 @@ pub const fn op_word(op: Op) -> u32 {
 }
 
 /// The opcode of the code word `word`, unless it is not a valid one. A specialized form (see
-/// [`QUICK_ARITHMETIC`]) reads as the instruction it specializes, so every reader other than
-/// tier 0's dispatch sees the instructions the compiler emitted.
+/// [`QUICK_ARITHMETIC`]) reads as the instruction it specializes and a superinstruction (see
+/// [`superinstructions!`]) as its first instruction, so every reader other than tier 0's
+/// dispatch sees the instructions the compiler emitted.
 pub fn op_of(word: u32) -> Option<Op> {
     let index = (word & OP_MASK) as usize;
     let op = match OPS.get(index) {
         Some(&op) => op,
-        None if index < HANDLER_COUNT => Op::Arithmetic,
-        None => return None,
+        None if index < SUPERINSTRUCTION_BASE => Op::Arithmetic,
+        None => SUPERINSTRUCTIONS.get(index - SUPERINSTRUCTION_BASE)?.0,
     };
     (op_word(op) & !OP_MASK == word & !(RESPECIALIZE_MASK | OP_MASK)).then_some(op)
 }
@@ -4387,8 +4389,71 @@ const QUICK_ARITHMETIC: [(Arith, bool); 19] = [
     (Arith::GreaterEqual, true),
 ];
 
-/// The size of tier 0's handler tables: every generic and specialized opcode.
-const HANDLER_COUNT: usize = OPS.len() + QUICK_ARITHMETIC.len();
+/// The first opcode of tier 0's superinstructions ([`superinstructions!`]).
+const SUPERINSTRUCTION_BASE: usize = OPS.len() + QUICK_ARITHMETIC.len();
+
+/// Writes each superinstruction's opcode over the first instruction of every pair of its
+/// instructions in `code`, the second right after the first. Only the opcode byte changes, so
+/// [`op_of`] and every operand read the same.
+fn fuse_pairs(code: &mut [u32]) -> R<()> {
+    if !SUPERINSTRUCTIONS_ON.get() {
+        return Ok(());
+    }
+    let mut pc = 0;
+    while pc < code.len() {
+        let op = op_of(code[pc]).ok_or_else(|| error("compiled an invalid instruction"))?;
+        let next = pc + 1 + operand_count(op);
+        if let Some(&word) = code.get(next)
+            && code[pc] == op_word(op)
+            && let Some(second) = op_of(word)
+            && let Some(index) = SUPERINSTRUCTIONS
+                .iter()
+                .position(|&pair| pair == (op, second))
+        {
+            code[pc] = (code[pc] & !OP_MASK) | (SUPERINSTRUCTION_BASE + index) as u32;
+        }
+        pc = next;
+    }
+    Ok(())
+}
+
+thread_local! {
+    /// Whether the compiler writes superinstructions, which tests turn off to compare a fused
+    /// body against the same body unfused.
+    static SUPERINSTRUCTIONS_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// A bit per superinstruction, by its position in the table, that `code` holds; none for a
+/// body that is not code.
+///
+/// # Safety
+/// `code` is a live object.
+pub unsafe fn superinstructions_in(code: Sexp) -> u64 {
+    if code.kind() != SexpType::Bytecode {
+        return 0;
+    }
+    let mut found = 0;
+    for &word in values::ints(code.car()) {
+        let index = (word as u32 & OP_MASK) as usize;
+        if let Some(position) = index.checked_sub(SUPERINSTRUCTION_BASE) {
+            found |= 1 << position;
+        }
+    }
+    found
+}
+
+/// The number of tier 0's superinstructions.
+pub const SUPERINSTRUCTION_COUNT: usize = SUPERINSTRUCTIONS.len();
+
+/// Turns the compiler's superinstructions on or off for code compiled after the call, so a
+/// test can run one body both ways.
+pub fn set_superinstructions(on: bool) {
+    SUPERINSTRUCTIONS_ON.set(on);
+}
+
+/// The size of tier 0's handler tables: every generic and specialized opcode and every
+/// superinstruction.
+const HANDLER_COUNT: usize = SUPERINSTRUCTION_BASE + SUPERINSTRUCTIONS.len();
 
 // The interpreter turns a code word's low byte back into an `Op` by its discriminant.
 const _: () = {
@@ -4398,6 +4463,8 @@ const _: () = {
         index += 1;
     }
     assert!(HANDLER_COUNT <= OP_MASK as usize + 1);
+    // `superinstructions_in` answers a bit per superinstruction.
+    assert!(SUPERINSTRUCTIONS.len() <= 64);
 };
 
 /// What an operand of an instruction is, as far as [`verify`] checks it.
@@ -4582,15 +4649,26 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
     let mut pc = 0;
     while pc < words.len() {
         let op = op_of(words[pc] as u32).ok_or("an invalid instruction")?;
-        // Specialized forms trust what tier 0 saw when it wrote them, which a file cannot show.
-        if words[pc] as u32 != op_word(op) {
-            return Err("a specialized instruction".to_owned());
-        }
         operands(op).ok_or("a record instruction")?;
         starts[pc / 64] |= 1 << (pc % 64);
         let next = pc + 1 + operand_count(op);
         if next > words.len() {
             return Err("an instruction runs past the end of the code".to_owned());
+        }
+        if words[pc] as u32 != op_word(op) {
+            // A superinstruction runs the next instruction's fast path without decoding it,
+            // so that instruction must be its second. Specialized forms trust what tier 0 saw
+            // when it wrote them, which a file cannot show.
+            let index = (words[pc] as u32 & OP_MASK) as usize;
+            let fused = index
+                .checked_sub(SUPERINSTRUCTION_BASE)
+                .and_then(|index| SUPERINSTRUCTIONS.get(index));
+            let second = words.get(next).and_then(|&word| op_of(word as u32));
+            if (words[pc] as u32 & !OP_MASK) != (op_word(op) & !OP_MASK)
+                || fused.is_none_or(|&(_, expected)| second != Some(expected))
+            {
+                return Err("a specialized instruction".to_owned());
+            }
         }
         if next == words.len() && !matches!(op, Op::Return | Op::Jump | Op::Resume) {
             return Err("execution runs past the end of the code".to_owned());
@@ -5669,8 +5747,14 @@ macro_rules! handlers {
             let mut table: [Handler; HANDLER_COUNT] = [jump::<SINGLE>; HANDLER_COUNT];
             $(table[Op::$op as usize] = $name::<SINGLE>;)*
             let mut index = 0;
-            while OPS.len() + index < HANDLER_COUNT {
+            while index < QUICK_ARITHMETIC.len() {
                 table[OPS.len() + index] = table[Op::Arithmetic as usize];
+                index += 1;
+            }
+            // A superinstruction steps as its first instruction alone.
+            let mut index = 0;
+            while index < SUPERINSTRUCTIONS.len() {
+                table[SUPERINSTRUCTION_BASE + index] = table[SUPERINSTRUCTIONS[index].0 as usize];
                 index += 1;
             }
             table
@@ -5720,7 +5804,7 @@ unsafe fn failed<const SINGLE: bool>(
 }
 
 static RUN_HANDLERS: [Handler; HANDLER_COUNT] =
-    specialized_table(fast_path_table(handler_table::<false>()));
+    superinstruction_table(specialized_table(fast_path_table(handler_table::<false>())));
 static STEP_HANDLERS: [Handler; HANDLER_COUNT] = handler_table::<true>();
 
 handlers! {
@@ -5902,6 +5986,61 @@ fast_paths! {
     fast_branch_if_object: BranchIfObject, branch_if_object_fast;
     fast_call_builtin: CallBuiltin, call_builtin_fast;
     fast_sub_assign: SubAssign, sub_assign_fast;
+    fast_branch_unless_builtin: BranchUnlessBuiltin, branch_unless_builtin_fast;
+}
+
+/// Defines tier 0's superinstructions from one table. Each entry names an instruction, the
+/// instruction it most often falls through to, and their fast paths (see [`fast_paths!`]). The
+/// compiler writes a pair's opcode over the first instruction's ([`fuse_pairs`]) and leaves the
+/// second in place, so every pc stays an instruction the tiers can resume at, the feedback
+/// words keep their positions, and [`op_of`] reads the first instruction as itself. The
+/// handler runs the first fast path and, when it falls through, the second's without a
+/// dispatch in between. A slow path runs the generic handler of the instruction it is in, as
+/// the fast handlers do, and single-stepping runs the first instruction alone.
+macro_rules! superinstructions {
+    ($($name:ident: $first:ident $first_fast:ident => $second:ident $second_fast:ident;)*) => {
+        /// The pair each superinstruction runs, by opcode minus [`SUPERINSTRUCTION_BASE`].
+        const SUPERINSTRUCTIONS: [(Op, Op); [$(stringify!($name)),*].len()] =
+            [$((Op::$first, Op::$second)),*];
+
+        $(
+            unsafe fn $name(state: &mut Activation<'_, '_>, at: usize) {
+                let Some(next) = $first_fast(state, at) else {
+                    become GENERIC_HANDLERS[Op::$first as usize](state, at);
+                };
+                if next != at + 1 + operand_count(Op::$first) {
+                    dispatch!(state, next);
+                }
+                if let Some(after) = $second_fast(state, next) {
+                    dispatch!(state, after);
+                }
+                become GENERIC_HANDLERS[Op::$second as usize](state, next)
+            }
+        )*
+
+        const fn superinstruction_table(
+            mut table: [Handler; HANDLER_COUNT],
+        ) -> [Handler; HANDLER_COUNT] {
+            let mut index = 0;
+            $(
+                table[SUPERINSTRUCTION_BASE + index] = $name;
+                index += 1;
+            )*
+            assert!(index == SUPERINSTRUCTIONS.len());
+            table
+        }
+    };
+}
+
+superinstructions! {
+    guard_guard: Guard guard_fast => Guard guard_fast;
+    get_fun_branch_unless_builtin: GetFun get_fun_fast => BranchUnlessBuiltin branch_unless_builtin_fast;
+    get_var_call_builtin: GetVar get_var_fast => CallBuiltin call_builtin_fast;
+    guard_constant: Guard guard_fast => Constant constant_fast;
+    guard_get_fun: Guard guard_fast => GetFun get_fun_fast;
+    end_statement_guard: EndStatement end_statement_fast => Guard guard_fast;
+    constant_get_var: Constant constant_fast => GetVar get_var_fast;
+    get_var_get_var: GetVar get_var_fast => GetVar get_var_fast;
 }
 
 /// The constant `index` of the activation's constant pool, read without the ALTREP check of
@@ -6121,6 +6260,15 @@ unsafe fn branch_unless_primitive_fast(state: &mut Activation<'_, '_>, at: usize
         return Some(*code.add(at + 3) as usize);
     }
     Some(at + 1 + operand_count(Op::BranchUnlessPrimitive))
+}
+
+#[inline(always)]
+unsafe fn branch_unless_builtin_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    if (*state.registers.add(*code.add(at + 1) as usize)).kind() != SexpType::Builtin {
+        return Some(*code.add(at + 2) as usize);
+    }
+    Some(at + 1 + operand_count(Op::BranchUnlessBuiltin))
 }
 
 #[inline(always)]

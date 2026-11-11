@@ -1,0 +1,16 @@
+[stdout]
+| [1] 4
+| [1] 4
+| [1] 4
+| [1] "masked length"
+| [1] "masked again"
+| [1] 4
+| [1] "attached length"
+| [1] 4
+[messages]
+- The following object is masked from package:base:\n\n    length\n
+[warnings]
+[errors]
+[value]
+integer
+| 4L

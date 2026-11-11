@@ -113,6 +113,50 @@ pub fn check_bytecode_agreement(entropy: &mut impl Entropy) {
     });
 }
 
+/// Tier 0's superinstructions agree with the pairs they fuse: a random closure body compiled
+/// with superinstructions gives the same results on every call [`check_bytecode_agreement`]
+/// makes as the same body compiled without them. Answers a bit per superinstruction the fused
+/// body's code holds, so a harness can check that its seeds reach every one.
+pub fn check_superinstruction_agreement(entropy: &mut impl Entropy) -> u64 {
+    syntax::testing::enable_invariants();
+    let body = program(entropy);
+    let arguments = [
+        "3L",
+        "-2.5",
+        "NA",
+        "TRUE",
+        "2147483647L",
+        "0",
+        "[3L]",
+        "[-2.5, 1]",
+    ];
+    let a = arguments[entropy.below(arguments.len())];
+    let b = arguments[entropy.below(arguments.len())];
+    with_interpreter(|| {
+        // Restores the compiler's default even when an assertion fails, so later tests
+        // sharing the interpreter compile as usual.
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                bytecode::set_superinstructions(true);
+            }
+        }
+        let _restore = Restore;
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            bytecode::set_superinstructions(false);
+            let (_, unfused) = outcomes(&body, a, b);
+            bytecode::set_superinstructions(true);
+            let (_, fused) = outcomes(&body, a, b);
+            assert_eq!(unfused, fused, "`{body}` with a = {a}, b = {b}");
+            let function = values::install("f")
+                .and_then(|symbol| eval::eval(symbol, values::global_env()))
+                .unwrap_or_else(|_| panic!("`f` is not defined"));
+            bytecode::superinstructions_in(function.cdr())
+        }
+    })
+}
+
 /// One compiled arithmetic site, called with a seeded sequence of operand pairs of changing
 /// kinds, agrees with the AST evaluator on every call. Tier 0 specializes the site to the kinds
 /// it sees and must undo the specialization when they change, give up after repeated undos,
