@@ -168,7 +168,7 @@ pub(crate) unsafe fn direct_subset2(_call: Sexp, args: &[Sexp]) -> R<Option<Sexp
 /// The zero-based position a plain scalar integer or real subscript selects among `count`
 /// elements, or `None` when it is out of bounds, `NA`, or not such a scalar.
 /// The position of the first of `subject`'s names that is the one-string `index`, when that
-/// string is ASCII. Every ASCII `CHARSXP` is one interned object whatever its encoding mark, so
+/// string is ASCII and not `NA`, which matches no name. Every ASCII `CHARSXP` is one interned object whatever its encoding mark, so
 /// the names that match it exactly are the ones that are the same pointer; any other string, or
 /// a name no element has, is left to the full subscript.
 #[inline(always)]
@@ -178,7 +178,7 @@ pub(crate) unsafe fn name_position(heap: &Heap, subject: Sexp, index: Sexp) -> O
         return None;
     }
     let name = *index.data().cast::<Sexp>();
-    if !name.has_gp(gp::ASCII) || name.length() == 0 {
+    if name == na_string() || !name.has_gp(gp::ASCII) || name.length() == 0 {
         return None;
     }
     let names = values::get_attr(subject, symbols().names);

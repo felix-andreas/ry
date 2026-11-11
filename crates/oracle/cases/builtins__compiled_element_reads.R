@@ -122,3 +122,15 @@ name_stores <- function() {
 }
 print(name_stores())
 print(name_stores())
+
+na_read <- function(x) {
+  out <- list()
+  for (k in 1:2) out[[k]] <- tryCatch(x[[NA_character_]], error = conditionMessage)
+  out
+}
+with_na <- list(a = 1, 2)
+names(with_na)[2] <- NA
+str(na_read(with_na))
+with_na_dbl <- c(a = 1, 2)
+names(with_na_dbl)[2] <- NA
+str(na_read(with_na_dbl))

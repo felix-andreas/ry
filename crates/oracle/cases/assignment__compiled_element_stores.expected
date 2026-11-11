@@ -270,11 +270,18 @@
 | $`NA`
 | [1] "na"
 | 
+|  Named num [1:4] 1 3 1 1.5
+|  - attr(*, "names")= chr [1:4] "a" NA NA NA
+| List of 4
+|  $ a : num 1
+|  $ NA: int 3
+|  $ NA: num 1
+|  $ NA: num 1.5
 [messages]
 [warnings]
 - number of items to replace is not a multiple of replacement length (in w[1L] <- 1:2)
 - number of items to replace is not a multiple of replacement length (in w[1L] <- 1:2)
 [errors]
 [value]
-list
-| structure(list(12, 2, "na"), names = c("é", NA, "NA"))
+NULL
+| NULL

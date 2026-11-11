@@ -170,3 +170,14 @@ names_edge <- function() {
 }
 print(names_edge())
 print(names_edge())
+
+# An NA subscript matches no name, not even an NA one, so each store appends.
+na_names <- function(x, n) {
+  for (i in seq_len(n)) {
+    x[NA_character_] <- i * 0.5
+    x[[NA_character_]] <- i
+  }
+  x
+}
+str(na_names(c(a = 1), 3))
+str(na_names(list(a = 1), 3))
