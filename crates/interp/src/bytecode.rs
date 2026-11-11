@@ -6155,13 +6155,25 @@ unsafe fn call_builtin_fast(state: &mut Activation<'_, '_>, at: usize) -> Option
     } else {
         return None;
     };
-    read_element_call(state, at, double)
+    read_element_call::<false>(state, at, double)
+        .or_else(|| read_string_element_call(state, at, double))
+}
+
+/// [`read_element_call`] of a character vector, reached only once the numeric kinds decline.
+#[cold]
+#[inline(never)]
+unsafe fn read_string_element_call(
+    state: &mut Activation<'_, '_>,
+    at: usize,
+    double: bool,
+) -> Option<usize> {
+    read_element_call::<true>(state, at, double)
 }
 
 /// The rest of [`call_builtin_fast`] once the builtin is `[` (or `[[`, `double`). Out of line
 /// because its frame setup would otherwise run for every builtin call the handler declines.
 #[inline(never)]
-unsafe fn read_element_call(
+unsafe fn read_element_call<const STRING: bool>(
     state: &mut Activation<'_, '_>,
     at: usize,
     double: bool,
@@ -6171,8 +6183,12 @@ unsafe fn read_element_call(
     let heap = &mut *state.heap;
     let first = *code.add(at + 4) as usize;
     let subject = *registers.add(first);
-    let position =
-        element_access::element_position(heap, subject, *registers.add(first + 1), double)?;
+    let position = element_access::element_position::<STRING>(
+        heap,
+        subject,
+        *registers.add(first + 1),
+        double,
+    )?;
     let known = *heap.known();
     let arguments = pool_constant(state, *code.add(at + 3) as usize).cdr();
     let second = arguments.cdr();
@@ -6185,7 +6201,7 @@ unsafe fn read_element_call(
     {
         return None;
     }
-    let value = element_access::element_value(heap, subject, position)?;
+    let value = element_access::element_value::<STRING>(heap, subject, position)?;
     state.record(at, value);
     *registers.add(*code.add(at + 1) as usize) = value;
     (*state.interp).visible = true;
