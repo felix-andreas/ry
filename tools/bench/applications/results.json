@@ -4,18 +4,18 @@
   "name": "Application workloads (ours)",
   "meta": {
     "date": "2026-11-11",
-    "ry_commit": "5cd92a3",
+    "ry_commit": "4d96a342bc28c2143046e3ab8c2996d64dd20a0c",
     "too_short_seconds": 0.1,
     "gnu_r": {
       "version": "4.6.2",
       "blas": "/usr/lib/x86_64-linux-gnu/blas/libblas.so.3.12.0"
     },
     "machine": {
-      "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+      "cpu": "Intel(R) Xeon(R) Processor @ 2.30GHz",
       "cores": 4,
-      "kernel": "Linux 6.18.44-fc-v338"
+      "kernel": "Linux 6.18.44-fc-v378"
     },
-    "command": "tools/bench/bench.py kernels applications public packages --rounds 10 --write --samples /tmp/claude-0/-home-user-ry/2410cb03-e35c-50f9-8e51-b57b80a6b0c1/scratchpad/rerun --ry /home/user/ry-main/target/release/ry",
+    "command": "tools/bench/bench.py public applications kernels --rounds 10 --samples /tmp/claude-0/-home-user-ry/2410cb03-e35c-50f9-8e51-b57b80a6b0c1/scratchpad/samples-rerecord --write",
     "rounds": 10,
     "extra_rounds": 10,
     "seed": 1
@@ -30,31 +30,35 @@
       "id": "bond_book",
       "display": "Bond book pricing",
       "seconds": {
-        "gnu_r": 0.512,
-        "ry": 0.2695,
-        "ry_typed": 0.055
+        "gnu_r": 0.433,
+        "ry": 0.228,
+        "ry_typed": 0.046
       },
       "ratio": {
         "ry": {
-          "median": 1.9095,
-          "low": 1.8191,
-          "high": 2.0438
+          "median": 1.8288,
+          "low": 1.6876,
+          "high": 2.0131
         },
         "ry_typed": {
-          "median": 9.1919,
-          "low": 8.7866,
-          "high": 9.9182
+          "median": 9.0653,
+          "low": 8.3011,
+          "high": 9.6413
         }
       },
       "peak_mib": {
         "gnu_r": 70.7,
-        "ry": 62.3,
-        "ry_typed": 50.5
+        "ry": 62.7,
+        "ry_typed": 50.7
       },
       "flags": [
         {
           "kind": "too_short",
           "engine": "ry_typed"
+        },
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
         }
       ]
     },
@@ -62,19 +66,19 @@
       "id": "conditions",
       "display": "Condition handling",
       "seconds": {
-        "gnu_r": 0.5225,
-        "ry": 0.4305
+        "gnu_r": 0.4405,
+        "ry": 0.336
       },
       "ratio": {
         "ry": {
-          "median": 1.2922,
-          "low": 1.1645,
-          "high": 1.3542
+          "median": 1.2772,
+          "low": 1.1611,
+          "high": 1.3208
         }
       },
       "peak_mib": {
-        "gnu_r": 70.6,
-        "ry": 64.9
+        "gnu_r": 70.7,
+        "ry": 65.2
       },
       "flags": []
     },
@@ -82,32 +86,36 @@
       "id": "expr_tree",
       "display": "Expression tree",
       "seconds": {
-        "gnu_r": 0.284,
-        "ry": 0.192,
-        "ry_typed": 0.241
+        "gnu_r": 0.274,
+        "ry": 0.1565,
+        "ry_typed": 0.2025
       },
       "ratio": {
         "ry": {
-          "median": 1.4814,
-          "low": 1.4499,
-          "high": 1.5001
+          "median": 1.7611,
+          "low": 1.5531,
+          "high": 1.8439
         },
         "ry_typed": {
-          "median": 1.1857,
-          "low": 1.1138,
-          "high": 1.2719
+          "median": 1.3486,
+          "low": 1.2642,
+          "high": 1.4686
         }
       },
       "peak_mib": {
-        "gnu_r": 184.9,
-        "ry": 153.8,
-        "ry_typed": 87.3
+        "gnu_r": 184.7,
+        "ry": 153.9,
+        "ry_typed": 87.5
       },
       "flags": [
         {
+          "kind": "wide_interval",
+          "engine": "ry"
+        },
+        {
           "kind": "typed_refused",
           "engine": "ry_typed",
-          "reason": "refusing `.ry_tag`; no code for [I64, I64]: a base function the typed core does not know"
+          "reason": "refusing `.ry_tag`; no code for [I64, I64]: a base function the typed core does not know; `build` runs in the interpreter; `evaluate` runs in the interpreter"
         }
       ]
     },
@@ -115,39 +123,44 @@
       "id": "functional",
       "display": "Functional style",
       "seconds": {
-        "gnu_r": 0.5665,
-        "ry": 0.305
+        "gnu_r": 0.496,
+        "ry": 0.269
       },
       "ratio": {
         "ry": {
-          "median": 1.8656,
-          "low": 1.8347,
-          "high": 1.9914
+          "median": 1.7774,
+          "low": 1.7024,
+          "high": 1.9593
         }
       },
       "peak_mib": {
-        "gnu_r": 122.6,
-        "ry": 103.9
+        "gnu_r": 122.4,
+        "ry": 104.5
       },
-      "flags": []
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ]
     },
     {
       "id": "objects",
       "display": "Object systems",
       "seconds": {
-        "gnu_r": 0.7335,
-        "ry": 0.4175
+        "gnu_r": 0.5805,
+        "ry": 0.3285
       },
       "ratio": {
         "ry": {
-          "median": 1.78,
-          "low": 1.6624,
-          "high": 1.8825
+          "median": 1.7694,
+          "low": 1.6714,
+          "high": 1.9286
         }
       },
       "peak_mib": {
-        "gnu_r": 83.3,
-        "ry": 102.0
+        "gnu_r": 83.4,
+        "ry": 102.1
       },
       "flags": []
     },
@@ -155,32 +168,32 @@
       "id": "orders",
       "display": "Order invoicing",
       "seconds": {
-        "gnu_r": 0.508,
-        "ry": 0.2715,
-        "ry_typed": 0.528
+        "gnu_r": 0.3715,
+        "ry": 0.1985,
+        "ry_typed": 0.4665
       },
       "ratio": {
         "ry": {
-          "median": 1.8578,
-          "low": 1.7946,
-          "high": 1.9185
+          "median": 1.8474,
+          "low": 1.8148,
+          "high": 2.0018
         },
         "ry_typed": {
-          "median": 0.9463,
-          "low": 0.9283,
-          "high": 0.9755
+          "median": 0.7919,
+          "low": 0.7478,
+          "high": 0.8261
         }
       },
       "peak_mib": {
-        "gnu_r": 71.4,
-        "ry": 65.0,
-        "ry_typed": 68.3
+        "gnu_r": 71.5,
+        "ry": 65.1,
+        "ry_typed": 68.5
       },
       "flags": [
         {
           "kind": "typed_refused",
           "engine": "ry_typed",
-          "reason": "refusing `.ry_record`; no code for [I64]: a base function the typed core does not know; refusing `.ry_tag`"
+          "reason": "refusing `.ry_record`; no code for [I64]: a base function the typed core does not know; `price_orders` runs in the interpreter; refusing `.ry_tag`; `region_of` runs in the interpreter; `tax_rate` runs in the interpreter"
         }
       ]
     },
@@ -188,19 +201,19 @@
       "id": "records",
       "display": "Records as lists",
       "seconds": {
-        "gnu_r": 0.473,
-        "ry": 0.2405
+        "gnu_r": 0.407,
+        "ry": 0.1855
       },
       "ratio": {
         "ry": {
-          "median": 1.9769,
-          "low": 1.8764,
-          "high": 2.0455
+          "median": 2.2411,
+          "low": 2.0279,
+          "high": 2.2755
         }
       },
       "peak_mib": {
-        "gnu_r": 148.6,
-        "ry": 113.3
+        "gnu_r": 148.7,
+        "ry": 109.4
       },
       "flags": []
     },
@@ -208,32 +221,40 @@
       "id": "report",
       "display": "Report formatting",
       "seconds": {
-        "gnu_r": 0.5815,
-        "ry": 0.365,
-        "ry_typed": 0.1725
+        "gnu_r": 0.4335,
+        "ry": 0.28,
+        "ry_typed": 0.14
       },
       "ratio": {
         "ry": {
-          "median": 1.6027,
-          "low": 1.5139,
-          "high": 1.7246
+          "median": 1.5401,
+          "low": 1.3645,
+          "high": 1.7413
         },
         "ry_typed": {
-          "median": 3.4371,
-          "low": 3.3282,
-          "high": 3.6861
+          "median": 3.0749,
+          "low": 2.7218,
+          "high": 3.4697
         }
       },
       "peak_mib": {
-        "gnu_r": 74.5,
-        "ry": 69.5,
-        "ry_typed": 84.5
+        "gnu_r": 74.3,
+        "ry": 69.9,
+        "ry_typed": 85.4
       },
       "flags": [
         {
+          "kind": "wide_interval",
+          "engine": "ry"
+        },
+        {
+          "kind": "wide_interval",
+          "engine": "ry_typed"
+        },
+        {
           "kind": "typed_refused",
           "engine": "ry_typed",
-          "reason": "refusing `.ry_text`; no code for [I64]: a base function the typed core does not know"
+          "reason": "refusing `.ry_text`; no code for [I64]: a base function the typed core does not know; `report` runs in the interpreter; `padded` runs in the interpreter"
         }
       ]
     },
@@ -241,26 +262,26 @@
       "id": "sales",
       "display": "Sales table pipeline",
       "seconds": {
-        "gnu_r": 0.1165,
-        "ry": 0.0625,
-        "ry_typed": 0.0415
+        "gnu_r": 0.105,
+        "ry": 0.0525,
+        "ry_typed": 0.0395
       },
       "ratio": {
         "ry": {
-          "median": 1.8639,
-          "low": 1.7667,
-          "high": 1.9278
+          "median": 2.0416,
+          "low": 1.8168,
+          "high": 2.1628
         },
         "ry_typed": {
-          "median": 2.8115,
-          "low": 2.5854,
-          "high": 2.9042
+          "median": 2.5985,
+          "low": 2.5,
+          "high": 2.7943
         }
       },
       "peak_mib": {
-        "gnu_r": 182.7,
+        "gnu_r": 182.6,
         "ry": 147.5,
-        "ry_typed": 317.9
+        "ry_typed": 318.1
       },
       "flags": [
         {
@@ -270,6 +291,15 @@
         {
           "kind": "too_short",
           "engine": "ry_typed"
+        },
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        },
+        {
+          "kind": "typed_refused",
+          "engine": "ry_typed",
+          "reason": "`pipeline` runs in the interpreter"
         }
       ]
     },
@@ -277,19 +307,19 @@
       "id": "strings",
       "display": "String handling",
       "seconds": {
-        "gnu_r": 0.674,
-        "ry": 0.393
+        "gnu_r": 0.6425,
+        "ry": 0.3
       },
       "ratio": {
         "ry": {
-          "median": 1.7525,
-          "low": 1.5896,
-          "high": 1.8082
+          "median": 2.1157,
+          "low": 1.9897,
+          "high": 2.2136
         }
       },
       "peak_mib": {
-        "gnu_r": 107.9,
-        "ry": 106.5
+        "gnu_r": 107.7,
+        "ry": 106.1
       },
       "flags": []
     },
@@ -297,19 +327,19 @@
       "id": "tables",
       "display": "Tables",
       "seconds": {
-        "gnu_r": 0.349,
-        "ry": 0.2885
+        "gnu_r": 0.287,
+        "ry": 0.234
       },
       "ratio": {
         "ry": {
-          "median": 1.2095,
-          "low": 1.1426,
-          "high": 1.2554
+          "median": 1.2707,
+          "low": 1.1782,
+          "high": 1.3588
         }
       },
       "peak_mib": {
-        "gnu_r": 96.8,
-        "ry": 134.8
+        "gnu_r": 97.1,
+        "ry": 134.4
       },
       "flags": []
     },
@@ -317,32 +347,40 @@
       "id": "team_scores",
       "display": "Row validation",
       "seconds": {
-        "gnu_r": 0.732,
-        "ry": 0.471,
-        "ry_typed": 0.365
+        "gnu_r": 0.6745,
+        "ry": 0.3985,
+        "ry_typed": 0.315
       },
       "ratio": {
         "ry": {
-          "median": 1.5354,
-          "low": 1.5052,
-          "high": 1.5621
+          "median": 1.618,
+          "low": 1.5111,
+          "high": 1.8148
         },
         "ry_typed": {
-          "median": 1.9841,
-          "low": 1.9269,
-          "high": 2.0541
+          "median": 2.1786,
+          "low": 1.8915,
+          "high": 2.3471
         }
       },
       "peak_mib": {
-        "gnu_r": 124.2,
-        "ry": 127.5,
-        "ry_typed": 130.2
+        "gnu_r": 124.1,
+        "ry": 127.6,
+        "ry_typed": 130.6
       },
       "flags": [
         {
+          "kind": "wide_interval",
+          "engine": "ry"
+        },
+        {
+          "kind": "wide_interval",
+          "engine": "ry_typed"
+        },
+        {
           "kind": "typed_refused",
           "engine": "ry_typed",
-          "reason": "no code for [Vector { item: Str, array: true }]: a mapped function that is not a local function; refusing `Result.with_default`; no code for [Str]: a base function the typed core does not know"
+          "reason": "no code for [Vector { item: Str, array: true }]: a mapped function that is not a local function; `team_scores` runs in the interpreter; refusing `Result.with_default`; no code for [Str]: a base function the typed core does not know; `score` runs in the interpreter"
         }
       ]
     },
@@ -350,39 +388,44 @@
       "id": "testthat",
       "display": "testthat suite",
       "seconds": {
-        "gnu_r": 0.6765,
-        "ry": 0.2035
+        "gnu_r": 0.5295,
+        "ry": 0.15
       },
       "ratio": {
         "ry": {
-          "median": 3.3571,
-          "low": 3.1368,
-          "high": 3.6374
+          "median": 3.3777,
+          "low": 2.9344,
+          "high": 3.5833
         }
       },
       "peak_mib": {
         "gnu_r": 101.2,
-        "ry": 83.2
+        "ry": 83.1
       },
-      "flags": []
+      "flags": [
+        {
+          "kind": "wide_interval",
+          "engine": "ry"
+        }
+      ]
     },
     {
       "id": "timeseries",
       "display": "Time series and dates",
       "seconds": {
-        "gnu_r": 1.1145,
-        "ry": 0.846
+        "gnu_r": 0.9335,
+        "ry": 0.668
       },
       "ratio": {
         "ry": {
-          "median": 1.3234,
-          "low": 1.271,
-          "high": 1.3796
+          "median": 1.3978,
+          "low": 1.331,
+          "high": 1.4365
         }
       },
       "peak_mib": {
-        "gnu_r": 122.9,
-        "ry": 122.7
+        "gnu_r": 122.8,
+        "ry": 123.1
       },
       "flags": []
     },
@@ -390,14 +433,14 @@
       "id": "validation",
       "display": "Argument validation",
       "seconds": {
-        "gnu_r": 0.725,
-        "ry": 0.2715
+        "gnu_r": 0.5485,
+        "ry": 0.195
       },
       "ratio": {
         "ry": {
-          "median": 2.6363,
-          "low": 2.5171,
-          "high": 2.7571
+          "median": 2.8142,
+          "low": 2.5767,
+          "high": 2.9206
         }
       },
       "peak_mib": {
@@ -409,15 +452,15 @@
   ],
   "geomean": {
     "ry": {
-      "median": 1.7662,
-      "low": 1.7401,
-      "high": 1.7872,
+      "median": 1.8445,
+      "low": 1.8019,
+      "high": 1.8728,
       "programs": 15
     },
     "ry_typed": {
-      "median": 2.4137,
-      "low": 2.3566,
-      "high": 2.4686,
+      "median": 2.3502,
+      "low": 2.2507,
+      "high": 2.4286,
       "programs": 6
     }
   }
