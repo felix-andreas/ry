@@ -19,7 +19,7 @@ use {
     crate::{builtin_libraries, bytecode, dispatch, format, heap, interp, unwind::R, values::nil},
     heap::{
         Fixed, ImageError, Relocation,
-        image::{Reader, Writer},
+        image::{ImageOrder, Reader, Writer},
         object::{Sexp, SexpType},
     },
     std::path::{Path, PathBuf},
@@ -49,7 +49,10 @@ pub unsafe fn host_environment() -> Option<Sexp> {
     (environment.kind() == SexpType::Environment).then_some(environment)
 }
 
-const MAGIC: &[u8; 8] = b"RYSTART\x05";
+/// The start-up image's format stamp. Its last byte goes up whenever what an image holds or
+/// how it lays it out changes, so that an image from an older format reads as stale and is
+/// written again rather than misread.
+pub const MAGIC: &[u8; 8] = b"RYSTART\x06";
 
 /// Whether the file at `path` is a start-up image the runtime build `identity` loads: one of this
 /// format that the same build wrote. A missing or unreadable file is not.
@@ -120,8 +123,8 @@ pub(crate) fn report_unused(reason: &str) {
 
 /// Why an image did not load.
 pub(crate) enum LoadError {
-    /// The home has no image for this build: there is none, or another build of the runtime
-    /// wrote it. The start goes the slow way without a word, unless `RY_IMAGE_LOG` asks.
+    /// The home has no image for this build: there is none, or another build of the runtime or
+    /// an older format wrote it. The start goes the slow way without a word, unless `RY_IMAGE_LOG` asks.
     Absent(String),
     /// The image is unreadable or damaged; nothing changed yet, so the start can go the slow way.
     Untouched(String),
@@ -156,6 +159,14 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<(), LoadError>
     let mut prefix = [0u8; 16];
     read_at(&file, &mut prefix, 0).map_err(cannot_read)?;
     if &prefix[..MAGIC.len()] != MAGIC {
+        // An image of an older format is stale like one another build wrote: the start is slow
+        // until the home is assembled again, which writes it anew.
+        if prefix[..MAGIC.len() - 1] == MAGIC[..MAGIC.len() - 1] {
+            return Err(LoadError::Absent(format!(
+                "the start-up image {} has an older file format",
+                path.display()
+            )));
+        }
         return Err(not_an_image());
     }
     let mut length = [0u8; 8];
@@ -237,6 +248,7 @@ pub(crate) unsafe fn load(host: &ImageHost, home: &str) -> Result<(), LoadError>
             ImageError::Mismatch(_) => LoadError::Untouched(error.to_string()),
             _ => LoadError::Partial(error.to_string()),
         })?;
+    touch::record(&heap().image_memory(), expected);
     restore_state(state, &roots, &relocation)
         .map_err(|error| LoadError::Partial(error.to_string()))?;
     Ok(())
@@ -363,21 +375,39 @@ pub(crate) unsafe fn before(host: &ImageHost) -> Result<Before, String> {
         primitives: &primitives,
         extra: &extra_objects(&host_objects),
     };
+    let precondition = heap().image_precondition(&fixed);
+    heap().pin_for_image();
     Ok(Before {
         layouts: heap().layouts.counts(),
-        precondition: heap().image_precondition(&fixed),
+        precondition,
     })
 }
 
 /// Writes the image of the session start-up just finished in the R home `home` to `path`. The
 /// file is the signature, the header's length, the header, and then the heap's pages and its
 /// large objects, each from a 64 KiB boundary.
+///
+/// With a `layout` directory, the heap is laid out in the order of the stable ids its `order`
+/// file lists, one decimal id per line, when it has one, and the image's ids are written to its
+/// `ids` file ([`heap::HeapImage::ids`]), so that a touch profile recorded against this image
+/// can order the next one.
 pub(crate) unsafe fn write(
     host: &ImageHost,
     home: &str,
     path: &Path,
+    layout: Option<&Path>,
     before: &Before,
 ) -> Result<(), String> {
+    let order = match layout.map(|layout| layout.join("order")) {
+        Some(file) if file.exists() => Some(read_order(&file)?),
+        _ => None,
+    };
+    // Compiling comes before `check_empty`, so the check also covers any interpreter state a
+    // rejected body could leave behind. Compiling runs no R code and adds no record layouts, so
+    // it cannot change the allocation state the check compares against `before`.
+    let mut fresh = bytecode::compile_namespaces_for_image()
+        .map_err(|error| format!("compiling the namespaces' closures failed: {error:?}"))?;
+    fresh.sort_unstable_by_key(|code| code.as_ptr() as usize);
     check_empty(before)?;
     let host_objects = (host.fixed_objects)()?;
     let primitives = primitives();
@@ -400,8 +430,20 @@ pub(crate) unsafe fn write(
             &fixed,
             before.precondition,
             &roots,
+            order.as_ref().map(|(numbering, ids)| ImageOrder {
+                numbering: *numbering,
+                ids,
+            }),
             &prefixes,
-            &|object| (object.kind() == SexpType::Bytecode).then(|| bytecode::source_of(object)),
+            &|object| {
+                (object.kind() == SexpType::Bytecode
+                    && fresh
+                        .binary_search_by_key(&(object.as_ptr() as usize), |code| {
+                            code.as_ptr() as usize
+                        })
+                        .is_err())
+                .then(|| bytecode::source_of(object))
+            },
             &mut |pointer| builtin_libraries::routine_token(pointer),
         )
         .map_err(|error| error.to_string())?;
@@ -416,7 +458,8 @@ pub(crate) unsafe fn write(
     payload.u64(image.large().len() as u64);
     let mut header = Writer::default();
     header.blob(host.identity.as_bytes());
-    header.u64(checksum(&payload.bytes));
+    let image_checksum = checksum(&payload.bytes);
+    header.u64(image_checksum);
     header.bytes.extend_from_slice(&payload.bytes);
     let mut out = Writer::default();
     out.bytes.extend_from_slice(MAGIC);
@@ -434,7 +477,40 @@ pub(crate) unsafe fn write(
     let cannot_write =
         |failure: std::io::Error| format!("cannot write {}: {failure}", path.display());
     std::fs::write(&partial, &out.bytes).map_err(cannot_write)?;
-    std::fs::rename(&partial, path).map_err(cannot_write)
+    std::fs::rename(&partial, path).map_err(cannot_write)?;
+    if let Some(layout) = layout {
+        // The header ties the ids to this image, which touch profiles name by its checksum,
+        // and to the numbering, which the next write's order must match.
+        let mut ids = Vec::with_capacity(16 + image.ids().len());
+        ids.extend_from_slice(&image_checksum.to_le_bytes());
+        ids.extend_from_slice(&image.numbering().to_le_bytes());
+        ids.extend_from_slice(image.ids());
+        let file = layout.join("ids");
+        std::fs::write(&file, ids)
+            .map_err(|failure| format!("cannot write {}: {failure}", file.display()))?;
+    }
+    Ok(())
+}
+
+/// Reads a layout order (`tools/layout/image_order.py`): a first line `numbering HEX` naming
+/// the numbering its ids belong to, then one decimal id per line.
+fn read_order(file: &Path) -> Result<(u64, Vec<u32>), String> {
+    let text = std::fs::read_to_string(file)
+        .map_err(|failure| format!("cannot read {}: {failure}", file.display()))?;
+    let mut lines = text.lines();
+    let numbering = lines
+        .next()
+        .and_then(|line| line.strip_prefix("numbering "))
+        .and_then(|digest| u64::from_str_radix(digest.trim(), 16).ok())
+        .ok_or_else(|| format!("{} does not start with a `numbering` line", file.display()))?;
+    let ids = lines
+        .map(|line| {
+            line.trim()
+                .parse()
+                .map_err(|_| format!("{} lists `{line}`, which is not an id", file.display()))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok((numbering, ids))
 }
 
 /// Every primitive by index, which both processes create the same way before start-up.
@@ -713,6 +789,224 @@ impl Drop for ImageFile {
                     "cannot unmap an image file: {}",
                     std::io::Error::last_os_error()
                 );
+            }
+        }
+    }
+}
+
+/// The touch recorder behind `RY_IMAGE_TOUCH=FILE`, which lays out the next image
+/// (`tools/layout/image_order.py`). It protects the loaded image's memory and records, in a
+/// fault handler, the first touch of each 16-byte granule with the phase of the session it came
+/// in: 0 while the session starts, 1 while a namespace loads after that, and 2 otherwise. After
+/// each fault the page is opened for one instruction and closed again, so every granule's first
+/// touch faults, until a page has faulted [`PAGE_FAULT_BUDGET`] times and stays open, which
+/// bounds the cost of a page touched in a loop. At exit, `FILE` gets one line per first touch, in
+/// order: the address in hexadecimal and the phase.
+///
+/// A system call that reads into protected memory fails instead of faulting, so a profiled
+/// run can differ from a plain one; the profile is a training input, never a correctness
+/// one. It needs single-stepping, so it exists on x86-64 Linux only.
+pub(crate) mod touch {
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    static LOADS: AtomicU32 = AtomicU32::new(0);
+    static PHASE: AtomicU8 = AtomicU8::new(0);
+
+    /// The phase from here on is the run's, outside namespace loads.
+    pub(crate) fn finish_start_up() {
+        STARTED.store(true, Ordering::Relaxed);
+        update();
+    }
+
+    pub(crate) fn enter_namespace_load() {
+        LOADS.fetch_add(1, Ordering::Relaxed);
+        update();
+    }
+
+    pub(crate) fn leave_namespace_load() {
+        LOADS.fetch_sub(1, Ordering::Relaxed);
+        update();
+    }
+
+    fn update() {
+        let phase = match (
+            STARTED.load(Ordering::Relaxed),
+            LOADS.load(Ordering::Relaxed),
+        ) {
+            (false, _) => 0,
+            (true, 0) => 2,
+            (true, _) => 1,
+        };
+        PHASE.store(phase, Ordering::Relaxed);
+    }
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    pub(crate) fn record(_memory: &[std::ops::Range<usize>; 2], _image: u64) {}
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub(crate) use recorder::record;
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    const PAGE_FAULT_BUDGET: u16 = 512;
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    mod recorder {
+        use {
+            super::{PAGE_FAULT_BUDGET, PHASE},
+            std::{ffi::c_void, ops::Range, path::PathBuf, sync::atomic::Ordering},
+        };
+
+        const SYSTEM_PAGE: usize = 4096;
+        const GRANULE: usize = 16;
+        /// The x86 trap flag, which makes the processor trap after the next instruction.
+        const TRAP_FLAG: i64 = 0x100;
+
+        /// What the handlers read. A signal handler cannot take a lock, and the session is the
+        /// only thread that touches the heap, so this lives in a static the handlers alone
+        /// mutate once it is armed.
+        struct Recorder {
+            regions: [Range<usize>; 2],
+            /// One bit per granule of the regions, laid end to end.
+            seen: Vec<u64>,
+            faults: Vec<u16>,
+            /// First touches as (address, phase), with room reserved up front, so the handler
+            /// never allocates.
+            touches: Vec<(usize, u8)>,
+            /// The page opened for the instruction that faulted.
+            open: Option<usize>,
+            previous_segv: libc::sigaction,
+            output: PathBuf,
+            /// The loaded image's header checksum, which names it in the profile.
+            image: u64,
+        }
+
+        static mut RECORDER: Option<Recorder> = None;
+
+        pub(crate) fn record(memory: &[Range<usize>; 2], image: u64) {
+            let Some(output) = std::env::var_os("RY_IMAGE_TOUCH") else {
+                return;
+            };
+            let granules: usize = memory.iter().map(|range| range.len() / GRANULE).sum();
+            let pages: usize = memory.iter().map(|range| range.len() / SYSTEM_PAGE).sum();
+            // SAFETY: the session's thread arms the recorder once, before any handler can run.
+            unsafe {
+                let recorder = &mut *std::ptr::addr_of_mut!(RECORDER);
+                *recorder = Some(Recorder {
+                    regions: memory.clone(),
+                    seen: vec![0; granules.div_ceil(64)],
+                    faults: vec![0; pages],
+                    touches: Vec::with_capacity(granules),
+                    open: None,
+                    previous_segv: std::mem::zeroed(),
+                    output: PathBuf::from(output),
+                    image,
+                });
+                let Some(state) = recorder.as_mut() else {
+                    return;
+                };
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = segv as *const () as usize;
+                action.sa_flags = libc::SA_SIGINFO;
+                libc::sigaction(libc::SIGSEGV, &action, &mut state.previous_segv);
+                let mut trap: libc::sigaction = std::mem::zeroed();
+                trap.sa_sigaction = step as *const () as usize;
+                trap.sa_flags = libc::SA_SIGINFO;
+                libc::sigaction(libc::SIGTRAP, &trap, std::ptr::null_mut());
+                libc::atexit(write);
+                for region in &state.regions {
+                    if !region.is_empty() {
+                        libc::mprotect(region.start as *mut c_void, region.len(), libc::PROT_NONE);
+                    }
+                }
+            }
+        }
+
+        /// The granule and system page indexes of `address`, counting through both regions.
+        fn locate(regions: &[Range<usize>; 2], address: usize) -> Option<(usize, usize)> {
+            let mut granules = 0;
+            let mut pages = 0;
+            for region in regions {
+                if region.contains(&address) {
+                    let offset = address - region.start;
+                    return Some((granules + offset / GRANULE, pages + offset / SYSTEM_PAGE));
+                }
+                granules += region.len() / GRANULE;
+                pages += region.len() / SYSTEM_PAGE;
+            }
+            None
+        }
+
+        extern "C" fn segv(_: i32, info: *mut libc::siginfo_t, context: *mut c_void) {
+            // SAFETY: the kernel passes a valid siginfo and context, and the recorder is armed.
+            unsafe {
+                let Some(state) = (*std::ptr::addr_of_mut!(RECORDER)).as_mut() else {
+                    return;
+                };
+                let address = (*info).si_addr() as usize;
+                let Some((granule, page)) = locate(&state.regions, address) else {
+                    // Not ours: the previous handler takes the fault when it repeats.
+                    libc::sigaction(libc::SIGSEGV, &state.previous_segv, std::ptr::null_mut());
+                    return;
+                };
+                let bit = 1 << (granule % 64);
+                if state.seen[granule / 64] & bit == 0 {
+                    state.seen[granule / 64] |= bit;
+                    if state.touches.len() < state.touches.capacity() {
+                        state.touches.push((address, PHASE.load(Ordering::Relaxed)));
+                    }
+                }
+                let start = address & !(SYSTEM_PAGE - 1);
+                libc::mprotect(
+                    start as *mut c_void,
+                    SYSTEM_PAGE,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                );
+                state.faults[page] = state.faults[page].saturating_add(1);
+                if state.faults[page] < PAGE_FAULT_BUDGET {
+                    state.open = Some(start);
+                    let context = context.cast::<libc::ucontext_t>();
+                    (*context).uc_mcontext.gregs[libc::REG_EFL as usize] |= TRAP_FLAG;
+                }
+            }
+        }
+
+        extern "C" fn step(_: i32, _: *mut libc::siginfo_t, context: *mut c_void) {
+            // SAFETY: as in `segv`.
+            unsafe {
+                if let Some(state) = (*std::ptr::addr_of_mut!(RECORDER)).as_mut()
+                    && let Some(start) = state.open.take()
+                {
+                    libc::mprotect(start as *mut c_void, SYSTEM_PAGE, libc::PROT_NONE);
+                }
+                let context = context.cast::<libc::ucontext_t>();
+                (*context).uc_mcontext.gregs[libc::REG_EFL as usize] &= !TRAP_FLAG;
+            }
+        }
+
+        extern "C" fn write() {
+            // SAFETY: exit runs on one thread, after the session's last touch.
+            unsafe {
+                let Some(state) = (*std::ptr::addr_of_mut!(RECORDER)).take() else {
+                    return;
+                };
+                for region in &state.regions {
+                    if !region.is_empty() {
+                        libc::mprotect(
+                            region.start as *mut c_void,
+                            region.len(),
+                            libc::PROT_READ | libc::PROT_WRITE,
+                        );
+                    }
+                }
+                let mut text = String::with_capacity(state.touches.len() * 16 + 32);
+                text.push_str(&format!("image {:016x}\n", state.image));
+                for &(address, phase) in &state.touches {
+                    text.push_str(&format!("{address:x} {phase}\n"));
+                }
+                if let Err(failure) = std::fs::write(&state.output, text) {
+                    eprintln!("ry: cannot write {}: {failure}", state.output.display());
+                }
             }
         }
     }

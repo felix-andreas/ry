@@ -590,7 +590,7 @@ fn refresh_start_image(base: &Path, rcmd: &Path, libr: &Path) -> Result<()> {
         &image,
         base,
         || unsafe { current(path.as_ptr()) } == 1,
-        || base::write_start_image(base, rcmd, libr).map(drop),
+        || base::write_start_image(base, rcmd, libr, None).map(drop),
     )
 }
 
