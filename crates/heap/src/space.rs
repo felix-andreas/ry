@@ -96,8 +96,6 @@ pub(crate) const POISONED_KIND: u8 = if cfg!(debug_assertions) {
 /// The bytes of freed small slots quarantine holds back from reuse before it gives the oldest
 /// back to the allocator.
 const QUARANTINE_BYTES: usize = 16 * 1024 * 1024;
-/// A bitmap with no slot set, which the allocator reads for a page while quarantine is off.
-static NO_SLOTS: Bitmap = [0; BITMAP_WORDS];
 
 pub(crate) struct Space {
     /// The start of the reservation, which `base` rounds up to a page boundary.
@@ -292,23 +290,40 @@ impl Space {
     #[cold]
     #[inline(never)]
     fn refill(&mut self, class: usize) -> Option<NonNull<u8>> {
+        // One test per refill keeps the quarantine out of the claim loop, so the allocator
+        // without quarantine runs the same code as if quarantine did not exist.
+        if self.quarantine.is_some() {
+            return self.refill_quarantined(class);
+        }
+        self.refill_from::<false>(class)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn refill_quarantined(&mut self, class: usize) -> Option<NonNull<u8>> {
+        self.refill_from::<true>(class)
+    }
+
+    /// [`Space::refill`], skipping quarantined slots when `QUARANTINE` is set.
+    #[inline(always)]
+    fn refill_from<const QUARANTINE: bool>(&mut self, class: usize) -> Option<NonNull<u8>> {
         let slot_size = SLOT_SIZES[class];
         let slots = PAGE_SIZE / slot_size;
         loop {
             let cursor = self.cursors[class];
             if cursor.page != NO_PAGE {
                 let page = cursor.page as usize;
-                let held = self
-                    .quarantine
-                    .as_ref()
-                    .and_then(|quarantine| quarantine.slots.get(page))
-                    .unwrap_or(&NO_SLOTS);
-                if let Some((start, end)) = claim_run(
-                    &mut self.allocated[page],
-                    held,
-                    slots,
-                    cursor.next_slot as usize,
-                ) {
+                let from = cursor.next_slot as usize;
+                let held = if QUARANTINE {
+                    self.quarantine
+                        .as_ref()
+                        .and_then(|quarantine| quarantine.slots.get(page))
+                } else {
+                    None
+                };
+                if let Some((start, end)) =
+                    claim_run(&mut self.allocated[page], held, slots, from)
+                {
                     // SAFETY: both offsets are inside a committed page.
                     let page_base = unsafe { self.base.as_ptr().add(page * PAGE_SIZE) };
                     let next = unsafe { page_base.add(start * slot_size) };
@@ -633,12 +648,12 @@ impl Space {
     /// young ones, after a minor collection marked every survivor.
     pub unsafe fn sweep_young(&mut self, swept: &mut Swept) -> isize {
         self.release_cursors();
+        self.release_quarantine(QUARANTINE_BYTES);
         let touched = std::mem::take(&mut self.touched);
         let mut live_bytes = 0;
         for &page in &touched {
             live_bytes += unsafe { self.sweep_page(page as usize, swept) };
         }
-        self.release_quarantine(QUARANTINE_BYTES);
         for &page in &touched {
             self.file_page(page);
         }
@@ -657,21 +672,17 @@ impl Space {
         }
         self.empty_pages.clear();
         self.touched.clear();
-        let mut live_bytes = 0;
-        for page in 0..self.page_count {
-            if self.page_class[page] != EMPTY_PAGE {
-                unsafe { self.sweep_page(page, swept) };
-                live_bytes +=
-                    self.live_slots[page] as usize * SLOT_SIZES[self.page_class[page] as usize];
-            }
-        }
         self.release_quarantine(QUARANTINE_BYTES);
+        let mut live_bytes = 0;
         for page in 0..self.page_count {
             if self.page_class[page] == EMPTY_PAGE {
                 self.empty_pages.push(page as u32);
-            } else {
-                self.file_page(page as u32);
+                continue;
             }
+            unsafe { self.sweep_page(page, swept) };
+            live_bytes +=
+                self.live_slots[page] as usize * SLOT_SIZES[self.page_class[page] as usize];
+            self.file_page(page as u32);
         }
         self.reset_cursors();
         live_bytes
@@ -679,6 +690,23 @@ impl Space {
 
     /// Sweeps one page and returns the change in the bytes its live objects take.
     unsafe fn sweep_page(&mut self, page: usize, swept: &mut Swept) -> isize {
+        // Poisoning makes a use after free fail loudly, but costs a store per byte of every
+        // dead slot, so only debug builds and quarantine pay for it. The two instances keep
+        // the release sweep without quarantine free of the poisoning code, whose writes
+        // through `self` would make the word loop reload the page's bitmaps.
+        if cfg!(debug_assertions) || self.quarantine.is_some() {
+            unsafe { self.sweep_page_words::<true>(page, swept) }
+        } else {
+            unsafe { self.sweep_page_words::<false>(page, swept) }
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn sweep_page_words<const POISON: bool>(
+        &mut self,
+        page: usize,
+        swept: &mut Swept,
+    ) -> isize {
         let class = self.page_class[page] as usize;
         let slot_size = SLOT_SIZES[class];
         let page_base = unsafe { self.base.as_ptr().add(page * PAGE_SIZE) };
@@ -698,21 +726,19 @@ impl Space {
                     unsafe { drop_frame(object) };
                 }
                 self.finalizable[page][word] &= !dead;
-                // Poisoning makes a use after free fail loudly, but costs a store per byte of
-                // every dead slot, so only debug builds and quarantine pay for it.
-                if cfg!(debug_assertions) || self.quarantine.is_some() {
+                if POISON {
                     for bit in set_bits(dead) {
                         unsafe { poison(page_base.add((word * 64 + bit) * slot_size), slot_size) };
                     }
-                }
-                if let Some(quarantine) = &mut self.quarantine {
-                    quarantine.slots[page][word] |= dead;
-                    quarantine.queue.push_back(QuarantinedWord {
-                        page: page as u32,
-                        word: word as u32,
-                        bits: dead,
-                    });
-                    quarantine.bytes += dead.count_ones() as usize * slot_size;
+                    if let Some(quarantine) = &mut self.quarantine {
+                        quarantine.slots[page][word] |= dead;
+                        quarantine.queue.push_back(QuarantinedWord {
+                            page: page as u32,
+                            word: word as u32,
+                            bits: dead,
+                        });
+                        quarantine.bytes += dead.count_ones() as usize * slot_size;
+                    }
                 }
                 swept.freed += u64::from(dead.count_ones());
                 swept.untenured_bytes +=
@@ -737,12 +763,7 @@ impl Space {
             return;
         }
         let live = self.live_slots[index] as usize;
-        let held = self
-            .quarantine
-            .as_ref()
-            .and_then(|quarantine| quarantine.slots.get(index))
-            .is_some_and(|slots| slots.iter().any(|&word| word != 0));
-        if live == 0 && !held {
+        if live == 0 && !self.holds_quarantined(index) {
             self.page_class[index] = EMPTY_PAGE;
             self.empty_pages.push(page);
         } else if live < PAGE_SIZE / SLOT_SIZES[class] {
@@ -768,8 +789,16 @@ impl Space {
         self.quarantine.is_some()
     }
 
+    fn holds_quarantined(&self, page: usize) -> bool {
+        self.quarantine
+            .as_ref()
+            .and_then(|quarantine| quarantine.slots.get(page))
+            .is_some_and(|slots| slots.iter().any(|&word| word != 0))
+    }
+
     /// Gives the oldest quarantined slots back to the allocator until at most `limit` bytes
-    /// stay. A page that empties keeps its class until the next sweep files it.
+    /// stay. A sweep calls this before it frees anything, so the quarantine holds the last
+    /// sweep's dead slots in full; a page that empties keeps its class until a sweep files it.
     fn release_quarantine(&mut self, limit: usize) {
         let Some(quarantine) = &mut self.quarantine else {
             return;
@@ -1185,9 +1214,10 @@ pub(crate) unsafe fn poison(object: *mut u8, bytes: usize) {
 /// Finds the first run of free slots at or after `from` among a page's first `slots`, marks it
 /// allocated, and returns its slot range. A slot in `held` is not free. A run stops at the first
 /// slot that is not free, so on a page with no objects it is the whole page.
+#[inline(always)]
 fn claim_run(
     allocated: &mut Bitmap,
-    held: &Bitmap,
+    held: Option<&Bitmap>,
     slots: usize,
     from: usize,
 ) -> Option<(usize, usize)> {
@@ -1196,7 +1226,7 @@ fn claim_run(
     let mut start = None;
     let mut free = 0;
     while word < words {
-        free = !(allocated[word] | held[word]) & valid_slots(slots, word);
+        free = !(allocated[word] | held.map_or(0, |held| held[word])) & valid_slots(slots, word);
         if word == from / 64 {
             free &= u64::MAX << (from % 64);
         }
@@ -1216,7 +1246,8 @@ fn claim_run(
         if bit + run < 64 || end / 64 >= words {
             break;
         }
-        free = !(allocated[end / 64] | held[end / 64]) & valid_slots(slots, end / 64);
+        free = !(allocated[end / 64] | held.map_or(0, |held| held[end / 64]))
+            & valid_slots(slots, end / 64);
         if free & 1 == 0 {
             break;
         }
@@ -1224,7 +1255,6 @@ fn claim_run(
     Some((start, end))
 }
 
-/// Clears the allocated bits of slots `from..to`.
 /// Gives back the slots each of `cursors` claimed but never handed out.
 fn release_runs(cursors: &mut [Cursor; CLASS_COUNT], allocated: &mut [Bitmap], base: NonNull<u8>) {
     for (class, cursor) in cursors.iter_mut().enumerate() {
@@ -1242,6 +1272,7 @@ fn release_runs(cursors: &mut [Cursor; CLASS_COUNT], allocated: &mut [Bitmap], b
     }
 }
 
+/// Clears the allocated bits of slots `from..to`.
 fn release_run(allocated: &mut Bitmap, from: usize, to: usize) {
     let mut slot = from;
     while slot < to {
