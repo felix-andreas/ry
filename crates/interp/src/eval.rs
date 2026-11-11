@@ -380,63 +380,35 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     }
     moves::forcing(promise)?;
     activity::count(Counter::PromisesForced);
-    if promise.has_gp(gp::ARGUMENT_REFERENCE) && promise.tag() == nil() {
-        let (owner, slot) = reference_target(promise);
-        let frame = &interp().frames[owner];
-        if frame.env == nil() && slot != NO_REFERENCE_SLOT {
-            // A slot that holds a value, or a promise already forced to one, is read without
-            // running code, so nothing can collect, unwind or force the reference again before
-            // it settles: it needs neither a root nor the mark that catches recursion.
-            let mut value = *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
-            if value.kind() == SexpType::Promise {
-                value = value.car();
-            }
-            if value != unbound() && value != missing_arg() {
-                let value = settle_promise(promise, value)?;
-                crate::heap().root(value);
-                return Ok(value);
-            }
-        }
-        return force_guarded(promise, || force_slot_reference(promise, owner, slot));
-    }
-    force_guarded(promise, || {
-        let code = promise.attrib();
-        let env = promise.tag();
-        // Releasing a promise's last counted reference clears its environment, so an unforced
-        // promise without one was held by a root the counts do not see, and forcing it here
-        // would evaluate its code nowhere instead of where it was made.
-        if env == nil()
-            && !promise.has_gp(gp::ARGUMENT_REFERENCE)
-            && (cfg!(debug_assertions)
-                || syntax::testing::invariants_enabled()
-                || heap::gc_stress_requested().is_some())
-        {
-            panic!("a promise was forced after its last counted reference was released");
-        }
-        if promise.has_gp(gp::ARGUMENT_REFERENCE) {
-            force_reference(promise)
-        } else if env.has_gp(gp::PENDING_FRAME) {
-            force_slot_promise(promise, env)
-        } else if code.kind() == SexpType::Bytecode {
-            bytecode::run_promise(code, env)
-        } else {
-            eval(promise.cdr(), env)
-        }
-    })
-}
-
-/// Forces `promise` to the value `compute` returns, which runs code. The code can remove the
-/// last binding that holds the promise (a loader placeholder replaces itself), and the promise's
-/// environment must outlive its code, so the promise stays a root while it runs, as GNU R's
-/// pending-promise stack keeps it, and it is marked so that forcing it again from its own code
-/// is an error.
-#[inline(always)]
-unsafe fn force_guarded(promise: Sexp, compute: impl FnOnce() -> R<Sexp>) -> R<Sexp> {
+    // The code being forced can remove the last binding that holds the promise (a loader
+    // placeholder replaces itself), and the promise's environment must outlive its code, so
+    // the promise stays a root while it runs, as GNU R's pending-promise stack keeps it.
     let heap = crate::heap();
     let mark = heap.handle_mark();
     heap.root(promise);
     promise.set_gp_bits(PROMISE_SEEN, true);
-    let result = compute();
+    let code = promise.attrib();
+    let env = promise.tag();
+    // Releasing a promise's last counted reference clears its environment, so an unforced
+    // promise without one was held by a root the counts do not see, and forcing it here would
+    // evaluate its code nowhere instead of where it was made.
+    if env == nil()
+        && !promise.has_gp(gp::ARGUMENT_REFERENCE)
+        && (cfg!(debug_assertions)
+            || syntax::testing::invariants_enabled()
+            || heap::gc_stress_requested().is_some())
+    {
+        panic!("a promise was forced after its last counted reference was released");
+    }
+    let result = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
+        force_reference(promise)
+    } else if env.has_gp(gp::PENDING_FRAME) {
+        force_slot_promise(promise, env)
+    } else if code.kind() == SexpType::Bytecode {
+        bytecode::run_promise(code, env)
+    } else {
+        eval(promise.cdr(), env)
+    };
     promise.set_gp_bits(PROMISE_SEEN, false);
     let settled = result.and_then(|value| settle_promise(promise, value));
     heap.release_handles(mark);
@@ -800,8 +772,8 @@ unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
     (owner as usize, slot as u32)
 }
 
-/// Forces an unforced environment or code reference: its variable or code, read or run as a
-/// promise of it in the caller's environment, or on the caller's slots, would be.
+/// Forces an unforced argument reference: what its variable holds in the frame it names, read
+/// as a promise of the variable's name in that frame would read it.
 unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
     let symbol = reference.cdr();
     if let Some(env) = reference_env(reference) {
@@ -811,20 +783,11 @@ unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
         }
         return eval(symbol, env);
     }
-    let (owner, _) = reference_target(reference);
-    let Some(code) = reference_code(reference) else {
-        panic!("a slot reference reached the forcing of environment and code references");
-    };
+    let (owner, slot) = reference_target(reference);
     let frame = &interp().frames[owner];
-    bytecode::run_promise_on_slots(code, frame.function, owner, frame.slots as usize)
-}
-
-/// Forces the slot reference to `slot` of the frame at `owner` when reading it may run code:
-/// what its variable holds in that frame, read as a promise of the variable's name in the frame
-/// would read it.
-unsafe fn force_slot_reference(reference: Sexp, owner: usize, slot: u32) -> R<Sexp> {
-    let symbol = reference.cdr();
-    let frame = &interp().frames[owner];
+    if let Some(code) = reference_code(reference) {
+        return bytecode::run_promise_on_slots(code, frame.function, owner, frame.slots as usize);
+    }
     if frame.env != nil() {
         return eval(symbol, frame.env);
     }
