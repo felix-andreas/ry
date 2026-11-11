@@ -750,7 +750,10 @@ impl Heap {
                 table,
             };
             // The page holds an empty frame that owns nothing, so it is overwritten unread.
-            std::ptr::write(env.frame_ptr(), Frame::from_image(image, nil));
+            std::ptr::write(
+                env.frame_ptr(),
+                Frame::from_image(image, nil, !env.has_gp(gp::DETACHED)),
+            );
         }
         for _ in 0..input.u32()? {
             let object = handle(input.u64()?)?;

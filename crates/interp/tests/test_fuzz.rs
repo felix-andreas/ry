@@ -152,7 +152,7 @@ fn fuzz_element_access_agrees_with_the_ast_evaluator() {
 
 #[test]
 fn fuzz_shadowed_guards_agree_with_the_ast_evaluator() {
-    for_each_seed(200, |seed| check_shadowing_agreement(&mut SplitMix64(seed)));
+    for_each_seed(600, |seed| check_shadowing_agreement(&mut SplitMix64(seed)));
 }
 
 #[test]

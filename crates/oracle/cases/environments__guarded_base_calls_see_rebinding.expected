@@ -42,10 +42,13 @@
 | [1] 3
 | [1] "could not find function \"+\""
 | [1] 3 3 5 7 9
+| [1] 3
+| [1] "table nchar"
+| [1] "table nchar"
 [messages]
 - The following object is masked from package:base:\n\n    (\n
 [warnings]
 [errors]
 [value]
-double
-| c(3, 3, 5, 7, 9)
+character
+| "table nchar"

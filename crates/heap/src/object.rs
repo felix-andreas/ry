@@ -347,10 +347,11 @@ pub mod gp {
     /// cell, or binding the symbol in a function frame, moves the heap's binding epoch and the
     /// symbol's lookup stamp, so compiled code revalidates a lookup only when both moved.
     pub const WATCHED: u16 = 1 << 10;
-    /// A symbol some frame other than the base frames binds or once bound. Only frame code sets
-    /// it ([`crate::env`]'s inserts), and nothing clears it, so a symbol without it resolves
-    /// from any attached environment to its base binding, which is what lets a compiled guard
-    /// for a base function check one bit and the base value instead of walking the chain.
+    /// A symbol that the frame of some attached environment (one without [`DETACHED`]) binds or
+    /// once bound, other than a base frame. Only frame code sets it ([`crate::env`]'s inserts,
+    /// and a detached frame as it is attached), and nothing clears it, so a symbol without it
+    /// resolves from any attached environment to its base binding, which is what lets a compiled
+    /// guard for a base function check one bit and the base value instead of walking the chain.
     pub const BOUND_ELSEWHERE: u16 = 1 << 11;
     /// An environment whose chain of enclosures may reach the empty environment without passing
     /// a base frame, so a lookup from it need not end at a base binding. The empty environment

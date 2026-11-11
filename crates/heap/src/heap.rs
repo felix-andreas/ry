@@ -2136,7 +2136,12 @@ impl Heap {
         }
         // A base frame's own bindings end every walk through it, so it is never detached.
         if !value.has_gp(gp::DETACHED) || self.is_symbol_frame(env) {
-            env.set_gp_bits(gp::DETACHED, false);
+            if env.has_gp(gp::DETACHED) {
+                env.set_gp_bits(gp::DETACHED, false);
+                if !self.is_symbol_frame(env) {
+                    (*bindings(env)).mark_bound_elsewhere();
+                }
+            }
         } else if !env.has_gp(gp::DETACHED) {
             env.set_gp_bits(gp::DETACHED, true);
             if env.has_gp(gp::ENCLOSING) && !self.everything_bound_elsewhere {
@@ -2294,7 +2299,7 @@ impl Heap {
             self.write_barrier(env, cell);
             let frame = &mut *bindings(env);
             let owned = frame.owns_memory();
-            frame.insert(symbol, cell);
+            frame.insert(symbol, cell, !env.has_gp(gp::DETACHED));
             if !owned && frame.owns_memory() {
                 self.space.set_finalizable(env);
             }
@@ -2347,7 +2352,11 @@ impl Heap {
         if let Some(&first) = cells.first() {
             let frame = &mut *env.frame_ptr();
             let owned = frame.owns_memory();
-            frame.insert_formals(&cells, bindings.iter().map(|binding| binding.symbol));
+            frame.insert_formals(
+                &cells,
+                bindings.iter().map(|binding| binding.symbol),
+                !env.has_gp(gp::DETACHED),
+            );
             if !owned && frame.owns_memory() {
                 self.space.set_finalizable(env);
             }

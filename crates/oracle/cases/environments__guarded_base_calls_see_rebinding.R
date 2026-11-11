@@ -136,3 +136,16 @@ parent.env(grand) <- emptyenv()
 print(tryCatch(child(1, 2), error = conditionMessage))
 parent.env(grand) <- globalenv()
 print(c(child(1, 2), add(1, 2), index(4:6), size(1:7), paren(9)))
+
+# A binding made while its environment was detached shadows base once the environment is
+# attached, for a closure in that environment and for one in a child made while it was detached.
+table_env <- new.env(parent = emptyenv())
+table_child <- new.env(parent = table_env)
+assign("nchar", function(x, ...) "table nchar", envir = table_env)
+counted <- function(s) nchar(s)
+print(warm(counted, "abc"))
+parent.env(table_env) <- globalenv()
+environment(counted) <- table_env
+print(counted("abc"))
+environment(counted) <- table_child
+print(counted("abc"))

@@ -428,7 +428,22 @@ pub fn check_shadowing_agreement(entropy: &mut impl Entropy) {
                     12 => format!(".Internal(list2env(list({name} = {value}), {target}))"),
                     13 => format!(".Internal(assign(\"{name}\", {value}, baseenv(), FALSE))"),
                     14 => format!(".Internal(remove(\"{name}\", {target}, FALSE))"),
-                    15 => match entropy.below(3) {
+                    15 => match entropy.below(5) {
+                        // A binding made while its frame was detached, which marks nothing until
+                        // the frame is attached; the closure's environment is that frame, or a
+                        // child made while it was still detached.
+                        3 | 4 => format!(
+                            "shadow_d <- .Internal(new.env(TRUE, emptyenv(), 29L)); \
+                             shadow_c <- .Internal(new.env(TRUE, shadow_d, 29L)); \
+                             .Internal(assign(\"{name}\", {value}, shadow_d, FALSE)); \
+                             .Internal(`parent.env<-`(shadow_d, globalenv())); \
+                             environment(shadow_g2) <- {}",
+                            if entropy.below(2) == 0 {
+                                "shadow_d"
+                            } else {
+                                "shadow_c"
+                            }
+                        ),
                         // A detached environment, made detached or made and then reattached.
                         0 => "environment(shadow_g2) <- \
                               .Internal(new.env(TRUE, emptyenv(), 29L))"

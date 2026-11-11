@@ -6287,12 +6287,12 @@ unsafe fn set_var_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usiz
     Some(at + 1 + operand_count(Op::SetVar))
 }
 
-/// `Guard` of a name the closure's frame cannot bind. A symbol no frame outside the base frames
-/// has bound, looked up from an environment whose chain reaches a base frame, resolves to its
-/// base binding, so that binding still holding the expected function is the whole check, with
-/// no stamp or cache to read (see `gp::BOUND_ELSEWHERE` and `gp::DETACHED`). Otherwise the cached
-/// cell holding the expected function answers; a cache key is never a function frame, so a hit
-/// also means the enclosure is not one.
+/// `Guard` of a name the closure's frame cannot bind. A symbol no attached frame outside the base
+/// frames has bound, looked up from an environment whose chain reaches a base frame, resolves to
+/// its base binding, so that binding still holding the expected function, directly or as a forced
+/// promise, is the whole check, with no stamp or cache to read (see `gp::BOUND_ELSEWHERE` and
+/// `gp::DETACHED`). Otherwise the cached cell holding the expected function answers; a cache key
+/// is never a function frame, so a hit also means the enclosure is not one.
 #[inline(always)]
 unsafe fn guard_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
     let code = state.code;
@@ -6308,11 +6308,12 @@ unsafe fn guard_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize>
     };
     let symbol = pool_constant(state, *code.add(at + 1) as usize);
     let expected = pool_constant(state, *code.add(at + 2) as usize);
-    if !symbol.has_gp(gp::BOUND_ELSEWHERE)
-        && !enclosure.has_gp(gp::DETACHED)
-        && symbol.cdr().cdr() == expected
-    {
-        return Some(at + 1 + operand_count(Op::Guard));
+    if !symbol.has_gp(gp::BOUND_ELSEWHERE) && !enclosure.has_gp(gp::DETACHED) {
+        // Base is lazy-loaded, so its binding usually holds the forced promise of the function.
+        let base = symbol.cdr().cdr();
+        if base == expected || (base.kind() == SexpType::Promise && base.car() == expected) {
+            return Some(at + 1 + operand_count(Op::Guard));
+        }
     }
     let slot = *code.add(at + 3) as usize;
     let cache = state.cache;
