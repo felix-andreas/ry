@@ -2,7 +2,9 @@
 # A compiled closure that calls a base function checks only that nothing rebound the name, so
 # every route that can bind a name outside the base frames must make the next call see it. Each
 # block warms a compiled caller, rebinds the operator by one route, calls again, and undoes the
-# rebinding.
+# rebinding. GNU R's compiler binds base functions when it compiles a closure and ignores later
+# shadowing, so its JIT is off here; ry's compiled code must match R's evaluator.
+invisible(compiler::enableJIT(0))
 warm <- function(f, ...) { for (i in 1:3) f(...); f(...) }
 
 add <- function(a, b) a + b
@@ -22,10 +24,12 @@ print(size(1:3))
 rm(length)
 print(size(1:3))
 
-# `<<-` from a function that was itself compiled before it ran.
+# `<<-` from a function that was itself compiled before it ran. It reaches a base name only
+# through an existing binding, since assigning into base itself fails on the locked binding.
 set_global <- function(value) `[` <<- value
+`[` <- NULL
 for (i in 1:3) set_global(NULL)
-rm(`[`)
+print(index(4:6))
 set_global(function(x, i) "superassigned index")
 print(index(4:6))
 rm(`[`)
@@ -45,7 +49,7 @@ print(in_e(1, 2)); rm("+", envir = e)
 print(in_e(1, 2))
 
 # list2env(), and the `$<-` and `[[<-` forms on an environment.
-list2env(list(`+` = function(a, b) "listed"), e)
+invisible(list2env(list(`+` = function(a, b) "listed"), e))
 print(in_e(1, 2)); rm("+", envir = e)
 e$`+` <- function(a, b) "dollar"
 print(in_e(1, 2)); rm("+", envir = e)
