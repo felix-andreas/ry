@@ -94,7 +94,9 @@ def summary_block(suites):
         typed = ratio(geomean["ry_typed"]["median"]) if "ry_typed" in geomean else "not typed"
         lines.append(f"| {suite['name']} | {len(suite['results']['programs'])} {suite['summary']} | {untyped} | {typed} |")
     lines += ["", "Geometric means of the speed-ups over GNU R; above 1x means ry is faster.", ""]
-    lines += [measured_line(suites), "", "[Benchmarks](https://ry-lang.org/benchmarks) explains how each suite is built and measured, and shows every program, with the machine and ry commit of each suite."]
+    lines += [measured_line(suites), ""]
+    lines += mixed_machines(suites)
+    lines += ["[Benchmarks](https://ry-lang.org/benchmarks) explains how each suite is built and measured, and shows every program, with the machine and ry commit of each suite."]
     return "\n".join(lines)
 
 def measured_line(suites):
@@ -107,6 +109,19 @@ def measured_line(suites):
     when = dates[0] if len(dates) == 1 else f"{dates[0]} to {dates[-1]}"
     count = str(rounds[0]) if len(rounds) == 1 else f"{rounds[0]} to {rounds[-1]}"
     return f"Measured on {when} against GNU R {' and '.join(versions)} on {' and '.join(kernels)}, {count} paired rounds per suite."
+
+def mixed_machines(suites):
+    """A warning, followed by a blank line, when the suites were measured on different machines
+    (CPU model or kernel), because their ratios are then not comparable with each other."""
+    machines = {}
+    for suite in suites:
+        machine = suite["results"]["meta"]["machine"]
+        key = ", ".join(part for part in (machine["cpu"], machine.get("kernel")) if part)
+        machines.setdefault(key, []).append(suite["name"])
+    if len(machines) < 2:
+        return []
+    where = "; ".join(f"{' and '.join(names)} on {key}" for key, names in machines.items())
+    return [f"**Warning:** the suites were measured on different machines ({where}), so their ratios are not directly comparable.", ""]
 
 def metadata(results):
     """The line `suiteMetadata` in docs/src/lib/benchmarks.ts prints under each chart."""
