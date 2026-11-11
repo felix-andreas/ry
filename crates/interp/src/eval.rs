@@ -388,6 +388,15 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     promise.set_gp_bits(PROMISE_SEEN, true);
     let code = promise.attrib();
     let env = promise.tag();
+    // Releasing a promise's last counted reference clears its environment, so an unforced
+    // promise without one was held by a root the counts do not see, and forcing it here would
+    // evaluate its code nowhere instead of where it was made.
+    if env == nil()
+        && !promise.has_gp(gp::ARGUMENT_REFERENCE)
+        && (cfg!(debug_assertions) || syntax::testing::invariants_enabled())
+    {
+        panic!("a promise was forced after its last counted reference was released");
+    }
     let result = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
         force_reference(promise)
     } else if env.has_gp(gp::PENDING_FRAME) {

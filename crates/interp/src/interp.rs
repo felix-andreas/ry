@@ -554,6 +554,11 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
     }
     state.heap = heap_pointer;
     heap::set_pending_resolver(crate::eval::resolve_pending_read);
+    // A run under collection stress hunts for objects freed or released while something still
+    // holds them, which is what the interpreter's cross-checks catch too.
+    if heap::gc_stress_requested().is_some() {
+        syntax::testing::enable_invariants();
+    }
     let heap = &mut *heap_pointer;
     heap.inhibit_collection();
     let symbols = values::Symbols::install(heap);

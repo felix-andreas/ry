@@ -1,0 +1,13 @@
+[stdout]
+|  [1] "native 1"    "y"           "signalled 1" "below 1"     "restarted 1"
+|  [6] "delayed 1"   "made 1"      "1"           "frames 1"    "frames 1"   
+| [11] "finalized 1"
+|  [1] "native 40"    "y"            "signalled 40" "below 40"     "restarted 40"
+|  [6] "delayed 40"   "made 40"      "40"           "frames 40"    "frames 40"   
+| [11] "finalized 40"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
